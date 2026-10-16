@@ -4,6 +4,7 @@ import { signal } from '@angular/core';
 import { By } from '@angular/platform-browser';
 import { CdkTextareaAutosize } from '@angular/cdk/text-field';
 import { ComposerComponent } from './composer.component';
+import { ComposerAttachments } from './composer-attachments';
 import { ProjectStateService, type AuthStatusResponse } from '../../services/project-state.service';
 import { TauriService } from '../../services/tauri.service';
 import { LoggerService } from '../../services/logger.service';
@@ -45,6 +46,7 @@ describe('ComposerComponent', () => {
     fixture = TestBed.createComponent(ComposerComponent);
     component = fixture.componentInstance;
     rootEl = fixture.nativeElement as HTMLElement;
+    fixture.componentRef.setInput('attachmentDraft', new ComposerAttachments());
     fixture.detectChanges();
   });
 
@@ -190,27 +192,22 @@ describe('ComposerComponent', () => {
       expect(emitted).toEqual(['/code-review']);
     });
 
-    it('CAN submit a lone `/` when an image attachment is present (ADR-065)', () => {
+    it('CAN submit a lone `/` when an image attachment is present (ADR-065)', async () => {
       component.text.setValue('/');
-      component.attachments.set([
-        {
-          id: 'a1',
-          filename: 'img.png',
-          previewUrl: 'blob:x',
-          preprocessed: {
-            attachment: {
-              filename: 'img.png',
-              mediaType: 'image/png',
-              containerPath: '/workspace/.speedwave/pastes/img.png',
-              hostPath: '/tmp/img.png',
-            },
-            previewUrl: 'blob:x',
-            width: 1,
-            height: 1,
-            sizeBytes: 1,
+      await component
+        .attachmentDraft()
+        .add(new File(['x'], 'img.png', { type: 'image/png' }), async () => ({
+          attachment: {
+            filename: 'img.png',
+            mediaType: 'image/png',
+            containerPath: '/workspace/.speedwave/pastes/img.png',
+            hostPath: '/tmp/img.png',
           },
-        },
-      ]);
+          previewUrl: 'blob:x',
+          width: 1,
+          height: 1,
+          sizeBytes: 1,
+        }));
       fixture.detectChanges();
       expect(component.canSubmit()).toBe(true);
     });
@@ -554,6 +551,13 @@ describe('ComposerComponent', () => {
       expect(component.planMode()).toBe(false);
     });
 
+    it('setPlanMode sets an explicit value (tab restore)', () => {
+      component.setPlanMode(true);
+      expect(component.planMode()).toBe(true);
+      component.setPlanMode(false);
+      expect(component.planMode()).toBe(false);
+    });
+
     it('emits the raw text in act mode', () => {
       const emitted: string[] = [];
       component.submitted.subscribe((v) => emitted.push(v.payload));
@@ -597,6 +601,26 @@ describe('ComposerComponent', () => {
     it('renders app-model-selector instead of the old read-only model span', () => {
       const selector = fixture.debugElement.query(By.css('app-model-selector'));
       expect(selector).toBeTruthy();
+    });
+
+    it('forwards sessionAwaited() to the model selector', () => {
+      const selector = fixture.debugElement.query(By.css('app-model-selector'));
+      expect(selector.componentInstance.sessionAwaited()).toBe(false);
+
+      fixture.componentRef.setInput('sessionAwaited', true);
+      fixture.detectChanges();
+
+      expect(selector.componentInstance.sessionAwaited()).toBe(true);
+    });
+
+    it('forwards launchModel() to the model selector', () => {
+      const selector = fixture.debugElement.query(By.css('app-model-selector'));
+      expect(selector.componentInstance.launchModel()).toBeNull();
+
+      fixture.componentRef.setInput('launchModel', 'claude-opus-5-5[1m]');
+      fixture.detectChanges();
+
+      expect(selector.componentInstance.launchModel()).toBe('claude-opus-5-5[1m]');
     });
 
     it('forwards streaming() to the model selector', () => {
@@ -800,9 +824,13 @@ describe('ComposerComponent', () => {
       expect(transcriptRow()).toBeNull();
     });
 
-    it('names the destination so the user knows the text leaves the machine', () => {
-      fixture.componentRef.setInput('transcriptAttached', true);
+    it('names the attached recording and the destination, so the user knows the text leaves the machine', () => {
+      fixture.componentRef.setInput('transcriptName', 'Sprint review');
       fixture.detectChanges();
+      expect(transcriptRow()?.textContent).toContain('Transcript:');
+      expect(
+        rootEl.querySelector('[data-testid="composer-transcript-name"]')?.textContent?.trim()
+      ).toBe('Sprint review');
       expect(transcriptRow()?.textContent).toContain('next message');
       expect(transcriptRow()?.textContent).toContain('LLM provider');
     });
@@ -810,7 +838,7 @@ describe('ComposerComponent', () => {
     it('emits transcriptDetached when the row is unpinned', () => {
       const detached: number[] = [];
       component.transcriptDetached.subscribe(() => detached.push(1));
-      fixture.componentRef.setInput('transcriptAttached', true);
+      fixture.componentRef.setInput('transcriptName', 'Sprint review');
       fixture.detectChanges();
       expect(detachButton()?.getAttribute('aria-label')).toBe('Detach meeting transcript');
       detachButton()!.click();
@@ -841,7 +869,7 @@ describe('ComposerComponent', () => {
     it('does not submit an empty field, so a cleared prompt sends nothing', () => {
       const emitted: string[] = [];
       component.submitted.subscribe((v) => emitted.push(v.payload));
-      fixture.componentRef.setInput('transcriptAttached', true);
+      fixture.componentRef.setInput('transcriptName', 'Sprint review');
       component.text.setValue('');
       fixture.detectChanges();
       textarea().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: false }));
@@ -872,6 +900,83 @@ describe('ComposerComponent', () => {
       expect(attachmentErrorEl()?.textContent?.trim()).toBe(
         'Select a project before attaching an image.'
       );
+    });
+
+    it('shows an unsupported-type error when a non-image file is dropped', () => {
+      const dropTarget = rootEl.querySelector('[appFileDrop]') as HTMLElement;
+      const file = new File(['x'], 'notes.pdf', { type: 'application/pdf' });
+
+      dropTarget.dispatchEvent(makeDropEvent([file]));
+      fixture.detectChanges();
+
+      expect(attachmentErrorEl()?.textContent?.trim()).toBe(
+        'Supported image formats: JPEG, PNG, GIF, WebP.'
+      );
+    });
+  });
+
+  describe('attachmentDraft binding (SPEED-785)', () => {
+    function stripItems(): NodeListOf<HTMLLIElement> {
+      return rootEl.querySelectorAll<HTMLLIElement>('[data-testid="composer-attachment-strip"] li');
+    }
+
+    async function addReady(draft: ComposerAttachments, filename: string): Promise<void> {
+      await draft.add(new File(['x'], filename, { type: 'image/png' }), async () => ({
+        attachment: {
+          filename,
+          mediaType: 'image/png',
+          containerPath: `/workspace/.speedwave/pastes/${filename}`,
+          hostPath: `/tmp/${filename}`,
+        },
+        previewUrl: `blob:${filename}`,
+        width: 1,
+        height: 1,
+        sizeBytes: 1,
+      }));
+    }
+
+    it('renders only the bound draft, and swapping the input swaps the rendered strip', async () => {
+      const draftA = component.attachmentDraft();
+      await addReady(draftA, 'a.png');
+      fixture.detectChanges();
+      expect(stripItems()).toHaveLength(1);
+
+      const draftB = new ComposerAttachments();
+      fixture.componentRef.setInput('attachmentDraft', draftB);
+      fixture.detectChanges();
+      expect(stripItems()).toHaveLength(0);
+      expect(draftA.records()).toHaveLength(1);
+    });
+
+    it('removing via the strip updates the bound draft and announces it', async () => {
+      const draft = component.attachmentDraft();
+      await addReady(draft, 'a.png');
+      fixture.detectChanges();
+
+      rootEl
+        .querySelector<HTMLButtonElement>('[data-testid="composer-attachment-remove"]')!
+        .click();
+      fixture.detectChanges();
+
+      expect(draft.records()).toHaveLength(0);
+      expect(draft.announcement()).toBe('Image removed: a.png');
+    });
+
+    it('submit clears only the bound draft, not a previously bound one', async () => {
+      const draftA = component.attachmentDraft();
+      await addReady(draftA, 'a.png');
+      fixture.detectChanges();
+
+      const draftB = new ComposerAttachments();
+      fixture.componentRef.setInput('attachmentDraft', draftB);
+      await addReady(draftB, 'b.png');
+      component.text.setValue('go');
+      fixture.detectChanges();
+
+      component.submit();
+
+      expect(draftB.records()).toHaveLength(0);
+      expect(draftA.records()).toHaveLength(1);
     });
   });
 });
@@ -911,6 +1016,7 @@ describe('ComposerComponent slash discovery with the real project and slash serv
 
   function mountComposer(): ComponentFixture<ComposerComponent> {
     const created = TestBed.createComponent(ComposerComponent);
+    created.componentRef.setInput('attachmentDraft', new ComposerAttachments());
     created.detectChanges();
     return created;
   }

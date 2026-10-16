@@ -963,12 +963,13 @@ mod tests {
 
     #[test]
     fn build_auth_command_custom_data_dir() {
-        let cmd = build_auth_command(
+        let cmd = build_auth_command_for_platform(
             "myproj",
             "/Users/test/Projects",
             std::path::Path::new("/Users/test"),
             std::path::Path::new("/Users/test/.speedwave-dev"),
             Some(std::path::Path::new("/Users/test/.speedwave")),
+            false,
         );
         assert!(cmd.starts_with(&format!(
             "export {}=",
@@ -984,12 +985,13 @@ mod tests {
 
     #[test]
     fn build_auth_command_custom_data_dir_quotes_value() {
-        let cmd = build_auth_command(
+        let cmd = build_auth_command_for_platform(
             "p",
             "/proj",
             std::path::Path::new("/Users/test"),
             std::path::Path::new("/Users/test/.speedwave-dev"),
             Some(std::path::Path::new("/Users/test/.speedwave")),
+            false,
         );
         assert!(cmd.contains("='/Users/test/.speedwave-dev'"));
     }
@@ -1007,24 +1009,26 @@ mod tests {
 
     #[test]
     fn build_auth_command_quotes_paths_with_spaces() {
-        let cmd = build_auth_command(
+        let cmd = build_auth_command_for_platform(
             "p",
             "/Users/John Smith/My Projects",
             std::path::Path::new("/Users/John Smith"),
             std::path::Path::new("/Users/John Smith/.speedwave"),
             Some(std::path::Path::new("/Users/John Smith/.speedwave")),
+            false,
         );
         assert!(cmd.contains("cd '/Users/John Smith/My Projects'"));
     }
 
     #[test]
     fn build_auth_command_escapes_single_quotes_in_project_dir() {
-        let cmd = build_auth_command(
+        let cmd = build_auth_command_for_platform(
             "p",
             "/Users/O'Brien/project",
             std::path::Path::new("/Users/O'Brien"),
             std::path::Path::new("/Users/O'Brien/.speedwave"),
             Some(std::path::Path::new("/Users/O'Brien/.speedwave")),
+            false,
         );
         assert!(cmd.contains("O'\\''Brien"));
         assert!(cmd.contains("cd '"));
@@ -1033,12 +1037,13 @@ mod tests {
 
     #[test]
     fn build_auth_command_escapes_single_quotes_in_data_dir() {
-        let cmd = build_auth_command(
+        let cmd = build_auth_command_for_platform(
             "p",
             "/projects",
             std::path::Path::new("/Users/O'Brien"),
             std::path::Path::new("/Users/O'Brien/.speedwave-dev"),
             Some(std::path::Path::new("/Users/O'Brien/.speedwave")),
+            false,
         );
         assert!(cmd.contains("export"));
         assert!(cmd.contains("O'\\''Brien"));
@@ -1046,12 +1051,13 @@ mod tests {
 
     #[test]
     fn build_auth_command_quotes_paths_with_special_chars() {
-        let cmd = build_auth_command(
+        let cmd = build_auth_command_for_platform(
             "p",
             "/Users/test/proj&ect",
             std::path::Path::new("/Users/test"),
             std::path::Path::new("/Users/test/.speedwave"),
             Some(std::path::Path::new("/Users/test/.speedwave")),
+            false,
         );
         assert!(cmd.contains("cd '/Users/test/proj&ect'"));
     }
@@ -1092,12 +1098,13 @@ mod tests {
 
     #[test]
     fn build_auth_command_ordering() {
-        let cmd = build_auth_command(
+        let cmd = build_auth_command_for_platform(
             "p",
             "/proj",
             std::path::Path::new("/data"),
             std::path::Path::new("/data-dev"),
             Some(std::path::Path::new("/data")),
+            false,
         );
         let export_pos = cmd.find("export").unwrap();
         let cd_pos = cmd.find("cd ").unwrap();
@@ -1131,12 +1138,13 @@ mod tests {
 
     #[test]
     fn build_auth_command_escapes_single_quote_in_project_name() {
-        let cmd = build_auth_command(
+        let cmd = build_auth_command_for_platform(
             "weird'name",
             "/proj",
             std::path::Path::new("/data"),
             std::path::Path::new("/data"),
             Some(std::path::Path::new("/data")),
+            false,
         );
         assert!(cmd.contains("--project 'weird'\\''name'"));
     }

@@ -6,9 +6,10 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use speedwave_runtime::transcription::{
-    self, AudioSource, AudioSourceInfo, CaptureCapabilities, DriverConfig, FinalizeConfig,
-    Language, ModelStatusEntry, ModelStore, StopSignal, TranscribeOptions, TranscriptDriver,
-    TranscriptEvent, TranscriptSession, TranscriptStatus, TranscriptStore, WhisperCppTranscriber,
+    self, AudioSource, AudioSourceInfo, CaptureCapabilities, DriverConfig, DriverError,
+    FinalizeConfig, Language, ModelStatusEntry, ModelStore, StopSignal, StoreError,
+    TranscribeOptions, TranscriptDriver, TranscriptEvent, TranscriptSession, TranscriptStatus,
+    TranscriptStore, TranscriptSummary, WhisperCppTranscriber,
 };
 use tauri::{AppHandle, Emitter};
 use tokio::sync::broadcast;
@@ -35,6 +36,9 @@ pub fn transcript_event_name(id: Uuid) -> String {
 /// Per-model-download progress event name.
 pub const MODEL_PROGRESS_EVENT: &str = "transcription_model_status";
 
+/// App-wide event carrying the id of a session whose recordings-list row changed.
+pub const TRANSCRIPTS_CHANGED_EVENT: &str = "transcripts_changed";
+
 /// Validates a transcript id (UUID v4 string). Same shape as
 /// `history::validate_session_id` but parses to `Uuid`.
 fn parse_transcript_id(s: &str) -> Result<Uuid, String> {
@@ -48,27 +52,6 @@ fn short_id(id: Uuid) -> String {
     let mut s = id.to_string();
     s.truncate(8);
     s
-}
-
-#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
-pub struct CapabilitiesAck {
-    /// What the host's audio backend can do.
-    pub capabilities: CaptureCapabilities,
-    /// Probed host GPU class (ADR-085) — drives the live-transcript default in the UI.
-    pub gpu_class: transcription::GpuClass,
-    /// Acceleration label computed by `accel::accel_label()` — the UI renders it verbatim.
-    pub accel_label: String,
-}
-
-#[tauri::command]
-pub async fn transcription_capabilities() -> Result<CapabilitiesAck, String> {
-    tokio::task::spawn_blocking(|| CapabilitiesAck {
-        capabilities: transcription::detect_audio_capture().capabilities(),
-        gpu_class: transcription::gpu_class(),
-        accel_label: transcription::accel_label(),
-    })
-    .await
-    .map_err(|e| format!("capabilities task panicked: {e}"))
 }
 
 #[tauri::command]
@@ -311,8 +294,11 @@ pub async fn resume_transcription(
 ) -> Result<StartAck, String> {
     let id = parse_transcript_id(&session_id)?;
     let session = store.get(id).map_err(|e| e.to_string())?;
-    if !matches!(session.status, TranscriptStatus::Done) {
-        return Err("only a finished recording can be resumed".to_string());
+    if !matches!(
+        session.status,
+        TranscriptStatus::Done | TranscriptStatus::Paused
+    ) {
+        return Err("only a finished or paused recording can be resumed".to_string());
     }
     let lang = session.language;
     let audio_source = session.audio_source.source.clone();
@@ -384,6 +370,25 @@ pub async fn resume_transcription(
     })
 }
 
+/// Pauses a running recording: the capture ends and its part is closed like on Stop, the
+/// microphone is released, and the session waits as `Paused` for Resume or Stop.
+#[tauri::command]
+pub async fn pause_transcription(
+    session_id: String,
+    drivers: tauri::State<'_, DriversHandle>,
+) -> Result<(), String> {
+    let id = parse_transcript_id(&session_id)?;
+    let stop = drivers
+        .lock()
+        .map_err(|e| format!("drivers lock poisoned: {e}"))?
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| "this recording is not capturing".to_string())?;
+    stop.pause();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), stop.await_finished()).await;
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn stop_transcription(
     session_id: String,
@@ -400,7 +405,9 @@ pub async fn stop_transcription(
     if let Some(stop) = stop_handle.as_ref() {
         stop.stop();
     } else {
-        let _ = store.set_status(id, TranscriptStatus::Finalizing { progress: 0.0 });
+        store
+            .set_status(id, TranscriptStatus::Finalizing { progress: 0.0 })
+            .map_err(|e| e.to_string())?;
     }
 
     if let Some(stop) = stop_handle {
@@ -408,32 +415,140 @@ pub async fn stop_transcription(
             tokio::time::timeout(std::time::Duration::from_secs(5), stop.await_finished()).await;
     }
 
-    let store_arc = store.inner().clone();
-    let models_arc = models.inner().clone();
     let audio_paths = offline_pass_parts(&store, id)?;
+    spawn_offline_pass(
+        store.inner().clone(),
+        models.inner().clone(),
+        id,
+        audio_paths,
+    );
+    Ok(())
+}
+
+/// Runs the offline pass again over a session's recorded parts: a failed one (an interrupted
+/// recording, or a model missing at Stop), a finished one made with a smaller model, or one the
+/// user put off. The session goes back to `Finalizing` and ends `Done`, `Failed`, or `Postponed`
+/// when it is put off again.
+#[tauri::command]
+pub async fn transcribe_transcript(
+    session_id: String,
+    store: tauri::State<'_, TranscriptStoreHandle>,
+    models: tauri::State<'_, ModelStoreHandle>,
+    drivers: tauri::State<'_, DriversHandle>,
+) -> Result<(), String> {
+    let id = parse_transcript_id(&session_id)?;
+    if drivers
+        .lock()
+        .map_err(|e| format!("drivers lock poisoned: {e}"))?
+        .contains_key(&id)
+    {
+        return Err("this recording is still capturing; stop it first".to_string());
+    }
+    let audio_paths = offline_pass_parts(&store, id)?;
+    store.begin_retranscribe(id).map_err(|e| e.to_string())?;
+    spawn_offline_pass(
+        store.inner().clone(),
+        models.inner().clone(),
+        id,
+        audio_paths,
+    );
+    Ok(())
+}
+
+/// Puts off a running or queued offline pass ("Later"): a running decode is aborted and its
+/// progress is lost, and the session waits as `Postponed` until `transcribe_transcript`.
+#[tauri::command]
+pub async fn postpone_transcription(
+    session_id: String,
+    store: tauri::State<'_, TranscriptStoreHandle>,
+) -> Result<(), String> {
+    let id = parse_transcript_id(&session_id)?;
+    store.postpone(id).map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// One offline pass at a time: two passes loading two large models side by side can exhaust the
+/// memory of a 16 GiB host, so a second Stop waits its turn (the list row says "queued").
+static OFFLINE_PASS_TURN: Mutex<()> = Mutex::new(());
+
+/// Waits for the offline-pass turn, marking the session queued while another pass holds it.
+fn take_offline_pass_turn(store: &TranscriptStore, id: Uuid) -> std::sync::MutexGuard<'static, ()> {
+    match OFFLINE_PASS_TURN.try_lock() {
+        Ok(turn) => turn,
+        Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            store.set_queued(id, true);
+            let turn = OFFLINE_PASS_TURN
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            store.set_queued(id, false);
+            turn
+        }
+    }
+}
+
+/// Loads the offline-pass model and transcribes `audio_paths` on a blocking task, one pass at a
+/// time; every failure lands on the session as `Failed`, so the UI always learns how it ended. It
+/// first waits for a capture driver still winding down after Stop, and a pass whose recording was
+/// put off or deleted meanwhile ends without touching it.
+fn spawn_offline_pass(
+    store_arc: TranscriptStoreHandle,
+    models_arc: ModelStoreHandle,
+    id: Uuid,
+    audio_paths: Vec<std::path::PathBuf>,
+) {
     tokio::task::spawn_blocking(move || {
-        let offline_key = pick_offline_model(&models_arc);
-        let Some(key) = offline_key else {
-            let _ = store_arc.set_status(
-                id,
-                TranscriptStatus::Failed {
-                    reason: "no Whisper model available for the offline pass".to_string(),
-                },
-            );
-            return;
-        };
-        let path = match models_arc.ensure_model(&key, &mut |_| {}) {
-            Ok(p) => p,
-            Err(e) => {
-                let _ = store_arc.set_status(
-                    id,
-                    TranscriptStatus::Failed {
-                        reason: format!("model: {e}"),
-                    },
+        match store_arc.wait_while_recording(id) {
+            Ok(TranscriptStatus::Finalizing { .. }) => {}
+            Ok(status) => {
+                log::info!(
+                    "offline pass for {} not started: the recording ended as {status:?}",
+                    short_id(id)
                 );
                 return;
             }
+            Err(e) => {
+                log_pass_store_error(id, "not started", &e);
+                return;
+            }
+        }
+        let _turn = take_offline_pass_turn(&store_arc, id);
+        let pass = match store_arc.begin_offline_pass(id) {
+            Ok(pass) => pass,
+            Err(e) => {
+                log_pass_store_error(id, "not started", &e);
+                return;
+            }
         };
+        let fail = |reason: String| {
+            if let Err(e) = store_arc.fail_pass(id, &pass, reason) {
+                log_pass_store_error(id, "could not record its failure", &e);
+            }
+        };
+        let offline_key = pick_offline_model(&models_arc);
+        let Some(key) = offline_key else {
+            fail("no Whisper model available for the offline pass".to_string());
+            return;
+        };
+        if let Err(e) = store_arc.set_finalize_model(id, &pass, &key) {
+            log_pass_store_error(id, "stopped before loading its model", &e);
+            if pass.cancelled() {
+                return;
+            }
+        }
+        let path = match models_arc.ensure_model(&key, &mut |_| {}) {
+            Ok(p) => p,
+            Err(e) => {
+                fail(format!("model: {e}"));
+                return;
+            }
+        };
+        if pass.cancelled() {
+            log::info!(
+                "offline pass for {} stopped before loading its model: put off or replaced",
+                short_id(id)
+            );
+            return;
+        }
         let transcriber =
             match WhisperCppTranscriber::load(&path, key.clone(), transcription::gpu_class()) {
                 Ok(mut t) => {
@@ -441,12 +556,7 @@ pub async fn stop_transcription(
                     Box::new(t) as Box<dyn speedwave_runtime::transcription::Transcriber>
                 }
                 Err(e) => {
-                    let _ = store_arc.set_status(
-                        id,
-                        TranscriptStatus::Failed {
-                            reason: format!("transcriber: {e}"),
-                        },
-                    );
+                    fail(format!("transcriber: {e}"));
                     return;
                 }
             };
@@ -456,12 +566,36 @@ pub async fn stop_transcription(
             audio_paths,
             transcriber,
             transcribe_opts: TranscribeOptions::for_language(session_language(&store_arc, id)),
+            pass,
         };
-        if let Err(e) = speedwave_runtime::transcription::run_finalize(cfg) {
-            log::warn!("offline finalize for {} failed: {e}", short_id(id));
+        match speedwave_runtime::transcription::run_finalize(cfg) {
+            Ok(()) => {}
+            Err(DriverError::Deleted) => {
+                log::info!(
+                    "offline finalize for {} stopped: session deleted",
+                    short_id(id)
+                );
+            }
+            Err(DriverError::Superseded) => {
+                log::info!(
+                    "offline finalize for {} stopped: put off or replaced",
+                    short_id(id)
+                );
+            }
+            Err(e) => log::warn!("offline finalize for {} failed: {e}", short_id(id)),
         }
     });
-    Ok(())
+}
+
+/// Logs a store refusal of an offline pass: a recording the user put off, replaced or deleted is
+/// expected and logged at info; any other store failure is a fault and logged at warn.
+fn log_pass_store_error(id: Uuid, what: &str, e: &StoreError) {
+    match e {
+        StoreError::PassEnded(_) | StoreError::InvalidState(_) | StoreError::NotFound(_) => {
+            log::info!("offline pass for {} {what}: {e}", short_id(id));
+        }
+        _ => log::warn!("offline pass for {} {what}: {e}", short_id(id)),
+    }
 }
 
 /// Resolves every recorded part for the offline pass (resumed sessions have several); a store
@@ -715,8 +849,134 @@ async fn forward_events(
 #[tauri::command]
 pub async fn list_transcripts(
     store: tauri::State<'_, TranscriptStoreHandle>,
-) -> Result<Vec<TranscriptSession>, String> {
-    Ok(store.list())
+) -> Result<Vec<TranscriptSummary>, String> {
+    let store = store.inner().clone();
+    tokio::task::spawn_blocking(move || store.list())
+        .await
+        .map_err(|e| format!("list task panicked: {e}"))
+}
+
+/// Forwards the store's change channel as [`TRANSCRIPTS_CHANGED_EVENT`] for the whole app run,
+/// so the recordings list refreshes on change instead of polling.
+pub fn spawn_change_forwarder(app: AppHandle, store: TranscriptStoreHandle) {
+    let mut changes = store.watch();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match changes.recv().await {
+                Ok(id) => {
+                    if let Err(e) = app.emit(TRANSCRIPTS_CHANGED_EVENT, id.to_string()) {
+                        log::warn!("failed to emit a transcripts change: {e}");
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    let _ = app.emit(TRANSCRIPTS_CHANGED_EVENT, String::new());
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
+/// Renames a session; a blank title restores the default name. Returns the stored title.
+#[tauri::command]
+pub async fn rename_transcript(
+    session_id: String,
+    title: String,
+    store: tauri::State<'_, TranscriptStoreHandle>,
+) -> Result<Option<String>, String> {
+    let id = parse_transcript_id(&session_id)?;
+    store.rename(id, &title).map_err(|e| e.to_string())
+}
+
+/// Saves the session's markdown transcript where the user picks in a native save dialog.
+/// Returns `false` when the user cancels.
+#[tauri::command]
+pub async fn export_transcript(
+    session_id: String,
+    store: tauri::State<'_, TranscriptStoreHandle>,
+    app: AppHandle,
+) -> Result<bool, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let id = parse_transcript_id(&session_id)?;
+    let session = store.get(id).map_err(|e| e.to_string())?;
+    let markdown = session.to_markdown();
+    let file_name = export_file_name(&session);
+    tokio::task::spawn_blocking(move || {
+        let Some(picked) = app
+            .dialog()
+            .file()
+            .set_file_name(file_name)
+            .add_filter("Markdown", &["md"])
+            .blocking_save_file()
+        else {
+            return Ok(false);
+        };
+        let path = picked
+            .into_path()
+            .map_err(|e| format!("unsupported save location: {e}"))?;
+        std::fs::write(&path, markdown)
+            .map_err(|e| format!("could not save the transcript: {e}"))?;
+        Ok(true)
+    })
+    .await
+    .map_err(|e| format!("export task panicked: {e}"))?
+}
+
+/// Default export file name: the title (or the start date) made safe for every filesystem.
+fn export_file_name(session: &TranscriptSession) -> String {
+    let base = session.title.clone().unwrap_or_else(|| {
+        let day = session.created_at.get(..10).unwrap_or(&session.created_at);
+        format!("Meeting {day}")
+    });
+    let safe: String = base
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '-',
+            c if c.is_control() => '-',
+            c => c,
+        })
+        .collect();
+    let trimmed = safe.trim().trim_end_matches('.');
+    if trimmed.is_empty() {
+        "Meeting transcript.md".to_string()
+    } else {
+        format!("{trimmed}.md")
+    }
+}
+
+/// Shows the session's audio in Finder (macOS) or Explorer (Windows).
+#[tauri::command]
+pub async fn reveal_transcript_audio(
+    session_id: String,
+    store: tauri::State<'_, TranscriptStoreHandle>,
+) -> Result<(), String> {
+    let id = parse_transcript_id(&session_id)?;
+    let session = store.get(id).map_err(|e| e.to_string())?;
+    let target = session
+        .audio_path
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| store.session_dir(id));
+    reveal_in_file_manager(&target)
+}
+
+#[cfg(target_os = "macos")]
+fn reveal_in_file_manager(path: &std::path::Path) -> Result<(), String> {
+    speedwave_runtime::binary::system_command("open")
+        .arg("-R")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("could not open Finder: {e}"))
+}
+
+#[cfg(target_os = "windows")]
+fn reveal_in_file_manager(path: &std::path::Path) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    speedwave_runtime::binary::system_command("explorer.exe")
+        .raw_arg(format!("/select,\"{}\"", path.display()))
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("could not open Explorer: {e}"))
 }
 
 #[tauri::command]
@@ -930,49 +1190,6 @@ mod tests {
     use super::*;
     use speedwave_runtime::transcription::TranscriptSession;
     use std::path::PathBuf;
-
-    #[test]
-    fn capabilities_ack_field_set_matches_ts() {
-        let ack = CapabilitiesAck {
-            capabilities: CaptureCapabilities {
-                supports_system_audio: true,
-                supports_microphone: false,
-                note: None,
-            },
-            gpu_class: transcription::GpuClass::Discrete,
-            accel_label: "Metal (GPU)".to_string(),
-        };
-        let json = serde_json::to_value(&ack).unwrap();
-        let mut rust: Vec<&str> = json
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect();
-        rust.sort_unstable();
-        assert_eq!(rust, ["accel_label", "capabilities", "gpu_class"]);
-
-        let src = include_str!("../../src/src/app/models/transcript.ts");
-        let marker = "export interface CapabilitiesAck {";
-        let idx = src
-            .find(marker)
-            .expect("transcript.ts must declare `export interface CapabilitiesAck`");
-        let body = src[idx + marker.len()..]
-            .split('}')
-            .next()
-            .expect("the CapabilitiesAck interface must be closed");
-        let mut ts: Vec<&str> = body
-            .lines()
-            .filter_map(|l| l.split(':').next())
-            .map(str::trim)
-            .filter(|s| !s.is_empty() && !s.starts_with('/') && !s.starts_with('*'))
-            .collect();
-        ts.sort_unstable();
-        assert_eq!(
-            rust, ts,
-            "TS CapabilitiesAck must mirror the Rust ack fields"
-        );
-    }
 
     fn mk_session_in(store: &TranscriptStore) -> Uuid {
         let s = TranscriptSession::new(
@@ -1230,6 +1447,165 @@ mod tests {
             store.get(id).unwrap().status,
             TranscriptStatus::Recording
         ));
+    }
+
+    #[test]
+    #[serial_test::serial(offline_pass_turn)]
+    fn a_second_offline_pass_waits_its_turn_and_shows_as_queued() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(dir.path()));
+        let first = mk_session_in(&store);
+        let second = mk_session_in(&store);
+        let queued = |id: Uuid| store.list().iter().any(|r| r.id == id && r.queued);
+
+        let held = take_offline_pass_turn(&store, first);
+        assert!(!queued(first), "the first pass runs at once");
+        let waiter = std::thread::spawn({
+            let store = store.clone();
+            move || drop(take_offline_pass_turn(&store, second))
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !queued(second) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "second pass never queued"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        drop(held);
+        waiter.join().unwrap();
+        assert!(
+            !queued(second),
+            "the mark clears once the pass gets its turn"
+        );
+    }
+
+    fn titled(title: Option<&str>, created_at: &str) -> TranscriptSession {
+        let mut s = TranscriptSession::new(
+            Language::Pl,
+            AudioSourceInfo {
+                source: speedwave_runtime::transcription::AudioSource::SystemWide,
+                label: "Test".to_string(),
+            },
+            PathBuf::from("/tmp/a.wav"),
+        );
+        s.title = title.map(str::to_string);
+        s.created_at = created_at.to_string();
+        s
+    }
+
+    #[test]
+    fn export_file_name_uses_the_title_or_the_start_day() {
+        assert_eq!(
+            export_file_name(&titled(Some("Sprint review"), "2026-10-12T07:28:04Z")),
+            "Sprint review.md"
+        );
+        assert_eq!(
+            export_file_name(&titled(None, "2026-10-12T07:28:04Z")),
+            "Meeting 2026-10-12.md"
+        );
+        assert_eq!(
+            export_file_name(&titled(Some("Spotkanie zespołu"), "x")),
+            "Spotkanie zespołu.md"
+        );
+    }
+
+    #[test]
+    fn export_file_name_strips_characters_no_filesystem_accepts() {
+        assert_eq!(
+            export_file_name(&titled(Some("Q3: plan/budget <draft>?"), "2026-01-01")),
+            "Q3- plan-budget -draft--.md"
+        );
+        assert_eq!(
+            export_file_name(&titled(Some("notes..."), "2026-01-01")),
+            "notes.md"
+        );
+        assert_eq!(
+            export_file_name(&titled(Some(" ... "), "2026-01-01")),
+            "Meeting transcript.md"
+        );
+        assert_eq!(
+            export_file_name(&titled(None, "bad")),
+            "Meeting bad.md",
+            "a short created_at never panics on the slice"
+        );
+    }
+
+    #[test]
+    fn transcripts_changed_event_matches_ts() {
+        let src = include_str!("../../src/src/app/services/transcription.service.ts");
+        assert!(
+            src.contains(&format!(
+                "const TRANSCRIPTS_CHANGED_EVENT = '{TRANSCRIPTS_CHANGED_EVENT}';"
+            )),
+            "transcription.service.ts must listen on the event the backend emits"
+        );
+    }
+
+    #[test]
+    fn stop_and_transcribe_share_the_one_offline_pass_spawner() {
+        let src = include_str!("transcription_cmd.rs");
+        for name in ["stop_transcription", "transcribe_transcript"] {
+            assert_eq!(
+                count_calls(fn_body(src, name), "spawn_offline_pass"),
+                1,
+                "{name} must start the offline pass through spawn_offline_pass"
+            );
+        }
+        assert_eq!(
+            count_calls(src, "run_finalize"),
+            1,
+            "run_finalize has exactly one caller, spawn_offline_pass"
+        );
+    }
+
+    #[test]
+    fn the_offline_pass_claims_its_session_before_it_loads_a_model_and_writes_only_through_it() {
+        let src = include_str!("transcription_cmd.rs");
+        let body = fn_body(src, "spawn_offline_pass");
+        let claim = body
+            .find("begin_offline_pass")
+            .expect("the pass must claim its session");
+        let turn = body.find("take_offline_pass_turn").expect("turn");
+        assert!(
+            body.find("wait_while_recording")
+                .expect("driver wind-down wait")
+                < turn,
+            "the pass must wait for a driver still winding down after Stop, outside the turn"
+        );
+        assert!(claim > turn);
+        assert!(claim < body.find("pick_offline_model").expect("model pick"));
+        assert!(
+            body.contains("set_finalize_model(id, &pass,"),
+            "recording the model is a pass write"
+        );
+        assert!(
+            body.find("pass.cancelled()").expect("cancel check")
+                < body
+                    .find("WhisperCppTranscriber::load")
+                    .expect("model load"),
+            "a put-off pass must not load the model"
+        );
+        assert!(
+            !body.contains("set_status("),
+            "a put-off pass must never overwrite the session's status"
+        );
+        assert_eq!(count_calls(body, "fail_pass"), 1);
+    }
+
+    #[test]
+    fn stop_reports_a_session_it_cannot_hand_to_the_offline_pass() {
+        let src = include_str!("transcription_cmd.rs");
+        assert!(!fn_body(src, "stop_transcription").contains("let _ = store.set_status"));
+    }
+
+    #[test]
+    fn later_puts_the_pass_off_through_the_store() {
+        let src = include_str!("transcription_cmd.rs");
+        assert_eq!(
+            count_calls(fn_body(src, "postpone_transcription"), "postpone"),
+            1
+        );
     }
 
     #[test]

@@ -145,6 +145,7 @@ fn set_dir_owner_only(dir: &Path) -> anyhow::Result<()> {
 )]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use serial_test::serial;
 
     #[test]

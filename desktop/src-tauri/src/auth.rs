@@ -48,7 +48,7 @@ pub fn has_api_key(project: &str) -> bool {
     api_key_path(project).map(|p| p.exists()).unwrap_or(false)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[expect(
     clippy::unwrap_used,
     reason = "test module uses unwrap() only, never expect()"
@@ -69,7 +69,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
     fn save_api_key_creates_file_with_0600_permissions() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -99,7 +98,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
     fn save_api_key_overwrites_existing_file() {
         let project = unique_project("auth-overwrite");
         save_api_key(&project, "old-key").unwrap();
@@ -121,7 +119,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
     fn delete_api_key_removes_file() {
         let project = unique_project("auth-delete");
         save_api_key(&project, "sk-key").unwrap();
@@ -146,7 +143,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
     fn has_api_key_returns_false_when_missing() {
         assert!(!has_api_key("nonexistent-auth-test"));
     }

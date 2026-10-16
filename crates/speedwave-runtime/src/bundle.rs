@@ -38,7 +38,7 @@ pub struct BundledAssetSpec {
     pub kind: BundledAssetKind,
 }
 
-/// Bundle-relative directory of the PII NER model artifact (ADR-090).
+/// Bundle-relative directory of the PII NER model artifact (ADR-094).
 pub const PII_NER_ASSET_DIR: &str = "pii-ner";
 /// Manifest file inside [`PII_NER_ASSET_DIR`]; the loader reads weights and tokenizer names from it.
 pub const PII_NER_MANIFEST: &str = "manifest.json";
@@ -300,16 +300,16 @@ pub fn load_current_bundle_manifest_from(build_root: &Path) -> anyhow::Result<Bu
         resources_version = Some(manifest.app_version);
     }
     generate_bundle_manifest(
-        env!("CARGO_PKG_VERSION"),
+        env!("SPEEDWAVE_VERSION"),
         crate::defaults::CLAUDE_VERSION,
         build_root,
     )
     .map_err(
-        |e| match resources_version.filter(|v| v != env!("CARGO_PKG_VERSION")) {
+        |e| match resources_version.filter(|v| v != env!("SPEEDWAVE_VERSION")) {
             Some(v) => anyhow::anyhow!(
                 "installed Desktop resources are v{v} but this binary is v{}: {e:#}. \
                  Update Speedwave Desktop, then run `speedwave update`.",
-                env!("CARGO_PKG_VERSION")
+                env!("SPEEDWAVE_VERSION")
             ),
             None => e,
         },
@@ -1804,7 +1804,7 @@ mod tests {
         let manifest = load_current_bundle_manifest_from(temp.path()).unwrap();
 
         assert!(!manifest.image_hashes.is_empty());
-        assert_eq!(manifest.app_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(manifest.app_version, env!("SPEEDWAVE_VERSION"));
         assert!(!temp.path().join(BUNDLE_MANIFEST_FILE).exists());
     }
 
@@ -1859,7 +1859,7 @@ mod tests {
             temp.path().join(BUNDLE_MANIFEST_FILE),
             format!(
                 r#"{{"app_version": "{}", "bundle_id": "x0123456789abcd", "claude_resources_hash": "cafebabe"}}"#,
-                env!("CARGO_PKG_VERSION")
+                env!("SPEEDWAVE_VERSION")
             ),
         )
         .unwrap();

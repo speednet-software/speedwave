@@ -1,4 +1,0 @@
-#!/usr/bin/env sh
-unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_REFLOG_ACTION GIT_PREFIX
-
-make check-fmt

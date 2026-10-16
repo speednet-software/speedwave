@@ -60,7 +60,7 @@ pub const MCP_OS_LOCK_FILE: &str = "mcp-os.lock.json";
 pub const MCP_OS_LOG_FILE: &str = "mcp-os.log";
 
 /// Single-file lock of the host-side PII NER detector (Desktop in-process HTTP service);
-/// the proxy renderer reads `{pid, port, authToken}` from it (ADR-091).
+/// the proxy renderer reads `{pid, port, authToken}` from it (ADR-095).
 pub const PII_NER_LOCK_FILE: &str = "pii-ner.lock.json";
 /// Persistent bearer secret of the PII NER detector (0600); stable across restarts so a
 /// rendered `proxy.json` only changes when the port does.
@@ -146,6 +146,7 @@ pub fn container_uid_gid() -> (u32, u32) {
         .unwrap_or((1000, 1000))
 }
 
+/// `automount` options for `/etc/wsl.conf`, mapping `/mnt/c` files to the container uid and gid.
 #[cfg(target_os = "windows")]
 pub fn wsl_automount_options() -> String {
     let (uid, gid) = container_uid_gid();
@@ -335,6 +336,12 @@ pub const CLOUDSTORAGE_TCC_PREFIX: &str = "CloudStorage TCC required: ";
 /// Default hours between automatic update checks. Used by the CLI and the
 /// Desktop updater (`UpdateSettings::check_interval_hours` default).
 pub const UPDATE_CHECK_INTERVAL_HOURS: u32 = 24;
+
+/// Default timeout for outbound HTTP requests (ADR-041).
+pub const HTTP_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Maximum outbound HTTP response body size (5 MiB) to prevent OOM from rogue servers.
+pub const HTTP_MAX_RESPONSE_BODY_BYTES: usize = 5 * 1024 * 1024;
 
 /// Delay in seconds after `compose_up_recreate` before checking container health.
 /// Allows crash-looping containers to exit before `compose_ps` reports state.

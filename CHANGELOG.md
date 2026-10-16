@@ -1,6 +1,19 @@
 # Changelog
 
 
+## [0.20.0](https://github.com/speednet-software/speedwave/compare/v0.19.0...v0.20.0) (2026-09-25)
+
+
+### Features
+
+* Claude Code 2.1.282 with Opus 5.5 and live model/effort control ([#1268](https://github.com/speednet-software/speedwave/issues/1268)) ([0dad447](https://github.com/speednet-software/speedwave/commit/0dad447df13e2749e96217f0422562649af3d54c))
+
+
+### Bug Fixes
+
+* **ci:** fetch the Artifact Signing token before the OIDC assertion expires ([#1254](https://github.com/speednet-software/speedwave/issues/1254)) ([cee27d8](https://github.com/speednet-software/speedwave/commit/cee27d855dc71081c98b417f1d9516c6092eca97))
+* **ci:** hand the Windows CLI to the signing script by a rooted path ([#1257](https://github.com/speednet-software/speedwave/issues/1257)) ([33d4e68](https://github.com/speednet-software/speedwave/commit/33d4e685d364b0e8b6fd783b35a274fc34e35a61))
+
 ## [0.19.0](https://github.com/speednet-software/speedwave/compare/v0.18.1...v0.19.0) (2026-09-24)
 
 

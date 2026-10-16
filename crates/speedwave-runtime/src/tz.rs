@@ -257,9 +257,12 @@ const WINDOWS_TO_IANA: &[(&str, &str)] = &[
 ];
 
 #[cfg(test)]
-#[expect(
-    clippy::unwrap_used,
-    reason = "test code: unwrap on fixtures is the sanctioned boundary"
+#[cfg_attr(
+    unix,
+    expect(
+        clippy::unwrap_used,
+        reason = "test code: unwrap on fixtures is the sanctioned boundary"
+    )
 )]
 mod tests {
     use super::*;

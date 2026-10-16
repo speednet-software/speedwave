@@ -91,12 +91,14 @@ guard-dev-port: guard-dev-instance
 dev-config: guard-dev-instance
 	@printf 'DEV_INSTANCE=%s\n' '$(DEV_INSTANCE)'
 	@printf 'SPEEDWAVE_DATA_DIR=%s\n' '$(SPEEDWAVE_DATA_DIR)'
-	@printf 'TAURI_CONFIG=%s\n' "$$DEV_TAURI_CONFIG"
+	@app_version="$${SPEEDWAVE_VERSION:-$$(cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- version --repo $(CURDIR) 2>/dev/null || echo 0.0.0)}"; \
+	DEV_TAURI_CONFIG="$$(printf '%s' "$$DEV_TAURI_CONFIG" | sed "s/^{/{\"version\":\"$$app_version\",/")"; \
+	printf 'TAURI_CONFIG=%s\n' "$$DEV_TAURI_CONFIG"
 
-.PHONY: all build test check clean dev dev-config install-deps setup-dev setup-dev-windows install-hooks guard-not-prod-data-dir guard-dev-instance guard-dev-port \
+.PHONY: all build test check clean dev dev-config install-deps setup-dev setup-dev-windows guard-not-prod-data-dir guard-dev-instance guard-dev-port \
         build-runtime build-cli build-desktop build-tauri build-mcp build-angular \
         build-native-macos build-os-cli bundle-native-assets bundle-static-licenses verify-bundled-assets stage-vulkan-windows \
-        test-rust test-transcription test-cli test-desktop test-angular test-mcp test-os test-swift test-e2e test-entrypoint test-ci test-desktop-build \
+        test-rust test-transcription test-cli test-desktop test-angular test-mcp test-os test-swift test-e2e test-entrypoint test-ci test-desktop-build test-desktop-build-portable test-desktop-build-macos \
         test-build-phase test-rust-run test-angular-run test-mcp-run test-desktop-build-run test-desktop-run test-run-lanes test-proxy \
         test-e2e-desktop _e2e-macos _e2e-windows test-e2e-all test-e2e-audio setup-e2e-vms \
         test-e2e-plugin-tamper-release test-engine-contract test-e2e-update-dirty \
@@ -155,16 +157,6 @@ setup-dev:
 	else \
 		echo "  📦 cargo-tauri not found — installing..."; \
 		cargo install tauri-cli && echo "  ✅ cargo-tauri installed" || { echo "  ❌ cargo-tauri install failed"; FAIL=1; }; \
-	fi; \
-	\
-	echo ""; \
-	echo "── Git hooks ──"; \
-	if command -v gitleaks >/dev/null 2>&1; then \
-		echo "  ✅ gitleaks $$(gitleaks version 2>/dev/null || echo installed)"; \
-	else \
-		echo "  ❌ gitleaks not found — the pre-commit hook rejects every commit without it"; \
-		echo "     Install: brew install gitleaks (macOS) / make setup-dev-windows (Windows)"; \
-		FAIL=1; \
 	fi; \
 	\
 	echo ""; \
@@ -232,9 +224,8 @@ setup-dev:
 	cd desktop/src && $(NPM) ci
 	@echo "── E2E test dependencies ──"
 	cd desktop/e2e && $(NPM) ci
-	@echo "── Git hooks (husky, commitlint) ──"
+	@echo "── Root npm dependencies (commitlint, prettier) ──"
 	$(NPM) ci
-	$(NPX) husky
 	@echo "\n✅ Dev environment ready. Next:"
 	@echo "  make test    # verify everything works"
 	@echo "  make dev     # start desktop in dev mode"
@@ -271,11 +262,6 @@ clean:
 
 install-deps: setup-dev
 
-install-hooks:
-	$(NPM) install
-	$(NPX) husky
-	@echo "✅ Git hooks installed"
-
 build-runtime:
 	cargo build -p speedwave-runtime
 
@@ -307,7 +293,9 @@ else
 	chmod +x desktop/src-tauri/cli/speedwave
 endif
 	@"$(MAKE)" verify-bundled-assets
-	cd desktop/src-tauri && cargo tauri build
+	@app_version="$${SPEEDWAVE_VERSION:-$$(cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- version --repo $(CURDIR) 2>/dev/null || echo 0.0.0)}"; \
+	cd desktop/src-tauri && SPEEDWAVE_VERSION="$$app_version" cargo tauri build \
+	  --config "{\"version\":\"$$app_version\"}"
 	@echo "\n✅ Tauri production bundle built"
 
 build-native-macos:
@@ -315,6 +303,7 @@ build-native-macos:
 		echo "⬚  Skipping macOS native build (not macOS)"; \
 	else \
 		echo "🔨 Building macOS native CLI binaries..." && \
+		bash $(CURDIR)/scripts/build-native-macos.sh --stage-only && \
 		cd $(CURDIR)/native/macos/reminders && swift build -c release && \
 		cd $(CURDIR)/native/macos/calendar && swift build -c release && \
 		cd $(CURDIR)/native/macos/mail && swift build -c release && \
@@ -329,6 +318,7 @@ test-swift:
 	@if [ "$$(uname)" != "Darwin" ]; then \
 		echo "⬚  Skipping Swift tests (not macOS)"; \
 	else \
+		bash $(CURDIR)/scripts/build-native-macos.sh --stage-only && \
 		for pkg in shared reminders calendar mail notes audio-capture; do \
 			echo "Testing $$pkg..." && \
 			(cd $(CURDIR)/native/macos/$$pkg && swift test) || exit 1; \
@@ -391,7 +381,7 @@ endif
 	@echo "✅ Build phase complete"
 
 test-rust-run: guard-not-prod-data-dir
-	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner --features speedwave-runtime/test-support)
+	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner -p speedwave-version --features speedwave-runtime/test-support,speedwave-version/cli)
 	"$(MAKE)" test-transcription
 	@echo "✅ Rust tests passed"
 
@@ -401,15 +391,15 @@ test-mcp-run:
 	cd mcp-servers && $(NPM) test
 	@echo "✅ MCP server tests passed"
 
-DESKTOP_BUILD_BATS := _tests/desktop/desktop-build.bats _tests/desktop/bundle-build-context.bats \
-  _tests/desktop/guard-prod-data-dir.bats _tests/desktop/verify-bundled-assets.bats \
-  _tests/desktop/sign-bundled-binaries.bats _tests/desktop/release-workflow-signing.bats \
-  _tests/desktop/sign-windows-binaries.bats _tests/desktop/setup-dev-windows.bats \
-  _tests/desktop/info-plist.bats _tests/desktop/entitlements-reminders.bats \
-  _tests/desktop/main-app-entitlements.bats _tests/desktop/native-cli-info-plist.bats \
-  _tests/desktop/transcription-bundle.bats _tests/desktop/build-native-macos.bats \
-  _tests/desktop/bundle-native-assets.bats _tests/desktop/vulkan-scripts.bats \
+DESKTOP_BUILD_BATS_PORTABLE := _tests/desktop/bundle-build-context.bats \
+  _tests/desktop/guard-prod-data-dir.bats _tests/desktop/vulkan-scripts.bats \
   _tests/desktop/dev-server-port.bats _tests/desktop/check-windows-build-deps.bats
+DESKTOP_BUILD_BATS_MACOS := _tests/desktop/verify-bundled-assets.bats \
+  _tests/desktop/sign-bundled-binaries.bats \
+  _tests/desktop/native-cli-info-plist.bats \
+  _tests/desktop/build-native-macos.bats \
+  _tests/desktop/bundle-native-assets.bats
+DESKTOP_BUILD_BATS := $(DESKTOP_BUILD_BATS_PORTABLE) $(DESKTOP_BUILD_BATS_MACOS)
 
 test-desktop-build-run:
 	@$(REQUIRE_BATS)
@@ -428,7 +418,7 @@ test-proxy: guard-not-prod-data-dir
 	@echo "✅ proxy tests passed"
 
 test-rust: guard-not-prod-data-dir
-	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner --features speedwave-runtime/test-support)
+	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner -p speedwave-version --features speedwave-runtime/test-support,speedwave-version/cli)
 	"$(MAKE)" test-transcription
 	@echo "✅ Rust tests passed"
 
@@ -519,7 +509,7 @@ coverage: coverage-rust coverage-mcp coverage-angular
 
 coverage-rust:
 	@command -v cargo-llvm-cov >/dev/null 2>&1 || { echo "❌ cargo-llvm-cov not found. Install: cargo install cargo-llvm-cov"; exit 1; }
-	cargo llvm-cov -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner --fail-under-lines 70
+	cargo llvm-cov -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner -p speedwave-version --features speedwave-version/cli --fail-under-lines 70
 	@echo "✅ Rust coverage passed (≥70% lines)"
 
 coverage-mcp: build-mcp
@@ -532,7 +522,7 @@ coverage-angular:
 
 coverage-html: build-mcp
 	@command -v cargo-llvm-cov >/dev/null 2>&1 || { echo "❌ cargo-llvm-cov not found. Install: cargo install cargo-llvm-cov"; exit 1; }
-	cargo llvm-cov -p speedwave-runtime -p speedwave-cli --html --output-dir target/coverage/rust
+	cargo llvm-cov -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-version/cli --html --output-dir target/coverage/rust
 	cd mcp-servers && $(NPM) run test:coverage
 	"$(MAKE)" coverage-angular
 	@echo "\n✅ Coverage reports generated:"
@@ -571,18 +561,28 @@ test-entrypoint:
 
 test-ci:
 	@$(REQUIRE_BATS)
-	bats _tests/ci/validate-pr-title-main.bats _tests/ci/windows-only-test-list.bats \
-	  _tests/ci/rust-coverage-gates.bats _tests/ci/dependabot-cargo-workspaces.bats \
-	  _tests/ci/composite-action-pins.bats _tests/ci/node-version-pin.bats \
-	  _tests/ci/bats-assertion-hygiene.bats _tests/ci/ci-gate.bats \
-	  _tests/ci/angular-coverage-gates.bats _tests/ci/makefile-path-precedence.bats \
-	  _tests/ci/bats-suite-wiring.bats _tests/ci/repo-ignores.bats
+	bats _tests/ci/node-version-pin.bats _tests/ci/ci-gate.bats \
+	  _tests/ci/makefile-path-precedence.bats \
+	  _tests/ci/bats-suite-wiring.bats \
+	  _tests/ci/audit-gate.bats _tests/ci/audit-changed-files.bats \
+	  _tests/ci/audit-run.bats _tests/ci/audit-diff.bats _tests/ci/audit-issue.bats \
+	  _tests/ci/resolve-pr-title-message.bats _tests/ci/dependabot-triage.bats
 	@echo "✅ CI workflow tests passed"
 
 test-desktop-build: build-angular build-mcp
 	@$(REQUIRE_BATS)
 	bats --print-output-on-failure $(DESKTOP_BUILD_BATS)
 	@echo "✅ Desktop build tests passed"
+
+test-desktop-build-portable: build-mcp
+	@$(REQUIRE_BATS)
+	bats --print-output-on-failure $(DESKTOP_BUILD_BATS_PORTABLE)
+	@echo "✅ Desktop build tests (portable) passed"
+
+test-desktop-build-macos:
+	@$(REQUIRE_BATS)
+	bats --print-output-on-failure $(DESKTOP_BUILD_BATS_MACOS)
+	@echo "✅ Desktop build tests (macOS) passed"
 
 test-native-cli-plist:
 	@$(REQUIRE_BATS)
@@ -591,16 +591,18 @@ test-native-cli-plist:
 
 test-desktop-config:
 	@$(REQUIRE_BATS)
-	bats _tests/desktop/updater-config.bats _tests/desktop/version-consistency.bats \
-	  _tests/desktop/backmerge-alignment.bats _tests/desktop/e2e-rig-deps.bats \
-	  _tests/desktop/ps1-utf8-bom.bats _tests/desktop/installer-reset.bats \
+	bats _tests/desktop/e2e-invoke-helper.bats \
+	  _tests/desktop/installer-reset.bats \
 	  _tests/desktop/installer-sweep.bats
 	@echo "✅ Desktop config tests passed"
 
 test-release-gate:
 	@$(REQUIRE_BATS)
 	@command -v jq >/dev/null 2>&1 || { echo "❌ jq not found. Install: brew install jq"; exit 1; }
-	bats _tests/desktop/verify-release-assets.bats
+	bats _tests/desktop/verify-release-assets.bats \
+	  _tests/desktop/tag-release-commit.bats _tests/desktop/prepend-changelog-entry.bats \
+	  _tests/desktop/beta-release-range.bats \
+	  _tests/desktop/beta-release-notes.bats
 	@echo "✅ Release-gate tests passed"
 
 test-e2e-desktop-build: build-cli build-mcp build-os-cli
@@ -690,7 +692,7 @@ setup-e2e-vms:
 	@bash scripts/e2e-vm-setup.sh all
 
 check-clippy:
-	cargo clippy -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner --all-targets -- -D warnings
+	cargo clippy -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner -p speedwave-version --features speedwave-version/cli --all-targets -- -D warnings
 	cargo clippy -p speedwave-runtime --all-targets --features test-support,audio-transcription -- -D warnings
 	cargo clippy -p speedwave-pii-ner --all-targets --features bench,model-e2e -- -D warnings
 	@echo "✅ Clippy: 0 warnings"
@@ -699,7 +701,7 @@ check-desktop-clippy: build-angular build-mcp
 	@if [ "$(OS)" = "Windows_NT" ]; then bash scripts/check-vulkan-path-budget.sh; fi
 	@bash scripts/bundle-build-context.sh
 	@bash scripts/create-desktop-stubs.sh
-	cd desktop/src-tauri && SPEEDWAVE_ALLOW_BUNDLE_STUBS=1 cargo clippy -- -D warnings
+	cd desktop/src-tauri && SPEEDWAVE_ALLOW_BUNDLE_STUBS=1 cargo clippy --all-targets -- -D warnings
 	@echo "✅ Desktop clippy: 0 warnings"
 
 check-proxy-clippy:
@@ -721,9 +723,7 @@ check-mcp:
 
 check-angular:
 	cd desktop/src && $(NPX) ng build --configuration production
-	@$(REQUIRE_BATS)
-	bats _tests/desktop/desktop-build.bats
-	@echo "✅ Angular production build + desktop path verification OK"
+	@echo "✅ Angular production build OK"
 
 PRETTIER_GLOBS := 'mcp-servers/*/src/**/*.ts' 'desktop/src/src/**/*.ts' '*.md'
 
@@ -743,25 +743,39 @@ check-angular-lint:
 	@echo "✅ Angular ESLint passed"
 
 audit: audit-rust audit-mcp audit-desktop
-	@echo "\n✅ No known vulnerabilities"
+	@echo "\n✅ No known vulnerabilities without a valid exception"
 
-AUDIT_IGNORE := --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195 --ignore RUSTSEC-2024-0429
+AUDIT_EXCEPTIONS := scripts/audit-exceptions.json
+AUDIT_TMP := .audit-tmp
 
+# scripts/audit-run.sh is the single source of the audited lockfile paths and
+# the cargo-audit/npm-audit invocations; scripts/audit-diff.sh (PR lane) and
+# scripts/audit-issue.sh (audit-schedule.yml) call the same script. The npm
+# severity threshold has one source too: audit-gate.py's own default, read by
+# audit-run.sh when NPM_AUDIT_LEVEL is not set and left unset here so
+# audit-gate.py's matching default applies on both sides.
 audit-rust:
 	@command -v cargo-audit >/dev/null 2>&1 || { echo "❌ cargo-audit not found. Install: cargo install cargo-audit"; exit 1; }
-	cargo audit $(AUDIT_IGNORE)
-	cargo audit $(AUDIT_IGNORE) --file desktop/src-tauri/Cargo.lock
-	@echo "✅ Rust dependencies: no vulnerabilities"
-
-NPM_AUDIT_LEVEL := high
+	@mkdir -p $(AUDIT_TMP)
+	scripts/audit-run.sh cargo-root $(AUDIT_TMP)/cargo-root.json
+	scripts/audit-run.sh cargo-desktop $(AUDIT_TMP)/cargo-desktop.json
+	python3 scripts/audit-gate.py absolute --exceptions $(AUDIT_EXCEPTIONS) \
+	  --report cargo:$(AUDIT_TMP)/cargo-root.json --report cargo:$(AUDIT_TMP)/cargo-desktop.json
+	@echo "✅ Rust dependencies: no vulnerabilities without a valid exception"
 
 audit-mcp:
-	cd mcp-servers && $(NPM) audit --audit-level=$(NPM_AUDIT_LEVEL) --omit=dev
-	@echo "✅ MCP dependencies: no vulnerabilities"
+	@mkdir -p $(AUDIT_TMP)
+	scripts/audit-run.sh npm-mcp $(AUDIT_TMP)/npm-mcp.json
+	python3 scripts/audit-gate.py absolute --exceptions $(AUDIT_EXCEPTIONS) \
+	  --report npm:$(AUDIT_TMP)/npm-mcp.json
+	@echo "✅ MCP dependencies: no vulnerabilities without a valid exception"
 
 audit-desktop:
-	cd desktop/src && $(NPM) audit --audit-level=$(NPM_AUDIT_LEVEL) --omit=dev
-	@echo "✅ Desktop dependencies: no vulnerabilities"
+	@mkdir -p $(AUDIT_TMP)
+	scripts/audit-run.sh npm-desktop $(AUDIT_TMP)/npm-desktop.json
+	python3 scripts/audit-gate.py absolute --exceptions $(AUDIT_EXCEPTIONS) \
+	  --report npm:$(AUDIT_TMP)/npm-desktop.json
+	@echo "✅ Desktop dependencies: no vulnerabilities without a valid exception"
 
 check-all: check test coverage audit
 	@echo "\n✅ Full quality gate passed — safe to push"
@@ -774,7 +788,7 @@ fmt:
 	@echo "✅ Formatted"
 
 lint:
-	cargo clippy -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-ner -- -D warnings
+	cargo clippy -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-ner -p speedwave-version --features speedwave-version/cli -- -D warnings
 	cd desktop/src-tauri && cargo clippy -- -D warnings
 	cd mcp-servers && $(NPX) eslint --fix .
 	cd desktop/src && $(NPX) eslint --fix 'src/**/*.ts'
@@ -920,14 +934,16 @@ dev: guard-not-prod-data-dir guard-dev-port build-cli build-os-cli build-mcp dow
 	chmod +x desktop/src-tauri/cli/speedwave
 	@"$(MAKE)" bundle-static-licenses
 	@"$(MAKE)" verify-bundled-assets
-	cd desktop/src-tauri && env -u PORT SPEEDWAVE_RESOURCES_DIR="$$(pwd)" SPEEDWAVE_ALLOW_UNSIGNED=1 TAURI_CONFIG="$$DEV_TAURI_CONFIG" cargo tauri dev --config "$$DEV_TAURI_CONFIG"
+	app_version="$${SPEEDWAVE_VERSION:-$$(cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- version --repo $(CURDIR) 2>/dev/null || echo 0.0.0)}"; \
+	DEV_TAURI_CONFIG="$$(printf '%s' "$$DEV_TAURI_CONFIG" | sed "s/^{/{\"version\":\"$$app_version\",/")"; \
+	cd desktop/src-tauri && env -u PORT SPEEDWAVE_RESOURCES_DIR="$$(pwd)" SPEEDWAVE_ALLOW_UNSIGNED=1 SPEEDWAVE_VERSION="$$app_version" TAURI_CONFIG="$$DEV_TAURI_CONFIG" cargo tauri dev --config "$$DEV_TAURI_CONFIG"
 endif
 
 status: guard-not-prod-data-dir
 	@echo "=== Rust ==="
-	@$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli --features speedwave-runtime/test-support 2>&1 | grep "test result" || true)
+	@$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-runtime/test-support,speedwave-version/cli 2>&1 | grep "test result" || true)
 	@echo "\n=== Clippy ==="
-	@echo "Warnings: $$(cargo clippy -p speedwave-runtime -p speedwave-cli 2>&1 | grep -c '^warning' || echo 0)"
+	@echo "Warnings: $$(cargo clippy -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-version/cli 2>&1 | grep -c '^warning' || echo 0)"
 	@echo "\n=== MCP Servers ==="
 	@cd mcp-servers && $(NPM) test 2>&1 | grep -E "Tests|Test Files" | tail -2 || true
 	@echo "\n=== Angular ==="

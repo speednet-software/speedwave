@@ -102,14 +102,25 @@ fn million_context_variants_bill_at_standard_rates() {
 }
 
 #[test]
-fn fable_5_1_cache_hit_is_the_lone_025x_multiplier() {
-    let fable_5_1 = ANTHROPIC_MODELS
-        .iter()
-        .find(|m| m.id == "claude-fable-5-1")
-        .expect("claude-fable-5-1 must be in the catalog");
-    assert!((fable_5_1.pricing.cached_input - fable_5_1.pricing.input * 0.025).abs() < 1e-9);
+fn cache_hit_is_the_standard_01x_multiplier_except_documented_exceptions() {
+    let exceptions = [
+        ("claude-fable-5-1", 0.025),
+        ("claude-opus-5-5", 0.05),
+        ("claude-sonnet-5-5", 0.05),
+    ];
+    for (id, multiplier) in exceptions {
+        let m = ANTHROPIC_MODELS
+            .iter()
+            .find(|m| m.id == id)
+            .unwrap_or_else(|| panic!("{id} must be in the catalog"));
+        assert!(
+            (m.pricing.cached_input - m.pricing.input * multiplier).abs() < 1e-9,
+            "{id}: expected the {multiplier}x cache-hit multiplier, got cached_input={}",
+            m.pricing.cached_input
+        );
+    }
     for m in ANTHROPIC_MODELS {
-        if m.id == "claude-fable-5-1" {
+        if exceptions.iter().any(|(id, _)| *id == m.id) {
             continue;
         }
         assert!(
@@ -135,4 +146,24 @@ fn sonnet_5_is_priced_below_sonnet_46() {
     assert!(s5.pricing.cached_input < s46.pricing.cached_input);
     assert!(s5.pricing.cache_write < s46.pricing.cache_write);
     assert!(s5.pricing.output < s46.pricing.output);
+}
+
+#[test]
+fn long_prompt_tiers_are_priced_with_a_positive_threshold() {
+    let mut saw_one = false;
+    for m in ANTHROPIC_MODELS {
+        if let Some(tiered) = &m.long_prompt {
+            saw_one = true;
+            assert_priced(m.id, "long_prompt", &tiered.pricing);
+            assert!(
+                tiered.threshold_tokens > 0,
+                "{}: long_prompt.threshold_tokens must be positive",
+                m.id
+            );
+        }
+    }
+    assert!(
+        saw_one,
+        "no catalog entry carries a long_prompt tier: this test asserts nothing"
+    );
 }

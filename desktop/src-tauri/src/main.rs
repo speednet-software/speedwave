@@ -7,6 +7,7 @@ mod auth;
 mod auth_commands;
 mod bridges;
 mod chat;
+mod chat_registry;
 mod chat_session_cmd;
 mod clipboard_bridge;
 mod cloudstorage_cmd;
@@ -68,7 +69,7 @@ mod window;
 
 use types::check_project;
 
-use chat::{ChatSession, SharedChatSession};
+use chat_registry::SharedChatSessions;
 use speedwave_runtime::config;
 
 use serde::Serialize;
@@ -82,7 +83,7 @@ use reconcile::{
     SharedPluginBridges,
 };
 
-pub(crate) use project_cmd::{rebind_chat, rollback_and_emit_failed};
+pub(crate) use project_cmd::{clear_chat_sessions, rollback_and_emit_failed};
 
 pub(crate) fn join_with_exit_watchdog(handle: std::thread::JoinHandle<()>) {
     let watchdog = std::thread::spawn(|| {
@@ -687,7 +688,7 @@ fn main() {
         }
     }
 
-    let initial_session: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("default")));
+    let chat_sessions: SharedChatSessions = Arc::new(chat_registry::ChatSessions::default());
     let queue_service = speedwave_runtime::session::QueuedMessageService::new();
     let transcript_store: transcription_cmd::TranscriptStoreHandle =
         Arc::new(speedwave_runtime::transcription::TranscriptStore::new());
@@ -833,7 +834,7 @@ fn main() {
                 }
             }
         }))
-        .manage(initial_session)
+        .manage(chat_sessions)
         .manage(ide_bridge.clone())
         .manage(clipboard_bridge_slot.clone())
         .manage(plugin_bridges.clone())
@@ -862,6 +863,12 @@ fn main() {
             if let Ok(mut slot) = clipboard_bridge_slot.lock() {
                 *slot = clipboard_bridge::spawn(app.handle().clone());
             }
+
+            let interrupted = transcript_store.reconcile_interrupted();
+            if interrupted > 0 {
+                log::info!("{interrupted} interrupted recording(s) marked for transcription");
+            }
+            transcription_cmd::spawn_change_forwarder(app.handle().clone(), transcript_store);
 
             if let Err(failures) = speedwave_runtime::plugin::audit_all() {
                 let body = format_audit_failure_message(&failures);
@@ -1006,10 +1013,6 @@ fn main() {
                                         "update available from tray check: {}",
                                         info.version
                                     );
-                                    use tauri::Emitter;
-                                    if let Err(e) = app_clone.emit("update_available", &info) {
-                                        log::error!("failed to emit update_available event: {e}");
-                                    }
                                 }
                                 Ok(updater::UpdateCheckOutcome::UpToDate) => {
                                     log::info!("tray update check found no new version");
@@ -1176,8 +1179,10 @@ fn main() {
             pin_cmd::get_effort_pin,
             pin_cmd::set_effort_pin,
             pin_cmd::get_model_hint,
+            pin_cmd::get_model_pin,
             pin_cmd::set_model_pin,
             pin_cmd::clear_model_pin,
+            pin_cmd::restore_model_pin,
             model_picker::list_model_picker,
             containers_cmd::get_telemetry_config,
             containers_cmd::update_telemetry_config,
@@ -1204,24 +1209,32 @@ fn main() {
             paste_cmd::save_pasted_image,
             chat_session_cmd::submit_question_answer,
             chat_session_cmd::stop_chat,
+            chat_session_cmd::close_chat_tab,
+            chat_session_cmd::reset_chat_tabs,
             chat_session_cmd::get_chat_session_info,
-            chat_session_cmd::get_chat_takes_wire_effort,
             chat_session_cmd::switch_chat_model,
+            chat_session_cmd::apply_chat_effort,
             chat_session_cmd::get_plan_usage,
             chat_session_cmd::get_context_usage,
+            chat_session_cmd::tab_owning_transcript,
             retry_cmd::retry_last_turn,
             queue_cmd::queue_message,
             queue_cmd::cancel_queued_message,
-            transcription_cmd::transcription_capabilities,
             transcription_cmd::list_audio_sources,
             transcription_cmd::start_transcription,
             transcription_cmd::stop_transcription,
+            transcription_cmd::pause_transcription,
             transcription_cmd::resume_transcription,
             transcription_cmd::subscribe_transcript,
             transcription_cmd::list_transcripts,
             transcription_cmd::get_transcript,
             transcription_cmd::delete_transcript,
             transcription_cmd::get_transcript_markdown,
+            transcription_cmd::rename_transcript,
+            transcription_cmd::transcribe_transcript,
+            transcription_cmd::postpone_transcription,
+            transcription_cmd::export_transcript,
+            transcription_cmd::reveal_transcript_audio,
             transcription_cmd::recommended_transcription_model,
             transcription_cmd::list_transcription_models,
             transcription_cmd::download_transcription_model,
@@ -1292,6 +1305,8 @@ fn main() {
             #[cfg(feature = "e2e")]
             e2e_support::e2e_last_spawn_args,
             #[cfg(feature = "e2e")]
+            e2e_support::e2e_last_applied_effort,
+            #[cfg(feature = "e2e")]
             e2e_support::e2e_restart_app,
         ])
         .on_window_event(move |window, event| {
@@ -1360,7 +1375,11 @@ fn main() {
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "test-only assertions")]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test assertions may unwrap/expect freely"
+)]
 mod tests {
     use super::*;
 
@@ -1718,10 +1737,10 @@ mod tests {
                 let before = &source[..*idx];
                 let last_mod_tests = before.rfind("mod tests");
                 let last_cfg_test = before.rfind("#[cfg(test)]");
-                match (last_mod_tests, last_cfg_test) {
-                    (Some(mt), Some(ct)) if ct < mt && *idx > mt => false,
-                    _ => true,
-                }
+                !matches!(
+                    (last_mod_tests, last_cfg_test),
+                    (Some(mt), Some(ct)) if ct < mt && *idx > mt
+                )
             })
             .count();
         assert!(
@@ -1848,6 +1867,29 @@ mod tests {
         assert!(
             directive.contains("data:"),
             "CSP image directive must allow data: for image sources; got: {directive}"
+        );
+    }
+
+    #[test]
+    fn main_window_disables_native_drag_drop_for_html5_composer_dnd() {
+        let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json"))
+            .expect("tauri.conf.json parses");
+        let windows = conf["app"]["windows"]
+            .as_array()
+            .expect("app.windows is an array");
+        let main_window = windows
+            .first()
+            .expect("app.windows must define the main window");
+
+        let drag_drop_enabled = main_window["dragDropEnabled"]
+            .as_bool()
+            .expect("main window must set dragDropEnabled explicitly");
+        assert!(
+            !drag_drop_enabled,
+            "dragDropEnabled must be false: Tauri's default native drag-drop \
+             handler swallows the drop before it reaches the webview, so \
+             composer.component.ts's HTML5 drag & drop (file-drop.directive.ts) \
+             never fires (SPEED-636)"
         );
     }
 }

@@ -467,7 +467,7 @@ pub async fn add_project(
     name: String,
     dir: String,
     app: tauri::AppHandle,
-    chat_state: tauri::State<'_, crate::chat::SharedChatSession>,
+    chat_state: tauri::State<'_, crate::chat_registry::SharedChatSessions>,
     mcp_os: tauri::State<'_, SharedMcpOs>,
     ide_bridge: tauri::State<'_, SharedIdeBridge>,
 ) -> Result<(), String> {
@@ -555,16 +555,11 @@ pub async fn add_project(
         SwitchResult::Succeeded { teardown } => teardown,
     };
 
-    let rebind_name = name.clone();
-    let rebind_app = app.clone();
-    let rebind_state = chat_state.inner().clone();
-    let rebind_result = tokio::task::spawn_blocking(move || {
-        crate::rebind_chat(&rebind_name, &rebind_app, &rebind_state)
-    })
-    .await
-    .unwrap_or_else(|je| Err(format!("join error: {je}")));
-    if let Err(e) = rebind_result {
-        log::warn!("rebind_chat failed after adding project: {e}");
+    let registry = chat_state.inner().clone();
+    if let Err(je) =
+        tokio::task::spawn_blocking(move || crate::clear_chat_sessions(&registry)).await
+    {
+        log::warn!("clearing the chat sessions after adding the project did not finish: {je}");
     }
 
     if let Some(prev) = pending_teardown {
@@ -727,37 +722,37 @@ pub async fn check_containers_running(project: String) -> Result<bool, String> {
     .map_err(|e| e.to_string())?
 }
 
-pub(crate) fn recreate_project_containers_if_running(project: &str) {
+pub(crate) fn recreate_project_containers_if_running(project: &str) -> bool {
     let active = speedwave_runtime::config::load_user_config()
         .ok()
         .and_then(|c| c.active_project);
     if active.as_deref() != Some(project) {
         log::debug!("'{project}' is not the active project — skipping recreate");
-        return;
+        return false;
     }
     if let Err(e) = ensure_images_ready() {
         log::warn!("images not ready for '{project}' — skipping recreate: {e}");
-        return;
+        return false;
     }
     let rt = speedwave_runtime::runtime::detect_runtime();
     if !rt.is_available() {
         log::debug!("runtime not available — skipping recreate");
-        return;
+        return false;
     }
     let running = match rt.compose_ps(project) {
         Ok(c) => !c.is_empty(),
         Err(e) => {
             log::debug!("compose_ps failed ({e}) — skipping recreate");
-            return;
+            return false;
         }
     };
     if !running {
         log::debug!("'{project}' not running — skipping recreate");
-        return;
+        return false;
     }
     if let Err(sanitized) = crate::integrations_cmd::ensure_project_images_built(&rt, project) {
         log::warn!("pre-build failed for '{project}' — skipping recreate: {sanitized}");
-        return;
+        return false;
     }
     use crate::types::IntoAnyhow;
     let result = rt.transaction(project, |rt| -> anyhow::Result<()> {
@@ -774,6 +769,7 @@ pub(crate) fn recreate_project_containers_if_running(project: &str) {
             log::warn!("failed to recreate containers for '{project}': {e}");
         }
     }
+    true
 }
 
 #[tauri::command]
@@ -931,6 +927,7 @@ pub struct ActiveProviderSummary {
     pub kind: config::LlmProviderKind,
     pub model: Option<String>,
     pub base_url: Option<String>,
+    pub effort_levels: &'static [&'static str],
 }
 
 pub(crate) fn active_provider_summary_from(
@@ -953,6 +950,7 @@ pub(crate) fn active_provider_summary_from(
         kind: entry.kind,
         model: llm.effective_active_model(),
         base_url: entry.base_url.clone(),
+        effort_levels: speedwave_runtime::defaults::EFFORT_LEVELS,
     })
 }
 
@@ -2320,21 +2318,21 @@ mod tests {
     }
 
     #[test]
-    fn add_project_rebinds_the_chat_on_a_blocking_thread() {
+    fn add_project_clears_the_chat_sessions_on_a_blocking_thread() {
         let source = include_str!("containers_cmd.rs");
         let body = &source[source
             .find("pub async fn add_project(")
             .expect("add_project must exist")..];
         let body = &body[..body.find("\n}\n").expect("function end")];
-        let rebind = body
-            .find("crate::rebind_chat(")
-            .expect("add_project must rebind the chat");
-        let spawn = body[..rebind]
+        let clear = body
+            .find("crate::clear_chat_sessions(")
+            .expect("add_project must clear the chat sessions");
+        let spawn = body[..clear]
             .rfind("spawn_blocking(")
-            .expect("the rebind must run on a blocking thread");
+            .expect("the clear must run on a blocking thread");
         assert!(
-            !body[spawn..rebind].contains(';'),
-            "the rebind must be the body of its spawn_blocking closure"
+            !body[spawn..clear].contains(';'),
+            "the clear must be the body of its spawn_blocking closure"
         );
     }
 
@@ -2369,7 +2367,7 @@ mod tests {
             .find(|v| v["id"] == "claude-fable-5")
             .expect("claude-fable-5 must be present in the JSON payload");
         assert_eq!(fable_json["family"], "Fable 5");
-        assert_eq!(fable_json["one_million_context"], "every_plan");
+        assert_eq!(fable_json["one_million_context"], "native");
         assert!(fable_json.get("has_1m").is_none());
         assert!(fable_json.get("selectable").is_none());
     }
@@ -3695,6 +3693,54 @@ mod tests {
             Some("http://host.docker.internal:11434"),
             "local discovery needs the entry's base_url, not the provider_id"
         );
+        assert_eq!(
+            summary.effort_levels,
+            speedwave_runtime::defaults::EFFORT_LEVELS,
+            "a routed model takes every effort level Speedwave can pin"
+        );
+    }
+
+    #[test]
+    fn active_provider_summary_matches_ts_mirror() {
+        let ts = include_str!("../../src/src/app/models/llm.ts");
+        let body = ts
+            .split("export interface ActiveProviderSummary {")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .expect("ActiveProviderSummary interface in models/llm.ts");
+        let ts_fields: std::collections::BTreeSet<&str> = body
+            .lines()
+            .filter_map(|line| line.trim().split(':').next())
+            .map(|name| name.trim_end_matches('?'))
+            .filter(|name| !name.is_empty())
+            .collect();
+        let summary = ActiveProviderSummary {
+            provider_id: "p".to_string(),
+            kind: config::LlmProviderKind::Local,
+            model: None,
+            base_url: None,
+            effort_levels: speedwave_runtime::defaults::EFFORT_LEVELS,
+        };
+        let json = serde_json::to_value(&summary).unwrap();
+        let rust_fields: std::collections::BTreeSet<&str> = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(ts_fields, rust_fields);
+    }
+
+    #[test]
+    fn model_selector_takes_the_slider_order_from_the_summary_not_from_a_level_count() {
+        let ts = include_str!(
+            "../../src/src/app/chat/composer/model-selector/model-selector.component.ts"
+        );
+        assert!(
+            !ts.contains("length === 5"),
+            "the slider order comes from EFFORT_LEVELS via ActiveProviderSummary.effort_levels"
+        );
+        assert!(ts.contains("summary()?.effort_levels"));
     }
 
     #[test]

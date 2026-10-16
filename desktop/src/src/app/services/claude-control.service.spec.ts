@@ -44,7 +44,7 @@ const CONTEXT: ClaudeContextUsage = {
   total_tokens: 46_567,
   max_tokens: 1_000_000,
   percentage: 5,
-  categories: [{ name: 'System prompt', tokens: 3_902, is_deferred: false }],
+  categories: [{ name: 'System prompt', tokens: 3_902 }],
 };
 
 describe('ClaudeControlService', () => {
@@ -74,6 +74,41 @@ describe('ClaudeControlService', () => {
   beforeEach(() => {
     mockTauri = new MockTauriService();
     logger = makeMockLogger();
+  });
+
+  it('keeps an event that arrives while a pull runs, over the older state the pull read', async () => {
+    let answer: (status: ClaudeSessionInfoState) => void = () => undefined;
+    mockTauri.invokeHandler = (cmd: string) =>
+      cmd === 'get_chat_session_info'
+        ? new Promise((resolve) => (answer = resolve))
+        : Promise.resolve(undefined);
+    const service = createService();
+    await awaitListener();
+
+    const pulling = service.refreshSessionInfo('p');
+    emit('p', { state: 'ready', info: INFO });
+    answer({ state: 'pending' });
+    await pulling;
+
+    expect(service.sessionInfoState('p')).toEqual({ state: 'ready', info: INFO });
+  });
+
+  it('applies a pull when only another project reported meanwhile', async () => {
+    let answer: (status: ClaudeSessionInfoState) => void = () => undefined;
+    mockTauri.invokeHandler = (cmd: string) =>
+      cmd === 'get_chat_session_info'
+        ? new Promise((resolve) => (answer = resolve))
+        : Promise.resolve(undefined);
+    const service = createService();
+    await awaitListener();
+
+    const pulling = service.refreshSessionInfo('p');
+    emit('q', { state: 'pending' });
+    answer({ state: 'ready', info: INFO });
+    await pulling;
+
+    expect(service.sessionInfoState('p')).toEqual({ state: 'ready', info: INFO });
+    expect(service.sessionInfoState('q')).toEqual({ state: 'pending' });
   });
 
   it('reports unavailable for a project it has heard nothing about', async () => {
@@ -179,7 +214,7 @@ describe('ClaudeControlService', () => {
     expect(logger.debug).toHaveBeenCalledWith('get_plan_usage failed: control request timed out');
   });
 
-  it('returns the context usage of the project', async () => {
+  it('returns the context usage of the tab', async () => {
     const calls: Array<Record<string, unknown> | undefined> = [];
     mockTauri.invokeHandler = async (cmd, args) => {
       if (cmd !== 'get_context_usage') return undefined;
@@ -188,8 +223,8 @@ describe('ClaudeControlService', () => {
     };
     const service = createService();
 
-    expect(await service.contextUsage('acme')).toEqual(CONTEXT);
-    expect(calls).toEqual([{ project: 'acme' }]);
+    expect(await service.contextUsage('acme', 'tab-1')).toEqual(CONTEXT);
+    expect(calls).toEqual([{ project: 'acme', tabId: 'tab-1' }]);
   });
 
   it('degrades context usage to null on any failure', async () => {
@@ -198,7 +233,7 @@ describe('ClaudeControlService', () => {
     };
     const service = createService();
 
-    expect(await service.contextUsage('acme')).toBeNull();
+    expect(await service.contextUsage('acme', 'tab-1')).toBeNull();
   });
 
   it('stays usable when the event subscription fails', async () => {

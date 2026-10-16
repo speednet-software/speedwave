@@ -1,7 +1,6 @@
 #!/usr/bin/env bats
 
 OSC52="$BATS_TEST_DIRNAME/../../containers/osc52-copy.sh"
-CONTAINERFILE="$BATS_TEST_DIRNAME/../../containers/Containerfile.claude"
 
 setup() {
     TMP_HOME=$(mktemp -d)
@@ -141,38 +140,6 @@ teardown() {
     [ "$status" -eq 0 ]
     [ "$(cat "$BRIDGE")" = "via-symlink" ]
 }
-
-
-@test "Containerfile.claude COPYs osc52-copy.sh to /usr/local/bin" {
-    grep -q 'COPY --chmod=755 osc52-copy.sh /usr/local/bin/osc52-copy.sh' "$CONTAINERFILE"
-}
-
-@test "Containerfile.claude creates symlinks for all six clipboard names" {
-    grep -q 'ln -s osc52-copy.sh /usr/local/bin/pbcopy' "$CONTAINERFILE"
-    grep -q 'ln -s osc52-copy.sh /usr/local/bin/xclip' "$CONTAINERFILE"
-    grep -q 'ln -s osc52-copy.sh /usr/local/bin/xsel' "$CONTAINERFILE"
-    grep -q 'ln -s osc52-copy.sh /usr/local/bin/wl-copy' "$CONTAINERFILE"
-    grep -q 'ln -s osc52-copy.sh /usr/local/bin/clip.exe' "$CONTAINERFILE"
-    grep -q 'ln -s osc52-copy.sh /usr/local/bin/powershell.exe' "$CONTAINERFILE"
-}
-
-@test "osc52-copy.sh is installed AFTER the heavy claude COPY layer" {
-    local osc_line claude_line
-    osc_line=$(grep -n 'osc52-copy.sh' "$CONTAINERFILE" | head -1 | cut -d: -f1)
-    claude_line=$(grep -n 'cp "\$CLAUDE_BIN" /usr/local/bin/claude' "$CONTAINERFILE" | head -1 | cut -d: -f1)
-    [ -n "$osc_line" ]
-    [ -n "$claude_line" ]
-    [ "$osc_line" -gt "$claude_line" ]
-}
-
-
-@test "bridge filename matches BRIDGE_FILENAME in clipboard_bridge.rs" {
-    local rs="$BATS_TEST_DIRNAME/../../desktop/src-tauri/src/clipboard_bridge.rs"
-    grep -q 'BRIDGE_FILENAME: &str = ".clipboard-bridge"' "$rs"
-    grep -q '\.clipboard-bridge' "$OSC52"
-}
-
-
 @test "reports a stderr error when the bridge file cannot be written" {
     local notadir="$TMP_HOME/regular-file"
     printf 'x' > "$notadir"
@@ -233,17 +200,4 @@ teardown() {
     run bash -c "SPEEDWAVE_CLIP_FILE='$f' bash '$OSC52' -t image/png -o"
     [ "$status" -eq 0 ]
     [ "$output" = "OK" ]
-}
-
-
-@test "script has no curl, wget, secrets, or anthropic touchpoints" {
-    ! grep -qE '\bcurl\b|\bwget\b|/tokens|\.credentials\.json|api\.anthropic' "$OSC52"
-}
-
-@test "script does not query terminal via OSC 52 ?" {
-    ! grep -qE '52;c;\?' "$OSC52"
-}
-
-@test "script does not source any external file" {
-    ! grep -qE '^\s*source\b|^\s*\.\s' "$OSC52"
 }

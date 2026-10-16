@@ -14,6 +14,7 @@ import { filter } from 'rxjs/operators';
 import { ProjectSwitcherComponent } from '../project-switcher/project-switcher.component';
 import { UpdateNotificationComponent } from '../update-notification/update-notification.component';
 import { BetaService } from '../services/beta.service';
+import { ChatStateService } from '../services/chat-state.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { TranscriptionService } from '../services/transcription.service';
 import { UiStateService } from '../services/ui-state.service';
@@ -190,6 +191,7 @@ export class ShellComponent implements OnInit, OnDestroy {
   readonly projectState = inject(ProjectStateService);
   readonly ui = inject(UiStateService);
   readonly beta = inject(BetaService);
+  private readonly chat = inject(ChatStateService);
   private readonly transcription = inject(TranscriptionService);
   private cdr = inject(ChangeDetectorRef);
   private router = inject(Router);
@@ -241,7 +243,7 @@ export class ShellComponent implements OnInit, OnDestroy {
 
   readonly visibleEntries = computed<readonly NavRailEntry[]>(() => {
     const recording = this.transcription.recording();
-    const show = this.beta.enabled() || recording;
+    const show = this.beta.enabled() || this.transcription.captureOpen();
     return this.entryCatalog
       .filter((e) => e.id !== TRANSCRIPTION_ENTRY_ID || show)
       .map((e) => (e.id === TRANSCRIPTION_ENTRY_ID ? { ...e, recording } : e));
@@ -337,7 +339,7 @@ export class ShellComponent implements OnInit, OnDestroy {
         return;
       case '4':
         event.preventDefault();
-        if (this.beta.enabled() || this.transcription.recording()) {
+        if (this.beta.enabled() || this.transcription.captureOpen()) {
           void this.router.navigateByUrl('/meeting-transcription');
         }
         return;
@@ -352,6 +354,40 @@ export class ShellComponent implements OnInit, OnDestroy {
       case 'l':
         event.preventDefault();
         void this.router.navigateByUrl('/logs');
+        return;
+      case 'r':
+        if (
+          this.beta.enabled() &&
+          this.activeViewId() === 'chat' &&
+          this.projectState.status() === 'ready'
+        ) {
+          event.preventDefault();
+          this.ui.requestRestart();
+        }
+        return;
+      case 't':
+      case 'n':
+        if (this.beta.enabled()) {
+          if (this.chat.canOpenTab()) {
+            event.preventDefault();
+            void this.chat.openTab();
+          }
+          return;
+        }
+        if (
+          key.toLowerCase() === 'n' &&
+          this.activeViewId() === 'chat' &&
+          this.projectState.status() === 'ready'
+        ) {
+          event.preventDefault();
+          this.ui.requestRestart();
+        }
+        return;
+      case 'w':
+        if (this.beta.enabled() && this.chat.tabs().size > 1) {
+          event.preventDefault();
+          void this.chat.closeTab(this.chat.activeTabId());
+        }
         return;
       default:
         return;
@@ -370,7 +406,7 @@ export class ShellComponent implements OnInit, OnDestroy {
 
   /** Triggers a container restart from the restart-required overlay. */
   restartContainers(): void {
-    this.projectState.restartContainers();
+    this.projectState.restartContainers(this.projectState.activeProject());
   }
 
   /** Dismisses the restart-required overlay without restarting. */

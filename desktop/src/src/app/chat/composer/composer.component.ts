@@ -31,21 +31,14 @@ import {
   type ModelSelection,
 } from './model-selector/model-selector.component';
 import {
-  ImagePreprocessorService,
   ERROR_UNSUPPORTED_TYPE,
+  ImagePreprocessorService,
   type ModelClass,
-  type PreprocessedImage,
 } from '../../services/image-preprocessor.service';
 import type { ChatAttachment } from '../../models/chat';
+import { ComposerAttachments } from './composer-attachments';
 
 const SLASH_TRIGGER = /^(\s*)\/([^\s/]*)$/;
-
-interface AttachmentRecord {
-  id: string;
-  filename: string;
-  previewUrl: string;
-  preprocessed: PreprocessedImage | null;
-}
 
 const MIN_COMPOSER_HEIGHT_PX = 56;
 
@@ -97,14 +90,19 @@ const PLAN_MODE_PREFIX =
       [attachments]="attachmentViewModels()"
       (remove)="removeAttachment($event)"
     />
-    @if (transcriptAttached()) {
+    @if (transcriptName()) {
       <div
         data-testid="composer-transcript"
         class="mono mb-2 flex items-center gap-2 rounded ring-1 ring-[var(--accent)]/40 bg-[var(--accent)]/[0.06] px-3 py-1.5 text-[11px] text-[var(--ink-dim)]"
       >
-        <span class="text-[var(--accent)]">transcript:</span>
-        <span class="truncate"
-          >goes out with your next message, to your configured LLM provider</span
+        <span class="shrink-0 text-[var(--accent)]">Transcript:</span>
+        <span
+          class="max-w-[50%] shrink-0 truncate text-[var(--ink)]"
+          data-testid="composer-transcript-name"
+          >{{ transcriptName() }}</span
+        >
+        <span class="truncate text-[var(--ink-mute)]"
+          >· sent with your next message to your configured LLM provider</span
         >
         <button
           type="button"
@@ -117,17 +115,17 @@ const PLAN_MODE_PREFIX =
         </button>
       </div>
     }
-    @if (attachmentError()) {
+    @if (attachmentDraft().error()) {
       <div
         data-testid="composer-attachment-error"
         role="alert"
         class="mb-2 rounded border border-red-500/40 bg-red-500/10 px-3 py-1.5 text-[11px] text-red-300"
       >
-        {{ attachmentError() }}
+        {{ attachmentDraft().error() }}
       </div>
     }
     <div class="sr-only" aria-live="polite" data-testid="composer-attachment-announce">
-      {{ attachmentAnnouncement() }}
+      {{ attachmentDraft().announcement() }}
     </div>
     <div
       appFileDrop
@@ -230,6 +228,9 @@ const PLAN_MODE_PREFIX =
             [streaming]="streaming()"
             [modelError]="modelError()"
             [sessionModel]="model()"
+            [pickedModel]="pickedModel()"
+            [launchModel]="launchModel()"
+            [sessionAwaited]="sessionAwaited()"
             (modelSelected)="modelSelected.emit($event)"
             (effortSelected)="effortSelected.emit($event)"
           />
@@ -321,15 +322,24 @@ export class ComposerComponent implements AfterViewInit {
 
   readonly model = input('');
 
+  readonly pickedModel = input('');
+
+  readonly launchModel = input<string | null>(null);
+
+  readonly sessionAwaited = input(false);
+
   readonly projectId = input('');
 
   readonly modelError = input('');
 
   readonly contextLabel = input('');
 
-  readonly transcriptAttached = input(false);
+  readonly transcriptName = input('');
 
   readonly draftText = input('');
+
+  /** Per-tab attachment state (`ChatSessionStore.composerAttachments`, SPEED-785) — never instance-held, so it survives a tab switch. */
+  readonly attachmentDraft = input.required<ComposerAttachments>();
 
   readonly submitted = output<{
     payload: string;
@@ -362,15 +372,8 @@ export class ComposerComponent implements AfterViewInit {
   readonly slashOpen = signal<boolean>(false);
   readonly slashQuery = signal<string>('');
 
+  /** Restored/snapshotted by `ChatComponent` via {@link setPlanMode} across a tab switch or a nav-rail remount. */
   readonly planMode = signal<boolean>(false);
-
-  readonly attachments = signal<ReadonlyArray<AttachmentRecord>>([]);
-
-  private attachmentSeq = 0;
-
-  readonly attachmentError = signal<string>('');
-
-  readonly attachmentAnnouncement = signal<string>('');
 
   readonly textValue = toSignal(this.text.valueChanges, { initialValue: '' });
 
@@ -409,17 +412,6 @@ export class ComposerComponent implements AfterViewInit {
       const value = this.disabled();
       if (value) this.text.disable({ emitEvent: false });
       else this.text.enable({ emitEvent: false });
-    });
-    let previous: ReadonlyArray<AttachmentRecord> = [];
-    effect((onCleanup) => {
-      const current = this.attachments();
-      for (const r of previous.filter((p) => !current.some((c) => c.id === p.id))) {
-        URL.revokeObjectURL(r.previewUrl);
-      }
-      previous = current;
-      onCleanup(() => {
-        for (const r of current) URL.revokeObjectURL(r.previewUrl);
-      });
     });
     effect(() => {
       const draft = this.draftText();
@@ -520,10 +512,11 @@ export class ComposerComponent implements AfterViewInit {
   /** Text submits queue while streaming (ADR-045); submits with attachments don't (ADR-065). */
   canSubmit(): boolean {
     if (this.disabled() || this.sendBlocked()()) return false;
-    if (this.anyAttachmentPreprocessing()) return false;
+    const draft = this.attachmentDraft();
+    if (draft.anyPreprocessing()) return false;
     const text = this.textValue();
     const hasText = !isBlankOrSlashOnly(text);
-    const hasAttachments = this.attachments().length > 0;
+    const hasAttachments = draft.records().length > 0;
     if (!hasText && !hasAttachments) return false;
     return !(hasAttachments && this.streaming());
   }
@@ -557,7 +550,8 @@ export class ComposerComponent implements AfterViewInit {
     if (!this.canSubmit()) return;
     const text = this.textValue().trim();
     const payload = this.planMode() ? `${PLAN_MODE_PREFIX}${text}` : text;
-    const attachments = this.readyChatAttachments();
+    const draft = this.attachmentDraft();
+    const attachments = draft.ready();
     if (this.streaming()) {
       if (attachments.length > 0) return;
       this.queueRequested.emit(payload);
@@ -566,7 +560,7 @@ export class ComposerComponent implements AfterViewInit {
     }
     this.text.reset('');
     this.restoreAutoSize();
-    this.clearAttachments();
+    draft.clear();
     this.closeSlash();
   }
 
@@ -604,37 +598,30 @@ export class ComposerComponent implements AfterViewInit {
    * @param id - Attachment id from the view-model.
    */
   removeAttachment(id: string): void {
-    const removed = this.attachments().find((a) => a.id === id);
-    this.attachments.update((list) => list.filter((a) => a.id !== id));
+    const draft = this.attachmentDraft();
+    const removed = draft.remove(id);
     if (removed) {
-      this.attachmentAnnouncement.set(`Image removed: ${removed.filename}`);
+      draft.announcement.set(`Image removed: ${removed.filename}`);
     }
   }
 
-  /** Clears every attachment (post-submit and on session reset). */
-  clearAttachments(): void {
-    this.attachments.set([]);
-    this.attachmentError.set('');
-  }
-
   readonly attachmentViewModels = computed<ReadonlyArray<AttachmentViewModel>>(() =>
-    this.attachments().map((a) => ({
-      id: a.id,
-      filename: a.filename,
-      previewUrl: a.previewUrl,
-      encodedSizeBytes: a.preprocessed?.sizeBytes ?? 0,
-      preprocessing: a.preprocessed === null,
-    }))
-  );
-
-  readonly anyAttachmentPreprocessing = computed<boolean>(() =>
-    this.attachments().some((a) => a.preprocessed === null)
+    this.attachmentDraft()
+      .records()
+      .map((a) => ({
+        id: a.id,
+        filename: a.filename,
+        previewUrl: a.previewUrl,
+        encodedSizeBytes: a.preprocessed?.sizeBytes ?? 0,
+        preprocessing: a.preprocessed === null,
+      }))
   );
 
   readonly submitBlockedReason = computed<string>(() => {
     if (this.disabled()) return '';
-    if (this.anyAttachmentPreprocessing()) return 'Preparing image…';
-    if (this.attachments().length > 0 && this.streaming()) {
+    const draft = this.attachmentDraft();
+    if (draft.anyPreprocessing()) return 'Preparing image…';
+    if (draft.records().length > 0 && this.streaming()) {
       return 'Wait for the response to finish before sending an image.';
     }
     return '';
@@ -642,38 +629,20 @@ export class ComposerComponent implements AfterViewInit {
 
   private async ingest(files: File[]): Promise<void> {
     const images = files.filter((f) => f.type.startsWith('image/'));
+    const draft = this.attachmentDraft();
     if (images.length === 0) {
+      draft.error.set(ERROR_UNSUPPORTED_TYPE);
       return;
     }
     const project = this.projectState.activeProject();
     if (!project) {
-      this.attachmentError.set('Select a project before attaching an image.');
+      draft.error.set('Select a project before attaching an image.');
       return;
     }
 
     const modelClass = this.modelClass();
     for (const file of images) {
-      const id = `att-${++this.attachmentSeq}`;
-      const previewUrl = URL.createObjectURL(file);
-      this.attachments.update((list) => [
-        ...list,
-        { id, filename: file.name || 'image', previewUrl, preprocessed: null },
-      ]);
-      try {
-        const out = await this.preprocessor.preprocess(file, modelClass, project);
-        URL.revokeObjectURL(previewUrl);
-        this.attachments.update((list) =>
-          list.map((a) =>
-            a.id === id ? { ...a, previewUrl: out.previewUrl, preprocessed: out } : a
-          )
-        );
-        this.attachmentError.set('');
-        this.attachmentAnnouncement.set(`Image attached: ${out.attachment.filename}`);
-      } catch (err) {
-        this.attachments.update((list) => list.filter((a) => a.id !== id));
-        URL.revokeObjectURL(previewUrl);
-        this.attachmentError.set(err instanceof Error ? err.message : ERROR_UNSUPPORTED_TYPE);
-      }
+      await draft.add(file, (f) => this.preprocessor.preprocess(f, modelClass, project));
     }
   }
 
@@ -685,19 +654,17 @@ export class ComposerComponent implements AfterViewInit {
     return 'sonnet';
   }
 
-  private readyAttachments(): PreprocessedImage[] {
-    return this.attachments()
-      .map((a) => a.preprocessed)
-      .filter((p): p is PreprocessedImage => p !== null);
-  }
-
-  private readyChatAttachments(): ChatAttachment[] {
-    return this.readyAttachments().map((p) => p.attachment);
-  }
-
   /** Toggles plan mode on/off. Persists across messages until toggled again. */
   togglePlanMode(): void {
-    this.planMode.update((v) => !v);
+    this.setPlanMode(!this.planMode());
+  }
+
+  /**
+   * Sets plan mode to an explicit value (tab restore).
+   * @param value - Plan mode flag to apply.
+   */
+  setPlanMode(value: boolean): void {
+    this.planMode.set(value);
   }
 
   /**

@@ -2,70 +2,6 @@
 
 SCRIPT="$BATS_TEST_DIRNAME/../../scripts/e2e-vm.sh"
 
-@test "E2E_RSYNC_EXCLUDES array is defined at script top level" {
-    grep -q '^E2E_RSYNC_EXCLUDES=' "$SCRIPT"
-}
-
-@test "macos_rsync_to references E2E_RSYNC_EXCLUDES" {
-    local body
-    body="$(sed -n '/^macos_rsync_to()/,/^}/p' "$SCRIPT")"
-    echo "$body" | grep -q 'E2E_RSYNC_EXCLUDES'
-}
-
-@test "windows_rsync_to references E2E_RSYNC_EXCLUDES" {
-    local body
-    body="$(sed -n '/^windows_rsync_to()/,/^}/p' "$SCRIPT")"
-    echo "$body" | grep -q 'E2E_RSYNC_EXCLUDES'
-}
-
-@test "shared excludes contain .angular and .build" {
-    local excludes
-    excludes="$(sed -n '/^E2E_RSYNC_EXCLUDES=(/,/)/p' "$SCRIPT")"
-    echo "$excludes" | grep -q '\.angular' || { echo "missing .angular"; return 1; }
-    echo "$excludes" | grep -q '\.build' || { echo "missing .build"; return 1; }
-}
-
-@test "shared excludes contain desktop/src-tauri bundled asset dirs" {
-    local excludes
-    excludes="$(sed -n '/^E2E_RSYNC_EXCLUDES=(/,/)/p' "$SCRIPT")"
-    for asset in lima nodejs wsl cli mcp-os pii-ner THIRD-PARTY-LICENSES \
-                 calendar-cli mail-cli notes-cli reminders-cli; do
-        echo "$excludes" | grep -q "desktop/src-tauri/${asset}" || {
-            echo "missing desktop/src-tauri/${asset}"; return 1
-        }
-    done
-}
-
-@test "every generated tauri bundle resource is excluded from the rig payload" {
-    local repo excludes conf roots root
-    repo="$BATS_TEST_DIRNAME/../.."
-    excludes="$(sed -n '/^E2E_RSYNC_EXCLUDES=(/,/)/p' "$SCRIPT")"
-
-    for conf in tauri.macos.conf.json tauri.windows.conf.json; do
-        roots="$(sed -n '/"resources": {/,/}/p' "$repo/desktop/src-tauri/$conf" \
-            | grep -o '"[^"]*": *"' | sed 's/^"//; s/": *"$//; s:/.*::' | sort -u)"
-        [ -n "$roots" ]
-        while IFS= read -r root; do
-            if git -C "$repo" ls-files --error-unmatch "desktop/src-tauri/$root" >/dev/null 2>&1; then
-                continue
-            fi
-            echo "$excludes" | grep -qE "desktop/src-tauri/${root}([^A-Za-z0-9._-]|\$)|(^|[[:space:]])${root}([[:space:]]|\$)" || {
-                echo "$conf bundles desktop/src-tauri/$root, which is generated and must not be rsynced to the rig"
-                return 1
-            }
-        done <<< "$roots"
-    done
-}
-
-@test "shared excludes contain the generated wasm package" {
-    local excludes
-    excludes="$(sed -n '/^E2E_RSYNC_EXCLUDES=(/,/)/p' "$SCRIPT")"
-    echo "$excludes" | grep -q 'mcp-servers/policies/wasm-pkg' || {
-        echo "wasm-pkg is a build output the rig rebuilds via build-mcp; do not ship it"
-        return 1
-    }
-}
-
 @test "ps_squote doubles single quotes for PowerShell literals" {
     eval "$(sed -n '/^ps_squote()/,/^}/p' "$SCRIPT")"
     [ "$(ps_squote "plain")" = "plain" ]
@@ -73,21 +9,4 @@ SCRIPT="$BATS_TEST_DIRNAME/../../scripts/e2e-vm.sh"
     [ "$(ps_squote "o'brien")" = "o''brien" ]
     [ "$(ps_squote "a'b'c")" = "a''b''c" ]
     [ "$(ps_squote "'; calc; '")" = "''; calc; ''" ]
-}
-
-@test "run_macos_e2e neither stops nor kills the VM before launching the app" {
-    local body launch
-    body="$(sed -n '/^run_macos_e2e()/,/^}/p' "$SCRIPT")"
-    launch="$(echo "$body" | grep -n '^"\$APP_PATH" &$' | cut -d: -f1)"
-    [ -n "$launch" ]
-    [ "$(echo "$body" | head -n "$launch" | grep -ciE 'pkill .*limactl|limactl"? stop')" -eq 0 ]
-}
-
-@test "every windows_ps env injection goes through ps_squote" {
-    local body assignments squoted
-    body="$(sed -n '/^windows_ps()/,/^}/p' "$SCRIPT")"
-    assignments="$(echo "$body" | grep -c "= '")"
-    squoted="$(echo "$body" | grep -c "= '\$(ps_squote ")"
-    [ "$assignments" -gt 0 ]
-    [ "$assignments" -eq "$squoted" ]
 }

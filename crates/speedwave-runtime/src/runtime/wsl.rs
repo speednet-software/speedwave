@@ -3012,7 +3012,7 @@ mod tests {
                     calls[i].1
                 );
                 let argv = shlex::split(&last(i)).unwrap();
-                let script = crate::runtime::test_support::decode_payload(&argv[2]);
+                let script = crate::runtime::decode_payload(&argv[2]);
                 assert!(
                     script.contains(&format!("iptables -t nat -X {own}")),
                     "cleanup {i} flushes the chain its own failure named: {script}"

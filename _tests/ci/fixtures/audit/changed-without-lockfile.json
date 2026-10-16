@@ -1,0 +1,4 @@
+[
+  "desktop/src/src/app/settings/update-section/update-section.component.ts",
+  "desktop/src-tauri/src/updater.rs"
+]

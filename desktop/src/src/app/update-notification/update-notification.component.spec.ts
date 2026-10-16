@@ -108,5 +108,174 @@ describe('UpdateNotificationComponent', () => {
         expectedVersion: '1.2.3',
       });
     });
+
+    it('switches to the newer version when the server changed it mid-install', async () => {
+      component.updateInfo = { version: '1.2.3', body: null, date: null, is_critical: false };
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'install_update_and_reconcile') {
+          throw new Error('Version mismatch: expected 1.2.3 but server returned 1.2.4');
+        }
+        if (cmd === 'check_for_update') {
+          return {
+            kind: 'update_available',
+            version: '1.2.4',
+            body: null,
+            date: null,
+            is_critical: false,
+          };
+        }
+        return undefined;
+      };
+
+      await component.installAndRestart();
+
+      expect(component.updateInfo?.version).toBe('1.2.4');
+      expect(component.confirmUpdate).toBe(false);
+      expect(component.error).toBe('');
+      expect(component.newerVersionNotice).toBe('A newer version v1.2.4 is available');
+    });
+
+    it('passes the newer version to a subsequent Confirm Update', async () => {
+      component.updateInfo = { version: '1.2.3', body: null, date: null, is_critical: false };
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'install_update_and_reconcile') throw new Error('version mismatch');
+        if (cmd === 'check_for_update') {
+          return {
+            kind: 'update_available',
+            version: '1.2.4',
+            body: null,
+            date: null,
+            is_critical: false,
+          };
+        }
+        return undefined;
+      };
+      await component.installAndRestart();
+
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      mockTauri.invokeHandler = async () => undefined;
+      await component.installAndRestart();
+
+      expect(invokeSpy).toHaveBeenCalledWith('install_update_and_reconcile', {
+        expectedVersion: '1.2.4',
+      });
+    });
+
+    it('keeps the original error when the re-check reports the same version', async () => {
+      component.updateInfo = { version: '1.2.3', body: null, date: null, is_critical: false };
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'install_update_and_reconcile') throw new Error('install failed');
+        if (cmd === 'check_for_update') {
+          return {
+            kind: 'update_available',
+            version: '1.2.3',
+            body: null,
+            date: null,
+            is_critical: false,
+          };
+        }
+        return undefined;
+      };
+
+      await component.installAndRestart();
+
+      expect(component.updateInfo?.version).toBe('1.2.3');
+      expect(component.error).toBe('install failed');
+      expect(component.newerVersionNotice).toBe('');
+    });
+
+    it('keeps the original error when the re-check reports up to date', async () => {
+      component.updateInfo = { version: '1.2.3', body: null, date: null, is_critical: false };
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'install_update_and_reconcile') throw new Error('install failed');
+        if (cmd === 'check_for_update') return { kind: 'up_to_date' };
+        return undefined;
+      };
+
+      await component.installAndRestart();
+
+      expect(component.error).toBe('install failed');
+      expect(component.newerVersionNotice).toBe('');
+    });
+
+    it('keeps the original error when the re-check itself fails', async () => {
+      component.updateInfo = { version: '1.2.3', body: null, date: null, is_critical: false };
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'install_update_and_reconcile') throw new Error('install failed');
+        if (cmd === 'check_for_update') throw new Error('network failed');
+        return undefined;
+      };
+
+      await component.installAndRestart();
+
+      expect(component.error).toBe('install failed');
+      expect(component.newerVersionNotice).toBe('');
+    });
+  });
+
+  describe('setupListeners() via the update_available event', () => {
+    it('keeps the failing install error and does not flip confirmUpdate when the listener repeats the same version mid-install', async () => {
+      component.updateInfo = { version: '1.2.3', body: null, date: null, is_critical: false };
+      component.confirmUpdate = true;
+      const pendingInstall = createDeferred();
+      mockTauri.invokeHandler = (cmd: string) => {
+        if (cmd === 'install_update_and_reconcile') return pendingInstall.promise;
+        if (cmd === 'check_for_update') return Promise.resolve({ kind: 'up_to_date' });
+        return Promise.resolve(undefined);
+      };
+
+      const installPromise = component.installAndRestart();
+
+      mockTauri.dispatchEvent('update_available', {
+        version: '1.2.3',
+        body: null,
+        date: null,
+        is_critical: false,
+      });
+
+      expect(component.confirmUpdate).toBe(true);
+      expect(component.dismissed).toBe(false);
+
+      pendingInstall.reject(new Error('install failed'));
+      await installPromise;
+
+      expect(component.error).toBe('install failed');
+    });
+
+    it('clears the notice and un-dismisses when the listener reports a different version while idle', () => {
+      component.updateInfo = { version: '1.2.3', body: null, date: null, is_critical: false };
+      component.installing = false;
+      component.dismissed = true;
+      component.newerVersionNotice = 'A newer version v1.2.4 is available';
+      component.error = 'stale error';
+      component.confirmUpdate = true;
+
+      mockTauri.dispatchEvent('update_available', {
+        version: '1.3.0',
+        body: null,
+        date: null,
+        is_critical: false,
+      });
+
+      expect(component.updateInfo?.version).toBe('1.3.0');
+      expect(component.dismissed).toBe(false);
+      expect(component.error).toBe('');
+      expect(component.confirmUpdate).toBe(false);
+      expect(component.newerVersionNotice).toBe('');
+    });
+
+    it('stays dismissed when the listener repeats the same version after Later', () => {
+      component.updateInfo = { version: '1.2.3', body: null, date: null, is_critical: false };
+      component.dismiss();
+
+      mockTauri.dispatchEvent('update_available', {
+        version: '1.2.3',
+        body: null,
+        date: null,
+        is_critical: false,
+      });
+
+      expect(component.dismissed).toBe(true);
+    });
   });
 });

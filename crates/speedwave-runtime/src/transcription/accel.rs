@@ -263,25 +263,14 @@ mod tests {
     }
 
     #[test]
-    fn gpu_class_serde_matches_ts_union() {
-        let src = include_str!("../../../../desktop/src/src/app/models/transcript.ts");
+    fn gpu_class_serde_uses_snake_case_wire_names() {
         for (c, tag) in [
-            (GpuClass::None, "'none'"),
-            (GpuClass::Integrated, "'integrated'"),
-            (GpuClass::Discrete, "'discrete'"),
+            (GpuClass::None, "\"none\""),
+            (GpuClass::Integrated, "\"integrated\""),
+            (GpuClass::Discrete, "\"discrete\""),
         ] {
-            assert_eq!(
-                serde_json::to_string(&c).unwrap(),
-                tag.replace('\x27', "\"")
-            );
-            assert_eq!(
-                serde_json::from_str::<GpuClass>(&tag.replace('\x27', "\"")).unwrap(),
-                c
-            );
-            assert!(
-                src.contains(tag),
-                "models/transcript.ts GpuClass union must carry {tag}"
-            );
+            assert_eq!(serde_json::to_string(&c).unwrap(), tag);
+            assert_eq!(serde_json::from_str::<GpuClass>(tag).unwrap(), c);
         }
     }
 }

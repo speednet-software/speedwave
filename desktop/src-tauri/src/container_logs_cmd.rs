@@ -757,11 +757,15 @@ mod tests {
         let newer = tmp.path().join("speedwave-desktop.log");
         std::fs::write(&older, "old-1\nold-2").unwrap();
         std::fs::write(&newer, "new-1\nnew-2").unwrap();
-        std::fs::File::open(&older)
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&older)
             .unwrap()
             .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000))
             .unwrap();
-        std::fs::File::open(&newer)
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&newer)
             .unwrap()
             .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(2_000_000))
             .unwrap();

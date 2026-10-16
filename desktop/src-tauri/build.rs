@@ -40,8 +40,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         allow_stubs,
     )?;
 
+    let version = speedwave_version::emit_cargo_version(&repo_root);
+
     let manifest = speedwave_runtime::bundle::generate_bundle_manifest(
-        env!("CARGO_PKG_VERSION"),
+        &version,
         speedwave_runtime::defaults::CLAUDE_VERSION,
         &hash_root,
     )?;

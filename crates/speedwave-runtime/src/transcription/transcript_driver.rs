@@ -13,7 +13,7 @@ use crate::transcription::transcriber::{
     Segment, TranscribeOptions, Transcriber, TranscriptSource,
 };
 use crate::transcription::transcript::TranscriptStatus;
-use crate::transcription::transcript_store::TranscriptStore;
+use crate::transcription::transcript_store::{OfflinePass, StoreError, TranscriptStore};
 
 /// Live sliding-window length (seconds): trailing audio re-fed to the transcriber for context.
 /// Longer = more accurate trailing words but more recompute per chunk.
@@ -47,6 +47,7 @@ const LEVEL_EMIT_INTERVAL: Duration = Duration::from_millis(250);
 #[derive(Debug, Clone, Default)]
 pub struct StopSignal {
     stopped: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
     finished: Arc<tokio::sync::Notify>,
 }
 
@@ -55,6 +56,7 @@ impl StopSignal {
     pub fn new() -> Self {
         Self {
             stopped: Arc::new(AtomicBool::new(false)),
+            paused: Arc::new(AtomicBool::new(false)),
             finished: Arc::new(tokio::sync::Notify::new()),
         }
     }
@@ -67,6 +69,18 @@ impl StopSignal {
     /// `true` once `stop()` was called.
     pub fn is_stopped(&self) -> bool {
         self.stopped.load(Ordering::SeqCst)
+    }
+
+    /// Trip the signal as a pause: the driver ends the capture like a stop, but leaves the
+    /// session `Paused` instead of handing it to the offline pass.
+    pub fn pause(&self) {
+        self.paused.store(true, Ordering::SeqCst);
+        self.stop();
+    }
+
+    /// `true` once `pause()` was called.
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::SeqCst)
     }
 
     /// The driver host calls this once `run()` has exited, releasing any
@@ -103,6 +117,12 @@ pub enum DriverError {
     /// Store mutator failed.
     #[error("transcript store failed: {0}")]
     Store(String),
+    /// The session was deleted while the offline pass ran.
+    #[error("transcript session was deleted")]
+    Deleted,
+    /// The user put the offline pass off, or a newer pass replaced it.
+    #[error("the offline pass was put off or replaced")]
+    Superseded,
 }
 
 /// Driver construction config (keeps `new()` under clippy's 7-arg cap).
@@ -543,9 +563,13 @@ impl TranscriptDriver {
                 if self.transcriber.is_some() {
                     let _ = self.decode_final_window();
                 }
-                let _ = self
-                    .store
-                    .set_status(self.id, TranscriptStatus::Finalizing { progress: 0.0 });
+                let next = if self.stop.is_paused() {
+                    let _ = self.store.live_draft(self.id, String::new());
+                    TranscriptStatus::Paused
+                } else {
+                    TranscriptStatus::Finalizing { progress: 0.0 }
+                };
+                let _ = self.store.set_status(self.id, next);
                 Ok(())
             }
             Err(e) => {
@@ -823,6 +847,8 @@ pub struct FinalizeConfig {
     pub transcriber: Box<dyn Transcriber>,
     /// Forced language + word-timestamps toggle.
     pub transcribe_opts: TranscribeOptions,
+    /// This pass's claim on the session ([`TranscriptStore::begin_offline_pass`]).
+    pub pass: OfflinePass,
 }
 
 /// Offline-pass decode window (seconds); transcribed per-window so the progress bar can move.
@@ -835,24 +861,32 @@ const FINALIZE_WINDOW_OVERLAP_SECS: f32 = 3.0;
 
 /// Runs the offline pass: load the recorded WAV, transcribe with the higher-quality model,
 /// install `final_segments`, mark `Done`. On failure flips to `Failed`; live transcript untouched.
+/// Once `pass` is cancelled it writes nothing more and returns [`DriverError::Superseded`], or
+/// [`DriverError::Deleted`] when a delete cancelled it.
 pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
     let FinalizeConfig {
         id,
         store,
         audio_paths,
         mut transcriber,
-        transcribe_opts,
+        mut transcribe_opts,
+        pass,
     } = cfg;
+    transcribe_opts.cancel = Some(pass.decode_cancel());
 
     let fail = |store: &TranscriptStore, reason: String| -> DriverError {
-        let _ = store.set_status(
-            id,
-            TranscriptStatus::Failed {
-                reason: reason.clone(),
-            },
-        );
-        DriverError::Transcribe(reason)
+        store
+            .fail_pass(id, &pass, reason.clone())
+            .err()
+            .and_then(|e| pass_stopped(&e))
+            .unwrap_or(DriverError::Transcribe(reason))
     };
+    if let Err(StoreError::NotFound(_)) = store.get(id) {
+        return Err(DriverError::Deleted);
+    }
+    if pass.cancelled() {
+        return Err(DriverError::Superseded);
+    }
 
     const NO_AUDIO: &str =
         "no audio was captured — check that audio was playing and that microphone / \
@@ -919,7 +953,11 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
         );
     }
 
-    let _ = store.finalize_progress(id, 0.05);
+    let report = |progress: f32| match store.finalize_progress(id, &pass, progress) {
+        Err(e) => pass_stopped(&e).map_or(Ok(()), Err),
+        Ok(_) => Ok(()),
+    };
+    report(0.05)?;
     let total_samples: u64 = plans.iter().map(|p| p.samples).sum();
     let mut final_segs: Vec<Segment> = Vec::new();
     let mut done_samples: u64 = 0;
@@ -955,12 +993,16 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
                 pcm,
                 &transcribe_opts,
                 source,
-                |frac| {
-                    let _ =
-                        store.finalize_progress(id, 0.05 + 0.55 * (done_frac + frac * lane_share));
-                },
+                |frac| report(0.05 + 0.55 * (done_frac + frac * lane_share)),
             ) {
                 Ok(s) => s,
+                Err(e @ (DriverError::Deleted | DriverError::Superseded)) => return Err(e),
+                Err(_) if pass.cancelled() => {
+                    return Err(match store.get(id) {
+                        Err(e) => pass_stopped(&e).unwrap_or(DriverError::Superseded),
+                        Ok(_) => DriverError::Superseded,
+                    })
+                }
                 Err(e) => return Err(fail(&store, format!("offline transcribe: {e}"))),
             };
             final_segs.extend(segs.into_iter().map(|mut s| {
@@ -979,26 +1021,38 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
         ));
     }
     final_segs.sort_by_key(|s| s.start);
-    let _ = store.finalize_progress(id, 0.9);
+    report(0.9)?;
 
-    if let Err(e) = store.set_final_segments(id, final_segs) {
-        return Err(fail(&store, format!("install final segments: {e}")));
+    if let Err(e) = store.set_final_segments(id, &pass, final_segs) {
+        return Err(pass_stopped(&e)
+            .unwrap_or_else(|| fail(&store, format!("install final segments: {e}"))));
     }
 
     store
-        .finish(id)
-        .map_err(|e| DriverError::Store(e.to_string()))?;
+        .finish(id, &pass)
+        .map_err(|e| pass_stopped(&e).unwrap_or_else(|| DriverError::Store(e.to_string())))?;
     Ok(())
 }
 
+/// How a refused offline-pass write ends the pass: `Deleted` for a deleted session, `Superseded`
+/// for a claim that was put off or replaced; `None` for a real store failure.
+fn pass_stopped(e: &StoreError) -> Option<DriverError> {
+    match e {
+        StoreError::NotFound(_) => Some(DriverError::Deleted),
+        StoreError::PassEnded(_) => Some(DriverError::Superseded),
+        _ => None,
+    }
+}
+
 /// Transcribes `pcm` in `FINALIZE_WINDOW_SECS` windows with `FINALIZE_WINDOW_OVERLAP_SECS`
-/// overlap, stitched to one absolute list tagged `source`; `progress` fires 0.0→1.0/window.
+/// overlap, stitched to one absolute list tagged `source`; `progress` fires 0.0→1.0/window,
+/// and an error it returns stops the decode before the next window.
 fn transcribe_chunked(
     transcriber: &mut dyn Transcriber,
     pcm: &[f32],
     opts: &TranscribeOptions,
     source: Option<TranscriptSource>,
-    mut progress: impl FnMut(f32),
+    mut progress: impl FnMut(f32) -> Result<(), DriverError>,
 ) -> Result<Vec<Segment>, DriverError> {
     let rate = SAMPLE_RATE_HZ as usize;
     let win = (FINALIZE_WINDOW_SECS * SAMPLE_RATE_HZ as f32) as usize;
@@ -1013,7 +1067,7 @@ fn transcribe_chunked(
         for s in &mut segs {
             s.source = source;
         }
-        progress(1.0);
+        progress(1.0)?;
         return Ok(segs);
     }
 
@@ -1045,7 +1099,7 @@ fn transcribe_chunked(
                 source,
             });
         }
-        progress((end as f32 / total as f32).min(1.0));
+        progress((end as f32 / total as f32).min(1.0))?;
         if is_last {
             break;
         }
@@ -1129,7 +1183,9 @@ mod tests {
     use crate::transcription::audio::{
         AudioCapture, AudioSource, AudioSourceInfo, CaptureError, FileAudioCapture,
     };
+    use crate::transcription::transcriber::DecodeCancel;
     use crate::transcription::transcriber::{Language, MockTranscriber};
+    use crate::transcription::transcript::TranscriptSession;
     use std::path::PathBuf;
 
     fn mk_session(store: &TranscriptStore, audio_path: &Path) -> Uuid {
@@ -1247,6 +1303,42 @@ mod tests {
             "should have decoded *some* live segments"
         );
         assert!(snap.last_seq > 0);
+    }
+
+    #[test]
+    fn a_paused_capture_leaves_the_session_paused_not_finalizing() {
+        let (_fixture_guard, fixture) = make_fixture_wav(5.0);
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session(&store, &store_dir.path().join("ignored.wav"));
+        let stop = StopSignal::new();
+        stop.pause();
+        assert!(stop.is_stopped(), "a pause ends the capture like a stop");
+        assert!(stop.is_paused());
+
+        let driver = TranscriptDriver::new(DriverConfig {
+            id,
+            store: store.clone(),
+            audio: stream_from(&fixture),
+            transcriber: None,
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+            stop,
+            time_base: Duration::ZERO,
+        });
+        let out_wav = store.session_dir(id).join("audio.wav");
+        driver.run(&out_wav).unwrap();
+
+        let snap = store.get(id).unwrap();
+        assert_eq!(snap.status, TranscriptStatus::Paused);
+        assert!(snap.live_draft.is_empty());
+    }
+
+    #[test]
+    fn a_plain_stop_is_not_a_pause() {
+        let stop = StopSignal::new();
+        stop.stop();
+        assert!(stop.is_stopped());
+        assert!(!stop.is_paused());
     }
 
     /// A paired (system+mic) stream: `secs` seconds in 200 ms chunks; system
@@ -1743,6 +1835,7 @@ mod tests {
         let (_g2, part2) = make_fixture_wav(2.0);
         let mut sub = store.subscribe(id).unwrap();
         run_finalize(FinalizeConfig {
+            pass: store.claim_finalizing(id),
             id,
             store: store.clone(),
             audio_paths: vec![part1, store_dir.path().join("never-recorded.wav"), part2],
@@ -1781,6 +1874,7 @@ mod tests {
         let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
         let id = mk_session(&store, &store_dir.path().join("a.wav"));
         let err = run_finalize(FinalizeConfig {
+            pass: store.claim_finalizing(id),
             id,
             store: store.clone(),
             audio_paths: vec![store_dir.path().join("missing.wav")],
@@ -1823,6 +1917,7 @@ mod tests {
         w.finalize().unwrap();
 
         run_finalize(FinalizeConfig {
+            pass: store.claim_finalizing(id),
             id,
             store: store.clone(),
             audio_paths: vec![wav],
@@ -1880,6 +1975,7 @@ mod tests {
         let undecodable = make_24bit_wav(store_dir.path(), 2.0);
         let mut sub = store.subscribe(id).unwrap();
         run_finalize(FinalizeConfig {
+            pass: store.claim_finalizing(id),
             id,
             store: store.clone(),
             audio_paths: vec![good, undecodable],
@@ -1923,6 +2019,7 @@ mod tests {
 
         let undecodable = make_24bit_wav(store_dir.path(), 2.0);
         let err = run_finalize(FinalizeConfig {
+            pass: store.claim_finalizing(id),
             id,
             store: store.clone(),
             audio_paths: vec![undecodable],
@@ -2576,6 +2673,7 @@ mod tests {
         let (id, wav) = seed_finalizing_session(&store, 12.0);
 
         run_finalize(FinalizeConfig {
+            pass: store.claim_finalizing(id),
             id,
             store: store.clone(),
             audio_paths: vec![wav],
@@ -2603,6 +2701,7 @@ mod tests {
         let _ = std::fs::remove_file(store.session_dir(id).join("audio.wav"));
 
         let err = run_finalize(FinalizeConfig {
+            pass: store.claim_finalizing(id),
             id,
             store: store.clone(),
             audio_paths: vec![store.session_dir(id).join("audio.wav")],
@@ -2624,6 +2723,7 @@ mod tests {
         std::fs::write(&wav, b"").unwrap();
 
         let err = run_finalize(FinalizeConfig {
+            pass: store.claim_finalizing(id),
             id,
             store: store.clone(),
             audio_paths: vec![wav],
@@ -2649,6 +2749,7 @@ mod tests {
         std::fs::write(&wav, vec![0xAAu8; 200]).unwrap();
 
         let err = run_finalize(FinalizeConfig {
+            pass: store.claim_finalizing(id),
             id,
             store: store.clone(),
             audio_paths: vec![wav],
@@ -2693,6 +2794,7 @@ mod tests {
         let (id, wav) = seed_finalizing_session(&store, 8.0);
 
         let err = run_finalize(FinalizeConfig {
+            pass: store.claim_finalizing(id),
             id,
             store: store.clone(),
             audio_paths: vec![wav],
@@ -2705,6 +2807,255 @@ mod tests {
             store.get(id).unwrap().status,
             TranscriptStatus::Failed { .. }
         ));
+    }
+
+    /// Deletes its own session from inside `transcribe`, as a user deleting it mid offline pass;
+    /// `fail` makes that window's decode fail too.
+    struct DeletingTranscriber {
+        store: Arc<TranscriptStore>,
+        id: Uuid,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        fail: bool,
+    }
+    impl Transcriber for DeletingTranscriber {
+        fn transcribe(
+            &mut self,
+            _pcm: &[f32],
+            _opts: &TranscribeOptions,
+        ) -> Result<Vec<Segment>, crate::transcription::transcriber::TranscribeError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.store.delete(self.id).unwrap();
+            if self.fail {
+                return Err(
+                    crate::transcription::transcriber::TranscribeError::Inference(
+                        "model exploded".to_string(),
+                    ),
+                );
+            }
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn finalize_stops_after_the_window_in_which_the_session_was_deleted() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let (id, wav) = seed_finalizing_session(&store, 70.0);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let err = run_finalize(FinalizeConfig {
+            pass: store.claim_finalizing(id),
+            id,
+            store: store.clone(),
+            audio_paths: vec![wav],
+            transcriber: Box::new(DeletingTranscriber {
+                store: store.clone(),
+                id,
+                calls: calls.clone(),
+                fail: false,
+            }),
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+        })
+        .unwrap_err();
+        assert!(matches!(err, DriverError::Deleted), "got {err:?}");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(!store.session_dir(id).exists());
+    }
+
+    /// Puts its own session off from inside `transcribe`, as a user clicking "Later" mid offline
+    /// pass, and records whether the decode was handed a raised cancel flag afterwards.
+    struct PostponingTranscriber {
+        store: Arc<TranscriptStore>,
+        id: Uuid,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        fail: bool,
+        cancel_seen: Arc<Mutex<Option<DecodeCancel>>>,
+    }
+    impl Transcriber for PostponingTranscriber {
+        fn transcribe(
+            &mut self,
+            _pcm: &[f32],
+            opts: &TranscribeOptions,
+        ) -> Result<Vec<Segment>, crate::transcription::transcriber::TranscribeError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            *self.cancel_seen.lock().unwrap() = opts.cancel.clone();
+            self.store.postpone(self.id).unwrap();
+            if self.fail {
+                return Err(
+                    crate::transcription::transcriber::TranscribeError::Inference(
+                        "whisper_full: aborted".to_string(),
+                    ),
+                );
+            }
+            Ok(vec![Segment {
+                start: Duration::ZERO,
+                end: Duration::from_secs(1),
+                text: "never installed".to_string(),
+                words: vec![],
+                source: None,
+            }])
+        }
+    }
+
+    /// Runs the offline pass over a 70 s recording with a transcriber that puts it off.
+    fn finalize_postponed_midway(fail: bool) -> (DriverError, usize, TranscriptSession, bool) {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let (id, wav) = seed_finalizing_session(&store, 70.0);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let cancel_seen = Arc::new(Mutex::new(None));
+        let pass = store.claim_finalizing(id);
+        let err = run_finalize(FinalizeConfig {
+            pass: pass.clone(),
+            id,
+            store: store.clone(),
+            audio_paths: vec![wav],
+            transcriber: Box::new(PostponingTranscriber {
+                store: store.clone(),
+                id,
+                calls: calls.clone(),
+                fail,
+                cancel_seen: cancel_seen.clone(),
+            }),
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+        })
+        .unwrap_err();
+        let handed_the_pass_flag =
+            cancel_seen.lock().unwrap().as_ref() == Some(&pass.decode_cancel());
+        (
+            err,
+            calls.load(Ordering::SeqCst),
+            store.get(id).unwrap(),
+            handed_the_pass_flag,
+        )
+    }
+
+    #[test]
+    fn a_pass_put_off_mid_decode_stops_after_that_window_and_writes_nothing() {
+        let (err, calls, snap, handed_the_pass_flag) = finalize_postponed_midway(false);
+        assert!(matches!(err, DriverError::Superseded), "got {err:?}");
+        assert_eq!(calls, 1, "no window may start after the pass was put off");
+        assert_eq!(snap.status, TranscriptStatus::Postponed);
+        assert!(snap.final_segments.is_none());
+        assert!(
+            handed_the_pass_flag,
+            "Whisper must poll the pass's own cancel flag"
+        );
+    }
+
+    #[test]
+    fn a_decode_aborted_by_later_is_not_reported_as_a_failure() {
+        let (err, calls, snap, _) = finalize_postponed_midway(true);
+        assert!(matches!(err, DriverError::Superseded), "got {err:?}");
+        assert_eq!(calls, 1);
+        assert_eq!(snap.status, TranscriptStatus::Postponed);
+    }
+
+    #[test]
+    fn a_pass_put_off_before_it_starts_writes_nothing() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let (id, wav) = seed_finalizing_session(&store, 8.0);
+        let pass = store.claim_finalizing(id);
+        store.postpone(id).unwrap();
+        let seq = store.get(id).unwrap().last_seq;
+
+        let err = run_finalize(FinalizeConfig {
+            pass,
+            id,
+            store: store.clone(),
+            audio_paths: vec![wav],
+            transcriber: Box::new(FailingTranscriber),
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+        })
+        .unwrap_err();
+        assert!(matches!(err, DriverError::Superseded), "got {err:?}");
+        let snap = store.get(id).unwrap();
+        assert_eq!(snap.status, TranscriptStatus::Postponed);
+        assert_eq!(snap.last_seq, seq);
+    }
+
+    #[test]
+    fn a_replaced_pass_writes_nothing_and_leaves_the_newer_pass_its_session() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let (id, wav) = seed_finalizing_session(&store, 8.0);
+        let old = store.claim_finalizing(id);
+        let new = store.begin_offline_pass(id).unwrap();
+        let seq = store.get(id).unwrap().last_seq;
+
+        let err = run_finalize(FinalizeConfig {
+            pass: old,
+            id,
+            store: store.clone(),
+            audio_paths: vec![wav],
+            transcriber: Box::new(FailingTranscriber),
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+        })
+        .unwrap_err();
+        assert!(matches!(err, DriverError::Superseded), "got {err:?}");
+        assert_eq!(store.get(id).unwrap().last_seq, seq);
+        store.finish(id, &new).unwrap();
+    }
+
+    #[test]
+    fn a_refused_pass_write_ends_the_pass_quietly_and_a_store_fault_does_not() {
+        let id = Uuid::new_v4();
+        assert!(matches!(
+            pass_stopped(&StoreError::PassEnded(id)),
+            Some(DriverError::Superseded)
+        ));
+        assert!(matches!(
+            pass_stopped(&StoreError::NotFound(id)),
+            Some(DriverError::Deleted)
+        ));
+        assert!(pass_stopped(&StoreError::InvalidState("x".to_string())).is_none());
+        assert!(pass_stopped(&StoreError::Io(std::io::Error::other("disk full"))).is_none());
+    }
+
+    #[test]
+    fn finalize_reports_deleted_when_the_failing_window_deleted_the_session() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let (id, wav) = seed_finalizing_session(&store, 8.0);
+
+        let err = run_finalize(FinalizeConfig {
+            pass: store.claim_finalizing(id),
+            id,
+            store: store.clone(),
+            audio_paths: vec![wav],
+            transcriber: Box::new(DeletingTranscriber {
+                store: store.clone(),
+                id,
+                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                fail: true,
+            }),
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+        })
+        .unwrap_err();
+        assert!(matches!(err, DriverError::Deleted), "got {err:?}");
+        assert!(!store.session_dir(id).exists());
+    }
+
+    #[test]
+    fn finalize_of_a_session_deleted_before_it_starts_reports_deleted() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let (id, wav) = seed_finalizing_session(&store, 8.0);
+        let pass = store.claim_finalizing(id);
+        store.delete(id).unwrap();
+
+        let err = run_finalize(FinalizeConfig {
+            pass,
+            id,
+            store: store.clone(),
+            audio_paths: vec![wav],
+            transcriber: Box::new(FailingTranscriber),
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+        })
+        .unwrap_err();
+        assert!(matches!(err, DriverError::Deleted), "got {err:?}");
+        assert!(!store.session_dir(id).exists());
     }
 
     #[test]
@@ -2732,6 +3083,7 @@ mod tests {
             .unwrap();
 
         let err = run_finalize(FinalizeConfig {
+            pass: store.claim_finalizing(id),
             id,
             store: store.clone(),
             audio_paths: vec![wav],
@@ -2798,7 +3150,11 @@ mod tests {
         };
         let mut last_progress = 0.0;
         let opts = TranscribeOptions::for_language(Language::Pl);
-        let segs = transcribe_chunked(&mut tr, &pcm, &opts, None, |p| last_progress = p).unwrap();
+        let segs = transcribe_chunked(&mut tr, &pcm, &opts, None, |p| {
+            last_progress = p;
+            Ok(())
+        })
+        .unwrap();
         assert_eq!(segs.len(), 5);
         assert!((last_progress - 1.0).abs() < 1e-6);
         assert_eq!(segs[0].start, Duration::ZERO);
@@ -2814,7 +3170,11 @@ mod tests {
         };
         let mut ticks: Vec<f32> = Vec::new();
         let opts = TranscribeOptions::for_language(Language::En);
-        let segs = transcribe_chunked(&mut tr, &pcm, &opts, None, |p| ticks.push(p)).unwrap();
+        let segs = transcribe_chunked(&mut tr, &pcm, &opts, None, |p| {
+            ticks.push(p);
+            Ok(())
+        })
+        .unwrap();
         assert!(!segs.is_empty());
         for w in segs.windows(2) {
             assert!(w[1].start >= w[0].start, "starts went backwards");
@@ -2854,7 +3214,7 @@ mod tests {
         }
         let pcm = vec![0.0f32; 5 * 16_000];
         let opts = TranscribeOptions::for_language(Language::Pl);
-        let err = transcribe_chunked(&mut Boom, &pcm, &opts, None, |_| {}).unwrap_err();
+        let err = transcribe_chunked(&mut Boom, &pcm, &opts, None, |_| Ok(())).unwrap_err();
         assert!(matches!(err, DriverError::Transcribe(_)));
     }
 

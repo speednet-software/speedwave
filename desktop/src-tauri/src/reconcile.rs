@@ -65,7 +65,7 @@ pub(crate) struct ExitCleanupContext {
     pub(crate) ide_bridge: SharedIdeBridge,
     pub(crate) plugin_bridges: SharedPluginBridges,
     pub(crate) mcp_os: SharedMcpOs,
-    /// In-process PII NER detector service (ADR-091) — stopped + lock removed on exit.
+    /// In-process PII NER detector service (ADR-095) — stopped + lock removed on exit.
     pub(crate) pii_ner: crate::pii_ner_service::SharedPiiNer,
     /// Per-project `oauth` workers (ADR-060) — stopped + files cleaned on exit.
     pub(crate) oauth: SharedOauth,

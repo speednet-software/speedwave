@@ -5,8 +5,12 @@
 
 $ErrorActionPreference = 'Stop'
 
+if ([string]::IsNullOrEmpty($env:SPEEDWAVE_VERSION)) {
+    throw "SPEEDWAVE_VERSION is not set; this script needs the git-computed app version to name the installer"
+}
+
 $conf = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot '..\desktop\src-tauri\tauri.conf.json') | ConvertFrom-Json
-$installer = Join-Path $BundleDir ($conf.productName + '_' + $conf.version + '_x64-setup.exe')
+$installer = Join-Path $BundleDir ($conf.productName + '_' + $env:SPEEDWAVE_VERSION + '_x64-setup.exe')
 if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
     throw "the build did not produce $installer"
 }

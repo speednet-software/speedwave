@@ -532,8 +532,10 @@ mod tests {
 
     #[test]
     fn save_credential_file_errors_on_unwritable_path() {
-        let impossible = std::path::Path::new("/dev/null/impossible");
-        let err = save_credential_file(impossible, "token", "v");
+        let tmp = tempfile::tempdir().unwrap();
+        let blocker = tmp.path().join("blocker");
+        std::fs::write(&blocker, "file").unwrap();
+        let err = save_credential_file(&blocker.join("svc"), "token", "v");
         assert!(err.is_err());
     }
 }

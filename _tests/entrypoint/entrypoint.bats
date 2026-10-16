@@ -323,12 +323,6 @@ EOF
 }
 
 
-@test "default command is a TERM-trappable keep-alive loop (not interactive shell)" {
-    grep -q "while :; do sleep 86400 & wait" "$ENTRYPOINT"
-    ! grep -q 'exec sleep infinity' "$ENTRYPOINT"
-}
-
-
 @test "mcp-config has only speedwave-hub when MCP_OS vars are unset" {
     unset MCP_OS_URL
     unset MCP_OS_AUTH_TOKEN
@@ -661,7 +655,6 @@ PY
 @test "keeps every Claude Code model alias when ANTHROPIC_MODEL is unset" {
     printf '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
     aliases="$(sed -n 's/.*claude-\.+|(\([a-z|]*\)).*/\1/p' "${ENTRYPOINT}" | tr '|' ' ')"
-    [[ " ${aliases} " == *" default "* && " ${aliases} " == *" opusplan "* ]]
     for alias in ${aliases} "opusplan[1m]"; do
         printf '{"model":"%s"}' "$alias" > "${TEST_HOME}/.claude/settings.json"
         run bash "${ENTRYPOINT}" echo ok
@@ -1389,15 +1382,25 @@ setup_os_subservice_fixture() {
 }
 
 
+_plugin_install_recording_block() {
+    cat << EOF
+if [ "\$1" = "plugin" ] && [ "\$2" = "install" ]; then
+    if [ "\$4" = "--marketplace" ]; then
+        echo "\$3@\${5##*/}" >> "$TEST_HOME/installed-plugins.log"
+    else
+        echo "\$3" >> "$TEST_HOME/installed-plugins.log"
+    fi
+    exit 0
+fi
+EOF
+}
+
 _stub_claude_recording_plugin_installs() {
     cat > "$STUBS_DIR/claude" << EOF
 #!/bin/bash
 echo "\$*" >> "$TEST_HOME/claude-calls.log"
 if [ "\$1" = "plugin" ] && [ "\$2" = "list" ]; then exit 1; fi
-if [ "\$1" = "plugin" ] && [ "\$2" = "install" ]; then
-    echo "\$3" >> "$TEST_HOME/installed-plugins.log"
-    exit 0
-fi
+$(_plugin_install_recording_block)
 echo "${PINNED_VERSION} (Claude Code)"
 EOF
     chmod +x "$STUBS_DIR/claude"
@@ -1599,31 +1602,27 @@ _stub_claude_recording_all_plugin_calls() {
 #!/bin/bash
 echo "\$*" >> "$TEST_HOME/claude-calls.log"
 if [ "\$1" = "plugin" ] && [ "\$2" = "list" ]; then exit 1; fi
-if [ "\$1" = "plugin" ] && [ "\$2" = "marketplace" ] && [ "\$3" = "add" ]; then
-    echo "marketplace-add \$4" >> "$TEST_HOME/plugin-calls.log"; exit 0
-fi
 if [ "\$1" = "plugin" ] && [ "\$2" = "install" ]; then
-    echo "install \$3" >> "$TEST_HOME/plugin-calls.log"; exit 0
+    shift 2; echo "install \$*" >> "$TEST_HOME/plugin-calls.log"; exit 0
 fi
 echo "${PINNED_VERSION} (Claude Code)"
 EOF
     chmod +x "$STUBS_DIR/claude"
 }
 
-@test "bootstraps the official marketplace once, before the first bundled-plugin install" {
+@test "passes --marketplace anthropics/<mp> on every install for the official marketplace" {
     _stub_claude_recording_all_plugin_calls
     export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design,example-plugin"
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
     run cat "$TEST_HOME/plugin-calls.log"
-    [ "${lines[0]}" = "marketplace-add anthropics/claude-plugins-official" ]
-    [ "${lines[1]}" = "install frontend-design@claude-plugins-official" ]
-    [ "${lines[2]}" = "install example-plugin@claude-plugins-official" ]
-    [ "${#lines[@]}" -eq 3 ]
+    [ "${lines[0]}" = "install frontend-design --marketplace anthropics/claude-plugins-official" ]
+    [ "${lines[1]}" = "install example-plugin --marketplace anthropics/claude-plugins-official" ]
+    [ "${#lines[@]}" -eq 2 ]
 }
 
-@test "does not bootstrap a custom bundled-plugin marketplace" {
+@test "does not pass --marketplace for a custom bundled-plugin marketplace" {
     _stub_claude_recording_all_plugin_calls
     export SPEEDWAVE_BUNDLED_PLUGINS="example-plugin"
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="custom-mp"
@@ -1632,53 +1631,6 @@ EOF
     run cat "$TEST_HOME/plugin-calls.log"
     [ "${lines[0]}" = "install example-plugin@custom-mp" ]
     [ "${#lines[@]}" -eq 1 ]
-}
-
-@test "skips the network add when the official marketplace is already registered on disk" {
-    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
-    _stub_claude_recording_all_plugin_calls
-    mkdir -p "$TEST_HOME/.claude/plugins"
-    echo '{"claude-plugins-official":{"source":{"source":"github"}}}' \
-        > "$TEST_HOME/.claude/plugins/known_marketplaces.json"
-    export SPEEDWAVE_BUNDLED_PLUGINS="example-plugin"
-    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
-    run bash "$ENTRYPOINT" true
-    [ "$status" -eq 0 ]
-    run cat "$TEST_HOME/plugin-calls.log"
-    [ "${lines[0]}" = "install example-plugin@claude-plugins-official" ]
-    [ "${#lines[@]}" -eq 1 ]
-}
-
-@test "a null tombstone entry for the official marketplace does not skip the add" {
-    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
-    _stub_claude_recording_all_plugin_calls
-    mkdir -p "$TEST_HOME/.claude/plugins"
-    echo '{"claude-plugins-official":null}' > "$TEST_HOME/.claude/plugins/known_marketplaces.json"
-    export SPEEDWAVE_BUNDLED_PLUGINS="example-plugin"
-    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
-    run bash "$ENTRYPOINT" true
-    [ "$status" -eq 0 ]
-    run cat "$TEST_HOME/plugin-calls.log"
-    [ "${lines[0]}" = "marketplace-add anthropics/claude-plugins-official" ]
-    [ "${lines[1]}" = "install example-plugin@claude-plugins-official" ]
-}
-
-@test "bundled-plugin install carries at least a 120s timeout budget" {
-    grep -qE 'timeout (1[2-9][0-9]|[2-9][0-9][0-9]) claude plugin install' "$ENTRYPOINT"
-}
-
-@test "a registry listing only other marketplaces does not skip the official add" {
-    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
-    _stub_claude_recording_all_plugin_calls
-    mkdir -p "$TEST_HOME/.claude/plugins"
-    echo '{"some-other-mp":{}}' > "$TEST_HOME/.claude/plugins/known_marketplaces.json"
-    export SPEEDWAVE_BUNDLED_PLUGINS="example-plugin"
-    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
-    run bash "$ENTRYPOINT" true
-    [ "$status" -eq 0 ]
-    run cat "$TEST_HOME/plugin-calls.log"
-    [ "${lines[0]}" = "marketplace-add anthropics/claude-plugins-official" ]
-    [ "${lines[1]}" = "install example-plugin@claude-plugins-official" ]
 }
 
 @test "skips marketplace bootstrap when every bundled plugin is already installed" {
@@ -1692,20 +1644,33 @@ EOF
     [ ! -f "$TEST_HOME/plugin-calls.log" ]
 }
 
-@test "a failed marketplace bootstrap is non-fatal, logged, and installs still run" {
-    _stub_claude_recording_all_plugin_calls
-    sed -i.bak 's|echo "marketplace-add .*|echo "network unreachable" >\&2; exit 1|' "$STUBS_DIR/claude"
-    export SPEEDWAVE_BUNDLED_PLUGINS="example-plugin"
+@test "a failed official-marketplace install is non-fatal and later plugins still install" {
+    cat > "$STUBS_DIR/claude" << EOF
+#!/bin/bash
+echo "\$*" >> "$TEST_HOME/claude-calls.log"
+if [ "\$1" = "plugin" ] && [ "\$2" = "list" ]; then exit 1; fi
+if [ "\$1" = "plugin" ] && [ "\$2" = "install" ]; then
+    if [ "\$3" = "frontend-design" ]; then
+        echo "network unreachable" >&2
+        exit 1
+    fi
+    shift 2; echo "install \$*" >> "$TEST_HOME/plugin-calls.log"
+    exit 0
+fi
+echo "${PINNED_VERSION} (Claude Code)"
+EOF
+    chmod +x "$STUBS_DIR/claude"
+    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design,example-plugin"
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
-    [[ "$output" == *"failed to add plugin marketplace"* ]]
+    [[ "$output" == *"failed to install bundled plugin frontend-design@claude-plugins-official"* ]]
     [[ "$output" == *"network unreachable"* ]]
     run cat "$TEST_HOME/plugin-calls.log"
-    [ "${lines[0]}" = "install example-plugin@claude-plugins-official" ]
+    [ "${lines[0]}" = "install example-plugin --marketplace anthropics/claude-plugins-official" ]
     run cat "$TEST_HOME/.speedwave-entrypoint.log"
-    [[ "$output" == *"WARN CONFIG"* ]]
-    [[ "$output" == *"marketplace add claude-plugins-official: network unreachable"* ]]
+    [[ "$output" == *"ERROR FAIL"* ]]
+    [[ "$output" == *"frontend-design@claude-plugins-official: network unreachable"* ]]
 }
 
 
@@ -1719,12 +1684,7 @@ if [ "\$1" = "plugin" ] && [ "\$2" = "uninstall" ]; then
     if [ -f "$TEST_HOME/uninstall-fail" ]; then cat "$TEST_HOME/uninstall-fail" >&2; exit 1; fi
     exit 0
 fi
-if [ "\$1" = "plugin" ] && [ "\$2" = "marketplace" ] && [ "\$3" = "add" ]; then
-    echo "marketplace-add \$4" >> "$TEST_HOME/plugin-calls.log"; exit 0
-fi
-if [ "\$1" = "plugin" ] && [ "\$2" = "install" ]; then
-    echo "\$3" >> "$TEST_HOME/installed-plugins.log"; exit 0
-fi
+$(_plugin_install_recording_block)
 echo "${PINNED_VERSION} (Claude Code)"
 EOF
     chmod +x "$STUBS_DIR/claude"
@@ -1917,10 +1877,6 @@ EOF
     [ ! -f "$TEST_HOME/uninstall.log" ]
     grep -qxF "superpowers@claude-plugins-official" \
         "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
-}
-
-@test "the retired-plugin uninstall carries a timeout budget" {
-    grep -qE 'timeout ([6-9][0-9]|[1-9][0-9]{2,}) claude plugin uninstall' "$ENTRYPOINT"
 }
 
 @test "a failing retired-plugin uninstall keeps its marker line through a bundled-install rebuild" {

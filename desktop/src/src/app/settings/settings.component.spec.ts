@@ -24,6 +24,8 @@ function setupMockTauri(mockTauri: MockTauriService): void {
         return 'darwin';
       case 'get_auth_status':
         return { api_key_configured: false, oauth_authenticated: false };
+      case 'list_transcripts':
+        return [];
       default:
         return undefined;
     }

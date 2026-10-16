@@ -1,4 +1,5 @@
 #[cfg(test)]
+#[expect(clippy::expect_used, reason = "test assertions may expect freely")]
 mod tests {
     const HOOKS: &str = include_str!("../windows/installer-hooks.nsh");
     const TEMPLATE: &str = include_str!("../windows/installer-hooks-template.nsh");

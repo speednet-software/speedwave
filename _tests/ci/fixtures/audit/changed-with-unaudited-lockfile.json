@@ -1,0 +1,7 @@
+[
+  "package-lock.json",
+  "containers/proxy/Cargo.lock",
+  "desktop/e2e/package-lock.json",
+  "mcp-servers/playwright/package-lock.json",
+  "README.md"
+]

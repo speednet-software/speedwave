@@ -32,3 +32,24 @@ for (const key of ['localStorage', 'sessionStorage'] as const) {
     value: memoryStorage(),
   });
 }
+
+/**
+ * jsdom does not implement `URL.createObjectURL`/`revokeObjectURL` itself, so the global falls
+ * through to Node's own Blob-URL registry, which expects a Node-native `Blob`/`File` — whether a
+ * jsdom-constructed `File` (what `new File(...)` gives a spec) is accepted is a Node point-release
+ * detail, not a documented contract (seen passing on Node 24.16, throwing `Cannot read properties
+ * of undefined (reading '_buffer')` on Node 24.20). Replace both with a deterministic,
+ * version-independent pair so a spec building attachments from real `File` objects never depends
+ * on that interaction.
+ */
+let mockObjectUrlSeq = 0;
+Object.defineProperty(URL, 'createObjectURL', {
+  configurable: true,
+  writable: true,
+  value: () => `blob:mock-${++mockObjectUrlSeq}`,
+});
+Object.defineProperty(URL, 'revokeObjectURL', {
+  configurable: true,
+  writable: true,
+  value: () => undefined,
+});

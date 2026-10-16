@@ -20,16 +20,16 @@ fn cargo_env_guard_config_is_committed_and_pins_the_env() {
     let config = repo_root().join(".cargo/config.toml");
     let content = std::fs::read_to_string(&config)
         .expect(".cargo/config.toml must be committed — it is the bare-`cargo test` safety net");
+    let entry = content
+        .lines()
+        .find(|l| l.trim_start().starts_with("SPEEDWAVE_DATA_DIR"))
+        .expect("config must set SPEEDWAVE_DATA_DIR under [env]");
     assert!(
-        content.contains("SPEEDWAVE_DATA_DIR"),
-        "config must set SPEEDWAVE_DATA_DIR under [env]"
-    );
-    assert!(
-        content.contains("relative = true"),
+        entry.contains("relative = true"),
         "value must be relative=true so cargo resolves it absolute per-worktree"
     );
     assert!(
-        !content.contains("force = true"),
+        !entry.contains("force = true"),
         "force must stay false so Makefile/e2e exports keep precedence"
     );
 }

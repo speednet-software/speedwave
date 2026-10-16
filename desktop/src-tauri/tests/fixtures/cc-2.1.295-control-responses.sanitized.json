@@ -1,0 +1,3692 @@
+{
+  "claude_code_version": "2.1.295",
+  "captured": "2026-10-11",
+  "account_plan": "team",
+  "note": "Sanitized capture of stream-json control responses. Removed: account e-mail and org name, commands, agents, pid, output-styles dir, remote-control and session-state flags, session totals, and the context detail lists (agents, skills, slash commands, memory files, MCP tools, message breakdown, grid). run_A = container env as rendered by compose; run_B = ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL unset. Each get_context_usage/<id> follows set_model/<id>; get_context_usage/initial is the state before any set_model. A set_model Claude Code rejected is stored as {\"error\": <text>}.",
+  "run_A": {
+    "initialize": {
+      "output_style": "Speedwave",
+      "available_output_styles": [
+        "default",
+        "Proactive",
+        "Concise",
+        "Explanatory",
+        "Learning",
+        "Speedwave"
+      ],
+      "models": [
+        {
+          "value": "default",
+          "resolvedModel": "claude-opus-5-5",
+          "displayName": "Default (recommended)",
+          "description": "Opus 5.5 · Best for everyday, complex tasks",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsAdaptiveThinking": true,
+          "supportsFastMode": true,
+          "supportsAutoMode": true
+        },
+        {
+          "value": "opus",
+          "resolvedModel": "claude-opus-5-5",
+          "displayName": "Opus",
+          "description": "Opus 5.5 · Best for everyday, complex tasks",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsAdaptiveThinking": true,
+          "supportsFastMode": true,
+          "supportsAutoMode": true
+        },
+        {
+          "value": "claude-fable-5-1[1m]",
+          "resolvedModel": "claude-fable-5-1[1m]",
+          "displayName": "Fable",
+          "description": "Fable 5.1 · Most capable for your hardest and longest-running tasks",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsAdaptiveThinking": true,
+          "supportsAutoMode": true
+        },
+        {
+          "value": "sonnet",
+          "resolvedModel": "claude-sonnet-5-5",
+          "displayName": "Sonnet",
+          "description": "Sonnet 5.5 · Efficient for routine tasks",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsAdaptiveThinking": true,
+          "supportsAutoMode": true
+        },
+        {
+          "value": "haiku",
+          "resolvedModel": "claude-haiku-5-5",
+          "displayName": "Haiku",
+          "description": "Haiku 5.5 · Fastest for quick answers",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsAdaptiveThinking": true,
+          "supportsAutoMode": true
+        }
+      ],
+      "account": {
+        "subscriptionType": "Claude Team",
+        "apiProvider": "firstParty"
+      },
+      "current_permission_mode": "default",
+      "feedback_mode": {
+        "kind": "post"
+      },
+      "analytics_disabled": false,
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required",
+      "capabilities": [
+        "ui_surface_v1"
+      ]
+    },
+    "get_usage": {
+      "subscription_type": "team",
+      "rate_limits_available": true,
+      "rate_limits": {
+        "five_hour": {
+          "utilization": 19,
+          "resets_at": "2026-10-11T14:19:59.748398+00:00",
+          "limit_dollars": null,
+          "used_dollars": null,
+          "remaining_dollars": null,
+          "locked_reason": null
+        },
+        "seven_day": {
+          "utilization": 82,
+          "resets_at": "2026-10-12T02:59:59.748418+00:00",
+          "limit_dollars": null,
+          "used_dollars": null,
+          "remaining_dollars": null,
+          "locked_reason": null
+        },
+        "seven_day_oauth_apps": null,
+        "seven_day_opus": null,
+        "seven_day_sonnet": null,
+        "seven_day_cowork": null,
+        "seven_day_omelette": null,
+        "tangelo": null,
+        "iguana_necktie": null,
+        "omelette_promotional": null,
+        "nimbus_quill": null,
+        "cinder_cove": null,
+        "copper_kite": null,
+        "brass_thimble": null,
+        "harbor_lantern": null,
+        "wattle_ember": null,
+        "amber_ladder": null,
+        "amber_cistern": null,
+        "juniper_tide": null,
+        "cedar_ember": null,
+        "amber_gauge": null,
+        "extra_usage": {
+          "is_enabled": false,
+          "monthly_limit": null,
+          "used_credits": null,
+          "utilization": null,
+          "currency": "EUR",
+          "decimal_places": 2,
+          "disabled_reason": "out_of_credits",
+          "user_disabled": false,
+          "spend_limit_reached": false,
+          "credits_ever_enabled": true,
+          "daily": null,
+          "weekly": null
+        },
+        "limits": [
+          {
+            "kind": "session",
+            "group": "session",
+            "percent": 19,
+            "severity": "normal",
+            "resets_at": "2026-10-11T14:19:59.748398+00:00",
+            "scope": null,
+            "is_active": false
+          },
+          {
+            "kind": "weekly_all",
+            "group": "weekly",
+            "percent": 82,
+            "severity": "warning",
+            "resets_at": "2026-10-12T02:59:59.748418+00:00",
+            "scope": null,
+            "is_active": true
+          },
+          {
+            "kind": "weekly_scoped",
+            "group": "weekly",
+            "percent": 26,
+            "severity": "normal",
+            "resets_at": "2026-10-12T02:59:59.748633+00:00",
+            "scope": {
+              "model": {
+                "id": null,
+                "display_name": "Fable"
+              },
+              "surface": null
+            },
+            "is_active": false
+          }
+        ],
+        "spend": {
+          "used": {
+            "amount_minor": 0,
+            "currency": "EUR",
+            "exponent": 2
+          },
+          "limit": null,
+          "percent": 0,
+          "severity": "normal",
+          "enabled": false,
+          "disabled_reason": "out_of_credits",
+          "cap": null,
+          "balance": null,
+          "auto_reload": null,
+          "disclaimer": "Usage credits cover you when you hit your plan limits. [Learn more](https://support.claude.com/articles/12429409)",
+          "can_purchase_credits": false,
+          "can_toggle": false
+        },
+        "member_dashboard_available": false,
+        "seven_day_breakdown": null,
+        "weekly_scoped_shares": [
+          {
+            "limit_index": 2,
+            "used_percent_of_weekly": 13,
+            "allowance_percent_of_weekly": 50
+          }
+        ],
+        "model_scoped": [
+          {
+            "display_name": "Fable",
+            "utilization": 26,
+            "resets_at": "2026-10-12T02:59:59.748633+00:00"
+          }
+        ]
+      },
+      "behaviors": null
+    },
+    "get_context_usage/initial": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1991,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918689,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48311,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-opus-5-5",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "list_models": {
+      "models": [
+        {
+          "value": "default",
+          "resolvedModel": "claude-opus-5-5",
+          "displayName": "Default (recommended)",
+          "description": "Opus 5.5 · Best for everyday, complex tasks",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsAdaptiveThinking": true,
+          "supportsFastMode": true,
+          "supportsAutoMode": true
+        },
+        {
+          "value": "opus",
+          "resolvedModel": "claude-opus-5-5",
+          "displayName": "Opus",
+          "description": "Opus 5.5 · Best for everyday, complex tasks",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsAdaptiveThinking": true,
+          "supportsFastMode": true,
+          "supportsAutoMode": true
+        },
+        {
+          "value": "claude-fable-5-1[1m]",
+          "resolvedModel": "claude-fable-5-1[1m]",
+          "displayName": "Fable",
+          "description": "Fable 5.1 · Most capable for your hardest and longest-running tasks",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsAdaptiveThinking": true,
+          "supportsAutoMode": true
+        },
+        {
+          "value": "sonnet",
+          "resolvedModel": "claude-sonnet-5-5",
+          "displayName": "Sonnet",
+          "description": "Sonnet 5.5 · Efficient for routine tasks",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsAdaptiveThinking": true,
+          "supportsAutoMode": true
+        },
+        {
+          "value": "haiku",
+          "resolvedModel": "claude-haiku-5-5",
+          "displayName": "Haiku",
+          "description": "Haiku 5.5 · Fastest for quick answers",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsAdaptiveThinking": true,
+          "supportsAutoMode": true
+        }
+      ]
+    },
+    "set_model/claude-fable-5-1": null,
+    "get_context_usage/claude-fable-5-1": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1991,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918689,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48311,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-fable-5-1",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-fable-5-1[1m]": null,
+    "get_context_usage/claude-fable-5-1[1m]": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1991,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918689,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48311,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-fable-5-1[1m]",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-opus-5-5": null,
+    "get_context_usage/claude-opus-5-5": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1991,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918689,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48311,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-opus-5-5",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-opus-5-5[1m]": null,
+    "get_context_usage/claude-opus-5-5[1m]": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1991,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918689,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48311,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-opus-5-5[1m]",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-sonnet-5-5": null,
+    "get_context_usage/claude-sonnet-5-5": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1991,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918689,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48311,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-sonnet-5-5",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-sonnet-5-5[1m]": null,
+    "get_context_usage/claude-sonnet-5-5[1m]": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1991,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918689,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48311,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-sonnet-5-5[1m]",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-sonnet-5": null,
+    "get_context_usage/claude-sonnet-5": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 9141,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 47136,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 902383,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 64617,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 6,
+      "model": "claude-sonnet-5",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-sonnet-5[1m]": null,
+    "get_context_usage/claude-sonnet-5[1m]": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 9141,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 47136,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 902383,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 64617,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 6,
+      "model": "claude-sonnet-5[1m]",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-haiku-5-5": null,
+    "get_context_usage/claude-haiku-5-5": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1991,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918689,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48311,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-haiku-5-5",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-haiku-5-5[1m]": null,
+    "get_context_usage/claude-haiku-5-5[1m]": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1991,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918689,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48311,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-haiku-5-5[1m]",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-haiku-4-5": null,
+    "get_context_usage/claude-haiku-4-5": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 6885,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 53619,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 178,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 2921,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 1993,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Free space",
+          "tokens": 134404,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 65596,
+      "maxTokens": 200000,
+      "rawMaxTokens": 200000,
+      "autocompactSource": "auto",
+      "percentage": 33,
+      "model": "claude-haiku-4-5",
+      "autoCompactThreshold": 167000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-opus-5": null,
+    "get_context_usage/claude-opus-5": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1991,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918689,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48311,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-opus-5",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-opus-5[1m]": null,
+    "get_context_usage/claude-opus-5[1m]": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1991,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918689,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48311,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-opus-5[1m]",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-fable-5": null,
+    "get_context_usage/claude-fable-5": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1991,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918689,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48311,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-fable-5",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-fable-5[1m]": null,
+    "get_context_usage/claude-fable-5[1m]": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1991,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918689,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48311,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-fable-5[1m]",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-opus-4-8": null,
+    "get_context_usage/claude-opus-4-8": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1972,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918708,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48292,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-opus-4-8",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-opus-4-8[1m]": null,
+    "get_context_usage/claude-opus-4-8[1m]": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1972,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918708,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48292,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-opus-4-8[1m]",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-opus-4-7": null,
+    "get_context_usage/claude-opus-4-7": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 9175,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 51405,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 898080,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 68920,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 7,
+      "model": "claude-opus-4-7",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-opus-4-7[1m]": null,
+    "get_context_usage/claude-opus-4-7[1m]": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 9175,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 51405,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 898080,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 68920,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 7,
+      "model": "claude-opus-4-7[1m]",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-opus-4-6": null,
+    "get_context_usage/claude-opus-4-6": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 6885,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 53619,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 178,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 2921,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 1993,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 101404,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 65596,
+      "maxTokens": 200000,
+      "rawMaxTokens": 200000,
+      "autocompactSource": "model-default",
+      "percentage": 33,
+      "model": "claude-opus-4-6",
+      "autoCompactThreshold": 167000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-opus-4-6[1m]": null,
+    "get_context_usage/claude-opus-4-6[1m]": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 6885,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 52452,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 178,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 2921,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 3160,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Free space",
+          "tokens": 934404,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 65596,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "auto",
+      "percentage": 7,
+      "model": "claude-opus-4-6[1m]",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-sonnet-4-6": null,
+    "get_context_usage/claude-sonnet-4-6": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 6885,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 53619,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 178,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 2921,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 1993,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 101404,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 65596,
+      "maxTokens": 200000,
+      "rawMaxTokens": 200000,
+      "autocompactSource": "model-default",
+      "percentage": 33,
+      "model": "claude-sonnet-4-6",
+      "autoCompactThreshold": 167000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-sonnet-4-6[1m]": null,
+    "get_context_usage/claude-sonnet-4-6[1m]": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 6885,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 52452,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 178,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 2921,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 3160,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Free space",
+          "tokens": 934404,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 65596,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "auto",
+      "percentage": 7,
+      "model": "claude-sonnet-4-6[1m]",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/opus": null,
+    "get_context_usage/opus": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1991,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918689,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48311,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-opus-5-5",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/sonnet": null,
+    "get_context_usage/sonnet": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1991,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918689,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48311,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-sonnet-5-5",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/haiku": null,
+    "get_context_usage/haiku": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1991,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918689,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48311,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-haiku-5-5",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/default": null,
+    "get_context_usage/default": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1991,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918689,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48311,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-opus-5-5",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    }
+  },
+  "run_B": {
+    "initialize": {
+      "output_style": "Speedwave",
+      "available_output_styles": [
+        "default",
+        "Proactive",
+        "Concise",
+        "Explanatory",
+        "Learning",
+        "Speedwave"
+      ],
+      "models": [
+        {
+          "value": "default",
+          "resolvedModel": "claude-opus-5-5",
+          "displayName": "Default (recommended)",
+          "description": "Opus 5.5 · Best for everyday, complex tasks",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsAdaptiveThinking": true,
+          "supportsFastMode": true,
+          "supportsAutoMode": true
+        },
+        {
+          "value": "opus",
+          "resolvedModel": "claude-opus-5-5",
+          "displayName": "Opus",
+          "description": "Opus 5.5 · Best for everyday, complex tasks",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsAdaptiveThinking": true,
+          "supportsFastMode": true,
+          "supportsAutoMode": true
+        },
+        {
+          "value": "claude-fable-5-1[1m]",
+          "resolvedModel": "claude-fable-5-1[1m]",
+          "displayName": "Fable",
+          "description": "Fable 5.1 · Most capable for your hardest and longest-running tasks",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsAdaptiveThinking": true,
+          "supportsAutoMode": true
+        },
+        {
+          "value": "sonnet",
+          "resolvedModel": "claude-sonnet-5-5",
+          "displayName": "Sonnet",
+          "description": "Sonnet 5.5 · Efficient for routine tasks",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsAdaptiveThinking": true,
+          "supportsAutoMode": true
+        },
+        {
+          "value": "haiku",
+          "resolvedModel": "claude-haiku-5-5",
+          "displayName": "Haiku",
+          "description": "Haiku 5.5 · Fastest for quick answers",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsAdaptiveThinking": true,
+          "supportsAutoMode": true
+        }
+      ],
+      "account": {
+        "subscriptionType": "Claude Team",
+        "apiProvider": "firstParty"
+      },
+      "current_permission_mode": "default",
+      "feedback_mode": {
+        "kind": "post"
+      },
+      "analytics_disabled": false,
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required",
+      "capabilities": [
+        "ui_surface_v1"
+      ]
+    },
+    "get_usage": {
+      "subscription_type": "team",
+      "rate_limits_available": true,
+      "rate_limits": {
+        "five_hour": {
+          "utilization": 19,
+          "resets_at": "2026-10-11T14:19:59.748398+00:00",
+          "limit_dollars": null,
+          "used_dollars": null,
+          "remaining_dollars": null,
+          "locked_reason": null
+        },
+        "seven_day": {
+          "utilization": 82,
+          "resets_at": "2026-10-12T02:59:59.748418+00:00",
+          "limit_dollars": null,
+          "used_dollars": null,
+          "remaining_dollars": null,
+          "locked_reason": null
+        },
+        "seven_day_oauth_apps": null,
+        "seven_day_opus": null,
+        "seven_day_sonnet": null,
+        "cinder_cove": null,
+        "wattle_ember": null,
+        "extra_usage": {
+          "is_enabled": false,
+          "monthly_limit": null,
+          "used_credits": null,
+          "utilization": null,
+          "currency": "EUR",
+          "disabled_reason": "out_of_credits",
+          "decimal_places": 2,
+          "user_disabled": false,
+          "spend_limit_reached": false,
+          "credits_ever_enabled": true,
+          "daily": null,
+          "weekly": null
+        },
+        "limits": [
+          {
+            "kind": "session",
+            "group": "session",
+            "percent": 19,
+            "resets_at": "2026-10-11T14:19:59.748398+00:00",
+            "severity": "normal",
+            "is_active": false,
+            "scope": null
+          },
+          {
+            "kind": "weekly_all",
+            "group": "weekly",
+            "percent": 82,
+            "resets_at": "2026-10-12T02:59:59.748418+00:00",
+            "severity": "warning",
+            "is_active": true,
+            "scope": null
+          },
+          {
+            "kind": "weekly_scoped",
+            "group": "weekly",
+            "percent": 26,
+            "resets_at": "2026-10-12T02:59:59.748633+00:00",
+            "severity": "normal",
+            "is_active": false,
+            "scope": {
+              "model": {
+                "display_name": "Fable",
+                "id": null
+              },
+              "surface": null
+            }
+          }
+        ],
+        "seven_day_cowork": null,
+        "seven_day_omelette": null,
+        "tangelo": null,
+        "iguana_necktie": null,
+        "omelette_promotional": null,
+        "nimbus_quill": null,
+        "copper_kite": null,
+        "brass_thimble": null,
+        "harbor_lantern": null,
+        "amber_ladder": null,
+        "amber_cistern": null,
+        "juniper_tide": null,
+        "cedar_ember": null,
+        "amber_gauge": null,
+        "spend": {
+          "used": {
+            "amount_minor": 0,
+            "currency": "EUR",
+            "exponent": 2
+          },
+          "limit": null,
+          "percent": 0,
+          "severity": "normal",
+          "enabled": false,
+          "disabled_reason": "out_of_credits",
+          "cap": null,
+          "balance": null,
+          "auto_reload": null,
+          "disclaimer": "Usage credits cover you when you hit your plan limits. [Learn more](https://support.claude.com/articles/12429409)",
+          "can_purchase_credits": false,
+          "can_toggle": false
+        },
+        "member_dashboard_available": false,
+        "seven_day_breakdown": null,
+        "weekly_scoped_shares": [
+          {
+            "limit_index": 2,
+            "used_percent_of_weekly": 13,
+            "allowance_percent_of_weekly": 50
+          }
+        ],
+        "model_scoped": [
+          {
+            "display_name": "Fable",
+            "utilization": 26,
+            "resets_at": "2026-10-12T02:59:59.748633+00:00"
+          }
+        ]
+      },
+      "behaviors": null
+    },
+    "get_context_usage/initial": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1991,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918689,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48311,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-opus-5-5",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "list_models": {
+      "models": [
+        {
+          "value": "default",
+          "resolvedModel": "claude-opus-5-5",
+          "displayName": "Default (recommended)",
+          "description": "Opus 5.5 · Best for everyday, complex tasks",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsAdaptiveThinking": true,
+          "supportsFastMode": true,
+          "supportsAutoMode": true
+        },
+        {
+          "value": "opus",
+          "resolvedModel": "claude-opus-5-5",
+          "displayName": "Opus",
+          "description": "Opus 5.5 · Best for everyday, complex tasks",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsAdaptiveThinking": true,
+          "supportsFastMode": true,
+          "supportsAutoMode": true
+        },
+        {
+          "value": "claude-fable-5-1[1m]",
+          "resolvedModel": "claude-fable-5-1[1m]",
+          "displayName": "Fable",
+          "description": "Fable 5.1 · Most capable for your hardest and longest-running tasks",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsAdaptiveThinking": true,
+          "supportsAutoMode": true
+        },
+        {
+          "value": "sonnet",
+          "resolvedModel": "claude-sonnet-5-5",
+          "displayName": "Sonnet",
+          "description": "Sonnet 5.5 · Efficient for routine tasks",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsAdaptiveThinking": true,
+          "supportsAutoMode": true
+        },
+        {
+          "value": "haiku",
+          "resolvedModel": "claude-haiku-5-5",
+          "displayName": "Haiku",
+          "description": "Haiku 5.5 · Fastest for quick answers",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsAdaptiveThinking": true,
+          "supportsAutoMode": true
+        }
+      ]
+    },
+    "set_model/claude-fable-5-1": null,
+    "get_context_usage/claude-fable-5-1": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1991,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918689,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48311,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-fable-5-1",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-fable-5-1[1m]": null,
+    "get_context_usage/claude-fable-5-1[1m]": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1991,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918689,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48311,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-fable-5-1[1m]",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-opus-5-5": null,
+    "get_context_usage/claude-opus-5-5": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1991,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918689,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48311,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-opus-5-5",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-opus-5-5[1m]": null,
+    "get_context_usage/claude-opus-5-5[1m]": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1991,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918689,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48311,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-opus-5-5[1m]",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-sonnet-5-5": null,
+    "get_context_usage/claude-sonnet-5-5": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1991,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918689,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48311,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-sonnet-5-5",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-sonnet-5-5[1m]": null,
+    "get_context_usage/claude-sonnet-5-5[1m]": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1991,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918689,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48311,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-sonnet-5-5[1m]",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-sonnet-5": null,
+    "get_context_usage/claude-sonnet-5": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 9141,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 47136,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 902383,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 64617,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 6,
+      "model": "claude-sonnet-5",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-sonnet-5[1m]": null,
+    "get_context_usage/claude-sonnet-5[1m]": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 9141,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 47136,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 902383,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 64617,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 6,
+      "model": "claude-sonnet-5[1m]",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-haiku-5-5": null,
+    "get_context_usage/claude-haiku-5-5": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1991,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918689,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48311,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-haiku-5-5",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-haiku-5-5[1m]": null,
+    "get_context_usage/claude-haiku-5-5[1m]": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1991,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918689,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48311,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-haiku-5-5[1m]",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-haiku-4-5": null,
+    "get_context_usage/claude-haiku-4-5": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 6885,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 53619,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 178,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 2921,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 1993,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Free space",
+          "tokens": 134404,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 65596,
+      "maxTokens": 200000,
+      "rawMaxTokens": 200000,
+      "autocompactSource": "auto",
+      "percentage": 33,
+      "model": "claude-haiku-4-5",
+      "autoCompactThreshold": 167000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-opus-5": null,
+    "get_context_usage/claude-opus-5": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1991,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918689,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48311,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-opus-5",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-opus-5[1m]": null,
+    "get_context_usage/claude-opus-5[1m]": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1991,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918689,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48311,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-opus-5[1m]",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-fable-5": null,
+    "get_context_usage/claude-fable-5": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1991,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918689,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48311,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-fable-5",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-fable-5[1m]": null,
+    "get_context_usage/claude-fable-5[1m]": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1991,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918689,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48311,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-fable-5[1m]",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-opus-4-8": null,
+    "get_context_usage/claude-opus-4-8": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1972,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918708,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48292,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-opus-4-8",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-opus-4-8[1m]": null,
+    "get_context_usage/claude-opus-4-8[1m]": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1972,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918708,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48292,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-opus-4-8[1m]",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-opus-4-7": null,
+    "get_context_usage/claude-opus-4-7": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 9175,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 51405,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 898080,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 68920,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 7,
+      "model": "claude-opus-4-7",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-opus-4-7[1m]": null,
+    "get_context_usage/claude-opus-4-7[1m]": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 9175,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 51405,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 898080,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 68920,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 7,
+      "model": "claude-opus-4-7[1m]",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-opus-4-6": null,
+    "get_context_usage/claude-opus-4-6": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 6885,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 53619,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 178,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 2921,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 1993,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 101404,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 65596,
+      "maxTokens": 200000,
+      "rawMaxTokens": 200000,
+      "autocompactSource": "model-default",
+      "percentage": 33,
+      "model": "claude-opus-4-6",
+      "autoCompactThreshold": 167000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-opus-4-6[1m]": null,
+    "get_context_usage/claude-opus-4-6[1m]": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 6885,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 52452,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 178,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 2921,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 3160,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Free space",
+          "tokens": 934404,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 65596,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "auto",
+      "percentage": 7,
+      "model": "claude-opus-4-6[1m]",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-sonnet-4-6": null,
+    "get_context_usage/claude-sonnet-4-6": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 6885,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 53619,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 178,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 2921,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 1993,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 101404,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 65596,
+      "maxTokens": 200000,
+      "rawMaxTokens": 200000,
+      "autocompactSource": "model-default",
+      "percentage": 33,
+      "model": "claude-sonnet-4-6",
+      "autoCompactThreshold": 167000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-sonnet-4-6[1m]": null,
+    "get_context_usage/claude-sonnet-4-6[1m]": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 6885,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 52452,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 178,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 2921,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 3160,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Free space",
+          "tokens": 934404,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 65596,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "auto",
+      "percentage": 7,
+      "model": "claude-sonnet-4-6[1m]",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/opus": null,
+    "get_context_usage/opus": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1991,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918689,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48311,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-opus-5-5",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/sonnet": null,
+    "get_context_usage/sonnet": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1991,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918689,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48311,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-sonnet-5-5",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/haiku": null,
+    "get_context_usage/haiku": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1991,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918689,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48311,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-haiku-5-5",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/default": null,
+    "get_context_usage/default": {
+      "categories": [
+        {
+          "name": "System prompt",
+          "tokens": 1991,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "name": "System tools",
+          "tokens": 37980,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "name": "Skills",
+          "tokens": 4207,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "name": "Free space",
+          "tokens": 918689,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 48311,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 5,
+      "model": "claude-opus-5-5",
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    }
+  }
+}

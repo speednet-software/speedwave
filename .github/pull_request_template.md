@@ -1,18 +1,16 @@
-## Description
+<!-- Jira key (e.g. SPEED-123) and "Closes #123" for related GitHub issues. -->
 
-<!-- What does this PR do? Link related issues with "Closes #123" -->
+## Summary
 
-## Type of Change
+<!-- Smallest view that makes the change clear: diagram, diff sketch, call tree or file tree. -->
 
-- [ ] Bug fix
-- [ ] New feature
-- [ ] Refactoring (no functional changes)
-- [ ] Documentation
-- [ ] CI/CD
-- [ ] Other: <!-- describe -->
+## Evidence
 
-## Checklist
+- **Before:** <!-- screenshot, output or failing test run -->
+  **After:** <!-- screenshot, output or passing test run -->
 
-- [ ] I have added tests for new functionality (the required CI checks run the full suite; `make test` / `make check` are optional locally)
-- [ ] I have updated documentation if needed
-- [ ] My commits follow [Conventional Commits](https://www.conventionalcommits.org/)
+## Merge Danger
+
+**Door:** <!-- one-way or two-way -->
+
+**Blast Radius:** <!-- one word, then potential ramifications if any -->

@@ -15,7 +15,7 @@ pub enum LockService {
     McpOs,
     /// The OAuth host process.
     Oauth,
-    /// The in-process PII NER detector service of the Desktop app (ADR-091).
+    /// The in-process PII NER detector service of the Desktop app (ADR-095).
     PiiNer,
 }
 

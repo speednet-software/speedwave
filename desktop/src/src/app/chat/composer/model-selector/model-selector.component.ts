@@ -7,13 +7,14 @@ import {
   input,
   output,
   signal,
+  untracked,
 } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { TooltipDirective } from '../../../shared/tooltip.directive';
 import { TauriService } from '../../../services/tauri.service';
 import { AnthropicModelsService } from '../../../services/anthropic-models.service';
 import { ClaudeControlService } from '../../../services/claude-control.service';
-import { ModelPickerService } from '../../../services/model-picker.service';
+import { DEFAULT_ALIAS, ModelPickerService } from '../../../services/model-picker.service';
 import { DiscoveredModelsService } from '../../../services/discovered-models.service';
 import { LoggerService } from '../../../services/logger.service';
 import type { ActiveProviderSummary, AnthropicModel, DiscoveredModel } from '../../../models/llm';
@@ -21,6 +22,7 @@ import { isAnthropicKind } from '../../../models/llm';
 import type { ModelPicker, ModelPickerRow } from '../../../models/model-picker';
 import { normalizeObserved, wireModelId } from './wire-model-id';
 import { EffortSliderComponent, capitalizeLevel } from './effort-slider.component';
+import { SpinIconComponent } from '../../../shared/spin-icon.component';
 
 const MODEL_LIST_UNAVAILABLE = 'Model list unavailable.';
 const LOAD_FAILED = 'Failed to load models.';
@@ -48,14 +50,12 @@ export interface ModelSelection {
 }
 
 /**
- * Clickable model badge opening a searchable combobox; sources depend on the
- * active provider kind (anthropic catalog / local discovery / OpenRouter catalog).
- * Emits exactly ONE `modelSelected` event per pick; all session-live/pending/
- * write-through decisions live in `ChatStateService.applyModelSelection`.
+ * Clickable model badge opening a searchable combobox sourced per provider kind. Emits one
+ * `modelSelected` event per pick; `ChatStateService.applyModelSelection` decides what it does.
  */
 @Component({
   selector: 'app-model-selector',
-  imports: [FormsModule, TooltipDirective, EffortSliderComponent],
+  imports: [FormsModule, TooltipDirective, EffortSliderComponent, SpinIconComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { '(document:keydown.escape)': 'onEscape()' },
   template: `
@@ -140,17 +140,8 @@ export interface ModelSelection {
                 data-testid="model-selector-loading"
                 class="mono flex items-center gap-2 px-3 py-2 text-[11px] text-[var(--ink-mute)]"
               >
+                <app-spin-icon testId="model-selector-spinner" class="h-3 w-3" />
                 Loading models...
-                @if (pickerPending()) {
-                  <button
-                    type="button"
-                    data-testid="model-selector-retry"
-                    class="hover-bg rounded border border-[var(--line-strong)] px-2 py-0.5 text-[10px] text-[var(--ink)]"
-                    (click)="fetchOptions(true)"
-                  >
-                    Retry
-                  </button>
-                }
               </div>
             } @else if (listError()) {
               <div
@@ -177,7 +168,7 @@ export interface ModelSelection {
                   (click)="select(opt)"
                 >
                   <span class="flex min-w-0 items-start gap-2">
-                    @if (showEffortControl()) {
+                    @if (isAnthropic()) {
                       <span class="inline-block w-3 shrink-0 text-[var(--teal)]" aria-hidden="true">
                         @if (opt.id === activeOptionId()) {
                           <span data-testid="model-selector-active-mark">&#x2713;</span>
@@ -222,7 +213,7 @@ export interface ModelSelection {
           </div>
         </div>
       }
-      @if (effortOpen()) {
+      @if (effortOpen() && showEffortSegment()) {
         <button
           type="button"
           data-testid="effort-popover-backdrop"
@@ -262,6 +253,12 @@ export class ModelSelectorComponent {
 
   readonly sessionModel = input('');
 
+  readonly pickedModel = input('');
+
+  readonly launchModel = input<string | null>(null);
+
+  readonly sessionAwaited = input(false);
+
   readonly modelSelected = output<ModelSelection>();
 
   readonly effortSelected = output<string>();
@@ -284,30 +281,32 @@ export class ModelSelectorComponent {
   protected readonly currentEffortPin = signal<string | null>(null);
   protected readonly effortOpen = signal(false);
 
-  private readonly lastPicked = signal('');
-
   private readonly modelHint = signal('');
 
-  protected readonly showEffortControl = computed(() => {
+  protected readonly isAnthropic = computed(() => {
     const summary = this.summary();
     return summary !== null && isAnthropicKind(summary.kind);
   });
 
+  private readonly providerKnown = computed(() => this.summary() !== null);
+
   protected readonly pickerPending = computed(
-    () =>
-      this.showEffortControl() &&
-      this.control.sessionInfoState(this.projectId()).state === 'pending'
+    () => this.isAnthropic() && this.control.sessionInfoState(this.projectId()).state === 'pending'
   );
 
+  protected readonly awaitingSession = computed(() => this.isAnthropic() && this.sessionAwaited());
+
   private readonly options = computed<ModelOption[]>(() => {
-    if (!this.showEffortControl()) return this.discoveredOptions();
+    if (!this.isAnthropic()) return this.discoveredOptions();
     const projectId = this.projectId();
     const held = this.picker.picker(projectId);
     return held ? this.anthropicOptionsFrom(held, projectId) : [];
   });
 
   protected readonly listLoading = computed(
-    () => this.loading() || (this.pickerPending() && this.options().length === 0)
+    () =>
+      this.loading() ||
+      ((this.pickerPending() || this.awaitingSession()) && this.options().length === 0)
   );
 
   protected readonly listError = computed(() => (this.options().length === 0 ? this.error() : ''));
@@ -320,32 +319,30 @@ export class ModelSelectorComponent {
   protected readonly activeOptionId = computed<string | null>(() => this.activeRow()?.id ?? null);
 
   private readonly activeRow = computed<ModelPickerRow | null>(() =>
-    this.showEffortControl() ? this.picker.rowFor(this.projectId(), this.displayModel()) : null
+    this.isAnthropic() ? this.picker.rowFor(this.projectId(), this.displayModel()) : null
   );
 
   private readonly currentModelEntry = computed<AnthropicModel | null>(() =>
-    this.anthropicModels.entryFor(this.activeOptionId() ?? this.displayModel())
+    this.isAnthropic()
+      ? this.anthropicModels.entryFor(this.activeOptionId() ?? this.displayModel())
+      : null
   );
 
-  private readonly canonicalOrder = computed<string[]>(
-    () => this.picker.picker(this.projectId())?.effort_order ?? []
-  );
+  private readonly canonicalOrder = computed<string[]>(() => this.summary()?.effort_levels ?? []);
 
-  protected readonly effortStops = computed<string[]>(
-    () =>
-      this.activeRow()?.effort_levels ??
-      this.currentModelEntry()?.effort_levels ??
-      this.canonicalOrder()
-  );
+  protected readonly effortStops = computed<string[]>(() => {
+    if (!this.isAnthropic()) return this.canonicalOrder();
+    const listed = this.activeRow()?.effort_levels ?? this.currentModelEntry()?.effort_levels;
+    if (listed) return listed;
+    return this.picker.picker(this.projectId()) ? this.canonicalOrder() : [];
+  });
 
   private readonly catalogDefaultEffort = computed<string | null>(() => {
     const row = this.activeRow();
     return row ? row.default_effort : (this.currentModelEntry()?.default_effort ?? null);
   });
 
-  protected readonly showEffortSegment = computed(
-    () => this.showEffortControl() && this.effortStops().length > 0
-  );
+  protected readonly showEffortSegment = computed(() => this.effortStops().length > 0);
 
   protected readonly effectiveEffortLevel = computed<string | null>(() => {
     const stops = this.effortStops();
@@ -384,19 +381,19 @@ export class ModelSelectorComponent {
     });
     effect(() => {
       const id = this.projectId();
-      if (this.showEffortControl() && id) void this.loadEffortState(id);
+      if (this.providerKnown() && id) void this.loadEffortState(id);
     });
     effect(() => {
       const id = this.projectId();
-      if (this.showEffortControl() && id) void this.anthropicModels.list();
+      if (this.isAnthropic() && id) void this.anthropicModels.list();
     });
     effect(() => {
       const id = this.projectId();
-      if (this.showEffortControl() && id) void this.control.refreshSessionInfo(id);
+      if (this.isAnthropic() && id) void this.control.refreshSessionInfo(id);
     });
     effect(() => {
       const id = this.projectId();
-      if (!this.showEffortControl() || !id) return;
+      if (!this.isAnthropic() || !id) return;
       if (this.control.sessionInfoState(id).state !== 'pending') void this.picker.refresh(id);
     });
     effect(() => {
@@ -405,31 +402,35 @@ export class ModelSelectorComponent {
       const ended = live === '' && this.lastSessionModel !== '';
       this.lastSessionModel = live;
       const id = this.projectId();
-      if (changed && this.showEffortControl() && id) void this.loadEffortState(id);
-      if (ended) {
-        this.lastPicked.set('');
-        if (id && !this.summary()?.model) void this.loadModelHint(id);
-      }
+      if (changed && this.providerKnown() && id) void this.loadEffortState(id);
+      if (ended && id && !this.summary()?.model) void this.loadModelHint(id);
+    });
+    effect(() => {
+      this.projectId();
+      this.showEffortSegment();
+      untracked(() => this.effortOpen.set(false));
     });
     effect(() => {
       const err = this.modelError();
       const changed = err !== '' && err !== this.lastModelError;
       this.lastModelError = err;
       const id = this.projectId();
-      if (changed && this.showEffortControl() && id) void this.loadEffortState(id);
+      if (changed && this.providerKnown() && id) void this.loadEffortState(id);
     });
   }
 
   readonly displayModel = computed<string>(() => {
     const s = this.summary();
-    const picked = this.lastPicked();
+    const picked = this.pickedModel();
     if (picked) return picked;
     const live = this.sessionModel();
     if (live) return s ? normalizeObserved(live, s.provider_id) : live;
+    const launched = this.isAnthropic() ? this.launchModel() : null;
+    if (launched) return s ? normalizeObserved(launched, s.provider_id) : launched;
     if (s?.model) return normalizeObserved(s.model, s.provider_id);
     const hint = this.modelHint();
     if (hint) return s ? normalizeObserved(hint, s.provider_id) : hint;
-    return 'default';
+    return DEFAULT_ALIAS;
   });
 
   readonly filteredOptions = computed<ModelOption[]>(() => {
@@ -445,10 +446,8 @@ export class ModelSelectorComponent {
   });
 
   /**
-   * Opens the combobox and starts the option fetch. Awaits the summary if it is
-   * missing or stale for the current project, then kicks off `fetchOptions`
-   * without awaiting it, so the combobox can render its loading state while the
-   * catalog request is in flight.
+   * Opens the combobox: awaits a missing or stale summary, then starts `fetchOptions` without
+   * awaiting it so the loading state renders while the catalog request is in flight.
    */
   async openCombobox(): Promise<void> {
     if (this.streaming()) return;
@@ -502,10 +501,8 @@ export class ModelSelectorComponent {
   }
 
   /**
-   * Fetches the option list for the active provider kind (badge combobox source).
-   * A selector instance probes a local/OpenRouter provider once per `kind|base_url`; pass
-   * `force` to re-probe. A failed probe falls back to the last known list, marked stale.
-   * Anthropic rows are the `ModelPickerService` rows; only the latest fetch writes the state.
+   * Fetches the option list for the active provider kind; a local/OpenRouter provider is probed
+   * once per `kind|base_url`, a failed probe keeps the last list marked stale.
    * @param force - Re-issue the discovery probe (or re-read the session info) even when held.
    */
   async fetchOptions(force = false): Promise<void> {
@@ -587,7 +584,6 @@ export class ModelSelectorComponent {
       isDefault: opt.isDefault,
       contextTokens: opt.contextTokens,
     });
-    this.lastPicked.set(opt.id);
     this.open.set(false);
   }
 
@@ -602,7 +598,6 @@ export class ModelSelectorComponent {
       if (this.projectId() !== projectId) return;
       this.summary.set(summary);
       this.summaryProjectId = projectId;
-      this.lastPicked.set('');
       if (!summary.model) {
         void this.loadModelHint(projectId);
       } else {

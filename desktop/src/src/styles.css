@@ -667,7 +667,7 @@ body.memory-open .memory-drawer {
   font-size: 11px;
   line-height: 1.4;
   color: var(--ink);
-  max-width: min(40rem, calc(100vw - 32px));
+  max-width: min(22rem, calc(100vw - 32px));
   overflow-wrap: anywhere;
   white-space: normal;
   opacity: 0;
