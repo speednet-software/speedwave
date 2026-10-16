@@ -81,7 +81,6 @@ pub(crate) async fn switch_project(
                 log::info!(
                     "switch_project: '{proj}' has no LLM provider — skipping container start"
                 );
-                crate::pii_ner_service::stop_service();
                 return Ok(());
             }
             if let Err(sanitized) = integrations_cmd::ensure_project_images_built(rt, proj) {

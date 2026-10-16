@@ -292,7 +292,7 @@ pub(crate) fn project_llm_is_unconfigured(project: &str) -> Result<bool, String>
     project_llm_is_unconfigured_in(&user_config, project)
 }
 
-fn project_llm_is_unconfigured_in(
+pub(crate) fn project_llm_is_unconfigured_in(
     user_config: &config::SpeedwaveUserConfig,
     project: &str,
 ) -> Result<bool, String> {
@@ -530,13 +530,12 @@ pub async fn add_project(
             if let Err(sanitized) = crate::integrations_cmd::ensure_project_images_built(rt, proj) {
                 return Err(format!("Image build failed: {sanitized}"));
             }
-            let llm_unconfigured = project_llm_is_unconfigured(proj)?;
-            crate::pii_ner_service::prepare_for_project_start(llm_unconfigured);
-            if llm_unconfigured {
+            if project_llm_is_unconfigured(proj)? {
                 log::info!("'{proj}' has no LLM provider — skipping container start");
                 return Ok(());
             }
             crate::ensure_oauth_running(&oauth_arc, proj);
+            crate::pii_ner_service::start_if_active_wants();
             log::info!("starting containers for project={proj}");
             setup_wizard::start_containers(proj).map_err(|e| {
                 log::error!("failed to start containers: {e:#}");
@@ -659,7 +658,7 @@ pub async fn start_containers(
         ensure_images_ready()?;
         check_project(&project)?;
         crate::ensure_oauth_running(&oauth_arc, &project);
-        crate::pii_ner_service::prepare_for_project_start(project_llm_is_unconfigured(&project)?);
+        crate::pii_ner_service::sync_with_active_project();
         if let Ok(cfg) = speedwave_runtime::config::load_user_config() {
             if let Some(p) = cfg.find_project(&project) {
                 speedwave_runtime::cloudstorage::check_project_readable_or_err(

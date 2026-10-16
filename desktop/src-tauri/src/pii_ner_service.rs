@@ -110,32 +110,28 @@ static GLOBAL_PII_NER: OnceLock<SharedPiiNer> = OnceLock::new();
 enum Transition {
     StartIfWanted,
     StopUnlessWanted,
+    Sync,
 }
 
 pub(crate) fn set_global_pii_ner(handle: SharedPiiNer) {
     let _ = GLOBAL_PII_NER.set(handle);
 }
 
-/// Starts the detector when the active project resolves it on; never stops it. Call before
+/// Starts the detector when the active project wants it; never stops it. Call before
 /// rendering a compose so the proxy picks the live port up.
 pub(crate) fn start_if_active_wants() {
     apply_for_active_project(Transition::StartIfWanted);
 }
 
-/// Stops the detector when there is no active project or it resolves the detector off; never
-/// starts it. Call after a switch, a Settings save and a beta toggle.
+/// Stops the detector unless the active project wants it; never starts it. Call after a
+/// switch, a Settings save and a beta toggle.
 pub(crate) fn stop_unless_active_wants() {
     apply_for_active_project(Transition::StopUnlessWanted);
 }
 
-/// Before a project's containers start: stops the detector for a project with no LLM
-/// provider, which starts no proxy, and otherwise starts it when the active project wants it.
-pub(crate) fn prepare_for_project_start(llm_unconfigured: bool) {
-    if llm_unconfigured {
-        stop_service();
-    } else {
-        start_if_active_wants();
-    }
+/// Starts or stops the detector to match the active project, outside a project switch.
+pub(crate) fn sync_with_active_project() {
+    apply_for_active_project(Transition::Sync);
 }
 
 /// Stops the detector regardless of the active project.
@@ -146,10 +142,13 @@ pub(crate) fn stop_service() {
 fn apply_for_active_project(transition: Transition) {
     let wanted = speedwave_runtime::config::load_user_config()
         .ok()
-        .and_then(|c| c.active_project)
-        .is_some_and(|project| {
-            speedwave_runtime::pii_policy::pii_ner_enabled_for_project(&project)
-        });
+        .and_then(|cfg| {
+            let project = cfg.active_project.clone()?;
+            let has_llm =
+                crate::containers_cmd::project_llm_is_unconfigured_in(&cfg, &project) == Ok(false);
+            Some(has_llm && speedwave_runtime::pii_policy::pii_ner_enabled_for_project(&project))
+        })
+        .unwrap_or(false);
     apply_to_global(wanted, transition);
 }
 
@@ -180,7 +179,7 @@ fn apply_state(
         }
     };
     match (transition, wanted, guard.is_some()) {
-        (Transition::StartIfWanted, true, false) => {
+        (Transition::StartIfWanted | Transition::Sync, true, false) => {
             match PiiNerService::start(data_dir, loader()) {
                 Ok(service) => {
                     log::info!(
@@ -192,7 +191,7 @@ fn apply_state(
                 Err(e) => log::error!("PII NER detector service failed to start: {e}"),
             }
         }
-        (Transition::StopUnlessWanted, false, true) => {
+        (Transition::StopUnlessWanted | Transition::Sync, false, true) => {
             *guard = None;
             log::info!("PII NER detector service stopped");
         }
@@ -760,6 +759,26 @@ mod tests {
             fake_loader,
         );
         assert!(running_port(&shared).is_none());
+    }
+
+    #[test]
+    #[serial_test::parallel(host_addressing)]
+    fn sync_starts_when_wanted_and_stops_when_not() {
+        let tmp = tempfile::tempdir().unwrap();
+        let shared = SharedPiiNer::default();
+        let lock_path = tmp.path().join(consts::PII_NER_LOCK_FILE);
+
+        apply_state(&shared, tmp.path(), false, Transition::Sync, fake_loader);
+        assert!(running_port(&shared).is_none());
+
+        apply_state(&shared, tmp.path(), true, Transition::Sync, fake_loader);
+        let port = running_port(&shared).unwrap();
+        apply_state(&shared, tmp.path(), true, Transition::Sync, fake_loader);
+        assert_eq!(running_port(&shared), Some(port));
+
+        apply_state(&shared, tmp.path(), false, Transition::Sync, fake_loader);
+        assert!(running_port(&shared).is_none());
+        assert!(!lock_path.exists());
     }
 
     #[test]
