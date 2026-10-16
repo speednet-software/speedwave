@@ -304,7 +304,8 @@ pub fn resolve_pii_ner(
     managed: Option<&crate::config::ManagedPiiPolicyConfig>,
     user: Option<&crate::config::PiiPolicyUserConfig>,
 ) -> bool {
-    pii_feature_enabled(beta_enabled, managed) && user.and_then(|u| u.ner).unwrap_or(false)
+    pii_feature_enabled(beta_enabled, managed)
+        && user.and_then(|u| u.pii_ner_enabled).unwrap_or(false)
 }
 
 /// Resolved detector switch for one project, read from the on-disk layers.
@@ -1385,11 +1386,11 @@ keywords: []
     #[test]
     fn resolve_pii_ner_follows_the_user_opt_in_under_the_feature_gate() {
         let user_on = PiiPolicyUserConfig {
-            ner: Some(true),
+            pii_ner_enabled: Some(true),
             ..Default::default()
         };
         let user_off = PiiPolicyUserConfig {
-            ner: Some(false),
+            pii_ner_enabled: Some(false),
             ..Default::default()
         };
         let unset = PiiPolicyUserConfig::default();
@@ -1464,7 +1465,7 @@ keywords: []
                 Vec::new(),
                 Vec::new(),
             )],
-            ner: None,
+            pii_ner_enabled: None,
         };
         assert!(resolve_pii_policy(Some(&user), None).is_err());
     }
@@ -1475,7 +1476,7 @@ keywords: []
         let user = PiiPolicyUserConfig {
             policies: vec!["acme".to_string()],
             custom_policies: vec![def.clone(), def],
-            ner: None,
+            pii_ner_enabled: None,
         };
         assert!(resolve_pii_policy(Some(&user), None).is_err());
     }
@@ -1535,7 +1536,7 @@ keywords: []
                     Vec::new(),
                 ),
             ],
-            ner: None,
+            pii_ner_enabled: None,
         };
         let resolved = resolve_pii_policy(Some(&user), None).unwrap();
         let rule = resolved
@@ -1565,7 +1566,7 @@ keywords: []
                     Vec::new(),
                 ),
             ],
-            ner: None,
+            pii_ner_enabled: None,
         };
         let err = resolve_pii_policy(Some(&user), None).unwrap_err();
         assert!(err.contains("EMPLOYEE_ID"));
@@ -1581,7 +1582,7 @@ keywords: []
                 vec![own_rule("EMAIL", r"x{3}", true, false)],
                 Vec::new(),
             )],
-            ner: None,
+            pii_ner_enabled: None,
         };
         let err = resolve_pii_policy(Some(&user), None).unwrap_err();
         assert!(err.contains("EMAIL"));
@@ -1597,7 +1598,7 @@ keywords: []
                 vec![own_rule("BAD_ID", "(a+)+", true, false)],
                 Vec::new(),
             )],
-            ner: None,
+            pii_ner_enabled: None,
         };
         assert!(resolve_pii_policy(Some(&user), None).is_err());
     }
@@ -1609,7 +1610,7 @@ keywords: []
         let user = PiiPolicyUserConfig {
             policies: vec!["a".to_string()],
             custom_policies: vec![custom_policy("a", categories, Vec::new(), Vec::new())],
-            ner: None,
+            pii_ner_enabled: None,
         };
         let err = resolve_pii_policy(Some(&user), None).unwrap_err();
         assert!(err.contains("NOT_A_RULE"));
@@ -1633,7 +1634,7 @@ keywords: []
                     vec![keyword("Calgon", "Solvex", false)],
                 ),
             ],
-            ner: None,
+            pii_ner_enabled: None,
         };
         let resolved = resolve_pii_policy(Some(&user), None).unwrap();
         assert_eq!(resolved.keywords.len(), 2);
@@ -1665,7 +1666,7 @@ keywords: []
                     vec![keyword("Coca-Cola", "Brandex", true)],
                 ),
             ],
-            ner: None,
+            pii_ner_enabled: None,
         };
         let resolved = resolve_pii_policy(Some(&user), None).unwrap();
         assert_eq!(resolved.keywords.len(), 1);
@@ -1689,7 +1690,7 @@ keywords: []
                     vec![keyword("Coca-Cola", "Fizzex", true)],
                 ),
             ],
-            ner: None,
+            pii_ner_enabled: None,
         };
         let err = resolve_pii_policy(Some(&user), None).unwrap_err();
         assert!(err.contains("Coca-Cola"));
@@ -1713,7 +1714,7 @@ keywords: []
                     vec![keyword("Calgon", "Brandex", true)],
                 ),
             ],
-            ner: None,
+            pii_ner_enabled: None,
         };
         let err = resolve_pii_policy(Some(&user), None).unwrap_err();
         assert!(err.contains("Brandex"));
@@ -1737,7 +1738,7 @@ keywords: []
                     vec![keyword("Brandex", "Otherex", true)],
                 ),
             ],
-            ner: None,
+            pii_ner_enabled: None,
         };
         let err = resolve_pii_policy(Some(&user), None).unwrap_err();
         assert!(err.contains("Brandex"));
@@ -1753,7 +1754,7 @@ keywords: []
                 Vec::new(),
                 vec![keyword("ab", "xyzalias", true)],
             )],
-            ner: None,
+            pii_ner_enabled: None,
         };
         let err = resolve_pii_policy(Some(&user), None).unwrap_err();
         assert!(err.contains("match"));
@@ -1769,7 +1770,7 @@ keywords: []
                 Vec::new(),
                 vec![keyword("secretco", "123bad", true)],
             )],
-            ner: None,
+            pii_ner_enabled: None,
         };
         let err = resolve_pii_policy(Some(&user), None).unwrap_err();
         assert!(err.contains("alias"));
@@ -1785,7 +1786,7 @@ keywords: []
                 Vec::new(),
                 vec![keyword("secret", "secret", true)],
             )],
-            ner: None,
+            pii_ner_enabled: None,
         };
         let err = resolve_pii_policy(Some(&user), None).unwrap_err();
         assert!(err.contains("differ"));
@@ -1799,7 +1800,7 @@ keywords: []
         let user = PiiPolicyUserConfig {
             policies: vec!["a".to_string()],
             custom_policies: vec![custom_policy("a", HashMap::new(), Vec::new(), keywords)],
-            ner: None,
+            pii_ner_enabled: None,
         };
         let err = resolve_pii_policy(Some(&user), None).unwrap_err();
         assert!(err.contains("too many keywords"));
@@ -1815,7 +1816,7 @@ keywords: []
                 Vec::new(),
                 vec![keyword("Coca-Cola", "Brandex", true)],
             )],
-            ner: None,
+            pii_ner_enabled: None,
         };
         let resolved = resolve_pii_policy(Some(&user), None).unwrap();
         let json = serde_json::to_value(&resolved).unwrap();
@@ -1846,7 +1847,7 @@ keywords: []
                 vec![own_rule("EMPLOYEE_ID", r"\bEMP-\d{4,8}\b", true, false)],
                 vec![keyword("Coca-Cola", "Brandex", true)],
             )],
-            ner: None,
+            pii_ner_enabled: None,
         };
         let resolved = resolve_pii_policy(Some(&user), None).unwrap();
 
@@ -1986,7 +1987,7 @@ keywords: []
         let cfg = PiiPolicyUserConfig {
             policies: vec!["custom".to_string()],
             custom_policies: vec![custom_policy("custom", HashMap::new(), rules, Vec::new())],
-            ner: None,
+            pii_ner_enabled: None,
         };
         assert!(validate_user_policy_config(&cfg).is_err());
     }
@@ -2004,7 +2005,7 @@ keywords: []
                 ],
                 Vec::new(),
             )],
-            ner: None,
+            pii_ner_enabled: None,
         };
         assert!(validate_user_policy_config(&cfg).is_err());
     }
@@ -2021,7 +2022,7 @@ keywords: []
                 vec![rule],
                 Vec::new(),
             )],
-            ner: None,
+            pii_ner_enabled: None,
         };
         let err = validate_user_policy_config(&cfg).unwrap_err();
         assert!(err.contains("display name exceeds"));
@@ -2039,7 +2040,7 @@ keywords: []
                 vec![rule],
                 Vec::new(),
             )],
-            ner: None,
+            pii_ner_enabled: None,
         };
         assert!(validate_user_policy_config(&cfg).is_ok());
     }
@@ -2057,7 +2058,7 @@ keywords: []
                 Vec::new(),
                 keywords,
             )],
-            ner: None,
+            pii_ner_enabled: None,
         };
         assert!(validate_user_policy_config(&cfg).is_err());
     }
@@ -2072,7 +2073,7 @@ keywords: []
                 vec![own_rule("EMPLOYEE_ID", r"\bEMP-\d{4,8}\b", true, false)],
                 vec![keyword("Coca-Cola", "Brandex", true)],
             )],
-            ner: None,
+            pii_ner_enabled: None,
         };
         assert!(validate_user_policy_config(&cfg).is_ok());
     }
@@ -2082,7 +2083,7 @@ keywords: []
         let cfg = PiiPolicyUserConfig {
             policies: vec!["totally-bogus".to_string()],
             custom_policies: Vec::new(),
-            ner: None,
+            pii_ner_enabled: None,
         };
         let err = validate_user_policy_config(&cfg).unwrap_err();
         assert!(err.contains("totally-bogus"));
@@ -2098,7 +2099,7 @@ keywords: []
                 Vec::new(),
                 Vec::new(),
             )],
-            ner: None,
+            pii_ner_enabled: None,
         };
         assert!(validate_user_policy_config(&cfg).is_err());
     }
@@ -2109,7 +2110,7 @@ keywords: []
         let cfg = PiiPolicyUserConfig {
             policies: vec!["acme".to_string()],
             custom_policies: vec![def.clone(), def],
-            ner: None,
+            pii_ner_enabled: None,
         };
         assert!(validate_user_policy_config(&cfg).is_err());
     }
@@ -2121,7 +2122,7 @@ keywords: []
         let cfg = PiiPolicyUserConfig {
             policies: vec!["custom".to_string()],
             custom_policies: vec![custom_policy("custom", categories, Vec::new(), Vec::new())],
-            ner: None,
+            pii_ner_enabled: None,
         };
         let err = validate_user_policy_config(&cfg).unwrap_err();
         assert!(err.contains("NOT_A_RULE"));
@@ -2157,7 +2158,7 @@ keywords: []
                 vec![rule],
                 vec![keyword("Coca-Cola", "Brandex", true)],
             )],
-            ner: None,
+            pii_ner_enabled: None,
         };
         let policy = resolve_pii_policy(Some(&user), None).unwrap();
         write_policy_config_in(tmp.path(), "proj", &policy).unwrap();

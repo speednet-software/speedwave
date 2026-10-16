@@ -865,7 +865,7 @@ pub struct PiiPolicyUserConfig {
     pub custom_policies: Vec<PiiPolicyDefinition>,
     /// Neural detector opt-in for this project; absent means off.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub ner: Option<bool>,
+    pub pii_ner_enabled: Option<bool>,
 }
 
 /// A user-defined policy: same shape as a builtin template, defined in config.
@@ -958,7 +958,7 @@ struct LegacyCustomPiiPattern {
 struct PiiPolicyUserConfigShape {
     policies: Option<Vec<String>>,
     custom_policies: Option<Vec<PiiPolicyDefinition>>,
-    ner: Option<bool>,
+    pii_ner_enabled: Option<bool>,
     template_id: Option<String>,
     categories: Option<LegacyCategoryFlags>,
     custom_patterns: Option<Vec<LegacyCustomPiiPattern>>,
@@ -970,7 +970,9 @@ impl TryFrom<PiiPolicyUserConfigShape> for PiiPolicyUserConfig {
     type Error = String;
 
     fn try_from(raw: PiiPolicyUserConfigShape) -> Result<Self, String> {
-        let is_v2 = raw.policies.is_some() || raw.custom_policies.is_some() || raw.ner.is_some();
+        let is_v2 = raw.policies.is_some()
+            || raw.custom_policies.is_some()
+            || raw.pii_ner_enabled.is_some();
         let has_v1_custom = raw.categories.is_some()
             || raw.custom_patterns.is_some()
             || raw.sensitive_keys.is_some();
@@ -988,7 +990,7 @@ impl TryFrom<PiiPolicyUserConfigShape> for PiiPolicyUserConfig {
             return Ok(Self {
                 policies: raw.policies.unwrap_or_default(),
                 custom_policies: raw.custom_policies.unwrap_or_default(),
-                ner: raw.ner,
+                pii_ner_enabled: raw.pii_ner_enabled,
             });
         }
 
@@ -1018,7 +1020,7 @@ impl TryFrom<PiiPolicyUserConfigShape> for PiiPolicyUserConfig {
                     rules,
                     keywords: Vec::new(),
                 }],
-                ner: None,
+                pii_ner_enabled: None,
             });
         }
 
@@ -1026,7 +1028,7 @@ impl TryFrom<PiiPolicyUserConfigShape> for PiiPolicyUserConfig {
             return Ok(Self {
                 policies: vec![id],
                 custom_policies: Vec::new(),
-                ner: None,
+                pii_ner_enabled: None,
             });
         }
 
@@ -5935,20 +5937,21 @@ mod tests {
     #[test]
     fn detector_switch_round_trips_and_is_absent_when_unset() {
         let cfg: PiiPolicyUserConfig =
-            serde_json::from_str(r#"{"policies":["gdpr-art32"],"ner":true}"#).unwrap();
-        assert_eq!(cfg.ner, Some(true));
+            serde_json::from_str(r#"{"policies":["gdpr-art32"],"pii_ner_enabled":true}"#).unwrap();
+        assert_eq!(cfg.pii_ner_enabled, Some(true));
         assert_eq!(
             serde_json::to_string(&cfg).unwrap(),
-            r#"{"policies":["gdpr-art32"],"custom_policies":[],"ner":true}"#
+            r#"{"policies":["gdpr-art32"],"custom_policies":[],"pii_ner_enabled":true}"#
         );
 
-        let off: PiiPolicyUserConfig = serde_json::from_str(r#"{"ner":false}"#).unwrap();
-        assert_eq!(off.ner, Some(false));
+        let off: PiiPolicyUserConfig =
+            serde_json::from_str(r#"{"pii_ner_enabled":false}"#).unwrap();
+        assert_eq!(off.pii_ner_enabled, Some(false));
         assert!(off.policies.is_empty());
 
         let unset: PiiPolicyUserConfig =
             serde_json::from_str(r#"{"policies":["gdpr-art32"]}"#).unwrap();
-        assert_eq!(unset.ner, None);
+        assert_eq!(unset.pii_ner_enabled, None);
         assert_eq!(
             serde_json::to_string(&unset).unwrap(),
             r#"{"policies":["gdpr-art32"],"custom_policies":[]}"#
@@ -5959,10 +5962,10 @@ mod tests {
     fn detector_switch_is_a_v2_field_and_v1_configs_leave_it_unset() {
         let migrated: PiiPolicyUserConfig =
             serde_json::from_str(r#"{"template_id":"gdpr-art32"}"#).unwrap();
-        assert_eq!(migrated.ner, None);
+        assert_eq!(migrated.pii_ner_enabled, None);
 
         let mixed = serde_json::from_str::<PiiPolicyUserConfig>(
-            r#"{"template_id":"gdpr-art32","ner":true}"#,
+            r#"{"template_id":"gdpr-art32","pii_ner_enabled":true}"#,
         );
         assert!(mixed.is_err());
     }

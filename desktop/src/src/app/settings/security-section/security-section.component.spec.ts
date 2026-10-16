@@ -72,7 +72,7 @@ function baseResponse(overrides: Partial<SecurityPolicyResponse> = {}): Security
     forced_policies: [],
     effective_rules: effectiveRulesFrom(allCategories()),
     custom_policies: [],
-    ner_enabled: false,
+    pii_ner_enabled: false,
     ...overrides,
   };
 }
@@ -164,7 +164,7 @@ describe('SecuritySectionComponent', () => {
 
   describe('on-device detector switch', () => {
     it('renders the backend state and sends the user selection on save', async () => {
-      setup(baseResponse({ ner_enabled: true }));
+      setup(baseResponse({ pii_ner_enabled: true }));
       await create();
       component.ngOnInit();
       await fixture.whenStable();
@@ -180,7 +180,7 @@ describe('SecuritySectionComponent', () => {
       await component.save();
       const call = spy.mock.calls.find((c) => c[0] === 'update_security_policy');
       const update = (call?.[1] as { update: SecurityPolicyUpdate }).update;
-      expect(update.ner_enabled).toBe(false);
+      expect(update.pii_ner_enabled).toBe(false);
     });
 
     it('renders the Desert Ant Labs credit and opens it through open_url', async () => {

@@ -96,7 +96,7 @@ const OFF_FLAGS: RuleFlags = { tokenize: false, log: false };
             <input
               type="checkbox"
               class="mt-0.5 accent-[var(--accent)]"
-              [checked]="nerEnabled()"
+              [checked]="piiNerEnabled()"
               (change)="toggleNer($event)"
               data-testid="security-ner-enabled"
             />
@@ -415,7 +415,7 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
   readonly effectiveCategories = signal<RuleCategories>({});
   readonly customPolicies = signal<CustomPolicyRow[]>([]);
   /** The on-device detector switch for the active project. */
-  readonly nerEnabled = signal(false);
+  readonly piiNerEnabled = signal(false);
 
   private readonly loadedFormSnapshot = signal('');
   private nextRowKey = 0;
@@ -501,7 +501,7 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
   }
 
   private applyPolicy(policy: SecurityPolicyResponse): void {
-    this.nerEnabled.set(policy.ner_enabled);
+    this.piiNerEnabled.set(policy.pii_ner_enabled);
     this.forcedPolicies.set(new Set(policy.forced_policies));
     this.enabledPolicies.set(new Set(policy.enabled_policies));
     this.effectiveCategories.set(
@@ -567,7 +567,7 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
    * @param ev - the checkbox change event.
    */
   toggleNer(ev: Event): void {
-    this.nerEnabled.set(eventChecked(ev));
+    this.piiNerEnabled.set(eventChecked(ev));
   }
 
   /**
@@ -862,7 +862,7 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
 
   private computeFormSnapshot(): string {
     return JSON.stringify({
-      ner: this.nerEnabled(),
+      piiNerEnabled: this.piiNerEnabled(),
       enabled: Array.from(this.enabledPolicies()).sort(),
       custom: this.customPolicies().map((r) => ({
         name: r.name,
@@ -894,7 +894,7 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
         caseSensitive: k.caseSensitive,
       })),
     }));
-    return { policies, custom_policies, ner_enabled: this.nerEnabled() };
+    return { policies, custom_policies, pii_ner_enabled: this.piiNerEnabled() };
   }
 
   /** Persists the enabled policies + custom definitions, then requests a restart. */

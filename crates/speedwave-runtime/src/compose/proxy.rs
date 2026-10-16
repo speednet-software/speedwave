@@ -174,12 +174,12 @@ pub(crate) fn render_proxy_config_full(
 }
 
 /// Renders + atomically persists the config (0600 + fsync) under `<data_dir>/proxy/<project>/`.
-/// `ner` is rendered only when `ner_enabled` and the detector's lock names a live process.
+/// `ner` is rendered only when `pii_ner_enabled` and the detector's lock names a live process.
 pub fn write_proxy_config_in(
     data_dir: &Path,
     project: &str,
     llm: &LlmConfig,
-    ner_enabled: bool,
+    pii_ner_enabled: bool,
 ) -> anyhow::Result<PathBuf> {
     crate::validation::validate_project_name(project)?;
     let path = proxy_config_path_in(data_dir, project);
@@ -188,7 +188,7 @@ pub fn write_proxy_config_in(
         crate::fs_perms::ensure_owner_only_dir(parent)?;
     }
     let token = ensure_caller_token_in(data_dir, project)?;
-    let ner = ner_enabled
+    let ner = pii_ner_enabled
         .then(|| super::pii_ner::live_service_in(data_dir))
         .flatten()
         .map(|live| {

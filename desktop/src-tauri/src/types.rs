@@ -237,7 +237,7 @@ pub(crate) struct SecurityPolicyResponse {
     pub(crate) forced_policies: Vec<String>,
     pub(crate) effective_rules: Vec<speedwave_runtime::pii_policy::RuleOutput>,
     pub(crate) custom_policies: Vec<CustomPolicyDto>,
-    pub(crate) ner_enabled: bool,
+    pub(crate) pii_ner_enabled: bool,
 }
 
 #[derive(Deserialize, Clone)]
@@ -263,7 +263,7 @@ pub(crate) struct SecurityPolicyUpdate {
     pub(crate) policies: Vec<String>,
     pub(crate) custom_policies: Vec<CustomPolicyDtoInput>,
     #[serde(default)]
-    pub(crate) ner_enabled: bool,
+    pub(crate) pii_ner_enabled: bool,
 }
 
 #[derive(Serialize, Clone)]
