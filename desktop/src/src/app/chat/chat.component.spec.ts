@@ -544,7 +544,13 @@ describe('ChatComponent', () => {
   describe('loadConversations', () => {
     it('calls backend with active project and sets conversations', async () => {
       const mockConversations = [
-        { session_id: 's1', timestamp: '2026-03-06T10:00:00Z', preview: 'Hello', message_count: 3 },
+        {
+          session_id: 's1',
+          timestamp: '2026-03-06T10:00:00Z',
+          title: null,
+          preview: 'Hello',
+          message_count: 3,
+        },
       ];
       projectState.activeProject.set('test');
       mockTauri.invokeHandler = async (cmd: string) => {
@@ -681,8 +687,8 @@ describe('ChatComponent', () => {
     it('calls delete_conversation and removes the row locally', async () => {
       projectState.activeProject.set('test');
       component.conversations = [
-        { session_id: 's1', timestamp: null, preview: 'a', message_count: 1 },
-        { session_id: 's2', timestamp: null, preview: 'b', message_count: 1 },
+        { session_id: 's1', timestamp: null, title: null, preview: 'a', message_count: 1 },
+        { session_id: 's2', timestamp: null, title: null, preview: 'b', message_count: 1 },
       ];
       const calls: { cmd: string; args: unknown }[] = [];
       mockTauri.invokeHandler = async (cmd: string, args: unknown) => {
@@ -709,7 +715,7 @@ describe('ChatComponent', () => {
     it('sets historyError when backend fails and keeps the row', async () => {
       projectState.activeProject.set('test');
       component.conversations = [
-        { session_id: 's1', timestamp: null, preview: 'a', message_count: 1 },
+        { session_id: 's1', timestamp: null, title: null, preview: 'a', message_count: 1 },
       ];
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'delete_conversation') throw new Error('io error');
@@ -738,7 +744,7 @@ describe('ChatComponent', () => {
         },
       });
       component.conversations = [
-        { session_id: 's1', timestamp: null, preview: 'a', message_count: 1 },
+        { session_id: 's1', timestamp: null, title: null, preview: 'a', message_count: 1 },
       ];
       const resetSpy = vi.spyOn(chatState, 'resetForNewConversation');
       mockTauri.invokeHandler = async () => undefined;
@@ -762,7 +768,7 @@ describe('ChatComponent', () => {
       });
       expect(chatState.lastKnownSessionId).toBe('s-old');
       component.conversations = [
-        { session_id: 's-old', timestamp: null, preview: 'a', message_count: 1 },
+        { session_id: 's-old', timestamp: null, title: null, preview: 'a', message_count: 1 },
       ];
       const resetSpy = vi.spyOn(chatState, 'resetForNewConversation');
       mockTauri.invokeHandler = async () => undefined;
@@ -1275,11 +1281,23 @@ describe('ChatComponent', () => {
       await component.ngOnInit();
       uiState.toggleSidebar();
       component.conversations = [
-        { session_id: 's1', timestamp: '2026-03-06T10:00:00Z', preview: 'old', message_count: 1 },
+        {
+          session_id: 's1',
+          timestamp: '2026-03-06T10:00:00Z',
+          title: null,
+          preview: 'old',
+          message_count: 1,
+        },
       ];
 
       const newConversations = [
-        { session_id: 's2', timestamp: '2026-03-07T10:00:00Z', preview: 'new', message_count: 2 },
+        {
+          session_id: 's2',
+          timestamp: '2026-03-07T10:00:00Z',
+          title: null,
+          preview: 'new',
+          message_count: 2,
+        },
       ];
       projectState.activeProject.set('other-project');
       mockTauri.invokeHandler = async (cmd: string) => {

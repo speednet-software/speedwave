@@ -35,7 +35,7 @@ function bucketForTimestamp(ts: string | null | undefined, now: number = Date.no
 
 interface ConversationRow {
   readonly conv: ConversationSummary;
-  readonly preview: string;
+  readonly label: string;
   readonly timestamp: string;
 }
 
@@ -170,7 +170,7 @@ const BUCKET_ORDER: readonly { key: string; label: string }[] = [
                         class="truncate text-[13px]"
                         [class]="active ? 'text-[var(--ink)]' : 'text-[var(--ink-dim)]'"
                       >
-                        {{ row.preview }}
+                        {{ row.label }}
                       </div>
                       <div class="mono mt-0.5 text-[10px] text-[var(--ink-mute)]">
                         {{ row.conv.message_count }} · {{ row.timestamp }}
@@ -180,7 +180,7 @@ const BUCKET_ORDER: readonly { key: string; label: string }[] = [
                       type="button"
                       class="flex shrink-0 items-center px-2 text-[var(--ink-mute)] opacity-0 hover:text-red-300 focus:opacity-100 group-hover:opacity-100"
                       [attr.data-testid]="'conversation-delete-' + row.conv.session_id"
-                      [attr.aria-label]="'Delete conversation ' + row.preview"
+                      [attr.aria-label]="'Delete conversation ' + row.label"
                       (click)="requestDelete(row.conv)"
                     >
                       <app-icon name="trash" class="h-4 w-4" />
@@ -218,13 +218,15 @@ export class ConversationsSidebarComponent {
     const q = this.query().trim().toLowerCase();
     const list = this.conversations();
     const filtered =
-      q === '' ? list : list.filter((c) => (c.preview ?? '').toLowerCase().includes(q));
+      q === ''
+        ? list
+        : list.filter((c) => [c.title, c.preview].some((t) => (t ?? '').toLowerCase().includes(q)));
     const buckets = new Map<string, ConversationRow[]>();
     for (const conv of filtered) {
       const bucket = bucketForTimestamp(conv.timestamp);
       const row: ConversationRow = {
         conv,
-        preview: cleanConversationPreview(conv.preview),
+        label: cleanConversationPreview(conv.title ?? conv.preview),
         timestamp: formatRelativeTime(conv.timestamp),
       };
       const existing = buckets.get(bucket);

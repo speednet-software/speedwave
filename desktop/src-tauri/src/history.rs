@@ -9,6 +9,7 @@ use speedwave_runtime::consts;
 pub struct ConversationSummary {
     pub session_id: String,
     pub timestamp: Option<String>,
+    pub title: Option<String>,
     pub preview: String,
     pub message_count: usize,
 }
@@ -164,8 +165,55 @@ fn parse_jsonl_message(line: &str) -> Option<ConversationMessage> {
 }
 
 const TAIL_READ_BYTES: u64 = 64 * 1024;
+const LABEL_MAX_CHARS: usize = 200;
 
-fn last_message_timestamp(path: &Path) -> Option<String> {
+#[derive(Default)]
+struct SessionTitles {
+    custom: Option<String>,
+    ai: Option<String>,
+}
+
+impl SessionTitles {
+    fn record(&mut self, line: &str) {
+        if !line.contains("-title") {
+            return;
+        }
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) else {
+            return;
+        };
+        let (slot, key) = match parsed["type"].as_str() {
+            Some("custom-title") => (&mut self.custom, "customTitle"),
+            Some("ai-title") => (&mut self.ai, "aiTitle"),
+            _ => return,
+        };
+        if let Some(title) = parsed[key].as_str() {
+            *slot = Some(title.to_string());
+        }
+    }
+
+    fn latest_over(self, earlier: SessionTitles) -> SessionTitles {
+        SessionTitles {
+            custom: self.custom.or(earlier.custom),
+            ai: self.ai.or(earlier.ai),
+        }
+    }
+
+    fn label(self) -> Option<String> {
+        [self.custom, self.ai]
+            .into_iter()
+            .flatten()
+            .map(|title| title.trim().to_string())
+            .find(|title| !title.is_empty())
+            .map(|title| truncate_preview(&title, LABEL_MAX_CHARS))
+    }
+}
+
+struct TailScan {
+    timestamp: Option<String>,
+    titles: SessionTitles,
+}
+
+fn scan_tail(path: &Path) -> Option<TailScan> {
     use std::io::{Read, Seek, SeekFrom};
     let mut file = fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
@@ -174,16 +222,20 @@ fn last_message_timestamp(path: &Path) -> Option<String> {
     let mut buf = Vec::new();
     file.read_to_end(&mut buf).ok()?;
     let tail = String::from_utf8_lossy(&buf);
-    let lines: Vec<&str> = tail.lines().collect();
     let scan_from = if start > 0 { 1 } else { 0 };
-    for line in lines.iter().skip(scan_from).rev() {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-            if let Some(ts) = v["timestamp"].as_str() {
-                return Some(ts.to_string());
-            }
-        }
+    let lines: Vec<&str> = tail.lines().skip(scan_from).collect();
+    let mut titles = SessionTitles::default();
+    for line in &lines {
+        titles.record(line);
     }
-    None
+    let timestamp = lines.iter().rev().find_map(|line| {
+        serde_json::from_str::<serde_json::Value>(line)
+            .ok()?
+            .get("timestamp")?
+            .as_str()
+            .map(String::from)
+    });
+    Some(TailScan { timestamp, titles })
 }
 
 fn is_synthetic_user_entry(parsed: &serde_json::Value) -> bool {
@@ -516,6 +568,7 @@ fn list_conversations_impl(
         let mut message_count: usize = 0;
         let mut user_message_count: usize = 0;
         let mut last_assistant_content: Option<String> = None;
+        let mut titles = SessionTitles::default();
         const MAX_SCAN_LINES: usize = 50;
         let mut scanned_lines: usize = 0;
 
@@ -525,6 +578,7 @@ fn list_conversations_impl(
                 Err(_) => break,
             };
             scanned_lines += 1;
+            titles.record(&line);
             if let Some(msg) = parse_jsonl_message(&line) {
                 let is_control_chip_user = msg.role == "user"
                     && speedwave_runtime::slash::parse_control_command(&msg.content).is_some();
@@ -551,7 +605,7 @@ fn list_conversations_impl(
                     last_timestamp = msg.timestamp.clone();
                 }
                 if preview.is_empty() && msg.role == "user" {
-                    preview = truncate_preview(&msg.content, 200);
+                    preview = truncate_preview(&msg.content, LABEL_MAX_CHARS);
                 }
             }
         }
@@ -559,8 +613,11 @@ fn list_conversations_impl(
         let head_saw_whole_file = scanned_lines < MAX_SCAN_LINES;
 
         if !head_saw_whole_file {
-            if let Some(ts) = last_message_timestamp(&path) {
-                last_timestamp = Some(ts);
+            if let Some(tail) = scan_tail(&path) {
+                if tail.timestamp.is_some() {
+                    last_timestamp = tail.timestamp;
+                }
+                titles = tail.titles.latest_over(titles);
             }
         }
 
@@ -578,6 +635,7 @@ fn list_conversations_impl(
         summaries.push(ConversationSummary {
             session_id,
             timestamp: last_timestamp,
+            title: titles.label(),
             preview,
             message_count,
         });
@@ -1065,6 +1123,10 @@ mod tests {
     fn write_session(dir: &Path, session_id: &str, lines: &[&str]) {
         let path = dir.join(format!("{session_id}.jsonl"));
         fs::write(&path, lines.join("\n")).unwrap();
+    }
+
+    fn tail_timestamp(path: &Path) -> Option<String> {
+        scan_tail(path).and_then(|tail| tail.timestamp)
     }
 
     fn user_msg(uuid: &str, content: &str) -> ConversationMessage {
@@ -1687,7 +1749,7 @@ mod tests {
                 r#"{"type":"user","message":{"role":"user","content":"hi"},"timestamp":"2025-01-01T00:00:00Z"}"#,
                 r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"yo"}]},"timestamp":"2025-02-02T02:02:02Z"}"#,
                 r#"{"type":"last-prompt"}"#,
-                r#"{"type":"ai-title","title":"chat"}"#,
+                r#"{"type":"ai-title","aiTitle":"chat","sessionId":"x"}"#,
             ],
         );
 
@@ -2355,7 +2417,7 @@ mod tests {
     }
 
     #[test]
-    fn last_message_timestamp_skips_trailing_metadata_lines() {
+    fn tail_timestamp_skips_trailing_metadata_lines() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
@@ -2365,28 +2427,28 @@ mod tests {
             &[
                 r#"{"type":"user","message":{"role":"user","content":"hi"},"timestamp":"2025-03-03T03:03:03Z"}"#,
                 r#"{"type":"last-prompt"}"#,
-                r#"{"type":"ai-title","title":"chat"}"#,
+                r#"{"type":"ai-title","aiTitle":"chat","sessionId":"x"}"#,
             ],
         );
         let path = dir.join(format!("{id}.jsonl"));
         assert_eq!(
-            last_message_timestamp(&path).as_deref(),
+            tail_timestamp(&path).as_deref(),
             Some("2025-03-03T03:03:03Z")
         );
     }
 
     #[test]
-    fn last_message_timestamp_none_when_no_line_has_a_timestamp() {
+    fn tail_timestamp_none_when_no_line_has_a_timestamp() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
         let path = dir.join(format!("{id}.jsonl"));
         fs::write(&path, "{\"type\":\"last-prompt\"}\n{\"type\":\"ai-title\"}").unwrap();
-        assert!(last_message_timestamp(&path).is_none());
+        assert!(tail_timestamp(&path).is_none());
     }
 
     #[test]
-    fn last_message_timestamp_does_not_panic_on_single_huge_line() {
+    fn tail_timestamp_does_not_panic_on_single_huge_line() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
@@ -2396,11 +2458,11 @@ mod tests {
         );
         let path = dir.join(format!("{id}.jsonl"));
         fs::write(&path, huge).unwrap();
-        assert!(last_message_timestamp(&path).is_none());
+        assert!(tail_timestamp(&path).is_none());
     }
 
     #[test]
-    fn last_message_timestamp_reads_final_line_without_trailing_newline() {
+    fn tail_timestamp_reads_final_line_without_trailing_newline() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
@@ -2411,22 +2473,22 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            last_message_timestamp(&path).as_deref(),
+            tail_timestamp(&path).as_deref(),
             Some("2027-07-07T07:07:07Z")
         );
     }
 
     #[test]
-    fn last_message_timestamp_none_for_unreadable_or_empty() {
+    fn tail_timestamp_none_for_unreadable_or_empty() {
         let tmp = tempfile::tempdir().unwrap();
-        assert!(last_message_timestamp(&tmp.path().join("nope.jsonl")).is_none());
+        assert!(tail_timestamp(&tmp.path().join("nope.jsonl")).is_none());
         let empty = tmp.path().join("empty.jsonl");
         fs::write(&empty, "").unwrap();
-        assert!(last_message_timestamp(&empty).is_none());
+        assert!(tail_timestamp(&empty).is_none());
     }
 
     #[test]
-    fn last_message_timestamp_reads_only_the_tail_of_a_large_file() {
+    fn tail_timestamp_reads_only_the_tail_of_a_large_file() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
@@ -2443,9 +2505,186 @@ mod tests {
         fs::write(&path, lines.join("\n")).unwrap();
         assert!(path.metadata().unwrap().len() > TAIL_READ_BYTES);
         assert_eq!(
-            last_message_timestamp(&path).as_deref(),
+            tail_timestamp(&path).as_deref(),
             Some("2026-12-12T12:12:12Z")
         );
+    }
+
+    const TITLED_SESSION_ID: &str = "abcdef01-2345-6789-abcd-ef0123456789";
+    const FIRST_QUESTION: &str = r#"{"type":"user","message":{"role":"user","content":"spojrz w moje notatki"},"timestamp":"2026-07-01T10:00:00Z"}"#;
+    const REPLY: &str = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]},"timestamp":"2026-07-01T10:00:05Z"}"#;
+
+    fn ai_title_line(title: &str) -> String {
+        serde_json::json!({"type": "ai-title", "aiTitle": title, "sessionId": TITLED_SESSION_ID})
+            .to_string()
+    }
+
+    fn custom_title_line(title: &str) -> String {
+        serde_json::json!({"type": "custom-title", "customTitle": title, "sessionId": TITLED_SESSION_ID})
+            .to_string()
+    }
+
+    fn list_one(data_dir: &Path, lines: &[&str]) -> ConversationSummary {
+        let dir = setup_sessions_dir(data_dir, "proj");
+        write_session(&dir, TITLED_SESSION_ID, lines);
+        let mut result = list_conversations_impl(data_dir, "proj").unwrap();
+        assert_eq!(result.len(), 1);
+        result.remove(0)
+    }
+
+    #[test]
+    fn list_conversations_titles_a_session_with_the_ai_title_claude_code_wrote() {
+        let tmp = tempfile::tempdir().unwrap();
+        let title = ai_title_line("Sprawdzenie notatek uzytkownika");
+        let summary = list_one(tmp.path(), &[FIRST_QUESTION, title.as_str(), REPLY]);
+        assert_eq!(
+            summary.title.as_deref(),
+            Some("Sprawdzenie notatek uzytkownika")
+        );
+        assert_eq!(summary.preview, "spojrz w moje notatki");
+    }
+
+    #[test]
+    fn list_conversations_has_no_title_without_a_title_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let summary = list_one(tmp.path(), &[FIRST_QUESTION, REPLY]);
+        assert_eq!(summary.title, None);
+        assert_eq!(summary.preview, "spojrz w moje notatki");
+    }
+
+    #[test]
+    fn list_conversations_ignores_a_title_line_without_a_string_ai_title() {
+        let tmp = tempfile::tempdir().unwrap();
+        let summary = list_one(
+            tmp.path(),
+            &[
+                FIRST_QUESTION,
+                REPLY,
+                r#"{"type":"ai-title","title":"chat"}"#,
+                r#"{"type":"ai-title"}"#,
+                r#"{"type":"ai-title","aiTitle":42}"#,
+            ],
+        );
+        assert_eq!(summary.title, None);
+    }
+
+    #[test]
+    fn list_conversations_takes_the_latest_ai_title() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = ai_title_line("First guess");
+        let last = ai_title_line("Final title");
+        let summary = list_one(
+            tmp.path(),
+            &[FIRST_QUESTION, first.as_str(), REPLY, last.as_str()],
+        );
+        assert_eq!(summary.title.as_deref(), Some("Final title"));
+    }
+
+    #[test]
+    fn list_conversations_prefers_the_custom_title_over_a_later_ai_title() {
+        let tmp = tempfile::tempdir().unwrap();
+        let custom = custom_title_line("Renamed by the user");
+        let ai = ai_title_line("Generated");
+        let summary = list_one(
+            tmp.path(),
+            &[FIRST_QUESTION, custom.as_str(), REPLY, ai.as_str()],
+        );
+        assert_eq!(summary.title.as_deref(), Some("Renamed by the user"));
+    }
+
+    #[test]
+    fn list_conversations_falls_back_to_the_ai_title_once_the_custom_title_is_cleared() {
+        let tmp = tempfile::tempdir().unwrap();
+        let named = custom_title_line("Old name");
+        let cleared = custom_title_line("");
+        let ai = ai_title_line("Generated");
+        let summary = list_one(
+            tmp.path(),
+            &[
+                FIRST_QUESTION,
+                named.as_str(),
+                ai.as_str(),
+                REPLY,
+                cleared.as_str(),
+            ],
+        );
+        assert_eq!(summary.title.as_deref(), Some("Generated"));
+    }
+
+    #[test]
+    fn list_conversations_skips_a_malformed_title_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let summary = list_one(
+            tmp.path(),
+            &[
+                FIRST_QUESTION,
+                r#"{"type":"ai-title","aiTitle":"Brok"#,
+                REPLY,
+            ],
+        );
+        assert_eq!(summary.title, None);
+        assert_eq!(summary.message_count, 2);
+    }
+
+    #[test]
+    fn list_conversations_ignores_title_text_inside_a_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        let question = r#"{"type":"user","message":{"role":"user","content":"why is {\"type\":\"ai-title\",\"aiTitle\":\"fake\"} ignored?"},"timestamp":"2026-07-01T10:00:00Z"}"#;
+        let summary = list_one(tmp.path(), &[question, REPLY]);
+        assert_eq!(summary.title, None);
+        assert!(summary.preview.contains("aiTitle"));
+    }
+
+    #[test]
+    fn list_conversations_trims_and_truncates_a_long_title_by_characters() {
+        let tmp = tempfile::tempdir().unwrap();
+        let long = "żółć ".repeat(60);
+        let title = ai_title_line(&format!("  {long}  "));
+        let summary = list_one(tmp.path(), &[FIRST_QUESTION, title.as_str(), REPLY]);
+        let got = summary.title.unwrap();
+        assert_eq!(got.chars().count(), LABEL_MAX_CHARS + 3);
+        assert!(got.starts_with("żółć żółć"));
+        assert!(got.ends_with("..."));
+    }
+
+    #[test]
+    fn list_conversations_does_not_list_a_session_holding_only_a_title() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let title = ai_title_line("Nothing said yet");
+        write_session(&dir, TITLED_SESSION_ID, &[title.as_str()]);
+        assert!(list_conversations_impl(tmp.path(), "proj")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn list_conversations_reads_the_latest_title_from_the_tail_of_a_long_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let early = ai_title_line("Early title");
+        let late = ai_title_line("Late title");
+        let mut lines = vec![FIRST_QUESTION, early.as_str()];
+        lines.extend(std::iter::repeat_n(REPLY, 60));
+        lines.push(late.as_str());
+        let summary = list_one(tmp.path(), &lines);
+        assert_eq!(summary.title.as_deref(), Some("Late title"));
+    }
+
+    #[test]
+    fn list_conversations_keeps_the_head_title_when_the_tail_does_not_repeat_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let title = ai_title_line("Head title");
+        let filler = format!(
+            r#"{{"type":"user","message":{{"role":"user","content":"{}"}},"timestamp":"2026-07-01T11:00:00Z"}}"#,
+            "x".repeat(2000)
+        );
+        let mut lines = vec![FIRST_QUESTION, title.as_str()];
+        lines.extend(std::iter::repeat_n(filler.as_str(), 60));
+        let summary = list_one(tmp.path(), &lines);
+        let path = sessions_dir_impl(tmp.path(), "proj").join(format!("{TITLED_SESSION_ID}.jsonl"));
+        assert!(path.metadata().unwrap().len() > TAIL_READ_BYTES);
+        assert_eq!(summary.title.as_deref(), Some("Head title"));
+        assert_eq!(summary.timestamp.as_deref(), Some("2026-07-01T11:00:00Z"));
     }
 
     #[test]
@@ -4116,6 +4355,32 @@ mod tests {
         assert!(
             ts.contains("type: 'chip'"),
             "TS normalizeHistoryBlocks must map control_chip to the chip view-model (type: 'chip')"
+        );
+    }
+
+    #[test]
+    fn conversation_summary_fields_match_ts_mirror() {
+        let src = include_str!("../../src/src/app/models/chat.ts");
+        let summary = ConversationSummary {
+            session_id: "s1".to_string(),
+            timestamp: None,
+            title: None,
+            preview: String::new(),
+            message_count: 0,
+        };
+        let json = serde_json::to_value(&summary).unwrap();
+        let start = src.find("export interface ConversationSummary {").unwrap();
+        let body = &src[start..start + src[start..].find("\n}").unwrap()];
+        for key in json.as_object().unwrap().keys() {
+            assert!(
+                body.contains(&format!("  {key}:")),
+                "models/chat.ts ConversationSummary is missing `{key}`"
+            );
+        }
+        assert_eq!(
+            body.lines().filter(|l| l.trim_end().ends_with(';')).count(),
+            json.as_object().unwrap().len(),
+            "models/chat.ts ConversationSummary has a field the Rust struct does not send"
         );
     }
 

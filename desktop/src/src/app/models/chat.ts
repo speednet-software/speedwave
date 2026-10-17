@@ -275,6 +275,7 @@ export type { ProjectList, ProjectEntry } from './update';
 export interface ConversationSummary {
   session_id: string;
   timestamp: string | null;
+  title: string | null;
   preview: string;
   message_count: number;
 }

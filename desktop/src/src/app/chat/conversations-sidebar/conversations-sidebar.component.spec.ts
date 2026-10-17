@@ -44,12 +44,19 @@ class HostComponent {
 const sample: readonly ConversationSummary[] = [
   {
     session_id: 's1',
+    title: null,
     preview: 'Refactoring container runtime',
     timestamp: '2m',
     message_count: 14,
   },
-  { session_id: 's2', preview: 'MCP plugin signing', timestamp: '1h', message_count: 8 },
-  { session_id: 's3', preview: '', timestamp: null, message_count: 0 },
+  {
+    session_id: 's2',
+    title: null,
+    preview: 'MCP plugin signing',
+    timestamp: '1h',
+    message_count: 8,
+  },
+  { session_id: 's3', title: null, preview: '', timestamp: null, message_count: 0 },
 ];
 
 function q(sel: string): HTMLElement | null {
@@ -157,7 +164,13 @@ describe('ConversationsSidebarComponent', () => {
 
     it('falls back to "untitled" when the backend preview is a bare control-chip message', () => {
       host.conversations = [
-        { session_id: 's4', preview: '/model claude-sonnet-5', timestamp: '2m', message_count: 3 },
+        {
+          session_id: 's4',
+          title: null,
+          preview: '/model claude-sonnet-5',
+          timestamp: '2m',
+          message_count: 3,
+        },
       ];
       fixture.detectChanges();
       const drawer = q('[data-testid="conversations-sidebar"]')!;
@@ -169,6 +182,7 @@ describe('ConversationsSidebarComponent', () => {
       host.conversations = [
         {
           session_id: 's5',
+          title: null,
           preview: 'help me refactor this module',
           timestamp: '2m',
           message_count: 3,
@@ -177,6 +191,74 @@ describe('ConversationsSidebarComponent', () => {
       fixture.detectChanges();
       const drawer = q('[data-testid="conversations-sidebar"]')!;
       expect(drawer.textContent).toContain('help me refactor this module');
+    });
+  });
+
+  describe('session title', () => {
+    const titled: readonly ConversationSummary[] = [
+      {
+        session_id: 's6',
+        title: 'Sprawdzenie notatek uzytkownika',
+        preview: 'spojrz w moje notatki',
+        timestamp: '2m',
+        message_count: 3,
+      },
+      {
+        session_id: 's7',
+        title: null,
+        preview: 'help me refactor this module',
+        timestamp: '1h',
+        message_count: 2,
+      },
+    ];
+
+    function search(text: string): void {
+      const input = q('input[name="conversations-search"]') as HTMLInputElement;
+      input.value = text;
+      input.dispatchEvent(new Event('input'));
+      fixture.detectChanges();
+    }
+
+    it('labels a titled conversation with its title instead of the first message', () => {
+      host.conversations = titled;
+      fixture.detectChanges();
+      const row = q('[data-testid="conversation-resume-s6"]')!;
+      expect(row.textContent).toContain('Sprawdzenie notatek uzytkownika');
+      expect(row.textContent).not.toContain('spojrz w moje notatki');
+      expect(q('[data-testid="conversation-delete-s6"]')!.getAttribute('aria-label')).toBe(
+        'Delete conversation Sprawdzenie notatek uzytkownika'
+      );
+    });
+
+    it('labels an untitled conversation with its first message', () => {
+      host.conversations = titled;
+      fixture.detectChanges();
+      expect(q('[data-testid="conversation-resume-s7"]')!.textContent).toContain(
+        'help me refactor this module'
+      );
+    });
+
+    it('finds a conversation by its title', () => {
+      host.conversations = titled;
+      fixture.detectChanges();
+      search('NOTATEK');
+      expect(q('[data-testid="conversation-resume-s6"]')).not.toBeNull();
+      expect(q('[data-testid="conversation-resume-s7"]')).toBeNull();
+    });
+
+    it('still finds a titled conversation by its first message', () => {
+      host.conversations = titled;
+      fixture.detectChanges();
+      search('moje notatki');
+      expect(q('[data-testid="conversation-resume-s6"]')).not.toBeNull();
+      expect(q('[data-testid="conversation-resume-s7"]')).toBeNull();
+    });
+
+    it('shows no matches when neither the title nor the first message matches', () => {
+      host.conversations = titled;
+      fixture.detectChanges();
+      search('kubernetes');
+      expect(q('[data-testid="conversations-sidebar"]')!.textContent).toContain('no matches');
     });
   });
 
