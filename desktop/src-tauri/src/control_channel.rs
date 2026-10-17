@@ -1828,6 +1828,7 @@ mod tests {
 
     #[test]
     fn model_switch_failed_event_matches_ts_mirror() {
+        use crate::ts_mirror::{rust_fields, ts_interface_fields};
         let ts = include_str!("../../src/src/app/models/claude-control.ts");
         let event = ModelSwitchFailedEvent {
             project: "p".to_string(),
