@@ -23,13 +23,11 @@ function pastesDir(project: string): string {
   return path.join(entry.dir, '.speedwave', 'pastes');
 }
 
-/** Names in the project's `.speedwave/pastes/` directory, empty before the first paste. */
 export function pastedFileNames(project: string): string[] {
   const dir = pastesDir(project);
   return fs.existsSync(dir) ? fs.readdirSync(dir) : [];
 }
 
-/** Host path of `name` in the project's `.speedwave/pastes/` directory. */
 export function pastedFilePath(project: string, name: string): string {
   return path.join(pastesDir(project), name);
 }

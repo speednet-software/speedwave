@@ -13,7 +13,6 @@ export interface DroppedItems {
 })
 export class FileDropDirective {
   readonly disabled = input<boolean>(false);
-  /** Everything one drop carried; directories by name, since the composer cannot attach them. */
   readonly dropped = output<DroppedItems>();
   readonly isDragging = signal<boolean>(false);
 

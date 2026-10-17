@@ -306,7 +306,6 @@ export interface WireTextBlock {
 /** One content block crossing the wire to Claude. */
 export type WireContentBlock = WireTextBlock;
 
-/** MIME types that take the image pipeline (ADR-065); every other file is streamed (ADR-094). */
 export const IMAGE_MEDIA_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'] as const;
 
 /** MIME of an image attachment. */
@@ -315,7 +314,6 @@ export type ImageMediaType = (typeof IMAGE_MEDIA_TYPES)[number];
 /** Image attachment persisted to `<project>/.speedwave/pastes/` by the image pipeline (ADR-065). */
 export interface ImageAttachment {
   kind: 'image';
-  /** Name as the user attached it; the on-disk name is generated. */
   filename: string;
   mediaType: ImageMediaType;
   containerPath: string;
@@ -324,7 +322,6 @@ export interface ImageAttachment {
 /** Any other file, streamed to `<project>/.speedwave/pastes/` in chunks (ADR-094). */
 export interface FileAttachment {
   kind: 'file';
-  /** Name as the user attached it; the on-disk name is generated. */
   filename: string;
   sizeBytes: number;
   containerPath: string;
@@ -339,10 +336,8 @@ export type AttachmentKind = ChatAttachment['kind'];
 /** An attachment written to the project paste directory, ready to ship with a submit. */
 export interface StagedAttachment<K extends AttachmentKind = AttachmentKind> {
   attachment: ChatAttachment & { kind: K };
-  /** Blob URL of a thumbnail; the owning `ComposerAttachments` revokes it. */
   previewUrl?: string;
   sizeBytes: number;
-  /** Deletes the written file; called when the attachment is dropped before it is sent. */
   discard: () => void;
 }
 

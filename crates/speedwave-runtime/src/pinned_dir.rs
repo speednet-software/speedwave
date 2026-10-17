@@ -1,13 +1,10 @@
-//! A directory reached beneath a trusted root without following a symlink or junction, held open
-//! so the container cannot swap it for a link while the host creates, renames or removes files in
-//! it (the project's `.speedwave/pastes/`, which the claude container mounts read-write).
+//! A directory opened beneath a trusted root without following a symlink or junction, and held
+//! so the container cannot swap it for a link while the host writes in it (ADR-094 decision 9).
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-/// Directory opened by [`PinnedDir::open_beneath`]. Unix resolves every name against the held
-/// directory descriptor; Windows holds each component open without `FILE_SHARE_DELETE`, so no
-/// component can be renamed or replaced while the `PinnedDir` lives.
+/// Directory opened by [`PinnedDir::open_beneath`], held for as long as the value lives.
 pub struct PinnedDir {
     path: PathBuf,
     #[cfg(unix)]
@@ -44,8 +41,7 @@ impl PinnedDir {
         imp::remove_file(self, name)
     }
 
-    /// Makes `file`, written here as `from`, durable under the name `to`: fsync (`F_FULLFSYNC`
-    /// with its fallback on macOS), close, rename over an existing `to`, then fsync the directory.
+    /// Makes `file`, written as `from`, durable under the name `to`, replacing an existing `to`.
     pub fn persist(&self, file: File, from: &str, to: &str) -> Result<(), String> {
         check_name(from)?;
         check_name(to)?;

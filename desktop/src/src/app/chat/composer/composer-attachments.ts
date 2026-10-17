@@ -10,7 +10,6 @@ export interface AttachmentRecord {
   id: string;
   filename: string;
   kind: AttachmentKind;
-  /** Blob URL of the thumbnail; empty for a file pill. */
   previewUrl: string;
   sizeBytes: number;
   staged: StagedAttachment | null;
@@ -35,16 +34,13 @@ export class ComposerAttachments {
   readonly error = signal<string>('');
   readonly announcement = signal<string>('');
 
-  /** Whether `dispose()` ran; a disposed instance stages nothing more. */
+  /** Whether `dispose()` ran. */
   get isDisposed(): boolean {
     return this.disposed;
   }
 
   /**
-   * Stages a pending record for `file`, runs `stage`, and resolves it in place. Safe to call
-   * from any tab's composer view — resolution always targets this instance, never whichever
-   * instance is bound to the composer when `stage` settles. A record removed before `stage`
-   * settles has the file `stage` wrote discarded; a failure is added to `error` under the file's name.
+   * Stages a pending record for `file`, runs `stage`, and resolves the record in place.
    * @param file - Source file (paste or drop).
    * @param kind - Pipeline the caller chose for it.
    * @param stage - Async step that writes the bytes; its signal aborts once the record is removed.

@@ -1,9 +1,5 @@
 /** Shared mock for TauriService used across Angular test files. */
 export class MockTauriService {
-  /**
-   * Configurable handler for invoke calls — override in beforeEach per test suite. A raw byte
-   * body arrives as a `Uint8Array` under the `args` slot; cast it in the suite that expects one.
-   */
   invokeHandler: (
     cmd: string,
     args?: Record<string, unknown>,
@@ -21,9 +17,9 @@ export class MockTauriService {
   /**
    * Mock invoke that delegates to invokeHandler.
    * @param cmd - The command name.
-   * @param args - Optional command arguments; a raw byte body lands here as a `Uint8Array` at runtime.
+   * @param args - Optional command arguments.
    * @param options - Optional request options.
-   * @param options.headers - Request headers a `tauri::ipc::Request` command reads.
+   * @param options.headers - Request headers.
    */
   async invoke<T = unknown>(
     cmd: string,

@@ -75,7 +75,6 @@ export class UserMessageComponent {
     this.blocks().filter((b): b is Extract<MessageBlock, { type: 'text' }> => b.type === 'text')
   );
 
-  /** Pretty-prints the size of a file pill (shared helper). */
   readonly formatBytes = formatBytes;
 
   /**

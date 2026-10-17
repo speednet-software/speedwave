@@ -1,7 +1,3 @@
-//! Save a pasted image to `<project>/.speedwave/pastes/` so Claude reads
-//! it by path (see ADR-065), and stream any other pasted or dropped file
-//! into the same directory in bounded chunks (ADR-094).
-
 use serde::Serialize;
 use speedwave_runtime::config;
 use speedwave_runtime::consts::DATA_DIR;
@@ -44,10 +40,8 @@ const MAX_UPLOAD_EXTENSION_CHARS: usize = 16;
 
 const FALLBACK_UPLOAD_STEM: &str = "file";
 
-/// A pasted image or finished upload under the pastes directory.
 #[derive(Serialize, Debug)]
 pub struct SavedPaste {
-    /// Key `discard_paste` deletes the file by while it has not been sent.
     pub paste_id: u64,
     /// `/workspace/...` — what the in-container claude sees.
     pub container_path: String,
@@ -90,8 +84,6 @@ pub async fn save_pasted_image(
         .map_err(|e| format!("join error: {e}"))?
 }
 
-/// Opens a chunked upload of a non-image file into the project's pastes directory and returns the
-/// id that `append_paste_upload`, `finish_paste_upload` and `discard_paste` address it by.
 #[tauri::command]
 pub async fn begin_paste_upload(
     project: String,
@@ -106,7 +98,6 @@ pub async fn begin_paste_upload(
     .map_err(|e| format!("join error: {e}"))?
 }
 
-/// Appends one chunk, the request body addressed by the `x-upload-id` header, to an open upload.
 #[tauri::command]
 pub async fn append_paste_upload(request: Request<'_>) -> Result<(), String> {
     let upload_id = upload_id_from_headers(request.headers())?;
@@ -116,8 +107,6 @@ pub async fn append_paste_upload(request: Request<'_>) -> Result<(), String> {
         .map_err(|e| format!("join error: {e}"))?
 }
 
-/// Closes an open upload: checks that the declared size arrived and makes the file durable under
-/// its final name.
 #[tauri::command]
 pub async fn finish_paste_upload(upload_id: u64) -> Result<SavedPaste, String> {
     tokio::task::spawn_blocking(move || finish_upload(upload_id))
@@ -125,8 +114,6 @@ pub async fn finish_paste_upload(upload_id: u64) -> Result<SavedPaste, String> {
         .map_err(|e| format!("join error: {e}"))?
 }
 
-/// Deletes an attachment that will not be sent: an open upload with its part file, or the file
-/// `save_pasted_image` or `finish_paste_upload` returned this id for. An unknown id is a no-op.
 #[tauri::command]
 pub async fn discard_paste(paste_id: u64) -> Result<(), String> {
     tokio::task::spawn_blocking(move || discard(paste_id))
@@ -184,8 +171,6 @@ fn extension_for(media_type: &str) -> Option<&'static str> {
         .map(|(_, extension)| *extension)
 }
 
-/// Verifies `bytes` starts with the magic for the declared `media_type`.
-/// Cheap defence against arbitrary blobs sneaking in under a known MIME.
 fn validate_magic(media_type: &str, bytes: &[u8]) -> Result<(), String> {
     let ok = match media_type {
         "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),

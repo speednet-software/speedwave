@@ -8,7 +8,6 @@ function makeFile(name = 'img.png', type = 'image/png'): File {
   return new File(['x'], name, { type });
 }
 
-/** Stage step held open until the test settles it, recording the signal it was handed. */
 function deferredStage<K extends AttachmentKind>() {
   const deferred = createDeferred<StagedAttachment<K>>();
   let seen: AbortSignal | undefined;

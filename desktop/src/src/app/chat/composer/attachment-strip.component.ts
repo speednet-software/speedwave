@@ -10,7 +10,6 @@ export interface AttachmentViewModel {
   id: string;
   filename: string;
   kind: AttachmentKind;
-  /** Blob URL owned by the composer; empty for a file pill. */
   previewUrl: string;
   sizeBytes: number;
   staging: boolean;
@@ -75,6 +74,5 @@ export class AttachmentStripComponent {
   readonly attachments = input.required<ReadonlyArray<AttachmentViewModel>>();
   readonly remove = output<string>();
 
-  /** Pretty-prints a byte count for the pill title (shared helper). */
   readonly formatBytes = formatBytes;
 }

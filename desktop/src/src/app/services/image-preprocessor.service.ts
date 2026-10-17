@@ -38,7 +38,7 @@ export const ERROR_TOO_LARGE =
 
 export const ERROR_UNSUPPORTED_TYPE = 'Supported image formats: JPEG, PNG, GIF, WebP.';
 
-/** Result of preprocessing — saved to disk and ready to ship as `ImageAttachment`. */
+/** Result of preprocessing: saved to disk and ready to ship as `ImageAttachment`. */
 export interface PreprocessedImage extends StagedAttachment<'image'> {
   /** Blob URL for thumbnail; the owning `ComposerAttachments` instance revokes it. */
   previewUrl: string;
