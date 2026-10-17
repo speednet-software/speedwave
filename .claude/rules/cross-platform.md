@@ -29,7 +29,7 @@ Every change must work on **both** platforms. `make check` compiles the host tar
 
 ## Filesystem
 
-- Durable writes go through `fs_perms` helpers only: fsync-before-rename is mandatory (APFS/virtiofs tear otherwise — the torn-compose.yml class of bugs), macOS needs `F_FULLFSYNC` with fsync fallback, and directory fsync must stay `#[cfg(unix)]` — Windows has no equivalent.
+- Durable writes go through `fs_perms` helpers only (`PinnedDir::persist` for a pinned directory, which calls `fs_perms::fsync_file_durable`): fsync-before-rename is mandatory (APFS/virtiofs tear otherwise — the torn-compose.yml class of bugs), macOS needs `F_FULLFSYNC` with fsync fallback, and directory fsync must stay `#[cfg(unix)]` — Windows has no equivalent.
 - Never set file modes directly — `fs_perms::set_owner_only{_dir}` is the SSOT (Unix chmod 0o600/0o700 ↔ Windows DACL). `PermissionsExt` does not compile on Windows; mode bits mean nothing on NTFS.
 - Windows drvfs automount needs `metadata,uid=1000,gid=1000,umask=022` (written by `provision::ensure_wsl_distro_metadata` via `consts::wsl_automount_options()`) — containers run as UID 1000; `EACCES` on `/workspace` means missing automount metadata, not a container bug ("cannot exec in a stopped state" is the symptom).
 - Git for Windows ships no `rsync`: a script that CI runs under `shell: bash` on `windows-latest` (`bundle-build-context.sh`) copies a filtered tree with `find -print0 | tar --null -T -` (GNU tar in Git Bash, bsdtar on macOS both accept it), never `rsync`. The extracting side drains the pipe (`{ tar -x… && cat >/dev/null; }`): `tar -x` exits at the end-of-archive blocks, and a writer still flushing record padding then hits EPIPE, which the Actions runner (SIGPIPE ignored) surfaces as bsdtar `Write error`.

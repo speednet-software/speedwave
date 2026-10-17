@@ -171,7 +171,8 @@ export type MessageBlock =
       decided?: 'allow_once' | 'allow_always' | 'deny';
     }
   | { type: 'chip'; command: string; argument: string }
-  | { type: 'image'; media_type: string; alt?: string };
+  | { type: 'image'; media_type: string; alt?: string }
+  | { type: 'file'; filename: string; size_bytes: number };
 
 /**
  * State for an interactive AskUserQuestion block: up to 4 questions; renderer shows only
@@ -305,15 +306,49 @@ export interface WireTextBlock {
 /** One content block crossing the wire to Claude. */
 export type WireContentBlock = WireTextBlock;
 
-/** Image attachment persisted to `<project>/.speedwave/pastes/`. */
-export interface ChatAttachment {
+export const IMAGE_MEDIA_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'] as const;
+
+/** MIME of an image attachment. */
+export type ImageMediaType = (typeof IMAGE_MEDIA_TYPES)[number];
+
+/** Image attachment persisted to `<project>/.speedwave/pastes/` by the image pipeline (ADR-065). */
+export interface ImageAttachment {
+  kind: 'image';
   filename: string;
-  mediaType: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
+  mediaType: ImageMediaType;
   containerPath: string;
-  hostPath: string;
 }
 
-/** Composer-collected user input bundled with image attachments. */
+/** Any other file, streamed to `<project>/.speedwave/pastes/` in chunks (ADR-094). */
+export interface FileAttachment {
+  kind: 'file';
+  filename: string;
+  sizeBytes: number;
+  containerPath: string;
+}
+
+/** One attachment the composer ships with a message, referenced on the wire by path. */
+export type ChatAttachment = ImageAttachment | FileAttachment;
+
+/** Which staging pipeline an attachment took and which pill it renders as. */
+export type AttachmentKind = ChatAttachment['kind'];
+
+/** An attachment written to the project paste directory, ready to ship with a submit. */
+export interface StagedAttachment<K extends AttachmentKind = AttachmentKind> {
+  attachment: ChatAttachment & { kind: K };
+  previewUrl?: string;
+  sizeBytes: number;
+  discard: () => void;
+}
+
+/** What `save_pasted_image` and `finish_paste_upload` return (`paste_cmd.rs::SavedPaste`). */
+export interface SavedPaste {
+  paste_id: number;
+  container_path: string;
+  filename: string;
+}
+
+/** Composer-collected user input bundled with attachments. */
 export interface ChatInput {
   text: string;
   attachments: ChatAttachment[];
