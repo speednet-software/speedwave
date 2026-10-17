@@ -1685,6 +1685,7 @@ describe('ChatComponent', () => {
       const el = scrollEl();
       Object.defineProperty(el, 'scrollHeight', { value: 1000, configurable: true });
       el.scrollTop = 250;
+      el.dispatchEvent(new Event('scroll'));
 
       const tab1 = chatState.activeTabId();
       await chatState.openTab();
@@ -1829,6 +1830,7 @@ describe('ChatComponent', () => {
       Object.defineProperty(el, 'scrollHeight', { value: 1000, configurable: true });
       Object.defineProperty(el, 'clientHeight', { value: 400, configurable: true });
       el.scrollTop = 250;
+      el.dispatchEvent(new Event('scroll'));
 
       const tab1 = chatState.activeTabId();
       await chatState.openTab();
@@ -1845,6 +1847,76 @@ describe('ChatComponent', () => {
       await fixture.whenStable();
 
       expect(el.scrollTop).toBe(250);
+    });
+
+    it('brings a tab that followed its stream back at the live end after it grew in the background', async () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      const el = scrollEl();
+      Object.defineProperty(el, 'scrollHeight', { value: 1000, configurable: true });
+      Object.defineProperty(el, 'clientHeight', { value: 400, configurable: true });
+      el.scrollTop = 600;
+      el.dispatchEvent(new Event('scroll'));
+
+      const tab1 = chatState.activeTabId();
+      await chatState.openTab();
+      fixture.detectChanges();
+      await fixture.whenStable();
+      expect(chatState.tabs().get(tab1)!.scrollPosition).toBeNull();
+
+      chatState
+        .tabs()
+        .get(tab1)!
+        .handleStreamChunk({
+          chunk_type: 'Text',
+          data: { content: 'streamed while another tab was open' },
+        });
+      Object.defineProperty(el, 'scrollHeight', { value: 1600, configurable: true });
+
+      chatState.activateTab(tab1);
+      fixture.detectChanges();
+      await fixture.whenStable();
+      expect(el.scrollTop).toBe(1600);
+
+      chatState.handleStreamChunk({ chunk_type: 'Text', data: { content: ' and more' } });
+      fixture.detectChanges();
+      await fixture.whenStable();
+      chatState.handleStreamChunk({ chunk_type: 'Text', data: { content: ' and the rest' } });
+      Object.defineProperty(el, 'scrollHeight', { value: 2400, configurable: true });
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      expect(el.scrollTop).toBe(2400);
+    });
+
+    it('pins the list when the user sends after scrolling up, and keeps it when the reply commits', async () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      fixture.detectChanges();
+
+      const el = scrollEl();
+      Object.defineProperty(el, 'scrollHeight', { value: 1000, configurable: true });
+      Object.defineProperty(el, 'clientHeight', { value: 400, configurable: true });
+      el.scrollTop = 100;
+      el.dispatchEvent(new Event('scroll'));
+
+      await component.sendMessage({ payload: 'next question', displayText: 'next question' });
+      fixture.detectChanges();
+      await fixture.whenStable();
+      expect(el.scrollTop).toBe(1000);
+
+      el.scrollTop = 100;
+      el.dispatchEvent(new Event('scroll'));
+      chatState.handleStreamChunk({ chunk_type: 'Text', data: { content: 'the answer' } });
+      chatState.handleStreamChunk({ chunk_type: 'Result', data: { session_id: 'sid' } });
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      expect(chatState.messages.at(-1)?.role).toBe('assistant');
+      expect(el.scrollTop).toBe(100);
     });
 
     it('leaves the composer untouched on a no-op re-activation of the already-active tab', async () => {

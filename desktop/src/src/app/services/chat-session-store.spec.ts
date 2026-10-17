@@ -104,6 +104,36 @@ describe('ChatSessionStore', () => {
     store.isStreaming = false;
   });
 
+  function seedRetryableSession(): void {
+    store._setState({
+      messages: [
+        {
+          role: 'user',
+          blocks: [{ type: 'text', content: 'q' }],
+          timestamp: 1,
+          uuid: 'msg_user_1',
+          uuid_status: 'Committed',
+        },
+        {
+          role: 'assistant',
+          blocks: [{ type: 'text', content: 'a' }],
+          timestamp: 2,
+          uuid: 'msg_assist_1',
+          uuid_status: 'Committed',
+        },
+      ],
+      sessionStats: {
+        session_id: '550e8400-e29b-41d4-a716-446655440000',
+        total_cost: 0,
+        usage: undefined,
+        model: undefined,
+        context_window_size: 200_000,
+        total_output_tokens: 0,
+      },
+    });
+    store.isStreaming = false;
+  }
+
   describe('loadingTranscript', () => {
     it('defaults to false', () => {
       expect(store.loadingTranscriptFromState()).toBe(false);
@@ -5541,34 +5571,6 @@ describe('ChatSessionStore', () => {
   });
 
   describe('autoScrollRequested', () => {
-    function seedRetryable(): void {
-      store._setState({
-        messages: [
-          {
-            role: 'user',
-            blocks: [{ type: 'text', content: 'q' }],
-            timestamp: 1,
-            uuid: 'msg_user_1',
-            uuid_status: 'Committed',
-          },
-          {
-            role: 'assistant',
-            blocks: [{ type: 'text', content: 'a' }],
-            timestamp: 2,
-            uuid: 'msg_assist_1',
-            uuid_status: 'Committed',
-          },
-        ],
-        sessionStats: {
-          session_id: '550e8400-e29b-41d4-a716-446655440000',
-          total_cost: 0,
-          context_window_size: 200_000,
-          total_output_tokens: 0,
-        },
-      });
-      store.isStreaming = false;
-    }
-
     it('starts at zero', () => {
       expect(store.autoScrollRequested()).toBe(0);
     });
@@ -5602,7 +5604,7 @@ describe('ChatSessionStore', () => {
     it('is bumped by a retry and not by a retry with nothing to retry', async () => {
       await store.retryLastAssistant();
       expect(store.autoScrollRequested()).toBe(0);
-      seedRetryable();
+      seedRetryableSession();
       vi.spyOn(mockTauri, 'invoke').mockResolvedValue(undefined);
       await store.retryLastAssistant();
       expect(store.autoScrollRequested()).toBe(1);
@@ -6224,36 +6226,6 @@ describe('ChatSessionStore', () => {
   });
 
   describe('canRetryLastAssistant / retryLastAssistant', () => {
-    function seedRetryableSession(): void {
-      store._setState({
-        messages: [
-          {
-            role: 'user',
-            blocks: [{ type: 'text', content: 'q' }],
-            timestamp: 1,
-            uuid: 'msg_user_1',
-            uuid_status: 'Committed',
-          },
-          {
-            role: 'assistant',
-            blocks: [{ type: 'text', content: 'a' }],
-            timestamp: 2,
-            uuid: 'msg_assist_1',
-            uuid_status: 'Committed',
-          },
-        ],
-        sessionStats: {
-          session_id: '550e8400-e29b-41d4-a716-446655440000',
-          total_cost: 0,
-          usage: undefined,
-          model: undefined,
-          context_window_size: 200_000,
-          total_output_tokens: 0,
-        },
-      });
-      store.isStreaming = false;
-    }
-
     it('canRetryLastAssistant returns true when last assistant is committed and a session id is known', () => {
       seedRetryableSession();
       expect(store.canRetryLastAssistant()).toBe(true);

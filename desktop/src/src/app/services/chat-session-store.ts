@@ -864,7 +864,6 @@ export class ChatSessionStore {
   /** Per-tab scroll offset restored when a background tab is reactivated (phase 3). */
   scrollPosition: number | null = null;
   private readonly _autoScrollRequested = signal(0);
-  /** Bumped when the message list should follow new output again: a send, a queued send, a retry or a replaced conversation. */
   readonly autoScrollRequested: Signal<number> = this._autoScrollRequested.asReadonly();
   /** Per-tab plan-mode flag restored when a background tab is reactivated, or on a nav-rail remount. */
   readonly composerPlanMode = signal(false);

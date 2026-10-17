@@ -80,7 +80,6 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges {
   readonly lastAssistantIndex = input(-1);
   /** Identity of the rendered conversation (tab id); a change resets the per-conversation scroll tracking. */
   readonly conversationKey = input('');
-  /** Counter whose change re-arms auto-scroll (a send, queue, retry or replaced conversation); a grown message list never does. */
   readonly autoScrollRequest = input(0);
 
   readonly questionAnswered = output<{ toolId: string; questionIdx: number; value: string }>();
@@ -158,6 +157,11 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges {
   /** Marks scroll position for sync on next `ngAfterViewChecked`. */
   ngOnChanges(): void {
     this.pendingScrollSync = true;
+  }
+
+  /** Whether new output is pinned to the bottom: false while the user reads earlier messages. */
+  followsNewOutput(): boolean {
+    return this.shouldAutoScroll;
   }
 
   /** Tracks user scrolling to decide whether to pin new output to the bottom. */

@@ -188,8 +188,9 @@ export class ChatComponent implements OnInit, OnDestroy {
     if (!store || !this.composer) return;
     store.composerDraft.set(this.composer.text.value);
     store.composerPlanMode.set(this.composer.planMode());
-    const el = this.messageList?.scrollContainer?.nativeElement;
-    store.scrollPosition = el ? el.scrollTop : null;
+    const list = this.messageList;
+    const el = list?.scrollContainer?.nativeElement;
+    store.scrollPosition = el && !list?.followsNewOutput() ? el.scrollTop : null;
   }
 
   /**
