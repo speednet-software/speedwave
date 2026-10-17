@@ -59,6 +59,8 @@ mod slash_cmd;
 mod system_settings_cmd;
 mod transcription_cmd;
 mod tray;
+#[cfg(test)]
+mod ts_mirror;
 mod types;
 mod ui_prefs_cmd;
 mod update_commands;

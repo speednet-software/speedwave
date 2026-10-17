@@ -226,7 +226,7 @@ export class ConversationsSidebarComponent {
       const bucket = bucketForTimestamp(conv.timestamp);
       const row: ConversationRow = {
         conv,
-        label: cleanConversationPreview(conv.title ?? conv.preview),
+        label: conv.title ?? cleanConversationPreview(conv.preview),
         timestamp: formatRelativeTime(conv.timestamp),
       };
       const existing = buckets.get(bucket);

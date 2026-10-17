@@ -230,6 +230,25 @@ describe('ConversationsSidebarComponent', () => {
       );
     });
 
+    it('shows a title with angle brackets as Claude Code stored it', () => {
+      host.conversations = [
+        {
+          session_id: 's8',
+          title: 'Fix Vec<String> parsing',
+          preview: 'the <command-name> cleanup still applies to previews',
+          timestamp: '2m',
+          message_count: 1,
+        },
+      ];
+      fixture.detectChanges();
+      expect(q('[data-testid="conversation-resume-s8"]')!.textContent).toContain(
+        'Fix Vec<String> parsing'
+      );
+      expect(q('[data-testid="conversation-delete-s8"]')!.getAttribute('aria-label')).toBe(
+        'Delete conversation Fix Vec<String> parsing'
+      );
+    });
+
     it('labels an untitled conversation with its first message', () => {
       host.conversations = titled;
       fixture.detectChanges();

@@ -1709,39 +1709,9 @@ mod tests {
         assert!(matches!(err, ControlError::Malformed(_)));
     }
 
-    fn ts_interface_fields(src: &'static str, name: &str) -> Vec<&'static str> {
-        let marker = format!("export interface {name} {{");
-        let idx = src
-            .find(&marker)
-            .unwrap_or_else(|| panic!("claude-control.ts must declare `{marker}`"));
-        let body = src[idx + marker.len()..]
-            .split("\n}")
-            .next()
-            .expect("interface must be closed");
-        let mut fields: Vec<&str> = body
-            .lines()
-            .filter_map(|l| l.split(':').next())
-            .map(str::trim)
-            .filter(|s| !s.is_empty() && !s.starts_with('/') && !s.starts_with('*'))
-            .collect();
-        fields.sort_unstable();
-        fields
-    }
-
-    fn rust_fields<T: Serialize>(sample: &T) -> Vec<String> {
-        let json = serde_json::to_value(sample).expect("sample serializes");
-        let mut keys: Vec<String> = json
-            .as_object()
-            .expect("sample is an object")
-            .keys()
-            .cloned()
-            .collect();
-        keys.sort_unstable();
-        keys
-    }
-
     #[test]
     fn control_payloads_match_ts_mirrors() {
+        use crate::ts_mirror::{rust_fields, ts_interface_fields};
         let ts = include_str!("../../src/src/app/models/claude-control.ts");
         let info = parse_session_info(&fixture()["run_A"]["initialize"]).unwrap();
         let usage = parse_plan_usage(&fixture()["run_A"]["get_usage"]).unwrap();
