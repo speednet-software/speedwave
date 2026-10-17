@@ -1,15 +1,22 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { TestBed } from '@angular/core/testing';
 import {
   MAX_IMAGE_BYTES,
   NATIVE_LONG_EDGE,
   ERROR_TOO_LARGE,
   ERROR_UNSUPPORTED_TYPE,
+  ImagePreprocessorService,
   isSupportedImageType,
 } from './image-preprocessor.service';
+import { IMAGE_MEDIA_TYPES } from '../models/chat';
+import { TauriService } from './tauri.service';
+import { LoggerService } from './logger.service';
+import { MockTauriService } from '../testing/mock-tauri.service';
+import { makeMockLogger } from '../testing/mock-logger';
 
 describe('isSupportedImageType', () => {
-  it('accepts the four raster types the resampler handles', () => {
-    for (const type of ['image/jpeg', 'image/png', 'image/gif', 'image/webp']) {
+  it('accepts every type of the image pipeline', () => {
+    for (const type of IMAGE_MEDIA_TYPES) {
       expect(isSupportedImageType(type)).toBe(true);
     }
   });
@@ -42,5 +49,58 @@ describe('error message constants', () => {
 
   it('ERROR_UNSUPPORTED_TYPE lists the four supported formats', () => {
     expect(ERROR_UNSUPPORTED_TYPE).toMatch(/JPEG.*PNG.*GIF.*WebP/);
+  });
+});
+
+describe('ImagePreprocessorService.preprocess', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('saves a GIF byte for byte under its original name and discards it by its paste id', async () => {
+    vi.stubGlobal(
+      'createImageBitmap',
+      vi.fn(async () => ({ width: 3, height: 2, close: () => undefined }))
+    );
+    const calls: { cmd: string; args?: Record<string, unknown> }[] = [];
+    const tauri = new MockTauriService();
+    tauri.invokeHandler = async (cmd, args) => {
+      calls.push({ cmd, args });
+      if (cmd === 'save_pasted_image') {
+        return {
+          paste_id: 11,
+          container_path: '/workspace/.speedwave/pastes/paste-1-0001.gif',
+          filename: 'paste-1-0001.gif',
+        };
+      }
+      return undefined;
+    };
+    TestBed.configureTestingModule({
+      providers: [
+        { provide: TauriService, useValue: tauri },
+        { provide: LoggerService, useValue: makeMockLogger() },
+      ],
+    });
+    const service = TestBed.inject(ImagePreprocessorService);
+    const gif = new File([new Uint8Array([71, 73, 70, 56, 57, 97, 1])], 'anim.gif', {
+      type: 'image/gif',
+    });
+
+    const staged = await service.preprocess(gif, 'sonnet', 'acme');
+    staged.discard();
+
+    expect(calls[0]).toEqual({
+      cmd: 'save_pasted_image',
+      args: { project: 'acme', mediaType: 'image/gif', bytes: [71, 73, 70, 56, 57, 97, 1] },
+    });
+    expect(staged.attachment).toEqual({
+      kind: 'image',
+      filename: 'anim.gif',
+      mediaType: 'image/gif',
+      containerPath: '/workspace/.speedwave/pastes/paste-1-0001.gif',
+    });
+    expect(staged.width).toBe(3);
+    expect(staged.sizeBytes).toBe(7);
+    expect(calls[1]).toEqual({ cmd: 'discard_paste', args: { pasteId: 11 } });
   });
 });

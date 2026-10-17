@@ -8,8 +8,8 @@ function vm(overrides: Partial<AttachmentViewModel> = {}): AttachmentViewModel {
     filename: 'screenshot.png',
     kind: 'image',
     previewUrl: 'blob:fake',
-    encodedSizeBytes: 1024,
-    preprocessing: false,
+    sizeBytes: 1024,
+    staging: false,
     ...overrides,
   };
 }
@@ -20,7 +20,7 @@ function fileVm(overrides: Partial<AttachmentViewModel> = {}): AttachmentViewMod
     filename: 'notes.pdf',
     kind: 'file',
     previewUrl: '',
-    encodedSizeBytes: 2048,
+    sizeBytes: 2048,
     ...overrides,
   });
 }
@@ -68,22 +68,22 @@ describe('AttachmentStripComponent', () => {
     expect(seen).toEqual(['kill-me']);
   });
 
-  it('shows spinner overlay for entries that are still preprocessing', () => {
+  it('shows spinner overlay for entries that are still staging', () => {
     const fixture = TestBed.configureTestingModule({
       imports: [AttachmentStripComponent],
     }).createComponent(AttachmentStripComponent);
-    fixture.componentRef.setInput('attachments', [vm({ preprocessing: true })]);
+    fixture.componentRef.setInput('attachments', [vm({ staging: true })]);
     fixture.detectChanges();
     const overlay = fixture.nativeElement.querySelector('[role="status"]');
     expect(overlay).toBeTruthy();
     expect(overlay.querySelector('app-spin-icon')).toBeTruthy();
   });
 
-  it('omits spinner once preprocessing settles', () => {
+  it('omits spinner once staging settles', () => {
     const fixture = TestBed.configureTestingModule({
       imports: [AttachmentStripComponent],
     }).createComponent(AttachmentStripComponent);
-    fixture.componentRef.setInput('attachments', [vm({ preprocessing: false })]);
+    fixture.componentRef.setInput('attachments', [vm({ staging: false })]);
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[role="status"]')).toBeNull();
   });
@@ -150,7 +150,7 @@ describe('AttachmentStripComponent', () => {
     const fixture = TestBed.configureTestingModule({
       imports: [AttachmentStripComponent],
     }).createComponent(AttachmentStripComponent);
-    fixture.componentRef.setInput('attachments', [fileVm({ preprocessing: true })]);
+    fixture.componentRef.setInput('attachments', [fileVm({ staging: true })]);
     fixture.detectChanges();
     const overlay = fixture.nativeElement.querySelector('[role="status"]');
     expect(overlay).toBeTruthy();

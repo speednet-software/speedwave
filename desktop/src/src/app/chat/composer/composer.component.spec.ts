@@ -8,12 +8,13 @@ import { ComposerAttachments } from './composer-attachments';
 import { ProjectStateService, type AuthStatusResponse } from '../../services/project-state.service';
 import { TauriService } from '../../services/tauri.service';
 import { LoggerService } from '../../services/logger.service';
-import {
-  FileAttachmentService,
-  type StagedAttachment,
-} from '../../services/file-attachment.service';
+import { FileAttachmentService } from '../../services/file-attachment.service';
+import type { StagedAttachment } from '../../models/chat';
 import { MockTauriService } from '../../testing/mock-tauri.service';
 import { makeMockLogger } from '../../testing/mock-logger';
+import { makeStagedFile, makeStagedImage } from '../../testing/attachments';
+import { makeDragEvent, makePasteEvent } from '../../testing/drag-events';
+import { createDeferred } from '../../testing/deferred';
 import { SlashService } from '../slash/slash.service';
 
 class ProjectStateStub {
@@ -21,18 +22,19 @@ class ProjectStateStub {
 }
 
 class FileAttachmentStub {
-  stage = vi.fn(async (file: File): Promise<StagedAttachment> => ({
-    attachment: {
-      kind: 'file',
-      filename: file.name,
-      mediaType: file.type,
-      sizeBytes: file.size,
-      containerPath: `/workspace/.speedwave/pastes/${file.name}`,
-      hostPath: `/tmp/${file.name}`,
-    },
-    previewUrl: '',
-    sizeBytes: file.size,
-  }));
+  stage = vi.fn(
+    async (file: File, _project: string, _signal: AbortSignal): Promise<StagedAttachment<'file'>> =>
+      makeStagedFile(file.name, {
+        attachment: {
+          kind: 'file',
+          filename: file.name,
+          sizeBytes: file.size,
+          containerPath: `/workspace/.speedwave/pastes/${file.name}`,
+        },
+        sizeBytes: file.size,
+      })
+  );
+  discard = vi.fn();
 }
 
 class SlashServiceStub {
@@ -216,19 +218,9 @@ describe('ComposerComponent', () => {
       component.text.setValue('/');
       await component
         .attachmentDraft()
-        .add(new File(['x'], 'img.png', { type: 'image/png' }), 'image', async () => ({
-          attachment: {
-            kind: 'image',
-            filename: 'img.png',
-            mediaType: 'image/png',
-            containerPath: '/workspace/.speedwave/pastes/img.png',
-            hostPath: '/tmp/img.png',
-          },
-          previewUrl: 'blob:x',
-          width: 1,
-          height: 1,
-          sizeBytes: 1,
-        }));
+        .add(new File(['x'], 'img.png', { type: 'image/png' }), 'image', async () =>
+          makeStagedImage('img.png')
+        );
       fixture.detectChanges();
       expect(component.canSubmit()).toBe(true);
     });
@@ -904,18 +896,11 @@ describe('ComposerComponent', () => {
       return rootEl.querySelector<HTMLElement>('[data-testid="composer-attachment-error"]');
     }
 
-    function makeDropEvent(files: File[]): DragEvent {
-      const dataTransfer = { types: ['Files'], files, dropEffect: 'none' };
-      const ev = new Event('drop', { bubbles: true, cancelable: true }) as DragEvent;
-      Object.defineProperty(ev, 'dataTransfer', { value: dataTransfer, configurable: true });
-      return ev;
-    }
-
     it('shows an English error when an image is dropped with no active project', () => {
       const dropTarget = rootEl.querySelector('[appFileDrop]') as HTMLElement;
       const file = new File(['x'], 'a.png', { type: 'image/png' });
 
-      dropTarget.dispatchEvent(makeDropEvent([file]));
+      dropTarget.dispatchEvent(makeDragEvent('drop', [file]));
       fixture.detectChanges();
 
       expect(attachmentErrorEl()?.textContent?.trim()).toBe(
@@ -927,7 +912,7 @@ describe('ComposerComponent', () => {
       const dropTarget = rootEl.querySelector('[appFileDrop]') as HTMLElement;
       const file = new File(['x'], 'notes.pdf', { type: 'application/pdf' });
 
-      dropTarget.dispatchEvent(makeDropEvent([file]));
+      dropTarget.dispatchEvent(makeDragEvent('drop', [file]));
       fixture.detectChanges();
 
       expect(attachmentErrorEl()?.textContent?.trim()).toBe(
@@ -937,26 +922,21 @@ describe('ComposerComponent', () => {
 
     it('names dropped folders instead of attaching them', () => {
       const dropTarget = rootEl.querySelector('[appFileDrop]') as HTMLElement;
-      const dataTransfer = {
-        types: ['Files'],
-        files: [],
-        items: [
-          {
-            kind: 'file',
-            type: '',
-            getAsFile: () => null,
-            webkitGetAsEntry: () => ({ isDirectory: true, isFile: false, name: 'docs' }),
-          },
-        ],
-        dropEffect: 'none',
-      };
-      const ev = new Event('drop', { bubbles: true, cancelable: true }) as DragEvent;
-      Object.defineProperty(ev, 'dataTransfer', { value: dataTransfer, configurable: true });
 
-      dropTarget.dispatchEvent(ev);
+      dropTarget.dispatchEvent(makeDragEvent('drop', [{ directory: 'docs' }]));
       fixture.detectChanges();
 
       expect(attachmentErrorEl()?.textContent?.trim()).toBe('Folders cannot be attached: docs');
+    });
+
+    it('a new drop replaces the errors of the previous one', () => {
+      const dropTarget = rootEl.querySelector('[appFileDrop]') as HTMLElement;
+      dropTarget.dispatchEvent(makeDragEvent('drop', [{ directory: 'old' }]));
+
+      dropTarget.dispatchEvent(makeDragEvent('drop', [{ directory: 'new' }]));
+      fixture.detectChanges();
+
+      expect(attachmentErrorEl()?.textContent?.trim()).toBe('Folders cannot be attached: new');
     });
   });
 
@@ -967,24 +947,6 @@ describe('ComposerComponent', () => {
       return new Promise((resolve) => setTimeout(resolve, 0));
     }
 
-    function makeDropEvent(files: File[]): DragEvent {
-      const dataTransfer = { types: ['Files'], files, dropEffect: 'none' };
-      const ev = new Event('drop', { bubbles: true, cancelable: true }) as DragEvent;
-      Object.defineProperty(ev, 'dataTransfer', { value: dataTransfer, configurable: true });
-      return ev;
-    }
-
-    function makePasteEvent(files: File[]): ClipboardEvent {
-      const items = files.map((file) => ({
-        kind: 'file',
-        type: file.type,
-        getAsFile: () => file,
-      }));
-      const ev = new Event('paste', { bubbles: true, cancelable: true }) as ClipboardEvent;
-      Object.defineProperty(ev, 'clipboardData', { value: { items }, configurable: true });
-      return ev;
-    }
-
     beforeEach(() => {
       (TestBed.inject(ProjectStateService) as unknown as ProjectStateStub).activeProject.set(
         'acme'
@@ -992,11 +954,15 @@ describe('ComposerComponent', () => {
       uploads = TestBed.inject(FileAttachmentService) as unknown as FileAttachmentStub;
     });
 
+    function errorText(): string | undefined {
+      return rootEl.querySelector('[data-testid="composer-attachment-error"]')?.textContent?.trim();
+    }
+
     it('stages a dropped PDF through the upload service and renders a file pill', async () => {
       const dropTarget = rootEl.querySelector('[appFileDrop]') as HTMLElement;
       const file = new File(['%PDF-1.7'], 'notes.pdf', { type: 'application/pdf' });
 
-      dropTarget.dispatchEvent(makeDropEvent([file]));
+      dropTarget.dispatchEvent(makeDragEvent('drop', [file]));
       await flush();
       fixture.detectChanges();
 
@@ -1008,10 +974,8 @@ describe('ComposerComponent', () => {
         {
           kind: 'file',
           filename: 'notes.pdf',
-          mediaType: 'application/pdf',
           sizeBytes: 8,
           containerPath: '/workspace/.speedwave/pastes/notes.pdf',
-          hostPath: '/tmp/notes.pdf',
         },
       ]);
     });
@@ -1020,10 +984,22 @@ describe('ComposerComponent', () => {
       const dropTarget = rootEl.querySelector('[appFileDrop]') as HTMLElement;
       const file = new File(['x'], 'Makefile', { type: '' });
 
-      dropTarget.dispatchEvent(makeDropEvent([file]));
+      dropTarget.dispatchEvent(makeDragEvent('drop', [file]));
       await flush();
 
       expect(uploads.stage).toHaveBeenCalledWith(file, 'acme', expect.any(AbortSignal));
+    });
+
+    it('keeps the folder notice of a drop that also carried a file', async () => {
+      const dropTarget = rootEl.querySelector('[appFileDrop]') as HTMLElement;
+      const file = new File(['x'], 'notes.pdf', { type: 'application/pdf' });
+
+      dropTarget.dispatchEvent(makeDragEvent('drop', [file, { directory: 'docs' }]));
+      await flush();
+      fixture.detectChanges();
+
+      expect(rootEl.querySelector('[data-testid="composer-attachment-file"]')).not.toBeNull();
+      expect(errorText()).toBe('Folders cannot be attached: docs');
     });
 
     it('captures a pasted non-image file and suppresses the default text paste', async () => {
@@ -1038,8 +1014,20 @@ describe('ComposerComponent', () => {
       expect(uploads.stage).toHaveBeenCalledWith(file, 'acme', expect.any(AbortSignal));
     });
 
+    it('reports a pasted folder instead of attaching it', () => {
+      const ev = makePasteEvent([{ directory: 'docs' }]);
+      const preventSpy = vi.spyOn(ev, 'preventDefault');
+
+      textarea().dispatchEvent(ev);
+      fixture.detectChanges();
+
+      expect(preventSpy).toHaveBeenCalled();
+      expect(uploads.stage).not.toHaveBeenCalled();
+      expect(errorText()).toBe('Folders cannot be attached: docs');
+    });
+
     it('leaves a paste without file items to the browser', () => {
-      const ev = makePasteEvent([]);
+      const ev = makePasteEvent([{ text: 'plain text' }]);
       const preventSpy = vi.spyOn(ev, 'preventDefault');
 
       textarea().dispatchEvent(ev);
@@ -1048,28 +1036,94 @@ describe('ComposerComponent', () => {
       expect(uploads.stage).not.toHaveBeenCalled();
     });
 
-    it('surfaces an upload failure in the attachment error and keeps the strip empty', async () => {
-      uploads.stage.mockRejectedValueOnce(
-        new Error('failed to write x.part: No space left on device')
-      );
+    it('shows the text an upload command rejected with and keeps the strip empty', async () => {
+      uploads.stage.mockRejectedValueOnce('failed to write x.part: No space left on device');
       const dropTarget = rootEl.querySelector('[appFileDrop]') as HTMLElement;
 
-      dropTarget.dispatchEvent(makeDropEvent([new File(['x'], 'big.iso', { type: '' })]));
+      dropTarget.dispatchEvent(makeDragEvent('drop', [new File(['x'], 'big.iso', { type: '' })]));
       await flush();
       fixture.detectChanges();
 
-      expect(
-        rootEl.querySelector('[data-testid="composer-attachment-error"]')?.textContent?.trim()
-      ).toContain('No space left on device');
+      expect(errorText()).toBe('big.iso: failed to write x.part: No space left on device');
       expect(rootEl.querySelector('[data-testid="composer-attachment-strip"]')).toBeNull();
     });
 
-    it('submits the staged file with the message and announces removal as a file', async () => {
+    it('names every file of a drop that failed, not only the last one', async () => {
+      uploads.stage.mockRejectedValueOnce('disk full').mockRejectedValueOnce('disk still full');
+      const dropTarget = rootEl.querySelector('[appFileDrop]') as HTMLElement;
+
+      dropTarget.dispatchEvent(
+        makeDragEvent('drop', [
+          new File(['a'], 'a.bin', { type: '' }),
+          new File(['b'], 'b.bin', { type: '' }),
+          new File(['c'], 'c.bin', { type: '' }),
+        ])
+      );
+      await flush();
+      fixture.detectChanges();
+
+      expect(component.attachmentDraft().error()).toBe('a.bin: disk full\nb.bin: disk still full');
+      expect(
+        component
+          .attachmentDraft()
+          .records()
+          .map((r) => r.filename)
+      ).toEqual(['c.bin']);
+    });
+
+    it('refuses Enter and the send button while a file is still uploading, and keeps the upload going', async () => {
+      const emitted: unknown[] = [];
+      component.submitted.subscribe((v) => emitted.push(v));
+      const pending = createDeferred<StagedAttachment<'file'>>();
+      let seen: AbortSignal | undefined;
+      uploads.stage.mockImplementationOnce((_file, _project, signal) => {
+        seen = signal;
+        return pending.promise;
+      });
+      const dropTarget = rootEl.querySelector('[appFileDrop]') as HTMLElement;
+      dropTarget.dispatchEvent(makeDragEvent('drop', [new File(['x'], 'big.iso', { type: '' })]));
+      component.text.setValue('read this');
+      fixture.detectChanges();
+
+      textarea().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', cancelable: true }));
+      sendButton().click();
+
+      expect(emitted).toEqual([]);
+      expect(sendButton().disabled).toBe(true);
+      expect(component.attachmentDraft().records()).toHaveLength(1);
+      expect(seen?.aborted).toBe(false);
+      pending.resolve(makeStagedFile('big.iso'));
+      await flush();
+    });
+
+    it('stops a drop once its tab is closed and stages none of the remaining files', async () => {
+      const first = createDeferred<StagedAttachment<'file'>>();
+      uploads.stage.mockImplementationOnce(() => first.promise);
+      const draft = component.attachmentDraft();
+      const dropTarget = rootEl.querySelector('[appFileDrop]') as HTMLElement;
+      dropTarget.dispatchEvent(
+        makeDragEvent('drop', [
+          new File(['a'], 'a.bin', { type: '' }),
+          new File(['b'], 'b.bin', { type: '' }),
+        ])
+      );
+
+      draft.dispose();
+      const staged = makeStagedFile('a.bin');
+      first.resolve(staged);
+      await flush();
+
+      expect(uploads.stage).toHaveBeenCalledTimes(1);
+      expect(staged.discard).toHaveBeenCalledOnce();
+      expect(draft.records()).toHaveLength(0);
+    });
+
+    it('submits the staged file with the message and clears the strip', async () => {
       const emitted: { attachments: { kind: string }[] }[] = [];
       component.submitted.subscribe((v) => emitted.push(v));
       const dropTarget = rootEl.querySelector('[appFileDrop]') as HTMLElement;
       dropTarget.dispatchEvent(
-        makeDropEvent([new File(['x'], 'notes.pdf', { type: 'application/pdf' })])
+        makeDragEvent('drop', [new File(['x'], 'notes.pdf', { type: 'application/pdf' })])
       );
       await flush();
       component.text.setValue('read this');
@@ -1082,19 +1136,21 @@ describe('ComposerComponent', () => {
       expect(component.attachmentDraft().records()).toHaveLength(0);
     });
 
-    it('announces a removed file as a file', async () => {
+    it('announces a removed file as a file and discards it', async () => {
       const dropTarget = rootEl.querySelector('[appFileDrop]') as HTMLElement;
       dropTarget.dispatchEvent(
-        makeDropEvent([new File(['x'], 'notes.pdf', { type: 'application/pdf' })])
+        makeDragEvent('drop', [new File(['x'], 'notes.pdf', { type: 'application/pdf' })])
       );
       await flush();
       fixture.detectChanges();
+      const staged = component.attachmentDraft().records()[0].staged;
 
       rootEl
         .querySelector<HTMLButtonElement>('[data-testid="composer-attachment-remove"]')!
         .click();
 
       expect(component.attachmentDraft().announcement()).toBe('File removed: notes.pdf');
+      expect(staged?.discard).toHaveBeenCalledOnce();
     });
   });
 
@@ -1104,19 +1160,9 @@ describe('ComposerComponent', () => {
     }
 
     async function addReady(draft: ComposerAttachments, filename: string): Promise<void> {
-      await draft.add(new File(['x'], filename, { type: 'image/png' }), 'image', async () => ({
-        attachment: {
-          kind: 'image',
-          filename,
-          mediaType: 'image/png',
-          containerPath: `/workspace/.speedwave/pastes/${filename}`,
-          hostPath: `/tmp/${filename}`,
-        },
-        previewUrl: `blob:${filename}`,
-        width: 1,
-        height: 1,
-        sizeBytes: 1,
-      }));
+      await draft.add(new File(['x'], filename, { type: 'image/png' }), 'image', async () =>
+        makeStagedImage(filename)
+      );
     }
 
     it('renders only the bound draft, and swapping the input swaps the rendered strip', async () => {

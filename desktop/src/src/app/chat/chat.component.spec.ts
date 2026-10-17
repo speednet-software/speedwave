@@ -17,6 +17,7 @@ import { TranscriptionService } from '../services/transcription.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 import { createDeferred } from '../testing/deferred';
 import { makeMockLogger } from '../testing/mock-logger';
+import { makeStagedImage } from '../testing/attachments';
 
 describe('ChatComponent', () => {
   let component: ChatComponent;
@@ -1858,19 +1859,7 @@ describe('ChatComponent', () => {
       await store1.composerAttachments.add(
         new File(['x'], 'a.png', { type: 'image/png' }),
         'image',
-        async () => ({
-          attachment: {
-            kind: 'image',
-            filename: 'a.png',
-            mediaType: 'image/png',
-            containerPath: '/workspace/.speedwave/pastes/a.png',
-            hostPath: '/tmp/a.png',
-          },
-          previewUrl: 'blob:a',
-          width: 1,
-          height: 1,
-          sizeBytes: 1,
-        })
+        async () => makeStagedImage('a.png', { previewUrl: 'blob:a' })
       );
       fixture.detectChanges();
       expect(composer.attachmentDraft().records()).toHaveLength(1);
@@ -1901,19 +1890,7 @@ describe('ChatComponent', () => {
       await store1.composerAttachments.add(
         new File(['x'], 'a.png', { type: 'image/png' }),
         'image',
-        async () => ({
-          attachment: {
-            kind: 'image',
-            filename: 'a.png',
-            mediaType: 'image/png',
-            containerPath: '/workspace/.speedwave/pastes/a.png',
-            hostPath: '/tmp/a.png',
-          },
-          previewUrl: 'blob:to-revoke',
-          width: 1,
-          height: 1,
-          sizeBytes: 1,
-        })
+        async () => makeStagedImage('a.png', { previewUrl: 'blob:to-revoke' })
       );
 
       await chatState.openTab();

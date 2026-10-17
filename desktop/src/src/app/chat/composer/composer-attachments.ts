@@ -1,11 +1,9 @@
 import { signal } from '@angular/core';
-import type { StagedAttachment } from '../../services/file-attachment.service';
-import type { ChatAttachment } from '../../models/chat';
+import type { AttachmentKind, ChatAttachment, StagedAttachment } from '../../models/chat';
 
 export const ERROR_ATTACH_FAILED = 'Could not attach the file.';
 
-/** Which staging pipeline a record took and which pill it renders as. */
-export type AttachmentKind = ChatAttachment['kind'];
+const KIND_LABELS: Record<AttachmentKind, string> = { image: 'Image', file: 'File' };
 
 /** One attachment staged in a composer, upload in progress or complete. */
 export interface AttachmentRecord {
@@ -18,8 +16,10 @@ export interface AttachmentRecord {
   staged: StagedAttachment | null;
 }
 
-/** Async step that puts one file on disk; `signal` aborts once the record is removed. */
-export type StageAttachment = (file: File, signal: AbortSignal) => Promise<StagedAttachment>;
+type StageAttachment<K extends AttachmentKind> = (
+  file: File,
+  signal: AbortSignal
+) => Promise<StagedAttachment<NoInfer<K>>>;
 
 /**
  * Per-tab composer attachment state (SPEED-785). One instance lives on each `ChatSessionStore`,
@@ -35,53 +35,73 @@ export class ComposerAttachments {
   readonly error = signal<string>('');
   readonly announcement = signal<string>('');
 
+  /** Whether `dispose()` ran; a disposed instance stages nothing more. */
+  get isDisposed(): boolean {
+    return this.disposed;
+  }
+
   /**
    * Stages a pending record for `file`, runs `stage`, and resolves it in place. Safe to call
    * from any tab's composer view — resolution always targets this instance, never whichever
-   * instance is bound to the composer when `stage` settles. Removing the record aborts `stage`.
+   * instance is bound to the composer when `stage` settles. A record removed before `stage`
+   * settles has the file `stage` wrote discarded; a failure is added to `error` under the file's name.
    * @param file - Source file (paste or drop).
-   * @param kind - Pipeline the caller chose for it: resampled image or streamed file.
-   * @param stage - Async resampling or upload step that persists the bytes.
+   * @param kind - Pipeline the caller chose for it.
+   * @param stage - Async step that writes the bytes; its signal aborts once the record is removed.
    */
-  async add(file: File, kind: AttachmentKind, stage: StageAttachment): Promise<void> {
+  async add<K extends AttachmentKind>(
+    file: File,
+    kind: K,
+    stage: StageAttachment<K>
+  ): Promise<void> {
+    if (this.disposed) return;
     const id = `att-${++this.seq}`;
+    const filename = file.name || kind;
     const previewUrl = kind === 'image' ? URL.createObjectURL(file) : '';
     const controller = new AbortController();
+    const cancelled = (): boolean => this.disposed || controller.signal.aborted;
     this.inFlight.set(id, controller);
     this.records.update((list) => [
       ...list,
-      { id, filename: file.name || kind, kind, previewUrl, sizeBytes: file.size, staged: null },
+      { id, filename, kind, previewUrl, sizeBytes: file.size, staged: null },
     ]);
     try {
       const out = await stage(file, controller.signal);
-      if (this.disposed || !this.records().some((r) => r.id === id)) {
+      if (cancelled()) {
         revoke(out.previewUrl);
+        out.discard();
         return;
       }
       revoke(previewUrl);
       this.records.update((list) =>
         list.map((r) =>
           r.id === id
-            ? { ...r, previewUrl: out.previewUrl, sizeBytes: out.sizeBytes, staged: out }
+            ? { ...r, previewUrl: out.previewUrl ?? '', sizeBytes: out.sizeBytes, staged: out }
             : r
         )
       );
-      this.error.set('');
-      this.announcement.set(`${kindLabel(kind)} attached: ${out.attachment.filename}`);
+      this.announcement.set(`${KIND_LABELS[kind]} attached: ${out.attachment.filename}`);
     } catch (err) {
-      if (this.disposed) return;
+      if (cancelled()) return;
       this.records.update((list) => list.filter((r) => r.id !== id));
       revoke(previewUrl);
-      if (!controller.signal.aborted) {
-        this.error.set(err instanceof Error ? err.message : ERROR_ATTACH_FAILED);
-      }
+      this.reportError(`${filename}: ${failureText(err)}`);
     } finally {
       this.inFlight.delete(id);
     }
   }
 
   /**
-   * Removes one record, revokes its preview URL and aborts its upload if still running.
+   * Adds one line to `error`, after any reported since it was last cleared.
+   * @param message - Self-contained message for the user.
+   */
+  reportError(message: string): void {
+    this.error.update((current) => (current ? `${current}\n${message}` : message));
+  }
+
+  /**
+   * Removes one record, announces it, revokes its preview URL, aborts its upload if still
+   * running and discards the file it wrote.
    * @param id - Record id to remove.
    * @returns The removed record, or `undefined` if no record had that id.
    */
@@ -91,14 +111,14 @@ export class ComposerAttachments {
     this.records.update((list) => list.filter((r) => r.id !== id));
     revoke(removed.previewUrl);
     this.inFlight.get(id)?.abort();
+    removed.staged?.discard();
+    this.announcement.set(`${KIND_LABELS[removed.kind]} removed: ${removed.filename}`);
     return removed;
   }
 
-  /** Clears every record, revoking previews and aborting uploads (post-submit). */
+  /** Clears every record after a submit sent them, revoking previews and aborting uploads. */
   clear(): void {
-    for (const r of this.records()) revoke(r.previewUrl);
-    this.abortAll();
-    this.records.set([]);
+    this.releaseRecords();
     this.error.set('');
   }
 
@@ -108,28 +128,34 @@ export class ComposerAttachments {
   }
 
   /** Whether any record is still staging (blocks submit). */
-  anyPreprocessing(): boolean {
+  anyStaging(): boolean {
     return this.records().some((r) => r.staged === null);
   }
 
-  /** Revokes every preview URL, aborts every upload and discards the result of any `add()` still in flight (tab close / project switch). */
+  /**
+   * Revokes every preview URL, aborts every upload, discards every file staged but not sent, and
+   * discards the result of any `add()` still in flight (tab close / project switch).
+   */
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    for (const r of this.records()) revoke(r.previewUrl);
-    this.abortAll();
-    this.records.set([]);
+    for (const r of this.records()) r.staged?.discard();
+    this.releaseRecords();
   }
 
-  private abortAll(): void {
+  private releaseRecords(): void {
+    for (const r of this.records()) revoke(r.previewUrl);
     for (const controller of this.inFlight.values()) controller.abort();
+    this.records.set([]);
   }
 }
 
-function revoke(url: string): void {
+function revoke(url: string | undefined): void {
   if (url) URL.revokeObjectURL(url);
 }
 
-function kindLabel(kind: AttachmentKind): string {
-  return kind === 'image' ? 'Image' : 'File';
+function failureText(err: unknown): string {
+  if (err instanceof Error && err.message) return err.message;
+  if (typeof err === 'string' && err) return err;
+  return ERROR_ATTACH_FAILED;
 }

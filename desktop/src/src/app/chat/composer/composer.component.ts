@@ -24,7 +24,7 @@ import { SlashMenuComponent } from '../slash/slash-menu.component';
 import { SlashService, isBlankOrSlashOnly, type SlashCommand } from '../slash/slash.service';
 import { TooltipDirective } from '../../shared/tooltip.directive';
 import { AttachmentStripComponent, type AttachmentViewModel } from './attachment-strip.component';
-import { FileDropDirective } from './file-drop.directive';
+import { FileDropDirective, partitionItems, type DroppedItems } from './file-drop.directive';
 import { ResizeHandleDirective } from './resize-handle.directive';
 import {
   ModelSelectorComponent,
@@ -37,7 +37,7 @@ import {
 } from '../../services/image-preprocessor.service';
 import { FileAttachmentService } from '../../services/file-attachment.service';
 import type { ChatAttachment } from '../../models/chat';
-import { ComposerAttachments, type AttachmentKind } from './composer-attachments';
+import { ComposerAttachments } from './composer-attachments';
 
 const SLASH_TRIGGER = /^(\s*)\/([^\s/]*)$/;
 
@@ -120,7 +120,7 @@ const PLAN_MODE_PREFIX =
       <div
         data-testid="composer-attachment-error"
         role="alert"
-        class="mb-2 rounded border border-red-500/40 bg-red-500/10 px-3 py-1.5 text-[11px] text-red-300"
+        class="mb-2 whitespace-pre-line rounded border border-red-500/40 bg-red-500/10 px-3 py-1.5 text-[11px] text-red-300"
       >
         {{ attachmentDraft().error() }}
       </div>
@@ -132,8 +132,7 @@ const PLAN_MODE_PREFIX =
       appFileDrop
       #fileDrop="appFileDrop"
       [disabled]="disabled()"
-      (filesDropped)="onFilesDropped($event)"
-      (foldersDropped)="onFoldersDropped($event)"
+      (dropped)="onDropped($event)"
       class="relative rounded border border-[var(--line)] bg-[var(--bg-1)] focus-within:border-[var(--accent)]"
       [class.ring-2]="fileDrop.isDragging()"
       [class.ring-[var(--accent)]]="fileDrop.isDragging()"
@@ -516,7 +515,7 @@ export class ComposerComponent implements AfterViewInit {
   canSubmit(): boolean {
     if (this.disabled() || this.sendBlocked()()) return false;
     const draft = this.attachmentDraft();
-    if (draft.anyPreprocessing()) return false;
+    if (draft.anyStaging()) return false;
     const text = this.textValue();
     const hasText = !isBlankOrSlashOnly(text);
     const hasAttachments = draft.records().length > 0;
@@ -573,34 +572,18 @@ export class ComposerComponent implements AfterViewInit {
    */
   onPaste(event: ClipboardEvent): void {
     if (this.disabled()) return;
-    const items = event.clipboardData?.items;
-    if (!items) return;
-    const files: File[] = [];
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i];
-      if (item.kind !== 'file') continue;
-      const f = item.getAsFile();
-      if (f) files.push(f);
-    }
-    if (files.length === 0) return;
+    const items = partitionItems(event.clipboardData?.items);
+    if (items.files.length === 0 && items.folders.length === 0) return;
     event.preventDefault();
-    void this.ingest(files);
+    void this.ingest(items);
   }
 
   /**
-   * Drop handler — emits from `FileDropDirective`; every file type is accepted.
-   * @param files - Dropped files (any MIME).
+   * Drop handler for `FileDropDirective`; every file type is accepted.
+   * @param items - Files and directory names of the drop.
    */
-  onFilesDropped(files: File[]): void {
-    void this.ingest(files);
-  }
-
-  /**
-   * A dropped directory has no bytes to stream, so it is reported instead of silently skipped.
-   * @param names - Directory names from the drop.
-   */
-  onFoldersDropped(names: string[]): void {
-    this.attachmentDraft().error.set(`Folders cannot be attached: ${names.join(', ')}`);
+  onDropped(items: DroppedItems): void {
+    void this.ingest(items);
   }
 
   /**
@@ -608,12 +591,7 @@ export class ComposerComponent implements AfterViewInit {
    * @param id - Attachment id from the view-model.
    */
   removeAttachment(id: string): void {
-    const draft = this.attachmentDraft();
-    const removed = draft.remove(id);
-    if (removed) {
-      const label = removed.kind === 'image' ? 'Image' : 'File';
-      draft.announcement.set(`${label} removed: ${removed.filename}`);
-    }
+    this.attachmentDraft().remove(id);
   }
 
   readonly attachmentViewModels = computed<ReadonlyArray<AttachmentViewModel>>(() =>
@@ -624,36 +602,43 @@ export class ComposerComponent implements AfterViewInit {
         filename: a.filename,
         kind: a.kind,
         previewUrl: a.previewUrl,
-        encodedSizeBytes: a.sizeBytes,
-        preprocessing: a.staged === null,
+        sizeBytes: a.sizeBytes,
+        staging: a.staged === null,
       }))
   );
 
   readonly submitBlockedReason = computed<string>(() => {
     if (this.disabled()) return '';
     const draft = this.attachmentDraft();
-    if (draft.anyPreprocessing()) return 'Preparing attachment…';
+    if (draft.anyStaging()) return 'Preparing attachment…';
     if (draft.records().length > 0 && this.streaming()) {
       return 'Wait for the response to finish before sending an attachment.';
     }
     return '';
   });
 
-  private async ingest(files: File[]): Promise<void> {
+  private async ingest({ files, folders }: DroppedItems): Promise<void> {
     const draft = this.attachmentDraft();
+    draft.error.set('');
+    if (folders.length > 0) {
+      draft.reportError(`Folders cannot be attached: ${folders.join(', ')}`);
+    }
+    if (files.length === 0) return;
     const project = this.projectState.activeProject();
     if (!project) {
-      draft.error.set('Select a project before attaching a file.');
+      draft.reportError('Select a project before attaching a file.');
       return;
     }
 
     const modelClass = this.modelClass();
     for (const file of files) {
-      const kind: AttachmentKind = isSupportedImageType(file.type) ? 'image' : 'file';
-      if (kind === 'image') {
-        await draft.add(file, kind, (f) => this.preprocessor.preprocess(f, modelClass, project));
+      if (draft.isDisposed) return;
+      if (isSupportedImageType(file.type)) {
+        await draft.add(file, 'image', (f) => this.preprocessor.preprocess(f, modelClass, project));
       } else {
-        await draft.add(file, kind, (f, signal) => this.fileAttachments.stage(f, project, signal));
+        await draft.add(file, 'file', (f, signal) =>
+          this.fileAttachments.stage(f, project, signal)
+        );
       }
     }
   }

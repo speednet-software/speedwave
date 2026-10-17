@@ -28,6 +28,7 @@ import { TauriService } from './tauri.service';
 import { AnthropicModelsService } from './anthropic-models.service';
 import { ClaudeControlService } from './claude-control.service';
 import { LoggerService } from './logger.service';
+import { makeStagedImage } from '../testing/attachments';
 import { PlanUsageService } from './plan-usage.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
 import { createDeferred, type Deferred } from '../testing/deferred';
@@ -240,29 +241,19 @@ describe('ChatSessionStore', () => {
       expect((store as unknown as { _resumeDecider: unknown })._resumeDecider).toBeNull();
     });
 
-    it('revokes a staged attachment preview URL (SPEED-785)', async () => {
+    it('revokes a staged attachment preview URL and discards its unsent file (SPEED-785)', async () => {
+      const staged = makeStagedImage('a.png', { previewUrl: 'blob:store-dispose' });
       await store.composerAttachments.add(
         new File(['x'], 'a.png', { type: 'image/png' }),
         'image',
-        async () => ({
-          attachment: {
-            kind: 'image',
-            filename: 'a.png',
-            mediaType: 'image/png',
-            containerPath: '/workspace/.speedwave/pastes/a.png',
-            hostPath: '/tmp/a.png',
-          },
-          previewUrl: 'blob:store-dispose',
-          width: 1,
-          height: 1,
-          sizeBytes: 1,
-        })
+        async () => staged
       );
       const revokeSpy = vi.spyOn(URL, 'revokeObjectURL');
 
       store.dispose();
 
       expect(revokeSpy).toHaveBeenCalledWith('blob:store-dispose');
+      expect(staged.discard).toHaveBeenCalledOnce();
       expect(store.composerAttachments.records()).toHaveLength(0);
       revokeSpy.mockRestore();
     });
@@ -767,10 +758,8 @@ describe('ChatSessionStore', () => {
           {
             kind: 'file',
             filename: 'raport końcowy.xlsx',
-            mediaType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             sizeBytes: 734_003_200,
             containerPath: '/workspace/.speedwave/pastes/paste-1-0001-raport_końcowy.xlsx',
-            hostPath: '/Users/x/proj/.speedwave/pastes/paste-1-0001-raport_końcowy.xlsx',
           },
         ],
       });
@@ -803,7 +792,6 @@ describe('ChatSessionStore', () => {
             filename: 'paste-1.png',
             mediaType: 'image/png',
             containerPath: '/workspace/.speedwave/pastes/paste-1.png',
-            hostPath: '/Users/x/proj/.speedwave/pastes/paste-1.png',
           },
         ],
       });
@@ -836,7 +824,6 @@ describe('ChatSessionStore', () => {
             filename: 'paste-2.jpg',
             mediaType: 'image/jpeg',
             containerPath: '/workspace/.speedwave/pastes/paste-2.jpg',
-            hostPath: '/Users/x/proj/.speedwave/pastes/paste-2.jpg',
           },
         ],
       });

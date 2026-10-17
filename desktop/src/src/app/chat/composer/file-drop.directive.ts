@@ -1,5 +1,11 @@
 import { Directive, HostListener, input, output, signal } from '@angular/core';
 
+/** Files and directory names one drop or paste carries. */
+export interface DroppedItems {
+  files: File[];
+  folders: string[];
+}
+
 /** Drop-target. `dragDepth` counter fixes the child-boundary flicker. */
 @Directive({
   selector: '[appFileDrop]',
@@ -7,9 +13,8 @@ import { Directive, HostListener, input, output, signal } from '@angular/core';
 })
 export class FileDropDirective {
   readonly disabled = input<boolean>(false);
-  readonly filesDropped = output<File[]>();
-  /** Names of dropped directories, which the composer cannot attach. */
-  readonly foldersDropped = output<string[]>();
+  /** Everything one drop carried; directories by name, since the composer cannot attach them. */
+  readonly dropped = output<DroppedItems>();
   readonly isDragging = signal<boolean>(false);
 
   private dragDepth = 0;
@@ -56,7 +61,7 @@ export class FileDropDirective {
   }
 
   /**
-   * Emits `filesDropped` with the dropped files and `foldersDropped` with the dropped directories.
+   * Emits `dropped` once with the drop's files and directory names.
    * @param event - Native drop event.
    */
   @HostListener('drop', ['$event'])
@@ -65,12 +70,9 @@ export class FileDropDirective {
     event.preventDefault();
     this.dragDepth = 0;
     this.isDragging.set(false);
-    const { files, folders } = partitionDrop(event.dataTransfer);
-    if (files.length > 0) {
-      this.filesDropped.emit(files);
-    }
-    if (folders.length > 0) {
-      this.foldersDropped.emit(folders);
+    const items = partitionItems(event.dataTransfer?.items);
+    if (items.files.length > 0 || items.folders.length > 0) {
+      this.dropped.emit(items);
     }
   }
 }
@@ -84,23 +86,24 @@ function hasFiles(event: DragEvent): boolean {
   return false;
 }
 
-function partitionDrop(dataTransfer: DataTransfer | null): { files: File[]; folders: string[] } {
+/**
+ * Splits the items of a drop or a paste into files and directory names.
+ * @param items - `DataTransfer.items` of the event; absent when it carries none.
+ */
+export function partitionItems(items: DataTransferItemList | undefined): DroppedItems {
   const files: File[] = [];
   const folders: string[] = [];
-  const items = dataTransfer?.items;
-  if (!items) {
-    return { files: Array.from(dataTransfer?.files ?? []), folders };
-  }
+  if (!items) return { files, folders };
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
     if (item.kind !== 'file') continue;
-    const entry = typeof item.webkitGetAsEntry === 'function' ? item.webkitGetAsEntry() : null;
+    const entry = item.webkitGetAsEntry();
     const file = item.getAsFile();
     if (entry?.isDirectory) {
       folders.push(entry.name || file?.name || 'folder');
-      continue;
+    } else if (file) {
+      files.push(file);
     }
-    if (file) files.push(file);
   }
   return { files, folders };
 }

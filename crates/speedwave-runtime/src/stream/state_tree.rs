@@ -1,5 +1,5 @@
 //! Conversation state-tree shapes (ADR-042) mirrored by the Angular
-//! frontend (`models/state-tree.ts`, `models/chat.ts::MessageBlock`).
+//! frontend (`models/state-tree.ts`).
 
 use serde::{Deserialize, Serialize};
 
@@ -161,7 +161,7 @@ pub struct QueuedMessage {
 }
 
 /// One block inside a conversation entry — aggregated state after delta application, not the
-/// raw event. Tagged enum mirrored by `models/chat.ts::MessageBlock` (SSOT alignment).
+/// raw event. Tagged enum mirrored by `models/state-tree.ts::MessageBlockState` (SSOT alignment).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MessageBlock {

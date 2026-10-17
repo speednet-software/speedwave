@@ -1,5 +1,6 @@
 import { ChangeDetectionStrategy, Component, input, output } from '@angular/core';
 
+import type { AttachmentKind } from '../../models/chat';
 import { formatBytes } from '../../shared/format-bytes';
 import { IconComponent } from '../../shared/icon.component';
 import { SpinIconComponent } from '../../shared/spin-icon.component';
@@ -8,11 +9,11 @@ import { SpinIconComponent } from '../../shared/spin-icon.component';
 export interface AttachmentViewModel {
   id: string;
   filename: string;
-  kind: 'image' | 'file';
+  kind: AttachmentKind;
   /** Blob URL owned by the composer; empty for a file pill. */
   previewUrl: string;
-  encodedSizeBytes: number;
-  preprocessing: boolean;
+  sizeBytes: number;
+  staging: boolean;
 }
 
 /** Stateless pill row: thumbnails for images, name-and-size pills for other files; emits `remove(id)`. */
@@ -30,23 +31,23 @@ export interface AttachmentViewModel {
               <img
                 [src]="att.previewUrl"
                 [alt]="att.filename"
-                [title]="att.filename + ' (' + formatBytes(att.encodedSizeBytes) + ')'"
+                [title]="att.filename + ' (' + formatBytes(att.sizeBytes) + ')'"
                 class="h-14 w-14 rounded border border-[var(--line)] object-cover"
               />
             } @else {
               <div
                 data-testid="composer-attachment-file"
                 class="mono flex h-14 max-w-[14rem] items-center gap-1.5 rounded border border-[var(--line)] bg-[var(--bg-2)] px-2 text-[11px] text-[var(--ink-dim)]"
-                [title]="att.filename + ' (' + formatBytes(att.encodedSizeBytes) + ')'"
+                [title]="att.filename + ' (' + formatBytes(att.sizeBytes) + ')'"
               >
                 <app-icon name="document" class="h-4 w-4 text-[var(--ink-mute)]" />
                 <span class="min-w-0 truncate text-[var(--ink)]">{{ att.filename }}</span>
                 <span class="shrink-0 text-[var(--ink-mute)]">{{
-                  formatBytes(att.encodedSizeBytes)
+                  formatBytes(att.sizeBytes)
                 }}</span>
               </div>
             }
-            @if (att.preprocessing) {
+            @if (att.staging) {
               <div
                 class="absolute inset-0 flex items-center justify-center rounded bg-black/50"
                 role="status"

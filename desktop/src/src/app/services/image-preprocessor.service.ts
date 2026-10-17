@@ -1,7 +1,13 @@
 import { Injectable, inject } from '@angular/core';
 import pica, { type Pica } from 'pica';
 import { TauriService } from './tauri.service';
-import type { ImageAttachment, ImageMediaType } from '../models/chat';
+import { FileAttachmentService } from './file-attachment.service';
+import {
+  IMAGE_MEDIA_TYPES,
+  type ImageMediaType,
+  type SavedPaste,
+  type StagedAttachment,
+} from '../models/chat';
 
 export const MAX_IMAGE_BYTES = 3 * 1024 * 1024;
 
@@ -18,23 +24,13 @@ const JPEG_QUALITY = 0.92;
 
 /** Vision-capable Anthropic model family. */
 export type ModelClass = 'opus' | 'sonnet' | 'haiku';
-/** MIME of a supported image attachment. */
-export type SupportedMediaType = ImageMediaType;
-
-const ACCEPTED_TYPES: ReadonlyArray<string> = [
-  'image/jpeg',
-  'image/png',
-  'image/gif',
-  'image/webp',
-];
 
 /**
- * Whether a browser-reported MIME takes the image pipeline (resample + 3 MB cap); every other
- * type, image-flavoured or not, is streamed as a plain file.
+ * Whether a browser-reported MIME takes the image pipeline (ADR-065).
  * @param mediaType - `File.type` as the browser reports it.
  */
-export function isSupportedImageType(mediaType: string): mediaType is SupportedMediaType {
-  return ACCEPTED_TYPES.includes(mediaType);
+export function isSupportedImageType(mediaType: string): mediaType is ImageMediaType {
+  return (IMAGE_MEDIA_TYPES as ReadonlyArray<string>).includes(mediaType);
 }
 
 export const ERROR_TOO_LARGE =
@@ -43,20 +39,22 @@ export const ERROR_TOO_LARGE =
 export const ERROR_UNSUPPORTED_TYPE = 'Supported image formats: JPEG, PNG, GIF, WebP.';
 
 /** Result of preprocessing — saved to disk and ready to ship as `ImageAttachment`. */
-export interface PreprocessedImage {
-  attachment: ImageAttachment;
+export interface PreprocessedImage extends StagedAttachment<'image'> {
   /** Blob URL for thumbnail; the owning `ComposerAttachments` instance revokes it. */
   previewUrl: string;
   width: number;
   height: number;
-  sizeBytes: number;
 }
 
-/** Resamples paste/drop bytes via pica and persists them through `save_pasted_image`. */
+/**
+ * Persists paste/drop image bytes through `save_pasted_image`, resampled via pica when they exceed
+ * the model's native long edge or 2 MB; a GIF is saved as it is.
+ */
 @Injectable({ providedIn: 'root' })
 export class ImagePreprocessorService {
   private readonly pica: Pica = pica();
   private readonly tauri = inject(TauriService);
+  private readonly files = inject(FileAttachmentService);
 
   /**
    * Preprocess a user image and persist it to the project paste directory.
@@ -78,14 +76,14 @@ export class ImagePreprocessorService {
       if (file.size > MAX_IMAGE_BYTES) {
         throw new Error(ERROR_TOO_LARGE);
       }
-      return this.persist(file, mediaType, project, file.size, undefined);
+      return this.persist(file, file.name, mediaType, project, file.size, undefined);
     }
 
     const dims = await readImageDimensions(file);
     const longEdge = NATIVE_LONG_EDGE[modelClass];
     const withinNative = dims.width <= longEdge && dims.height <= longEdge;
     if (withinNative && file.size <= PASS_THROUGH_BYTES) {
-      return this.persist(file, mediaType, project, file.size, dims);
+      return this.persist(file, file.name, mediaType, project, file.size, dims);
     }
 
     const targetLongEdge = Math.min(longEdge, MAX_DIMENSION);
@@ -96,13 +94,14 @@ export class ImagePreprocessorService {
     if (blob.size > MAX_IMAGE_BYTES) {
       throw new Error(ERROR_TOO_LARGE);
     }
-    const outMime: SupportedMediaType = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
-    return this.persist(blob, outMime, project, blob.size, undefined);
+    const outMime: ImageMediaType = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
+    return this.persist(blob, file.name, outMime, project, blob.size, undefined);
   }
 
   private async persist(
     source: Blob,
-    mediaType: SupportedMediaType,
+    name: string,
+    mediaType: ImageMediaType,
     project: string,
     sizeBytes: number,
     knownDims: { width: number; height: number } | undefined
@@ -110,11 +109,7 @@ export class ImagePreprocessorService {
     const dims =
       knownDims ?? (await readImageDimensions(source).catch(() => ({ width: 0, height: 0 })));
     const bytes = new Uint8Array(await source.arrayBuffer());
-    const saved = await this.tauri.invoke<{
-      container_path: string;
-      host_path: string;
-      filename: string;
-    }>('save_pasted_image', {
+    const saved = await this.tauri.invoke<SavedPaste>('save_pasted_image', {
       project,
       mediaType,
       bytes: Array.from(bytes),
@@ -123,15 +118,15 @@ export class ImagePreprocessorService {
     return {
       attachment: {
         kind: 'image',
-        filename: saved.filename,
+        filename: name || saved.filename,
         mediaType,
         containerPath: saved.container_path,
-        hostPath: saved.host_path,
       },
       previewUrl,
       width: dims.width,
       height: dims.height,
       sizeBytes,
+      discard: () => this.files.discard(saved.paste_id),
     };
   }
 
@@ -160,7 +155,7 @@ export class ImagePreprocessorService {
       dstCanvas.height = targetH;
       await this.pica.resize(srcCanvas, dstCanvas);
 
-      const outMime: SupportedMediaType = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
+      const outMime: ImageMediaType = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
       const blob: Blob | null = await this.pica.toBlob(
         dstCanvas,
         outMime,

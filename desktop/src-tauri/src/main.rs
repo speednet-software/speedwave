@@ -1192,7 +1192,7 @@ fn main() {
             paste_cmd::begin_paste_upload,
             paste_cmd::append_paste_upload,
             paste_cmd::finish_paste_upload,
-            paste_cmd::abort_paste_upload,
+            paste_cmd::discard_paste,
             chat_session_cmd::submit_question_answer,
             chat_session_cmd::stop_chat,
             chat_session_cmd::close_chat_tab,

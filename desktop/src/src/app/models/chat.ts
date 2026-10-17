@@ -306,32 +306,52 @@ export interface WireTextBlock {
 /** One content block crossing the wire to Claude. */
 export type WireContentBlock = WireTextBlock;
 
-/** MIME of an image the composer resamples before saving (ADR-065). */
-export type ImageMediaType = 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
+/** MIME types that take the image pipeline (ADR-065); every other file is streamed (ADR-094). */
+export const IMAGE_MEDIA_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'] as const;
 
-/** Image attachment persisted to `<project>/.speedwave/pastes/` after resampling. */
+/** MIME of an image attachment. */
+export type ImageMediaType = (typeof IMAGE_MEDIA_TYPES)[number];
+
+/** Image attachment persisted to `<project>/.speedwave/pastes/` by the image pipeline (ADR-065). */
 export interface ImageAttachment {
   kind: 'image';
+  /** Name as the user attached it; the on-disk name is generated. */
   filename: string;
   mediaType: ImageMediaType;
   containerPath: string;
-  hostPath: string;
 }
 
 /** Any other file, streamed to `<project>/.speedwave/pastes/` in chunks (ADR-094). */
 export interface FileAttachment {
   kind: 'file';
-  /** Original name as the user attached it; the on-disk name is generated. */
+  /** Name as the user attached it; the on-disk name is generated. */
   filename: string;
-  /** Browser-reported MIME, empty when unknown. */
-  mediaType: string;
   sizeBytes: number;
   containerPath: string;
-  hostPath: string;
 }
 
 /** One attachment the composer ships with a message, referenced on the wire by path. */
 export type ChatAttachment = ImageAttachment | FileAttachment;
+
+/** Which staging pipeline an attachment took and which pill it renders as. */
+export type AttachmentKind = ChatAttachment['kind'];
+
+/** An attachment written to the project paste directory, ready to ship with a submit. */
+export interface StagedAttachment<K extends AttachmentKind = AttachmentKind> {
+  attachment: ChatAttachment & { kind: K };
+  /** Blob URL of a thumbnail; the owning `ComposerAttachments` revokes it. */
+  previewUrl?: string;
+  sizeBytes: number;
+  /** Deletes the written file; called when the attachment is dropped before it is sent. */
+  discard: () => void;
+}
+
+/** What `save_pasted_image` and `finish_paste_upload` return (`paste_cmd.rs::SavedPaste`). */
+export interface SavedPaste {
+  paste_id: number;
+  container_path: string;
+  filename: string;
+}
 
 /** Composer-collected user input bundled with attachments. */
 export interface ChatInput {
