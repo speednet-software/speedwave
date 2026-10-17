@@ -186,7 +186,54 @@ describe('ChatMessageListComponent', () => {
     expect(container.scrollTop).toBe(1400);
   });
 
-  it('re-arms auto-scroll on a new message even after the user scrolled up', () => {
+  it.each<[string, ChatMessage]>([
+    [
+      'the streamed reply',
+      { role: 'assistant', blocks: [{ type: 'text', content: 'partial, finished' }], timestamp: 2 },
+    ],
+    [
+      'an error entry',
+      {
+        role: 'assistant',
+        blocks: [{ type: 'error', content: 'Error: rate limit' }],
+        timestamp: 2,
+      },
+    ],
+    [
+      'a drained queued message',
+      { role: 'user', blocks: [{ type: 'text', content: 'queued earlier' }], timestamp: 2 },
+    ],
+  ])('keeps the reader in place when %s lands after they scrolled up', (_label, landed) => {
+    const first: ChatMessage = {
+      role: 'user',
+      blocks: [{ type: 'text', content: 'first' }],
+      timestamp: 1,
+    };
+    fixture.componentRef.setInput('messages', [first]);
+    fixture.componentRef.setInput('currentBlocks', [{ type: 'text', content: 'partial' }]);
+    fixture.componentRef.setInput('isStreaming', true);
+    fakeOnChanges();
+    fixture.detectChanges();
+
+    const container = fixture.nativeElement.querySelector(
+      '[data-testid="chat-message-list"]'
+    ) as HTMLDivElement;
+    Object.defineProperty(container, 'scrollHeight', { configurable: true, value: 1000 });
+    Object.defineProperty(container, 'clientHeight', { configurable: true, value: 400 });
+    container.scrollTop = 100;
+    container.dispatchEvent(new Event('scroll'));
+
+    fixture.componentRef.setInput('messages', [first, landed]);
+    fixture.componentRef.setInput('currentBlocks', []);
+    fixture.componentRef.setInput('isStreaming', false);
+    fakeOnChanges();
+    Object.defineProperty(container, 'scrollHeight', { configurable: true, value: 1400 });
+    fixture.detectChanges();
+
+    expect(container.scrollTop).toBe(100);
+  });
+
+  it('re-arms auto-scroll on an auto-scroll request even after the user scrolled up', () => {
     fixture.componentRef.setInput('messages', [
       { role: 'user', blocks: [{ type: 'text', content: 'first' }], timestamp: 1 },
     ]);
@@ -203,13 +250,55 @@ describe('ChatMessageListComponent', () => {
 
     fixture.componentRef.setInput('messages', [
       ...component.messages(),
-      { role: 'assistant', blocks: [{ type: 'text', content: 'second' }], timestamp: 2 },
+      { role: 'user', blocks: [{ type: 'text', content: 'second' }], timestamp: 2 },
     ]);
+    fixture.componentRef.setInput('autoScrollRequest', 1);
     fakeOnChanges();
     Object.defineProperty(container, 'scrollHeight', { configurable: true, value: 1400 });
     fixture.detectChanges();
 
     expect(container.scrollTop).toBe(1400);
+  });
+
+  it('does not take the request counter a tab switch brings along as a new request', () => {
+    fixture.componentRef.setInput('conversationKey', 't1');
+    fixture.componentRef.setInput('autoScrollRequest', 3);
+    fixture.componentRef.setInput('messages', [
+      { role: 'user', blocks: [{ type: 'text', content: 'first' }], timestamp: 1 },
+    ]);
+    fakeOnChanges();
+    fixture.detectChanges();
+
+    const container = fixture.nativeElement.querySelector(
+      '[data-testid="chat-message-list"]'
+    ) as HTMLDivElement;
+    Object.defineProperty(container, 'scrollHeight', { configurable: true, value: 1000 });
+    Object.defineProperty(container, 'clientHeight', { configurable: true, value: 400 });
+    container.scrollTop = 600;
+    container.dispatchEvent(new Event('scroll'));
+
+    fixture.componentRef.setInput('conversationKey', 't2');
+    fixture.componentRef.setInput('autoScrollRequest', 7);
+    fixture.componentRef.setInput('messages', [
+      { role: 'user', blocks: [{ type: 'text', content: 'a' }], timestamp: 1 },
+      { role: 'assistant', blocks: [{ type: 'text', content: 'b' }], timestamp: 2 },
+    ]);
+    fakeOnChanges();
+    container.scrollTop = 100;
+    fixture.detectChanges();
+
+    fixture.componentRef.setInput('currentBlocks', [{ type: 'text', content: 'delta' }]);
+    fixture.componentRef.setInput('isStreaming', true);
+    fakeOnChanges();
+    fixture.detectChanges();
+
+    expect(container.scrollTop).toBe(100);
+
+    fixture.componentRef.setInput('autoScrollRequest', 8);
+    fakeOnChanges();
+    fixture.detectChanges();
+
+    expect(container.scrollTop).toBe(1000);
   });
 
   it('suppresses the pin on a conversation key change and re-derives from a mid-scroll restored viewport', () => {
