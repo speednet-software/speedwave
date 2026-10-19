@@ -49,7 +49,7 @@ _init_repo() {
   out="$BATS_TEST_TMPDIR/changed.json"
   run bash -c "cd '$FIXTURE' && '$SCRIPT' '$BASE' '$HEAD_SHA' '$out'"
   [ "$status" -eq 0 ]
-  touched="$(python3 "$REPO_ROOT/scripts/audit-gate.py" lockfiles-touched --changed "$out")"
+  touched="$(python3 "$REPO_ROOT/scripts/audit-gate.py" lockfiles-touched --changed "$out" $("$REPO_ROOT/scripts/audit-run.sh" --list | cut -d" " -f3))"
   [ "$touched" = "false" ]
 }
 
@@ -68,7 +68,7 @@ _init_repo() {
   out="$BATS_TEST_TMPDIR/changed.json"
   run bash -c "cd '$FIXTURE' && '$SCRIPT' '$BASE' '$HEAD_SHA' '$out'"
   [ "$status" -eq 0 ]
-  touched="$(python3 "$REPO_ROOT/scripts/audit-gate.py" lockfiles-touched --changed "$out")"
+  touched="$(python3 "$REPO_ROOT/scripts/audit-gate.py" lockfiles-touched --changed "$out" $("$REPO_ROOT/scripts/audit-run.sh" --list | cut -d" " -f3))"
   [ "$touched" = "true" ]
 }
 
