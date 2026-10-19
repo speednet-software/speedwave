@@ -148,8 +148,6 @@ pub struct TranscriptSummary {
     pub finalize_model: Option<String>,
     /// `true` while the offline pass waits for another recording's pass to finish.
     pub queued: bool,
-    /// Seconds speaker diarization took in the pass that made the transcript, if it ran.
-    pub diarization_secs: Option<f64>,
 }
 
 impl TranscriptSession {
@@ -254,7 +252,6 @@ impl TranscriptSession {
             size_bytes,
             finalize_model: self.models_used.finalize.clone(),
             queued: false,
-            diarization_secs: self.diarization_secs,
         }
     }
 
@@ -608,7 +605,6 @@ mod tests {
             Some("nemotron-3-diarization-q8_0")
         );
         assert_eq!(loaded.diarization_secs, Some(41.5));
-        assert_eq!(loaded.summary(dir.path()).diarization_secs, Some(41.5));
     }
 
     #[test]

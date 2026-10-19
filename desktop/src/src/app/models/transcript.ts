@@ -117,8 +117,6 @@ export interface TranscriptSummary {
   finalize_model: string | null;
   /** True while the offline pass waits for another recording's pass to finish. */
   queued: boolean;
-  /** Seconds speaker diarization took in the pass that made the transcript; null if none. */
-  diarization_secs: number | null;
 }
 
 /** Non-fatal capture-health warnings — mirrors Rust `CaptureWarning`. */

@@ -12,7 +12,6 @@ import {
 import { TauriService } from '../../services/tauri.service';
 import { TranscriptionService } from '../../services/transcription.service';
 import type {
-  GpuClass,
   MicPermissionStatus,
   RecommendedModelAck,
   RecommendedModelEntry,
@@ -29,37 +28,15 @@ interface ModelRow {
   idSuffix: string;
 }
 
-/** What telling speakers apart costs on a Mac, measured on Apple silicon (ADR-094). */
-const SPEAKER_HARDWARE_TEXT_MACOS = {
-  text: "Uses the Mac's graphics chip: adds under a minute per hour of recording.",
-  warn: false,
-};
-
-/** What telling speakers apart costs on Windows, by GPU class; not measured there yet (ADR-094). */
-const SPEAKER_HARDWARE_TEXT: Record<GpuClass, { text: string; warn: boolean }> = {
-  discrete: {
-    text: 'Uses your graphics chip: adds some time after each recording.',
-    warn: false,
-  },
-  integrated: {
-    text: 'Uses your integrated graphics: adds some time after each recording.',
-    warn: false,
-  },
-  none: {
-    text:
-      'This computer has no graphics acceleration. Telling speakers apart runs on the processor ' +
-      'and adds time and battery use after each recording.',
+/** What telling speakers apart costs: measured on Apple silicon, not measured on Windows (ADR-094). */
+const SPEAKER_COST_TEXT = {
+  macos: { text: 'Adds under a minute per hour of recording.', warn: false },
+  windowsGpu: { text: 'Adds some time after each recording.', warn: false },
+  windowsCpu: {
+    text: 'No graphics acceleration here: runs on the processor and takes longer after each recording.',
     warn: true,
   },
 };
-
-/**
- * A duration in whole minutes, or seconds under a minute.
- * @param secs - the duration in seconds.
- */
-function roughDuration(secs: number): string {
-  return secs < 60 ? `${Math.max(1, Math.round(secs))} s` : `${Math.round(secs / 60)} min`;
-}
 
 /**
  * Settings → Meeting transcription (ADR-056), written for someone who does not know what a model
@@ -173,9 +150,8 @@ function roughDuration(secs: number): string {
               Tell speakers apart in the meeting audio
             </div>
             <div class="text-[11px] leading-relaxed text-[var(--ink-mute)]">
-              Labels who said what in the meeting audio (Speaker 1, Speaker 2, …) so the transcript
-              and Claude's summary don't have to guess. Your microphone stays labelled You. Runs on
-              this computer after you stop.
+              Labels the people in the meeting audio as Speaker 1, Speaker 2, … Your microphone
+              stays "You". Runs on this computer.
             </div>
           </div>
           <app-toggle
@@ -185,18 +161,13 @@ function roughDuration(secs: number): string {
             (changed)="onSpeakerToggle($event)"
           />
         </div>
-        @if (speakerHardware(); as hw) {
+        @if (speakerCost(); as cost) {
           <p
             class="mt-2 text-[11px] leading-relaxed"
-            [class]="hw.warn ? 'text-amber-300' : 'text-[var(--ink-mute)]'"
+            [class]="cost.warn ? 'text-amber-300' : 'text-[var(--ink-mute)]'"
             data-testid="speaker-hardware"
           >
-            {{ hw.text }}
-          </p>
-        }
-        @if (lastDiarization(); as last) {
-          <p class="mt-1 text-[11px] text-[var(--ink-mute)]" data-testid="speaker-last-run">
-            {{ last }}
+            {{ cost.text }}
           </p>
         }
         @if (speakerAttribution() && diarizationModel(); as dm) {
@@ -215,44 +186,20 @@ function roughDuration(secs: number): string {
             </div>
           }
         }
-        <details class="mt-2" data-testid="speaker-what-to-expect">
+        <details class="mt-2" data-testid="speaker-limits">
           <summary class="cursor-pointer select-none text-[11.5px] text-[var(--ink-dim)]">
-            What to expect
+            Limits
           </summary>
-          <div
-            class="mt-2 grid gap-3 text-[11px] leading-relaxed text-[var(--ink-mute)] sm:grid-cols-2"
+          <ul
+            class="mt-2 list-disc space-y-1 pl-4 text-[11px] leading-relaxed text-[var(--ink-mute)]"
           >
-            <div>
-              <div class="mono mb-1 uppercase tracking-wider text-[var(--ink-dim)]">Better</div>
-              <ul class="list-disc space-y-1 pl-4">
-                <li>
-                  Summaries and action items can say who said what instead of guessing it from the
-                  text alone.
-                </li>
-                <li>Works offline, on this computer. Needs no names, accounts or voice samples.</li>
-                <li>
-                  The exported transcript and the transcript sent to Claude carry the same labels.
-                </li>
-              </ul>
-            </div>
-            <div>
-              <div class="mono mb-1 uppercase tracking-wider text-[var(--ink-dim)]">Limits</div>
-              <ul class="list-disc space-y-1 pl-4">
-                <li>Labels are numbers (Speaker 1, Speaker 2), not names.</li>
-                <li>One person can get two labels, and one label can cover two people.</li>
-                <li>Up to 8 people in the meeting audio. Larger meetings get merged labels.</li>
-                <li>
-                  People talking over each other and very short replies ("yes", "okay") can get the
-                  wrong label.
-                </li>
-                <li>Transcribing the recording again can number the speakers differently.</li>
-                <li>
-                  People in the room with you, picked up by your microphone, are all labelled You.
-                </li>
-                <li data-testid="speaker-extra-cost">{{ speakerExtraCost() }}</li>
-              </ul>
-            </div>
-          </div>
+            <li>
+              One person can get two labels and one label can cover two people, most often when
+              people talk over each other.
+            </li>
+            <li>Up to 8 people. Transcribing again can number them differently.</li>
+            <li>People in the room with you are picked up by your microphone and labelled You.</li>
+          </ul>
         </details>
       </div>
 
@@ -429,19 +376,12 @@ export class TranscriptionSectionComponent implements OnInit {
   /** The speaker-diarization model; `null` while loading. */
   readonly diarizationModel = computed(() => this.model()?.diarization ?? null);
 
-  /** The time and download the mode adds, for the Limits list. */
-  readonly speakerExtraCost = computed(() => {
-    const dm = this.diarizationModel();
-    return dm
-      ? `Takes extra time after each recording and one extra download (${this.size(dm)}).`
-      : 'Takes extra time after each recording.';
-  });
-
   /** What telling speakers apart costs on this computer; `null` while loading. */
-  readonly speakerHardware = computed(() => {
+  readonly speakerCost = computed(() => {
     const m = this.model();
     if (!m) return null;
-    return this.isMacos() ? SPEAKER_HARDWARE_TEXT_MACOS : SPEAKER_HARDWARE_TEXT[m.gpu_class];
+    if (this.isMacos()) return SPEAKER_COST_TEXT.macos;
+    return m.gpu_class === 'none' ? SPEAKER_COST_TEXT.windowsCpu : SPEAKER_COST_TEXT.windowsGpu;
   });
   /** Local error string. */
   readonly error = signal('');
@@ -486,17 +426,6 @@ export class TranscriptionSectionComponent implements OnInit {
   /** Whether the offline pass tells meeting speakers apart (off unless the user turned it on). */
   readonly speakerAttribution = signal(this.transcription.speakerAttribution());
 
-  /**
-   * How long telling speakers apart took for the newest recording that had it, from the
-   * recordings list the service already holds; `null` when none is known.
-   */
-  readonly lastDiarization = computed(() => {
-    const rows = this.transcription.recordings().filter((r) => r.diarization_secs != null);
-    if (rows.length === 0) return null;
-    const newest = rows.reduce((best, r) => (r.created_at > best.created_at ? r : best));
-    const took = roughDuration(newest.diarization_secs ?? 0);
-    return `Last recording: speakers took ${took} for ${roughDuration(newest.duration_secs)} of audio.`;
-  });
   private readonly tauri = inject(TauriService);
   private readonly cdr = inject(ChangeDetectorRef);
 

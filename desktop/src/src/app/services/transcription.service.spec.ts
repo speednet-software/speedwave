@@ -653,7 +653,6 @@ describe('TranscriptionService', () => {
         size_bytes: 1,
         finalize_model: null,
         queued: false,
-        diarization_secs: null,
         ...overrides,
       };
     }
@@ -919,7 +918,6 @@ describe('TranscriptionService', () => {
         size_bytes: 1000,
         finalize_model: null,
         queued: false,
-        diarization_secs: null,
         ...overrides,
       };
     }

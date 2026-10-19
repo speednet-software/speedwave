@@ -10,7 +10,6 @@ import type {
   MicPermissionStatus,
   RecommendedModelAck,
   RecommendedModelEntry,
-  TranscriptSummary,
 } from '../../models/transcript';
 
 describe('TranscriptionSectionComponent', () => {
@@ -18,7 +17,6 @@ describe('TranscriptionSectionComponent', () => {
   let fixture: ComponentFixture<TranscriptionSectionComponent>;
   let downloadingModelKey: ReturnType<typeof signal<string | null>>;
   let downloadProgress: ReturnType<typeof signal<DownloadProgress | null>>;
-  let recordings: ReturnType<typeof signal<TranscriptSummary[]>>;
   let svc: {
     recommendedModel: ReturnType<typeof vi.fn>;
     downloadModel: ReturnType<typeof vi.fn>;
@@ -36,7 +34,6 @@ describe('TranscriptionSectionComponent', () => {
     refreshRecordings: ReturnType<typeof vi.fn>;
     speakerAttribution: ReturnType<typeof vi.fn>;
     setSpeakerAttribution: ReturnType<typeof vi.fn>;
-    recordings: typeof recordings;
   };
   let platform: string;
 
@@ -69,7 +66,6 @@ describe('TranscriptionSectionComponent', () => {
   beforeEach(async () => {
     downloadingModelKey = signal<string | null>(null);
     downloadProgress = signal<DownloadProgress | null>(null);
-    recordings = signal<TranscriptSummary[]>([]);
     platform = 'macos';
     svc = {
       recommendedModel: vi.fn(async () => notDownloaded),
@@ -88,7 +84,6 @@ describe('TranscriptionSectionComponent', () => {
       refreshRecordings: vi.fn(async () => undefined),
       speakerAttribution: vi.fn(() => false),
       setSpeakerAttribution: vi.fn(),
-      recordings,
     };
     await TestBed.configureTestingModule({
       imports: [TranscriptionSectionComponent],
@@ -548,30 +543,13 @@ describe('TranscriptionSectionComponent', () => {
       diarization: { ...diarizationEntry, ...entry },
       gpu_class,
     });
-    const row = (overrides: Partial<TranscriptSummary>): TranscriptSummary => ({
-      id: 'r',
-      created_at: '2026-10-19T08:00:00Z',
-      title: null,
-      language: 'pl',
-      source_label: 'System',
-      status: { state: 'done' },
-      duration_secs: 47 * 60,
-      segment_count: 3,
-      preview: null,
-      size_bytes: 1,
-      finalize_model: 'large-v3',
-      queued: false,
-      diarization_secs: null,
-      ...overrides,
-    });
-
     it('sits under While recording, off by default, and saves the choice', async () => {
       await component.ngOnInit();
       fixture.detectChanges();
       const card = q('speaker-attribution');
       expect(card?.textContent).toContain('After you stop');
       expect(card?.textContent).toContain('Tell speakers apart in the meeting audio');
-      expect(card?.textContent).toContain('Your microphone stays labelled You');
+      expect(card?.textContent).toContain('Your microphone stays "You"');
       expect(component.speakerAttribution()).toBe(false);
       const input = toggle();
       input.checked = true;
@@ -653,21 +631,17 @@ describe('TranscriptionSectionComponent', () => {
         await component.ngOnInit();
         fixture.detectChanges();
         const hw = q('speaker-hardware');
-        expect(hw?.textContent).toContain('adds under a minute per hour of recording');
+        expect(hw?.textContent?.trim()).toBe('Adds under a minute per hour of recording.');
         expect(hw?.className.includes('text-amber-300')).toBe(false);
       }
     });
 
-    it('says what it costs on each Windows GPU class without a number, warning only without acceleration', async () => {
+    it('gives no number on Windows and warns only without graphics acceleration', async () => {
       platform = 'windows';
       const cases: [RecommendedModelAck['gpu_class'], string, boolean][] = [
-        ['discrete', 'Uses your graphics chip: adds some time after each recording.', false],
-        [
-          'integrated',
-          'Uses your integrated graphics: adds some time after each recording.',
-          false,
-        ],
-        ['none', 'no graphics acceleration', true],
+        ['discrete', 'Adds some time after each recording.', false],
+        ['integrated', 'Adds some time after each recording.', false],
+        ['none', 'No graphics acceleration here', true],
       ];
       for (const [gpu, text, warn] of cases) {
         svc.recommendedModel.mockResolvedValue(withDiarization({}, gpu));
@@ -680,36 +654,23 @@ describe('TranscriptionSectionComponent', () => {
       }
     });
 
-    it('shows the measured time of the newest diarized recording, and nothing without one', async () => {
+    it('keeps the card to the switch, one cost line and three collapsed limits', async () => {
       await component.ngOnInit();
       fixture.detectChanges();
-      expect(q('speaker-last-run')).toBeNull();
-      recordings.set([
-        row({ id: 'old', created_at: '2026-10-01T08:00:00Z', diarization_secs: 600 }),
-        row({ id: 'new', diarization_secs: 125 }),
-        row({ id: 'plain', created_at: '2026-10-20T08:00:00Z' }),
-      ]);
-      fixture.detectChanges();
-      expect(q('speaker-last-run')?.textContent).toContain(
-        'Last recording: speakers took 2 min for 47 min of audio.'
-      );
-    });
-
-    it('lists the gains and the limits under What to expect, collapsed', async () => {
-      await component.ngOnInit();
-      fixture.detectChanges();
-      const details = q('speaker-what-to-expect') as HTMLDetailsElement;
+      const card = q('speaker-attribution');
+      expect(card?.textContent).not.toContain('Claude');
+      expect(card?.textContent).not.toContain('Better');
+      expect(card?.querySelectorAll('p').length).toBe(1);
+      const details = q('speaker-limits') as HTMLDetailsElement;
       expect(details.open).toBe(false);
-      expect(details.textContent).toContain('can say who said what');
-      expect(details.textContent).not.toContain('attributed to the right person');
-      expect(details.textContent).toContain(
-        'One person can get two labels, and one label can cover two people.'
+      const items = Array.from(details.querySelectorAll('li')).map((li) =>
+        li.textContent?.replace(/\s+/g, ' ').trim()
       );
-      expect(details.textContent).toContain('Up to 8 people in the meeting audio');
-      expect(details.textContent).toContain('can number the speakers differently');
-      expect(q('speaker-extra-cost')?.textContent).toContain(
-        'Takes extra time after each recording and one extra download (102.1 MB).'
-      );
+      expect(items).toEqual([
+        'One person can get two labels and one label can cover two people, most often when people talk over each other.',
+        'Up to 8 people. Transcribing again can number them differently.',
+        'People in the room with you are picked up by your microphone and labelled You.',
+      ]);
     });
   });
 
