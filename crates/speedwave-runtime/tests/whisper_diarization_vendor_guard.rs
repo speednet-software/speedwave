@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 const VENDOR_DIR: &str = "native/whisper-diarization";
 const GGML_HEADERS: [&str; 4] = ["ggml.h", "ggml-alloc.h", "ggml-backend.h", "gguf.h"];
-const V3_OFFLINE_GEOMETRY: [(&str, i64); 6] = [
+const OFFLINE_GEOMETRY: [(&str, i64); 6] = [
     ("spkcache_len", 264),
     ("fifo_len", 0),
     ("chunk_len", 264),
@@ -180,10 +180,10 @@ fn the_vendored_code_never_writes_to_stderr() {
 }
 
 #[test]
-fn the_cache_geometry_is_the_nemo_speech_v3_offline_preset() {
+fn the_cache_geometry_is_the_offline_one_upstream_lists() {
     let params = cache_params(&read_vendor_file("whisper-diarization.cpp"))
         .expect("whisper-diarization.cpp defines whisper_diar_cache_params");
-    let expected: Vec<_> = V3_OFFLINE_GEOMETRY
+    let expected: Vec<_> = OFFLINE_GEOMETRY
         .iter()
         .map(|(name, value)| ((*name).to_owned(), *value))
         .collect();
@@ -191,7 +191,7 @@ fn the_cache_geometry_is_the_nemo_speech_v3_offline_preset() {
         params, expected,
         "the cache geometry is local change 6 in {VENDOR_DIR}/UPSTREAM; update both together"
     );
-    assert!(read_vendor_file("UPSTREAM").contains("v3-offline"));
+    assert!(read_vendor_file("UPSTREAM").contains("\n  6. "));
 }
 
 #[test]

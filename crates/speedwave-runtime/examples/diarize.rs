@@ -1,5 +1,5 @@
-//! Development tool for the SPEED-727 comparisons: the `diarize` example of whisper.cpp PR #4095
-//! over `NemotronDiarizer`, with an optional threshold grid and a dump of the probabilities.
+//! Development tool: runs `NemotronDiarizer` on a 16 kHz WAV and prints one line per speaker turn,
+//! optionally for a grid of activation thresholds, with a dump of the model's probabilities.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -218,7 +218,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_the_round_3_command_line() {
+    fn parses_the_full_command_line_and_its_defaults() {
         assert_eq!(
             args(&["-m", "m.gguf", "-t", "6", "--gpu", "a.wav"]).unwrap(),
             Args {
@@ -296,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn writes_turns_in_the_pr_example_format() {
+    fn writes_one_line_per_turn_with_centiseconds() {
         let mut out = Vec::new();
         write_turns(
             &mut out,
