@@ -29,10 +29,16 @@ interface ModelRow {
   idSuffix: string;
 }
 
-/** What telling speakers apart costs on this computer, by GPU class (plan §7.4, ADR-094). */
+/** What telling speakers apart costs on a Mac, measured on Apple silicon (ADR-094). */
+const SPEAKER_HARDWARE_TEXT_MACOS = {
+  text: "Uses the Mac's graphics chip: adds under a minute per hour of recording.",
+  warn: false,
+};
+
+/** What telling speakers apart costs on Windows, by GPU class; not measured there yet (ADR-094). */
 const SPEAKER_HARDWARE_TEXT: Record<GpuClass, { text: string; warn: boolean }> = {
   discrete: {
-    text: 'Uses your graphics chip: adds about a minute or two per hour of recording.',
+    text: 'Uses your graphics chip: adds some time after each recording.',
     warn: false,
   },
   integrated: {
@@ -41,8 +47,8 @@ const SPEAKER_HARDWARE_TEXT: Record<GpuClass, { text: string; warn: boolean }> =
   },
   none: {
     text:
-      'This computer has no graphics acceleration. Telling speakers apart adds time and battery ' +
-      'use after each recording, roughly a quarter on top of the transcript itself.',
+      'This computer has no graphics acceleration. Telling speakers apart runs on the processor ' +
+      'and adds time and battery use after each recording.',
     warn: true,
   },
 };
@@ -220,8 +226,8 @@ function roughDuration(secs: number): string {
               <div class="mono mb-1 uppercase tracking-wider text-[var(--ink-dim)]">Better</div>
               <ul class="list-disc space-y-1 pl-4">
                 <li>
-                  Summaries and action items are attributed to the right person instead of being
-                  guessed from the text.
+                  Summaries and action items can say who said what instead of guessing it from the
+                  text alone.
                 </li>
                 <li>Works offline, on this computer. Needs no names, accounts or voice samples.</li>
                 <li>
@@ -233,6 +239,7 @@ function roughDuration(secs: number): string {
               <div class="mono mb-1 uppercase tracking-wider text-[var(--ink-dim)]">Limits</div>
               <ul class="list-disc space-y-1 pl-4">
                 <li>Labels are numbers (Speaker 1, Speaker 2), not names.</li>
+                <li>One person can get two labels, and one label can cover two people.</li>
                 <li>Up to 8 people in the meeting audio. Larger meetings get merged labels.</li>
                 <li>
                   People talking over each other and very short replies ("yes", "okay") can get the
@@ -433,7 +440,8 @@ export class TranscriptionSectionComponent implements OnInit {
   /** What telling speakers apart costs on this computer; `null` while loading. */
   readonly speakerHardware = computed(() => {
     const m = this.model();
-    return m ? SPEAKER_HARDWARE_TEXT[m.gpu_class] : null;
+    if (!m) return null;
+    return this.isMacos() ? SPEAKER_HARDWARE_TEXT_MACOS : SPEAKER_HARDWARE_TEXT[m.gpu_class];
   });
   /** Local error string. */
   readonly error = signal('');

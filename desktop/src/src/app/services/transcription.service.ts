@@ -77,11 +77,18 @@ const TRANSCRIPT_PROMPT_DEFAULTS: Record<Language, string> = {
 /** Prompt sentence added for a transcript whose meeting speakers were told apart (ADR-094). */
 const SPEAKER_LABELS_PROMPT: Record<Language, string> = {
   pl:
-    " Etykiety 'Speaker N' pochodzą z analizy dźwięku i oznaczają różne osoby, ale nie ich " +
-    'tożsamość; nie przypisuj imion bez podstaw w treści.',
+    " Etykiety 'Speaker N' pochodzą z analizy dźwięku i są przybliżone: jedna osoba może " +
+    'dostać kilka etykiet, a jedna etykieta może objąć kilka osób. ' +
+    "Linia 'Meeting' bez numeru to wypowiedź bez rozpoznanego mówcy. " +
+    'Tożsamość ustalaj z treści (imiona, zwroty do osób, odpowiedzi na pytania), ' +
+    'nie przypisuj imion bez podstaw w treści i zaznacz, gdzie przypisanie jest niepewne.',
   en:
-    " 'Speaker N' labels come from the audio and mark different people, not who they are; " +
-    'do not assign names without evidence in the text.',
+    " 'Speaker N' labels come from the audio and are approximate: one person can get more " +
+    'than one label, and one label can cover more than one person. ' +
+    "A 'Meeting' line without a number is speech with no recognised speaker. " +
+    'Work out who is who from the content (names, people being addressed, answers to ' +
+    'questions), do not assign names without evidence in the text, and flag uncertain ' +
+    'attributions.',
 };
 
 /**

@@ -1140,6 +1140,44 @@ describe('TranscriptionService', () => {
       }
     });
 
+    it('tells the model the speaker labels can split or merge people, in both languages', async () => {
+      const expected = {
+        pl: [
+          'są przybliżone',
+          'kilka etykiet',
+          'kilka osób',
+          "Linia 'Meeting' bez numeru",
+          'niepewne',
+        ],
+        en: [
+          'are approximate',
+          'more than one label',
+          'more than one person',
+          "A 'Meeting' line",
+          'uncertain',
+        ],
+      } as const;
+      for (const language of ['pl', 'en'] as const) {
+        mockTauri.invokeHandler = async (cmd: string) => {
+          if (cmd === 'get_transcript') {
+            return snapshot({
+              language,
+              models_used: { live: null, finalize: 'large-v3', diarization: 'nemotron' },
+            });
+          }
+          if (cmd === 'get_transcript_markdown') return '# Meeting transcript';
+          return undefined;
+        };
+        await svc.stageForChat('sess-1');
+        for (const phrase of expected[language]) {
+          expect(svc.chatPromptDraft()).toContain(phrase);
+        }
+        expect(svc.chatPromptDraft()).not.toContain(
+          language === 'pl' ? 'oznaczają różne osoby' : 'mark different people'
+        );
+      }
+    });
+
     it('says the transcript is attached, not "below", in both languages', async () => {
       await svc.stageForChat('sess-1');
       expect(svc.chatPromptDraft()).toMatch(/^Attached is a meeting transcript\./);

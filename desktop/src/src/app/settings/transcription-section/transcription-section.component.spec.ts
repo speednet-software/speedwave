@@ -647,9 +647,21 @@ describe('TranscriptionSectionComponent', () => {
       expect(component.speakerAttribution()).toBe(true);
     });
 
-    it('says what it costs on each GPU class, warning only without acceleration', async () => {
+    it('gives the measured cost on a Mac whatever the GPU class reports', async () => {
+      for (const gpu of ['discrete', 'integrated', 'none'] as const) {
+        svc.recommendedModel.mockResolvedValue(withDiarization({}, gpu));
+        await component.ngOnInit();
+        fixture.detectChanges();
+        const hw = q('speaker-hardware');
+        expect(hw?.textContent).toContain('adds under a minute per hour of recording');
+        expect(hw?.className.includes('text-amber-300')).toBe(false);
+      }
+    });
+
+    it('says what it costs on each Windows GPU class without a number, warning only without acceleration', async () => {
+      platform = 'windows';
       const cases: [RecommendedModelAck['gpu_class'], string, boolean][] = [
-        ['discrete', 'adds about a minute or two per hour of recording', false],
+        ['discrete', 'Uses your graphics chip: adds some time after each recording.', false],
         [
           'integrated',
           'Uses your integrated graphics: adds some time after each recording.',
@@ -663,6 +675,7 @@ describe('TranscriptionSectionComponent', () => {
         fixture.detectChanges();
         const hw = q('speaker-hardware');
         expect(hw?.textContent).toContain(text);
+        expect(hw?.textContent).not.toMatch(/\d/);
         expect(hw?.className.includes('text-amber-300')).toBe(warn);
       }
     });
@@ -687,7 +700,11 @@ describe('TranscriptionSectionComponent', () => {
       fixture.detectChanges();
       const details = q('speaker-what-to-expect') as HTMLDetailsElement;
       expect(details.open).toBe(false);
-      expect(details.textContent).toContain('attributed to the right person');
+      expect(details.textContent).toContain('can say who said what');
+      expect(details.textContent).not.toContain('attributed to the right person');
+      expect(details.textContent).toContain(
+        'One person can get two labels, and one label can cover two people.'
+      );
       expect(details.textContent).toContain('Up to 8 people in the meeting audio');
       expect(details.textContent).toContain('can number the speakers differently');
       expect(q('speaker-extra-cost')?.textContent).toContain(
