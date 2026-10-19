@@ -37,3 +37,10 @@ local changes in whisper-diarization.cpp:
      a narrow std::ifstream path is read in the ANSI code page there and fails for a
      data directory with non-ASCII characters. gguf_init_from_file already handles
      UTF-8 through ggml_fopen.
+  6. whisper_diar_cache_params carries the geometry of NeMo-Speech.cpp's v3-offline
+     preset (DiarGeometry::v3_offline in src/asr/diar/aosc_state.h: speaker cache 264,
+     FIFO 0, chunk 264, cache update period 188, left and right context 1) instead of
+     the low-latency streaming one (264, 80, 13, 40, no left context). The chunk loop
+     in whisper_diar_detect_speakers, whisper_diar_process and whisper_diar_cache_update
+     take a left context: its frames enter the graph but neither the output
+     probabilities nor the FIFO, as in NeMo-Speech.cpp's AoscState::update.

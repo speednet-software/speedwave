@@ -86,9 +86,11 @@ struct whisper_diar_scoring {
 
 struct whisper_diar_cache_params {
     int spkcache_len       = 264;
-    int fifo_len           = 80;
-    int chunk_len          = 13;
-    int spkcache_batch_len = 40;
+    int fifo_len           = 0;
+    int chunk_len          = 264;
+    int spkcache_batch_len = 188;
+    int left_context       = 1;
+    int right_context      = 1;
 };
 
 struct whisper_diar_cache {
@@ -241,8 +243,8 @@ static void whisper_diar_cache_init(whisper_diar_cache & state, const whisper_di
 static void whisper_diar_cache_compact(whisper_diar_cache & state, const std::vector<float> &  cache_preds);
 
 static void whisper_diar_cache_update(whisper_diar_cache & state,
-        const float * hidden, int frames, const float * probs, int rc) {
-    const int chunk_valid = frames - rc;
+        const float * hidden, int frames, const float * probs, int lc, int rc) {
+    const int chunk_valid = frames - lc - rc;
     if (chunk_valid <= 0) {
         return;
     }
@@ -261,8 +263,8 @@ static void whisper_diar_cache_update(whisper_diar_cache & state,
     // is the projected input not the processed input.
     // [hidden0, hidden1, ... ]
     state.fifo.insert(state.fifo.end(),
-                      hidden,
-                      hidden + static_cast<size_t>(chunk_valid) * state.n_embd);
+                      hidden + static_cast<size_t>(lc) * state.n_embd,
+                      hidden + static_cast<size_t>(lc + chunk_valid) * state.n_embd);
 
     state.n_fifo_frames = n_fifo_frames + chunk_valid;
 
@@ -273,7 +275,7 @@ static void whisper_diar_cache_update(whisper_diar_cache & state,
         // prediction space, so that pop_embs[f] and pop_preds[f] below always
         // refer to the same physical frame.
         const float * processed_fifo = probs + static_cast<size_t>(n_spk_frames) * state.n_speakers;
-        const float * new_chunk = probs + static_cast<size_t>(n_spk_frames + n_fifo_frames) * state.n_speakers;
+        const float * new_chunk = probs + static_cast<size_t>(n_spk_frames + n_fifo_frames + lc) * state.n_speakers;
         std::vector<float> processed_fifo_and_new_chunk;
         processed_fifo_and_new_chunk.reserve(static_cast<size_t>(n_fifo_frames + chunk_valid) * state.n_speakers);
         processed_fifo_and_new_chunk.insert(processed_fifo_and_new_chunk.end(),
@@ -1227,14 +1229,14 @@ static ggml_cgraph * whisper_diar_build_graph(whisper_diar_context & dctx, int f
 }
 
 static bool whisper_diar_process(whisper_diar_context & dctx,
-        const std::vector<float> & mel, int valid_mel, int right_mel) {
+        const std::vector<float> & mel, int left_mel, int valid_mel, int right_mel) {
     whisper_diar_state & state = dctx.state;
     whisper_diar_cache & cache = state.cache;
 
     const auto & hparams    = dctx.model.hparams;
     const int    n_speakers = hparams.n_speakers;
     const int    sf         = hparams.subsampling_factor;
-    const int    n_frames   = (valid_mel + right_mel + sf - 1) / sf;
+    const int    n_frames   = (left_mel + valid_mel + right_mel + sf - 1) / sf;
     const int    prefix     = cache.n_spk_frames + cache.n_fifo_frames;
     const int    time       = prefix + n_frames;
 
@@ -1292,8 +1294,8 @@ static bool whisper_diar_process(whisper_diar_context & dctx,
 
     // write probabilites to probs.
     state.probs.insert(state.probs.end(),
-                       state.buf_probs.begin() + prefix * sf * n_speakers,
-                       state.buf_probs.begin() + (prefix * sf + valid_mel) * n_speakers);
+                       state.buf_probs.begin() + (prefix * sf + left_mel) * n_speakers,
+                       state.buf_probs.begin() + (prefix * sf + left_mel + valid_mel) * n_speakers);
 
     // Update cache.
 
@@ -1314,7 +1316,8 @@ static bool whisper_diar_process(whisper_diar_context & dctx,
             }
         }
     }
-    whisper_diar_cache_update(cache, state.buf_hidden.data(), n_frames, state.buf_probs_80ms.data(), (right_mel + sf - 1) / sf);
+    whisper_diar_cache_update(cache, state.buf_hidden.data(), n_frames, state.buf_probs_80ms.data(),
+            left_mel / sf, (right_mel + sf - 1) / sf);
 
     return true;
 }
@@ -1424,11 +1427,12 @@ bool whisper_diar_detect_speakers(whisper_diar_context * ctx, const float * samp
         const int64_t n_mel_frames = n / 160 + 1;
         for (int64_t i = 0; i < n_mel_frames; i += cache_params.chunk_len * sf) {
             const int count = (int)std::min<int64_t>(cache_params.chunk_len * sf, n_mel_frames - i);
-            const int right = (int)std::min<int64_t>(sf, n_mel_frames - i - count);
+            const int left  = (int)std::min<int64_t>(cache_params.left_context * sf, i);
+            const int right = (int)std::min<int64_t>(cache_params.right_context * sf, n_mel_frames - i - count);
 
-            const auto mel = whisper_diar_pcm_to_mel(ctx->model, samples, n, i, count + right);
+            const auto mel = whisper_diar_pcm_to_mel(ctx->model, samples, n, i - left, left + count + right);
 
-            if (!whisper_diar_process(*ctx, mel, count, right)) {
+            if (!whisper_diar_process(*ctx, mel, left, count, right)) {
                 ctx->state.probs.clear();
                 ggml_backend_sched_reset(ctx->state.sched);
                 return false;

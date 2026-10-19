@@ -12,6 +12,14 @@ use std::path::{Path, PathBuf};
 
 const VENDOR_DIR: &str = "native/whisper-diarization";
 const GGML_HEADERS: [&str; 4] = ["ggml.h", "ggml-alloc.h", "ggml-backend.h", "gguf.h"];
+const V3_OFFLINE_GEOMETRY: [(&str, i64); 6] = [
+    ("spkcache_len", 264),
+    ("fifo_len", 0),
+    ("chunk_len", 264),
+    ("spkcache_batch_len", 188),
+    ("left_context", 1),
+    ("right_context", 1),
+];
 
 fn vendor_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(VENDOR_DIR)
@@ -44,6 +52,21 @@ fn defined_c_functions(source: &str) -> BTreeSet<String> {
         .filter(|c| !c[0].starts_with("static"))
         .map(|c| c[1].to_owned())
         .collect()
+}
+
+fn cache_params(source: &str) -> Option<Vec<(String, i64)>> {
+    let body = source
+        .split("struct whisper_diar_cache_params {")
+        .nth(1)?
+        .split("};")
+        .next()?;
+    let re =
+        regex::Regex::new(r"(?m)^\s*int\s+([a-z_]+)\s*=\s*(-?[0-9]+)\s*;").expect("valid regex");
+    Some(
+        re.captures_iter(body)
+            .map(|c| (c[1].to_owned(), c[2].parse().expect("an int literal")))
+            .collect(),
+    )
 }
 
 fn whisper_rs_sys_version_in(lockfile: &str) -> String {
@@ -155,6 +178,37 @@ fn the_vendored_code_never_writes_to_stderr() {
              callback set with speedwave_diar_log_set"
         );
     }
+}
+
+#[test]
+fn the_cache_geometry_is_the_nemo_speech_v3_offline_preset() {
+    let params = cache_params(&read_vendor_file("whisper-diarization.cpp"))
+        .expect("whisper-diarization.cpp defines whisper_diar_cache_params");
+    let expected: Vec<_> = V3_OFFLINE_GEOMETRY
+        .iter()
+        .map(|(name, value)| ((*name).to_owned(), *value))
+        .collect();
+    assert_eq!(
+        params, expected,
+        "the cache geometry is local change 6 in {VENDOR_DIR}/UPSTREAM; update both together"
+    );
+    assert!(read_vendor_file("UPSTREAM").contains("v3-offline"));
+}
+
+#[test]
+fn the_geometry_scan_reads_every_field_and_rejects_a_missing_struct() {
+    let source = "struct other { int a = 1; };\nstruct whisper_diar_cache_params {\n    int fifo_len           = 0;\n    int left_context = -1;\n};\nint after = 5;";
+    assert_eq!(
+        cache_params(source),
+        Some(vec![
+            ("fifo_len".to_owned(), 0),
+            ("left_context".to_owned(), -1)
+        ])
+    );
+    assert_eq!(
+        cache_params("struct whisper_diar_cache { int n = 0; };"),
+        None
+    );
 }
 
 #[test]
