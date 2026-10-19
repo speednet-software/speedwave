@@ -88,8 +88,8 @@ interface TranscriptLine {
 }
 
 /**
- * Colours of the first told-apart speakers, the theme tokens that are neither the error red nor
- * the action accent; later speakers keep the chip's default colour and differ by number alone.
+ * Colours of the first told-apart speakers, semantic theme tokens with a light-mode variant;
+ * later speakers keep the chip's default colour and differ by number alone.
  */
 const SPEAKER_COLORS = ['var(--teal)', 'var(--violet)', 'var(--amber)', 'var(--green)'];
 

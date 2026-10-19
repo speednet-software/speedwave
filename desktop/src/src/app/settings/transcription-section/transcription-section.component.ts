@@ -28,7 +28,7 @@ interface ModelRow {
   idSuffix: string;
 }
 
-/** What telling speakers apart costs: measured on Apple silicon, not measured on Windows (ADR-097). */
+/** What telling speakers apart costs on each kind of host (ADR-097). */
 const SPEAKER_COST_TEXT = {
   macos: { text: 'Adds under a minute per hour of recording.', warn: false },
   windowsGpu: { text: 'Adds some time after each recording.', warn: false },

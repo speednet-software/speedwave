@@ -69,8 +69,8 @@ impl DecodeCancel {
         self.0.load(Ordering::Acquire)
     }
 
-    /// The shared flag itself, for whisper.cpp's abort hook.
-    fn flag(&self) -> &AtomicBool {
+    /// The shared flag itself, for the ggml abort hooks of Whisper and the diarizer.
+    pub(crate) fn flag(&self) -> &AtomicBool {
         &self.0
     }
 }
@@ -563,12 +563,13 @@ fn full_with_cancel(
     state.full(params, pcm)
 }
 
-/// whisper.cpp's abort hook: `true` (abort) once the `AtomicBool` behind `data` is raised.
+/// The ggml abort hook of Whisper and the diarizer: `true` (abort) once the `AtomicBool`
+/// behind `data` is raised.
 #[expect(
     unsafe_code,
     reason = "whisper.cpp abort-callback FFI boundary; every block has a SAFETY comment"
 )]
-unsafe extern "C" fn abort_when_cancelled(data: *mut std::ffi::c_void) -> bool {
+pub(crate) unsafe extern "C" fn abort_when_cancelled(data: *mut std::ffi::c_void) -> bool {
     // SAFETY: the only caller is whisper.cpp with the pointer `full_with_cancel` installed, an
     // `AtomicBool` that stays alive for the whole decode.
     unsafe { &*data.cast::<AtomicBool>() }.load(Ordering::Acquire)
@@ -808,10 +809,14 @@ mod tests {
             (TranscriptSource::Mic, "mic"),
             (TranscriptSource::System, "system"),
         ] {
-            let expr = format!("seg.source === '{ts_tag}' ? '{}'", variant.label());
+            let tag = format!("seg.source {{}}== '{ts_tag}'");
+            let label = format!("speaker: '{}'", variant.label());
+            let compared = ["=", "!"]
+                .iter()
+                .any(|op| src.contains(&tag.replace("{}", op)));
             assert!(
-                src.contains(&expr),
-                "live-transcript.component.ts must label the {ts_tag} channel '{}' (expected fragment: {expr})",
+                compared && src.contains(&label),
+                "live-transcript.component.ts must compare seg.source with '{ts_tag}' and label that channel '{}' (expected fragment: {label})",
                 variant.label()
             );
         }

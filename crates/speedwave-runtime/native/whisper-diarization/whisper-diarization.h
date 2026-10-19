@@ -41,7 +41,8 @@ extern "C" {
             const char * path_model, struct whisper_diar_context_params params);
 
     WHISPER_API bool whisper_diar_detect_speakers(struct whisper_diar_context * ctx,
-            const float * samples, int64_t n_samples);
+            const float * samples, int64_t n_samples,
+            ggml_abort_callback abort_callback, void * abort_callback_data);
 
     WHISPER_API int     whisper_diar_n_speakers(const struct whisper_diar_context * ctx);
     WHISPER_API int64_t whisper_diar_n_frames  (const struct whisper_diar_context * ctx);

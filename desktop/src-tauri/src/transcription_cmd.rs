@@ -6,11 +6,11 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use speedwave_runtime::transcription::{
-    self, AudioSource, AudioSourceInfo, CaptureCapabilities, CaptureWarning, Diarizer,
-    DiarizerLoader, DriverConfig, DriverError, FinalizeConfig, GpuClass, Language,
-    ModelStatusEntry, ModelStore, NemotronDiarizer, StopSignal, StoreError, TranscribeOptions,
-    TranscriptDriver, TranscriptEvent, TranscriptSession, TranscriptStatus, TranscriptStore,
-    TranscriptSummary, WhisperCppTranscriber, DIARIZATION_MODEL,
+    self, AudioSource, AudioSourceInfo, CaptureCapabilities, Diarizer, DiarizerLoader,
+    DriverConfig, DriverError, FinalizeConfig, GpuClass, Language, ModelStatusEntry, ModelStore,
+    NemotronDiarizer, StopSignal, StoreError, TranscribeOptions, TranscriptDriver, TranscriptEvent,
+    TranscriptSession, TranscriptStatus, TranscriptStore, TranscriptSummary, WhisperCppTranscriber,
+    DIARIZATION_MODEL,
 };
 use tauri::{AppHandle, Emitter};
 use tokio::sync::broadcast;
@@ -395,7 +395,7 @@ pub async fn pause_transcription(
 #[tauri::command]
 pub async fn stop_transcription(
     session_id: String,
-    speaker_mode: Option<bool>,
+    speaker_mode: bool,
     store: tauri::State<'_, TranscriptStoreHandle>,
     models: tauri::State<'_, ModelStoreHandle>,
     drivers: tauri::State<'_, DriversHandle>,
@@ -425,7 +425,7 @@ pub async fn stop_transcription(
         models.inner().clone(),
         id,
         audio_paths,
-        speaker_mode.unwrap_or(false),
+        speaker_mode,
     );
     Ok(())
 }
@@ -437,7 +437,7 @@ pub async fn stop_transcription(
 #[tauri::command]
 pub async fn transcribe_transcript(
     session_id: String,
-    speaker_mode: Option<bool>,
+    speaker_mode: bool,
     store: tauri::State<'_, TranscriptStoreHandle>,
     models: tauri::State<'_, ModelStoreHandle>,
     drivers: tauri::State<'_, DriversHandle>,
@@ -457,7 +457,7 @@ pub async fn transcribe_transcript(
         models.inner().clone(),
         id,
         audio_paths,
-        speaker_mode.unwrap_or(false),
+        speaker_mode,
     );
     Ok(())
 }
@@ -569,13 +569,7 @@ fn spawn_offline_pass(
                     return;
                 }
             };
-        let diarizer = offline_diarizer(
-            &models_arc,
-            &store_arc,
-            id,
-            speaker_mode,
-            transcription::gpu_class(),
-        );
+        let diarizer = offline_diarizer(&models_arc, speaker_mode, transcription::gpu_class());
         let cfg = FinalizeConfig {
             id,
             store: store_arc.clone(),
@@ -604,26 +598,15 @@ fn spawn_offline_pass(
     });
 }
 
-/// The diarizer loader for an offline pass: `None` without `speaker_mode` or, with a
-/// `SpeakerModelMissing` warning, without the model on disk; `run_finalize` runs it after Whisper.
+/// The diarizer loader for an offline pass, `None` without `speaker_mode`. `run_finalize` runs it
+/// after Whisper and only for a recording with a meeting channel, so a model that is not
+/// downloaded is judged there, where it raises `SpeakerModelMissing`.
 fn offline_diarizer(
     models: &ModelStore,
-    store: &TranscriptStore,
-    id: Uuid,
     speaker_mode: bool,
     class: GpuClass,
 ) -> Option<DiarizerLoader> {
     if !speaker_mode {
-        return None;
-    }
-    if !models.diarization_is_present() {
-        log::info!(
-            "speaker diarization for {} is off for this pass: the model is not downloaded",
-            short_id(id)
-        );
-        if let Err(e) = store.capture_warning(id, CaptureWarning::SpeakerModelMissing) {
-            log_pass_store_error(id, "could not record its speaker warning", &e);
-        }
         return None;
     }
     let path = models.diarization_path();
@@ -1127,7 +1110,7 @@ pub struct RecommendedModelAck {
     pub live: RecommendedModelEntry,
     /// The offline-pass model, or `None` when the live model serves both passes.
     pub finalize: Option<RecommendedModelEntry>,
-    /// The speaker-diarization model, downloaded only once the user turns the mode on.
+    /// The speaker-diarization model; Settings offers its download next to the switch.
     pub diarization: RecommendedModelEntry,
     /// Acceleration label for the UI (e.g. `"Metal (GPU)"`, `"CPU"`).
     pub accel_label: String,
@@ -1221,14 +1204,7 @@ pub async fn download_transcription_model(
         let mut progress = |p: transcription::DownloadProgress| {
             let _ = app.emit(MODEL_PROGRESS_EVENT, &p);
         };
-        let result = if model_id == DIARIZATION_MODEL.key {
-            models.ensure_diarization_model(&mut progress)
-        } else {
-            if let Err(e) = models.ensure_vad_model() {
-                log::warn!(target: "transcription::models", "VAD model download failed: {e}");
-            }
-            models.ensure_model(&model_id, &mut progress)
-        };
+        let result = download_model_by_key(&models, &model_id, &mut progress);
         result.map(|_| ()).map_err(|e| {
             log::warn!(target: "transcription::models", "download of '{model_id}' failed: {e}");
             e.to_string()
@@ -1244,19 +1220,22 @@ pub async fn delete_transcription_model(
     model_id: String,
     models: tauri::State<'_, ModelStoreHandle>,
 ) -> Result<(), String> {
-    delete_model_by_key(&models, &model_id).map_err(|e| e.to_string())
+    models.delete_model(&model_id).map_err(|e| e.to_string())
 }
 
-/// Deletes a downloaded model by key: the diarization model or a Whisper catalogue model.
-fn delete_model_by_key(
+/// Downloads the model with catalogue key `key`; a Whisper model brings the VAD model along,
+/// whose failure only warns.
+fn download_model_by_key(
     models: &ModelStore,
     key: &str,
-) -> Result<(), transcription::ModelStoreError> {
-    if key == DIARIZATION_MODEL.key {
-        models.delete_diarization_model()
-    } else {
-        models.delete_model(key)
+    progress: &mut dyn FnMut(transcription::DownloadProgress),
+) -> Result<std::path::PathBuf, transcription::ModelStoreError> {
+    if key != DIARIZATION_MODEL.key {
+        if let Err(e) = models.ensure_vad_model() {
+            log::warn!(target: "transcription::models", "VAD model download failed: {e}");
+        }
     }
+    models.ensure_model(key, progress)
 }
 
 #[cfg(test)]
@@ -1787,42 +1766,32 @@ mod tests {
     }
 
     #[test]
-    fn offline_diarizer_is_off_without_speaker_mode_and_warns_nothing() {
+    fn offline_diarizer_is_off_without_speaker_mode() {
         let dir = tempfile::tempdir().unwrap();
-        let store = TranscriptStore::with_root(dir.path().join("t"));
         let models = ModelStore::with_root(dir.path().join("m"));
         write_sparse_diarization_model(&models);
-        let id = mk_session_in(&store);
-        assert!(offline_diarizer(&models, &store, id, false, GpuClass::None).is_none());
-        assert!(store.get(id).unwrap().active_warnings.is_empty());
+        assert!(offline_diarizer(&models, false, GpuClass::None).is_none());
     }
 
     #[test]
-    fn offline_diarizer_without_the_model_warns_that_it_is_missing() {
+    fn offline_diarizer_hands_the_pass_a_loader_that_reports_a_missing_model_only_when_run() {
         let dir = tempfile::tempdir().unwrap();
-        let store = TranscriptStore::with_root(dir.path().join("t"));
         let models = ModelStore::with_root(dir.path().join("m"));
-        let id = mk_session_in(&store);
-        assert!(offline_diarizer(&models, &store, id, true, GpuClass::None).is_none());
-        assert_eq!(
-            store.get(id).unwrap().active_warnings,
-            vec![CaptureWarning::SpeakerModelMissing]
-        );
+        let load = offline_diarizer(&models, true, GpuClass::None)
+            .expect("the switch alone yields a loader");
+        assert!(matches!(
+            load().map(|_| ()),
+            Err(transcription::DiarizeError::ModelMissing(ref model)) if model == DIARIZATION_MODEL.file
+        ));
     }
 
     #[test]
     fn offline_diarizer_hands_the_pass_a_loader_that_reports_a_model_that_does_not_load() {
         let dir = tempfile::tempdir().unwrap();
-        let store = TranscriptStore::with_root(dir.path().join("t"));
         let models = ModelStore::with_root(dir.path().join("m"));
         write_sparse_diarization_model(&models);
-        let id = mk_session_in(&store);
-        let load = offline_diarizer(&models, &store, id, true, GpuClass::None)
+        let load = offline_diarizer(&models, true, GpuClass::None)
             .expect("a present model yields a loader");
-        assert!(
-            store.get(id).unwrap().active_warnings.is_empty(),
-            "nothing is loaded or judged before the pass asks"
-        );
         assert!(matches!(
             load().map(|_| ()),
             Err(transcription::DiarizeError::ModelLoad { ref model, .. }) if model == DIARIZATION_MODEL.file
@@ -1849,15 +1818,18 @@ mod tests {
     }
 
     #[test]
-    fn delete_model_by_key_routes_the_diarization_key_to_its_own_store() {
+    fn download_model_by_key_fetches_the_vad_model_only_beside_a_whisper_model() {
         let dir = tempfile::tempdir().unwrap();
         let models = ModelStore::with_root(dir.path());
         write_sparse_diarization_model(&models);
-        delete_model_by_key(&models, DIARIZATION_MODEL.key).unwrap();
-        assert!(!models.diarization_path().exists());
-        delete_model_by_key(&models, "tiny").unwrap();
+        let path = download_model_by_key(&models, DIARIZATION_MODEL.key, &mut |_| {}).unwrap();
+        assert_eq!(path, models.diarization_path());
+        assert!(
+            !models.vad_is_present(),
+            "the diarization model is downloaded without the VAD model"
+        );
         assert!(matches!(
-            delete_model_by_key(&models, "nope").unwrap_err(),
+            download_model_by_key(&models, "nope", &mut |_| {}).unwrap_err(),
             transcription::ModelStoreError::UnknownModel(_)
         ));
     }
@@ -1904,14 +1876,14 @@ mod tests {
         let src = include_str!("transcription_cmd.rs");
         for name in ["stop_transcription", "transcribe_transcript"] {
             assert!(
-                fn_body(src, name).contains("speaker_mode.unwrap_or(false),"),
+                fn_body(src, name).contains("speaker_mode,\n"),
                 "{name} must pass the Settings speaker mode to spawn_offline_pass"
             );
         }
         let body = fn_body(src, "spawn_offline_pass");
         assert!(
             body.find("WhisperCppTranscriber::load").unwrap() < body.find("offline_diarizer(").unwrap(),
-            "the speaker warning is judged only after the pass survived the cancel check and loaded Whisper"
+            "the diarizer is handed over only after the pass survived the cancel check and loaded Whisper"
         );
     }
 

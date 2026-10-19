@@ -1,7 +1,6 @@
 //! Build script: emits `SPEEDWAVE_VERSION` for the crate and, with `audio-transcription`,
 //! compiles the vendored whisper.cpp diarization code against whisper-rs-sys's ggml.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 const DIARIZATION_DIR: &str = "native/whisper-diarization";
@@ -24,7 +23,7 @@ fn main() {
 }
 
 fn build_diarization(dir: &Path) {
-    emit_directive(&format!("cargo:rerun-if-changed={}", dir.display()));
+    println!("cargo:rerun-if-changed={}", dir.display());
 
     let vendored = vendored_ggml_version(&dir.join("UPSTREAM"));
     let shipped = std::env::var("DEP_WHISPER_WHISPER_CPP_VERSION").unwrap_or_else(|_| {
@@ -61,10 +60,4 @@ fn vendored_ggml_version(upstream: &Path) -> String {
                 upstream.display()
             )
         })
-}
-
-fn emit_directive(directive: &str) {
-    if let Err(e) = writeln!(std::io::stdout(), "{directive}") {
-        panic!("write cargo directive: {e}");
-    }
 }

@@ -1,14 +1,16 @@
 //! Speaker diarization of the meeting channel (ADR-097): the `Diarizer` trait, the
 //! Nemotron-3 engine over the vendored whisper.cpp code, and attribution to segments.
 
+use std::cmp::Reverse;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::path::Path;
 use std::ptr::NonNull;
+use std::sync::atomic::AtomicBool;
 use std::sync::Once;
 use std::time::Duration;
 
 use super::accel::{decode_threads, GpuClass};
-use super::transcriber::{Segment, TranscriptSource};
+use super::transcriber::{abort_when_cancelled, DecodeCancel, Segment, TranscriptSource};
 
 const LOG_TARGET: &str = "transcription::diarization";
 
@@ -60,7 +62,7 @@ pub enum DiarizeError {
 }
 
 /// Speaker-activity thresholds that cut the model's per-frame probabilities into turns: a turn
-/// opens at `start` and closes below `stop`, so `stop` never exceeds `start`.
+/// opens at `start` and closes below `stop`; `validated` refuses a `stop` above `start`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ActivationThresholds {
     /// Probability at which a speaker's turn opens.
@@ -101,8 +103,13 @@ pub struct SpeakerProbabilities {
 
 /// A speaker-diarization engine over a whole 16 kHz mono buffer. One per offline pass.
 pub trait Diarizer: Send {
-    /// Speaker turns of `pcm` (16 kHz mono `f32`), ordered by start.
-    fn diarize(&mut self, pcm: &[f32]) -> Result<Vec<SpeakerTurn>, DiarizeError>;
+    /// Speaker turns of `pcm` (16 kHz mono `f32`), ordered by start; a raised `cancel` ends
+    /// the run early with an error.
+    fn diarize(
+        &mut self,
+        pcm: &[f32],
+        cancel: &DecodeCancel,
+    ) -> Result<Vec<SpeakerTurn>, DiarizeError>;
 }
 
 /// Loads a diarizer on demand, so the offline pass holds its model only after Whisper is done.
@@ -181,21 +188,35 @@ impl Diarizer for NemotronDiarizer {
         unsafe_code,
         reason = "whisper diarization FFI boundary; every block has a SAFETY comment"
     )]
-    fn diarize(&mut self, pcm: &[f32]) -> Result<Vec<SpeakerTurn>, DiarizeError> {
+    fn diarize(
+        &mut self,
+        pcm: &[f32],
+        cancel: &DecodeCancel,
+    ) -> Result<Vec<SpeakerTurn>, DiarizeError> {
         validate_pcm(pcm)?;
         if pcm.is_empty() {
             return Ok(Vec::new());
         }
         let n_samples = i64::try_from(pcm.len())
             .map_err(|_| DiarizeError::InvalidAudio(format!("{} samples", pcm.len())))?;
+        let flag: *const AtomicBool = cancel.flag();
         // SAFETY: `self.ctx` is a live context owned by `self`, `&mut self` rules out a
         // concurrent call, and `pcm` holds `n_samples` floats for the whole call.
+        // `abort_when_cancelled` has the `ggml_abort_callback` signature and only reads the
+        // `AtomicBool` behind its data pointer, the flag inside `cancel`, which this function
+        // borrows until the call returns; the vendored code calls the hook only inside it.
         let detected = unsafe {
-            ffi::whisper_diar_detect_speakers(self.ctx.as_ptr(), pcm.as_ptr(), n_samples)
+            ffi::whisper_diar_detect_speakers(
+                self.ctx.as_ptr(),
+                pcm.as_ptr(),
+                n_samples,
+                Some(abort_when_cancelled),
+                flag.cast_mut().cast(),
+            )
         };
         if !detected {
             return Err(DiarizeError::Inference(format!(
-                "speaker detection failed; see the {LOG_TARGET} log"
+                "speaker detection failed or was stopped; see the {LOG_TARGET} log"
             )));
         }
         self.turns(ActivationThresholds::PRODUCT)
@@ -254,34 +275,37 @@ impl Drop for NemotronDiarizer {
     }
 }
 
+/// Labels the `System` segments with `Segment.speaker_id` 1..N from `turns`: each gets the
+/// model speaker of the turn covering most of it, and the speakers are numbered by first
+/// appearance in time. Segments no turn overlaps keep `None`.
+pub(crate) fn label_speakers(segments: &mut [Segment], turns: &[SpeakerTurn]) {
+    assign_speakers(segments, turns);
+    number_speakers(segments);
+}
+
 /// Stamps each `System` segment with the model speaker of the turn covering most of it; ties
 /// go to the smaller speaker index, and a segment no turn overlaps keeps `None`.
-pub(crate) fn assign_speakers(segments: &mut [Segment], turns: &[SpeakerTurn]) {
+fn assign_speakers(segments: &mut [Segment], turns: &[SpeakerTurn]) {
     for seg in segments
         .iter_mut()
         .filter(|s| s.source == Some(TranscriptSource::System))
     {
-        let mut best: Option<(u32, Duration)> = None;
-        for turn in turns {
-            let overlap = turn
-                .end
-                .min(seg.end)
-                .saturating_sub(turn.start.max(seg.start));
-            if overlap.is_zero() {
-                continue;
-            }
-            match best {
-                Some((speaker, cur))
-                    if overlap < cur || (overlap == cur && turn.speaker >= speaker) => {}
-                _ => best = Some((turn.speaker, overlap)),
-            }
-        }
-        seg.speaker_id = best.map(|(speaker, _)| speaker);
+        let best = turns
+            .iter()
+            .filter_map(|turn| {
+                let overlap = turn
+                    .end
+                    .min(seg.end)
+                    .saturating_sub(turn.start.max(seg.start));
+                (!overlap.is_zero()).then_some((overlap, Reverse(turn.speaker)))
+            })
+            .max();
+        seg.speaker_id = best.map(|(_, Reverse(speaker))| speaker);
     }
 }
 
 /// Renumbers the model speakers on `segments` to 1..N in order of first appearance in time.
-pub(crate) fn number_speakers(segments: &mut [Segment]) {
+fn number_speakers(segments: &mut [Segment]) {
     let mut order: Vec<usize> = (0..segments.len()).collect();
     order.sort_by_key(|&i| (segments[i].start, i));
     let mut numbers: Vec<(u32, u32)> = Vec::new();
@@ -381,7 +405,8 @@ impl SegmentList {
         thresholds: ActivationThresholds,
     ) -> Result<Self, DiarizeError> {
         let params = segment_params(thresholds);
-        // SAFETY: `ctx` is live and has just run `whisper_diar_detect_speakers`; the function
+        // SAFETY: `ctx` is live; the function reads only the probabilities the context holds
+        // (none before the first `whisper_diar_detect_speakers`, which gives an empty list),
         // returns null on failure and catches every C++ exception.
         let raw = unsafe { ffi::whisper_diar_segments_from_probs(ctx.as_ptr(), params) };
         NonNull::new(raw).map(Self).ok_or_else(|| {
@@ -475,6 +500,8 @@ mod ffi {
     pub(super) type LogCallback =
         unsafe extern "C" fn(level: c_int, text: *const c_char, user_data: *mut c_void);
 
+    pub(super) type AbortCallback = unsafe extern "C" fn(data: *mut c_void) -> bool;
+
     #[expect(
         unsafe_code,
         reason = "whisper diarization FFI boundary; every block has a SAFETY comment"
@@ -489,6 +516,8 @@ mod ffi {
             ctx: *mut Context,
             samples: *const f32,
             n_samples: i64,
+            abort_callback: Option<AbortCallback>,
+            abort_callback_data: *mut c_void,
         ) -> bool;
         pub(super) fn whisper_diar_default_params() -> Params;
         pub(super) fn whisper_diar_segments_from_probs(
@@ -520,16 +549,16 @@ mod ffi {
 }
 
 /// Deterministic fake diarizer for orchestration tests: `n_speakers` equal turns, one per
-/// speaker index in order. `#[cfg(test)]` only.
+/// speaker index in order.
 #[cfg(test)]
-pub struct MockDiarizer {
+pub(crate) struct MockDiarizer {
     n_speakers: u32,
 }
 
 #[cfg(test)]
 impl MockDiarizer {
     /// A mock that splits the buffer into `n_speakers` (at least 1) turns.
-    pub fn new(n_speakers: u32) -> Self {
+    pub(crate) fn new(n_speakers: u32) -> Self {
         Self {
             n_speakers: n_speakers.max(1),
         }
@@ -538,7 +567,11 @@ impl MockDiarizer {
 
 #[cfg(test)]
 impl Diarizer for MockDiarizer {
-    fn diarize(&mut self, pcm: &[f32]) -> Result<Vec<SpeakerTurn>, DiarizeError> {
+    fn diarize(
+        &mut self,
+        pcm: &[f32],
+        _cancel: &DecodeCancel,
+    ) -> Result<Vec<SpeakerTurn>, DiarizeError> {
         if pcm.is_empty() {
             return Ok(Vec::new());
         }
@@ -642,6 +675,21 @@ mod tests {
         let mut segs = vec![sys(0, 1000)];
         assign_speakers(&mut segs, &[]);
         assert_eq!(ids(&segs), vec![None]);
+    }
+
+    #[test]
+    fn label_speakers_assigns_the_model_speakers_and_numbers_them_by_first_appearance() {
+        let mut segs = vec![
+            sys(0, 1000),
+            sys(1000, 2000),
+            sys(2000, 3000),
+            sys(3000, 4000),
+        ];
+        label_speakers(
+            &mut segs,
+            &[turn(0, 1000, 5), turn(1000, 2000, 2), turn(2000, 3000, 5)],
+        );
+        assert_eq!(ids(&segs), vec![Some(1), Some(2), Some(1), None]);
     }
 
     #[test]
@@ -791,12 +839,13 @@ mod tests {
     #[test]
     fn mock_diarizer_splits_the_buffer_into_equal_turns() {
         let mut d = MockDiarizer::new(3);
-        let turns = d.diarize(&vec![0.0; 9 * 16_000]).unwrap();
+        let cancel = DecodeCancel::default();
+        let turns = d.diarize(&vec![0.0; 9 * 16_000], &cancel).unwrap();
         assert_eq!(
             turns,
             vec![turn(0, 3000, 0), turn(3000, 6000, 1), turn(6000, 9000, 2)]
         );
-        assert!(d.diarize(&[]).unwrap().is_empty());
+        assert!(d.diarize(&[], &cancel).unwrap().is_empty());
         assert_eq!(MockDiarizer::new(0).n_speakers, 1);
     }
 

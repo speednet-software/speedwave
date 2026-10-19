@@ -6,9 +6,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
+use speedwave_runtime::transcription::audio::parse_wav_to_channels_f32;
 use speedwave_runtime::transcription::{
-    decode_threads, ActivationThresholds, Diarizer, GpuClass, NemotronDiarizer, SpeakerTurn,
-    SAMPLE_RATE_HZ,
+    decode_threads, ActivationThresholds, DecodeCancel, Diarizer, GpuClass, NemotronDiarizer,
+    SpeakerTurn, SAMPLE_RATE_HZ,
 };
 
 const USAGE: &str = "usage: diarize -m MODEL [-t THREADS] [--gpu] \
@@ -28,10 +29,16 @@ fn main() -> ExitCode {
     match run(std::env::args().skip(1)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            let _ = writeln!(std::io::stderr(), "error: {e}");
+            note(&format!("error: {e}"));
             ExitCode::FAILURE
         }
     }
+}
+
+/// The tool's one stderr sink: errors and the timing lines, so stdout carries only the turns.
+#[expect(clippy::print_stderr, reason = "the example's single stderr sink")]
+fn note(line: &str) {
+    eprintln!("{line}");
 }
 
 fn run(argv: impl Iterator<Item = String>) -> Result<(), String> {
@@ -47,22 +54,21 @@ fn run(argv: impl Iterator<Item = String>) -> Result<(), String> {
     let mut diarizer = NemotronDiarizer::load_with_threads(&args.model, class, args.threads)
         .map_err(|e| e.to_string())?;
     let t_process = Instant::now();
-    let turns = diarizer.diarize(&pcm).map_err(|e| e.to_string())?;
+    let turns = diarizer
+        .diarize(&pcm, &DecodeCancel::default())
+        .map_err(|e| e.to_string())?;
     let t_done = Instant::now();
 
-    writeln!(
-        std::io::stderr(),
+    note(&format!(
         "timing: load_ms={:.1} process_ms={:.1} audio_s={:.3}",
         (t_process - t_load).as_secs_f64() * 1000.0,
         (t_done - t_process).as_secs_f64() * 1000.0,
         pcm.len() as f64 / f64::from(SAMPLE_RATE_HZ)
-    )
-    .map_err(|e| e.to_string())?;
+    ));
     if let Some(path) = &args.probs {
         let probs = diarizer.probabilities();
         write_probs(path, &probs.values)?;
-        writeln!(
-            std::io::stderr(),
+        note(&format!(
             "probs: frames={} speakers={} file={}",
             probs
                 .values
@@ -71,8 +77,7 @@ fn run(argv: impl Iterator<Item = String>) -> Result<(), String> {
                 .unwrap_or(0),
             probs.n_speakers,
             path.display()
-        )
-        .map_err(|e| e.to_string())?;
+        ));
     }
     let mut out = std::io::stdout().lock();
     match &args.thresholds {
@@ -163,33 +168,20 @@ fn value_of(flag: &str, value: Option<String>) -> Result<String, String> {
     value.ok_or_else(|| format!("{flag} needs a value\n{USAGE}"))
 }
 
+/// The first channel of a 16 kHz WAV, through the runtime's own reader.
 fn read_wav(path: &Path) -> Result<Vec<f32>, String> {
-    let mut reader =
-        hound::WavReader::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let spec = reader.spec();
-    if spec.sample_rate != SAMPLE_RATE_HZ {
+    let (channels, rate) =
+        parse_wav_to_channels_f32(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if rate != SAMPLE_RATE_HZ {
         return Err(format!(
-            "{}: {} Hz, expected {SAMPLE_RATE_HZ} Hz",
-            path.display(),
-            spec.sample_rate
+            "{}: {rate} Hz, expected {SAMPLE_RATE_HZ} Hz",
+            path.display()
         ));
     }
-    let channels = usize::from(spec.channels.max(1));
-    let samples: Vec<f32> = match (spec.sample_format, spec.bits_per_sample) {
-        (hound::SampleFormat::Int, 16) => reader
-            .samples::<i16>()
-            .map(|s| s.map(|v| f32::from(v) / 32768.0))
-            .collect::<Result<_, _>>(),
-        (hound::SampleFormat::Float, 32) => reader.samples::<f32>().collect::<Result<_, _>>(),
-        (format, bits) => {
-            return Err(format!(
-                "{}: {bits}-bit {format:?} samples, expected 16-bit int or 32-bit float",
-                path.display()
-            ))
-        }
-    }
-    .map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(samples.into_iter().step_by(channels).collect())
+    channels
+        .into_iter()
+        .next()
+        .ok_or_else(|| format!("{}: no audio channel", path.display()))
 }
 
 #[cfg(test)]

@@ -524,7 +524,6 @@ static bool whisper_diar_backend_init(whisper_diar_context & dctx) {
     auto & backends = dctx.state.backends;
     const auto & params = dctx.params;
     backends.reserve(2);
-    ggml_backend_load_all();
 
     if (params.use_gpu) {
         int index = 0;
@@ -554,6 +553,7 @@ static bool whisper_diar_backend_init(whisper_diar_context & dctx) {
     backends.push_back(cpu);
 
     for (auto backend : backends) {
+        WHISPER_LOG_INFO("%s: using backend %s\n", __func__, ggml_backend_name(backend));
         auto reg = ggml_backend_dev_backend_reg(ggml_backend_get_device(backend));
         auto fn  = (ggml_backend_set_n_threads_t)ggml_backend_reg_get_proc_address(reg, "ggml_backend_set_n_threads");
         if (fn) {
@@ -1258,7 +1258,8 @@ whisper_diar_context * whisper_diar_init_from_file_with_params(const char * path
     return nullptr;
 }
 
-bool whisper_diar_detect_speakers(whisper_diar_context * ctx, const float * samples, int64_t n) {
+bool whisper_diar_detect_speakers(whisper_diar_context * ctx, const float * samples, int64_t n,
+        ggml_abort_callback abort_callback, void * abort_callback_data) {
     if (!ctx) {
         return false;
     }
@@ -1295,6 +1296,12 @@ bool whisper_diar_detect_speakers(whisper_diar_context * ctx, const float * samp
         const int sf = ctx->model.hparams.subsampling_factor;
         const int64_t n_mel_frames = n / 160 + 1;
         for (int64_t i = 0; i < n_mel_frames; i += cache_params.chunk_len * sf) {
+            if (abort_callback && abort_callback(abort_callback_data)) {
+                WHISPER_LOG_INFO("%s: aborted by the caller\n", __func__);
+                ctx->state.probs.clear();
+                ggml_backend_sched_reset(ctx->state.sched);
+                return false;
+            }
             const int count = (int)std::min<int64_t>(cache_params.chunk_len * sf, n_mel_frames - i);
             const int left  = (int)std::min<int64_t>(cache_params.left_context * sf, i);
             const int right = (int)std::min<int64_t>(cache_params.right_context * sf, n_mel_frames - i - count);

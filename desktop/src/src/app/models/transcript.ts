@@ -198,7 +198,7 @@ export type GpuClass = 'none' | 'integrated' | 'discrete';
 export interface RecommendedModelAck {
   live: RecommendedModelEntry;
   finalize: RecommendedModelEntry | null;
-  /** The speaker-diarization model, downloaded once the user turns the mode on. */
+  /** The speaker-diarization model; Settings offers its download next to the switch. */
   diarization: RecommendedModelEntry;
   accel_label: string;
   /** Sets the Settings text on what telling speakers apart costs on this computer. */

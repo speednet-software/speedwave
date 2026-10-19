@@ -41,9 +41,12 @@ pub use model_store::{
     no_progress, DownloadProgress, ModelStatusEntry, ModelStore, ModelStoreError,
 };
 pub use transcriber::{
-    Language, Segment, TranscribeError, TranscribeOptions, Transcriber, WhisperCppTranscriber, Word,
+    DecodeCancel, Language, Segment, TranscribeError, TranscribeOptions, Transcriber,
+    WhisperCppTranscriber, Word,
 };
-pub use transcript::{ModelsUsed, TranscriptSession, TranscriptStatus, TranscriptSummary};
+pub use transcript::{
+    DiarizationRecord, ModelsUsed, TranscriptSession, TranscriptStatus, TranscriptSummary,
+};
 pub use transcript_driver::{
     run_finalize, DriverConfig, DriverError, FinalizeConfig, StopSignal, TranscriptDriver,
 };

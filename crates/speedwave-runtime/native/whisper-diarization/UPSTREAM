@@ -49,3 +49,10 @@ local changes in whisper-diarization.cpp:
      in whisper_diar_detect_speakers, whisper_diar_process and whisper_diar_cache_update
      take a left context: its frames enter the graph but neither the output
      probabilities nor the FIFO, as in NeMo-Speech.cpp's AoscState::update.
+  7. whisper_diar_backend_init does not call ggml_backend_load_all, which searches the
+     executable's directory, the working directory and GGML_BACKEND_PATH for backend
+     libraries and loads every match; the backends this build links are registered
+     statically, as for whisper.cpp itself. It logs the name of every backend it picks.
+  8. whisper_diar_detect_speakers takes a ggml_abort_callback and its data pointer, read
+     before every chunk; a true answer clears the probabilities, resets the scheduler and
+     returns false, so a put-off offline pass stops within one chunk.

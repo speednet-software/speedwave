@@ -159,34 +159,63 @@ impl ModelStore {
             .unwrap_or(false)
     }
 
-    /// Ensures the Whisper model with catalogue key `key` is present locally,
-    /// downloading + verifying it if needed. Returns the local path.
+    /// Ensures the model with catalogue key `key` (a Whisper model or `DIARIZATION_MODEL`) is
+    /// present locally, downloading + verifying it if needed. Returns the local path.
     pub fn ensure_model(
         &self,
         key: &str,
         progress: &mut dyn FnMut(DownloadProgress),
     ) -> Result<PathBuf, ModelStoreError> {
+        if key == DIARIZATION_MODEL.key {
+            return self.ensure_diarization_from(
+                &DIARIZATION_MODEL,
+                &DIARIZATION_MODEL.url(),
+                progress,
+            );
+        }
         let info =
             whisper_model(key).ok_or_else(|| ModelStoreError::UnknownModel(key.to_string()))?;
-        let dest = self.whisper_path(info);
-        if self.whisper_is_present(info) {
+        self.ensure_file(
+            &self.whisper_dir(),
+            info.file,
+            key,
+            &info.url(),
+            info.sha256,
+            info.approx_bytes,
+            progress,
+        )
+    }
+
+    /// The one download path: `dir/file` is present once its size is in the window of
+    /// `approx_bytes`, else it is fetched from `url` within the storage cap, verified against
+    /// `sha256` and restricted to the owner. Returns the local path.
+    fn ensure_file(
+        &self,
+        dir: &Path,
+        file: &str,
+        key: &str,
+        url: &str,
+        sha256: &str,
+        approx_bytes: u64,
+        progress: &mut dyn FnMut(DownloadProgress),
+    ) -> Result<PathBuf, ModelStoreError> {
+        let dest = dir.join(file);
+        if file_in_size_window(&dest, approx_bytes) {
             return Ok(dest);
         }
-        std::fs::create_dir_all(self.whisper_dir())?;
-        restrict_dir_perms(&self.whisper_dir());
-        let per_model_cap = download_cap(info.approx_bytes);
-        self.check_storage_cap(key, info.approx_bytes)?;
+        std::fs::create_dir_all(dir)?;
+        restrict_dir_perms(dir);
+        self.check_storage_cap(key, approx_bytes)?;
         log::info!(
             target: "transcription::models",
-            "downloading model '{key}' (~{} bytes)",
-            info.approx_bytes
+            "downloading model '{key}' (~{approx_bytes} bytes)"
         );
         self.download_to(
-            &info.url(),
+            url,
             &dest,
             key,
-            info.sha256,
-            per_model_cap,
+            sha256,
+            download_cap(approx_bytes),
             progress,
         )?;
         log::info!(target: "transcription::models", "model '{key}' downloaded and verified");
@@ -237,28 +266,15 @@ impl ModelStore {
     /// Ensures the Silero VAD model is present locally, downloading + verifying
     /// it if needed (no progress reporting; the file is ~1 MiB). Returns the local path.
     pub fn ensure_vad_model(&self) -> Result<PathBuf, ModelStoreError> {
-        let dest = self.vad_path();
-        if self.vad_is_present() {
-            return Ok(dest);
-        }
-        std::fs::create_dir_all(self.whisper_dir())?;
-        restrict_dir_perms(&self.whisper_dir());
-        let cap = download_cap(VAD_MODEL.approx_bytes);
-        log::info!(
-            target: "transcription::models",
-            "downloading the Silero VAD model (~{} bytes)",
-            VAD_MODEL.approx_bytes
-        );
-        self.download_to(
-            &VAD_MODEL.url(),
-            &dest,
+        self.ensure_file(
+            &self.whisper_dir(),
+            VAD_MODEL.file,
             "silero-vad",
+            &VAD_MODEL.url(),
             VAD_MODEL.sha256,
-            cap,
+            VAD_MODEL.approx_bytes,
             &mut no_progress,
-        )?;
-        log::info!(target: "transcription::models", "the Silero VAD model downloaded and verified");
-        Ok(dest)
+        )
     }
 
     fn diarization_dir(&self) -> PathBuf {
@@ -270,18 +286,10 @@ impl ModelStore {
         self.diarization_dir().join(DIARIZATION_MODEL.file)
     }
 
-    /// `true` if the verified diarization model file is present (same size window as Whisper).
+    /// `true` if the diarization model file is on disk with a size in the window of the
+    /// verified download (same window as Whisper; the hash is checked only when downloading).
     pub fn diarization_is_present(&self) -> bool {
         file_in_size_window(&self.diarization_path(), DIARIZATION_MODEL.approx_bytes)
-    }
-
-    /// Ensures the speaker-diarization model is present locally, downloading + verifying it
-    /// with progress if needed (within the total storage cap). Returns the local path.
-    pub fn ensure_diarization_model(
-        &self,
-        progress: &mut dyn FnMut(DownloadProgress),
-    ) -> Result<PathBuf, ModelStoreError> {
-        self.ensure_diarization_from(&DIARIZATION_MODEL, &DIARIZATION_MODEL.url(), progress)
     }
 
     fn ensure_diarization_from(
@@ -290,56 +298,25 @@ impl ModelStore {
         url: &str,
         progress: &mut dyn FnMut(DownloadProgress),
     ) -> Result<PathBuf, ModelStoreError> {
-        let dest = self.diarization_dir().join(info.file);
-        if file_in_size_window(&dest, info.approx_bytes) {
-            return Ok(dest);
-        }
-        std::fs::create_dir_all(self.diarization_dir())?;
-        restrict_dir_perms(&self.diarization_dir());
-        self.check_storage_cap(info.key, info.approx_bytes)?;
-        log::info!(
-            target: "transcription::models",
-            "downloading model '{}' (~{} bytes)",
+        self.ensure_file(
+            &self.diarization_dir(),
+            info.file,
             info.key,
-            info.approx_bytes
-        );
-        self.download_to(
             url,
-            &dest,
-            info.key,
             info.sha256,
-            download_cap(info.approx_bytes),
+            info.approx_bytes,
             progress,
-        )?;
-        log::info!(target: "transcription::models", "model '{}' downloaded and verified", info.key);
-        Ok(dest)
+        )
     }
 
     /// Status of the speaker-diarization model on disk.
     pub fn diarization_status(&self) -> ModelStatusEntry {
-        let path = self.diarization_path();
-        let present = self.diarization_is_present();
-        ModelStatusEntry {
-            key: DIARIZATION_MODEL.key.to_string(),
-            downloaded: present,
-            size_bytes: if present {
-                std::fs::metadata(&path)
-                    .map(|m| m.len())
-                    .unwrap_or(DIARIZATION_MODEL.approx_bytes)
-            } else {
-                DIARIZATION_MODEL.approx_bytes
-            },
-            path: present.then_some(path),
-        }
-    }
-
-    /// Deletes the downloaded speaker-diarization model. No-op if it isn't present.
-    pub fn delete_diarization_model(&self) -> Result<(), ModelStoreError> {
-        let path = self.diarization_path();
-        if path.exists() {
-            std::fs::remove_file(&path)?;
-        }
-        Ok(())
+        status_entry(
+            DIARIZATION_MODEL.key,
+            self.diarization_path(),
+            self.diarization_is_present(),
+            DIARIZATION_MODEL.approx_bytes,
+        )
     }
 
     /// Status of every Whisper model in the catalogue (downloaded? size? path?).
@@ -347,35 +324,30 @@ impl ModelStore {
         crate::transcription::model_catalog::WHISPER_MODELS
             .iter()
             .map(|info| {
-                let path = self.whisper_path(info);
-                let present = self.whisper_is_present(info);
-                ModelStatusEntry {
-                    key: info.key.to_string(),
-                    downloaded: present,
-                    size_bytes: if present {
-                        std::fs::metadata(&path)
-                            .map(|m| m.len())
-                            .unwrap_or(info.approx_bytes)
-                    } else {
-                        info.approx_bytes
-                    },
-                    path: present.then_some(path),
-                }
+                status_entry(
+                    info.key,
+                    self.whisper_path(info),
+                    self.whisper_is_present(info),
+                    info.approx_bytes,
+                )
             })
             .collect()
     }
 
-    /// Deletes a downloaded Whisper model by catalogue key. No-op if it isn't
-    /// present; errors on an unknown key.
+    /// Deletes a downloaded model by catalogue key (a Whisper model or `DIARIZATION_MODEL`).
+    /// No-op if it isn't present; errors on an unknown key.
     pub fn delete_model(&self, key: &str) -> Result<(), ModelStoreError> {
-        if let Some(info) = whisper_model(key) {
-            let p = self.whisper_path(info);
-            if p.exists() {
-                std::fs::remove_file(&p)?;
-            }
-            return Ok(());
+        let path = if key == DIARIZATION_MODEL.key {
+            self.diarization_path()
+        } else {
+            let info =
+                whisper_model(key).ok_or_else(|| ModelStoreError::UnknownModel(key.to_string()))?;
+            self.whisper_path(info)
+        };
+        if path.exists() {
+            std::fs::remove_file(&path)?;
         }
-        Err(ModelStoreError::UnknownModel(key.to_string()))
+        Ok(())
     }
 
     /// Total bytes the downloaded models occupy on disk (best effort — walks
@@ -393,6 +365,22 @@ impl Default for ModelStore {
 
 /// `true` if `path` is a file whose size is within the [`size_window`] of `approx_bytes` (the
 /// SHA256 check before the rename is what put a file there).
+/// The status row of a catalogue model: its real size when downloaded, else the estimate.
+fn status_entry(key: &str, path: PathBuf, present: bool, approx_bytes: u64) -> ModelStatusEntry {
+    ModelStatusEntry {
+        key: key.to_string(),
+        downloaded: present,
+        size_bytes: if present {
+            std::fs::metadata(&path)
+                .map(|m| m.len())
+                .unwrap_or(approx_bytes)
+        } else {
+            approx_bytes
+        },
+        path: present.then_some(path),
+    }
+}
+
 fn file_in_size_window(path: &Path, approx_bytes: u64) -> bool {
     match std::fs::metadata(path) {
         Ok(m) => {
@@ -1146,7 +1134,7 @@ mod tests {
         assert!(!status.downloaded);
         assert_eq!(status.size_bytes, DIARIZATION_MODEL.approx_bytes);
         assert_eq!(status.path, None);
-        store.delete_diarization_model().unwrap();
+        store.delete_model(DIARIZATION_MODEL.key).unwrap();
 
         std::fs::create_dir_all(store.diarization_dir()).unwrap();
         let write_sparse = |len: u64| {
@@ -1166,14 +1154,37 @@ mod tests {
         assert!(status.downloaded);
         assert_eq!(status.path, Some(store.diarization_path()));
         assert_eq!(
-            store.ensure_diarization_model(&mut no_progress).unwrap(),
+            store
+                .ensure_model(DIARIZATION_MODEL.key, &mut no_progress)
+                .unwrap(),
             store.diarization_path(),
             "a present model is not downloaded again"
         );
 
-        store.delete_diarization_model().unwrap();
+        store.delete_model(DIARIZATION_MODEL.key).unwrap();
         assert!(!store.diarization_path().exists());
         assert!(!store.diarization_is_present());
+        assert!(matches!(
+            store.delete_model("nope").unwrap_err(),
+            ModelStoreError::UnknownModel(_)
+        ));
+    }
+
+    #[test]
+    fn the_vad_model_counts_against_the_total_storage_cap_like_every_other_download() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ModelStore::with_root(dir.path());
+        std::fs::create_dir_all(store.whisper_dir()).unwrap();
+        let filler = std::fs::File::create(store.whisper_dir().join("other.bin")).unwrap();
+        filler
+            .set_len(consts::MAX_TOTAL_TRANSCRIPTION_MODELS_BYTES - VAD_MODEL.approx_bytes + 1)
+            .unwrap();
+        let err = store.ensure_vad_model().unwrap_err();
+        assert!(
+            matches!(err, ModelStoreError::StorageCapExceeded { ref model, .. } if model == "silero-vad"),
+            "expected StorageCapExceeded, got {err:?}"
+        );
+        assert!(!store.vad_is_present());
     }
 
     #[test]

@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::transcription::transcriber::{DecodeCancel, Segment};
 use crate::transcription::transcript::{
-    normalize_title, TranscriptSession, TranscriptStatus, TranscriptSummary,
+    normalize_title, DiarizationRecord, TranscriptSession, TranscriptStatus, TranscriptSummary,
 };
 
 /// Capacity of each session's `broadcast` channel — generous enough that a slow subscriber
@@ -846,29 +846,13 @@ impl TranscriptStore {
         id: Uuid,
         pass: &OfflinePass,
         final_segs: Vec<Segment>,
+        diarization: Option<DiarizationRecord>,
     ) -> Result<u64, StoreError> {
         self.pass_write(id, pass, |s, seq| {
-            s.set_final_segments(final_segs);
+            s.set_final_segments(final_segs, diarization);
             let segments = s.final_segments.clone().unwrap_or_default();
             vec![TranscriptEvent::FinalSegmentsReady { seq, segments }]
         })
-    }
-
-    /// Records that `pass` told the speakers of its transcript apart with diarization model `model`
-    /// in `secs` seconds; call after `set_final_segments`, which clears the previous record.
-    pub fn set_diarization(
-        &self,
-        id: Uuid,
-        pass: &OfflinePass,
-        model: &str,
-        secs: f64,
-    ) -> Result<(), StoreError> {
-        self.pass_write(id, pass, |s, _| {
-            s.models_used.diarization = Some(model.to_string());
-            s.diarization_secs = Some(secs);
-            Vec::new()
-        })
-        .map(|_| ())
     }
 
     /// Ends `pass` with the session done and returns the emitted event sequence number.
@@ -1470,7 +1454,7 @@ mod tests {
         let store = TranscriptStore::with_root(dir.path());
         let mut old = mk_session(&dir.path().join("old.wav"));
         old.created_at = "2026-01-01T00:00:00Z".to_string();
-        old.set_final_segments(vec![seg(0.0, 1.0, "stare")]);
+        old.set_final_segments(vec![seg(0.0, 1.0, "stare")], None);
         let old_id = store.create(old).unwrap();
         let mut new = mk_session(&dir.path().join("new.wav"));
         new.created_at = "2026-02-01T00:00:00Z".to_string();
@@ -1507,7 +1491,7 @@ mod tests {
             .unwrap();
         let pass = store.begin_offline_pass(id).unwrap();
         store.finalize_progress(id, &pass, 0.5).unwrap();
-        store.set_final_segments(id, &pass, vec![]).unwrap();
+        store.set_final_segments(id, &pass, vec![], None).unwrap();
         store.finish(id, &pass).unwrap();
         store.rename(id, "t").unwrap();
         store.delete(id).unwrap();
@@ -1574,6 +1558,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = TranscriptStore::with_root(dir.path());
         let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        store
+            .set_status(id, TranscriptStatus::Finalizing { progress: 0.0 })
+            .unwrap();
         finish_a_pass(&store, id, "large-v3", "bez mówców");
         store
             .capture_warning(id, CaptureWarning::SpeakerModelMissing)
@@ -1608,7 +1595,7 @@ mod tests {
         let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
         let pass = store.claim_finalizing(id);
         store
-            .set_final_segments(id, &pass, vec![seg(0.0, 1.0, "gotowe")])
+            .set_final_segments(id, &pass, vec![seg(0.0, 1.0, "gotowe")], None)
             .unwrap();
         store.finish(id, &pass).unwrap();
 
@@ -1669,27 +1656,46 @@ mod tests {
     }
 
     #[test]
-    fn set_diarization_records_the_model_and_time_only_for_the_live_pass() {
+    fn final_segments_land_with_their_diarization_record_in_one_write() {
         let dir = tempfile::tempdir().unwrap();
         let store = TranscriptStore::with_root(dir.path());
         let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
         let old = store.claim_finalizing(id);
         let new = store.begin_offline_pass(id).unwrap();
+        let record = || {
+            Some(DiarizationRecord {
+                model: "m".to_string(),
+                secs: 12.5,
+            })
+        };
         assert!(matches!(
-            store.set_diarization(id, &old, "m", 1.0).unwrap_err(),
+            store
+                .set_final_segments(id, &old, vec![seg(0.0, 1.0, "a")], record())
+                .unwrap_err(),
             StoreError::PassEnded(_)
         ));
         assert_eq!(store.get(id).unwrap().models_used.diarization, None);
 
         store
-            .set_final_segments(id, &new, vec![seg(0.0, 1.0, "a")])
+            .set_final_segments(id, &new, vec![seg(0.0, 1.0, "a")], record())
             .unwrap();
-        store.set_diarization(id, &new, "m", 12.5).unwrap();
         let snap = store.get(id).unwrap();
         assert_eq!(snap.models_used.diarization.as_deref(), Some("m"));
         assert_eq!(snap.diarization_secs, Some(12.5));
         let reloaded = TranscriptStore::with_root(dir.path()).get(id).unwrap();
         assert_eq!(reloaded.diarization_secs, Some(12.5));
+
+        store.postpone(id).unwrap();
+        let snap = store.get(id).unwrap();
+        assert!(
+            matches!(snap.status, TranscriptStatus::Done),
+            "a put-off pass that installed its transcript leaves it Done"
+        );
+        assert_eq!(
+            snap.models_used.diarization.as_deref(),
+            Some("m"),
+            "the record is part of the transcript it describes"
+        );
     }
 
     #[test]
@@ -1705,7 +1711,9 @@ mod tests {
         let seq = store.get(id).unwrap().last_seq;
         for err in [
             store.finalize_progress(id, &old, 0.5).unwrap_err(),
-            store.set_final_segments(id, &old, vec![]).unwrap_err(),
+            store
+                .set_final_segments(id, &old, vec![], None)
+                .unwrap_err(),
             store.fail_pass(id, &old, "x".to_string()).unwrap_err(),
             store.finish(id, &old).unwrap_err(),
         ] {
@@ -1819,7 +1827,7 @@ mod tests {
         let pass = store.begin_offline_pass(id).unwrap();
         store.set_finalize_model(id, &pass, model).unwrap();
         store
-            .set_final_segments(id, &pass, vec![seg(0.0, 1.0, text)])
+            .set_final_segments(id, &pass, vec![seg(0.0, 1.0, text)], None)
             .unwrap();
         store.finish(id, &pass).unwrap();
     }
@@ -2408,7 +2416,7 @@ mod tests {
         let mut sub = store.subscribe(id).unwrap();
 
         store
-            .set_final_segments(id, &pass, vec![seg(2.0, 4.0, "hi")])
+            .set_final_segments(id, &pass, vec![seg(2.0, 4.0, "hi")], None)
             .unwrap();
 
         let ev = sub.events.try_recv().unwrap();
@@ -2433,7 +2441,7 @@ mod tests {
         store.append_segment(id, seg(0.0, 1.0, "live v1")).unwrap();
         let pass = store.claim_finalizing(id);
         store
-            .set_final_segments(id, &pass, vec![seg(0.0, 1.0, "final v1")])
+            .set_final_segments(id, &pass, vec![seg(0.0, 1.0, "final v1")], None)
             .unwrap();
         store.finish(id, &pass).unwrap();
 
@@ -2518,7 +2526,7 @@ mod tests {
         store.append_segment(id, seg(0.0, 1.0, "live v1")).unwrap();
         let pass = store.claim_finalizing(id);
         store
-            .set_final_segments(id, &pass, vec![seg(0.0, 1.0, "final v1")])
+            .set_final_segments(id, &pass, vec![seg(0.0, 1.0, "final v1")], None)
             .unwrap();
         store.finish(id, &pass).unwrap();
         let before = store.get(id).unwrap();

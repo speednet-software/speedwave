@@ -61,6 +61,20 @@ pub struct ModelsUsed {
     pub diarization: Option<String>,
 }
 
+/// What an offline pass that told speakers apart records: its diarization model and the
+/// seconds that took.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiarizationRecord {
+    /// Diarization model key.
+    pub model: String,
+    /// Seconds the diarization took.
+    pub secs: f64,
+}
+
+/// The word in front of a speaker number in every label: the Markdown export, the transcript
+/// pane and the summary prompt (`speaker_label_matches_ts_mirrors`).
+const SPEAKER_LABEL: &str = "Speaker";
+
 /// One transcript session — the persisted artifact.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptSession {
@@ -205,12 +219,19 @@ impl TranscriptSession {
         }
     }
 
-    /// Installs `final_segments` from the higher-quality offline pass and drops the diarization
-    /// record of the transcript they replace (`TranscriptStore::set_diarization` adds the new one).
-    pub fn set_final_segments(&mut self, final_segs: Vec<Segment>) {
+    /// Installs `final_segments` from the higher-quality offline pass with the diarization
+    /// record of that pass, replacing the record of the transcript they replace.
+    pub fn set_final_segments(
+        &mut self,
+        final_segs: Vec<Segment>,
+        diarization: Option<DiarizationRecord>,
+    ) {
         self.final_segments = Some(final_segs);
-        self.models_used.diarization = None;
-        self.diarization_secs = None;
+        let (model, secs) = diarization
+            .map(|d| (Some(d.model), Some(d.secs)))
+            .unwrap_or_default();
+        self.models_used.diarization = model;
+        self.diarization_secs = secs;
     }
 
     /// The recordings-list row for this session; `dir` is its directory, read for the audio
@@ -279,7 +300,10 @@ impl TranscriptSession {
             speakers.sort_unstable();
             speakers.dedup();
             if !speakers.is_empty() {
-                let names: Vec<String> = speakers.iter().map(|n| format!("Speaker {n}")).collect();
+                let names: Vec<String> = speakers
+                    .iter()
+                    .map(|n| format!("{SPEAKER_LABEL} {n}"))
+                    .collect();
                 s.push_str(&format!(
                     "- Speakers: {} (told apart from the meeting audio)\n",
                     names.join(", ")
@@ -296,7 +320,7 @@ impl TranscriptSession {
             }
             let label = match (seg.source, seg.speaker_id) {
                 (Some(src @ TranscriptSource::System), Some(n)) => {
-                    format!(" {} · Speaker {n}:", src.label())
+                    format!(" {} · {SPEAKER_LABEL} {n}:", src.label())
                 }
                 (Some(src), _) => format!(" {}:", src.label()),
                 (None, _) => String::new(),
@@ -433,6 +457,12 @@ mod tests {
     use crate::transcription::audio::AudioSource;
     use std::time::Duration;
 
+    /// The body of `export interface <name> { ... }` in a TS source, for mirror checks.
+    fn ts_interface_body<'a>(src: &'a str, name: &str) -> &'a str {
+        let start = src.find(&format!("export interface {name} {{")).unwrap();
+        &src[start..start + src[start..].find("\n}").unwrap()]
+    }
+
     fn mk_source() -> AudioSourceInfo {
         AudioSourceInfo {
             source: AudioSource::SystemWide,
@@ -487,19 +517,46 @@ mod tests {
         s.live_segments = vec![seg(0.0, 1.0, "live")];
         assert_eq!(s.effective_segments().len(), 1);
         assert_eq!(s.effective_segments()[0].text, "live");
-        s.set_final_segments(vec![seg(0.0, 2.0, "final")]);
+        s.set_final_segments(vec![seg(0.0, 2.0, "final")], None);
         assert_eq!(s.effective_segments().len(), 1);
         assert_eq!(s.effective_segments()[0].text, "final");
     }
 
     #[test]
-    fn new_final_segments_drop_the_diarization_record_of_the_ones_they_replace() {
+    fn new_final_segments_carry_their_own_diarization_record_and_drop_the_old_one() {
         let mut s = diarized_session();
         s.diarization_secs = Some(3.0);
-        s.set_final_segments(vec![seg(0.0, 1.0, "nowe")]);
+        s.set_final_segments(vec![seg(0.0, 1.0, "nowe")], None);
         assert_eq!(s.models_used.diarization, None);
         assert_eq!(s.diarization_secs, None);
         assert_eq!(s.effective_segments()[0].text, "nowe");
+
+        s.set_final_segments(
+            vec![seg(0.0, 1.0, "nowsze")],
+            Some(DiarizationRecord {
+                model: "m".to_string(),
+                secs: 12.5,
+            }),
+        );
+        assert_eq!(s.models_used.diarization.as_deref(), Some("m"));
+        assert_eq!(s.diarization_secs, Some(12.5));
+    }
+
+    #[test]
+    fn speaker_label_matches_ts_mirrors() {
+        let pane = include_str!(
+            "../../../../desktop/src/src/app/meeting-transcription/live-transcript/live-transcript.component.ts"
+        );
+        let service =
+            include_str!("../../../../desktop/src/src/app/services/transcription.service.ts");
+        assert!(
+            pane.contains(&format!("`Meeting · {SPEAKER_LABEL} ${{n}}`")),
+            "live-transcript.component.ts must label a diarized meeting line `Meeting · {SPEAKER_LABEL} N`"
+        );
+        assert!(
+            service.contains(&format!("'{SPEAKER_LABEL} N'")),
+            "transcription.service.ts SPEAKER_LABELS_PROMPT must name the labels as '{SPEAKER_LABEL} N'"
+        );
     }
 
     #[test]
@@ -701,10 +758,10 @@ mod tests {
         s.audio_parts.push(second);
         s.title = Some("Retro".to_string());
         s.live_segments = vec![seg(0.0, 1.0, "live only")];
-        s.set_final_segments(vec![
-            seg(5.0, 6.0, "później"),
-            seg(0.0, 1.0, "  Dzień dobry "),
-        ]);
+        s.set_final_segments(
+            vec![seg(5.0, 6.0, "później"), seg(0.0, 1.0, "  Dzień dobry ")],
+            None,
+        );
         s.save(dir.path()).unwrap();
 
         let sum = s.summary(dir.path());
@@ -729,7 +786,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut s = TranscriptSession::new(Language::Pl, mk_source(), dir.path().join("a.wav"));
         assert!(s.live_segments.is_empty());
-        s.set_final_segments(vec![seg(0.0, 1.0, "tekst")]);
+        s.set_final_segments(vec![seg(0.0, 1.0, "tekst")], None);
         assert_eq!(s.summary(dir.path()).segment_count, 1);
     }
 
@@ -763,8 +820,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = TranscriptSession::new(Language::En, mk_source(), dir.path().join("a.wav"));
         let json = serde_json::to_value(s.summary(dir.path())).unwrap();
-        let start = src.find("export interface TranscriptSummary {").unwrap();
-        let body = &src[start..start + src[start..].find("\n}").unwrap()];
+        let body = ts_interface_body(src, "TranscriptSummary");
         for key in json.as_object().unwrap().keys() {
             assert!(
                 body.contains(&format!("  {key}:")),
@@ -807,12 +863,8 @@ mod tests {
     #[test]
     fn diarization_fields_match_ts_mirror() {
         let src = include_str!("../../../../desktop/src/src/app/models/transcript.ts");
-        let field_in = |interface: &str, field: &str| {
-            let start = src
-                .find(&format!("export interface {interface} {{"))
-                .unwrap();
-            src[start..start + src[start..].find("\n}").unwrap()].contains(field)
-        };
+        let field_in =
+            |interface: &str, field: &str| ts_interface_body(src, interface).contains(field);
         assert!(
             field_in("Segment", "  speaker_id?: number | null;"),
             "models/transcript.ts Segment must carry the optional speaker_id field"

@@ -180,6 +180,68 @@ fn the_vendored_code_never_writes_to_stderr() {
 }
 
 #[test]
+fn the_vendored_code_loads_no_backend_library() {
+    let source = vendored_sources();
+    assert!(
+        !source.contains("ggml_backend_load"),
+        "ggml_backend_load_all and ggml_backend_load search the executable's directory and the \
+         working directory for backend libraries and load every match; the linked backends are \
+         registered statically (UPSTREAM, local change 7)"
+    );
+}
+
+#[test]
+fn the_chunk_loop_reads_the_abort_callback_before_every_chunk() {
+    let source = read_vendor_file("whisper-diarization.cpp");
+    let detect = source
+        .split("bool whisper_diar_detect_speakers(")
+        .nth(1)
+        .expect("whisper_diar_detect_speakers is defined");
+    let body = &detect[..detect.find("\n}\n").expect("the function ends")];
+    assert!(
+        body.contains("ggml_abort_callback abort_callback, void * abort_callback_data"),
+        "the function takes the abort callback and its data (UPSTREAM, local change 8)"
+    );
+    let chunk_loop = body
+        .find("for (int64_t i = 0; i < n_mel_frames;")
+        .expect("the chunk loop");
+    let check = body
+        .find("if (abort_callback && abort_callback(abort_callback_data))")
+        .expect("the loop reads the abort callback");
+    assert!(
+        check > chunk_loop,
+        "the abort check sits inside the chunk loop"
+    );
+    assert!(
+        body.contains("ggml_abort_callback abort_callback, void * abort_callback_data"),
+        "the header declaration carries the same two parameters"
+    );
+    assert!(read_vendor_file("whisper-diarization.h")
+        .contains("ggml_abort_callback abort_callback, void * abort_callback_data"));
+}
+
+#[test]
+fn upstream_names_the_whisper_rs_sys_version_the_crate_pins() {
+    let upstream = read_vendor_file("UPSTREAM");
+    let named = upstream
+        .lines()
+        .find_map(|l| l.strip_prefix("ggml-headers-source: whisper-rs-sys "))
+        .and_then(|rest| rest.split(',').next())
+        .map(str::trim)
+        .expect("UPSTREAM names the whisper-rs-sys version its ggml headers come from");
+    let manifest = read_repo_file("crates/speedwave-runtime/Cargo.toml");
+    let pin = manifest
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("whisper-rs-sys = { version = \"="))
+        .and_then(|rest| rest.split('"').next())
+        .expect("speedwave-runtime pins whisper-rs-sys with `=`");
+    assert_eq!(
+        named, pin,
+        "UPSTREAM's ggml-headers-source must name the whisper-rs-sys version the crate pins"
+    );
+}
+
+#[test]
 fn the_cache_geometry_is_the_offline_one_upstream_lists() {
     let params = cache_params(&read_vendor_file("whisper-diarization.cpp"))
         .expect("whisper-diarization.cpp defines whisper_diar_cache_params");

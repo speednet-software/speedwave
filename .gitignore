@@ -87,3 +87,4 @@ __pycache__/
 *.pyc
 .claude/specs/
 .claude/plans/
+.claude/settings.local.json
