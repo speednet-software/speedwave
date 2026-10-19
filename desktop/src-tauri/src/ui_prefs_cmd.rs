@@ -41,9 +41,13 @@ pub(crate) async fn apply_beta_toggle_inner(app: &AppHandle, enabled: bool) -> R
     }
     app.state::<tray::TrayMenuState>().set_beta_enabled(enabled);
     tray::refresh_tray_menu(app);
-    app.emit("beta-changed", enabled)
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    let emitted = app.emit("beta-changed", enabled).map_err(|e| e.to_string());
+    if let Err(e) =
+        tokio::task::spawn_blocking(crate::pii_ner_service::stop_unless_active_wants).await
+    {
+        log::error!("PII NER detector stop after the beta toggle panicked: {e}");
+    }
+    emitted
 }
 
 #[cfg(test)]

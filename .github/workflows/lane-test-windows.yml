@@ -29,7 +29,14 @@ jobs:
           rust-cache-directories: D:\st
 
       - name: cargo test (full suite incl. test-support)
-        run: cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-runtime/test-support,speedwave-version/cli
+        run: cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner -p speedwave-version --features speedwave-runtime/test-support,speedwave-version/cli
+
+      - name: pii-ner model e2e and converter tests (CPU)
+        run: |
+          PY=$(command -v python3 || command -v python)
+          "$PY" crates/pii-ner/tools/fetch_and_convert.py --out desktop/src-tauri/pii-ner --verify
+          SPEEDWAVE_PII_NER_ARTIFACT="$GITHUB_WORKSPACE/desktop/src-tauri/pii-ner" cargo test -p speedwave-pii-ner --features model-e2e --lib model_e2e
+          "$PY" -m unittest discover -s crates/pii-ner/tools -p 'test_*.py'
 
       - name: Verify .gitattributes survives core.autocrlf=true checkout
         env:
@@ -63,8 +70,9 @@ jobs:
 
       - name: Rust clippy
         run: |
-          cargo clippy -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-version/cli --all-targets -- -D warnings
+          cargo clippy -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner -p speedwave-version --features speedwave-version/cli --all-targets -- -D warnings
           cargo clippy -p speedwave-runtime --all-targets --features test-support,audio-transcription -- -D warnings
+          cargo clippy -p speedwave-pii-ner --all-targets --features bench,model-e2e -- -D warnings
 
       - name: Desktop clippy
         working-directory: desktop/src-tauri

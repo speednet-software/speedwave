@@ -409,32 +409,33 @@ pub(crate) fn worker_gateway_url(port: u16) -> String {
     format!("http://{}:{port}", consts::HOST_GATEWAY_ALIAS)
 }
 
-/// Whether a rendered compose's hub `WORKER_OS_URL` already targets the current mcp-os port.
+/// Whether a rendered host-worker URL (`WORKER_OS_URL`, `proxy.json` `ner.url`) still targets
+/// the live worker.
 #[derive(Debug, PartialEq, Eq)]
-pub enum WorkerOsUrlState {
-    /// `mcp-hub` carries no `WORKER_OS_URL` (OS integration not wired in).
+pub enum RenderedUrlState {
+    /// Nothing rendered and nothing to target.
     Absent,
-    /// The hub URL equals the container-facing URL for the current port.
+    /// The rendered URL equals the container-facing URL of the live port.
     Current,
-    /// The hub URL targets another port, or the compose cannot be parsed.
+    /// The rendered URL targets another port, one side is missing, or the file cannot be parsed.
     Stale,
 }
 
 /// Exact match against the URL the renderer injects for `current_port`; a substring
 /// probe (`:80` inside `:8080`) or an unparsable compose never counts as current.
-pub fn worker_os_url_state(yaml: &str, current_port: u16) -> WorkerOsUrlState {
+pub fn worker_os_url_state(yaml: &str, current_port: u16) -> RenderedUrlState {
     let doc: serde_yaml_ng::Value = match serde_yaml_ng::from_str(yaml) {
         Ok(doc) => doc,
         Err(e) => {
             log::warn!("compose is not parsable ({e}); treating WORKER_OS_URL as stale");
-            return WorkerOsUrlState::Stale;
+            return RenderedUrlState::Stale;
         }
     };
     let expected = worker_gateway_url(current_port);
     match hub_env_value(&doc, "WORKER_OS_URL") {
-        None => WorkerOsUrlState::Absent,
-        Some(value) if value == expected => WorkerOsUrlState::Current,
-        Some(_) => WorkerOsUrlState::Stale,
+        None => RenderedUrlState::Absent,
+        Some(value) if value == expected => RenderedUrlState::Current,
+        Some(_) => RenderedUrlState::Stale,
     }
 }
 
@@ -641,7 +642,7 @@ mod worker_os_url_state_tests {
             "PORT=4000",
             "WORKER_OS_URL=http://host.docker.internal:54321",
         ]);
-        assert_eq!(worker_os_url_state(&yaml, 54321), WorkerOsUrlState::Current);
+        assert_eq!(worker_os_url_state(&yaml, 54321), RenderedUrlState::Current);
     }
 
     #[test]
@@ -649,7 +650,7 @@ mod worker_os_url_state_tests {
     fn reports_stale_when_hub_url_targets_another_port() {
         let _direct = crate::compose::pin_direct_addressing(crate::consts::LIMA_VZ_HOST_IP);
         let yaml = hub_compose(&["WORKER_OS_URL=http://host.docker.internal:54321"]);
-        assert_eq!(worker_os_url_state(&yaml, 54322), WorkerOsUrlState::Stale);
+        assert_eq!(worker_os_url_state(&yaml, 54322), RenderedUrlState::Stale);
     }
 
     #[test]
@@ -657,7 +658,7 @@ mod worker_os_url_state_tests {
     fn reports_stale_when_current_port_is_a_decimal_prefix_of_the_hub_port() {
         let _direct = crate::compose::pin_direct_addressing(crate::consts::LIMA_VZ_HOST_IP);
         let yaml = hub_compose(&["WORKER_OS_URL=http://host.docker.internal:8080"]);
-        assert_eq!(worker_os_url_state(&yaml, 80), WorkerOsUrlState::Stale);
+        assert_eq!(worker_os_url_state(&yaml, 80), RenderedUrlState::Stale);
     }
 
     #[test]
@@ -665,7 +666,7 @@ mod worker_os_url_state_tests {
     fn reports_absent_when_hub_has_no_os_url() {
         let _direct = crate::compose::pin_direct_addressing(crate::consts::LIMA_VZ_HOST_IP);
         let yaml = hub_compose(&["PORT=4000"]);
-        assert_eq!(worker_os_url_state(&yaml, 54321), WorkerOsUrlState::Absent);
+        assert_eq!(worker_os_url_state(&yaml, 54321), RenderedUrlState::Absent);
     }
 
     #[test]
@@ -675,17 +676,17 @@ mod worker_os_url_state_tests {
         let relayed = hub_compose(&["WORKER_OS_URL=http://host.docker.internal:43739"]);
         assert_eq!(
             worker_os_url_state(&relayed, 60123),
-            WorkerOsUrlState::Current
+            RenderedUrlState::Current
         );
         let raw = hub_compose(&["WORKER_OS_URL=http://host.docker.internal:60123"]);
-        assert_eq!(worker_os_url_state(&raw, 60123), WorkerOsUrlState::Stale);
+        assert_eq!(worker_os_url_state(&raw, 60123), RenderedUrlState::Stale);
     }
 
     #[test]
     fn treats_an_unparsable_compose_as_stale() {
         assert_eq!(
             worker_os_url_state("services: [", 54321),
-            WorkerOsUrlState::Stale
+            RenderedUrlState::Stale
         );
     }
 }

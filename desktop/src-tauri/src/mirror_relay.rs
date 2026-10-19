@@ -163,6 +163,31 @@ impl Drop for RetiredRelay {
     }
 }
 
+/// Relay of an in-process host listener: ensured on creation, re-ensured by the owner's
+/// watchdog, torn down synchronously on drop (rollback and stop alike).
+pub(crate) struct RelayedPort {
+    port: u16,
+}
+
+impl RelayedPort {
+    /// Ensures the guest relay for a listener just bound on `port`.
+    pub(crate) fn new(port: u16) -> Self {
+        ensure_relay_for_port(port);
+        Self { port }
+    }
+
+    /// Re-ensures the relay; a WSL distro restart wipes it while the listener survives.
+    pub(crate) fn ensure_relay(&self) {
+        ensure_relay_for_port(self.port);
+    }
+}
+
+impl Drop for RelayedPort {
+    fn drop(&mut self) {
+        remove_relay_for_port(self.port);
+    }
+}
+
 /// Records every relay op under `cfg(test)` so lifecycle tests (wrapper, HostBridge)
 /// can assert the exact ensure/remove sequence; keyed by port to stay parallel-safe.
 #[cfg(test)]
@@ -608,7 +633,7 @@ mod tests {
         RELAY_FAILED_MARKER, RELAY_UNIT_PREFIX,
     };
     use super::recorder::{calls_for_port, RelayOp};
-    use super::{RelayWorkerInner, RelayedWorker};
+    use super::{RelayWorkerInner, RelayedPort, RelayedWorker};
     use std::cell::Cell;
     use std::rc::Rc;
     use std::time::{Duration, Instant};
@@ -712,6 +737,20 @@ mod tests {
         assert_eq!(
             calls_for_port(1002),
             vec![RelayOp::Ensure, RelayOp::Ensure, RelayOp::Remove]
+        );
+    }
+
+    #[test]
+    fn relayed_port_ensures_on_creation_and_removes_on_drop() {
+        let relay = RelayedPort::new(1201);
+        assert_eq!(calls_for_port(1201), vec![RelayOp::Ensure]);
+        relay.ensure_relay();
+        assert_eq!(calls_for_port(1201), vec![RelayOp::Ensure, RelayOp::Ensure]);
+        drop(relay);
+        assert_eq!(
+            calls_for_port(1201),
+            vec![RelayOp::Ensure, RelayOp::Ensure, RelayOp::Remove],
+            "dropping the guard tears the relay down synchronously"
         );
     }
 

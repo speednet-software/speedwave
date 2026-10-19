@@ -17,16 +17,21 @@ source "${SCRIPT_DIR}/e2e-common.sh"
 E2E_RSYNC_EXCLUDES=(
     node_modules target dist .e2e-artifacts .git build-context
     .angular .build
+    'mcp-servers/policies/wasm-pkg'
     'desktop/src-tauri/lima'
     'desktop/src-tauri/nodejs'
     'desktop/src-tauri/wsl'
     'desktop/src-tauri/cli'
     'desktop/src-tauri/mcp-os'
+    'desktop/src-tauri/oauth'
+    'desktop/src-tauri/pii-ner'
+    'desktop/src-tauri/vulkan-1.dll'
     'desktop/src-tauri/THIRD-PARTY-LICENSES'
     'desktop/src-tauri/calendar-cli'
     'desktop/src-tauri/mail-cli'
     'desktop/src-tauri/notes-cli'
     'desktop/src-tauri/reminders-cli'
+    'desktop/src-tauri/audio-capture-cli'
 )
 
 WINDOWS_SSH_OPTS="$SSH_OPTS_BASE -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -p $WINDOWS_SSH_PORT"

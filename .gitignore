@@ -78,6 +78,7 @@ desktop/src-tauri/audio-capture-cli
 desktop/src-tauri/build-context/
 desktop/src-tauri/mcp-os/
 desktop/src-tauri/oauth/
+desktop/src-tauri/pii-ner/
 .e2e-artifacts/
 
 .office-test-venv/

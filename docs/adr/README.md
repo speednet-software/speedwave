@@ -100,6 +100,8 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-092](ADR-092-per-tab-model-selection.md)                          | Per-tab model selection with a settings.json-backed project default                                                         | Accepted                                                                           |
 | [ADR-093](ADR-093-portable-ggml-cpu-baseline.md)                       | Portable ggml CPU baseline for whisper builds: `GGML_NATIVE` off, no build-host instruction sets                            | Accepted                                                                           |
 | [ADR-094](ADR-094-arbitrary-file-attachments-chunked-upload.md)        | Arbitrary file attachments streamed to disk through chunked raw-body IPC                                                    | Accepted                                                                           |
+| [ADR-095](ADR-095-pii-ner-redact-model-in-burn.md)                     | Neural PII detection: Redact model converted at build time and ported to burn (wgpu GPU, CPU fallback)                      | Accepted                                                                           |
+| [ADR-096](ADR-096-host-side-pii-ner-detector-for-the-proxy.md)         | Host-side PII NER detector served from the Desktop process; proxy seals its spans with the existing engine                  | Accepted                                                                           |
 
 ## Creating a New ADR
 

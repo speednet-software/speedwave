@@ -292,7 +292,7 @@ pub(crate) fn project_llm_is_unconfigured(project: &str) -> Result<bool, String>
     project_llm_is_unconfigured_in(&user_config, project)
 }
 
-fn project_llm_is_unconfigured_in(
+pub(crate) fn project_llm_is_unconfigured_in(
     user_config: &config::SpeedwaveUserConfig,
     project: &str,
 ) -> Result<bool, String> {
@@ -307,6 +307,7 @@ fn project_llm_is_unconfigured_in(
 }
 
 pub(crate) fn render_and_save_compose(project: &str) -> Result<(), String> {
+    crate::pii_ner_service::start_if_active_wants();
     let user_config = config::load_user_config().map_err(|e| e.to_string())?;
     let project_dir = user_config
         .find_project(project)
@@ -534,6 +535,7 @@ pub async fn add_project(
                 return Ok(());
             }
             crate::ensure_oauth_running(&oauth_arc, proj);
+            crate::pii_ner_service::start_if_active_wants();
             log::info!("starting containers for project={proj}");
             setup_wizard::start_containers(proj).map_err(|e| {
                 log::error!("failed to start containers: {e:#}");
@@ -565,6 +567,7 @@ pub async fn add_project(
     if let Some(prev) = pending_teardown {
         spawn_background_teardown(prev);
     }
+    crate::pii_ner_service::stop_unless_active_wants();
 
     let _ = app.emit(
         "project_switch_succeeded",
@@ -655,6 +658,7 @@ pub async fn start_containers(
         ensure_images_ready()?;
         check_project(&project)?;
         crate::ensure_oauth_running(&oauth_arc, &project);
+        crate::pii_ner_service::sync_with_active_project();
         if let Ok(cfg) = speedwave_runtime::config::load_user_config() {
             if let Some(p) = cfg.find_project(&project) {
                 speedwave_runtime::cloudstorage::check_project_readable_or_err(
@@ -853,6 +857,8 @@ pub async fn factory_reset(
     if let Ok(mut guard) = clipboard.lock() {
         drop(guard.take());
     }
+
+    crate::pii_ner_service::stop_service();
 
     let wipe = tokio::task::spawn_blocking(|| {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1213,6 +1219,7 @@ pub async fn probe_otlp_endpoint(endpoint: String) -> Result<bool, String> {
 fn build_security_policy_response(
     resolved: &speedwave_runtime::pii_policy::ResolvedPiiPolicy,
     raw: Option<&config::PiiPolicyUserConfig>,
+    pii_ner_enabled: bool,
 ) -> SecurityPolicyResponse {
     let custom_policies = raw
         .map(|r| {
@@ -1233,6 +1240,7 @@ fn build_security_policy_response(
         forced_policies: resolved.source.forced.clone(),
         effective_rules: resolved.rules.clone(),
         custom_policies,
+        pii_ner_enabled,
     }
 }
 
@@ -1253,7 +1261,16 @@ fn get_security_policy_in(
         .and_then(|m| m.pii_policy);
     let resolved =
         speedwave_runtime::pii_policy::resolve_pii_policy(policy.as_ref(), managed.as_ref())?;
-    Ok(build_security_policy_response(&resolved, policy.as_ref()))
+    let pii_ner_enabled = speedwave_runtime::pii_policy::resolve_pii_ner(
+        user_config.beta_enabled(),
+        managed.as_ref(),
+        policy.as_ref(),
+    );
+    Ok(build_security_policy_response(
+        &resolved,
+        policy.as_ref(),
+        pii_ner_enabled,
+    ))
 }
 
 fn stored_security_policy(
@@ -1395,6 +1412,7 @@ fn build_pii_policy_user_config(
     let cfg = config::PiiPolicyUserConfig {
         policies,
         custom_policies,
+        pii_ner_enabled: Some(update.pii_ner_enabled),
     };
     pii_policy::validate_user_policy_config(&cfg).map_err(|e| anyhow::anyhow!(e))?;
     Ok(cfg)
@@ -1418,11 +1436,15 @@ pub fn update_security_policy(
     update: SecurityPolicyUpdate,
     project: Option<String>,
 ) -> Result<(), String> {
-    update_security_policy_in(
+    let saved = update_security_policy_in(
         speedwave_runtime::consts::data_dir(),
         &update,
         project.as_deref(),
-    )
+    );
+    if saved.is_ok() {
+        crate::pii_ner_service::stop_unless_active_wants();
+    }
+    saved
 }
 
 fn update_security_policy_in(
@@ -2801,11 +2823,39 @@ mod tests {
     }
 
     #[test]
+    fn the_policy_getter_reports_the_detector_opt_in_only_under_the_feature_gate() {
+        let mut cfg = make_config_with_active_project();
+        cfg.find_project_mut("beta").unwrap().policy = Some(config::PiiPolicyUserConfig {
+            policies: Vec::new(),
+            custom_policies: Vec::new(),
+            pii_ner_enabled: Some(true),
+        });
+        cfg.ui = Some(config::UiPrefsConfig {
+            beta_enabled: Some(true),
+        });
+        let gate_on = seeded_tempdir(&cfg);
+        assert!(
+            get_security_policy_in(gate_on.path(), Some("beta"))
+                .unwrap()
+                .pii_ner_enabled
+        );
+
+        cfg.ui = None;
+        let gate_off = seeded_tempdir(&cfg);
+        assert!(
+            !get_security_policy_in(gate_off.path(), Some("beta"))
+                .unwrap()
+                .pii_ner_enabled
+        );
+    }
+
+    #[test]
     fn the_policy_getter_resolves_the_named_projects_policy() {
         let mut cfg = make_config_with_active_project();
         cfg.find_project_mut("beta").unwrap().policy = Some(config::PiiPolicyUserConfig {
             policies: vec!["strict".to_string()],
             custom_policies: Vec::new(),
+            pii_ner_enabled: None,
         });
         let tmp = seeded_tempdir(&cfg);
 
@@ -2836,6 +2886,7 @@ mod tests {
         cfg.find_project_mut("beta").unwrap().policy = Some(config::PiiPolicyUserConfig {
             policies: vec!["strict".to_string()],
             custom_policies: Vec::new(),
+            pii_ner_enabled: None,
         });
 
         let named = stored_security_policy(&cfg, Some("beta")).unwrap();
@@ -2849,6 +2900,7 @@ mod tests {
         SecurityPolicyUpdate {
             policies: vec!["strict".to_string()],
             custom_policies: Vec::new(),
+            pii_ner_enabled: false,
         }
     }
 
@@ -5846,6 +5898,7 @@ mod tests {
         SecurityPolicyUpdate {
             policies: policies.into_iter().map(String::from).collect(),
             custom_policies,
+            pii_ner_enabled: false,
         }
     }
 
@@ -5925,8 +5978,9 @@ mod tests {
     #[test]
     fn build_response_defaults_to_every_library_rule_tokenized_for_unconfigured_project() {
         let resolved = speedwave_runtime::pii_policy::resolve_pii_policy(None, None).unwrap();
-        let resp = build_security_policy_response(&resolved, None);
+        let resp = build_security_policy_response(&resolved, None, false);
         assert!(resp.enabled_policies.is_empty());
+        assert!(!resp.pii_ner_enabled);
         assert!(resp.forced_policies.is_empty());
         let library = speedwave_runtime::pii_policy::rule_library().unwrap();
         assert_eq!(resp.effective_rules.len(), library.len());
@@ -5963,9 +6017,10 @@ mod tests {
                 }],
                 keywords: vec![],
             }],
+            pii_ner_enabled: None,
         };
         let resolved = speedwave_runtime::pii_policy::resolve_pii_policy(Some(&raw), None).unwrap();
-        let resp = build_security_policy_response(&resolved, Some(&raw));
+        let resp = build_security_policy_response(&resolved, Some(&raw), false);
         assert_eq!(resp.enabled_policies, vec!["my-custom".to_string()]);
         assert!(resp.forced_policies.is_empty());
         assert!(resp.effective_rules.iter().any(|r| r.id == "EMPLOYEE_ID"));
@@ -5986,9 +6041,10 @@ mod tests {
         };
         let resolved =
             speedwave_runtime::pii_policy::resolve_pii_policy(None, Some(&managed)).unwrap();
-        let resp = build_security_policy_response(&resolved, None);
+        let resp = build_security_policy_response(&resolved, None, false);
         assert_eq!(resp.enabled_policies, vec!["strict".to_string()]);
         assert_eq!(resp.forced_policies, vec!["strict".to_string()]);
+        assert!(!resp.pii_ner_enabled);
     }
 
     #[test]
@@ -5997,6 +6053,24 @@ mod tests {
         let cfg = build_pii_policy_user_config(&update).unwrap();
         assert_eq!(cfg.policies, vec!["gdpr-art32".to_string()]);
         assert!(cfg.custom_policies.is_empty());
+    }
+
+    #[test]
+    fn build_config_stores_the_detector_switch() {
+        let mut update = security_policy_input(vec!["gdpr-art32"], vec![]);
+        assert_eq!(
+            build_pii_policy_user_config(&update)
+                .unwrap()
+                .pii_ner_enabled,
+            Some(false)
+        );
+        update.pii_ner_enabled = true;
+        assert_eq!(
+            build_pii_policy_user_config(&update)
+                .unwrap()
+                .pii_ner_enabled,
+            Some(true)
+        );
     }
 
     #[test]
