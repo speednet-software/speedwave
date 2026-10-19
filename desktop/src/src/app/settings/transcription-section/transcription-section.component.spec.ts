@@ -10,6 +10,7 @@ import type {
   MicPermissionStatus,
   RecommendedModelAck,
   RecommendedModelEntry,
+  TranscriptSummary,
 } from '../../models/transcript';
 
 describe('TranscriptionSectionComponent', () => {
@@ -17,6 +18,7 @@ describe('TranscriptionSectionComponent', () => {
   let fixture: ComponentFixture<TranscriptionSectionComponent>;
   let downloadingModelKey: ReturnType<typeof signal<string | null>>;
   let downloadProgress: ReturnType<typeof signal<DownloadProgress | null>>;
+  let recordings: ReturnType<typeof signal<TranscriptSummary[]>>;
   let svc: {
     recommendedModel: ReturnType<typeof vi.fn>;
     downloadModel: ReturnType<typeof vi.fn>;
@@ -32,6 +34,9 @@ describe('TranscriptionSectionComponent', () => {
     downloadingModelKey: typeof downloadingModelKey;
     downloadProgress: typeof downloadProgress;
     refreshRecordings: ReturnType<typeof vi.fn>;
+    speakerAttribution: ReturnType<typeof vi.fn>;
+    setSpeakerAttribution: ReturnType<typeof vi.fn>;
+    recordings: typeof recordings;
   };
   let platform: string;
 
@@ -64,6 +69,7 @@ describe('TranscriptionSectionComponent', () => {
   beforeEach(async () => {
     downloadingModelKey = signal<string | null>(null);
     downloadProgress = signal<DownloadProgress | null>(null);
+    recordings = signal<TranscriptSummary[]>([]);
     platform = 'macos';
     svc = {
       recommendedModel: vi.fn(async () => notDownloaded),
@@ -80,6 +86,9 @@ describe('TranscriptionSectionComponent', () => {
       downloadingModelKey,
       downloadProgress,
       refreshRecordings: vi.fn(async () => undefined),
+      speakerAttribution: vi.fn(() => false),
+      setSpeakerAttribution: vi.fn(),
+      recordings,
     };
     await TestBed.configureTestingModule({
       imports: [TranscriptionSectionComponent],
@@ -145,6 +154,8 @@ describe('TranscriptionSectionComponent', () => {
           size_bytes: 487_601_967,
         },
         accel_label: 'CPU',
+        diarization: diarizationEntry,
+        gpu_class: 'none',
         finalize: {
           key: 'large-v3-turbo',
           display_name: 'Large v3 Turbo',
@@ -415,7 +426,13 @@ describe('TranscriptionSectionComponent', () => {
       '';
 
     it('says ready when the high-quality model is on disk, with no download button', async () => {
-      svc.recommendedModel.mockResolvedValue({ live: small, finalize: large, accel_label: 'CPU' });
+      svc.recommendedModel.mockResolvedValue({
+        live: small,
+        finalize: large,
+        accel_label: 'CPU',
+        diarization: diarizationEntry,
+        gpu_class: 'none',
+      });
       await component.ngOnInit();
       fixture.detectChanges();
       expect(status()).toContain('Ready to record');
@@ -428,6 +445,8 @@ describe('TranscriptionSectionComponent', () => {
         live: small,
         finalize: { ...large, downloaded: false },
         accel_label: 'CPU',
+        diarization: diarizationEntry,
+        gpu_class: 'none',
       });
       await component.ngOnInit();
       fixture.detectChanges();
@@ -475,7 +494,13 @@ describe('TranscriptionSectionComponent', () => {
     };
 
     it('names the extra download live text needs when it is a separate model', async () => {
-      svc.recommendedModel.mockResolvedValue({ live: small, finalize: large, accel_label: 'CPU' });
+      svc.recommendedModel.mockResolvedValue({
+        live: small,
+        finalize: large,
+        accel_label: 'CPU',
+        diarization: diarizationEntry,
+        gpu_class: 'none',
+      });
       await component.ngOnInit();
       fixture.detectChanges();
       expect(fixture.nativeElement.textContent).toContain('needs an extra download (465.0 MB)');
@@ -483,7 +508,13 @@ describe('TranscriptionSectionComponent', () => {
     });
 
     it('offers that download once live text is turned on', async () => {
-      svc.recommendedModel.mockResolvedValue({ live: small, finalize: large, accel_label: 'CPU' });
+      svc.recommendedModel.mockResolvedValue({
+        live: small,
+        finalize: large,
+        accel_label: 'CPU',
+        diarization: diarizationEntry,
+        gpu_class: 'none',
+      });
       await component.ngOnInit();
       component.liveTranscript.set(true);
       fixture.detectChanges();
@@ -497,7 +528,171 @@ describe('TranscriptionSectionComponent', () => {
       component.liveTranscript.set(true);
       fixture.detectChanges();
       expect(component.liveModel()).toBeNull();
-      expect(fixture.nativeElement.textContent).not.toContain('extra download');
+      const liveCard = fixture.nativeElement
+        .querySelector('[data-testid="live-transcript-toggle"]')
+        .closest('.rounded');
+      expect(liveCard.textContent).not.toContain('extra download');
+    });
+  });
+
+  describe('speaker attribution', () => {
+    const q = (id: string): HTMLElement | null =>
+      fixture.nativeElement.querySelector(`[data-testid="${id}"]`);
+    const toggle = (): HTMLInputElement =>
+      fixture.nativeElement.querySelector('[data-testid="speaker-attribution-toggle"]');
+    const withDiarization = (
+      entry: Partial<RecommendedModelEntry>,
+      gpu_class: RecommendedModelAck['gpu_class'] = 'discrete'
+    ): RecommendedModelAck => ({
+      ...notDownloaded,
+      diarization: { ...diarizationEntry, ...entry },
+      gpu_class,
+    });
+    const row = (overrides: Partial<TranscriptSummary>): TranscriptSummary => ({
+      id: 'r',
+      created_at: '2026-10-19T08:00:00Z',
+      title: null,
+      language: 'pl',
+      source_label: 'System',
+      status: { state: 'done' },
+      duration_secs: 47 * 60,
+      segment_count: 3,
+      preview: null,
+      size_bytes: 1,
+      finalize_model: 'large-v3',
+      queued: false,
+      diarization_secs: null,
+      ...overrides,
+    });
+
+    it('sits under While recording, off by default, and saves the choice', async () => {
+      await component.ngOnInit();
+      fixture.detectChanges();
+      const card = q('speaker-attribution');
+      expect(card?.textContent).toContain('After you stop');
+      expect(card?.textContent).toContain('Tell speakers apart in the meeting audio');
+      expect(card?.textContent).toContain('Your microphone stays labelled You');
+      expect(component.speakerAttribution()).toBe(false);
+      const input = toggle();
+      input.checked = true;
+      input.dispatchEvent(new Event('change'));
+      expect(svc.setSpeakerAttribution).toHaveBeenCalledWith(true);
+      expect(component.speakerAttribution()).toBe(true);
+    });
+
+    it('reads the stored choice on first paint', async () => {
+      svc.speakerAttribution.mockReturnValue(true);
+      fixture = TestBed.createComponent(TranscriptionSectionComponent);
+      component = fixture.componentInstance;
+      await component.ngOnInit();
+      expect(component.speakerAttribution()).toBe(true);
+    });
+
+    it('asks for the one download only once the mode is on and the model is missing', async () => {
+      await component.ngOnInit();
+      fixture.detectChanges();
+      expect(q('download-diarization-model')).toBeNull();
+      component.speakerAttribution.set(true);
+      fixture.detectChanges();
+      expect(q('speaker-attribution')?.textContent).toContain('Needs one download (102.1 MB)');
+      q('download-diarization-model')?.click();
+      await fixture.whenStable();
+      expect(svc.downloadModel).toHaveBeenCalledWith('nemotron-3-diarization-q8_0');
+    });
+
+    it('shows the progress of its own download and disables the button', async () => {
+      svc.recommendedModel.mockResolvedValue(withDiarization({ downloading: true }));
+      downloadingModelKey.set('nemotron-3-diarization-q8_0');
+      downloadProgress.set({
+        model_key: 'nemotron-3-diarization-q8_0',
+        downloaded_bytes: 53_506_064,
+        total_bytes: 107_012_128,
+      });
+      component.speakerAttribution.set(true);
+      await component.ngOnInit();
+      fixture.detectChanges();
+      const btn = q('download-diarization-model') as HTMLButtonElement;
+      expect(btn.textContent).toContain('Downloading 50%');
+      expect(btn.disabled).toBe(true);
+    });
+
+    it('drops the download row once the model is on disk and offers Remove in Technical details', async () => {
+      svc.recommendedModel.mockResolvedValue(withDiarization({ downloaded: true }));
+      component.speakerAttribution.set(true);
+      await component.ngOnInit();
+      fixture.detectChanges();
+      expect(q('download-diarization-model')).toBeNull();
+      const remove = q('remove-model-diarization');
+      expect(remove).not.toBeNull();
+      remove?.click();
+      await fixture.whenStable();
+      expect(svc.deleteModel).toHaveBeenCalledWith('nemotron-3-diarization-q8_0');
+    });
+
+    it('keeps the speaker model out of Technical details until it is downloaded', async () => {
+      await component.ngOnInit();
+      fixture.detectChanges();
+      expect(q('model-state-diarization')).toBeNull();
+    });
+
+    it('surfaces a failed download as an error and keeps the switch on', async () => {
+      svc.downloadModel.mockRejectedValue(new Error('network down'));
+      component.speakerAttribution.set(true);
+      await component.ngOnInit();
+      fixture.detectChanges();
+      q('download-diarization-model')?.click();
+      await fixture.whenStable();
+      fixture.detectChanges();
+      expect(q('transcription-error')?.textContent).toContain('network down');
+      expect(component.speakerAttribution()).toBe(true);
+    });
+
+    it('says what it costs on each GPU class, warning only without acceleration', async () => {
+      const cases: [RecommendedModelAck['gpu_class'], string, boolean][] = [
+        ['discrete', 'adds about a minute or two per hour of recording', false],
+        [
+          'integrated',
+          'Uses your integrated graphics: adds some time after each recording.',
+          false,
+        ],
+        ['none', 'no graphics acceleration', true],
+      ];
+      for (const [gpu, text, warn] of cases) {
+        svc.recommendedModel.mockResolvedValue(withDiarization({}, gpu));
+        await component.ngOnInit();
+        fixture.detectChanges();
+        const hw = q('speaker-hardware');
+        expect(hw?.textContent).toContain(text);
+        expect(hw?.className.includes('text-amber-300')).toBe(warn);
+      }
+    });
+
+    it('shows the measured time of the newest diarized recording, and nothing without one', async () => {
+      await component.ngOnInit();
+      fixture.detectChanges();
+      expect(q('speaker-last-run')).toBeNull();
+      recordings.set([
+        row({ id: 'old', created_at: '2026-10-01T08:00:00Z', diarization_secs: 600 }),
+        row({ id: 'new', diarization_secs: 125 }),
+        row({ id: 'plain', created_at: '2026-10-20T08:00:00Z' }),
+      ]);
+      fixture.detectChanges();
+      expect(q('speaker-last-run')?.textContent).toContain(
+        'Last recording: speakers took 2 min for 47 min of audio.'
+      );
+    });
+
+    it('lists the gains and the limits under What to expect, collapsed', async () => {
+      await component.ngOnInit();
+      fixture.detectChanges();
+      const details = q('speaker-what-to-expect') as HTMLDetailsElement;
+      expect(details.open).toBe(false);
+      expect(details.textContent).toContain('attributed to the right person');
+      expect(details.textContent).toContain('Up to 8 people in the meeting audio');
+      expect(details.textContent).toContain('can number the speakers differently');
+      expect(q('speaker-extra-cost')?.textContent).toContain(
+        'Takes extra time after each recording and one extra download (102.1 MB).'
+      );
     });
   });
 

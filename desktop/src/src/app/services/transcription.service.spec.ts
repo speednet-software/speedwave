@@ -4,6 +4,7 @@ import { signal } from '@angular/core';
 import {
   LIVE_TRANSCRIPT_STORAGE_KEY,
   RECORDING_CHOICE_STORAGE_KEY,
+  SPEAKER_ATTRIBUTION_STORAGE_KEY,
   TranscriptionService,
 } from './transcription.service';
 import { TauriService } from './tauri.service';
@@ -857,6 +858,52 @@ describe('TranscriptionService', () => {
     });
   });
 
+  describe('speaker attribution', () => {
+    beforeEach(() => {
+      localStorage.removeItem(SPEAKER_ATTRIBUTION_STORAGE_KEY);
+    });
+
+    it('is off when nothing is stored and round-trips a stored choice', () => {
+      expect(svc.speakerAttribution()).toBe(false);
+      svc.setSpeakerAttribution(true);
+      expect(svc.speakerAttribution()).toBe(true);
+      expect(localStorage.getItem(SPEAKER_ATTRIBUTION_STORAGE_KEY)).toBe('on');
+      svc.setSpeakerAttribution(false);
+      expect(svc.speakerAttribution()).toBe(false);
+      expect(localStorage.getItem(SPEAKER_ATTRIBUTION_STORAGE_KEY)).toBe('off');
+    });
+
+    it('reads as off when storage throws, and a failed save throws nothing', () => {
+      const get = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+        throw new Error('denied');
+      });
+      const set = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+        throw new Error('quota');
+      });
+      expect(svc.speakerAttribution()).toBe(false);
+      expect(() => svc.setSpeakerAttribution(true)).not.toThrow();
+      get.mockRestore();
+      set.mockRestore();
+    });
+
+    it('stop and transcribe hand the current choice to the backend', async () => {
+      const calls: [string, unknown][] = [];
+      mockTauri.invokeHandler = async (cmd, args) => {
+        calls.push([cmd, args]);
+        return undefined;
+      };
+      await svc.stopRecording('sess-1');
+      svc.setSpeakerAttribution(true);
+      await svc.transcribe('other');
+      await svc.stopRecording('sess-2');
+      expect(calls).toEqual([
+        ['stop_transcription', { sessionId: 'sess-1', speakerMode: false }],
+        ['transcribe_transcript', { sessionId: 'other', speakerMode: true }],
+        ['stop_transcription', { sessionId: 'sess-2', speakerMode: true }],
+      ]);
+    });
+  });
+
   describe('recordings list', () => {
     function summary(id: string, overrides: Partial<TranscriptSummary> = {}): TranscriptSummary {
       return {
@@ -1068,6 +1115,29 @@ describe('TranscriptionService', () => {
       expect(svc.chatPromptDraft()).toContain('podsumowanie');
       expect(svc.stagedTranscript()).toBe('# Meeting transcript');
       expect(mockChat.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('explains speaker labels in the prompt only for a diarized transcript, in both languages', async () => {
+      for (const language of ['pl', 'en'] as const) {
+        mockTauri.invokeHandler = transcriptHandler(language);
+        await svc.stageForChat('sess-1');
+        expect(svc.chatPromptDraft()).not.toContain('Speaker N');
+        mockTauri.invokeHandler = async (cmd: string) => {
+          if (cmd === 'get_transcript') {
+            return snapshot({
+              language,
+              models_used: { live: null, finalize: 'large-v3', diarization: 'nemotron' },
+            });
+          }
+          if (cmd === 'get_transcript_markdown') return '# Meeting transcript';
+          return undefined;
+        };
+        await svc.stageForChat('sess-1');
+        expect(svc.chatPromptDraft()).toContain("'Speaker N'");
+        expect(svc.chatPromptDraft()).toContain(
+          language === 'pl' ? 'nie przypisuj imion' : 'do not assign names'
+        );
+      }
     });
 
     it('says the transcript is attached, not "below", in both languages', async () => {
