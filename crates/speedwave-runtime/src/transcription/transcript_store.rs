@@ -1569,6 +1569,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn begin_retranscribe_clears_the_speaker_warnings_of_the_transcript_it_replaces() {
+        use crate::transcription::CaptureWarning;
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        finish_a_pass(&store, id, "large-v3", "bez mówców");
+        store
+            .capture_warning(id, CaptureWarning::SpeakerModelMissing)
+            .unwrap();
+        store
+            .capture_warning(id, CaptureWarning::SpeakerAttributionFailed)
+            .unwrap();
+        let mut sub = store.subscribe(id).unwrap();
+
+        store.begin_retranscribe(id).unwrap();
+
+        assert!(store.get(id).unwrap().active_warnings.is_empty());
+        let cleared: Vec<CaptureWarning> = std::iter::from_fn(|| sub.events.try_recv().ok())
+            .filter_map(|e| match e {
+                TranscriptEvent::CaptureWarningCleared { warning, .. } => Some(warning),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            cleared,
+            vec![
+                CaptureWarning::SpeakerModelMissing,
+                CaptureWarning::SpeakerAttributionFailed
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn begin_retranscribe_keeps_a_finished_transcript_on_screen_while_it_runs() {
         let dir = tempfile::tempdir().unwrap();
         let store = TranscriptStore::with_root(dir.path());

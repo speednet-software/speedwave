@@ -195,7 +195,7 @@ describe('LiveTranscriptComponent', () => {
     ]);
     expect(lines[0].speakerColor).toBe(lines[3].speakerColor);
     expect(lines[0].speakerColor).not.toBe(lines[2].speakerColor);
-    expect(lines[5].speakerColor).toBe(lines[0].speakerColor);
+    expect(lines[5].speakerColor).toBeNull();
     expect(lines[1].speakerColor).toBeNull();
     expect(lines[4].speakerColor).toBeNull();
     const chips: HTMLElement[] = Array.from(

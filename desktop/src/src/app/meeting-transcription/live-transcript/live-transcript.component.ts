@@ -82,19 +82,16 @@ interface TranscriptLine {
   startLabel: string;
   /** Channel label ('You' / 'Meeting', 'Meeting · Speaker N' when diarized), else null. */
   speaker: string | null;
-  /** Colour token of a diarized speaker, the same for one number on every line; else null. */
+  /** Colour token of one of the first diarized speakers, the same on every line; else null. */
   speakerColor: string | null;
   text: string;
 }
 
-/** Colours told-apart speakers cycle through; no red, which the UI keeps for errors. */
-const SPEAKER_COLORS = [
-  'var(--teal)',
-  'var(--violet)',
-  'var(--amber)',
-  'var(--green)',
-  'var(--accent)',
-];
+/**
+ * Colours of the first told-apart speakers, the theme tokens that are neither the error red nor
+ * the action accent; later speakers keep the chip's default colour and differ by number alone.
+ */
+const SPEAKER_COLORS = ['var(--teal)', 'var(--violet)', 'var(--amber)', 'var(--green)'];
 
 /**
  * Label and colour of one segment's channel and, on a diarized meeting segment, its speaker.
@@ -107,7 +104,7 @@ function speakerOf(seg: Segment): Pick<TranscriptLine, 'speaker' | 'speakerColor
   if (n == null || n < 1) return { speaker: 'Meeting', speakerColor: null };
   return {
     speaker: `Meeting · Speaker ${n}`,
-    speakerColor: SPEAKER_COLORS[(n - 1) % SPEAKER_COLORS.length],
+    speakerColor: SPEAKER_COLORS[n - 1] ?? null,
   };
 }
 
