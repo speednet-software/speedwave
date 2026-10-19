@@ -71,18 +71,34 @@ pub struct NemotronDiarizer {
 unsafe impl Send for NemotronDiarizer {}
 
 impl NemotronDiarizer {
-    /// Loads the GGUF model at `model_path`, on the GPU unless `class` is `GpuClass::None`.
+    /// Loads the GGUF model at `model_path`, on the GPU unless `class` is `GpuClass::None`,
+    /// with `decode_threads()` CPU threads.
+    pub fn load(model_path: &Path, class: GpuClass) -> Result<Self, DiarizeError> {
+        Self::load_with_threads(model_path, class, decode_threads())
+    }
+
+    /// `load` with an explicit CPU thread count (at least 1).
     #[expect(
         unsafe_code,
         reason = "whisper diarization FFI boundary; every block has a SAFETY comment"
     )]
-    pub fn load(model_path: &Path, class: GpuClass) -> Result<Self, DiarizeError> {
+    pub fn load_with_threads(
+        model_path: &Path,
+        class: GpuClass,
+        n_threads: i32,
+    ) -> Result<Self, DiarizeError> {
         let label = model_path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| model_path.display().to_string());
         if !model_path.is_file() {
             return Err(DiarizeError::ModelMissing(label));
+        }
+        if n_threads < 1 {
+            return Err(DiarizeError::ModelLoad {
+                model: label,
+                detail: format!("thread count must be at least 1, got {n_threads}"),
+            });
         }
         let path = model_path
             .to_str()
@@ -95,7 +111,7 @@ impl NemotronDiarizer {
 
         // SAFETY: takes no arguments and returns a plain struct by value.
         let mut params = unsafe { ffi::whisper_diar_default_context_params() };
-        params.n_threads = decode_threads();
+        params.n_threads = n_threads;
         params.use_gpu = class != GpuClass::None;
 
         // SAFETY: `path` is a NUL-terminated string alive for the call, which copies it; the
@@ -645,6 +661,22 @@ mod tests {
             Err(DiarizeError::ModelLoad { model, .. }) => assert_eq!(model, "not-a-model.gguf"),
             Err(e) => panic!("expected ModelLoad, got {e}"),
             Ok(_) => panic!("expected ModelLoad, got a context"),
+        }
+    }
+
+    #[test]
+    fn load_rejects_a_thread_count_below_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model.gguf");
+        std::fs::write(&path, b"x").unwrap();
+        for n in [0, -4] {
+            match NemotronDiarizer::load_with_threads(&path, GpuClass::None, n) {
+                Err(DiarizeError::ModelLoad { detail, .. }) => {
+                    assert!(detail.contains(&n.to_string()), "{detail}")
+                }
+                Err(e) => panic!("expected ModelLoad, got {e}"),
+                Ok(_) => panic!("expected ModelLoad, got a context"),
+            }
         }
     }
 

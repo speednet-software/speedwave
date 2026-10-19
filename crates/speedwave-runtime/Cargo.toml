@@ -85,6 +85,10 @@ speedwave-version = { path = "../speedwave-version" }
 [lints]
 workspace = true
 
+[[example]]
+name = "diarize"
+required-features = ["audio-transcription"]
+
 [[test]]
 name = "lock_acquisitions"
 required-features = ["test-support"]
