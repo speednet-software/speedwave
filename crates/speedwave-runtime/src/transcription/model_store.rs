@@ -1059,6 +1059,7 @@ mod tests {
         DiarizationModelInfo {
             key: "test-diarization",
             file: "test.gguf",
+            display_name: "Test",
             approx_bytes: body.len() as u64,
             sha256: Box::leak(sha256.into_boxed_str()),
             license: "test",

@@ -249,6 +249,8 @@ pub struct DiarizationModelInfo {
     pub key: &'static str,
     /// The GGUF filename in [`DIARIZATION_HF_REPO`].
     pub file: &'static str,
+    /// Human-readable label for the UI.
+    pub display_name: &'static str,
     /// Download size in bytes (the SHA256 check is authoritative).
     pub approx_bytes: u64,
     /// SHA256 of the file (lowercase hex). Verified on download.
@@ -271,6 +273,7 @@ impl DiarizationModelInfo {
 pub const DIARIZATION_MODEL: DiarizationModelInfo = DiarizationModelInfo {
     key: "nemotron-3-diarization-q8_0",
     file: "Nemotron-3-Diarization.q8_0.gguf",
+    display_name: "Nemotron-3 Diarization",
     approx_bytes: 107_012_128,
     sha256: "08456d9e22cd9a323c0364d98375f3746d6e68507ebb705cd46438c534c7a3a1",
     license: "OpenMDW-1.1",
@@ -383,6 +386,7 @@ mod tests {
         assert!(is_hex64(m.sha256));
         assert!(m.approx_bytes > 10_000_000 && m.approx_bytes < 1_000_000_000);
         assert!(!m.license.is_empty());
+        assert!(!m.display_name.is_empty());
         let url = m.url();
         assert!(
             url.starts_with("https://huggingface.co/nvidia/Nemotron-3-Diarization/resolve/main/")

@@ -42,10 +42,19 @@ describe('TranscriptionSectionComponent', () => {
     downloaded: false,
     downloading: false,
   };
+  const diarizationEntry: RecommendedModelEntry = {
+    key: 'nemotron-3-diarization-q8_0',
+    display_name: 'Nemotron-3 Diarization',
+    size_bytes: 107_012_128,
+    downloaded: false,
+    downloading: false,
+  };
   const notDownloaded: RecommendedModelAck = {
     live: liveEntry,
     accel_label: 'Metal (GPU)',
     finalize: null,
+    diarization: diarizationEntry,
+    gpu_class: 'discrete',
   };
   const downloaded: RecommendedModelAck = {
     ...notDownloaded,

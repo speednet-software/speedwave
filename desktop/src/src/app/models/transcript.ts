@@ -189,14 +189,22 @@ export interface RecommendedModelEntry {
   downloading: boolean;
 }
 
+/** The host's GPU class (ADR-085) — mirrors Rust `GpuClass`. */
+export type GpuClass = 'none' | 'integrated' | 'discrete';
+
 /**
  * `recommended_transcription_model` — the live model plus the offline-pass model when this
- * host needs a different one. Mirrors Rust `RecommendedModelAck`.
+ * host needs a different one, and the optional speaker-diarization model. Mirrors Rust
+ * `RecommendedModelAck`.
  */
 export interface RecommendedModelAck {
   live: RecommendedModelEntry;
   finalize: RecommendedModelEntry | null;
+  /** The speaker-diarization model, downloaded once the user turns the mode on. */
+  diarization: RecommendedModelEntry;
   accel_label: string;
+  /** Sets the Settings text on what telling speakers apart costs on this computer. */
+  gpu_class: GpuClass;
 }
 
 /** Per-update payload of the `transcription_model_status` Tauri event. */

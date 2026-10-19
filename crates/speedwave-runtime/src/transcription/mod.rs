@@ -30,7 +30,10 @@ pub use audio::{
 };
 pub use diarizer::{DiarizeError, Diarizer, NemotronDiarizer, SpeakerTurn};
 pub use mix::{poll_paired_chunk, MixBuffer, MixSource, CHUNK_SAMPLES};
-pub use model_catalog::{whisper_model, ModelRole, Quantization, WhisperModelInfo, WHISPER_MODELS};
+pub use model_catalog::{
+    whisper_model, DiarizationModelInfo, ModelRole, Quantization, WhisperModelInfo,
+    DIARIZATION_MODEL, WHISPER_MODELS,
+};
 pub use model_store::{
     no_progress, DownloadProgress, ModelStatusEntry, ModelStore, ModelStoreError,
 };
