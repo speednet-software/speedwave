@@ -104,6 +104,36 @@ describe('ChatSessionStore', () => {
     store.isStreaming = false;
   });
 
+  function seedRetryableSession(): void {
+    store._setState({
+      messages: [
+        {
+          role: 'user',
+          blocks: [{ type: 'text', content: 'q' }],
+          timestamp: 1,
+          uuid: 'msg_user_1',
+          uuid_status: 'Committed',
+        },
+        {
+          role: 'assistant',
+          blocks: [{ type: 'text', content: 'a' }],
+          timestamp: 2,
+          uuid: 'msg_assist_1',
+          uuid_status: 'Committed',
+        },
+      ],
+      sessionStats: {
+        session_id: '550e8400-e29b-41d4-a716-446655440000',
+        total_cost: 0,
+        usage: undefined,
+        model: undefined,
+        context_window_size: 200_000,
+        total_output_tokens: 0,
+      },
+    });
+    store.isStreaming = false;
+  }
+
   describe('loadingTranscript', () => {
     it('defaults to false', () => {
       expect(store.loadingTranscriptFromState()).toBe(false);
@@ -5540,6 +5570,82 @@ describe('ChatSessionStore', () => {
     });
   });
 
+  describe('autoScrollRequested', () => {
+    it('starts at zero', () => {
+      expect(store.autoScrollRequested()).toBe(0);
+    });
+
+    it('is bumped by a sent message', async () => {
+      await store.sendMessage('hello');
+      expect(store.autoScrollRequested()).toBe(1);
+    });
+
+    it('is bumped by a control-shaped send, which starts a turn without a bubble', async () => {
+      await store.sendMessage('/effort high');
+      expect(store.autoScrollRequested()).toBe(1);
+    });
+
+    it('is not bumped by a send the chat refuses', async () => {
+      await store.sendMessage('   ');
+      await store.sendMessage('/');
+      store.isStreaming = true;
+      await store.sendMessage('while streaming');
+      expect(store.autoScrollRequested()).toBe(0);
+    });
+
+    it('is bumped by a queued message at the moment it is queued', async () => {
+      mockTauri.invokeHandler = async () => null;
+      await store.queueMessage('next');
+      expect(store.autoScrollRequested()).toBe(1);
+      await store.queueMessage('');
+      expect(store.autoScrollRequested()).toBe(1);
+    });
+
+    it('is bumped by a retry and not by a retry with nothing to retry', async () => {
+      await store.retryLastAssistant();
+      expect(store.autoScrollRequested()).toBe(0);
+      seedRetryableSession();
+      vi.spyOn(mockTauri, 'invoke').mockResolvedValue(undefined);
+      await store.retryLastAssistant();
+      expect(store.autoScrollRequested()).toBe(1);
+    });
+
+    it('is bumped when a transcript or a reset replaces the conversation', () => {
+      store.loadMessages([
+        { role: 'user', blocks: [{ type: 'text', content: 'loaded' }], timestamp: 1 },
+      ]);
+      expect(store.autoScrollRequested()).toBe(1);
+      store.resetForNewConversation();
+      expect(store.autoScrollRequested()).toBe(2);
+    });
+
+    it('is not bumped when the stream commits its reply, an error, a drained queue or a chip', () => {
+      store.isStreaming = true;
+      store.handleStreamChunk({ chunk_type: 'Text', data: { content: 'answer' } });
+      store.handleStreamChunk({ chunk_type: 'Result', data: { session_id: 'sid' } });
+      store.handleStreamChunk({ chunk_type: 'Error', data: { content: 'Error: rate limit' } });
+      store.handleStreamChunk({
+        chunk_type: 'QueueDrained',
+        data: { session_id: 'sid', text: 'queued earlier' },
+      });
+      store.handleStreamChunk({
+        chunk_type: 'ControlChip',
+        data: { command: 'model', argument: 'claude-sonnet-5' },
+      });
+
+      expect(store.messages.map((m) => m.role)).toEqual(['assistant', 'assistant', 'user', 'user']);
+      expect(store.autoScrollRequested()).toBe(0);
+    });
+
+    it('is not bumped when Stop finalizes the interrupted turn', async () => {
+      store.isStreaming = true;
+      store.handleStreamChunk({ chunk_type: 'Text', data: { content: 'partial' } });
+      await store.stopConversation();
+      expect(store.messages).toHaveLength(1);
+      expect(store.autoScrollRequested()).toBe(0);
+    });
+  });
+
   describe('state-tree signal rebuild on mutation', () => {
     it('rebuilds the signal on a stream chunk so projections refresh', () => {
       const before = store.state();
@@ -6120,36 +6226,6 @@ describe('ChatSessionStore', () => {
   });
 
   describe('canRetryLastAssistant / retryLastAssistant', () => {
-    function seedRetryableSession(): void {
-      store._setState({
-        messages: [
-          {
-            role: 'user',
-            blocks: [{ type: 'text', content: 'q' }],
-            timestamp: 1,
-            uuid: 'msg_user_1',
-            uuid_status: 'Committed',
-          },
-          {
-            role: 'assistant',
-            blocks: [{ type: 'text', content: 'a' }],
-            timestamp: 2,
-            uuid: 'msg_assist_1',
-            uuid_status: 'Committed',
-          },
-        ],
-        sessionStats: {
-          session_id: '550e8400-e29b-41d4-a716-446655440000',
-          total_cost: 0,
-          usage: undefined,
-          model: undefined,
-          context_window_size: 200_000,
-          total_output_tokens: 0,
-        },
-      });
-      store.isStreaming = false;
-    }
-
     it('canRetryLastAssistant returns true when last assistant is committed and a session id is known', () => {
       seedRetryableSession();
       expect(store.canRetryLastAssistant()).toBe(true);

@@ -544,7 +544,13 @@ describe('ChatComponent', () => {
   describe('loadConversations', () => {
     it('calls backend with active project and sets conversations', async () => {
       const mockConversations = [
-        { session_id: 's1', timestamp: '2026-03-06T10:00:00Z', preview: 'Hello', message_count: 3 },
+        {
+          session_id: 's1',
+          timestamp: '2026-03-06T10:00:00Z',
+          title: null,
+          preview: 'Hello',
+          message_count: 3,
+        },
       ];
       projectState.activeProject.set('test');
       mockTauri.invokeHandler = async (cmd: string) => {
@@ -681,8 +687,8 @@ describe('ChatComponent', () => {
     it('calls delete_conversation and removes the row locally', async () => {
       projectState.activeProject.set('test');
       component.conversations = [
-        { session_id: 's1', timestamp: null, preview: 'a', message_count: 1 },
-        { session_id: 's2', timestamp: null, preview: 'b', message_count: 1 },
+        { session_id: 's1', timestamp: null, title: null, preview: 'a', message_count: 1 },
+        { session_id: 's2', timestamp: null, title: null, preview: 'b', message_count: 1 },
       ];
       const calls: { cmd: string; args: unknown }[] = [];
       mockTauri.invokeHandler = async (cmd: string, args: unknown) => {
@@ -709,7 +715,7 @@ describe('ChatComponent', () => {
     it('sets historyError when backend fails and keeps the row', async () => {
       projectState.activeProject.set('test');
       component.conversations = [
-        { session_id: 's1', timestamp: null, preview: 'a', message_count: 1 },
+        { session_id: 's1', timestamp: null, title: null, preview: 'a', message_count: 1 },
       ];
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'delete_conversation') throw new Error('io error');
@@ -738,7 +744,7 @@ describe('ChatComponent', () => {
         },
       });
       component.conversations = [
-        { session_id: 's1', timestamp: null, preview: 'a', message_count: 1 },
+        { session_id: 's1', timestamp: null, title: null, preview: 'a', message_count: 1 },
       ];
       const resetSpy = vi.spyOn(chatState, 'resetForNewConversation');
       mockTauri.invokeHandler = async () => undefined;
@@ -762,7 +768,7 @@ describe('ChatComponent', () => {
       });
       expect(chatState.lastKnownSessionId).toBe('s-old');
       component.conversations = [
-        { session_id: 's-old', timestamp: null, preview: 'a', message_count: 1 },
+        { session_id: 's-old', timestamp: null, title: null, preview: 'a', message_count: 1 },
       ];
       const resetSpy = vi.spyOn(chatState, 'resetForNewConversation');
       mockTauri.invokeHandler = async () => undefined;
@@ -1275,11 +1281,23 @@ describe('ChatComponent', () => {
       await component.ngOnInit();
       uiState.toggleSidebar();
       component.conversations = [
-        { session_id: 's1', timestamp: '2026-03-06T10:00:00Z', preview: 'old', message_count: 1 },
+        {
+          session_id: 's1',
+          timestamp: '2026-03-06T10:00:00Z',
+          title: null,
+          preview: 'old',
+          message_count: 1,
+        },
       ];
 
       const newConversations = [
-        { session_id: 's2', timestamp: '2026-03-07T10:00:00Z', preview: 'new', message_count: 2 },
+        {
+          session_id: 's2',
+          timestamp: '2026-03-07T10:00:00Z',
+          title: null,
+          preview: 'new',
+          message_count: 2,
+        },
       ];
       projectState.activeProject.set('other-project');
       mockTauri.invokeHandler = async (cmd: string) => {
@@ -1667,6 +1685,7 @@ describe('ChatComponent', () => {
       const el = scrollEl();
       Object.defineProperty(el, 'scrollHeight', { value: 1000, configurable: true });
       el.scrollTop = 250;
+      el.dispatchEvent(new Event('scroll'));
 
       const tab1 = chatState.activeTabId();
       await chatState.openTab();
@@ -1811,6 +1830,7 @@ describe('ChatComponent', () => {
       Object.defineProperty(el, 'scrollHeight', { value: 1000, configurable: true });
       Object.defineProperty(el, 'clientHeight', { value: 400, configurable: true });
       el.scrollTop = 250;
+      el.dispatchEvent(new Event('scroll'));
 
       const tab1 = chatState.activeTabId();
       await chatState.openTab();
@@ -1827,6 +1847,76 @@ describe('ChatComponent', () => {
       await fixture.whenStable();
 
       expect(el.scrollTop).toBe(250);
+    });
+
+    it('brings a tab that followed its stream back at the live end after it grew in the background', async () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      const el = scrollEl();
+      Object.defineProperty(el, 'scrollHeight', { value: 1000, configurable: true });
+      Object.defineProperty(el, 'clientHeight', { value: 400, configurable: true });
+      el.scrollTop = 600;
+      el.dispatchEvent(new Event('scroll'));
+
+      const tab1 = chatState.activeTabId();
+      await chatState.openTab();
+      fixture.detectChanges();
+      await fixture.whenStable();
+      expect(chatState.tabs().get(tab1)!.scrollPosition).toBeNull();
+
+      chatState
+        .tabs()
+        .get(tab1)!
+        .handleStreamChunk({
+          chunk_type: 'Text',
+          data: { content: 'streamed while another tab was open' },
+        });
+      Object.defineProperty(el, 'scrollHeight', { value: 1600, configurable: true });
+
+      chatState.activateTab(tab1);
+      fixture.detectChanges();
+      await fixture.whenStable();
+      expect(el.scrollTop).toBe(1600);
+
+      chatState.handleStreamChunk({ chunk_type: 'Text', data: { content: ' and more' } });
+      fixture.detectChanges();
+      await fixture.whenStable();
+      chatState.handleStreamChunk({ chunk_type: 'Text', data: { content: ' and the rest' } });
+      Object.defineProperty(el, 'scrollHeight', { value: 2400, configurable: true });
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      expect(el.scrollTop).toBe(2400);
+    });
+
+    it('pins the list when the user sends after scrolling up, and keeps it when the reply commits', async () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      fixture.detectChanges();
+
+      const el = scrollEl();
+      Object.defineProperty(el, 'scrollHeight', { value: 1000, configurable: true });
+      Object.defineProperty(el, 'clientHeight', { value: 400, configurable: true });
+      el.scrollTop = 100;
+      el.dispatchEvent(new Event('scroll'));
+
+      await component.sendMessage({ payload: 'next question', displayText: 'next question' });
+      fixture.detectChanges();
+      await fixture.whenStable();
+      expect(el.scrollTop).toBe(1000);
+
+      el.scrollTop = 100;
+      el.dispatchEvent(new Event('scroll'));
+      chatState.handleStreamChunk({ chunk_type: 'Text', data: { content: 'the answer' } });
+      chatState.handleStreamChunk({ chunk_type: 'Result', data: { session_id: 'sid' } });
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      expect(chatState.messages.at(-1)?.role).toBe('assistant');
+      expect(el.scrollTop).toBe(100);
     });
 
     it('leaves the composer untouched on a no-op re-activation of the already-active tab', async () => {
