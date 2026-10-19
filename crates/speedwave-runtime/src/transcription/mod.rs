@@ -1,5 +1,6 @@
 //! Host-side meeting transcription — SSOT layer (ADR-056). Capture + Whisper + model store;
-//! gated behind `audio-transcription` (CLI never enables it). Diarization removed (ADR-075).
+//! gated behind `audio-transcription` (CLI never enables it). Optional speaker diarization of
+//! the meeting channel in the offline pass (ADR-094).
 
 pub mod accel;
 pub mod audio;
@@ -7,6 +8,7 @@ pub mod audio;
 pub mod audio_macos;
 #[cfg(windows)]
 pub mod audio_windows;
+pub mod diarizer;
 mod gpu_probe;
 pub mod mix;
 pub mod model_catalog;
@@ -25,6 +27,9 @@ pub use audio::{
     repair_wav_header, wav_duration, AudioCapture, AudioChunk, AudioSource, AudioSourceInfo,
     AudioStream, CaptureCapabilities, CaptureError, CaptureWarning, FileAudioCapture,
     CHUNK_DURATION, DEFAULT_MIXED_SOURCE_LABEL, SAMPLE_RATE_HZ,
+};
+pub use diarizer::{
+    assign_speakers, number_speakers, DiarizeError, Diarizer, NemotronDiarizer, SpeakerTurn,
 };
 pub use mix::{poll_paired_chunk, MixBuffer, MixSource, CHUNK_SAMPLES};
 pub use model_catalog::{whisper_model, ModelRole, Quantization, WhisperModelInfo, WHISPER_MODELS};

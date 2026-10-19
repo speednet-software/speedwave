@@ -413,6 +413,7 @@ mod tests {
             text: text.to_string(),
             words: vec![],
             source: None,
+            speaker_id: None,
         }
     }
 
@@ -781,6 +782,7 @@ mod tests {
         let s = TranscriptSession::load(dir.path()).unwrap();
         assert_eq!(s.live_segments.len(), 1);
         assert_eq!(s.live_segments[0].text, "hej");
+        assert_eq!(s.live_segments[0].speaker_id, None);
         assert_eq!(s.models_used.live.as_deref(), Some("small"));
         assert_eq!(s.last_seq, 7);
         s.save(dir.path()).unwrap();
@@ -788,6 +790,7 @@ mod tests {
         assert!(!body.contains("speaker_names"));
         assert!(!body.contains("diarization"));
         assert!(!body.contains("expected_speakers"));
+        assert!(!body.contains("speaker_id"));
     }
 
     #[test]

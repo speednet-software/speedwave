@@ -756,6 +756,7 @@ impl TranscriptDriver {
                 text: s.text,
                 words: s.words,
                 source,
+                speaker_id: None,
             })
             .collect();
 
@@ -1097,6 +1098,7 @@ fn transcribe_chunked(
                 text: s.text,
                 words: s.words,
                 source,
+                speaker_id: None,
             });
         }
         progress((end as f32 / total as f32).min(1.0))?;
@@ -2143,6 +2145,7 @@ mod tests {
             text: text.to_string(),
             words: Vec::new(),
             source: None,
+            speaker_id: None,
         }
     }
 
@@ -2295,6 +2298,7 @@ mod tests {
                 },
             ],
             source: None,
+            speaker_id: None,
         };
         let trimmed = trim_committed_overlap(seg, Duration::from_secs(4)).unwrap();
         assert_eq!(trimmed.start, Duration::from_secs(4));
@@ -2380,6 +2384,7 @@ mod tests {
                 },
             ],
             source: None,
+            speaker_id: None,
         };
         let script = vec![
             vec![seg_at(0.0, 4.0, "ala ma")],
@@ -2893,6 +2898,7 @@ mod tests {
                 text: "never installed".to_string(),
                 words: vec![],
                 source: None,
+                speaker_id: None,
             }])
         }
     }

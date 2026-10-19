@@ -83,6 +83,8 @@ extern "C" {
 
     void speedwave_diar_log_set(ggml_log_callback callback, void * user_data);
 
+    void speedwave_diar_abi_sizes(size_t * context_params, size_t * params);
+
 #ifdef __cplusplus
 }
 #endif

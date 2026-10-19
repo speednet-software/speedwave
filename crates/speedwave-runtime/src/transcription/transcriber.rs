@@ -115,8 +115,8 @@ impl TranscriptSource {
     }
 }
 
-/// One transcript segment: a span of audio, its text, and optional per-word
-/// timings. (Speaker diarization was removed — ADR-075.)
+/// One transcript segment: a span of audio, its text, optional per-word timings,
+/// and, on the meeting channel of a diarized offline pass, a speaker number (ADR-094).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Segment {
     /// Start offset from the start of the audio.
@@ -131,6 +131,10 @@ pub struct Segment {
     /// pre-Amendment-9 transcripts).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<TranscriptSource>,
+    /// Speaker number 1..N in order of first appearance, set only on `System` segments
+    /// by speaker diarization. The pre-ADR-075 `speaker` field is never read into it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker_id: Option<u32>,
 }
 
 /// Transcriber errors.
@@ -462,6 +466,7 @@ impl WhisperCppTranscriber {
                 text,
                 words: Vec::new(),
                 source: None,
+                speaker_id: None,
             });
         }
         if opts.word_timestamps {
@@ -616,6 +621,7 @@ impl Transcriber for MockTranscriber {
                 text: self.text_template.replace("{n}", &i.to_string()),
                 words: Vec::new(),
                 source: None,
+                speaker_id: None,
             })
             .collect())
     }
@@ -928,6 +934,7 @@ mod tests {
                 end: Duration::from_millis(2000),
             }],
             source: None,
+            speaker_id: None,
         };
         assert_eq!(
             serde_json::from_str::<Segment>(&serde_json::to_string(&seg).unwrap()).unwrap(),
@@ -948,6 +955,24 @@ mod tests {
         let seg: Segment = serde_json::from_str(legacy).unwrap();
         assert_eq!(seg.text, "hej");
         assert_eq!(seg.start, Duration::from_secs(1));
+        assert_eq!(seg.speaker_id, None);
+    }
+
+    #[test]
+    fn speaker_id_is_written_only_when_set_and_round_trips() {
+        let mut seg = Segment {
+            start: Duration::from_secs(1),
+            end: Duration::from_secs(2),
+            text: "hej".to_string(),
+            words: vec![],
+            source: Some(TranscriptSource::System),
+            speaker_id: None,
+        };
+        assert!(!serde_json::to_string(&seg).unwrap().contains("speaker_id"));
+        seg.speaker_id = Some(2);
+        let json = serde_json::to_string(&seg).unwrap();
+        assert!(json.contains(r#""speaker_id":2"#));
+        assert_eq!(serde_json::from_str::<Segment>(&json).unwrap(), seg);
     }
 
     #[test]

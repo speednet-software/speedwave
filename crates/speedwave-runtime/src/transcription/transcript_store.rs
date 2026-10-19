@@ -975,6 +975,7 @@ mod tests {
             text: text.to_string(),
             words: vec![],
             source: None,
+            speaker_id: None,
         }
     }
 

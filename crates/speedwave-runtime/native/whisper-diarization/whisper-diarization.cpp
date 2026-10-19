@@ -5,7 +5,9 @@
 #include "gguf.h"
 
 #include <algorithm>
+#include <codecvt>
 #include <fstream>
+#include <locale>
 #include <cmath>
 #include <cstdarg>
 #include <cstdint>
@@ -34,6 +36,11 @@ static void *            speedwave_diar_log_user_data = nullptr;
 extern "C" void speedwave_diar_log_set(ggml_log_callback callback, void * user_data) {
     speedwave_diar_log_callback  = callback;
     speedwave_diar_log_user_data = user_data;
+}
+
+extern "C" void speedwave_diar_abi_sizes(size_t * context_params, size_t * params) {
+    *context_params = sizeof(whisper_diar_context_params);
+    *params         = sizeof(whisper_diar_params);
 }
 
 static void whisper_diar_log_callback_default(ggml_log_level level, const char * text, void * user_data) {
@@ -875,7 +882,12 @@ static bool whisper_diar_model_load(whisper_diar_context & dctx) {
     model.buffers.push_back(buffer);
     ggml_backend_buffer_set_usage(buffer, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
 
+#ifdef _MSC_VER
+    std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
+    std::ifstream file(converter.from_bytes(dctx.path_model), std::ios::binary);
+#else
     std::ifstream file(dctx.path_model, std::ios::binary);
+#endif
     if (!file) {
         WHISPER_LOG_ERROR("%s: failed to open model file for reading\n", __func__);
         return false;

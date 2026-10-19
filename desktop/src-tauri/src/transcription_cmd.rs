@@ -1677,6 +1677,7 @@ mod tests {
                     text: "hi".to_string(),
                     words: vec![],
                     source: None,
+                    speaker_id: None,
                 },
             )
             .unwrap();
