@@ -95,7 +95,7 @@ pub struct Word {
 }
 
 /// Which captured channel a segment was decoded from. Deterministic channel
-/// attribution, not speaker diarization (ADR-075 stays in force).
+/// attribution; telling speakers apart on the `System` channel is `diarizer.rs` (ADR-094).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TranscriptSource {

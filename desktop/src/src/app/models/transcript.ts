@@ -189,7 +189,7 @@ export interface RecommendedModelEntry {
   downloading: boolean;
 }
 
-/** The host's GPU class (ADR-085) — mirrors Rust `GpuClass`. */
+/** The host's GPU class (ADR-085); mirrors Rust `GpuClass`. */
 export type GpuClass = 'none' | 'integrated' | 'discrete';
 
 /**
