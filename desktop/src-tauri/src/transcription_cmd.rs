@@ -604,10 +604,8 @@ fn spawn_offline_pass(
     });
 }
 
-/// The diarizer loader for an offline pass: `None` without `speaker_mode`, and `None` plus a
-/// `SpeakerModelMissing` warning when the model is not downloaded, so the pass still finishes.
-/// The loader itself runs inside `run_finalize` once Whisper is released; a model that does not
-/// load then raises `SpeakerAttributionFailed` there.
+/// The diarizer loader for an offline pass: `None` without `speaker_mode` or, with a
+/// `SpeakerModelMissing` warning, without the model on disk; `run_finalize` runs it after Whisper.
 fn offline_diarizer(
     models: &ModelStore,
     store: &TranscriptStore,

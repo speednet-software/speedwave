@@ -1,6 +1,5 @@
-//! Guards the vendored whisper.cpp diarization code in `native/whisper-diarization/`:
-//! it compiles against the ggml headers vendored beside it (the version whisper-rs-sys
-//! links), exports its C API through its own header, and logs only through the callback.
+//! Guards the vendored whisper.cpp diarization code in `native/whisper-diarization/`: ggml calls
+//! match the vendored headers, the C API is declared in its own header, logs go only to the callback.
 
 #![expect(
     clippy::expect_used,

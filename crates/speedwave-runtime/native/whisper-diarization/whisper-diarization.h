@@ -13,9 +13,6 @@
 extern "C" {
 #endif
 
-    //
-    // Experimental diarization.
-    //
     struct whisper_diar_context;
     struct whisper_diar_segments;
 
@@ -27,26 +24,14 @@ extern "C" {
     };
 
     struct whisper_diar_params {
-        // the following two fields together specify a "in speech" zone. If the
-        // probability for a speaker in a 10ms frame is greater than or equal to
-        // start it will be considered an active segment. And it will continue to
-        // be considered active until the probability drops below the stop threshold.
-        // Using different value enables hysteresis (to have a non-abrupt cutoff).
         float start_threshold;
         float stop_threshold;
 
-        // padding added to the start and end of each detected segment (ms) before
-        // merging and duration filtering. Expanding segments encourages nearby
-        // fragments to be joined by the min_silence_duration_ms merge pass.
         int start_pad_ms;
         int end_pad_ms;
 
-        // min duration of active segments (after padding). Segments shorter than
-        // this value are dropped.
         int min_speech_duration_ms;
 
-        // gap in ms between two segments (after padding). If the time between two
-        // segments is less than this value they are merged into one.
         int min_silence_duration_ms;
     };
 

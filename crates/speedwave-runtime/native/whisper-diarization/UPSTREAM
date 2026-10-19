@@ -6,13 +6,18 @@ source-commit: 1cd623724fd5b4c38e45dab36346b2352fd78bec
 license: MIT, see LICENSE (copied from the same commit)
 
 files:
-  whisper-diarization.cpp       src/whisper-diarization.cpp, with the local changes below
+  whisper-diarization.cpp       src/whisper-diarization.cpp without its comments, with the
+                                local changes below
   whisper-diarization-arch.h    src/whisper-diarization-arch.h, unchanged
   whisper-diarization.h         the "Experimental diarization" block of include/whisper.h
-                                (lines 695-761) unchanged, wrapped in a header of its own
-                                with an empty WHISPER_API and the declarations of
-                                speedwave_diar_log_set and speedwave_diar_abi_sizes
+                                (lines 695-761) without its comments, wrapped in a header
+                                of its own with an empty WHISPER_API and the declarations
+                                of speedwave_diar_log_set and speedwave_diar_abi_sizes
   ggml/                         ggml.h, ggml-alloc.h, ggml-backend.h, gguf.h, unchanged
+
+The comments were removed with a string-aware pass (// to end of line, /* */ blocks, runs of
+blank lines collapsed to one). To diff against the source, apply the same pass to the
+upstream file first; the local changes below are the only other differences.
 
 ggml-headers-source: whisper-rs-sys 0.15.0, whisper.cpp/ggml/include
 ggml-headers-whisper-cpp-version: 1.8.3

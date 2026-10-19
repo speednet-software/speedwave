@@ -865,11 +865,9 @@ const FINALIZE_WINDOW_SECS: f32 = 30.0;
 /// *next* window's overlap are dropped from the previous window's output to avoid duplicates.
 const FINALIZE_WINDOW_OVERLAP_SECS: f32 = 3.0;
 
-/// Runs the offline pass: load the recorded WAV, transcribe with the higher-quality model, tell
-/// the meeting-channel speakers apart when a diarizer is given, install `final_segments`, mark
-/// `Done`. On failure flips to `Failed`; live transcript untouched. A diarization failure only
-/// raises a warning. Once `pass` is cancelled it writes nothing more and returns
-/// [`DriverError::Superseded`], or [`DriverError::Deleted`] when a delete cancelled it.
+/// Runs the offline pass: transcribes the recorded WAV, diarizes the meeting channel when a loader
+/// is given (a failure there only warns), installs `final_segments` and marks `Done`; a cancelled
+/// `pass` writes nothing more and returns [`DriverError::Superseded`] or [`DriverError::Deleted`].
 pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
     let FinalizeConfig {
         id,

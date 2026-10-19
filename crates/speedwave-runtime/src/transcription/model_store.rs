@@ -1,6 +1,5 @@
-//! On-demand download/verify/cache of transcription models (ADR-056) under models/whisper/ and
-//! models/diarization/ (0700/0600). Streams to a .part temp, SHA256-verifies, atomic rename;
-//! redirects allowlisted, size-capped.
+//! On-demand download/verify/cache of models (ADR-056) under models/whisper/ and models/diarization/
+//! (0700/0600): .part temp, SHA256 check, atomic rename; redirects allowlisted, size-capped.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};

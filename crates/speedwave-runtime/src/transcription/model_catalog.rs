@@ -1,6 +1,5 @@
-//! SSOT catalogue of the transcription models downloaded on demand: Whisper (ADR-056), Silero VAD
-//! and the speaker-diarization model (ADR-097). Bump 1 const; Whisper comes from
-//! `ggerganov/whisper.cpp` on HF, not `ggml-org` (401s).
+//! SSOT catalogue of the models downloaded on demand: Whisper (ADR-056), Silero VAD and the
+//! diarization model (ADR-097). Bump 1 const; Whisper comes from `ggerganov/whisper.cpp` on HF.
 
 use crate::transcription::accel::GpuClass;
 

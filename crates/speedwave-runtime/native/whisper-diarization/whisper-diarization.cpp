@@ -105,8 +105,6 @@ struct whisper_diar_cache {
 
     std::vector<float> spkcache_preds;
 
-    // Holds a rolling buffer of hidden states (the input to the graph computation,
-    // the log melspectrograms projected to the models hidden vector space
     std::vector<float> fifo;
     int n_fifo_frames = 0;
 
@@ -183,7 +181,6 @@ struct whisper_diar_state {
     whisper_diar_cache cache;
     std::vector<float> probs;
 
-    // Buffers reused across chunks to avoid per-chunk heap allocation.
     std::vector<float>   buf_padded;
     std::vector<float>   buf_cache;
     std::vector<int32_t> buf_pos;
@@ -249,19 +246,9 @@ static void whisper_diar_cache_update(whisper_diar_cache & state,
         return;
     }
 
-    // probs will contain the models predictions, which is the processed output
-    // of [speaker_cache | fifo | hidden] and this will produce the output in
-    // the following shape:
-    // [ processed_speaker_cache | processed_fifo | new_chunk]
-    //
-    // Where new_chunk is the processed output of hidden.
-
     const int n_spk_frames  = state.n_spk_frames;
     const int n_fifo_frames = state.n_fifo_frames;
 
-    // Append the new hidden state into the fifo. So the contents of the fifo
-    // is the projected input not the processed input.
-    // [hidden0, hidden1, ... ]
     state.fifo.insert(state.fifo.end(),
                       hidden + static_cast<size_t>(lc) * state.n_embd,
                       hidden + static_cast<size_t>(lc + chunk_valid) * state.n_embd);
@@ -269,11 +256,6 @@ static void whisper_diar_cache_update(whisper_diar_cache & state,
     state.n_fifo_frames = n_fifo_frames + chunk_valid;
 
     if (state.n_fifo_frames > state.cache_params.fifo_len) {
-        // The following vector will contain the processed fifo and the new_chunk.
-        // state.fifo now holds [old fifo hiddens | hidden] (we just appended the
-        // new hidden state above). This array mirrors that same layout but in
-        // prediction space, so that pop_embs[f] and pop_preds[f] below always
-        // refer to the same physical frame.
         const float * processed_fifo = probs + static_cast<size_t>(n_spk_frames) * state.n_speakers;
         const float * new_chunk = probs + static_cast<size_t>(n_spk_frames + n_fifo_frames + lc) * state.n_speakers;
         std::vector<float> processed_fifo_and_new_chunk;
@@ -291,15 +273,12 @@ static void whisper_diar_cache_update(whisper_diar_cache & state,
 
         const float * pop_embs  = state.fifo.data();
 
-        // Append the new fifo frames to the speaker cache.
         state.spkcache.insert(state.spkcache.end(),
                 pop_embs,
                 pop_embs + static_cast<size_t>(n_pop) * state.n_embd);
 
         const float * pop_preds = processed_fifo_and_new_chunk.data();
         if (!state.spkcache_preds.empty()) {
-            // Append the processed fifo and new chunks (prediction space) to
-            // the states speaker cache for predictions.
             state.spkcache_preds.insert(state.spkcache_preds.end(),
                                         pop_preds,
                                         pop_preds + static_cast<size_t>(n_pop) * state.n_speakers);
@@ -307,23 +286,18 @@ static void whisper_diar_cache_update(whisper_diar_cache & state,
 
         state.n_spk_frames += n_pop;
 
-        // if we exceeded the length of the speaker cache and the speaker cache preditions is empty.
         if (state.n_spk_frames > state.cache_params.spkcache_len && state.spkcache_preds.empty()) {
             state.spkcache_preds.reserve(static_cast<size_t>(state.n_spk_frames) * state.n_speakers);
-            // insert probs:
-            // [ processed_speaker_cache | processed_fifo | new_chunk] into the
-            // speaker cache for predictions.
+
             state.spkcache_preds.insert(state.spkcache_preds.end(),
                     probs,
                     probs + static_cast<size_t>(n_spk_frames) * state.n_speakers);
 
-            // Append the processed fifo and new chunk.
             state.spkcache_preds.insert(state.spkcache_preds.end(),
                     pop_preds,
                     pop_preds + static_cast<size_t>(n_pop) * state.n_speakers);
         }
 
-        // Remove the frames that have been popped.
         state.fifo.erase(state.fifo.begin(), state.fifo.begin() + static_cast<size_t>(n_pop) * state.n_embd);
         state.n_fifo_frames -= n_pop;
 
@@ -341,21 +315,6 @@ static void whisper_diar_cache_compact(whisper_diar_cache & state,
     const int min_pos  = static_cast<int>(std::floor(per_spk * state.scoring.min_pos_scores_rate));
     const float log_half = std::log(0.5f);
 
-    // Populate log-odds scores for each frame/speaker. For each 80ms frame a
-    // score will be inserted representing the log-odds that only that speaker
-    // is speaking.
-    // score[0] = frame0 speaker0: log-odds that only speaker 0 is speaking
-    // score[1] = frame0 speaker1: log-odds that only speaker 1 is speaking
-    // score[2] = frame0 speaker2: log-odds that only speaker 2 is speaking
-    // score[3] = frame0 speaker3: log-odds that only speaker 3 is speaking
-    // score[4] = frame0 speaker4: log-odds that only speaker 4 is speaking
-    // score[5] = frame0 speaker5: log-odds that only speaker 5 is speaking
-    // score[6] = frame0 speaker6: log-odds that only speaker 6 is speaking
-    // score[7] = frame0 speaker7: log-odds that only speaker 7 is speaking
-    //
-    // score[8] = frame1 speaker8: log-odds that only speaker 8 is speaking
-    // score[9] = frame1 speaker9: log-odds that only speaker 9 is speaking
-    // ...
     std::vector<float> scores(static_cast<size_t>(n) * state.n_speakers);
     for (int f = 0; f < n; ++f) {
         float sum_log1p = 0.f;
@@ -372,16 +331,11 @@ static void whisper_diar_cache_compact(whisper_diar_cache & state,
         }
     }
 
-    // The pos_count vector will store a count for each speaker for which its
-    // scores value is greater than 0 meaning that this was a highly probable
-    // solo speech with no cross-talk and no back ground ambiguiity.
     std::vector<int> pos_count(state.n_speakers, 0);
     for (int f = 0; f < n; ++f) {
         for (int s = 0; s < state.n_speakers; s++) {
             const size_t i = static_cast<size_t>(f) * state.n_speakers + s;
 
-            // if the current speaker did not speak, then set to -inf to avoid
-            // negative values in later operations.
             const bool is_speech = cache_preds[i] > 0.5f;
             if (!is_speech) {
                 scores[i] = WHISPER_DIAR_NEG_INF;
@@ -394,11 +348,6 @@ static void whisper_diar_cache_compact(whisper_diar_cache & state,
     }
 
     for (int s = 0; s < state.n_speakers; s++) {
-        // If the count for a speaker is less that min_pos then skip it.
-        // Just one or two 80ms frames do not contain enough accoustic information
-        // to define human voice so if we have less that the defined min we
-        // skip this speaker. For example, the current min_pos is 16 which is
-        // about 1.28 seconds (16*80ms ≈ 1.28s).
         if (pos_count[s] < min_pos) {
             continue;
         }
@@ -406,21 +355,13 @@ static void whisper_diar_cache_compact(whisper_diar_cache & state,
         for (int f = 0; f < n; ++f) {
             const size_t i = static_cast<size_t>(f) * state.n_speakers + s;
             const bool is_speech = cache_preds[i] > 0.5f;
-            // If the probability of cache_pred[i] is greater than 0.5 we consider it
-            // that someone is talking. But we also want to make sure that the
-            // score for this index (speaker) is greater than 0, because if it
-            // is not then there is some kind of cross-talk or background noice
-            // and it is not a pure solo speaker.
+
             if (is_speech && !(scores[i] > 0.f)) {
                 scores[i] = WHISPER_DIAR_NEG_INF;
             }
         }
     }
 
-    // Increase/boost more recent speaker frames to rotate in the current
-    // representations of a speakers voice to account for changes in the acoustic
-    // profile (like a speaker turning their head away from the microphone, or
-    // leaning back in their chair).
     if (state.scoring.scores_boost_latest > 0.f) {
         for (int f = cap; f < n; ++f) {
             for (int s = 0; s < state.n_speakers; s++) {
@@ -429,11 +370,6 @@ static void whisper_diar_cache_compact(whisper_diar_cache & state,
         }
     }
 
-    // Boost top k of each speaker's score so that all speakers are condidered
-    // even if some speakers have acoustic characteristics that gave then a higher
-    // score (like load, close to the microphone) compared to a speaker with a
-    // lower score (more softly spoken, head away from the mic). This avoid a
-    // strong speaker from drowning out other speakers completely.
     const int strong_k = static_cast<int>(std::floor(per_spk * state.scoring.strong_boost_rate));
     for (int s = 0; s < state.n_speakers; ++s) {
         for (int f : whisper_diar_topk_column(scores, n, state.n_speakers, s, strong_k)) {
@@ -441,8 +377,6 @@ static void whisper_diar_cache_compact(whisper_diar_cache & state,
         }
     }
 
-    // The following will use the boosted scores from above and gives a boost
-    // to runner ups that were not included in the above strong_k boost.
     const int weak_k = static_cast<int>(std::floor(per_spk * state.scoring.weak_boost_rate));
     for (int s = 0; s < state.n_speakers; ++s) {
         for (int f : whisper_diar_topk_column(scores, n, state.n_speakers, s, weak_k)) {
@@ -450,18 +384,12 @@ static void whisper_diar_cache_compact(whisper_diar_cache & state,
         }
     }
 
-    // Softformer requires that there is a silence anchor for every speaker, 
-    // even inacactive ones (for self-attention to have a negative refernece point
-    // and not hallucinate speech during pauses). By setting the silence frames
-    // to +INF means that those silence frames will be at the front of the flat
-    // vector.
     const int n_pad = n + state.scoring.sil_frames_per_spk;
     std::vector<int64_t> flat(static_cast<size_t>(state.n_speakers) * n_pad);
     std::iota(flat.begin(), flat.end(), 0);
     auto flat_score = [&](int64_t i) -> float {
         const int f = static_cast<int>(i % n_pad);
         if (f >= n) {
-            // Set silence/padding frames to positive infinity.
             return WHISPER_DIAR_POS_INF;
         }
         const int s = static_cast<int>(i / n_pad);
@@ -476,15 +404,13 @@ static void whisper_diar_cache_compact(whisper_diar_cache & state,
         return a < b;
     });
 
-    // Copy the flat vector up to the cap silence frames and the frames with
-    // the highest scores (top cap).
     std::vector<int64_t> picked(flat.begin(), flat.begin() + cap);
     for (auto & i : picked) {
         if (flat_score(i) == WHISPER_DIAR_NEG_INF) {
             i = WHISPER_DIAR_MAX_INDEX * static_cast<int64_t>(n_pad) + WHISPER_DIAR_MAX_INDEX;
         }
     }
-    // Sort by speaker and sequence in time.
+
     std::sort(picked.begin(), picked.end());
 
     std::vector<float> new_cache;
@@ -500,7 +426,6 @@ static void whisper_diar_cache_compact(whisper_diar_cache & state,
         bool silence_anchor = f >= n;
         bool sentinel_id = i >= static_cast<int64_t>(state.n_speakers) * n_pad;
         if (silence_anchor || sentinel_id) {
-            // Insert a reference vector represeting pure silence.
             new_cache.insert(new_cache.end(), state.mean_sil_emb.begin(), state.mean_sil_emb.end());
             new_preds.insert(new_preds.end(), state.n_speakers, 0.f);
         } else {
@@ -512,10 +437,8 @@ static void whisper_diar_cache_compact(whisper_diar_cache & state,
         }
     }
 
-    // release and replace the old speaker cache
     state.spkcache = std::move(new_cache);
 
-    // release and replace the old predictions cache
     state.spkcache_preds = std::move(new_preds);
 
     state.n_spk_frames   = cap;
@@ -682,7 +605,7 @@ static bool whisper_diar_model_load(whisper_diar_context & dctx) {
         read_str (WHISPER_DIAR_HPARAM_SUBSAMPLING_TYPE,                     subsampling_type);
         read_i32 (WHISPER_DIAR_HPARAM_ENCODER_N_HEADS,                      hparams.n_audio_head);
         read_i32 (WHISPER_DIAR_HPARAM_ENCODER_SUBSAMPLING_FACTOR,           hparams.subsampling_factor);
-        // Runtime fields → hparams
+
         read_i32 (WHISPER_DIAR_HPARAM_ENCODER_D_MODEL,                      hparams.n_audio_state);
         read_i32 (WHISPER_DIAR_HPARAM_ENCODER_D_FF,                         hparams.n_ff);
         read_i32 (WHISPER_DIAR_HPARAM_TRANSFORMER_HIDDEN_SIZE,              hparams.n_head_state);
@@ -695,7 +618,6 @@ static bool whisper_diar_model_load(whisper_diar_context & dctx) {
         read_f32 (WHISPER_DIAR_HPARAM_PREPROCESSOR_LOG_ZERO_GUARD,          hparams.log_guard);
         read_f32 (WHISPER_DIAR_HPARAM_ENCODER_ROPE_BASE,                    hparams.rope_base);
 
-        // Scoring fields → scoring
         read_i32 (WHISPER_DIAR_HPARAM_SCORING_SPKCACHE_SIL_FRAMES_PER_SPK,  sil_frames_per_spk);
         read_f32 (WHISPER_DIAR_HPARAM_SCORING_PRED_SCORE_THRESHOLD,         scoring.pred_score_threshold);
         read_f32 (WHISPER_DIAR_HPARAM_SCORING_SCORES_BOOST_LATEST,          scoring.scores_boost_latest);
@@ -735,9 +657,9 @@ static bool whisper_diar_model_load(whisper_diar_context & dctx) {
     model.buffers.reserve(1);
 
     ggml_init_params params = {
-        /*.mem_size   =*/ n_tensors * ggml_tensor_overhead(),
-        /*.mem_buffer =*/ nullptr,
-        /*.no_alloc   =*/ true,
+        n_tensors * ggml_tensor_overhead(),
+        nullptr,
+        true,
     };
     ggml_context * ctx = ggml_init(params);
     if (!ctx) {
@@ -747,9 +669,9 @@ static bool whisper_diar_model_load(whisper_diar_context & dctx) {
     model.ctxs.push_back(ctx);
 
     ggml_init_params meta_params = {
-        /*.mem_size   =*/ n_tensors * ggml_tensor_overhead(),
-        /*.mem_buffer =*/ nullptr,
-        /*.no_alloc   =*/ true,
+        n_tensors * ggml_tensor_overhead(),
+        nullptr,
+        true,
     };
     ggml_context_ptr meta_ctx(ggml_init(meta_params));
     if (!meta_ctx) {
@@ -941,7 +863,6 @@ static bool whisper_diar_model_load(whisper_diar_context & dctx) {
 static void whisper_diar_fft(float * re, float * im) {
     constexpr int n_fft = 512;
 
-    // perform bit-reversal permutation
     for (int i = 1, j = 0; i < n_fft; ++i) {
         int bit = n_fft >> 1;
         for (; j & bit; bit >>= 1) {
@@ -954,39 +875,29 @@ static void whisper_diar_fft(float * re, float * im) {
             std::swap(im[i], im[j]);
         }
     }
-    // re and im arrays are now in bit-revered order.
 
-    // Cooley-Tukey butterfly starting at 2 points, then 4, 8 and so on.
     for (int len = 2; len <= n_fft; len *= 2) {
-        // twiddle factors for real and imaginary.
         const float angle = -2.0f * WHISPER_DIAR_PI / len;
         const float wr = std::cos(angle);
         const float wi = std::sin(angle);
 
-        // performs len point merges
         for (int i = 0; i < n_fft; i += len) {
-            // current twiddle factors for real/imaginary, intially 1+0i
-            // as cos(0) = 1, and sin(0) = 0.
             float cr = 1;
             float ci = 0;
 
-            // butterfly operation
             for (int j = 0; j < len / 2; ++j) {
                 const int a = i + j;
                 const int b = a + len / 2;
 
-                // calculate how much odd samples (b) needs to be rotated to be
-                // aligned with even samples (a)
                 const float twiddle_real = cr * re[b] - ci * im[b];
                 const float twiddle_img  = cr * im[b] + ci * re[b];
 
-                re[b] = re[a] - twiddle_real; // diff
-                re[a] += twiddle_real;        // sum
+                re[b] = re[a] - twiddle_real;
+                re[a] += twiddle_real;
 
-                im[b] = im[a] - twiddle_img;  // diff
-                im[a] += twiddle_img;         // sum
+                im[b] = im[a] - twiddle_img;
+                im[a] += twiddle_img;
 
-                // phasor step to avoid cos/sin calls for every iteration
                 const float next = cr * wr - ci * wi;
                 ci = cr * wi + ci * wr;
                 cr = next;
@@ -997,40 +908,34 @@ static void whisper_diar_fft(float * re, float * im) {
 
 static std::vector<float> whisper_diar_pcm_to_mel(const whisper_diar_model & model,
         const float * samples, int64_t n, int64_t first, int count) {
-    constexpr int n_hop      = 160; // 160/16000=10ms
-    constexpr int n_fft      = 512; // 400/16000=25ms
+    constexpr int n_hop      = 160;
+    constexpr int n_fft      = 512;
     constexpr int n_win      = 400;
-    constexpr int n_pad      = 56;  // n_fft - n_win) / 2
-    constexpr int center_off = 200; // 400/2
+    constexpr int n_pad      = 56;
+    constexpr int center_off = 200;
 
     const int n_mels    = model.hparams.n_mels;
     const int n_fft_out = model.hparams.n_fft / 2 + 1;
 
     std::vector<float> out(count * n_mels);
     for (int f = 0; f < count; ++f) {
-        // zero initialized to n_fft which provides implicit zero-padding on
-        // both sides of the centered window.
         float re[n_fft] = {};
         float im[n_fft] = {};
 
-        // apply padding, optional pre-emphasis, and fft window to the real samples
         for (int j = 0; j < n_win; ++j) {
-            // map the window index j to audio sample s, centered to the frame
             const int64_t s = (first + f) * n_hop - center_off + j;
             if (s >= 0 && s < n) {
-                // apply preemphasis to cut low frequencies and boost high frequencies.
                 const float preemp = (samples[s] - (s > 0 ? model.hparams.preemph * samples[s - 1] : 0));
-                // apply FFT window.
+
                 re[j + n_pad] = preemp * model.window[j];
             }
         }
 
         whisper_diar_fft(re, im);
 
-        // Create log mel spectrogram from the frequency domain values in re and im.
         for (int m = 0; m < n_mels; ++m) {
             float mel_bin = 0;
-            // apply mel filterbank filters.
+
             for (int k = 0; k < n_fft_out; ++k) {
                 float bin_power = re[k] * re[k] + im[k] * im[k];
                 mel_bin += model.filters[m * n_fft_out + k] * bin_power;
@@ -1051,9 +956,9 @@ static ggml_cgraph * whisper_diar_build_graph(whisper_diar_context & dctx, int f
     const int d_head  = hparams.n_audio_state / n_heads;
 
     ggml_init_params params = {
-        /*.mem_size   =*/ dctx.state.meta.size(),
-        /*.mem_buffer =*/ dctx.state.meta.data(),
-        /*.no_alloc   =*/ true,
+        dctx.state.meta.size(),
+        dctx.state.meta.data(),
+        true,
     };
     ggml_context * ctx = ggml_init(params);
     if (!ctx) {
@@ -1066,16 +971,12 @@ static ggml_cgraph * whisper_diar_build_graph(whisper_diar_context & dctx, int f
     ggml_set_input(input);
     ggml_set_name(input, "input");
 
-    // project down into the model hidden vector space.
     ggml_tensor * hidden = ggml_mul_mat(ctx, model.enc_pre_w, input);
     ggml_set_output(hidden);
     ggml_set_name(hidden, "hidden");
 
     ggml_tensor * cur = hidden;
 
-    // This is conditionally adding an input which will cause the graph to be
-    // reshaped and not be reused. We should fix this and always add a cache
-    // but I need to understand the operations first to see how to to this.
     ggml_tensor * cache = nullptr;
     if (prefix) {
         cache = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, hparams.n_audio_state, prefix);
@@ -1098,7 +999,6 @@ static ggml_cgraph * whisper_diar_build_graph(whisper_diar_context & dctx, int f
     for (int i = 0; i < model.hparams.n_audio_layer; ++i) {
         const auto & layer = model.layers[i];
 
-        // norm
         {
             cur = ggml_norm(ctx, inpL, 1e-5f);
 
@@ -1107,7 +1007,6 @@ static ggml_cgraph * whisper_diar_build_graph(whisper_diar_context & dctx, int f
                     layer.norm_attn_b);
         }
 
-        // self attention
         {
             ggml_tensor * qkv = ggml_mul_mat(ctx, layer.attn_qkv_w, cur);
 
@@ -1129,8 +1028,6 @@ static ggml_cgraph * whisper_diar_build_graph(whisper_diar_context & dctx, int f
 
             ggml_tensor * attn;
             if (dctx.params.flash_attn) {
-                // ggml_flash_attn_ext output shape is [v.ne[0], q.ne[2], q.ne[1]] =
-                // [head_dim, n_heads, seq_len] — permute is already baked in.
                 attn = ggml_flash_attn_ext(ctx, Qcur, Kcur, Vcur, nullptr,
                         1.0f / sqrtf((float)d_head), 0.0f, 0.0f);
             } else {
@@ -1138,7 +1035,7 @@ static ggml_cgraph * whisper_diar_build_graph(whisper_diar_context & dctx, int f
                 ggml_tensor * KQ_softmax = ggml_soft_max_ext(ctx, KQ, nullptr, 1.0f / sqrtf((float)d_head), 0);
                 ggml_tensor * V_trans    = ggml_cont(ctx, ggml_transpose(ctx, Vcur));
                 attn = ggml_mul_mat(ctx, V_trans, KQ_softmax);
-                // manual path gives [head_dim, seq_len, n_heads]; permute to [head_dim, n_heads, seq_len].
+
                 attn = ggml_cont(ctx, ggml_permute(ctx, attn, 0, 2, 1, 3));
             }
             attn = ggml_reshape_2d(ctx, attn, hparams.n_audio_state, time);
@@ -1151,9 +1048,7 @@ static ggml_cgraph * whisper_diar_build_graph(whisper_diar_context & dctx, int f
 
         struct ggml_tensor * inp_ff = cur;
 
-        // feed-forward network
         {
-            // norm
             cur = ggml_norm(ctx, inp_ff, 1e-5f);
 
             cur = ggml_add(ctx,
@@ -1167,14 +1062,12 @@ static ggml_cgraph * whisper_diar_build_graph(whisper_diar_context & dctx, int f
 
             cur = ggml_mul_mat(ctx, layer.ff2_w, cur);
             cur = ggml_add(ctx, cur, layer.ff2_b);
-
         }
         inpL = ggml_add(ctx, cur, inp_ff);
     }
 
     cur = inpL;
 
-    // norm
     {
         cur = ggml_norm(ctx, cur, 1e-5f);
 
@@ -1183,40 +1076,27 @@ static ggml_cgraph * whisper_diar_build_graph(whisper_diar_context & dctx, int f
                 model.enc_out_norm_b);
     }
 
-    // we currently have 512 dimension which was required by the self-attention
-    // but to output 8 speaker probabilities we don't need all of those dimensions.
-    // The following down projection will project this down to 192 dimensions.
     cur = ggml_mul_mat(ctx, model.enc_proj_w, cur);
     cur = ggml_add(ctx, cur, model.enc_proj_b);
 
-    // transpose for convolution
     cur = ggml_cont(ctx, ggml_transpose(ctx, cur));
-    // convolution to look accross neighboring frames to interpolate between them.
+
     cur = ggml_conv_1d(ctx, model.upsample_w, cur, 1, 1, 1);
-    // add bias (broadcasting first which is what reshape is doing)
+
     cur = ggml_add(ctx, cur, ggml_reshape_2d(ctx, model.upsample_b, 1, hparams.n_head_state * sf));
     cur = ggml_cont(ctx, ggml_transpose(ctx, cur));
 
-    // reshape back to the original 10ms resolution.
     cur = ggml_reshape_2d(ctx, cur, hparams.n_head_state, time * sf);
 
-    // eliminate noise or background by zeroing out negative values, but keep
-    // vocal characteristics.
     cur = ggml_relu(ctx, cur);
 
-    // mix features all 192 acoustic features together.
     cur = ggml_mul_mat(ctx, model.head_hidden_w, cur);
     cur = ggml_add(ctx, cur, model.head_hidden_b);
     cur = ggml_relu(ctx, cur);
 
-    // map the 192 accoustic rules to 8 speaker slots.
     cur = ggml_mul_mat(ctx, model.head_spks_w, cur);
     cur = ggml_add(ctx, cur, model.head_spks_b);
 
-    // Sigmoid is used as speakers can be talking at the same time and we need
-    // to have a probability for each channel at each timeframe. The output
-    // shape will be be [8, 112], where we will have 112 rows representing 10ms
-    // and each will have 8 values, a probability for each speaker.
     ggml_tensor * output = ggml_sigmoid(ctx, cur);
     ggml_set_output(output);
     ggml_set_name(output, "output");
@@ -1269,11 +1149,10 @@ static bool whisper_diar_process(whisper_diar_context & dctx,
     ggml_backend_tensor_set(input, state.buf_padded.data(), 0, state.buf_padded.size() * sizeof(float));
 
     if (prefix) {
-        // set the cache input by copying the current speaker cache and then the fifo.
         state.buf_cache.resize(cache.spkcache.size() + cache.fifo.size());
-        // copy the speaker cache.
+
         std::copy(cache.spkcache.begin(), cache.spkcache.end(), state.buf_cache.begin());
-        // copy the fifo.
+
         std::copy(cache.fifo.begin(), cache.fifo.end(), state.buf_cache.begin() + cache.spkcache.size());
 
         ggml_tensor * cache_t = ggml_graph_get_tensor(gf, "cache");
@@ -1292,22 +1171,13 @@ static bool whisper_diar_process(whisper_diar_context & dctx,
     state.buf_probs.resize(time * sf * n_speakers);
     ggml_backend_tensor_get(output, state.buf_probs.data(), 0, state.buf_probs.size() * sizeof(float));
 
-    // write probabilites to probs.
     state.probs.insert(state.probs.end(),
                        state.buf_probs.begin() + (prefix * sf + left_mel) * n_speakers,
                        state.buf_probs.begin() + (prefix * sf + left_mel + valid_mel) * n_speakers);
 
-    // Update cache.
-
-    // Get the hidden state of the previous chunk, this is the log-mel
-    // spectrogram after it has been projected into the models hidden vector space.
-    // So this is 80ms of state saved before the model processes it.
     state.buf_hidden.resize(n_frames * hparams.n_audio_state);
     ggml_backend_tensor_get(hidden, state.buf_hidden.data(), 0, state.buf_hidden.size() * sizeof(float));
 
-    // The following will go through and average sf, 10ms frames for each speaker,
-    // bringing the value to the 80ms time scale, which will make it easier for the
-    // calculations required for updating the cache.
     state.buf_probs_80ms.assign(time * n_speakers, 0.0f);
     for (int f = 0; f < time; ++f) {
         for (int j = 0; j < sf; ++j) {
@@ -1334,22 +1204,22 @@ struct whisper_diar_segments {
 
 whisper_diar_context_params whisper_diar_default_context_params(void) {
     whisper_diar_context_params result = {
-        /*.n_threads  =*/ 4,
-        /*.use_gpu    =*/ false,
-        /*.gpu_device =*/ 0,
-        /*.flash_attn =*/ true,
+        4,
+        false,
+        0,
+        true,
     };
     return result;
 }
 
 whisper_diar_params whisper_diar_default_params(void) {
     whisper_diar_params result = {
-        /*.start_threshold         =*/ 0.641f,
-        /*.stop_threshold          =*/ 0.561f,
-        /*.start_pad_ms            =*/ 229,
-        /*.end_pad_ms              =*/ 79,
-        /*.min_speech_duration_ms  =*/ 511,
-        /*.min_silence_duration_ms =*/ 296,
+        0.641f,
+        0.561f,
+        229,
+        79,
+        511,
+        296,
     };
     return result;
 }
@@ -1422,7 +1292,6 @@ bool whisper_diar_detect_speakers(whisper_diar_context * ctx, const float * samp
                 ctx->model.scoring, ctx->model.hparams.n_speakers,
                 ctx->model.hparams.n_audio_state, ctx->model.silence);
 
-        // 16000 samples/sec * 0.010 sec = 160 samples per frame
         const int sf = ctx->model.hparams.subsampling_factor;
         const int64_t n_mel_frames = n / 160 + 1;
         for (int64_t i = 0; i < n_mel_frames; i += cache_params.chunk_len * sf) {
@@ -1508,46 +1377,32 @@ whisper_diar_segments * whisper_diar_segments_from_probs(const whisper_diar_cont
         std::unique_ptr<whisper_diar_segments> result(new whisper_diar_segments);
         const int64_t n_frames    = whisper_diar_n_frames(ctx);
 
-        // since speech does not start and stop at exact thresholds, there is
-        // usually valid audio just before the probability raises and just after
-        // it falls. So we add some padding to the start and end of each detected
-        // segment. So the start of a segment (t0) is pulled back by start_pad
-        // and the end of a segment (t1) is pushed forward by end_pad.
         const int64_t start_pad = (p.start_pad_ms + 5) / 10;
         const int64_t end_pad   = (p.end_pad_ms   + 5) / 10;
 
         for (int s = 0; s < ctx->model.hparams.n_speakers; ++s) {
             std::vector<whisper_diar_segment> segments;
 
-            // Find contigous frames where speaker s is active
-            int64_t start = -1; // -1 = not currently in a segment
+            int64_t start = -1;
             for (int64_t f = 0; f <= n_frames; ++f) {
                 const float v = f < n_frames ? ctx->state.probs[f * ctx->model.hparams.n_speakers + s] : -1.0f;
 
-                // if we are not currently in a segment and f is a valid frame,
-                // and the start threshold is met, then start a new segment.
                 if (start < 0 && f < n_frames && v >= p.start_threshold) {
                     start = f;
                 }
 
-                // if we are currently in a segment and f is not a valid frame,
-                // or the stop threshold is met, then end the current segment.
                 if (start >= 0 && (f == n_frames || v < p.stop_threshold)) {
                     segments.push_back({start, f, s});
                     start = -1;
                 }
             }
 
-            // padding of t0 and t1
             for (auto & seg : segments) {
-                // pull back the start of the segment but clamp to zero.
                 seg.t0 = std::max<int64_t>(0, seg.t0 - start_pad);
-                // push forward the end of the segment but clamp to n_frames.
+
                 seg.t1 = std::min<int64_t>(n_frames, seg.t1 + end_pad);
             }
 
-            // by applying the padding above it is now possible that segments
-            // overlap. So we merge overlapping segments here.
             std::vector<whisper_diar_segment> merged;
             for (const auto & seg : segments) {
                 if (merged.empty()) {
@@ -1566,8 +1421,6 @@ whisper_diar_segments * whisper_diar_segments_from_probs(const whisper_diar_cont
             }
 
             for (const auto & seg : merged) {
-                // only add a segments if it is longer than the min speech duration.
-                // (t0/t1 are in centiseconds so we multiply by 10 to convert to ms)
                 if ((seg.t1 - seg.t0) * 10 >= p.min_speech_duration_ms) {
                     result->data.push_back(seg);
                 }
@@ -1576,7 +1429,6 @@ whisper_diar_segments * whisper_diar_segments_from_probs(const whisper_diar_cont
 
         std::sort(result->data.begin(), result->data.end(),
             [](const whisper_diar_segment & a, const whisper_diar_segment & b) {
-                // sort by start time (t0), if tied then sort by speaker.
                 return a.t0 != b.t0 ? a.t0 < b.t0 : a.speaker < b.speaker;
         });
         return result.release();

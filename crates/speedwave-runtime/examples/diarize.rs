@@ -1,6 +1,5 @@
-//! Development tool for the SPEED-727 comparisons: runs `NemotronDiarizer` on a 16 kHz WAV with
-//! the command line and output of the `diarize` example from whisper.cpp PR #4095, optionally
-//! cutting one model run with several activation thresholds and saving its probabilities.
+//! Development tool for the SPEED-727 comparisons: the `diarize` example of whisper.cpp PR #4095
+//! over `NemotronDiarizer`, with an optional threshold grid and a dump of the probabilities.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
