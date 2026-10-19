@@ -31,7 +31,7 @@ tauri-plugin-log = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
 notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
-tauri-plugin-webdriver = { version = "0.2", optional = true }
+tauri-plugin-webdriver = { git = "https://github.com/Choochmeque/tauri-plugin-webdriver", rev = "b94eb81c9d4359cefdde15bd74d0f7d8a00065b6", optional = true }
 url = "2"
 tokio-tungstenite = "0.30"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
