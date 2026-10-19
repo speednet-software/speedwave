@@ -207,9 +207,12 @@ impl TranscriptSession {
         }
     }
 
-    /// Installs `final_segments` from the higher-quality offline pass.
+    /// Installs `final_segments` from the higher-quality offline pass and drops the diarization
+    /// record of the transcript they replace (`TranscriptStore::set_diarization` adds the new one).
     pub fn set_final_segments(&mut self, final_segs: Vec<Segment>) {
         self.final_segments = Some(final_segs);
+        self.models_used.diarization = None;
+        self.diarization_secs = None;
     }
 
     /// The recordings-list row for this session; `dir` is its directory, read for the audio
@@ -490,6 +493,16 @@ mod tests {
         s.set_final_segments(vec![seg(0.0, 2.0, "final")]);
         assert_eq!(s.effective_segments().len(), 1);
         assert_eq!(s.effective_segments()[0].text, "final");
+    }
+
+    #[test]
+    fn new_final_segments_drop_the_diarization_record_of_the_ones_they_replace() {
+        let mut s = diarized_session();
+        s.diarization_secs = Some(3.0);
+        s.set_final_segments(vec![seg(0.0, 1.0, "nowe")]);
+        assert_eq!(s.models_used.diarization, None);
+        assert_eq!(s.diarization_secs, None);
+        assert_eq!(s.effective_segments()[0].text, "nowe");
     }
 
     #[test]

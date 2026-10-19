@@ -567,6 +567,7 @@ fn spawn_offline_pass(
             transcriber,
             transcribe_opts: TranscribeOptions::for_language(session_language(&store_arc, id)),
             pass,
+            diarizer: None,
         };
         match speedwave_runtime::transcription::run_finalize(cfg) {
             Ok(()) => {}

@@ -165,7 +165,7 @@ impl Drop for NemotronDiarizer {
 
 /// Stamps each `System` segment with the model speaker of the turn covering most of it; ties
 /// go to the smaller speaker index, and a segment no turn overlaps keeps `None`.
-pub fn assign_speakers(segments: &mut [Segment], turns: &[SpeakerTurn]) {
+pub(crate) fn assign_speakers(segments: &mut [Segment], turns: &[SpeakerTurn]) {
     for seg in segments
         .iter_mut()
         .filter(|s| s.source == Some(TranscriptSource::System))
@@ -190,7 +190,7 @@ pub fn assign_speakers(segments: &mut [Segment], turns: &[SpeakerTurn]) {
 }
 
 /// Renumbers the model speakers on `segments` to 1..N in order of first appearance in time.
-pub fn number_speakers(segments: &mut [Segment]) {
+pub(crate) fn number_speakers(segments: &mut [Segment]) {
     let mut order: Vec<usize> = (0..segments.len()).collect();
     order.sort_by_key(|&i| (segments[i].start, i));
     let mut numbers: Vec<(u32, u32)> = Vec::new();

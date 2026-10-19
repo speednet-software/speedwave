@@ -854,6 +854,23 @@ impl TranscriptStore {
         })
     }
 
+    /// Records that `pass` told the speakers of its transcript apart with diarization model `model`
+    /// in `secs` seconds; call after `set_final_segments`, which clears the previous record.
+    pub fn set_diarization(
+        &self,
+        id: Uuid,
+        pass: &OfflinePass,
+        model: &str,
+        secs: f64,
+    ) -> Result<(), StoreError> {
+        self.pass_write(id, pass, |s, _| {
+            s.models_used.diarization = Some(model.to_string());
+            s.diarization_secs = Some(secs);
+            Vec::new()
+        })
+        .map(|_| ())
+    }
+
     /// Ends `pass` with the session done and returns the emitted event sequence number.
     pub fn finish(&self, id: Uuid, pass: &OfflinePass) -> Result<u64, StoreError> {
         self.pass_write(id, pass, |s, seq| {
@@ -1616,6 +1633,30 @@ mod tests {
             store.begin_offline_pass(Uuid::new_v4()).unwrap_err(),
             StoreError::NotFound(_)
         ));
+    }
+
+    #[test]
+    fn set_diarization_records_the_model_and_time_only_for_the_live_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        let old = store.claim_finalizing(id);
+        let new = store.begin_offline_pass(id).unwrap();
+        assert!(matches!(
+            store.set_diarization(id, &old, "m", 1.0).unwrap_err(),
+            StoreError::PassEnded(_)
+        ));
+        assert_eq!(store.get(id).unwrap().models_used.diarization, None);
+
+        store
+            .set_final_segments(id, &new, vec![seg(0.0, 1.0, "a")])
+            .unwrap();
+        store.set_diarization(id, &new, "m", 12.5).unwrap();
+        let snap = store.get(id).unwrap();
+        assert_eq!(snap.models_used.diarization.as_deref(), Some("m"));
+        assert_eq!(snap.diarization_secs, Some(12.5));
+        let reloaded = TranscriptStore::with_root(dir.path()).get(id).unwrap();
+        assert_eq!(reloaded.diarization_secs, Some(12.5));
     }
 
     #[test]

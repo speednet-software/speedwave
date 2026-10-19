@@ -28,9 +28,7 @@ pub use audio::{
     AudioStream, CaptureCapabilities, CaptureError, CaptureWarning, FileAudioCapture,
     CHUNK_DURATION, DEFAULT_MIXED_SOURCE_LABEL, SAMPLE_RATE_HZ,
 };
-pub use diarizer::{
-    assign_speakers, number_speakers, DiarizeError, Diarizer, NemotronDiarizer, SpeakerTurn,
-};
+pub use diarizer::{DiarizeError, Diarizer, NemotronDiarizer, SpeakerTurn};
 pub use mix::{poll_paired_chunk, MixBuffer, MixSource, CHUNK_SAMPLES};
 pub use model_catalog::{whisper_model, ModelRole, Quantization, WhisperModelInfo, WHISPER_MODELS};
 pub use model_store::{
