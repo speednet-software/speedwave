@@ -49,6 +49,20 @@ describe('TauriService', () => {
 
       await expect(service.invoke('failing_cmd')).rejects.toThrow('backend error');
     });
+
+    it('passes a raw byte body and request headers through to core invoke', async () => {
+      mockInternals.invoke.mockResolvedValue(3);
+      const bytes = new Uint8Array([1, 2, 3]);
+
+      const result = await service.invoke('append_paste_upload', bytes, {
+        headers: { 'x-upload-id': '7' },
+      });
+
+      expect(mockInternals.invoke).toHaveBeenCalledWith('append_paste_upload', bytes, {
+        headers: { 'x-upload-id': '7' },
+      });
+      expect(result).toBe(3);
+    });
   });
 
   describe('listen()', () => {

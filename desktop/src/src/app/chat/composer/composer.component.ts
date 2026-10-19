@@ -24,17 +24,18 @@ import { SlashMenuComponent } from '../slash/slash-menu.component';
 import { SlashService, isBlankOrSlashOnly, type SlashCommand } from '../slash/slash.service';
 import { TooltipDirective } from '../../shared/tooltip.directive';
 import { AttachmentStripComponent, type AttachmentViewModel } from './attachment-strip.component';
-import { FileDropDirective } from './file-drop.directive';
+import { FileDropDirective, partitionItems, type DroppedItems } from './file-drop.directive';
 import { ResizeHandleDirective } from './resize-handle.directive';
 import {
   ModelSelectorComponent,
   type ModelSelection,
 } from './model-selector/model-selector.component';
 import {
-  ERROR_UNSUPPORTED_TYPE,
   ImagePreprocessorService,
+  isSupportedImageType,
   type ModelClass,
 } from '../../services/image-preprocessor.service';
+import { FileAttachmentService } from '../../services/file-attachment.service';
 import type { ChatAttachment } from '../../models/chat';
 import { ComposerAttachments } from './composer-attachments';
 
@@ -119,7 +120,7 @@ const PLAN_MODE_PREFIX =
       <div
         data-testid="composer-attachment-error"
         role="alert"
-        class="mb-2 rounded border border-red-500/40 bg-red-500/10 px-3 py-1.5 text-[11px] text-red-300"
+        class="mb-2 whitespace-pre-line rounded border border-red-500/40 bg-red-500/10 px-3 py-1.5 text-[11px] text-red-300"
       >
         {{ attachmentDraft().error() }}
       </div>
@@ -131,7 +132,7 @@ const PLAN_MODE_PREFIX =
       appFileDrop
       #fileDrop="appFileDrop"
       [disabled]="disabled()"
-      (filesDropped)="onFilesDropped($event)"
+      (dropped)="onDropped($event)"
       class="relative rounded border border-[var(--line)] bg-[var(--bg-1)] focus-within:border-[var(--accent)]"
       [class.ring-2]="fileDrop.isDragging()"
       [class.ring-[var(--accent)]]="fileDrop.isDragging()"
@@ -140,7 +141,7 @@ const PLAN_MODE_PREFIX =
         <div
           class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded bg-[var(--accent)]/10 text-[12px] font-medium text-[var(--accent)]"
         >
-          Drop image to attach
+          Drop files to attach
         </div>
       }
       <div
@@ -366,6 +367,7 @@ export class ComposerComponent implements AfterViewInit {
   readonly slashService = inject(SlashService);
   protected readonly projectState = inject(ProjectStateService);
   private readonly preprocessor = inject(ImagePreprocessorService);
+  private readonly fileAttachments = inject(FileAttachmentService);
 
   readonly text = new FormControl<string>('', { nonNullable: true });
 
@@ -513,7 +515,7 @@ export class ComposerComponent implements AfterViewInit {
   canSubmit(): boolean {
     if (this.disabled() || this.sendBlocked()()) return false;
     const draft = this.attachmentDraft();
-    if (draft.anyPreprocessing()) return false;
+    if (draft.anyStaging()) return false;
     const text = this.textValue();
     const hasText = !isBlankOrSlashOnly(text);
     const hasAttachments = draft.records().length > 0;
@@ -565,32 +567,23 @@ export class ComposerComponent implements AfterViewInit {
   }
 
   /**
-   * preventDefault only when an image was captured, so text paste keeps working.
+   * preventDefault only when a file was captured, so text paste keeps working.
    * @param event - Native paste event.
    */
   onPaste(event: ClipboardEvent): void {
     if (this.disabled()) return;
-    const items = event.clipboardData?.items;
-    if (!items) return;
-    const files: File[] = [];
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i];
-      if (item.kind === 'file' && item.type.startsWith('image/')) {
-        const f = item.getAsFile();
-        if (f) files.push(f);
-      }
-    }
-    if (files.length === 0) return;
+    const items = partitionItems(event.clipboardData?.items);
+    if (items.files.length === 0 && items.folders.length === 0) return;
     event.preventDefault();
-    void this.ingest(files);
+    void this.ingest(items);
   }
 
   /**
-   * Drop handler — emits from `FileDropDirective`, validates MIME.
-   * @param files - Dropped files (any MIME).
+   * Drop handler for `FileDropDirective`; every file type is accepted.
+   * @param items - Files and directory names of the drop.
    */
-  onFilesDropped(files: File[]): void {
-    void this.ingest(files);
+  onDropped(items: DroppedItems): void {
+    void this.ingest(items);
   }
 
   /**
@@ -598,11 +591,7 @@ export class ComposerComponent implements AfterViewInit {
    * @param id - Attachment id from the view-model.
    */
   removeAttachment(id: string): void {
-    const draft = this.attachmentDraft();
-    const removed = draft.remove(id);
-    if (removed) {
-      draft.announcement.set(`Image removed: ${removed.filename}`);
-    }
+    this.attachmentDraft().remove(id);
   }
 
   readonly attachmentViewModels = computed<ReadonlyArray<AttachmentViewModel>>(() =>
@@ -611,38 +600,46 @@ export class ComposerComponent implements AfterViewInit {
       .map((a) => ({
         id: a.id,
         filename: a.filename,
+        kind: a.kind,
         previewUrl: a.previewUrl,
-        encodedSizeBytes: a.preprocessed?.sizeBytes ?? 0,
-        preprocessing: a.preprocessed === null,
+        sizeBytes: a.sizeBytes,
+        staging: a.staged === null,
       }))
   );
 
   readonly submitBlockedReason = computed<string>(() => {
     if (this.disabled()) return '';
     const draft = this.attachmentDraft();
-    if (draft.anyPreprocessing()) return 'Preparing image…';
+    if (draft.anyStaging()) return 'Preparing attachment…';
     if (draft.records().length > 0 && this.streaming()) {
-      return 'Wait for the response to finish before sending an image.';
+      return 'Wait for the response to finish before sending an attachment.';
     }
     return '';
   });
 
-  private async ingest(files: File[]): Promise<void> {
-    const images = files.filter((f) => f.type.startsWith('image/'));
+  private async ingest({ files, folders }: DroppedItems): Promise<void> {
     const draft = this.attachmentDraft();
-    if (images.length === 0) {
-      draft.error.set(ERROR_UNSUPPORTED_TYPE);
-      return;
+    draft.error.set('');
+    if (folders.length > 0) {
+      draft.reportError(`Folders cannot be attached: ${folders.join(', ')}`);
     }
+    if (files.length === 0) return;
     const project = this.projectState.activeProject();
     if (!project) {
-      draft.error.set('Select a project before attaching an image.');
+      draft.reportError('Select a project before attaching a file.');
       return;
     }
 
     const modelClass = this.modelClass();
-    for (const file of images) {
-      await draft.add(file, (f) => this.preprocessor.preprocess(f, modelClass, project));
+    for (const file of files) {
+      if (draft.isDisposed) return;
+      if (isSupportedImageType(file.type)) {
+        await draft.add(file, 'image', (f) => this.preprocessor.preprocess(f, modelClass, project));
+      } else {
+        await draft.add(file, 'file', (f, signal) =>
+          this.fileAttachments.stage(f, project, signal)
+        );
+      }
     }
   }
 

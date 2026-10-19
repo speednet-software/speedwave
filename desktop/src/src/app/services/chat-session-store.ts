@@ -1216,7 +1216,11 @@ export class ChatSessionStore {
       displayBlocks.push({ type: 'text', content: surfaceText });
     }
     for (const att of chatInput.attachments) {
-      displayBlocks.push({ type: 'image', media_type: att.mediaType, alt: att.filename });
+      displayBlocks.push(
+        att.kind === 'image'
+          ? { type: 'image', media_type: att.mediaType, alt: att.filename }
+          : { type: 'file', filename: att.filename, size_bytes: att.sizeBytes }
+      );
     }
     const isControlSend = chatInput.attachments.length === 0 && isControlShaped(chatInput.text);
     if (isControlSend) this.recordTypedModelCommand(chatInput.text);
@@ -2605,6 +2609,9 @@ export function stateBlocksToMessageBlocks(blocks: readonly MessageBlockState[])
       case 'image':
         out.push({ type: 'image', media_type: b.media_type, alt: b.alt ?? undefined });
         break;
+      case 'file':
+        out.push({ type: 'file', filename: b.filename, size_bytes: b.size_bytes });
+        break;
       case 'chip':
         out.push({ type: 'chip', command: b.command, argument: b.argument });
         break;
@@ -2671,6 +2678,9 @@ export function messageBlocksToState(blocks: readonly MessageBlock[]): MessageBl
         break;
       case 'image':
         out.push({ kind: 'image', media_type: b.media_type, alt: b.alt ?? null });
+        break;
+      case 'file':
+        out.push({ kind: 'file', filename: b.filename, size_bytes: b.size_bytes });
         break;
       case 'permission_prompt':
         break;

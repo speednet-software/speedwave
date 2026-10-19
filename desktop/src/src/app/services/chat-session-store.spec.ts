@@ -28,6 +28,7 @@ import { TauriService } from './tauri.service';
 import { AnthropicModelsService } from './anthropic-models.service';
 import { ClaudeControlService } from './claude-control.service';
 import { LoggerService } from './logger.service';
+import { makeStagedImage } from '../testing/attachments';
 import { PlanUsageService } from './plan-usage.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
 import { createDeferred, type Deferred } from '../testing/deferred';
@@ -270,27 +271,19 @@ describe('ChatSessionStore', () => {
       expect((store as unknown as { _resumeDecider: unknown })._resumeDecider).toBeNull();
     });
 
-    it('revokes a staged attachment preview URL (SPEED-785)', async () => {
+    it('revokes a staged attachment preview URL and discards its unsent file (SPEED-785)', async () => {
+      const staged = makeStagedImage('a.png', { previewUrl: 'blob:store-dispose' });
       await store.composerAttachments.add(
         new File(['x'], 'a.png', { type: 'image/png' }),
-        async () => ({
-          attachment: {
-            filename: 'a.png',
-            mediaType: 'image/png',
-            containerPath: '/workspace/.speedwave/pastes/a.png',
-            hostPath: '/tmp/a.png',
-          },
-          previewUrl: 'blob:store-dispose',
-          width: 1,
-          height: 1,
-          sizeBytes: 1,
-        })
+        'image',
+        async () => staged
       );
       const revokeSpy = vi.spyOn(URL, 'revokeObjectURL');
 
       store.dispose();
 
       expect(revokeSpy).toHaveBeenCalledWith('blob:store-dispose');
+      expect(staged.discard).toHaveBeenCalledOnce();
       expect(store.composerAttachments.records()).toHaveLength(0);
       revokeSpy.mockRestore();
     });
@@ -785,6 +778,38 @@ describe('ChatSessionStore', () => {
       });
     });
 
+    it('inlines file attachments as @/workspace/... and shows a file pill in the bubble (ADR-094)', async () => {
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      spy.mockResolvedValue(undefined);
+
+      await store.sendMessage({
+        text: 'Summarize this',
+        attachments: [
+          {
+            kind: 'file',
+            filename: 'raport końcowy.xlsx',
+            sizeBytes: 734_003_200,
+            containerPath: '/workspace/.speedwave/pastes/paste-1-0001-raport_końcowy.xlsx',
+          },
+        ],
+      });
+
+      expect(spy).toHaveBeenCalledWith('send_message', {
+        blocks: [
+          {
+            type: 'text',
+            text: 'Summarize this\n\n@/workspace/.speedwave/pastes/paste-1-0001-raport_końcowy.xlsx',
+          },
+        ],
+        displayText: 'Summarize this',
+        tabId: store.tabId,
+      });
+      expect(store.messages[0].blocks).toEqual([
+        { type: 'text', content: 'Summarize this' },
+        { type: 'file', filename: 'raport końcowy.xlsx', size_bytes: 734_003_200 },
+      ]);
+    });
+
     it('inlines image attachments as @/workspace/... in the wire text (ADR-065)', async () => {
       const spy = vi.spyOn(mockTauri, 'invoke');
       spy.mockResolvedValue(undefined);
@@ -793,10 +818,10 @@ describe('ChatSessionStore', () => {
         text: 'Co tu widać?',
         attachments: [
           {
+            kind: 'image',
             filename: 'paste-1.png',
             mediaType: 'image/png',
             containerPath: '/workspace/.speedwave/pastes/paste-1.png',
-            hostPath: '/Users/x/proj/.speedwave/pastes/paste-1.png',
           },
         ],
       });
@@ -825,10 +850,10 @@ describe('ChatSessionStore', () => {
         text: '',
         attachments: [
           {
+            kind: 'image',
             filename: 'paste-2.jpg',
             mediaType: 'image/jpeg',
             containerPath: '/workspace/.speedwave/pastes/paste-2.jpg',
-            hostPath: '/Users/x/proj/.speedwave/pastes/paste-2.jpg',
           },
         ],
       });
@@ -5839,6 +5864,24 @@ describe('ChatSessionStore', () => {
         answer: 'A, B',
         tabId: store.tabId,
       });
+    });
+  });
+
+  describe('file block persistence round-trip (ADR-094)', () => {
+    it('messageBlocksToState keeps a file pill so a kept conversation view restores it', () => {
+      const state = messageBlocksToState([
+        { type: 'text', content: 'see attached' },
+        { type: 'file', filename: 'raport końcowy.xlsx', size_bytes: 734_003_200 },
+      ]);
+
+      expect(state).toEqual([
+        { kind: 'text', content: 'see attached' },
+        { kind: 'file', filename: 'raport końcowy.xlsx', size_bytes: 734_003_200 },
+      ]);
+      expect(stateBlocksToMessageBlocks(state)).toEqual([
+        { type: 'text', content: 'see attached' },
+        { type: 'file', filename: 'raport końcowy.xlsx', size_bytes: 734_003_200 },
+      ]);
     });
   });
 

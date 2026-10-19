@@ -3,10 +3,11 @@
 use anyhow::{Context, Result};
 use arboard::Clipboard;
 use image::{ColorType, ImageEncoder};
-use speedwave_runtime::consts::DATA_DIR;
-use speedwave_runtime::fs_perms::set_owner_only;
+use speedwave_runtime::pastes::open_pastes_dir;
+use speedwave_runtime::pinned_dir::PinnedDir;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -15,10 +16,9 @@ use std::time::Duration;
 
 const POLL_MS: u64 = 250;
 
-/// `<project>/<DATA_DIR>/pastes/clip.png` — composed from SSOT.
-pub fn clip_path(project_dir: &Path) -> PathBuf {
-    project_dir.join(DATA_DIR).join("pastes").join("clip.png")
-}
+const CLIP_FILE: &str = "clip.png";
+
+const CLIP_TMP_FILE: &str = "clip.png.tmp";
 
 /// Owned watcher handle — drop or call `stop()` to terminate.
 pub struct PasteWatcher {
@@ -53,12 +53,12 @@ impl Drop for PasteWatcher {
 }
 
 fn run_loop(project_dir: &Path, stop: &AtomicBool) {
-    let target = clip_path(project_dir);
-    if let Some(parent) = target.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            log::warn!("cannot create paste directory {}: {e}", parent.display());
-            return;
-        }
+    if let Err(e) = open_pastes_dir(project_dir) {
+        log::warn!(
+            "cannot open the paste directory of {}: {e}",
+            project_dir.display()
+        );
+        return;
     }
 
     let mut clipboard = match Clipboard::new() {
@@ -75,10 +75,14 @@ fn run_loop(project_dir: &Path, stop: &AtomicBool) {
             Ok(img) => {
                 let h = hash_image(&img);
                 if Some(h) != last_hash {
-                    if let Err(e) = write_png(&target, &img) {
-                        log::warn!("failed to write {}: {e}", target.display());
-                    } else {
-                        log::debug!("wrote {} ({}x{})", target.display(), img.width, img.height);
+                    match write_clip(project_dir, &img) {
+                        Ok(target) => {
+                            log::debug!("wrote {} ({}x{})", target.display(), img.width, img.height)
+                        }
+                        Err(e) => log::warn!(
+                            "failed to write the clipboard image of {}: {e:#}",
+                            project_dir.display()
+                        ),
                     }
                     last_hash = Some(h);
                 }
@@ -100,59 +104,53 @@ fn hash_image(img: &arboard::ImageData<'_>) -> u64 {
     h.finish()
 }
 
-fn write_png(target: &Path, img: &arboard::ImageData<'_>) -> Result<()> {
-    let tmp = target.with_extension("png.tmp");
-    {
-        let file =
-            std::fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
-        let writer = std::io::BufWriter::new(file);
-        let encoder = image::codecs::png::PngEncoder::new(writer);
-        encoder
-            .write_image(
-                &img.bytes,
-                img.width as u32,
-                img.height as u32,
-                ColorType::Rgba8.into(),
-            )
-            .context("png encode")?;
-    }
-    restrict_paste_perms(&tmp)?;
-    std::fs::rename(&tmp, target).with_context(|| format!("rename → {}", target.display()))?;
-    Ok(())
+fn write_clip(project_dir: &Path, img: &arboard::ImageData<'_>) -> Result<PathBuf> {
+    let dir = open_pastes_dir(project_dir).map_err(anyhow::Error::msg)?;
+    write_png(&dir, img)?;
+    Ok(dir.path().join(CLIP_FILE))
 }
 
-/// Unix: a chmod failure aborts the paste. Windows: DACL calls can transiently
-/// fail under AV/EDR, so it degrades to warn-and-continue instead.
-#[cfg(unix)]
-fn restrict_paste_perms(tmp: &Path) -> Result<()> {
-    set_owner_only(tmp)
-        .map_err(|e| anyhow::anyhow!(e))
-        .with_context(|| format!("owner-only perms {}", tmp.display()))
-}
-
-#[cfg(not(unix))]
-fn restrict_paste_perms(tmp: &Path) -> Result<()> {
-    if let Err(e) = set_owner_only(tmp) {
-        log::warn!("owner-only perms failed for {}: {e}", tmp.display());
-    }
-    Ok(())
+fn write_png(dir: &PinnedDir, img: &arboard::ImageData<'_>) -> Result<()> {
+    dir.remove_file(CLIP_TMP_FILE).map_err(anyhow::Error::msg)?;
+    let file = dir
+        .create_new_file(CLIP_TMP_FILE)
+        .map_err(anyhow::Error::msg)?;
+    let mut writer = BufWriter::new(file);
+    image::codecs::png::PngEncoder::new(&mut writer)
+        .write_image(
+            &img.bytes,
+            img.width as u32,
+            img.height as u32,
+            ColorType::Rgba8.into(),
+        )
+        .context("png encode")?;
+    let file = writer
+        .into_inner()
+        .map_err(|e| anyhow::anyhow!("flush {CLIP_TMP_FILE}: {}", e.error()))?;
+    dir.persist(file, CLIP_TMP_FILE, CLIP_FILE)
+        .map_err(anyhow::Error::msg)
 }
 
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "test assertions may unwrap freely")]
 mod tests {
     use super::*;
+    use speedwave_runtime::consts::DATA_DIR;
+    use speedwave_runtime::pastes::PASTES_DIR;
 
-    #[test]
-    fn clip_path_is_under_project_pastes_dir() {
-        let p = clip_path(Path::new("/tmp/proj"));
-        assert_eq!(
-            p,
-            Path::new("/tmp/proj")
-                .join(DATA_DIR)
-                .join("pastes")
-                .join("clip.png")
-        );
+    fn red_pixels() -> arboard::ImageData<'static> {
+        arboard::ImageData {
+            width: 2,
+            height: 2,
+            bytes: vec![
+                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+            ]
+            .into(),
+        }
+    }
+
+    fn pastes_dir_of(project_dir: &Path) -> PathBuf {
+        project_dir.join(DATA_DIR).join(PASTES_DIR)
     }
 
     #[test]
@@ -183,60 +181,77 @@ mod tests {
     }
 
     #[test]
-    fn write_png_atomic_creates_file() {
+    fn write_clip_writes_a_png_into_the_project_paste_directory() {
         let tmp = tempfile::tempdir().unwrap();
-        let target = tmp.path().join("clip.png");
-        let img = arboard::ImageData {
-            width: 2,
-            height: 2,
-            bytes: vec![
-                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
-            ]
-            .into(),
-        };
-        write_png(&target, &img).unwrap();
-        assert!(target.is_file());
+
+        let target = write_clip(tmp.path(), &red_pixels()).unwrap();
+
+        assert_eq!(target, pastes_dir_of(tmp.path()).join(CLIP_FILE));
         let bytes = std::fs::read(&target).unwrap();
         assert!(
             bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
             "not a PNG: {:?}",
             &bytes[..8]
         );
+        assert!(!pastes_dir_of(tmp.path()).join(CLIP_TMP_FILE).exists());
+    }
+
+    #[test]
+    fn write_clip_replaces_the_previous_clip_and_a_leftover_temp_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = write_clip(tmp.path(), &red_pixels()).unwrap();
+        std::fs::write(&first, "stale").unwrap();
+        std::fs::write(pastes_dir_of(tmp.path()).join(CLIP_TMP_FILE), "leftover").unwrap();
+
+        let second = write_clip(tmp.path(), &red_pixels()).unwrap();
+
+        assert_eq!(first, second);
+        assert!(std::fs::read(&second)
+            .unwrap()
+            .starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert!(!pastes_dir_of(tmp.path()).join(CLIP_TMP_FILE).exists());
     }
 
     #[cfg(unix)]
     #[test]
-    fn write_png_creates_owner_only_file() {
+    fn write_clip_creates_owner_only_file() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
-        let target = tmp.path().join("clip.png");
-        let img = arboard::ImageData {
-            width: 1,
-            height: 1,
-            bytes: vec![1, 2, 3, 4].into(),
-        };
-        write_png(&target, &img).unwrap();
+
+        let target = write_clip(tmp.path(), &red_pixels()).unwrap();
+
         let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "expected 0600, got {:o}", mode);
     }
 
     #[cfg(unix)]
     #[test]
-    fn restrict_paste_perms_fails_on_nonexistent_path_unix() {
+    fn write_clip_never_writes_through_a_symlinked_temp_file() {
         let tmp = tempfile::tempdir().unwrap();
-        let missing = tmp.path().join("does-not-exist.png.tmp");
-        assert!(restrict_paste_perms(&missing).is_err());
+        let victim = tmp.path().join("victim.txt");
+        std::fs::write(&victim, "untouched").unwrap();
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(pastes_dir_of(&project)).unwrap();
+        std::os::unix::fs::symlink(&victim, pastes_dir_of(&project).join(CLIP_TMP_FILE)).unwrap();
+
+        write_clip(&project, &red_pixels()).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
     }
 
-    #[cfg(not(unix))]
+    #[cfg(unix)]
     #[test]
-    fn restrict_paste_perms_degrades_to_ok_on_failure_non_unix() {
+    fn write_clip_refuses_a_symlinked_paste_directory() {
         let tmp = tempfile::tempdir().unwrap();
-        let missing = tmp.path().join("does-not-exist.png.tmp");
-        assert!(
-            restrict_paste_perms(&missing).is_ok(),
-            "a DACL failure must warn-and-continue, not fail the paste"
-        );
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(project.join(DATA_DIR)).unwrap();
+        std::os::unix::fs::symlink(&outside, pastes_dir_of(&project)).unwrap();
+
+        assert!(write_clip(&project, &red_pixels()).is_err());
+
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
     }
 
     #[test]
