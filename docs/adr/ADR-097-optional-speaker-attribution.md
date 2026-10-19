@@ -1,4 +1,4 @@
-# ADR-094: Optional Speaker Attribution with Nemotron-3 Diarization
+# ADR-097: Optional Speaker Attribution with Nemotron-3 Diarization
 
 > **Status:** Proposed
 > **Date:** 2026-10-19

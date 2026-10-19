@@ -56,7 +56,7 @@ pub struct ModelsUsed {
     /// Whisper catalogue key used for the higher-quality offline pass.
     pub finalize: Option<String>,
     /// Diarization model key when the offline pass that made the transcript told speakers
-    /// apart (ADR-094); `None` otherwise.
+    /// apart (ADR-097); `None` otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diarization: Option<String>,
 }
@@ -257,7 +257,7 @@ impl TranscriptSession {
 
     /// Renders the transcript as markdown: a header plus one timestamped line per segment,
     /// channel-labelled on paired captures, with the speaker number on diarized meeting-channel
-    /// segments (ADR-094).
+    /// segments (ADR-097).
     pub fn to_markdown(&self) -> String {
         let mut s = String::new();
         match &self.title {

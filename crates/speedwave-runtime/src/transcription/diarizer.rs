@@ -1,4 +1,4 @@
-//! Speaker diarization of the meeting channel (ADR-094): the `Diarizer` trait, the
+//! Speaker diarization of the meeting channel (ADR-097): the `Diarizer` trait, the
 //! Nemotron-3 engine over the vendored whisper.cpp code, and attribution to segments.
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
@@ -70,7 +70,7 @@ pub struct ActivationThresholds {
 }
 
 impl ActivationThresholds {
-    /// The thresholds of the offline pass (ADR-094).
+    /// The thresholds of the offline pass (ADR-097).
     pub const PRODUCT: Self = Self {
         start: 0.641,
         stop: 0.561,

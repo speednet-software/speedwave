@@ -1,0 +1,43 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__plugin_figma_figma__use_figma",
+      "Bash(make test-rust *)",
+      "Bash(brew list *)",
+      "Bash(brew install *)",
+      "Bash(cmake --version)",
+      "Bash(make build-desktop *)",
+      "Bash(SPEEDWAVE_ALLOW_BUNDLE_STUBS=1 cargo build *)",
+      "Bash(make dev *)",
+      "Bash(npm --version)",
+      "Bash(npm install *)",
+      "Bash(PATH=__TRACKED_VAR__:__CMDSUB_OUTPUT__/node_modules/.bin make dev)",
+      "Bash(cargo tauri *)",
+      "Bash(cargo install *)",
+      "Bash(PATH=__TRACKED_VAR__:__CMDSUB_OUTPUT__/mcp-servers/node_modules/.bin make dev)",
+      "Read(//Users/kamil.parczewski/.speedwave/**)",
+      "Bash(pkill -f \"speedwave-desktop\")",
+      "Bash(xargs kill -9)",
+      "Bash(mkdir -p ~/.speedwave-dev)",
+      "Bash(echo '{\"runtime_ready\":true,\"vm_ready\":false,\"project_created\":null,\"tokens_configured\":[],\"images_built\":false,\"containers_started\":false,\"cli_linked\":false}')",
+      "Bash(git add *)",
+      "Bash(grep -o 'Pluginy zewn[^|]*\\\\{0,5000\\\\}' /Users/kamil.parczewski/.claude/projects/-Users-kamil-parczewski-Projects-speedwave-projects-speedwave/dcc36afb-763d-47d1-b4f2-62fd72bb1a1a/tool-results/toolu_01VgHD92fqpBjZgGVKYF3X5c.txt)",
+      "Bash(grep -oE 'Propozycja[^|]{0,8000}' /Users/kamil.parczewski/.claude/projects/-Users-kamil-parczewski-Projects-speedwave-projects-speedwave/dcc36afb-763d-47d1-b4f2-62fd72bb1a1a/tool-results/toolu_01VgHD92fqpBjZgGVKYF3X5c.txt)",
+      "Bash(grep -oE 'figma[^|]{0,3000}' /Users/kamil.parczewski/.claude/projects/-Users-kamil-parczewski-Projects-speedwave-projects-speedwave/dcc36afb-763d-47d1-b4f2-62fd72bb1a1a/tool-results/toolu_01VgHD92fqpBjZgGVKYF3X5c.txt)",
+      "Bash(grep -oE 'WebSocket[^|]{0,2000}' /Users/kamil.parczewski/.claude/projects/-Users-kamil-parczewski-Projects-speedwave-projects-speedwave/dcc36afb-763d-47d1-b4f2-62fd72bb1a1a/tool-results/toolu_01VgHD92fqpBjZgGVKYF3X5c.txt)",
+      "Bash(grep -oE 'bridge[^|]{0,1500}' /Users/kamil.parczewski/.claude/projects/-Users-kamil-parczewski-Projects-speedwave-projects-speedwave/dcc36afb-763d-47d1-b4f2-62fd72bb1a1a/tool-results/toolu_01VgHD92fqpBjZgGVKYF3X5c.txt)",
+      "Bash(grep -oE 'Plugin API[^|]{0,1500}' /Users/kamil.parczewski/.claude/projects/-Users-kamil-parczewski-Projects-speedwave-projects-speedwave/dcc36afb-763d-47d1-b4f2-62fd72bb1a1a/tool-results/toolu_01VgHD92fqpBjZgGVKYF3X5c.txt)",
+      "Read(//Users/kamil.parczewski/.claude/**)",
+      "Read(//Users/kamil.parczewski/Projects/speedwave-projects/**)",
+      "Read(//Users/kamil.parczewski/Projects/speedwave-projects/speedwave-plugins/.claude/**)",
+      "Bash(mkdir -p ~/.claude/skills)",
+      "Bash(cp -R /Users/kamil.parczewski/Projects/speedwave-projects/speedwave/.claude/skills/speedwave-code-review ~/.claude/skills/)",
+      "Bash(sed -n '130,158p' docs/adr/ADR-066-cli-host-bridge-reconstruction.md)",
+      "Bash(sed -n '450,456p' docs/guides/integrations.md)",
+      "Bash(make check-fmt *)",
+      "Bash(make fmt *)",
+      "Bash(make check-clippy *)",
+      "Bash(git grep *)"
+    ]
+  }
+}

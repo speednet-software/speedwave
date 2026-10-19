@@ -141,10 +141,10 @@ pub enum CaptureWarning {
     /// finalized transcript is missing that span (resumed parts, ADR-056 Am. 10).
     RecordingPartMissing,
     /// Speaker diarization of the offline pass failed; the transcript is complete without
-    /// speaker labels (ADR-094).
+    /// speaker labels (ADR-097).
     SpeakerAttributionFailed,
     /// Speaker diarization was on but its model is not downloaded; the transcript has no
-    /// speaker labels (ADR-094).
+    /// speaker labels (ADR-097).
     SpeakerModelMissing,
 }
 

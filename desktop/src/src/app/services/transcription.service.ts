@@ -42,7 +42,7 @@ const LEGACY_LIVE_TRANSCRIPT_STORAGE_KEY = 'speedwave-live-transcript';
 
 /**
  * localStorage key for the "Tell speakers apart in the meeting audio" choice (only `'on'` turns it
- * on), read when an offline pass starts (ADR-094).
+ * on), read when an offline pass starts (ADR-097).
  */
 export const SPEAKER_ATTRIBUTION_STORAGE_KEY = 'speedwave-speaker-attribution';
 
@@ -74,7 +74,7 @@ const TRANSCRIPT_PROMPT_DEFAULTS: Record<Language, string> = {
     'The transcript may contain speech-recognition errors; flag unclear fragments.',
 };
 
-/** Prompt sentence added for a transcript whose meeting speakers were told apart (ADR-094). */
+/** Prompt sentence added for a transcript whose meeting speakers were told apart (ADR-097). */
 const SPEAKER_LABELS_PROMPT: Record<Language, string> = {
   pl:
     " Etykiety 'Speaker N' pochodzą z analizy dźwięku i są przybliżone: jedna osoba może " +

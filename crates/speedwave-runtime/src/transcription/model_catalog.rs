@@ -1,5 +1,5 @@
 //! SSOT catalogue of the transcription models downloaded on demand: Whisper (ADR-056), Silero VAD
-//! and the speaker-diarization model (ADR-094). Bump 1 const; Whisper comes from
+//! and the speaker-diarization model (ADR-097). Bump 1 const; Whisper comes from
 //! `ggerganov/whisper.cpp` on HF, not `ggml-org` (401s).
 
 use crate::transcription::accel::GpuClass;
@@ -242,7 +242,7 @@ pub const VAD_MODEL: VadModelInfo = VadModelInfo {
 /// Hugging Face repo the speaker-diarization model comes from.
 pub const DIARIZATION_HF_REPO: &str = "nvidia/Nemotron-3-Diarization";
 
-/// The speaker-diarization model of the optional offline-pass speaker attribution (ADR-094).
+/// The speaker-diarization model of the optional offline-pass speaker attribution (ADR-097).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiarizationModelInfo {
     /// Stable key used in Tauri commands, download progress and `ModelsUsed`.

@@ -95,7 +95,7 @@ pub struct Word {
 }
 
 /// Which captured channel a segment was decoded from. Deterministic channel
-/// attribution; telling speakers apart on the `System` channel is `diarizer.rs` (ADR-094).
+/// attribution; telling speakers apart on the `System` channel is `diarizer.rs` (ADR-097).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TranscriptSource {
@@ -116,7 +116,7 @@ impl TranscriptSource {
 }
 
 /// One transcript segment: a span of audio, its text, optional per-word timings,
-/// and, on the meeting channel of a diarized offline pass, a speaker number (ADR-094).
+/// and, on the meeting channel of a diarized offline pass, a speaker number (ADR-097).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Segment {
     /// Start offset from the start of the audio.
