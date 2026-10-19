@@ -35,6 +35,16 @@ jobs:
       run:
         shell: bash
     steps:
+      - name: Runner account and tools (PowerShell)
+        shell: powershell
+        run: |
+          whoami
+          Get-CimInstance Win32_Service | Where-Object Name -like 'actions.runner*' | Select-Object Name, StartName, State | Format-List
+          foreach ($c in 'bash', 'git', 'ssh', 'scp', 'tar', 'wsl') {
+            $p = Get-Command $c -ErrorAction SilentlyContinue
+            "{0}: {1}" -f $c, ($(if ($p) { $p.Source } else { 'missing' }))
+          }
+          Get-Service sshd -ErrorAction SilentlyContinue | Select-Object Name, Status, StartType | Format-List
       - name: Runner account
         run: |
           echo "user=$USERNAME whoami=$(whoami)"
