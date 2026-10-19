@@ -49,6 +49,54 @@ pub enum DiarizeError {
     /// Unusable input PCM.
     #[error("invalid audio for diarization: {0}")]
     InvalidAudio(String),
+    /// Activation thresholds that are not probabilities or close above where they open.
+    #[error("invalid activation thresholds: start {start}, stop {stop}")]
+    InvalidThresholds {
+        /// Requested start threshold.
+        start: f32,
+        /// Requested stop threshold.
+        stop: f32,
+    },
+}
+
+/// Speaker-activity thresholds that cut the model's per-frame probabilities into turns: a turn
+/// opens at `start` and closes below `stop`, so `stop` never exceeds `start`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ActivationThresholds {
+    /// Probability at which a speaker's turn opens.
+    pub start: f32,
+    /// Probability below which an open turn closes.
+    pub stop: f32,
+}
+
+impl ActivationThresholds {
+    /// The thresholds of the offline pass (ADR-094).
+    pub const PRODUCT: Self = Self {
+        start: 0.641,
+        stop: 0.561,
+    };
+
+    /// `self` when both are probabilities in `0..=1` and `stop <= start`.
+    pub fn validated(self) -> Result<Self, DiarizeError> {
+        let probability = |v: f32| v.is_finite() && (0.0..=1.0).contains(&v);
+        if probability(self.start) && probability(self.stop) && self.stop <= self.start {
+            Ok(self)
+        } else {
+            Err(DiarizeError::InvalidThresholds {
+                start: self.start,
+                stop: self.stop,
+            })
+        }
+    }
+}
+
+/// The model's per-frame speaker probabilities of the last `NemotronDiarizer::diarize` call.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpeakerProbabilities {
+    /// Speaker slots per frame.
+    pub n_speakers: usize,
+    /// Frame-major values, `n_speakers` per 10 ms frame.
+    pub values: Vec<f32>,
 }
 
 /// A speaker-diarization engine over a whole 16 kHz mono buffer. One per offline pass.
@@ -147,7 +195,47 @@ impl Diarizer for NemotronDiarizer {
                 "speaker detection failed; see the {LOG_TARGET} log"
             )));
         }
-        SegmentList::from_probs(self.ctx)?.turns()
+        self.turns(ActivationThresholds::PRODUCT)
+    }
+}
+
+impl NemotronDiarizer {
+    /// Cuts the probabilities of the last `diarize` call into turns with `thresholds`, without
+    /// running the model again; empty before the first call.
+    pub fn turns(
+        &self,
+        thresholds: ActivationThresholds,
+    ) -> Result<Vec<SpeakerTurn>, DiarizeError> {
+        SegmentList::from_probs(self.ctx, thresholds.validated()?)?.turns()
+    }
+
+    /// A copy of the probabilities of the last `diarize` call; no values before the first call.
+    #[expect(
+        unsafe_code,
+        reason = "whisper diarization FFI boundary; every block has a SAFETY comment"
+    )]
+    pub fn probabilities(&self) -> SpeakerProbabilities {
+        let ctx = self.ctx.as_ptr();
+        // SAFETY: `ctx` is live while `self` is; the three calls only read its state.
+        let (n_speakers, n_frames, values) = unsafe {
+            (
+                ffi::whisper_diar_n_speakers(ctx),
+                ffi::whisper_diar_n_frames(ctx),
+                ffi::whisper_diar_probs(ctx),
+            )
+        };
+        let n_speakers = usize::try_from(n_speakers).unwrap_or(0);
+        let len = usize::try_from(n_frames)
+            .unwrap_or(0)
+            .saturating_mul(n_speakers);
+        let values = if values.is_null() || len == 0 {
+            Vec::new()
+        } else {
+            // SAFETY: the context holds `n_frames * n_speakers` floats at `values`, which stay
+            // unchanged until the next `diarize`, and `&self` rules out that call meanwhile.
+            unsafe { std::slice::from_raw_parts(values, len) }.to_vec()
+        };
+        SpeakerProbabilities { n_speakers, values }
     }
 }
 
@@ -285,9 +373,11 @@ impl SegmentList {
         unsafe_code,
         reason = "whisper diarization FFI boundary; every block has a SAFETY comment"
     )]
-    fn from_probs(ctx: NonNull<ffi::Context>) -> Result<Self, DiarizeError> {
-        // SAFETY: takes no arguments and returns a plain struct by value.
-        let params = unsafe { ffi::whisper_diar_default_params() };
+    fn from_probs(
+        ctx: NonNull<ffi::Context>,
+        thresholds: ActivationThresholds,
+    ) -> Result<Self, DiarizeError> {
+        let params = segment_params(thresholds);
         // SAFETY: `ctx` is live and has just run `whisper_diar_detect_speakers`; the function
         // returns null on failure and catches every C++ exception.
         let raw = unsafe { ffi::whisper_diar_segments_from_probs(ctx.as_ptr(), params) };
@@ -320,6 +410,18 @@ impl SegmentList {
             })
             .collect()
     }
+}
+
+#[expect(
+    unsafe_code,
+    reason = "whisper diarization FFI boundary; every block has a SAFETY comment"
+)]
+fn segment_params(thresholds: ActivationThresholds) -> ffi::Params {
+    // SAFETY: takes no arguments and returns a plain struct by value.
+    let mut params = unsafe { ffi::whisper_diar_default_params() };
+    params.start_threshold = thresholds.start;
+    params.stop_threshold = thresholds.stop;
+    params
 }
 
 impl Drop for SegmentList {
@@ -390,6 +492,9 @@ mod ffi {
             ctx: *const Context,
             params: Params,
         ) -> *mut Segments;
+        pub(super) fn whisper_diar_n_speakers(ctx: *const Context) -> c_int;
+        pub(super) fn whisper_diar_n_frames(ctx: *const Context) -> i64;
+        pub(super) fn whisper_diar_probs(ctx: *const Context) -> *const f32;
         pub(super) fn whisper_diar_segments_n_segments(segments: *const Segments) -> c_int;
         pub(super) fn whisper_diar_segments_get_segment_t0(
             segments: *const Segments,
@@ -690,5 +795,66 @@ mod tests {
         );
         assert!(d.diarize(&[]).unwrap().is_empty());
         assert_eq!(MockDiarizer::new(0).n_speakers, 1);
+    }
+
+    #[test]
+    fn the_product_thresholds_are_valid() {
+        let t = ActivationThresholds::PRODUCT.validated().unwrap();
+        assert!(t.stop <= t.start && t.start <= 1.0 && t.stop > 0.0);
+    }
+
+    #[test]
+    fn thresholds_accept_the_bounds_and_equal_values() {
+        for (start, stop) in [(1.0, 0.0), (0.5, 0.5), (0.55, 0.47)] {
+            let t = ActivationThresholds { start, stop };
+            assert_eq!(t.validated().unwrap(), t);
+        }
+    }
+
+    #[test]
+    fn thresholds_reject_a_stop_above_start_and_values_that_are_not_probabilities() {
+        for (start, stop) in [
+            (0.5, 0.6),
+            (1.1, 0.5),
+            (0.5, -0.1),
+            (f32::NAN, 0.5),
+            (0.5, f32::INFINITY),
+        ] {
+            match (ActivationThresholds { start, stop }).validated() {
+                Err(DiarizeError::InvalidThresholds { start: s, stop: e }) => {
+                    assert!(s.to_bits() == start.to_bits() && e.to_bits() == stop.to_bits());
+                }
+                other => panic!("expected InvalidThresholds for {start}/{stop}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    #[expect(
+        unsafe_code,
+        reason = "whisper diarization FFI boundary; every block has a SAFETY comment"
+    )]
+    fn segment_params_override_only_the_two_thresholds() {
+        // SAFETY: takes no arguments and returns a plain struct by value.
+        let defaults = unsafe { ffi::whisper_diar_default_params() };
+        let p = segment_params(ActivationThresholds {
+            start: 0.55,
+            stop: 0.47,
+        });
+        assert_eq!((p.start_threshold, p.stop_threshold), (0.55, 0.47));
+        assert_eq!(
+            (
+                p.start_pad_ms,
+                p.end_pad_ms,
+                p.min_speech_duration_ms,
+                p.min_silence_duration_ms
+            ),
+            (
+                defaults.start_pad_ms,
+                defaults.end_pad_ms,
+                defaults.min_speech_duration_ms,
+                defaults.min_silence_duration_ms
+            )
+        );
     }
 }
