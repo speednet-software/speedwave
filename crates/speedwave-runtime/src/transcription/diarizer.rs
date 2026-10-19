@@ -105,6 +105,9 @@ pub trait Diarizer: Send {
     fn diarize(&mut self, pcm: &[f32]) -> Result<Vec<SpeakerTurn>, DiarizeError>;
 }
 
+/// Loads a diarizer on demand, so the offline pass holds its model only after Whisper is done.
+pub type DiarizerLoader = Box<dyn FnOnce() -> Result<Box<dyn Diarizer>, DiarizeError> + Send>;
+
 /// Nemotron-3 Diarization (Sortformer) through the vendored whisper.cpp code.
 pub struct NemotronDiarizer {
     ctx: NonNull<ffi::Context>,

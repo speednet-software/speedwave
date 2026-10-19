@@ -7,10 +7,10 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use speedwave_runtime::transcription::{
     self, AudioSource, AudioSourceInfo, CaptureCapabilities, CaptureWarning, Diarizer,
-    DriverConfig, DriverError, FinalizeConfig, GpuClass, Language, ModelStatusEntry, ModelStore,
-    NemotronDiarizer, StopSignal, StoreError, TranscribeOptions, TranscriptDriver, TranscriptEvent,
-    TranscriptSession, TranscriptStatus, TranscriptStore, TranscriptSummary, WhisperCppTranscriber,
-    DIARIZATION_MODEL,
+    DiarizerLoader, DriverConfig, DriverError, FinalizeConfig, GpuClass, Language,
+    ModelStatusEntry, ModelStore, NemotronDiarizer, StopSignal, StoreError, TranscribeOptions,
+    TranscriptDriver, TranscriptEvent, TranscriptSession, TranscriptStatus, TranscriptStore,
+    TranscriptSummary, WhisperCppTranscriber, DIARIZATION_MODEL,
 };
 use tauri::{AppHandle, Emitter};
 use tokio::sync::broadcast;
@@ -604,40 +604,34 @@ fn spawn_offline_pass(
     });
 }
 
-/// The diarizer for an offline pass: `None` without `speaker_mode`; with it, `None` plus a
-/// capture warning when the model is not downloaded or does not load, so the pass still finishes.
+/// The diarizer loader for an offline pass: `None` without `speaker_mode`, and `None` plus a
+/// `SpeakerModelMissing` warning when the model is not downloaded, so the pass still finishes.
+/// The loader itself runs inside `run_finalize` once Whisper is released; a model that does not
+/// load then raises `SpeakerAttributionFailed` there.
 fn offline_diarizer(
     models: &ModelStore,
     store: &TranscriptStore,
     id: Uuid,
     speaker_mode: bool,
     class: GpuClass,
-) -> Option<Box<dyn Diarizer>> {
+) -> Option<DiarizerLoader> {
     if !speaker_mode {
         return None;
     }
-    let warning = if models.diarization_is_present() {
-        match NemotronDiarizer::load(&models.diarization_path(), class) {
-            Ok(d) => return Some(Box::new(d)),
-            Err(e) => {
-                log::warn!(
-                    "speaker diarization for {} is off for this pass: {e}",
-                    short_id(id)
-                );
-                CaptureWarning::SpeakerAttributionFailed
-            }
-        }
-    } else {
+    if !models.diarization_is_present() {
         log::info!(
             "speaker diarization for {} is off for this pass: the model is not downloaded",
             short_id(id)
         );
-        CaptureWarning::SpeakerModelMissing
-    };
-    if let Err(e) = store.capture_warning(id, warning) {
-        log_pass_store_error(id, "could not record its speaker warning", &e);
+        if let Err(e) = store.capture_warning(id, CaptureWarning::SpeakerModelMissing) {
+            log_pass_store_error(id, "could not record its speaker warning", &e);
+        }
+        return None;
     }
-    None
+    let path = models.diarization_path();
+    Some(Box::new(move || {
+        NemotronDiarizer::load(&path, class).map(|d| Box::new(d) as Box<dyn Diarizer>)
+    }))
 }
 
 /// Logs a store refusal of an offline pass: a recording the user put off, replaced or deleted is
@@ -1819,17 +1813,22 @@ mod tests {
     }
 
     #[test]
-    fn offline_diarizer_with_a_model_that_does_not_load_warns_and_lets_the_pass_go_on() {
+    fn offline_diarizer_hands_the_pass_a_loader_that_reports_a_model_that_does_not_load() {
         let dir = tempfile::tempdir().unwrap();
         let store = TranscriptStore::with_root(dir.path().join("t"));
         let models = ModelStore::with_root(dir.path().join("m"));
         write_sparse_diarization_model(&models);
         let id = mk_session_in(&store);
-        assert!(offline_diarizer(&models, &store, id, true, GpuClass::None).is_none());
-        assert_eq!(
-            store.get(id).unwrap().active_warnings,
-            vec![CaptureWarning::SpeakerAttributionFailed]
+        let load = offline_diarizer(&models, &store, id, true, GpuClass::None)
+            .expect("a present model yields a loader");
+        assert!(
+            store.get(id).unwrap().active_warnings.is_empty(),
+            "nothing is loaded or judged before the pass asks"
         );
+        assert!(matches!(
+            load().map(|_| ()),
+            Err(transcription::DiarizeError::ModelLoad { ref model, .. }) if model == DIARIZATION_MODEL.file
+        ));
     }
 
     #[test]
@@ -1914,7 +1913,7 @@ mod tests {
         let body = fn_body(src, "spawn_offline_pass");
         assert!(
             body.find("WhisperCppTranscriber::load").unwrap() < body.find("offline_diarizer(").unwrap(),
-            "the diarization model loads only after the pass survived the cancel check and loaded Whisper"
+            "the speaker warning is judged only after the pass survived the cancel check and loaded Whisper"
         );
     }
 
