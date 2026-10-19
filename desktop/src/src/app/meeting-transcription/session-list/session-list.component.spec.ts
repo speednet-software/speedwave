@@ -25,6 +25,7 @@ function summary(id: string, overrides: Partial<TranscriptSummary> = {}): Transc
     size_bytes: 50 * 1024 * 1024,
     finalize_model: 'large',
     queued: false,
+    diarization_secs: null,
     ...overrides,
   };
 }

@@ -399,6 +399,7 @@ describe('RecordingControlsComponent', () => {
       size_bytes: 1,
       finalize_model: 'large',
       queued: false,
+      diarization_secs: null,
     });
 
     it('shows a running transcription as a muted status and keeps Record enabled', async () => {

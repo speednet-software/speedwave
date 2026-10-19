@@ -38,6 +38,7 @@ function row(overrides: Partial<TranscriptSummary> = {}): TranscriptSummary {
     size_bytes: 12 * 1024 * 1024,
     finalize_model: 'large',
     queued: false,
+    diarization_secs: null,
     ...overrides,
   };
 }

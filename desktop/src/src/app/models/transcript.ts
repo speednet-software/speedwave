@@ -34,6 +34,8 @@ export interface Segment {
   text: string;
   words: Word[];
   source?: TranscriptSource | null;
+  /** Speaker number 1..N on a diarized meeting-channel segment (absent otherwise). */
+  speaker_id?: number | null;
 }
 
 /** Which models were used for each pass of a session. */
@@ -41,6 +43,8 @@ export interface ModelsUsed {
   /** Live-pass model key; null = record-only for the current part (drives the record-only UI). */
   live: string | null;
   finalize: string | null;
+  /** Diarization model key when the pass that made the transcript told speakers apart. */
+  diarization?: string | null;
 }
 
 /** Lifecycle of a recording. */
@@ -88,6 +92,8 @@ export interface TranscriptSession {
   /** Capture warnings currently raised, in arrival order (absent when none are). */
   active_warnings?: CaptureWarning[];
   models_used: ModelsUsed;
+  /** Seconds speaker diarization took in the pass that made the transcript (absent if none). */
+  diarization_secs?: number | null;
   last_seq: number;
 }
 
@@ -111,6 +117,8 @@ export interface TranscriptSummary {
   finalize_model: string | null;
   /** True while the offline pass waits for another recording's pass to finish. */
   queued: boolean;
+  /** Seconds speaker diarization took in the pass that made the transcript; null if none. */
+  diarization_secs: number | null;
 }
 
 /** Non-fatal capture-health warnings — mirrors Rust `CaptureWarning`. */
@@ -119,7 +127,9 @@ export type CaptureWarning =
   | 'microphone_stalled'
   | 'system_audio_stalled'
   | 'audio_dropped'
-  | 'recording_part_missing';
+  | 'recording_part_missing'
+  | 'speaker_attribution_failed'
+  | 'speaker_model_missing';
 
 /** `request_microphone_permission` outcome — mirrors Rust `MicPermission`. */
 export type MicPermission = 'granted' | 'denied' | 'previously_denied';

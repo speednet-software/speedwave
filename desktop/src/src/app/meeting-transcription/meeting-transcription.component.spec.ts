@@ -410,6 +410,24 @@ describe('MeetingTranscriptionComponent', () => {
     expect(banner.querySelector('[data-testid="open-audio-settings"]')).toBeNull();
   });
 
+  it('renders the speaker-attribution warning as a complete transcript without labels', () => {
+    captureWarningsSig.set(['speaker_attribution_failed']);
+    fixture.detectChanges();
+    const banner = fixture.nativeElement.querySelector('[data-testid="capture-warning"]');
+    expect(banner.textContent).toContain('Speakers could not be told apart for this recording');
+    expect(banner.textContent).toContain('complete without speaker labels');
+    expect(banner.querySelector('[data-testid="open-audio-settings"]')).toBeNull();
+  });
+
+  it('renders the missing speaker model warning with the way to fix it', () => {
+    captureWarningsSig.set(['speaker_model_missing']);
+    fixture.detectChanges();
+    const banner = fixture.nativeElement.querySelector('[data-testid="capture-warning"]');
+    expect(banner.textContent).toContain('model is not downloaded yet');
+    expect(banner.textContent).toContain('Download it in Settings and transcribe again');
+    expect(banner.querySelector('[data-testid="open-audio-settings"]')).toBeNull();
+  });
+
   it('renders the dropped-audio warning without blaming the transcriber', () => {
     captureWarningsSig.set(['audio_dropped']);
     fixture.detectChanges();

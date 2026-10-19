@@ -264,6 +264,10 @@ export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
         return 'Some captured audio was dropped before it reached the recording — that span is missing from the recording and the transcript.';
       case 'recording_part_missing':
         return 'A resumed part of this recording contributed no audio — the transcript may be missing that span.';
+      case 'speaker_attribution_failed':
+        return 'Speakers could not be told apart for this recording; the transcript is complete without speaker labels.';
+      case 'speaker_model_missing':
+        return 'Speakers could not be told apart because the model is not downloaded yet. Download it in Settings and transcribe again.';
     }
   }
 

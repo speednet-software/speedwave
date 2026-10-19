@@ -140,6 +140,12 @@ pub enum CaptureWarning {
     /// A registered audio part contributed nothing to the offline pass — the
     /// finalized transcript is missing that span (resumed parts, ADR-056 Am. 10).
     RecordingPartMissing,
+    /// Speaker diarization of the offline pass failed; the transcript is complete without
+    /// speaker labels (ADR-094).
+    SpeakerAttributionFailed,
+    /// Speaker diarization was on but its model is not downloaded; the transcript has no
+    /// speaker labels (ADR-094).
+    SpeakerModelMissing,
 }
 
 /// A capture-health transition: a warning raised, or a prior one recovered.
@@ -564,6 +570,11 @@ mod tests {
                 CaptureWarning::RecordingPartMissing,
                 "recording_part_missing",
             ),
+            (
+                CaptureWarning::SpeakerAttributionFailed,
+                "speaker_attribution_failed",
+            ),
+            (CaptureWarning::SpeakerModelMissing, "speaker_model_missing"),
         ] {
             assert_eq!(
                 serde_json::to_string(&variant).unwrap(),
