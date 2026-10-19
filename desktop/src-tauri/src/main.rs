@@ -60,6 +60,8 @@ mod slash_cmd;
 mod system_settings_cmd;
 mod transcription_cmd;
 mod tray;
+#[cfg(test)]
+mod ts_mirror;
 mod types;
 mod ui_prefs_cmd;
 mod update_commands;
@@ -1202,6 +1204,10 @@ fn main() {
             chat_session_cmd::start_chat,
             chat_session_cmd::send_message,
             paste_cmd::save_pasted_image,
+            paste_cmd::begin_paste_upload,
+            paste_cmd::append_paste_upload,
+            paste_cmd::finish_paste_upload,
+            paste_cmd::discard_paste,
             chat_session_cmd::submit_question_answer,
             chat_session_cmd::stop_chat,
             chat_session_cmd::close_chat_tab,

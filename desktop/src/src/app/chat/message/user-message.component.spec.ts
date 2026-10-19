@@ -126,6 +126,23 @@ describe('UserMessageComponent', () => {
     expect(textIdx).toBeGreaterThan(imgIdx);
   });
 
+  it('renders a file pill with the filename and its size', () => {
+    fixture.componentRef.setInput('blocks', [
+      { type: 'text', content: 'Summarize:' },
+      { type: 'file', filename: 'raport końcowy.xlsx', size_bytes: 3_145_728 },
+    ]);
+    fixture.detectChanges();
+
+    const pill = fixture.nativeElement.querySelector(
+      '[data-testid="user-message-file"]'
+    ) as HTMLElement;
+    expect(pill).not.toBeNull();
+    expect(pill.textContent).toContain('raport końcowy.xlsx');
+    expect(pill.textContent).toContain('3.0 MB');
+    expect(pill.getAttribute('aria-label')).toBe('File attachment');
+    expect(pill.getAttribute('title')).toBe('raport końcowy.xlsx (3.0 MB)');
+  });
+
   it('renders a chip block with the control-chip testid', () => {
     fixture.componentRef.setInput('blocks', [
       { type: 'chip', command: 'model', argument: 'claude-sonnet-5' },

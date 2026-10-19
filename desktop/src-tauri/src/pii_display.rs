@@ -97,6 +97,10 @@ pub(crate) fn detokenize_summaries(summaries: &mut [ConversationSummary], policy
     }
     for summary in summaries {
         summary.preview = detokenize_for_display(policy, &summary.preview);
+        summary.title = summary
+            .title
+            .as_deref()
+            .map(|title| detokenize_for_display(policy, title));
     }
 }
 
@@ -312,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn detokenize_summaries_resolves_preview_in_place() {
+    fn detokenize_summaries_resolves_preview_and_title_in_place() {
         let tmp = tempfile::tempdir().unwrap();
         let key = setup_key(tmp.path(), "proj");
         let tokenized = tokenize(&key, "jan@example.com");
@@ -320,11 +324,32 @@ mod tests {
         let mut summaries = vec![ConversationSummary {
             session_id: "s1".to_string(),
             timestamp: None,
+            title: Some(tokenized.clone()),
             preview: tokenized,
             message_count: 1,
         }];
         detokenize_summaries(&mut summaries, &key_policy(key));
         assert_eq!(summaries[0].preview, "jan@example.com");
+        assert_eq!(
+            summaries[0].title.as_deref(),
+            Some(summaries[0].preview.as_str())
+        );
+    }
+
+    #[test]
+    fn detokenize_summaries_leaves_a_missing_title_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = setup_key(tmp.path(), "proj");
+        let mut summaries = vec![ConversationSummary {
+            session_id: "s1".to_string(),
+            timestamp: None,
+            title: None,
+            preview: "hello".to_string(),
+            message_count: 1,
+        }];
+        detokenize_summaries(&mut summaries, &key_policy(key));
+        assert_eq!(summaries[0].title, None);
+        assert_eq!(summaries[0].preview, "hello");
     }
 
     fn keyword_policy(key: Option<EngineKey>) -> DisplayPolicy {

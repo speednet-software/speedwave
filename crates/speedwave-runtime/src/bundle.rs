@@ -38,7 +38,7 @@ pub struct BundledAssetSpec {
     pub kind: BundledAssetKind,
 }
 
-/// Bundle-relative directory of the PII NER model artifact (ADR-094).
+/// Bundle-relative directory of the PII NER model artifact (ADR-095).
 pub const PII_NER_ASSET_DIR: &str = "pii-ner";
 /// Manifest file inside [`PII_NER_ASSET_DIR`]; the loader reads weights and tokenizer names from it.
 pub const PII_NER_MANIFEST: &str = "manifest.json";

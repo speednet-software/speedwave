@@ -21,6 +21,46 @@ import {
   openHistory,
 } from '../helpers/llm';
 import { LONG_STREAM_PROMPT } from '../helpers/memory-fact';
+import { pastedFileNames, pastedFilePath } from '../helpers/host-files';
+import { createHash } from 'node:crypto';
+import * as fs from 'node:fs';
+
+const PROJECT = 'e2e-test';
+
+const NOTE_TEXT = 'speedwave e2e file attachment\n';
+
+const CHUNKED_SIZE = 9 * 1024 * 1024 + 123;
+
+function chunkedBytes(size: number): Buffer {
+  const bytes = Buffer.alloc(size);
+  for (let i = 0; i < size; i++) bytes[i] = (i * 31 + 7) & 0xff;
+  return bytes;
+}
+
+function sha256(bytes: Buffer): string {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+function newPastes(before: ReadonlySet<string>): string[] {
+  return pastedFileNames(PROJECT).filter((name) => !before.has(name));
+}
+
+async function waitForUploadToSettle(): Promise<void> {
+  await $('[data-testid="composer-attachment-file"]').waitForExist({
+    timeout: 20_000,
+    timeoutMsg: 'file pill never appeared after the synthetic paste',
+  });
+  await browser.waitUntil(
+    async () =>
+      (await $$('[data-testid="composer-attachment-strip"] [role="status"]').getElements())
+        .length === 0,
+    { timeout: 60_000, timeoutMsg: 'file upload never finished (spinner stayed on)' }
+  );
+  await browser.waitUntil(
+    async () => (await $$('[data-testid="composer-attachment-error"]').getElements()).length === 0,
+    { timeout: 1_000, timeoutMsg: 'file upload reported an error' }
+  );
+}
 
 describe('Chat Controls', function () {
   before(async function () {
@@ -163,6 +203,72 @@ describe('Chat Controls', function () {
     await $('[data-testid="user-message-image"]').waitForExist({
       timeout: 15_000,
       timeoutMsg: 'sent message did not render the image attachment pill',
+    });
+    await waitForTurnStart();
+    await waitForTurnComplete(180_000);
+  });
+
+  it('streams a multi-chunk file to disk byte for byte and deletes it once its pill is removed (SPEED-801)', async function () {
+    this.timeout(120_000);
+    const input = await $('[data-testid="chat-input"]');
+    await input.waitForExist({ timeout: 15_000 });
+    const before = new Set(pastedFileNames(PROJECT));
+
+    await browser.execute((size: number) => {
+      const ta = document.querySelector('[data-testid="chat-input"]');
+      if (!ta) return;
+      const bytes = new Uint8Array(size);
+      for (let i = 0; i < size; i++) bytes[i] = (i * 31 + 7) & 0xff;
+      const dt = new DataTransfer();
+      dt.items.add(new File([bytes], 'e2e-chunked.bin', { type: 'application/octet-stream' }));
+      const ev = new Event('paste', { bubbles: true, cancelable: true });
+      Object.defineProperty(ev, 'clipboardData', { value: dt });
+      ta.dispatchEvent(ev);
+    }, CHUNKED_SIZE);
+    await waitForUploadToSettle();
+
+    const added = newPastes(before);
+    const uploaded = added.find((name) => name.endsWith('-e2e-chunked.bin'));
+    expect(uploaded).toBeDefined();
+    expect(added.filter((name) => name.endsWith('.part'))).toEqual([]);
+    const uploadedPath = pastedFilePath(PROJECT, uploaded as string);
+    const onDisk = fs.readFileSync(uploadedPath);
+    expect(onDisk.length).toBe(CHUNKED_SIZE);
+    expect(sha256(onDisk)).toBe(sha256(chunkedBytes(CHUNKED_SIZE)));
+
+    await $('[data-testid="composer-attachment-remove"]').click();
+    await browser.waitUntil(async () => !fs.existsSync(uploadedPath), {
+      timeout: 15_000,
+      timeoutMsg: 'the removed attachment stayed in the pastes directory',
+    });
+  });
+
+  it('attaches a pasted non-image file, streamed to disk, and sends it (SPEED-801)', async function () {
+    this.timeout(240_000);
+    const input = await $('[data-testid="chat-input"]');
+    await input.waitForExist({ timeout: 15_000 });
+    const before = new Set(pastedFileNames(PROJECT));
+
+    await browser.execute((text: string) => {
+      const ta = document.querySelector('[data-testid="chat-input"]');
+      if (!ta) return;
+      const file = new File([text], 'e2e-note.txt', { type: 'text/plain' });
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      const ev = new Event('paste', { bubbles: true, cancelable: true });
+      Object.defineProperty(ev, 'clipboardData', { value: dt });
+      ta.dispatchEvent(ev);
+    }, NOTE_TEXT);
+    await waitForUploadToSettle();
+
+    const note = newPastes(before).find((name) => name.endsWith('-e2e-note.txt'));
+    expect(note).toBeDefined();
+    expect(fs.readFileSync(pastedFilePath(PROJECT, note as string), 'utf8')).toBe(NOTE_TEXT);
+
+    await sendMessageNoWait('Reply with the single word RECEIVED.');
+    await $('[data-testid="user-message-file"]').waitForExist({
+      timeout: 15_000,
+      timeoutMsg: 'sent message did not render the file attachment pill',
     });
     await waitForTurnStart();
     await waitForTurnComplete(180_000);

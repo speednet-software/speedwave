@@ -80,6 +80,7 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges {
   readonly lastAssistantIndex = input(-1);
   /** Identity of the rendered conversation (tab id); a change resets the per-conversation scroll tracking. */
   readonly conversationKey = input('');
+  readonly autoScrollRequest = input(0);
 
   readonly questionAnswered = output<{ toolId: string; questionIdx: number; value: string }>();
 
@@ -87,8 +88,7 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges {
 
   private shouldAutoScroll = true;
   private pendingScrollSync = false;
-  /** Tracks message-count to detect new turns (vs. mere streaming deltas). */
-  private lastMessageCount = 0;
+  private lastAutoScrollRequest = 0;
   private lastConversationKey: string | null = null;
   private rederiveFromViewport = false;
 
@@ -96,13 +96,15 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges {
   constructor() {
     effect(() => {
       const key = this.conversationKey();
-      const count = this.messages().length;
+      const request = this.autoScrollRequest();
+      this.messages();
       this.currentBlocks();
       this.isStreaming();
       const keyChanged = this.lastConversationKey !== null && key !== this.lastConversationKey;
+      const requested = request !== this.lastAutoScrollRequest;
       this.lastConversationKey = key;
+      this.lastAutoScrollRequest = request;
       if (keyChanged) {
-        this.lastMessageCount = count;
         this.rederiveFromViewport = true;
         this.pendingScrollSync = false;
         return;
@@ -111,10 +113,9 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges {
         this.rederiveFromViewport = false;
         this.shouldAutoScroll = this.isAtBottom();
       }
-      if (count > this.lastMessageCount) {
+      if (requested) {
         this.shouldAutoScroll = true;
       }
-      this.lastMessageCount = count;
       this.pendingScrollSync = true;
     });
   }
@@ -156,6 +157,11 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges {
   /** Marks scroll position for sync on next `ngAfterViewChecked`. */
   ngOnChanges(): void {
     this.pendingScrollSync = true;
+  }
+
+  /** Whether new output is pinned to the bottom: false while the user reads earlier messages. */
+  followsNewOutput(): boolean {
+    return this.shouldAutoScroll;
   }
 
   /** Tracks user scrolling to decide whether to pin new output to the bottom. */

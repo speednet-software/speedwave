@@ -12,7 +12,7 @@ const AUDIT_FILE_NAME: &str = "audit-proxy.jsonl";
 /// the fresh prompt from replayed history and file content, so every line carries one layer tag.
 const LAYER: &str = "llm-request";
 
-/// `source` value of rows produced from host NER detector spans (ADR-095).
+/// `source` value of rows produced from host NER detector spans (ADR-096).
 pub const NER_SOURCE: &str = "ner";
 
 /// Pseudo-category of the single `passed` row written when the detector could not be asked.

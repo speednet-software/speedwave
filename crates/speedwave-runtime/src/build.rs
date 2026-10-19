@@ -446,7 +446,7 @@ pub fn resolve_oauth_script() -> Option<std::path::PathBuf> {
     )
 }
 
-/// Resolves the PII NER model artifact directory (`manifest.json`, weights, tokenizer; ADR-094):
+/// Resolves the PII NER model artifact directory (`manifest.json`, weights, tokenizer; ADR-095):
 /// bundle, then the dev-tree output of `make prepare-pii-ner-model`, then the resources marker.
 pub fn resolve_pii_ner_artifact_dir() -> Option<PathBuf> {
     resolve_pii_ner_artifact_dir_inner(

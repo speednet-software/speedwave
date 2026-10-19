@@ -374,7 +374,7 @@ pub enum SecurityRule {
     SpeedwaveProxyVolumes,
 
     /// `proxy.json` `ner.url`, when rendered, is exactly `http://<gateway alias>:<port>`
-    /// (ADR-095): request text goes only to the host-side detector, never elsewhere.
+    /// (ADR-096): request text goes only to the host-side detector, never elsewhere.
     #[strum(to_string = "PROXY_NER_URL")]
     #[strum(props(
         description = "proxy.json ner.url targets the host gateway alias over http with no path"

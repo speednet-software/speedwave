@@ -1,10 +1,10 @@
-//! Per-project LLM forwarder: relays native Anthropic `/v1/messages` verbatim,
-//! routes provider-prefixed models, and is the sole appender of the usage JSONL.
+//! Per-project LLM forwarder: routes provider-prefixed models, tokenizes and
+//! detokenizes `/v1/messages` both ways, and is the sole appender of the usage JSONL.
 
 use std::sync::Arc;
 
 use axum::{
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::Response,
@@ -27,6 +27,8 @@ use config::Config;
 
 /// Header the `claude` container sends with the per-project caller secret.
 const CALLER_AUTH_HEADER: &str = "x-speedwave-proxy-auth";
+
+const MAX_REQUEST_BODY_BYTES: usize = 32 * 1024 * 1024;
 
 /// Rejects `/v1/*` callers lacking the per-project secret — the proxy shares the
 /// network with every worker, which could else relay the real key (confused deputy).
@@ -54,6 +56,7 @@ fn build_router(cfg: Arc<Config>) -> Router {
     let guarded = Router::new()
         .route("/v1/messages", post(forward::messages))
         .route("/v1/messages/count_tokens", post(count_tokens::shim))
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .route_layer(middleware::from_fn_with_state(
             cfg.clone(),
             require_caller_auth,
@@ -663,6 +666,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 401);
+    }
+
+    async fn post_messages_of(bytes: usize) -> StatusCode {
+        build_router(test_config())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .body(Body::from(vec![b'x'; bytes]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn a_messages_body_above_axums_two_mib_default_reaches_the_handler() {
+        let status = post_messages_of(3 * 1024 * 1024).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a 3 MiB body must be parsed (and rejected as invalid JSON), not refused as too large"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_messages_body_up_to_the_upstream_cap_reaches_the_handler() {
+        let status = post_messages_of(MAX_REQUEST_BODY_BYTES).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn a_messages_body_over_the_upstream_cap_is_refused_as_too_large() {
+        let status = post_messages_of(MAX_REQUEST_BODY_BYTES + 1).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[tokio::test]

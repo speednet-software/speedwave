@@ -1476,7 +1476,7 @@ pub struct ResolvedClaudeConfig {
     /// per-project (unlike the global telemetry policy), so `render_compose`
     /// propagates the error via `?` in addition to the global boot check.
     pub pii_policy: Result<crate::pii_policy::ResolvedPiiPolicy, String>,
-    /// Whether this project's proxy gets the host PII NER detector (ADR-095).
+    /// Whether this project's proxy gets the host PII NER detector (ADR-096).
     pub pii_ner_enabled: bool,
 }
 
