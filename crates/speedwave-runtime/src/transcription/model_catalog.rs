@@ -1,5 +1,6 @@
-//! SSOT catalogue of Whisper transcription models downloaded on demand (ADR-056; diarization
-//! removed — ADR-075). Bump 1 const; from `ggerganov/whisper.cpp` on HF, not `ggml-org` (401s).
+//! SSOT catalogue of the transcription models downloaded on demand: Whisper (ADR-056), Silero VAD
+//! and the speaker-diarization model (ADR-094). Bump 1 const; Whisper comes from
+//! `ggerganov/whisper.cpp` on HF, not `ggml-org` (401s).
 
 use crate::transcription::accel::GpuClass;
 
@@ -238,6 +239,43 @@ pub const VAD_MODEL: VadModelInfo = VadModelInfo {
     license: "MIT",
 };
 
+/// Hugging Face repo the speaker-diarization model comes from.
+pub const DIARIZATION_HF_REPO: &str = "nvidia/Nemotron-3-Diarization";
+
+/// The speaker-diarization model of the optional offline-pass speaker attribution (ADR-094).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiarizationModelInfo {
+    /// Stable key used in Tauri commands, download progress and `ModelsUsed`.
+    pub key: &'static str,
+    /// The GGUF filename in [`DIARIZATION_HF_REPO`].
+    pub file: &'static str,
+    /// Download size in bytes (the SHA256 check is authoritative).
+    pub approx_bytes: u64,
+    /// SHA256 of the file (lowercase hex). Verified on download.
+    pub sha256: &'static str,
+    /// SPDX-ish licence string for the model weights.
+    pub license: &'static str,
+}
+
+impl DiarizationModelInfo {
+    /// Download URL for this model.
+    pub fn url(&self) -> String {
+        format!(
+            "https://huggingface.co/{DIARIZATION_HF_REPO}/resolve/main/{}",
+            self.file
+        )
+    }
+}
+
+/// The one diarization model this build uses: Nemotron-3 Diarization, q8_0 GGUF.
+pub const DIARIZATION_MODEL: DiarizationModelInfo = DiarizationModelInfo {
+    key: "nemotron-3-diarization-q8_0",
+    file: "Nemotron-3-Diarization.q8_0.gguf",
+    approx_bytes: 107_012_128,
+    sha256: "08456d9e22cd9a323c0364d98375f3746d6e68507ebb705cd46438c534c7a3a1",
+    license: "OpenMDW-1.1",
+};
+
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "test code")]
 mod tests {
@@ -339,6 +377,31 @@ mod tests {
     }
 
     #[test]
+    fn diarization_model_is_well_formed() {
+        let m = DIARIZATION_MODEL;
+        assert!(m.file.ends_with(".gguf"), "bad GGUF filename: {}", m.file);
+        assert!(is_hex64(m.sha256));
+        assert!(m.approx_bytes > 10_000_000 && m.approx_bytes < 1_000_000_000);
+        assert!(!m.license.is_empty());
+        let url = m.url();
+        assert!(
+            url.starts_with("https://huggingface.co/nvidia/Nemotron-3-Diarization/resolve/main/")
+        );
+        assert!(url.ends_with(m.file));
+        let host = reqwest::Url::parse(&url).unwrap();
+        assert!(crate::consts::TRANSCRIPTION_MODEL_ALLOWED_REDIRECT_HOSTS
+            .contains(&host.host_str().unwrap()));
+    }
+
+    #[test]
+    fn diarization_model_key_and_file_never_collide_with_other_models() {
+        let m = DIARIZATION_MODEL;
+        assert!(whisper_model(m.key).is_none());
+        assert!(WHISPER_MODELS.iter().all(|w| w.file != m.file));
+        assert_ne!(VAD_MODEL.file, m.file);
+    }
+
+    #[test]
     fn lookups_work() {
         assert_eq!(
             whisper_model("medium").map(|m| m.file),
@@ -372,7 +435,9 @@ mod tests {
             .iter()
             .filter(|m| matches!(m.quantization, Quantization::Full))
             .map(|m| m.approx_bytes)
-            .sum();
+            .sum::<u64>()
+            + VAD_MODEL.approx_bytes
+            + DIARIZATION_MODEL.approx_bytes;
         assert!(
             total < crate::consts::MAX_TOTAL_TRANSCRIPTION_MODELS_BYTES,
             "realistic model set ({total} B = {:.1} GiB) exceeds the global dome ({} B = {:.1} GiB) — raise MAX_TOTAL_TRANSCRIPTION_MODELS_BYTES",
