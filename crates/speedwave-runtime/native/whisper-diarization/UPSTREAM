@@ -1,0 +1,31 @@
+Vendored whisper.cpp speaker diarization (Nemotron-3 Diarization / Sortformer)
+
+source-pull-request: https://github.com/ggml-org/whisper.cpp/pull/4095
+source-repository: https://github.com/danbev/whisper.cpp
+source-commit: 1cd623724fd5b4c38e45dab36346b2352fd78bec
+license: MIT, see LICENSE (copied from the same commit)
+
+files:
+  whisper-diarization.cpp       src/whisper-diarization.cpp, with the local changes below
+  whisper-diarization-arch.h    src/whisper-diarization-arch.h, unchanged
+  whisper-diarization.h         the "Experimental diarization" block of include/whisper.h
+                                (lines 695-761) unchanged, wrapped in a header of its own
+                                with an empty WHISPER_API and the speedwave_diar_log_set
+                                declaration
+  ggml/                         ggml.h, ggml-alloc.h, ggml-backend.h, gguf.h, unchanged
+
+ggml-headers-source: whisper-rs-sys 0.15.0, whisper.cpp/ggml/include
+ggml-headers-whisper-cpp-version: 1.8.3
+
+build.rs refuses to build when whisper-rs-sys reports a different whisper.cpp version
+(DEP_WHISPER_WHISPER_CPP_VERSION) than ggml-headers-whisper-cpp-version.
+
+local changes in whisper-diarization.cpp:
+  1. gguf_get_tensor_ne does not exist in ggml 1.8.3. whisper_diar_model_load asks
+     gguf_init_from_file for a no_alloc ggml context of the file's tensors (file_ctx)
+     and reads each tensor's shape from it with ggml_get_tensor(file_ctx, name)->ne.
+     The shape check against the expected tensor stays as upstream.
+  2. whisper_diar_log_callback_default forwards every line to the callback installed
+     with speedwave_diar_log_set (new extern "C" function) and prints nothing without
+     one, so the log reaches the Rust log facade instead of stderr.
+  3. #include "whisper-diarization.h" instead of #include "whisper.h".

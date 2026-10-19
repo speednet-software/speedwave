@@ -6135,6 +6135,7 @@ dependencies = [
  "anyhow",
  "ash",
  "base64 0.23.1",
+ "cc",
  "chrono",
  "cpal",
  "dashmap",
@@ -6168,6 +6169,7 @@ dependencies = [
  "uuid",
  "wasapi",
  "whisper-rs",
+ "whisper-rs-sys",
  "windows-sys 0.61.2",
  "zip 8.6.0",
 ]
