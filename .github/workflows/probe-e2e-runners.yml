@@ -1,0 +1,51 @@
+name: probe-e2e-runners
+
+on:
+  push:
+    branches: [probe/e2e-runners]
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 10
+    steps:
+      - name: Runner account and GUI session
+        run: |
+          echo "user=$(whoami) home=$HOME"
+          sw_vers -productVersion
+          console="$(stat -f %Su /dev/console)"
+          echo "console=$console"
+          [ "$console" = "$(whoami)" ] || { echo "::error::GUI session belongs to '$console', runner runs as '$(whoami)'"; exit 1; }
+      - name: SSH to self
+        run: |
+          ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "$(whoami)@127.0.0.1" 'echo ssh-ok'
+      - name: Tools over SSH (ensure_provisioned_macos)
+        run: |
+          ssh -o BatchMode=yes "$(whoami)@127.0.0.1" 'eval "$(/opt/homebrew/bin/brew shellenv)"; export PATH="$HOME/.cargo/bin:$PATH"; command -v npm cargo cmake rsync'
+      - name: Outbound to OpenRouter
+        run: curl -fsS -o /dev/null -w '%{http_code}\n' https://openrouter.ai/api/v1/models
+
+  windows:
+    runs-on: [self-hosted, Windows, X64]
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Runner account
+        run: |
+          echo "user=$USERNAME whoami=$(whoami)"
+          command -v ssh scp tar
+          tar --version | head -1
+      - name: SSH to self and WSL
+        run: |
+          ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "$USERNAME@127.0.0.1" 'wsl.exe -l -q'
+          ssh -o BatchMode=yes "$USERNAME@127.0.0.1" 'wsl.exe -d Ubuntu-22.04 -- echo wsl-ok'
+      - name: Tools over SSH (ensure_provisioned_windows)
+        run: |
+          ssh -o BatchMode=yes "$USERNAME@127.0.0.1" 'powershell -NoProfile -Command "Get-Command node,cargo,cmake | Select-Object -ExpandProperty Source"'
+      - name: Outbound to OpenRouter
+        run: curl -fsS -o /dev/null -w '%{http_code}\n' https://openrouter.ai/api/v1/models
