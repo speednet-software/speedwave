@@ -903,7 +903,14 @@ impl StreamParser {
                     "result message has is_error=true but empty result text; \
                      returning placeholder error chunk"
                 );
-                log::debug!("empty-error result payload: {parsed}");
+                log::debug!(
+                    "empty-error result payload: subtype={:?} fields={:?}",
+                    parsed["subtype"].as_str(),
+                    parsed
+                        .as_object()
+                        .map(|o| o.keys().cloned().collect::<Vec<_>>())
+                        .unwrap_or_default()
+                );
                 "The LLM returned an error without details. \
                      Check the provider server logs or try a different model."
                     .to_string()

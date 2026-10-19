@@ -4,7 +4,7 @@
 
 **Date:** 2026-07-19
 
-**Amends:** [ADR-083](ADR-083-vaultless-pii-tokenization.md) — only the `policy.json` wire-contract section ("The policy.json v2 contract: a flag pair, not a bool"). Every other ADR-083 decision — vaultless AES-SIV tokenization, one Rust engine consumed natively by the proxy and via WASM by the hub, union-of-policies resolution, fail-closed enforcement at both egress points, and Desktop-only host-side detokenization at the presentation layer — is unchanged by this ADR and remains in force.
+**Amends:** [ADR-083](ADR-083-vaultless-pii-tokenization.md) — only the `policy.json` wire-contract section ("The policy.json v2 contract: a flag pair, not a bool"). Every other ADR-083 decision — vaultless AES-SIV tokenization, one Rust engine consumed natively by the proxy and via WASM by the hub, union-of-policies resolution, fail-closed enforcement at both egress points, and the presentation-layer detokenization described there — is unchanged by this ADR and remains in force. (ADR-083's Presentation section has since been corrected to the code: the proxy detokenizes the model's response inbound, and Desktop resolves only the spans the hub sealed. That correction is independent of this ADR.)
 
 ## Context
 
@@ -38,7 +38,9 @@ ADR-083 pinned `policy.json` at `version: 2` with a closed, enum-shaped category
 
 ## What is not reversed
 
-ADR-083's vaultless AES-SIV tokenization engine, its dual native-Rust/WASM consumption split, its union-of-policies resolution algorithm, its fail-closed boot and request-time enforcement, and its Desktop-only host-side detokenization at the presentation layer are all unchanged. No proxy-side or in-container detokenization was introduced by this migration; CLI users still see tokens rather than plaintext, for the TTY-passthrough reason ADR-083 already documents.
+ADR-083's vaultless AES-SIV tokenization engine, its dual native-Rust/WASM consumption split, its union-of-policies resolution algorithm, its fail-closed boot and request-time enforcement, and its presentation-layer detokenization are all unchanged by this migration: it changes the wire contract for rules, nothing about where tokens are resolved.
+
+This section previously claimed that no proxy-side detokenization existed and that CLI users see tokens rather than plaintext. Both statements were already wrong when written, and neither was caused by this migration. The proxy rewrites the inbound `/v1/messages` response (`containers/proxy/src/forward.rs`, `containers/proxy/src/rewrite.rs`), so model prose reaches Claude Code and the CLI terminal in plaintext; only hub-sealed tool results still arrive as token spans. The corrected description lives in ADR-083's Presentation section.
 
 ## Alternatives considered
 

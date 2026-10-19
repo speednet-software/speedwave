@@ -22,7 +22,7 @@ use crate::usage::{append_usage, sniff, RequestStatus, UsageAcc};
 const MAX_SNIFF_BUF: usize = 1024 * 1024;
 
 /// Drops the sniff buffer if a not-yet-complete line exceeds `max`. Keeps RAM
-/// flat against a newline-free upstream; the verbatim byte relay is separate.
+/// flat against a newline-free upstream.
 fn bound_sniff_buffer(buf: &mut String, max: usize) {
     if buf.len() > max {
         buf.clear();
@@ -272,8 +272,8 @@ fn resolve_request_status(
     }
 }
 
-/// Resolve the route, forward with swapped/verbatim headers, relay the SSE byte
-/// stream unbuffered while sniffing usage, and append one usage line on end.
+/// Resolve the route, scan the request, forward it, then rewrite the response
+/// stream while sniffing usage, and append one usage line on end.
 pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: Bytes) -> Response {
     let mut parsed = match serde_json::from_slice::<serde_json::Value>(&body) {
         Ok(v) => v,
