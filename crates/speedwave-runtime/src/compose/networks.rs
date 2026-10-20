@@ -21,17 +21,21 @@ pub(crate) fn external_egress_less_networks(yaml: &str) -> anyhow::Result<Vec<St
     let Some(networks) = doc.get("networks").and_then(|n| n.as_mapping()) else {
         return Ok(Vec::new());
     };
-    Ok(networks
-        .iter()
-        .filter_map(|(key, decl)| {
-            let key = key.as_str()?;
-            if !is_egress_less_network(key) || !declares_external(decl) {
-                return None;
-            }
-            let name = decl.get("name").and_then(|n| n.as_str()).unwrap_or(key);
-            Some(name.to_string())
-        })
-        .collect())
+    let mut names = Vec::new();
+    for (key, decl) in networks {
+        let Some(key) = key.as_str().filter(|k| is_egress_less_network(k)) else {
+            continue;
+        };
+        if !declares_external(decl) {
+            anyhow::bail!(
+                "egress-less network {key} is not declared external: true, so compose would \
+                 create it with internet access; re-render the project before starting it"
+            );
+        }
+        let name = decl.get("name").and_then(|n| n.as_str()).unwrap_or(key);
+        names.push(name.to_string());
+    }
+    Ok(names)
 }
 
 pub(crate) fn is_egress_less_network(key: &str) -> bool {
@@ -188,24 +192,35 @@ networks:
     }
 
     #[test]
-    fn external_egress_less_networks_skips_compose_managed_and_other_networks() {
+    fn external_egress_less_networks_skips_other_networks() {
         let yaml = r#"
 networks:
   speedwave_test_network:
     external: true
-  speedwave_test_network_office:
+  speedwave_test_network_officer:
     driver: bridge
-    internal: true
 "#;
         assert!(external_egress_less_networks(yaml).unwrap().is_empty());
         assert!(external_egress_less_networks("services: {}\n")
             .unwrap()
             .is_empty());
-        assert!(
-            external_egress_less_networks("networks:\n  speedwave_test_network_office:\n")
-                .unwrap()
-                .is_empty()
-        );
+    }
+
+    #[test]
+    fn external_egress_less_networks_rejects_a_compose_managed_egress_less_network() {
+        for decl in [
+            "\n    driver: bridge\n    internal: true\n",
+            "\n    external: false\n",
+            "\n",
+        ] {
+            let yaml = format!("networks:\n  speedwave_test_network_office:{decl}");
+            let err = external_egress_less_networks(&yaml).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("speedwave_test_network_office is not declared external: true"),
+                "{err}"
+            );
+        }
     }
 
     #[test]

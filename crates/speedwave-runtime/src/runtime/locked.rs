@@ -773,6 +773,32 @@ mod tests {
     }
 
     #[test]
+    fn no_stack_starts_over_an_egress_less_network_compose_would_create() {
+        let project = "locked-net-compose-managed";
+        let office = crate::compose::egress_less_network_names(project).remove(0);
+        let data_dir = rendered(
+            project,
+            &format!(
+                "services: {{}}\nnetworks:\n  {office}:\n    driver: bridge\n    internal: true\n"
+            ),
+        );
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_data_dir(data_dir.path())
+            .build();
+        for started in start_every_way(&rt, project) {
+            let err = started.unwrap_err();
+            assert!(
+                err.to_string().contains("is not declared external: true"),
+                "{err}"
+            );
+        }
+        assert!(handles.ensured_networks().is_empty());
+        assert!(handles.up_projects().is_empty());
+        assert!(!handles.was_recreated());
+        assert!(handles.up_service_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn the_teardown_refusal_comes_before_any_network_is_created() {
         let project = "locked-net-teardown";
         let data_dir = rendered(project, &compose_with_office(project));
