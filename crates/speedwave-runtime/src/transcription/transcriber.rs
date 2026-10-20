@@ -567,11 +567,12 @@ fn full_with_cancel(
 /// behind `data` is raised.
 #[expect(
     unsafe_code,
-    reason = "whisper.cpp abort-callback FFI boundary; every block has a SAFETY comment"
+    reason = "ggml abort-callback FFI boundary of Whisper and the diarizer; every block has a SAFETY comment"
 )]
 pub(crate) unsafe extern "C" fn abort_when_cancelled(data: *mut std::ffi::c_void) -> bool {
-    // SAFETY: the only caller is whisper.cpp with the pointer `full_with_cancel` installed, an
-    // `AtomicBool` that stays alive for the whole decode.
+    // SAFETY: the callers are whisper.cpp, with the pointer `full_with_cancel` installed, and
+    // the vendored diarizer, with the one `NemotronDiarizer::diarize` passes; both point at the
+    // `AtomicBool` of a `DecodeCancel` that outlives the decode or diarization reading it.
     unsafe { &*data.cast::<AtomicBool>() }.load(Ordering::Acquire)
 }
 

@@ -208,6 +208,10 @@ fn the_backend_choice_takes_an_integrated_gpu_like_whisper_cpp() {
              whisper.cpp 1.8.3 (UPSTREAM, local change 9)"
         );
     }
+    assert!(
+        body.contains("if (backends.empty()) {\n            WHISPER_LOG_WARN("),
+        "a GPU request that ends on the CPU is logged as a warning (UPSTREAM, local change 10)"
+    );
 }
 
 #[test]

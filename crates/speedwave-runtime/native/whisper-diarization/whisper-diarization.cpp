@@ -538,6 +538,9 @@ static bool whisper_diar_backend_init(whisper_diar_context & dctx) {
                 break;
             }
         }
+        if (backends.empty()) {
+            WHISPER_LOG_WARN("%s: no usable GPU device %d, running on the CPU\n", __func__, params.gpu_device);
+        }
     }
 
     auto cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);

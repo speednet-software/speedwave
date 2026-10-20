@@ -88,6 +88,7 @@ workspace = true
 [[example]]
 name = "diarize"
 required-features = ["audio-transcription"]
+test = true
 
 [[test]]
 name = "lock_acquisitions"

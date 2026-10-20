@@ -1230,7 +1230,7 @@ fn download_model_by_key(
     key: &str,
     progress: &mut dyn FnMut(transcription::DownloadProgress),
 ) -> Result<std::path::PathBuf, transcription::ModelStoreError> {
-    if key != DIARIZATION_MODEL.key {
+    if transcription::whisper_model(key).is_some() {
         if let Err(e) = models.ensure_vad_model() {
             log::warn!(target: "transcription::models", "VAD model download failed: {e}");
         }
@@ -1832,6 +1832,10 @@ mod tests {
             download_model_by_key(&models, "nope", &mut |_| {}).unwrap_err(),
             transcription::ModelStoreError::UnknownModel(_)
         ));
+        assert!(
+            !models.vad_is_present(),
+            "an unknown key is refused before any download"
+        );
     }
 
     #[test]
@@ -1851,15 +1855,11 @@ mod tests {
             accel_label: "CPU".to_string(),
             gpu_class: GpuClass::None,
         };
-        let json = serde_json::to_value(&ack).unwrap();
-        let start = src.find("export interface RecommendedModelAck {").unwrap();
-        let body = &src[start..start + src[start..].find("\n}").unwrap()];
-        for key in json.as_object().unwrap().keys() {
-            assert!(
-                body.contains(&format!("  {key}:")),
-                "models/transcript.ts RecommendedModelAck is missing `{key}`"
-            );
-        }
+        assert_eq!(
+            crate::ts_mirror::rust_fields(&ack),
+            crate::ts_mirror::ts_interface_fields(src, "RecommendedModelAck"),
+            "models/transcript.ts RecommendedModelAck must carry exactly the Rust fields"
+        );
         for class in [GpuClass::None, GpuClass::Integrated, GpuClass::Discrete] {
             let wire = serde_json::to_string(&class).unwrap();
             let wire = wire.trim_matches('"');

@@ -36,9 +36,8 @@ fn main() -> ExitCode {
 }
 
 /// The tool's one stderr sink: errors and the timing lines, so stdout carries only the turns.
-#[expect(clippy::print_stderr, reason = "the example's single stderr sink")]
 fn note(line: &str) {
-    eprintln!("{line}");
+    let _ = writeln!(std::io::stderr().lock(), "{line}");
 }
 
 fn run(argv: impl Iterator<Item = String>) -> Result<(), String> {

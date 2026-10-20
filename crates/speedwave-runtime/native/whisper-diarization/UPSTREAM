@@ -60,3 +60,5 @@ local changes in whisper-diarization.cpp:
      GPU device, as whisper_backend_init_gpu does in whisper.cpp 1.8.3; the source matched
      GGML_BACKEND_DEVICE_TYPE_GPU alone, so a laptop whose Vulkan device is its integrated
      GPU ran Whisper on it and the diarization on the CPU.
+ 10. whisper_diar_backend_init logs a warning when it was asked for a GPU and found none
+     it could start, instead of falling back to the CPU without a word.
