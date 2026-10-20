@@ -25,6 +25,7 @@ jobs:
           rust-cache-workspaces: |
             . -> target
             desktop/src-tauri -> target
+          rust-cache-definition: .github/workflows/lane-test-macos.yml
           node-cache-dependency-path: desktop/src/package-lock.json
 
       - name: Install bats

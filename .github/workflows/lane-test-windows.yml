@@ -26,6 +26,7 @@ jobs:
           rust-cache-workspaces: |
             . -> target
             desktop/src-tauri -> target
+          rust-cache-definition: .github/workflows/lane-test-windows.yml
           rust-cache-directories: D:\st
 
       - name: cargo test (full suite incl. test-support)

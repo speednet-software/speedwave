@@ -1,0 +1,29 @@
+name: Cache warm
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - Cargo.lock
+      - desktop/src-tauri/Cargo.lock
+      - containers/proxy/Cargo.lock
+      - rust-toolchain.toml
+      - .cargo/config.toml
+      - .github/workflows/lane-*.yml
+      - .github/actions/setup-toolchain/action.yml
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Start test.yml on dev to write the Rust cache
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: gh workflow run test.yml --repo "$REPO" --ref dev

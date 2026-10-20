@@ -33,6 +33,10 @@ inputs:
     description: 'swatinem/rust-cache `cache-directories`: extra directories outside the workspaces, such as an absolute CARGO_TARGET_DIR'
     required: false
     default: ''
+  rust-cache-definition:
+    description: 'Path of the calling lane workflow; its hash keys the Rust cache, so a change to that lane re-keys only its own cache (ignored with rust-cache-shared-key)'
+    required: false
+    default: ''
 runs:
   using: 'composite'
   steps:
@@ -61,10 +65,15 @@ runs:
           [ -n "$t" ] && rustup target add "$t"
         done
 
-    - name: Capture runner image version
+    - name: Capture runner image version and lane definition hash
       if: inputs.rust-cache-workspaces != ''
       shell: bash
-      run: echo "SETUP_TOOLCHAIN_IMAGE_VERSION=${ImageVersion:-unknown}" >> "$GITHUB_ENV"
+      env:
+        DEFINITION: ${{ inputs.rust-cache-definition }}
+      run: |
+        echo "SETUP_TOOLCHAIN_IMAGE_VERSION=${ImageVersion:-unknown}" >> "$GITHUB_ENV"
+        hash="$(cat "$GITHUB_ACTION_PATH/action.yml" ${DEFINITION:+"$DEFINITION"} | sha256sum | cut -c1-16)"
+        echo "SETUP_TOOLCHAIN_DEFINITION_HASH=$hash" >> "$GITHUB_ENV"
 
     - name: Rust cache
       if: inputs.rust-cache-workspaces != ''
@@ -73,5 +82,5 @@ runs:
         workspaces: ${{ inputs.rust-cache-workspaces }}
         shared-key: ${{ inputs.rust-cache-shared-key }}
         cache-directories: ${{ inputs.rust-cache-directories }}
-        key: ${{ env.SETUP_TOOLCHAIN_IMAGE_VERSION }}-${{ hashFiles('.github/workflows/lane-*.yml', '.github/workflows/build-publish.yml', '.github/actions/*/action.yml') }}
+        key: ${{ env.SETUP_TOOLCHAIN_IMAGE_VERSION }}-${{ env.SETUP_TOOLCHAIN_DEFINITION_HASH }}
         save-if: ${{ github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/release/') }}
