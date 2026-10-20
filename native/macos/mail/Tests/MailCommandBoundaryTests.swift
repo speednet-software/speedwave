@@ -35,7 +35,7 @@ final class MailCommandBoundaryTests: XCTestCase {
         ]
         let replies = [
             "list_emails": "Work" + String(repeating: "\u{1D}", count: 5),
-            "get_email": "S||A||D||true||b@x,||Body",
+            "get_email": String(repeating: "\u{1D}", count: 11),
             "search_emails": "Work" + String(repeating: "\u{1D}", count: 5),
         ]
         for (command, params) in calls {
@@ -217,7 +217,7 @@ final class MailCommandBoundaryTests: XCTestCase {
 
     func testGetEmailReadsTheMessageInTheMailboxAndAccountOfItsId() throws {
         let id = MailId(account: "On My Mac", mailbox: "Speedwave-Test", messageId: "<z@x>").encoded
-        harness.executor.reply("S||A||D||false||b@x,||Body")
+        harness.executor.reply(String(repeating: "\u{1D}", count: 11))
 
         let result = try harness.call("get_email", ["id": id])
 

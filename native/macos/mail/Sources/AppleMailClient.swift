@@ -164,7 +164,7 @@ enum AppleMailClient {
         mailboxLookup(name: id.mailbox, account: id.account) + """
 
             set spwFound to (every message of mb whose message id is "\(escapeAppleScript(id.messageId))")
-            if (count of spwFound) is 0 then error "Email not found"
+            if (count of spwFound) is 0 then error "\(mailNotFoundMarker)"
             set m to item 1 of spwFound
         """
     }
@@ -323,28 +323,6 @@ enum AppleMailClient {
     static func localDate(_ isot: String) -> Date? {
         isotFormatter.timeZone = .current
         return isotFormatter.date(from: isot)
-    }
-
-    static func getEmail(scripts: MailScripts, id: String) throws -> [String: Any] {
-        let mailId = try MailId(decoding: id)
-        let script = """
-        tell application "Mail"
-        \(messageLookup(mailId))
-            set subj to subject of m
-            set sndr to sender of m
-            set rcvd to date received of m as string
-            set bod to content of m
-            set isRead to read status of m
-            set toList to ""
-            repeat with r in to recipients of m
-                set toList to toList & address of r & ","
-            end repeat
-            return subj & "||" & sndr & "||" & rcvd & "||" & isRead & "||" & toList & "||" & bod
-        end tell
-        """
-
-        let output = try scripts.run(script, mailbox: mailId.mailbox, account: mailId.account)
-        return try parseEmailDetail(output, id: id)
     }
 
     static func sendEmail(scripts: MailScripts, to: String, subject: String, body: String, cc: String?, bcc: String? = nil) throws -> [String: Any] {

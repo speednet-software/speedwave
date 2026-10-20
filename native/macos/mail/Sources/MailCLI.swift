@@ -94,7 +94,14 @@ func getEmail(params: [String: Any], scripts: MailScripts) throws -> [String: An
     guard let id = params["id"] as? String else {
         throw MailError.missingField("id")
     }
-    return ["email": try AppleMailClient.getEmail(scripts: scripts, id: id)]
+    return [
+        "email": try MailReading.getEmail(
+            scripts: scripts,
+            id: id,
+            includeHeaders: params["include_headers"] as? Bool ?? false,
+            includeSource: params["include_source"] as? Bool ?? false
+        ),
+    ]
 }
 
 func searchEmails(params: [String: Any], scripts: MailScripts) throws -> [String: Any] {

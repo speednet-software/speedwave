@@ -93,6 +93,44 @@ final class LiveMailTests: XCTestCase {
         XCTAssertEqual(future["total"] as? Int, 0)
     }
 
+    func testGetEmailReadsCcAttachmentsHeadersAndSourceOfTheNewestTestMail() throws {
+        let params: [String: Any] = [
+            "mailbox": Self.testMailbox, "account": AppleMailClient.localAccountName, "limit": 1,
+        ]
+        let listed = try XCTUnwrap(try call("list_emails", params) as? [String: Any])
+        guard let newest = (listed["emails"] as? [[String: Any]])?.first?["id"] as? String else {
+            throw XCTSkip("\(Self.testMailbox) holds no message to read")
+        }
+
+        let read = try XCTUnwrap(
+            try call("get_email", ["id": newest, "include_headers": true, "include_source": true]) as? [String: Any])
+
+        let email = try XCTUnwrap(read["email"] as? [String: Any])
+        XCTAssertNotNil(email["cc"] as? [String])
+        XCTAssertNotNil(parseISO8601(try XCTUnwrap(email["date"] as? String)))
+        XCTAssertEqual(email["mailbox"] as? String, Self.testMailbox)
+        let attachments = try XCTUnwrap(email["attachments"] as? [[String: Any]])
+        for (offset, attachment) in attachments.enumerated() {
+            XCTAssertEqual(attachment["index"] as? Int, offset + 1)
+            XCTAssertNotNil(attachment["name"] as? String)
+        }
+        let headers = try XCTUnwrap(email["headers"] as? String)
+        XCTAssertTrue(headers.localizedCaseInsensitiveContains("message-id:"), headers)
+        XCTAssertNotNil(email["headers_truncated"] as? Bool)
+        XCTAssertFalse(try XCTUnwrap(email["source"] as? String).isEmpty)
+        XCTAssertNotNil(email["source_truncated"] as? Bool)
+    }
+
+    func testGetEmailOfAMessageIdTheMailboxDoesNotHoldIsReportedAsMailNotFound() {
+        let id = MailId(
+            account: AppleMailClient.localAccountName, mailbox: Self.testMailbox, messageId: "<spw-missing-833@x>")
+        XCTAssertThrowsError(try call("get_email", ["id": id.encoded])) { error in
+            XCTAssertEqual(
+                error as? MailFailure,
+                .mailNotFound(mailbox: Self.testMailbox, account: AppleMailClient.localAccountName))
+        }
+    }
+
     func testAMailboxNoAccountHasIsReportedAsMailboxNotFound() {
         let mailbox = "SPW-Nonexistent-Mailbox-831"
         XCTAssertThrowsError(try call("list_emails", ["mailbox": mailbox, "limit": 1])) { error in
