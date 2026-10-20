@@ -53,6 +53,15 @@ function Test-PinnedNode {
     return ([version]$Matches[1] -ge [version]$required)
 }
 
+function Test-Python3 {
+    $candidates = Get-Command python3, python -All -ErrorAction SilentlyContinue |
+        Where-Object { $_.Source -notlike '*\WindowsApps\*' }
+    foreach ($py in $candidates) {
+        if ((& $py.Source --version 2>$null) -match '^Python 3\.') { return $true }
+    }
+    return $false
+}
+
 $packages = @(
     @{ Name = 'git'; Have = { [bool](Get-Command git -ErrorAction SilentlyContinue) } },
     @{ Name = 'gitleaks'; Have = { [bool](Get-Command gitleaks -ErrorAction SilentlyContinue) } },
@@ -64,6 +73,7 @@ $packages = @(
     @{ Name = 'cmake'; Have = { [bool](Get-Command cmake -ErrorAction SilentlyContinue) } },
     @{ Name = 'llvm'; Have = { Test-Path (Join-Path $llvmBin 'clang.exe') } },
     @{ Name = 'ninja'; Have = { [bool](Get-Command ninja -ErrorAction SilentlyContinue) } },
+    @{ Name = 'python'; Have = { Test-Python3 } },
     @{ Name = 'visualstudio2022buildtools'; Have = { Test-Path $vsBase } },
     @{ Name = 'visualstudio2022-workload-vctools'; Have = { Test-Path $msvcRoot } }
 )

@@ -3,6 +3,8 @@
 STORE=/var/lib/nerdctl/1935db59/names/default
 TASKS=/run/containerd/io.containerd.runtime.v2.task/default
 NAME=spwcontract_ghost
+NET=spwcontract_internal
+ABSENT_NET=spwcontract_absent_net
 DEAD=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef
 
 setup_file() {
@@ -14,7 +16,7 @@ setup_file() {
 }
 
 teardown() {
-  $ENGINE_EXEC sh -c "nerdctl unpause $NAME >/dev/null 2>&1; nerdctl rm -f $NAME >/dev/null 2>&1; rm -f $STORE/$NAME; true"
+  $ENGINE_EXEC sh -c "nerdctl unpause $NAME >/dev/null 2>&1; nerdctl rm -f $NAME >/dev/null 2>&1; rm -f $STORE/$NAME; nerdctl network rm $NET >/dev/null 2>&1; true"
   if [ -n "${BUNDLE_ID:-}" ]; then
     $ENGINE_EXEC rmdir "$TASKS/$BUNDLE_ID" 2>/dev/null || true
   fi
@@ -108,4 +110,33 @@ EOF
   [ "$status" -ne 0 ]
   [ $((SECONDS - started)) -lt 10 ]
   [[ "$output" == *"timeout: sending signal KILL to command"* ]]
+}
+
+@test "network inspect --mode=native of a missing name fails non-zero with a not-found phrase" {
+  run $ENGINE_EXEC nerdctl network inspect --mode=native "$ABSENT_NET"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"no network found matching"* || "$output" == *"unable to find any network matching"* ]]
+}
+
+@test "network rm of a missing name fails non-zero with a not-found phrase" {
+  run $ENGINE_EXEC nerdctl network rm "$ABSENT_NET"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"no network found matching"* || "$output" == *"unable to find any network matching"* ]]
+}
+
+@test "network create --internal yields a bridge with no gateway, masquerade, portmap or default route" {
+  $ENGINE_EXEC nerdctl network create --internal "$NET"
+  run $ENGINE_EXEC nerdctl network ls --format '{{.Name}}'
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | tr -d '\r' | grep -cx "$NET")" -eq 1 ]
+  run $ENGINE_EXEC nerdctl network inspect --mode=native "$NET"
+  [ "$status" -eq 0 ]
+  compact=$(printf '%s' "$output" | tr -d ' \t\r\n')
+  [[ "$compact" == *'"plugins":[{"type":"bridge"'* ]] || false
+  [[ "$compact" != *'"isGateway":true'* ]] || false
+  [[ "$compact" != *'"isDefaultGateway":true'* ]] || false
+  [[ "$compact" != *'"ipMasq":true'* ]] || false
+  [[ "$compact" != *'"type":"portmap"'* ]] || false
+  [[ "$compact" != *'"0.0.0.0/0"'* ]] || false
+  [[ "$compact" != *'"::/0"'* ]]
 }

@@ -283,7 +283,7 @@ pub(crate) fn apply_integrations_filter(
         }
         remove_env_from(&mut doc, "mcp-hub", svc.worker_env);
         if svc.egress_less {
-            let net = format!("{network_name}_{}", svc.config_key);
+            let net = super::egress_less_network_name(network_name, svc.config_key);
             if let Some(map) = doc.get_mut("networks").and_then(|n| n.as_mapping_mut()) {
                 map.remove(serde_yaml_ng::Value::String(net.clone()));
             }

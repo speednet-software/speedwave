@@ -1180,6 +1180,38 @@ mod tests {
     }
 
     #[test]
+    fn choose_rollback_forward_fixes_a_snapshot_with_a_compose_created_office_network() {
+        let tmp = tempfile::tempdir().unwrap();
+        let expected = compose::SecurityExpectedPaths::from_raw("/project", "/tokens");
+        let check = |yaml: &str| -> Vec<compose::SecurityViolation> {
+            SecurityCheck::run_with_data_dir(yaml, "acme", &[], &expected, tmp.path())
+                .into_iter()
+                .filter(|v| v.rule == compose::SecurityRule::EgressLessNetworkExternal)
+                .collect()
+        };
+        let office = compose::egress_less_network_names("acme").remove(0);
+        let snapshot = format!("networks:\n  {office}:\n    driver: bridge\n    internal: true\n");
+        let fresh = format!("networks:\n  {office}:\n    name: {office}\n    external: true\n");
+        let snapshot_violations = check(&snapshot);
+        assert_eq!(snapshot_violations.len(), 1, "{snapshot_violations:?}");
+        let fresh_violations = check(&fresh);
+        assert!(fresh_violations.is_empty(), "{fresh_violations:?}");
+        assert_eq!(
+            choose_rollback_compose(&snapshot_violations, Some((&fresh, &fresh_violations))),
+            RollbackComposeChoice::UseFreshRender,
+            "a pre-upgrade snapshot whose office network nerdctl compose created with a gateway \
+             must give way to a fresh render"
+        );
+        assert_eq!(
+            choose_rollback_compose(
+                &snapshot_violations,
+                Some((&snapshot, &snapshot_violations))
+            ),
+            RollbackComposeChoice::Abort
+        );
+    }
+
+    #[test]
     fn rollback_containers_forward_fixes_instead_of_bailing_on_snapshot_check() {
         let source = include_str!("update.rs");
         let fn_start = source

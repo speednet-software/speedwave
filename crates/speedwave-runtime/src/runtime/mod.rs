@@ -12,6 +12,7 @@ pub(crate) mod lima;
 pub mod locked;
 #[cfg(any(test, feature = "test-support"))]
 pub mod mock_runtime;
+pub(crate) mod networks;
 pub(crate) mod wsl;
 
 pub use locked::LockedRuntime;
@@ -98,6 +99,12 @@ pub(crate) trait ContainerRuntime: Send + Sync {
     /// Recreates ONE compose service (`--force-recreate`, no orphan removal),
     /// e.g. restart `proxy` mid-session (ADR-073). `service` must be built-in; impls validate.
     fn compose_up_service(&self, project: &str, service: &str) -> anyhow::Result<()>;
+
+    fn ensure_internal_network(&self, name: &str, project: &str) -> anyhow::Result<()>;
+
+    fn remove_network(&self, name: &str) -> anyhow::Result<()>;
+
+    fn network_exists(&self, name: &str) -> anyhow::Result<bool>;
 
     /// Validates compose.yml as the engine sees it. Every impl MUST run the engine's
     /// `compose config` so a silent no-op cannot mask a torn/invalid file.
@@ -757,6 +764,20 @@ impl std::fmt::Display for EngineTearingDown {
 }
 
 impl std::error::Error for EngineTearingDown {}
+
+#[derive(Debug)]
+pub(crate) struct NetworkMigrationPending;
+
+impl std::fmt::Display for NetworkMigrationPending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "The project network is being migrated to an isolated network; restart the project \
+             to finish it.",
+        )
+    }
+}
+
+impl std::error::Error for NetworkMigrationPending {}
 
 /// POSIX-shell-quotes each arg (via `shlex::try_quote`) and joins with spaces —
 /// for transports re-evaluating the line through a remote shell (`ssh`, `wsl.exe`).
@@ -4990,6 +5011,15 @@ impl ContainerRuntime for NoopRuntime {
     }
     fn compose_up_service(&self, _: &str, _: &str) -> anyhow::Result<()> {
         Ok(())
+    }
+    fn ensure_internal_network(&self, _: &str, _: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn remove_network(&self, _: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn network_exists(&self, _: &str) -> anyhow::Result<bool> {
+        Ok(false)
     }
     fn compose_validate(&self, _: &str) -> anyhow::Result<()> {
         Ok(())
