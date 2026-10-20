@@ -28,7 +28,8 @@ endif
 DEV_TAURI_CONFIG = {"identifier":"$(DEV_IDENTIFIER)","productName":"$(DEV_PRODUCT_NAME)"$(DEV_PORT_CONFIG)}
 export DEV_TAURI_CONFIG
 
-PYTHON ?= $(shell command -v python3 2>/dev/null || command -v python 2>/dev/null || echo python3)
+PYTHON3_PROBE := -c 'import sys; sys.exit(sys.version_info < (3,))'
+PYTHON ?= $(or $(shell for p in python3 python; do $$p $(PYTHON3_PROBE) >/dev/null 2>&1 && echo $$p && break; done),python3)
 
 SPEEDWAVE_DATA_DIR ?= $(HOME)/.speedwave-$(DEV_INSTANCE)
 export SPEEDWAVE_DATA_DIR
@@ -95,7 +96,7 @@ dev-config: guard-dev-instance
 	DEV_TAURI_CONFIG="$$(printf '%s' "$$DEV_TAURI_CONFIG" | sed "s/^{/{\"version\":\"$$app_version\",/")"; \
 	printf 'TAURI_CONFIG=%s\n' "$$DEV_TAURI_CONFIG"
 
-.PHONY: all build test check clean dev dev-config install-deps setup-dev setup-dev-windows guard-not-prod-data-dir guard-dev-instance guard-dev-port \
+.PHONY: all build test check clean dev dev-config install-deps setup-dev setup-dev-windows guard-not-prod-data-dir guard-dev-instance guard-dev-port guard-python \
         build-runtime build-cli build-desktop build-tauri build-mcp build-angular \
         build-native-macos build-os-cli bundle-native-assets bundle-static-licenses verify-bundled-assets stage-vulkan-windows \
         test-rust test-transcription test-cli test-desktop test-angular test-mcp test-os test-swift test-e2e test-entrypoint test-ci test-desktop-build test-desktop-build-portable test-desktop-build-macos \
@@ -393,7 +394,8 @@ test-mcp-run:
 
 DESKTOP_BUILD_BATS_PORTABLE := _tests/desktop/bundle-build-context.bats \
   _tests/desktop/guard-prod-data-dir.bats _tests/desktop/vulkan-scripts.bats \
-  _tests/desktop/dev-server-port.bats _tests/desktop/check-windows-build-deps.bats
+  _tests/desktop/dev-server-port.bats _tests/desktop/check-windows-build-deps.bats \
+  _tests/desktop/guard-python.bats
 DESKTOP_BUILD_BATS_MACOS := _tests/desktop/verify-bundled-assets.bats \
   _tests/desktop/sign-bundled-binaries.bats \
   _tests/desktop/native-cli-info-plist.bats \
@@ -486,10 +488,17 @@ test-mcp-office-py:
 PII_NER_ARTIFACT_DIR := desktop/src-tauri/pii-ner
 PII_NER_TOOLS := crates/pii-ner/tools
 
-prepare-pii-ner-model:
+guard-python:
+	@if ! $(PYTHON) $(PYTHON3_PROBE) >/dev/null 2>&1; then \
+	    echo "❌ Python 3 not found (PYTHON=$(PYTHON)); the PII NER model build runs $(PII_NER_TOOLS)/fetch_and_convert.py." >&2; \
+	    echo "   Windows: make setup-dev-windows, then open a NEW Git Bash. Elsewhere: install python3 or pass PYTHON=/path/to/python3." >&2; \
+	    exit 1; \
+	fi
+
+prepare-pii-ner-model: guard-python
 	@$(PYTHON) $(PII_NER_TOOLS)/fetch_and_convert.py --out $(PII_NER_ARTIFACT_DIR)
 
-test-pii-ner-tools:
+test-pii-ner-tools: guard-python
 	@$(PYTHON) -m unittest discover -s $(PII_NER_TOOLS) -p 'test_*.py'
 	@echo "✅ pii-ner converter tests passed"
 
