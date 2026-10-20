@@ -44,6 +44,17 @@ fn is_event_stream(headers: &HeaderMap) -> bool {
         })
 }
 
+/// OpenRouter's generation id from the `X-Generation-Id` response header, which
+/// its `/messages` endpoint sends instead of a `gen-` body id.
+fn generation_id(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-generation-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|id| id.starts_with("gen-"))
+        .map(str::to_string)
+}
+
 /// Drain all complete (`\n`-terminated) lines from `buf`, CRLF-stripped.
 /// Any remaining incomplete line stays in `buf`.
 pub(crate) fn drain_complete_lines(buf: &mut String) -> Vec<String> {
@@ -416,6 +427,7 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
     }
     let response_headers = upstream.headers().clone();
     let upstream_is_sse = is_event_stream(&response_headers);
+    let header_gen_id = generation_id(&response_headers);
 
     let usage_path = cfg.usage_path.clone();
     let model_owned = model.clone();
@@ -430,7 +442,10 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
             return;
         };
         let mut byte_stream = upstream.bytes_stream();
-        let mut acc = UsageAcc::default();
+        let mut acc = UsageAcc {
+            gen_id: header_gen_id,
+            ..UsageAcc::default()
+        };
         let mut line_buf = String::new();
         let mut rewrite_buffer = crate::rewrite::ResponseRewriter::new(upstream_is_sse);
         let mut stream_errored = false;
@@ -973,6 +988,62 @@ mod tests {
             "Text/Event-Stream; charset=utf-8".parse().unwrap(),
         );
         assert!(is_event_stream(&headers), "params and case are tolerated");
+    }
+
+    #[test]
+    fn generation_id_reads_the_openrouter_header() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(generation_id(&headers), None, "no header, no id");
+
+        headers.insert("x-generation-id", "gen-1781-abc".parse().unwrap());
+        assert_eq!(generation_id(&headers).as_deref(), Some("gen-1781-abc"));
+
+        headers.insert("x-generation-id", " gen-1781-abc ".parse().unwrap());
+        assert_eq!(
+            generation_id(&headers).as_deref(),
+            Some("gen-1781-abc"),
+            "surrounding whitespace is tolerated"
+        );
+
+        headers.insert(
+            "x-generation-id",
+            "msg_D1ZDR1ffBhjE6iopiVTd".parse().unwrap(),
+        );
+        assert_eq!(
+            generation_id(&headers),
+            None,
+            "only a gen- id is a generation id"
+        );
+
+        headers.insert("x-generation-id", "".parse().unwrap());
+        assert_eq!(generation_id(&headers), None, "an empty header is no id");
+    }
+
+    #[test]
+    fn a_header_generation_id_survives_a_msg_body_id() {
+        let mut acc = UsageAcc {
+            gen_id: Some("gen-1781-abc".to_string()),
+            ..UsageAcc::default()
+        };
+        let frame = serde_json::json!({
+            "type": "message_start",
+            "message": {"id": "msg_D1ZDR1ffBhjE6iopiVTd", "usage": {"input_tokens": 3, "output_tokens": 1}}
+        });
+        sniff(&frame, &mut acc);
+        let line = acc
+            .finish(
+                "openrouter/m",
+                1,
+                "openrouter",
+                "openrouter",
+                RequestStatus::Success,
+            )
+            .unwrap();
+        assert_eq!(line.gen_id.as_deref(), Some("gen-1781-abc"));
+        assert_eq!(
+            line.response_id.as_deref(),
+            Some("msg_D1ZDR1ffBhjE6iopiVTd")
+        );
     }
 
     fn route(prefix: &str, provider_kind: &str) -> Route {
