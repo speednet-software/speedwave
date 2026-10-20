@@ -5,41 +5,54 @@ import XCTest
 final class MailTests: XCTestCase {
 
 
-    func testAppleMailAlwaysAvailable() {
-        XCTAssertTrue(AppleMailClient.isAvailable())
+    func testParseMailboxesTypesMessageCountAsANumber() {
+        let rows = AppleMailClient.parseMailboxes("iCloud||INBOX||42\nWork||Archive||0\n")
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertEqual(rows[0]["account"] as? String, "iCloud")
+        XCTAssertEqual(rows[0]["name"] as? String, "INBOX")
+        XCTAssertEqual(rows[0]["message_count"] as? Int, 42)
+        XCTAssertEqual(rows[1]["message_count"] as? Int, 0)
+    }
+
+    func testParseMailboxesOmitsAMessageCountThatIsNotAnInteger() {
+        let rows = AppleMailClient.parseMailboxes("iCloud||INBOX||missing value\n")
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertNil(rows[0]["message_count"])
+    }
+
+    func testParseMessageListTypesReadAsABoolean() {
+        let rows = AppleMailClient.parseMessageList(
+            "<a@x>||Hi||Anna <anna@x>||Monday||false\n<b@x>||Re||Bob <bob@x>||Tuesday||true\n"
+        )
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertEqual(rows[0]["id"] as? String, "<a@x>")
+        XCTAssertEqual(rows[0]["read"] as? Bool, false)
+        XCTAssertEqual(rows[1]["read"] as? Bool, true)
+    }
+
+    func testParseMessageListOfEmptyOutputIsEmpty() {
+        XCTAssertTrue(AppleMailClient.parseMessageList("").isEmpty)
     }
 
 
-    func testDetectClientsHasMailAndOutlookEntries() {
-        let result = detectClients()
-        let clients = result["clients"] as? [[String: Any]] ?? []
-        XCTAssertEqual(clients.count, 2, "must list Apple Mail + Outlook")
-        XCTAssertEqual(clients.first?["name"] as? String, AppleMailClient.name)
-        XCTAssertEqual(clients.first?["available"] as? Bool, true)
+    func testDetectClientsReportsAppleMailAsTheOnlySupportedClient() {
+        let clients = detectClients(outlookInstalled: { false })["clients"] as? [[String: Any]] ?? []
+        XCTAssertEqual(clients.count, 1)
+        XCTAssertEqual(clients.first?["name"] as? String, "Apple Mail")
+        XCTAssertEqual(clients.first?["supported"] as? Bool, true)
+        XCTAssertNil(clients.first?["instructions"])
+    }
+
+    func testDetectClientsReportsAnInstalledOutlookAsUnsupportedWithInstructions() {
+        let clients = detectClients(outlookInstalled: { true })["clients"] as? [[String: Any]] ?? []
+        XCTAssertEqual(clients.count, 2)
         let outlook = clients.last
-        XCTAssertEqual(outlook?["name"] as? String, OutlookClient.name)
-        XCTAssertNotNil(outlook?["available"], "Outlook entry must always carry an availability flag")
-        if let err = outlook?["error"] as? String {
-            XCTAssertEqual(outlook?["available"] as? Bool, false,
-                           "an Outlook error must pair with available=false")
-            XCTAssertFalse(err.isEmpty)
-        }
-    }
-
-    func testOutlookAvailabilityRethrowsPermissionAndTimeoutErrors() {
-        let permission = ScriptError.automationPermission("not allowed")
-        let timeout = ScriptError.timeout(5, nil)
-        let scriptFailed = ScriptError.scriptFailed("syntax error")
-
-        func classify(_ e: ScriptError) -> Bool {
-            switch e {
-            case .automationPermission, .timeout: return true
-            case .scriptFailed: return false
-            }
-        }
-        XCTAssertTrue(classify(permission), "permission denial must be surfaced, not swallowed")
-        XCTAssertTrue(classify(timeout), "timeout must be surfaced, not swallowed")
-        XCTAssertFalse(classify(scriptFailed), "a generic failure means Outlook is simply not available")
+        XCTAssertEqual(outlook?["name"] as? String, "Microsoft Outlook")
+        XCTAssertEqual(outlook?["supported"] as? Bool, false)
+        let instructions = outlook?["instructions"] as? String ?? ""
+        XCTAssertTrue(instructions.contains("not supported"), instructions)
+        XCTAssertTrue(instructions.contains("Internet Accounts"), instructions)
+        XCTAssertTrue(instructions.contains("Apple Mail"), instructions)
     }
 
 
@@ -48,39 +61,10 @@ final class MailTests: XCTestCase {
         XCTAssertEqual(error.errorDescription, "Missing required field: to")
     }
 
-    func testMailErrorClientNotAvailable() {
-        let error = MailError.clientNotAvailable("Microsoft Outlook")
-        XCTAssertTrue(error.errorDescription!.contains("not running"))
-    }
-
-    func testMailErrorUnknownClient() {
-        let error = MailError.unknownClient("thunderbird")
-        XCTAssertTrue(error.errorDescription!.contains("Unknown mail client"))
-    }
 
     func testMailErrorConfirmRequired() {
         let error = MailError.confirmRequired
         XCTAssertTrue(error.errorDescription!.contains("confirm_send"))
-    }
-
-
-    func testResolveClientDefaultIsMail() throws {
-        let client = try resolveClient(preferred: nil)
-        XCTAssertEqual(client, "mail")
-    }
-
-    func testResolveClientAppleMail() throws {
-        let client = try resolveClient(preferred: "mail")
-        XCTAssertEqual(client, "mail")
-    }
-
-    func testResolveClientAppleMailAlt() throws {
-        let client = try resolveClient(preferred: "Apple Mail")
-        XCTAssertEqual(client, "mail")
-    }
-
-    func testResolveClientUnknownThrows() {
-        XCTAssertThrowsError(try resolveClient(preferred: "thunderbird"))
     }
 
 
@@ -122,20 +106,6 @@ final class MailTests: XCTestCase {
 
     func testAppleMailRecipientClausesEmptyStringProducesNoLines() {
         XCTAssertEqual(AppleMailClient.recipientClauses("", kind: "bcc"), "")
-    }
-
-
-    func testOutlookRecipientClausesSingleAddress() {
-        let result = OutlookClient.recipientClauses("alice@example.com", kind: "to")
-        XCTAssertTrue(result.contains("email address:{address:\"alice@example.com\"}"))
-    }
-
-    func testOutlookRecipientClausesMultipleAddressesOneLinePerRecipient() {
-        let result = OutlookClient.recipientClauses("alice@example.com,bob@example.com", kind: "bcc")
-        let lines = result.components(separatedBy: "\n")
-        XCTAssertEqual(lines.count, 2, "must emit one AppleScript line per recipient")
-        XCTAssertTrue(lines[0].contains("bcc recipient") && lines[0].contains("alice@example.com"))
-        XCTAssertTrue(lines[1].contains("bcc recipient") && lines[1].contains("bob@example.com"))
     }
 
 
@@ -184,20 +154,6 @@ final class MailTests: XCTestCase {
             guard case ScriptError.scriptFailed = error else {
                 return XCTFail("expected raw ScriptError.scriptFailed, got \(error)")
             }
-        }
-    }
-
-    func testOutlookListEmailsMapsMailboxNotFoundToTeachingError() throws {
-        guard (try? OutlookClient.isAvailable()) == true else {
-            throw XCTSkip("Microsoft Outlook not installed/running in this environment")
-        }
-        XCTAssertThrowsError(
-            try OutlookClient.listEmails(limit: 1, mailbox: "SPW-Nonexistent-Folder-XYZ-123")
-        ) { error in
-            guard case CLIError.notFound(let message) = error else {
-                return XCTFail("expected CLIError.notFound, got \(error)")
-            }
-            XCTAssertTrue(message.contains("listMailboxes"))
         }
     }
 

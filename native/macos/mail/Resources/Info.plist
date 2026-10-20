@@ -13,6 +13,6 @@
 	<key>CFBundleVersion</key>
 	<string>0.0.0</string>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>Speedwave needs to send Apple Events to automate Mail and Microsoft Outlook via Claude Code.</string>
+	<string>Speedwave needs to send Apple Events to automate Mail via Claude Code.</string>
 </dict>
 </plist>

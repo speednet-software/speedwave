@@ -7,6 +7,7 @@ paths:
   - 'desktop/src-tauri/src/mic_permission_cmd.rs'
   - 'desktop/src-tauri/Info.plist'
   - 'mcp-servers/os/src/tools/reminder-tools.ts'
+  - 'mcp-servers/os/src/tools/mail-tools.ts'
 ---
 
 # Native macOS Rules (Swift OS integrations, TCC, transcription)
@@ -29,6 +30,12 @@ Extending a Mail/Notes gate or adding a new native automation gate must keep thi
 - Native CLI Info.plists must embed the computed app version (`SPEEDWAVE_VERSION`, from `crates/speedwave-version` or the env override — see `build-native-macos.sh`), correct sub-identifier, and TCC UsageDescription keys. The embedded version is test-guarded (`native-cli-info-plist.bats`, macOS-only, runs only after `make build-native-macos`); the source `Info.plist`/`Package.swift` content is a manual alignment.
 - **No build step writes a native CLI `Resources/Info.plist`.** `build-native-macos.sh::stage_info_plist` copies it to `native/macos/<pkg>/.build/Info.plist` with the version substituted by `sed`, reads the copy back with `PlistBuddy -c Print` (read-only) to fail loud on a missed key, and each `Package.swift` embeds that copy with `-sectcreate`. A bare `swift build`/`swift test` therefore needs `build-native-macos.sh --stage-only` first; `make build-native-macos` and `make test-swift` do it. Guard: `_tests/desktop/build-native-macos.bats` (clean `git status` after staging).
 - **Microphone consent is requested in-process by the main Tauri app** (`mic_permission_cmd.rs`, before any capture spawn), never left to a spawned CLI: `AVCaptureDevice.requestAccess` shows no prompt from a headless helper — it silently denies, with no TCC entry to re-enable. The grant lands under `pl.speedwave.desktop` and child CLIs inherit it. The main app is therefore signed with `bundle.macOS.entitlements` (`audio-capture.plist`, manual alignment) and carries `NSMicrophoneUsageDescription` in its Info.plist.
+
+## Mail (AppleScript)
+
+- **Apple Mail is the only mail client.** `mail-cli` drives Mail.app and nothing else. Microsoft Outlook is not a client: New Outlook has no AppleScript dictionary and Legacy Outlook no longer connects to Exchange Online, so its AppleScript path was removed (SPEED-830). `detect_clients` lists an installed Outlook (found by bundle id `com.microsoft.Outlook` through `NSWorkspace`, no Apple Event sent) as `supported: false` with `instructions` for adding the account to Apple Mail. Do not reintroduce an Outlook implementation or a `client` parameter on the mail tools; an account the user reads in Outlook is reached by adding it to Apple Mail.
+- **The mail tools reject undeclared arguments** (`withDeclaredParams` in `mail-tools.ts`), so a `client`, `offset` or `unread_only` argument fails with a teaching error instead of being dropped by `mail-cli`. A new parameter is declared in the same change that makes `mail-cli` read it.
+- **`outputSchema` mirrors what `mail-cli` prints**, nesting included (`getEmail` returns `{ email: {...} }`), with `read` a boolean and `message_count` a number (`AppleMailClient.parseMessageList`/`parseMailboxes`); `mail-tools.test.ts` compares the key tree of each tool's schema with a sample of the CLI's output. A key added to a Swift result is declared in the schema and in that sample in the same change.
 
 ## Reminders (EventKit)
 

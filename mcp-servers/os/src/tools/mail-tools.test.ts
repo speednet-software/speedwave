@@ -27,7 +27,12 @@ describe('mail-tools', () => {
 
   describe('handleDetectMailClients', () => {
     it('returns detected clients', async () => {
-      const mockData = { clients: ['Apple Mail', 'Outlook'] };
+      const mockData = {
+        clients: [
+          { name: 'Apple Mail', supported: true },
+          { name: 'Microsoft Outlook', supported: false, instructions: 'Add the account…' },
+        ],
+      };
       vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: mockData });
 
       const result = await handleDetectMailClients({});
@@ -41,7 +46,7 @@ describe('mail-tools', () => {
   describe('handleListMailboxes', () => {
     it('returns mailboxes on success', async () => {
       const mockData = {
-        mailboxes: [{ name: 'INBOX', account: 'john@example.com', unread_count: 5 }],
+        mailboxes: [{ name: 'INBOX', account: 'john@example.com', message_count: 5 }],
       };
       vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: mockData });
 
@@ -53,34 +58,23 @@ describe('mail-tools', () => {
   });
 
   describe('handleListEmails', () => {
-    it('returns emails with pagination', async () => {
+    it('returns emails of the inbox', async () => {
       const mockData = {
-        emails: [{ id: 'msg-1', subject: 'Hello', from: 'alice@example.com' }],
+        emails: [{ id: 'msg-1', subject: 'Hello', sender: 'alice@example.com' }],
       };
       vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: mockData });
 
-      const result = await handleListEmails({ limit: 10, offset: 0 });
+      const result = await handleListEmails({ limit: 10 });
 
       expect(result.success).toBe(true);
-      expect(runCommand).toHaveBeenCalledWith('mail', 'list_emails', { limit: 10, offset: 0 });
-    });
-
-    it('passes client through to the native CLI', async () => {
-      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { emails: [] } });
-
-      await handleListEmails({ client: 'outlook' });
-
-      expect(runCommand).toHaveBeenCalledWith('mail', 'list_emails', { client: 'outlook' });
+      expect(runCommand).toHaveBeenCalledWith('mail', 'list_emails', { limit: 10 });
     });
   });
 
   describe('handleGetEmail', () => {
     it('returns email by ID', async () => {
       const mockData = {
-        id: 'msg-1',
-        subject: 'Hello',
-        from: 'alice@example.com',
-        body: 'Hello world',
+        email: { id: 'msg-1', subject: 'Hello', sender: 'alice@example.com', body: 'Hello world' },
       };
       vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: mockData });
 
@@ -96,23 +90,12 @@ describe('mail-tools', () => {
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('EMPTY_FIELDS');
     });
-
-    it('passes client through to the native CLI', async () => {
-      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { id: 'msg-1' } });
-
-      await handleGetEmail({ id: 'msg-1', client: 'outlook' });
-
-      expect(runCommand).toHaveBeenCalledWith('mail', 'get_email', {
-        id: 'msg-1',
-        client: 'outlook',
-      });
-    });
   });
 
   describe('handleSearchEmails', () => {
     it('searches emails by query', async () => {
       const mockData = {
-        results: [{ id: 'msg-2', subject: 'Invoice', from: 'billing@example.com' }],
+        emails: [{ id: 'msg-2', subject: 'Invoice', sender: 'billing@example.com' }],
       };
       vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: mockData });
 
@@ -120,17 +103,6 @@ describe('mail-tools', () => {
 
       expect(result.success).toBe(true);
       expect(runCommand).toHaveBeenCalledWith('mail', 'search_emails', { query: 'invoice' });
-    });
-
-    it('passes client through to the native CLI', async () => {
-      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { emails: [] } });
-
-      await handleSearchEmails({ query: 'invoice', client: 'outlook' });
-
-      expect(runCommand).toHaveBeenCalledWith('mail', 'search_emails', {
-        query: 'invoice',
-        client: 'outlook',
-      });
     });
 
     it('fails when query is empty', async () => {
@@ -144,7 +116,7 @@ describe('mail-tools', () => {
 
   describe('handleSendEmail', () => {
     it('sends email when confirm_send is true', async () => {
-      const mockData = { status: 'sent', message_id: 'msg-new' };
+      const mockData = { status: 'sent' };
       vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: mockData });
 
       const result = await handleSendEmail({
@@ -183,7 +155,7 @@ describe('mail-tools', () => {
       expect(result.error?.message).toContain('to');
     });
 
-    it('passes bcc and client through to the native CLI', async () => {
+    it('passes bcc through to the native CLI', async () => {
       vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { status: 'sent' } });
 
       await handleSendEmail({
@@ -191,7 +163,6 @@ describe('mail-tools', () => {
         subject: 'Test',
         body: 'Hello Bob',
         bcc: 'carol@example.com',
-        client: 'outlook',
         confirm_send: true,
       });
 
@@ -200,7 +171,6 @@ describe('mail-tools', () => {
         subject: 'Test',
         body: 'Hello Bob',
         bcc: 'carol@example.com',
-        client: 'outlook',
         confirm_send: true,
       });
     });
@@ -242,24 +212,6 @@ describe('mail-tools', () => {
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('EMPTY_FIELDS');
     });
-
-    it('passes client through to the native CLI', async () => {
-      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { status: 'sent' } });
-
-      await handleReplyToEmail({
-        id: 'msg-1',
-        body: 'Thanks!',
-        client: 'outlook',
-        confirm_send: true,
-      });
-
-      expect(runCommand).toHaveBeenCalledWith('mail', 'reply_to_email', {
-        id: 'msg-1',
-        body: 'Thanks!',
-        client: 'outlook',
-        confirm_send: true,
-      });
-    });
   });
 
   describe('createMailTools', () => {
@@ -284,6 +236,96 @@ describe('mail-tools', () => {
         expect(t.handler).toBeTypeOf('function');
       }
     });
+  });
+
+  describe('mail client choice', () => {
+    it('no mail tool offers a client parameter', () => {
+      for (const t of createMailTools()) {
+        expect(Object.keys(t.tool.inputSchema.properties), t.tool.name).not.toContain('client');
+      }
+    });
+
+    it('listEmails rejects the pagination and unread filters mail-cli does not apply', async () => {
+      const tool = createMailTools().find((t) => t.tool.name === 'listEmails')!;
+
+      for (const extra of [{ offset: 10 }, { unread_only: true }]) {
+        const result = await tool.handler({ limit: 5, ...extra });
+        expect(result.isError).toBe(true);
+        expect((result.content[0] as { text: string }).text).toContain(Object.keys(extra)[0]);
+      }
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it.each(createMailTools().map((t) => [t.tool.name, t] as const))(
+      '%s rejects a client argument without calling the native CLI',
+      async (_name, t) => {
+        const result = await t.handler({ ...validInput(t.tool.name), client: 'outlook' });
+
+        expect(result.isError).toBe(true);
+        const text = (result.content[0] as { text: string }).text;
+        expect(text).toContain('client');
+        expect(text).toContain('nothing was sent');
+        expect(runCommand).not.toHaveBeenCalled();
+      }
+    );
+
+    it('detectMailClients declares the supported flag and the instructions of an unsupported client', () => {
+      const tool = createMailTools().find((t) => t.tool.name === 'detectMailClients')!;
+      const item = (tool.tool.outputSchema as any).properties.clients.items.properties;
+
+      expect(Object.keys(item).sort()).toEqual(['instructions', 'name', 'supported']);
+      expect(tool.tool.description).toContain('Outlook');
+      expect(tool.tool.description).toContain('Apple Mail');
+    });
+  });
+
+  describe('outputSchema matches what mail-cli emits', () => {
+    const NATIVE_OUTPUT: Record<string, Record<string, unknown>> = {
+      detectMailClients: {
+        clients: [
+          { name: 'Apple Mail', supported: true },
+          { name: 'Microsoft Outlook', supported: false, instructions: 'Add the account…' },
+        ],
+      },
+      listMailboxes: { mailboxes: [{ account: 'iCloud', name: 'INBOX', message_count: 3 }] },
+      listEmails: {
+        emails: [{ id: '<a@x>', subject: 'Hi', sender: 'Anna', date: 'Monday', read: false }],
+      },
+      getEmail: {
+        email: {
+          id: '<a@x>',
+          subject: 'Hi',
+          sender: 'Anna',
+          date: 'Monday',
+          read: true,
+          to: ['me@x'],
+          body: 'Hello',
+        },
+      },
+      searchEmails: { emails: [{ id: '<a@x>', subject: 'Hi', sender: 'Anna', date: 'Monday' }] },
+      sendEmail: { status: 'sent' },
+      replyToEmail: { status: 'sent' },
+    };
+
+    it('covers every mail tool', () => {
+      expect(Object.keys(NATIVE_OUTPUT).sort()).toEqual(
+        createMailTools()
+          .map((t) => t.tool.name)
+          .sort()
+      );
+    });
+
+    it.each(createMailTools().map((t) => [t.tool.name, t] as const))(
+      '%s declares exactly the keys it emits',
+      async (name, t) => {
+        vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: NATIVE_OUTPUT[name] });
+
+        const result = await t.handler(validInput(name));
+
+        const emitted = JSON.parse((result.content[0] as { text: string }).text);
+        expect(declaredShape(t.tool.outputSchema)).toEqual(shapeOf(emitted));
+      }
+    );
   });
 
   describe('confirm_send priority', () => {
@@ -318,20 +360,6 @@ describe('mail-tools', () => {
         expect(result.success).toBe(false);
         expect(result.error?.code).toBe('INVALID_CHARACTERS');
       });
-
-      it('rejects client with control characters', async () => {
-        const result = await handleGetEmail({ id: 'msg-1', client: 'out\x01look' });
-        expect(result.success).toBe(false);
-        expect(result.error?.code).toBe('INVALID_CHARACTERS');
-      });
-    });
-
-    describe('handleListMailboxes', () => {
-      it('rejects client with control characters', async () => {
-        const result = await handleListMailboxes({ client: 'mail\x07app' });
-        expect(result.success).toBe(false);
-        expect(result.error?.code).toBe('INVALID_CHARACTERS');
-      });
     });
 
     describe('handleListEmails', () => {
@@ -346,24 +374,6 @@ describe('mail-tools', () => {
         expect(result.success).toBe(false);
         expect(result.error?.code).toBe('INVALID_TYPE');
       });
-
-      it('rejects negative offset', async () => {
-        const result = await handleListEmails({ offset: -1 });
-        expect(result.success).toBe(false);
-        expect(result.error?.code).toBe('OUT_OF_RANGE');
-      });
-
-      it('rejects unread_only as string', async () => {
-        const result = await handleListEmails({ unread_only: 'true' as any });
-        expect(result.success).toBe(false);
-        expect(result.error?.code).toBe('INVALID_TYPE');
-      });
-
-      it('rejects client with control characters', async () => {
-        const result = await handleListEmails({ client: 'out\x01look' });
-        expect(result.success).toBe(false);
-        expect(result.error?.code).toBe('INVALID_CHARACTERS');
-      });
     });
 
     describe('handleSearchEmails', () => {
@@ -377,12 +387,6 @@ describe('mail-tools', () => {
         const result = await handleSearchEmails({ query: 'test', limit: -1 });
         expect(result.success).toBe(false);
         expect(result.error?.code).toBe('OUT_OF_RANGE');
-      });
-
-      it('rejects client exceeding max length', async () => {
-        const result = await handleSearchEmails({ query: 'test', client: 'a'.repeat(1001) });
-        expect(result.success).toBe(false);
-        expect(result.error?.code).toBe('FIELD_TOO_LONG');
       });
     });
 
@@ -431,18 +435,6 @@ describe('mail-tools', () => {
         expect(result.success).toBe(false);
         expect(result.error?.code).toBe('INVALID_CHARACTERS');
       });
-
-      it('rejects client exceeding max length', async () => {
-        const result = await handleSendEmail({
-          to: 'bob@example.com',
-          subject: 'Test',
-          body: 'Hello',
-          client: 'a'.repeat(1001),
-          confirm_send: true,
-        });
-        expect(result.success).toBe(false);
-        expect(result.error?.code).toBe('FIELD_TOO_LONG');
-      });
     });
 
     describe('handleReplyToEmail', () => {
@@ -466,17 +458,62 @@ describe('mail-tools', () => {
         expect(result.success).toBe(false);
         expect(result.error?.code).toBe('INVALID_TYPE');
       });
-
-      it('rejects client with control characters', async () => {
-        const result = await handleReplyToEmail({
-          id: 'msg-1',
-          body: 'Thanks!',
-          confirm_send: true,
-          client: 'out\x01look',
-        });
-        expect(result.success).toBe(false);
-        expect(result.error?.code).toBe('INVALID_CHARACTERS');
-      });
     });
   });
 });
+
+/**
+ * A call each mail tool accepts.
+ * @param name - Tool name.
+ */
+function validInput(name: string): Record<string, unknown> {
+  const inputs: Record<string, Record<string, unknown>> = {
+    detectMailClients: {},
+    listMailboxes: {},
+    listEmails: {},
+    getEmail: { id: '<a@x>' },
+    searchEmails: { query: 'hi' },
+    sendEmail: { to: 'a@x', subject: 's', body: 'b', confirm_send: true },
+    replyToEmail: { id: '<a@x>', body: 'b', confirm_send: true },
+  };
+  return inputs[name];
+}
+
+/**
+ * The key tree of a JSON value: objects map keys to subtrees, arrays to the merged tree of their items.
+ * @param value - Parsed JSON.
+ */
+function shapeOf(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    const items = value.map(shapeOf);
+    if (items.length === 0) return [null];
+    if (items.every((item) => item !== null && typeof item === 'object')) {
+      return [shapeOf(Object.assign({}, ...items))];
+    }
+    return [items[0]];
+  }
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([k, v]) => [k, shapeOf(v)])
+    );
+  }
+  return null;
+}
+
+/**
+ * The key tree a JSON schema declares, in the form {@link shapeOf} returns.
+ * @param schema - JSON schema.
+ */
+function declaredShape(schema: any): unknown {
+  if (schema?.type === 'array') return [declaredShape(schema.items)];
+  if (schema?.type === 'object' && schema.properties) {
+    return Object.fromEntries(
+      Object.entries(schema.properties as Record<string, unknown>)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([k, v]) => [k, declaredShape(v)])
+    );
+  }
+  return null;
+}

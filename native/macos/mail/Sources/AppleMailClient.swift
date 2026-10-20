@@ -5,13 +5,14 @@ import SharedCLI
 enum AppleMailClient {
     static let name = "Apple Mail"
 
-    static func isAvailable() -> Bool {
-        return true
-    }
-
     /// One `make new <kind> recipient...` AppleScript line per comma-separated address.
     static func recipientClauses(_ addresses: String, kind: String) -> String {
-        makeRecipientClauses(addresses, kind: kind) { "address:\"\($0)\"" }
+        splitAddressList(addresses)
+            .map { addr in
+                "        make new \(kind) recipient at end of \(kind) recipients "
+                    + "with properties {address:\"\(escapeAppleScript(addr))\"}"
+            }
+            .joined(separator: "\n")
     }
 
     /// True only when a probe confirms the mailbox is absent; a probe error returns false
@@ -38,8 +39,16 @@ enum AppleMailClient {
         end tell
         """
 
-        let output = try ScriptRunner.run(script, timeout: 15)
-        return parseDelimited(output, fields: ["account", "name", "message_count"])
+        return parseMailboxes(try ScriptRunner.run(script, timeout: 15))
+    }
+
+    /// Mailbox rows with `message_count` as a number; a count that is not an integer is left out.
+    static func parseMailboxes(_ output: String) -> [[String: Any]] {
+        parseDelimited(output, fields: ["account", "name", "message_count"]).map { row in
+            var typed = row
+            typed["message_count"] = (row["message_count"] as? String).flatMap { Int($0) }
+            return typed
+        }
     }
 
     static func listEmails(limit: Int, mailbox: String?) throws -> [[String: Any]] {
@@ -72,7 +81,16 @@ enum AppleMailClient {
             script, timeout: 30, mailbox: mailbox,
             mailboxMissing: { mailbox.map { Self.mailboxDefinitelyMissing($0) } ?? false }
         )
-        return parseDelimited(output, fields: ["id", "subject", "sender", "date", "read"])
+        return parseMessageList(output)
+    }
+
+    /// Message rows with `read` as a boolean.
+    static func parseMessageList(_ output: String) -> [[String: Any]] {
+        parseDelimited(output, fields: ["id", "subject", "sender", "date", "read"]).map { row in
+            var typed = row
+            typed["read"] = (row["read"] as? String) == "true"
+            return typed
+        }
     }
 
     static func getEmail(id: String) throws -> [String: Any] {

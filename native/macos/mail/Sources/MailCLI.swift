@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SharedCLI
 
@@ -26,7 +27,7 @@ struct MailCLI {
             },
             commands: [
                 "detect_clients": { _ in detectClients() },
-                "list_mailboxes": { try listMailboxes(params: $0) },
+                "list_mailboxes": { _ in try listMailboxes() },
                 "list_emails": { try listEmails(params: $0) },
                 "get_email": { try getEmail(params: $0) },
                 "search_emails": { try searchEmails(params: $0) },
@@ -38,98 +39,52 @@ struct MailCLI {
 }
 
 
-func resolveClient(preferred: String?) throws -> String {
-    if let preferred = preferred {
-        switch preferred.lowercased() {
-        case "outlook", "microsoft outlook":
-            guard try OutlookClient.isAvailable() else {
-                throw MailError.clientNotAvailable("Microsoft Outlook")
-            }
-            return "outlook"
-        case "mail", "apple mail":
-            return "mail"
-        default:
-            throw MailError.unknownClient(preferred)
-        }
-    }
-    return "mail"
-}
+let outlookBundleId = "com.microsoft.Outlook"
 
+let outlookUnsupportedInstructions =
+    "Microsoft Outlook is not supported: New Outlook has no AppleScript and Legacy Outlook no longer connects to Exchange Online. "
+    + "Add the account to Apple Mail (System Settings > Internet Accounts, or Mail > Add Account) and the mail tools will reach it there."
 
-func detectClients() -> [String: Any] {
-    var clients: [[String: Any]] = [
-        ["name": AppleMailClient.name, "available": true, "default": true]
-    ]
-    var outlook: [String: Any] = ["name": OutlookClient.name, "default": false]
-    do {
-        outlook["available"] = try OutlookClient.isAvailable()
-    } catch {
-        outlook["available"] = false
-        outlook["error"] = error.localizedDescription
+func detectClients(
+    outlookInstalled: () -> Bool = {
+        NSWorkspace.shared.urlForApplication(withBundleIdentifier: outlookBundleId) != nil
     }
-    clients.append(outlook)
+) -> [String: Any] {
+    var clients: [[String: Any]] = [["name": AppleMailClient.name, "supported": true]]
+    if outlookInstalled() {
+        clients.append([
+            "name": "Microsoft Outlook",
+            "supported": false,
+            "instructions": outlookUnsupportedInstructions,
+        ])
+    }
     return ["clients": clients]
 }
 
-func listMailboxes(params: [String: Any]) throws -> [String: Any] {
-    let client = try resolveClient(preferred: params["client"] as? String)
-    let mailboxes: [[String: Any]]
-    switch client {
-    case "outlook":
-        mailboxes = try OutlookClient.listMailboxes()
-    default:
-        mailboxes = try AppleMailClient.listMailboxes()
-    }
-    return ["mailboxes": mailboxes]
+func listMailboxes() throws -> [String: Any] {
+    return ["mailboxes": try AppleMailClient.listMailboxes()]
 }
 
 func listEmails(params: [String: Any]) throws -> [String: Any] {
-    let client = try resolveClient(preferred: params["client"] as? String)
     let limit = params["limit"] as? Int ?? 10
     let mailbox = params["mailbox"] as? String
-
-    let emails: [[String: Any]]
-    switch client {
-    case "outlook":
-        emails = try OutlookClient.listEmails(limit: limit, mailbox: mailbox)
-    default:
-        emails = try AppleMailClient.listEmails(limit: limit, mailbox: mailbox)
-    }
-    return ["emails": emails]
+    return ["emails": try AppleMailClient.listEmails(limit: limit, mailbox: mailbox)]
 }
 
 func getEmail(params: [String: Any]) throws -> [String: Any] {
     guard let id = params["id"] as? String else {
         throw MailError.missingField("id")
     }
-    let client = try resolveClient(preferred: params["client"] as? String)
-
-    let email: [String: Any]
-    switch client {
-    case "outlook":
-        email = try OutlookClient.getEmail(id: id)
-    default:
-        email = try AppleMailClient.getEmail(id: id)
-    }
-    return ["email": email]
+    return ["email": try AppleMailClient.getEmail(id: id)]
 }
 
 func searchEmails(params: [String: Any]) throws -> [String: Any] {
     guard let query = params["query"] as? String else {
         throw MailError.missingField("query")
     }
-    let client = try resolveClient(preferred: params["client"] as? String)
     let limit = params["limit"] as? Int ?? 10
     let mailbox = params["mailbox"] as? String
-
-    let emails: [[String: Any]]
-    switch client {
-    case "outlook":
-        emails = try OutlookClient.searchEmails(query: query, limit: limit, mailbox: mailbox)
-    default:
-        emails = try AppleMailClient.searchEmails(query: query, limit: limit, mailbox: mailbox)
-    }
-    return ["emails": emails]
+    return ["emails": try AppleMailClient.searchEmails(query: query, limit: limit, mailbox: mailbox)]
 }
 
 func sendEmail(params: [String: Any]) throws -> [String: Any] {
@@ -149,7 +104,6 @@ func sendEmail(params: [String: Any]) throws -> [String: Any] {
         throw MailError.confirmRequired
     }
 
-    let client = try resolveClient(preferred: params["client"] as? String)
     let cc = params["cc"] as? String
     let bcc = params["bcc"] as? String
     if let cc = cc, splitAddressList(cc).isEmpty {
@@ -159,12 +113,7 @@ func sendEmail(params: [String: Any]) throws -> [String: Any] {
         throw MailError.emptyRecipients("bcc")
     }
 
-    switch client {
-    case "outlook":
-        return try OutlookClient.sendEmail(to: to, subject: subject, body: body, cc: cc, bcc: bcc)
-    default:
-        return try AppleMailClient.sendEmail(to: to, subject: subject, body: body, cc: cc, bcc: bcc)
-    }
+    return try AppleMailClient.sendEmail(to: to, subject: subject, body: body, cc: cc, bcc: bcc)
 }
 
 func replyToEmail(params: [String: Any]) throws -> [String: Any] {
@@ -178,22 +127,13 @@ func replyToEmail(params: [String: Any]) throws -> [String: Any] {
         throw MailError.confirmRequired
     }
 
-    let client = try resolveClient(preferred: params["client"] as? String)
     let replyAll = params["reply_all"] as? Bool ?? false
-
-    switch client {
-    case "outlook":
-        return try OutlookClient.replyToEmail(id: id, body: body, replyAll: replyAll)
-    default:
-        return try AppleMailClient.replyToEmail(id: id, body: body, replyAll: replyAll)
-    }
+    return try AppleMailClient.replyToEmail(id: id, body: body, replyAll: replyAll)
 }
 
 
 enum MailError: LocalizedError {
     case missingField(String)
-    case clientNotAvailable(String)
-    case unknownClient(String)
     case confirmRequired
     case emptyRecipients(String)
 
@@ -201,10 +141,6 @@ enum MailError: LocalizedError {
         switch self {
         case .missingField(let field):
             return "Missing required field: \(field)"
-        case .clientNotAvailable(let client):
-            return "\(client) is not running. Start it or omit the 'client' parameter to use Apple Mail."
-        case .unknownClient(let client):
-            return "Unknown mail client: \(client). Available: mail, outlook"
         case .confirmRequired:
             return "Send confirmation required. Set confirm_send: true to send the email."
         case .emptyRecipients(let field):

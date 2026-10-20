@@ -8,6 +8,7 @@ import {
   READ_ONLY_ANNOTATIONS,
   DESTRUCTIVE_ANNOTATIONS,
   META_KEYS,
+  withDeclaredParams,
 } from '@speedwave/mcp-shared';
 import { withValidation, ToolResult, validateAll, asRecord, MAX_LENGTHS } from './validation.js';
 import { runCommand } from '../platform-runner.js';
@@ -15,11 +16,8 @@ import { runCommand } from '../platform-runner.js';
 /** Input parameters for the detectMailClients tool (no params required). */
 type DetectMailClientsParams = Record<string, never>;
 
-/** Input parameters for the listMailboxes tool. */
-interface ListMailboxesParams {
-  /** Mail client to use. */
-  client?: string;
-}
+/** Input parameters for the listMailboxes tool (no params required). */
+type ListMailboxesParams = Record<string, never>;
 
 /** Input parameters for the listEmails tool. */
 interface ListEmailsParams {
@@ -27,20 +25,12 @@ interface ListEmailsParams {
   mailbox?: string;
   /** Max emails to return. */
   limit?: number;
-  /** Skip first N emails for pagination. */
-  offset?: number;
-  /** Only return unread emails. */
-  unread_only?: boolean;
-  /** Mail client to use. */
-  client?: string;
 }
 
 /** Input parameters for the getEmail tool. */
 interface GetEmailParams {
   /** Email message ID. */
   id: string;
-  /** Mail client to use. */
-  client?: string;
 }
 
 /** Input parameters for the searchEmails tool. */
@@ -51,8 +41,6 @@ interface SearchEmailsParams {
   mailbox?: string;
   /** Max results to return. */
   limit?: number;
-  /** Mail client to use. */
-  client?: string;
 }
 
 /** Input parameters for the sendEmail tool. */
@@ -67,8 +55,6 @@ interface SendEmailParams {
   cc?: string;
   /** BCC recipient(s), comma-separated. */
   bcc?: string;
-  /** Mail client to use. */
-  client?: string;
   /** Safety check flag that must be true to send. */
   confirm_send: boolean;
 }
@@ -81,22 +67,21 @@ interface ReplyToEmailParams {
   body: string;
   /** Whether to reply to all recipients. */
   reply_all?: boolean;
-  /** Mail client to use. */
-  client?: string;
   /** Safety check flag that must be true to send. */
   confirm_send: boolean;
 }
 
 const detectMailClientsTool: Tool = {
   name: 'detectMailClients',
-  description: 'Detect available mail clients on this device (Apple Mail, Outlook, etc.)',
+  description:
+    'Report the mail clients the mail tools can drive. Apple Mail is the only supported client; an installed Microsoft Outlook is listed as unsupported, with instructions for adding its account to Apple Mail.',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
     [META_KEYS.TIMEOUT_MS]: 30_000,
     [META_KEYS.OS_CATEGORY]: 'mail',
   },
-  keywords: ['os', 'mail', 'email', 'detect', 'clients', 'outlook', 'thunderbird'],
+  keywords: ['os', 'mail', 'email', 'detect', 'clients', 'outlook', 'apple mail'],
   example: 'const { clients } = await os.detectMailClients()',
   inputSchema: {
     type: 'object',
@@ -110,8 +95,15 @@ const detectMailClientsTool: Tool = {
         items: {
           type: 'object',
           properties: {
-            name: { type: 'string', description: 'Client name (e.g., "Apple Mail", "Outlook")' },
-            available: { type: 'boolean' },
+            name: { type: 'string', description: '"Apple Mail" or "Microsoft Outlook"' },
+            supported: {
+              type: 'boolean',
+              description: 'Whether the mail tools can drive this client',
+            },
+            instructions: {
+              type: 'string',
+              description: 'For an unsupported client: how to reach its account through Apple Mail',
+            },
           },
         },
       },
@@ -139,9 +131,7 @@ const listMailboxesTool: Tool = {
   example: 'const { mailboxes } = await os.listMailboxes()',
   inputSchema: {
     type: 'object',
-    properties: {
-      client: { type: 'string', description: 'Mail client to use (auto-detected if omitted)' },
-    },
+    properties: {},
   },
   outputSchema: {
     type: 'object',
@@ -164,12 +154,8 @@ const listMailboxesTool: Tool = {
   },
   inputExamples: [
     {
-      description: 'List all mailboxes (auto-detect client)',
+      description: 'List all mailboxes (no params)',
       input: {},
-    },
-    {
-      description: 'List from specific client',
-      input: { client: 'apple_mail' },
     },
   ],
 };
@@ -194,9 +180,6 @@ const listEmailsTool: Tool = {
           "Mailbox/folder name (default: INBOX). Use the name field from listMailboxes' output.",
       },
       limit: { type: 'number', description: 'Max emails to return (default 10)' },
-      offset: { type: 'number', description: 'Skip first N emails (for pagination)' },
-      unread_only: { type: 'boolean', description: 'Only return unread emails' },
-      client: { type: 'string', description: 'Mail client to use (auto-detected if omitted)' },
     },
   },
   outputSchema: {
@@ -210,12 +193,11 @@ const listEmailsTool: Tool = {
             id: { type: 'string' },
             subject: { type: 'string' },
             sender: { type: 'string' },
-            date: { type: 'string', description: 'ISO8601' },
+            date: { type: 'string', description: 'Date received, as Apple Mail formats it' },
             read: { type: 'boolean' },
           },
         },
       },
-      total: { type: 'number' },
     },
   },
   inputExamples: [
@@ -224,8 +206,8 @@ const listEmailsTool: Tool = {
       input: { limit: 10 },
     },
     {
-      description: 'Full: paginated from specific mailbox',
-      input: { mailbox: 'Archive', limit: 20, offset: 40 },
+      description: 'Full: recent emails of a named mailbox',
+      input: { mailbox: 'Archive', limit: 20 },
     },
   ],
 };
@@ -233,7 +215,7 @@ const listEmailsTool: Tool = {
 const getEmailTool: Tool = {
   name: 'getEmail',
   description:
-    'Get a specific email by ID with full body. On Apple Mail (the default client), only searches the Inbox — ids from other mailboxes are not resolvable. On Outlook (client: "outlook"), any id in the account is resolvable regardless of mailbox.',
+    'Get a specific email by ID with full body. Only searches the Inbox: ids from other mailboxes are not resolvable.',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
@@ -241,38 +223,30 @@ const getEmailTool: Tool = {
     [META_KEYS.OS_CATEGORY]: 'mail',
   },
   keywords: ['os', 'mail', 'email', 'get', 'read', 'detail', 'body', 'content'],
-  example: 'const email = await os.getEmail({ id: "msg-456" })',
+  example: 'const { email } = await os.getEmail({ id: "msg-456" })',
   inputSchema: {
     type: 'object',
     properties: {
       id: {
         type: 'string',
-        description:
-          'Email message ID (must be from the Inbox on Apple Mail; any mailbox on Outlook)',
+        description: 'Email message ID (must be from the Inbox)',
       },
-      client: { type: 'string', description: 'Mail client to use (auto-detected if omitted)' },
     },
     required: ['id'],
   },
   outputSchema: {
     type: 'object',
     properties: {
-      id: { type: 'string' },
-      subject: { type: 'string' },
-      sender: { type: 'string' },
-      to: { type: 'array', items: { type: 'string' } },
-      cc: { type: 'array', items: { type: 'string' } },
-      date: { type: 'string' },
-      body: { type: 'string', description: 'Email body (plain text)' },
-      html_body: { type: 'string', description: 'Email body (HTML)' },
-      attachments: {
-        type: 'array',
-        items: {
-          type: 'object',
-          properties: {
-            name: { type: 'string' },
-            size: { type: 'number' },
-          },
+      email: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          subject: { type: 'string' },
+          sender: { type: 'string' },
+          to: { type: 'array', items: { type: 'string' } },
+          date: { type: 'string', description: 'Date received, as Apple Mail formats it' },
+          read: { type: 'boolean' },
+          body: { type: 'string', description: 'Email body (plain text)' },
         },
       },
     },
@@ -307,7 +281,6 @@ const searchEmailsTool: Tool = {
           "Mailbox/folder name to search (default: Inbox). Use the name field from listMailboxes' output.",
       },
       limit: { type: 'number', description: 'Max results (default 10)' },
-      client: { type: 'string', description: 'Mail client to use (auto-detected if omitted)' },
     },
     required: ['query'],
   },
@@ -322,12 +295,10 @@ const searchEmailsTool: Tool = {
             id: { type: 'string' },
             subject: { type: 'string' },
             sender: { type: 'string' },
-            date: { type: 'string' },
-            snippet: { type: 'string', description: 'Matching text snippet' },
+            date: { type: 'string', description: 'Date received, as Apple Mail formats it' },
           },
         },
       },
-      total: { type: 'number' },
     },
   },
   inputExamples: [
@@ -362,7 +333,6 @@ const sendEmailTool: Tool = {
       body: { type: 'string', description: 'Email body (plain text)' },
       cc: { type: 'string', description: 'CC recipient(s), comma-separated' },
       bcc: { type: 'string', description: 'BCC recipient(s), comma-separated' },
-      client: { type: 'string', description: 'Mail client to use (auto-detected if omitted)' },
       confirm_send: {
         type: 'boolean',
         description: 'Must be true to actually send (safety check)',
@@ -373,8 +343,7 @@ const sendEmailTool: Tool = {
   outputSchema: {
     type: 'object',
     properties: {
-      status: { type: 'string', description: '"sent" or "draft_created"' },
-      message_id: { type: 'string' },
+      status: { type: 'string', description: '"sent"' },
     },
   },
   inputExamples: [
@@ -404,7 +373,7 @@ const sendEmailTool: Tool = {
 const replyToEmailTool: Tool = {
   name: 'replyToEmail',
   description:
-    'Reply to an existing email. Requires confirm_send=true as safety check. On Apple Mail (the default client), only searches the Inbox — ids from other mailboxes are not resolvable. On Outlook (client: "outlook"), any id in the account is resolvable regardless of mailbox.',
+    'Reply to an existing email. Requires confirm_send=true as safety check. Only searches the Inbox: ids from other mailboxes are not resolvable.',
   annotations: DESTRUCTIVE_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
@@ -419,12 +388,10 @@ const replyToEmailTool: Tool = {
     properties: {
       id: {
         type: 'string',
-        description:
-          'Email message ID to reply to (must be from the Inbox on Apple Mail; any mailbox on Outlook)',
+        description: 'Email message ID to reply to (must be from the Inbox)',
       },
       body: { type: 'string', description: 'Reply body (plain text)' },
       reply_all: { type: 'boolean', description: 'Reply to all recipients (default false)' },
-      client: { type: 'string', description: 'Mail client to use (auto-detected if omitted)' },
       confirm_send: {
         type: 'boolean',
         description: 'Must be true to actually send (safety check)',
@@ -436,7 +403,6 @@ const replyToEmailTool: Tool = {
     type: 'object',
     properties: {
       status: { type: 'string', description: '"sent"' },
-      message_id: { type: 'string' },
     },
   },
   inputExamples: [
@@ -469,15 +435,10 @@ export async function handleDetectMailClients(
 
 /**
  * Lists mail accounts and mailboxes/folders.
- * @param params - Tool input parameters.
+ * @param _params - Unused tool input parameters.
  */
-export async function handleListMailboxes(params: ListMailboxesParams): Promise<ToolResult> {
-  const p = asRecord(params);
-  const v = validateAll(p, {
-    strings: [['client', MAX_LENGTHS.short, false]],
-  });
-  if (!v.valid) return v.error;
-  const result = await runCommand('mail', 'list_mailboxes', p);
+export async function handleListMailboxes(_params: ListMailboxesParams): Promise<ToolResult> {
+  const result = await runCommand('mail', 'list_mailboxes');
   return { success: true, data: result.parsed };
 }
 
@@ -488,15 +449,8 @@ export async function handleListMailboxes(params: ListMailboxesParams): Promise<
 export async function handleListEmails(params: ListEmailsParams): Promise<ToolResult> {
   const p = asRecord(params);
   const v = validateAll(p, {
-    booleans: ['unread_only'],
-    strings: [
-      ['mailbox', MAX_LENGTHS.short, false],
-      ['client', MAX_LENGTHS.short, false],
-    ],
-    numbers: [
-      ['limit', 1, 10_000],
-      ['offset', 0, 1_000_000],
-    ],
+    strings: [['mailbox', MAX_LENGTHS.short, false]],
+    numbers: [['limit', 1, 10_000]],
   });
   if (!v.valid) return v.error;
   const result = await runCommand('mail', 'list_emails', p);
@@ -511,10 +465,7 @@ export async function handleGetEmail(params: GetEmailParams): Promise<ToolResult
   const p = asRecord(params);
   const v = validateAll(p, {
     required: ['id'],
-    strings: [
-      ['id', MAX_LENGTHS.id, false],
-      ['client', MAX_LENGTHS.short, false],
-    ],
+    strings: [['id', MAX_LENGTHS.id, false]],
   });
   if (!v.valid) return v.error;
   const result = await runCommand('mail', 'get_email', p);
@@ -532,7 +483,6 @@ export async function handleSearchEmails(params: SearchEmailsParams): Promise<To
     strings: [
       ['query', MAX_LENGTHS.short, false],
       ['mailbox', MAX_LENGTHS.short, false],
-      ['client', MAX_LENGTHS.short, false],
     ],
     numbers: [['limit', 1, 10_000]],
   });
@@ -566,7 +516,6 @@ export async function handleSendEmail(params: SendEmailParams): Promise<ToolResu
       ['body', MAX_LENGTHS.body, true],
       ['cc', MAX_LENGTHS.short, false],
       ['bcc', MAX_LENGTHS.short, false],
-      ['client', MAX_LENGTHS.short, false],
     ],
   });
   if (!v.valid) return v.error;
@@ -596,7 +545,6 @@ export async function handleReplyToEmail(params: ReplyToEmailParams): Promise<To
     strings: [
       ['id', MAX_LENGTHS.id, false],
       ['body', MAX_LENGTHS.body, true],
-      ['client', MAX_LENGTHS.short, false],
     ],
   });
   if (!v.valid) return v.error;
@@ -607,12 +555,24 @@ export async function handleReplyToEmail(params: ReplyToEmailParams): Promise<To
 /** Creates tool definitions for all mail operations. */
 export function createMailTools(): ToolDefinition[] {
   return [
-    { tool: detectMailClientsTool, handler: withValidation(handleDetectMailClients) },
-    { tool: listMailboxesTool, handler: withValidation(handleListMailboxes) },
-    { tool: listEmailsTool, handler: withValidation(handleListEmails) },
-    { tool: getEmailTool, handler: withValidation(handleGetEmail) },
-    { tool: searchEmailsTool, handler: withValidation(handleSearchEmails) },
-    { tool: sendEmailTool, handler: withValidation(handleSendEmail) },
-    { tool: replyToEmailTool, handler: withValidation(handleReplyToEmail) },
+    declared(detectMailClientsTool, handleDetectMailClients),
+    declared(listMailboxesTool, handleListMailboxes),
+    declared(listEmailsTool, handleListEmails),
+    declared(getEmailTool, handleGetEmail),
+    declared(searchEmailsTool, handleSearchEmails),
+    declared(sendEmailTool, handleSendEmail),
+    declared(replyToEmailTool, handleReplyToEmail),
   ];
+}
+
+/**
+ * Pairs a tool with its handler, rejecting any argument the tool's inputSchema does not declare.
+ * @param tool - Tool definition.
+ * @param handler - Handler returning a ToolResult.
+ */
+function declared<T>(
+  tool: Tool,
+  handler: (params: T) => ToolResult | Promise<ToolResult>
+): ToolDefinition {
+  return { tool, handler: withDeclaredParams(tool, withValidation(handler)) };
 }

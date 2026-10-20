@@ -2,12 +2,12 @@
 
 Four Swift CLI binaries providing macOS-specific OS integration via EventKit and AppleScript:
 
-| Directory    | Binary          | Framework   | Purpose                   |
-| ------------ | --------------- | ----------- | ------------------------- |
-| `reminders/` | `reminders-cli` | EventKit    | Reminders CRUD            |
-| `calendar/`  | `calendar-cli`  | EventKit    | Calendar events CRUD      |
-| `mail/`      | `mail-cli`      | AppleScript | Apple Mail / Outlook read |
-| `notes/`     | `notes-cli`     | AppleScript | Apple Notes CRUD          |
+| Directory    | Binary          | Framework   | Purpose                  |
+| ------------ | --------------- | ----------- | ------------------------ |
+| `reminders/` | `reminders-cli` | EventKit    | Reminders CRUD           |
+| `calendar/`  | `calendar-cli`  | EventKit    | Calendar events CRUD     |
+| `mail/`      | `mail-cli`      | AppleScript | Apple Mail read and send |
+| `notes/`     | `notes-cli`     | AppleScript | Apple Notes CRUD         |
 
 Each directory is a standalone Swift Package (`Package.swift`). Build all with:
 
