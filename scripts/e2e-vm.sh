@@ -67,10 +67,10 @@ PROBE
     # shellcheck disable=SC2086
     ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- echo ready" >/dev/null 2>&1 || ok=0
     if [ "$ok" -eq 1 ]; then
-        echo 'if (-not (Get-Command node -ErrorAction SilentlyContinue)) { exit 1 }; if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { exit 1 }; if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) { exit 1 }; $p = [System.Environment]::GetEnvironmentVariable("LIBCLANG_PATH","Machine"); if (-not $p -or -not (Test-Path "$p\libclang.dll")) { exit 1 }; $v = [System.Environment]::GetEnvironmentVariable("VULKAN_SDK","Machine"); if (-not $v -or -not (Test-Path "$v\runtime\x64\vulkan-1.dll")) { exit 1 }' | windows_ps >/dev/null 2>&1 || ok=0
+        echo 'if (-not (Get-Command node -ErrorAction SilentlyContinue)) { exit 1 }; if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { exit 1 }; if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) { exit 1 }; python --version *> $null; if ($LASTEXITCODE -ne 0) { exit 1 }; $p = [System.Environment]::GetEnvironmentVariable("LIBCLANG_PATH","Machine"); if (-not $p -or -not (Test-Path "$p\libclang.dll")) { exit 1 }; $v = [System.Environment]::GetEnvironmentVariable("VULKAN_SDK","Machine"); if (-not $v -or -not (Test-Path "$v\runtime\x64\vulkan-1.dll")) { exit 1 }' | windows_ps >/dev/null 2>&1 || ok=0
     fi
     if [ "$ok" -eq 1 ]; then
-        echo "[windows] Provisioning: OK (WSL2 + node + cargo + cmake + libclang + Vulkan SDK found)"
+        echo "[windows] Provisioning: OK (WSL2 + node + cargo + cmake + python + libclang + Vulkan SDK found)"
         return
     fi
     if [ "${CI:-}" = "true" ]; then

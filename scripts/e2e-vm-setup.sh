@@ -203,6 +203,17 @@ Invoke-Installer "$env:TEMP\rustup-init.exe" '-y'
 Remove-Item "$env:TEMP\rustup-init.exe"
 SCRIPT
 
+    echo "[windows] Installing Python (PII NER model converter)..."
+    windows_ps <<'SCRIPT'
+$ErrorActionPreference = 'Stop'
+$pythonDir = 'C:\Program Files\Python312'
+if (Test-Path "$pythonDir\python.exe") { Write-Host "Python already installed: $pythonDir"; exit 0 }
+Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe' -OutFile "$env:TEMP\python-installer.exe"
+Invoke-Installer "$env:TEMP\python-installer.exe" '/quiet','InstallAllUsers=1','PrependPath=1','Include_test=0'
+Remove-Item "$env:TEMP\python-installer.exe"
+if (-not (Test-Path "$pythonDir\python.exe")) { Write-Error "Python installation completed but python.exe not found at $pythonDir"; exit 1 }
+SCRIPT
+
     echo "[windows] Installing Ninja (cmake-crate generator for whisper-rs-sys)..."
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = 'Stop'
@@ -277,6 +288,7 @@ Write-Host "Rust: $(rustc --version)"
 Write-Host "Cargo: $(cargo --version)"
 Write-Host "tauri-cli: $(cargo tauri --version 2>&1)"
 Write-Host "cmake: $(cmake --version 2>&1 | Select-Object -First 1)"
+Write-Host "python: $(python --version 2>&1)"
 Write-Host "LIBCLANG_PATH: $([System.Environment]::GetEnvironmentVariable('LIBCLANG_PATH','Machine'))"
 Write-Host "VULKAN_SDK: $([System.Environment]::GetEnvironmentVariable('VULKAN_SDK','Machine'))"
 Write-Host "Arch: $env:PROCESSOR_ARCHITECTURE"
