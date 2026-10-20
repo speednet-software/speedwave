@@ -73,8 +73,7 @@ $packages = @(
     @{ Name = 'cmake'; Have = { [bool](Get-Command cmake -ErrorAction SilentlyContinue) } },
     @{ Name = 'llvm'; Have = { Test-Path (Join-Path $llvmBin 'clang.exe') } },
     @{ Name = 'ninja'; Have = { [bool](Get-Command ninja -ErrorAction SilentlyContinue) } },
-    @{ Name = 'python'; Have = { Test-Python3 };
-       Hint = 'make dev runs crates/pii-ner/tools/fetch_and_convert.py -- a Microsoft Store python stub in WindowsApps does not count.' },
+    @{ Name = 'python'; Have = { Test-Python3 } },
     @{ Name = 'visualstudio2022buildtools'; Have = { Test-Path $vsBase } },
     @{ Name = 'visualstudio2022-workload-vctools'; Have = { Test-Path $msvcRoot } }
 )
