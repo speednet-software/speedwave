@@ -42,7 +42,12 @@ HOST_REPO_DIR="${SPEEDWAVE_REPO_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 
 ensure_provisioned_windows() {
-    local ok=1
+    local ok=1 sac
+    sac=$(echo '(Get-MpComputerStatus).SmartAppControlState' | windows_ps 2>/dev/null | tr -d '\r') || sac=""
+    if [ "$sac" = "On" ]; then
+        echo "[windows] ERROR: Smart App Control is on and blocks every unsigned build script; an administrator sets VerifiedAndReputablePolicyState to 0 and restarts the rig (RELEASING.md)" >&2
+        return 1
+    fi
     # shellcheck disable=SC2086
     ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- echo ready" >/dev/null 2>&1 || ok=0
     if [ "$ok" -eq 1 ]; then

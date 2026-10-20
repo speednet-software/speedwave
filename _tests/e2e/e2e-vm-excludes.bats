@@ -136,6 +136,15 @@ _load_ensure_provisioned_windows() {
     [ ! -e "$BATS_TEST_TMPDIR/setup-called" ]
 }
 
+@test "ensure_provisioned_windows fails before setup while Smart App Control is on" {
+    _load_ensure_provisioned_windows
+    windows_ps() { if grep -q SmartAppControlState; then echo On; fi; }
+    CI= run ensure_provisioned_windows
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Smart App Control is on"* ]]
+    [ ! -e "$BATS_TEST_TMPDIR/setup-called" ]
+}
+
 _run_installer() {
     command -v pwsh >/dev/null || skip "pwsh not installed"
     eval "$(sed -n "/^SETUP_PS_PRELUDE='/,/^}'\$/p" "$SETUP")"
