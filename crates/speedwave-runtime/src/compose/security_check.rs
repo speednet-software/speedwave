@@ -427,6 +427,14 @@ pub enum SecurityRule {
     ))]
     ClaudeWorkspaceMount,
 
+    /// The project's egress-less networks are `external: true` under their own names (pre-created
+    /// `--internal`; compose ignores `internal:`); only their worker and the hub join one.
+    #[strum(to_string = "EGRESS_LESS_NETWORK_EXTERNAL")]
+    #[strum(props(
+        description = "The project's egress-less networks are external (pre-created --internal) and only their worker and the hub join them"
+    ))]
+    EgressLessNetworkExternal,
+
     #[strum(to_string = "FILE_SECURITY_VIOLATION")]
     #[strum(props(description = "Host file permissions and ownership are correct"))]
     /// Host file/dir has wrong mode bits or UID (Unix-only, skipped on Windows).
@@ -595,6 +603,7 @@ impl SecurityCheck {
             Self::check_audit_mount(&doc, data_dir, project, "mcp-hub"),
             Self::check_no_policy_or_audit_mount_on_claude(&doc, data_dir, project),
             Self::check_claude_workspace_mount(&doc, expected_paths, data_dir, project),
+            Self::check_egress_less_networks(&doc, project),
             Self::check_file_security(data_dir, project),
         ]
         .into_iter()
@@ -984,6 +993,115 @@ impl SecurityCheck {
                     remediation:
                         "Remove the 'ports:' section. Hub and workers communicate over the internal Docker network.",
                 });
+            }
+        }
+        violations
+    }
+
+    fn check_egress_less_networks(
+        doc: &serde_yaml_ng::Value,
+        project: &str,
+    ) -> Vec<SecurityViolation> {
+        const REMEDIATION: &str = "Run render_compose() again: egress-less networks are declared \
+             `external: true` and pre-created by the runtime with `nerdctl network create --internal`.";
+        let owners = super::networks::egress_less_network_owners(project);
+        let is_own = |net: &str| owners.iter().any(|(name, _)| name == net);
+        let mut violations = Vec::new();
+        let declared = doc.get("networks").and_then(|n| n.as_mapping());
+        let mut egress_less_keys: Vec<String> = Vec::new();
+
+        for (key, decl) in declared.into_iter().flatten() {
+            let Some(key) = key.as_str() else {
+                continue;
+            };
+            let name = decl.get("name").and_then(|n| n.as_str());
+            let egress_less = [Some(key), name]
+                .into_iter()
+                .flatten()
+                .any(|net| is_own(net) || super::networks::is_egress_less_network(net));
+            if !egress_less {
+                continue;
+            }
+            egress_less_keys.push(key.to_string());
+            if !is_own(key) {
+                violations.push(SecurityViolation::new(
+                    key,
+                    SecurityRule::EgressLessNetworkExternal,
+                    format!(
+                        "network '{key}' refers to an egress-less network that is not one of \
+                         project {project}'s: expected one of {:?}",
+                        owners.iter().map(|(name, _)| name).collect::<Vec<_>>()
+                    ),
+                    REMEDIATION,
+                ));
+                continue;
+            }
+            if !super::networks::declares_external(decl) {
+                violations.push(SecurityViolation::new(
+                    key,
+                    SecurityRule::EgressLessNetworkExternal,
+                    format!(
+                        "egress-less network '{key}' is not declared `external: true`; nerdctl \
+                         compose ignores `internal:` and would create it with a gateway"
+                    ),
+                    REMEDIATION,
+                ));
+            }
+            if let Some(name) = decl.get("name").filter(|n| n.as_str() != Some(key)) {
+                violations.push(SecurityViolation::new(
+                    key,
+                    SecurityRule::EgressLessNetworkExternal,
+                    format!("egress-less network '{key}' points at another network: {name:?}"),
+                    REMEDIATION,
+                ));
+            }
+        }
+
+        let services = get_services(doc).unwrap_or_default();
+        for (service_name, service) in &services {
+            for net in service_network_refs(service) {
+                let egress_less = egress_less_keys.contains(&net)
+                    || is_own(&net)
+                    || super::networks::is_egress_less_network(&net);
+                let owner = owners
+                    .iter()
+                    .find(|(name, _)| *name == net)
+                    .map(|(_, o)| *o);
+                let may_join = owner == Some(service_name.as_str())
+                    || (service_name == "mcp-hub" && is_own(&net));
+                if egress_less && !may_join {
+                    violations.push(SecurityViolation::new(
+                        service_name,
+                        SecurityRule::EgressLessNetworkExternal,
+                        format!(
+                            "{service_name} is attached to the egress-less network '{net}', \
+                             which only its own worker and mcp-hub may join"
+                        ),
+                        REMEDIATION,
+                    ));
+                }
+            }
+        }
+
+        for (network, worker) in &owners {
+            let Some((_, service)) = services.iter().find(|(n, _)| n == worker) else {
+                continue;
+            };
+            let attached = service_network_refs(service);
+            let declared_external = declared
+                .and_then(|m| m.get(network.as_str()))
+                .is_some_and(super::networks::declares_external);
+            let escapes = attached.iter().any(|net| net != network);
+            if attached.is_empty() || escapes || !declared_external {
+                violations.push(SecurityViolation::new(
+                    *worker,
+                    SecurityRule::EgressLessNetworkExternal,
+                    format!(
+                        "{worker} must be attached only to its external egress-less network \
+                         '{network}'; attached: {attached:?}"
+                    ),
+                    REMEDIATION,
+                ));
             }
         }
         violations
@@ -2244,6 +2362,20 @@ fn is_plugin_service(service: &serde_yaml_ng::Value) -> bool {
         .and_then(|l| l.get("speedwave.plugin-service"))
         .and_then(|v| v.as_str())
         .is_some_and(|s| s == "true")
+}
+
+fn service_network_refs(service: &serde_yaml_ng::Value) -> Vec<String> {
+    match service.get("networks") {
+        Some(serde_yaml_ng::Value::Sequence(seq)) => seq
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect(),
+        Some(serde_yaml_ng::Value::Mapping(map)) => map
+            .keys()
+            .filter_map(|k| k.as_str().map(str::to_string))
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// Helper: extract services as Vec<(name, &Value)> from a compose YAML doc

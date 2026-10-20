@@ -341,5 +341,5 @@ networks:
   ${NETWORK_NAME}:
     driver: bridge
   ${NETWORK_NAME}_office:
-    driver: bridge
-    internal: true
+    name: ${NETWORK_NAME}_office
+    external: true

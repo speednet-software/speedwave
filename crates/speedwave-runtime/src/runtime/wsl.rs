@@ -202,6 +202,17 @@ impl WslRuntime {
         let _ = run_root("chmod", &["chmod", "-R", "u+rwX", &path]);
     }
 
+    fn network_command(&self, args: &[&str]) -> anyhow::Result<String> {
+        let mut argv = vec!["nerdctl"];
+        argv.extend_from_slice(args);
+        let remote_cmd = super::shell_quote_argv(&argv);
+        self.runner.run_bounded(
+            "wsl.exe",
+            &["-d", self.distro(), "--", "sh", "-c", &remote_cmd],
+            consts::CONTAINER_EXEC_PROBE_TIMEOUT,
+        )
+    }
+
     fn run_bounded_up(&self, up_argv: &[String]) -> anyhow::Result<()> {
         let args: Vec<&str> = up_argv.iter().map(String::as_str).collect();
         self.run_in_distro(&args, false)
@@ -653,6 +664,20 @@ impl ContainerRuntime for WslRuntime {
         let result = self.up_with_heal(project, &compose_file, super::UpMode::Service(service));
         self.ensure_claude_home_writable(project);
         result
+    }
+
+    fn ensure_internal_network(&self, name: &str, project: &str) -> anyhow::Result<()> {
+        super::networks::ensure_internal_network_with(name, project, &|args| {
+            self.network_command(args)
+        })
+    }
+
+    fn remove_network(&self, name: &str) -> anyhow::Result<()> {
+        super::networks::remove_network_with(name, &|args| self.network_command(args))
+    }
+
+    fn network_exists(&self, name: &str) -> anyhow::Result<bool> {
+        super::networks::network_exists_with(name, &|args| self.network_command(args))
     }
 
     fn compose_validate(&self, project: &str) -> anyhow::Result<()> {
@@ -3266,5 +3291,98 @@ mod tests {
             assert_eq!(calls[2].1, vec!["--terminate", "Speedwave-test"]);
             assert_eq!(calls[3].1, vec!["--unregister", "Speedwave-test"]);
         }
+    }
+
+    fn network_script(
+        answers: &[Result<&str, &str>],
+    ) -> (WslRuntime, crate::runtime::networks::tests::ScriptedCalls) {
+        let (runner, calls) =
+            crate::runtime::networks::tests::ScriptedRunner::new(answers, |_| None);
+        (WslRuntime::with_runner(Box::new(runner)), calls)
+    }
+
+    fn distro_network_key(argv: &[&str]) -> String {
+        let mut full = vec!["nerdctl"];
+        full.extend_from_slice(argv);
+        format!(
+            "wsl.exe -d {} -- sh -c {}",
+            consts::wsl_distro_name(),
+            crate::runtime::shell_quote_argv(&full)
+        )
+    }
+
+    #[test]
+    fn ensure_internal_network_creates_it_through_the_distro_bounded() {
+        use crate::runtime::networks::tests::{INTERNAL_INSPECT, NOT_FOUND};
+        let name = "speedwave_acme_network_office";
+        let (rt, calls) = network_script(&[Err(NOT_FOUND), Ok(name), Ok(INTERNAL_INSPECT)]);
+        rt.ensure_internal_network(name, "acme").unwrap();
+        let calls = calls.lock().unwrap();
+        let keys: Vec<String> = calls.iter().map(|(k, _)| k.clone()).collect();
+        let inspect = distro_network_key(&["network", "inspect", "--mode=native", name]);
+        let project_label = "com.docker.compose.project=acme";
+        let network_label = format!("com.docker.compose.network={name}");
+        let create = distro_network_key(&[
+            "network",
+            "create",
+            "--internal",
+            "--label",
+            project_label,
+            "--label",
+            &network_label,
+            name,
+        ]);
+        assert_eq!(keys, vec![inspect.clone(), create, inspect]);
+        assert!(!keys.iter().any(|k| k.contains('$')), "{keys:?}");
+        assert!(calls
+            .iter()
+            .all(|(_, t)| *t == consts::CONTAINER_EXEC_PROBE_TIMEOUT));
+    }
+
+    #[test]
+    fn ensure_internal_network_surfaces_a_wsl_transport_failure() {
+        let (rt, _) = network_script(&[Err("wsl.exe failed: Wsl/Service/E_UNEXPECTED")]);
+        let err = rt
+            .ensure_internal_network("speedwave_acme_network_office", "acme")
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("E_UNEXPECTED"), "{err:#}");
+    }
+
+    #[test]
+    fn network_exists_inspects_in_the_distro_bounded() {
+        use crate::runtime::networks::tests::{BRIDGED_INSPECT, NOT_FOUND};
+        let name = "acme_speedwave_acme_network_office";
+        let (rt, calls) = network_script(&[Ok(BRIDGED_INSPECT), Err(NOT_FOUND)]);
+        assert!(rt.network_exists(name).unwrap());
+        assert!(!rt.network_exists(name).unwrap());
+        let calls = calls.lock().unwrap();
+        let inspect = distro_network_key(&["network", "inspect", "--mode=native", name]);
+        assert_eq!(
+            calls.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
+            vec![inspect.clone(), inspect]
+        );
+        assert!(calls
+            .iter()
+            .all(|(_, t)| *t == consts::CONTAINER_EXEC_PROBE_TIMEOUT));
+    }
+
+    #[test]
+    fn network_exists_surfaces_a_wsl_transport_failure() {
+        let (rt, _) = network_script(&[Err("wsl.exe failed: Wsl/Service/E_UNEXPECTED")]);
+        let err = rt
+            .network_exists("acme_speedwave_acme_network_office")
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("E_UNEXPECTED"), "{err:#}");
+    }
+
+    #[test]
+    fn remove_network_runs_nerdctl_network_rm_in_the_distro() {
+        let name = "speedwave_acme_network_office";
+        let (rt, calls) = network_script(&[Ok(name)]);
+        rt.remove_network(name).unwrap();
+        assert_eq!(
+            calls.lock().unwrap()[0].0,
+            distro_network_key(&["network", "rm", name])
+        );
     }
 }
