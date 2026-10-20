@@ -213,8 +213,9 @@ const AUTH_FAILURE_MESSAGE = withSetupGuidance(
   'Slack authentication failed. Reconnect Slack in Speedwave Desktop (Integrations → Slack).'
 );
 const MISSING_SCOPE_MESSAGE = withSetupGuidance(
-  'Permission denied: the Slack sign-in lacks a newly required permission. ' +
-    'Re-authorise Slack in Speedwave Desktop (Integrations → Slack) and retry.'
+  'Permission denied: the Slack sign-in lacks a required permission. ' +
+    'If this was file sending, ask the user to click Enable for file sending in the Slack card ' +
+    '(Speedwave Desktop, Integrations, Slack); otherwise re-authorise Slack there and retry.'
 );
 const MALFORMED_FIELD_MESSAGE =
   'Slack rejected the request: a required field was missing or malformed (e.g. empty message text).';

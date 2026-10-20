@@ -55,6 +55,7 @@ mod redmine_api_cmd;
 mod retry_cmd;
 mod session_model;
 mod setup_wizard;
+mod slack_features;
 mod slack_oauth_cmd;
 mod slash_cmd;
 mod system_settings_cmd;
@@ -1281,6 +1282,7 @@ fn main() {
             plugin_oauth_cmd::cancel_plugin_oauth,
             slack_oauth_cmd::start_slack_oauth,
             slack_oauth_cmd::cancel_slack_oauth,
+            slack_features::get_slack_features,
             plugin_oauth_cmd::forget_plugin_oauth,
             redmine_api_cmd::validate_redmine_credentials,
             redmine_api_cmd::fetch_redmine_enumerations,

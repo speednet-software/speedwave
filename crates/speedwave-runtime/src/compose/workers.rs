@@ -52,7 +52,7 @@ fn apply_credentials_digests(yaml: &str, tokens_root: &std::path::Path) -> anyho
 
 /// Machine-managed OAuth artifacts — change on every refresh, must NOT trigger recreate.
 /// Contract (ADR-060/071): add here any new machine-written file in the token mount.
-const VOLATILE_CREDENTIAL_FILES: &[&str] = &["access_token"];
+const VOLATILE_CREDENTIAL_FILES: &[&str] = &["access_token", crate::consts::SLACK_FEATURES_FILE];
 
 /// `writeRestrictedSecret` pattern: `<name>.tmp.<pid>.<rand>` — exclude mid-rename files.
 fn is_write_in_progress(name: &std::ffi::OsStr) -> bool {
@@ -615,6 +615,30 @@ mod credentials_digest_tests {
             env_of(&before, "mcp-slack"),
             env_of(&after, "mcp-slack"),
             "access_token (volatile) must not change the digest either"
+        );
+    }
+
+    #[test]
+    fn slack_features_file_does_not_change_digest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tokens = tmp.path().join("tokens");
+        let slack_dir = tokens.join("slack");
+        std::fs::create_dir_all(&slack_dir).unwrap();
+        std::fs::write(slack_dir.join("bot_token"), "secret-A").unwrap();
+        let before = apply_credentials_digests(YAML, &tokens).unwrap();
+        assert!(env_of(&before, "mcp-slack").is_some());
+
+        std::fs::write(
+            slack_dir.join(crate::consts::SLACK_FEATURES_FILE),
+            r#"{"enabled":["file_upload"]}"#,
+        )
+        .unwrap();
+
+        let after = apply_credentials_digests(YAML, &tokens).unwrap();
+        assert_eq!(
+            env_of(&before, "mcp-slack"),
+            env_of(&after, "mcp-slack"),
+            "enabling a Slack feature must not recreate the worker"
         );
     }
 }

@@ -123,6 +123,12 @@ describe('slack client', () => {
       }
     });
 
+    it('points a missing_scope error at the file sending switch in the Slack card', () => {
+      const message = formatSlackError({ data: { error: 'missing_scope' } });
+      expect(message).toContain('click Enable for file sending');
+      expect(message).toContain('Speedwave Desktop, Integrations, Slack');
+    });
+
     it('formats channel not found error', () => {
       const error = { data: { error: 'channel_not_found' } };
       const message = formatSlackError(error);

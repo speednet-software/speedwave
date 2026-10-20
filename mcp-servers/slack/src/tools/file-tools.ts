@@ -18,6 +18,7 @@ import {
   MAX_UPLOAD_BYTES,
   MAX_UPLOAD_FILES,
 } from '../client.js';
+import { SLACK_FEATURE_IDS, featureNotEnabledResult, isFeatureEnabled } from '../features.js';
 
 interface GetFileContentParams {
   file: string;
@@ -112,7 +113,7 @@ const downloadFileTool: Tool = {
 
 const uploadFileTool: Tool = {
   name: 'uploadFile',
-  description: `Upload 1 to ${MAX_UPLOAD_FILES} files from /workspace to a Slack channel, DM or thread as the signed-in user (their name and avatar), all into the same target with one comment. Files are streamed, up to ${MAX_UPLOAD_BYTES / 1000 ** 3} GB each. One call has about 10 minutes, so split large sets over several calls. Files outside /workspace (e.g. /tmp, the home directory) must first be copied under /workspace/.speedwave/slack-out/. Pass \`thread_ts\` copied verbatim from getChannelMessages/getThreadMessages to post into that thread. If any file fails, nothing is shared. Needs the files:write scope: a missing_scope error means the user must re-authorise Slack in Speedwave Desktop. Irreversible and instantly visible: the user must confirm the recipient, the file list and the comment in the current conversation before calling.`,
+  description: `Upload 1 to ${MAX_UPLOAD_FILES} files from /workspace to a Slack channel, DM or thread as the signed-in user (their name and avatar), all into the same target with one comment. Files are streamed, up to ${MAX_UPLOAD_BYTES / 1000 ** 3} GB each. One call has about 10 minutes, so split large sets over several calls. Files outside /workspace (e.g. /tmp, the home directory) must first be copied under /workspace/.speedwave/slack-out/. Pass \`thread_ts\` copied verbatim from getChannelMessages/getThreadMessages to post into that thread. If any file fails, nothing is shared. File sending is an opt-in feature (files:write scope): when it is not enabled the call fails before any Slack request and the user must click Enable for file sending in Speedwave Desktop, Integrations, Slack. A missing_scope error means the same. Irreversible and instantly visible: the user must confirm the recipient, the file list and the comment in the current conversation before calling.`,
   inputSchema: {
     type: 'object',
     properties: {
@@ -225,6 +226,9 @@ export async function handleUploadFile(
   clients: SlackClients,
   params: UploadFileParams
 ): Promise<ToolResult> {
+  if (!(await isFeatureEnabled(SLACK_FEATURE_IDS.fileUpload))) {
+    return featureNotEnabledResult(SLACK_FEATURE_IDS.fileUpload, 'uploadFile');
+  }
   try {
     const result = await uploadFile(clients, params);
     return { success: true, data: result };

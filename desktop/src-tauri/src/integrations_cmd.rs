@@ -17,7 +17,7 @@ fn required_scopes_for(service: &str) -> Option<Vec<String>> {
     match service {
         "sharepoint" => Some(sharepoint_required_scopes()),
         "slack" => Some(
-            speedwave_runtime::consts::SLACK_OAUTH_USER_SCOPES
+            speedwave_runtime::consts::SLACK_OAUTH_BASE_SCOPES
                 .iter()
                 .map(|s| s.to_lowercase())
                 .collect(),
@@ -1605,7 +1605,7 @@ mod tests {
 
     /// Every currently-required slack scope, as Slack echoes them (SSOT-derived).
     fn all_slack_scopes() -> Vec<&'static str> {
-        speedwave_runtime::consts::SLACK_OAUTH_USER_SCOPES.to_vec()
+        speedwave_runtime::consts::SLACK_OAUTH_BASE_SCOPES.to_vec()
     }
 
     /// The pre-DM grant (8 scopes, shipped before im/mpim support). Deliberately
@@ -1633,6 +1633,40 @@ mod tests {
         let now = chrono::Utc::now().to_rfc3339();
         write_slack_state_for_detect(tmp.path(), &all_slack_scopes(), &now);
         assert!(detect_oauth_action_required_in(tmp.path(), "p", "slack").is_none());
+    }
+
+    #[test]
+    fn detect_oauth_action_required_slack_none_for_grant_without_any_feature_scope() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let granted = all_slack_scopes();
+        assert!(!granted.contains(&"files:write"));
+        write_slack_state_for_detect(tmp.path(), &granted, &now);
+        assert!(detect_oauth_action_required_in(tmp.path(), "p", "slack").is_none());
+    }
+
+    #[test]
+    fn detect_oauth_action_required_slack_none_when_a_feature_is_enabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut granted = all_slack_scopes();
+        granted.push("files:write");
+        write_slack_state_for_detect(tmp.path(), &granted, &now);
+        assert!(detect_oauth_action_required_in(tmp.path(), "p", "slack").is_none());
+    }
+
+    #[test]
+    fn detect_oauth_action_required_slack_some_when_a_base_scope_is_missing_despite_a_feature() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut granted = all_slack_scopes();
+        granted.retain(|s| *s != "im:write");
+        granted.push("files:write");
+        write_slack_state_for_detect(tmp.path(), &granted, &now);
+        assert_eq!(
+            detect_oauth_action_required_in(tmp.path(), "p", "slack"),
+            Some("scope_mismatch".to_string())
+        );
     }
 
     #[test]

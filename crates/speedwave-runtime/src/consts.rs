@@ -484,9 +484,10 @@ pub const GITHUB_OAUTH_SCOPES: &str = "repo read:user";
 /// rotation, shared across all users. See ADR-071.
 pub const SLACK_OAUTH_CLIENT_ID: &str = "11058760208.11311852745015";
 
-/// Slack user scopes (`user_scope` — never bot scopes). Derived from the
-/// `mcp-slack` worker surface; must match the app's User Token Scopes.
-pub const SLACK_OAUTH_USER_SCOPES: &[&str] = &[
+/// Slack base user scopes (`user_scope`, never bot scopes): required for the
+/// integration to work, so a grant missing one raises the re-authorise banner.
+/// Derived from the `mcp-slack` worker surface; must match the app's User Token Scopes.
+pub const SLACK_OAUTH_BASE_SCOPES: &[&str] = &[
     "chat:write",
     "channels:read",
     "groups:read",
@@ -501,8 +502,35 @@ pub const SLACK_OAUTH_USER_SCOPES: &[&str] = &[
     "users:read",
     "users:read.email",
     "files:read",
-    "files:write",
 ];
+
+/// Opt-in Slack capability backed by extra user scopes. Never part of the banner check:
+/// the user enables it from the Slack card, and a refused enable keeps the existing grant.
+pub struct SlackFeature {
+    /// Stable id: Desktop command parameter, UI key, and the entry in [`SLACK_FEATURES_FILE`].
+    pub id: &'static str,
+    /// Name shown in the Slack card and in the refusal message.
+    pub label: &'static str,
+    /// User scopes the feature needs on top of [`SLACK_OAUTH_BASE_SCOPES`].
+    pub scopes: &'static [&'static str],
+}
+
+/// Slack features a user can enable. Mirrored by id in `mcp-servers/slack/src/features.ts`.
+pub const SLACK_FEATURES: &[SlackFeature] = &[SlackFeature {
+    id: "file_upload",
+    label: "File sending",
+    scopes: &["files:write"],
+}];
+
+/// Non-secret JSON `{"enabled":[<feature id>...]}` Desktop writes next to `access_token`
+/// in the Slack token dir; the worker reads it per call. Mirrored by `SLACK_FEATURES_FILE`
+/// in `mcp-servers/slack/src/features.ts` (cross-read test).
+pub const SLACK_FEATURES_FILE: &str = "features.json";
+
+/// Looks up a Slack feature by id.
+pub fn find_slack_feature(id: &str) -> Option<&'static SlackFeature> {
+    SLACK_FEATURES.iter().find(|f| f.id == id)
+}
 
 /// Slack OAuth authorize endpoint (fixed — slack.com is not instance-specific).
 pub const SLACK_OAUTH_AUTHORIZE_URL: &str = "https://slack.com/oauth/v2/authorize";
@@ -1749,7 +1777,7 @@ mod tests {
         assert!(SLACK_OAUTH_CLIENT_ID
             .split('.')
             .all(|seg| !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_digit())));
-        assert_eq!(SLACK_OAUTH_USER_SCOPES.len(), 15);
+        assert_eq!(SLACK_OAUTH_BASE_SCOPES.len(), 14);
         for dm_scope in [
             "im:read",
             "im:history",
@@ -1759,11 +1787,14 @@ mod tests {
             "mpim:write",
         ] {
             assert!(
-                SLACK_OAUTH_USER_SCOPES.contains(&dm_scope),
+                SLACK_OAUTH_BASE_SCOPES.contains(&dm_scope),
                 "missing DM scope: {dm_scope}"
             );
         }
-        for scope in SLACK_OAUTH_USER_SCOPES {
+        for scope in SLACK_OAUTH_BASE_SCOPES
+            .iter()
+            .chain(SLACK_FEATURES.iter().flat_map(|f| f.scopes.iter()))
+        {
             assert!(
                 !scope.contains(' ') && !scope.contains(','),
                 "scope: {scope}"
@@ -1772,6 +1803,56 @@ mod tests {
         assert!(SLACK_OAUTH_AUTHORIZE_URL.starts_with("https://slack.com/"));
         assert!(SLACK_OAUTH_TOKEN_URL.starts_with("https://slack.com/api/"));
         assert!(SLACK_OAUTH_REDIRECT_PORT > 1024);
+    }
+
+    #[test]
+    fn slack_features_are_well_formed_and_disjoint_from_base_scopes() {
+        let mut ids = std::collections::HashSet::new();
+        let mut scopes = std::collections::HashSet::new();
+        for feature in SLACK_FEATURES {
+            assert!(
+                ids.insert(feature.id),
+                "duplicate feature id: {}",
+                feature.id
+            );
+            assert!(!feature.label.is_empty());
+            assert!(
+                !feature.scopes.is_empty(),
+                "feature without scopes: {}",
+                feature.id
+            );
+            for scope in feature.scopes {
+                assert!(
+                    !SLACK_OAUTH_BASE_SCOPES.contains(scope),
+                    "feature scope also in base scopes: {scope}"
+                );
+                assert!(scopes.insert(*scope), "scope in two features: {scope}");
+            }
+        }
+        assert_eq!(
+            find_slack_feature("file_upload").map(|f| f.scopes),
+            Some(&["files:write"][..])
+        );
+        assert!(find_slack_feature("nope").is_none());
+    }
+
+    #[test]
+    fn slack_features_file_and_ids_match_mcp_slack_ts() {
+        let src = include_str!("../../../mcp-servers/slack/src/features.ts");
+        let file_re =
+            regex::Regex::new(r#"export\s+const\s+SLACK_FEATURES_FILE\s*=\s*['"]([^'"]+)['"]"#)
+                .unwrap();
+        let cap = file_re.captures(src).expect(
+            "mcp-servers/slack/src/features.ts must declare `export const SLACK_FEATURES_FILE`",
+        );
+        assert_eq!(&cap[1], SLACK_FEATURES_FILE);
+        for feature in SLACK_FEATURES {
+            assert!(
+                src.contains(&format!("'{}'", feature.id)),
+                "mcp-servers/slack/src/features.ts must name feature id {}",
+                feature.id
+            );
+        }
     }
 
     const CREDENTIAL_LESS_SERVICES: &[&str] = &["playwright", "office"];

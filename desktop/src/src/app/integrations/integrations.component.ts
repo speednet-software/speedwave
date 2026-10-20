@@ -6,6 +6,7 @@ import {
   OnInit,
   effect,
   inject,
+  signal,
 } from '@angular/core';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
@@ -20,6 +21,7 @@ import {
   OAuthProgressEvent,
   OsIntegrationStatusEntry,
   OsIntegrationValidation,
+  SlackFeatureStatus,
 } from '../models/integration';
 import { ServiceCardComponent, SaveCredentialsEvent } from './service-card/service-card.component';
 import { RedmineConfigComponent } from './redmine-config/redmine-config.component';
@@ -284,6 +286,54 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
                     (cancelOAuth)="handleCancelOAuth()"
                     (openVerificationUrl)="handleOpenVerificationUrl($event)"
                   />
+                  @if (svc.service === 'slack' && slackFeatures().length > 0) {
+                    <div
+                      class="m-3 rounded border border-[var(--line)] p-3 text-sm"
+                      data-testid="integrations-slack-features"
+                    >
+                      <p
+                        class="mono mb-2 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                      >
+                        Features
+                      </p>
+                      @for (feature of slackFeatures(); track feature.id) {
+                        <div
+                          class="flex items-center gap-3 py-1"
+                          [attr.data-testid]="'integrations-slack-feature-' + feature.id"
+                        >
+                          <span class="text-[var(--ink)]">{{ feature.label }}</span>
+                          @if (feature.enabled) {
+                            <span
+                              class="pill green ml-auto"
+                              [attr.data-testid]="
+                                'integrations-slack-feature-enabled-' + feature.id
+                              "
+                              >enabled</span
+                            >
+                          } @else {
+                            <button
+                              type="button"
+                              class="pill accent ml-auto hover:bg-[var(--accent-soft)]"
+                              [disabled]="oauthFlowRunning()"
+                              [attr.data-testid]="'integrations-slack-feature-enable-' + feature.id"
+                              (click)="handleEnableSlackFeature(svc, feature.id)"
+                            >
+                              Enable
+                            </button>
+                          }
+                        </div>
+                      }
+                      @if (slackFeatureError()) {
+                        <p
+                          class="mt-2 text-[12px] text-red-300"
+                          role="alert"
+                          data-testid="integrations-slack-feature-error"
+                        >
+                          {{ slackFeatureError() }}
+                        </p>
+                      }
+                    </div>
+                  }
                 }
               </div>
             }
@@ -349,6 +399,12 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   osIntegrationsAutoDisabled: OsIntegrationValidation[] = [];
   /** In-flight or completed validation promises keyed by project. */
   private static validationByProject = new Map<string, Promise<void>>();
+
+  /** Opt-in Slack features of the signed-in grant; empty while Slack is not signed in. */
+  readonly slackFeatures = signal<SlackFeatureStatus[]>([]);
+  /** Readable reason the last feature enable did not complete, empty if none. */
+  readonly slackFeatureError = signal('');
+  private slackEnablingFeature: string | null = null;
 
   /** OAuth state */
   oauthStatus: OAuthFlowStatus | null = null;
@@ -424,6 +480,9 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
 
           this.oauthStatus = payload.status;
           this.oauthStatusMessage = payload.message;
+          if (service === 'slack') {
+            this.settleSlackFeatureEnable(payload);
+          }
           if (payload.status === 'awaiting_redirect') {
             this.oauthRedirectUri = payload.message;
           }
@@ -556,10 +615,56 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
         (s) => betaOn || !IntegrationsComponent.BETA_ONLY_SERVICES.has(s.service)
       );
       this.osIntegrations = response.os;
+      await this.loadSlackFeatures();
     } catch (e: unknown) {
       this.error = e instanceof Error ? e.message : String(e);
     }
     this.cdr.markForCheck();
+  }
+
+  /** Refreshes the Slack card's feature list from the stored grant. */
+  private async loadSlackFeatures(): Promise<void> {
+    const slack = this.services.find((s) => s.service === 'slack');
+    if (!slack?.configured) {
+      this.slackFeatures.set([]);
+      return;
+    }
+    const features = await this.tauri.invoke<SlackFeatureStatus[]>('get_slack_features', {
+      project: this.activeProject,
+    });
+    this.slackFeatures.set(features ?? []);
+  }
+
+  /**
+   * Starts the Slack sign-in that adds one feature's scopes to the current grant.
+   * @param svc - the Slack integration entry
+   * @param featureId - the feature to enable
+   */
+  async handleEnableSlackFeature(svc: IntegrationStatusEntry, featureId: string): Promise<void> {
+    if (this.oauthFlowRunning()) return;
+    this.slackFeatureError.set('');
+    this.slackEnablingFeature = featureId;
+    await this.handleStartOAuth({ svc, credentials: {}, enableFeature: featureId });
+    if (!this.oauthFlowRunning()) this.slackEnablingFeature = null;
+  }
+
+  /** True while an OAuth flow is starting or waiting for the browser. */
+  oauthFlowRunning(): boolean {
+    return this.oauthStatus === 'starting' || this.oauthStatus === 'polling';
+  }
+
+  /**
+   * Ends a pending feature enable when the Slack flow reaches a terminal status; a failure keeps its readable message inline.
+   * @param payload - the Slack OAuth progress event
+   */
+  private settleSlackFeatureEnable(payload: OAuthProgressEvent): void {
+    if (!this.slackEnablingFeature) return;
+    if (payload.status === 'error') {
+      this.slackFeatureError.set(payload.message);
+    }
+    if (['success', 'error', 'expired', 'cancelled'].includes(payload.status)) {
+      this.slackEnablingFeature = null;
+    }
   }
 
   /**
@@ -693,10 +798,12 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
    * @param payload - the service and non-oauth credentials
    * @param payload.svc - the integration to start OAuth for
    * @param payload.credentials - non-oauth field values from the form
+   * @param payload.enableFeature - Slack feature whose scopes this sign-in adds
    */
   async handleStartOAuth(payload: {
     svc: IntegrationStatusEntry;
     credentials: Record<string, string>;
+    enableFeature?: string;
   }): Promise<void> {
     if (this.oauthStatus === 'starting' || this.oauthStatus === 'polling') return;
 
@@ -725,7 +832,11 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
     }
 
     try {
-      const result = await this.invokeOAuthStart(payload.svc.service, payload.credentials);
+      const result = await this.invokeOAuthStart(
+        payload.svc.service,
+        payload.credentials,
+        payload.enableFeature
+      );
       if (myNonce !== this.oauthStartNonce) return;
       this.deviceCodeInfo = 'user_code' in result ? result : null;
       this.activeOAuthRequestId = result.request_id;
@@ -743,10 +854,12 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
    * Per-service dispatcher for the `start_*_oauth` Tauri commands.
    * @param service - the integration to start OAuth for
    * @param credentials - non-oauth field values from the form
+   * @param enableFeature - Slack feature whose scopes this sign-in adds
    */
   private invokeOAuthStart(
     service: string,
-    credentials: Record<string, string>
+    credentials: Record<string, string>,
+    enableFeature?: string
   ): Promise<DeviceCodeInfo | LoopbackFlowStart> {
     if (service === 'github') {
       return this.tauri.invoke<DeviceCodeInfo>('start_github_oauth', {
@@ -756,6 +869,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
     if (service === 'slack') {
       return this.tauri.invoke<LoopbackFlowStart>('start_slack_oauth', {
         project: this.activeProject,
+        ...(enableFeature ? { enableFeature } : {}),
       });
     }
     const clientId = credentials['client_id'] ?? '';
@@ -788,6 +902,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
     this.deviceCodeInfo = null;
     this.oauthStatus = null;
     this.oauthStatusMessage = '';
+    this.slackEnablingFeature = null;
     this.cdr.markForCheck();
   }
 
