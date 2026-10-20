@@ -108,12 +108,20 @@ windows_wsl() {
     ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -"
 }
 
+tar_is_bsdtar() {
+    case "$(tar --version 2>/dev/null)" in
+        *bsdtar*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 windows_rsync_to() {
     local src="$1" dst="$2"
     local -a tar_excludes=()
     for e in "${E2E_RSYNC_EXCLUDES[@]}"; do tar_excludes+=("--exclude=$e"); done
     tar_excludes+=('--exclude=._*')
-    local -a tar_flags=(--no-mac-metadata)
+    local -a tar_flags=()
+    if tar_is_bsdtar; then tar_flags+=(--no-mac-metadata); fi
     echo "  Waiting for WSL distro $WINDOWS_WSL_DISTRO..."
     local wsl_ready=0
     for i in $(seq 1 10); do
@@ -137,7 +145,7 @@ windows_rsync_to() {
     local tar_local
     tar_local=$(mktemp "${TMPDIR:-/tmp}/speedwave-e2e-XXXXXX.tar")
     echo "  tar: creating archive from $(dirname "$src")/$(basename "$src")..."
-    tar "${tar_flags[@]}" -cf "$tar_local" -C "$(dirname "$src")" "${tar_excludes[@]}" "$(basename "$src")"
+    tar ${tar_flags[@]+"${tar_flags[@]}"} -cf "$tar_local" -C "$(dirname "$src")" "${tar_excludes[@]}" "$(basename "$src")"
 
     echo "  scp: uploading $(du -h "$tar_local" | cut -f1) archive to Windows..."
     scp -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
@@ -167,6 +175,7 @@ windows_scp_from() {
 }
 
 windows_wait_ssh() {
+    require_host SPEEDWAVE_WINDOWS_HOST "$WINDOWS_HOST"
     echo "[windows] Waiting for SSH on $WINDOWS_HOST (port $WINDOWS_SSH_PORT)..."
     for i in $(seq 1 30); do
         windows_ssh "echo ready" >/dev/null 2>&1 && { echo "[windows] SSH ready"; return 0; }
@@ -263,6 +272,7 @@ macos_rsync_to() {
 }
 
 macos_wait_ssh() {
+    require_host SPEEDWAVE_MACOS_HOST "$MACOS_HOST"
     echo "[macos] Waiting for SSH on $MACOS_HOST..."
     for i in $(seq 1 30); do
         macos_ssh "echo ready" >/dev/null 2>&1 && { echo "[macos] SSH ready"; return 0; }

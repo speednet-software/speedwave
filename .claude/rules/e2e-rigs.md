@@ -14,6 +14,7 @@ Rules for the clean-install rig pipeline and the engine-level bats suites (`_tes
 - Anything crossing the `wsl.exe ... --` interop boundary is re-parsed by the distro's default shell: payloads carrying `$`-constructs meant for the inner shell MUST be base64-wrapped (`echo <b64> | base64 -d | sh` — the runtime's `wrap_base64_sh` shape). Quoted metachar payloads without `$` survive as data; bare-spliced scripts do not.
 - The rig's sshd hands command lines to cmd.exe, which ignores single quotes: never place a pipe/redirect intended for a remote POSIX shell in a cmd.exe-parsed segment (resolve host-side instead, like the CLI-path lookup). Never caret-escape POSIX-side files — `^` is only a cmd.exe escape.
 - Env vars injected into `windows_ps` scripts go through the `ps_squote` prefix pattern. `e2e-vm-excludes.bats` guards only that `ps_squote` itself quotes correctly (it doubles single quotes); whether every `windows_ps` call site actually uses it is a manual alignment, caught only by review.
+- The Windows lane's control side is Git Bash on the self-hosted runner (GNU tar) or a Mac (bsdtar): `windows_rsync_to` passes `--no-mac-metadata` only when `tar_is_bsdtar`, since GNU tar rejects it. Guarded by `e2e-vm-excludes.bats`.
 - The engine bats suites ship to `WINDOWS_CONTRACT_STAGING` (own dir) — other pipeline steps `rm -rf` the main staging dir between phases.
 
 ## Suite discipline

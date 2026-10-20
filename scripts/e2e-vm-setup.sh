@@ -31,6 +31,7 @@ windows_ps() {
 
 
 setup_windows() {
+    require_host SPEEDWAVE_WINDOWS_HOST "$WINDOWS_HOST"
     echo "[windows] Checking SSH connectivity to $WINDOWS_HOST (port $WINDOWS_SSH_PORT)..."
     windows_ssh "echo ready" || { echo "[windows] ERROR: cannot connect via SSH"; return 1; }
 
@@ -268,6 +269,7 @@ SCRIPT
 }
 
 setup_macos() {
+    require_host SPEEDWAVE_MACOS_HOST "$MACOS_HOST"
     echo "[macos] Checking SSH connectivity to $MACOS_HOST..."
     macos_ssh "echo ready" || { echo "[macos] ERROR: cannot connect via SSH"; return 1; }
 
