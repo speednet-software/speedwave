@@ -1,5 +1,5 @@
 name: 'Setup Toolchain'
-description: 'Sets up Node.js (version from .node-version) + Rust stable + optional Rust cache, saved only by runs on dev and release/** so every run restores the cache written there. Shared by every test.yml lane and by build-publish.yml so the pinned action SHAs live in one place.'
+description: 'Sets up Node.js (version from .node-version) + the Rust toolchain pinned in rust-toolchain.toml + optional Rust cache, saved only by runs on dev and release/** so every run restores the cache written there. Shared by every test.yml lane and by build-publish.yml so the pinned action SHAs live in one place.'
 inputs:
   node:
     description: 'Whether to set up Node.js at all'
@@ -14,11 +14,11 @@ inputs:
     required: false
     default: 'desktop/src/package-lock.json'
   rust-targets:
-    description: 'Comma-separated rustup targets to install with the toolchain (empty for none)'
+    description: 'Comma-separated rustup targets to add to the pinned toolchain (empty for none)'
     required: false
     default: ''
   rust-components:
-    description: 'Comma-separated rustup components to install with the toolchain (empty for none)'
+    description: 'Comma-separated rustup components to add to the pinned toolchain beyond those rust-toolchain.toml lists (empty for none)'
     required: false
     default: ''
   rust-cache-workspaces:
@@ -48,22 +48,24 @@ runs:
         cache: ${{ inputs.node-cache == 'true' && 'npm' || '' }}
         cache-dependency-path: ${{ inputs.node-cache-dependency-path }}
 
-    - name: Install Rust stable
-      uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
-      with:
-        targets: ${{ inputs.rust-targets }}
-        components: ${{ inputs.rust-components }}
-
-    - name: Ensure cross-compile target is installed
-      if: inputs.rust-targets != ''
+    - name: Install the Rust toolchain pinned in rust-toolchain.toml
       shell: bash
       env:
         RUST_TARGETS: ${{ inputs.rust-targets }}
+        RUST_COMPONENTS: ${{ inputs.rust-components }}
       run: |
-        IFS=',' read -ra _targets <<< "$RUST_TARGETS"
+        rustup toolchain install --no-self-update
+        IFS=', ' read -ra _targets <<< "$RUST_TARGETS"
         for t in "${_targets[@]}"; do
           [ -n "$t" ] && rustup target add "$t"
         done
+        IFS=', ' read -ra _components <<< "$RUST_COMPONENTS"
+        for c in "${_components[@]}"; do
+          [ -n "$c" ] && rustup component add "$c"
+        done
+        rustc --version --verbose
+        echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+        echo "CARGO_TERM_COLOR=always" >> "$GITHUB_ENV"
 
     - name: Capture runner image version and lane definition hash
       if: inputs.rust-cache-workspaces != ''
