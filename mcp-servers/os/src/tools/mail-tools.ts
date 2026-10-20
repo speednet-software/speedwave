@@ -555,22 +555,22 @@ export async function handleReplyToEmail(params: ReplyToEmailParams): Promise<To
 /** Creates tool definitions for all mail operations. */
 export function createMailTools(): ToolDefinition[] {
   return [
-    declared(detectMailClientsTool, handleDetectMailClients),
-    declared(listMailboxesTool, handleListMailboxes),
-    declared(listEmailsTool, handleListEmails),
-    declared(getEmailTool, handleGetEmail),
-    declared(searchEmailsTool, handleSearchEmails),
-    declared(sendEmailTool, handleSendEmail),
-    declared(replyToEmailTool, handleReplyToEmail),
+    guardedTool(detectMailClientsTool, handleDetectMailClients),
+    guardedTool(listMailboxesTool, handleListMailboxes),
+    guardedTool(listEmailsTool, handleListEmails),
+    guardedTool(getEmailTool, handleGetEmail),
+    guardedTool(searchEmailsTool, handleSearchEmails),
+    guardedTool(sendEmailTool, handleSendEmail),
+    guardedTool(replyToEmailTool, handleReplyToEmail),
   ];
 }
 
 /**
- * Pairs a tool with its handler, rejecting any argument the tool's inputSchema does not declare.
+ * Pairs a tool with its validated handler, rejecting any argument its inputSchema does not declare.
  * @param tool - Tool definition.
  * @param handler - Handler returning a ToolResult.
  */
-function declared<T>(
+function guardedTool<T>(
   tool: Tool,
   handler: (params: T) => ToolResult | Promise<ToolResult>
 ): ToolDefinition {

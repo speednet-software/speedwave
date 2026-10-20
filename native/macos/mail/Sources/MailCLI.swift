@@ -3,6 +3,15 @@ import Foundation
 import SharedCLI
 
 
+private let outlookName = "Microsoft Outlook"
+
+private let outlookBundleId = "com.microsoft.Outlook"
+
+private let outlookUnsupportedInstructions =
+    "\(outlookName) is not supported: New Outlook has no AppleScript and Legacy Outlook no longer connects to Exchange Online. "
+    + "Add the account to Apple Mail (System Settings > Internet Accounts, or Mail > Add Account) and the mail tools will reach it there."
+
+
 /// mail-cli <command> [json-args]
 /// Commands: check_permission, detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email
 @main
@@ -39,12 +48,6 @@ struct MailCLI {
 }
 
 
-let outlookBundleId = "com.microsoft.Outlook"
-
-let outlookUnsupportedInstructions =
-    "Microsoft Outlook is not supported: New Outlook has no AppleScript and Legacy Outlook no longer connects to Exchange Online. "
-    + "Add the account to Apple Mail (System Settings > Internet Accounts, or Mail > Add Account) and the mail tools will reach it there."
-
 func detectClients(
     outlookInstalled: () -> Bool = {
         NSWorkspace.shared.urlForApplication(withBundleIdentifier: outlookBundleId) != nil
@@ -53,7 +56,7 @@ func detectClients(
     var clients: [[String: Any]] = [["name": AppleMailClient.name, "supported": true]]
     if outlookInstalled() {
         clients.append([
-            "name": "Microsoft Outlook",
+            "name": outlookName,
             "supported": false,
             "instructions": outlookUnsupportedInstructions,
         ])
