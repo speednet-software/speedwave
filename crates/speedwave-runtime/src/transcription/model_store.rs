@@ -111,6 +111,16 @@ fn size_window(approx_bytes: u64) -> (u64, u64) {
     (approx_bytes / 10 * 9, download_cap(approx_bytes))
 }
 
+/// A pinned download: the file name, the catalogue key the log and the storage cap name it
+/// by, its URL, SHA256 and the size the on-disk presence window is built from.
+struct PinnedFile<'a> {
+    file: &'a str,
+    key: &'a str,
+    url: &'a str,
+    sha256: &'a str,
+    approx_bytes: u64,
+}
+
 /// Per-download byte cap: the estimate plus 5% headroom (guards a wildly-wrong
 /// `Content-Length` from writing gigabytes; the file itself is a fixed size).
 fn download_cap(approx_bytes: u64) -> u64 {
@@ -177,28 +187,33 @@ impl ModelStore {
             whisper_model(key).ok_or_else(|| ModelStoreError::UnknownModel(key.to_string()))?;
         self.ensure_file(
             &self.whisper_dir(),
-            info.file,
-            key,
-            &info.url(),
-            info.sha256,
-            info.approx_bytes,
+            PinnedFile {
+                file: info.file,
+                key,
+                url: &info.url(),
+                sha256: info.sha256,
+                approx_bytes: info.approx_bytes,
+            },
             progress,
         )
     }
 
-    /// The one download path: `dir/file` is present once its size is in the window of
-    /// `approx_bytes`, else it is fetched from `url` within the storage cap, verified against
-    /// `sha256` and restricted to the owner. Returns the local path.
+    /// The one download path: `dir/pinned.file` is present once its size is in the window of
+    /// `pinned.approx_bytes`, else it is fetched from `pinned.url` within the storage cap,
+    /// verified against `pinned.sha256` and restricted to the owner. Returns the local path.
     fn ensure_file(
         &self,
         dir: &Path,
-        file: &str,
-        key: &str,
-        url: &str,
-        sha256: &str,
-        approx_bytes: u64,
+        pinned: PinnedFile<'_>,
         progress: &mut dyn FnMut(DownloadProgress),
     ) -> Result<PathBuf, ModelStoreError> {
+        let PinnedFile {
+            file,
+            key,
+            url,
+            sha256,
+            approx_bytes,
+        } = pinned;
         let dest = dir.join(file);
         if file_in_size_window(&dest, approx_bytes) {
             return Ok(dest);
@@ -268,11 +283,13 @@ impl ModelStore {
     pub fn ensure_vad_model(&self) -> Result<PathBuf, ModelStoreError> {
         self.ensure_file(
             &self.whisper_dir(),
-            VAD_MODEL.file,
-            "silero-vad",
-            &VAD_MODEL.url(),
-            VAD_MODEL.sha256,
-            VAD_MODEL.approx_bytes,
+            PinnedFile {
+                file: VAD_MODEL.file,
+                key: "silero-vad",
+                url: &VAD_MODEL.url(),
+                sha256: VAD_MODEL.sha256,
+                approx_bytes: VAD_MODEL.approx_bytes,
+            },
             &mut no_progress,
         )
     }
@@ -300,11 +317,13 @@ impl ModelStore {
     ) -> Result<PathBuf, ModelStoreError> {
         self.ensure_file(
             &self.diarization_dir(),
-            info.file,
-            info.key,
-            url,
-            info.sha256,
-            info.approx_bytes,
+            PinnedFile {
+                file: info.file,
+                key: info.key,
+                url,
+                sha256: info.sha256,
+                approx_bytes: info.approx_bytes,
+            },
             progress,
         )
     }
