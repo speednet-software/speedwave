@@ -1,5 +1,5 @@
 /**
- * File Tools - Reading files shared on Slack (requires the files:read scope).
+ * File Tools - Reading files shared on Slack (files:read scope) and uploading workspace files (files:write scope).
  */
 
 import {
@@ -10,7 +10,16 @@ import {
   META_KEYS,
 } from '@speedwave/mcp-shared';
 import { withValidation, withClients, ToolResult } from './validation.js';
-import { SlackClients, getFileContent, downloadFile, formatSlackError } from '../client.js';
+import {
+  SlackClients,
+  getFileContent,
+  downloadFile,
+  uploadFile,
+  formatSlackError,
+  MAX_UPLOAD_BYTES,
+  MAX_UPLOAD_FILES,
+  UploadTransferError,
+} from '../client.js';
 
 interface GetFileContentParams {
   file: string;
@@ -18,6 +27,13 @@ interface GetFileContentParams {
 
 interface DownloadFileParams {
   file: string;
+}
+
+interface UploadFileParams {
+  channel: string;
+  filePaths: string[];
+  thread_ts?: string;
+  initial_comment?: string;
 }
 
 const getFileContentTool: Tool = {
@@ -96,6 +112,80 @@ const downloadFileTool: Tool = {
   ],
 };
 
+const UPLOAD_FILE_REQUIRED = ['channel', 'filePaths'];
+
+const uploadFileTool: Tool = {
+  name: 'uploadFile',
+  description: `Upload 1 to ${MAX_UPLOAD_FILES} files from /workspace to a Slack channel, DM or thread as the signed-in user (their name and avatar), all into the same target with one comment. Files are streamed, up to ${MAX_UPLOAD_BYTES / 1000 ** 3} GB each. One call has about 10 minutes, so split large sets over several calls. Files outside /workspace (e.g. /tmp, the home directory) must first be copied under /workspace/.speedwave/slack-out/. Pass \`thread_ts\` copied verbatim from getChannelMessages/getThreadMessages to post into that thread. If any file fails, nothing is shared. Needs the files:write scope: a missing_scope error means the user must re-authorise Slack in Speedwave Desktop. Irreversible and instantly visible: the user must confirm the recipient, the file list and the comment in the current conversation before calling.`,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      channel: {
+        type: 'string',
+        description:
+          'Channel name (e.g., #general), channel ID (C…), or DM conversation ID (D…/G…)',
+      },
+      filePaths: {
+        type: 'array',
+        items: { type: 'string' },
+        minItems: 1,
+        maxItems: MAX_UPLOAD_FILES,
+        description:
+          'Paths under /workspace of the files to send (e.g. ["/workspace/report.pdf"]); the same file twice is rejected',
+      },
+      thread_ts: {
+        type: 'string',
+        description:
+          'Post into this thread. The exact `ts` of the thread parent, copied VERBATIM from a prior getChannelMessages/getThreadMessages result (e.g. "1717000000.000100"). Omit to post at channel level.',
+      },
+      initial_comment: {
+        type: 'string',
+        description: 'Message posted together with the files',
+      },
+    },
+    required: UPLOAD_FILE_REQUIRED,
+  },
+  annotations: WRITE_ANNOTATIONS,
+  _meta: { [META_KEYS.DEFER_LOADING]: true, [META_KEYS.TIMEOUT_CLASS]: 'long' },
+  keywords: ['slack', 'file', 'upload', 'send', 'attach', 'share', 'dm', 'thread', 'workspace'],
+  example: 'await slack.uploadFile({ channel: "#general", filePaths: ["/workspace/report.pdf"] })',
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      ok: { type: 'boolean', description: 'Slack reported the upload as completed' },
+      files: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: { id: { type: 'string' }, name: { type: 'string' } },
+          required: ['id', 'name'],
+        },
+        description: 'Uploaded files in call order: Slack file ID and original file name',
+      },
+      channel: { type: 'string', description: 'Channel ID the files were sent to' },
+      thread_ts: { type: 'string', description: 'Thread the files were posted into, when given' },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Send a file to a channel',
+      input: { channel: '#general', filePaths: ['/workspace/report.pdf'] },
+    },
+    {
+      description: 'Send two files into a thread with one comment',
+      input: {
+        channel: 'C0123ABC456',
+        filePaths: ['/workspace/out/summary.md', '/workspace/out/data.csv'],
+        thread_ts: '1717000000.000100',
+        initial_comment: 'Summary attached',
+      },
+    },
+  ],
+};
+
 /**
  * Tool handler function.
  * @param clients - Slack client instances
@@ -134,6 +224,29 @@ export async function handleGetFileContent(
 }
 
 /**
+ * Tool handler function.
+ * @param clients - Slack client instances
+ * @param params - Tool parameters
+ */
+export async function handleUploadFile(
+  clients: SlackClients,
+  params: UploadFileParams
+): Promise<ToolResult> {
+  try {
+    const result = await uploadFile(clients, params);
+    return { success: true, data: result };
+  } catch (error) {
+    return {
+      success: false,
+      error: {
+        code: 'UPLOAD_FAILED',
+        message: error instanceof UploadTransferError ? error.message : formatSlackError(error),
+      },
+    };
+  }
+}
+
+/**
  * Tool factory.
  * @param clients - Slack client instances
  */
@@ -148,6 +261,13 @@ export function createFileTools(clients: SlackClients): ToolDefinition[] {
     {
       tool: downloadFileTool,
       handler: withValidation<DownloadFileParams>(gate(handleDownloadFile)),
+    },
+    {
+      tool: uploadFileTool,
+      handler: withValidation<UploadFileParams>(gate(handleUploadFile), {
+        required: UPLOAD_FILE_REQUIRED,
+        toolName: uploadFileTool.name,
+      }),
     },
   ];
 }
