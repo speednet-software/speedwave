@@ -36,6 +36,9 @@ jobs:
           rustup target add wasm32-unknown-unknown
           npm install -g wasm-pack
 
+      - name: Install prebuilt wasm-bindgen (wasm-pack has none for Apple silicon)
+        run: scripts/install-wasm-bindgen.sh
+
       - name: Install dependencies
         working-directory: desktop/src-tauri
         run: cargo fetch
