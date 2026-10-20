@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { RefreshLock } from '@speedwave/mcp-shared';
 import type { WebClient } from '@slack/web-api';
-import { uploadFile, MAX_UPLOAD_FILES, type SlackClients } from './client.js';
+import { uploadFile, MAX_UPLOAD_FILES, UploadTransferError, type SlackClients } from './client.js';
 
 const VALID_TS = '1717000000.000100';
 
@@ -221,7 +221,7 @@ describe('uploadFile', () => {
     it('rejects a path outside the workspace', async () => {
       await expectRejected(
         { channel: '#general', filePaths: ['report.txt', '../secret.txt'] },
-        'filePath must resolve to a location inside the workspace'
+        /Path resolves outside the workspace: \.\.\/secret\.txt/
       );
     });
 
@@ -246,6 +246,7 @@ describe('uploadFile', () => {
     });
 
     await expect(failure).rejects.toThrow(/report\.txt.*500.*no file was shared/is);
+    await expect(failure).rejects.toBeInstanceOf(UploadTransferError);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(completeUploadExternal).not.toHaveBeenCalled();
   });
@@ -260,6 +261,7 @@ describe('uploadFile', () => {
     const failure = uploadFile(clients, { channel: 'C12345678', filePaths: ['report.txt'] });
 
     await expect(failure).rejects.toThrow(/report\.txt.*no file was shared/is);
+    await expect(failure).rejects.toBeInstanceOf(UploadTransferError);
     expect(fetchMock).not.toHaveBeenCalled();
     expect(completeUploadExternal).not.toHaveBeenCalled();
   });
@@ -277,6 +279,34 @@ describe('uploadFile', () => {
       new RegExp(`report\\.txt.*${cause}.*no file was shared`, 'is')
     );
     expect(completeUploadExternal).not.toHaveBeenCalled();
+  });
+
+  it('names the file and the underlying cause when Node reports a network failure', async () => {
+    const { clients, completeUploadExternal } = uploadClients();
+    fetchMock.mockRejectedValue(
+      new TypeError('fetch failed', {
+        cause: Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }),
+      })
+    );
+
+    const failure = uploadFile(clients, { channel: 'C12345678', filePaths: ['report.txt'] });
+
+    await expect(failure).rejects.toBeInstanceOf(UploadTransferError);
+    await expect(failure).rejects.toThrow(
+      /report\.txt.*fetch failed.*ECONNRESET.*no file was shared/is
+    );
+    expect(completeUploadExternal).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the cause message when the cause has no code', async () => {
+    const { clients } = uploadClients();
+    fetchMock.mockRejectedValue(
+      new TypeError('fetch failed', { cause: new Error('socket closed') })
+    );
+
+    await expect(
+      uploadFile(clients, { channel: 'C12345678', filePaths: ['report.txt'] })
+    ).rejects.toThrow(/fetch failed \(socket closed\)/);
   });
 
   it('propagates a Slack API error', async () => {

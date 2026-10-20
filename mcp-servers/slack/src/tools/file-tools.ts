@@ -18,6 +18,7 @@ import {
   formatSlackError,
   MAX_UPLOAD_BYTES,
   MAX_UPLOAD_FILES,
+  UploadTransferError,
 } from '../client.js';
 
 interface GetFileContentParams {
@@ -115,7 +116,7 @@ const UPLOAD_FILE_REQUIRED = ['channel', 'filePaths'];
 
 const uploadFileTool: Tool = {
   name: 'uploadFile',
-  description: `Upload 1 to ${MAX_UPLOAD_FILES} files from /workspace to a Slack channel, DM or thread as the signed-in user (their name and avatar), all into the same target with one comment. Files are streamed, up to ${MAX_UPLOAD_BYTES / 1024 ** 3} GiB each. Files outside /workspace (e.g. /tmp, the home directory) must first be copied under /workspace/.speedwave/slack-out/. Pass \`thread_ts\` copied verbatim from getChannelMessages/getThreadMessages to post into that thread. If any file fails, nothing is shared. Needs the files:write scope: a missing_scope error means the user must re-authorise Slack in Speedwave Desktop. Irreversible and instantly visible: the user must confirm the recipient, the file list and the comment in the current conversation before calling.`,
+  description: `Upload 1 to ${MAX_UPLOAD_FILES} files from /workspace to a Slack channel, DM or thread as the signed-in user (their name and avatar), all into the same target with one comment. Files are streamed, up to ${MAX_UPLOAD_BYTES / 1000 ** 3} GB each. One call has about 10 minutes, so split large sets over several calls. Files outside /workspace (e.g. /tmp, the home directory) must first be copied under /workspace/.speedwave/slack-out/. Pass \`thread_ts\` copied verbatim from getChannelMessages/getThreadMessages to post into that thread. If any file fails, nothing is shared. Needs the files:write scope: a missing_scope error means the user must re-authorise Slack in Speedwave Desktop. Irreversible and instantly visible: the user must confirm the recipient, the file list and the comment in the current conversation before calling.`,
   inputSchema: {
     type: 'object',
     properties: {
@@ -155,7 +156,11 @@ const uploadFileTool: Tool = {
       ok: { type: 'boolean', description: 'Slack reported the upload as completed' },
       files: {
         type: 'array',
-        items: { type: 'object' },
+        items: {
+          type: 'object',
+          properties: { id: { type: 'string' }, name: { type: 'string' } },
+          required: ['id', 'name'],
+        },
         description: 'Uploaded files in call order: Slack file ID and original file name',
       },
       channel: { type: 'string', description: 'Channel ID the files were sent to' },
@@ -233,7 +238,10 @@ export async function handleUploadFile(
   } catch (error) {
     return {
       success: false,
-      error: { code: 'UPLOAD_FAILED', message: formatSlackError(error) },
+      error: {
+        code: 'UPLOAD_FAILED',
+        message: error instanceof UploadTransferError ? error.message : formatSlackError(error),
+      },
     };
   }
 }

@@ -44,7 +44,7 @@ describe('resolveWorkspaceFile', () => {
   it('rejects ../ traversal out of the workspace', async () => {
     await fsp.writeFile(path.join(outside, 'secret.txt'), 'x');
     await expect(resolveWorkspaceFile('../outside/secret.txt', 100)).rejects.toThrow(
-      'filePath must resolve to a location inside the workspace'
+      /Path resolves outside the workspace: .*Only files under .* can be read; copy the file there first\./
     );
   });
 
@@ -52,7 +52,7 @@ describe('resolveWorkspaceFile', () => {
     await fsp.writeFile(path.join(outside, 'secret.txt'), 'x');
     await fsp.symlink(path.join(outside, 'secret.txt'), path.join(root, 'link.txt'));
     await expect(resolveWorkspaceFile('link.txt', 100)).rejects.toThrow(
-      'filePath must resolve to a location inside the workspace'
+      /Path resolves outside the workspace: .*Only files under .* can be read; copy the file there first\./
     );
   });
 

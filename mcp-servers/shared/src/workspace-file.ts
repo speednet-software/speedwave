@@ -6,6 +6,9 @@
 import { promises as fsp } from 'node:fs';
 import path from 'node:path';
 
+/** A resolved workspace file: real path, basename and size in bytes. */
+export type WorkspaceFile = { path: string; name: string; size: number };
+
 /**
  * Read `filePath` from the workspace mount under the same guard as `resolveWorkspaceFile`.
  * @param filePath - Path relative to (or inside) the workspace root.
@@ -29,7 +32,7 @@ export async function readWorkspaceFile(
 export async function resolveWorkspaceFile(
   filePath: string,
   maxBytes: number
-): Promise<{ path: string; name: string; size: number }> {
+): Promise<WorkspaceFile> {
   const root = await fsp.realpath(workspaceRoot());
   const candidate = path.resolve(root, filePath);
   let real: string;
@@ -39,7 +42,9 @@ export async function resolveWorkspaceFile(
     throw new Error(`File not found under workspace: ${filePath}`);
   }
   if (real !== root && !real.startsWith(root + path.sep)) {
-    throw new Error('filePath must resolve to a location inside the workspace');
+    throw new Error(
+      `Path resolves outside the workspace: ${filePath}. Only files under ${root} can be read; copy the file there first.`
+    );
   }
   const stat = await fsp.stat(real);
   if (!stat.isFile()) throw new Error(`Not a regular file: ${filePath}`);

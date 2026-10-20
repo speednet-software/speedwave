@@ -27,7 +27,7 @@ vi.mock('../client.js', async () => {
 });
 
 import * as client from '../client.js';
-import { MAX_UPLOAD_FILES } from '../client.js';
+import { MAX_UPLOAD_FILES, UploadTransferError } from '../client.js';
 
 function presentClients(): SlackClients {
   return {
@@ -149,6 +149,21 @@ describe('file-tools', () => {
     });
   });
 
+  describe('handleUploadFile transfer errors', () => {
+    it('keeps an UploadTransferError message verbatim', async () => {
+      const message = 'Uploading report.pdf failed: fetch failed (ECONNRESET). No file was shared.';
+      vi.mocked(client.uploadFile).mockRejectedValue(new UploadTransferError(message));
+
+      const result = await handleUploadFile(presentClients(), {
+        channel: 'C1',
+        filePaths: ['report.pdf'],
+      });
+
+      expect(result.error).toEqual({ code: 'UPLOAD_FAILED', message });
+      expect(client.formatSlackError).not.toHaveBeenCalled();
+    });
+  });
+
   describe('createFileTools', () => {
     it('registers getFileContent, downloadFile and uploadFile with required metadata', () => {
       const tools = createFileTools(presentClients());
@@ -180,6 +195,16 @@ describe('file-tools', () => {
       expect(upload._meta?.[META_KEYS.DEFER_LOADING]).toBe(true);
       expect(upload._meta?.[META_KEYS.TIMEOUT_CLASS]).toBe('long');
       expect(upload.description).toContain('files:write');
+      expect(upload.description).toContain('1 GB');
+      expect(upload.description).toContain('10 minutes');
+      expect(upload.outputSchema?.properties).toMatchObject({
+        files: {
+          items: {
+            properties: { id: { type: 'string' }, name: { type: 'string' } },
+            required: ['id', 'name'],
+          },
+        },
+      });
       expect(Object.keys(upload.outputSchema?.properties as object).sort()).toEqual(
         ['channel', 'error', 'files', 'ok', 'success', 'thread_ts'].sort()
       );

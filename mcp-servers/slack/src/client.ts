@@ -31,6 +31,7 @@ import {
   resolveWorkspaceFile,
   workspaceRoot,
   type AuthedTokenState,
+  type WorkspaceFile,
 } from '@speedwave/mcp-shared';
 
 /** Whether the Slack access token was loadable at startup. */
@@ -436,11 +437,16 @@ export async function sendChannel(
   };
 }
 
-/** Slack's per-file upload limit. */
-export const MAX_UPLOAD_BYTES = 1024 * 1024 * 1024;
+/** Slack's per-file upload limit (1 GB). */
+export const MAX_UPLOAD_BYTES = 1000 * 1000 * 1000;
 
 /** Most files accepted in one uploadFile call. */
 export const MAX_UPLOAD_FILES = 10;
+
+type StagedFile = { id: string; name: string };
+
+/** Thrown when moving file bytes to Slack fails; its message is safe to show verbatim. */
+export class UploadTransferError extends Error {}
 
 /**
  * Stream 1 to MAX_UPLOAD_FILES workspace files to a channel, DM or thread as the signed-in user in one share.
@@ -462,7 +468,7 @@ export async function uploadFile(
   }
 ): Promise<{
   ok: boolean;
-  files: Array<{ id: string; name: string }>;
+  files: StagedFile[];
   channel: string;
   thread_ts?: string;
 }> {
@@ -470,13 +476,15 @@ export async function uploadFile(
   const resolved = await resolveUploadFiles(params.filePaths);
   const channelId = await resolveChannelId(clients, params.channel);
 
-  const staged: Array<{ id: string; name: string }> = [];
+  const staged: StagedFile[] = [];
   for (const file of resolved) {
     const target = await slackCall(clients, (c) =>
       c.files.getUploadURLExternal({ filename: file.name, length: file.size })
     );
     if (!target.upload_url || !target.file_id) {
-      throw new Error(`Slack returned no upload URL for ${file.name}. No file was shared.`);
+      throw new UploadTransferError(
+        `Slack returned no upload URL for ${file.name}. No file was shared.`
+      );
     }
     await postFileStream(target.upload_url, file);
     staged.push({ id: target.file_id, name: file.name });
@@ -493,22 +501,13 @@ export async function uploadFile(
 
   return {
     ok: result.ok === true,
-    files: staged.map(({ id, name }) => ({ id, name })),
+    files: staged,
     channel: channelId,
     ...(params.thread_ts ? { thread_ts: params.thread_ts } : {}),
   };
 }
 
-function toCompletionFiles(
-  staged: Array<{ id: string; name: string }>
-): [{ id: string; title: string }, ...Array<{ id: string; title: string }>] {
-  const [first, ...rest] = staged.map((f) => ({ id: f.id, title: f.name }));
-  return [first, ...rest];
-}
-
-async function resolveUploadFiles(
-  filePaths: string[]
-): Promise<Array<{ path: string; name: string; size: number }>> {
+async function resolveUploadFiles(filePaths: string[]): Promise<WorkspaceFile[]> {
   if (
     !Array.isArray(filePaths) ||
     filePaths.length === 0 ||
@@ -521,7 +520,7 @@ async function resolveUploadFiles(
       `filePaths has ${filePaths.length} entries; at most ${MAX_UPLOAD_FILES} files per call. Split them into several calls.`
     );
   }
-  const resolved: Array<{ path: string; name: string; size: number }> = [];
+  const resolved: WorkspaceFile[] = [];
   for (const p of filePaths) {
     const file = await resolveWorkspaceFile(p, MAX_UPLOAD_BYTES);
     if (resolved.some((r) => r.path === file.path)) {
@@ -532,10 +531,7 @@ async function resolveUploadFiles(
   return resolved;
 }
 
-async function postFileStream(
-  uploadUrl: string,
-  file: { path: string; name: string; size: number }
-): Promise<void> {
+async function postFileStream(uploadUrl: string, file: WorkspaceFile): Promise<void> {
   let response: Response;
   try {
     response = await fetch(uploadUrl, {
@@ -548,15 +544,30 @@ async function postFileStream(
       },
     } as RequestInit);
   } catch (error) {
-    throw new Error(
-      `Uploading ${file.name} failed: ${error instanceof Error ? error.message : String(error)}. No file was shared.`
+    throw new UploadTransferError(
+      `Uploading ${file.name} failed: ${describeTransferFailure(error)}. No file was shared.`
     );
   }
   if (!response.ok) {
-    throw new Error(
+    throw new UploadTransferError(
       `Uploading ${file.name} failed with HTTP ${response.status}. No file was shared; retry the call.`
     );
   }
+}
+
+function describeTransferFailure(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+  const cause = error.cause;
+  if (!(cause instanceof Error)) return error.message;
+  const code = (cause as NodeJS.ErrnoException).code;
+  return `${error.message} (${code ?? cause.message})`;
+}
+
+function toCompletionFiles(
+  staged: StagedFile[]
+): [{ id: string; title: string }, ...Array<{ id: string; title: string }>] {
+  const [first, ...rest] = staged.map((f) => ({ id: f.id, title: f.name }));
+  return [first, ...rest];
 }
 
 /**
