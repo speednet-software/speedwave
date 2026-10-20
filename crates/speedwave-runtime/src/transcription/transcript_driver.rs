@@ -905,6 +905,7 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
         frames: u64,
         /// Frames × channels — this part's share of the progress band.
         samples: u64,
+        channels: usize,
     }
     let mut plans: Vec<PartPlan> = Vec::new();
     let mut part_base = Duration::ZERO;
@@ -921,6 +922,7 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
                         part_base,
                         frames,
                         samples: frames * u64::from(spec.channels.max(1)),
+                        channels: usize::from(spec.channels),
                     });
                     part_base +=
                         Duration::from_secs_f64(frames as f64 / f64::from(spec.sample_rate));
@@ -970,7 +972,11 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
     let total_samples: u64 = plans.iter().map(|p| p.samples).sum();
     let mut final_segs: Vec<Segment> = Vec::new();
     let system_frames: u64 = if diarizer.is_some() {
-        plans.iter().map(|p| p.frames).sum()
+        plans
+            .iter()
+            .map(|p| system_pcm_end(p.part_base, p.frames, p.channels))
+            .max()
+            .unwrap_or(0)
     } else {
         0
     };
@@ -1133,9 +1139,24 @@ fn stopped_pass_error(store: &TranscriptStore, id: Uuid) -> DriverError {
 /// Copies `pcm` into `buf` starting at `offset` (16 kHz), padding the gap with silence, so the
 /// meeting channel of every part sits on the same timeline as the transcript segments.
 fn append_at(buf: &mut Vec<f32>, offset: Duration, pcm: &[f32]) {
-    let start = (offset.as_secs_f64() * f64::from(SAMPLE_RATE_HZ)).round() as usize;
-    buf.resize(start, 0.0);
+    buf.resize(frame_at(offset), 0.0);
     buf.extend_from_slice(pcm);
+}
+
+/// Length the meeting-channel buffer reaches once a part of `frames` frames at `part_base`
+/// is appended: its end frame when its first channel is `System`, else 0, so a mono part
+/// reserves nothing.
+fn system_pcm_end(part_base: Duration, frames: u64, channels: usize) -> u64 {
+    if lane_sources(channels).first() == Some(&Some(TranscriptSource::System)) {
+        frame_at(part_base) as u64 + frames
+    } else {
+        0
+    }
+}
+
+/// The 16 kHz frame index of `offset` on the transcript timeline.
+fn frame_at(offset: Duration) -> usize {
+    (offset.as_secs_f64() * f64::from(SAMPLE_RATE_HZ)).round() as usize
 }
 
 /// How a refused offline-pass write ends the pass: `Deleted` for a deleted session, `Superseded`
@@ -4286,6 +4307,36 @@ mod tests {
 
         assert!(matches!(result, Err(DriverError::Deleted)), "{result:?}");
         assert!(matches!(store.get(id), Err(StoreError::NotFound(_))));
+    }
+
+    #[test]
+    fn the_meeting_buffer_reserves_up_to_the_end_of_the_last_stereo_part_and_nothing_for_mono() {
+        let rate = u64::from(SAMPLE_RATE_HZ);
+        assert_eq!(system_pcm_end(Duration::ZERO, 5 * rate, 1), 0);
+        assert_eq!(system_pcm_end(Duration::from_secs(3), 5 * rate, 1), 0);
+        assert_eq!(system_pcm_end(Duration::ZERO, 0, 2), 0);
+        assert_eq!(
+            system_pcm_end(Duration::from_millis(2500), 4 * rate, 2),
+            (2.5 * rate as f64) as u64 + 4 * rate
+        );
+
+        let parts = [
+            (Duration::ZERO, 3 * rate, 1),
+            (Duration::from_secs(3), 2 * rate, 2),
+            (Duration::from_secs(5), 7 * rate, 1),
+        ];
+        let reserved = parts
+            .iter()
+            .map(|&(base, frames, channels)| system_pcm_end(base, frames, channels))
+            .max()
+            .unwrap_or(0);
+        let mut buf = Vec::new();
+        append_at(
+            &mut buf,
+            Duration::from_secs(3),
+            &vec![0.5; 2 * rate as usize],
+        );
+        assert_eq!(reserved, buf.len() as u64);
     }
 
     #[test]
