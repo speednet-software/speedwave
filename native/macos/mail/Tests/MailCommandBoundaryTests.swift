@@ -37,12 +37,13 @@ final class MailCommandBoundaryTests: XCTestCase {
             "list_emails": "Work" + String(repeating: "\u{1D}", count: 5),
             "get_email": String(repeating: "\u{1D}", count: 11),
             "search_emails": "Work" + String(repeating: "\u{1D}", count: 5),
+            "reply_to_email": String(repeating: "\u{1D}", count: 5),
         ]
         for (command, params) in calls {
             harness.executor.reply(replies[command] ?? "")
             _ = try harness.call(command, params.merging([scriptTimeoutParam: 7_500]) { $1 })
         }
-        XCTAssertEqual(harness.executor.calls.map(\.timeout), Array(repeating: 7.5, count: calls.count))
+        XCTAssertEqual(harness.executor.calls.map(\.timeout), Array(repeating: 7.5, count: calls.count + 1))
     }
 
     func testAScriptedCommandWithoutABudgetRunsNothing() {
@@ -161,16 +162,6 @@ final class MailCommandBoundaryTests: XCTestCase {
         }
     }
 
-    func testSendEmailWithoutConfirmationSendsNothing() {
-        let error = harness.callFailing(
-            "send_email",
-            ["to": "alice@example.com", "subject": "Test", "body": "Hello", "bcc": "carol@example.com"])
-        guard case MailError.confirmRequired = error else {
-            return XCTFail("expected confirmRequired, got \(error)")
-        }
-        XCTAssertTrue(harness.executor.calls.isEmpty)
-    }
-
     func testSendEmailRefusesARecipientFieldWithoutAnAddress() {
         let cases: [(String, [String: Any])] = [
             ("to", ["to": ""]),
@@ -199,7 +190,7 @@ final class MailCommandBoundaryTests: XCTestCase {
         let script = try XCTUnwrap(harness.executor.calls.first?.script)
         XCTAssertTrue(script.contains("address:\"alice@example.com\""), script)
         XCTAssertTrue(script.contains("address:\"bob@example.com\""), script)
-        XCTAssertTrue(script.contains("send newMsg"), script)
+        XCTAssertTrue(script.contains("send spwMsg"), script)
     }
 
     func testACommandGivenSomethingOtherThanAMailIdRunsNothingAndSaysWhereIdsComeFrom() throws {

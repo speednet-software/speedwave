@@ -35,6 +35,7 @@ enum MailFailure: LocalizedError, Equatable {
     case archiveNotFound(account: String)
     case alreadyArchived
     case mailboxExists(mailbox: String, account: String)
+    case sendFailed
 
     var code: String {
         switch self {
@@ -54,6 +55,7 @@ enum MailFailure: LocalizedError, Equatable {
         case .archiveNotFound: return "MAIL_ARCHIVE_NOT_FOUND"
         case .alreadyArchived: return "MAIL_ALREADY_ARCHIVED"
         case .mailboxExists: return "MAIL_MAILBOX_EXISTS"
+        case .sendFailed: return "MAIL_SEND_FAILED"
         }
     }
 
@@ -98,6 +100,8 @@ enum MailFailure: LocalizedError, Equatable {
             return "The email is already in the Archive mailbox."
         case .mailboxExists(let mailbox, let account):
             return "Mailbox '\(mailbox)' already exists in account '\(account)'; move emails to it as it is."
+        case .sendFailed:
+            return "Mail.app did not send the message; it may wait in the Outbox."
         }
     }
 }
@@ -194,6 +198,9 @@ struct MailScripts {
         }
         if detail.contains(mailboxExistsMarker) {
             return .mailboxExists(mailbox: mailbox ?? "", account: account ?? "")
+        }
+        if detail.contains(sendFailedMarker) {
+            return .sendFailed
         }
         if detail.contains(mailNotFoundMarker) {
             return .mailNotFound(mailbox: mailbox ?? "", account: account ?? "")

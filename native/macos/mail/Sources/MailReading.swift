@@ -11,6 +11,20 @@ enum MailReading {
     private static let subfieldSeparator = "\u{1F}"
     private static let fieldCount = 12
 
+    /// The AppleScript handler `spwClean(t)`: `t` as text without ASCII GS, RS and US, "" for missing value.
+    static let cleanHandler = """
+        on spwClean(t)
+            if t is missing value then return ""
+            set spwOld to AppleScript's text item delimiters
+            set AppleScript's text item delimiters to {character id 29, character id 30, character id 31}
+            set spwParts to text items of (t as text)
+            set AppleScript's text item delimiters to ""
+            set spwText to spwParts as text
+            set AppleScript's text item delimiters to spwOld
+            return spwText
+        end spwClean
+        """
+
     static func getEmail(
         scripts: MailScripts,
         id: String,
@@ -27,16 +41,7 @@ enum MailReading {
     /// stripped of those three characters first, so a mail cannot forge a field.
     static func getEmailScript(_ id: MailId, includeHeaders: Bool, includeSource: Bool) -> String {
         """
-        on spwClean(t)
-            if t is missing value then return ""
-            set spwOld to AppleScript's text item delimiters
-            set AppleScript's text item delimiters to {character id 29, character id 30, character id 31}
-            set spwParts to text items of (t as text)
-            set AppleScript's text item delimiters to ""
-            set spwText to spwParts as text
-            set AppleScript's text item delimiters to spwOld
-            return spwText
-        end spwClean
+        \(cleanHandler)
 
         on spwCapped(t)
             if t is missing value then return {"", "false"}

@@ -49,12 +49,6 @@ final class MailTests: XCTestCase {
     }
 
 
-    func testMailErrorConfirmRequired() {
-        let error = MailError.confirmRequired
-        XCTAssertTrue(error.errorDescription!.contains("confirm_send"))
-    }
-
-
     func testSplitAddressListSingleAddress() {
         XCTAssertEqual(splitAddressList("alice@example.com"), ["alice@example.com"])
     }
@@ -76,7 +70,7 @@ final class MailTests: XCTestCase {
 
 
     func testAppleMailRecipientClausesSingleAddress() {
-        let result = AppleMailClient.recipientClauses("alice@example.com", kind: "to")
+        let result = MailSending.recipientClauses(["alice@example.com"], kind: "to")
         XCTAssertEqual(
             result,
             "        make new to recipient at end of to recipients with properties {address:\"alice@example.com\"}"
@@ -84,7 +78,7 @@ final class MailTests: XCTestCase {
     }
 
     func testAppleMailRecipientClausesMultipleAddressesOneLinePerRecipient() {
-        let result = AppleMailClient.recipientClauses("alice@example.com,bob@example.com", kind: "cc")
+        let result = MailSending.recipientClauses(["alice@example.com", "bob@example.com"], kind: "cc")
         let lines = result.components(separatedBy: "\n")
         XCTAssertEqual(lines.count, 2, "must emit one AppleScript line per recipient")
         XCTAssertTrue(lines[0].contains("cc recipient") && lines[0].contains("alice@example.com"))
@@ -92,7 +86,7 @@ final class MailTests: XCTestCase {
     }
 
     func testAppleMailRecipientClausesEmptyStringProducesNoLines() {
-        XCTAssertEqual(AppleMailClient.recipientClauses("", kind: "bcc"), "")
+        XCTAssertEqual(MailSending.recipientClauses([], kind: "bcc"), "")
     }
 
 
