@@ -17,7 +17,12 @@ trap 'rm -rf "$WORKDIR"' EXIT
 
 "$REPO_ROOT/scripts/audit-changed-files.sh" "$AUDIT_BASE_SHA" "HEAD" "$WORKDIR/changed.json"
 
-if [ "$(python3 "$GATE" lockfiles-touched --changed "$WORKDIR/changed.json")" = "false" ]; then
+AUDIT_LOCKFILES=()
+while read -r _ _ lockfile; do
+    AUDIT_LOCKFILES+=("$lockfile")
+done < <("$AUDIT_RUN" --list)
+
+if [ "$(python3 "$GATE" lockfiles-touched --changed "$WORKDIR/changed.json" "${AUDIT_LOCKFILES[@]}")" = "false" ]; then
     echo "No package-lock.json or Cargo.lock in the diff, green without auditing."
     exit 0
 fi
@@ -29,31 +34,27 @@ fetch_base_file() {
 }
 
 BASE_ROOT="$WORKDIR/base"
-fetch_base_file "Cargo.lock" "$BASE_ROOT/Cargo.lock"
-fetch_base_file "desktop/src-tauri/Cargo.lock" "$BASE_ROOT/desktop/src-tauri/Cargo.lock"
-fetch_base_file "mcp-servers/package.json" "$BASE_ROOT/mcp-servers/package.json"
-fetch_base_file "mcp-servers/package-lock.json" "$BASE_ROOT/mcp-servers/package-lock.json"
-fetch_base_file "desktop/src/package.json" "$BASE_ROOT/desktop/src/package.json"
-fetch_base_file "desktop/src/package-lock.json" "$BASE_ROOT/desktop/src/package-lock.json"
+TARGETS=()
+KINDS=()
+while read -r target kind lockfile; do
+    TARGETS+=("$target")
+    KINDS+=("$kind")
+    fetch_base_file "$lockfile" "$BASE_ROOT/$lockfile"
+    if [ "$kind" = "npm" ]; then
+        manifest="$(dirname "$lockfile")/package.json"
+        fetch_base_file "$manifest" "$BASE_ROOT/$manifest"
+    fi
+done < <("$AUDIT_RUN" --list)
 
-"$AUDIT_RUN" cargo-root "$WORKDIR/base-cargo-root.json" "$BASE_ROOT"
-"$AUDIT_RUN" cargo-desktop "$WORKDIR/base-cargo-desktop.json" "$BASE_ROOT"
-"$AUDIT_RUN" npm-mcp "$WORKDIR/base-npm-mcp.json" "$BASE_ROOT"
-"$AUDIT_RUN" npm-desktop "$WORKDIR/base-npm-desktop.json" "$BASE_ROOT"
-
-"$AUDIT_RUN" cargo-root "$WORKDIR/head-cargo-root.json"
-"$AUDIT_RUN" cargo-desktop "$WORKDIR/head-cargo-desktop.json"
-"$AUDIT_RUN" npm-mcp "$WORKDIR/head-npm-mcp.json"
-"$AUDIT_RUN" npm-desktop "$WORKDIR/head-npm-desktop.json"
+GATE_ARGS=()
+for i in "${!TARGETS[@]}"; do
+    target="${TARGETS[$i]}"
+    "$AUDIT_RUN" "$target" "$WORKDIR/base-$target.json" "$BASE_ROOT"
+    "$AUDIT_RUN" "$target" "$WORKDIR/head-$target.json"
+    GATE_ARGS+=(--base "${KINDS[$i]}:$WORKDIR/base-$target.json" --head "${KINDS[$i]}:$WORKDIR/head-$target.json")
+done
 
 python3 "$GATE" diff \
     --exceptions "$EXCEPTIONS" \
     --npm-min-severity "$NPM_AUDIT_LEVEL" \
-    --base "cargo:$WORKDIR/base-cargo-root.json" \
-    --base "cargo:$WORKDIR/base-cargo-desktop.json" \
-    --base "npm:$WORKDIR/base-npm-mcp.json" \
-    --base "npm:$WORKDIR/base-npm-desktop.json" \
-    --head "cargo:$WORKDIR/head-cargo-root.json" \
-    --head "cargo:$WORKDIR/head-cargo-desktop.json" \
-    --head "npm:$WORKDIR/head-npm-mcp.json" \
-    --head "npm:$WORKDIR/head-npm-desktop.json"
+    "${GATE_ARGS[@]}"

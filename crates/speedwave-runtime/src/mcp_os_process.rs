@@ -113,13 +113,15 @@ pub fn is_mcp_os_alive_in(data_dir: &Path) -> bool {
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
-    clippy::expect_used,
     reason = "test code: panics on setup failure are acceptable"
 )]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::host_mcp_process::drain::test_support::write_fake_worker;
+    #[cfg(unix)]
     use serial_test::serial;
+    #[cfg(unix)]
     use std::process::Stdio;
 
     #[test]
@@ -292,6 +294,10 @@ mod tests {
     #[test]
     #[serial_test::parallel(host_addressing)]
     #[serial(env)]
+    #[expect(
+        clippy::expect_used,
+        reason = "test code: panics on setup failure are acceptable"
+    )]
     fn spawn_migrates_legacy_three_file_layout() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("mcp-os-port"), "54321").unwrap();
@@ -343,6 +349,10 @@ mod tests {
     #[test]
     #[serial_test::parallel(host_addressing)]
     #[serial(env)]
+    #[expect(
+        clippy::expect_used,
+        reason = "test code: panics on setup failure are acceptable"
+    )]
     fn upgrade_path_with_real_bundled_mcp_os() {
         let script = "../../desktop/src-tauri/mcp-os/os/dist/index.js";
         assert!(

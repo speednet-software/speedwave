@@ -1,19 +1,36 @@
 /** Shared mock for TauriService used across Angular test files. */
 export class MockTauriService {
-  /** Configurable handler for invoke calls — override in beforeEach per test suite. */
-  invokeHandler: (cmd: string, args?: Record<string, unknown>) => Promise<unknown> = async () =>
-    undefined;
+  invokeHandler: (
+    cmd: string,
+    args?: Record<string, unknown>,
+    options?: { headers: Record<string, string> }
+  ) => Promise<unknown> = async () => undefined;
 
-  /** Registered event listener callbacks keyed by event name. */
+  /**
+   * Registered event listeners keyed by event name; each entry delivers to every listener of that
+   * event, and disappears with the last one, as Tauri's own listeners do.
+   */
   listenHandlers: Record<string, (event: unknown) => void> = {};
+
+  private readonly listeners = new Map<string, Set<(event: unknown) => void>>();
 
   /**
    * Mock invoke that delegates to invokeHandler.
    * @param cmd - The command name.
    * @param args - Optional command arguments.
+   * @param options - Optional request options.
+   * @param options.headers - Request headers.
    */
-  async invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-    return this.invokeHandler(cmd, args) as Promise<T>;
+  async invoke<T = unknown>(
+    cmd: string,
+    args?: Record<string, unknown>,
+    options?: { headers: Record<string, string> }
+  ): Promise<T> {
+    const result =
+      options === undefined
+        ? this.invokeHandler(cmd, args)
+        : this.invokeHandler(cmd, args, options);
+    return result as Promise<T>;
   }
 
   /**
@@ -22,14 +39,24 @@ export class MockTauriService {
    * @param handler - The event handler callback.
    */
   async listen(event: string, handler: unknown): Promise<() => void> {
-    this.listenHandlers[event] = handler as (event: unknown) => void;
+    const fn = handler as (event: unknown) => void;
+    const set = this.listeners.get(event) ?? new Set<(event: unknown) => void>();
+    set.add(fn);
+    this.listeners.set(event, set);
+    this.listenHandlers[event] = (e) => {
+      for (const listener of [...(this.listeners.get(event) ?? [])]) listener(e);
+    };
     return () => {
-      delete this.listenHandlers[event];
+      set.delete(fn);
+      if (set.size === 0 && this.listeners.get(event) === set) {
+        this.listeners.delete(event);
+        delete this.listenHandlers[event];
+      }
     };
   }
 
   /**
-   * Dispatches a mock event to a registered listener.
+   * Dispatches a mock event to every listener registered for it.
    * @param event - The event name.
    * @param payload - The event payload.
    */

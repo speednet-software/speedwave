@@ -1,5 +1,5 @@
 //! Conversation state-tree shapes (ADR-042) mirrored by the Angular
-//! frontend (`models/state-tree.ts`, `models/chat.ts::MessageBlock`).
+//! frontend (`models/state-tree.ts`).
 
 use serde::{Deserialize, Serialize};
 
@@ -161,7 +161,7 @@ pub struct QueuedMessage {
 }
 
 /// One block inside a conversation entry — aggregated state after delta application, not the
-/// raw event. Tagged enum mirrored by `models/chat.ts::MessageBlock` (SSOT alignment).
+/// raw event. Tagged enum mirrored by `models/state-tree.ts::MessageBlockState` (SSOT alignment).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MessageBlock {
@@ -219,6 +219,13 @@ pub enum MessageBlock {
         /// Optional alt text.
         #[serde(default)]
         alt: Option<String>,
+    },
+    /// User-attached non-image file (metadata only; bytes live on disk per ADR-094).
+    File {
+        /// Original filename as the user attached it.
+        filename: String,
+        /// Size on disk in bytes.
+        size_bytes: u64,
     },
 }
 
@@ -363,10 +370,45 @@ mod tests {
                 media_type: "image/png".into(),
                 alt: Some("screenshot.png".into()),
             },
+            MessageBlock::File {
+                filename: "raport końcowy.xlsx".into(),
+                size_bytes: 734_003_200,
+            },
         ];
         let encoded = serde_json::to_value(&blocks).unwrap();
         let decoded: Vec<MessageBlock> = serde_json::from_value(encoded).unwrap();
         assert_eq!(blocks, decoded);
+    }
+
+    #[test]
+    fn file_block_serializes_with_snake_case_kind_and_size() {
+        let block = MessageBlock::File {
+            filename: "notes.pdf".into(),
+            size_bytes: 0,
+        };
+        let encoded = serde_json::to_value(&block).unwrap();
+        assert_eq!(
+            encoded,
+            json!({
+                "kind": "file",
+                "filename": "notes.pdf",
+                "size_bytes": 0,
+            })
+        );
+    }
+
+    #[test]
+    fn file_block_requires_both_fields() {
+        let missing_size = serde_json::from_value::<MessageBlock>(json!({
+            "kind": "file",
+            "filename": "notes.pdf",
+        }));
+        assert!(missing_size.is_err());
+        let missing_name = serde_json::from_value::<MessageBlock>(json!({
+            "kind": "file",
+            "size_bytes": 12,
+        }));
+        assert!(missing_name.is_err());
     }
 
     #[test]

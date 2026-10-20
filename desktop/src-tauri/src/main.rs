@@ -44,6 +44,7 @@ mod paste_cmd;
 #[cfg(target_os = "windows")]
 mod path_util;
 mod pii_display;
+mod pii_ner_service;
 mod pin_cmd;
 mod plugin_cmd;
 mod plugin_oauth_cmd;
@@ -59,6 +60,8 @@ mod slash_cmd;
 mod system_settings_cmd;
 mod transcription_cmd;
 mod tray;
+#[cfg(test)]
+mod ts_mirror;
 mod types;
 mod ui_prefs_cmd;
 mod update_commands;
@@ -705,10 +708,12 @@ fn main() {
     let plugin_bridges: SharedPluginBridges =
         Arc::new(Mutex::new(std::collections::HashMap::new()));
     let mcp_os: SharedMcpOs = Arc::new(Mutex::new(None));
+    let pii_ner: pii_ner_service::SharedPiiNer = Arc::new(Mutex::new(None));
     let oauth: SharedOauth = Arc::new(Mutex::new(std::collections::HashMap::new()));
     let auto_check_handle: SharedAutoCheckHandle = Arc::new(Mutex::new(None));
 
     reconcile::set_global_plugin_bridges(plugin_bridges.clone());
+    pii_ner_service::set_global_pii_ner(pii_ner.clone());
 
     let tray_available = Arc::new(AtomicBool::new(false));
     let tray_available_setup = tray_available.clone();
@@ -718,6 +723,7 @@ fn main() {
         ide_bridge: ide_bridge.clone(),
         plugin_bridges: plugin_bridges.clone(),
         mcp_os: mcp_os.clone(),
+        pii_ner: pii_ner.clone(),
         oauth: oauth.clone(),
         auto_check_handle: auto_check_handle.clone(),
     };
@@ -796,6 +802,16 @@ fn main() {
                 .level_for("tungstenite", log::LevelFilter::Warn)
                 .level_for("tokio_tungstenite", log::LevelFilter::Warn)
                 .level_for("whisper_rs", log::LevelFilter::Info)
+                .level_for("wgpu_core", log::LevelFilter::Warn)
+                .level_for("wgpu_hal", log::LevelFilter::Warn)
+                .level_for("wgpu", log::LevelFilter::Warn)
+                .level_for("naga", log::LevelFilter::Warn)
+                .level_for("cubecl", log::LevelFilter::Warn)
+                .level_for("cubecl_runtime", log::LevelFilter::Warn)
+                .level_for("cubecl_wgpu", log::LevelFilter::Warn)
+                .level_for("burn_fusion", log::LevelFilter::Warn)
+                .level_for("burn_wgpu", log::LevelFilter::Warn)
+                .level_for("tokenizers", log::LevelFilter::Warn)
                 .max_file_size(50_000_000)
                 .rotation_strategy(RotationStrategy::KeepSome(10))
                 .format(move |callback, message, record| {
@@ -850,6 +866,12 @@ fn main() {
                 *slot = clipboard_bridge::spawn(app.handle().clone());
             }
 
+            let interrupted = transcript_store.reconcile_interrupted();
+            if interrupted > 0 {
+                log::info!("{interrupted} interrupted recording(s) marked for transcription");
+            }
+            transcription_cmd::spawn_change_forwarder(app.handle().clone(), transcript_store);
+
             if let Err(failures) = speedwave_runtime::plugin::audit_all() {
                 let body = format_audit_failure_message(&failures);
                 log::error!("plugin audit failed:\n{}", body);
@@ -873,7 +895,6 @@ fn main() {
                 log::error!("PII policy check failed: {}", e);
                 show_audit_failure_dialog_and_exit(app.handle(), "Organization policy error", body);
             }
-
 
             if setup_started {
                 let cleaned =
@@ -902,14 +923,14 @@ fn main() {
                             if let Ok(mut guard) = mcp_os.lock() {
                                 *guard = Some(worker);
                             }
-
-                            reconcile::reconcile_compose_port(app.handle());
                         }
                         Err(e) => log::error!("mcp-os spawn error: {e}"),
                     }
                 } else {
                     log::warn!("mcp-os script not found — OS integrations will be unavailable");
                 }
+
+                reconcile::reconcile_compose_port(app.handle());
 
                 start_mcp_os_watchdog(mcp_os.clone(), app.handle().clone());
 
@@ -1183,6 +1204,10 @@ fn main() {
             chat_session_cmd::start_chat,
             chat_session_cmd::send_message,
             paste_cmd::save_pasted_image,
+            paste_cmd::begin_paste_upload,
+            paste_cmd::append_paste_upload,
+            paste_cmd::finish_paste_upload,
+            paste_cmd::discard_paste,
             chat_session_cmd::submit_question_answer,
             chat_session_cmd::stop_chat,
             chat_session_cmd::close_chat_tab,
@@ -1196,16 +1221,21 @@ fn main() {
             retry_cmd::retry_last_turn,
             queue_cmd::queue_message,
             queue_cmd::cancel_queued_message,
-            transcription_cmd::transcription_capabilities,
             transcription_cmd::list_audio_sources,
             transcription_cmd::start_transcription,
             transcription_cmd::stop_transcription,
+            transcription_cmd::pause_transcription,
             transcription_cmd::resume_transcription,
             transcription_cmd::subscribe_transcript,
             transcription_cmd::list_transcripts,
             transcription_cmd::get_transcript,
             transcription_cmd::delete_transcript,
             transcription_cmd::get_transcript_markdown,
+            transcription_cmd::rename_transcript,
+            transcription_cmd::transcribe_transcript,
+            transcription_cmd::postpone_transcription,
+            transcription_cmd::export_transcript,
+            transcription_cmd::reveal_transcript_audio,
             transcription_cmd::recommended_transcription_model,
             transcription_cmd::list_transcription_models,
             transcription_cmd::download_transcription_model,
@@ -1346,7 +1376,11 @@ fn main() {
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "test-only assertions")]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test assertions may unwrap/expect freely"
+)]
 mod tests {
     use super::*;
 
@@ -1704,10 +1738,10 @@ mod tests {
                 let before = &source[..*idx];
                 let last_mod_tests = before.rfind("mod tests");
                 let last_cfg_test = before.rfind("#[cfg(test)]");
-                match (last_mod_tests, last_cfg_test) {
-                    (Some(mt), Some(ct)) if ct < mt && *idx > mt => false,
-                    _ => true,
-                }
+                !matches!(
+                    (last_mod_tests, last_cfg_test),
+                    (Some(mt), Some(ct)) if ct < mt && *idx > mt
+                )
             })
             .count();
         assert!(
@@ -1834,6 +1868,29 @@ mod tests {
         assert!(
             directive.contains("data:"),
             "CSP image directive must allow data: for image sources; got: {directive}"
+        );
+    }
+
+    #[test]
+    fn main_window_disables_native_drag_drop_for_html5_composer_dnd() {
+        let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json"))
+            .expect("tauri.conf.json parses");
+        let windows = conf["app"]["windows"]
+            .as_array()
+            .expect("app.windows is an array");
+        let main_window = windows
+            .first()
+            .expect("app.windows must define the main window");
+
+        let drag_drop_enabled = main_window["dragDropEnabled"]
+            .as_bool()
+            .expect("main window must set dragDropEnabled explicitly");
+        assert!(
+            !drag_drop_enabled,
+            "dragDropEnabled must be false: Tauri's default native drag-drop \
+             handler swallows the drop before it reaches the webview, so \
+             composer.component.ts's HTML5 drag & drop (file-drop.directive.ts) \
+             never fires (SPEED-636)"
         );
     }
 }

@@ -5,10 +5,11 @@ use std::path::Path;
 
 use rand::RngCore;
 use speedwave_pii_engine::{
-    alias_json, compile_policy_v3, default_policy_json, detokenize_text, detokenize_text_with,
-    incomplete_token_span_start, scan_json, unalias_text_preserving_tokens,
+    alias_json, collect_string_leaves, collect_string_leaves_with_keys, compile_policy_v3,
+    default_policy_json, detokenize_text, detokenize_text_with, incomplete_token_span_start,
+    scan_json, scan_json_with_external, unalias_text_preserving_tokens,
     unalias_text_preserving_tokens_with, CompiledKeyword, CompiledPolicy, Detection,
-    DetokenizeError, EngineKey, ScanError,
+    DetokenizeError, EngineKey, ExternalSpan, ScanError,
 };
 
 /// Loaded PII engine state: ready to scan, or a fatal load error. `Failed` is surfaced by
@@ -112,31 +113,104 @@ fn merge_detections(agg: &mut Vec<Detection>, more: Vec<Detection>) {
     }
 }
 
-/// Scans `system` and every `messages[].content` (tool results included); other protocol
-/// fields are untouched. An `Err` may leave `body` partially mutated. The caller must discard it.
-///
-/// Each scanned subtree is then keyword-masked (design doc §7.3): masking runs strictly after
-/// tokenization so a keyword occurring inside a value that also matched a PII rule is already
-/// sealed behind a token span and cannot be re-exposed by the keyword pass.
-pub fn scan_request(
+/// Rule and host-detector (NER) detection aggregates of one request scan.
+#[derive(Default, Debug, PartialEq, Eq)]
+pub struct ScanReport {
+    pub detections: Vec<Detection>,
+    pub external: Vec<Detection>,
+}
+
+/// Object keys holding protocol plumbing or base64 payloads; the neural detector skips them,
+/// the rule engine still scans them.
+const NON_PROSE_LEAF_KEYS: &[&str] = &[
+    "type",
+    "id",
+    "tool_use_id",
+    "media_type",
+    "data",
+    "signature",
+    "url",
+    "file_id",
+];
+
+enum ScanRoot {
+    System,
+    Content,
+}
+
+/// Every string leaf [`scan_request_with_external`] scans, in its order; `system` and
+/// non-prose leaves are blanked so the detector does not see them.
+pub fn collect_scan_leaves(body: &serde_json::Value) -> Vec<String> {
+    let mut leaves = Vec::new();
+    for (root, pointer) in scan_roots(body) {
+        let Some(subtree) = body.pointer(&pointer) else {
+            continue;
+        };
+        match root {
+            ScanRoot::System => {
+                leaves.extend(collect_string_leaves(subtree).iter().map(|_| String::new()));
+            }
+            ScanRoot::Content => leaves.extend(
+                collect_string_leaves_with_keys(subtree)
+                    .into_iter()
+                    .map(|leaf| match leaf.key {
+                        Some(key) if NON_PROSE_LEAF_KEYS.contains(&key) => String::new(),
+                        _ => leaf.text.to_string(),
+                    }),
+            ),
+        }
+    }
+    leaves
+}
+
+/// Scans, seals and keyword-masks `system` and every `messages[].content`, sealing `external`
+/// detector spans per leaf of [`collect_scan_leaves`]. An `Err` may leave `body` half-mutated.
+pub fn scan_request_with_external(
     policy: &CompiledPolicy,
     key: &EngineKey,
     body: &mut serde_json::Value,
-) -> Result<Vec<Detection>, ScanError> {
-    let mut detections = Vec::new();
-    if let Some(system) = body.get_mut("system") {
-        merge_detections(&mut detections, scan_json(policy, key, system)?);
-        mask_keywords(system, policy.keywords());
+    external: Option<Vec<Vec<ExternalSpan>>>,
+) -> Result<ScanReport, ScanError> {
+    let mut report = ScanReport::default();
+    let mut lists = external.map(std::collections::VecDeque::from);
+    let mut scan_subtree =
+        |subtree: &mut serde_json::Value, report: &mut ScanReport| -> Result<(), ScanError> {
+            match lists.as_mut() {
+                None => merge_detections(&mut report.detections, scan_json(policy, key, subtree)?),
+                Some(queue) => {
+                    let wanted = collect_string_leaves(subtree).len();
+                    let taken: Vec<Vec<ExternalSpan>> =
+                        queue.drain(..wanted.min(queue.len())).collect();
+                    let outcome = scan_json_with_external(policy, key, subtree, &taken)?;
+                    merge_detections(&mut report.detections, outcome.detections);
+                    merge_detections(&mut report.external, outcome.external_detections);
+                }
+            }
+            mask_keywords(subtree, policy.keywords());
+            Ok(())
+        };
+    for (_, pointer) in scan_roots(body) {
+        if let Some(subtree) = body.pointer_mut(&pointer) {
+            scan_subtree(subtree, &mut report)?;
+        }
     }
-    if let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
-        for message in messages.iter_mut() {
-            if let Some(content) = message.get_mut("content") {
-                merge_detections(&mut detections, scan_json(policy, key, content)?);
-                mask_keywords(content, policy.keywords());
+    Ok(report)
+}
+
+/// JSON pointers of the scanned subtrees, in scan order: `system`, then each message's content.
+fn scan_roots(body: &serde_json::Value) -> Vec<(ScanRoot, String)> {
+    let mut roots = Vec::new();
+    if body.get("system").is_some() {
+        roots.push((ScanRoot::System, "/system".to_string()));
+    }
+    if let Some(messages) = body.get("messages").and_then(|m| m.as_array()) {
+        for (index, message) in messages.iter().enumerate() {
+            if message.get("content").is_some() {
+                roots.push((ScanRoot::Content, format!("/messages/{index}/content")));
             }
         }
     }
-    Ok(detections)
+    roots
 }
 
 /// Masks every configured keyword to its alias across `value`'s string leaves, case-pattern
@@ -183,7 +257,7 @@ pub fn unmask_keywords_text(text: &str, keywords: &[CompiledKeyword]) -> String 
 }
 
 /// Full inbound response rewrite (design doc §5.1, §7.2/§7.3): keywords unmasked first
-/// (alias → match), then PII token spans decrypted — the inverse of `scan_request`'s
+/// (alias → match), then PII token spans decrypted — the inverse of `scan_request_with_external`'s
 /// tokenize-then-mask order. Fail-closed: a token failing SIV verification is an `Err`,
 /// never a silent pass-through of the literal span.
 pub fn unmask_and_detokenize_response(
@@ -333,6 +407,14 @@ mod tests {
     fn test_policy_and_key() -> (CompiledPolicy, EngineKey) {
         let policy = compile_policy_v3(&default_policy_json()).expect("default policy compiles");
         (policy, EngineKey::from_bytes([9u8; 32]))
+    }
+
+    fn scan_request(
+        policy: &CompiledPolicy,
+        key: &EngineKey,
+        body: &mut serde_json::Value,
+    ) -> Result<Vec<Detection>, ScanError> {
+        scan_request_with_external(policy, key, body, None).map(|report| report.detections)
     }
 
     #[test]
@@ -1019,5 +1101,195 @@ mod tests {
         let mut buffer = ResponseRewriteBuffer::new();
         buffer.push_chunk(&bytes);
         assert!(buffer.finish(&[], &key).is_err());
+    }
+
+    fn external(start: usize, end: usize, category: &str) -> ExternalSpan {
+        ExternalSpan {
+            start,
+            end,
+            category: category.to_string(),
+        }
+    }
+
+    #[test]
+    fn scan_leaves_are_every_string_under_system_and_message_content_in_walk_order() {
+        let body = json!({
+            "model": "claude",
+            "system": [{"type": "text", "text": "sys"}],
+            "messages": [
+                {"role": "user", "content": "first"},
+                {"role": "assistant", "content": [{"type": "text", "text": "second"}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "id", "content": [{"type": "text", "text": "third"}]}]}
+            ],
+            "metadata": {"user_id": "ignored"}
+        });
+        let leaves = collect_scan_leaves(&body);
+        assert_eq!(leaves, ["", "", "first", "second", "", "third", "", "", ""]);
+        assert_eq!(
+            leaves.len(),
+            collect_string_leaves(&body["system"]).len()
+                + body["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|m| collect_string_leaves(&m["content"]).len())
+                    .sum::<usize>(),
+            "blanking must not change how many leaves the scan indexes"
+        );
+        assert!(collect_scan_leaves(&json!({"model": "x"})).is_empty());
+    }
+
+    #[test]
+    fn the_client_scaffolding_is_never_offered_to_the_detector() {
+        let body = json!({
+            "system": [
+                {"type": "text", "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK."},
+                {"type": "text", "text": "Jan Kowalski, mikolaj@example.com"}
+            ],
+            "messages": [{"role": "user", "content": "Jan Kowalski"}]
+        });
+        let leaves = collect_scan_leaves(&body);
+        assert_eq!(leaves, ["", "", "", "", "Jan Kowalski"]);
+        assert_eq!(
+            leaves.len(),
+            collect_string_leaves(&body["system"]).len() + 1,
+            "system keeps one slot per leaf so the per-leaf answers stay aligned"
+        );
+    }
+
+    #[test]
+    fn an_attached_image_is_blanked_instead_of_being_sent_to_the_detector() {
+        let body = json!({
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgoAAAA"}},
+                    {"type": "text", "text": "Jan Kowalski"}
+                ]
+            }]
+        });
+        let leaves = collect_scan_leaves(&body);
+        assert_eq!(leaves, ["", "", "", "", "Jan Kowalski", ""]);
+    }
+
+    #[test]
+    fn external_spans_are_sealed_per_leaf_and_reported_separately() {
+        let (policy, key) = test_policy_and_key();
+        let mut body = json!({
+            "system": "Jan Kowalski",
+            "messages": [
+                {"role": "user", "content": "nothing here"},
+                {"role": "user", "content": [{"type": "text", "text": "mieszka w Gdańsku"}]}
+            ]
+        });
+        let leaves = collect_scan_leaves(&body);
+        assert_eq!(leaves, ["", "nothing here", "mieszka w Gdańsku", ""]);
+        let external = vec![
+            vec![],
+            vec![external(0, 7, "SURNAME")],
+            vec![external(10, 18, "CITY")],
+            vec![],
+        ];
+        let report = scan_request_with_external(&policy, &key, &mut body, Some(external)).unwrap();
+        assert!(report.detections.is_empty());
+        assert_eq!(report.external.len(), 2);
+        assert!(report
+            .external
+            .iter()
+            .all(|d| d.action == DetectionAction::Tokenized && d.count == 1));
+        assert_eq!(
+            body["system"], "Jan Kowalski",
+            "the client's scaffolding is forwarded verbatim"
+        );
+        assert!(body["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .starts_with("[SURNAME:TOKEN_"));
+        let city = body["messages"][1]["content"][0]["text"].as_str().unwrap();
+        assert!(city.starts_with("mieszka w [CITY:TOKEN_"), "{city}");
+    }
+
+    #[test]
+    fn external_spans_defer_to_rules_and_a_short_list_is_an_error() {
+        let (policy, key) = test_policy_and_key();
+        let text = "PESEL 44051401359 and someone@example.org";
+        let mut body = json!({"system": text});
+        let external = vec![vec![
+            external(6, 17, "GOVERNMENT_ID"),
+            external(0, 5, "SURNAME"),
+        ]];
+        let report = scan_request_with_external(&policy, &key, &mut body, Some(external)).unwrap();
+        assert!(report.detections.iter().any(|d| d.category == "PESEL"));
+        assert!(report.detections.iter().any(|d| d.category == "EMAIL"));
+        assert_eq!(report.external.len(), 1);
+        assert_eq!(report.external[0].category, "SURNAME");
+        assert!(!body["system"].as_str().unwrap().contains("GOVERNMENT_ID"));
+
+        let mut body = json!({"system": "a", "messages": [{"role": "user", "content": "b"}]});
+        let err =
+            scan_request_with_external(&policy, &key, &mut body, Some(vec![vec![]])).unwrap_err();
+        assert!(matches!(err, ScanError::ExternalSpanCount { .. }), "{err}");
+    }
+
+    #[test]
+    fn scan_request_preserves_cache_breakpoints_and_produces_a_stable_prefix() {
+        let (policy, key) = test_policy_and_key();
+        let tools = json!([{
+            "name": "send_mail",
+            "description": "sends mail",
+            "input_schema": {"type": "object", "properties": {}},
+            "cache_control": {"type": "ephemeral"}
+        }]);
+        let body_for = || {
+            json!({
+                "model": "claude-x",
+                "tools": tools.clone(),
+                "system": [
+                    {"type": "text", "text": "you are helpful"},
+                    {"type": "text", "text": "reach me at fixture@example.invalid",
+                     "cache_control": {"type": "ephemeral"}}
+                ],
+                "messages": [{
+                    "role": "user",
+                    "content": [{"type": "text", "text": "mail fixture@example.invalid",
+                                 "cache_control": {"type": "ephemeral"}}]
+                }]
+            })
+        };
+
+        let mut first = body_for();
+        scan_request(&policy, &key, &mut first).unwrap();
+
+        assert_eq!(
+            first["tools"], tools,
+            "tool definitions must survive the scan untouched"
+        );
+        assert_eq!(
+            first["system"][1]["cache_control"],
+            json!({"type": "ephemeral"}),
+            "a system breakpoint marker must survive the scan"
+        );
+        assert_eq!(
+            first["messages"][0]["content"][0]["cache_control"],
+            json!({"type": "ephemeral"}),
+            "a message breakpoint marker must survive the scan"
+        );
+        assert_eq!(first["system"].as_array().unwrap().len(), 2);
+        assert_eq!(first["system"][0]["text"], json!("you are helpful"));
+        assert_eq!(first["messages"][0]["content"][0]["type"], json!("text"));
+
+        let system_text = first["system"][1]["text"].as_str().unwrap();
+        assert!(
+            !system_text.contains("fixture@example.invalid"),
+            "the address must be sealed: {system_text}"
+        );
+
+        let mut second = body_for();
+        scan_request(&policy, &key, &mut second).unwrap();
+        assert_eq!(
+            serde_json::to_string(&first).unwrap(),
+            serde_json::to_string(&second).unwrap(),
+            "a repeated prefix must scan to identical bytes or every turn is a cache miss"
+        );
     }
 }

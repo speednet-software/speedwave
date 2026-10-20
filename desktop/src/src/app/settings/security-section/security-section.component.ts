@@ -26,6 +26,8 @@ import type {
   SecurityPolicyUpdate,
 } from '../../models/security-policy';
 
+const DESERT_ANT_URL = 'https://desertant.com';
+
 /** Editable row for a custom detection pattern (server derives the rule id). */
 interface CustomPatternRow {
   displayName: string;
@@ -85,6 +87,40 @@ const OFF_FLAGS: RuleFlags = { tokenize: false, log: false };
 
       @if (loaded()) {
         <div class="mt-4 space-y-2">
+          <div class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">
+            Detection
+          </div>
+          <label
+            class="flex items-start gap-2 rounded border border-[var(--line)] bg-[var(--bg-1)] px-3 py-2"
+          >
+            <input
+              type="checkbox"
+              class="mt-0.5 accent-[var(--accent)]"
+              [checked]="piiNerEnabled()"
+              (change)="toggleNer($event)"
+              data-testid="security-ner-enabled"
+            />
+            <div class="min-w-0 flex-1">
+              <div class="text-[12px] font-medium text-[var(--ink)]">
+                On-device name and address detection
+              </div>
+              <div class="text-[11px] text-[var(--ink-dim)]">
+                Catches names, addresses and ids the patterns miss. Message text is analysed by the
+                Speedwave app on this machine and never leaves it.
+              </div>
+            </div>
+          </label>
+          <div class="px-3 text-[11px] text-[var(--ink-dim)]" data-testid="security-ner-credit">
+            Powered by
+            <a
+              [href]="desertAntUrl"
+              class="text-[var(--accent)] hover:underline"
+              data-testid="security-ner-credit-link"
+              (click)="openDesertAnt($event)"
+              >Desert Ant Labs</a
+            >
+          </div>
+
           <div class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">
             Policies
           </div>
@@ -360,6 +396,7 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
   /** Forwards errors to the Settings shell banner. */
   readonly errorOccurred = output<string>();
 
+  readonly desertAntUrl = DESERT_ANT_URL;
   readonly templates = signal<SecurityPolicyTemplateInfo[]>([]);
   /** Every known PII rule id + label, fetched from the library (`list_pii_rules`). */
   readonly categories = signal<PiiRuleInfo[]>([]);
@@ -377,6 +414,8 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
   /** Rule id -> flags, built from the last load's `effective_rules`; a missing id is off. */
   readonly effectiveCategories = signal<RuleCategories>({});
   readonly customPolicies = signal<CustomPolicyRow[]>([]);
+  /** The on-device detector switch for the active project. */
+  readonly piiNerEnabled = signal(false);
 
   private readonly loadedFormSnapshot = signal('');
   private nextRowKey = 0;
@@ -462,6 +501,7 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
   }
 
   private applyPolicy(policy: SecurityPolicyResponse): void {
+    this.piiNerEnabled.set(policy.pii_ner_enabled);
     this.forcedPolicies.set(new Set(policy.forced_policies));
     this.enabledPolicies.set(new Set(policy.enabled_policies));
     this.effectiveCategories.set(
@@ -520,6 +560,27 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
       else next.delete(id);
       return next;
     });
+  }
+
+  /**
+   * Toggles the on-device detector.
+   * @param ev - the checkbox change event.
+   */
+  toggleNer(ev: Event): void {
+    this.piiNerEnabled.set(eventChecked(ev));
+  }
+
+  /**
+   * Opens the Desert Ant Labs credit link in the system browser.
+   * @param ev - the click event, default navigation is suppressed.
+   */
+  async openDesertAnt(ev: Event): Promise<void> {
+    ev.preventDefault();
+    try {
+      await this.tauri.invoke('open_url', { url: DESERT_ANT_URL });
+    } catch (e: unknown) {
+      this.emitError(e);
+    }
   }
 
   /**
@@ -801,6 +862,7 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
 
   private computeFormSnapshot(): string {
     return JSON.stringify({
+      piiNerEnabled: this.piiNerEnabled(),
       enabled: Array.from(this.enabledPolicies()).sort(),
       custom: this.customPolicies().map((r) => ({
         name: r.name,
@@ -832,7 +894,7 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
         caseSensitive: k.caseSensitive,
       })),
     }));
-    return { policies, custom_policies };
+    return { policies, custom_policies, pii_ner_enabled: this.piiNerEnabled() };
   }
 
   /** Persists the enabled policies + custom definitions, then requests a restart. */

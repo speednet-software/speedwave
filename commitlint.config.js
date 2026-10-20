@@ -43,6 +43,7 @@ export default {
         'lint',
         'config',
         'native',
+        'pii-ner',
         'security',
         'version',
         'release',

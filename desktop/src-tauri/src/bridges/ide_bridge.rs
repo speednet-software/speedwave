@@ -904,7 +904,11 @@ async fn handle_test_connection<S>(
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "test module")]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test assertions may unwrap/expect freely"
+)]
 mod tests {
     use super::{
         dispatch_method, find_available_port, handle_jsonrpc_message, jsonrpc_error,
@@ -1231,11 +1235,12 @@ mod tests {
     fn test_ide_bridge_new_returns_valid_instance() {
         let bridge = IdeBridge::new().unwrap();
         assert!(bridge._tcp_port > 0, "TCP port should be assigned");
-        assert!(
+        assert_eq!(
             bridge
                 .lock_file_path
-                .to_string_lossy()
-                .contains("ide-bridge/"),
+                .parent()
+                .and_then(|dir| dir.file_name()),
+            Some(std::ffi::OsStr::new("ide-bridge")),
             "Lock file path should be in <data_dir>/ide-bridge/, got: {:?}",
             bridge.lock_file_path
         );

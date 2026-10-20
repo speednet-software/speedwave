@@ -12,6 +12,8 @@ homepage = "https://github.com/speednet-software/speedwave"
 [dependencies]
 speedwave-runtime = { path = "../../crates/speedwave-runtime", features = ["audio-transcription"] }
 speedwave-pii-engine = { path = "../../crates/pii-engine" }
+speedwave-pii-ner = { path = "../../crates/pii-ner" }
+axum = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_with = "3"
@@ -29,7 +31,7 @@ tauri-plugin-log = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
 notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
-tauri-plugin-webdriver = { version = "0.2", optional = true }
+tauri-plugin-webdriver = { git = "https://github.com/Choochmeque/tauri-plugin-webdriver", rev = "b94eb81c9d4359cefdde15bd74d0f7d8a00065b6", optional = true }
 url = "2"
 tokio-tungstenite = "0.30"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
@@ -58,6 +60,8 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security_Authorization",
     "Win32_System_Threading",
     "Win32_System_Memory",
+    "Win32_System_Pipes",
+    "Win32_Storage_FileSystem",
     "Win32_Foundation",
 ] }
 
@@ -66,7 +70,9 @@ e2e = ["dep:tauri-plugin-webdriver"]
 
 [dev-dependencies]
 fs2 = "0.4"
+http-body-util = "0.1"
 mockito = "1"
+tower = { version = "0.5", features = ["util"] }
 serial_test = "4"
 speedwave-runtime = { path = "../../crates/speedwave-runtime", features = ["audio-transcription", "test-support"] }
 

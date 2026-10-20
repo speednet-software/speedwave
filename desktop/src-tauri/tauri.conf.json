@@ -30,7 +30,8 @@
         "height": 800,
         "resizable": true,
         "visible": true,
-        "center": true
+        "center": true,
+        "dragDropEnabled": false
       }
     ]
   },

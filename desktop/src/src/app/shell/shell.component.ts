@@ -243,7 +243,7 @@ export class ShellComponent implements OnInit, OnDestroy {
 
   readonly visibleEntries = computed<readonly NavRailEntry[]>(() => {
     const recording = this.transcription.recording();
-    const show = this.beta.enabled() || recording;
+    const show = this.beta.enabled() || this.transcription.captureOpen();
     return this.entryCatalog
       .filter((e) => e.id !== TRANSCRIPTION_ENTRY_ID || show)
       .map((e) => (e.id === TRANSCRIPTION_ENTRY_ID ? { ...e, recording } : e));
@@ -339,7 +339,7 @@ export class ShellComponent implements OnInit, OnDestroy {
         return;
       case '4':
         event.preventDefault();
-        if (this.beta.enabled() || this.transcription.recording()) {
+        if (this.beta.enabled() || this.transcription.captureOpen()) {
           void this.router.navigateByUrl('/meeting-transcription');
         }
         return;

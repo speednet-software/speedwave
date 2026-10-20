@@ -903,7 +903,14 @@ impl StreamParser {
                     "result message has is_error=true but empty result text; \
                      returning placeholder error chunk"
                 );
-                log::debug!("empty-error result payload: {parsed}");
+                log::debug!(
+                    "empty-error result payload: subtype={:?} fields={:?}",
+                    parsed["subtype"].as_str(),
+                    parsed
+                        .as_object()
+                        .map(|o| o.keys().cloned().collect::<Vec<_>>())
+                        .unwrap_or_default()
+                );
                 "The LLM returned an error without details. \
                      Check the provider server logs or try a different model."
                     .to_string()
@@ -2886,14 +2893,81 @@ fn write_and_emit_drained_message(
     true
 }
 
-#[cfg(test)]
-fn test_stdin_pipe() -> (std::io::PipeReader, std::process::ChildStdin) {
+#[cfg(all(test, unix))]
+#[expect(clippy::expect_used, reason = "test helper may expect freely")]
+fn test_stdin_pipe() -> (
+    impl std::io::Read + Send + 'static,
+    std::process::ChildStdin,
+) {
     let (reader, writer) = std::io::pipe().expect("create test stdin pipe");
-    #[cfg(unix)]
     let stdin = std::process::ChildStdin::from(std::os::fd::OwnedFd::from(writer));
-    #[cfg(windows)]
-    let stdin = std::process::ChildStdin::from(std::os::windows::io::OwnedHandle::from(writer));
     (reader, stdin)
+}
+
+#[cfg(all(test, windows))]
+#[expect(
+    unsafe_code,
+    reason = "ChildStdin needs an overlapped pipe handle, which std::io::pipe cannot create"
+)]
+fn test_stdin_pipe() -> (
+    impl std::io::Read + Send + 'static,
+    std::process::ChildStdin,
+) {
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use windows_sys::Win32::Foundation::{GENERIC_WRITE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, OPEN_EXISTING,
+        PIPE_ACCESS_INBOUND,
+    };
+    use windows_sys::Win32::System::Pipes::{
+        CreateNamedPipeW, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
+    };
+
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let name: Vec<u16> = format!(
+        r"\\.\pipe\speedwave-test-stdin-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )
+    .encode_utf16()
+    .chain(std::iter::once(0))
+    .collect();
+    // SAFETY: `name` is a NUL-terminated UTF-16 string that outlives the call; null security attributes are accepted by the API.
+    let read = unsafe {
+        CreateNamedPipeW(
+            name.as_ptr(),
+            PIPE_ACCESS_INBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            PIPE_TYPE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+            1,
+            4096,
+            4096,
+            0,
+            std::ptr::null(),
+        )
+    };
+    assert_ne!(read, INVALID_HANDLE_VALUE, "create test stdin pipe");
+    // SAFETY: `read` was just created, is valid and is owned by nobody else.
+    let reader = unsafe { OwnedHandle::from_raw_handle(read) };
+    // SAFETY: `name` is a NUL-terminated UTF-16 string that outlives the call; null security attributes and template handle are accepted by the API.
+    let write = unsafe {
+        CreateFileW(
+            name.as_ptr(),
+            GENERIC_WRITE,
+            0,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_OVERLAPPED,
+            std::ptr::null_mut(),
+        )
+    };
+    assert_ne!(write, INVALID_HANDLE_VALUE, "open test stdin pipe writer");
+    // SAFETY: `write` was just created, is valid and is owned by nobody else.
+    let writer = unsafe { OwnedHandle::from_raw_handle(write) };
+    (
+        std::fs::File::from(reader),
+        std::process::ChildStdin::from(writer),
+    )
 }
 
 #[cfg(test)]
@@ -2930,6 +3004,7 @@ fn test_broken_pipe_stdin() -> std::process::ChildStdin {
 }
 
 #[cfg(test)]
+#[expect(clippy::expect_used, reason = "test helper may expect freely")]
 fn spawn_test_child() -> Child {
     #[cfg(unix)]
     let mut command = {
@@ -2939,8 +3014,8 @@ fn spawn_test_child() -> Child {
     };
     #[cfg(windows)]
     let mut command = {
-        let mut c = std::process::Command::new("cmd");
-        c.arg("/C").arg("pause");
+        let mut c = speedwave_runtime::binary::system_command("cmd");
+        c.arg("/C").arg("set /p line=");
         c
     };
     command
@@ -2959,6 +3034,41 @@ fn spawn_test_child() -> Child {
 )]
 mod tests {
     use super::*;
+
+    fn wait_for_exit(child: &mut Child, within: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + within;
+        while std::time::Instant::now() < deadline {
+            if child.try_wait().unwrap().is_some() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        false
+    }
+
+    #[test]
+    fn the_test_child_waits_for_a_line_on_stdin_and_exits_after_it() {
+        let mut child = spawn_test_child();
+        assert!(!wait_for_exit(
+            &mut child,
+            std::time::Duration::from_millis(500)
+        ));
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(b"\n").unwrap();
+        stdin.flush().unwrap();
+        let exited = wait_for_exit(&mut child, std::time::Duration::from_secs(20));
+        child.kill().ok();
+        assert!(exited, "the test child must exit once it has read a line");
+    }
+
+    #[test]
+    fn the_test_child_exits_when_its_stdin_closes() {
+        let mut child = spawn_test_child();
+        drop(child.stdin.take());
+        let exited = wait_for_exit(&mut child, std::time::Duration::from_secs(20));
+        child.kill().ok();
+        assert!(exited, "the test child must exit at end of input");
+    }
 
     #[test]
     fn chat_stream_emits_go_through_helper() {

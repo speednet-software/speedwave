@@ -863,6 +863,10 @@ export class ChatSessionStore {
   readonly composerDraft = signal('');
   /** Per-tab scroll offset restored when a background tab is reactivated (phase 3). */
   scrollPosition: number | null = null;
+  private readonly _autoScrollRequested = signal(0);
+  readonly autoScrollRequested: Signal<number> = this._autoScrollRequested.asReadonly();
+  /** Per-tab plan-mode flag restored when a background tab is reactivated, or on a nav-rail remount. */
+  readonly composerPlanMode = signal(false);
   /** Per-tab staged image attachments (SPEED-785) — a paste/drop resolves into this instance regardless of which tab's composer is active when it finishes. */
   readonly composerAttachments = new ComposerAttachments();
 
@@ -1212,7 +1216,11 @@ export class ChatSessionStore {
       displayBlocks.push({ type: 'text', content: surfaceText });
     }
     for (const att of chatInput.attachments) {
-      displayBlocks.push({ type: 'image', media_type: att.mediaType, alt: att.filename });
+      displayBlocks.push(
+        att.kind === 'image'
+          ? { type: 'image', media_type: att.mediaType, alt: att.filename }
+          : { type: 'file', filename: att.filename, size_bytes: att.sizeBytes }
+      );
     }
     const isControlSend = chatInput.attachments.length === 0 && isControlShaped(chatInput.text);
     if (isControlSend) this.recordTypedModelCommand(chatInput.text);
@@ -1229,6 +1237,7 @@ export class ChatSessionStore {
     this.isStreaming = true;
     this._turnId += 1;
     this._currentBlocks = [];
+    this.requestAutoScroll();
     this.notifyChange();
 
     const invokeArgs = { blocks: wireBlocks, displayText: surfaceText, tabId: this.tabId };
@@ -1364,6 +1373,10 @@ export class ChatSessionStore {
       ];
       this.notifyChange();
     }
+  }
+
+  private requestAutoScroll(): void {
+    this._autoScrollRequested.update((n) => n + 1);
   }
 
   /**
@@ -1773,6 +1786,7 @@ export class ChatSessionStore {
       view.confirmedModel === null
         ? null
         : { catalogId: view.confirmedModel, generation: this._sessionGeneration };
+    this.requestAutoScroll();
     this.notifyChange();
   }
 
@@ -1792,6 +1806,7 @@ export class ChatSessionStore {
    */
   loadMessages(msgs: ChatMessage[]): void {
     this._messages = msgs;
+    this.requestAutoScroll();
     this.notifyChange();
     const lastAssistant = [...msgs].reverse().find((m) => m.role === 'assistant' && m.uuid);
     if (lastAssistant?.uuid) {
@@ -1829,6 +1844,7 @@ export class ChatSessionStore {
     if (!text) return null;
     const prior = this._pendingQueue?.text ?? null;
     this._pendingQueue = { text, queued_at: Date.now() };
+    this.requestAutoScroll();
     this.notifyChange();
     const sessionId = this._sessionStats()?.session_id;
     if (!sessionId) {
@@ -1926,6 +1942,7 @@ export class ChatSessionStore {
     this.isStreaming = true;
     this._turnId += 1;
     this._deferredEffort.set(null);
+    this.requestAutoScroll();
     this.notifyChange();
 
     try {
@@ -2592,6 +2609,9 @@ export function stateBlocksToMessageBlocks(blocks: readonly MessageBlockState[])
       case 'image':
         out.push({ type: 'image', media_type: b.media_type, alt: b.alt ?? undefined });
         break;
+      case 'file':
+        out.push({ type: 'file', filename: b.filename, size_bytes: b.size_bytes });
+        break;
       case 'chip':
         out.push({ type: 'chip', command: b.command, argument: b.argument });
         break;
@@ -2658,6 +2678,9 @@ export function messageBlocksToState(blocks: readonly MessageBlock[]): MessageBl
         break;
       case 'image':
         out.push({ kind: 'image', media_type: b.media_type, alt: b.alt ?? null });
+        break;
+      case 'file':
+        out.push({ kind: 'file', filename: b.filename, size_bytes: b.size_bytes });
         break;
       case 'permission_prompt':
         break;

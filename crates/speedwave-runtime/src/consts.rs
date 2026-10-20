@@ -10,6 +10,10 @@ pub const PII_MAX_PATTERNS: usize = 1024;
 pub const PII_MAX_KEYWORDS: usize = 256;
 /// Maximum byte length of a single PII rule pattern accepted at load.
 pub const PII_MAX_PATTERN_LENGTH: usize = 512;
+/// Minimum length, in characters, of a keyword substitution's `match` and `alias`.
+pub const PII_KEYWORD_MIN_CHARS: usize = 3;
+/// Maximum length, in characters, of a keyword substitution's `match` and `alias`.
+pub const PII_KEYWORD_MAX_CHARS: usize = 128;
 
 /// Env var overriding the data-dir location.
 pub const DATA_DIR_ENV: &str = "SPEEDWAVE_DATA_DIR";
@@ -58,6 +62,16 @@ pub const MCP_OS_LEGACY_PID_FILE: &str = "mcp-os-pid";
 pub const MCP_OS_LOCK_FILE: &str = "mcp-os.lock.json";
 /// Log filename for the mcp-os host process.
 pub const MCP_OS_LOG_FILE: &str = "mcp-os.log";
+
+/// Single-file lock of the host-side PII NER detector (Desktop in-process HTTP service);
+/// the proxy renderer reads `{pid, port, authToken}` from it (ADR-096).
+pub const PII_NER_LOCK_FILE: &str = "pii-ner.lock.json";
+/// Persistent bearer secret of the PII NER detector (0600); stable across restarts so a
+/// rendered `proxy.json` only changes when the port does.
+pub const PII_NER_AUTH_TOKEN_FILE: &str = "pii-ner-auth-token";
+/// Header the proxy presents the detector token in; mirror of
+/// `containers/proxy/src/ner.rs::NER_AUTH_HEADER` (cross-read test below).
+pub const PII_NER_AUTH_HEADER: &str = "x-speedwave-pii-ner-auth";
 
 /// Per-project unified lock file in each per-project state dir; SSOT for compose
 /// port injection + watchdog (supersedes the split `port`/`pid`/`auth-token` files).
@@ -136,6 +150,7 @@ pub fn container_uid_gid() -> (u32, u32) {
         .unwrap_or((1000, 1000))
 }
 
+/// `automount` options for `/etc/wsl.conf`, mapping `/mnt/c` files to the container uid and gid.
 #[cfg(target_os = "windows")]
 pub fn wsl_automount_options() -> String {
     let (uid, gid) = container_uid_gid();
@@ -2921,6 +2936,32 @@ mod tests {
     }
 
     #[test]
+    fn pii_ner_auth_header_matches_proxy_ner_rs() {
+        let src = include_str!("../../../containers/proxy/src/ner.rs");
+        let re = regex::Regex::new(r#"pub const NER_AUTH_HEADER: &str = "([^"]+)";"#).unwrap();
+        let cap = re
+            .captures(src)
+            .expect("containers/proxy/src/ner.rs must declare `pub const NER_AUTH_HEADER`");
+        assert_eq!(
+            &cap[1], PII_NER_AUTH_HEADER,
+            "proxy NER_AUTH_HEADER must match consts::PII_NER_AUTH_HEADER"
+        );
+    }
+
+    #[test]
+    fn host_gateway_alias_matches_proxy_ner_rs() {
+        let src = include_str!("../../../containers/proxy/src/ner.rs");
+        let re = regex::Regex::new(r#"const HOST_GATEWAY_ALIAS: &str = "([^"]+)";"#).unwrap();
+        let cap = re
+            .captures(src)
+            .expect("containers/proxy/src/ner.rs must declare `const HOST_GATEWAY_ALIAS`");
+        assert_eq!(
+            &cap[1], HOST_GATEWAY_ALIAS,
+            "proxy HOST_GATEWAY_ALIAS must match consts::HOST_GATEWAY_ALIAS"
+        );
+    }
+
+    #[test]
     fn plugin_settings_file_matches_mcp_shared_ts() {
         let src = include_str!("../../../mcp-servers/shared/src/security.ts");
         let re =
@@ -2932,6 +2973,43 @@ mod tests {
         assert_eq!(
             &cap[1], PLUGIN_SETTINGS_FILE,
             "TS PLUGIN_SETTINGS_FILE must match Rust consts::PLUGIN_SETTINGS_FILE"
+        );
+    }
+
+    #[test]
+    fn pii_limits_match_policy_engine() {
+        fn engine_const(src: &str, name: &str) -> usize {
+            let needle = format!("const {name}: usize = ");
+            let rest = src
+                .split(&needle)
+                .nth(1)
+                .unwrap_or_else(|| panic!("`{name}` not found in pii-engine policy.rs"));
+            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            digits
+                .parse()
+                .unwrap_or_else(|_| panic!("`{name}` is not a plain integer literal"))
+        }
+
+        let engine = include_str!("../../pii-engine/src/policy.rs");
+        for (name, ours) in [
+            ("MAX_RULES", PII_MAX_RULES),
+            ("MAX_PATTERNS", PII_MAX_PATTERNS),
+            ("MAX_KEYWORDS", PII_MAX_KEYWORDS),
+            ("MAX_PATTERN_LEN", PII_MAX_PATTERN_LENGTH),
+            ("KEYWORD_MIN_CHARS", PII_KEYWORD_MIN_CHARS),
+            ("KEYWORD_MAX_CHARS", PII_KEYWORD_MAX_CHARS),
+        ] {
+            assert_eq!(
+                engine_const(engine, name),
+                ours,
+                "pii-engine `{name}` and this crate's mirror disagree; update both"
+            );
+        }
+
+        assert!(
+            engine.contains("kw.r#match.chars().count()")
+                && engine.contains("kw.alias.chars().count()"),
+            "pii-engine must count keyword length in characters, not bytes"
         );
     }
 

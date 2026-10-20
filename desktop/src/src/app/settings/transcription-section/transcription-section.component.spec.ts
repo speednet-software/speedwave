@@ -27,8 +27,11 @@ describe('TranscriptionSectionComponent', () => {
     requestMicrophonePermission: ReturnType<typeof vi.fn>;
     openMicrophonePrivacyPane: ReturnType<typeof vi.fn>;
     openAudioCapturePrivacyPane: ReturnType<typeof vi.fn>;
+    liveTranscriptPreferred: ReturnType<typeof vi.fn>;
+    setLiveTranscriptPreferred: ReturnType<typeof vi.fn>;
     downloadingModelKey: typeof downloadingModelKey;
     downloadProgress: typeof downloadProgress;
+    refreshRecordings: ReturnType<typeof vi.fn>;
   };
   let platform: string;
 
@@ -63,8 +66,11 @@ describe('TranscriptionSectionComponent', () => {
       requestMicrophonePermission: vi.fn(async () => 'granted'),
       openMicrophonePrivacyPane: vi.fn(async () => undefined),
       openAudioCapturePrivacyPane: vi.fn(async () => undefined),
+      liveTranscriptPreferred: vi.fn(() => false),
+      setLiveTranscriptPreferred: vi.fn(),
       downloadingModelKey,
       downloadProgress,
+      refreshRecordings: vi.fn(async () => undefined),
     };
     await TestBed.configureTestingModule({
       imports: [TranscriptionSectionComponent],
@@ -81,6 +87,30 @@ describe('TranscriptionSectionComponent', () => {
     }).compileComponents();
     fixture = TestBed.createComponent(TranscriptionSectionComponent);
     component = fixture.componentInstance;
+  });
+
+  describe('live text toggle', () => {
+    it('is off by default, names its cost, and persists a change', async () => {
+      await component.ngOnInit();
+      fixture.detectChanges();
+      const box: HTMLInputElement = fixture.nativeElement.querySelector(
+        '[data-testid="live-transcript-toggle"]'
+      );
+      expect(box.checked).toBe(false);
+      expect(fixture.nativeElement.textContent).toContain('Uses more CPU and battery');
+      box.checked = true;
+      box.dispatchEvent(new Event('change'));
+      fixture.detectChanges();
+      expect(svc.setLiveTranscriptPreferred).toHaveBeenCalledWith(true);
+      expect(component.liveTranscript()).toBe(true);
+    });
+
+    it('shows a stored opt-in as on', async () => {
+      svc.liveTranscriptPreferred.mockReturnValue(true);
+      fixture = TestBed.createComponent(TranscriptionSectionComponent);
+      component = fixture.componentInstance;
+      expect(component.liveTranscript()).toBe(true);
+    });
   });
 
   describe('model rows', () => {
@@ -154,8 +184,8 @@ describe('TranscriptionSectionComponent', () => {
       await component.ngOnInit();
       fixture.detectChanges();
 
-      expect(component.downloadLabel({ ...liveEntry, key: 'small' })).toBe('download model');
-      expect(component.downloadLabel(finalize)).toBe('downloading 50%');
+      expect(component.downloadLabel({ ...liveEntry, key: 'small' })).toBe('Download (2.9 GB)');
+      expect(component.downloadLabel(finalize)).toBe('Downloading 50%');
     });
   });
   describe('permissions block', () => {
@@ -167,7 +197,7 @@ describe('TranscriptionSectionComponent', () => {
       );
       expect(block).not.toBeNull();
       const state = fixture.nativeElement.querySelector('[data-testid="mic-permission-state"]');
-      expect(state.textContent).toContain('Granted');
+      expect(state.textContent).toContain('Allowed');
       expect(
         fixture.nativeElement.querySelector('[data-testid="request-mic-permission"]')
       ).toBeNull();
@@ -224,9 +254,9 @@ describe('TranscriptionSectionComponent', () => {
     await component.ngOnInit();
     fixture.detectChanges();
     const body: string = fixture.nativeElement.textContent ?? '';
-    expect(body).toContain('record system audio');
-    expect(body).toContain('locally');
-    expect(body).toContain('network');
+    expect(body).toContain('records system audio');
+    expect(body).toContain('on this machine');
+    expect(body).toContain('Audio never leaves your computer.');
   });
 
   it('shows the acceleration label from the backend', async () => {
@@ -300,13 +330,13 @@ describe('TranscriptionSectionComponent', () => {
     fixture.detectChanges();
     const btn = fixture.nativeElement.querySelector('[data-testid="download-model"]');
     expect(btn.disabled).toBe(true);
-    expect(btn.textContent).toContain('downloading 50%');
+    expect(btn.textContent).toContain('Downloading 50%');
   });
 
   it('progress label falls back to an indeterminate form without total_bytes', () => {
     downloadingModelKey.set('large-v3');
     downloadProgress.set({ model_key: 'large-v3', downloaded_bytes: 50, total_bytes: null });
-    expect(component.progressLabel()).toBe('downloading…');
+    expect(component.progressLabel()).toBe('Downloading…');
   });
 
   it('resumes progress tracking when the backend reports an untracked download', async () => {
@@ -354,5 +384,119 @@ describe('TranscriptionSectionComponent', () => {
   it('size() formats GB and MB', () => {
     expect(component.size({ ...liveEntry, size_bytes: 3_100_000_000 })).toBe('2.9 GB');
     expect(component.size({ ...liveEntry, size_bytes: 488_000_000 })).toBe('465.4 MB');
+  });
+
+  describe('status line', () => {
+    const small: RecommendedModelEntry = {
+      key: 'small',
+      display_name: 'Small',
+      size_bytes: 487_601_967,
+      downloaded: true,
+      downloading: false,
+    };
+    const large: RecommendedModelEntry = {
+      key: 'large-v3',
+      display_name: 'Large v3',
+      size_bytes: 1_624_555_275,
+      downloaded: true,
+      downloading: false,
+    };
+    const status = (): string =>
+      fixture.nativeElement.querySelector('[data-testid="transcription-status"]')?.textContent ??
+      '';
+
+    it('says ready when the high-quality model is on disk, with no download button', async () => {
+      svc.recommendedModel.mockResolvedValue({ live: small, finalize: large, accel_label: 'CPU' });
+      await component.ngOnInit();
+      fixture.detectChanges();
+      expect(status()).toContain('Ready to record');
+      expect(status()).toContain('runs on this machine');
+      expect(fixture.nativeElement.querySelector('[data-testid="download-best-model"]')).toBeNull();
+    });
+
+    it('says ready with the smaller model and offers the high-quality one', async () => {
+      svc.recommendedModel.mockResolvedValue({
+        live: small,
+        finalize: { ...large, downloaded: false },
+        accel_label: 'CPU',
+      });
+      await component.ngOnInit();
+      fixture.detectChanges();
+      expect(status()).toContain('Ready to record, with the smaller model');
+      const btn = fixture.nativeElement.querySelector('[data-testid="download-best-model"]');
+      btn.click();
+      await fixture.whenStable();
+      expect(svc.downloadModel).toHaveBeenCalledWith('large-v3');
+    });
+
+    it('says not ready and names the one download when nothing is on disk', async () => {
+      await component.ngOnInit();
+      fixture.detectChanges();
+      expect(status()).toContain('Not ready to record');
+      expect(status()).toContain('one download (2.9 GB)');
+    });
+
+    it('keeps model names and removal inside the collapsed Technical details', async () => {
+      svc.recommendedModel.mockResolvedValue(downloaded);
+      await component.ngOnInit();
+      fixture.detectChanges();
+      const details: HTMLDetailsElement = fixture.nativeElement.querySelector(
+        '[data-testid="transcription-technical"]'
+      );
+      expect(details.open).toBe(false);
+      expect(details.querySelector('[data-testid="remove-model"]')).not.toBeNull();
+      expect(details.querySelector('[data-testid="accel-label"]')).not.toBeNull();
+    });
+  });
+
+  describe('live text model', () => {
+    const small: RecommendedModelEntry = {
+      key: 'small',
+      display_name: 'Small',
+      size_bytes: 487_601_967,
+      downloaded: false,
+      downloading: false,
+    };
+    const large: RecommendedModelEntry = {
+      key: 'large-v3',
+      display_name: 'Large v3',
+      size_bytes: 1_624_555_275,
+      downloaded: true,
+      downloading: false,
+    };
+
+    it('names the extra download live text needs when it is a separate model', async () => {
+      svc.recommendedModel.mockResolvedValue({ live: small, finalize: large, accel_label: 'CPU' });
+      await component.ngOnInit();
+      fixture.detectChanges();
+      expect(fixture.nativeElement.textContent).toContain('needs an extra download (465.0 MB)');
+      expect(fixture.nativeElement.querySelector('[data-testid="download-live-model"]')).toBeNull();
+    });
+
+    it('offers that download once live text is turned on', async () => {
+      svc.recommendedModel.mockResolvedValue({ live: small, finalize: large, accel_label: 'CPU' });
+      await component.ngOnInit();
+      component.liveTranscript.set(true);
+      fixture.detectChanges();
+      fixture.nativeElement.querySelector('[data-testid="download-live-model"]').click();
+      await fixture.whenStable();
+      expect(svc.downloadModel).toHaveBeenCalledWith('small');
+    });
+
+    it('asks for no extra download when one model serves both passes', async () => {
+      await component.ngOnInit();
+      component.liveTranscript.set(true);
+      fixture.detectChanges();
+      expect(component.liveModel()).toBeNull();
+      expect(fixture.nativeElement.textContent).not.toContain('extra download');
+    });
+  });
+
+  it('leaves the recordings and their disk use to the recordings view', async () => {
+    await component.ngOnInit();
+    fixture.detectChanges();
+    expect(svc.refreshRecordings).not.toHaveBeenCalled();
+    expect(fixture.nativeElement.querySelector('[data-testid="transcription-storage"]')).toBeNull();
+    expect(fixture.nativeElement.textContent).not.toContain('Recordings use');
   });
 });

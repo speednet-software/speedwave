@@ -1,6 +1,7 @@
 import { vi } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { NativeThemeAdapter } from './native-theme-adapter';
+import { mockMatchMedia } from '../testing/mock-match-media';
 import {
   ThemeService,
   THEME_MODES,
@@ -10,54 +11,6 @@ import {
   type ThemeId,
   type ThemeMode,
 } from './theme.service';
-
-/**
- * Installs a controllable `matchMedia` on `window`; returns `fireChange` to simulate OS
- * theme toggles and `restore` to remove the stub.
- * @param prefersDark - Initial `matches` for `(prefers-color-scheme: dark)`.
- */
-function mockMatchMedia(prefersDark: boolean): {
-  fireChange: (prefersDarkNow: boolean) => void;
-  restore: () => void;
-} {
-  const original = Object.getOwnPropertyDescriptor(window, 'matchMedia');
-  const listeners = new Set<(e: MediaQueryListEvent) => void>();
-  const mq = {
-    matches: prefersDark,
-    media: '(prefers-color-scheme: dark)',
-    onchange: null,
-    addEventListener: (
-      _: string,
-      fn: (e: MediaQueryListEvent) => void,
-      options?: { signal?: AbortSignal }
-    ) => {
-      listeners.add(fn);
-      options?.signal?.addEventListener('abort', () => listeners.delete(fn));
-    },
-    removeEventListener: (_: string, fn: (e: MediaQueryListEvent) => void) => listeners.delete(fn),
-    addListener: (fn: (e: MediaQueryListEvent) => void) => listeners.add(fn),
-    removeListener: (fn: (e: MediaQueryListEvent) => void) => listeners.delete(fn),
-    dispatchEvent: () => false,
-  } as unknown as MediaQueryList;
-  Object.defineProperty(window, 'matchMedia', {
-    configurable: true,
-    writable: true,
-    value: () => mq,
-  });
-  return {
-    fireChange: (prefersDarkNow: boolean) => {
-      (mq as unknown as { matches: boolean }).matches = prefersDarkNow;
-      for (const fn of listeners) fn({ matches: prefersDarkNow } as MediaQueryListEvent);
-    },
-    restore: () => {
-      if (original) {
-        Object.defineProperty(window, 'matchMedia', original);
-      } else {
-        Reflect.deleteProperty(window as unknown as Record<string, unknown>, 'matchMedia');
-      }
-    },
-  };
-}
 
 /** Build a fresh in-memory `Storage`-shaped object for each test. */
 function makeMemoryStorage(): Storage {
@@ -199,10 +152,20 @@ describe('ThemeService', () => {
       media.restore();
     });
 
-    it('defaults to dark when no mode is persisted (first run)', () => {
+    it('defaults to auto and follows a light system when no mode is persisted (first run)', () => {
       const svc = create();
-      expect(svc.mode()).toBe<ThemeMode>('dark');
+      expect(svc.mode()).toBe<ThemeMode>('auto');
+      expect(document.documentElement.classList.contains('dark')).toBe(false);
+      expect(localStorage.getItem(MODE_STORAGE_KEY)).toBeNull();
+    });
+
+    it('defaults to auto and follows a dark system when no mode is persisted (first run)', () => {
+      media.restore();
+      media = mockMatchMedia(true);
+      const svc = create();
+      expect(svc.mode()).toBe<ThemeMode>('auto');
       expect(document.documentElement.classList.contains('dark')).toBe(true);
+      expect(localStorage.getItem(MODE_STORAGE_KEY)).toBeNull();
     });
 
     it('setMode("light") removes .dark and persists the choice', () => {
@@ -231,10 +194,11 @@ describe('ThemeService', () => {
       expect(document.documentElement.classList.contains('dark')).toBe(false);
     });
 
-    it('treats unknown stored mode as dark', () => {
+    it('treats unknown stored mode as the first-run default', () => {
       localStorage.setItem(MODE_STORAGE_KEY, 'sepia');
       const svc = create();
-      expect(svc.mode()).toBe<ThemeMode>('dark');
+      expect(svc.mode()).toBe<ThemeMode>('auto');
+      expect(document.documentElement.classList.contains('dark')).toBe(false);
     });
 
     it('setMode("auto") with prefers-color-scheme=dark adds .dark while keeping mode()==="auto"', () => {
@@ -290,7 +254,7 @@ describe('ThemeService', () => {
 
     it('pins the native window only in explicit modes and hands it to the OS in auto', () => {
       const { svc, sync } = createWithNative();
-      expect(sync).toHaveBeenLastCalledWith('dark');
+      expect(sync).toHaveBeenLastCalledWith(null);
       svc.setMode('light');
       expect(sync).toHaveBeenLastCalledWith('light');
       svc.setMode('auto');
@@ -382,10 +346,6 @@ describe('ThemeService', () => {
 
     it('THEME_MODES is the canonical list', () => {
       expect(THEME_MODES).toEqual(['light', 'dark', 'auto']);
-    });
-
-    it('MODE_STORAGE_KEY matches the literal used by the anti-FOUC script', () => {
-      expect(MODE_STORAGE_KEY).toBe('speedwave-theme-mode');
     });
 
     it('does not re-persist while in auto mode on system theme changes', () => {

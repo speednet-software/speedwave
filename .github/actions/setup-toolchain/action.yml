@@ -1,5 +1,5 @@
 name: 'Setup Toolchain'
-description: 'Sets up Node.js (version from .node-version) + Rust stable + optional Rust cache, saved only outside pull_request and merge_group so every run restores the cache written on dev. Shared by every test.yml lane and by build-publish.yml so the pinned action SHAs live in one place.'
+description: 'Sets up Node.js (version from .node-version) + Rust stable + optional Rust cache, saved only by runs on dev and release/** so every run restores the cache written there. Shared by every test.yml lane and by build-publish.yml so the pinned action SHAs live in one place.'
 inputs:
   node:
     description: 'Whether to set up Node.js at all'
@@ -73,5 +73,5 @@ runs:
         workspaces: ${{ inputs.rust-cache-workspaces }}
         shared-key: ${{ inputs.rust-cache-shared-key }}
         cache-directories: ${{ inputs.rust-cache-directories }}
-        key: ${{ env.SETUP_TOOLCHAIN_IMAGE_VERSION }}
-        save-if: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+        key: ${{ env.SETUP_TOOLCHAIN_IMAGE_VERSION }}-${{ hashFiles('.github/workflows/lane-*.yml', '.github/workflows/build-publish.yml', '.github/actions/*/action.yml') }}
+        save-if: ${{ github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/release/') }}

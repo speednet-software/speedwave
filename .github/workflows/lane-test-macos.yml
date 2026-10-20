@@ -1,0 +1,100 @@
+name: lane-test-macos
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test-macos:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+
+      - name: Fetch release/* branches
+        run: git fetch origin '+refs/heads/release/*:refs/remotes/origin/release/*'
+
+      - name: Setup toolchain (Node + Rust + cache)
+        uses: ./.github/actions/setup-toolchain
+        with:
+          rust-components: clippy
+          rust-cache-workspaces: |
+            . -> target
+            desktop/src-tauri -> target
+          node-cache-dependency-path: desktop/src/package-lock.json
+
+      - name: Install bats
+        run: brew install bats-core
+
+      - name: Install wasm toolchain (PII engine)
+        run: |
+          rustup target add wasm32-unknown-unknown
+          npm install -g wasm-pack
+
+      - name: Install dependencies
+        working-directory: desktop/src-tauri
+        run: cargo fetch
+
+      - name: Install Angular dependencies
+        working-directory: desktop/src
+        run: npm ci
+
+      - name: Install mcp-servers dependencies
+        working-directory: mcp-servers
+        run: npm ci
+
+      - name: Create resource stubs for Tauri build script
+        run: scripts/create-desktop-stubs.sh
+
+      - name: Rust clippy
+        run: make check-clippy
+
+      - name: Desktop clippy
+        working-directory: desktop/src-tauri
+        env:
+          SPEEDWAVE_ALLOW_BUNDLE_STUBS: "1"
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Desktop tests
+        env:
+          SPEEDWAVE_ALLOW_BUNDLE_STUBS: "1"
+        run: make test-desktop-run
+
+      - name: mcp-os bundle upgrade-path test
+        run: make test-mcp-os-bundle
+
+      - name: Desktop config tests (fast)
+        run: make test-desktop-config
+
+      - name: Desktop build bats tests (macOS-only suites)
+        run: make test-desktop-build-macos
+
+      - name: CLI e2e trio (no VM)
+        run: make test-e2e
+
+      - name: Compute app version
+        id: version
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          echo "version=$(cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- version --branch "$BRANCH")" >> "$GITHUB_OUTPUT"
+
+      - name: Build native macOS CLI binaries (universal)
+        env:
+          SPEEDWAVE_VERSION: ${{ steps.version.outputs.version }}
+        run: scripts/build-native-macos.sh
+
+      - name: Run Swift tests
+        run: make test-swift
+
+      - name: Native CLI embedded-plist guards
+        env:
+          SPEEDWAVE_VERSION: ${{ steps.version.outputs.version }}
+        run: make test-native-cli-plist
+
+      - name: Check the build did not modify a tracked file
+        run: git diff --exit-code

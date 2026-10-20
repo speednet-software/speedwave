@@ -1,4 +1,10 @@
-import { Directive, ElementRef, HostListener, inject, input, output, signal } from '@angular/core';
+import { Directive, HostListener, input, output, signal } from '@angular/core';
+
+/** Files and directory names one drop or paste carries. */
+export interface DroppedItems {
+  files: File[];
+  folders: string[];
+}
 
 /** Drop-target. `dragDepth` counter fixes the child-boundary flicker. */
 @Directive({
@@ -7,11 +13,10 @@ import { Directive, ElementRef, HostListener, inject, input, output, signal } fr
 })
 export class FileDropDirective {
   readonly disabled = input<boolean>(false);
-  readonly filesDropped = output<File[]>();
+  readonly dropped = output<DroppedItems>();
   readonly isDragging = signal<boolean>(false);
 
   private dragDepth = 0;
-  private readonly host = inject(ElementRef<HTMLElement>);
 
   /**
    * Starts a drag session; increments `dragDepth` so child boundaries don't flicker.
@@ -55,7 +60,7 @@ export class FileDropDirective {
   }
 
   /**
-   * Emits `filesDropped` with the dropped File list.
+   * Emits `dropped` once with the drop's files and directory names.
    * @param event - Native drop event.
    */
   @HostListener('drop', ['$event'])
@@ -64,9 +69,9 @@ export class FileDropDirective {
     event.preventDefault();
     this.dragDepth = 0;
     this.isDragging.set(false);
-    const files = Array.from(event.dataTransfer?.files ?? []);
-    if (files.length > 0) {
-      this.filesDropped.emit(files);
+    const items = partitionItems(event.dataTransfer?.items);
+    if (items.files.length > 0 || items.folders.length > 0) {
+      this.dropped.emit(items);
     }
   }
 }
@@ -78,4 +83,26 @@ function hasFiles(event: DragEvent): boolean {
     if (types[i] === 'Files') return true;
   }
   return false;
+}
+
+/**
+ * Splits the items of a drop or a paste into files and directory names.
+ * @param items - `DataTransfer.items` of the event; absent when it carries none.
+ */
+export function partitionItems(items: DataTransferItemList | undefined): DroppedItems {
+  const files: File[] = [];
+  const folders: string[] = [];
+  if (!items) return { files, folders };
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (item.kind !== 'file') continue;
+    const entry = item.webkitGetAsEntry();
+    const file = item.getAsFile();
+    if (entry?.isDirectory) {
+      folders.push(entry.name || file?.name || 'folder');
+    } else if (file) {
+      files.push(file);
+    }
+  }
+  return { files, folders };
 }

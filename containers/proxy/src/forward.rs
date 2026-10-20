@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::audit;
+use crate::ner::NerOutcome;
 use crate::pii::{self, PiiEngineState};
 use crate::router::{resolve, Auth, BareAuth, Config, Route, Scheme};
 use crate::usage::{append_usage, sniff, RequestStatus, UsageAcc};
@@ -22,7 +23,7 @@ use crate::usage::{append_usage, sniff, RequestStatus, UsageAcc};
 const MAX_SNIFF_BUF: usize = 1024 * 1024;
 
 /// Drops the sniff buffer if a not-yet-complete line exceeds `max`. Keeps RAM
-/// flat against a newline-free upstream; the verbatim byte relay is separate.
+/// flat against a newline-free upstream.
 fn bound_sniff_buffer(buf: &mut String, max: usize) {
     if buf.len() > max {
         buf.clear();
@@ -272,8 +273,8 @@ fn resolve_request_status(
     }
 }
 
-/// Resolve the route, forward with swapped/verbatim headers, relay the SSE byte
-/// stream unbuffered while sniffing usage, and append one usage line on end.
+/// Resolve the route, scan the request, forward it, then rewrite the response
+/// stream while sniffing usage, and append one usage line on end.
 pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: Bytes) -> Response {
     let mut parsed = match serde_json::from_slice::<serde_json::Value>(&body) {
         Ok(v) => v,
@@ -301,8 +302,19 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
                 .into_response();
         }
     };
-    let detections = match pii::scan_request(policy, key, &mut parsed) {
-        Ok(d) => d,
+    let external = match cfg.ner.as_deref() {
+        None => None,
+        Some(ner) => match ner.detect_batch(&pii::collect_scan_leaves(&parsed)).await {
+            NerOutcome::Spans(spans) => Some(spans),
+            NerOutcome::Unavailable(reason) => {
+                ner.warn_unavailable(&reason);
+                audit::write_ner_unavailable(cfg.audit_dir.as_deref());
+                None
+            }
+        },
+    };
+    let report = match pii::scan_request_with_external(policy, key, &mut parsed, external) {
+        Ok(report) => report,
         Err(e) => {
             log::error!("PII scan failed, rejecting /v1/messages: {e}");
             return (
@@ -312,7 +324,12 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
                 .into_response();
         }
     };
-    audit::write_pii_audit(cfg.audit_dir.as_deref(), &detections);
+    audit::write_pii_audit(cfg.audit_dir.as_deref(), &report.detections);
+    audit::write_pii_audit_with_source(
+        cfg.audit_dir.as_deref(),
+        &report.external,
+        Some(audit::NER_SOURCE),
+    );
 
     let scanned_body = match serde_json::to_vec(&parsed) {
         Ok(b) => b,

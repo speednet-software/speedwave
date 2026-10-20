@@ -89,12 +89,8 @@ jobs:
         id: notes
         env:
           BODY: ${{ steps.cliff.outputs.content }}
-        run: |
-          {
-            echo "body<<SPEEDWAVE_NOTES_EOF"
-            printf '%s\n' "$BODY"
-            echo "SPEEDWAVE_NOTES_EOF"
-          } >> "$GITHUB_OUTPUT"
+          SINCE: ${{ steps.range.outputs.since }}
+        run: bash scripts/beta-release-notes.sh "$SINCE" >> "$GITHUB_OUTPUT"
 
   publish:
     needs: compute

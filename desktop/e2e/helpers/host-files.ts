@@ -14,6 +14,24 @@ function configJsonPath(): string {
   return path.join(dataDir(), 'config.json');
 }
 
+function pastesDir(project: string): string {
+  const cfg = JSON.parse(fs.readFileSync(configJsonPath(), 'utf8')) as {
+    projects?: Array<{ name: string; dir: string }>;
+  };
+  const entry = cfg.projects?.find((proj) => proj.name === project);
+  if (!entry) throw new Error(`project ${project} is not in ${configJsonPath()}`);
+  return path.join(entry.dir, '.speedwave', 'pastes');
+}
+
+export function pastedFileNames(project: string): string[] {
+  const dir = pastesDir(project);
+  return fs.existsSync(dir) ? fs.readdirSync(dir) : [];
+}
+
+export function pastedFilePath(project: string, name: string): string {
+  return path.join(pastesDir(project), name);
+}
+
 export function clearModelPinFile(project: string): void {
   const settingsPath = settingsJsonPath(project);
   if (!fs.existsSync(settingsPath)) return;

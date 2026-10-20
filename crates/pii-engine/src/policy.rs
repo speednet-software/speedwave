@@ -13,6 +13,9 @@ const MAX_PATTERNS: usize = 1024;
 const MAX_KEYWORDS: usize = 256;
 const MAX_PATTERN_LEN: usize = 512;
 
+const KEYWORD_MIN_CHARS: usize = 3;
+const KEYWORD_MAX_CHARS: usize = 128;
+
 static RULE_ID_RE: LazyLock<Result<Regex, regex::Error>> =
     LazyLock::new(|| Regex::new(r"^[A-Z][A-Z0-9_]{0,63}$"));
 static ALIAS_RE: LazyLock<Result<Regex, regex::Error>> =
@@ -187,7 +190,7 @@ pub fn compile_policy_v3(json: &str) -> Result<CompiledPolicy, PolicyError> {
 fn compile_rules(rules: Vec<RuleV3>) -> Result<Vec<CompiledRule>, PolicyError> {
     let mut compiled = Vec::with_capacity(rules.len());
     for rule in rules {
-        if !rule_id_format_valid(&rule.id) {
+        if !is_valid_rule_id(&rule.id) {
             return Err(PolicyError::Semantic(format!(
                 "invalid rule id format '{}'",
                 rule.id
@@ -247,15 +250,15 @@ fn compile_rules(rules: Vec<RuleV3>) -> Result<Vec<CompiledRule>, PolicyError> {
 fn compile_keywords(keywords: Vec<KeywordV3>) -> Result<Vec<CompiledKeyword>, PolicyError> {
     let mut compiled = Vec::with_capacity(keywords.len());
     for kw in keywords {
-        if kw.r#match.len() < 3 {
-            return Err(PolicyError::Semantic(
-                "keyword match must be at least 3 characters".to_string(),
-            ));
+        if !(KEYWORD_MIN_CHARS..=KEYWORD_MAX_CHARS).contains(&kw.r#match.chars().count()) {
+            return Err(PolicyError::Semantic(format!(
+                "keyword match must be {KEYWORD_MIN_CHARS}-{KEYWORD_MAX_CHARS} characters"
+            )));
         }
-        if kw.alias.len() < 3 {
-            return Err(PolicyError::Semantic(
-                "keyword alias must be at least 3 characters".to_string(),
-            ));
+        if !(KEYWORD_MIN_CHARS..=KEYWORD_MAX_CHARS).contains(&kw.alias.chars().count()) {
+            return Err(PolicyError::Semantic(format!(
+                "keyword alias must be {KEYWORD_MIN_CHARS}-{KEYWORD_MAX_CHARS} characters"
+            )));
         }
         if kw.r#match == kw.alias {
             return Err(PolicyError::Semantic(
@@ -277,12 +280,14 @@ fn compile_keywords(keywords: Vec<KeywordV3>) -> Result<Vec<CompiledKeyword>, Po
     Ok(compiled)
 }
 
-fn rule_id_format_valid(id: &str) -> bool {
+/// Whether `id` has the shape of a policy rule id (and so of a token category).
+pub fn is_valid_rule_id(id: &str) -> bool {
     RULE_ID_RE.as_ref().is_ok_and(|re| re.is_match(id))
 }
 
 fn alias_format_valid(alias: &str) -> bool {
-    alias.len() <= 128 && ALIAS_RE.as_ref().is_ok_and(|re| re.is_match(alias))
+    alias.chars().count() <= KEYWORD_MAX_CHARS
+        && ALIAS_RE.as_ref().is_ok_and(|re| re.is_match(alias))
 }
 
 #[derive(Deserialize)]

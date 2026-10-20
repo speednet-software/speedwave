@@ -21,7 +21,7 @@ describe('transcriptionRouteGuard', () => {
       imports: [RouterModule.forRoot([])],
       providers: [
         { provide: TauriService, useValue: mockTauri },
-        { provide: TranscriptionService, useValue: { recording: recording.asReadonly() } },
+        { provide: TranscriptionService, useValue: { captureOpen: recording.asReadonly() } },
       ],
     }).compileComponents();
 

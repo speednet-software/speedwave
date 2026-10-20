@@ -1,6 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { ChangeDetectionStrategy, Component, signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { FlexibleConnectedPositionStrategy } from '@angular/cdk/overlay';
 import { TooltipDirective, type TooltipPlacement } from './tooltip.directive';
 
 @Component({
@@ -52,6 +53,15 @@ describe('TooltipDirective', () => {
     const tooltip = queryTooltip();
     expect(tooltip).not.toBeNull();
     expect(tooltip!.textContent).toContain('hello');
+  });
+
+  it('keeps the panel inside the window instead of letting it run off an edge', async () => {
+    const push = vi.spyOn(FlexibleConnectedPositionStrategy.prototype, 'withPush');
+    getButton(fixture!).dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+    fixture!.detectChanges();
+    await fixture!.whenStable();
+    expect(push).toHaveBeenCalledWith(true);
+    push.mockRestore();
   });
 
   it('shows overlay panel on focusin', async () => {

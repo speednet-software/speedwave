@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { join, relative } from 'node:path';
+import { findSrcRoot } from './testing/src-root';
 
 interface ForbiddenPattern {
   readonly label: string;
@@ -8,30 +9,6 @@ interface ForbiddenPattern {
   readonly extensions: readonly string[];
   readonly ignoreFiles?: readonly string[];
   readonly lineExemptions?: readonly string[];
-}
-
-function findSrcRoot(): string {
-  const candidates: string[] = [];
-  let dir = __dirname;
-  for (let depth = 0; depth < 6; depth++) {
-    candidates.push(dir);
-    candidates.push(join(dir, 'src'));
-    const parent = resolve(dir, '..');
-    if (parent === dir) break;
-    dir = parent;
-  }
-  for (const candidate of candidates) {
-    try {
-      const markerSpec = join(candidate, 'app', 'forbidden-patterns.spec.ts');
-      const markerSvc = join(candidate, 'app', 'services');
-      if (statSync(markerSpec).isFile() && statSync(markerSvc).isDirectory()) {
-        return candidate;
-      }
-    } catch {}
-  }
-  throw new Error(
-    `forbidden-patterns: could not locate desktop/src/src starting from ${__dirname}`
-  );
 }
 
 const SRC_ROOT = findSrcRoot();

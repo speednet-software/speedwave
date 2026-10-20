@@ -17,6 +17,7 @@ import { TranscriptionService } from '../services/transcription.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 import { createDeferred } from '../testing/deferred';
 import { makeMockLogger } from '../testing/mock-logger';
+import { makeStagedImage } from '../testing/attachments';
 
 describe('ChatComponent', () => {
   let component: ChatComponent;
@@ -338,7 +339,7 @@ describe('ChatComponent', () => {
       const transcription = TestBed.inject(TranscriptionService);
       const prior = mockTauri.invokeHandler;
       mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'get_transcript') return { language: 'en' };
+        if (cmd === 'get_transcript') return { language: 'en', created_at: '2026-10-12T07:28:04Z' };
         if (cmd === 'get_transcript_markdown') return '# Meeting transcript';
         return prior(cmd);
       };
@@ -409,6 +410,32 @@ describe('ChatComponent', () => {
       expect(
         fixture.nativeElement.querySelector('[data-testid="composer-transcript"]')
       ).toBeTruthy();
+    });
+
+    it('a mount-time tab-draft restore does not clobber a staged transcript prompt (SPEED-557)', async () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      await component.ngOnInit();
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      const transcription = await stage();
+      const stagedPrompt = transcription.chatPromptDraft();
+      expect(stagedPrompt).not.toBe('');
+
+      fixture.destroy();
+
+      const fixture2 = TestBed.createComponent(ChatComponent);
+      const component2 = fixture2.componentInstance;
+      await component2.ngOnInit();
+      fixture2.detectChanges();
+      await fixture2.whenStable();
+
+      const composer2 = fixture2.debugElement.query(By.directive(ComposerComponent))
+        .componentInstance as ComposerComponent;
+      expect(composer2.text.value).toBe(stagedPrompt);
+
+      fixture2.destroy();
     });
   });
 
@@ -518,7 +545,13 @@ describe('ChatComponent', () => {
   describe('loadConversations', () => {
     it('calls backend with active project and sets conversations', async () => {
       const mockConversations = [
-        { session_id: 's1', timestamp: '2026-03-06T10:00:00Z', preview: 'Hello', message_count: 3 },
+        {
+          session_id: 's1',
+          timestamp: '2026-03-06T10:00:00Z',
+          title: null,
+          preview: 'Hello',
+          message_count: 3,
+        },
       ];
       projectState.activeProject.set('test');
       mockTauri.invokeHandler = async (cmd: string) => {
@@ -655,8 +688,8 @@ describe('ChatComponent', () => {
     it('calls delete_conversation and removes the row locally', async () => {
       projectState.activeProject.set('test');
       component.conversations = [
-        { session_id: 's1', timestamp: null, preview: 'a', message_count: 1 },
-        { session_id: 's2', timestamp: null, preview: 'b', message_count: 1 },
+        { session_id: 's1', timestamp: null, title: null, preview: 'a', message_count: 1 },
+        { session_id: 's2', timestamp: null, title: null, preview: 'b', message_count: 1 },
       ];
       const calls: { cmd: string; args: unknown }[] = [];
       mockTauri.invokeHandler = async (cmd: string, args: unknown) => {
@@ -683,7 +716,7 @@ describe('ChatComponent', () => {
     it('sets historyError when backend fails and keeps the row', async () => {
       projectState.activeProject.set('test');
       component.conversations = [
-        { session_id: 's1', timestamp: null, preview: 'a', message_count: 1 },
+        { session_id: 's1', timestamp: null, title: null, preview: 'a', message_count: 1 },
       ];
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'delete_conversation') throw new Error('io error');
@@ -712,7 +745,7 @@ describe('ChatComponent', () => {
         },
       });
       component.conversations = [
-        { session_id: 's1', timestamp: null, preview: 'a', message_count: 1 },
+        { session_id: 's1', timestamp: null, title: null, preview: 'a', message_count: 1 },
       ];
       const resetSpy = vi.spyOn(chatState, 'resetForNewConversation');
       mockTauri.invokeHandler = async () => undefined;
@@ -736,7 +769,7 @@ describe('ChatComponent', () => {
       });
       expect(chatState.lastKnownSessionId).toBe('s-old');
       component.conversations = [
-        { session_id: 's-old', timestamp: null, preview: 'a', message_count: 1 },
+        { session_id: 's-old', timestamp: null, title: null, preview: 'a', message_count: 1 },
       ];
       const resetSpy = vi.spyOn(chatState, 'resetForNewConversation');
       mockTauri.invokeHandler = async () => undefined;
@@ -1249,11 +1282,23 @@ describe('ChatComponent', () => {
       await component.ngOnInit();
       uiState.toggleSidebar();
       component.conversations = [
-        { session_id: 's1', timestamp: '2026-03-06T10:00:00Z', preview: 'old', message_count: 1 },
+        {
+          session_id: 's1',
+          timestamp: '2026-03-06T10:00:00Z',
+          title: null,
+          preview: 'old',
+          message_count: 1,
+        },
       ];
 
       const newConversations = [
-        { session_id: 's2', timestamp: '2026-03-07T10:00:00Z', preview: 'new', message_count: 2 },
+        {
+          session_id: 's2',
+          timestamp: '2026-03-07T10:00:00Z',
+          title: null,
+          preview: 'new',
+          message_count: 2,
+        },
       ];
       projectState.activeProject.set('other-project');
       mockTauri.invokeHandler = async (cmd: string) => {
@@ -1641,6 +1686,7 @@ describe('ChatComponent', () => {
       const el = scrollEl();
       Object.defineProperty(el, 'scrollHeight', { value: 1000, configurable: true });
       el.scrollTop = 250;
+      el.dispatchEvent(new Event('scroll'));
 
       const tab1 = chatState.activeTabId();
       await chatState.openTab();
@@ -1661,6 +1707,120 @@ describe('ChatComponent', () => {
       expect(el.scrollTop).toBe(250);
     });
 
+    it('persists the draft and plan mode across the component being destroyed and recreated (nav-rail switch, SPEED-557)', async () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      const composer = composerInstance();
+      composer.setText('half-written thought');
+      composer.togglePlanMode();
+      fixture.detectChanges();
+
+      const tabId = chatState.activeTabId();
+      fixture.destroy();
+      expect(chatState.tabs().get(tabId)!.composerDraft()).toBe('half-written thought');
+      expect(chatState.tabs().get(tabId)!.composerPlanMode()).toBe(true);
+
+      const fixture2 = TestBed.createComponent(ChatComponent);
+      const component2 = fixture2.componentInstance;
+      await component2.ngOnInit();
+      fixture2.detectChanges();
+      await fixture2.whenStable();
+
+      const composer2 = fixture2.debugElement.query(By.directive(ComposerComponent))
+        .componentInstance as ComposerComponent;
+      expect(composer2.text.value).toBe('half-written thought');
+      expect(composer2.planMode()).toBe(true);
+
+      fixture2.destroy();
+    });
+
+    it('applies a tab switch synchronously, with no window where a fast send could reach the wrong tab (SPEED-557)', async () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      const composer = composerInstance();
+      composer.setText('alpha');
+
+      const tab1 = chatState.activeTabId();
+      await chatState.openTab();
+      fixture.detectChanges();
+      await fixture.whenStable();
+      composer.setText('beta');
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      chatState.activateTab(tab1);
+      fixture.detectChanges();
+      expect(composer.text.value).toBe('alpha');
+    });
+
+    it('ngOnDestroy does not clobber the stored draft when the composer is not rendered (SPEED-557)', async () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      const composer = composerInstance();
+      composer.setText('saved before auth hiccup');
+      fixture.detectChanges();
+
+      const tabId = chatState.activeTabId();
+      const store = chatState.tabs().get(tabId)!;
+      fixture.destroy();
+      expect(store.composerDraft()).toBe('saved before auth hiccup');
+
+      projectState.status.set('auth_required');
+      const fixture2 = TestBed.createComponent(ChatComponent);
+      const component2 = fixture2.componentInstance;
+      await component2.ngOnInit();
+      fixture2.detectChanges();
+      fixture2.destroy();
+
+      expect(store.composerDraft()).toBe('saved before auth hiccup');
+    });
+
+    it("keeps each tab's draft independent across a destroy/recreate round trip (SPEED-557)", async () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      const tab1 = chatState.activeTabId();
+      composerInstance().setText('draft on tab one');
+
+      const tab2 = await chatState.openTab();
+      fixture.detectChanges();
+      await fixture.whenStable();
+      composerInstance().setText('draft on tab two');
+      fixture.detectChanges();
+
+      fixture.destroy();
+
+      const fixture2 = TestBed.createComponent(ChatComponent);
+      const component2 = fixture2.componentInstance;
+      await component2.ngOnInit();
+      fixture2.detectChanges();
+      await fixture2.whenStable();
+      const composer2 = () =>
+        fixture2.debugElement.query(By.directive(ComposerComponent))
+          .componentInstance as ComposerComponent;
+
+      expect(chatState.activeTabId()).toBe(tab2);
+      expect(composer2().text.value).toBe('draft on tab two');
+
+      chatState.activateTab(tab1);
+      fixture2.detectChanges();
+      await fixture2.whenStable();
+      expect(composer2().text.value).toBe('draft on tab one');
+
+      fixture2.destroy();
+    });
+
     it('does not snap a restored mid-scroll tab to the bottom when new content streams into it', async () => {
       projectState.activeProject.set('test');
       projectState.status.set('ready');
@@ -1671,6 +1831,7 @@ describe('ChatComponent', () => {
       Object.defineProperty(el, 'scrollHeight', { value: 1000, configurable: true });
       Object.defineProperty(el, 'clientHeight', { value: 400, configurable: true });
       el.scrollTop = 250;
+      el.dispatchEvent(new Event('scroll'));
 
       const tab1 = chatState.activeTabId();
       await chatState.openTab();
@@ -1687,6 +1848,76 @@ describe('ChatComponent', () => {
       await fixture.whenStable();
 
       expect(el.scrollTop).toBe(250);
+    });
+
+    it('brings a tab that followed its stream back at the live end after it grew in the background', async () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      const el = scrollEl();
+      Object.defineProperty(el, 'scrollHeight', { value: 1000, configurable: true });
+      Object.defineProperty(el, 'clientHeight', { value: 400, configurable: true });
+      el.scrollTop = 600;
+      el.dispatchEvent(new Event('scroll'));
+
+      const tab1 = chatState.activeTabId();
+      await chatState.openTab();
+      fixture.detectChanges();
+      await fixture.whenStable();
+      expect(chatState.tabs().get(tab1)!.scrollPosition).toBeNull();
+
+      chatState
+        .tabs()
+        .get(tab1)!
+        .handleStreamChunk({
+          chunk_type: 'Text',
+          data: { content: 'streamed while another tab was open' },
+        });
+      Object.defineProperty(el, 'scrollHeight', { value: 1600, configurable: true });
+
+      chatState.activateTab(tab1);
+      fixture.detectChanges();
+      await fixture.whenStable();
+      expect(el.scrollTop).toBe(1600);
+
+      chatState.handleStreamChunk({ chunk_type: 'Text', data: { content: ' and more' } });
+      fixture.detectChanges();
+      await fixture.whenStable();
+      chatState.handleStreamChunk({ chunk_type: 'Text', data: { content: ' and the rest' } });
+      Object.defineProperty(el, 'scrollHeight', { value: 2400, configurable: true });
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      expect(el.scrollTop).toBe(2400);
+    });
+
+    it('pins the list when the user sends after scrolling up, and keeps it when the reply commits', async () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      fixture.detectChanges();
+
+      const el = scrollEl();
+      Object.defineProperty(el, 'scrollHeight', { value: 1000, configurable: true });
+      Object.defineProperty(el, 'clientHeight', { value: 400, configurable: true });
+      el.scrollTop = 100;
+      el.dispatchEvent(new Event('scroll'));
+
+      await component.sendMessage({ payload: 'next question', displayText: 'next question' });
+      fixture.detectChanges();
+      await fixture.whenStable();
+      expect(el.scrollTop).toBe(1000);
+
+      el.scrollTop = 100;
+      el.dispatchEvent(new Event('scroll'));
+      chatState.handleStreamChunk({ chunk_type: 'Text', data: { content: 'the answer' } });
+      chatState.handleStreamChunk({ chunk_type: 'Result', data: { session_id: 'sid' } });
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      expect(chatState.messages.at(-1)?.role).toBe('assistant');
+      expect(el.scrollTop).toBe(100);
     });
 
     it('leaves the composer untouched on a no-op re-activation of the already-active tab', async () => {
@@ -1717,18 +1948,8 @@ describe('ChatComponent', () => {
       const store1 = chatState.tabs().get(tab1)!;
       await store1.composerAttachments.add(
         new File(['x'], 'a.png', { type: 'image/png' }),
-        async () => ({
-          attachment: {
-            filename: 'a.png',
-            mediaType: 'image/png',
-            containerPath: '/workspace/.speedwave/pastes/a.png',
-            hostPath: '/tmp/a.png',
-          },
-          previewUrl: 'blob:a',
-          width: 1,
-          height: 1,
-          sizeBytes: 1,
-        })
+        'image',
+        async () => makeStagedImage('a.png', { previewUrl: 'blob:a' })
       );
       fixture.detectChanges();
       expect(composer.attachmentDraft().records()).toHaveLength(1);
@@ -1758,18 +1979,8 @@ describe('ChatComponent', () => {
       const store1 = chatState.tabs().get(tab1)!;
       await store1.composerAttachments.add(
         new File(['x'], 'a.png', { type: 'image/png' }),
-        async () => ({
-          attachment: {
-            filename: 'a.png',
-            mediaType: 'image/png',
-            containerPath: '/workspace/.speedwave/pastes/a.png',
-            hostPath: '/tmp/a.png',
-          },
-          previewUrl: 'blob:to-revoke',
-          width: 1,
-          height: 1,
-          sizeBytes: 1,
-        })
+        'image',
+        async () => makeStagedImage('a.png', { previewUrl: 'blob:to-revoke' })
       );
 
       await chatState.openTab();

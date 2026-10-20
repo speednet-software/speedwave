@@ -1,0 +1,96 @@
+name: lane-test-windows
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test-windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      CARGO_TARGET_DIR: D:\st
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Setup toolchain (Node + Rust + cache)
+        uses: ./.github/actions/setup-toolchain
+        with:
+          node: 'false'
+          rust-components: clippy
+          rust-cache-workspaces: |
+            . -> target
+            desktop/src-tauri -> target
+          rust-cache-directories: D:\st
+
+      - name: cargo test (full suite incl. test-support)
+        run: cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner -p speedwave-version --features speedwave-runtime/test-support,speedwave-version/cli
+
+      - name: pii-ner model e2e and converter tests (CPU)
+        run: |
+          PY=$(command -v python3 || command -v python)
+          "$PY" crates/pii-ner/tools/fetch_and_convert.py --out desktop/src-tauri/pii-ner --verify
+          SPEEDWAVE_PII_NER_ARTIFACT="$GITHUB_WORKSPACE/desktop/src-tauri/pii-ner" cargo test -p speedwave-pii-ner --features model-e2e --lib model_e2e
+          "$PY" -m unittest discover -s crates/pii-ner/tools -p 'test_*.py'
+
+      - name: Verify .gitattributes survives core.autocrlf=true checkout
+        env:
+          REPO_PATH: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          tmp="$RUNNER_TEMP/recheck"
+          rm -rf "$tmp"
+          git -c core.autocrlf=true clone "$REPO_PATH" "$tmp"
+          cd "$tmp"
+          fail=0
+          while IFS= read -r -d '' f; do
+            if ! cmp -s <(tr -d "$(printf '\r')" < "$f") "$f"; then
+              echo "::error file=$f::CRLF detected after autocrlf=true checkout — .gitattributes regression"
+              fail=1
+            fi
+          done < <(find containers -type f -name '*.sh' -print0)
+          exit "$fail"
+
+      - name: Install Vulkan SDK
+        shell: pwsh
+        run: |
+          $out = scripts/install-vulkan-sdk.ps1
+          $out | Write-Output
+          $root = (($out | Select-String -Pattern '^VULKAN_SDK=').Line) -replace '^VULKAN_SDK=', ''
+          "VULKAN_SDK=$root" | Add-Content $env:GITHUB_ENV
+          Join-Path $root 'runtime\x64' | Add-Content $env:GITHUB_PATH
+
+      - name: Create resource stubs for Tauri build script
+        run: scripts/create-desktop-stubs.sh
+
+      - name: Rust clippy
+        run: |
+          cargo clippy -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner -p speedwave-version --features speedwave-version/cli --all-targets -- -D warnings
+          cargo clippy -p speedwave-runtime --all-targets --features test-support,audio-transcription -- -D warnings
+          cargo clippy -p speedwave-pii-ner --all-targets --features bench,model-e2e -- -D warnings
+
+      - name: Desktop clippy
+        working-directory: desktop/src-tauri
+        env:
+          SPEEDWAVE_ALLOW_BUNDLE_STUBS: "1"
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test speedwave-runtime transcription (windows)
+        run: |
+          LIST="$(cargo test -p speedwave-runtime --lib --features audio-transcription "transcription::" -- --list)"
+          grep -q 'transcription::audio_windows' <<<"$LIST" || { echo '::error::no transcription::audio_windows tests matched the filter'; exit 1; }
+          cargo test -p speedwave-runtime --lib --features audio-transcription "transcription::"
+          # Integration targets (transcription_pipeline_e2e) must still compile with the
+          # feature — check-only, so nothing links libwhisper for zero runnable tests.
+          cargo check --tests -p speedwave-runtime --features audio-transcription
+
+      - name: Desktop tests
+        working-directory: desktop/src-tauri
+        env:
+          SPEEDWAVE_ALLOW_BUNDLE_STUBS: "1"
+        run: cargo test

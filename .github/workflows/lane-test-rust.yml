@@ -17,9 +17,7 @@ jobs:
         uses: ./.github/actions/setup-toolchain
         with:
           node: 'false'
-          rust-cache-workspaces: |
-            . -> target
-            containers/proxy -> target
+          rust-cache-workspaces: . -> target
 
       - name: Install cmake
         run: brew install cmake
@@ -40,5 +38,8 @@ jobs:
       - name: Audio transcription tests
         run: make test-transcription
 
-      - name: Proxy tests
-        run: make test-proxy
+      - name: pii-ner model e2e (CPU)
+        run: make test-pii-ner-model
+
+      - name: pii-ner converter tests
+        run: make test-pii-ner-tools

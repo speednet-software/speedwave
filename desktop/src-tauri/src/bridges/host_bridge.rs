@@ -703,7 +703,7 @@ fn relocate_lock_on_addressing_change(
 
 /// Binds the listener on `compose::host_bind_address()`. Retries once on `EADDRNOTAVAIL`
 /// (typical after `wsl --shutdown` invalidated the cached adapter IP) after re-detecting.
-fn bind_with_retry(
+pub(crate) fn bind_with_retry(
     name: &str,
     preferred_port: Option<u16>,
 ) -> anyhow::Result<std::net::TcpListener> {
@@ -737,7 +737,7 @@ fn bind_with_retry(
     }
 }
 
-fn load_or_create_persistent_token(path: Option<&Path>) -> anyhow::Result<String> {
+pub(crate) fn load_or_create_persistent_token(path: Option<&Path>) -> anyhow::Result<String> {
     let Some(p) = path else {
         return Ok(uuid::Uuid::new_v4().to_string());
     };

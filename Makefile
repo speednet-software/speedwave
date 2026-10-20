@@ -28,6 +28,8 @@ endif
 DEV_TAURI_CONFIG = {"identifier":"$(DEV_IDENTIFIER)","productName":"$(DEV_PRODUCT_NAME)"$(DEV_PORT_CONFIG)}
 export DEV_TAURI_CONFIG
 
+PYTHON ?= $(shell command -v python3 2>/dev/null || command -v python 2>/dev/null || echo python3)
+
 SPEEDWAVE_DATA_DIR ?= $(HOME)/.speedwave-$(DEV_INSTANCE)
 export SPEEDWAVE_DATA_DIR
 
@@ -96,14 +98,14 @@ dev-config: guard-dev-instance
 .PHONY: all build test check clean dev dev-config install-deps setup-dev setup-dev-windows guard-not-prod-data-dir guard-dev-instance guard-dev-port \
         build-runtime build-cli build-desktop build-tauri build-mcp build-angular \
         build-native-macos build-os-cli bundle-native-assets bundle-static-licenses verify-bundled-assets stage-vulkan-windows \
-        test-rust test-transcription test-cli test-desktop test-angular test-mcp test-os test-swift test-e2e test-entrypoint test-ci test-desktop-build \
+        test-rust test-transcription test-cli test-desktop test-angular test-mcp test-os test-swift test-e2e test-entrypoint test-ci test-desktop-build test-desktop-build-portable test-desktop-build-macos \
         test-build-phase test-rust-run test-angular-run test-mcp-run test-desktop-build-run test-desktop-run test-run-lanes test-proxy \
         test-e2e-desktop _e2e-macos _e2e-windows test-e2e-all test-e2e-audio setup-e2e-vms \
         test-e2e-plugin-tamper-release test-engine-contract test-e2e-update-dirty \
         check-clippy check-desktop-clippy check-proxy-clippy check-angular check-mcp check-fmt \
         check-mcp-lint check-angular-lint check-all \
         coverage coverage-rust coverage-mcp coverage-html \
-        audit audit-rust audit-mcp audit-desktop \
+        audit audit-rust audit-npm audit-root audit-mcp audit-playwright audit-desktop audit-e2e \
         fmt lint status \
         download-lima clean-lima \
         download-nodejs clean-nodejs \
@@ -276,7 +278,7 @@ build-desktop: generate-installer-nsh
 	@if [ "$(OS)" = "Windows_NT" ]; then bash scripts/check-vulkan-path-budget.sh; fi
 	cd desktop/src-tauri && cargo build
 
-build-tauri: build-cli-release build-angular build-mcp build-os-cli download-nodejs generate-installer-nsh
+build-tauri: build-cli-release build-angular build-mcp build-os-cli download-nodejs generate-installer-nsh prepare-pii-ner-model
 	@if [ "$$(uname)" = "Darwin" ]; then "$(MAKE)" download-lima; fi
 	@if [ "$(OS)" = "Windows_NT" ]; then "$(MAKE)" download-wsl-resources; fi
 	@bash scripts/bundle-build-context.sh
@@ -379,7 +381,7 @@ endif
 	@echo "✅ Build phase complete"
 
 test-rust-run: guard-not-prod-data-dir
-	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-runtime/test-support,speedwave-version/cli)
+	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner -p speedwave-version --features speedwave-runtime/test-support,speedwave-version/cli)
 	"$(MAKE)" test-transcription
 	@echo "✅ Rust tests passed"
 
@@ -389,13 +391,15 @@ test-mcp-run:
 	cd mcp-servers && $(NPM) test
 	@echo "✅ MCP server tests passed"
 
-DESKTOP_BUILD_BATS := _tests/desktop/bundle-build-context.bats \
-  _tests/desktop/guard-prod-data-dir.bats _tests/desktop/verify-bundled-assets.bats \
+DESKTOP_BUILD_BATS_PORTABLE := _tests/desktop/bundle-build-context.bats \
+  _tests/desktop/guard-prod-data-dir.bats _tests/desktop/vulkan-scripts.bats \
+  _tests/desktop/dev-server-port.bats _tests/desktop/check-windows-build-deps.bats
+DESKTOP_BUILD_BATS_MACOS := _tests/desktop/verify-bundled-assets.bats \
   _tests/desktop/sign-bundled-binaries.bats \
   _tests/desktop/native-cli-info-plist.bats \
   _tests/desktop/build-native-macos.bats \
-  _tests/desktop/bundle-native-assets.bats _tests/desktop/vulkan-scripts.bats \
-  _tests/desktop/dev-server-port.bats _tests/desktop/check-windows-build-deps.bats
+  _tests/desktop/bundle-native-assets.bats
+DESKTOP_BUILD_BATS := $(DESKTOP_BUILD_BATS_PORTABLE) $(DESKTOP_BUILD_BATS_MACOS)
 
 test-desktop-build-run:
 	@$(REQUIRE_BATS)
@@ -407,14 +411,14 @@ test-desktop-run: guard-not-prod-data-dir
 	@echo "✅ Desktop tests passed"
 
 test-run-lanes: test-rust-run test-angular-run test-entrypoint test-desktop-config test-ci \
-                test-mcp-run test-desktop-build-run test-desktop-run test-proxy
+                test-mcp-run test-desktop-build-run test-desktop-run test-proxy test-pii-ner-tools
 
 test-proxy: guard-not-prod-data-dir
 	cd containers/proxy && cargo test --locked
 	@echo "✅ proxy tests passed"
 
 test-rust: guard-not-prod-data-dir
-	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-runtime/test-support,speedwave-version/cli)
+	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner -p speedwave-version --features speedwave-runtime/test-support,speedwave-version/cli)
 	"$(MAKE)" test-transcription
 	@echo "✅ Rust tests passed"
 
@@ -479,12 +483,33 @@ test-mcp-office-py:
 	rm -rf "$$VENV"; exit $$status
 	@echo "✅ Office Python script tests passed"
 
+PII_NER_ARTIFACT_DIR := desktop/src-tauri/pii-ner
+PII_NER_TOOLS := crates/pii-ner/tools
+
+prepare-pii-ner-model:
+	@$(PYTHON) $(PII_NER_TOOLS)/fetch_and_convert.py --out $(PII_NER_ARTIFACT_DIR)
+
+test-pii-ner-tools:
+	@$(PYTHON) -m unittest discover -s $(PII_NER_TOOLS) -p 'test_*.py'
+	@echo "✅ pii-ner converter tests passed"
+
+clean-pii-ner-model:
+	rm -rf $(PII_NER_ARTIFACT_DIR)
+
+test-pii-ner-model: guard-not-prod-data-dir prepare-pii-ner-model
+	@$(PYTHON) $(PII_NER_TOOLS)/fetch_and_convert.py --out $(PII_NER_ARTIFACT_DIR) --verify
+	$(call RUN_CARGO_ISOLATED,env SPEEDWAVE_PII_NER_ARTIFACT="$(CURDIR)/$(PII_NER_ARTIFACT_DIR)" cargo test -p speedwave-pii-ner --features model-e2e --lib model_e2e)
+	@echo "✅ pii-ner model e2e passed"
+
+bench-pii-ner: prepare-pii-ner-model
+	cargo run -p speedwave-pii-ner --release --features bench --bin pii-ner-bench -- --artifact $(PII_NER_ARTIFACT_DIR) $(ARGS)
+
 coverage: coverage-rust coverage-mcp coverage-angular
 	@echo "\n✅ All coverage reports generated"
 
 coverage-rust:
 	@command -v cargo-llvm-cov >/dev/null 2>&1 || { echo "❌ cargo-llvm-cov not found. Install: cargo install cargo-llvm-cov"; exit 1; }
-	cargo llvm-cov -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-version/cli --fail-under-lines 70
+	cargo llvm-cov -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner -p speedwave-version --features speedwave-version/cli --fail-under-lines 70
 	@echo "✅ Rust coverage passed (≥70% lines)"
 
 coverage-mcp: build-mcp
@@ -549,6 +574,16 @@ test-desktop-build: build-angular build-mcp
 	bats --print-output-on-failure $(DESKTOP_BUILD_BATS)
 	@echo "✅ Desktop build tests passed"
 
+test-desktop-build-portable: build-mcp
+	@$(REQUIRE_BATS)
+	bats --print-output-on-failure $(DESKTOP_BUILD_BATS_PORTABLE)
+	@echo "✅ Desktop build tests (portable) passed"
+
+test-desktop-build-macos:
+	@$(REQUIRE_BATS)
+	bats --print-output-on-failure $(DESKTOP_BUILD_BATS_MACOS)
+	@echo "✅ Desktop build tests (macOS) passed"
+
 test-native-cli-plist:
 	@$(REQUIRE_BATS)
 	bats --print-output-on-failure _tests/desktop/native-cli-info-plist.bats
@@ -566,7 +601,8 @@ test-release-gate:
 	@command -v jq >/dev/null 2>&1 || { echo "❌ jq not found. Install: brew install jq"; exit 1; }
 	bats _tests/desktop/verify-release-assets.bats \
 	  _tests/desktop/tag-release-commit.bats _tests/desktop/prepend-changelog-entry.bats \
-	  _tests/desktop/beta-release-range.bats
+	  _tests/desktop/beta-release-range.bats \
+	  _tests/desktop/beta-release-notes.bats
 	@echo "✅ Release-gate tests passed"
 
 test-e2e-desktop-build: build-cli build-mcp build-os-cli
@@ -656,15 +692,16 @@ setup-e2e-vms:
 	@bash scripts/e2e-vm-setup.sh all
 
 check-clippy:
-	cargo clippy -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-version/cli --all-targets -- -D warnings
+	cargo clippy -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner -p speedwave-version --features speedwave-version/cli --all-targets -- -D warnings
 	cargo clippy -p speedwave-runtime --all-targets --features test-support,audio-transcription -- -D warnings
+	cargo clippy -p speedwave-pii-ner --all-targets --features bench,model-e2e -- -D warnings
 	@echo "✅ Clippy: 0 warnings"
 
 check-desktop-clippy: build-angular build-mcp
 	@if [ "$(OS)" = "Windows_NT" ]; then bash scripts/check-vulkan-path-budget.sh; fi
 	@bash scripts/bundle-build-context.sh
 	@bash scripts/create-desktop-stubs.sh
-	cd desktop/src-tauri && SPEEDWAVE_ALLOW_BUNDLE_STUBS=1 cargo clippy -- -D warnings
+	cd desktop/src-tauri && SPEEDWAVE_ALLOW_BUNDLE_STUBS=1 cargo clippy --all-targets -- -D warnings
 	@echo "✅ Desktop clippy: 0 warnings"
 
 check-proxy-clippy:
@@ -705,7 +742,7 @@ check-angular-lint:
 	cd desktop/src && $(NPX) eslint 'src/**/*.ts'
 	@echo "✅ Angular ESLint passed"
 
-audit: audit-rust audit-mcp audit-desktop
+audit: audit-rust audit-npm
 	@echo "\n✅ No known vulnerabilities without a valid exception"
 
 AUDIT_EXCEPTIONS := scripts/audit-exceptions.json
@@ -726,6 +763,15 @@ audit-rust:
 	  --report cargo:$(AUDIT_TMP)/cargo-root.json --report cargo:$(AUDIT_TMP)/cargo-desktop.json
 	@echo "✅ Rust dependencies: no vulnerabilities without a valid exception"
 
+audit-npm: audit-root audit-mcp audit-playwright audit-desktop audit-e2e
+
+audit-root:
+	@mkdir -p $(AUDIT_TMP)
+	scripts/audit-run.sh npm-root $(AUDIT_TMP)/npm-root.json
+	python3 scripts/audit-gate.py absolute --exceptions $(AUDIT_EXCEPTIONS) \
+	  --report npm:$(AUDIT_TMP)/npm-root.json
+	@echo "✅ Root dependencies: no vulnerabilities without a valid exception"
+
 audit-mcp:
 	@mkdir -p $(AUDIT_TMP)
 	scripts/audit-run.sh npm-mcp $(AUDIT_TMP)/npm-mcp.json
@@ -733,12 +779,26 @@ audit-mcp:
 	  --report npm:$(AUDIT_TMP)/npm-mcp.json
 	@echo "✅ MCP dependencies: no vulnerabilities without a valid exception"
 
+audit-playwright:
+	@mkdir -p $(AUDIT_TMP)
+	scripts/audit-run.sh npm-playwright $(AUDIT_TMP)/npm-playwright.json
+	python3 scripts/audit-gate.py absolute --exceptions $(AUDIT_EXCEPTIONS) \
+	  --report npm:$(AUDIT_TMP)/npm-playwright.json
+	@echo "✅ Playwright MCP dependencies: no vulnerabilities without a valid exception"
+
 audit-desktop:
 	@mkdir -p $(AUDIT_TMP)
 	scripts/audit-run.sh npm-desktop $(AUDIT_TMP)/npm-desktop.json
 	python3 scripts/audit-gate.py absolute --exceptions $(AUDIT_EXCEPTIONS) \
 	  --report npm:$(AUDIT_TMP)/npm-desktop.json
 	@echo "✅ Desktop dependencies: no vulnerabilities without a valid exception"
+
+audit-e2e:
+	@mkdir -p $(AUDIT_TMP)
+	scripts/audit-run.sh npm-e2e $(AUDIT_TMP)/npm-e2e.json
+	python3 scripts/audit-gate.py absolute --exceptions $(AUDIT_EXCEPTIONS) \
+	  --report npm:$(AUDIT_TMP)/npm-e2e.json
+	@echo "✅ Desktop e2e dependencies: no vulnerabilities without a valid exception"
 
 check-all: check test coverage audit
 	@echo "\n✅ Full quality gate passed — safe to push"
@@ -751,7 +811,7 @@ fmt:
 	@echo "✅ Formatted"
 
 lint:
-	cargo clippy -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-version/cli -- -D warnings
+	cargo clippy -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-ner -p speedwave-version --features speedwave-version/cli -- -D warnings
 	cd desktop/src-tauri && cargo clippy -- -D warnings
 	cd mcp-servers && $(NPX) eslint --fix .
 	cd desktop/src && $(NPX) eslint --fix 'src/**/*.ts'
@@ -874,7 +934,7 @@ clean-wsl-resources:
 	rm -rf desktop/src-tauri/wsl
 
 ifeq ($(OS),Windows_NT)
-dev: guard-not-prod-data-dir guard-dev-port download-nodejs download-wsl-resources generate-installer-nsh
+dev: guard-not-prod-data-dir guard-dev-port download-nodejs download-wsl-resources generate-installer-nsh prepare-pii-ner-model
 	@command -v cargo-tauri >/dev/null 2>&1 || { echo "❌ cargo-tauri not found. Install: cargo install tauri-cli"; exit 1; }
 	@"$(MAKE)" build-cli && "$(MAKE)" build-os-cli && "$(MAKE)" build-mcp
 	@echo "Preparing build context..."
@@ -886,7 +946,7 @@ dev: guard-not-prod-data-dir guard-dev-port download-nodejs download-wsl-resourc
 	@"$(MAKE)" verify-bundled-assets
 	@bash scripts/dev-tauri-windows.sh
 else
-dev: guard-not-prod-data-dir guard-dev-port build-cli build-os-cli build-mcp download-nodejs generate-installer-nsh
+dev: guard-not-prod-data-dir guard-dev-port build-cli build-os-cli build-mcp download-nodejs generate-installer-nsh prepare-pii-ner-model
 	@command -v cargo-tauri >/dev/null 2>&1 || { echo "❌ cargo-tauri not found. Install: cargo install tauri-cli"; exit 1; }
 	@if [ "$$(uname)" = "Darwin" ]; then "$(MAKE)" download-lima; fi
 	@echo "Preparing build context..."

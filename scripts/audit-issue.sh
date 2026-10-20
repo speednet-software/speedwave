@@ -16,19 +16,17 @@ trap 'rm -rf "$WORKDIR"' EXIT
 
 cd "$REPO_ROOT"
 
-"$AUDIT_RUN" cargo-root "$WORKDIR/cargo-root.json"
-"$AUDIT_RUN" cargo-desktop "$WORKDIR/cargo-desktop.json"
-"$AUDIT_RUN" npm-mcp "$WORKDIR/npm-mcp.json"
-"$AUDIT_RUN" npm-desktop "$WORKDIR/npm-desktop.json"
+REPORT_ARGS=()
+while read -r target kind _; do
+    "$AUDIT_RUN" "$target" "$WORKDIR/$target.json"
+    REPORT_ARGS+=(--report "$kind:$WORKDIR/$target.json")
+done < <("$AUDIT_RUN" --list)
 
 set +e
 python3 "$GATE" absolute \
     --exceptions "$EXCEPTIONS" \
     --npm-min-severity "$NPM_AUDIT_LEVEL" \
-    --report "cargo:$WORKDIR/cargo-root.json" \
-    --report "cargo:$WORKDIR/cargo-desktop.json" \
-    --report "npm:$WORKDIR/npm-mcp.json" \
-    --report "npm:$WORKDIR/npm-desktop.json" \
+    "${REPORT_ARGS[@]}" \
     --markdown-out "$WORKDIR/report.md"
 GATE_STATUS=$?
 set -e

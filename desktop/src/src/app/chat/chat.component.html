@@ -70,6 +70,7 @@
         [loadingTranscript]="chat.loadingTranscriptFromState()"
         [lastAssistantIndex]="lastAssistantIndex()"
         [conversationKey]="chat.activeTabId()"
+        [autoScrollRequest]="chat.activeStore().autoScrollRequested()"
         (questionAnswered)="onQuestionAnswered($event)"
       />
       <div class="shrink-0 border-t border-[var(--line)] bg-[var(--bg-2)] px-4 pb-3 pt-3 md:px-6">
@@ -133,7 +134,7 @@
             [projectId]="projectState.activeProject() ?? ''"
             [modelError]="chat.modelSelectionError()"
             [contextLabel]="composerContextLabel()"
-            [transcriptAttached]="transcription.stagedTranscript() !== ''"
+            [transcriptName]="transcription.stagedTranscriptName()"
             [draftText]="transcription.chatPromptDraft()"
             [attachmentDraft]="chat.activeStore().composerAttachments"
             (submitted)="sendMessage($event)"

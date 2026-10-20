@@ -100,6 +100,7 @@ describe('ShellComponent', () => {
           useValue: {
             recordingSessionId: recordingSessionId.asReadonly(),
             recording: computed(() => recordingSessionId() !== null),
+            captureOpen: computed(() => recordingSessionId() !== null),
           },
         },
       ],
