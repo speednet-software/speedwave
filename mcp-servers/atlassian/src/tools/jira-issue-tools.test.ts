@@ -4,7 +4,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { META_KEYS } from '@speedwave/mcp-shared';
@@ -312,13 +312,6 @@ describe('addAttachment handler via filePath', () => {
     expect(payload(res)).toEqual({ attachment: { id: '1', filename: 'bug.png' } });
   });
 
-  it('accepts a relative path resolved against the workspace root', async () => {
-    writeFileSync(join(ws, 'shot.png'), Buffer.from('x'));
-    issuesStub.addAttachment.mockResolvedValueOnce({ id: '2' });
-    await handlerFor('addAttachment')({ issueIdOrKey: 'PROJ-1', filePath: 'shot.png' });
-    expect(issuesStub.addAttachment.mock.calls[0][1].filename).toBe('shot.png');
-  });
-
   it('lets an explicit filename override the basename', async () => {
     writeFileSync(join(ws, 'shot.png'), Buffer.from('x'));
     issuesStub.addAttachment.mockResolvedValueOnce({ id: '3' });
@@ -343,15 +336,6 @@ describe('addAttachment handler via filePath', () => {
     rmSync(outside, { recursive: true, force: true });
   });
 
-  it('errors when the file does not exist', async () => {
-    const res = await handlerFor('addAttachment')({
-      issueIdOrKey: 'PROJ-1',
-      filePath: 'nope.png',
-    });
-    expect(res.isError).toBe(true);
-    expect(res.content[0].text).toMatch(/not found/i);
-  });
-
   it('passes an explicit contentType through', async () => {
     writeFileSync(join(ws, 'shot.png'), Buffer.from('x'));
     issuesStub.addAttachment.mockResolvedValueOnce({ id: '4' });
@@ -369,17 +353,6 @@ describe('addAttachment handler via filePath', () => {
     const res = await handlerFor('addAttachment')({ issueIdOrKey: 'PROJ-1', filePath: 'shot.png' });
     expect(res.isError).toBe(true);
     expect(res.content[0].text).toMatch(/boom-attach/);
-  });
-
-  it('errors when filePath points to a directory', async () => {
-    mkdirSync(join(ws, 'subdir'));
-    const res = await handlerFor('addAttachment')({
-      issueIdOrKey: 'PROJ-1',
-      filePath: join(ws, 'subdir'),
-    });
-    expect(res.isError).toBe(true);
-    expect(res.content[0].text).toMatch(/Not a regular file/);
-    expect(issuesStub.addAttachment).not.toHaveBeenCalled();
   });
 });
 
@@ -416,7 +389,7 @@ describe('addAttachment handler size cap', () => {
     const def = await freshAddAttachmentDef();
     const res = await def.handler({ issueIdOrKey: 'PROJ-1', filePath: 'big.bin' } as never);
     expect(res.isError).toBe(true);
-    expect(res.content[0].text).toMatch(/too large to attach/);
+    expect(res.content[0].text).toMatch(/File is too large/);
     expect(res.content[0].text).toMatch(/11 bytes > 10 byte limit/);
     expect(issuesStub.addAttachment).not.toHaveBeenCalled();
   });

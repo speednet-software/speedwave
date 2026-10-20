@@ -10,13 +10,12 @@ import {
   errorResult,
   notConfiguredMessage,
   teachingErrorResult,
+  readWorkspaceFile,
   META_KEYS,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
   DESTRUCTIVE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
-import { promises as fsp } from 'node:fs';
-import path from 'node:path';
 import { AtlassianClient } from '../client.js';
 import { createJiraIssuesClient } from '../domains/jira-issues.js';
 import type { AdfDoc } from '../types.js';
@@ -35,40 +34,6 @@ const MAX_ATTACHMENT_BYTES = (() => {
   const n = raw === undefined ? NaN : Number.parseInt(raw, 10);
   return Number.isInteger(n) && n > 0 ? n : 25 * 1024 * 1024;
 })();
-
-/** Root of the read-only project mount inside the worker (overridable for tests). */
-function workspaceRoot(): string {
-  return process.env.WORKSPACE_DIR || '/workspace';
-}
-
-/**
- * Read `filePath` from the read-only workspace mount, rejecting any path escaping it (traversal
- * or symlink) so a tokened worker can't read `/tokens` etc, or exceeding {@link MAX_ATTACHMENT_BYTES}.
- * @param filePath - Path relative to (or inside) the workspace root.
- * @returns The file bytes and its basename.
- */
-async function readWorkspaceFile(filePath: string): Promise<{ buffer: Buffer; name: string }> {
-  const root = await fsp.realpath(workspaceRoot());
-  const candidate = path.resolve(root, filePath);
-  let real: string;
-  try {
-    real = await fsp.realpath(candidate);
-  } catch {
-    throw new Error(`File not found under workspace: ${filePath}`);
-  }
-  if (real !== root && !real.startsWith(root + path.sep)) {
-    throw new Error('filePath must resolve to a location inside the workspace');
-  }
-  const stat = await fsp.stat(real);
-  if (!stat.isFile()) throw new Error(`Not a regular file: ${filePath}`);
-  if (stat.size > MAX_ATTACHMENT_BYTES) {
-    throw new Error(
-      `File is too large to attach (${stat.size} bytes > ${MAX_ATTACHMENT_BYTES} byte limit): ${filePath}. ` +
-        'Split the file or reduce it before attaching.'
-    );
-  }
-  return { buffer: await fsp.readFile(real), name: path.basename(real) };
-}
 
 const searchIssuesTool: Tool = {
   name: 'searchIssues',
@@ -608,7 +573,7 @@ export function createJiraIssueTools(client: AtlassianClient | null): ToolDefini
           });
         }
 
-        const file = await readWorkspaceFile(filePath);
+        const file = await readWorkspaceFile(filePath, MAX_ATTACHMENT_BYTES);
         return jsonResult({
           attachment: await issues.addAttachment(issueIdOrKey, {
             filename: filename || file.name,

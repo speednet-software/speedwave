@@ -26,6 +26,8 @@ import {
   RefreshLock,
   OAuthRefreshError,
   clampPageSize,
+  readWorkspaceFile,
+  workspaceRoot,
   type AuthedTokenState,
 } from '@speedwave/mcp-shared';
 
@@ -394,14 +396,7 @@ export async function sendChannel(
   clients: SlackClients,
   params: { channel: string; message: string; thread_ts?: string; reply_broadcast?: boolean }
 ): Promise<{ ok: boolean; ts?: string; channel?: string }> {
-  if (params.thread_ts && !looksLikeSlackTs(params.thread_ts)) {
-    throw new Error(
-      `thread_ts "${params.thread_ts}" does not look like a Slack timestamp (expected e.g. ` +
-        '"1717000000.000100"). Copy it exactly from a getChannelMessages/getThreadMessages ' +
-        'result — do not reformat or round it. Slack accepts a malformed thread_ts silently and ' +
-        'posts the message to the channel instead of the thread.'
-    );
-  }
+  assertThreadTsShape(params.thread_ts);
   const broadcast = params.reply_broadcast ?? false;
   if (typeof broadcast !== 'boolean') {
     throw new Error(
@@ -436,6 +431,62 @@ export async function sendChannel(
     ok: result.ok || false,
     ts: result.ts,
     channel: result.channel,
+  };
+}
+
+/** Largest workspace file uploaded to Slack; the worker buffers the whole body (128 MiB budget). */
+export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+
+/**
+ * Upload one workspace file to a channel, DM or thread as the signed-in user; returns the Slack file ID and target.
+ * Path, size and `thread_ts` checks run before any Slack API call; throws on any failure.
+ * @param clients - The Slack client container.
+ * @param params - File, target and optional presentation.
+ * @param params.channel - Channel name (with or without `#`) or channel/DM ID.
+ * @param params.filePath - Path under /workspace of the file to upload.
+ * @param params.thread_ts - Thread parent's Slack timestamp; omit to post at channel level.
+ * @param params.initial_comment - Message posted together with the file.
+ * @param params.title - Display title; defaults to the file name.
+ */
+export async function uploadFile(
+  clients: SlackClients,
+  params: {
+    channel: string;
+    filePath: string;
+    thread_ts?: string;
+    initial_comment?: string;
+    title?: string;
+  }
+): Promise<{
+  ok: boolean;
+  file?: { id: string; name: string; title?: string };
+  channel: string;
+  thread_ts?: string;
+}> {
+  assertThreadTsShape(params.thread_ts);
+  const { buffer, name } = await readWorkspaceFile(params.filePath, MAX_UPLOAD_BYTES);
+  const channelId = await resolveChannelId(clients, params.channel);
+
+  const content = {
+    file: buffer,
+    filename: name,
+    title: params.title ?? name,
+    ...(params.initial_comment ? { initial_comment: params.initial_comment } : {}),
+  };
+  const threadTs = params.thread_ts;
+
+  const result = (await slackCall(clients, (c) =>
+    threadTs
+      ? c.filesUploadV2({ ...content, channel_id: channelId, thread_ts: threadTs })
+      : c.filesUploadV2({ ...content, channel_id: channelId })
+  )) as { ok?: boolean; files?: Array<{ files?: Array<{ id?: string; title?: string }> }> };
+
+  const uploaded = result.files?.[0]?.files?.[0];
+  return {
+    ok: result.ok || false,
+    ...(uploaded?.id ? { file: { id: uploaded.id, name, title: uploaded.title } } : {}),
+    channel: channelId,
+    ...(params.thread_ts ? { thread_ts: params.thread_ts } : {}),
   };
 }
 
@@ -570,6 +621,21 @@ const SLACK_TS_RE = /^\d+\.\d{6}$/;
  */
 function looksLikeSlackTs(value: string): boolean {
   return SLACK_TS_RE.test(value);
+}
+
+/**
+ * Throw a teaching error when `value` is set but is not a genuine Slack `ts`.
+ * @param value - The candidate thread timestamp, or undefined.
+ */
+function assertThreadTsShape(value: string | undefined): void {
+  if (value && !looksLikeSlackTs(value)) {
+    throw new Error(
+      `thread_ts "${value}" does not look like a Slack timestamp (expected e.g. ` +
+        '"1717000000.000100"). Copy it exactly from a getChannelMessages/getThreadMessages ' +
+        'result; do not reformat or round it. Slack accepts a malformed thread_ts silently and ' +
+        'posts the message to the channel instead of the thread.'
+    );
+  }
 }
 
 /**
@@ -752,11 +818,6 @@ export async function getFileContent(
 /** Hidden workspace subpath for downloads — keeps the project root clean (same convention as office's `.speedwave/office`). */
 const SLACK_DOWNLOAD_SUBPATH = path.join('.speedwave', 'slack');
 
-/** Workspace mount root (env override for tests). */
-function workspaceDir(): string {
-  return process.env.WORKSPACE_DIR || '/workspace';
-}
-
 /**
  * Reduce a filename to a safe basename (no separators, no leading dots).
  * @param name - Raw filename from Slack's files.info.
@@ -796,7 +857,7 @@ export async function downloadFile(
         'Ask the user to share it another way.'
     );
   }
-  const dir = path.join(workspaceDir(), SLACK_DOWNLOAD_SUBPATH);
+  const dir = path.join(workspaceRoot(), SLACK_DOWNLOAD_SUBPATH);
   await mkdir(dir, { recursive: true });
   const target = path.join(dir, `${sanitizeFilename(meta.id)}-${sanitizeFilename(meta.name)}`);
   await writeFile(target, body);
