@@ -30,6 +30,11 @@ enum MailFailure: LocalizedError, Equatable {
     case batchTooLarge(count: Int, limit: Int)
     case trashNotFound(account: String)
     case alreadyInTrash
+    case junkNotFound(account: String)
+    case alreadyInJunk
+    case archiveNotFound(account: String)
+    case alreadyArchived
+    case mailboxExists(mailbox: String, account: String)
 
     var code: String {
         switch self {
@@ -44,6 +49,11 @@ enum MailFailure: LocalizedError, Equatable {
         case .batchTooLarge: return "MAIL_BATCH_TOO_LARGE"
         case .trashNotFound: return "MAIL_TRASH_NOT_FOUND"
         case .alreadyInTrash: return "MAIL_ALREADY_IN_TRASH"
+        case .junkNotFound: return "MAIL_JUNK_NOT_FOUND"
+        case .alreadyInJunk: return "MAIL_ALREADY_IN_JUNK"
+        case .archiveNotFound: return "MAIL_ARCHIVE_NOT_FOUND"
+        case .alreadyArchived: return "MAIL_ALREADY_ARCHIVED"
+        case .mailboxExists: return "MAIL_MAILBOX_EXISTS"
         }
     }
 
@@ -77,6 +87,17 @@ enum MailFailure: LocalizedError, Equatable {
             return "Account '\(account)' has no Trash mailbox, so the email was left where it is."
         case .alreadyInTrash:
             return "The email is already in the Trash; no tool deletes an email permanently."
+        case .junkNotFound(let account):
+            return "Account '\(account)' has no Junk mailbox, so the email was left where it is."
+        case .alreadyInJunk:
+            return "The email is already in the Junk mailbox."
+        case .archiveNotFound(let account):
+            return "Account '\(account)' has no Archive mailbox, so the email was left where it is. "
+                + "Ask the user where to keep it and move it there with moveEmails, or create the mailbox first."
+        case .alreadyArchived:
+            return "The email is already in the Archive mailbox."
+        case .mailboxExists(let mailbox, let account):
+            return "Mailbox '\(mailbox)' already exists in account '\(account)'; move emails to it as it is."
         }
     }
 }
@@ -170,6 +191,9 @@ struct MailScripts {
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty && !$0.hasPrefix("(") } ?? []
             return .mailboxAmbiguous(mailbox: mailbox ?? "", accounts: accounts)
+        }
+        if detail.contains(mailboxExistsMarker) {
+            return .mailboxExists(mailbox: mailbox ?? "", account: account ?? "")
         }
         if detail.contains(mailNotFoundMarker) {
             return .mailNotFound(mailbox: mailbox ?? "", account: account ?? "")

@@ -13,11 +13,11 @@ private let outlookUnsupportedInstructions =
 
 
 /// mail-cli <command> [json-args]
-/// Commands: check_permission, detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email, list_rules, check_mail, delete_emails
+/// Commands: check_permission, detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email, list_rules, check_mail, delete_emails, mark_emails_read, flag_emails, move_emails, copy_emails, archive_emails, create_mailbox, mark_emails_spam
 @main
 struct MailCLI {
     static let commandList =
-        "check_permission, detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email, list_rules, check_mail, delete_emails"
+        "check_permission, detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email, list_rules, check_mail, delete_emails, mark_emails_read, flag_emails, move_emails, copy_emails, archive_emails, create_mailbox, mark_emails_spam"
 
     static func main() {
         runCLI(
@@ -60,6 +60,13 @@ func mailCommands(executor: @escaping ScriptExecutor) -> [String: (_ params: [St
             try MailRules.checkMail(scripts: scripts, account: params["account"] as? String)
         },
         "delete_emails": scripted(deleteEmails),
+        "mark_emails_read": scripted(markEmailsRead),
+        "flag_emails": scripted(flagEmails),
+        "move_emails": scripted(moveEmails),
+        "copy_emails": scripted(copyEmails),
+        "archive_emails": scripted(archiveEmails),
+        "create_mailbox": scripted(createMailbox),
+        "mark_emails_spam": scripted(markEmailsSpam),
     ]
 }
 

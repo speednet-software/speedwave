@@ -15,6 +15,8 @@ import {
   handleListMailRules,
   handleCheckMail,
   handleDeleteEmails,
+  handleCreateMailbox,
+  handleMoveEmails,
   createMailTools,
 } from './mail-tools.js';
 
@@ -390,10 +392,10 @@ describe('mail-tools', () => {
   });
 
   describe('createMailTools', () => {
-    it('returns 10 tool definitions', () => {
+    it('returns 17 tool definitions', () => {
       const tools = createMailTools();
 
-      expect(tools).toHaveLength(10);
+      expect(tools).toHaveLength(17);
       expect(tools.map((t) => t.tool.name)).toEqual([
         'detectMailClients',
         'listMailboxes',
@@ -405,6 +407,13 @@ describe('mail-tools', () => {
         'listMailRules',
         'checkMail',
         'deleteEmails',
+        'markEmailsRead',
+        'flagEmails',
+        'moveEmails',
+        'copyEmails',
+        'archiveEmails',
+        'createMailbox',
+        'markEmailsSpam',
       ]);
     });
 
@@ -658,6 +667,13 @@ describe('mail-tools', () => {
       },
       checkMail: { status: 'started', account: 'Work' },
       deleteEmails: gatedBatchOutputs(DELETE_PREVIEW, DELETE_REPORT),
+      markEmailsRead: ORGANIZE_REPORT,
+      flagEmails: ORGANIZE_REPORT,
+      moveEmails: ORGANIZE_REPORT,
+      copyEmails: ORGANIZE_REPORT,
+      archiveEmails: ORGANIZE_REPORT,
+      createMailbox: { status: 'created', mailbox: 'Clients/Acme', account: 'Work' },
+      markEmailsSpam: gatedBatchOutputs(DELETE_PREVIEW, DELETE_REPORT),
     };
 
     it('covers every mail tool', () => {
@@ -930,6 +946,142 @@ describe('mail-tools', () => {
     });
   });
 
+  describe('organizing emails', () => {
+    const ids = (count: number): string[] =>
+      Array.from({ length: count }, (_, i) => `${MAIL_ID.slice(0, -2)}${i}`);
+
+    const tool = (name: string) => createMailTools().find((t) => t.tool.name === name)!;
+
+    it.each([
+      ['markEmailsRead', 'mark_emails_read', { ids: [MAIL_ID], read: false }],
+      ['flagEmails', 'flag_emails', { ids: [MAIL_ID], flag: 'purple' }],
+      ['moveEmails', 'move_emails', { ids: [MAIL_ID], mailbox: 'Clients/Acme', account: 'Work' }],
+      ['copyEmails', 'copy_emails', { ids: [MAIL_ID], mailbox: 'Clients', account: 'On My Mac' }],
+      ['archiveEmails', 'archive_emails', { ids: [MAIL_ID] }],
+      ['createMailbox', 'create_mailbox', { name: 'Clients/Acme', account: 'Work' }],
+      ['markEmailsSpam', 'mark_emails_spam', { ids: [MAIL_ID], confirm_spam: true }],
+    ])('%s passes its arguments to mail-cli %s', async (name, command, input) => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: ORGANIZE_REPORT });
+
+      const result = await tool(name).handler(input);
+
+      expect(result.isError).toBeFalsy();
+      expect(runCommand).toHaveBeenCalledWith('mail', command, budgeted(input), PROCESS_TIMEOUT);
+    });
+
+    it.each(['markEmailsRead', 'flagEmails', 'moveEmails', 'copyEmails', 'archiveEmails'])(
+      '%s is reversible, so it needs no confirmation and is not destructive',
+      (name) => {
+        const t = tool(name).tool;
+
+        expect(t.annotations?.readOnlyHint).toBe(false);
+        expect(t.annotations?.destructiveHint).toBe(false);
+        expect(Object.keys(t.inputSchema.properties).some((k) => k.startsWith('confirm_'))).toBe(
+          false
+        );
+        expect((t.inputSchema.properties as any).ids).toMatchObject({
+          type: 'array',
+          minItems: 1,
+          maxItems: 25,
+        });
+      }
+    );
+
+    it('createMailbox is a reversible write', () => {
+      const t = tool('createMailbox').tool;
+
+      expect(t.annotations?.readOnlyHint).toBe(false);
+      expect(t.annotations?.destructiveHint).toBe(false);
+      expect(t.inputSchema.required).toEqual(['name', 'account']);
+    });
+
+    it('markEmailsSpam is destructive and gated by confirm_spam', () => {
+      const t = tool('markEmailsSpam').tool;
+
+      expect(t.annotations?.destructiveHint).toBe(true);
+      expect((t.inputSchema.properties as any).confirm_spam.type).toBe('boolean');
+      expect(t.inputSchema.required).toEqual(['ids']);
+      expect(t.description).toContain('ask the user');
+      expect(t.description).toContain('Junk');
+    });
+
+    it('moveEmails and copyEmails take the target mailbox together with its account', () => {
+      for (const name of ['moveEmails', 'copyEmails']) {
+        expect(tool(name).tool.inputSchema.required).toEqual(['ids', 'mailbox', 'account']);
+      }
+    });
+
+    it('flagEmails declares the colors Mail has and none', () => {
+      const flag = (tool('flagEmails').tool.inputSchema.properties as any).flag;
+
+      expect(flag.enum).toEqual([
+        'red',
+        'orange',
+        'yellow',
+        'green',
+        'blue',
+        'purple',
+        'gray',
+        'none',
+      ]);
+    });
+
+    it.each([
+      ['markEmailsRead', { ids: [MAIL_ID] }, 'requires read'],
+      ['markEmailsRead', { ids: [MAIL_ID], read: 'yes' }, 'INVALID_TYPE'],
+      ['flagEmails', { ids: [MAIL_ID] }, 'requires flag'],
+      ['flagEmails', { ids: [MAIL_ID], flag: 'pink' }, 'INVALID_VALUE'],
+      ['moveEmails', { ids: [MAIL_ID], mailbox: 'Clients' }, 'requires account'],
+      ['copyEmails', { ids: [MAIL_ID], account: 'Work' }, 'requires mailbox'],
+      ['moveEmails', { ids: [MAIL_ID], mailbox: 'Cl\x01', account: 'Work' }, 'INVALID_CHARACTERS'],
+      ['archiveEmails', { ids: [] }, 'EMPTY_FIELDS'],
+      ['archiveEmails', { ids: ids(26) }, 'MAIL_BATCH_TOO_LARGE'],
+      ['markEmailsRead', { ids: ids(26), read: true }, 'MAIL_BATCH_TOO_LARGE'],
+      ['markEmailsSpam', { ids: ids(26), confirm_spam: true }, 'MAIL_BATCH_TOO_LARGE'],
+      ['markEmailsSpam', { ids: [MAIL_ID], confirm_spam: 'true' }, 'INVALID_TYPE'],
+      ['createMailbox', { name: 'Clients' }, 'requires account'],
+      ['createMailbox', { name: '', account: 'Work' }, 'requires name'],
+    ])('%s refuses %o before calling mail-cli', async (name, input, code) => {
+      const result = await tool(name).handler(input);
+
+      expect(result.isError).toBe(true);
+      expect((result.content[0] as { text: string }).text).toContain(code);
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it('a mailbox that already exists teaches to use it', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        new Error(
+          "mail.create_mailbox failed: MAIL_MAILBOX_EXISTS: Mailbox 'Clients' already exists in account 'Work'; move emails to it as it is."
+        )
+      );
+
+      const result = await handleCreateMailbox({ name: 'Clients', account: 'Work' });
+
+      expect(result.error?.code).toBe('MAIL_MAILBOX_EXISTS');
+      expect(result.error?.message).toContain('Invalid name (received: "Clients")');
+      expect(result.error?.message).toContain('moveEmails');
+    });
+
+    it('a target mailbox that does not exist points at listMailboxes and createMailbox', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        new Error(
+          "mail.move_emails failed: MAIL_MAILBOX_NOT_FOUND: Mailbox 'Clients' not found in account 'Work'."
+        )
+      );
+
+      const result = await handleMoveEmails({
+        ids: [MAIL_ID],
+        mailbox: 'Clients',
+        account: 'Work',
+      });
+
+      expect(result.error?.code).toBe('MAIL_MAILBOX_NOT_FOUND');
+      expect(result.error?.message).toContain('Invalid mailbox (received: "Clients")');
+      expect(result.error?.message).toContain('listMailboxes');
+    });
+  });
+
   describe('mail-cli failures reach Claude as teaching errors', () => {
     const cliFailure = (command: string, stderr: string): Error =>
       new Error(`mail.${command} failed: ${stderr}`);
@@ -1118,6 +1270,30 @@ const DELETE_REPORT = {
   failed: 1,
 };
 
+const ORGANIZE_REPORT = {
+  status: 'partial',
+  emails: [
+    {
+      id: MAIL_ID,
+      ok: true,
+      subject: 'Hi',
+      sender: 'Anna',
+      date: '2026-10-20T09:15:00+02:00',
+      mailbox: 'INBOX',
+      account: 'iCloud',
+    },
+    {
+      id: MAIL_ID,
+      ok: false,
+      mailbox: 'INBOX',
+      account: 'iCloud',
+      error: "MAIL_ARCHIVE_NOT_FOUND: Account 'iCloud' has no Archive mailbox …",
+    },
+  ],
+  succeeded: 1,
+  failed: 1,
+};
+
 /**
  * One sample carrying every key a gated batch tool emits, from its preview and from its per-mail report.
  * @param preview - The unconfirmed answer.
@@ -1146,6 +1322,13 @@ function validInput(name: string): Record<string, unknown> {
     listMailRules: {},
     checkMail: {},
     deleteEmails: { ids: [MAIL_ID], confirm_delete: true },
+    markEmailsRead: { ids: [MAIL_ID], read: true },
+    flagEmails: { ids: [MAIL_ID], flag: 'red' },
+    moveEmails: { ids: [MAIL_ID], mailbox: 'Clients', account: 'Work' },
+    copyEmails: { ids: [MAIL_ID], mailbox: 'Clients', account: 'Work' },
+    archiveEmails: { ids: [MAIL_ID] },
+    createMailbox: { name: 'Clients', account: 'Work' },
+    markEmailsSpam: { ids: [MAIL_ID], confirm_spam: true },
   };
   return inputs[name];
 }
