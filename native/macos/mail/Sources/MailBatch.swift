@@ -157,9 +157,12 @@ struct MailBatch {
         repeat with spwRowRef in spwRows
             set spwRow to contents of spwRowRef
             set spwIso to ""
-            if class of (item 4 of spwRow) is date then set spwIso to ((item 4 of spwRow) as «class isot» as string)
+            set spwReceived to contents of item 4 of spwRow
+            if class of spwReceived is date then set spwIso to (spwReceived as «class isot» as string)
+            set spwFields to {(contents of item 1 of spwRow) as text, (contents of item 2 of spwRow) as text, ¬
+                (contents of item 3 of spwRow) as text, spwIso, (contents of item 5 of spwRow) as text}
             set AppleScript's text item delimiters to (character id 31)
-            set end of spwLines to ({item 1 of spwRow, item 2 of spwRow, item 3 of spwRow, spwIso, item 5 of spwRow} as text)
+            set end of spwLines to (spwFields as text)
         end repeat
         set AppleScript's text item delimiters to (character id 30)
         return spwLines as text
