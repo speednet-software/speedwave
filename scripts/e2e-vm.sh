@@ -746,7 +746,7 @@ cd desktop/src && npm ci && cd ../..
 cd desktop/e2e && npm ci && cd ../..
 
 echo "── Building full release (.dmg)..."
-make test-e2e-desktop-build
+CI=true make test-e2e-desktop-build
 SCRIPT
 
     echo "[macos] Locating .dmg artifact on remote..."

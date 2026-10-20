@@ -9,6 +9,8 @@ Rules for the clean-install rig pipeline and the engine-level bats suites (`_tes
 - macOS only: the app stops the Lima VM when it exits, and Lima has no on-demand start (WSL does) — the bats step must `limactl start` (bundled binary, prod `LIMA_HOME`) before the engine preflight.
 - macOS only: `run_macos_e2e` never stops or kills the VM before launching the app — the reset-only launch adopts the VM the bats step started (`ensure_ready` sees it Running). A `pkill -f limactl` there SIGTERMed the hostagent into a graceful shutdown during which `limactl list` still said Running for tens of seconds while SSH reset (`kex_exchange_identification`), so every engine call of the fresh app failed and spec 07 found no `project-pill`. No automated guard for this; review is the check.
 
+- macOS only: the `.dmg` build runs with `CI=true`, which makes Tauri pass `--skip-jenkins` to `bundle_dmg.sh` and skip its Finder AppleScript window layout. Over SSH Finder answers no Apple Events (`AppleEvent timed out (-1712)`) and the bundle step fails; the lane only mounts the image, so the layout is not needed.
+
 ## Windows transport rules (all empirically verified on the rig)
 
 - Anything crossing the `wsl.exe ... --` interop boundary is re-parsed by the distro's default shell: payloads carrying `$`-constructs meant for the inner shell MUST be base64-wrapped (`echo <b64> | base64 -d | sh` — the runtime's `wrap_base64_sh` shape). Quoted metachar payloads without `$` survive as data; bare-spliced scripts do not.
