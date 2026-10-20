@@ -442,7 +442,7 @@ describe('ChatComponent', () => {
       fixture2.destroy();
     });
 
-    describe('with chat tabs (beta, SPEED-795)', () => {
+    describe('with chat tabs (beta)', () => {
       function transcriptChip(): Element | null {
         return fixture.nativeElement.querySelector('[data-testid="composer-transcript"]');
       }

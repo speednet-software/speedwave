@@ -20,7 +20,6 @@ import type {
 } from '../models/transcript';
 import type { StagedTranscript } from '../models/chat';
 
-/** One chat tab's staging fields, as `ChatSessionStore` carries them. */
 interface MockTab {
   stagedTranscript: WritableSignal<StagedTranscript | null>;
   stageTranscript: (transcript: StagedTranscript) => void;
@@ -31,7 +30,6 @@ interface MockTab {
 class MockChatState {
   readonly isStreamingFromState = signal(false);
   calls: string[] = [];
-  /** Whether `openNewChat` opens a new tab (beta) instead of restarting the active one. */
   opensTab = false;
   private readonly tabStores = new Map<string, MockTab>([['tab-1', mockTab()]]);
   private active = 'tab-1';
@@ -61,10 +59,6 @@ class MockChatState {
     this.calls.push('sendMessage');
   });
 
-  /**
-   * Test helper: the staging fields of one tab.
-   * @param tabId - id of an open tab.
-   */
   tab(tabId: string): MockTab {
     const tab = this.tabStores.get(tabId);
     if (!tab) throw new Error(`no tab ${tabId}`);
@@ -1099,10 +1093,6 @@ describe('TranscriptionService', () => {
       };
     }
 
-    /**
-     * Holds the markdown read until the returned gate resolves, so a test can act mid-flow.
-     * @returns the gate the markdown read waits on.
-     */
     function gateMarkdown() {
       const markdownGate = createDeferred<string>();
       mockTauri.invokeHandler = async (cmd: string) => {

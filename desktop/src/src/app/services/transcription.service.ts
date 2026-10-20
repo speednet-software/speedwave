@@ -502,10 +502,10 @@ export class TranscriptionService {
   }
 
   /**
-   * Stages the transcript in one chat tab's composer: the default prompt goes into its text field,
-   * the markdown rides along with whatever the user sends next from that tab.
+   * Stages the transcript for the chat composer: the default prompt goes into the text field, the
+   * markdown rides along with whatever the user sends next.
    * @param sessionId - the session to stage.
-   * @param target - `'new-chat'` (default) opens a new chat first (`ChatStateService.openNewChat`); `'current-chat'` stages into the tab that was active when the call started, re-activating it.
+   * @param target - `'new-chat'` (default) opens a new chat first; `'current-chat'` keeps the tab that was active.
    */
   async stageForChat(sessionId: string, target: SendTarget = 'new-chat'): Promise<void> {
     const originTabId = this.chatState.activeTabId();

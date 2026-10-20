@@ -83,10 +83,8 @@ export {
   type LegacyStateSnapshot,
 } from './chat-session-store';
 
-/** Why a new chat cannot open while every chat tab is in use (beta, SPEED-795). */
 export const NEW_CHAT_TAB_LIMIT = 'Close a chat tab to open a new one.';
 
-/** Why {@link ChatStateService.claimTab} refused: the tab closed while work for it was in flight. */
 export const CHAT_TAB_CLOSED = 'That chat tab was closed. Try again.';
 
 /** Singleton service that holds chat session state across navigation. */
@@ -285,9 +283,8 @@ export class ChatStateService {
   }
 
   /**
-   * Activates a tab that work started for earlier, failing with {@link CHAT_TAB_CLOSED} once it
-   * closed, so that work never lands on whichever tab is open instead.
-   * @param tabId - Id of the tab the work is for.
+   * Activates a tab and returns its store; throws {@link CHAT_TAB_CLOSED} once it closed.
+   * @param tabId - Id of the tab.
    * @returns The tab's store.
    */
   claimTab(tabId: string): ChatSessionStore {
@@ -460,10 +457,6 @@ export class ChatStateService {
     this.activeStore().newConversationBlockedReason()
   );
 
-  /**
-   * Why {@link openNewChat} would refuse ('' when it would not): with beta the tab cap and the
-   * project, never the active tab's turn; without beta the active conversation's restart gate.
-   */
   readonly newChatBlockedReason: Signal<string> = computed(() => {
     if (!this.beta.enabled()) return this.newConversationBlockedReason();
     if (!this.canOpenTab()) return NEW_CHAT_TAB_LIMIT;
@@ -560,9 +553,8 @@ export class ChatStateService {
   }
 
   /**
-   * Opens a new chat: with beta a new active tab, every open conversation left as it is; without
-   * beta the conversation in `originTabId` restarts. Refuses with {@link newChatBlockedReason}.
-   * @param originTabId - Tab the request came from; only the restart without beta uses it.
+   * Opens a new tab with beta, else restarts the conversation in `originTabId`.
+   * @param originTabId - Tab the request came from.
    * @returns Id of the tab that holds the new chat.
    */
   async openNewChat(originTabId: string): Promise<string> {

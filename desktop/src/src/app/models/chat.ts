@@ -342,7 +342,7 @@ export interface StagedAttachment<K extends AttachmentKind = AttachmentKind> {
   discard: () => void;
 }
 
-/** A meeting transcript attached to a tab's next message: its markdown and the composer chip name. */
+/** A meeting transcript staged for a tab's next message. */
 export interface StagedTranscript {
   readonly markdown: string;
   readonly name: string;

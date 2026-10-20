@@ -881,9 +881,7 @@ export class ChatSessionStore {
   /** Per-tab staged image attachments (SPEED-785) — a paste/drop resolves into this instance regardless of which tab's composer is active when it finishes. */
   readonly composerAttachments = new ComposerAttachments();
   private readonly _stagedTranscript = signal<StagedTranscript | null>(null);
-  /** Meeting transcript that rides along with this tab's next message (SPEED-795); `null` when none. */
   readonly stagedTranscript: Signal<StagedTranscript | null> = this._stagedTranscript.asReadonly();
-  /** Prompt the composer loads into its field once this tab is shown ('' = nothing pending). */
   readonly composerPromptDraft = signal('');
 
   private readonly _sessionEnded = signal(false);
@@ -891,7 +889,7 @@ export class ChatSessionStore {
   readonly sessionEnded: Signal<boolean> = this._sessionEnded.asReadonly();
 
   /**
-   * Attaches a transcript to this tab's next message, replacing one staged earlier.
+   * Stages a transcript for this tab's next message.
    * @param transcript - The transcript to stage.
    */
   stageTranscript(transcript: StagedTranscript): void {
@@ -899,8 +897,8 @@ export class ChatSessionStore {
   }
 
   /**
-   * Drops the staged transcript; given the one a send took, only while that one is still staged.
-   * @param sent - The transcript a send took, so one staged during the send survives it.
+   * Drops the staged transcript, or only `sent` while it is still the staged one.
+   * @param sent - The transcript a send took.
    */
   unstageTranscript(sent?: StagedTranscript): void {
     if (sent && this._stagedTranscript() !== sent) return;

@@ -262,7 +262,7 @@ describe('ChatSessionStore', () => {
     });
   });
 
-  describe('staged transcript (SPEED-795)', () => {
+  describe('staged transcript', () => {
     const first = { markdown: '# First meeting', name: 'First' };
     const second = { markdown: '# Second meeting', name: 'Second' };
 

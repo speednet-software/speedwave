@@ -542,7 +542,7 @@ describe('ChatStateService', () => {
       });
     });
 
-    describe('openNewChat (SPEED-795)', () => {
+    describe('openNewChat', () => {
       const conversation = [
         {
           role: 'user' as const,
