@@ -9,13 +9,12 @@ import {
   WRITE_ANNOTATIONS,
   META_KEYS,
 } from '@speedwave/mcp-shared';
-import { withValidation, withClients, ToolResult } from './validation.js';
+import { withValidation, withClients, failureResult, ToolResult } from './validation.js';
 import {
   SlackClients,
   getFileContent,
   downloadFile,
   uploadFile,
-  formatSlackError,
   MAX_UPLOAD_BYTES,
   MAX_UPLOAD_FILES,
   UploadTransferError,
@@ -112,8 +111,6 @@ const downloadFileTool: Tool = {
   ],
 };
 
-const UPLOAD_FILE_REQUIRED = ['channel', 'filePaths'];
-
 const uploadFileTool: Tool = {
   name: 'uploadFile',
   description: `Upload 1 to ${MAX_UPLOAD_FILES} files from /workspace to a Slack channel, DM or thread as the signed-in user (their name and avatar), all into the same target with one comment. Files are streamed, up to ${MAX_UPLOAD_BYTES / 1000 ** 3} GB each. One call has about 10 minutes, so split large sets over several calls. Files outside /workspace (e.g. /tmp, the home directory) must first be copied under /workspace/.speedwave/slack-out/. Pass \`thread_ts\` copied verbatim from getChannelMessages/getThreadMessages to post into that thread. If any file fails, nothing is shared. Needs the files:write scope: a missing_scope error means the user must re-authorise Slack in Speedwave Desktop. Irreversible and instantly visible: the user must confirm the recipient, the file list and the comment in the current conversation before calling.`,
@@ -143,7 +140,7 @@ const uploadFileTool: Tool = {
         description: 'Message posted together with the files',
       },
     },
-    required: UPLOAD_FILE_REQUIRED,
+    required: ['channel', 'filePaths'],
   },
   annotations: WRITE_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true, [META_KEYS.TIMEOUT_CLASS]: 'long' },
@@ -199,10 +196,7 @@ export async function handleDownloadFile(
     const result = await downloadFile(clients, params);
     return { success: true, data: result };
   } catch (error) {
-    return {
-      success: false,
-      error: { code: 'DOWNLOAD_FAILED', message: formatSlackError(error) },
-    };
+    return failureResult('DOWNLOAD_FAILED', error);
   }
 }
 
@@ -219,7 +213,7 @@ export async function handleGetFileContent(
     const result = await getFileContent(clients, params);
     return { success: true, data: result };
   } catch (error) {
-    return { success: false, error: { code: 'READ_FAILED', message: formatSlackError(error) } };
+    return failureResult('READ_FAILED', error);
   }
 }
 
@@ -236,13 +230,10 @@ export async function handleUploadFile(
     const result = await uploadFile(clients, params);
     return { success: true, data: result };
   } catch (error) {
-    return {
-      success: false,
-      error: {
-        code: 'UPLOAD_FAILED',
-        message: error instanceof UploadTransferError ? error.message : formatSlackError(error),
-      },
-    };
+    if (error instanceof UploadTransferError) {
+      return { success: false, error: { code: 'UPLOAD_FAILED', message: error.message } };
+    }
+    return failureResult('UPLOAD_FAILED', error);
   }
 }
 
@@ -264,10 +255,7 @@ export function createFileTools(clients: SlackClients): ToolDefinition[] {
     },
     {
       tool: uploadFileTool,
-      handler: withValidation<UploadFileParams>(gate(handleUploadFile), {
-        required: UPLOAD_FILE_REQUIRED,
-        toolName: uploadFileTool.name,
-      }),
+      handler: withValidation<UploadFileParams>(gate(handleUploadFile)),
     },
   ];
 }

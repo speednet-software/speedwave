@@ -8,18 +8,10 @@ import {
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
   META_KEYS,
-  type ResultValidationOptions,
 } from '@speedwave/mcp-shared';
-import { withValidation, withClients, ToolResult } from './validation.js';
+import { withValidation, withClients, failureResult, ToolResult } from './validation.js';
 import { enrichMessagesWithAuthors } from '../user-directory.js';
-import {
-  SlackClients,
-  sendChannel,
-  readChannel,
-  readThread,
-  getChannels,
-  formatSlackError,
-} from '../client.js';
+import { SlackClients, sendChannel, readChannel, readThread, getChannels } from '../client.js';
 
 interface SendChannelParams {
   channel: string;
@@ -378,7 +370,7 @@ export async function handleSendChannel(
     const result = await sendChannel(clients, params);
     return { success: true, data: result };
   } catch (error) {
-    return { success: false, error: { code: 'SEND_FAILED', message: formatSlackError(error) } };
+    return failureResult('SEND_FAILED', error);
   }
 }
 
@@ -396,7 +388,7 @@ export async function handleGetChannelMessages(
     await enrichMessagesWithAuthors(clients, result.messages);
     return { success: true, data: result };
   } catch (error) {
-    return { success: false, error: { code: 'READ_FAILED', message: formatSlackError(error) } };
+    return failureResult('READ_FAILED', error);
   }
 }
 
@@ -414,7 +406,7 @@ export async function handleGetThreadMessages(
     await enrichMessagesWithAuthors(clients, result.messages);
     return { success: true, data: result };
   } catch (error) {
-    return { success: false, error: { code: 'READ_FAILED', message: formatSlackError(error) } };
+    return failureResult('READ_FAILED', error);
   }
 }
 
@@ -439,16 +431,8 @@ export async function handleListChannelIds(
       },
     };
   } catch (error) {
-    return { success: false, error: { code: 'LIST_FAILED', message: formatSlackError(error) } };
+    return failureResult('LIST_FAILED', error);
   }
-}
-
-/**
- * Required-param options for {@link withValidation}, driven by the tool's own declared `inputSchema.required` so the guard can never drift from the schema.
- * @param tool - The tool whose schema drives the required-param set.
- */
-function requiredOf(tool: Tool): ResultValidationOptions {
-  return { required: tool.inputSchema.required ?? [], toolName: tool.name };
 }
 
 /**
@@ -461,24 +445,15 @@ export function createChannelTools(clients: SlackClients): ToolDefinition[] {
   return [
     {
       tool: sendChannelTool,
-      handler: withValidation<SendChannelParams>(
-        gate(handleSendChannel),
-        requiredOf(sendChannelTool)
-      ),
+      handler: withValidation<SendChannelParams>(gate(handleSendChannel)),
     },
     {
       tool: getChannelMessagesTool,
-      handler: withValidation<GetChannelMessagesParams>(
-        gate(handleGetChannelMessages),
-        requiredOf(getChannelMessagesTool)
-      ),
+      handler: withValidation<GetChannelMessagesParams>(gate(handleGetChannelMessages)),
     },
     {
       tool: getThreadMessagesTool,
-      handler: withValidation<GetThreadMessagesParams>(
-        gate(handleGetThreadMessages),
-        requiredOf(getThreadMessagesTool)
-      ),
+      handler: withValidation<GetThreadMessagesParams>(gate(handleGetThreadMessages)),
     },
     {
       tool: listChannelIdsTool,

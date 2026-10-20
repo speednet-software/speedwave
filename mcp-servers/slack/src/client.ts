@@ -31,6 +31,7 @@ import {
   resolveWorkspaceFile,
   workspaceRoot,
   type AuthedTokenState,
+  type TeachingErrorParams,
   type WorkspaceFile,
 } from '@speedwave/mcp-shared';
 
@@ -308,6 +309,20 @@ export function formatSlackError(error: unknown): string {
   return e.message || 'Slack API error';
 }
 
+/** Thrown when a tool parameter is rejected; the tool layer turns it into a teaching error. */
+export class InvalidParamError extends Error {
+  readonly teaching: TeachingErrorParams;
+
+  /**
+   * Build the error from the teaching-error fields of the rejected parameter.
+   * @param teaching - What was wrong, where a correct value comes from, and what to do next.
+   */
+  constructor(teaching: TeachingErrorParams) {
+    super(`Invalid ${teaching.paramName}. ${teaching.nextStep}`);
+    this.teaching = teaching;
+  }
+}
+
 const CHANNEL_LIST_PAGE_LIMIT = 1000;
 
 /** Hard cap on pagination (20k channels) — runaway-cursor backstop. */
@@ -378,11 +393,14 @@ async function resolveChannelId(clients: SlackClients, channel: string): Promise
     }
   }
 
-  throw new Error(
-    `Channel not found: ${channel}. If this is a person, use findUsers then openDirectMessage. ` +
-      'If it is a channel, call listChannelIds to see channels you (the signed-in user) are a ' +
-      'member of — Speedwave has no bot to invite, so a missing channel usually means you are not a member.'
-  );
+  throw new InvalidParamError({
+    paramName: 'channel',
+    received: channel,
+    correctValueTool: 'listChannelIds',
+    nextStep:
+      'If this is a person, use findUsers then openDirectMessage. A missing channel usually means ' +
+      'the signed-in user is not a member of it: Speedwave has no bot to invite.',
+  });
 }
 
 /**
@@ -402,16 +420,21 @@ export async function sendChannel(
   assertThreadTsShape(params.thread_ts);
   const broadcast = params.reply_broadcast ?? false;
   if (typeof broadcast !== 'boolean') {
-    throw new Error(
-      `reply_broadcast must be a boolean, got ${typeof broadcast}. Pass true or false; the ` +
-        'string "false" would be read as true and surface the reply to the whole channel.'
-    );
+    throw new InvalidParamError({
+      paramName: 'reply_broadcast',
+      received: broadcast,
+      nextStep:
+        'Pass true or false; the string "false" would be read as true and surface the reply to the whole channel.',
+    });
   }
   if (broadcast && !params.thread_ts) {
-    throw new Error(
-      'reply_broadcast requires thread_ts: it surfaces a thread reply in the channel, so there ' +
-        'must be a thread. Pass the thread parent ts, or drop reply_broadcast to post at channel level.'
-    );
+    throw new InvalidParamError({
+      paramName: 'reply_broadcast',
+      received: broadcast,
+      nextStep:
+        'reply_broadcast surfaces a thread reply in the channel, so it needs thread_ts: pass the thread ' +
+        'parent ts copied from getChannelMessages or getThreadMessages, or drop reply_broadcast to post at channel level.',
+    });
   }
 
   const channelId = await resolveChannelId(clients, params.channel);
@@ -513,22 +536,44 @@ async function resolveUploadFiles(filePaths: string[]): Promise<WorkspaceFile[]>
     filePaths.length === 0 ||
     filePaths.some((p) => typeof p !== 'string' || p === '')
   ) {
-    throw new Error('filePaths must be a non-empty array of non-empty path strings.');
+    throw new InvalidParamError({
+      paramName: 'filePaths',
+      received: filePaths,
+      nextStep:
+        'Pass a non-empty array of non-empty path strings under /workspace, e.g. ["/workspace/report.pdf"].',
+    });
   }
   if (filePaths.length > MAX_UPLOAD_FILES) {
-    throw new Error(
-      `filePaths has ${filePaths.length} entries; at most ${MAX_UPLOAD_FILES} files per call. Split them into several calls.`
-    );
+    throw new InvalidParamError({
+      paramName: 'filePaths',
+      nextStep: `filePaths has ${filePaths.length} entries; at most ${MAX_UPLOAD_FILES} files per call. Split them into several calls.`,
+    });
   }
   const resolved: WorkspaceFile[] = [];
   for (const p of filePaths) {
-    const file = await resolveWorkspaceFile(p, MAX_UPLOAD_BYTES);
+    const file = await resolveUploadFile(p);
     if (resolved.some((r) => r.path === file.path)) {
-      throw new Error(`File listed twice in filePaths: ${p}. Remove the duplicate.`);
+      throw new InvalidParamError({
+        paramName: 'filePaths',
+        received: p,
+        nextStep: 'This file is listed twice in filePaths. Remove the duplicate.',
+      });
     }
     resolved.push(file);
   }
   return resolved;
+}
+
+async function resolveUploadFile(filePath: string): Promise<WorkspaceFile> {
+  try {
+    return await resolveWorkspaceFile(filePath, MAX_UPLOAD_BYTES);
+  } catch (error) {
+    throw new InvalidParamError({
+      paramName: 'filePaths',
+      received: filePath,
+      nextStep: (error as Error).message,
+    });
+  }
 }
 
 async function postFileStream(uploadUrl: string, file: WorkspaceFile): Promise<void> {
@@ -709,12 +754,13 @@ function looksLikeSlackTs(value: string): boolean {
  */
 function assertThreadTsShape(value: string | undefined): void {
   if (value && !looksLikeSlackTs(value)) {
-    throw new Error(
-      `thread_ts "${value}" does not look like a Slack timestamp (expected e.g. ` +
-        '"1717000000.000100"). Copy it exactly from a getChannelMessages/getThreadMessages ' +
-        'result; do not reformat or round it. Slack accepts a malformed thread_ts silently and ' +
-        'posts the message to the channel instead of the thread.'
-    );
+    throw new InvalidParamError({
+      paramName: 'thread_ts',
+      received: value,
+      correctValueTool: 'getChannelMessages or getThreadMessages',
+      nextStep:
+        'Copy the ts exactly as returned (e.g. "1717000000.000100"); never reformat or round it.',
+    });
   }
 }
 
@@ -732,13 +778,7 @@ export async function readThread(
   clients: SlackClients,
   params: { channel: string; thread_ts: string; limit?: number; cursor?: string }
 ): Promise<SlackHistoryPage> {
-  if (!looksLikeSlackTs(params.thread_ts)) {
-    throw new Error(
-      `thread_ts "${params.thread_ts}" does not look like a Slack timestamp (expected e.g. ` +
-        '"1717000000.000100"). Copy it exactly from a getChannelMessages/getThreadMessages ' +
-        'result — do not reformat or round it.'
-    );
-  }
+  assertThreadTsShape(params.thread_ts);
   const channelId = await resolveChannelId(clients, params.channel);
   const limit = clampPageSize(params.limit, 50, 100);
 
@@ -1142,35 +1182,24 @@ export async function openDm(
   clients: SlackClients,
   params: { users: string[] }
 ): Promise<{ id: string }> {
-  if (!Array.isArray(params.users)) {
-    throw new Error("'users' is required: an array of 1-8 user IDs or e-mail addresses.");
-  }
-  if (params.users.length === 0) {
-    throw new Error('openDirectMessage needs at least one user.');
+  if (!Array.isArray(params.users) || params.users.length === 0) {
+    throw new InvalidParamError({
+      paramName: 'users',
+      received: params.users,
+      correctValueTool: 'findUsers',
+      nextStep: 'Pass an array of 1-8 user IDs or exact e-mail addresses.',
+    });
   }
   if (params.users.length > MAX_DM_PARTICIPANTS) {
-    throw new Error(
-      `A Slack DM holds at most ${MAX_DM_PARTICIPANTS} people; got ${params.users.length}.`
-    );
+    throw new InvalidParamError({
+      paramName: 'users',
+      correctValueTool: 'findUsers',
+      nextStep: `A Slack DM holds at most ${MAX_DM_PARTICIPANTS} people; got ${params.users.length}. Pass 1-8 user IDs or exact e-mail addresses.`,
+    });
   }
   const ids: string[] = [];
   for (const entry of params.users) {
-    const normalized = entry.toUpperCase();
-    if (USER_ID_RE.test(normalized)) {
-      ids.push(normalized);
-    } else if (entry.includes('@')) {
-      const found = await getUsers(clients, { email: entry });
-      if (!found.user) {
-        throw new Error(
-          `No Slack user found for email "${entry}". Check for typos/whitespace, or use findUsers to search by name instead.`
-        );
-      }
-      ids.push(found.user.id);
-    } else {
-      throw new Error(
-        `'${entry}' is not a user ID or email. Find the person with findUsers first.`
-      );
-    }
+    ids.push(await resolveDmUserId(clients, entry));
   }
 
   const result = await slackCall(clients, (c) => c.conversations.open({ users: ids.join(',') }));
@@ -1179,4 +1208,33 @@ export async function openDm(
     throw new Error('Slack did not return a conversation ID from conversations.open.');
   }
   return { id: channel.id };
+}
+
+async function resolveDmUserId(clients: SlackClients, entry: unknown): Promise<string> {
+  if (typeof entry === 'string') {
+    const normalized = entry.toUpperCase();
+    if (USER_ID_RE.test(normalized)) {
+      return normalized;
+    }
+    if (entry.includes('@')) {
+      const found = await getUsers(clients, { email: entry });
+      if (found.user) {
+        return found.user.id;
+      }
+      throw new InvalidParamError({
+        paramName: 'users',
+        received: entry,
+        correctValueTool: 'findUsers',
+        nextStep:
+          'No Slack user has this e-mail address. Check for typos or whitespace, or search by name with findUsers.',
+      });
+    }
+  }
+  throw new InvalidParamError({
+    paramName: 'users',
+    received: entry,
+    correctValueTool: 'findUsers',
+    nextStep:
+      'This entry is not a user ID or e-mail address. Find the person with findUsers, then pass the returned id.',
+  });
 }

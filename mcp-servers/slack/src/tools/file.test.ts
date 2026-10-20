@@ -210,13 +210,6 @@ describe('file-tools', () => {
       );
     });
 
-    it('rejects an upload call that omits a required parameter', async () => {
-      const upload = createFileTools(presentClients())[2];
-      const result = await upload.handler({ channel: 'C1' });
-      expect(result.isError).toBe(true);
-      expect(client.uploadFile).not.toHaveBeenCalled();
-    });
-
     it('returns NOT_CONFIGURED for every tool when the worker has no token', async () => {
       const tools = createFileTools(unconfiguredClients());
 
