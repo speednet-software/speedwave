@@ -1115,11 +1115,16 @@ describe('TranscriptionService', () => {
       expect(mockChat.sendMessage).not.toHaveBeenCalled();
     });
 
-    it('explains speaker labels in the prompt only for a diarized transcript, in both languages', async () => {
+    it('adds one speaker-label sentence to the prompt only for a diarized transcript, in both languages', async () => {
+      const expected = {
+        pl: ['są przybliżone', 'tylko na podstawie treści', 'niepewne przypisania'],
+        en: ['are approximate', 'only on evidence in the text', 'uncertain attributions'],
+      } as const;
       for (const language of ['pl', 'en'] as const) {
         mockTauri.invokeHandler = transcriptHandler(language);
         await svc.stageForChat('sess-1');
-        expect(svc.chatPromptDraft()).not.toContain('Speaker N');
+        const plain = svc.chatPromptDraft();
+        expect(plain).not.toContain('Speaker N');
         mockTauri.invokeHandler = async (cmd: string) => {
           if (cmd === 'get_transcript') {
             return snapshot({
@@ -1131,48 +1136,14 @@ describe('TranscriptionService', () => {
           return undefined;
         };
         await svc.stageForChat('sess-1');
-        expect(svc.chatPromptDraft()).toContain("'Speaker N'");
-        expect(svc.chatPromptDraft()).toContain(
-          language === 'pl' ? 'nie przypisuj imion' : 'do not assign names'
-        );
-      }
-    });
-
-    it('tells the model the speaker labels can split or merge people, in both languages', async () => {
-      const expected = {
-        pl: [
-          'są przybliżone',
-          'kilka etykiet',
-          'kilka osób',
-          "Linia 'Meeting' bez numeru",
-          'niepewne',
-        ],
-        en: [
-          'are approximate',
-          'more than one label',
-          'more than one person',
-          "A 'Meeting' line",
-          'uncertain',
-        ],
-      } as const;
-      for (const language of ['pl', 'en'] as const) {
-        mockTauri.invokeHandler = async (cmd: string) => {
-          if (cmd === 'get_transcript') {
-            return snapshot({
-              language,
-              models_used: { live: null, finalize: 'large-v3', diarization: 'nemotron' },
-            });
-          }
-          if (cmd === 'get_transcript_markdown') return '# Meeting transcript';
-          return undefined;
-        };
-        await svc.stageForChat('sess-1');
+        const draft = svc.chatPromptDraft();
+        expect(draft).toContain("'Speaker N'");
         for (const phrase of expected[language]) {
-          expect(svc.chatPromptDraft()).toContain(phrase);
+          expect(draft).toContain(phrase);
         }
-        expect(svc.chatPromptDraft()).not.toContain(
-          language === 'pl' ? 'oznaczają różne osoby' : 'mark different people'
-        );
+        expect(draft).not.toContain(language === 'pl' ? 'kilka etykiet' : 'more than one label');
+        expect(draft.startsWith(plain)).toBe(true);
+        expect(draft.length - plain.length).toBeLessThan(130);
       }
     });
 

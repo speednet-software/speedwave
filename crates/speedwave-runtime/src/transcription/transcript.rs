@@ -74,6 +74,9 @@ pub struct DiarizationRecord {
 /// The word in front of a speaker number in every label: the Markdown export, the transcript
 /// pane and the summary prompt (`speaker_label_matches_ts_mirrors`).
 const SPEAKER_LABEL: &str = "Speaker";
+const SPEAKERS_NOTE: &str = "told apart from the meeting audio; approximate: one person can get \
+several labels and one label several people; a 'Meeting' line without a number has no \
+recognised speaker";
 
 /// One transcript session — the persisted artifact.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -305,7 +308,7 @@ impl TranscriptSession {
                     .map(|n| format!("{SPEAKER_LABEL} {n}"))
                     .collect();
                 s.push_str(&format!(
-                    "- Speakers: {} (told apart from the meeting audio)\n",
+                    "- Speakers: {} ({SPEAKERS_NOTE})\n",
                     names.join(", ")
                 ));
             }
@@ -625,9 +628,13 @@ mod tests {
     #[test]
     fn to_markdown_lists_the_speakers_in_numeric_order_in_the_header() {
         let md = diarized_session().to_markdown();
-        assert!(md.contains(
-            "- Status: recording\n- Speakers: Speaker 1, Speaker 2, Speaker 10 (told apart from the meeting audio)\n\n"
-        ), "{md}");
+        assert!(
+            md.contains(&format!(
+                "- Status: recording\n- Speakers: Speaker 1, Speaker 2, Speaker 10 ({SPEAKERS_NOTE})\n\n"
+            )),
+            "{md}"
+        );
+        assert!(md.contains("approximate: one person can get several labels and one label several people; a 'Meeting' line without a number has no recognised speaker)\n"));
     }
 
     #[test]
