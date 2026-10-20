@@ -7,6 +7,7 @@ final class LiveMailTests: XCTestCase {
     static let optInVariable = "SPEEDWAVE_LIVE_MAIL"
     static let testMailbox = "Speedwave-Test"
     static let scriptTimeoutMs = 25_000
+    static let sendToVariable = "SPEEDWAVE_LIVE_MAIL_SEND_TO"
 
     override func setUpWithError() throws {
         guard ProcessInfo.processInfo.environment[Self.optInVariable] == "1" else {
@@ -214,5 +215,52 @@ final class LiveMailTests: XCTestCase {
             end tell
             """, 30)
         XCTAssertNotEqual(inTrash, "0", "the deleted mail is not in any Trash mailbox")
+    }
+
+    func testSendEmailPreviewsThenSendsOnlyToTheTestAddress() throws {
+        guard let address = ProcessInfo.processInfo.environment[Self.sendToVariable], !address.isEmpty else {
+            throw XCTSkip("Sending runs only with \(Self.sendToVariable) set to a test address")
+        }
+        let message: [String: Any] = [
+            "to": address,
+            "subject": "Speedwave live send \(UUID().uuidString)",
+            "body": "Line \"one\"\nC:\\temp\tend",
+        ]
+
+        let preview = try XCTUnwrap(try call("send_email", message) as? [String: Any])
+        XCTAssertEqual(preview["status"] as? String, "confirmation_required")
+        XCTAssertEqual(preview["to"] as? [String], [address])
+
+        let sent = try XCTUnwrap(try call("send_email", message.merging(["confirm_send": true]) { $1 }) as? [String: Any])
+        XCTAssertEqual(sent["status"] as? String, "sent", "\(sent)")
+        XCTAssertEqual(sent["body"] as? String, message["body"] as? String)
+    }
+
+    func testReplyToTheNewestTestMailPreviewsAndSendsOnlyWhenItGoesToTheTestAddress() throws {
+        let params: [String: Any] = ["mailbox": Self.testMailbox, "account": AppleMailClient.localAccountName]
+        let listed = try XCTUnwrap(try call("list_emails", params.merging(["limit": 1]) { $1 }) as? [String: Any])
+        guard let id = (listed["emails"] as? [[String: Any]])?.first?["id"] as? String else {
+            throw XCTSkip("\(Self.testMailbox) holds no message to reply to")
+        }
+        let reply: [String: Any] = ["id": id, "body": "Speedwave live reply"]
+
+        let preview = try XCTUnwrap(try call("reply_to_email", reply) as? [String: Any])
+        XCTAssertEqual(preview["status"] as? String, "confirmation_required", "\(preview)")
+        let body = try XCTUnwrap(preview["body"] as? String)
+        XCTAssertTrue(body.hasPrefix("Speedwave live reply\n\n"), body)
+        XCTAssertTrue(body.contains(" wrote:\n"), body)
+        XCTAssertEqual(
+            try XCTUnwrap(try call("list_emails", params.merging(["limit": 1]) { $1 }) as? [String: Any])["total"] as? Int,
+            listed["total"] as? Int)
+
+        guard let address = ProcessInfo.processInfo.environment[Self.sendToVariable], !address.isEmpty,
+              preview["to"] as? [String] == [address], (preview["cc"] as? [String])?.isEmpty == true
+        else {
+            throw XCTSkip("The reply would not go only to \(Self.sendToVariable); it was previewed, not sent")
+        }
+        let sent = try XCTUnwrap(
+            try call("reply_to_email", reply.merging(["confirm_send": true]) { $1 }) as? [String: Any])
+        XCTAssertEqual(sent["status"] as? String, "sent", "\(sent)")
+        XCTAssertEqual(sent["body"] as? String, body)
     }
 }

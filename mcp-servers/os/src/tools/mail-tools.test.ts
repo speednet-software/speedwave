@@ -300,16 +300,41 @@ describe('mail-tools', () => {
       expect(result.data).toEqual(mockData);
     });
 
-    it('rejects when confirm_send is false', async () => {
+    it('hands an unconfirmed send to mail-cli, which answers with the preview', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: SEND_PREVIEW });
+
       const result = await handleSendEmail({
         to: 'bob@example.com',
         subject: 'Test',
         body: 'Hello Bob',
-        confirm_send: false,
       });
 
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual(SEND_PREVIEW);
+      expect(runCommand).toHaveBeenCalledWith(
+        'mail',
+        'send_email',
+        budgeted({ to: 'bob@example.com', subject: 'Test', body: 'Hello Bob' }),
+        PROCESS_TIMEOUT
+      );
+    });
+
+    it('reports missing fields of an unconfirmed send instead of previewing it', async () => {
+      const result = await handleSendEmail({ to: '', subject: '', body: '' });
+
       expect(result.success).toBe(false);
-      expect(result.error?.code).toBe('CONFIRMATION_REQUIRED');
+      expect(result.error?.code).toBe('EMPTY_FIELDS');
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it('promises no HTML body and no attachments', () => {
+      const tool = createMailTools().find((t) => t.tool.name === 'sendEmail')!.tool;
+      const input = Object.keys(tool.inputSchema.properties ?? {});
+
+      expect(input).not.toContain('html_body');
+      expect(input).not.toContain('attachments');
+      expect(Object.keys(tool.outputSchema?.properties ?? {})).not.toContain('attachments');
+      expect(tool.description).toContain('Plain text only');
     });
 
     it('fails when required fields are empty', async () => {
@@ -366,15 +391,29 @@ describe('mail-tools', () => {
       expect(result.data).toEqual(mockData);
     });
 
-    it('rejects when confirm_send is false', async () => {
-      const result = await handleReplyToEmail({
-        id: MAIL_ID,
-        body: 'Thanks!',
-        confirm_send: false,
-      });
+    it('hands an unconfirmed reply to mail-cli, which answers with the preview', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: REPLY_PREVIEW });
 
-      expect(result.success).toBe(false);
-      expect(result.error?.code).toBe('CONFIRMATION_REQUIRED');
+      const result = await handleReplyToEmail({ id: MAIL_ID, body: 'Thanks!', reply_all: true });
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual(REPLY_PREVIEW);
+      expect(runCommand).toHaveBeenCalledWith(
+        'mail',
+        'reply_to_email',
+        budgeted({ id: MAIL_ID, body: 'Thanks!', reply_all: true }),
+        PROCESS_TIMEOUT
+      );
+    });
+
+    it('gives both scripts of a confirmed reply time to finish before mail-cli is killed', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: REPLY_PREVIEW });
+
+      await handleReplyToEmail({ id: MAIL_ID, body: 'Thanks!', confirm_send: true });
+
+      const [, , args, processTimeoutMs] = vi.mocked(runCommand).mock.calls[0];
+      const scriptTimeoutMs = (args as Record<string, unknown>).script_timeout_ms as number;
+      expect(processTimeoutMs! - 2 * scriptTimeoutMs).toBeGreaterThanOrEqual(2_000);
     });
 
     it('fails when required fields are empty', async () => {
@@ -631,8 +670,8 @@ describe('mail-tools', () => {
         ],
         total: 1,
       },
-      sendEmail: { status: 'sent' },
-      replyToEmail: { status: 'sent' },
+      sendEmail: { ...SEND_PREVIEW, bcc: ['carol@x'] },
+      replyToEmail: REPLY_PREVIEW,
       listMailRules: {
         rules: [
           {
@@ -679,31 +718,6 @@ describe('mail-tools', () => {
         expect(declaredShape(t.tool.outputSchema)).toEqual(shapeOf(emitted));
       }
     );
-  });
-
-  describe('confirm_send priority', () => {
-    it('handleSendEmail returns CONFIRMATION_REQUIRED before MISSING_FIELDS when confirm_send is false and fields are missing', async () => {
-      const result = await handleSendEmail({
-        to: '',
-        subject: '',
-        body: '',
-        confirm_send: false,
-      });
-
-      expect(result.success).toBe(false);
-      expect(result.error?.code).toBe('CONFIRMATION_REQUIRED');
-    });
-
-    it('handleReplyToEmail returns CONFIRMATION_REQUIRED before MISSING_FIELDS when confirm_send is false and fields are missing', async () => {
-      const result = await handleReplyToEmail({
-        id: '',
-        body: '',
-        confirm_send: false,
-      });
-
-      expect(result.success).toBe(false);
-      expect(result.error?.code).toBe('CONFIRMATION_REQUIRED');
-    });
   });
 
   describe('input validation (SEC-012)', () => {
@@ -1069,6 +1083,26 @@ describe('mail-tools', () => {
       expect(result.error?.message).toContain('listEmails');
     });
 
+    it('a send Mail did not complete asks the user instead of retrying', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        cliFailure(
+          'send_email',
+          'MAIL_SEND_FAILED: Mail.app did not send the message; it may wait in the Outbox.'
+        )
+      );
+
+      const result = await handleSendEmail({
+        to: 'a@x',
+        subject: 's',
+        body: 'b',
+        confirm_send: true,
+      });
+
+      expect(result.error?.code).toBe('MAIL_SEND_FAILED');
+      expect(result.error?.message).toContain('Outbox');
+      expect(result.error?.message).toContain('do not retry without asking');
+    });
+
     it('any other failure keeps its own message', async () => {
       vi.mocked(runCommand).mockRejectedValue(
         cliFailure('get_email', 'AppleScript error: Mail got an error: Can’t get message 1.')
@@ -1100,6 +1134,29 @@ const DELETE_PREVIEW = {
       account: 'iCloud',
     },
   ],
+};
+
+const SEND_PREVIEW = {
+  status: 'confirmation_required',
+  confirm_param: 'confirm_send',
+  instruction:
+    'Nothing was changed. Show this preview to the user and ask the user: Send this email? …',
+  to: ['bob@example.com'],
+  cc: [],
+  bcc: [],
+  subject: 'Test',
+  body: 'Hello Bob',
+};
+
+const REPLY_PREVIEW = {
+  status: 'confirmation_required',
+  confirm_param: 'confirm_send',
+  instruction:
+    'Nothing was changed. Show this preview to the user and ask the user: Send this reply? …',
+  to: ['anna@x'],
+  cc: ['ewa@x'],
+  subject: 'Re: Hi',
+  body: 'Thanks!\n\nOn 20 Oct 2026 at 09:15, Anna <anna@x> wrote:\n\n> Hello\n',
 };
 
 const DELETE_REPORT = {

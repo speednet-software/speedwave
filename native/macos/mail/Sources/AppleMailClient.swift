@@ -97,16 +97,6 @@ enum AppleMailClient {
         }
     }
 
-    /// One `make new <kind> recipient...` AppleScript line per comma-separated address.
-    static func recipientClauses(_ addresses: String, kind: String) -> String {
-        splitAddressList(addresses)
-            .map { addr in
-                "        make new \(kind) recipient at end of \(kind) recipients "
-                    + "with properties {address:\"\(escapeAppleScript(addr))\"}"
-            }
-            .joined(separator: "\n")
-    }
-
     /// AppleScript lines, run inside `tell application "Mail"`, that set `mb` to the mailbox named `name` in
     /// `account`, or in the one account or On My Mac that has it, and `spwAcctName` to that account's name.
     /// An app-level `mailbox "X"` reaches only On My Mac, so an account mailbox is always `mailbox "X" of account`.
@@ -323,49 +313,5 @@ enum AppleMailClient {
     static func localDate(_ isot: String) -> Date? {
         isotFormatter.timeZone = .current
         return isotFormatter.date(from: isot)
-    }
-
-    static func sendEmail(scripts: MailScripts, to: String, subject: String, body: String, cc: String?, bcc: String? = nil) throws -> [String: Any] {
-        let subjectEsc = escapeAppleScript(subject)
-        let bodyEsc = escapeAppleScript(body)
-
-        let toClause = recipientClauses(to, kind: "to")
-        let ccClause = cc.map { recipientClauses($0, kind: "cc") } ?? ""
-        let bccClause = bcc.map { recipientClauses($0, kind: "bcc") } ?? ""
-
-        let script = """
-        tell application "Mail"
-            set newMsg to make new outgoing message with properties {subject:"\(subjectEsc)", content:"\(bodyEsc)", visible:true}
-            tell newMsg
-        \(toClause)
-        \(ccClause)
-        \(bccClause)
-            end tell
-            send newMsg
-        end tell
-        """
-
-        _ = try scripts.run(script)
-        return ["status": "sent"]
-    }
-
-    static func replyToEmail(scripts: MailScripts, id: String, body: String, replyAll: Bool) throws -> [String: Any] {
-        let mailId = try MailId(decoding: id)
-        let bodyEsc = escapeAppleScript(body)
-        let replyType = replyAll ? "reply with properties {reply all:true}" : "reply"
-
-        let script = """
-        tell application "Mail"
-        \(messageLookup(mailId))
-            set replyMsg to \(replyType) m
-            tell replyMsg
-                set content to "\(bodyEsc)" & content
-            end tell
-            send replyMsg
-        end tell
-        """
-
-        _ = try scripts.run(script, mailbox: mailId.mailbox, account: mailId.account)
-        return ["status": "sent"]
     }
 }

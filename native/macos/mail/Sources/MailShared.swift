@@ -30,6 +30,7 @@ enum MailFailure: LocalizedError, Equatable {
     case batchTooLarge(count: Int, limit: Int)
     case trashNotFound(account: String)
     case alreadyInTrash
+    case sendFailed
 
     var code: String {
         switch self {
@@ -44,6 +45,7 @@ enum MailFailure: LocalizedError, Equatable {
         case .batchTooLarge: return "MAIL_BATCH_TOO_LARGE"
         case .trashNotFound: return "MAIL_TRASH_NOT_FOUND"
         case .alreadyInTrash: return "MAIL_ALREADY_IN_TRASH"
+        case .sendFailed: return "MAIL_SEND_FAILED"
         }
     }
 
@@ -77,6 +79,8 @@ enum MailFailure: LocalizedError, Equatable {
             return "Account '\(account)' has no Trash mailbox, so the email was left where it is."
         case .alreadyInTrash:
             return "The email is already in the Trash; no tool deletes an email permanently."
+        case .sendFailed:
+            return "Mail.app did not send the message; it may wait in the Outbox."
         }
     }
 }
@@ -170,6 +174,9 @@ struct MailScripts {
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty && !$0.hasPrefix("(") } ?? []
             return .mailboxAmbiguous(mailbox: mailbox ?? "", accounts: accounts)
+        }
+        if detail.contains(sendFailedMarker) {
+            return .sendFailed
         }
         if detail.contains(mailNotFoundMarker) {
             return .mailNotFound(mailbox: mailbox ?? "", account: account ?? "")

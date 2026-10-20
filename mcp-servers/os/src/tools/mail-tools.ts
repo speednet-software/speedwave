@@ -39,6 +39,11 @@ const BODY_SEARCH_BUDGET = mailTimeBudget(180_000);
 
 const BATCH_BUDGET = mailTimeBudget(120_000);
 
+const REPLY_BUDGET = mailTimeBudget(60_000, 2);
+
+const PLAIN_TEXT_ONLY =
+  'Plain text only: line breaks are kept, HTML is sent as literal text, and no file can be attached.';
+
 /** The most mails one batch tool acts on; mail-cli's `mailBatchLimit` holds the same number. */
 const MAIL_BATCH_LIMIT = 25;
 
@@ -97,6 +102,12 @@ const MAIL_FAILURE_TEACHING: Record<
   MAIL_MAILBOX_CHANGED: (detail) => ({
     paramName: 'mailbox',
     nextStep: `${detail} New mail arrived or messages moved during the read; retry the same call once.`,
+  }),
+  MAIL_SEND_FAILED: (detail) => ({
+    paramName: 'request',
+    nextStep:
+      `${detail} Tell the user the message was not sent and ask them to check the Outbox in Mail.app; ` +
+      'do not retry without asking.',
   }),
   MAIL_BATCH_TOO_LARGE: (detail) => ({
     paramName: 'ids',
@@ -170,8 +181,8 @@ interface SendEmailParams {
   cc?: string;
   /** BCC recipient(s), comma-separated. */
   bcc?: string;
-  /** Safety check flag that must be true to send. */
-  confirm_send: boolean;
+  /** Must be true, after the user agreed to the preview, to send. */
+  confirm_send?: boolean;
 }
 
 /** Input parameters for the replyToEmail tool. */
@@ -182,8 +193,8 @@ interface ReplyToEmailParams {
   body: string;
   /** Whether to reply to all recipients. */
   reply_all?: boolean;
-  /** Safety check flag that must be true to send. */
-  confirm_send: boolean;
+  /** Must be true, after the user agreed to the preview, to send. */
+  confirm_send?: boolean;
 }
 
 /** Input parameters for the deleteEmails tool. */
@@ -556,7 +567,10 @@ const searchEmailsTool: Tool = {
 
 const sendEmailTool: Tool = {
   name: 'sendEmail',
-  description: 'Send a new email. Requires confirm_send=true as safety check.',
+  description:
+    `Send a new plain-text email through Apple Mail. ${PLAIN_TEXT_ONLY} ` +
+    'Without confirm_send=true nothing is sent: the call returns a preview of the recipients (to, cc, bcc), subject and text, and you must show it and ask the user before calling again with the same arguments and confirm_send=true. ' +
+    'Sending cannot be undone.',
   annotations: DESTRUCTIVE_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
@@ -565,44 +579,35 @@ const sendEmailTool: Tool = {
   },
   keywords: ['os', 'mail', 'email', 'send', 'compose', 'write', 'new'],
   example:
-    'await os.sendEmail({ to: "alice@example.com", subject: "Meeting notes", body: "See attached.", confirm_send: true })',
+    'const preview = await os.sendEmail({ to: "alice@example.com", subject: "Meeting notes", body: "Notes below." }); /* ask the user */ await os.sendEmail({ to: "alice@example.com", subject: "Meeting notes", body: "Notes below.", confirm_send: true })',
   inputSchema: {
     type: 'object',
     properties: {
       to: { type: 'string', description: 'Recipient email address(es), comma-separated' },
       subject: { type: 'string', description: 'Email subject' },
-      body: { type: 'string', description: 'Email body (plain text)' },
+      body: { type: 'string', description: `Email text. ${PLAIN_TEXT_ONLY}` },
       cc: { type: 'string', description: 'CC recipient(s), comma-separated' },
       bcc: { type: 'string', description: 'BCC recipient(s), comma-separated' },
-      confirm_send: {
-        type: 'boolean',
-        description: 'Must be true to actually send (safety check)',
-      },
+      confirm_send: confirmProperty('send this email'),
     },
-    required: ['to', 'subject', 'body', 'confirm_send'],
+    required: ['to', 'subject', 'body'],
   },
-  outputSchema: {
-    type: 'object',
-    properties: {
-      status: { type: 'string', description: '"sent"' },
-    },
-  },
+  outputSchema: sendOutputSchema(true),
   inputExamples: [
     {
-      description: 'Minimal: send to one recipient',
+      description: 'Minimal: preview an email before asking the user',
       input: {
         to: 'alice@example.com',
         subject: 'Quick update',
         body: 'Everything looks good.',
-        confirm_send: true,
       },
     },
     {
-      description: 'Full: send with CC and BCC',
+      description: 'Full: send with CC and BCC after the user agreed',
       input: {
         to: 'alice@example.com',
         subject: 'Q4 Report',
-        body: 'Please review the attached report.',
+        body: 'The Q4 numbers are below.',
         cc: 'bob@example.com',
         bcc: 'carol@example.com',
         confirm_send: true,
@@ -614,16 +619,19 @@ const sendEmailTool: Tool = {
 const replyToEmailTool: Tool = {
   name: 'replyToEmail',
   description:
-    'Reply to an email in any mailbox, by the mail id listEmails or searchEmails returned. Requires confirm_send=true as safety check.',
+    'Reply to an email in any mailbox, by the mail id listEmails or searchEmails returned; Mail picks the recipients and the "Re:" subject, reply_all adds every recipient of the email. ' +
+    `The text goes above the quoted original, separated by a blank line and an "On <date>, <sender> wrote:" line. ${PLAIN_TEXT_ONLY} ` +
+    'Without confirm_send=true nothing is sent: the call returns a preview of the recipients, subject and the full text, and you must show it and ask the user before calling again with the same arguments and confirm_send=true. ' +
+    'Sending cannot be undone.',
   annotations: DESTRUCTIVE_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
-    [META_KEYS.TIMEOUT_MS]: STANDARD_BUDGET.toolMs,
+    [META_KEYS.TIMEOUT_MS]: REPLY_BUDGET.toolMs,
     [META_KEYS.OS_CATEGORY]: 'mail',
   },
   keywords: ['os', 'mail', 'email', 'reply', 'respond', 'answer'],
   example:
-    'await os.replyToEmail({ id: emails[0].id, body: "Sounds good, let\'s proceed.", confirm_send: true })',
+    'const preview = await os.replyToEmail({ id: emails[0].id, body: "Sounds good." }); /* ask the user */ await os.replyToEmail({ id: emails[0].id, body: "Sounds good.", confirm_send: true })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -631,32 +639,23 @@ const replyToEmailTool: Tool = {
         type: 'string',
         description: 'Mail id from listEmails or searchEmails',
       },
-      body: { type: 'string', description: 'Reply body (plain text)' },
+      body: { type: 'string', description: `Reply text, without the quote. ${PLAIN_TEXT_ONLY}` },
       reply_all: { type: 'boolean', description: 'Reply to all recipients (default false)' },
-      confirm_send: {
-        type: 'boolean',
-        description: 'Must be true to actually send (safety check)',
-      },
+      confirm_send: confirmProperty('send this reply'),
     },
-    required: ['id', 'body', 'confirm_send'],
+    required: ['id', 'body'],
   },
-  outputSchema: {
-    type: 'object',
-    properties: {
-      status: { type: 'string', description: '"sent"' },
-    },
-  },
+  outputSchema: sendOutputSchema(false),
   inputExamples: [
     {
-      description: 'Minimal: reply to sender only',
+      description: 'Minimal: preview a reply to the sender before asking the user',
       input: {
         id: 'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0',
         body: 'Thanks, acknowledged.',
-        confirm_send: true,
       },
     },
     {
-      description: 'Full: reply all',
+      description: 'Full: reply to all after the user agreed',
       input: {
         id: 'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0',
         body: 'I agree with the proposed timeline.',
@@ -927,20 +926,10 @@ export async function handleSearchEmails(params: SearchEmailsParams): Promise<To
 }
 
 /**
- * Sends a new email. Requires confirm_send=true as safety check.
+ * Sends a new email; without confirm_send mail-cli only previews it.
  * @param params - Tool input parameters.
  */
 export async function handleSendEmail(params: SendEmailParams): Promise<ToolResult> {
-  if (!params.confirm_send) {
-    return {
-      success: false,
-      error: {
-        code: 'CONFIRMATION_REQUIRED',
-        message:
-          'confirm_send must be true to send email. This is a safety check to prevent accidental sends.',
-      },
-    };
-  }
   const p = asRecord(params);
   const v = validateAll(p, {
     required: ['to', 'subject', 'body'],
@@ -958,20 +947,10 @@ export async function handleSendEmail(params: SendEmailParams): Promise<ToolResu
 }
 
 /**
- * Replies to an existing email. Requires confirm_send=true as safety check.
+ * Replies to an email; without confirm_send mail-cli only previews the reply.
  * @param params - Tool input parameters.
  */
 export async function handleReplyToEmail(params: ReplyToEmailParams): Promise<ToolResult> {
-  if (!params.confirm_send) {
-    return {
-      success: false,
-      error: {
-        code: 'CONFIRMATION_REQUIRED',
-        message:
-          'confirm_send must be true to send reply. This is a safety check to prevent accidental sends.',
-      },
-    };
-  }
   const p = asRecord(params);
   const v = validateAll(p, {
     required: ['id', 'body'],
@@ -982,7 +961,7 @@ export async function handleReplyToEmail(params: ReplyToEmailParams): Promise<To
     ],
   });
   if (!v.valid) return v.error;
-  return runMail('reply_to_email', p);
+  return runMail('reply_to_email', p, REPLY_BUDGET);
 }
 
 /**
@@ -1087,6 +1066,38 @@ function gatedBatchOutputSchema(): Tool['outputSchema'] {
 }
 
 /**
+ * The output schema of a gated send: its preview, or what was sent.
+ * @param withBcc - Whether the tool takes bcc recipients.
+ */
+function sendOutputSchema(withBcc: boolean): Tool['outputSchema'] {
+  const addresses = (what: string) => ({
+    type: 'array',
+    items: { type: 'string' },
+    description: `${what} addresses`,
+  });
+  return {
+    type: 'object',
+    properties: {
+      status: {
+        type: 'string',
+        description:
+          '"confirmation_required" (nothing sent: ask the user), or "sent" after confirmation',
+      },
+      confirm_param: {
+        type: 'string',
+        description: 'Preview only: the flag to set true once the user agreed',
+      },
+      instruction: { type: 'string', description: 'Preview only: what to ask the user' },
+      to: addresses('To'),
+      cc: addresses('CC'),
+      ...(withBcc ? { bcc: addresses('BCC') } : {}),
+      subject: { type: 'string' },
+      body: { type: 'string', description: 'The full plain text that is sent' },
+    },
+  };
+}
+
+/**
  * The teaching error for a batch's `ids` that is not 1 to {@link MAIL_BATCH_LIMIT} mail ids, or undefined.
  * @param p - Tool arguments.
  */
@@ -1124,10 +1135,11 @@ function mailBatchError(p: Record<string, unknown>): ToolResult | undefined {
 /**
  * Splits a hub timeout into the mail-cli process and script timeouts, each ending before the one above it.
  * @param toolMs - Hub timeout of the tool call.
+ * @param scriptRuns - Scripts one call runs one after another, all within the process timeout.
  */
-function mailTimeBudget(toolMs: number): MailTimeBudget {
+function mailTimeBudget(toolMs: number, scriptRuns = 1): MailTimeBudget {
   const processMs = toolMs - PROCESS_HEADROOM_MS;
-  return { toolMs, processMs, scriptMs: processMs - SCRIPT_HEADROOM_MS };
+  return { toolMs, processMs, scriptMs: Math.floor((processMs - SCRIPT_HEADROOM_MS) / scriptRuns) };
 }
 
 /**

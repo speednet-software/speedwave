@@ -53,8 +53,8 @@ func mailCommands(executor: @escaping ScriptExecutor) -> [String: (_ params: [St
         "list_emails": scripted(listEmails),
         "get_email": scripted(getEmail),
         "search_emails": scripted(searchEmails),
-        "send_email": scripted(sendEmail),
-        "reply_to_email": scripted(replyToEmail),
+        "send_email": scripted(MailSending.sendEmail),
+        "reply_to_email": scripted(MailSending.replyToEmail),
         "list_rules": scripted { _, scripts in ["rules": try MailRules.listRules(scripts: scripts)] },
         "check_mail": scripted { params, scripts in
             try MailRules.checkMail(scripts: scripts, account: params["account"] as? String)
@@ -157,54 +157,8 @@ func mailboxParams(_ params: [String: Any]) throws -> (mailbox: String, account:
     return (mailbox, params["account"] as? String)
 }
 
-func sendEmail(params: [String: Any], scripts: MailScripts) throws -> [String: Any] {
-    guard let to = params["to"] as? String else {
-        throw MailError.missingField("to")
-    }
-    guard !splitAddressList(to).isEmpty else {
-        throw MailError.emptyRecipients("to")
-    }
-    guard let subject = params["subject"] as? String else {
-        throw MailError.missingField("subject")
-    }
-    guard let body = params["body"] as? String else {
-        throw MailError.missingField("body")
-    }
-    guard params["confirm_send"] as? Bool == true else {
-        throw MailError.confirmRequired
-    }
-
-    let cc = params["cc"] as? String
-    let bcc = params["bcc"] as? String
-    if let cc = cc, splitAddressList(cc).isEmpty {
-        throw MailError.emptyRecipients("cc")
-    }
-    if let bcc = bcc, splitAddressList(bcc).isEmpty {
-        throw MailError.emptyRecipients("bcc")
-    }
-
-    return try AppleMailClient.sendEmail(scripts: scripts, to: to, subject: subject, body: body, cc: cc, bcc: bcc)
-}
-
-func replyToEmail(params: [String: Any], scripts: MailScripts) throws -> [String: Any] {
-    guard let id = params["id"] as? String else {
-        throw MailError.missingField("id")
-    }
-    guard let body = params["body"] as? String else {
-        throw MailError.missingField("body")
-    }
-    guard params["confirm_send"] as? Bool == true else {
-        throw MailError.confirmRequired
-    }
-
-    let replyAll = params["reply_all"] as? Bool ?? false
-    return try AppleMailClient.replyToEmail(scripts: scripts, id: id, body: body, replyAll: replyAll)
-}
-
-
 enum MailError: LocalizedError {
     case missingField(String)
-    case confirmRequired
     case emptyRecipients(String)
     case invalidValue(String, String)
 
@@ -212,8 +166,6 @@ enum MailError: LocalizedError {
         switch self {
         case .missingField(let field):
             return "Missing required field: \(field)"
-        case .confirmRequired:
-            return "Send confirmation required. Set confirm_send: true to send the email."
         case .emptyRecipients(let field):
             return "The '\(field)' field is empty. Provide at least one recipient email address."
         case .invalidValue(let field, let rule):
