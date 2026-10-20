@@ -32,18 +32,22 @@ final class MailCommandBoundaryTests: XCTestCase {
             ("search_emails", ["query": "x", "mailbox": "INBOX"]),
             ("send_email", ["to": "a@x", "subject": "S", "body": "B", "confirm_send": true]),
             ("reply_to_email", ["id": mailId, "body": "B", "confirm_send": true]),
+            ("forward_email", ["id": mailId, "to": "a@x", "comment": "C", "confirm_send": true]),
+            ("redirect_email", ["id": mailId, "to": "a@x", "confirm_send": true]),
         ]
         let replies = [
             "list_emails": "Work" + String(repeating: "\u{1D}", count: 5),
             "get_email": String(repeating: "\u{1D}", count: 11),
             "search_emails": "Work" + String(repeating: "\u{1D}", count: 5),
             "reply_to_email": String(repeating: "\u{1D}", count: 5),
+            "forward_email": String(repeating: "\u{1D}", count: 4),
+            "redirect_email": String(repeating: "\u{1D}", count: 4),
         ]
         for (command, params) in calls {
             harness.executor.reply(replies[command] ?? "")
             _ = try harness.call(command, params.merging([scriptTimeoutParam: 7_500]) { $1 })
         }
-        XCTAssertEqual(harness.executor.calls.map(\.timeout), Array(repeating: 7.5, count: calls.count + 1))
+        XCTAssertEqual(harness.executor.calls.map(\.timeout), Array(repeating: 7.5, count: calls.count + 3))
     }
 
     func testAScriptedCommandWithoutABudgetRunsNothing() {
@@ -197,6 +201,8 @@ final class MailCommandBoundaryTests: XCTestCase {
         let calls: [(String, [String: Any])] = [
             ("get_email", ["id": "<a@x>"]),
             ("reply_to_email", ["id": "msg-1", "body": "B", "confirm_send": true]),
+            ("forward_email", ["id": "msg-1", "to": "a@x", "confirm_send": true]),
+            ("redirect_email", ["id": "msg-1", "to": "a@x", "confirm_send": true]),
         ]
         for (command, params) in calls {
             let failure = try failure(command, params)

@@ -263,4 +263,39 @@ final class LiveMailTests: XCTestCase {
         XCTAssertEqual(sent["status"] as? String, "sent", "\(sent)")
         XCTAssertEqual(sent["body"] as? String, body)
     }
+
+    func testForwardOfTheNewestTestMailPreviewsThenSendsItWithItsAttachmentsOnlyToTheTestAddress() throws {
+        try passOnTheNewestTestMail("forward_email", extra: ["comment": "Speedwave live forward\nsecond line"])
+    }
+
+    func testRedirectOfTheNewestTestMailPreviewsThenSendsItUnchangedOnlyToTheTestAddress() throws {
+        try passOnTheNewestTestMail("redirect_email", extra: [:])
+    }
+
+    private func passOnTheNewestTestMail(_ command: String, extra: [String: Any]) throws {
+        guard let address = ProcessInfo.processInfo.environment[Self.sendToVariable], !address.isEmpty else {
+            throw XCTSkip("Sending runs only with \(Self.sendToVariable) set to a test address")
+        }
+        let params: [String: Any] = ["mailbox": Self.testMailbox, "account": AppleMailClient.localAccountName]
+        let listed = try XCTUnwrap(try call("list_emails", params.merging(["limit": 1]) { $1 }) as? [String: Any])
+        guard let id = (listed["emails"] as? [[String: Any]])?.first?["id"] as? String else {
+            throw XCTSkip("\(Self.testMailbox) holds no message to pass on")
+        }
+        let email = try XCTUnwrap(try call("get_email", ["id": id]) as? [String: Any])["email"] as? [String: Any]
+        let names = (email?["attachments"] as? [[String: Any]] ?? []).compactMap { $0["name"] as? String }
+        let request = extra.merging(["id": id, "to": address]) { $1 }
+
+        let preview = try XCTUnwrap(try call(command, request) as? [String: Any])
+        XCTAssertEqual(preview["status"] as? String, "confirmation_required", "\(preview)")
+        XCTAssertEqual(preview["to"] as? [String], [address])
+        XCTAssertEqual(preview["attachments"] as? [String], names)
+        XCTAssertEqual((preview["original"] as? [String: Any])?["subject"] as? String, email?["subject"] as? String)
+        XCTAssertEqual(
+            try XCTUnwrap(try call("list_emails", params.merging(["limit": 1]) { $1 }) as? [String: Any])["total"] as? Int,
+            listed["total"] as? Int)
+
+        let sent = try XCTUnwrap(try call(command, request.merging(["confirm_send": true]) { $1 }) as? [String: Any])
+        XCTAssertEqual(sent["status"] as? String, "sent", "\(sent)")
+        XCTAssertEqual(sent["subject"] as? String, preview["subject"] as? String)
+    }
 }
