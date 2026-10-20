@@ -8,6 +8,9 @@ NPM := npm
 NPX := npx
 endif
 
+ANGULAR_NPM_INSTALL := desktop/src/node_modules/.package-lock.json
+MCP_NPM_INSTALL := mcp-servers/node_modules/.package-lock.json
+
 DEV_INSTANCE ?= dev
 DEV_IDENTIFIER ?= pl.speedwave.desktop.$(DEV_INSTANCE)
 ifeq ($(DEV_INSTANCE),dev)
@@ -351,10 +354,13 @@ else
 	fi
 endif
 
-build-mcp:
+%/node_modules/.package-lock.json: %/package-lock.json
+	cd $* && $(NPM) ci
+
+build-mcp: $(MCP_NPM_INSTALL)
 	cd mcp-servers && $(NPM) run build
 
-build-angular:
+build-angular: $(ANGULAR_NPM_INSTALL)
 	cd desktop/src && $(NPX) ng build
 
 define RUN_CARGO_ISOLATED
@@ -388,14 +394,14 @@ test-rust-run: guard-not-prod-data-dir
 
 test-angular-run: test-angular
 
-test-mcp-run:
+test-mcp-run: $(MCP_NPM_INSTALL)
 	cd mcp-servers && $(NPM) test
 	@echo "✅ MCP server tests passed"
 
 DESKTOP_BUILD_BATS_PORTABLE := _tests/desktop/bundle-build-context.bats \
   _tests/desktop/guard-prod-data-dir.bats _tests/desktop/vulkan-scripts.bats \
   _tests/desktop/dev-server-port.bats _tests/desktop/check-windows-build-deps.bats \
-  _tests/desktop/angular-externals.bats \
+  _tests/desktop/angular-externals.bats _tests/desktop/npm-install-sync.bats \
   _tests/desktop/guard-python.bats
 DESKTOP_BUILD_BATS_MACOS := _tests/desktop/verify-bundled-assets.bats \
   _tests/desktop/sign-bundled-binaries.bats \
@@ -463,7 +469,7 @@ endif
 	@if [ "$(OS)" != "Windows_NT" ]; then "$(MAKE)" test-mcp-os-bundle; fi
 	@echo "✅ Desktop tests passed"
 
-test-angular:
+test-angular: $(ANGULAR_NPM_INSTALL)
 	cd desktop/src && $(NPX) ng test --no-watch
 	@echo "✅ Angular tests passed"
 
@@ -526,7 +532,7 @@ coverage-mcp: build-mcp
 	cd mcp-servers && $(NPM) run test:coverage
 	@echo "✅ MCP coverage passed"
 
-coverage-angular:
+coverage-angular: $(ANGULAR_NPM_INSTALL)
 	cd desktop/src && $(NPX) ng test --no-watch --coverage
 	@echo "✅ Angular coverage passed"
 
@@ -718,7 +724,7 @@ check-proxy-clippy:
 	cd containers/proxy && cargo clippy --all-targets --locked -- -D warnings
 	@echo "✅ Proxy clippy: 0 warnings"
 
-check-mcp:
+check-mcp: $(MCP_NPM_INSTALL)
 	@echo "  Building mcp-servers/shared (required by other workspaces)..."
 	@cd mcp-servers/shared && $(NPX) tsc
 	@echo "  Building PII engine wasm artifact (policies/src/engine.ts imports it)..."
@@ -731,7 +737,7 @@ check-mcp:
 	done
 	@echo "✅ MCP type-check done"
 
-check-angular:
+check-angular: $(ANGULAR_NPM_INSTALL)
 	cd desktop/src && $(NPX) ng build --configuration production
 	@echo "✅ Angular production build OK"
 
@@ -744,11 +750,11 @@ check-fmt:
 	$(NPX) prettier --check $(PRETTIER_GLOBS)
 	@echo "✅ Format check passed"
 
-check-mcp-lint:
+check-mcp-lint: $(MCP_NPM_INSTALL)
 	cd mcp-servers && $(NPX) eslint .
 	@echo "✅ MCP ESLint passed"
 
-check-angular-lint:
+check-angular-lint: $(ANGULAR_NPM_INSTALL)
 	cd desktop/src && $(NPX) eslint 'src/**/*.ts'
 	@echo "✅ Angular ESLint passed"
 
@@ -820,7 +826,7 @@ fmt:
 	$(NPX) prettier --write $(PRETTIER_GLOBS)
 	@echo "✅ Formatted"
 
-lint:
+lint: $(MCP_NPM_INSTALL) $(ANGULAR_NPM_INSTALL)
 	cargo clippy -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-ner -p speedwave-version --features speedwave-version/cli -- -D warnings
 	cd desktop/src-tauri && cargo clippy -- -D warnings
 	cd mcp-servers && $(NPX) eslint --fix .
@@ -944,7 +950,7 @@ clean-wsl-resources:
 	rm -rf desktop/src-tauri/wsl
 
 ifeq ($(OS),Windows_NT)
-dev: guard-not-prod-data-dir guard-dev-port download-nodejs download-wsl-resources generate-installer-nsh prepare-pii-ner-model
+dev: guard-not-prod-data-dir guard-dev-port download-nodejs download-wsl-resources generate-installer-nsh prepare-pii-ner-model $(ANGULAR_NPM_INSTALL)
 	@command -v cargo-tauri >/dev/null 2>&1 || { echo "❌ cargo-tauri not found. Install: cargo install tauri-cli"; exit 1; }
 	@"$(MAKE)" build-cli && "$(MAKE)" build-os-cli && "$(MAKE)" build-mcp
 	@echo "Preparing build context..."
@@ -956,7 +962,7 @@ dev: guard-not-prod-data-dir guard-dev-port download-nodejs download-wsl-resourc
 	@"$(MAKE)" verify-bundled-assets
 	@bash scripts/dev-tauri-windows.sh
 else
-dev: guard-not-prod-data-dir guard-dev-port build-cli build-os-cli build-mcp download-nodejs generate-installer-nsh prepare-pii-ner-model
+dev: guard-not-prod-data-dir guard-dev-port build-cli build-os-cli build-mcp download-nodejs generate-installer-nsh prepare-pii-ner-model $(ANGULAR_NPM_INSTALL)
 	@command -v cargo-tauri >/dev/null 2>&1 || { echo "❌ cargo-tauri not found. Install: cargo install tauri-cli"; exit 1; }
 	@if [ "$$(uname)" = "Darwin" ]; then "$(MAKE)" download-lima; fi
 	@echo "Preparing build context..."
@@ -972,7 +978,7 @@ dev: guard-not-prod-data-dir guard-dev-port build-cli build-os-cli build-mcp dow
 	cd desktop/src-tauri && env -u PORT SPEEDWAVE_RESOURCES_DIR="$$(pwd)" SPEEDWAVE_ALLOW_UNSIGNED=1 SPEEDWAVE_VERSION="$$app_version" TAURI_CONFIG="$$DEV_TAURI_CONFIG" cargo tauri dev --config "$$DEV_TAURI_CONFIG"
 endif
 
-status: guard-not-prod-data-dir
+status: guard-not-prod-data-dir $(MCP_NPM_INSTALL) $(ANGULAR_NPM_INSTALL)
 	@echo "=== Rust ==="
 	@$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-runtime/test-support,speedwave-version/cli 2>&1 | grep "test result" || true)
 	@echo "\n=== Clippy ==="
