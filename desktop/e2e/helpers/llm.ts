@@ -26,10 +26,10 @@ export function requireLocalLlm(): { baseUrl: string; apiKey: string; model: str
 }
 
 export async function openSettings(): Promise<void> {
-  const nav = await $('[data-testid="nav-settings"]');
-  await nav.waitForExist({ timeout: 15_000 });
-  await nav.click();
-  await $('[data-testid="settings-title"]').waitForExist({ timeout: 10_000 });
+  await clickUntil('[data-testid="nav-settings"]', '[data-testid="settings-title"]', {
+    timeout: 25_000,
+    timeoutMsg: 'settings-title never appeared after clicking nav-settings',
+  });
 }
 
 export async function storedProviderModel(providerId: string): Promise<string | null> {
@@ -41,18 +41,12 @@ export async function storedProviderModel(providerId: string): Promise<string | 
 }
 
 export async function configureOpenRouter(apiKey: string): Promise<void> {
-  const selectBtn = await $('[data-testid="settings-llm-extra-select-openrouter"]');
-  await selectBtn.waitForExist({ timeout: 10_000 });
-  await selectBtn.click();
-
-  const keyInput = await $('[data-testid="settings-llm-extra-key-openrouter"]');
-  try {
-    await keyInput.waitForExist({ timeout: 3_000 });
-  } catch {
-    await selectBtn.click();
-    await keyInput.waitForExist({ timeout: 5_000 });
-  }
-  await keyInput.setValue(apiKey);
+  await clickUntil(
+    '[data-testid="settings-llm-extra-select-openrouter"]',
+    '[data-testid="settings-llm-extra-key-openrouter"]',
+    { timeout: 20_000, timeoutMsg: 'OpenRouter key input never appeared after selecting it' }
+  );
+  await (await $('[data-testid="settings-llm-extra-key-openrouter"]')).setValue(apiKey);
 
   await (await $('[data-testid="settings-llm-extra-refresh-openrouter"]')).click();
   const success = await $('[data-testid="settings-llm-extra-test-success-openrouter"]');
@@ -66,6 +60,21 @@ export async function configureOpenRouter(apiKey: string): Promise<void> {
   }
 
   await saveProvider();
+}
+
+async function clickUntil(
+  target: string,
+  appears: string,
+  opts: { timeout: number; timeoutMsg: string }
+): Promise<void> {
+  await browser.waitUntil(
+    async () => {
+      if (await $(appears).isExisting()) return true;
+      await (await $(target)).click();
+      return await $(appears).isExisting();
+    },
+    { timeout: opts.timeout, interval: 500, timeoutMsg: opts.timeoutMsg }
+  );
 }
 
 export async function configureLocalProvider(baseUrl: string, apiKey: string): Promise<void> {
