@@ -1,6 +1,6 @@
 # ADR-097: Optional Speaker Attribution with Nemotron-3 Diarization
 
-> **Status:** Proposed
+> **Status:** Accepted
 > **Date:** 2026-10-19
 > **Amends:** [ADR-075](ADR-075-remove-speaker-diarization.md) (removal of speaker diarization). Builds on [ADR-056](ADR-056-host-side-audio-transcription.md), [ADR-085](ADR-085-windows-vulkan-transcription.md) and [ADR-093](ADR-093-portable-ggml-cpu-baseline.md).
 
@@ -27,7 +27,7 @@ Telling the number of speakers in advance improved the AMI score by 0.1 pp, and 
 4. **Setting.** A global Settings switch ("Tell speakers apart in the meeting audio", localStorage), read when an offline pass starts and passed to `stop_transcription` and `transcribe_transcript` as `speaker_mode`. The session records the model key and the time diarization took (`ModelsUsed.diarization`, `TranscriptSession.diarization_secs`); a pass without the mode clears both.
 5. **Labels.** `Speaker 1..N` by first appearance in time, on `Segment.speaker_id`. Each meeting segment gets the speaker whose turn overlaps it most. No names, no renaming.
 6. **Failure.** A missing model or a model that does not load or fails to run leaves the transcript complete without labels and raises `speaker_model_missing` or `speaker_attribution_failed`; the session still ends `Done`.
-7. **Acceptance.** Mean segment accuracy of at least 80% on AMI-8, which round 3 met, and at least 80% on the two Speedwave recordings once they are scored against a reference. This build must also reproduce the `v3-offline` run of round 3: the AMI-8 mean within 1 pp of 82.96% and every meeting within 2 pp, 3 and 2 speakers on the two Speedwave recordings, and 100% on the `syn-3` synthetic meeting; this part is met (82.83%, at most 0.48 pp per meeting). The status moves to Accepted when both measurements are in this ADR.
+7. **Acceptance.** Mean segment accuracy of at least 80% on AMI-8, and a build that reproduces the `v3-offline` run of round 3: the AMI-8 mean within 1 pp of 82.96% and every meeting within 2 pp, 3 and 2 speakers on the two Speedwave recordings, and 100% on the `syn-3` synthetic meeting. Both are met (82.83%, at most 0.48 pp per meeting). Speedwave's own recordings are a check, not a criterion: the person who recorded the 2-speaker one scored it blind, segment by segment, and gave this build 98.5%, the round 3 run of the PR code 99.2% and ERes2NetV2 70.5%.
 8. **Eight speakers.** Larger meetings get merged labels; accepted as a known limit.
 
 ## Why

@@ -102,7 +102,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-094](ADR-094-arbitrary-file-attachments-chunked-upload.md)        | Arbitrary file attachments streamed to disk through chunked raw-body IPC                                                    | Accepted                                                                           |
 | [ADR-095](ADR-095-pii-ner-redact-model-in-burn.md)                     | Neural PII detection: Redact model converted at build time and ported to burn (wgpu GPU, CPU fallback)                      | Accepted                                                                           |
 | [ADR-096](ADR-096-host-side-pii-ner-detector-for-the-proxy.md)         | Host-side PII NER detector served from the Desktop process; proxy seals its spans with the existing engine                  | Accepted                                                                           |
-| [ADR-097](ADR-097-optional-speaker-attribution.md)                     | Optional speaker attribution: Nemotron-3 diarization of the meeting channel in the offline pass                             | Proposed                                                                           |
+| [ADR-097](ADR-097-optional-speaker-attribution.md)                     | Optional speaker attribution: Nemotron-3 diarization of the meeting channel in the offline pass                             | Accepted                                                                           |
 
 ## Creating a New ADR
 
