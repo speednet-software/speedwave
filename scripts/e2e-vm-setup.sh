@@ -8,6 +8,15 @@ source "$(dirname "$0")/e2e-common.sh"
 
 NODE_VERSION="$(cat "$(dirname "$0")/../.node-version")"
 
+# shellcheck disable=SC2016
+SETUP_PS_PRELUDE='function Invoke-Installer {
+    param([string]$FilePath, [string[]]$ArgumentList)
+    $p = Start-Process -Wait -PassThru -FilePath $FilePath -ArgumentList $ArgumentList
+    if ($p.ExitCode -notin 0, 3010) {
+        [Console]::Error.WriteLine("$FilePath $($ArgumentList -join " ") exited with $($p.ExitCode)")
+        exit $p.ExitCode
+    }
+}'
 
 windows_ps() {
     local ps_script tmpname tmpfile_win tmpfile_local
@@ -15,7 +24,7 @@ windows_ps() {
     tmpname="e2e-setup-$$.ps1"
     tmpfile_win="C:\\Windows\\Temp\\${tmpname}"
     tmpfile_local=$(mktemp)
-    printf '\xEF\xBB\xBF%s\n' "$ps_script" > "$tmpfile_local"
+    printf '\xEF\xBB\xBF%s\n%s\n' "$SETUP_PS_PRELUDE" "$ps_script" > "$tmpfile_local"
     # shellcheck disable=SC2086
     scp -q -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
         -P "$WINDOWS_SSH_PORT" "$tmpfile_local" "${WINDOWS_HOST}:C:\\Windows\\Temp\\${tmpname}"
@@ -48,7 +57,7 @@ if (\$arch -eq 'ARM64') { \$msiArch = 'arm64' } else { \$msiArch = 'x64' }
 \$url = "https://nodejs.org/dist/v\$nodeVersion/node-v\$nodeVersion-\$msiArch.msi"
 Write-Host "Downloading \$url..."
 Invoke-WebRequest -Uri \$url -OutFile "\$env:TEMP\\node-installer.msi"
-Start-Process -Wait msiexec -ArgumentList '/i',"\$env:TEMP\\node-installer.msi",'/qn','/norestart'
+Invoke-Installer msiexec '/i',"\$env:TEMP\\node-installer.msi",'/qn','/norestart'
 Remove-Item "\$env:TEMP\\node-installer.msi"
 SCRIPT
 
@@ -60,7 +69,7 @@ $arch = $env:PROCESSOR_ARCHITECTURE
 $installArgs = '--quiet --wait --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended'
 if ($arch -eq 'ARM64') { $installArgs += ' --add Microsoft.VisualStudio.Component.VC.Tools.ARM64' }
 Write-Host "Running: vs_buildtools.exe $installArgs"
-Start-Process -Wait -FilePath "$env:TEMP\vs_buildtools.exe" -ArgumentList $installArgs
+Invoke-Installer "$env:TEMP\vs_buildtools.exe" $installArgs
 Remove-Item "$env:TEMP\vs_buildtools.exe"
 SCRIPT
 
@@ -84,7 +93,7 @@ if ($haveVer -eq $pinned) {
         $u = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*' |
             Where-Object { $_.DisplayName -like 'CMake*' } | Select-Object -First 1
         if ($u -and $u.UninstallString -match '\{[0-9A-F-]+\}') {
-            Start-Process msiexec -ArgumentList '/x', $Matches[0], '/qn', '/norestart' -Wait
+            Invoke-Installer msiexec '/x', $Matches[0], '/qn', '/norestart'
         }
     }
     $arch = $env:PROCESSOR_ARCHITECTURE
@@ -96,7 +105,7 @@ if ($haveVer -eq $pinned) {
     Write-Host "Downloading $url..."
     Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\cmake-installer.msi"
     # ADD_CMAKE_TO_PATH=System adds cmake.exe to the Machine PATH automatically.
-    Start-Process -Wait msiexec -ArgumentList '/i',"$env:TEMP\cmake-installer.msi",'/qn','/norestart','ADD_CMAKE_TO_PATH=System'
+    Invoke-Installer msiexec '/i',"$env:TEMP\cmake-installer.msi",'/qn','/norestart','ADD_CMAKE_TO_PATH=System'
     Remove-Item "$env:TEMP\cmake-installer.msi"
     if (-not (Test-Path "$cmakeBin\cmake.exe")) {
         Write-Error "CMake installation completed but cmake.exe not found at $cmakeBin"
@@ -129,7 +138,7 @@ if (Test-Path "$llvmBin\libclang.dll") {
     }
     Write-Host "Downloading $url..."
     Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\llvm-installer.exe"
-    Start-Process -Wait -FilePath "$env:TEMP\llvm-installer.exe" -ArgumentList '/S'
+    Invoke-Installer "$env:TEMP\llvm-installer.exe" '/S'
     Remove-Item "$env:TEMP\llvm-installer.exe"
     if (-not (Test-Path "$llvmBin\libclang.dll")) {
         Write-Error "LLVM installation completed but libclang.dll not found at $llvmBin"
@@ -190,15 +199,23 @@ $ErrorActionPreference = 'Stop'
 $arch = $env:PROCESSOR_ARCHITECTURE
 if ($arch -eq 'ARM64') { $url = 'https://win.rustup.rs/aarch64' } else { $url = 'https://win.rustup.rs/x86_64' }
 Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\rustup-init.exe"
-Start-Process -Wait -FilePath "$env:TEMP\rustup-init.exe" -ArgumentList '-y'
+Invoke-Installer "$env:TEMP\rustup-init.exe" '-y'
 Remove-Item "$env:TEMP\rustup-init.exe"
 SCRIPT
 
     echo "[windows] Installing Ninja (cmake-crate generator for whisper-rs-sys)..."
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = 'Stop'
-if (Get-Command ninja -ErrorAction SilentlyContinue) { Write-Host 'Ninja already installed' }
-else { choco install ninja -y --no-progress }
+if (Get-Command ninja -ErrorAction SilentlyContinue) { Write-Host 'Ninja already installed'; exit 0 }
+if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
+    Write-Host 'Installing Chocolatey...'
+    Set-ExecutionPolicy Bypass -Scope Process -Force
+    [System.Net.ServicePointManager]::SecurityProtocol = 3072
+    Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+    $env:Path += ";$env:ProgramData\chocolatey\bin"
+}
+choco install ninja -y --no-progress
+if ($LASTEXITCODE -notin 0, 3010) { [Console]::Error.WriteLine("choco install ninja exited with $LASTEXITCODE"); exit $LASTEXITCODE }
 SCRIPT
 
     echo "[windows] Adding Defender exclusions for build dirs..."

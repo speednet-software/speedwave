@@ -95,3 +95,68 @@ _load_rsync_to() {
     [[ "$output" == *"Set SPEEDWAVE_WINDOWS_HOST"* ]]
     [ ! -e "$BATS_TEST_TMPDIR/ssh-called" ]
 }
+
+SETUP="$BATS_TEST_DIRNAME/../../scripts/e2e-vm-setup.sh"
+
+_load_ensure_provisioned_windows() {
+    eval "$(sed -n '/^ensure_provisioned_windows()/,/^}/p' "$SCRIPT")"
+    WINDOWS_SSH_OPTS=""
+    WINDOWS_HOST="runner@127.0.0.1"
+    WINDOWS_WSL_DISTRO="Ubuntu-22.04"
+    SCRIPT_DIR="$BATS_TEST_TMPDIR/scripts"
+    mkdir -p "$SCRIPT_DIR"
+    printf '#!/usr/bin/env bash\ntouch "%s/setup-called"\n' "$BATS_TEST_TMPDIR" >"$SCRIPT_DIR/e2e-vm-setup.sh"
+    chmod +x "$SCRIPT_DIR/e2e-vm-setup.sh"
+    _stub ssh 'exit 0'
+    PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+    windows_ps() { cat >/dev/null; return 1; }
+}
+
+@test "ensure_provisioned_windows fails without running setup in CI" {
+    _load_ensure_provisioned_windows
+    CI=true run ensure_provisioned_windows
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"an administrator runs scripts/e2e-vm-setup.sh windows"* ]]
+    [ ! -e "$BATS_TEST_TMPDIR/setup-called" ]
+}
+
+@test "ensure_provisioned_windows runs setup outside CI" {
+    _load_ensure_provisioned_windows
+    CI= run ensure_provisioned_windows
+    [ "$status" -eq 0 ]
+    [ -e "$BATS_TEST_TMPDIR/setup-called" ]
+}
+
+@test "ensure_provisioned_windows skips setup in CI when the toolchain is complete" {
+    _load_ensure_provisioned_windows
+    windows_ps() { cat >/dev/null; return 0; }
+    CI=true run ensure_provisioned_windows
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Provisioning: OK"* ]]
+    [ ! -e "$BATS_TEST_TMPDIR/setup-called" ]
+}
+
+_run_installer() {
+    command -v pwsh >/dev/null || skip "pwsh not installed"
+    eval "$(sed -n "/^SETUP_PS_PRELUDE='/,/^}'\$/p" "$SETUP")"
+    printf '%s\nfunction Start-Process { param($FilePath, $ArgumentList, [switch]$Wait, [switch]$PassThru) "$FilePath|$($ArgumentList -join ",")" | Set-Content "%s/started"; [pscustomobject]@{ ExitCode = %s } }\n$ErrorActionPreference = "Stop"\nInvoke-Installer msiexec "/i","cmake.msi","/qn"\nWrite-Output "after"\n' \
+        "$SETUP_PS_PRELUDE" "$BATS_TEST_TMPDIR" "$1" >"$BATS_TEST_TMPDIR/run.ps1"
+    run pwsh -NoProfile -File "$BATS_TEST_TMPDIR/run.ps1"
+}
+
+@test "Invoke-Installer stops the script with the installer's exit code" {
+    _run_installer 87
+    [ "$status" -eq 87 ]
+    [[ "$output" == *"msiexec /i cmake.msi /qn exited with 87"* ]]
+    [[ "$output" != *"after"* ]]
+}
+
+@test "Invoke-Installer continues on success and on reboot-required" {
+    _run_installer 0
+    [ "$status" -eq 0 ]
+    [ "$output" = "after" ]
+    [ "$(cat "$BATS_TEST_TMPDIR/started")" = "msiexec|/i,cmake.msi,/qn" ]
+    _run_installer 3010
+    [ "$status" -eq 0 ]
+    [ "$output" = "after" ]
+}

@@ -52,6 +52,10 @@ ensure_provisioned_windows() {
         echo "[windows] Provisioning: OK (WSL2 + node + cargo + cmake + libclang + Vulkan SDK found)"
         return
     fi
+    if [ "${CI:-}" = "true" ]; then
+        echo "[windows] ERROR: rig toolchain is missing or incomplete; an administrator runs scripts/e2e-vm-setup.sh windows on the rig (RELEASING.md)" >&2
+        return 1
+    fi
     echo "[windows] Provisioning: missing tools — running setup..."
     "${SCRIPT_DIR}/e2e-vm-setup.sh" windows
 }
