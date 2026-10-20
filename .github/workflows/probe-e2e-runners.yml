@@ -45,6 +45,7 @@ jobs:
             "{0}: {1}" -f $c, ($(if ($p) { $p.Source } else { 'missing' }))
           }
           Get-Service sshd -ErrorAction SilentlyContinue | Select-Object Name, Status, StartType | Format-List
+          Add-Content $env:GITHUB_PATH 'C:\Program Files\Git\bin'
       - name: Runner account
         run: |
           echo "user=$USERNAME whoami=$(whoami)"
