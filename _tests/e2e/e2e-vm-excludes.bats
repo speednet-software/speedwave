@@ -138,10 +138,19 @@ _load_ensure_provisioned_windows() {
 
 @test "ensure_provisioned_windows fails before setup while Smart App Control is on" {
     _load_ensure_provisioned_windows
-    windows_ps() { if grep -q SmartAppControlState; then echo On; fi; }
+    windows_ps() { if grep -q SmartAppControlState; then printf 'sac=On\r\njunction=True\r\n'; fi; }
     CI= run ensure_provisioned_windows
     [ "$status" -eq 1 ]
     [[ "$output" == *"Smart App Control is on"* ]]
+    [ ! -e "$BATS_TEST_TMPDIR/setup-called" ]
+}
+
+@test "ensure_provisioned_windows fails before setup when SSH sessions cannot follow junctions" {
+    _load_ensure_provisioned_windows
+    windows_ps() { if grep -q SmartAppControlState; then printf 'sac=Off\r\njunction=False\r\n'; fi; }
+    CI= run ensure_provisioned_windows
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"RedirectionGuard on sshd.exe"* ]]
     [ ! -e "$BATS_TEST_TMPDIR/setup-called" ]
 }
 

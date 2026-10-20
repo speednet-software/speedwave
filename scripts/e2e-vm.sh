@@ -42,10 +42,26 @@ HOST_REPO_DIR="${SPEEDWAVE_REPO_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 
 ensure_provisioned_windows() {
-    local ok=1 sac
-    sac=$(echo '(Get-MpComputerStatus).SmartAppControlState' | windows_ps 2>/dev/null | tr -d '\r') || sac=""
-    if [ "$sac" = "On" ]; then
+    local ok=1 host_policy
+    host_policy=$(windows_ps 2>/dev/null <<'PROBE' | tr -d '\r'
+"sac=$((Get-MpComputerStatus).SmartAppControlState)"
+$d = Join-Path $env:TEMP 'speedwave-junction-probe'
+cmd /c rmdir "$d\link" 2>$null
+Remove-Item -Recurse -Force $d -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Path "$d\target" -Force | Out-Null
+Set-Content -Path "$d\target\probe" -Value ok
+New-Item -ItemType Junction -Path "$d\link" -Target "$d\target" | Out-Null
+"junction=$(Test-Path "$d\link\probe")"
+cmd /c rmdir "$d\link"
+Remove-Item -Recurse -Force $d -ErrorAction SilentlyContinue
+PROBE
+) || host_policy=""
+    if [[ "$host_policy" == *"sac=On"* ]]; then
         echo "[windows] ERROR: Smart App Control is on and blocks every unsigned build script; an administrator sets VerifiedAndReputablePolicyState to 0 and restarts the rig (RELEASING.md)" >&2
+        return 1
+    fi
+    if [[ "$host_policy" == *"junction=False"* ]]; then
+        echo "[windows] ERROR: SSH sessions cannot follow junctions created by this account (RedirectionGuard on sshd.exe), so npm workspace links do not resolve; an administrator clears it in the sshd.exe MitigationOptions and restarts sshd (RELEASING.md)" >&2
         return 1
     fi
     # shellcheck disable=SC2086
@@ -415,6 +431,10 @@ if ((Get-FileHash -Algorithm SHA256 $dll).Hash -ne $pin) { Write-Error "vulkan-1
 Copy-Item $dll desktop\src-tauri\vulkan-1.dll
 New-Item -ItemType Directory -Path desktop\src-tauri\THIRD-PARTY-LICENSES -Force | Out-Null
 Copy-Item desktop\src-tauri\licenses-static\* desktop\src-tauri\THIRD-PARTY-LICENSES\
+
+Write-Host "── Converting the PII NER model for bundling..."
+python crates\pii-ner\tools\fetch_and_convert.py --out desktop\src-tauri\pii-ner
+Assert-ExitCode
 
 Write-Host "── Bundling build context..."
 powershell -ExecutionPolicy Bypass -File scripts\bundle-build-context.ps1
