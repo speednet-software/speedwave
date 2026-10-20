@@ -1,6 +1,6 @@
 import { ChangeDetectionStrategy, Component, computed, input } from '@angular/core';
-import { marked } from 'marked';
-import { parseMarkdownSync } from '../../shared/markdown';
+import { chatMarkdown, parseMarkdownSync } from '../../shared/markdown';
+import { MermaidSlotsDirective } from '../../shared/mermaid-slots.directive';
 
 /**
  * Renders markdown text as HTML with an optional streaming caret.
@@ -8,6 +8,7 @@ import { parseMarkdownSync } from '../../shared/markdown';
  */
 @Component({
   selector: 'app-text-block',
+  imports: [MermaidSlotsDirective],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: {
     class: 'block text-[14px] leading-[1.7]',
@@ -16,7 +17,7 @@ import { parseMarkdownSync } from '../../shared/markdown';
     '[attr.aria-live]': "streaming() ? 'polite' : null",
   },
   template: `
-    <div class="prose-sw" [innerHTML]="rendered()"></div>
+    <div class="prose-sw" [innerHTML]="rendered()" [appMermaidSlots]="rendered()"></div>
     @if (streaming()) {
       <span
         data-testid="streaming-caret"
@@ -35,5 +36,5 @@ export class TextBlockComponent {
   readonly streaming = input(false);
 
   /** Returns unsanitized HTML from `marked`. Safe only when bound via `[innerHTML]` — see class doc. */
-  readonly rendered = computed(() => parseMarkdownSync(marked, this.content()));
+  readonly rendered = computed(() => parseMarkdownSync(chatMarkdown, this.content()));
 }

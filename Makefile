@@ -395,6 +395,7 @@ test-mcp-run:
 DESKTOP_BUILD_BATS_PORTABLE := _tests/desktop/bundle-build-context.bats \
   _tests/desktop/guard-prod-data-dir.bats _tests/desktop/vulkan-scripts.bats \
   _tests/desktop/dev-server-port.bats _tests/desktop/check-windows-build-deps.bats \
+  _tests/desktop/angular-externals.bats \
   _tests/desktop/guard-python.bats
 DESKTOP_BUILD_BATS_MACOS := _tests/desktop/verify-bundled-assets.bats \
   _tests/desktop/sign-bundled-binaries.bats \

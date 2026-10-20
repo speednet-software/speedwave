@@ -925,6 +925,163 @@ body.memory-open .memory-drawer {
     border-radius: 6px;
     margin: 12px 0;
   }
+
+  .prose-sw {
+    --prose-teal: var(--teal);
+    --prose-amber: var(--amber);
+    --prose-green: var(--green);
+    --prose-violet: var(--violet);
+  }
+  :root:not(.dark) .prose-sw {
+    --prose-teal: #0f766e;
+    --prose-amber: #8a5c00;
+    --prose-green: #047857;
+    --prose-violet: #7c3aed;
+  }
+
+  .prose-sw .hljs-keyword,
+  .prose-sw .hljs-doctag,
+  .prose-sw .hljs-meta .hljs-keyword,
+  .prose-sw .hljs-template-tag,
+  .prose-sw .hljs-type,
+  .prose-sw .hljs-variable.language_,
+  .prose-sw .hljs-selector-tag,
+  .prose-sw .hljs-section {
+    color: var(--prose-violet);
+  }
+  .prose-sw .hljs-string,
+  .prose-sw .hljs-regexp,
+  .prose-sw .hljs-meta .hljs-string,
+  .prose-sw .hljs-addition {
+    color: var(--prose-green);
+  }
+  .prose-sw .hljs-number,
+  .prose-sw .hljs-literal,
+  .prose-sw .hljs-symbol,
+  .prose-sw .hljs-bullet,
+  .prose-sw .hljs-attr,
+  .prose-sw .hljs-attribute,
+  .prose-sw .hljs-variable,
+  .prose-sw .hljs-template-variable,
+  .prose-sw .hljs-selector-attr,
+  .prose-sw .hljs-selector-pseudo {
+    color: var(--prose-amber);
+  }
+  .prose-sw .hljs-title,
+  .prose-sw .hljs-built_in,
+  .prose-sw .hljs-name,
+  .prose-sw .hljs-selector-id,
+  .prose-sw .hljs-selector-class {
+    color: var(--prose-teal);
+  }
+  .prose-sw .hljs-comment,
+  .prose-sw .hljs-quote,
+  .prose-sw .hljs-meta {
+    color: var(--ink-mute);
+  }
+  .prose-sw .hljs-comment,
+  .prose-sw .hljs-quote {
+    font-style: italic;
+  }
+  .prose-sw .hljs-deletion {
+    color: var(--red);
+  }
+  .prose-sw .hljs-emphasis {
+    font-style: italic;
+  }
+  .prose-sw .hljs-strong {
+    font-weight: 700;
+  }
+
+  .prose-sw .markdown-alert {
+    border-left: 3px solid var(--alert-color);
+    border-radius: 0 6px 6px 0;
+    background: var(--bg-1);
+    padding: 8px 16px;
+    margin: 12px 0;
+  }
+  .prose-sw .markdown-alert-title {
+    color: var(--alert-color);
+    font-weight: 600;
+    margin: 0 0 4px;
+  }
+  .prose-sw .markdown-alert-note {
+    --alert-color: var(--prose-teal);
+  }
+  .prose-sw .markdown-alert-tip {
+    --alert-color: var(--prose-green);
+  }
+  .prose-sw .markdown-alert-important {
+    --alert-color: var(--prose-violet);
+  }
+  .prose-sw .markdown-alert-warning {
+    --alert-color: var(--prose-amber);
+  }
+  .prose-sw .markdown-alert-caution {
+    --alert-color: var(--red);
+  }
+
+  .prose-sw .footnote-ref {
+    color: var(--accent);
+    font-size: 0.75em;
+    line-height: 0;
+    margin-left: 1px;
+  }
+  .prose-sw .footnotes {
+    border-top: 1px solid var(--line);
+    margin-top: 16px;
+    padding-top: 8px;
+    font-size: 0.9em;
+    color: var(--ink-dim);
+  }
+  .prose-sw .footnotes p {
+    color: inherit;
+    margin: 4px 0;
+  }
+
+  .prose-sw li:has(> .task-checkbox),
+  .prose-sw li:has(> p > .task-checkbox) {
+    list-style: none;
+  }
+  .prose-sw .task-checkbox {
+    position: relative;
+    display: inline-block;
+    width: 0.95em;
+    height: 0.95em;
+    margin-right: 0.4em;
+    vertical-align: -0.12em;
+    border: 1.5px solid var(--ink-mute);
+    border-radius: 3px;
+  }
+  .prose-sw .task-checkbox[aria-checked='true'] {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+  .prose-sw .task-checkbox[aria-checked='true']::after {
+    content: '';
+    position: absolute;
+    left: 0.26em;
+    top: 0.06em;
+    width: 0.25em;
+    height: 0.5em;
+    border: solid var(--on-accent);
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+  }
+
+  .prose-sw .mermaid-slot {
+    margin: 12px 0;
+    overflow-x: auto;
+  }
+}
+
+.mermaid-measure {
+  position: absolute;
+  top: 0;
+  left: -10000px;
+  width: 1024px;
+  visibility: hidden;
+  pointer-events: none;
 }
 
 /* ── Scrollbars (WebKit) ── */
