@@ -66,6 +66,7 @@ runs:
         rustc --version --verbose
         echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
         echo "CARGO_TERM_COLOR=always" >> "$GITHUB_ENV"
+        echo "CARGO_PROFILE_DEV_DEBUG=line-tables-only" >> "$GITHUB_ENV"
 
     - name: Capture runner image version and lane definition hash
       if: inputs.rust-cache-workspaces != ''
