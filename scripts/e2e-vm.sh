@@ -101,7 +101,7 @@ WINDOWS_CONTRACT_STAGING="/home/windows/speedwave-contract-suite"
 WINDOWS_BATS_ENGINE_PREAMBLE="command -v bats >/dev/null || (sudo apt-get update -o Acquire::Retries=3 && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y bats); ENGINE_EXEC='env WSL_UTF8=1 wsl.exe -d Speedwave -u root --'"
 
 MACOS_ENGINE_BATS_PREAMBLE='command -v bats >/dev/null 2>&1 || brew install bats-core
-env LIMA_HOME="$HOME/.speedwave/lima" /Applications/Speedwave.app/Contents/Resources/lima/bin/limactl start speedwave'
+env LIMA_HOME="$HOME/.speedwave/lima" "$HOME/Applications/Speedwave.app/Contents/Resources/lima/bin/limactl" start speedwave'
 
 ps_squote() {
     printf '%s' "$1" | sed "s/'/''/g"
@@ -339,7 +339,7 @@ for vol in /Volumes/Speedwave*; do
     [ -d "$vol" ] || continue
     hdiutil detach "$vol" -force 2>/dev/null || true
 done
-rm -rf /Applications/Speedwave.app 2>/dev/null || true
+rm -rf ~/Applications/Speedwave.app 2>/dev/null || true
 # Remove Speedwave user data (config, Lima VM, setup markers, cached downloads)
 rm -rf "$SPEEDWAVE_DATA_DIR" 2>/dev/null || true
 rm -rf ~/Library/Caches/lima 2>/dev/null || true
@@ -674,7 +674,7 @@ Write-Host "── Launching $appExe in interactive session..."
 # SSH runs in session 0 (services) which has no desktop.
 # Use schtasks /IT to launch the app in the console session where the GUI lives.
 $taskName = "SpeedwaveE2E"
-schtasks /Create /TN $taskName /TR $appExe /SC ONCE /ST 00:00 /IT /F /RL HIGHEST | Out-Null
+schtasks /Create /TN $taskName /TR $appExe /SC ONCE /ST 00:00 /IT /F | Out-Null
 schtasks /Run /TN $taskName | Out-Null
 schtasks /Delete /TN $taskName /F | Out-Null
 # Wait for the process to appear (retry loop for slow VMs)
@@ -766,11 +766,11 @@ SCRIPT
 
     macos_ssh bash <<'SCRIPT'
 set -euo pipefail
-# Mount the .dmg and copy .app to /Applications (same as user drag-and-drop)
+# Mount the .dmg and copy .app to ~/Applications (a drag-and-drop target that needs no admin)
 hdiutil attach /tmp/speedwave.dmg -nobrowse -noautoopen
-cp -R "/Volumes/Speedwave/Speedwave.app" /Applications/
+mkdir -p ~/Applications && cp -R "/Volumes/Speedwave/Speedwave.app" ~/Applications/
 hdiutil detach "/Volumes/Speedwave"
-echo "Install OK: $(ls -d /Applications/Speedwave.app)"
+echo "Install OK: $(ls -d ~/Applications/Speedwave.app)"
 SCRIPT
 
     # shellcheck disable=SC2086
@@ -804,7 +804,7 @@ SCRIPT
     macos_ssh bash <<'SCRIPT'
 set -euo pipefail
 hdiutil attach /tmp/speedwave.dmg -nobrowse -noautoopen
-cp -R "/Volumes/Speedwave/Speedwave.app" /Applications/
+mkdir -p ~/Applications && cp -R "/Volumes/Speedwave/Speedwave.app" ~/Applications/
 hdiutil detach "/Volumes/Speedwave"
 echo "Install OK"
 SCRIPT
@@ -833,7 +833,7 @@ eval "$(/opt/homebrew/bin/brew shellenv)"
 SCRIPT_HEAD
             printf '%s\n' "$MACOS_ENGINE_BATS_PREAMBLE"
             cat <<'SCRIPT_TAIL'
-ENGINE_EXEC="env LIMA_HOME=$HOME/.speedwave/lima /Applications/Speedwave.app/Contents/Resources/lima/bin/limactl shell speedwave -- sudo" \
+ENGINE_EXEC="env LIMA_HOME=$HOME/.speedwave/lima $HOME/Applications/Speedwave.app/Contents/Resources/lima/bin/limactl shell speedwave -- sudo" \
 bats --print-output-on-failure /tmp/speedwave-e2e/engine-contract.bats
 SCRIPT_TAIL
         } | macos_ssh bash || exit_code=$?
@@ -849,7 +849,7 @@ SCRIPT_HEAD
             printf '%s\n' "$MACOS_ENGINE_BATS_PREAMBLE"
             cat <<'SCRIPT_TAIL'
 SPEEDWAVE_BIN="$HOME/.local/bin/speedwave" \
-ENGINE_EXEC="env LIMA_HOME=$HOME/.speedwave/lima /Applications/Speedwave.app/Contents/Resources/lima/bin/limactl shell speedwave -- sudo" \
+ENGINE_EXEC="env LIMA_HOME=$HOME/.speedwave/lima $HOME/Applications/Speedwave.app/Contents/Resources/lima/bin/limactl shell speedwave -- sudo" \
 SPW_E2E_PROJECT=e2e-test bats --print-output-on-failure /tmp/speedwave-e2e/update-dirty-state.bats
 SCRIPT_TAIL
         } | macos_ssh bash || exit_code=$?
@@ -887,7 +887,7 @@ SPEEDWAVE_DATA_DIR="${SPEEDWAVE_DATA_DIR:-$HOME/.speedwave}"
 export PATH="$HOME/.cargo/bin:$PATH"
 eval "$(/opt/homebrew/bin/brew shellenv)"
 
-APP_PATH="/Applications/Speedwave.app/Contents/MacOS/speedwave-desktop"
+APP_PATH="$HOME/Applications/Speedwave.app/Contents/MacOS/speedwave-desktop"
 if [ ! -f "$APP_PATH" ]; then
     echo "ERROR: Speedwave binary not found at $APP_PATH" >&2
     exit 1
@@ -980,9 +980,9 @@ preview_macos() {
     macos_ssh bash <<'SCRIPT'
 set -euo pipefail
 hdiutil attach /tmp/speedwave.dmg -nobrowse -noautoopen
-cp -R "/Volumes/Speedwave/Speedwave.app" /Applications/
+mkdir -p ~/Applications && cp -R "/Volumes/Speedwave/Speedwave.app" ~/Applications/
 hdiutil detach "/Volumes/Speedwave"
-open /Applications/Speedwave.app
+open ~/Applications/Speedwave.app
 echo "Launched"
 SCRIPT
 
