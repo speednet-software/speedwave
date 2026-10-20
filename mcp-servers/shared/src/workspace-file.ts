@@ -1,5 +1,5 @@
 /**
- * Workspace file reader: confines a caller-supplied path to the project mount before any bytes are read.
+ * Workspace file guard and reader: confines a caller-supplied path to the project mount before any bytes are read.
  * @module mcp-shared/workspace-file
  */
 
@@ -7,7 +7,7 @@ import { promises as fsp } from 'node:fs';
 import path from 'node:path';
 
 /**
- * Read `filePath` from the workspace mount, rejecting any path escaping it (traversal or symlink) or exceeding `maxBytes`.
+ * Read `filePath` from the workspace mount under the same guard as `resolveWorkspaceFile`.
  * @param filePath - Path relative to (or inside) the workspace root.
  * @param maxBytes - Largest file size accepted.
  * @returns The file bytes and the basename of the resolved file.
@@ -16,6 +16,20 @@ export async function readWorkspaceFile(
   filePath: string,
   maxBytes: number
 ): Promise<{ buffer: Buffer; name: string }> {
+  const { path: real, name } = await resolveWorkspaceFile(filePath, maxBytes);
+  return { buffer: await fsp.readFile(real), name };
+}
+
+/**
+ * Resolve `filePath` inside the workspace mount without reading it, rejecting any path escaping it (traversal or symlink), non-files, or files over `maxBytes`.
+ * @param filePath - Path relative to (or inside) the workspace root.
+ * @param maxBytes - Largest file size accepted.
+ * @returns The real path, basename and size of the resolved file.
+ */
+export async function resolveWorkspaceFile(
+  filePath: string,
+  maxBytes: number
+): Promise<{ path: string; name: string; size: number }> {
   const root = await fsp.realpath(workspaceRoot());
   const candidate = path.resolve(root, filePath);
   let real: string;
@@ -35,7 +49,7 @@ export async function readWorkspaceFile(
         'Split the file or reduce it.'
     );
   }
-  return { buffer: await fsp.readFile(real), name: path.basename(real) };
+  return { path: real, name: path.basename(real), size: stat.size };
 }
 
 /** Root of the project mount inside the worker (overridable for tests). */

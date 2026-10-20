@@ -142,4 +142,4 @@ export type { MemoizedPromiseOptions } from './promise-memo.js';
 export { classifyConnectionError } from './connection-test.js';
 export type { ConnectionTestResult, ConnectionErrorType } from './connection-test.js';
 
-export { readWorkspaceFile, workspaceRoot } from './workspace-file.js';
+export { readWorkspaceFile, resolveWorkspaceFile, workspaceRoot } from './workspace-file.js';

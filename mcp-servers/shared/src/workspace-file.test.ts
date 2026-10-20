@@ -2,9 +2,9 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { promises as fsp } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { readWorkspaceFile } from './workspace-file.js';
+import { readWorkspaceFile, resolveWorkspaceFile } from './workspace-file.js';
 
-describe('readWorkspaceFile', () => {
+describe('resolveWorkspaceFile', () => {
   let base: string;
   let root: string;
   let outside: string;
@@ -29,22 +29,21 @@ describe('readWorkspaceFile', () => {
   it('reads an absolute path inside the workspace', async () => {
     const file = path.join(root, 'report.txt');
     await fsp.writeFile(file, 'hello');
-    const result = await readWorkspaceFile(file, 100);
-    expect(result.buffer.toString()).toBe('hello');
-    expect(result.name).toBe('report.txt');
+    const result = await resolveWorkspaceFile(file, 100);
+    expect(result).toEqual({ path: await fsp.realpath(file), name: 'report.txt', size: 5 });
   });
 
   it('reads a relative path from the workspace root', async () => {
     await fsp.mkdir(path.join(root, 'sub'));
     await fsp.writeFile(path.join(root, 'sub', 'a.md'), '# a');
-    const result = await readWorkspaceFile('sub/a.md', 100);
-    expect(result.buffer.toString()).toBe('# a');
+    const result = await resolveWorkspaceFile('sub/a.md', 100);
     expect(result.name).toBe('a.md');
+    expect(result.size).toBe(3);
   });
 
   it('rejects ../ traversal out of the workspace', async () => {
     await fsp.writeFile(path.join(outside, 'secret.txt'), 'x');
-    await expect(readWorkspaceFile('../outside/secret.txt', 100)).rejects.toThrow(
+    await expect(resolveWorkspaceFile('../outside/secret.txt', 100)).rejects.toThrow(
       'filePath must resolve to a location inside the workspace'
     );
   });
@@ -52,7 +51,7 @@ describe('readWorkspaceFile', () => {
   it('rejects a symlink inside the workspace that points outside', async () => {
     await fsp.writeFile(path.join(outside, 'secret.txt'), 'x');
     await fsp.symlink(path.join(outside, 'secret.txt'), path.join(root, 'link.txt'));
-    await expect(readWorkspaceFile('link.txt', 100)).rejects.toThrow(
+    await expect(resolveWorkspaceFile('link.txt', 100)).rejects.toThrow(
       'filePath must resolve to a location inside the workspace'
     );
   });
@@ -60,32 +59,39 @@ describe('readWorkspaceFile', () => {
   it('accepts a symlink that points inside the workspace', async () => {
     await fsp.writeFile(path.join(root, 'real.txt'), 'data');
     await fsp.symlink(path.join(root, 'real.txt'), path.join(root, 'alias.txt'));
-    const result = await readWorkspaceFile('alias.txt', 100);
-    expect(result.buffer.toString()).toBe('data');
+    const result = await resolveWorkspaceFile('alias.txt', 100);
     expect(result.name).toBe('real.txt');
+    expect(result.path).toBe(await fsp.realpath(path.join(root, 'real.txt')));
   });
 
   it('reports a missing file', async () => {
-    await expect(readWorkspaceFile('missing.txt', 100)).rejects.toThrow(
+    await expect(resolveWorkspaceFile('missing.txt', 100)).rejects.toThrow(
       'File not found under workspace: missing.txt'
     );
   });
 
   it('rejects a directory', async () => {
     await fsp.mkdir(path.join(root, 'dir'));
-    await expect(readWorkspaceFile('dir', 100)).rejects.toThrow('Not a regular file: dir');
+    await expect(resolveWorkspaceFile('dir', 100)).rejects.toThrow('Not a regular file: dir');
   });
 
   it('rejects a file over the cap with a generic message', async () => {
     await fsp.writeFile(path.join(root, 'big.bin'), Buffer.alloc(11));
-    await expect(readWorkspaceFile('big.bin', 10)).rejects.toThrow(
+    await expect(resolveWorkspaceFile('big.bin', 10)).rejects.toThrow(
       'File is too large (11 bytes > 10 byte limit): big.bin. Split the file or reduce it.'
     );
   });
 
   it('accepts a file exactly at the cap', async () => {
     await fsp.writeFile(path.join(root, 'edge.bin'), Buffer.alloc(10));
-    const result = await readWorkspaceFile('edge.bin', 10);
-    expect(result.buffer.length).toBe(10);
+    const result = await resolveWorkspaceFile('edge.bin', 10);
+    expect(result.size).toBe(10);
+  });
+
+  it('readWorkspaceFile returns the bytes and name', async () => {
+    await fsp.writeFile(path.join(root, 'report.txt'), 'hello');
+    const result = await readWorkspaceFile('report.txt', 100);
+    expect(result.buffer.toString()).toBe('hello');
+    expect(result.name).toBe('report.txt');
   });
 });

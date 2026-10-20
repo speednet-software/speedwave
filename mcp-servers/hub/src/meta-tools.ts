@@ -125,7 +125,7 @@ return { total: results.length, failed: errors.length };
       },
       timeout_ms: {
         type: 'number',
-        description: `Execution timeout in milliseconds (default: ${TIMEOUTS.EXECUTION_MS}ms, max: ${TIMEOUTS.EXECUTION_MS}ms). For long operations (sharepoint.downloadFile, sharepoint.uploadFile) timeout auto-extends to ${TIMEOUTS.LONG_OPERATION_MS}ms.`,
+        description: `Execution timeout in milliseconds (default: ${TIMEOUTS.EXECUTION_MS}ms, max: ${TIMEOUTS.EXECUTION_MS}ms). For long operations (sharepoint.downloadFile, sharepoint.uploadFile, slack.uploadFile) timeout auto-extends to ${TIMEOUTS.LONG_OPERATION_MS}ms.`,
       },
     },
     required: ['code'],

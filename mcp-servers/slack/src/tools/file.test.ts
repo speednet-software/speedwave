@@ -27,6 +27,7 @@ vi.mock('../client.js', async () => {
 });
 
 import * as client from '../client.js';
+import { MAX_UPLOAD_FILES } from '../client.js';
 
 function presentClients(): SlackClients {
   return {
@@ -116,21 +117,21 @@ describe('file-tools', () => {
     it('passes the upload result through on success', async () => {
       const uploaded = {
         ok: true,
-        file: { id: 'F9', name: 'report.pdf', title: 'report.pdf' },
+        files: [{ id: 'F9', name: 'report.pdf', title: 'report.pdf' }],
         channel: 'C1',
       };
       vi.mocked(client.uploadFile).mockResolvedValue(uploaded);
 
       const result = await handleUploadFile(presentClients(), {
         channel: 'C1',
-        filePath: 'report.pdf',
+        filePaths: ['report.pdf'],
       });
 
       expect(result.success).toBe(true);
       expect(result.data).toEqual(uploaded);
       expect(client.uploadFile).toHaveBeenCalledWith(expect.anything(), {
         channel: 'C1',
-        filePath: 'report.pdf',
+        filePaths: ['report.pdf'],
       });
     });
 
@@ -139,7 +140,7 @@ describe('file-tools', () => {
 
       const result = await handleUploadFile(presentClients(), {
         channel: 'C1',
-        filePath: 'report.pdf',
+        filePaths: ['report.pdf'],
       });
 
       expect(result.success).toBe(false);
@@ -165,19 +166,22 @@ describe('file-tools', () => {
       expect(download.annotations?.readOnlyHint).not.toBe(true);
       expect(download._meta?.[META_KEYS.DEFER_LOADING]).toBe(true);
       const upload = tools[2].tool;
-      expect(upload.inputSchema.required).toEqual(['channel', 'filePath']);
+      expect(upload.inputSchema.required).toEqual(['channel', 'filePaths']);
       expect(Object.keys(upload.inputSchema.properties as object)).toEqual([
         'channel',
-        'filePath',
+        'filePaths',
         'thread_ts',
         'initial_comment',
-        'title',
       ]);
+      expect(upload.inputSchema.properties).toMatchObject({
+        filePaths: { type: 'array', minItems: 1, maxItems: MAX_UPLOAD_FILES },
+      });
       expect(upload.annotations).toEqual(WRITE_ANNOTATIONS);
       expect(upload._meta?.[META_KEYS.DEFER_LOADING]).toBe(true);
+      expect(upload._meta?.[META_KEYS.TIMEOUT_CLASS]).toBe('long');
       expect(upload.description).toContain('files:write');
       expect(Object.keys(upload.outputSchema?.properties as object).sort()).toEqual(
-        ['channel', 'error', 'file', 'ok', 'success', 'thread_ts'].sort()
+        ['channel', 'error', 'files', 'ok', 'success', 'thread_ts'].sort()
       );
     });
 
@@ -195,7 +199,7 @@ describe('file-tools', () => {
         const result = await handler({
           file: 'F1',
           channel: 'C1',
-          filePath: 'a.txt',
+          filePaths: ['a.txt'],
         });
         expect(result.isError).toBe(true);
         const parsed = JSON.parse(result.content[0].text as string);

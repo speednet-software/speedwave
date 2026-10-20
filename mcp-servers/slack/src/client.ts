@@ -3,7 +3,9 @@
  * Error convention: `initializeSlackClients` returns a `_tokensStatus:'missing'` container on config failures (never throws); instance methods throw on API failures.
  */
 
+import { createReadStream } from 'fs';
 import { mkdir, writeFile } from 'fs/promises';
+import { Readable } from 'stream';
 import type { UserDirectoryCache } from './user-directory.js';
 import path from 'path';
 import {
@@ -26,7 +28,7 @@ import {
   RefreshLock,
   OAuthRefreshError,
   clampPageSize,
-  readWorkspaceFile,
+  resolveWorkspaceFile,
   workspaceRoot,
   type AuthedTokenState,
 } from '@speedwave/mcp-shared';
@@ -434,60 +436,131 @@ export async function sendChannel(
   };
 }
 
-/** Largest workspace file uploaded to Slack; the worker buffers the whole body (128 MiB budget). */
-export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+/** Slack's per-file upload limit. */
+export const MAX_UPLOAD_BYTES = 1024 * 1024 * 1024;
+
+/** Most files accepted in one uploadFile call. */
+export const MAX_UPLOAD_FILES = 10;
 
 /**
- * Upload one workspace file to a channel, DM or thread as the signed-in user; returns the Slack file ID and target.
- * Path, size and `thread_ts` checks run before any Slack API call; throws on any failure.
+ * Stream 1 to MAX_UPLOAD_FILES workspace files to a channel, DM or thread as the signed-in user in one share.
+ * All checks run before any Slack call; nothing is shared unless every file uploaded and the completion succeeded.
  * @param clients - The Slack client container.
- * @param params - File, target and optional presentation.
+ * @param params - Files, target and optional comment.
  * @param params.channel - Channel name (with or without `#`) or channel/DM ID.
- * @param params.filePath - Path under /workspace of the file to upload.
+ * @param params.filePaths - Paths under /workspace of the files to upload.
  * @param params.thread_ts - Thread parent's Slack timestamp; omit to post at channel level.
- * @param params.initial_comment - Message posted together with the file.
- * @param params.title - Display title; defaults to the file name.
+ * @param params.initial_comment - Message posted together with the files.
  */
 export async function uploadFile(
   clients: SlackClients,
   params: {
     channel: string;
-    filePath: string;
+    filePaths: string[];
     thread_ts?: string;
     initial_comment?: string;
-    title?: string;
   }
 ): Promise<{
   ok: boolean;
-  file?: { id: string; name: string; title?: string };
+  files: Array<{ id: string; name: string; title?: string }>;
   channel: string;
   thread_ts?: string;
 }> {
   assertThreadTsShape(params.thread_ts);
-  const { buffer, name } = await readWorkspaceFile(params.filePath, MAX_UPLOAD_BYTES);
+  const resolved = await resolveUploadFiles(params.filePaths);
   const channelId = await resolveChannelId(clients, params.channel);
 
-  const content = {
-    file: buffer,
-    filename: name,
-    title: params.title ?? name,
-    ...(params.initial_comment ? { initial_comment: params.initial_comment } : {}),
-  };
-  const threadTs = params.thread_ts;
+  const staged: Array<{ id: string; name: string }> = [];
+  for (const file of resolved) {
+    const target = await slackCall(clients, (c) =>
+      c.files.getUploadURLExternal({ filename: file.name, length: file.size })
+    );
+    if (!target.upload_url || !target.file_id) {
+      throw new Error(`Slack returned no upload URL for ${file.name}. No file was shared.`);
+    }
+    await postFileStream(target.upload_url, file);
+    staged.push({ id: target.file_id, name: file.name });
+  }
 
-  const result = (await slackCall(clients, (c) =>
-    threadTs
-      ? c.filesUploadV2({ ...content, channel_id: channelId, thread_ts: threadTs })
-      : c.filesUploadV2({ ...content, channel_id: channelId })
-  )) as { ok?: boolean; files?: Array<{ files?: Array<{ id?: string; title?: string }> }> };
+  const result = await slackCall(clients, (c) =>
+    c.files.completeUploadExternal({
+      files: toCompletionFiles(staged),
+      channel_id: channelId,
+      ...(params.thread_ts ? { thread_ts: params.thread_ts } : {}),
+      ...(params.initial_comment ? { initial_comment: params.initial_comment } : {}),
+    })
+  );
 
-  const uploaded = result.files?.[0]?.files?.[0];
   return {
     ok: result.ok || false,
-    ...(uploaded?.id ? { file: { id: uploaded.id, name, title: uploaded.title } } : {}),
+    files: (result.files ?? []).flatMap((f) => {
+      if (!f.id) return [];
+      const name = staged.find((s) => s.id === f.id)?.name ?? f.name ?? f.id;
+      return [{ id: f.id, name, title: f.title }];
+    }),
     channel: channelId,
     ...(params.thread_ts ? { thread_ts: params.thread_ts } : {}),
   };
+}
+
+function toCompletionFiles(
+  staged: Array<{ id: string; name: string }>
+): [{ id: string; title: string }, ...Array<{ id: string; title: string }>] {
+  const [first, ...rest] = staged.map((f) => ({ id: f.id, title: f.name }));
+  return [first, ...rest];
+}
+
+async function resolveUploadFiles(
+  filePaths: string[]
+): Promise<Array<{ path: string; name: string; size: number }>> {
+  if (
+    !Array.isArray(filePaths) ||
+    filePaths.length === 0 ||
+    filePaths.some((p) => typeof p !== 'string' || p === '')
+  ) {
+    throw new Error('filePaths must be a non-empty array of non-empty path strings.');
+  }
+  if (filePaths.length > MAX_UPLOAD_FILES) {
+    throw new Error(
+      `filePaths has ${filePaths.length} entries; at most ${MAX_UPLOAD_FILES} files per call. Split them into several calls.`
+    );
+  }
+  const resolved: Array<{ path: string; name: string; size: number }> = [];
+  for (const p of filePaths) {
+    const file = await resolveWorkspaceFile(p, MAX_UPLOAD_BYTES);
+    if (resolved.some((r) => r.path === file.path)) {
+      throw new Error(`File listed twice in filePaths: ${p}. Remove the duplicate.`);
+    }
+    resolved.push(file);
+  }
+  return resolved;
+}
+
+async function postFileStream(
+  uploadUrl: string,
+  file: { path: string; name: string; size: number }
+): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetch(uploadUrl, {
+      method: 'POST',
+      body: Readable.toWeb(createReadStream(file.path)) as ReadableStream,
+      duplex: 'half',
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'Content-Length': String(file.size),
+      },
+    } as RequestInit);
+  } catch (error) {
+    throw new Error(
+      `Uploading ${file.name} failed: ${error instanceof Error ? error.message : String(error)}. No file was shared.`
+    );
+  }
+  if (!response.ok) {
+    throw new Error(
+      `Uploading ${file.name} failed with HTTP ${response.status}. No file was shared; retry the call.`
+    );
+  }
 }
 
 /**
