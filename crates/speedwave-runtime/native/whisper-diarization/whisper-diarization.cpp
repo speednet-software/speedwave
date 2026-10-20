@@ -529,7 +529,8 @@ static bool whisper_diar_backend_init(whisper_diar_context & dctx) {
         int index = 0;
         for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
             auto dev = ggml_backend_dev_get(i);
-            if (ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_GPU && index++ == params.gpu_device) {
+            auto type = ggml_backend_dev_type(dev);
+            if ((type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU) && index++ == params.gpu_device) {
                 auto backend = ggml_backend_dev_init(dev, nullptr);
                 if (backend) {
                     backends.push_back(backend);

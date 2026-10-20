@@ -191,6 +191,26 @@ fn the_vendored_code_loads_no_backend_library() {
 }
 
 #[test]
+fn the_backend_choice_takes_an_integrated_gpu_like_whisper_cpp() {
+    let source = read_vendor_file("whisper-diarization.cpp");
+    let init = source
+        .split("static bool whisper_diar_backend_init(")
+        .nth(1)
+        .expect("whisper_diar_backend_init is defined");
+    let body = &init[..init.find("\n}\n").expect("the function ends")];
+    for device_type in [
+        "GGML_BACKEND_DEVICE_TYPE_GPU",
+        "GGML_BACKEND_DEVICE_TYPE_IGPU",
+    ] {
+        assert!(
+            body.contains(device_type),
+            "the GPU device loop accepts {device_type}, as whisper_backend_init_gpu does in \
+             whisper.cpp 1.8.3 (UPSTREAM, local change 9)"
+        );
+    }
+}
+
+#[test]
 fn the_chunk_loop_reads_the_abort_callback_before_every_chunk() {
     let source = read_vendor_file("whisper-diarization.cpp");
     let detect = source

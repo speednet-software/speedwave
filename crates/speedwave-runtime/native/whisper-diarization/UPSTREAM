@@ -56,3 +56,7 @@ local changes in whisper-diarization.cpp:
   8. whisper_diar_detect_speakers takes a ggml_abort_callback and its data pointer, read
      before every chunk; a true answer clears the probabilities, resets the scheduler and
      returns false, so a put-off offline pass stops within one chunk.
+  9. whisper_diar_backend_init takes an integrated GPU (GGML_BACKEND_DEVICE_TYPE_IGPU) as a
+     GPU device, as whisper_backend_init_gpu does in whisper.cpp 1.8.3; the source matched
+     GGML_BACKEND_DEVICE_TYPE_GPU alone, so a laptop whose Vulkan device is its integrated
+     GPU ran Whisper on it and the diarization on the CPU.

@@ -1088,9 +1088,19 @@ fn diarize_meeting_channel(
     let record = match result {
         Ok(turns) => {
             label_speakers(final_segs, &turns);
+            let secs = started.elapsed().as_secs_f64();
+            let speakers = final_segs
+                .iter()
+                .filter_map(|seg| seg.speaker_id)
+                .max()
+                .unwrap_or(0);
+            log::info!(
+                "speaker diarization of transcript {id} labelled {speakers} speakers from {} turns in {secs:.1} s",
+                turns.len()
+            );
             Some(DiarizationRecord {
                 model: DIARIZATION_MODEL.key.to_string(),
-                secs: started.elapsed().as_secs_f64(),
+                secs,
             })
         }
         Err(e) => {
