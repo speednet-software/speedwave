@@ -13,11 +13,11 @@ private let outlookUnsupportedInstructions =
 
 
 /// mail-cli <command> [json-args]
-/// Commands: check_permission, detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email, list_rules, check_mail
+/// Commands: check_permission, detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email, list_rules, check_mail, delete_emails
 @main
 struct MailCLI {
     static let commandList =
-        "check_permission, detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email, list_rules, check_mail"
+        "check_permission, detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email, list_rules, check_mail, delete_emails"
 
     static func main() {
         runCLI(
@@ -59,6 +59,7 @@ func mailCommands(executor: @escaping ScriptExecutor) -> [String: (_ params: [St
         "check_mail": scripted { params, scripts in
             try MailRules.checkMail(scripts: scripts, account: params["account"] as? String)
         },
+        "delete_emails": scripted(deleteEmails),
     ]
 }
 

@@ -8,6 +8,9 @@ enum AppleMailClient {
     /// The account name `listMailboxes` gives the On My Mac mailboxes, which belong to no account.
     static let localAccountName = "On My Mac"
 
+    /// The error `messageLookup` raises when the mailbox holds no message with the mail's Message-ID.
+    static let messageNotFound = "Email not found"
+
     static let listFieldSeparator = "\u{1D}"
     static let listItemSeparator = "\u{1E}"
 
@@ -100,7 +103,7 @@ enum AppleMailClient {
         mailboxLookup(name: id.mailbox, account: id.account) + """
 
             set spwFound to (every message of mb whose message id is "\(escapeAppleScript(id.messageId))")
-            if (count of spwFound) is 0 then error "Email not found"
+            if (count of spwFound) is 0 then error "\(messageNotFound)"
             set m to item 1 of spwFound
         """
     }

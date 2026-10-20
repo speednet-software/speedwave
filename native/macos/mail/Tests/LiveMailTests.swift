@@ -98,4 +98,55 @@ final class LiveMailTests: XCTestCase {
             XCTAssertEqual(error as? MailFailure, .accountNotFound(account))
         }
     }
+
+    func testDeleteEmailsPreviewsFirstThenMovesTheMailToTheTrashWhereItCanBeRestored() throws {
+        let params: [String: Any] = ["mailbox": Self.testMailbox, "account": AppleMailClient.localAccountName]
+        let before = try XCTUnwrap(try call("list_emails", params.merging(["limit": 1]) { $1 }) as? [String: Any])
+        guard let newest = (before["emails"] as? [[String: Any]])?.first,
+              let id = newest["id"] as? String
+        else {
+            throw XCTSkip("\(Self.testMailbox) holds no message to delete")
+        }
+        let total = try XCTUnwrap(before["total"] as? Int)
+
+        let preview = try XCTUnwrap(try call("delete_emails", ["ids": [id]]) as? [String: Any])
+        XCTAssertEqual(preview["status"] as? String, "confirmation_required")
+        let previewed = try XCTUnwrap((preview["emails"] as? [[String: Any]])?.first)
+        XCTAssertEqual(previewed["ok"] as? Bool, true, "\(previewed)")
+        XCTAssertEqual(previewed["subject"] as? String, newest["subject"] as? String)
+        let unchanged = try XCTUnwrap(try call("list_emails", params.merging(["limit": 1]) { $1 }) as? [String: Any])
+        XCTAssertEqual(unchanged["total"] as? Int, total)
+
+        let messageId = escapeAppleScript(try MailId(decoding: id).messageId)
+        defer {
+            _ = try? osascriptExecutor("""
+                tell application "Mail"
+                    repeat with spwBoxRef in ((mailboxes of trash mailbox) & {trash mailbox})
+                        set spwFound to (every message of (contents of spwBoxRef) whose message id is "\(messageId)")
+                        if (count of spwFound) > 0 then
+                            move item 1 of spwFound to mailbox "\(Self.testMailbox)"
+                            return "restored"
+                        end if
+                    end repeat
+                    return "missing"
+                end tell
+                """, 30)
+        }
+        let report = try XCTUnwrap(
+            try call("delete_emails", ["ids": [id], "confirm_delete": true]) as? [String: Any])
+        XCTAssertEqual(report["status"] as? String, "completed", "\(report)")
+        XCTAssertEqual(report["succeeded"] as? Int, 1)
+        let after = try XCTUnwrap(try call("list_emails", params.merging(["limit": 1]) { $1 }) as? [String: Any])
+        XCTAssertEqual(after["total"] as? Int, total - 1)
+        let inTrash = try osascriptExecutor("""
+            tell application "Mail"
+                set spwCount to 0
+                repeat with spwBoxRef in ((mailboxes of trash mailbox) & {trash mailbox})
+                    set spwCount to spwCount + (count of (every message of (contents of spwBoxRef) whose message id is "\(messageId)"))
+                end repeat
+                return spwCount
+            end tell
+            """, 30)
+        XCTAssertNotEqual(inTrash, "0", "the deleted mail is not in any Trash mailbox")
+    }
 }
