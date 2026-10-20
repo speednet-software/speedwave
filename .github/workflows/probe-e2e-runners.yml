@@ -60,3 +60,22 @@ jobs:
           ssh -o BatchMode=yes "$USERNAME@127.0.0.1" 'powershell -NoProfile -Command "Get-Command node,cargo,cmake | Select-Object -ExpandProperty Source"'
       - name: Outbound to OpenRouter
         run: curl -fsS -o /dev/null -w '%{http_code}\n' https://openrouter.ai/api/v1/models
+      - name: Interactive session and machine env (PowerShell)
+        shell: powershell
+        run: |
+          quser
+          foreach ($n in 'LIBCLANG_PATH', 'VULKAN_SDK', 'INCLUDE', 'LIB') {
+            "{0}={1}" -f $n, [System.Environment]::GetEnvironmentVariable($n, 'Machine')
+          }
+          $p = [System.Environment]::GetEnvironmentVariable('LIBCLANG_PATH', 'Machine')
+          "libclang.dll: {0}" -f (Test-Path "$p\libclang.dll")
+          $v = [System.Environment]::GetEnvironmentVariable('VULKAN_SDK', 'Machine')
+          "vulkan-1.dll: {0}" -f (Test-Path "$v\runtime\x64\vulkan-1.dll")
+          "C:\Windows\Temp writable: {0}" -f [bool](New-Item -ItemType File -Force C:\Windows\Temp\speedwave-probe.txt)
+          Remove-Item C:\Windows\Temp\speedwave-probe.txt
+      - name: WSL staging user and sudo
+        run: |
+          ssh -o BatchMode=yes "$USERNAME@127.0.0.1" 'wsl.exe -d Ubuntu-22.04 -- whoami'
+          ssh -o BatchMode=yes "$USERNAME@127.0.0.1" 'wsl.exe -d Ubuntu-22.04 -- mkdir -p /home/windows/speedwave-e2e-probe'
+          ssh -o BatchMode=yes "$USERNAME@127.0.0.1" 'wsl.exe -d Ubuntu-22.04 -- rmdir /home/windows/speedwave-e2e-probe'
+          ssh -o BatchMode=yes "$USERNAME@127.0.0.1" 'wsl.exe -d Ubuntu-22.04 -- sudo -n true' && echo sudo-ok
