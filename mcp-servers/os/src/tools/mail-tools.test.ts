@@ -14,6 +14,7 @@ import {
   handleReplyToEmail,
   handleListMailRules,
   handleCheckMail,
+  handleDeleteEmails,
   createMailTools,
 } from './mail-tools.js';
 
@@ -389,10 +390,10 @@ describe('mail-tools', () => {
   });
 
   describe('createMailTools', () => {
-    it('returns 9 tool definitions', () => {
+    it('returns 10 tool definitions', () => {
       const tools = createMailTools();
 
-      expect(tools).toHaveLength(9);
+      expect(tools).toHaveLength(10);
       expect(tools.map((t) => t.tool.name)).toEqual([
         'detectMailClients',
         'listMailboxes',
@@ -403,6 +404,7 @@ describe('mail-tools', () => {
         'replyToEmail',
         'listMailRules',
         'checkMail',
+        'deleteEmails',
       ]);
     });
 
@@ -655,6 +657,7 @@ describe('mail-tools', () => {
         ],
       },
       checkMail: { status: 'started', account: 'Work' },
+      deleteEmails: gatedBatchOutputs(DELETE_PREVIEW, DELETE_REPORT),
     };
 
     it('covers every mail tool', () => {
@@ -839,6 +842,94 @@ describe('mail-tools', () => {
     });
   });
 
+  describe('deleteEmails', () => {
+    const ids = (count: number): string[] =>
+      Array.from({ length: count }, (_, i) => `${MAIL_ID.slice(0, -2)}${i}`);
+
+    it('passes the ids and the confirmation to mail-cli', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: DELETE_REPORT });
+
+      const result = await handleDeleteEmails({ ids: [MAIL_ID], confirm_delete: true });
+
+      expect(result.success).toBe(true);
+      expect(runCommand).toHaveBeenCalledWith(
+        'mail',
+        'delete_emails',
+        budgeted({ ids: [MAIL_ID], confirm_delete: true }),
+        PROCESS_TIMEOUT
+      );
+    });
+
+    it('without confirm_delete still asks mail-cli, which only previews', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: DELETE_PREVIEW });
+
+      const result = await handleDeleteEmails({ ids: [MAIL_ID] });
+
+      expect(result).toEqual({ success: true, data: DELETE_PREVIEW });
+      expect(vi.mocked(runCommand).mock.calls[0][2]).toEqual(budgeted({ ids: [MAIL_ID] }));
+    });
+
+    it('accepts 25 mail ids', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: DELETE_PREVIEW });
+
+      const result = await handleDeleteEmails({ ids: ids(25) });
+
+      expect(result.success).toBe(true);
+    });
+
+    it('refuses 26 mail ids with the instruction to split them into confirmed batches', async () => {
+      const result = await handleDeleteEmails({ ids: ids(26), confirm_delete: true });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('MAIL_BATCH_TOO_LARGE');
+      expect(result.error?.message).toContain('at most 25');
+      expect(result.error?.message).toContain('confirm each batch');
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['no ids', {}, 'MISSING_FIELDS'],
+      ['an empty list', { ids: [] }, 'EMPTY_FIELDS'],
+      ['ids as a string', { ids: MAIL_ID }, 'INVALID_TYPE'],
+      ['a number among the ids', { ids: [MAIL_ID, 7] }, 'INVALID_TYPE'],
+      ['an id with control characters', { ids: ['mail1.\x01'] }, 'INVALID_CHARACTERS'],
+      ['an over-long id', { ids: ['m'.repeat(513)] }, 'FIELD_TOO_LONG'],
+      ['confirm_delete as a string', { ids: [MAIL_ID], confirm_delete: 'true' }, 'INVALID_TYPE'],
+    ])('refuses %s before calling mail-cli', async (_case, input, code) => {
+      const result = await handleDeleteEmails(input as any);
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(code);
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it('is destructive and declares the confirmation and the 25-id limit', () => {
+      const tool = createMailTools().find((t) => t.tool.name === 'deleteEmails')!.tool;
+
+      expect(tool.annotations?.destructiveHint).toBe(true);
+      expect(tool.annotations?.readOnlyHint).toBe(false);
+      const props = tool.inputSchema.properties as any;
+      expect(props.ids).toMatchObject({ type: 'array', minItems: 1, maxItems: 25 });
+      expect(props.confirm_delete.type).toBe('boolean');
+      expect(tool.inputSchema.required).toEqual(['ids']);
+      expect(tool.description).toContain('Trash');
+      expect(tool.description).toContain('ask the user');
+    });
+
+    it('a batch mail-cli refuses as too large teaches the split', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        new Error(
+          'mail.delete_emails failed: MAIL_BATCH_TOO_LARGE: 30 mail ids given, but one call takes at most 25.'
+        )
+      );
+
+      const result = await handleDeleteEmails({ ids: [MAIL_ID] });
+
+      expect(result.error?.code).toBe('MAIL_BATCH_TOO_LARGE');
+      expect(result.error?.message).toContain('confirm each batch');
+    });
+  });
+
   describe('mail-cli failures reach Claude as teaching errors', () => {
     const cliFailure = (command: string, stderr: string): Error =>
       new Error(`mail.${command} failed: ${stderr}`);
@@ -994,6 +1085,51 @@ describe('mail-tools', () => {
   });
 });
 
+const DELETE_PREVIEW = {
+  status: 'confirmation_required',
+  confirm_param: 'confirm_delete',
+  instruction: 'Nothing was changed. Show this preview to the user and ask the user: …',
+  emails: [
+    {
+      id: MAIL_ID,
+      ok: true,
+      subject: 'Hi',
+      sender: 'Anna',
+      date: '2026-10-20T09:15:00+02:00',
+      mailbox: 'INBOX',
+      account: 'iCloud',
+    },
+  ],
+};
+
+const DELETE_REPORT = {
+  status: 'partial',
+  emails: [
+    { id: MAIL_ID, ok: true, subject: 'Hi', sender: 'Anna', mailbox: 'INBOX', account: 'iCloud' },
+    {
+      id: MAIL_ID,
+      ok: false,
+      mailbox: 'INBOX',
+      account: 'iCloud',
+      error: 'MAIL_NOT_FOUND: The email is no longer in mailbox …',
+    },
+  ],
+  succeeded: 1,
+  failed: 1,
+};
+
+/**
+ * One sample carrying every key a gated batch tool emits, from its preview and from its per-mail report.
+ * @param preview - The unconfirmed answer.
+ * @param report - The confirmed answer.
+ */
+function gatedBatchOutputs(
+  preview: { emails: object[] },
+  report: { emails: object[] }
+): Record<string, unknown> {
+  return { ...preview, ...report, emails: [...preview.emails, ...report.emails] };
+}
+
 /**
  * A call each mail tool accepts.
  * @param name - Tool name.
@@ -1009,6 +1145,7 @@ function validInput(name: string): Record<string, unknown> {
     replyToEmail: { id: MAIL_ID, body: 'b', confirm_send: true },
     listMailRules: {},
     checkMail: {},
+    deleteEmails: { ids: [MAIL_ID], confirm_delete: true },
   };
   return inputs[name];
 }

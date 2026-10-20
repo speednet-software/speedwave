@@ -37,6 +37,13 @@ const STANDARD_BUDGET = mailTimeBudget(30_000);
 
 const BODY_SEARCH_BUDGET = mailTimeBudget(180_000);
 
+const BATCH_BUDGET = mailTimeBudget(120_000);
+
+/** The most mails one batch tool acts on; mail-cli's `mailBatchLimit` holds the same number. */
+const MAIL_BATCH_LIMIT = 25;
+
+const SPLIT_BATCH_STEP = `Split the mail ids into batches of at most ${MAIL_BATCH_LIMIT} and confirm each batch with the user separately.`;
+
 const RAW_TEXT_LIMIT = 100_000;
 
 const MAIL_FAILURE = /\b(MAIL_[A-Z_]+): ([\s\S]*)$/;
@@ -90,6 +97,10 @@ const MAIL_FAILURE_TEACHING: Record<
   MAIL_MAILBOX_CHANGED: (detail) => ({
     paramName: 'mailbox',
     nextStep: `${detail} New mail arrived or messages moved during the read; retry the same call once.`,
+  }),
+  MAIL_BATCH_TOO_LARGE: (detail) => ({
+    paramName: 'ids',
+    nextStep: `${detail} ${SPLIT_BATCH_STEP}`,
   }),
 };
 
@@ -173,6 +184,14 @@ interface ReplyToEmailParams {
   reply_all?: boolean;
   /** Safety check flag that must be true to send. */
   confirm_send: boolean;
+}
+
+/** Input parameters for the deleteEmails tool. */
+interface DeleteEmailsParams {
+  /** 1 to 25 mail ids from listEmails or searchEmails. */
+  ids: string[];
+  /** Must be true, after the user agreed to the preview, to move the emails to the Trash. */
+  confirm_delete?: boolean;
 }
 
 /** Input parameters for the listMailRules tool (no params required). */
@@ -784,6 +803,48 @@ const checkMailTool: Tool = {
   ],
 };
 
+const deleteEmailsTool: Tool = {
+  name: 'deleteEmails',
+  description:
+    'Move 1 to 25 emails, by the mail ids listEmails or searchEmails returned, to the Trash of their own account; no tool deletes an email permanently. ' +
+    'Without confirm_delete=true nothing changes: the call returns a preview of each email (sender, subject, date, mailbox), and you must show it and ask the user before calling again with confirm_delete=true. ' +
+    'The confirmed call reports every email: ok, or the error that kept it where it is.',
+  annotations: DESTRUCTIVE_ANNOTATIONS,
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: BATCH_BUDGET.toolMs,
+    [META_KEYS.OS_CATEGORY]: 'mail',
+  },
+  keywords: ['os', 'mail', 'email', 'delete', 'remove', 'trash', 'bin'],
+  example:
+    'const preview = await os.deleteEmails({ ids: [emails[0].id] }); /* ask the user */ await os.deleteEmails({ ids: [emails[0].id], confirm_delete: true })',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      ids: mailIdsProperty('Emails to move to the Trash'),
+      confirm_delete: confirmProperty('move the emails to the Trash'),
+    },
+    required: ['ids'],
+  },
+  outputSchema: gatedBatchOutputSchema(),
+  inputExamples: [
+    {
+      description: 'Minimal: preview one email before asking the user',
+      input: { ids: ['mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0'] },
+    },
+    {
+      description: 'Full: move two emails to the Trash after the user agreed',
+      input: {
+        ids: [
+          'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0',
+          'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxiQHg-Il0',
+        ],
+        confirm_delete: true,
+      },
+    },
+  ],
+};
+
 /**
  * Detects available mail clients on this device.
  * @param _params - Unused tool input parameters.
@@ -946,6 +1007,121 @@ export async function handleCheckMail(params: CheckMailParams): Promise<ToolResu
 }
 
 /**
+ * Moves emails to the Trash of their account; without confirm_delete mail-cli only previews them.
+ * @param params - Tool input parameters.
+ */
+export async function handleDeleteEmails(params: DeleteEmailsParams): Promise<ToolResult> {
+  const p = asRecord(params);
+  const invalid = mailBatchError(p);
+  if (invalid) return invalid;
+  const v = validateAll(p, { booleans: ['confirm_delete'] });
+  if (!v.valid) return v.error;
+  return runMail('delete_emails', p, BATCH_BUDGET);
+}
+
+/**
+ * The input schema of a batch tool's `ids`: 1 to {@link MAIL_BATCH_LIMIT} mail ids.
+ * @param what - What the ids name.
+ */
+function mailIdsProperty(what: string): Record<string, unknown> {
+  return {
+    type: 'array',
+    items: { type: 'string' },
+    minItems: 1,
+    maxItems: MAIL_BATCH_LIMIT,
+    description: `${what}: 1 to ${MAIL_BATCH_LIMIT} mail ids from listEmails or searchEmails. ${SPLIT_BATCH_STEP}`,
+  };
+}
+
+/**
+ * The input schema of a confirmation gate's `confirm_*` flag.
+ * @param action - What the confirmed call does.
+ */
+function confirmProperty(action: string): Record<string, unknown> {
+  return {
+    type: 'boolean',
+    description:
+      `Set true only after the user saw the preview and agreed to ${action}. ` +
+      'Without it nothing changes and the call returns the preview.',
+  };
+}
+
+/** The output schema of a gated batch tool: its preview, or its per-mail report. */
+function gatedBatchOutputSchema(): Tool['outputSchema'] {
+  return {
+    type: 'object',
+    properties: {
+      status: {
+        type: 'string',
+        description:
+          '"confirmation_required" (nothing changed: ask the user), or after confirmation "completed", "partial" or "failed"',
+      },
+      confirm_param: {
+        type: 'string',
+        description: 'Preview only: the flag to set true once the user agreed',
+      },
+      instruction: { type: 'string', description: 'Preview only: what to ask the user' },
+      emails: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', description: 'Mail id' },
+            ok: {
+              type: 'boolean',
+              description: 'Preview: the email was found. Report: the action succeeded',
+            },
+            subject: { type: 'string' },
+            sender: { type: 'string' },
+            date: { type: 'string', description: 'Date received, ISO 8601 with the UTC offset' },
+            mailbox: { type: 'string' },
+            account: { type: 'string' },
+            error: { type: 'string', description: 'Why this email was not found or not changed' },
+          },
+        },
+      },
+      succeeded: { type: 'number', description: 'Report only: emails the action succeeded on' },
+      failed: { type: 'number', description: 'Report only: emails left unchanged' },
+    },
+  };
+}
+
+/**
+ * The teaching error for a batch's `ids` that is not 1 to {@link MAIL_BATCH_LIMIT} mail ids, or undefined.
+ * @param p - Tool arguments.
+ */
+function mailBatchError(p: Record<string, unknown>): ToolResult | undefined {
+  const ids = p.ids;
+  if (ids === undefined || ids === null) {
+    return teachingToolResult(
+      {
+        paramName: 'ids',
+        nextStep: 'Pass ids as an array of mail ids from listEmails or searchEmails.',
+      },
+      'MISSING_FIELDS'
+    );
+  }
+  if (Array.isArray(ids) && ids.length === 0) {
+    return teachingToolResult(
+      { paramName: 'ids', received: ids, nextStep: 'Pass at least one mail id.' },
+      'EMPTY_FIELDS'
+    );
+  }
+  if (Array.isArray(ids) && ids.length > MAIL_BATCH_LIMIT) {
+    return teachingToolResult(
+      {
+        paramName: 'ids',
+        received: `${ids.length} mail ids`,
+        nextStep: `One call takes at most ${MAIL_BATCH_LIMIT} mail ids. ${SPLIT_BATCH_STEP}`,
+      },
+      'MAIL_BATCH_TOO_LARGE'
+    );
+  }
+  const v = validateAll(p, { stringArrays: [['ids', MAIL_BATCH_LIMIT, MAX_LENGTHS.id]] });
+  return v.valid ? undefined : v.error;
+}
+
+/**
  * Splits a hub timeout into the mail-cli process and script timeouts, each ending before the one above it.
  * @param toolMs - Hub timeout of the tool call.
  */
@@ -1004,6 +1180,7 @@ export function createMailTools(): ToolDefinition[] {
     guardedTool(replyToEmailTool, handleReplyToEmail),
     guardedTool(listMailRulesTool, handleListMailRules),
     guardedTool(checkMailTool, handleCheckMail),
+    guardedTool(deleteEmailsTool, handleDeleteEmails),
   ];
 }
 

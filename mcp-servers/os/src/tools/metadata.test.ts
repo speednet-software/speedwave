@@ -19,8 +19,8 @@ const ALL_TOOLS = [
 ];
 
 describe('OS tool metadata', () => {
-  it('registers exactly 28 tools', () => {
-    expect(ALL_TOOLS).toHaveLength(28);
+  it('registers exactly 29 tools', () => {
+    expect(ALL_TOOLS).toHaveLength(29);
   });
 
   describe.each(ALL_TOOLS.map((td) => [td.tool.name, td] as const))('%s', (_name, td) => {
@@ -91,7 +91,7 @@ describe('OS tool metadata', () => {
       'createNote',
       'updateNote',
     ];
-    const deleteTools = ['deleteEvent', 'deleteNote', 'sendEmail', 'replyToEmail'];
+    const deleteTools = ['deleteEvent', 'deleteNote', 'sendEmail', 'replyToEmail', 'deleteEmails'];
 
     for (const td of ALL_TOOLS) {
       if (writeTools.includes(td.tool.name)) {

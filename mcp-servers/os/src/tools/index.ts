@@ -60,6 +60,7 @@ export const ALLOWED_COMMANDS: Record<OsDomain, ReadonlySet<string>> = {
     'reply_to_email',
     'list_rules',
     'check_mail',
+    'delete_emails',
   ]),
   notes: new Set([
     'list_folders',
