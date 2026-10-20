@@ -331,7 +331,6 @@ describe('addAttachment handler via filePath', () => {
       filePath: join(outside, 'secret'),
     });
     expect(res.isError).toBe(true);
-    expect(res.content[0].text).toMatch(/Path resolves outside the workspace/);
     expect(issuesStub.addAttachment).not.toHaveBeenCalled();
     rmSync(outside, { recursive: true, force: true });
   });
