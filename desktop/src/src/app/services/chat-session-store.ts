@@ -46,6 +46,7 @@ import {
   type QueuedMessage,
   type WireContentBlock,
   type ConversationTranscript,
+  type StagedTranscript,
 } from '../models/chat';
 
 type StartOutcome = 'started' | 'skipped' | 'auth' | 'failed';
@@ -184,6 +185,16 @@ export function mapNotLoggedInError(raw: string): string | null {
  */
 export function isNotAuthenticatedError(msg: string): boolean {
   return msg.includes('not authenticated');
+}
+
+/**
+ * Why the project cannot take a new chat session ('' when it can).
+ * @param projectState - The project lifecycle state.
+ */
+export function projectBlockedReason(projectState: ProjectStateService): string {
+  if (!projectState.activeProject()) return NEW_CONVERSATION_NO_PROJECT;
+  if (projectState.status() !== 'ready') return NEW_CONVERSATION_BUSY;
+  return '';
 }
 
 /** Composer model-selector pick handed to `applyModelSelection` (Task 16 contract). */
@@ -869,10 +880,32 @@ export class ChatSessionStore {
   readonly composerPlanMode = signal(false);
   /** Per-tab staged image attachments (SPEED-785) — a paste/drop resolves into this instance regardless of which tab's composer is active when it finishes. */
   readonly composerAttachments = new ComposerAttachments();
+  private readonly _stagedTranscript = signal<StagedTranscript | null>(null);
+  /** Meeting transcript that rides along with this tab's next message (SPEED-795); `null` when none. */
+  readonly stagedTranscript: Signal<StagedTranscript | null> = this._stagedTranscript.asReadonly();
+  /** Prompt the composer loads into its field once this tab is shown ('' = nothing pending). */
+  readonly composerPromptDraft = signal('');
 
   private readonly _sessionEnded = signal(false);
   /** Set for a background tab whose backend session ended without this store driving it (phase 3 surfaces this). */
   readonly sessionEnded: Signal<boolean> = this._sessionEnded.asReadonly();
+
+  /**
+   * Attaches a transcript to this tab's next message, replacing one staged earlier.
+   * @param transcript - The transcript to stage.
+   */
+  stageTranscript(transcript: StagedTranscript): void {
+    this._stagedTranscript.set(transcript);
+  }
+
+  /**
+   * Drops the staged transcript; given the one a send took, only while that one is still staged.
+   * @param sent - The transcript a send took, so one staged during the send survives it.
+   */
+  unstageTranscript(sent?: StagedTranscript): void {
+    if (sent && this._stagedTranscript() !== sent) return;
+    this._stagedTranscript.set(null);
+  }
 
   /** Marks that this tab's backend session ended while it was not the active tab; a streaming turn is finalized as interrupted. */
   markSessionEnded(): void {
@@ -943,9 +976,7 @@ export class ChatSessionStore {
   readonly newConversationBlockedReason: Signal<string> = computed(() => {
     if (this.isStreamingFromState()) return NEW_CONVERSATION_STREAMING;
     if (this.resumeInProgressSignal() || this.startingSessionSignal()) return NEW_CONVERSATION_BUSY;
-    if (!this.deps.projectState.activeProject()) return NEW_CONVERSATION_NO_PROJECT;
-    if (this.deps.projectState.status() !== 'ready') return NEW_CONVERSATION_BUSY;
-    return '';
+    return projectBlockedReason(this.deps.projectState);
   });
 
   readonly sessionStartInFlightFromState: Signal<boolean> = computed(

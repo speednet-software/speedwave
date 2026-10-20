@@ -262,6 +262,37 @@ describe('ChatSessionStore', () => {
     });
   });
 
+  describe('staged transcript (SPEED-795)', () => {
+    const first = { markdown: '# First meeting', name: 'First' };
+    const second = { markdown: '# Second meeting', name: 'Second' };
+
+    it('holds nothing until a transcript is staged, then the latest one', () => {
+      expect(store.stagedTranscript()).toBeNull();
+      store.stageTranscript(first);
+      store.stageTranscript(second);
+      expect(store.stagedTranscript()).toBe(second);
+    });
+
+    it('drops the staged transcript when asked without a sent one', () => {
+      store.stageTranscript(first);
+      store.unstageTranscript();
+      expect(store.stagedTranscript()).toBeNull();
+    });
+
+    it('drops the transcript a send took', () => {
+      store.stageTranscript(first);
+      store.unstageTranscript(first);
+      expect(store.stagedTranscript()).toBeNull();
+    });
+
+    it('keeps a transcript staged while the send that took an earlier one was in flight', () => {
+      store.stageTranscript(first);
+      store.stageTranscript(second);
+      store.unstageTranscript(first);
+      expect(store.stagedTranscript()).toBe(second);
+    });
+  });
+
   describe('dispose', () => {
     it('clears the resume decider', () => {
       store.setResumeDecider(() => Promise.resolve('resume'));
