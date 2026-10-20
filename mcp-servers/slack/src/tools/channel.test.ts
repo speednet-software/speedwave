@@ -113,24 +113,6 @@ describe('channel-tools', () => {
       });
     });
 
-    it('maps a rejected thread parameter to SEND_FAILED', async () => {
-      const error = new Error('thread_ts "1717000000" does not look like a Slack timestamp');
-      vi.mocked(client.sendChannel).mockRejectedValue(error);
-      vi.mocked(client.formatSlackError).mockReturnValue(error.message);
-
-      const result = await handleSendChannel(mockClients, {
-        channel: '#general',
-        message: 'Reply',
-        thread_ts: '1717000000',
-      });
-
-      expect(result.success).toBe(false);
-      expect(result.error).toEqual({
-        code: 'SEND_FAILED',
-        message: 'thread_ts "1717000000" does not look like a Slack timestamp',
-      });
-    });
-
     it('handles API errors', async () => {
       const error = new Error('channel_not_found');
       vi.mocked(client.sendChannel).mockRejectedValue(error);

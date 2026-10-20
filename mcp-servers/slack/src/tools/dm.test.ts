@@ -111,14 +111,14 @@ describe('dm-tools', () => {
 
     it('maps failures to OPEN_FAILED', async () => {
       vi.mocked(client.openDm).mockRejectedValue(
-        new Error("'Pawel' is not a user ID or email. Find the person with findUsers first.")
+        new Error('Slack did not return a conversation ID from conversations.open.')
       );
 
-      const result = await handleOpenDirectMessage(presentClients(), { users: ['Pawel'] });
+      const result = await handleOpenDirectMessage(presentClients(), { users: ['U1'] });
 
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('OPEN_FAILED');
-      expect(result.error?.message).toContain('findUsers');
+      expect(result.error?.message).toContain('conversations.open');
     });
   });
 

@@ -17,7 +17,6 @@ import {
   uploadFile,
   MAX_UPLOAD_BYTES,
   MAX_UPLOAD_FILES,
-  UploadTransferError,
 } from '../client.js';
 
 interface GetFileContentParams {
@@ -230,9 +229,6 @@ export async function handleUploadFile(
     const result = await uploadFile(clients, params);
     return { success: true, data: result };
   } catch (error) {
-    if (error instanceof UploadTransferError) {
-      return { success: false, error: { code: 'UPLOAD_FAILED', message: error.message } };
-    }
     return failureResult('UPLOAD_FAILED', error);
   }
 }

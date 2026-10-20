@@ -30,9 +30,12 @@ import {
   clampPageSize,
   resolveWorkspaceFile,
   workspaceRoot,
+  buildTeachingMessage,
+  WorkspaceFileError,
   type AuthedTokenState,
   type TeachingErrorParams,
   type WorkspaceFile,
+  type WorkspaceFileErrorKind,
 } from '@speedwave/mcp-shared';
 
 /** Whether the Slack access token was loadable at startup. */
@@ -318,7 +321,7 @@ export class InvalidParamError extends Error {
    * @param teaching - What was wrong, where a correct value comes from, and what to do next.
    */
   constructor(teaching: TeachingErrorParams) {
-    super(`Invalid ${teaching.paramName}. ${teaching.nextStep}`);
+    super(buildTeachingMessage(teaching));
     this.teaching = teaching;
   }
 }
@@ -395,7 +398,6 @@ async function resolveChannelId(clients: SlackClients, channel: string): Promise
 
   throw new InvalidParamError({
     paramName: 'channel',
-    received: channel,
     correctValueTool: 'listChannelIds',
     nextStep:
       'If this is a person, use findUsers then openDirectMessage. A missing channel usually means ' +
@@ -422,7 +424,6 @@ export async function sendChannel(
   if (typeof broadcast !== 'boolean') {
     throw new InvalidParamError({
       paramName: 'reply_broadcast',
-      received: broadcast,
       nextStep:
         'Pass true or false; the string "false" would be read as true and surface the reply to the whole channel.',
     });
@@ -430,7 +431,6 @@ export async function sendChannel(
   if (broadcast && !params.thread_ts) {
     throw new InvalidParamError({
       paramName: 'reply_broadcast',
-      received: broadcast,
       nextStep:
         'reply_broadcast surfaces a thread reply in the channel, so it needs thread_ts: pass the thread ' +
         'parent ts copied from getChannelMessages or getThreadMessages, or drop reply_broadcast to post at channel level.',
@@ -531,16 +531,18 @@ export async function uploadFile(
 }
 
 async function resolveUploadFiles(filePaths: string[]): Promise<WorkspaceFile[]> {
-  if (
-    !Array.isArray(filePaths) ||
-    filePaths.length === 0 ||
-    filePaths.some((p) => typeof p !== 'string' || p === '')
-  ) {
+  if (!Array.isArray(filePaths) || filePaths.length === 0) {
     throw new InvalidParamError({
       paramName: 'filePaths',
-      received: filePaths,
       nextStep:
         'Pass a non-empty array of non-empty path strings under /workspace, e.g. ["/workspace/report.pdf"].',
+    });
+  }
+  const badEntry = filePaths.findIndex((p) => typeof p !== 'string' || p === '');
+  if (badEntry !== -1) {
+    throw new InvalidParamError({
+      paramName: 'filePaths',
+      nextStep: `filePaths[${badEntry}] is not a non-empty path string. Pass every entry as a path under /workspace, e.g. "/workspace/report.pdf".`,
     });
   }
   if (filePaths.length > MAX_UPLOAD_FILES) {
@@ -550,13 +552,12 @@ async function resolveUploadFiles(filePaths: string[]): Promise<WorkspaceFile[]>
     });
   }
   const resolved: WorkspaceFile[] = [];
-  for (const p of filePaths) {
-    const file = await resolveUploadFile(p);
+  for (const [index, p] of filePaths.entries()) {
+    const file = await resolveUploadFile(p, index);
     if (resolved.some((r) => r.path === file.path)) {
       throw new InvalidParamError({
         paramName: 'filePaths',
-        received: p,
-        nextStep: 'This file is listed twice in filePaths. Remove the duplicate.',
+        nextStep: `filePaths[${index}] is the same file as an earlier entry. Remove the duplicate.`,
       });
     }
     resolved.push(file);
@@ -564,15 +565,25 @@ async function resolveUploadFiles(filePaths: string[]): Promise<WorkspaceFile[]>
   return resolved;
 }
 
-async function resolveUploadFile(filePath: string): Promise<WorkspaceFile> {
+const WORKSPACE_FILE_FAILURE: Record<WorkspaceFileErrorKind, string> = {
+  not_found: 'was not found under /workspace. Check the path with a directory listing.',
+  outside_workspace:
+    'resolves outside the workspace. Only files under /workspace can be uploaded; copy the file there first.',
+  not_a_file: 'is not a regular file. Pass a file, not a directory.',
+  too_large: 'is too large to upload. Split the file or reduce it.',
+};
+
+async function resolveUploadFile(filePath: string, index: number): Promise<WorkspaceFile> {
   try {
     return await resolveWorkspaceFile(filePath, MAX_UPLOAD_BYTES);
   } catch (error) {
-    throw new InvalidParamError({
-      paramName: 'filePaths',
-      received: filePath,
-      nextStep: (error as Error).message,
-    });
+    if (error instanceof WorkspaceFileError) {
+      throw new InvalidParamError({
+        paramName: 'filePaths',
+        nextStep: `filePaths[${index}] ${WORKSPACE_FILE_FAILURE[error.kind]}`,
+      });
+    }
+    throw error;
   }
 }
 
@@ -756,10 +767,11 @@ function assertThreadTsShape(value: string | undefined): void {
   if (value && !looksLikeSlackTs(value)) {
     throw new InvalidParamError({
       paramName: 'thread_ts',
-      received: value,
-      correctValueTool: 'getChannelMessages or getThreadMessages',
+      correctValueTool: 'getChannelMessages',
       nextStep:
-        'Copy the ts exactly as returned (e.g. "1717000000.000100"); never reformat or round it.',
+        'Slack silently accepts a malformed thread_ts and posts to the channel instead of the thread. ' +
+        'Copy the ts exactly as returned by getChannelMessages or getThreadMessages ' +
+        '(e.g. "1717000000.000100"); never reformat or round it.',
     });
   }
 }
@@ -1183,23 +1195,16 @@ export async function openDm(
   params: { users: string[] }
 ): Promise<{ id: string }> {
   if (!Array.isArray(params.users) || params.users.length === 0) {
-    throw new InvalidParamError({
-      paramName: 'users',
-      received: params.users,
-      correctValueTool: 'findUsers',
-      nextStep: 'Pass an array of 1-8 user IDs or exact e-mail addresses.',
-    });
+    throw invalidUsers('Pass an array of 1-8 user IDs or exact e-mail addresses.');
   }
   if (params.users.length > MAX_DM_PARTICIPANTS) {
-    throw new InvalidParamError({
-      paramName: 'users',
-      correctValueTool: 'findUsers',
-      nextStep: `A Slack DM holds at most ${MAX_DM_PARTICIPANTS} people; got ${params.users.length}. Pass 1-8 user IDs or exact e-mail addresses.`,
-    });
+    throw invalidUsers(
+      `A Slack DM holds at most ${MAX_DM_PARTICIPANTS} people; got ${params.users.length}. Pass 1-8 user IDs or exact e-mail addresses.`
+    );
   }
   const ids: string[] = [];
-  for (const entry of params.users) {
-    ids.push(await resolveDmUserId(clients, entry));
+  for (const [index, entry] of params.users.entries()) {
+    ids.push(await resolveDmUserId(clients, entry, index));
   }
 
   const result = await slackCall(clients, (c) => c.conversations.open({ users: ids.join(',') }));
@@ -1210,7 +1215,15 @@ export async function openDm(
   return { id: channel.id };
 }
 
-async function resolveDmUserId(clients: SlackClients, entry: unknown): Promise<string> {
+function invalidUsers(nextStep: string): InvalidParamError {
+  return new InvalidParamError({ paramName: 'users', correctValueTool: 'findUsers', nextStep });
+}
+
+async function resolveDmUserId(
+  clients: SlackClients,
+  entry: unknown,
+  index: number
+): Promise<string> {
   if (typeof entry === 'string') {
     const normalized = entry.toUpperCase();
     if (USER_ID_RE.test(normalized)) {
@@ -1221,20 +1234,12 @@ async function resolveDmUserId(clients: SlackClients, entry: unknown): Promise<s
       if (found.user) {
         return found.user.id;
       }
-      throw new InvalidParamError({
-        paramName: 'users',
-        received: entry,
-        correctValueTool: 'findUsers',
-        nextStep:
-          'No Slack user has this e-mail address. Check for typos or whitespace, or search by name with findUsers.',
-      });
+      throw invalidUsers(
+        `No Slack user has this e-mail address (users[${index}]). Check for typos or whitespace, or search by name with findUsers.`
+      );
     }
   }
-  throw new InvalidParamError({
-    paramName: 'users',
-    received: entry,
-    correctValueTool: 'findUsers',
-    nextStep:
-      'This entry is not a user ID or e-mail address. Find the person with findUsers, then pass the returned id.',
-  });
+  throw invalidUsers(
+    `users[${index}] is not a user ID or e-mail address. Find the person with findUsers, then pass the returned id.`
+  );
 }

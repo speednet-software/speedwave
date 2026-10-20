@@ -9,7 +9,12 @@ import {
   type ToolResult,
   type ToolsCallResult,
 } from '@speedwave/mcp-shared';
-import { InvalidParamError, formatSlackError, type SlackClients } from '../client.js';
+import {
+  InvalidParamError,
+  UploadTransferError,
+  formatSlackError,
+  type SlackClients,
+} from '../client.js';
 
 export type { ToolResult };
 
@@ -44,13 +49,16 @@ export function withValidation<T>(
 }
 
 /**
- * Failure result for a thrown error: a rejected parameter becomes a teaching error, anything else a Slack-formatted failure under `code`.
+ * Failure result for a thrown error: a rejected parameter becomes a teaching error, a failed upload transfer keeps its own message under `UPLOAD_FAILED`, anything else a Slack-formatted failure under `code`.
  * @param code - Failure code of the tool for a non-parameter error.
  * @param error - The thrown value.
  */
 export function failureResult(code: string, error: unknown): ToolResult {
   if (error instanceof InvalidParamError) {
     return teachingToolResult(error.teaching);
+  }
+  if (error instanceof UploadTransferError) {
+    return { success: false, error: { code: 'UPLOAD_FAILED', message: error.message } };
   }
   return { success: false, error: { code, message: formatSlackError(error) } };
 }
