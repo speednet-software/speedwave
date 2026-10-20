@@ -63,7 +63,7 @@ final class DeleteEmailsTests: XCTestCase {
     func testThePreviewReportsAMailThatIsGoneWithoutFailingTheOthers() throws {
         harness.executor.reply(rows(
             row("ok", "Invoice 12", "Anna", "", ""),
-            row("error", "", "", "", "Email not found (-2700)")
+            row("error", "", "", "", "\(mailNotFoundMarker) (-2700)")
         ))
 
         let result = try harness.call("delete_emails", ["ids": [first.encoded, second.encoded]])

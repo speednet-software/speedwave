@@ -4,6 +4,7 @@ import SharedCLI
 let mailboxNotFoundMarker = "SPW_MAILBOX_NOT_FOUND"
 let mailboxAmbiguousMarker = "SPW_MAILBOX_AMBIGUOUS:"
 let accountNotFoundMarker = "SPW_ACCOUNT_NOT_FOUND"
+let mailNotFoundMarker = "SPW_MAIL_NOT_FOUND"
 
 /// The JSON argument carrying the script time budget in milliseconds, set by the mail tools of the os worker.
 let scriptTimeoutParam = "script_timeout_ms"
@@ -25,8 +26,8 @@ enum MailFailure: LocalizedError, Equatable {
     case mailboxAmbiguous(mailbox: String, accounts: [String])
     case invalidMailId(String)
     case mailboxChanged(mailbox: String)
-    case batchTooLarge(count: Int, limit: Int)
     case mailNotFound(mailbox: String, account: String)
+    case batchTooLarge(count: Int, limit: Int)
     case trashNotFound(account: String)
     case alreadyInTrash
 
@@ -39,8 +40,8 @@ enum MailFailure: LocalizedError, Equatable {
         case .mailboxAmbiguous: return "MAIL_MAILBOX_AMBIGUOUS"
         case .invalidMailId: return "MAIL_INVALID_ID"
         case .mailboxChanged: return "MAIL_MAILBOX_CHANGED"
-        case .batchTooLarge: return "MAIL_BATCH_TOO_LARGE"
         case .mailNotFound: return "MAIL_NOT_FOUND"
+        case .batchTooLarge: return "MAIL_BATCH_TOO_LARGE"
         case .trashNotFound: return "MAIL_TRASH_NOT_FOUND"
         case .alreadyInTrash: return "MAIL_ALREADY_IN_TRASH"
         }
@@ -67,11 +68,11 @@ enum MailFailure: LocalizedError, Equatable {
             return "'\(id)' is not a mail id. Take the id from listEmails or searchEmails."
         case .mailboxChanged(let mailbox):
             return "Mailbox '\(mailbox)' changed while it was being read."
+        case .mailNotFound(let mailbox, let account):
+            return "No email with this id in mailbox '\(mailbox)' of account '\(account)'; it was moved or deleted."
         case .batchTooLarge(let count, let limit):
             return "\(count) mail ids given, but one call takes at most \(limit). "
                 + "Split them into batches of at most \(limit) and confirm each batch with the user separately."
-        case .mailNotFound(let mailbox, let account):
-            return "The email is no longer in mailbox '\(mailbox)' of account '\(account)'."
         case .trashNotFound(let account):
             return "Account '\(account)' has no Trash mailbox, so the email was left where it is."
         case .alreadyInTrash:
@@ -169,6 +170,9 @@ struct MailScripts {
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty && !$0.hasPrefix("(") } ?? []
             return .mailboxAmbiguous(mailbox: mailbox ?? "", accounts: accounts)
+        }
+        if detail.contains(mailNotFoundMarker) {
+            return .mailNotFound(mailbox: mailbox ?? "", account: account ?? "")
         }
         if detail.contains(mailboxNotFoundMarker) {
             return .mailboxNotFound(mailbox: mailbox ?? "", account: account)

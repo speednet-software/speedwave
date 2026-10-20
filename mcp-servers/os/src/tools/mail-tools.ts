@@ -42,6 +42,8 @@ const MAIL_BATCH_LIMIT = 25;
 
 const SPLIT_BATCH_STEP = `Split the mail ids into batches of at most ${MAIL_BATCH_LIMIT} and confirm each batch with the user separately.`;
 
+const RAW_TEXT_LIMIT = 100_000;
+
 const MAIL_FAILURE = /\b(MAIL_[A-Z_]+): ([\s\S]*)$/;
 
 const MAIL_FAILURE_TEACHING: Record<
@@ -84,6 +86,12 @@ const MAIL_FAILURE_TEACHING: Record<
     correctValueTool: 'listEmails',
     nextStep: `${detail} Pass the id field of an email exactly as listEmails or searchEmails returns it.`,
   }),
+  MAIL_NOT_FOUND: (detail, args) => ({
+    paramName: 'id',
+    received: args.id,
+    correctValueTool: 'listEmails',
+    nextStep: `${detail} List or search that mailbox again with listEmails or searchEmails and use a current id.`,
+  }),
   MAIL_MAILBOX_CHANGED: (detail) => ({
     paramName: 'mailbox',
     nextStep: `${detail} New mail arrived or messages moved during the read; retry the same call once.`,
@@ -118,6 +126,10 @@ interface ListEmailsParams {
 interface GetEmailParams {
   /** Mail id from listEmails or searchEmails. */
   id: string;
+  /** Also return the full headers. */
+  include_headers?: boolean;
+  /** Also return the raw source. */
+  include_source?: boolean;
 }
 
 /** Input parameters for the searchEmails tool. */
@@ -338,14 +350,29 @@ const listEmailsTool: Tool = {
 const getEmailTool: Tool = {
   name: 'getEmail',
   description:
-    'Get one email with its full body, by the mail id listEmails or searchEmails returned, from any mailbox.',
+    'Get one email by the mail id listEmails or searchEmails returned, from any mailbox: sender, to, cc, ISO 8601 date, ' +
+    'plain-text body and the list of attachments. Set include_headers or include_source to diagnose a suspicious ' +
+    `email; headers or source longer than ${RAW_TEXT_LIMIT} characters are cut and flagged truncated.`,
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
     [META_KEYS.TIMEOUT_MS]: STANDARD_BUDGET.toolMs,
     [META_KEYS.OS_CATEGORY]: 'mail',
   },
-  keywords: ['os', 'mail', 'email', 'get', 'read', 'detail', 'body', 'content'],
+  keywords: [
+    'os',
+    'mail',
+    'email',
+    'get',
+    'read',
+    'detail',
+    'body',
+    'content',
+    'cc',
+    'attachments',
+    'headers',
+    'source',
+  ],
   example: 'const { email } = await os.getEmail({ id: emails[0].id })',
   inputSchema: {
     type: 'object',
@@ -353,6 +380,14 @@ const getEmailTool: Tool = {
       id: {
         type: 'string',
         description: 'Mail id from listEmails or searchEmails',
+      },
+      include_headers: {
+        type: 'boolean',
+        description: 'Also return every header of the email (default false)',
+      },
+      include_source: {
+        type: 'boolean',
+        description: 'Also return the raw RFC 822 source of the email (default false)',
       },
     },
     required: ['id'],
@@ -367,17 +402,60 @@ const getEmailTool: Tool = {
           subject: { type: 'string' },
           sender: { type: 'string' },
           to: { type: 'array', items: { type: 'string' } },
-          date: { type: 'string', description: 'Date received, as Apple Mail formats it' },
+          cc: { type: 'array', items: { type: 'string' } },
+          date: {
+            type: 'string',
+            description:
+              'Date received, ISO 8601 with the offset of the host; absent when Mail has none',
+          },
           read: { type: 'boolean' },
           body: { type: 'string', description: 'Email body (plain text)' },
+          mailbox: { type: 'string' },
+          account: { type: 'string' },
+          attachments: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                index: {
+                  type: 'number',
+                  description: 'Position of the attachment in the email, from 1',
+                },
+                name: { type: 'string' },
+                size: {
+                  type: 'number',
+                  description: 'Size in bytes; absent when Mail does not know it',
+                },
+                mime_type: { type: 'string' },
+              },
+            },
+          },
+          headers: { type: 'string', description: 'Every header, only with include_headers' },
+          headers_truncated: {
+            type: 'boolean',
+            description: `True when the headers were cut at ${RAW_TEXT_LIMIT} characters`,
+          },
+          source: { type: 'string', description: 'Raw source, only with include_source' },
+          source_truncated: {
+            type: 'boolean',
+            description: `True when the source was cut at ${RAW_TEXT_LIMIT} characters`,
+          },
         },
       },
     },
   },
   inputExamples: [
     {
-      description: 'Get email by its mail id',
+      description: 'Minimal: read an email by its mail id',
       input: { id: 'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0' },
+    },
+    {
+      description: 'Full: read a suspicious email with its headers and source',
+      input: {
+        id: 'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0',
+        include_headers: true,
+        include_source: true,
+      },
     },
   ],
 };
@@ -781,6 +859,7 @@ export async function handleGetEmail(params: GetEmailParams): Promise<ToolResult
   const p = asRecord(params);
   const v = validateAll(p, {
     required: ['id'],
+    booleans: ['include_headers', 'include_source'],
     strings: [['id', MAX_LENGTHS.id, false]],
   });
   if (!v.valid) return v.error;

@@ -182,9 +182,6 @@ struct MailBatch {
         if detail.contains(alreadyInTrashMarker) {
             return MailFailure.alreadyInTrash.localizedDescription
         }
-        if detail.hasPrefix(AppleMailClient.messageNotFound) {
-            return MailFailure.mailNotFound(mailbox: id.mailbox, account: id.account).localizedDescription
-        }
         return detail
     }
 }
