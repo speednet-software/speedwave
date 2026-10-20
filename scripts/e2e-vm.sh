@@ -708,6 +708,7 @@ try {
     npx wdio run wdio.conf.ts
     $e2eExit = $LASTEXITCODE
 } finally {
+    Get-ChildItem "$env:USERPROFILE\.speedwave\usage\*\proxy\*.jsonl" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "== PROBE $($_.FullName)"; Get-Content $_.FullName }
     Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
     # Kill all leftover Speedwave child processes (WSL2 nerdctl, node mcp workers). Killing ALL
     # node.exe is intentional — dedicated build machine, no other node processes should run.
