@@ -18,6 +18,7 @@ jobs:
         with:
           node: 'false'
           rust-cache-workspaces: . -> target
+          rust-cache-definition: .github/workflows/lane-test-rust.yml
 
       - name: Install cmake
         run: brew install cmake
