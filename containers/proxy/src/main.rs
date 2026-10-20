@@ -411,6 +411,57 @@ mod tests {
         );
     }
 
+    async fn usage_line_for_request(session_header: Option<&str>) -> serde_json::Value {
+        let usage_dir = tempfile::tempdir().unwrap();
+        let usage_path = usage_dir.path().join("usage.jsonl");
+        let addr = spawn_mock_sse_backend().await;
+        let app = build_router(Arc::new(config_pointing_at(&addr, usage_path.clone())));
+
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/v1/messages")
+            .header("content-type", "application/json");
+        if let Some(value) = session_header {
+            request = request.header("x-claude-code-session-id", value);
+        }
+        let resp = app
+            .oneshot(
+                request
+                    .body(Body::from(r#"{"model":"local/x","stream":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let _ = resp.into_body().collect().await.unwrap();
+
+        let lines = wait_for_usage_lines(&usage_path).await;
+        assert_eq!(lines.len(), 1, "expected one usage line, got: {lines:?}");
+        serde_json::from_str(&lines[0]).unwrap()
+    }
+
+    #[tokio::test]
+    async fn usage_line_carries_session_hash_only_when_the_session_header_is_sent() {
+        let with_session =
+            usage_line_for_request(Some("6f1c2a9e-4b7d-4c1e-9a3f-0d2b8e5c7a41")).await;
+        assert_eq!(
+            with_session["session_hash"],
+            "b651b3f34e51109a5a5cd32efbb86cf6be94ec58d212caafee9d34a6a93c6b04"
+        );
+
+        let without_session = usage_line_for_request(None).await;
+        assert!(
+            without_session.get("session_hash").is_none(),
+            "no header must mean no field: {without_session}"
+        );
+
+        let empty_session = usage_line_for_request(Some("")).await;
+        assert!(
+            empty_session.get("session_hash").is_none(),
+            "an empty header must mean no field: {empty_session}"
+        );
+    }
+
     /// An in-band `{"type":"error"}` frame after a completed content block, with a proper
     /// stream end, must still mark the usage line as a failure — not a success.
     #[tokio::test]

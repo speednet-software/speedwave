@@ -13,6 +13,8 @@ pub struct UsageLine {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gen_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
     pub latency_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -191,6 +193,7 @@ impl UsageAcc {
             provider_kind: provider_kind.to_string(),
             provider_id: provider_id.to_string(),
             gen_id: self.gen_id,
+            session_hash: None,
             cost_usd: None,
             latency_ms,
             ttft_ms: self.ttft_ms,
@@ -237,6 +240,7 @@ mod tests {
             provider_kind: "anthropic_oauth".to_string(),
             provider_id: "anthropic".to_string(),
             gen_id: None,
+            session_hash: None,
             cost_usd: None,
             latency_ms: 900,
             ttft_ms: None,
@@ -365,6 +369,7 @@ mod tests {
             provider_kind: "anthropic_oauth".to_string(),
             provider_id: "anthropic".to_string(),
             gen_id: None,
+            session_hash: None,
             cost_usd: None,
             latency_ms: 900,
             ttft_ms: None,
@@ -440,6 +445,7 @@ mod tests {
             provider_kind: "local".to_string(),
             provider_id: "local".to_string(),
             gen_id: None,
+            session_hash: None,
             cost_usd: None,
             latency_ms: 900,
             ttft_ms: Some(150),
