@@ -62,16 +62,21 @@ ensure_provisioned_windows() {
         return 1
     fi
     echo "[windows] Provisioning: missing tools — running setup..."
-    "${SCRIPT_DIR}/e2e-vm-setup.sh" windows
+    bash "${SCRIPT_DIR}/e2e-vm-setup.sh" windows
 }
 
 ensure_provisioned_macos() {
-    if macos_ssh "command -v npm && command -v cargo && command -v cmake" >/dev/null 2>&1; then
+    # shellcheck disable=SC2016
+    if macos_ssh 'eval "$(/opt/homebrew/bin/brew shellenv)"; export PATH="$HOME/.cargo/bin:$PATH"; command -v npm && command -v cargo && command -v cmake' >/dev/null 2>&1; then
         echo "[macos] Provisioning: OK (npm + cargo + cmake found)"
         return
     fi
+    if [ "${CI:-}" = "true" ]; then
+        echo "[macos] ERROR: rig toolchain is missing or incomplete; an administrator runs scripts/e2e-vm-setup.sh macos on the rig (RELEASING.md)" >&2
+        return 1
+    fi
     echo "[macos] Provisioning: missing tools — running setup..."
-    "${SCRIPT_DIR}/e2e-vm-setup.sh" macos
+    bash "${SCRIPT_DIR}/e2e-vm-setup.sh" macos
 }
 
 WINDOWS_WSL_STAGING="/home/windows/speedwave-e2e"
@@ -341,7 +346,7 @@ run_windows() {
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = "Stop"
 function Assert-ExitCode { if ($LASTEXITCODE -ne 0) { Write-Error "Command failed with exit code $LASTEXITCODE"; exit $LASTEXITCODE } }
-$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+$env:Path = "C:\Program Files\Git\bin;" + [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 
 Write-Host "── Copying repo from WSL2 to Windows side..."
 Stop-Process -Name "esbuild" -Force -ErrorAction SilentlyContinue
@@ -364,6 +369,11 @@ wsl.exe -d $WINDOWS_WSL_DISTRO -- cp -rT /home/windows/speedwave-e2e /mnt/c/spee
 Assert-ExitCode
 
 Set-Location C:\speedwave-e2e
+Write-Host "── Ensuring the wasm32 target and wasm-pack for the PII engine..."
+rustup target add wasm32-unknown-unknown; Assert-ExitCode
+if (-not (Get-Command wasm-pack -ErrorAction SilentlyContinue)) {
+    cargo install wasm-pack --locked; Assert-ExitCode
+}
 Write-Host "── Installing npm dependencies..."
 npm ci; Assert-ExitCode
 Set-Location mcp-servers; npm ci; Assert-ExitCode; Set-Location ..
@@ -376,7 +386,7 @@ SCRIPT
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = "Stop"
 function Assert-ExitCode { if ($LASTEXITCODE -ne 0) { Write-Error "Command failed with exit code $LASTEXITCODE"; exit $LASTEXITCODE } }
-$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+$env:Path = "C:\Program Files\Git\bin;" + [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 Set-Location C:\speedwave-e2e
 
 Write-Host "── Building MCP servers..."
@@ -416,7 +426,7 @@ SCRIPT
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = "Stop"
 function Assert-ExitCode { if ($LASTEXITCODE -ne 0) { Write-Error "Command failed with exit code $LASTEXITCODE"; exit $LASTEXITCODE } }
-$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+$env:Path = "C:\Program Files\Git\bin;" + [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 $env:INCLUDE = [System.Environment]::GetEnvironmentVariable("INCLUDE","Machine")
 $env:LIB = [System.Environment]::GetEnvironmentVariable("LIB","Machine")
 $env:CARGO_TARGET_DIR = 'C:\cb'
@@ -438,7 +448,7 @@ SCRIPT
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = "Stop"
 function Assert-ExitCode { if ($LASTEXITCODE -ne 0) { Write-Error "Command failed with exit code $LASTEXITCODE"; exit $LASTEXITCODE } }
-$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+$env:Path = "C:\Program Files\Git\bin;" + [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 $env:INCLUDE = [System.Environment]::GetEnvironmentVariable("INCLUDE","Machine")
 $env:LIB = [System.Environment]::GetEnvironmentVariable("LIB","Machine")
 # whisper-rs-sys needs the pinned SDK (ADR-085); fresh ssh sessions carry stale machine env.
@@ -493,7 +503,7 @@ SCRIPT
     windows_rsync_to "$HOST_REPO_DIR/desktop/e2e/" "$WINDOWS_WSL_STAGING/"
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = "Stop"
-$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+$env:Path = "C:\Program Files\Git\bin;" + [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 Remove-Item -Recurse -Force "C:\speedwave-e2e" -ErrorAction SilentlyContinue
 wsl.exe -d $WINDOWS_WSL_DISTRO -- rm -rf /mnt/c/speedwave-e2e
 wsl.exe -d $WINDOWS_WSL_DISTRO -- cp -rT /home/windows/speedwave-e2e /mnt/c/speedwave-e2e
@@ -528,7 +538,7 @@ SCRIPT
     windows_rsync_to "$HOST_REPO_DIR/desktop/e2e/" "$WINDOWS_WSL_STAGING/"
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = "Stop"
-$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+$env:Path = "C:\Program Files\Git\bin;" + [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 Remove-Item -Recurse -Force "C:\speedwave-e2e" -ErrorAction SilentlyContinue
 wsl.exe -d $WINDOWS_WSL_DISTRO -- rm -rf /mnt/c/speedwave-e2e
 wsl.exe -d $WINDOWS_WSL_DISTRO -- cp -rT /home/windows/speedwave-e2e /mnt/c/speedwave-e2e
@@ -586,7 +596,7 @@ run_windows_audio() {
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = "Stop"
 function Assert-ExitCode { if ($LASTEXITCODE -ne 0) { Write-Error "exit $LASTEXITCODE"; exit $LASTEXITCODE } }
-$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+$env:Path = "C:\Program Files\Git\bin;" + [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 
 $dst = "C:\spw-audio-e2e"
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $dst
@@ -621,7 +631,7 @@ run_windows_e2e() {
     local SPW_E2E_SPEC_PHASE="${1:-}"
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = "Stop"
-$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+$env:Path = "C:\Program Files\Git\bin;" + [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 
 $appExe = "C:\Speedwave\speedwave-desktop.exe"
 if (-not (Test-Path $appExe)) {
@@ -706,6 +716,9 @@ set -euo pipefail
 cd /tmp/speedwave-e2e
 export PATH="$HOME/.cargo/bin:$PATH"
 eval "$(/opt/homebrew/bin/brew shellenv)"
+
+rustup target add wasm32-unknown-unknown
+command -v wasm-pack >/dev/null 2>&1 || cargo install wasm-pack --locked
 
 npm ci
 cd mcp-servers && npm ci && cd ..

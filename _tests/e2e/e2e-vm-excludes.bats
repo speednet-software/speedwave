@@ -145,6 +145,29 @@ _load_ensure_provisioned_windows() {
     [ ! -e "$BATS_TEST_TMPDIR/setup-called" ]
 }
 
+_load_ensure_provisioned_macos() {
+    eval "$(sed -n '/^ensure_provisioned_macos()/,/^}/p' "$SCRIPT")"
+    SCRIPT_DIR="$BATS_TEST_TMPDIR/scripts"
+    mkdir -p "$SCRIPT_DIR"
+    printf 'touch "%s/setup-called"\n' "$BATS_TEST_TMPDIR" >"$SCRIPT_DIR/e2e-vm-setup.sh"
+    macos_ssh() { return 1; }
+}
+
+@test "ensure_provisioned_macos fails without running setup in CI" {
+    _load_ensure_provisioned_macos
+    CI=true run ensure_provisioned_macos
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"an administrator runs scripts/e2e-vm-setup.sh macos"* ]]
+    [ ! -e "$BATS_TEST_TMPDIR/setup-called" ]
+}
+
+@test "ensure_provisioned_macos runs a non-executable setup script outside CI" {
+    _load_ensure_provisioned_macos
+    CI= run ensure_provisioned_macos
+    [ "$status" -eq 0 ]
+    [ -e "$BATS_TEST_TMPDIR/setup-called" ]
+}
+
 _run_installer() {
     command -v pwsh >/dev/null || skip "pwsh not installed"
     eval "$(sed -n "/^SETUP_PS_PRELUDE='/,/^}'\$/p" "$SETUP")"
