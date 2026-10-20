@@ -13,11 +13,11 @@ private let outlookUnsupportedInstructions =
 
 
 /// mail-cli <command> [json-args]
-/// Commands: check_permission, detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email, list_rules, check_mail, delete_emails, save_draft, list_signatures
+/// Commands: check_permission, detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email, forward_email, redirect_email, list_rules, check_mail, delete_emails, mark_emails_read, flag_emails, move_emails, copy_emails, archive_emails, create_mailbox, mark_emails_spam, save_draft, list_signatures
 @main
 struct MailCLI {
     static let commandList =
-        "check_permission, detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email, list_rules, check_mail, delete_emails, save_draft, list_signatures"
+        "check_permission, detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email, forward_email, redirect_email, list_rules, check_mail, delete_emails, mark_emails_read, flag_emails, move_emails, copy_emails, archive_emails, create_mailbox, mark_emails_spam, save_draft, list_signatures"
 
     static func main() {
         runCLI(
@@ -55,6 +55,8 @@ func mailCommands(executor: @escaping ScriptExecutor) -> [String: (_ params: [St
         "search_emails": scripted(searchEmails),
         "send_email": scripted(MailSending.sendEmail),
         "reply_to_email": scripted(MailSending.replyToEmail),
+        "forward_email": scripted(MailSending.forwardEmail),
+        "redirect_email": scripted(MailSending.redirectEmail),
         "save_draft": scripted(MailSending.saveDraft),
         "list_signatures": scripted { _, scripts in try MailSending.listSignatures(scripts: scripts) },
         "list_rules": scripted { _, scripts in ["rules": try MailRules.listRules(scripts: scripts)] },
@@ -62,6 +64,13 @@ func mailCommands(executor: @escaping ScriptExecutor) -> [String: (_ params: [St
             try MailRules.checkMail(scripts: scripts, account: params["account"] as? String)
         },
         "delete_emails": scripted(deleteEmails),
+        "mark_emails_read": scripted(markEmailsRead),
+        "flag_emails": scripted(flagEmails),
+        "move_emails": scripted(moveEmails),
+        "copy_emails": scripted(copyEmails),
+        "archive_emails": scripted(archiveEmails),
+        "create_mailbox": scripted(createMailbox),
+        "mark_emails_spam": scripted(markEmailsSpam),
     ]
 }
 

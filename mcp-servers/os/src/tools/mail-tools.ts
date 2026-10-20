@@ -39,7 +39,7 @@ const BODY_SEARCH_BUDGET = mailTimeBudget(180_000);
 
 const BATCH_BUDGET = mailTimeBudget(120_000);
 
-const REPLY_BUDGET = mailTimeBudget(60_000, 2);
+const READ_THEN_SEND_BUDGET = mailTimeBudget(60_000, 2);
 
 const PLAIN_TEXT_ONLY =
   'Plain text only: line breaks are kept, HTML is sent as literal text, and no file can be attached.';
@@ -56,6 +56,14 @@ const SIGNATURE_PROPERTY = {
 const SPLIT_BATCH_STEP = `Split the mail ids into batches of at most ${MAIL_BATCH_LIMIT} and confirm each batch with the user separately.`;
 
 const RAW_TEXT_LIMIT = 100_000;
+
+/** Flag colors in the order of Mail's flag index, then `none`; mail-cli's `mailFlagColors` holds the same colors. */
+const MAIL_FLAG_VALUES = ['red', 'orange', 'yellow', 'green', 'blue', 'purple', 'gray', 'none'];
+
+const EXAMPLE_IDS = [
+  'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0',
+  'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxiQHg-Il0',
+];
 
 const MAIL_FAILURE = /\b(MAIL_[A-Z_]+): ([\s\S]*)$/;
 
@@ -79,7 +87,9 @@ const MAIL_FAILURE_TEACHING: Record<
     paramName: 'mailbox',
     received: args.mailbox,
     correctValueTool: 'listMailboxes',
-    nextStep: `${detail} Pass the name and account of a mailbox exactly as listMailboxes returns them.`,
+    nextStep:
+      `${detail} Pass the name and account of a mailbox exactly as listMailboxes returns them; ` +
+      'a mailbox the user wants that does not exist yet is made with createMailbox.',
   }),
   MAIL_ACCOUNT_NOT_FOUND: (detail, args) => ({
     paramName: 'account',
@@ -124,6 +134,11 @@ const MAIL_FAILURE_TEACHING: Record<
   MAIL_BATCH_TOO_LARGE: (detail) => ({
     paramName: 'ids',
     nextStep: `${detail} ${SPLIT_BATCH_STEP}`,
+  }),
+  MAIL_MAILBOX_EXISTS: (detail, args) => ({
+    paramName: 'name',
+    received: args.name,
+    nextStep: `${detail} Do not create it again: pass it to moveEmails or copyEmails as it is.`,
   }),
 };
 
@@ -234,12 +249,86 @@ interface ReplyToEmailParams {
   confirm_send?: boolean;
 }
 
+/** Input parameters for the forwardEmail tool. */
+interface ForwardEmailParams {
+  /** Mail id from listEmails or searchEmails. */
+  id: string;
+  /** Recipient(s), comma-separated. */
+  to: string;
+  /** CC recipient(s), comma-separated. */
+  cc?: string;
+  /** Plain text above the forwarded email. */
+  comment?: string;
+  /** Must be true, after the user agreed to the preview, to send. */
+  confirm_send?: boolean;
+}
+
+/** Input parameters for the redirectEmail tool. */
+interface RedirectEmailParams {
+  /** Mail id from listEmails or searchEmails. */
+  id: string;
+  /** Recipient(s), comma-separated. */
+  to: string;
+  /** CC recipient(s), comma-separated. */
+  cc?: string;
+  /** Must be true, after the user agreed to the preview, to send. */
+  confirm_send?: boolean;
+}
+
 /** Input parameters for the deleteEmails tool. */
 interface DeleteEmailsParams {
   /** 1 to 25 mail ids from listEmails or searchEmails. */
   ids: string[];
   /** Must be true, after the user agreed to the preview, to move the emails to the Trash. */
   confirm_delete?: boolean;
+}
+
+/** Input parameters for the markEmailsRead tool. */
+interface MarkEmailsReadParams {
+  /** 1 to 25 mail ids from listEmails or searchEmails. */
+  ids: string[];
+  /** true marks the emails read, false unread. */
+  read: boolean;
+}
+
+/** Input parameters for the flagEmails tool. */
+interface FlagEmailsParams {
+  /** 1 to 25 mail ids from listEmails or searchEmails. */
+  ids: string[];
+  /** Flag color, or none to take the flag off. */
+  flag: string;
+}
+
+/** Input parameters for the moveEmails and copyEmails tools. */
+interface TargetEmailsParams {
+  /** 1 to 25 mail ids from listEmails or searchEmails. */
+  ids: string[];
+  /** Target mailbox path from listMailboxes. */
+  mailbox: string;
+  /** Account of the target mailbox. */
+  account: string;
+}
+
+/** Input parameters for the archiveEmails tool. */
+interface ArchiveEmailsParams {
+  /** 1 to 25 mail ids from listEmails or searchEmails. */
+  ids: string[];
+}
+
+/** Input parameters for the createMailbox tool. */
+interface CreateMailboxParams {
+  /** Mailbox path to create. */
+  name: string;
+  /** Account to create it in. */
+  account: string;
+}
+
+/** Input parameters for the markEmailsSpam tool. */
+interface MarkEmailsSpamParams {
+  /** 1 to 25 mail ids from listEmails or searchEmails. */
+  ids: string[];
+  /** Must be true, after the user agreed to the preview, to mark the emails as spam. */
+  confirm_spam?: boolean;
 }
 
 /** Input parameters for the listMailRules tool (no params required). */
@@ -664,7 +753,7 @@ const replyToEmailTool: Tool = {
   annotations: DESTRUCTIVE_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
-    [META_KEYS.TIMEOUT_MS]: REPLY_BUDGET.toolMs,
+    [META_KEYS.TIMEOUT_MS]: READ_THEN_SEND_BUDGET.toolMs,
     [META_KEYS.OS_CATEGORY]: 'mail',
   },
   keywords: ['os', 'mail', 'email', 'reply', 'respond', 'answer'],
@@ -699,6 +788,97 @@ const replyToEmailTool: Tool = {
         id: 'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0',
         body: 'I agree with the proposed timeline.',
         reply_all: true,
+        confirm_send: true,
+      },
+    },
+  ],
+};
+
+const forwardEmailTool: Tool = {
+  name: 'forwardEmail',
+  description:
+    'Forward an email in any mailbox, by the mail id listEmails or searchEmails returned, with its attachments, through Mail\'s own forward (Mail picks the "Fwd:" subject and quotes the email); an optional plain-text comment goes above it. ' +
+    'Without confirm_send=true nothing is sent: the call returns a preview of the recipients, subject, comment, the forwarded email and its attachment names, and you must show it and ask the user before calling again with the same arguments and confirm_send=true. ' +
+    'Sending cannot be undone.',
+  annotations: DESTRUCTIVE_ANNOTATIONS,
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: READ_THEN_SEND_BUDGET.toolMs,
+    [META_KEYS.OS_CATEGORY]: 'mail',
+  },
+  keywords: ['os', 'mail', 'email', 'forward', 'fwd', 'share', 'pass on'],
+  example:
+    'const preview = await os.forwardEmail({ id: emails[0].id, to: "bob@example.com", comment: "FYI" }); /* ask the user */ await os.forwardEmail({ id: emails[0].id, to: "bob@example.com", comment: "FYI", confirm_send: true })',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', description: 'Mail id from listEmails or searchEmails' },
+      to: { type: 'string', description: 'Recipient email address(es), comma-separated' },
+      cc: { type: 'string', description: 'CC recipient(s), comma-separated' },
+      comment: {
+        type: 'string',
+        description: 'Text above the forwarded email. Plain text only: line breaks are kept.',
+      },
+      confirm_send: confirmProperty('forward this email'),
+    },
+    required: ['id', 'to'],
+  },
+  outputSchema: passOnOutputSchema(true),
+  inputExamples: [
+    {
+      description: 'Minimal: preview a forward before asking the user',
+      input: { id: 'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0', to: 'bob@example.com' },
+    },
+    {
+      description: 'Full: forward with a comment and CC after the user agreed',
+      input: {
+        id: 'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0',
+        to: 'bob@example.com',
+        cc: 'carol@example.com',
+        comment: 'Please handle this invoice.',
+        confirm_send: true,
+      },
+    },
+  ],
+};
+
+const redirectEmailTool: Tool = {
+  name: 'redirectEmail',
+  description:
+    'Redirect an email in any mailbox, by the mail id listEmails or searchEmails returned: Mail sends it unchanged, with its attachments, and the recipients see it as coming from its original sender; no comment can be added (use forwardEmail for that). ' +
+    'Without confirm_send=true nothing is sent: the call returns a preview of the recipients, the redirected email and its attachment names, and you must show it and ask the user before calling again with the same arguments and confirm_send=true. ' +
+    'Sending cannot be undone.',
+  annotations: DESTRUCTIVE_ANNOTATIONS,
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: READ_THEN_SEND_BUDGET.toolMs,
+    [META_KEYS.OS_CATEGORY]: 'mail',
+  },
+  keywords: ['os', 'mail', 'email', 'redirect', 'bounce', 'resend', 'pass on'],
+  example:
+    'const preview = await os.redirectEmail({ id: emails[0].id, to: "bob@example.com" }); /* ask the user */ await os.redirectEmail({ id: emails[0].id, to: "bob@example.com", confirm_send: true })',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', description: 'Mail id from listEmails or searchEmails' },
+      to: { type: 'string', description: 'Recipient email address(es), comma-separated' },
+      cc: { type: 'string', description: 'CC recipient(s), comma-separated' },
+      confirm_send: confirmProperty('redirect this email'),
+    },
+    required: ['id', 'to'],
+  },
+  outputSchema: passOnOutputSchema(false),
+  inputExamples: [
+    {
+      description: 'Minimal: preview a redirect before asking the user',
+      input: { id: 'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0', to: 'bob@example.com' },
+    },
+    {
+      description: 'Full: redirect with CC after the user agreed',
+      input: {
+        id: 'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0',
+        to: 'bob@example.com',
+        cc: 'carol@example.com',
         confirm_send: true,
       },
     },
@@ -982,6 +1162,254 @@ const deleteEmailsTool: Tool = {
   ],
 };
 
+const markEmailsReadTool: Tool = {
+  name: 'markEmailsRead',
+  description:
+    'Mark 1 to 25 emails, by the mail ids listEmails or searchEmails returned, as read (read=true) or unread (read=false). ' +
+    'Reversible, so no confirmation is needed. Reports every email: ok, or the error that left it unchanged.',
+  annotations: WRITE_ANNOTATIONS,
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: BATCH_BUDGET.toolMs,
+    [META_KEYS.OS_CATEGORY]: 'mail',
+  },
+  keywords: ['os', 'mail', 'email', 'read', 'unread', 'mark', 'seen'],
+  example: 'await os.markEmailsRead({ ids: [emails[0].id], read: true })',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      ids: mailIdsProperty('Emails to mark'),
+      read: { type: 'boolean', description: 'true: mark read; false: mark unread' },
+    },
+    required: ['ids', 'read'],
+  },
+  outputSchema: batchReportOutputSchema(),
+  inputExamples: [
+    { description: 'Minimal: mark one email read', input: { ids: [EXAMPLE_IDS[0]], read: true } },
+    { description: 'Full: mark two emails unread', input: { ids: EXAMPLE_IDS, read: false } },
+  ],
+};
+
+const flagEmailsTool: Tool = {
+  name: 'flagEmails',
+  description:
+    'Flag 1 to 25 emails, by the mail ids listEmails or searchEmails returned, with a color, or take the flag off with flag "none". ' +
+    'Reversible, so no confirmation is needed. Reports every email: ok, or the error that left it unchanged.',
+  annotations: WRITE_ANNOTATIONS,
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: BATCH_BUDGET.toolMs,
+    [META_KEYS.OS_CATEGORY]: 'mail',
+  },
+  keywords: ['os', 'mail', 'email', 'flag', 'unflag', 'color', 'mark', 'follow up'],
+  example: 'await os.flagEmails({ ids: [emails[0].id], flag: "red" })',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      ids: mailIdsProperty('Emails to flag'),
+      flag: {
+        type: 'string',
+        enum: MAIL_FLAG_VALUES,
+        description: 'Flag color, or "none" to take the flag off',
+      },
+    },
+    required: ['ids', 'flag'],
+  },
+  outputSchema: batchReportOutputSchema(),
+  inputExamples: [
+    { description: 'Minimal: flag one email red', input: { ids: [EXAMPLE_IDS[0]], flag: 'red' } },
+    {
+      description: 'Full: take the flag off two emails',
+      input: { ids: EXAMPLE_IDS, flag: 'none' },
+    },
+  ],
+};
+
+const moveEmailsTool: Tool = {
+  name: 'moveEmails',
+  description:
+    'Move 1 to 25 emails, by the mail ids listEmails or searchEmails returned, to a mailbox named together with its account (as listMailboxes returns them). ' +
+    'Reversible, so no confirmation is needed; a target that does not exist fails the call and nothing moves. ' +
+    'Reports every email: ok, or the error that left it where it is. A moved email gets a new mail id: list the target mailbox to act on it again.',
+  annotations: WRITE_ANNOTATIONS,
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: BATCH_BUDGET.toolMs,
+    [META_KEYS.OS_CATEGORY]: 'mail',
+  },
+  keywords: ['os', 'mail', 'email', 'move', 'file', 'folder', 'sort', 'organize'],
+  example:
+    'await os.moveEmails({ ids: [emails[0].id], mailbox: "Clients/Acme", account: "iCloud" })',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      ids: mailIdsProperty('Emails to move'),
+      mailbox: targetMailboxProperty(),
+      account: targetAccountProperty(),
+    },
+    required: ['ids', 'mailbox', 'account'],
+  },
+  outputSchema: batchReportOutputSchema(),
+  inputExamples: [
+    {
+      description: 'Minimal: move one email',
+      input: { ids: [EXAMPLE_IDS[0]], mailbox: 'Receipts', account: 'iCloud' },
+    },
+    {
+      description: 'Full: move two emails to a nested mailbox on this Mac',
+      input: { ids: EXAMPLE_IDS, mailbox: 'Clients/Acme', account: 'On My Mac' },
+    },
+  ],
+};
+
+const copyEmailsTool: Tool = {
+  name: 'copyEmails',
+  description:
+    'Copy 1 to 25 emails, by the mail ids listEmails or searchEmails returned, to a mailbox named together with its account (as listMailboxes returns them); the originals stay where they are. ' +
+    'No confirmation is needed; a target that does not exist fails the call and nothing is copied. Reports every email: ok, or the error that kept it from being copied.',
+  annotations: WRITE_ANNOTATIONS,
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: BATCH_BUDGET.toolMs,
+    [META_KEYS.OS_CATEGORY]: 'mail',
+  },
+  keywords: ['os', 'mail', 'email', 'copy', 'duplicate', 'folder'],
+  example:
+    'await os.copyEmails({ ids: [emails[0].id], mailbox: "Clients/Acme", account: "iCloud" })',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      ids: mailIdsProperty('Emails to copy'),
+      mailbox: targetMailboxProperty(),
+      account: targetAccountProperty(),
+    },
+    required: ['ids', 'mailbox', 'account'],
+  },
+  outputSchema: batchReportOutputSchema(),
+  inputExamples: [
+    {
+      description: 'Minimal: copy one email',
+      input: { ids: [EXAMPLE_IDS[0]], mailbox: 'Receipts', account: 'iCloud' },
+    },
+    {
+      description: 'Full: copy two emails to a mailbox on this Mac',
+      input: { ids: EXAMPLE_IDS, mailbox: 'Clients/Acme', account: 'On My Mac' },
+    },
+  ],
+};
+
+const archiveEmailsTool: Tool = {
+  name: 'archiveEmails',
+  description:
+    'Archive 1 to 25 emails, by the mail ids listEmails or searchEmails returned: each moves to the Archive mailbox of its own account (All Mail on Gmail). ' +
+    'Reversible, so no confirmation is needed. An account without an archive mailbox leaves the email where it is and reports MAIL_ARCHIVE_NOT_FOUND for it; then ask the user where to keep it and use moveEmails.',
+  annotations: WRITE_ANNOTATIONS,
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: BATCH_BUDGET.toolMs,
+    [META_KEYS.OS_CATEGORY]: 'mail',
+  },
+  keywords: ['os', 'mail', 'email', 'archive', 'clean', 'inbox zero'],
+  example: 'await os.archiveEmails({ ids: [emails[0].id] })',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      ids: mailIdsProperty('Emails to archive'),
+    },
+    required: ['ids'],
+  },
+  outputSchema: batchReportOutputSchema(),
+  inputExamples: [
+    { description: 'Minimal: archive one email', input: { ids: [EXAMPLE_IDS[0]] } },
+    { description: 'Full: archive two emails', input: { ids: EXAMPLE_IDS } },
+  ],
+};
+
+const createMailboxTool: Tool = {
+  name: 'createMailbox',
+  description:
+    'Create a mailbox in an account (the account field from listMailboxes, "On My Mac" for a local one). ' +
+    'name is its path inside the account; Clients/Acme makes Acme inside Clients. An existing mailbox is refused (MAIL_MAILBOX_EXISTS), never reused. ' +
+    'No tool deletes a mailbox.',
+  annotations: WRITE_ANNOTATIONS,
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: STANDARD_BUDGET.toolMs,
+    [META_KEYS.OS_CATEGORY]: 'mail',
+  },
+  keywords: ['os', 'mail', 'email', 'mailbox', 'folder', 'create', 'new'],
+  example: 'await os.createMailbox({ name: "Clients/Acme", account: "iCloud" })',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      name: {
+        type: 'string',
+        description: 'Path of the new mailbox inside the account, e.g. Receipts or Clients/Acme',
+      },
+      account: {
+        type: 'string',
+        description:
+          'Account to create it in: the account field from listMailboxes, or "On My Mac"',
+      },
+    },
+    required: ['name', 'account'],
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      status: { type: 'string', description: '"created"' },
+      mailbox: { type: 'string', description: 'Path of the new mailbox; pass it to moveEmails' },
+      account: { type: 'string' },
+    },
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: a mailbox in an account',
+      input: { name: 'Receipts', account: 'iCloud' },
+    },
+    {
+      description: 'Full: a nested mailbox on this Mac',
+      input: { name: 'Clients/Acme', account: 'On My Mac' },
+    },
+  ],
+};
+
+const markEmailsSpamTool: Tool = {
+  name: 'markEmailsSpam',
+  description:
+    "Mark 1 to 25 emails, by the mail ids listEmails or searchEmails returned, as spam: Mail's junk filter learns from them and each moves to the Junk mailbox of its own account. " +
+    'Without confirm_spam=true nothing changes: the call returns a preview of each email (sender, subject, date, mailbox), and you must show it and ask the user before calling again with confirm_spam=true. ' +
+    'The confirmed call reports every email: ok, or the error that kept it where it is.',
+  annotations: DESTRUCTIVE_ANNOTATIONS,
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: BATCH_BUDGET.toolMs,
+    [META_KEYS.OS_CATEGORY]: 'mail',
+  },
+  keywords: ['os', 'mail', 'email', 'spam', 'junk', 'phishing', 'filter'],
+  example:
+    'const preview = await os.markEmailsSpam({ ids: [emails[0].id] }); /* ask the user */ await os.markEmailsSpam({ ids: [emails[0].id], confirm_spam: true })',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      ids: mailIdsProperty('Emails to mark as spam'),
+      confirm_spam: confirmProperty('mark the emails as spam'),
+    },
+    required: ['ids'],
+  },
+  outputSchema: gatedBatchOutputSchema(),
+  inputExamples: [
+    {
+      description: 'Minimal: preview one email before asking the user',
+      input: { ids: [EXAMPLE_IDS[0]] },
+    },
+    {
+      description: 'Full: mark two emails as spam after the user agreed',
+      input: { ids: EXAMPLE_IDS, confirm_spam: true },
+    },
+  ],
+};
+
 /**
  * Detects available mail clients on this device.
  * @param _params - Unused tool input parameters.
@@ -1133,7 +1561,46 @@ export async function handleReplyToEmail(params: ReplyToEmailParams): Promise<To
     ],
   });
   if (!v.valid) return v.error;
-  return runMail('reply_to_email', p, REPLY_BUDGET);
+  return runMail('reply_to_email', p, READ_THEN_SEND_BUDGET);
+}
+
+/**
+ * Forwards an email with its attachments; without confirm_send mail-cli only previews the forward.
+ * @param params - Tool input parameters.
+ */
+export async function handleForwardEmail(params: ForwardEmailParams): Promise<ToolResult> {
+  const p = asRecord(params);
+  const v = validateAll(p, {
+    required: ['id', 'to'],
+    booleans: ['confirm_send'],
+    strings: [
+      ['id', MAX_LENGTHS.id, false],
+      ['to', MAX_LENGTHS.short, false],
+      ['cc', MAX_LENGTHS.short, false],
+      ['comment', MAX_LENGTHS.body, true],
+    ],
+  });
+  if (!v.valid) return v.error;
+  return runMail('forward_email', p, READ_THEN_SEND_BUDGET);
+}
+
+/**
+ * Redirects an email unchanged; without confirm_send mail-cli only previews the redirect.
+ * @param params - Tool input parameters.
+ */
+export async function handleRedirectEmail(params: RedirectEmailParams): Promise<ToolResult> {
+  const p = asRecord(params);
+  const v = validateAll(p, {
+    required: ['id', 'to'],
+    booleans: ['confirm_send'],
+    strings: [
+      ['id', MAX_LENGTHS.id, false],
+      ['to', MAX_LENGTHS.short, false],
+      ['cc', MAX_LENGTHS.short, false],
+    ],
+  });
+  if (!v.valid) return v.error;
+  return runMail('redirect_email', p, READ_THEN_SEND_BUDGET);
 }
 
 /**
@@ -1171,6 +1638,136 @@ export async function handleDeleteEmails(params: DeleteEmailsParams): Promise<To
 }
 
 /**
+ * Marks emails read or unread.
+ * @param params - Tool input parameters.
+ */
+export async function handleMarkEmailsRead(params: MarkEmailsReadParams): Promise<ToolResult> {
+  const p = asRecord(params);
+  const invalid = mailBatchError(p);
+  if (invalid) return invalid;
+  const v = validateAll(p, { booleans: ['read'] });
+  if (!v.valid) return v.error;
+  return runMail('mark_emails_read', p, BATCH_BUDGET);
+}
+
+/**
+ * Flags emails with a color, or takes the flag off.
+ * @param params - Tool input parameters.
+ */
+export async function handleFlagEmails(params: FlagEmailsParams): Promise<ToolResult> {
+  const p = asRecord(params);
+  const invalid = mailBatchError(p);
+  if (invalid) return invalid;
+  const v = validateAll(p, { strings: [['flag', MAX_LENGTHS.short, false]] });
+  if (!v.valid) return v.error;
+  if (!MAIL_FLAG_VALUES.includes(p.flag as string)) {
+    return teachingToolResult(
+      {
+        paramName: 'flag',
+        received: p.flag,
+        nextStep: `Pass one of ${MAIL_FLAG_VALUES.join(', ')}.`,
+      },
+      'INVALID_VALUE'
+    );
+  }
+  return runMail('flag_emails', p, BATCH_BUDGET);
+}
+
+/**
+ * Moves emails to a mailbox of an account.
+ * @param params - Tool input parameters.
+ */
+export async function handleMoveEmails(params: TargetEmailsParams): Promise<ToolResult> {
+  return runTargetBatch('move_emails', asRecord(params));
+}
+
+/**
+ * Copies emails to a mailbox of an account.
+ * @param params - Tool input parameters.
+ */
+export async function handleCopyEmails(params: TargetEmailsParams): Promise<ToolResult> {
+  return runTargetBatch('copy_emails', asRecord(params));
+}
+
+/**
+ * Moves emails to the archive mailbox of their own account.
+ * @param params - Tool input parameters.
+ */
+export async function handleArchiveEmails(params: ArchiveEmailsParams): Promise<ToolResult> {
+  const p = asRecord(params);
+  const invalid = mailBatchError(p);
+  if (invalid) return invalid;
+  return runMail('archive_emails', p, BATCH_BUDGET);
+}
+
+/**
+ * Creates a mailbox in an account.
+ * @param params - Tool input parameters.
+ */
+export async function handleCreateMailbox(params: CreateMailboxParams): Promise<ToolResult> {
+  const p = asRecord(params);
+  const v = validateAll(p, {
+    required: ['name', 'account'],
+    strings: [
+      ['name', MAX_LENGTHS.short, false],
+      ['account', MAX_LENGTHS.short, false],
+    ],
+  });
+  if (!v.valid) return v.error;
+  return runMail('create_mailbox', p);
+}
+
+/**
+ * Marks emails as spam and moves them to the Junk mailbox; without confirm_spam mail-cli only previews them.
+ * @param params - Tool input parameters.
+ */
+export async function handleMarkEmailsSpam(params: MarkEmailsSpamParams): Promise<ToolResult> {
+  const p = asRecord(params);
+  const invalid = mailBatchError(p);
+  if (invalid) return invalid;
+  const v = validateAll(p, { booleans: ['confirm_spam'] });
+  if (!v.valid) return v.error;
+  return runMail('mark_emails_spam', p, BATCH_BUDGET);
+}
+
+/**
+ * Validates a move or copy to a target mailbox of an account and runs it.
+ * @param command - mail-cli command.
+ * @param p - Tool arguments.
+ */
+async function runTargetBatch(command: string, p: Record<string, unknown>): Promise<ToolResult> {
+  const invalid = mailBatchError(p);
+  if (invalid) return invalid;
+  const v = validateAll(p, {
+    required: ['mailbox', 'account'],
+    strings: [
+      ['mailbox', MAX_LENGTHS.short, false],
+      ['account', MAX_LENGTHS.short, false],
+    ],
+  });
+  if (!v.valid) return v.error;
+  return runMail(command, p, BATCH_BUDGET);
+}
+
+/** The input schema of a move or copy's target `mailbox`. */
+function targetMailboxProperty(): Record<string, unknown> {
+  return {
+    type: 'string',
+    description:
+      'Target mailbox path: the name field from listMailboxes. Create a missing one with createMailbox first.',
+  };
+}
+
+/** The input schema of a move or copy's target `account`. */
+function targetAccountProperty(): Record<string, unknown> {
+  return {
+    type: 'string',
+    description:
+      'Account of the target mailbox: the account field from listMailboxes, or "On My Mac"',
+  };
+}
+
+/**
  * The input schema of a batch tool's `ids`: 1 to {@link MAIL_BATCH_LIMIT} mail ids.
  * @param what - What the ids name.
  */
@@ -1199,9 +1796,11 @@ function confirmProperty(action: string): Record<string, unknown> {
 
 /** The output schema of a gated batch tool: its preview, or its per-mail report. */
 function gatedBatchOutputSchema(): Tool['outputSchema'] {
+  const report = batchReportOutputSchema();
   return {
     type: 'object',
     properties: {
+      ...report.properties,
       status: {
         type: 'string',
         description:
@@ -1212,6 +1811,21 @@ function gatedBatchOutputSchema(): Tool['outputSchema'] {
         description: 'Preview only: the flag to set true once the user agreed',
       },
       instruction: { type: 'string', description: 'Preview only: what to ask the user' },
+    },
+  };
+}
+
+/** The output schema of a batch tool's per-mail report. */
+function batchReportOutputSchema(): Tool['outputSchema'] & {
+  properties: Record<string, unknown>;
+} {
+  return {
+    type: 'object',
+    properties: {
+      status: {
+        type: 'string',
+        description: '"completed" (every email), "partial" or "failed" (no email)',
+      },
       emails: {
         type: 'array',
         items: {
@@ -1268,6 +1882,56 @@ function sendOutputSchema(withBcc: boolean): Tool['outputSchema'] {
       signature: {
         type: 'string',
         description: 'The signature Mail adds below the text; absent when none was chosen',
+      },
+    },
+  };
+}
+
+/**
+ * The output schema of a gated forward or redirect: its preview, or what was sent.
+ * @param withComment - Whether the tool takes a comment.
+ */
+function passOnOutputSchema(withComment: boolean): Tool['outputSchema'] {
+  const addresses = (what: string) => ({
+    type: 'array',
+    items: { type: 'string' },
+    description: `${what} addresses`,
+  });
+  return {
+    type: 'object',
+    properties: {
+      status: {
+        type: 'string',
+        description:
+          '"confirmation_required" (nothing sent: ask the user), or "sent" after confirmation',
+      },
+      confirm_param: {
+        type: 'string',
+        description: 'Preview only: the flag to set true once the user agreed',
+      },
+      instruction: { type: 'string', description: 'Preview only: what to ask the user' },
+      to: addresses('To'),
+      cc: addresses('CC'),
+      subject: { type: 'string', description: 'Subject of the message that is sent' },
+      ...(withComment
+        ? { comment: { type: 'string', description: 'Text above the forwarded email' } }
+        : {}),
+      original: {
+        type: 'object',
+        description: 'The email that is passed on',
+        properties: {
+          id: { type: 'string', description: 'Mail id' },
+          subject: { type: 'string' },
+          sender: { type: 'string' },
+          date: { type: 'string', description: 'Date received, ISO 8601 with the UTC offset' },
+          mailbox: { type: 'string' },
+          account: { type: 'string' },
+        },
+      },
+      attachments: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Names of the attachments that go along',
       },
     },
   };
@@ -1366,9 +2030,18 @@ export function createMailTools(): ToolDefinition[] {
     guardedTool(searchEmailsTool, handleSearchEmails),
     guardedTool(sendEmailTool, handleSendEmail),
     guardedTool(replyToEmailTool, handleReplyToEmail),
+    guardedTool(forwardEmailTool, handleForwardEmail),
+    guardedTool(redirectEmailTool, handleRedirectEmail),
     guardedTool(listMailRulesTool, handleListMailRules),
     guardedTool(checkMailTool, handleCheckMail),
     guardedTool(deleteEmailsTool, handleDeleteEmails),
+    guardedTool(markEmailsReadTool, handleMarkEmailsRead),
+    guardedTool(flagEmailsTool, handleFlagEmails),
+    guardedTool(moveEmailsTool, handleMoveEmails),
+    guardedTool(copyEmailsTool, handleCopyEmails),
+    guardedTool(archiveEmailsTool, handleArchiveEmails),
+    guardedTool(createMailboxTool, handleCreateMailbox),
+    guardedTool(markEmailsSpamTool, handleMarkEmailsSpam),
     guardedTool(saveDraftTool, handleSaveDraft),
     guardedTool(listMailSignaturesTool, handleListMailSignatures),
   ];

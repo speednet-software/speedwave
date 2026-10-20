@@ -31,6 +31,16 @@ struct ConfirmationGate {
     }
 }
 
+/// What a batch command does to each mail: `lines` run on every mail found (AppleScript using `m`, `mb` and
+/// `spwAcctName`), after `setup` ran once for the whole batch; a failed setup fails the call, its lookup failures
+/// naming `mailbox` and `account`.
+struct MailAction {
+    let lines: String
+    var setup = ""
+    var mailbox: String?
+    var account: String?
+}
+
 /// The mails of one batch command: 1 to `mailBatchLimit` distinct mail ids, all decoded before any script runs.
 struct MailBatch {
     /// What became of one mail of the batch: found (preview) or acted on, or the reason it was not.
@@ -82,7 +92,7 @@ struct MailBatch {
         params: [String: Any],
         scripts: MailScripts,
         gate: ConfirmationGate,
-        action: String
+        action: MailAction
     ) throws -> [String: Any] {
         let batch = try MailBatch(params: params)
         guard gate.isConfirmed(params) else {
@@ -103,10 +113,15 @@ struct MailBatch {
         ]
     }
 
-    /// Looks up every mail in one script, each in its own `try`, and runs `action` (AppleScript lines using `m`, `mb`
-    /// and `spwAcctName`) on each one found; nil only reads the mails.
-    func run(scripts: MailScripts, action: String?) throws -> [Outcome] {
-        let output = try scripts.run(script(action: action))
+    /// A reversible command: runs `action` on every mail without confirmation and reports each one.
+    func apply(scripts: MailScripts, action: MailAction) throws -> [String: Any] {
+        Self.report(try run(scripts: scripts, action: action))
+    }
+
+    /// Looks up every mail in one script, each in its own `try`, and runs `action` on each one found; nil only reads
+    /// the mails.
+    func run(scripts: MailScripts, action: MailAction?) throws -> [Outcome] {
+        let output = try scripts.run(script(action: action), mailbox: action?.mailbox, account: action?.account)
         let rows = output.isEmpty ? [] : output.components(separatedBy: Self.rowSeparator)
         guard rows.count == ids.count else {
             throw ScriptError.scriptFailed("Unexpected batch result from Mail.app")
@@ -114,7 +129,7 @@ struct MailBatch {
         return try zip(ids, rows).map { id, row in try outcome(id, row: row, scripts: scripts) }
     }
 
-    private func script(action: String?) -> String {
+    private func script(action: MailAction?) -> String {
         let perMail = ids.map { id in
             """
                 set spwSubject to ""
@@ -125,7 +140,7 @@ struct MailBatch {
                     set spwSubject to subject of m
                     set spwSender to sender of m
                     set spwDate to date received of m
-            \(action ?? "")
+            \(action?.lines ?? "")
                     set end of spwRows to {"ok", spwSubject, spwSender, spwDate, ""}
                 on error spwErr number spwNum
                     set end of spwRows to {"error", spwSubject, spwSender, spwDate, spwErr & " (" & spwNum & ")"}
@@ -135,6 +150,7 @@ struct MailBatch {
         return """
         set spwRows to {}
         tell application "Mail"
+        \(action?.setup ?? "")
         \(perMail)
         end tell
         set spwLines to {}
@@ -176,13 +192,15 @@ struct MailBatch {
             if case .automationDenied = failure { throw failure }
             return failure.localizedDescription
         }
-        if detail.contains(trashNotFoundMarker) {
-            return MailFailure.trashNotFound(account: id.account).localizedDescription
-        }
-        if detail.contains(alreadyInTrashMarker) {
-            return MailFailure.alreadyInTrash.localizedDescription
-        }
-        return detail
+        let perMail: [(marker: String, failure: MailFailure)] = [
+            (trashNotFoundMarker, .trashNotFound(account: id.account)),
+            (alreadyInTrashMarker, .alreadyInTrash),
+            (junkNotFoundMarker, .junkNotFound(account: id.account)),
+            (alreadyInJunkMarker, .alreadyInJunk),
+            (archiveNotFoundMarker, .archiveNotFound(account: id.account)),
+            (alreadyArchivedMarker, .alreadyArchived),
+        ]
+        return perMail.first { detail.contains($0.marker) }?.failure.localizedDescription ?? detail
     }
 }
 
@@ -199,28 +217,39 @@ func deleteEmails(params: [String: Any], scripts: MailScripts) throws -> [String
             tool: "deleteEmails",
             question: "Move these emails to the Trash?"
         ),
-        action: moveToTrashAction
+        action: MailAction(lines: moveToTrashAction)
     )
 }
 
 /// AppleScript lines that move `m` to the Trash mailbox of the account `spwAcctName`; Mail's `delete` is never used,
 /// because an account set not to move deleted messages to the Trash would erase the mail.
-let moveToTrashAction = """
-            set spwTrash to missing value
-            repeat with spwBoxRef in mailboxes of trash mailbox
+let moveToTrashAction = accountSpecialMailbox(
+    "trash mailbox", into: "spwTrash", missing: trashNotFoundMarker, already: alreadyInTrashMarker
+) + """
+
+            move m to spwTrash
+    """
+
+/// AppleScript lines that set `variable` to the child of Mail's `special` mailbox (`trash mailbox`, `junk mailbox`)
+/// that belongs to the account `spwAcctName`, else to `special` itself when it belongs to that account; none is
+/// error `missing`, and `m` already in it is error `already`.
+func accountSpecialMailbox(_ special: String, into variable: String, missing: String, already: String) -> String {
+    """
+            set \(variable) to missing value
+            repeat with spwBoxRef in mailboxes of \(special)
                 set spwBox to contents of spwBoxRef
                 set spwOwner to "\(escapeAppleScript(AppleMailClient.localAccountName))"
                 try
                     set spwOwner to name of account of spwBox
                 end try
-                if spwOwner is spwAcctName then set spwTrash to spwBox
+                if spwOwner is spwAcctName then set \(variable) to spwBox
             end repeat
-            if spwTrash is missing value then
+            if \(variable) is missing value then
                 try
-                    if name of account of trash mailbox is spwAcctName then set spwTrash to trash mailbox
+                    if name of account of \(special) is spwAcctName then set \(variable) to \(special)
                 end try
             end if
-            if spwTrash is missing value then error "\(trashNotFoundMarker)"
-            if name of mb is name of spwTrash then error "\(alreadyInTrashMarker)"
-            move m to spwTrash
+            if \(variable) is missing value then error "\(missing)"
+            if name of mb is name of \(variable) then error "\(already)"
     """
+}
