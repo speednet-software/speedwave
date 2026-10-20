@@ -10,20 +10,23 @@ import {
   handleListEmails,
   handleGetEmail,
   handleSearchEmails,
+} from './mail-reading.js';
+import {
   handleSendEmail,
   handleReplyToEmail,
   handleForwardEmail,
   handleRedirectEmail,
-  handleListMailRules,
-  handleCheckMail,
+  handleSaveDraft,
+  handleListMailSignatures,
+} from './mail-sending.js';
+import { handleListMailRules, handleCheckMail } from './mail-rules.js';
+import {
   handleDeleteEmails,
   handleCreateMailbox,
   handleMoveEmails,
   handleCopyEmails,
-  handleSaveDraft,
-  handleListMailSignatures,
-  createMailTools,
-} from './mail-tools.js';
+} from './mail-organizing.js';
+import { createMailTools } from './mail-tools.js';
 
 vi.mock('../platform-runner.js', () => ({
   runCommand: vi.fn(),
