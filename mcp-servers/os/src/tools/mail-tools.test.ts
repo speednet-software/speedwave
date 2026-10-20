@@ -3,6 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { META_KEYS } from '@speedwave/mcp-shared';
 import {
   handleDetectMailClients,
   handleListMailboxes,
@@ -19,6 +20,16 @@ vi.mock('../platform-runner.js', () => ({
 }));
 
 import { runCommand } from '../platform-runner.js';
+
+const PROCESS_TIMEOUT = expect.any(Number);
+
+/**
+ * The arguments mail-cli receives for a call: the tool's arguments plus the script time budget.
+ * @param args - Tool arguments.
+ */
+function budgeted(args: Record<string, unknown>): Record<string, unknown> {
+  return { ...args, script_timeout_ms: expect.any(Number) };
+}
 
 describe('mail-tools', () => {
   beforeEach(() => {
@@ -39,7 +50,12 @@ describe('mail-tools', () => {
 
       expect(result.success).toBe(true);
       expect(result.data).toEqual(mockData);
-      expect(runCommand).toHaveBeenCalledWith('mail', 'detect_clients');
+      expect(runCommand).toHaveBeenCalledWith(
+        'mail',
+        'detect_clients',
+        budgeted({}),
+        PROCESS_TIMEOUT
+      );
     });
   });
 
@@ -67,7 +83,12 @@ describe('mail-tools', () => {
       const result = await handleListEmails({ limit: 10 });
 
       expect(result.success).toBe(true);
-      expect(runCommand).toHaveBeenCalledWith('mail', 'list_emails', { limit: 10 });
+      expect(runCommand).toHaveBeenCalledWith(
+        'mail',
+        'list_emails',
+        budgeted({ limit: 10 }),
+        PROCESS_TIMEOUT
+      );
     });
   });
 
@@ -102,7 +123,12 @@ describe('mail-tools', () => {
       const result = await handleSearchEmails({ query: 'invoice' });
 
       expect(result.success).toBe(true);
-      expect(runCommand).toHaveBeenCalledWith('mail', 'search_emails', { query: 'invoice' });
+      expect(runCommand).toHaveBeenCalledWith(
+        'mail',
+        'search_emails',
+        budgeted({ query: 'invoice' }),
+        PROCESS_TIMEOUT
+      );
     });
 
     it('fails when query is empty', async () => {
@@ -166,13 +192,18 @@ describe('mail-tools', () => {
         confirm_send: true,
       });
 
-      expect(runCommand).toHaveBeenCalledWith('mail', 'send_email', {
-        to: 'bob@example.com',
-        subject: 'Test',
-        body: 'Hello Bob',
-        bcc: 'carol@example.com',
-        confirm_send: true,
-      });
+      expect(runCommand).toHaveBeenCalledWith(
+        'mail',
+        'send_email',
+        budgeted({
+          to: 'bob@example.com',
+          subject: 'Test',
+          body: 'Hello Bob',
+          bcc: 'carol@example.com',
+          confirm_send: true,
+        }),
+        PROCESS_TIMEOUT
+      );
     });
   });
 
@@ -248,7 +279,7 @@ describe('mail-tools', () => {
 
         await tool.handler(input);
 
-        expect(vi.mocked(runCommand).mock.calls[0][2]).toEqual(input);
+        expect(vi.mocked(runCommand).mock.calls[0][2]).toEqual(budgeted(input));
       }
     );
 
@@ -490,6 +521,141 @@ describe('mail-tools', () => {
         expect(result.success).toBe(false);
         expect(result.error?.code).toBe('INVALID_TYPE');
       });
+    });
+  });
+
+  describe('time budget', () => {
+    it.each(createMailTools().map((t) => [t.tool.name, t] as const))(
+      '%s ends the script before mail-cli is killed, and mail-cli before the hub gives up',
+      async (name, t) => {
+        vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: {} });
+
+        await t.handler(validInput(name));
+
+        const [, , args, processTimeoutMs] = vi.mocked(runCommand).mock.calls[0];
+        const scriptTimeoutMs = (args as Record<string, unknown>).script_timeout_ms as number;
+        const toolTimeoutMs = t.tool._meta?.[META_KEYS.TIMEOUT_MS] as number;
+        expect(scriptTimeoutMs).toBeGreaterThan(0);
+        expect(processTimeoutMs).toBeGreaterThan(scriptTimeoutMs);
+        expect(toolTimeoutMs).toBeGreaterThan(processTimeoutMs!);
+      }
+    );
+
+    it('leaves Mail at least a few seconds of headroom before the process is killed', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { emails: [] } });
+
+      await handleListEmails({});
+
+      const [, , args, processTimeoutMs] = vi.mocked(runCommand).mock.calls[0];
+      const scriptTimeoutMs = (args as Record<string, unknown>).script_timeout_ms as number;
+      expect(processTimeoutMs! - scriptTimeoutMs).toBeGreaterThanOrEqual(2_000);
+    });
+  });
+
+  describe('mail-cli failures reach Claude as teaching errors', () => {
+    const cliFailure = (command: string, stderr: string): Error =>
+      new Error(`mail.${command} failed: ${stderr}`);
+
+    it('a timeout says how long Mail had and how to retry safely', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        cliFailure('list_emails', 'MAIL_TIMEOUT: Mail.app did not answer within 25 s.')
+      );
+
+      const result = await handleListEmails({ mailbox: 'Archive', limit: 500 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('MAIL_TIMEOUT');
+      expect(result.error?.message).toContain('Mail.app did not answer within 25 s.');
+      expect(result.error?.message).toContain('smaller limit');
+      expect(result.error?.message).toContain('Sent');
+    });
+
+    it('a denied Automation permission tells the user where to allow it', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        cliFailure(
+          'list_mailboxes',
+          'MAIL_AUTOMATION_DENIED: Speedwave is not allowed to control Mail.app (Not authorized to send Apple events to Mail. (-1743)).'
+        )
+      );
+
+      const result = await handleListMailboxes({});
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('MAIL_AUTOMATION_DENIED');
+      expect(result.error?.message).toContain('not allowed to control Mail.app');
+      expect(result.error?.message).toContain('System Settings > Privacy & Security > Automation');
+    });
+
+    it('a missing mailbox names it and points at listMailboxes', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        cliFailure(
+          'search_emails',
+          "MAIL_MAILBOX_NOT_FOUND: Mailbox 'Archiv' not found in any account."
+        )
+      );
+
+      const result = await handleSearchEmails({ query: 'x', mailbox: 'Archiv' });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('MAIL_MAILBOX_NOT_FOUND');
+      expect(result.error?.message).toContain('Invalid mailbox (received: "Archiv")');
+      expect(result.error?.message).toContain('Get a valid value from listMailboxes');
+      expect(result.error?.message).toContain("Mailbox 'Archiv' not found in any account.");
+    });
+
+    it('a missing account names it and points at listMailboxes', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        cliFailure('list_emails', "MAIL_ACCOUNT_NOT_FOUND: Account 'Nope' not found.")
+      );
+
+      const result = await handleListEmails({ mailbox: 'Inbox', account: 'Nope' });
+
+      expect(result.error?.code).toBe('MAIL_ACCOUNT_NOT_FOUND');
+      expect(result.error?.message).toContain('Invalid account (received: "Nope")');
+      expect(result.error?.message).toContain('listMailboxes');
+    });
+
+    it('a mailbox in several accounts asks for the account', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        cliFailure(
+          'list_emails',
+          "MAIL_MAILBOX_AMBIGUOUS: Mailbox 'Inbox' exists in several accounts: Exchange, Google."
+        )
+      );
+
+      const result = await handleListEmails({ mailbox: 'Inbox' });
+
+      expect(result.error?.code).toBe('MAIL_MAILBOX_AMBIGUOUS');
+      expect(result.error?.message).toContain('Invalid account');
+      expect(result.error?.message).toContain('Exchange, Google');
+    });
+
+    it('reaches Claude through the registered tool as an error result', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        cliFailure('list_emails', 'MAIL_TIMEOUT: Mail.app did not answer within 25 s.')
+      );
+      const tool = createMailTools().find((t) => t.tool.name === 'listEmails')!;
+
+      const result = await tool.handler({ limit: 5 });
+
+      expect(result.isError).toBe(true);
+      const text = (result.content[0] as { text: string }).text;
+      expect(text).toContain('MAIL_TIMEOUT');
+      expect(text).toContain('Mail.app did not answer within 25 s.');
+    });
+
+    it('any other failure keeps its own message', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        cliFailure('get_email', 'AppleScript error: Email not found')
+      );
+      const tool = createMailTools().find((t) => t.tool.name === 'getEmail')!;
+
+      const result = await tool.handler({ id: '<a@x>' });
+
+      expect(result.isError).toBe(true);
+      const text = (result.content[0] as { text: string }).text;
+      expect(text).toContain('HANDLER_ERROR');
+      expect(text).toContain('AppleScript error: Email not found');
     });
   });
 });

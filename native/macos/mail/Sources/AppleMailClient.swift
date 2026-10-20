@@ -67,8 +67,8 @@ enum AppleMailClient {
         end tell
         """
 
-    static func listMailboxes() throws -> [[String: Any]] {
-        return parseMailboxes(try ScriptRunner.run(listMailboxesScript, timeout: 15))
+    static func listMailboxes(scripts: MailScripts) throws -> [[String: Any]] {
+        return parseMailboxes(try scripts.run(listMailboxesScript))
     }
 
     /// Mailbox rows with `message_count` as a number; a count that is not an integer is left out.
@@ -80,7 +80,7 @@ enum AppleMailClient {
         }
     }
 
-    static func listEmails(limit: Int, mailbox: String?, account: String?) throws -> [[String: Any]] {
+    static func listEmails(scripts: MailScripts, limit: Int, mailbox: String?, account: String?) throws -> [[String: Any]] {
         let script = """
         tell application "Mail"
         \(mailboxLookup(name: mailbox, account: account))
@@ -100,7 +100,7 @@ enum AppleMailClient {
         end tell
         """
 
-        let output = try runMailboxScript(script, timeout: 30, mailbox: mailbox, account: account)
+        let output = try scripts.run(script, mailbox: mailbox, account: account)
         return parseMessageList(output)
     }
 
@@ -113,7 +113,7 @@ enum AppleMailClient {
         }
     }
 
-    static func getEmail(id: String) throws -> [String: Any] {
+    static func getEmail(scripts: MailScripts, id: String) throws -> [String: Any] {
         let idEsc = escapeAppleScript(id)
         let script = """
         tell application "Mail"
@@ -135,11 +135,11 @@ enum AppleMailClient {
         end tell
         """
 
-        let output = try ScriptRunner.run(script, timeout: 15)
+        let output = try scripts.run(script)
         return try parseEmailDetail(output, id: id)
     }
 
-    static func searchEmails(query: String, limit: Int, mailbox: String?, account: String?) throws -> [[String: Any]] {
+    static func searchEmails(scripts: MailScripts, query: String, limit: Int, mailbox: String?, account: String?) throws -> [[String: Any]] {
         let queryEsc = escapeAppleScript(query)
         let script = """
         tell application "Mail"
@@ -161,11 +161,11 @@ enum AppleMailClient {
         end tell
         """
 
-        let output = try runMailboxScript(script, timeout: 30, mailbox: mailbox, account: account)
+        let output = try scripts.run(script, mailbox: mailbox, account: account)
         return parseDelimited(output, fields: ["id", "subject", "sender", "date"])
     }
 
-    static func sendEmail(to: String, subject: String, body: String, cc: String?, bcc: String? = nil) throws -> [String: Any] {
+    static func sendEmail(scripts: MailScripts, to: String, subject: String, body: String, cc: String?, bcc: String? = nil) throws -> [String: Any] {
         let subjectEsc = escapeAppleScript(subject)
         let bodyEsc = escapeAppleScript(body)
 
@@ -185,11 +185,11 @@ enum AppleMailClient {
         end tell
         """
 
-        _ = try ScriptRunner.run(script, timeout: 15)
+        _ = try scripts.run(script)
         return ["status": "sent"]
     }
 
-    static func replyToEmail(id: String, body: String, replyAll: Bool) throws -> [String: Any] {
+    static func replyToEmail(scripts: MailScripts, id: String, body: String, replyAll: Bool) throws -> [String: Any] {
         let idEsc = escapeAppleScript(id)
         let bodyEsc = escapeAppleScript(body)
         let replyType = replyAll ? "reply with properties {reply all:true}" : "reply"
@@ -209,7 +209,7 @@ enum AppleMailClient {
         end tell
         """
 
-        _ = try ScriptRunner.run(script, timeout: 15)
+        _ = try scripts.run(script)
         return ["status": "sent"]
     }
 }

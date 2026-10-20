@@ -34,19 +34,29 @@ struct MailCLI {
                     appLauncher: allowLaunch ? NSWorkspaceAppLauncher() : NeverLaunchAppLauncher()
                 )
             },
-            commands: [
-                "detect_clients": { _ in detectClients() },
-                "list_mailboxes": { _ in try listMailboxes() },
-                "list_emails": { try listEmails(params: $0) },
-                "get_email": { try getEmail(params: $0) },
-                "search_emails": { try searchEmails(params: $0) },
-                "send_email": { try sendEmail(params: $0) },
-                "reply_to_email": { try replyToEmail(params: $0) },
-            ]
+            commands: mailCommands(executor: osascriptExecutor)
         )
     }
 }
 
+
+/// The mail-cli command boundary: command name to handler, every script run through `executor`.
+func mailCommands(executor: @escaping ScriptExecutor) -> [String: (_ params: [String: Any]) throws -> Any] {
+    func scripted(
+        _ handler: @escaping (_ params: [String: Any], _ scripts: MailScripts) throws -> Any
+    ) -> (_ params: [String: Any]) throws -> Any {
+        { params in try handler(params, try MailScripts(execute: executor, params: params)) }
+    }
+    return [
+        "detect_clients": { _ in detectClients() },
+        "list_mailboxes": scripted { _, scripts in try listMailboxes(scripts: scripts) },
+        "list_emails": scripted(listEmails),
+        "get_email": scripted(getEmail),
+        "search_emails": scripted(searchEmails),
+        "send_email": scripted(sendEmail),
+        "reply_to_email": scripted(replyToEmail),
+    ]
+}
 
 func detectClients(
     outlookInstalled: () -> Bool = {
@@ -64,30 +74,30 @@ func detectClients(
     return ["clients": clients]
 }
 
-func listMailboxes() throws -> [String: Any] {
-    return ["mailboxes": try AppleMailClient.listMailboxes()]
+func listMailboxes(scripts: MailScripts) throws -> [String: Any] {
+    return ["mailboxes": try AppleMailClient.listMailboxes(scripts: scripts)]
 }
 
-func listEmails(params: [String: Any]) throws -> [String: Any] {
+func listEmails(params: [String: Any], scripts: MailScripts) throws -> [String: Any] {
     let limit = params["limit"] as? Int ?? 10
     let (mailbox, account) = try mailboxParams(params)
-    return ["emails": try AppleMailClient.listEmails(limit: limit, mailbox: mailbox, account: account)]
+    return ["emails": try AppleMailClient.listEmails(scripts: scripts, limit: limit, mailbox: mailbox, account: account)]
 }
 
-func getEmail(params: [String: Any]) throws -> [String: Any] {
+func getEmail(params: [String: Any], scripts: MailScripts) throws -> [String: Any] {
     guard let id = params["id"] as? String else {
         throw MailError.missingField("id")
     }
-    return ["email": try AppleMailClient.getEmail(id: id)]
+    return ["email": try AppleMailClient.getEmail(scripts: scripts, id: id)]
 }
 
-func searchEmails(params: [String: Any]) throws -> [String: Any] {
+func searchEmails(params: [String: Any], scripts: MailScripts) throws -> [String: Any] {
     guard let query = params["query"] as? String else {
         throw MailError.missingField("query")
     }
     let limit = params["limit"] as? Int ?? 10
     let (mailbox, account) = try mailboxParams(params)
-    return ["emails": try AppleMailClient.searchEmails(query: query, limit: limit, mailbox: mailbox, account: account)]
+    return ["emails": try AppleMailClient.searchEmails(scripts: scripts, query: query, limit: limit, mailbox: mailbox, account: account)]
 }
 
 /// The mailbox name and its account; an account means nothing without a mailbox to look up in it.
@@ -100,7 +110,7 @@ func mailboxParams(_ params: [String: Any]) throws -> (mailbox: String?, account
     return (mailbox, account)
 }
 
-func sendEmail(params: [String: Any]) throws -> [String: Any] {
+func sendEmail(params: [String: Any], scripts: MailScripts) throws -> [String: Any] {
     guard let to = params["to"] as? String else {
         throw MailError.missingField("to")
     }
@@ -126,10 +136,10 @@ func sendEmail(params: [String: Any]) throws -> [String: Any] {
         throw MailError.emptyRecipients("bcc")
     }
 
-    return try AppleMailClient.sendEmail(to: to, subject: subject, body: body, cc: cc, bcc: bcc)
+    return try AppleMailClient.sendEmail(scripts: scripts, to: to, subject: subject, body: body, cc: cc, bcc: bcc)
 }
 
-func replyToEmail(params: [String: Any]) throws -> [String: Any] {
+func replyToEmail(params: [String: Any], scripts: MailScripts) throws -> [String: Any] {
     guard let id = params["id"] as? String else {
         throw MailError.missingField("id")
     }
@@ -141,7 +151,7 @@ func replyToEmail(params: [String: Any]) throws -> [String: Any] {
     }
 
     let replyAll = params["reply_all"] as? Bool ?? false
-    return try AppleMailClient.replyToEmail(id: id, body: body, replyAll: replyAll)
+    return try AppleMailClient.replyToEmail(scripts: scripts, id: id, body: body, replyAll: replyAll)
 }
 
 

@@ -9,9 +9,68 @@ import {
   DESTRUCTIVE_ANNOTATIONS,
   META_KEYS,
   withDeclaredParams,
+  teachingToolResult,
+  type TeachingErrorParams,
 } from '@speedwave/mcp-shared';
 import { withValidation, ToolResult, validateAll, asRecord, MAX_LENGTHS } from './validation.js';
 import { runCommand } from '../platform-runner.js';
+
+/** Time budget of one mail tool call: the script ends before mail-cli is killed, mail-cli before the hub gives up. */
+interface MailTimeBudget {
+  /** Hub timeout of the tool call (`_meta` TIMEOUT_MS). */
+  toolMs: number;
+  /** Timeout of the mail-cli process. */
+  processMs: number;
+  /** Timeout of the AppleScript inside mail-cli, passed as `script_timeout_ms`. */
+  scriptMs: number;
+}
+
+/** Arguments of a mail tool call, as mail-cli receives them. */
+type MailArgs = Record<string, unknown>;
+
+const PROCESS_HEADROOM_MS = 2_000;
+
+const SCRIPT_HEADROOM_MS = 3_000;
+
+const STANDARD_BUDGET = mailTimeBudget(30_000);
+
+const MAIL_FAILURE = /\b(MAIL_[A-Z_]+): ([\s\S]*)$/;
+
+const MAIL_FAILURE_TEACHING: Record<
+  string,
+  (detail: string, args: MailArgs) => TeachingErrorParams
+> = {
+  MAIL_TIMEOUT: (detail) => ({
+    paramName: 'request',
+    nextStep:
+      `${detail} Retry once; for a list or a search pass a specific mailbox or a smaller limit. ` +
+      'Before retrying a send or a reply, check the Sent mailbox, since Mail.app may have sent it anyway.',
+  }),
+  MAIL_AUTOMATION_DENIED: (detail) => ({
+    paramName: 'Mail automation permission',
+    nextStep:
+      `${detail} Ask the user to allow Speedwave to control Mail in ` +
+      'System Settings > Privacy & Security > Automation, then retry.',
+  }),
+  MAIL_MAILBOX_NOT_FOUND: (detail, args) => ({
+    paramName: 'mailbox',
+    received: args.mailbox,
+    correctValueTool: 'listMailboxes',
+    nextStep: `${detail} Pass the name and account of a mailbox exactly as listMailboxes returns them.`,
+  }),
+  MAIL_ACCOUNT_NOT_FOUND: (detail, args) => ({
+    paramName: 'account',
+    received: args.account,
+    correctValueTool: 'listMailboxes',
+    nextStep: `${detail} Pass the account field of a mailbox listMailboxes returns.`,
+  }),
+  MAIL_MAILBOX_AMBIGUOUS: (detail, args) => ({
+    paramName: 'account',
+    received: args.account,
+    correctValueTool: 'listMailboxes',
+    nextStep: `${detail} Pass account together with mailbox to pick one of them.`,
+  }),
+};
 
 /** Input parameters for the detectMailClients tool (no params required). */
 type DetectMailClientsParams = Record<string, never>;
@@ -82,7 +141,7 @@ const detectMailClientsTool: Tool = {
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
-    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.TIMEOUT_MS]: STANDARD_BUDGET.toolMs,
     [META_KEYS.OS_CATEGORY]: 'mail',
   },
   keywords: ['os', 'mail', 'email', 'detect', 'clients', 'outlook', 'apple mail'],
@@ -128,7 +187,7 @@ const listMailboxesTool: Tool = {
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
-    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.TIMEOUT_MS]: STANDARD_BUDGET.toolMs,
     [META_KEYS.OS_CATEGORY]: 'mail',
   },
   keywords: ['os', 'mail', 'email', 'mailboxes', 'accounts', 'inbox', 'folders'],
@@ -170,7 +229,7 @@ const listEmailsTool: Tool = {
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
-    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.TIMEOUT_MS]: STANDARD_BUDGET.toolMs,
     [META_KEYS.OS_CATEGORY]: 'mail',
   },
   keywords: ['os', 'mail', 'email', 'list', 'inbox', 'messages'],
@@ -228,7 +287,7 @@ const getEmailTool: Tool = {
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
-    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.TIMEOUT_MS]: STANDARD_BUDGET.toolMs,
     [META_KEYS.OS_CATEGORY]: 'mail',
   },
   keywords: ['os', 'mail', 'email', 'get', 'read', 'detail', 'body', 'content'],
@@ -275,7 +334,7 @@ const searchEmailsTool: Tool = {
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
-    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.TIMEOUT_MS]: STANDARD_BUDGET.toolMs,
     [META_KEYS.OS_CATEGORY]: 'mail',
   },
   keywords: ['os', 'mail', 'email', 'search', 'find', 'query'],
@@ -333,7 +392,7 @@ const sendEmailTool: Tool = {
   annotations: DESTRUCTIVE_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
-    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.TIMEOUT_MS]: STANDARD_BUDGET.toolMs,
     [META_KEYS.OS_CATEGORY]: 'mail',
   },
   keywords: ['os', 'mail', 'email', 'send', 'compose', 'write', 'new'],
@@ -391,7 +450,7 @@ const replyToEmailTool: Tool = {
   annotations: DESTRUCTIVE_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
-    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.TIMEOUT_MS]: STANDARD_BUDGET.toolMs,
     [META_KEYS.OS_CATEGORY]: 'mail',
   },
   keywords: ['os', 'mail', 'email', 'reply', 'respond', 'answer'],
@@ -443,8 +502,7 @@ const replyToEmailTool: Tool = {
 export async function handleDetectMailClients(
   _params: DetectMailClientsParams
 ): Promise<ToolResult> {
-  const result = await runCommand('mail', 'detect_clients');
-  return { success: true, data: result.parsed };
+  return runMail('detect_clients');
 }
 
 /**
@@ -452,8 +510,7 @@ export async function handleDetectMailClients(
  * @param _params - Unused tool input parameters.
  */
 export async function handleListMailboxes(_params: ListMailboxesParams): Promise<ToolResult> {
-  const result = await runCommand('mail', 'list_mailboxes');
-  return { success: true, data: result.parsed };
+  return runMail('list_mailboxes');
 }
 
 /**
@@ -470,8 +527,7 @@ export async function handleListEmails(params: ListEmailsParams): Promise<ToolRe
     numbers: [['limit', 1, 10_000]],
   });
   if (!v.valid) return v.error;
-  const result = await runCommand('mail', 'list_emails', p);
-  return { success: true, data: result.parsed };
+  return runMail('list_emails', p);
 }
 
 /**
@@ -485,8 +541,7 @@ export async function handleGetEmail(params: GetEmailParams): Promise<ToolResult
     strings: [['id', MAX_LENGTHS.id, false]],
   });
   if (!v.valid) return v.error;
-  const result = await runCommand('mail', 'get_email', p);
-  return { success: true, data: result.parsed };
+  return runMail('get_email', p);
 }
 
 /**
@@ -505,8 +560,7 @@ export async function handleSearchEmails(params: SearchEmailsParams): Promise<To
     numbers: [['limit', 1, 10_000]],
   });
   if (!v.valid) return v.error;
-  const result = await runCommand('mail', 'search_emails', p);
-  return { success: true, data: result.parsed };
+  return runMail('search_emails', p);
 }
 
 /**
@@ -537,8 +591,7 @@ export async function handleSendEmail(params: SendEmailParams): Promise<ToolResu
     ],
   });
   if (!v.valid) return v.error;
-  const result = await runCommand('mail', 'send_email', p);
-  return { success: true, data: result.parsed };
+  return runMail('send_email', p);
 }
 
 /**
@@ -566,8 +619,54 @@ export async function handleReplyToEmail(params: ReplyToEmailParams): Promise<To
     ],
   });
   if (!v.valid) return v.error;
-  const result = await runCommand('mail', 'reply_to_email', p);
-  return { success: true, data: result.parsed };
+  return runMail('reply_to_email', p);
+}
+
+/**
+ * Splits a hub timeout into the mail-cli process and script timeouts, each ending before the one above it.
+ * @param toolMs - Hub timeout of the tool call.
+ */
+function mailTimeBudget(toolMs: number): MailTimeBudget {
+  const processMs = toolMs - PROCESS_HEADROOM_MS;
+  return { toolMs, processMs, scriptMs: processMs - SCRIPT_HEADROOM_MS };
+}
+
+/**
+ * Runs a mail-cli command within a time budget; a failure mail-cli names comes back as a teaching error.
+ * @param command - mail-cli command.
+ * @param args - Tool arguments.
+ * @param budget - Time budget of the call.
+ */
+async function runMail(
+  command: string,
+  args: MailArgs = {},
+  budget: MailTimeBudget = STANDARD_BUDGET
+): Promise<ToolResult> {
+  try {
+    const result = await runCommand(
+      'mail',
+      command,
+      { ...args, script_timeout_ms: budget.scriptMs },
+      budget.processMs
+    );
+    return { success: true, data: result.parsed };
+  } catch (error) {
+    const failure = mailFailureResult(error, args);
+    if (failure) return failure;
+    throw error;
+  }
+}
+
+/**
+ * The teaching error for a mail-cli failure that starts with a known `MAIL_*` code, or undefined.
+ * @param error - What runCommand threw.
+ * @param args - Tool arguments of the failed call.
+ */
+function mailFailureResult(error: unknown, args: MailArgs): ToolResult | undefined {
+  const match = error instanceof Error ? MAIL_FAILURE.exec(error.message) : null;
+  const teaching = match ? MAIL_FAILURE_TEACHING[match[1]] : undefined;
+  if (!match || !teaching) return undefined;
+  return teachingToolResult(teaching(match[2].trim(), args), match[1]);
 }
 
 /** Creates tool definitions for all mail operations. */
