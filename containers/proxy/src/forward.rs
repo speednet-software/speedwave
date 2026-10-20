@@ -16,11 +16,12 @@ use crate::audit;
 use crate::ner::NerOutcome;
 use crate::pii::{self, PiiEngineState};
 use crate::router::{resolve, Auth, BareAuth, Config, Route, Scheme};
-use crate::usage::{append_usage, sniff, RequestStatus, UsageAcc};
+use crate::usage::{append_usage, sniff, RequestStatus, UsageAcc, UsageLine};
 
 /// Cap on the SSE sniff buffer. A partial line past this is not a real usage
 /// frame; drop it so a newline-free upstream cannot grow the buffer unbounded.
 const MAX_SNIFF_BUF: usize = 1024 * 1024;
+const SESSION_ID_HEADER: &str = "x-claude-code-session-id";
 
 /// Drops the sniff buffer if a not-yet-complete line exceeds `max`. Keeps RAM
 /// flat against a newline-free upstream.
@@ -376,6 +377,7 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
     let outbound_body = strip_model_prefix(&scanned_body, &parsed, &model);
     let provider_kind = route.provider_kind.clone();
     let provider_id = route.provider_id.clone();
+    let session_hash = session_hash(&headers);
 
     let client = cfg.client.clone();
 
@@ -532,7 +534,13 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
             &provider_id,
             req_status,
         ) {
-            append_usage(&usage_path, &line);
+            append_usage(
+                &usage_path,
+                &UsageLine {
+                    session_hash,
+                    ..line
+                },
+            );
         }
     });
 
@@ -546,6 +554,20 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
     builder
         .body(Body::from_stream(stream))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+fn session_hash(headers: &HeaderMap) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let value = headers.get(SESSION_ID_HEADER)?.as_bytes();
+    if value.is_empty() {
+        return None;
+    }
+    Some(
+        Sha256::digest(value)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect(),
+    )
 }
 
 /// Connection-specific headers that must not be relayed end-to-end (RFC 7230 §6.1).
