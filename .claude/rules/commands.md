@@ -3,7 +3,7 @@
 ```bash
 make setup-dev         # first-time: prerequisites + all dependencies
 make setup-dev-windows # Windows only dev setup (requires admin, self-elevates):
-                       # - Installs Chocolatey toolchain and pinned Vulkan SDK (machine-wide VULKAN_SDK).
+                       # - Installs Chocolatey toolchain (incl. Python 3 for prepare-pii-ner-model) and pinned Vulkan SDK (machine-wide VULKAN_SDK).
                        # - Reports missing items at the end without aborting configuration early.
                        # - Enables long paths machine-wide (registry and system Git config).
                        # - Writes ~/msvc-env.sh (MSVC env + CMAKE_GENERATOR=Ninja).

@@ -69,6 +69,10 @@ Every change must work on **both** platforms. `make check` compiles the host tar
   - Windows e2e rig installs `bats` inside WSL (`apt-get install bats`), not on host.
   - `setup-dev-windows` does not provision it. `make setup-dev` reports it as not-applicable (`BATS_HINT`).
   - Do not add `bats` back to the toolchain list (manual alignment, no automated guard).
+- Python on Windows:
+  - `make dev` and `build-tauri` run `prepare-pii-ner-model` (`crates/pii-ner/tools/fetch_and_convert.py`, stdlib only), so a Windows dev host needs Python 3; `setup-dev-windows` installs the Chocolatey `python` package.
+  - Windows ships `python.exe`/`python3.exe` App Installer stubs in `%LOCALAPPDATA%\Microsoft\WindowsApps`; run with arguments they exit with an error. The traditional python.org installer adds `python.exe` and no `python3`, so `python3` on `PATH` can stay the stub after Python is installed.
+  - The Makefile's `PYTHON` therefore takes the first of `python3`/`python` that passes `PYTHON3_PROBE`, never the first that `command -v` finds; `guard-python` fails `prepare-pii-ner-model` and `test-pii-ner-tools` with an install hint instead of `CreateProcess ... e=2` (`_tests/desktop/guard-python.bats`). `setup-dev-windows.ps1`'s `Test-Python3` likewise skips `WindowsApps` (manual alignment).
 - MSVC linker resolution on Git Bash:
   - MSVC `link.exe` must win over Git's `/usr/bin/link` on `PATH` (symptoms: `link: extra operand`, `LNK1146`-class failures).
   - Sole mechanism: `PATH` prepend in generated `~/msvc-env.sh`.
