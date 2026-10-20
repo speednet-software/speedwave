@@ -81,3 +81,11 @@ store_stub() {
     [ "$status" -ne 0 ]
     [[ "$output" == *"Python 3 not found (PYTHON=python3)"* ]]
 }
+
+@test "autodetection keeps the bare name so an interpreter under a path with a space runs" {
+    mkdir -p "$BIN/Program Files/Python313"
+    BIN="$BIN/Program Files/Python313" fake_python python3 0
+    run env PATH="$BIN/Program Files/Python313:$PATH" make -C "$REPO_ROOT" prepare-pii-ner-model
+    [ "$status" -eq 0 ]
+    [ "$(cat "$BIN/Program Files/Python313/python3.args")" = "crates/pii-ner/tools/fetch_and_convert.py --out desktop/src-tauri/pii-ner" ]
+}

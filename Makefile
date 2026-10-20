@@ -29,7 +29,7 @@ DEV_TAURI_CONFIG = {"identifier":"$(DEV_IDENTIFIER)","productName":"$(DEV_PRODUC
 export DEV_TAURI_CONFIG
 
 PYTHON3_PROBE := -c 'import sys; sys.exit(sys.version_info < (3,))'
-PYTHON ?= $(or $(shell for p in python3 python; do $$p $(PYTHON3_PROBE) >/dev/null 2>&1 && command -v $$p && break; done),python3)
+PYTHON ?= $(or $(shell for p in python3 python; do $$p $(PYTHON3_PROBE) >/dev/null 2>&1 && echo $$p && break; done),python3)
 
 SPEEDWAVE_DATA_DIR ?= $(HOME)/.speedwave-$(DEV_INSTANCE)
 export SPEEDWAVE_DATA_DIR
