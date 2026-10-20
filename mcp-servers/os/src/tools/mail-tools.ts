@@ -21,8 +21,10 @@ type ListMailboxesParams = Record<string, never>;
 
 /** Input parameters for the listEmails tool. */
 interface ListEmailsParams {
-  /** Mailbox/folder name. */
+  /** Mailbox path from listMailboxes. */
   mailbox?: string;
+  /** Account of the mailbox. */
+  account?: string;
   /** Max emails to return. */
   limit?: number;
 }
@@ -37,8 +39,10 @@ interface GetEmailParams {
 interface SearchEmailsParams {
   /** Search query string. */
   query: string;
-  /** Mailbox/folder name to search (default: Inbox). */
+  /** Mailbox path from listMailboxes (default: Inbox). */
   mailbox?: string;
+  /** Account of the mailbox. */
+  account?: string;
   /** Max results to return. */
   limit?: number;
 }
@@ -120,7 +124,7 @@ const detectMailClientsTool: Tool = {
 const listMailboxesTool: Tool = {
   name: 'listMailboxes',
   description:
-    "List mail accounts and mailboxes/folders. Use each mailbox's name field (not id, which is not returned) as listEmails/searchEmails's mailbox parameter — exact case-sensitive match.",
+    "List mail accounts and mailboxes. Each mailbox's name is its path inside the account (Inbox/Clients for a nested one); pass it as listEmails/searchEmails's mailbox parameter (exact, case-sensitive) together with its account when the name exists in several accounts.",
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
@@ -143,7 +147,7 @@ const listMailboxesTool: Tool = {
           properties: {
             name: {
               type: 'string',
-              description: 'Mailbox name; pass this to listEmails/searchEmails',
+              description: 'Mailbox path inside the account; pass this to listEmails/searchEmails',
             },
             account: { type: 'string', description: 'Account this mailbox belongs to' },
             message_count: { type: 'number', description: 'Total message count in this mailbox' },
@@ -177,7 +181,12 @@ const listEmailsTool: Tool = {
       mailbox: {
         type: 'string',
         description:
-          "Mailbox/folder name (default: INBOX). Use the name field from listMailboxes' output.",
+          "Mailbox path (default: the Inbox of every account). Use the name field from listMailboxes' output.",
+      },
+      account: {
+        type: 'string',
+        description:
+          'Account of the mailbox (the account field from listMailboxes); needed when the mailbox name exists in several accounts. Requires mailbox.',
       },
       limit: { type: 'number', description: 'Max emails to return (default 10)' },
     },
@@ -206,8 +215,8 @@ const listEmailsTool: Tool = {
       input: { limit: 10 },
     },
     {
-      description: 'Full: recent emails of a named mailbox',
-      input: { mailbox: 'Archive', limit: 20 },
+      description: 'Full: recent emails of a mailbox in one account',
+      input: { mailbox: 'Archive', account: 'Exchange', limit: 20 },
     },
   ],
 };
@@ -278,7 +287,12 @@ const searchEmailsTool: Tool = {
       mailbox: {
         type: 'string',
         description:
-          "Mailbox/folder name to search (default: Inbox). Use the name field from listMailboxes' output.",
+          "Mailbox path to search (default: the Inbox of every account). Use the name field from listMailboxes' output.",
+      },
+      account: {
+        type: 'string',
+        description:
+          'Account of the mailbox (the account field from listMailboxes); needed when the mailbox name exists in several accounts. Requires mailbox.',
       },
       limit: { type: 'number', description: 'Max results (default 10)' },
     },
@@ -449,7 +463,10 @@ export async function handleListMailboxes(_params: ListMailboxesParams): Promise
 export async function handleListEmails(params: ListEmailsParams): Promise<ToolResult> {
   const p = asRecord(params);
   const v = validateAll(p, {
-    strings: [['mailbox', MAX_LENGTHS.short, false]],
+    strings: [
+      ['mailbox', MAX_LENGTHS.short, false],
+      ['account', MAX_LENGTHS.short, false],
+    ],
     numbers: [['limit', 1, 10_000]],
   });
   if (!v.valid) return v.error;
@@ -483,6 +500,7 @@ export async function handleSearchEmails(params: SearchEmailsParams): Promise<To
     strings: [
       ['query', MAX_LENGTHS.short, false],
       ['mailbox', MAX_LENGTHS.short, false],
+      ['account', MAX_LENGTHS.short, false],
     ],
     numbers: [['limit', 1, 10_000]],
   });

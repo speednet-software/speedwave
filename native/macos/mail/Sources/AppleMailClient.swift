@@ -15,22 +15,50 @@ enum AppleMailClient {
             .joined(separator: "\n")
     }
 
-    /// True only when a probe confirms the mailbox is absent; a probe error returns false
-    /// so an unrelated -1728 surfaces its real cause rather than a wrong mailbox message.
-    static func mailboxDefinitelyMissing(_ name: String) -> Bool {
-        let script = "tell application \"Mail\" to return (exists mailbox \"\(escapeAppleScript(name))\")"
-        guard let out = try? ScriptRunner.run(script, timeout: 10) else { return false }
-        return out == "false"
+    /// AppleScript lines, run inside `tell application "Mail"`, that set `mb` to the mailbox named `name`
+    /// in `account` or in any account (an app-level `mailbox "X"` reaches only On My Mac), or to the inbox.
+    static func mailboxLookup(name: String?, account: String?) -> String {
+        guard let name = name else { return "set mb to inbox" }
+        let nameEsc = escapeAppleScript(name)
+        var accounts = "accounts"
+        var accountCheck = ""
+        if let account = account {
+            let accountEsc = escapeAppleScript(account)
+            accounts = "{account \"\(accountEsc)\"}"
+            accountCheck = "    if not (exists account \"\(accountEsc)\") then error \"\(accountNotFoundMarker)\"\n"
+        }
+        return accountCheck + """
+            set spwMatches to {}
+            set spwAccounts to ""
+            repeat with spwAcctRef in \(accounts)
+                set spwAcct to contents of spwAcctRef
+                if exists mailbox "\(nameEsc)" of spwAcct then
+                    set end of spwMatches to mailbox "\(nameEsc)" of spwAcct
+                    set spwAccounts to spwAccounts & name of spwAcct & ", "
+                end if
+            end repeat
+            if (count of spwMatches) is 0 then error "\(mailboxNotFoundMarker)"
+            if (count of spwMatches) > 1 then error "\(mailboxAmbiguousMarker)" & spwAccounts
+            set mb to item 1 of spwMatches
+        """
     }
 
-    static func listMailboxes() throws -> [[String: Any]] {
-        let script = """
+    /// Lists every mailbox with `name` as its path inside the account (`Inbox/Clients`), the form
+    /// `mailbox "<path>" of account` resolves; Mail reports a nested mailbox by its last segment only.
+    static let listMailboxesScript = """
         tell application "Mail"
             set output to ""
-            repeat with acct in accounts
+            repeat with acctRef in accounts
+                set acct to contents of acctRef
                 set acctName to name of acct
-                repeat with mb in mailboxes of acct
+                repeat with mbRef in mailboxes of acct
+                    set mb to contents of mbRef
                     set mbName to name of mb
+                    set parentBox to container of mb
+                    repeat while class of parentBox is mailbox
+                        set mbName to name of parentBox & "/" & mbName
+                        set parentBox to container of parentBox
+                    end repeat
                     set msgCount to count of messages of mb
                     set output to output & acctName & "||" & mbName & "||" & msgCount & linefeed
                 end repeat
@@ -39,7 +67,8 @@ enum AppleMailClient {
         end tell
         """
 
-        return parseMailboxes(try ScriptRunner.run(script, timeout: 15))
+    static func listMailboxes() throws -> [[String: Any]] {
+        return parseMailboxes(try ScriptRunner.run(listMailboxesScript, timeout: 15))
     }
 
     /// Mailbox rows with `message_count` as a number; a count that is not an integer is left out.
@@ -51,21 +80,15 @@ enum AppleMailClient {
         }
     }
 
-    static func listEmails(limit: Int, mailbox: String?) throws -> [[String: Any]] {
-        let mailboxClause: String
-        if let mb = mailbox {
-            mailboxClause = "mailbox \"\(escapeAppleScript(mb))\""
-        } else {
-            mailboxClause = "inbox"
-        }
-
+    static func listEmails(limit: Int, mailbox: String?, account: String?) throws -> [[String: Any]] {
         let script = """
         tell application "Mail"
+        \(mailboxLookup(name: mailbox, account: account))
             set output to ""
-            set msgCount to count of messages of \(mailboxClause)
+            set msgCount to count of messages of mb
             if msgCount > \(limit) then set msgCount to \(limit)
             repeat with i from 1 to msgCount
-                set m to message i of \(mailboxClause)
+                set m to message i of mb
                 set msgId to message id of m
                 set subj to subject of m
                 set sndr to sender of m
@@ -77,10 +100,7 @@ enum AppleMailClient {
         end tell
         """
 
-        let output = try runMailScript(
-            script, timeout: 30, mailbox: mailbox,
-            mailboxMissing: { mailbox.map { Self.mailboxDefinitelyMissing($0) } ?? false }
-        )
+        let output = try runMailboxScript(script, timeout: 30, mailbox: mailbox, account: account)
         return parseMessageList(output)
     }
 
@@ -119,14 +139,14 @@ enum AppleMailClient {
         return try parseEmailDetail(output, id: id)
     }
 
-    static func searchEmails(query: String, limit: Int, mailbox: String?) throws -> [[String: Any]] {
+    static func searchEmails(query: String, limit: Int, mailbox: String?, account: String?) throws -> [[String: Any]] {
         let queryEsc = escapeAppleScript(query)
-        let sourceClause = mailbox.map { "mailbox \"\(escapeAppleScript($0))\"" } ?? "inbox"
         let script = """
         tell application "Mail"
+        \(mailboxLookup(name: mailbox, account: account))
             set output to ""
             set msgCount to 0
-            set msgs to (every message of \(sourceClause) whose subject contains "\(queryEsc)" or content contains "\(queryEsc)")
+            set msgs to (every message of mb whose subject contains "\(queryEsc)" or content contains "\(queryEsc)")
             repeat with m in msgs
                 if msgCount < \(limit) then
                     set msgId to message id of m
@@ -141,10 +161,7 @@ enum AppleMailClient {
         end tell
         """
 
-        let output = try runMailScript(
-            script, timeout: 30, mailbox: mailbox,
-            mailboxMissing: { mailbox.map { Self.mailboxDefinitelyMissing($0) } ?? false }
-        )
+        let output = try runMailboxScript(script, timeout: 30, mailbox: mailbox, account: account)
         return parseDelimited(output, fields: ["id", "subject", "sender", "date"])
     }
 

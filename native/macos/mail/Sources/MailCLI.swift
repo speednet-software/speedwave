@@ -70,8 +70,8 @@ func listMailboxes() throws -> [String: Any] {
 
 func listEmails(params: [String: Any]) throws -> [String: Any] {
     let limit = params["limit"] as? Int ?? 10
-    let mailbox = params["mailbox"] as? String
-    return ["emails": try AppleMailClient.listEmails(limit: limit, mailbox: mailbox)]
+    let (mailbox, account) = try mailboxParams(params)
+    return ["emails": try AppleMailClient.listEmails(limit: limit, mailbox: mailbox, account: account)]
 }
 
 func getEmail(params: [String: Any]) throws -> [String: Any] {
@@ -86,8 +86,18 @@ func searchEmails(params: [String: Any]) throws -> [String: Any] {
         throw MailError.missingField("query")
     }
     let limit = params["limit"] as? Int ?? 10
+    let (mailbox, account) = try mailboxParams(params)
+    return ["emails": try AppleMailClient.searchEmails(query: query, limit: limit, mailbox: mailbox, account: account)]
+}
+
+/// The mailbox name and its account; an account means nothing without a mailbox to look up in it.
+func mailboxParams(_ params: [String: Any]) throws -> (mailbox: String?, account: String?) {
     let mailbox = params["mailbox"] as? String
-    return ["emails": try AppleMailClient.searchEmails(query: query, limit: limit, mailbox: mailbox)]
+    let account = params["account"] as? String
+    if account != nil && mailbox == nil {
+        throw CLIError.missingField("mailbox")
+    }
+    return (mailbox, account)
 }
 
 func sendEmail(params: [String: Any]) throws -> [String: Any] {

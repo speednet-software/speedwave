@@ -125,34 +125,104 @@ final class MailTests: XCTestCase {
     }
 
 
-    func testRunMailScriptMapsMailboxNotFoundToTeachingError() {
-        let script = "error \"Can\u{2019}t get mailbox \\\"Nope\\\". (-1728)\""
+    func testMailboxLookupSearchesEveryAccountWhenNoAccountIsGiven() {
+        let script = AppleMailClient.mailboxLookup(name: "Archive", account: nil)
+        XCTAssertTrue(script.contains("repeat with spwAcctRef in accounts"), script)
+        XCTAssertTrue(script.contains("set spwAcct to contents of spwAcctRef"), script)
+        XCTAssertTrue(script.contains("exists mailbox \"Archive\" of spwAcct"), script)
+        XCTAssertFalse(script.contains("exists account"), script)
+    }
+
+    func testMailboxLookupSearchesOnlyTheNamedAccount() {
+        let script = AppleMailClient.mailboxLookup(name: "Archive", account: "Exchange")
+        XCTAssertTrue(script.contains("if not (exists account \"Exchange\")"), script)
+        XCTAssertTrue(script.contains("repeat with spwAcctRef in {account \"Exchange\"}"), script)
+    }
+
+    func testMailboxLookupEscapesQuotesInNames() {
+        let script = AppleMailClient.mailboxLookup(name: "My \"Box\"", account: "Work \"A\"")
+        XCTAssertTrue(script.contains("mailbox \"My \\\"Box\\\"\" of spwAcct"), script)
+        XCTAssertTrue(script.contains("account \"Work \\\"A\\\"\""), script)
+    }
+
+    func testListMailboxesNamesANestedMailboxByItsPathInTheAccount() {
+        let script = AppleMailClient.listMailboxesScript
+        XCTAssertTrue(script.contains("repeat while class of parentBox is mailbox"), script)
+        XCTAssertTrue(script.contains("set mbName to name of parentBox & \"/\" & mbName"), script)
+    }
+
+    func testMailboxLookupWithoutANameIsTheInbox() {
+        XCTAssertEqual(AppleMailClient.mailboxLookup(name: nil, account: nil), "set mb to inbox")
+    }
+
+    func testRunMailboxScriptMapsAMissingMailboxToNotFound() {
         XCTAssertThrowsError(
-            try runMailScript(script, timeout: 5, mailbox: "Nope", mailboxMissing: { true })
+            try runMailboxScript("error \"SPW_MAILBOX_NOT_FOUND\"", timeout: 5, mailbox: "Nope", account: nil)
         ) { error in
             guard case CLIError.notFound(let message) = error else {
                 return XCTFail("expected CLIError.notFound, got \(error)")
             }
-            XCTAssertTrue(message.contains("listMailboxes"))
+            XCTAssertTrue(message.contains("'Nope'"), message)
+            XCTAssertTrue(message.contains("listMailboxes"), message)
         }
     }
 
-    func testRunMailScriptPropagatesWhenMailboxExists() {
-        let script = "error \"Can\u{2019}t get subject of message 1 of mailbox \\\"Inbox\\\". (-1728)\""
+    func testRunMailboxScriptNamesTheAccountOfAMissingMailbox() {
         XCTAssertThrowsError(
-            try runMailScript(script, timeout: 5, mailbox: "Inbox", mailboxMissing: { false })
+            try runMailboxScript("error \"SPW_MAILBOX_NOT_FOUND\"", timeout: 5, mailbox: "Nope", account: "Exchange")
         ) { error in
+            guard case CLIError.notFound(let message) = error else {
+                return XCTFail("expected CLIError.notFound, got \(error)")
+            }
+            XCTAssertTrue(message.contains("account 'Exchange'"), message)
+        }
+    }
+
+    func testRunMailboxScriptMapsANameInSeveralAccountsToAmbiguous() {
+        XCTAssertThrowsError(
+            try runMailboxScript(
+                "error \"SPW_MAILBOX_AMBIGUOUS:Exchange, Google, \"", timeout: 5, mailbox: "Inbox", account: nil)
+        ) { error in
+            guard case CLIError.ambiguous(let message) = error else {
+                return XCTFail("expected CLIError.ambiguous, got \(error)")
+            }
+            XCTAssertTrue(message.contains("Exchange, Google."), message)
+            XCTAssertTrue(message.contains("account"), message)
+        }
+    }
+
+    func testRunMailboxScriptMapsAMissingAccountToNotFound() {
+        XCTAssertThrowsError(
+            try runMailboxScript("error \"SPW_ACCOUNT_NOT_FOUND\"", timeout: 5, mailbox: "Inbox", account: "Nope")
+        ) { error in
+            guard case CLIError.notFound(let message) = error else {
+                return XCTFail("expected CLIError.notFound, got \(error)")
+            }
+            XCTAssertTrue(message.contains("Account 'Nope'"), message)
+        }
+    }
+
+    func testRunMailboxScriptKeepsAnUnrelatedFailure() {
+        let script = "error \"Can\u{2019}t get subject of message 1. (-1728)\""
+        XCTAssertThrowsError(try runMailboxScript(script, timeout: 5, mailbox: "Inbox", account: nil)) { error in
             guard case ScriptError.scriptFailed = error else {
                 return XCTFail("expected raw ScriptError.scriptFailed, got \(error)")
             }
         }
     }
 
-    func testRunMailScriptDoesNotWrapWhenMailboxIsNil() {
-        let script = "error \"Can\u{2019}t get mailbox \\\"Nope\\\". (-1728)\""
-        XCTAssertThrowsError(try runMailScript(script, timeout: 5, mailbox: nil)) { error in
-            guard case ScriptError.scriptFailed = error else {
-                return XCTFail("expected raw ScriptError.scriptFailed, got \(error)")
+    func testListEmailsRefusesAnAccountWithoutAMailbox() {
+        XCTAssertThrowsError(try listEmails(params: ["account": "Exchange"])) { error in
+            guard case CLIError.missingField("mailbox") = error else {
+                return XCTFail("expected missingField(mailbox), got \(error)")
+            }
+        }
+    }
+
+    func testSearchEmailsRefusesAnAccountWithoutAMailbox() {
+        XCTAssertThrowsError(try searchEmails(params: ["query": "x", "account": "Exchange"])) { error in
+            guard case CLIError.missingField("mailbox") = error else {
+                return XCTFail("expected missingField(mailbox), got \(error)")
             }
         }
     }

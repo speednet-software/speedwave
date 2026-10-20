@@ -22,7 +22,7 @@ Always run steps 1–2 before guessing a tool name or parameter. The live schema
 ## Pitfalls
 
 - **`os.*`, not `mail.*`.** All four OS sub-services (mail, calendar, reminders, notes) share the same `os` global. There is no `mail` global.
-- **Mailbox names are case-sensitive** and may be nested (e.g. `INBOX/Work/Clients`). Call `os.listMailboxes` first to get exact names; do not guess folder paths.
+- **Mailbox names are case-sensitive paths inside an account** (e.g. `Inbox/Clients` for a nested mailbox). Call `os.listMailboxes` first and pass its `name` as `mailbox`; do not guess folder paths. When the same name exists in several accounts (e.g. `Drafts`), also pass that mailbox's `account`, or the call is refused as ambiguous.
 - **Listing returns metadata only.** `os.listEmails` returns subject, sender, date, and read-status, not the full body. Retrieve the body with a separate `os.getEmail({ id })` call. Be selective; fetching many bodies in a loop can be slow and token-heavy.
 - **`confirm_send` is mandatory for writes.** Both `os.sendEmail` and `os.replyToEmail` require `confirm_send: true` in the payload: the parameter is a hard gate in the Swift CLI, not just a convention. Per the global write/delete confirmation rule in CLAUDE.md, always show the user a summary of subject, recipients, and body before calling these tools; never set `confirm_send: true` without explicit user approval.
 - **Sending is irreversible.** Once `os.sendEmail` or `os.replyToEmail` returns `{ "status": "sent" }`, the message is in the MTA queue. There is no undo. Drafts (compose without send) are not exposed as a tool; if the user only wants to draft, explain this limitation.

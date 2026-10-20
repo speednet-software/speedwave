@@ -238,6 +238,38 @@ describe('mail-tools', () => {
     });
   });
 
+  describe('mailbox account', () => {
+    it.each(['listEmails', 'searchEmails'])(
+      '%s passes mailbox and account through to mail-cli',
+      async (name) => {
+        vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { emails: [] } });
+        const tool = createMailTools().find((t) => t.tool.name === name)!;
+        const input = { ...validInput(name), mailbox: 'Drafts', account: 'Google' };
+
+        await tool.handler(input);
+
+        expect(vi.mocked(runCommand).mock.calls[0][2]).toEqual(input);
+      }
+    );
+
+    it.each(['listEmails', 'searchEmails'])(
+      '%s rejects an account with control characters',
+      async (name) => {
+        const tool = createMailTools().find((t) => t.tool.name === name)!;
+
+        const result = await tool.handler({
+          ...validInput(name),
+          mailbox: 'Inbox',
+          account: 'Ex\x01change',
+        });
+
+        expect(result.isError).toBe(true);
+        expect((result.content[0] as { text: string }).text).toContain('INVALID_CHARACTERS');
+        expect(runCommand).not.toHaveBeenCalled();
+      }
+    );
+  });
+
   describe('mail client choice', () => {
     it('no mail tool offers a client parameter', () => {
       for (const t of createMailTools()) {
