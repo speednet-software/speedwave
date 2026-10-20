@@ -218,8 +218,10 @@ enum MailSending {
         }
     }
 
-    private static func signatureApply(_ signature: String?, to message: String) -> String? {
-        signature.map { "    set message signature of \(message) to signature \"\(escapeAppleScript($0))\"" }
+    /// Sets the chosen signature, or clears the one Mail may add on its own, so only the previewed text goes out.
+    private static func signatureApply(_ signature: String?, to message: String) -> String {
+        "    set message signature of \(message) to "
+            + (signature.map { "signature \"\(escapeAppleScript($0))\"" } ?? "missing value")
     }
 
     private static func signatureCheckScript(_ signature: String) -> String {
@@ -458,7 +460,7 @@ enum MailSending {
         \(AppleMailClient.messageLookup(id))
             \(replyCommand(replyAll))
             set content of spwReply to "\(appleScriptText(text))"
-        \(signatureApply(signature, to: "spwReply") ?? "")
+        \(signatureApply(signature, to: "spwReply"))
             if not (send spwReply) then error "\(sendFailedMarker)"
         end tell
         """

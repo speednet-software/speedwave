@@ -50,7 +50,7 @@ const MAIL_BATCH_LIMIT = 25;
 const SIGNATURE_PROPERTY = {
   type: 'string',
   description:
-    "Name of a Mail signature, exactly as listMailSignatures returns it; Mail's default signature for the account when omitted",
+    'Name of a Mail signature, exactly as listMailSignatures returns it; when omitted no signature is added, not even the account default',
 };
 
 const SPLIT_BATCH_STEP = `Split the mail ids into batches of at most ${MAIL_BATCH_LIMIT} and confirm each batch with the user separately.`;
@@ -136,7 +136,7 @@ const MAIL_FAILURE_TEACHING: Record<
     paramName: 'signature',
     received: args.signature,
     correctValueTool: 'listMailSignatures',
-    nextStep: `${detail} Pass a name listMailSignatures returns, or leave signature out for Mail's default.`,
+    nextStep: `${detail} Pass a name listMailSignatures returns, or leave signature out to add none.`,
   }),
   MAIL_BATCH_TOO_LARGE: (detail) => ({
     paramName: 'ids',
@@ -146,6 +146,20 @@ const MAIL_FAILURE_TEACHING: Record<
     paramName: 'name',
     received: args.name,
     nextStep: `${detail} Do not create it again: pass it to moveEmails or copyEmails as it is.`,
+  }),
+  MAIL_TARGET_IS_TRASH: (detail, args) => ({
+    paramName: 'mailbox',
+    received: args.mailbox,
+    nextStep:
+      `${detail} If the user wants these emails deleted, call deleteEmails with the same ids; ` +
+      'it previews them and moves them to the Trash only after the user confirms.',
+  }),
+  MAIL_TARGET_IS_JUNK: (detail, args) => ({
+    paramName: 'mailbox',
+    received: args.mailbox,
+    nextStep:
+      `${detail} If the user wants these emails reported as spam, call markEmailsSpam with the same ids; ` +
+      'it previews them and moves them to the Junk mailbox only after the user confirms.',
   }),
 };
 
@@ -1230,6 +1244,7 @@ const moveEmailsTool: Tool = {
   description:
     'Move 1 to 25 emails, by the mail ids listEmails or searchEmails returned, to a mailbox named together with its account (as listMailboxes returns them). ' +
     'Reversible, so no confirmation is needed; a target that does not exist fails the call and nothing moves. ' +
+    "The account's Trash and Junk mailbox are refused: delete with deleteEmails and report spam with markEmailsSpam, which ask the user first. " +
     'Reports every email: ok, or the error that left it where it is. A moved email gets a new mail id: list the target mailbox to act on it again.',
   annotations: WRITE_ANNOTATIONS,
   _meta: {
@@ -1266,7 +1281,9 @@ const copyEmailsTool: Tool = {
   name: 'copyEmails',
   description:
     'Copy 1 to 25 emails, by the mail ids listEmails or searchEmails returned, to a mailbox named together with its account (as listMailboxes returns them); the originals stay where they are. ' +
-    'No confirmation is needed; a target that does not exist fails the call and nothing is copied. Reports every email: ok, or the error that kept it from being copied.',
+    'No confirmation is needed; a target that does not exist fails the call and nothing is copied. ' +
+    "The account's Trash and Junk mailbox are refused: delete with deleteEmails and report spam with markEmailsSpam, which ask the user first. " +
+    'Reports every email: ok, or the error that kept it from being copied.',
   annotations: WRITE_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,

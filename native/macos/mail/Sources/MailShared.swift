@@ -7,6 +7,7 @@ let accountNotFoundMarker = "SPW_ACCOUNT_NOT_FOUND"
 let accountDisabledMarker = "SPW_ACCOUNT_DISABLED"
 let mailNotFoundMarker = "SPW_MAIL_NOT_FOUND"
 let signatureNotFoundMarker = "SPW_SIGNATURE_NOT_FOUND"
+let mailboxesChangedMarker = "SPW_MAILBOXES_CHANGED"
 
 /// The JSON argument carrying the script time budget in milliseconds, set by the mail tools of the os worker.
 let scriptTimeoutParam = "script_timeout_ms"
@@ -29,6 +30,7 @@ enum MailFailure: LocalizedError, Equatable {
     case mailboxAmbiguous(mailbox: String, accounts: [String])
     case invalidMailId(String)
     case mailboxChanged(mailbox: String)
+    case mailboxesChanged
     case mailNotFound(mailbox: String, account: String)
     case batchTooLarge(count: Int, limit: Int)
     case trashNotFound(account: String)
@@ -38,6 +40,8 @@ enum MailFailure: LocalizedError, Equatable {
     case archiveNotFound(account: String)
     case alreadyArchived
     case mailboxExists(mailbox: String, account: String)
+    case targetIsTrash(mailbox: String, account: String)
+    case targetIsJunk(mailbox: String, account: String)
     case sendFailed
     case signatureNotFound(String)
 
@@ -50,7 +54,7 @@ enum MailFailure: LocalizedError, Equatable {
         case .accountDisabled: return "MAIL_ACCOUNT_DISABLED"
         case .mailboxAmbiguous: return "MAIL_MAILBOX_AMBIGUOUS"
         case .invalidMailId: return "MAIL_INVALID_ID"
-        case .mailboxChanged: return "MAIL_MAILBOX_CHANGED"
+        case .mailboxChanged, .mailboxesChanged: return "MAIL_MAILBOX_CHANGED"
         case .mailNotFound: return "MAIL_NOT_FOUND"
         case .batchTooLarge: return "MAIL_BATCH_TOO_LARGE"
         case .trashNotFound: return "MAIL_TRASH_NOT_FOUND"
@@ -60,6 +64,8 @@ enum MailFailure: LocalizedError, Equatable {
         case .archiveNotFound: return "MAIL_ARCHIVE_NOT_FOUND"
         case .alreadyArchived: return "MAIL_ALREADY_ARCHIVED"
         case .mailboxExists: return "MAIL_MAILBOX_EXISTS"
+        case .targetIsTrash: return "MAIL_TARGET_IS_TRASH"
+        case .targetIsJunk: return "MAIL_TARGET_IS_JUNK"
         case .sendFailed: return "MAIL_SEND_FAILED"
         case .signatureNotFound: return "MAIL_SIGNATURE_NOT_FOUND"
         }
@@ -88,6 +94,8 @@ enum MailFailure: LocalizedError, Equatable {
             return "'\(id)' is not a mail id. Take the id from listEmails or searchEmails."
         case .mailboxChanged(let mailbox):
             return "Mailbox '\(mailbox)' changed while it was being read."
+        case .mailboxesChanged:
+            return "Mail's mailboxes changed while they were being read."
         case .mailNotFound(let mailbox, let account):
             return "No email with this id in mailbox '\(mailbox)' of account '\(account)'; it was moved or deleted."
         case .batchTooLarge(let count, let limit):
@@ -102,12 +110,20 @@ enum MailFailure: LocalizedError, Equatable {
         case .alreadyInJunk:
             return "The email is already in the Junk mailbox."
         case .archiveNotFound(let account):
-            return "Account '\(account)' has no Archive mailbox, so the email was left where it is. "
-                + "Ask the user where to keep it and move it there with moveEmails, or create the mailbox first."
+            let names = archiveMailboxNames.map { "'\($0)'" }.joined(separator: " or ")
+            return "Account '\(account)' has no mailbox named \(names), so the email was left where it is. "
+                + "Ask the user which mailbox of the account keeps archived mail (listMailboxes lists them) and move "
+                + "the email there with moveEmails, passing that mailbox and the account."
         case .alreadyArchived:
             return "The email is already in the Archive mailbox."
         case .mailboxExists(let mailbox, let account):
             return "Mailbox '\(mailbox)' already exists in account '\(account)'; move emails to it as it is."
+        case .targetIsTrash(let mailbox, let account):
+            return "Mailbox '\(mailbox)' is the Trash of account '\(account)', so no email was moved or copied. "
+                + "To delete emails use deleteEmails, which asks the user first."
+        case .targetIsJunk(let mailbox, let account):
+            return "Mailbox '\(mailbox)' is the Junk mailbox of account '\(account)', so no email was moved or copied. "
+                + "To mark emails as spam use markEmailsSpam, which asks the user first."
         case .sendFailed:
             return "Mail.app did not send the message; it may wait in the Outbox."
         case .signatureNotFound(let name):
@@ -173,7 +189,7 @@ struct MailScripts {
 
     func run(_ script: String, mailbox: String? = nil, account: String? = nil) throws -> String {
         do {
-            return try execute(script, timeout)
+            return try execute(Self.withTimeout(script, seconds: max(1, Int(timeout))), timeout)
         } catch ScriptError.timeout {
             throw MailFailure.timeout(seconds: timeout)
         } catch ScriptError.automationPermission(let detail) {
@@ -182,6 +198,34 @@ struct MailScripts {
             throw Self.failure(detail, mailbox: mailbox, account: account, timeout: timeout)
                 ?? ScriptError.scriptFailed(detail)
         }
+    }
+
+    /// `script` with every `tell application "Mail"` block and one-line tell inside `with timeout of seconds`, since
+    /// an Apple event otherwise gives up after AppleScript's default of two minutes, whatever the budget.
+    private static func withTimeout(_ script: String, seconds: Int) -> String {
+        let open = "tell application \"Mail\""
+        let start = "with timeout of \(seconds) seconds"
+        var blocks: [Bool] = []
+        var lines: [String] = []
+        for line in script.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed == open {
+                lines += [line, start]
+                blocks.append(true)
+                continue
+            }
+            if trimmed.hasPrefix(open + " to ") {
+                lines += [start, line, "end timeout"]
+                continue
+            }
+            if trimmed.hasPrefix("tell ") && !trimmed.contains(" to ") {
+                blocks.append(false)
+            } else if trimmed == "end tell", blocks.popLast() == true {
+                lines.append("end timeout")
+            }
+            lines.append(line)
+        }
+        return lines.joined(separator: "\n")
     }
 
     static func failure(
@@ -211,6 +255,15 @@ struct MailScripts {
         }
         if detail.contains(mailboxExistsMarker) {
             return .mailboxExists(mailbox: mailbox ?? "", account: account ?? "")
+        }
+        if detail.contains(mailboxesChangedMarker) {
+            return .mailboxesChanged
+        }
+        if detail.contains(targetIsTrashMarker) {
+            return .targetIsTrash(mailbox: mailbox ?? "", account: account ?? "")
+        }
+        if detail.contains(targetIsJunkMarker) {
+            return .targetIsJunk(mailbox: mailbox ?? "", account: account ?? "")
         }
         if detail.contains(sendFailedMarker) {
             return .sendFailed

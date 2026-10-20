@@ -171,11 +171,27 @@ final class DraftsAndSignaturesTests: XCTestCase {
         XCTAssertEqual(result["signature"] as? String, "Work")
     }
 
-    func testASendWithoutASignatureLeavesMailsDefaultAndReportsNone() throws {
-        let result = try harness.call("send_email", ["to": "a@x", "subject": "S", "body": "B", "confirm_send": true])
+    func testWithoutAChosenSignatureASendADraftAndAReplyClearMailsDefaultSoOnlyThePreviewedTextGoesOut() throws {
+        harness.executor.reply("")
+        harness.executor.reply("")
+        harness.executor.reply(replyRead())
+        harness.executor.reply(replyRead())
 
-        XCTAssertFalse(harness.executor.calls[0].script.contains("signature"))
-        XCTAssertNil(result["signature"])
+        let sent = try harness.call("send_email", ["to": "a@x", "subject": "S", "body": "B", "confirm_send": true])
+        _ = try harness.call("save_draft", ["subject": "S", "body": "B"])
+        let reply = try harness.call("reply_to_email", ["id": archived.encoded, "body": "Ok", "confirm_send": true])
+
+        let scripts = harness.executor.calls.map(\.script)
+        XCTAssertEqual(scripts.count, 4)
+        for (script, message) in [(scripts[0], "spwMsg"), (scripts[1], "spwMsg"), (scripts[3], "spwReply")] {
+            XCTAssertTrue(script.contains("set message signature of \(message) to missing value"), script)
+            XCTAssertFalse(script.contains("exists signature"), script)
+        }
+        let clear = try XCTUnwrap(scripts[0].range(of: "to missing value"))
+        let send = try XCTUnwrap(scripts[0].range(of: "send spwMsg"))
+        XCTAssertLessThan(clear.lowerBound, send.lowerBound)
+        XCTAssertNil(sent["signature"])
+        XCTAssertNil(reply["signature"])
     }
 
     func testAnUnknownSignatureIsReportedByNameBeforeAnythingIsSent() {

@@ -158,6 +158,47 @@ final class OrganizeEmailsTests: XCTestCase {
         XCTAssertTrue(harness.executor.calls.isEmpty)
     }
 
+    func testMovingAndCopyingCheckTheTargetAgainstTheTrashAndJunkOfItsAccountBeforeAnyMail() throws {
+        for command in ["move_emails", "copy_emails"] {
+            let harness = MailCommandHarness()
+            harness.executor.reply(row("ok", "a", "b", "", ""))
+
+            _ = try harness.call(command, ["ids": [first.encoded], "mailbox": "Clients", "account": "Work"])
+
+            let script = harness.executor.calls[0].script
+            for special in ["trash mailbox", "junk mailbox"] {
+                XCTAssertTrue(script.contains("repeat with spwBoxRef in mailboxes of \(special)"), script)
+            }
+            let trashCheck = try XCTUnwrap(
+                script.range(of: "if mb is spwTargetTrash then error \"\(targetIsTrashMarker)\""), script)
+            XCTAssertNotNil(script.range(of: "if mb is spwTargetJunk then error \"\(targetIsJunkMarker)\""), script)
+            let firstMail = try XCTUnwrap(script.range(of: "\"<a@x>\""))
+            XCTAssertLessThan(trashCheck.lowerBound, firstMail.lowerBound)
+        }
+    }
+
+    func testMovingToTheTrashOfTheTargetAccountIsRefusedPointingToDeleteEmails() {
+        harness.executor.fail(ScriptError.scriptFailed("\(targetIsTrashMarker) (-2700)"))
+
+        let error = harness.callFailing(
+            "move_emails", ["ids": [first.encoded], "mailbox": "Deleted Items", "account": "Work"])
+
+        XCTAssertEqual(error as? MailFailure, .targetIsTrash(mailbox: "Deleted Items", account: "Work"))
+        XCTAssertTrue(error.localizedDescription.hasPrefix("MAIL_TARGET_IS_TRASH: "), error.localizedDescription)
+        XCTAssertTrue(error.localizedDescription.contains("deleteEmails"), error.localizedDescription)
+    }
+
+    func testCopyingToTheJunkOfTheTargetAccountIsRefusedPointingToMarkEmailsSpam() {
+        harness.executor.fail(ScriptError.scriptFailed("\(targetIsJunkMarker) (-2700)"))
+
+        let error = harness.callFailing(
+            "copy_emails", ["ids": [first.encoded], "mailbox": "Junk Email", "account": "Work"])
+
+        XCTAssertEqual(error as? MailFailure, .targetIsJunk(mailbox: "Junk Email", account: "Work"))
+        XCTAssertTrue(error.localizedDescription.hasPrefix("MAIL_TARGET_IS_JUNK: "), error.localizedDescription)
+        XCTAssertTrue(error.localizedDescription.contains("markEmailsSpam"), error.localizedDescription)
+    }
+
     func testCopyingDuplicatesEachMailIntoTheTargetAndLeavesTheOriginal() throws {
         harness.executor.reply(row("ok", "a", "b", "", ""))
 
@@ -198,6 +239,10 @@ final class OrganizeEmailsTests: XCTestCase {
         XCTAssertTrue(noArchive.hasPrefix("MAIL_ARCHIVE_NOT_FOUND: "), noArchive)
         XCTAssertTrue(noArchive.contains("iCloud"), noArchive)
         XCTAssertTrue(noArchive.contains("moveEmails"), noArchive)
+        XCTAssertTrue(noArchive.contains("listMailboxes"), noArchive)
+        for name in archiveMailboxNames {
+            XCTAssertTrue(noArchive.contains("'\(name)'"), noArchive)
+        }
         let archived = try XCTUnwrap(emails[1]["error"] as? String)
         XCTAssertTrue(archived.hasPrefix("MAIL_ALREADY_ARCHIVED: "), archived)
     }

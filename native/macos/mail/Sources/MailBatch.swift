@@ -237,6 +237,16 @@ let moveToTrashAction = accountSpecialMailbox(
 /// that belongs to the account `spwAcctName`, else to `special` itself when it belongs to that account; none is
 /// error `missing`, and `m` already in it is error `already`.
 func accountSpecialMailbox(_ special: String, into variable: String, missing: String, already: String) -> String {
+    accountSpecialLookup(special, into: variable) + """
+
+            if \(variable) is missing value then error "\(missing)"
+            if name of mb is name of \(variable) then error "\(already)"
+    """
+}
+
+/// AppleScript lines that set `variable` to the child of Mail's `special` mailbox that belongs to the account
+/// `spwAcctName`, else to `special` itself when it belongs to that account, else to `missing value`.
+func accountSpecialLookup(_ special: String, into variable: String) -> String {
     """
             set \(variable) to missing value
             repeat with spwBoxRef in mailboxes of \(special)
@@ -252,7 +262,5 @@ func accountSpecialMailbox(_ special: String, into variable: String, missing: St
                     if name of account of \(special) is spwAcctName then set \(variable) to \(special)
                 end try
             end if
-            if \(variable) is missing value then error "\(missing)"
-            if name of mb is name of \(variable) then error "\(already)"
     """
 }

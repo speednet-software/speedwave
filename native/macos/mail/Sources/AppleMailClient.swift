@@ -159,46 +159,61 @@ enum AppleMailClient {
         """
     }
 
-    private static let mailboxRow = """
-                set mbName to name of mb
-                try
-                    set parentBox to container of mb
-                    repeat while class of parentBox is mailbox
-                        set mbName to name of parentBox & "/" & mbName
-                        set parentBox to container of parentBox
-                    end repeat
-                end try
-                set msgCount to count of messages of mb
-                set output to output & acctName & "||" & mbName & "||" & msgCount & linefeed
-        """
-
     /// Lists every mailbox of every account, then the On My Mac mailboxes under `localAccountName`, each with
     /// `name` as its path inside the account (`Inbox/Clients`), the form `mailbox "<path>" of account` resolves;
-    /// Mail reports a nested mailbox by its last segment only.
+    /// Mail reports a nested mailbox by its last segment only. Each account costs five bulk reads, whatever its
+    /// number of mailboxes; the paths and counts are worked out after Mail answered.
     static let listMailboxesScript = """
         tell application "Mail"
-            set output to ""
-            repeat with acctRef in accounts
-                set acct to contents of acctRef
-                set acctName to name of acct
-                repeat with mbRef in mailboxes of acct
-                    set mb to contents of mbRef
-        \(mailboxRow)
-                end repeat
+            set spwScopes to {}
+            repeat with spwAcctRef in accounts
+                set spwAcct to contents of spwAcctRef
+                set spwAcctName to name of spwAcct
+                set spwBoxes to every mailbox of spwAcct
+                set spwNames to name of every mailbox of spwAcct
+                set spwParents to container of every mailbox of spwAcct
+                set spwIds to id of every message of every mailbox of spwAcct
+                set end of spwScopes to {spwAcctName, spwBoxes, spwNames, spwParents, spwIds, missing value}
             end repeat
-            set acctName to "\(escapeAppleScript(localAccountName))"
-            repeat with mbRef in mailboxes
-                set mb to contents of mbRef
-                set spwOwner to missing value
-                try
-                    set spwOwner to account of mb
-                end try
-                if spwOwner is missing value then
-        \(mailboxRow)
+            set spwBoxes to every mailbox
+            set spwNames to name of every mailbox
+            set spwParents to container of every mailbox
+            set spwIds to id of every message of every mailbox
+            set spwOwners to account of every mailbox
+            set end of spwScopes to {"\(escapeAppleScript(localAccountName))", spwBoxes, spwNames, spwParents, spwIds, spwOwners}
+        end tell
+        set spwLines to {}
+        repeat with spwScopeRef in spwScopes
+            set spwScope to contents of spwScopeRef
+            set spwAcctName to item 1 of spwScope
+            set spwBoxes to item 2 of spwScope
+            set spwNames to item 3 of spwScope
+            set spwParents to item 4 of spwScope
+            set spwIds to item 5 of spwScope
+            set spwOwners to item 6 of spwScope
+            set spwCount to count of spwBoxes
+            if (count of spwNames) is not spwCount or (count of spwParents) is not spwCount or (count of spwIds) is not spwCount then error "\(mailboxesChangedMarker)"
+            repeat with spwI from 1 to spwCount
+                set spwLocal to true
+                if spwOwners is not missing value then set spwLocal to (item spwI of spwOwners is missing value)
+                if spwLocal then
+                    set spwPath to item spwI of spwNames
+                    set spwParent to item spwI of spwParents
+                    repeat spwCount times
+                        set spwJ to 0
+                        repeat with spwK from 1 to spwCount
+                            if item spwK of spwBoxes is spwParent then set spwJ to spwK
+                        end repeat
+                        if spwJ is 0 then exit repeat
+                        set spwPath to (item spwJ of spwNames) & "/" & spwPath
+                        set spwParent to item spwJ of spwParents
+                    end repeat
+                    set end of spwLines to spwAcctName & "||" & spwPath & "||" & (count of item spwI of spwIds)
                 end if
             end repeat
-            return output
-        end tell
+        end repeat
+        set AppleScript's text item delimiters to linefeed
+        return spwLines as text
         """
 
     static func listMailboxes(scripts: MailScripts) throws -> [[String: Any]] {

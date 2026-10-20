@@ -50,6 +50,41 @@ final class MailCommandBoundaryTests: XCTestCase {
         XCTAssertEqual(harness.executor.calls.map(\.timeout), Array(repeating: 7.5, count: calls.count + 3))
     }
 
+    func testEveryRequestToMailOfEveryCommandWaitsAsLongAsTheScriptBudgetInsteadOfTheTwoMinuteDefault() throws {
+        let budget = "with timeout of \(MailCommandHarness.scriptTimeoutMs / 1000) seconds"
+        for call in MailCommandCall.all {
+            for script in try call.scripts() {
+                var depth = 0
+                var mailTells = 0
+                let lines = script.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+                for (index, line) in lines.enumerated() {
+                    if line.hasPrefix("with timeout") {
+                        XCTAssertEqual(line, budget, call.command)
+                        depth += 1
+                    } else if line == "end timeout" {
+                        depth -= 1
+                    } else if line == "tell application \"Mail\"" {
+                        mailTells += 1
+                        XCTAssertEqual(lines[index + 1], budget, "\(call.command):\n\(script)")
+                    } else if line.hasPrefix("tell application \"Mail\"") {
+                        mailTells += 1
+                        XCTAssertGreaterThan(depth, 0, "\(call.command): \(line) outside \(budget)\n\(script)")
+                    }
+                }
+                XCTAssertEqual(depth, 0, "\(call.command):\n\(script)")
+                XCTAssertGreaterThan(mailTells, 0, "\(call.command):\n\(script)")
+            }
+        }
+    }
+
+    func testABudgetOfAFractionOfASecondStillGivesMailAWholeSecond() throws {
+        harness.executor.reply("")
+
+        _ = try harness.call("list_mailboxes", [scriptTimeoutParam: 400])
+
+        XCTAssertTrue(harness.executor.calls[0].script.contains("with timeout of 1 seconds"))
+    }
+
     func testAScriptedCommandWithoutABudgetRunsNothing() {
         for budget in [nil, 0, -1, "25000"] as [Any?] {
             let params: [String: Any] = budget.map { [scriptTimeoutParam: $0] } ?? [:]

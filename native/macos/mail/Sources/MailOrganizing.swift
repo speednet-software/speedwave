@@ -6,6 +6,8 @@ let alreadyInJunkMarker = "SPW_ALREADY_IN_JUNK"
 let archiveNotFoundMarker = "SPW_ARCHIVE_NOT_FOUND"
 let alreadyArchivedMarker = "SPW_ALREADY_ARCHIVED"
 let mailboxExistsMarker = "SPW_MAILBOX_EXISTS"
+let targetIsTrashMarker = "SPW_TARGET_IS_TRASH"
+let targetIsJunkMarker = "SPW_TARGET_IS_JUNK"
 
 /// The flag colors in the order of Mail's `flag index` (0 is red); `none` takes the flag off.
 let mailFlagColors = ["red", "orange", "yellow", "green", "blue", "purple", "gray"]
@@ -130,8 +132,9 @@ func createMailbox(params: [String: Any], scripts: MailScripts) throws -> [Strin
     return ["status": "created", "mailbox": name, "account": account]
 }
 
-/// The action of `move_emails`/`copy_emails`: looks the target up once, `mailbox` inside `account`, then runs `verb`
-/// (`move` or `duplicate`) on each mail.
+/// The action of `move_emails`/`copy_emails`: looks the target up once, `mailbox` inside `account`, refuses the
+/// Trash and the Junk mailbox of that account, which only the gated `delete_emails` and `mark_emails_spam` reach,
+/// then runs `verb` (`move` or `duplicate`) on each mail.
 private func targetAction(_ params: [String: Any], verb: String) throws -> MailAction {
     let (mailbox, account) = try mailboxParams(params)
     guard let account = account else {
@@ -139,8 +142,12 @@ private func targetAction(_ params: [String: Any], verb: String) throws -> MailA
     }
     return MailAction(
         lines: "            \(verb) m to spwTarget",
-        setup: AppleMailClient.mailboxLookup(name: mailbox, account: account) + """
+        setup: AppleMailClient.mailboxLookup(name: mailbox, account: account) + "\n"
+            + accountSpecialLookup("trash mailbox", into: "spwTargetTrash") + "\n"
+            + accountSpecialLookup("junk mailbox", into: "spwTargetJunk") + """
 
+                if mb is spwTargetTrash then error "\(targetIsTrashMarker)"
+                if mb is spwTargetJunk then error "\(targetIsJunkMarker)"
                 set spwTarget to mb
             """,
         mailbox: mailbox,

@@ -114,25 +114,12 @@ final class MailTests: XCTestCase {
         XCTAssertTrue(script.contains("account \"Work \\\"A\\\"\""), script)
     }
 
-    func testListMailboxesNamesANestedMailboxByItsPathInTheAccount() {
-        let script = AppleMailClient.listMailboxesScript
-        XCTAssertTrue(script.contains("repeat while class of parentBox is mailbox"), script)
-        XCTAssertTrue(script.contains("set mbName to name of parentBox & \"/\" & mbName"), script)
-    }
-
     func testMailboxLookupInOnMyMacAddressesTheLocalMailbox() {
         let script = AppleMailClient.mailboxLookup(name: "Speedwave-Test", account: "On My Mac")
         XCTAssertTrue(script.contains("set mb to mailbox \"Speedwave-Test\"\n"), script)
         XCTAssertTrue(script.contains("set spwAcctName to \"On My Mac\""), script)
         XCTAssertFalse(script.contains("spwAcct\n"), script)
         XCTAssertFalse(script.contains("exists account"), script)
-    }
-
-    func testListMailboxesListsTheOnMyMacMailboxesUnderTheirOwnAccountName() {
-        let script = AppleMailClient.listMailboxesScript
-        XCTAssertTrue(script.contains("set acctName to \"On My Mac\""), script)
-        XCTAssertTrue(script.contains("repeat with mbRef in mailboxes\n"), script)
-        XCTAssertTrue(script.contains("if spwOwner is missing value then"), script)
     }
 
     func testMessageLookupFindsTheMessageInItsOwnMailboxAndAccount() {

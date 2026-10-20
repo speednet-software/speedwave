@@ -19,6 +19,7 @@ import {
   handleDeleteEmails,
   handleCreateMailbox,
   handleMoveEmails,
+  handleCopyEmails,
   handleSaveDraft,
   handleListMailSignatures,
   createMailTools,
@@ -1187,6 +1188,41 @@ describe('mail-tools', () => {
       expect(result.error?.message).toContain('Invalid mailbox (received: "Clients")');
       expect(result.error?.message).toContain('listMailboxes');
     });
+
+    it.each([
+      [
+        handleMoveEmails,
+        'move_emails',
+        'MAIL_TARGET_IS_TRASH',
+        'Deleted Items',
+        'the Trash',
+        'deleteEmails',
+      ],
+      [
+        handleCopyEmails,
+        'copy_emails',
+        'MAIL_TARGET_IS_JUNK',
+        'Junk Email',
+        'the Junk mailbox',
+        'markEmailsSpam',
+      ],
+    ])(
+      'a move or copy into a Trash or Junk target is refused and points at the gated tool (%#)',
+      async (handle, command, code, mailbox, what, gatedTool) => {
+        vi.mocked(runCommand).mockRejectedValue(
+          new Error(
+            `mail.${command} failed: ${code}: Mailbox '${mailbox}' is ${what} of account 'Work', so no email was moved or copied.`
+          )
+        );
+
+        const result = await handle({ ids: [MAIL_ID], mailbox, account: 'Work' });
+
+        expect(result.error?.code).toBe(code);
+        expect(result.error?.message).toContain(`Invalid mailbox (received: "${mailbox}")`);
+        expect(result.error?.message).toContain(gatedTool);
+        expect(result.error?.message).toContain('confirm');
+      }
+    );
   });
 
   describe('drafts and signatures', () => {
