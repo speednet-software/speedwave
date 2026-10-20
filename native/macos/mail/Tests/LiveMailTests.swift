@@ -263,4 +263,79 @@ final class LiveMailTests: XCTestCase {
         XCTAssertEqual(sent["status"] as? String, "sent", "\(sent)")
         XCTAssertEqual(sent["body"] as? String, body)
     }
+
+    func testListSignaturesReturnsEveryNameMailHas() throws {
+        let result = try XCTUnwrap(try call("list_signatures") as? [String: Any])
+        let names = try XCTUnwrap(result["signatures"] as? [String])
+        let count = try osascriptExecutor("tell application \"Mail\" to count of signatures", 15)
+
+        XCTAssertEqual(String(names.count), count)
+        XCTAssertTrue(names.allSatisfy { !$0.isEmpty }, "\(names)")
+    }
+
+    func testAnUnknownSignatureIsRefusedBeforeAnythingIsSent() {
+        XCTAssertThrowsError(
+            try call(
+                "send_email",
+                ["to": "nobody@example.invalid", "subject": "S", "body": "B", "signature": "Speedwave no such \(UUID())"])
+        ) { error in
+            XCTAssertEqual((error as? MailFailure)?.code, "MAIL_SIGNATURE_NOT_FOUND", "\(error)")
+        }
+    }
+
+    func testSaveDraftInAnAccountLandsUnsentInThatAccountsDraftsOnce() throws {
+        let account = try osascriptExecutor("tell application \"Mail\" to name of item 1 of accounts", 15)
+        let subject = "Speedwave live draft \(UUID().uuidString)"
+        let signatures = try XCTUnwrap(try call("list_signatures") as? [String: Any])["signatures"] as? [String]
+        var draft: [String: Any] = [
+            "to": "nobody@example.invalid", "subject": subject, "body": "Line one\nline two", "account": account,
+        ]
+        draft["signature"] = signatures?.first
+
+        let saved = try XCTUnwrap(try call("save_draft", draft) as? [String: Any])
+        XCTAssertEqual(saved["status"] as? String, "saved", "\(saved)")
+        defer {
+            _ = try? osascriptExecutor(
+                "tell application \"Mail\" to delete (every message of drafts mailbox whose subject is \"\(subject)\")", 30)
+        }
+
+        var found = ""
+        for _ in 0..<10 where found.isEmpty {
+            Thread.sleep(forTimeInterval: 1)
+            found = try osascriptExecutor(
+                """
+                tell application "Mail"
+                    set spwFound to every message of drafts mailbox whose subject is "\(subject)"
+                    if (count of spwFound) is 0 then return ""
+                    return ((count of spwFound) as text) & "|" & (name of account of mailbox of item 1 of spwFound)
+                end tell
+                """, 30)
+        }
+        XCTAssertEqual(found, "1|\(account)")
+        let sent = try osascriptExecutor(
+            """
+            tell application "Mail" to count (every message of sent mailbox whose subject is "\(subject)")
+            """, 30)
+        XCTAssertEqual(sent, "0")
+    }
+
+    func testSendWithAChosenSignatureGoesOnlyToTheTestAddress() throws {
+        guard let address = ProcessInfo.processInfo.environment[Self.sendToVariable], !address.isEmpty else {
+            throw XCTSkip("Sending runs only with \(Self.sendToVariable) set to a test address")
+        }
+        let listed = try XCTUnwrap(try call("list_signatures") as? [String: Any])
+        guard let signature = (listed["signatures"] as? [String])?.first else {
+            throw XCTSkip("Mail.app has no signature to choose")
+        }
+        let message: [String: Any] = [
+            "to": address, "subject": "Speedwave live signed send \(UUID().uuidString)", "body": "Signed",
+            "signature": signature,
+        ]
+
+        let preview = try XCTUnwrap(try call("send_email", message) as? [String: Any])
+        XCTAssertEqual(preview["signature"] as? String, signature)
+        let sent = try XCTUnwrap(try call("send_email", message.merging(["confirm_send": true]) { $1 }) as? [String: Any])
+        XCTAssertEqual(sent["status"] as? String, "sent", "\(sent)")
+        XCTAssertEqual(sent["signature"] as? String, signature)
+    }
 }

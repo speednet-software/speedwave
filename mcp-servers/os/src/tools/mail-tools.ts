@@ -47,6 +47,12 @@ const PLAIN_TEXT_ONLY =
 /** The most mails one batch tool acts on; mail-cli's `mailBatchLimit` holds the same number. */
 const MAIL_BATCH_LIMIT = 25;
 
+const SIGNATURE_PROPERTY = {
+  type: 'string',
+  description:
+    "Name of a Mail signature, exactly as listMailSignatures returns it; Mail's default signature for the account when omitted",
+};
+
 const SPLIT_BATCH_STEP = `Split the mail ids into batches of at most ${MAIL_BATCH_LIMIT} and confirm each batch with the user separately.`;
 
 const RAW_TEXT_LIMIT = 100_000;
@@ -108,6 +114,12 @@ const MAIL_FAILURE_TEACHING: Record<
     nextStep:
       `${detail} Tell the user the message was not sent and ask them to check the Outbox in Mail.app; ` +
       'do not retry without asking.',
+  }),
+  MAIL_SIGNATURE_NOT_FOUND: (detail, args) => ({
+    paramName: 'signature',
+    received: args.signature,
+    correctValueTool: 'listMailSignatures',
+    nextStep: `${detail} Pass a name listMailSignatures returns, or leave signature out for Mail's default.`,
   }),
   MAIL_BATCH_TOO_LARGE: (detail) => ({
     paramName: 'ids',
@@ -181,9 +193,32 @@ interface SendEmailParams {
   cc?: string;
   /** BCC recipient(s), comma-separated. */
   bcc?: string;
+  /** Name of a Mail signature from listMailSignatures. */
+  signature?: string;
   /** Must be true, after the user agreed to the preview, to send. */
   confirm_send?: boolean;
 }
+
+/** Input parameters for the saveDraft tool. */
+interface SaveDraftParams {
+  /** Email subject. */
+  subject: string;
+  /** Email body in plain text. */
+  body?: string;
+  /** Recipient email address(es), comma-separated. */
+  to?: string;
+  /** CC recipient(s), comma-separated. */
+  cc?: string;
+  /** BCC recipient(s), comma-separated. */
+  bcc?: string;
+  /** Account whose Drafts mailbox keeps the draft. */
+  account?: string;
+  /** Name of a Mail signature from listMailSignatures. */
+  signature?: string;
+}
+
+/** Input parameters for the listMailSignatures tool (no params required). */
+type ListMailSignaturesParams = Record<string, never>;
 
 /** Input parameters for the replyToEmail tool. */
 interface ReplyToEmailParams {
@@ -193,6 +228,8 @@ interface ReplyToEmailParams {
   body: string;
   /** Whether to reply to all recipients. */
   reply_all?: boolean;
+  /** Name of a Mail signature from listMailSignatures. */
+  signature?: string;
   /** Must be true, after the user agreed to the preview, to send. */
   confirm_send?: boolean;
 }
@@ -588,6 +625,7 @@ const sendEmailTool: Tool = {
       body: { type: 'string', description: `Email text. ${PLAIN_TEXT_ONLY}` },
       cc: { type: 'string', description: 'CC recipient(s), comma-separated' },
       bcc: { type: 'string', description: 'BCC recipient(s), comma-separated' },
+      signature: SIGNATURE_PROPERTY,
       confirm_send: confirmProperty('send this email'),
     },
     required: ['to', 'subject', 'body'],
@@ -641,6 +679,7 @@ const replyToEmailTool: Tool = {
       },
       body: { type: 'string', description: `Reply text, without the quote. ${PLAIN_TEXT_ONLY}` },
       reply_all: { type: 'boolean', description: 'Reply to all recipients (default false)' },
+      signature: SIGNATURE_PROPERTY,
       confirm_send: confirmProperty('send this reply'),
     },
     required: ['id', 'body'],
@@ -662,6 +701,105 @@ const replyToEmailTool: Tool = {
         reply_all: true,
         confirm_send: true,
       },
+    },
+  ],
+};
+
+const saveDraftTool: Tool = {
+  name: 'saveDraft',
+  description:
+    `Save a new plain-text email as a draft in Apple Mail without sending it, for the user to finish and send in Mail.app. ${PLAIN_TEXT_ONLY} ` +
+    "The draft lands in the Drafts mailbox of account (Mail's default account when omitted). No confirmation is needed: nothing is sent and the user can delete the draft. " +
+    'Recipients and text are optional.',
+  annotations: WRITE_ANNOTATIONS,
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: STANDARD_BUDGET.toolMs,
+    [META_KEYS.OS_CATEGORY]: 'mail',
+  },
+  keywords: ['os', 'mail', 'email', 'draft', 'compose', 'write', 'save'],
+  example:
+    'await os.saveDraft({ to: "alice@example.com", subject: "Meeting notes", body: "Notes below." })',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      subject: { type: 'string', description: 'Email subject' },
+      body: { type: 'string', description: `Email text. ${PLAIN_TEXT_ONLY}` },
+      to: { type: 'string', description: 'Recipient email address(es), comma-separated' },
+      cc: { type: 'string', description: 'CC recipient(s), comma-separated' },
+      bcc: { type: 'string', description: 'BCC recipient(s), comma-separated' },
+      account: {
+        type: 'string',
+        description:
+          "Account the draft is written from and whose Drafts keep it (the account field from listMailboxes); Mail's default account when omitted",
+      },
+      signature: SIGNATURE_PROPERTY,
+    },
+    required: ['subject'],
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      status: { type: 'string', description: '"saved": the draft is in Drafts, nothing was sent' },
+      to: { type: 'array', items: { type: 'string' }, description: 'To addresses' },
+      cc: { type: 'array', items: { type: 'string' }, description: 'CC addresses' },
+      bcc: { type: 'array', items: { type: 'string' }, description: 'BCC addresses' },
+      subject: { type: 'string' },
+      body: { type: 'string', description: 'The plain text saved' },
+      account: { type: 'string', description: 'The account given; absent for the default account' },
+      signature: { type: 'string', description: 'The signature chosen; absent when none was' },
+    },
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: a draft with only a subject',
+      input: { subject: 'Ideas for Q1' },
+    },
+    {
+      description: 'Full: a draft in one account with recipients and a signature',
+      input: {
+        subject: 'Q4 Report',
+        body: 'The Q4 numbers are below.',
+        to: 'alice@example.com',
+        cc: 'bob@example.com',
+        bcc: 'carol@example.com',
+        account: 'Work',
+        signature: 'Work',
+      },
+    },
+  ],
+};
+
+const listMailSignaturesTool: Tool = {
+  name: 'listMailSignatures',
+  description:
+    "List the names of the user's Apple Mail signatures; pass one as signature to sendEmail, replyToEmail or saveDraft.",
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: STANDARD_BUDGET.toolMs,
+    [META_KEYS.OS_CATEGORY]: 'mail',
+  },
+  keywords: ['os', 'mail', 'email', 'signature', 'signatures'],
+  example: 'const { signatures } = await os.listMailSignatures()',
+  inputSchema: {
+    type: 'object',
+    properties: {},
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      signatures: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Signature names, as Mail lists them',
+      },
+    },
+  },
+  inputExamples: [
+    {
+      description: 'List all signatures (no params)',
+      input: {},
     },
   ],
 };
@@ -940,10 +1078,43 @@ export async function handleSendEmail(params: SendEmailParams): Promise<ToolResu
       ['body', MAX_LENGTHS.body, true],
       ['cc', MAX_LENGTHS.short, false],
       ['bcc', MAX_LENGTHS.short, false],
+      ['signature', MAX_LENGTHS.short, false],
     ],
   });
   if (!v.valid) return v.error;
   return runMail('send_email', p);
+}
+
+/**
+ * Saves a new email as a draft without sending it.
+ * @param params - Tool input parameters.
+ */
+export async function handleSaveDraft(params: SaveDraftParams): Promise<ToolResult> {
+  const p = asRecord(params);
+  const v = validateAll(p, {
+    required: ['subject'],
+    strings: [
+      ['subject', MAX_LENGTHS.short, false],
+      ['body', MAX_LENGTHS.body, true],
+      ['to', MAX_LENGTHS.short, false],
+      ['cc', MAX_LENGTHS.short, false],
+      ['bcc', MAX_LENGTHS.short, false],
+      ['account', MAX_LENGTHS.short, false],
+      ['signature', MAX_LENGTHS.short, false],
+    ],
+  });
+  if (!v.valid) return v.error;
+  return runMail('save_draft', p);
+}
+
+/**
+ * Lists the names of the user's Mail signatures.
+ * @param _params - Unused tool input parameters.
+ */
+export async function handleListMailSignatures(
+  _params: ListMailSignaturesParams
+): Promise<ToolResult> {
+  return runMail('list_signatures');
 }
 
 /**
@@ -958,6 +1129,7 @@ export async function handleReplyToEmail(params: ReplyToEmailParams): Promise<To
     strings: [
       ['id', MAX_LENGTHS.id, false],
       ['body', MAX_LENGTHS.body, true],
+      ['signature', MAX_LENGTHS.short, false],
     ],
   });
   if (!v.valid) return v.error;
@@ -1093,6 +1265,10 @@ function sendOutputSchema(withBcc: boolean): Tool['outputSchema'] {
       ...(withBcc ? { bcc: addresses('BCC') } : {}),
       subject: { type: 'string' },
       body: { type: 'string', description: 'The full plain text that is sent' },
+      signature: {
+        type: 'string',
+        description: 'The signature Mail adds below the text; absent when none was chosen',
+      },
     },
   };
 }
@@ -1193,6 +1369,8 @@ export function createMailTools(): ToolDefinition[] {
     guardedTool(listMailRulesTool, handleListMailRules),
     guardedTool(checkMailTool, handleCheckMail),
     guardedTool(deleteEmailsTool, handleDeleteEmails),
+    guardedTool(saveDraftTool, handleSaveDraft),
+    guardedTool(listMailSignaturesTool, handleListMailSignatures),
   ];
 }
 

@@ -20,7 +20,7 @@ const ALL_TOOLS = [
 
 describe('OS tool metadata', () => {
   it('registers exactly 29 tools', () => {
-    expect(ALL_TOOLS).toHaveLength(29);
+    expect(ALL_TOOLS).toHaveLength(31);
   });
 
   describe.each(ALL_TOOLS.map((td) => [td.tool.name, td] as const))('%s', (_name, td) => {
@@ -90,6 +90,7 @@ describe('OS tool metadata', () => {
       'updateEvent',
       'createNote',
       'updateNote',
+      'saveDraft',
     ];
     const deleteTools = ['deleteEvent', 'deleteNote', 'sendEmail', 'replyToEmail', 'deleteEmails'];
 

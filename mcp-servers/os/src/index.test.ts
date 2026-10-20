@@ -15,7 +15,7 @@ describe('mcp-os integration', () => {
   describe('createToolDefinitions', () => {
     it('returns all 29 tools', () => {
       const tools = createToolDefinitions();
-      expect(tools).toHaveLength(29);
+      expect(tools).toHaveLength(31);
     });
 
     it('all tool names are unique', () => {
@@ -71,6 +71,8 @@ describe('mcp-os integration', () => {
       expect(names).toContain('listMailRules');
       expect(names).toContain('checkMail');
       expect(names).toContain('deleteEmails');
+      expect(names).toContain('saveDraft');
+      expect(names).toContain('listMailSignatures');
     });
 
     it('contains all notes tools', () => {

@@ -15,6 +15,8 @@ import {
   handleListMailRules,
   handleCheckMail,
   handleDeleteEmails,
+  handleSaveDraft,
+  handleListMailSignatures,
   createMailTools,
 } from './mail-tools.js';
 
@@ -429,10 +431,10 @@ describe('mail-tools', () => {
   });
 
   describe('createMailTools', () => {
-    it('returns 10 tool definitions', () => {
+    it('returns 12 tool definitions', () => {
       const tools = createMailTools();
 
-      expect(tools).toHaveLength(10);
+      expect(tools).toHaveLength(12);
       expect(tools.map((t) => t.tool.name)).toEqual([
         'detectMailClients',
         'listMailboxes',
@@ -444,6 +446,8 @@ describe('mail-tools', () => {
         'listMailRules',
         'checkMail',
         'deleteEmails',
+        'saveDraft',
+        'listMailSignatures',
       ]);
     });
 
@@ -670,8 +674,10 @@ describe('mail-tools', () => {
         ],
         total: 1,
       },
-      sendEmail: { ...SEND_PREVIEW, bcc: ['carol@x'] },
-      replyToEmail: REPLY_PREVIEW,
+      sendEmail: { ...SEND_PREVIEW, bcc: ['carol@x'], signature: 'Work' },
+      replyToEmail: { ...REPLY_PREVIEW, signature: 'Work' },
+      saveDraft: DRAFT_SAVED,
+      listMailSignatures: { signatures: ['Work', 'Private'] },
       listMailRules: {
         rules: [
           {
@@ -944,6 +950,133 @@ describe('mail-tools', () => {
     });
   });
 
+  describe('drafts and signatures', () => {
+    it('saves a draft through mail-cli without a confirmation flag', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: DRAFT_SAVED });
+      const input = {
+        to: 'bob@example.com',
+        subject: 'Test',
+        body: 'Hello Bob',
+        account: 'Work',
+        signature: 'Work',
+      };
+
+      const result = await handleSaveDraft(input);
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual(DRAFT_SAVED);
+      expect(runCommand).toHaveBeenCalledWith(
+        'mail',
+        'save_draft',
+        budgeted(input),
+        PROCESS_TIMEOUT
+      );
+    });
+
+    it('saves a draft without recipients', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: DRAFT_SAVED });
+
+      const result = await handleSaveDraft({ subject: 'Idea', body: '' });
+
+      expect(result.success).toBe(true);
+      expect(vi.mocked(runCommand).mock.calls[0][2]).toEqual(
+        budgeted({ subject: 'Idea', body: '' })
+      );
+    });
+
+    it('saveDraft is a non-destructive write with no confirmation flag', () => {
+      const tool = createMailTools().find((t) => t.tool.name === 'saveDraft')!.tool;
+
+      expect(tool.annotations?.readOnlyHint).toBe(false);
+      expect(tool.annotations?.destructiveHint).toBe(false);
+      expect(Object.keys(tool.inputSchema.properties ?? {}).sort()).toEqual([
+        'account',
+        'bcc',
+        'body',
+        'cc',
+        'signature',
+        'subject',
+        'to',
+      ]);
+      expect(tool.inputSchema.required).toEqual(['subject']);
+    });
+
+    it('listMailSignatures is read-only and reads the names through mail-cli', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { signatures: ['Work'] } });
+      const tool = createMailTools().find((t) => t.tool.name === 'listMailSignatures')!;
+
+      const result = await handleListMailSignatures({});
+
+      expect(result.data).toEqual({ signatures: ['Work'] });
+      expect(runCommand).toHaveBeenCalledWith(
+        'mail',
+        'list_signatures',
+        budgeted({}),
+        PROCESS_TIMEOUT
+      );
+      expect(tool.tool.annotations?.readOnlyHint).toBe(true);
+    });
+
+    it.each([
+      ['sendEmail', 'send_email'],
+      ['replyToEmail', 'reply_to_email'],
+      ['saveDraft', 'save_draft'],
+    ])('%s passes the chosen signature through to mail-cli', async (name, command) => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: {} });
+      const tool = createMailTools().find((t) => t.tool.name === name)!;
+      const input = { ...validInput(name), signature: 'Work' };
+
+      const result = await tool.handler(input);
+
+      expect(result.isError).toBeFalsy();
+      expect(runCommand).toHaveBeenCalledWith('mail', command, budgeted(input), PROCESS_TIMEOUT);
+    });
+
+    it.each([
+      [{ signature: 'Wo\x01rk' }, 'INVALID_CHARACTERS'],
+      [{ signature: 3 }, 'INVALID_TYPE'],
+      [{ account: 'Ex\x01change' }, 'INVALID_CHARACTERS'],
+      [{ to: 'a\x00@x' }, 'INVALID_CHARACTERS'],
+      [{ body: 'a'.repeat(100_001) }, 'FIELD_TOO_LONG'],
+    ])('saveDraft rejects %o without calling mail-cli', async (extra, code) => {
+      const result = await handleSaveDraft({
+        subject: 's',
+        body: 'b',
+        ...(extra as object),
+      } as any);
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(code);
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it('saveDraft requires a subject', async () => {
+      const result = await handleSaveDraft({ body: 'b' } as any);
+
+      expect(result.error?.code).toBe('MISSING_FIELDS');
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it('an unknown signature points at listMailSignatures', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        new Error(
+          "mail.send_email failed: MAIL_SIGNATURE_NOT_FOUND: Mail.app has no signature named 'Nope'."
+        )
+      );
+
+      const result = await handleSendEmail({
+        to: 'a@x',
+        subject: 's',
+        body: 'b',
+        signature: 'Nope',
+      });
+
+      expect(result.error?.code).toBe('MAIL_SIGNATURE_NOT_FOUND');
+      expect(result.error?.message).toContain('Invalid signature (received: "Nope")');
+      expect(result.error?.message).toContain('listMailSignatures');
+    });
+  });
+
   describe('mail-cli failures reach Claude as teaching errors', () => {
     const cliFailure = (command: string, stderr: string): Error =>
       new Error(`mail.${command} failed: ${stderr}`);
@@ -1159,6 +1292,17 @@ const REPLY_PREVIEW = {
   body: 'Thanks!\n\nOn 20 Oct 2026 at 09:15, Anna <anna@x> wrote:\n\n> Hello\n',
 };
 
+const DRAFT_SAVED = {
+  status: 'saved',
+  to: ['bob@example.com'],
+  cc: [],
+  bcc: [],
+  subject: 'Test',
+  body: 'Hello Bob',
+  account: 'Work',
+  signature: 'Work',
+};
+
 const DELETE_REPORT = {
   status: 'partial',
   emails: [
@@ -1203,6 +1347,8 @@ function validInput(name: string): Record<string, unknown> {
     listMailRules: {},
     checkMail: {},
     deleteEmails: { ids: [MAIL_ID], confirm_delete: true },
+    saveDraft: { subject: 's', body: 'b' },
+    listMailSignatures: {},
   };
   return inputs[name];
 }

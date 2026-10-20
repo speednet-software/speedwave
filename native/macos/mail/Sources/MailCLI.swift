@@ -13,11 +13,11 @@ private let outlookUnsupportedInstructions =
 
 
 /// mail-cli <command> [json-args]
-/// Commands: check_permission, detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email, list_rules, check_mail, delete_emails
+/// Commands: check_permission, detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email, list_rules, check_mail, delete_emails, save_draft, list_signatures
 @main
 struct MailCLI {
     static let commandList =
-        "check_permission, detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email, list_rules, check_mail, delete_emails"
+        "check_permission, detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email, list_rules, check_mail, delete_emails, save_draft, list_signatures"
 
     static func main() {
         runCLI(
@@ -55,6 +55,8 @@ func mailCommands(executor: @escaping ScriptExecutor) -> [String: (_ params: [St
         "search_emails": scripted(searchEmails),
         "send_email": scripted(MailSending.sendEmail),
         "reply_to_email": scripted(MailSending.replyToEmail),
+        "save_draft": scripted(MailSending.saveDraft),
+        "list_signatures": scripted { _, scripts in try MailSending.listSignatures(scripts: scripts) },
         "list_rules": scripted { _, scripts in ["rules": try MailRules.listRules(scripts: scripts)] },
         "check_mail": scripted { params, scripts in
             try MailRules.checkMail(scripts: scripts, account: params["account"] as? String)

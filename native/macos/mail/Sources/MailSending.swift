@@ -23,25 +23,40 @@ enum MailSending {
 
     /// The `send_email` command: a new message to `to`, `cc` and `bcc`.
     static func sendEmail(params: [String: Any], scripts: MailScripts) throws -> [String: Any] {
-        let to = try recipients(params, "to", required: true)
-        guard let subject = params["subject"] as? String else {
-            throw MailError.missingField("subject")
-        }
-        guard let body = params["body"] as? String else {
-            throw MailError.missingField("body")
-        }
-        let fields: [String: Any] = [
-            "to": to,
-            "cc": try recipients(params, "cc", required: false),
-            "bcc": try recipients(params, "bcc", required: false),
-            "subject": singleLine(subject),
-            "body": plainText(body),
-        ]
+        let signature = try signatureParam(params)
+        let fields = try newMessageFields(params, draft: false, signature: signature)
         guard sendGate.isConfirmed(params) else {
+            if let signature {
+                _ = try run(signatureCheckScript(signature), scripts: scripts, signature: signature)
+            }
             return sendGate.preview(fields)
         }
-        _ = try scripts.run(sendScript(fields))
+        _ = try run(
+            newMessageScript(fields, signature: signature, account: nil, finish: sendLine("spwMsg")),
+            scripts: scripts,
+            signature: signature)
         return sent(fields)
+    }
+
+    /// The `save_draft` command: a new message saved, not sent, in the Drafts of `account` (Mail's default account
+    /// when omitted), without a confirmation gate.
+    static func saveDraft(params: [String: Any], scripts: MailScripts) throws -> [String: Any] {
+        let signature = try signatureParam(params)
+        let account = try accountParam(params)
+        var fields = try newMessageFields(params, draft: true, signature: signature)
+        fields["account"] = account
+        _ = try run(
+            newMessageScript(fields, signature: signature, account: account, finish: draftLines),
+            scripts: scripts,
+            signature: signature,
+            account: account)
+        return fields.merging(["status": "saved"]) { _, status in status }
+    }
+
+    /// The `list_signatures` command: the names of the user's Mail signatures.
+    static func listSignatures(scripts: MailScripts) throws -> [String: Any] {
+        let output = try scripts.run(listSignaturesScript)
+        return ["signatures": output.components(separatedBy: itemSeparator).filter { !$0.isEmpty }]
     }
 
     /// The `reply_to_email` command: Mail's own reply to the mail `id`, in any mailbox, the user's text above the
@@ -53,16 +68,24 @@ enum MailSending {
         guard let body = params["body"] as? String else {
             throw MailError.missingField("body")
         }
+        let signature = try signatureParam(params)
         let mailId = try MailId(decoding: id)
         let replyAll = params["reply_all"] as? Bool ?? false
-        let read = try scripts.run(
-            replyReadScript(mailId, replyAll: replyAll), mailbox: mailId.mailbox, account: mailId.account)
-        let fields = try replyFields(read, body: body)
+        let read = try run(
+            replyReadScript(mailId, replyAll: replyAll, signature: signature),
+            scripts: scripts,
+            signature: signature,
+            mailbox: mailId.mailbox,
+            account: mailId.account)
+        var fields = try replyFields(read, body: body)
+        fields["signature"] = signature
         guard replyGate.isConfirmed(params) else {
             return replyGate.preview(fields)
         }
-        _ = try scripts.run(
-            replySendScript(mailId, replyAll: replyAll, text: fields["body"] as? String ?? ""),
+        _ = try run(
+            replySendScript(mailId, replyAll: replyAll, text: fields["body"] as? String ?? "", signature: signature),
+            scripts: scripts,
+            signature: signature,
             mailbox: mailId.mailbox,
             account: mailId.account)
         return sent(fields)
@@ -99,6 +122,131 @@ enum MailSending {
             .joined(separator: "\\n")
     }
 
+    private static let draftLines = """
+            save spwMsg
+            try
+                close spwMsg saving yes
+            end try
+        """
+
+    private static let listSignaturesScript = """
+        \(MailReading.cleanHandler)
+
+        tell application "Mail"
+            set spwNames to {}
+            repeat with spwSignature in signatures
+                set end of spwNames to my spwClean(name of spwSignature)
+            end repeat
+        end tell
+        set AppleScript's text item delimiters to (character id 30)
+        return spwNames as text
+        """
+
+    private static func newMessageFields(
+        _ params: [String: Any],
+        draft: Bool,
+        signature: String?
+    ) throws -> [String: Any] {
+        let to = try recipients(params, "to", required: !draft)
+        guard let subject = params["subject"] as? String else {
+            throw MailError.missingField("subject")
+        }
+        guard let body = params["body"] as? String ?? (draft ? "" : nil) else {
+            throw MailError.missingField("body")
+        }
+        var fields: [String: Any] = [
+            "to": to,
+            "cc": try recipients(params, "cc", required: false),
+            "bcc": try recipients(params, "bcc", required: false),
+            "subject": singleLine(subject),
+            "body": plainText(body),
+        ]
+        fields["signature"] = signature
+        return fields
+    }
+
+    private static func signatureParam(_ params: [String: Any]) throws -> String? {
+        try nameParam(params, "signature", rule: "must be a signature name from listMailSignatures")
+    }
+
+    private static func accountParam(_ params: [String: Any]) throws -> String? {
+        try nameParam(params, "account", rule: "must be an account name from listMailboxes")
+    }
+
+    private static func nameParam(_ params: [String: Any], _ field: String, rule: String) throws -> String? {
+        guard let raw = params[field] else { return nil }
+        guard let name = raw as? String, !name.trimmingCharacters(in: .whitespaces).isEmpty else {
+            throw MailError.invalidValue(field, rule)
+        }
+        return name
+    }
+
+    private static func run(
+        _ script: String,
+        scripts: MailScripts,
+        signature: String?,
+        mailbox: String? = nil,
+        account: String? = nil
+    ) throws -> String {
+        do {
+            return try scripts.run(script, mailbox: mailbox, account: account)
+        } catch ScriptError.scriptFailed(let detail) where detail.contains(signatureNotFoundMarker) {
+            throw MailFailure.signatureNotFound(signature ?? "")
+        }
+    }
+
+    private static func signatureCheck(_ signature: String?) -> String? {
+        signature.map {
+            "    if not (exists signature \"\(escapeAppleScript($0))\") then error \"\(signatureNotFoundMarker)\""
+        }
+    }
+
+    private static func signatureApply(_ signature: String?, to message: String) -> String? {
+        signature.map { "    set message signature of \(message) to signature \"\(escapeAppleScript($0))\"" }
+    }
+
+    private static func signatureCheckScript(_ signature: String) -> String {
+        ["tell application \"Mail\"", signatureCheck(signature), "end tell"].compactMap { $0 }.joined(separator: "\n")
+    }
+
+    private static func sendLine(_ message: String) -> String {
+        "    if not (send \(message)) then error \"\(sendFailedMarker)\""
+    }
+
+    private static func newMessageScript(
+        _ fields: [String: Any],
+        signature: String?,
+        account: String?,
+        finish: String
+    ) -> String {
+        let clauses = ["to", "cc", "bcc"]
+            .map { recipientClauses(fields[$0] as? [String] ?? [], kind: $0) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+        let subject = escapeAppleScript(fields["subject"] as? String ?? "")
+        let content = appleScriptText(fields["body"] as? String ?? "")
+        let accountLines = account.map { name in
+            """
+                if not (exists account "\(escapeAppleScript(name))") then error "\(accountNotFoundMarker)"
+                set spwAccount to account "\(escapeAppleScript(name))"
+                set spwSender to (full name of spwAccount) & " <" & (item 1 of email addresses of spwAccount) & ">"
+            """
+        }
+        let lines: [String?] = [
+            "tell application \"Mail\"",
+            signatureCheck(signature),
+            accountLines,
+            "    set spwMsg to make new outgoing message with properties "
+                + "{subject:\"\(subject)\", content:\"\(content)\", visible:true}",
+            account.map { _ in "    set sender of spwMsg to spwSender" },
+            clauses.isEmpty ? nil : "    tell spwMsg\n\(clauses)\n    end tell",
+            signatureApply(signature, to: "spwMsg"),
+            finish,
+            "end tell",
+        ]
+        return lines.compactMap { $0 }.joined(separator: "\n")
+    }
+
     private static func plainText(_ text: String) -> String {
         let lines = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
         return lines.components(separatedBy: "\n")
@@ -129,33 +277,18 @@ enum MailSending {
         fields.merging(["status": "sent"]) { _, status in status }
     }
 
-    private static func sendScript(_ fields: [String: Any]) -> String {
-        let clauses = ["to", "cc", "bcc"]
-            .map { recipientClauses(fields[$0] as? [String] ?? [], kind: $0) }
-            .filter { !$0.isEmpty }
-            .joined(separator: "\n")
-        return """
-        tell application "Mail"
-            set spwMsg to make new outgoing message with properties {subject:"\(escapeAppleScript(fields["subject"] as? String ?? ""))", content:"\(appleScriptText(fields["body"] as? String ?? ""))", visible:true}
-            tell spwMsg
-        \(clauses)
-            end tell
-            if not (send spwMsg) then error "\(sendFailedMarker)"
-        end tell
-        """
-    }
-
     private static func replyCommand(_ replyAll: Bool) -> String {
         "set spwReply to reply m opening window false reply to all \(replyAll)"
     }
 
     /// Creates Mail's reply to read its recipients and subject, closes it unsaved, and reads the original's sender,
     /// date and text; fields joined by GS, list items by RS, free text stripped of both.
-    private static func replyReadScript(_ id: MailId, replyAll: Bool) -> String {
+    private static func replyReadScript(_ id: MailId, replyAll: Bool, signature: String?) -> String {
         """
         \(MailReading.cleanHandler)
 
         tell application "Mail"
+        \(signatureCheck(signature) ?? "")
         \(AppleMailClient.messageLookup(id))
             \(replyCommand(replyAll))
             set spwTo to {}
@@ -198,12 +331,14 @@ enum MailSending {
         ]
     }
 
-    private static func replySendScript(_ id: MailId, replyAll: Bool, text: String) -> String {
+    private static func replySendScript(_ id: MailId, replyAll: Bool, text: String, signature: String?) -> String {
         """
         tell application "Mail"
+        \(signatureCheck(signature) ?? "")
         \(AppleMailClient.messageLookup(id))
             \(replyCommand(replyAll))
             set content of spwReply to "\(appleScriptText(text))"
+        \(signatureApply(signature, to: "spwReply") ?? "")
             if not (send spwReply) then error "\(sendFailedMarker)"
         end tell
         """
