@@ -57,7 +57,7 @@ jobs:
           ssh -o BatchMode=yes "$USERNAME@127.0.0.1" 'wsl.exe -d Ubuntu-22.04 -- echo wsl-ok'
       - name: Tools over SSH (ensure_provisioned_windows)
         run: |
-          ssh -o BatchMode=yes "$USERNAME@127.0.0.1" 'powershell -NoProfile -Command "Get-Command node,cargo,cmake | Select-Object -ExpandProperty Source"'
+          ssh -o BatchMode=yes "$USERNAME@127.0.0.1" 'powershell -NoProfile -Command "Get-Command node,cargo,cmake | Select-Object -ExpandProperty Source; cmake --version; ninja --version; cargo tauri --version"'
       - name: Outbound to OpenRouter
         run: curl -fsS -o /dev/null -w '%{http_code}\n' https://openrouter.ai/api/v1/models
       - name: Interactive session and machine env (PowerShell)
@@ -78,4 +78,4 @@ jobs:
           ssh -o BatchMode=yes "$USERNAME@127.0.0.1" 'wsl.exe -d Ubuntu-22.04 -- whoami'
           ssh -o BatchMode=yes "$USERNAME@127.0.0.1" 'wsl.exe -d Ubuntu-22.04 -- mkdir -p /home/windows/speedwave-e2e-probe'
           ssh -o BatchMode=yes "$USERNAME@127.0.0.1" 'wsl.exe -d Ubuntu-22.04 -- rmdir /home/windows/speedwave-e2e-probe'
-          ssh -o BatchMode=yes "$USERNAME@127.0.0.1" 'wsl.exe -d Ubuntu-22.04 -- sudo -n true' && echo sudo-ok
+          ssh -o BatchMode=yes "$USERNAME@127.0.0.1" 'wsl.exe -d Ubuntu-22.04 -- bats --version'
