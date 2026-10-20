@@ -20,11 +20,6 @@ pub(super) static LOCK_ACQUISITIONS: std::sync::atomic::AtomicUsize =
 
 type SettledProjects = std::sync::Mutex<HashSet<(std::path::PathBuf, String)>>;
 
-fn legacy_networks_settled() -> &'static SettledProjects {
-    static SETTLED: std::sync::OnceLock<SettledProjects> = std::sync::OnceLock::new();
-    SETTLED.get_or_init(Default::default)
-}
-
 /// RAII: inserts the project into `HELD_LOCKS` on construction and removes it
 /// on drop (even on panic).
 struct HeldGuard {
@@ -96,87 +91,10 @@ impl LockedRuntime {
         self
     }
 
-    fn data_dir(&self) -> &std::path::Path {
-        #[cfg(any(test, feature = "test-support"))]
-        if let Some(dir) = &self.data_dir_override {
-            return dir;
-        }
-        crate::consts::data_dir()
-    }
-
     fn refuse_during_engine_teardown(&self) -> anyhow::Result<()> {
         if (self.engine_teardown_started)() {
             return Err(anyhow::Error::new(super::EngineTearingDown));
         }
-        Ok(())
-    }
-
-    fn settled_key(&self, project: &str) -> (std::path::PathBuf, String) {
-        (self.data_dir().to_path_buf(), project.to_string())
-    }
-
-    fn legacy_networks_are_settled(&self, project: &str) -> bool {
-        legacy_networks_settled()
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .contains(&self.settled_key(project))
-    }
-
-    fn settle_legacy_networks(&self, project: &str) {
-        legacy_networks_settled()
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(self.settled_key(project));
-    }
-
-    fn isolate_egress_less_networks(&self, project: &str) -> anyhow::Result<Vec<String>> {
-        let settled = self.legacy_networks_are_settled(project);
-        let mut probed = false;
-        let mut legacy = Vec::new();
-        for name in crate::compose::compose_egress_less_networks_in(self.data_dir(), project)? {
-            self.inner.ensure_internal_network(&name, project)?;
-            if settled {
-                continue;
-            }
-            probed = true;
-            let compose_created = crate::compose::legacy_compose_network_name(project, &name);
-            if self.inner.network_exists(&compose_created)? {
-                legacy.push(compose_created);
-            }
-        }
-        if probed && legacy.is_empty() {
-            self.settle_legacy_networks(project);
-        }
-        Ok(legacy)
-    }
-
-    fn start_isolated(
-        &self,
-        project: &str,
-        up: impl FnOnce() -> anyhow::Result<()>,
-    ) -> anyhow::Result<()> {
-        self.refuse_during_engine_teardown()?;
-        let legacy = self.isolate_egress_less_networks(project)?;
-        if legacy.is_empty() {
-            return up();
-        }
-        log::warn!(
-            "project {project} still has the compose-created networks {legacy:?} of a release \
-             before the isolated pre-create; recreating every container so none stays on them"
-        );
-        let result = self.inner.compose_up_recreate(project);
-        crate::slash::invalidate_cache(project);
-        result?;
-        for name in &legacy {
-            self.inner.remove_network(name).map_err(|e| {
-                e.context(format!(
-                    "the containers of {project} were recreated, but the network {name} could \
-                     not be removed; stop the containers attached to it (or remove the network) \
-                     and start the project again"
-                ))
-            })?;
-        }
-        self.settle_legacy_networks(project);
         Ok(())
     }
 
@@ -373,6 +291,88 @@ impl LockedRuntime {
     {
         with_acquired(project, || f(self))
     }
+
+    fn start_isolated(
+        &self,
+        project: &str,
+        up: impl FnOnce() -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        self.refuse_during_engine_teardown()?;
+        let legacy = self.isolate_egress_less_networks(project)?;
+        if legacy.is_empty() {
+            return up();
+        }
+        log::warn!(
+            "project {project} still has the compose-created networks {legacy:?} of a release \
+             before the isolated pre-create; recreating every container so none stays on them"
+        );
+        let result = self.inner.compose_up_recreate(project);
+        crate::slash::invalidate_cache(project);
+        result?;
+        for name in &legacy {
+            self.inner.remove_network(name).map_err(|e| {
+                e.context(format!(
+                    "the containers of {project} were recreated, but the network {name} could \
+                     not be removed; stop the containers attached to it (or remove the network) \
+                     and start the project again"
+                ))
+            })?;
+        }
+        self.settle_legacy_networks(project);
+        Ok(())
+    }
+
+    fn isolate_egress_less_networks(&self, project: &str) -> anyhow::Result<Vec<String>> {
+        let settled = self.legacy_networks_are_settled(project);
+        let mut probed = false;
+        let mut legacy = Vec::new();
+        for name in crate::compose::compose_egress_less_networks_in(self.data_dir(), project)? {
+            self.inner.ensure_internal_network(&name, project)?;
+            if settled {
+                continue;
+            }
+            probed = true;
+            let compose_created = crate::compose::legacy_compose_network_name(project, &name);
+            if self.inner.network_exists(&compose_created)? {
+                legacy.push(compose_created);
+            }
+        }
+        if probed && legacy.is_empty() {
+            self.settle_legacy_networks(project);
+        }
+        Ok(legacy)
+    }
+
+    fn data_dir(&self) -> &std::path::Path {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(dir) = &self.data_dir_override {
+            return dir;
+        }
+        crate::consts::data_dir()
+    }
+
+    fn legacy_networks_are_settled(&self, project: &str) -> bool {
+        legacy_networks_settled()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(&self.settled_key(project))
+    }
+
+    fn settled_key(&self, project: &str) -> (std::path::PathBuf, String) {
+        (self.data_dir().to_path_buf(), project.to_string())
+    }
+
+    fn settle_legacy_networks(&self, project: &str) {
+        legacy_networks_settled()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(self.settled_key(project));
+    }
+}
+
+fn legacy_networks_settled() -> &'static SettledProjects {
+    static SETTLED: std::sync::OnceLock<SettledProjects> = std::sync::OnceLock::new();
+    SETTLED.get_or_init(Default::default)
 }
 
 #[cfg(test)]

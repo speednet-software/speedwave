@@ -301,8 +301,6 @@ fn retry_on_eof_with_delays<T>(
     }
 }
 
-/// `true` for the network subcommands a transient EOF may repeat: the reads, and `rm`, whose
-/// repeat after a removal that landed answers not-found, which `remove_network_with` accepts.
 fn network_command_is_retryable(args: &[&str]) -> bool {
     matches!(args, ["network", "inspect" | "ls" | "rm", ..])
 }
@@ -3878,13 +3876,12 @@ mod tests {
 
     #[test]
     fn ensure_internal_network_fails_when_the_vm_is_stopped() {
-        let runner = MockRunner::new()
-            .with_response("limactl --version", "limactl version 1.0.0")
-            .with_response(&vm_status_key(), "Stopped");
+        let runner = MockRunner::new().with_response(&vm_status_key(), "Stopped");
         let rt = LimaRuntime::with_runner(Box::new(runner));
-        assert!(rt
+        let err = rt
             .ensure_internal_network("speedwave_acme_network_office", "acme")
-            .is_err());
+            .unwrap_err();
+        assert!(err.to_string().contains("is not running"), "{err}");
     }
 
     #[test]
@@ -3910,13 +3907,12 @@ mod tests {
 
     #[test]
     fn network_exists_fails_when_the_vm_is_stopped() {
-        let runner = MockRunner::new()
-            .with_response("limactl --version", "limactl version 1.0.0")
-            .with_response(&vm_status_key(), "Stopped");
+        let runner = MockRunner::new().with_response(&vm_status_key(), "Stopped");
         let rt = LimaRuntime::with_runner(Box::new(runner));
-        assert!(rt
+        let err = rt
             .network_exists("acme_speedwave_acme_network_office")
-            .is_err());
+            .unwrap_err();
+        assert!(err.to_string().contains("is not running"), "{err}");
     }
 
     #[test]

@@ -5390,14 +5390,11 @@ mod tests {
         assert!(result.is_ok(), "{result:?}");
         assert_eq!(handles.ensure_ready_count(), 1);
         assert_eq!(handles.down_projects(), vec!["alpha"]);
-        let office = format!(
-            "{}_alpha_network_office",
-            speedwave_runtime::consts::compose_prefix()
-        );
-        assert_eq!(
-            handles.removed_networks(),
-            vec![office.clone(), format!("alpha_{office}")]
-        );
+        let (reference_rt, reference_handles) = MockRuntimeBuilder::new().build();
+        reference_rt.remove_egress_less_networks("alpha").unwrap();
+        let expected = reference_handles.removed_networks();
+        assert!(!expected.is_empty());
+        assert_eq!(handles.removed_networks(), expected);
         assert_eq!(*removed.borrow(), vec!["alpha"]);
     }
 

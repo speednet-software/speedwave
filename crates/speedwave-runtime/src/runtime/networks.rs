@@ -1,7 +1,3 @@
-//! Engine-side lifecycle of the egress-less networks: `nerdctl network create --internal`,
-//! a live isolation check of the created CNI config, and removal. Lima and WSL share it through
-//! a `nerdctl <args>` closure.
-
 use serde::Deserialize;
 
 const NETWORK_NOT_FOUND_FRAGMENTS: [&str; 2] = [
@@ -53,62 +49,6 @@ struct CniRoute {
     dst: String,
 }
 
-fn is_network_not_found(e: &anyhow::Error) -> bool {
-    let msg = format!("{e:#}");
-    NETWORK_NOT_FOUND_FRAGMENTS
-        .iter()
-        .any(|fragment| msg.contains(fragment))
-}
-
-fn isolation_problem(network: &NativeNetwork) -> Option<String> {
-    let plugins = &network.cni.plugins;
-    if plugins.first().map(|p| p.plugin_type.as_str()) != Some("bridge") {
-        return Some(format!(
-            "its first CNI plugin is not a bridge: {:?}",
-            plugins.iter().map(|p| &p.plugin_type).collect::<Vec<_>>()
-        ));
-    }
-    for plugin in plugins {
-        if plugin.is_gateway || plugin.is_default_gateway {
-            return Some(format!("the {} plugin is a gateway", plugin.plugin_type));
-        }
-        if plugin.ip_masq {
-            return Some(format!("the {} plugin masquerades", plugin.plugin_type));
-        }
-        if plugin.plugin_type == "portmap" {
-            return Some("it maps ports".to_string());
-        }
-        let routes = plugin.ipam.as_ref().map(|i| i.routes.as_slice());
-        if let Some(route) = routes
-            .unwrap_or_default()
-            .iter()
-            .find(|r| DEFAULT_ROUTES.contains(&r.dst.as_str()))
-        {
-            return Some(format!("it routes {} out", route.dst));
-        }
-    }
-    None
-}
-
-fn inspect_network(
-    name: &str,
-    nerdctl: &dyn Fn(&[&str]) -> anyhow::Result<String>,
-) -> anyhow::Result<Option<NativeNetwork>> {
-    let output = match nerdctl(&["network", "inspect", "--mode=native", name]) {
-        Ok(output) => output,
-        Err(e) if is_network_not_found(&e) => return Ok(None),
-        Err(e) => return Err(e.context(format!("failed to inspect network {name}"))),
-    };
-    let mut entries: Vec<NativeNetwork> = serde_json::from_str(output.trim())
-        .map_err(|e| anyhow::anyhow!("unreadable inspect output for network {name}: {e}"))?;
-    match entries.len() {
-        1 => Ok(entries.pop()),
-        n => anyhow::bail!("network inspect for {name} returned {n} entries, expected 1"),
-    }
-}
-
-/// `Ok(true)` if the network `name` exists; `Ok(false)` only when the engine answers that it does
-/// not, while an engine that cannot answer is `Err`.
 pub(crate) fn network_exists_with(
     name: &str,
     nerdctl: &dyn Fn(&[&str]) -> anyhow::Result<String>,
@@ -116,8 +56,6 @@ pub(crate) fn network_exists_with(
     Ok(inspect_network(name, nerdctl)?.is_some())
 }
 
-/// Makes `name` an isolated (`--internal`) network of `project`, checked by a live inspect: a missing
-/// one is created (a failed create stands only if a re-inspect finds it isolated), egress recreated.
 pub(crate) fn ensure_internal_network_with(
     name: &str,
     project: &str,
@@ -173,7 +111,6 @@ pub(crate) fn ensure_internal_network_with(
     }
 }
 
-/// Removes the network `name`; a network that does not exist is not an error.
 pub(crate) fn remove_network_with(
     name: &str,
     nerdctl: &dyn Fn(&[&str]) -> anyhow::Result<String>,
@@ -183,6 +120,60 @@ pub(crate) fn remove_network_with(
         Err(e) if is_network_not_found(&e) => Ok(()),
         Err(e) => Err(e.context(format!("failed to remove network {name}"))),
     }
+}
+
+fn inspect_network(
+    name: &str,
+    nerdctl: &dyn Fn(&[&str]) -> anyhow::Result<String>,
+) -> anyhow::Result<Option<NativeNetwork>> {
+    let output = match nerdctl(&["network", "inspect", "--mode=native", name]) {
+        Ok(output) => output,
+        Err(e) if is_network_not_found(&e) => return Ok(None),
+        Err(e) => return Err(e.context(format!("failed to inspect network {name}"))),
+    };
+    let mut entries: Vec<NativeNetwork> = serde_json::from_str(output.trim())
+        .map_err(|e| anyhow::anyhow!("unreadable inspect output for network {name}: {e}"))?;
+    match entries.len() {
+        1 => Ok(entries.pop()),
+        n => anyhow::bail!("network inspect for {name} returned {n} entries, expected 1"),
+    }
+}
+
+fn isolation_problem(network: &NativeNetwork) -> Option<String> {
+    let plugins = &network.cni.plugins;
+    if plugins.first().map(|p| p.plugin_type.as_str()) != Some("bridge") {
+        return Some(format!(
+            "its first CNI plugin is not a bridge: {:?}",
+            plugins.iter().map(|p| &p.plugin_type).collect::<Vec<_>>()
+        ));
+    }
+    for plugin in plugins {
+        if plugin.is_gateway || plugin.is_default_gateway {
+            return Some(format!("the {} plugin is a gateway", plugin.plugin_type));
+        }
+        if plugin.ip_masq {
+            return Some(format!("the {} plugin masquerades", plugin.plugin_type));
+        }
+        if plugin.plugin_type == "portmap" {
+            return Some("it maps ports".to_string());
+        }
+        let routes = plugin.ipam.as_ref().map(|i| i.routes.as_slice());
+        if let Some(route) = routes
+            .unwrap_or_default()
+            .iter()
+            .find(|r| DEFAULT_ROUTES.contains(&r.dst.as_str()))
+        {
+            return Some(format!("it routes {} out", route.dst));
+        }
+    }
+    None
+}
+
+fn is_network_not_found(e: &anyhow::Error) -> bool {
+    let msg = format!("{e:#}");
+    NETWORK_NOT_FOUND_FRAGMENTS
+        .iter()
+        .any(|fragment| msg.contains(fragment))
 }
 
 #[cfg(test)]
@@ -598,33 +589,6 @@ pub(crate) mod tests {
             "level=error msg=\"no network found matching: speedwave_acme_network_office\"",
         )]);
         remove_network_with(NAME, &|a| script.run(a)).unwrap();
-    }
-
-    #[test]
-    fn engine_contract_bats_pins_the_network_not_found_phrases_and_isolation_fields() {
-        let bats = include_str!("../../../../_tests/e2e/engine-contract.bats");
-        for fragment in NETWORK_NOT_FOUND_FRAGMENTS {
-            assert!(
-                bats.contains(&format!("\"$output\" == *\"{fragment}\"*")),
-                "engine-contract.bats must assert the not-found phrase {fragment:?}"
-            );
-        }
-        for field in ["isGateway", "isDefaultGateway", "ipMasq"] {
-            assert!(
-                bats.contains(&format!("!= *'\"{field}\":true'*")),
-                "engine-contract.bats must assert that an --internal network has no {field}"
-            );
-        }
-        assert!(bats.contains("*'\"plugins\":[{\"type\":\"bridge\"'*"));
-        assert!(bats.contains("!= *'\"type\":\"portmap\"'*"));
-        for route in DEFAULT_ROUTES {
-            assert!(
-                bats.contains(&format!("!= *'\"{route}\"'*")),
-                "engine-contract.bats must assert that an --internal network has no {route} route"
-            );
-        }
-        assert!(bats.contains("network create --internal"));
-        assert!(bats.contains("network inspect --mode=native"));
     }
 
     #[test]

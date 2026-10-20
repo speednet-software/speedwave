@@ -100,15 +100,10 @@ pub(crate) trait ContainerRuntime: Send + Sync {
     /// e.g. restart `proxy` mid-session (ADR-073). `service` must be built-in; impls validate.
     fn compose_up_service(&self, project: &str, service: &str) -> anyhow::Result<()>;
 
-    /// Makes `name` exist as an isolated network of `project`, created with `--internal` and
-    /// verified by a live inspect; recreates one that has egress. Every impl MUST do all three.
     fn ensure_internal_network(&self, name: &str, project: &str) -> anyhow::Result<()>;
 
-    /// Removes the network `name`; a network that does not exist is not an error.
     fn remove_network(&self, name: &str) -> anyhow::Result<()>;
 
-    /// `Ok(true)` if the network `name` exists; `Ok(false)` only when the engine answers that it
-    /// does not, while an engine that cannot answer is `Err`.
     fn network_exists(&self, name: &str) -> anyhow::Result<bool>;
 
     /// Validates compose.yml as the engine sees it. Every impl MUST run the engine's
@@ -770,8 +765,6 @@ impl std::fmt::Display for EngineTearingDown {
 
 impl std::error::Error for EngineTearingDown {}
 
-/// A single-service up met a network an earlier release created with egress; only a full start
-/// moves every container off it, so the running stack is left as it is.
 #[derive(Debug)]
 pub(crate) struct NetworkMigrationPending;
 

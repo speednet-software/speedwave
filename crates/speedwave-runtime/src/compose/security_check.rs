@@ -998,8 +998,6 @@ impl SecurityCheck {
         violations
     }
 
-    /// The project's own egress-less networks must be pre-created `external` networks (a compose-created
-    /// one keeps its gateway); only their worker and the hub join one, and the worker nothing else.
     fn check_egress_less_networks(
         doc: &serde_yaml_ng::Value,
         project: &str,
@@ -2366,7 +2364,6 @@ fn is_plugin_service(service: &serde_yaml_ng::Value) -> bool {
         .is_some_and(|s| s == "true")
 }
 
-/// Network keys a service attaches to, from either the list or the mapping form of `networks:`.
 fn service_network_refs(service: &serde_yaml_ng::Value) -> Vec<String> {
     match service.get("networks") {
         Some(serde_yaml_ng::Value::Sequence(seq)) => seq
