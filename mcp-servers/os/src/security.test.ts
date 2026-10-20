@@ -80,7 +80,7 @@ describe('Security', () => {
     it('has expected command count per domain', () => {
       expect(ALLOWED_COMMANDS.reminders.size).toBe(6);
       expect(ALLOWED_COMMANDS.calendar.size).toBe(6);
-      expect(ALLOWED_COMMANDS.mail.size).toBe(17);
+      expect(ALLOWED_COMMANDS.mail.size).toBe(19);
       expect(ALLOWED_COMMANDS.notes.size).toBe(7);
     });
 

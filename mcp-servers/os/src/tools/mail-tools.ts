@@ -39,7 +39,7 @@ const BODY_SEARCH_BUDGET = mailTimeBudget(180_000);
 
 const BATCH_BUDGET = mailTimeBudget(120_000);
 
-const REPLY_BUDGET = mailTimeBudget(60_000, 2);
+const READ_THEN_SEND_BUDGET = mailTimeBudget(60_000, 2);
 
 const PLAIN_TEXT_ONLY =
   'Plain text only: line breaks are kept, HTML is sent as literal text, and no file can be attached.';
@@ -208,6 +208,32 @@ interface ReplyToEmailParams {
   body: string;
   /** Whether to reply to all recipients. */
   reply_all?: boolean;
+  /** Must be true, after the user agreed to the preview, to send. */
+  confirm_send?: boolean;
+}
+
+/** Input parameters for the forwardEmail tool. */
+interface ForwardEmailParams {
+  /** Mail id from listEmails or searchEmails. */
+  id: string;
+  /** Recipient(s), comma-separated. */
+  to: string;
+  /** CC recipient(s), comma-separated. */
+  cc?: string;
+  /** Plain text above the forwarded email. */
+  comment?: string;
+  /** Must be true, after the user agreed to the preview, to send. */
+  confirm_send?: boolean;
+}
+
+/** Input parameters for the redirectEmail tool. */
+interface RedirectEmailParams {
+  /** Mail id from listEmails or searchEmails. */
+  id: string;
+  /** Recipient(s), comma-separated. */
+  to: string;
+  /** CC recipient(s), comma-separated. */
+  cc?: string;
   /** Must be true, after the user agreed to the preview, to send. */
   confirm_send?: boolean;
 }
@@ -689,7 +715,7 @@ const replyToEmailTool: Tool = {
   annotations: DESTRUCTIVE_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
-    [META_KEYS.TIMEOUT_MS]: REPLY_BUDGET.toolMs,
+    [META_KEYS.TIMEOUT_MS]: READ_THEN_SEND_BUDGET.toolMs,
     [META_KEYS.OS_CATEGORY]: 'mail',
   },
   keywords: ['os', 'mail', 'email', 'reply', 'respond', 'answer'],
@@ -723,6 +749,97 @@ const replyToEmailTool: Tool = {
         id: 'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0',
         body: 'I agree with the proposed timeline.',
         reply_all: true,
+        confirm_send: true,
+      },
+    },
+  ],
+};
+
+const forwardEmailTool: Tool = {
+  name: 'forwardEmail',
+  description:
+    'Forward an email in any mailbox, by the mail id listEmails or searchEmails returned, with its attachments, through Mail\'s own forward (Mail picks the "Fwd:" subject and quotes the email); an optional plain-text comment goes above it. ' +
+    'Without confirm_send=true nothing is sent: the call returns a preview of the recipients, subject, comment, the forwarded email and its attachment names, and you must show it and ask the user before calling again with the same arguments and confirm_send=true. ' +
+    'Sending cannot be undone.',
+  annotations: DESTRUCTIVE_ANNOTATIONS,
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: READ_THEN_SEND_BUDGET.toolMs,
+    [META_KEYS.OS_CATEGORY]: 'mail',
+  },
+  keywords: ['os', 'mail', 'email', 'forward', 'fwd', 'share', 'pass on'],
+  example:
+    'const preview = await os.forwardEmail({ id: emails[0].id, to: "bob@example.com", comment: "FYI" }); /* ask the user */ await os.forwardEmail({ id: emails[0].id, to: "bob@example.com", comment: "FYI", confirm_send: true })',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', description: 'Mail id from listEmails or searchEmails' },
+      to: { type: 'string', description: 'Recipient email address(es), comma-separated' },
+      cc: { type: 'string', description: 'CC recipient(s), comma-separated' },
+      comment: {
+        type: 'string',
+        description: 'Text above the forwarded email. Plain text only: line breaks are kept.',
+      },
+      confirm_send: confirmProperty('forward this email'),
+    },
+    required: ['id', 'to'],
+  },
+  outputSchema: passOnOutputSchema(true),
+  inputExamples: [
+    {
+      description: 'Minimal: preview a forward before asking the user',
+      input: { id: 'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0', to: 'bob@example.com' },
+    },
+    {
+      description: 'Full: forward with a comment and CC after the user agreed',
+      input: {
+        id: 'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0',
+        to: 'bob@example.com',
+        cc: 'carol@example.com',
+        comment: 'Please handle this invoice.',
+        confirm_send: true,
+      },
+    },
+  ],
+};
+
+const redirectEmailTool: Tool = {
+  name: 'redirectEmail',
+  description:
+    'Redirect an email in any mailbox, by the mail id listEmails or searchEmails returned: Mail sends it unchanged, with its attachments, and the recipients see it as coming from its original sender; no comment can be added (use forwardEmail for that). ' +
+    'Without confirm_send=true nothing is sent: the call returns a preview of the recipients, the redirected email and its attachment names, and you must show it and ask the user before calling again with the same arguments and confirm_send=true. ' +
+    'Sending cannot be undone.',
+  annotations: DESTRUCTIVE_ANNOTATIONS,
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: READ_THEN_SEND_BUDGET.toolMs,
+    [META_KEYS.OS_CATEGORY]: 'mail',
+  },
+  keywords: ['os', 'mail', 'email', 'redirect', 'bounce', 'resend', 'pass on'],
+  example:
+    'const preview = await os.redirectEmail({ id: emails[0].id, to: "bob@example.com" }); /* ask the user */ await os.redirectEmail({ id: emails[0].id, to: "bob@example.com", confirm_send: true })',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', description: 'Mail id from listEmails or searchEmails' },
+      to: { type: 'string', description: 'Recipient email address(es), comma-separated' },
+      cc: { type: 'string', description: 'CC recipient(s), comma-separated' },
+      confirm_send: confirmProperty('redirect this email'),
+    },
+    required: ['id', 'to'],
+  },
+  outputSchema: passOnOutputSchema(false),
+  inputExamples: [
+    {
+      description: 'Minimal: preview a redirect before asking the user',
+      input: { id: 'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0', to: 'bob@example.com' },
+    },
+    {
+      description: 'Full: redirect with CC after the user agreed',
+      input: {
+        id: 'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0',
+        to: 'bob@example.com',
+        cc: 'carol@example.com',
         confirm_send: true,
       },
     },
@@ -1272,7 +1389,46 @@ export async function handleReplyToEmail(params: ReplyToEmailParams): Promise<To
     ],
   });
   if (!v.valid) return v.error;
-  return runMail('reply_to_email', p, REPLY_BUDGET);
+  return runMail('reply_to_email', p, READ_THEN_SEND_BUDGET);
+}
+
+/**
+ * Forwards an email with its attachments; without confirm_send mail-cli only previews the forward.
+ * @param params - Tool input parameters.
+ */
+export async function handleForwardEmail(params: ForwardEmailParams): Promise<ToolResult> {
+  const p = asRecord(params);
+  const v = validateAll(p, {
+    required: ['id', 'to'],
+    booleans: ['confirm_send'],
+    strings: [
+      ['id', MAX_LENGTHS.id, false],
+      ['to', MAX_LENGTHS.short, false],
+      ['cc', MAX_LENGTHS.short, false],
+      ['comment', MAX_LENGTHS.body, true],
+    ],
+  });
+  if (!v.valid) return v.error;
+  return runMail('forward_email', p, READ_THEN_SEND_BUDGET);
+}
+
+/**
+ * Redirects an email unchanged; without confirm_send mail-cli only previews the redirect.
+ * @param params - Tool input parameters.
+ */
+export async function handleRedirectEmail(params: RedirectEmailParams): Promise<ToolResult> {
+  const p = asRecord(params);
+  const v = validateAll(p, {
+    required: ['id', 'to'],
+    booleans: ['confirm_send'],
+    strings: [
+      ['id', MAX_LENGTHS.id, false],
+      ['to', MAX_LENGTHS.short, false],
+      ['cc', MAX_LENGTHS.short, false],
+    ],
+  });
+  if (!v.valid) return v.error;
+  return runMail('redirect_email', p, READ_THEN_SEND_BUDGET);
 }
 
 /**
@@ -1556,6 +1712,56 @@ function sendOutputSchema(withBcc: boolean): Tool['outputSchema'] {
 }
 
 /**
+ * The output schema of a gated forward or redirect: its preview, or what was sent.
+ * @param withComment - Whether the tool takes a comment.
+ */
+function passOnOutputSchema(withComment: boolean): Tool['outputSchema'] {
+  const addresses = (what: string) => ({
+    type: 'array',
+    items: { type: 'string' },
+    description: `${what} addresses`,
+  });
+  return {
+    type: 'object',
+    properties: {
+      status: {
+        type: 'string',
+        description:
+          '"confirmation_required" (nothing sent: ask the user), or "sent" after confirmation',
+      },
+      confirm_param: {
+        type: 'string',
+        description: 'Preview only: the flag to set true once the user agreed',
+      },
+      instruction: { type: 'string', description: 'Preview only: what to ask the user' },
+      to: addresses('To'),
+      cc: addresses('CC'),
+      subject: { type: 'string', description: 'Subject of the message that is sent' },
+      ...(withComment
+        ? { comment: { type: 'string', description: 'Text above the forwarded email' } }
+        : {}),
+      original: {
+        type: 'object',
+        description: 'The email that is passed on',
+        properties: {
+          id: { type: 'string', description: 'Mail id' },
+          subject: { type: 'string' },
+          sender: { type: 'string' },
+          date: { type: 'string', description: 'Date received, ISO 8601 with the UTC offset' },
+          mailbox: { type: 'string' },
+          account: { type: 'string' },
+        },
+      },
+      attachments: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Names of the attachments that go along',
+      },
+    },
+  };
+}
+
+/**
  * The teaching error for a batch's `ids` that is not 1 to {@link MAIL_BATCH_LIMIT} mail ids, or undefined.
  * @param p - Tool arguments.
  */
@@ -1648,6 +1854,8 @@ export function createMailTools(): ToolDefinition[] {
     guardedTool(searchEmailsTool, handleSearchEmails),
     guardedTool(sendEmailTool, handleSendEmail),
     guardedTool(replyToEmailTool, handleReplyToEmail),
+    guardedTool(forwardEmailTool, handleForwardEmail),
+    guardedTool(redirectEmailTool, handleRedirectEmail),
     guardedTool(listMailRulesTool, handleListMailRules),
     guardedTool(checkMailTool, handleCheckMail),
     guardedTool(deleteEmailsTool, handleDeleteEmails),

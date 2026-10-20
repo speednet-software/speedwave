@@ -12,6 +12,8 @@ import {
   handleSearchEmails,
   handleSendEmail,
   handleReplyToEmail,
+  handleForwardEmail,
+  handleRedirectEmail,
   handleListMailRules,
   handleCheckMail,
   handleDeleteEmails,
@@ -430,11 +432,88 @@ describe('mail-tools', () => {
     });
   });
 
+  describe('forwarding and redirecting', () => {
+    it('hands an unconfirmed forward to mail-cli, which answers with the preview', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: FORWARD_PREVIEW });
+
+      const result = await handleForwardEmail({ id: MAIL_ID, to: 'bob@x', comment: 'FYI' });
+
+      expect(result.data).toEqual(FORWARD_PREVIEW);
+      expect(runCommand).toHaveBeenCalledWith(
+        'mail',
+        'forward_email',
+        budgeted({ id: MAIL_ID, to: 'bob@x', comment: 'FYI' }),
+        PROCESS_TIMEOUT
+      );
+    });
+
+    it('hands a confirmed redirect with cc to mail-cli', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: REDIRECT_SENT });
+
+      const result = await handleRedirectEmail({
+        id: MAIL_ID,
+        to: 'bob@x',
+        cc: 'carol@x',
+        confirm_send: true,
+      });
+
+      expect(result.data).toEqual(REDIRECT_SENT);
+      expect(runCommand).toHaveBeenCalledWith(
+        'mail',
+        'redirect_email',
+        budgeted({ id: MAIL_ID, to: 'bob@x', cc: 'carol@x', confirm_send: true }),
+        PROCESS_TIMEOUT
+      );
+    });
+
+    it('gives the read and the send of both tools time to finish before mail-cli is killed', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: REDIRECT_SENT });
+
+      await handleForwardEmail({ id: MAIL_ID, to: 'bob@x', confirm_send: true });
+      await handleRedirectEmail({ id: MAIL_ID, to: 'bob@x', confirm_send: true });
+
+      for (const [, , args, processTimeoutMs] of vi.mocked(runCommand).mock.calls) {
+        const scriptTimeoutMs = (args as Record<string, unknown>).script_timeout_ms as number;
+        expect(processTimeoutMs! - 2 * scriptTimeoutMs).toBeGreaterThanOrEqual(2_000);
+      }
+    });
+
+    it('refuses a forward or a redirect without recipients before mail-cli runs', async () => {
+      const forward = await handleForwardEmail({ id: MAIL_ID } as never);
+      const redirect = await handleRedirectEmail({ id: MAIL_ID, to: '' });
+
+      expect(forward.error?.code).toBe('MISSING_FIELDS');
+      expect(redirect.error?.code).toBe('EMPTY_FIELDS');
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it('rejects confirm_send given as a string', async () => {
+      const result = await handleForwardEmail({
+        id: MAIL_ID,
+        to: 'bob@x',
+        confirm_send: 'true' as never,
+      });
+
+      expect(result.error?.code).toBe('INVALID_TYPE');
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it('redirectEmail takes no comment, since a redirect goes out unchanged', async () => {
+      const redirect = createMailTools().find((t) => t.tool.name === 'redirectEmail')!;
+
+      expect(redirect.tool.inputSchema.properties).not.toHaveProperty('comment');
+      await expect(
+        redirect.handler({ id: MAIL_ID, to: 'bob@x', comment: 'Hi' })
+      ).resolves.toMatchObject({ isError: true });
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+  });
+
   describe('createMailTools', () => {
-    it('returns 17 tool definitions', () => {
+    it('returns 19 tool definitions', () => {
       const tools = createMailTools();
 
-      expect(tools).toHaveLength(17);
+      expect(tools).toHaveLength(19);
       expect(tools.map((t) => t.tool.name)).toEqual([
         'detectMailClients',
         'listMailboxes',
@@ -443,6 +522,8 @@ describe('mail-tools', () => {
         'searchEmails',
         'sendEmail',
         'replyToEmail',
+        'forwardEmail',
+        'redirectEmail',
         'listMailRules',
         'checkMail',
         'deleteEmails',
@@ -681,6 +762,8 @@ describe('mail-tools', () => {
       },
       sendEmail: { ...SEND_PREVIEW, bcc: ['carol@x'] },
       replyToEmail: REPLY_PREVIEW,
+      forwardEmail: { ...REDIRECT_SENT, ...FORWARD_PREVIEW },
+      redirectEmail: { ...REDIRECT_SENT, ...REDIRECT_PREVIEW },
       listMailRules: {
         rules: [
           {
@@ -1311,6 +1394,47 @@ const REPLY_PREVIEW = {
   body: 'Thanks!\n\nOn 20 Oct 2026 at 09:15, Anna <anna@x> wrote:\n\n> Hello\n',
 };
 
+const FORWARD_PREVIEW = {
+  status: 'confirmation_required',
+  confirm_param: 'confirm_send',
+  instruction:
+    'Nothing was changed. Show this preview to the user and ask the user: Forward this email? …',
+  to: ['bob@x'],
+  cc: [],
+  subject: 'Fwd: Hi',
+  comment: 'FYI',
+  original: {
+    id: MAIL_ID,
+    subject: 'Hi',
+    sender: 'Anna <anna@x>',
+    date: '2026-10-20T09:15:00+02:00',
+    mailbox: 'INBOX',
+    account: 'iCloud',
+  },
+  attachments: ['invoice.pdf'],
+};
+
+const REDIRECT_PREVIEW = {
+  status: 'confirmation_required',
+  confirm_param: 'confirm_send',
+  instruction:
+    'Nothing was changed. Show this preview to the user and ask the user: Redirect this email? …',
+  to: ['bob@x'],
+  cc: [],
+  subject: 'Hi',
+  original: FORWARD_PREVIEW.original,
+  attachments: ['invoice.pdf'],
+};
+
+const REDIRECT_SENT = {
+  status: 'sent',
+  to: ['bob@x'],
+  cc: ['carol@x'],
+  subject: 'Hi',
+  original: { id: MAIL_ID, subject: 'Hi', sender: 'Anna', mailbox: 'INBOX', account: 'iCloud' },
+  attachments: [],
+};
+
 const DELETE_REPORT = {
   status: 'partial',
   emails: [
@@ -1376,6 +1500,8 @@ function validInput(name: string): Record<string, unknown> {
     searchEmails: { query: 'hi', mailbox: 'INBOX' },
     sendEmail: { to: 'a@x', subject: 's', body: 'b', confirm_send: true },
     replyToEmail: { id: MAIL_ID, body: 'b', confirm_send: true },
+    forwardEmail: { id: MAIL_ID, to: 'a@x', comment: 'c', confirm_send: true },
+    redirectEmail: { id: MAIL_ID, to: 'a@x', confirm_send: true },
     listMailRules: {},
     checkMail: {},
     deleteEmails: { ids: [MAIL_ID], confirm_delete: true },
