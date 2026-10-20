@@ -1103,6 +1103,16 @@ pub fn save_redmine_mappings(
     Ok(())
 }
 
+fn remove_credential_files(svc_dir: &std::path::Path, files: &[&str]) -> Result<(), String> {
+    for &file in files {
+        let path = svc_dir.join(file);
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn delete_integration_credentials(project: String, service: String) -> Result<(), String> {
     check_project(&project)?;
@@ -1115,12 +1125,7 @@ pub fn delete_integration_credentials(project: String, service: String) -> Resul
         .join(&project)
         .join(&service);
 
-    for &field in allowed {
-        let path = svc_dir.join(field);
-        if path.exists() {
-            std::fs::remove_file(&path).map_err(|e| e.to_string())?;
-        }
-    }
+    remove_credential_files(&svc_dir, allowed)?;
 
     let svc_desc = speedwave_runtime::consts::find_mcp_service(&service);
     if svc_desc.is_some_and(|d| d.oauth_state_fields.is_some()) {
@@ -2828,6 +2833,21 @@ mod tests {
                 key
             );
         }
+    }
+
+    #[test]
+    fn disconnecting_slack_removes_the_features_file_with_the_access_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let svc_dir = tmp.path().join("slack");
+        std::fs::create_dir_all(&svc_dir).unwrap();
+        for name in ["access_token", "features.json"] {
+            std::fs::write(svc_dir.join(name), "x").unwrap();
+        }
+
+        remove_credential_files(&svc_dir, get_allowed_fields("slack").unwrap()).unwrap();
+
+        assert!(!svc_dir.join("access_token").exists());
+        assert!(!svc_dir.join("features.json").exists());
     }
 
     #[test]

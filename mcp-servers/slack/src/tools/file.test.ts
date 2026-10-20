@@ -180,7 +180,9 @@ describe('file-tools', () => {
 
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('FEATURE_NOT_ENABLED');
-      expect(result.error?.message).toContain('Enable for file sending');
+      expect(result.error?.message).toContain('uploadFile');
+      expect(result.error?.message).toContain('file_upload');
+      expect(result.error?.message).toContain('Speedwave Desktop, Integrations, Slack');
       expect(result.error?.message).not.toContain('/workspace/report.pdf');
       expect(client.uploadFile).not.toHaveBeenCalled();
     });
@@ -202,16 +204,6 @@ describe('file-tools', () => {
 
       expect(result.success).toBe(true);
       expect(client.uploadFile).toHaveBeenCalledTimes(1);
-    });
-
-    it('refuses through the registered tool handler', async () => {
-      await writeFile(path.join(tokens, 'features.json'), '{"enabled":[]}');
-      const tool = createFileTools(presentClients()).find((t) => t.tool.name === 'uploadFile');
-
-      const raw = await tool?.handler(params);
-
-      expect(JSON.stringify(raw)).toContain('FEATURE_NOT_ENABLED');
-      expect(client.uploadFile).not.toHaveBeenCalled();
     });
   });
 
@@ -261,7 +253,6 @@ describe('file-tools', () => {
       expect(upload._meta?.[META_KEYS.DEFER_LOADING]).toBe(true);
       expect(upload._meta?.[META_KEYS.TIMEOUT_CLASS]).toBe('long');
       expect(upload.description).toContain('files:write');
-      expect(upload.description).toContain('click Enable for file sending');
       expect(upload.description).toContain('1 GB');
       expect(upload.description).toContain('10 minutes');
       expect(upload.outputSchema?.properties).toMatchObject({

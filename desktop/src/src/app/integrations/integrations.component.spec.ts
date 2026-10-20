@@ -1373,53 +1373,114 @@ describe('IntegrationsComponent', () => {
       expect(component.slackFeatureError()).toBe('');
     });
 
-    it('keeps the feature error empty when a plain sign-in fails', async () => {
+    function dispatchSlack(status: string, message = ''): void {
+      mockTauri.dispatchEvent('slack_oauth_progress', {
+        status,
+        message,
+        request_id: 'sl-feat-1',
+      });
+    }
+
+    it('shows a failed plain sign-in inline so a reconnect is never silent', async () => {
       setupSlackFeatures(true);
       await component.ngOnInit();
       await component.handleStartOAuth({ svc: component.services[0], credentials: {} });
 
-      mockTauri.dispatchEvent('slack_oauth_progress', {
-        status: 'error',
-        message: 'token exchange failed: invalid_code',
-        request_id: 'sl-feat-1',
-      });
-      await Promise.resolve();
-
-      expect(component.slackFeatureError()).toBe('');
+      dispatchSlack('error', 'token exchange failed: invalid_code');
+      await vi.waitFor(() =>
+        expect(component.slackFeatureError()).toBe('token exchange failed: invalid_code')
+      );
     });
 
-    it('does not keep a refusal for a cancelled enable', async () => {
+    it('names the feature when the user cancels an enable', async () => {
       setupSlackFeatures(true);
       await component.ngOnInit();
       await component.handleEnableSlackFeature(component.services[0], 'file_upload');
 
       await component.handleCancelOAuth();
-      mockTauri.dispatchEvent('slack_oauth_progress', {
-        status: 'cancelled',
-        message: 'OAuth flow cancelled',
-        request_id: 'sl-feat-1',
-      });
+      dispatchSlack('cancelled', 'OAuth flow cancelled');
+      await Promise.resolve();
+
+      expect(component.slackFeatureError()).toBe(
+        'Enabling file sending was cancelled. The rest of the Slack integration keeps working.'
+      );
+    });
+
+    it('names the feature when the backend reports the enable as cancelled', async () => {
+      setupSlackFeatures(true);
+      await component.ngOnInit();
+      await component.handleEnableSlackFeature(component.services[0], 'file_upload');
+
+      dispatchSlack('cancelled', 'OAuth flow cancelled');
+
+      await vi.waitFor(() =>
+        expect(component.slackFeatureError()).toBe(
+          'Enabling file sending was cancelled. The rest of the Slack integration keeps working.'
+        )
+      );
+    });
+
+    it('does not claim a cancelled enable for a cancelled plain sign-in', async () => {
+      setupSlackFeatures(true);
+      await component.ngOnInit();
+      await component.handleStartOAuth({ svc: component.services[0], credentials: {} });
+
+      dispatchSlack('cancelled', 'OAuth flow cancelled');
       await Promise.resolve();
 
       expect(component.slackFeatureError()).toBe('');
     });
 
-    it('refreshes the features after a successful enable', async () => {
+    it('refreshes the features and asks for a restart after a successful enable', async () => {
       setupSlackFeatures(true);
       await component.ngOnInit();
       await component.handleEnableSlackFeature(component.services[0], 'file_upload');
       features = [FILE_UPLOAD_ON];
       const restartSpy = vi.spyOn(projectState, 'requestRestart');
 
-      mockTauri.dispatchEvent('slack_oauth_progress', {
-        status: 'success',
-        message: '',
-        request_id: 'sl-feat-1',
-      });
+      dispatchSlack('success');
       await vi.waitFor(() => expect(restartSpy).toHaveBeenCalled());
 
       expect(component.slackFeatures()).toEqual([FILE_UPLOAD_ON]);
       expect(component.slackFeatureError()).toBe('');
+    });
+
+    it('says so when a successful sign-in still lacks the requested feature', async () => {
+      setupSlackFeatures(true);
+      await component.ngOnInit();
+      await component.handleEnableSlackFeature(component.services[0], 'file_upload');
+      const restartSpy = vi.spyOn(projectState, 'requestRestart');
+
+      dispatchSlack('success');
+      await vi.waitFor(() => expect(restartSpy).toHaveBeenCalled());
+
+      expect(component.slackFeatureError()).toBe(
+        'Slack signed in but did not grant file sending. The rest of the Slack integration keeps working.'
+      );
+    });
+
+    it('clears an old refusal after a later successful plain sign-in', async () => {
+      setupSlackFeatures(true);
+      await component.ngOnInit();
+      component.slackFeatureError.set('Slack did not allow enabling file sending.');
+      await component.handleStartOAuth({ svc: component.services[0], credentials: {} });
+      const restartSpy = vi.spyOn(projectState, 'requestRestart');
+
+      dispatchSlack('success');
+      await vi.waitFor(() => expect(restartSpy).toHaveBeenCalled());
+
+      expect(component.slackFeatureError()).toBe('');
+    });
+
+    it('ignores a second sign-in while one is starting', async () => {
+      setupSlackFeatures(true);
+      await component.ngOnInit();
+      component.oauthStatus = 'starting';
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      await component.handleStartOAuth({ svc: component.services[0], credentials: {} });
+
+      expect(invokeSpy).not.toHaveBeenCalledWith('start_slack_oauth', expect.anything());
     });
 
     it('treats a missing feature list as empty', async () => {

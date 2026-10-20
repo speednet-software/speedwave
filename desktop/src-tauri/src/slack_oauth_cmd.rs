@@ -4,6 +4,7 @@ use crate::slack_features;
 use crate::types::check_project;
 use serde::Deserialize;
 use speedwave_runtime::consts::{self, SlackFeature};
+use std::path::Path;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -79,9 +80,7 @@ pub async fn start_slack_oauth(
     check_project(&project)?;
     let feature = enable_feature
         .as_deref()
-        .map(|id| {
-            consts::find_slack_feature(id).ok_or_else(|| format!("unknown Slack feature '{id}'"))
-        })
+        .map(|id| consts::find_slack_feature(id).ok_or_else(|| "unknown Slack feature".to_string()))
         .transpose()?;
     let granted =
         slack_features::granted_scopes_in(consts::data_dir(), &project).unwrap_or_default();
@@ -138,75 +137,57 @@ pub async fn start_slack_oauth(
             log::warn!("could not open browser automatically: {e}");
         }
 
-        let code = match wait_for_callback(&primary, secondary.as_ref(), &state, &cancel).await {
-            Ok(c) => c,
-            Err(CallbackFailure::Cancelled) => {
-                oauth_flow::emit_terminal(
-                    &app,
-                    &FLOW_STATE,
-                    ProgressStatus::Cancelled,
-                    "OAuth flow cancelled",
-                    &request_id,
-                );
-                return;
-            }
-            Err(CallbackFailure::Error(e)) => {
-                oauth_flow::emit_terminal(
-                    &app,
-                    &FLOW_STATE,
-                    ProgressStatus::Error,
-                    &friendly_callback_error(&e, feature),
-                    &request_id,
-                );
-                return;
-            }
+        let callback = wait_for_callback(&primary, secondary.as_ref(), &state, &cancel).await;
+        let exchange = ExchangeRequest {
+            token_url: consts::SLACK_OAUTH_TOKEN_URL,
+            redirect_uri: &redirect_uri,
+            verifier: &pkce.verifier,
         };
-        if oauth_flow::superseded(&FLOW_STATE, my_generation, &request_id) {
-            return;
-        }
-
-        oauth_flow::emit_progress(
-            &app,
-            &FLOW_STATE,
-            ProgressStatus::Exchanging,
-            "",
-            &request_id,
-        );
-        let token = match exchange_slack_code(
-            consts::SLACK_OAUTH_TOKEN_URL,
-            &code,
-            &redirect_uri,
-            &pkce.verifier,
+        let end = complete_flow(
+            consts::data_dir(),
+            &project,
+            callback,
+            &exchange,
+            &scopes,
+            || oauth_flow::superseded(&FLOW_STATE, my_generation, &request_id),
+            || {
+                oauth_flow::emit_progress(
+                    &app,
+                    &FLOW_STATE,
+                    ProgressStatus::Exchanging,
+                    "",
+                    &request_id,
+                )
+            },
         )
-        .await
-        {
-            Ok(t) => t,
-            Err(e) => {
-                let message = if feature.is_some() {
-                    friendly_callback_error(&e, feature)
-                } else {
-                    e
-                };
-                oauth_flow::emit_terminal(
+        .await;
+        match end {
+            FlowEnd::Superseded => {}
+            FlowEnd::Cancelled => oauth_flow::emit_terminal(
+                &app,
+                &FLOW_STATE,
+                ProgressStatus::Cancelled,
+                "OAuth flow cancelled",
+                &request_id,
+            ),
+            FlowEnd::Failed(message) => oauth_flow::emit_terminal(
+                &app,
+                &FLOW_STATE,
+                ProgressStatus::Error,
+                &message,
+                &request_id,
+            ),
+            FlowEnd::Done => {
+                FLOW_STATE.clear_if_current(&request_id);
+                oauth_flow::emit_progress(
                     &app,
                     &FLOW_STATE,
-                    ProgressStatus::Error,
-                    &message,
+                    ProgressStatus::Success,
+                    "",
                     &request_id,
                 );
-                return;
             }
-        };
-        if oauth_flow::superseded(&FLOW_STATE, my_generation, &request_id) {
-            return;
         }
-
-        if let Err(e) = persist_slack_tokens(&project, &token, &scopes) {
-            oauth_flow::emit_terminal(&app, &FLOW_STATE, ProgressStatus::Error, &e, &request_id);
-            return;
-        }
-        FLOW_STATE.clear_if_current(&request_id);
-        oauth_flow::emit_progress(&app, &FLOW_STATE, ProgressStatus::Success, "", &request_id);
     });
 
     Ok(resp)
@@ -217,25 +198,95 @@ pub fn cancel_slack_oauth() {
     FLOW_STATE.cancel();
 }
 
-const FEATURE_REFUSAL_MARKERS: &[&str] = &[
-    "invalid_scope",
-    "unapproved_scope",
-    "access_denied",
-    "timed out",
-];
+const FEATURE_REFUSAL_CODES: &[&str] = &["invalid_scope", "unapproved_scope", "access_denied"];
 
-/// Translate the raw flow failure into actionable wording. While enabling a feature, a refusal or
-/// timeout becomes the feature's refusal message; otherwise the consent-screen dead ends are explained.
-fn friendly_callback_error(raw: &str, enabling: Option<&SlackFeature>) -> String {
-    if let Some(feature) = enabling {
-        if FEATURE_REFUSAL_MARKERS.iter().any(|m| raw.contains(m)) {
-            return slack_features::refusal_message(feature);
-        }
+/// How a sign-in attempt ended; only `Done` has written anything.
+#[derive(Debug, PartialEq)]
+enum FlowEnd {
+    Cancelled,
+    Superseded,
+    Failed(String),
+    Done,
+}
+
+struct ExchangeRequest<'a> {
+    token_url: &'a str,
+    redirect_uri: &'a str,
+    verifier: &'a str,
+}
+
+/// Runs everything after the browser callback: exchange the code, then persist. Nothing is written
+/// unless both succeed, so a refused, cancelled or timed-out sign-in keeps the previous grant.
+async fn complete_flow(
+    data_dir: &Path,
+    project: &str,
+    callback: Result<String, CallbackFailure>,
+    exchange: &ExchangeRequest<'_>,
+    requested_scopes: &[String],
+    superseded: impl Fn() -> bool,
+    on_exchanging: impl Fn(),
+) -> FlowEnd {
+    let features = slack_features::features_in(requested_scopes);
+    let code = match callback {
+        Ok(code) => code,
+        Err(CallbackFailure::Cancelled) => return FlowEnd::Cancelled,
+        Err(failure) => return FlowEnd::Failed(callback_failure_message(&failure, &features)),
+    };
+    if superseded() {
+        return FlowEnd::Superseded;
     }
-    if raw.contains("access_denied") {
-        return "Slack authorization was declined. If your workspace requires app approval, \
-                ask a workspace admin to approve Speedwave and try again."
-            .to_string();
+    on_exchanging();
+    let token = match exchange_slack_code(
+        exchange.token_url,
+        &code,
+        exchange.redirect_uri,
+        exchange.verifier,
+    )
+    .await
+    {
+        Ok(token) => token,
+        Err(raw) => return FlowEnd::Failed(exchange_failure_message(&raw, &features)),
+    };
+    if superseded() {
+        return FlowEnd::Superseded;
+    }
+    match persist_slack_tokens_in(data_dir, project, &token, requested_scopes) {
+        Ok(()) => FlowEnd::Done,
+        Err(e) => FlowEnd::Failed(e),
+    }
+}
+
+/// Wording for a callback failure. When the sign-in requested features, a refusal or timeout names
+/// them; otherwise the consent-screen dead end is explained.
+fn callback_failure_message(failure: &CallbackFailure, features: &[&SlackFeature]) -> String {
+    let refused = match failure {
+        CallbackFailure::TimedOut => true,
+        CallbackFailure::Denied { provider_error, .. } => provider_error
+            .as_deref()
+            .is_some_and(|code| FEATURE_REFUSAL_CODES.contains(&code)),
+        CallbackFailure::Cancelled | CallbackFailure::Error(_) => false,
+    };
+    if refused && !features.is_empty() {
+        return slack_features::refusal_message(features);
+    }
+    if matches!(
+        failure,
+        CallbackFailure::Denied { provider_error: Some(code), .. } if code == "access_denied"
+    ) {
+        return ACCESS_DENIED_MESSAGE.to_string();
+    }
+    failure.message().to_string()
+}
+
+const ACCESS_DENIED_MESSAGE: &str = "Slack authorization was declined. If your workspace requires \
+     app approval, ask a workspace admin to approve Speedwave and try again.";
+
+/// Wording for a token-exchange failure, which reaches us as text only: the Slack error code is
+/// looked up in it when the sign-in requested features.
+fn exchange_failure_message(raw: &str, features: &[&SlackFeature]) -> String {
+    let refused = FEATURE_REFUSAL_CODES.iter().any(|code| raw.contains(code));
+    if refused && !features.is_empty() {
+        return slack_features::refusal_message(features);
     }
     raw.to_string()
 }
@@ -395,24 +446,12 @@ async fn exchange_slack_code(
     })
 }
 
-/// Persists the outcome: oauth state (refresh token) FIRST, the mounted access token second —
-/// a crash in between leaves recoverable state, never a mounted token without refresh state.
-fn persist_slack_tokens(
-    project: &str,
-    token: &SlackUserToken,
-    requested_scopes: &[String],
-) -> Result<(), String> {
-    persist_slack_tokens_in(
-        speedwave_runtime::consts::data_dir(),
-        project,
-        token,
-        requested_scopes,
-    )
-}
-
+/// Persists the outcome in the order oauth state (refresh token), `features.json`, mounted access
+/// token: a crash in between leaves recoverable state, and a failed write never pairs a new access
+/// token with a feature file from the previous sign-in.
 /// `data_dir`-parameterised so tests pass a tempdir (cf. `save_oauth_state_in`).
 fn persist_slack_tokens_in(
-    data_dir: &std::path::Path,
+    data_dir: &Path,
     project: &str,
     token: &SlackUserToken,
     requested_scopes: &[String],
@@ -450,8 +489,8 @@ fn persist_slack_tokens_in(
     )?;
 
     let svc_dir = speedwave_runtime::plugin::token_dir_in(data_dir, project, "slack");
-    oauth_flow::save_credential_file(&svc_dir, "access_token", &token.access_token)?;
-    slack_features::write_features_file_in(&svc_dir, &token.granted_scopes)
+    slack_features::write_features_file_in(&svc_dir, &token.granted_scopes)?;
+    oauth_flow::save_credential_file(&svc_dir, "access_token", &token.access_token)
 }
 
 #[cfg(test)]
@@ -655,40 +694,75 @@ mod tests {
         let _ = handle.await;
     }
 
+    fn denied(provider_error: &str) -> CallbackFailure {
+        CallbackFailure::Denied {
+            provider_error: Some(provider_error.to_string()),
+            message: format!("authorization denied: {provider_error}"),
+        }
+    }
+
+    fn file_upload_features() -> Vec<&'static SlackFeature> {
+        vec![consts::find_slack_feature("file_upload").unwrap()]
+    }
+
     #[test]
-    fn friendly_callback_error_translates_access_denied() {
-        let msg = friendly_callback_error("authorization denied: access_denied", None);
+    fn callback_failure_without_features_explains_access_denied_and_keeps_the_rest() {
+        let msg = callback_failure_message(&denied("access_denied"), &[]);
         assert!(msg.contains("workspace admin"), "got: {msg}");
         assert_eq!(
-            friendly_callback_error("OAuth flow timed out", None),
+            callback_failure_message(&CallbackFailure::TimedOut, &[]),
             "OAuth flow timed out"
         );
         assert_eq!(
-            friendly_callback_error("authorization denied: invalid_scope", None),
+            callback_failure_message(&denied("invalid_scope"), &[]),
             "authorization denied: invalid_scope"
         );
     }
 
     #[test]
-    fn friendly_callback_error_explains_a_refused_feature_enable() {
-        let feature = consts::find_slack_feature("file_upload");
-        let expected = slack_features::refusal_message(feature.unwrap());
-        for raw in [
-            "authorization denied: invalid_scope",
-            "authorization denied: unapproved_scope",
-            "authorization denied: access_denied",
-            "OAuth flow timed out",
-            "token exchange failed: invalid_scope",
+    fn callback_failure_with_features_names_them_on_refusal_or_timeout() {
+        let features = file_upload_features();
+        let expected = slack_features::refusal_message(&features);
+        for failure in [
+            denied("invalid_scope"),
+            denied("unapproved_scope"),
+            denied("access_denied"),
+            CallbackFailure::TimedOut,
         ] {
             assert_eq!(
-                friendly_callback_error(raw, feature),
+                callback_failure_message(&failure, &features),
                 expected,
-                "raw: {raw}"
+                "failure: {failure:?}"
             );
         }
+        for failure in [
+            CallbackFailure::Denied {
+                provider_error: None,
+                message: "callback missing authorization code".to_string(),
+            },
+            CallbackFailure::Error("callback accept failed: x".to_string()),
+        ] {
+            assert_eq!(
+                callback_failure_message(&failure, &features),
+                failure.message()
+            );
+        }
+    }
+
+    #[test]
+    fn exchange_failure_names_the_features_only_for_a_refusal_code() {
+        let features = file_upload_features();
         assert_eq!(
-            friendly_callback_error("callback missing authorization code", feature),
-            "callback missing authorization code"
+            exchange_failure_message("token exchange failed: invalid_scope", &features),
+            slack_features::refusal_message(&features)
+        );
+        assert_eq!(
+            exchange_failure_message("token exchange failed: invalid_scope", &[]),
+            "token exchange failed: invalid_scope"
+        );
+        assert_eq!(
+            exchange_failure_message("token exchange failed: invalid_code", &features),
+            "token exchange failed: invalid_code"
         );
     }
 
@@ -828,22 +902,136 @@ mod tests {
     }
 
     #[test]
-    fn persist_writes_oauth_state_before_access_token() {
-        let src = include_str!("slack_oauth_cmd.rs");
-        let start = src
-            .find("fn persist_slack_tokens_in(")
-            .expect("persist_slack_tokens_in must exist");
-        let body = &src[start..];
-        let state_pos = body
-            .find("write_oauth_state(")
-            .expect("state write must exist");
-        let token_pos = body
-            .find("save_credential_file(")
-            .expect("access token write must exist");
+    fn persist_writes_the_features_file_before_the_access_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut token = sample_token();
+        token.access_token = "x".repeat(crate::types::MAX_CREDENTIAL_BYTES + 1);
+        let svc_dir = speedwave_runtime::plugin::token_dir_in(tmp.path(), "proj", "slack");
+
+        let result = persist_slack_tokens_in(tmp.path(), "proj", &token, &requested());
+
+        assert!(result.is_err());
+        assert!(svc_dir.join(consts::SLACK_FEATURES_FILE).exists());
+        assert!(!svc_dir.join("access_token").exists());
         assert!(
-            state_pos < token_pos,
-            "oauth state must be persisted before the mounted access token"
+            speedwave_runtime::plugin::oauth_state_file_in(tmp.path(), "proj", "slack").exists()
         );
+    }
+
+    struct Stored {
+        state: String,
+        access_token: String,
+        features: String,
+    }
+
+    fn stored(data_dir: &Path) -> Stored {
+        let svc_dir = speedwave_runtime::plugin::token_dir_in(data_dir, "proj", "slack");
+        let read = |path: std::path::PathBuf| std::fs::read_to_string(path).unwrap();
+        Stored {
+            state: read(speedwave_runtime::plugin::oauth_state_file_in(
+                data_dir, "proj", "slack",
+            )),
+            access_token: read(svc_dir.join("access_token")),
+            features: read(svc_dir.join(consts::SLACK_FEATURES_FILE)),
+        }
+    }
+
+    fn seeded_data_dir() -> (tempfile::TempDir, Stored) {
+        let tmp = tempfile::tempdir().unwrap();
+        persist_slack_tokens_in(tmp.path(), "proj", &sample_token(), &requested()).unwrap();
+        let before = stored(tmp.path());
+        (tmp, before)
+    }
+
+    fn assert_unchanged(data_dir: &Path, before: &Stored) {
+        let after = stored(data_dir);
+        assert_eq!(after.state, before.state);
+        assert_eq!(after.access_token, before.access_token);
+        assert_eq!(after.features, before.features);
+    }
+
+    fn enable_file_upload_scopes() -> Vec<String> {
+        slack_features::requested_scopes(&[], consts::find_slack_feature("file_upload"))
+    }
+
+    async fn run_flow(
+        data_dir: &Path,
+        callback: Result<String, CallbackFailure>,
+        token_url: &str,
+        scopes: &[String],
+    ) -> FlowEnd {
+        let exchange = ExchangeRequest {
+            token_url,
+            redirect_uri: "http://localhost:41739/callback",
+            verifier: "ver",
+        };
+        complete_flow(
+            data_dir,
+            "proj",
+            callback,
+            &exchange,
+            scopes,
+            || false,
+            || {},
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn failed_callbacks_persist_nothing() {
+        let (tmp, before) = seeded_data_dir();
+        let scopes = enable_file_upload_scopes();
+        let refusal = slack_features::refusal_message(&file_upload_features());
+        for failure in [denied("invalid_scope"), CallbackFailure::TimedOut] {
+            let end = run_flow(tmp.path(), Err(failure), "http://127.0.0.1:1/x", &scopes).await;
+            assert_eq!(end, FlowEnd::Failed(refusal.clone()));
+            assert_unchanged(tmp.path(), &before);
+        }
+        let end = run_flow(
+            tmp.path(),
+            Err(CallbackFailure::Cancelled),
+            "http://127.0.0.1:1/x",
+            &scopes,
+        )
+        .await;
+        assert_eq!(end, FlowEnd::Cancelled);
+        assert_unchanged(tmp.path(), &before);
+    }
+
+    #[tokio::test]
+    async fn a_refused_token_exchange_persists_nothing() {
+        let (tmp, before) = seeded_data_dir();
+        let (url, handle) =
+            stub_token_endpoint(200, r#"{"ok": false, "error": "invalid_scope"}"#).await;
+
+        let end = run_flow(
+            tmp.path(),
+            Ok("code".to_string()),
+            &url,
+            &enable_file_upload_scopes(),
+        )
+        .await;
+
+        assert_eq!(
+            end,
+            FlowEnd::Failed(slack_features::refusal_message(&file_upload_features()))
+        );
+        assert_unchanged(tmp.path(), &before);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn a_successful_exchange_replaces_the_stored_grant() {
+        let (tmp, before) = seeded_data_dir();
+        let (url, handle) = stub_token_endpoint(200, HAPPY_BODY).await;
+
+        let end = run_flow(tmp.path(), Ok("code".to_string()), &url, &requested()).await;
+
+        assert_eq!(end, FlowEnd::Done);
+        let after = stored(tmp.path());
+        assert_ne!(after.access_token, before.access_token);
+        assert_ne!(after.state, before.state);
+        let _ = handle.await;
     }
 
     #[test]

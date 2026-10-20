@@ -48,17 +48,28 @@ pub(crate) fn granted_scopes_in(data_dir: &Path, project: &str) -> Option<Vec<St
     )
 }
 
-/// Message for a feature enable Slack refused or that never completed; the existing grant is untouched.
-pub(crate) fn refusal_message(feature: &SlackFeature) -> String {
+/// Features whose scopes are all in `scopes`.
+pub(crate) fn features_in(scopes: &[String]) -> Vec<&'static SlackFeature> {
+    consts::SLACK_FEATURES
+        .iter()
+        .filter(|feature| is_enabled(feature, scopes))
+        .collect()
+}
+
+/// Message for a sign-in that requested `features` and that Slack refused or that never completed;
+/// the existing grant is untouched.
+pub(crate) fn refusal_message(features: &[&SlackFeature]) -> String {
+    let names: Vec<String> = features.iter().map(|f| f.label.to_lowercase()).collect();
     format!(
         "Slack did not allow enabling {}. The rest of the Slack integration keeps working.",
-        feature.label.to_lowercase()
+        names.join(", ")
     )
 }
 
 /// Writes `features.json` next to `access_token`, derived from the scopes Slack granted.
 pub(crate) fn write_features_file_in(svc_dir: &Path, granted: &[String]) -> Result<(), String> {
-    let body = serde_json::json!({ "enabled": enabled_feature_ids(granted) }).to_string();
+    let lowercased: Vec<String> = granted.iter().map(|s| s.to_lowercase()).collect();
+    let body = serde_json::json!({ "enabled": enabled_feature_ids(&lowercased) }).to_string();
     oauth_flow::save_credential_file(svc_dir, consts::SLACK_FEATURES_FILE, &body)
 }
 
@@ -77,9 +88,8 @@ fn feature_statuses_in(data_dir: &Path, project: &str) -> Vec<SlackFeatureStatus
 }
 
 fn enabled_feature_ids(granted: &[String]) -> Vec<&'static str> {
-    consts::SLACK_FEATURES
-        .iter()
-        .filter(|feature| is_enabled(feature, granted))
+    features_in(granted)
+        .into_iter()
         .map(|feature| feature.id)
         .collect()
 }
@@ -150,11 +160,19 @@ mod tests {
 
     #[test]
     fn refusal_message_names_the_feature_and_keeps_the_integration() {
-        let msg = refusal_message(file_upload());
+        let msg = refusal_message(&[file_upload()]);
         assert_eq!(
             msg,
             "Slack did not allow enabling file sending. The rest of the Slack integration keeps working."
         );
+    }
+
+    #[test]
+    fn features_in_lists_features_whose_scopes_are_all_present() {
+        assert!(features_in(&scopes(&["chat:write"])).is_empty());
+        let found = features_in(&scopes(&["chat:write", "files:write"]));
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, "file_upload");
     }
 
     #[test]
@@ -218,6 +236,15 @@ mod tests {
         write_features_file_in(&dir, &scopes(&["chat:write", "files:write"])).unwrap();
         let some = std::fs::read_to_string(dir.join(consts::SLACK_FEATURES_FILE)).unwrap();
         assert_eq!(some, r#"{"enabled":["file_upload"]}"#);
+    }
+
+    #[test]
+    fn features_file_derivation_lowercases_granted_scopes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("slack");
+        write_features_file_in(&dir, &scopes(&["Chat:Write", "Files:Write"])).unwrap();
+        let body = std::fs::read_to_string(dir.join(consts::SLACK_FEATURES_FILE)).unwrap();
+        assert_eq!(body, r#"{"enabled":["file_upload"]}"#);
     }
 
     #[test]

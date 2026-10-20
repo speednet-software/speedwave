@@ -50,7 +50,8 @@ fn apply_credentials_digests(yaml: &str, tokens_root: &std::path::Path) -> anyho
     Ok(serde_yaml_ng::to_string(&doc)?)
 }
 
-/// Machine-managed OAuth artifacts — change on every refresh, must NOT trigger recreate.
+/// Machine-written files in a token dir that must NOT trigger recreate: `access_token` is rotated by
+/// every OAuth refresh, the Slack features file is rewritten by Desktop at every sign-in.
 /// Contract (ADR-060/071): add here any new machine-written file in the token mount.
 const VOLATILE_CREDENTIAL_FILES: &[&str] = &["access_token", crate::consts::SLACK_FEATURES_FILE];
 

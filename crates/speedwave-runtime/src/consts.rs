@@ -614,7 +614,7 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 hint: None,
             },
         ],
-        credential_files: &["access_token"],
+        credential_files: &["access_token", SLACK_FEATURES_FILE],
         oauth_state_fields: Some(&["refresh_token"]),
         badge: None,
         oauth_provider_label: Some("Slack"),
@@ -1751,7 +1751,7 @@ mod tests {
     fn test_slack_descriptor_is_oauth_shaped() {
         let svc = find_mcp_service("slack").unwrap();
         assert!(svc.uses_oauth_refresh);
-        assert_eq!(svc.credential_files, &["access_token"]);
+        assert_eq!(svc.credential_files, &["access_token", SLACK_FEATURES_FILE]);
         assert_eq!(svc.oauth_state_fields, Some(&["refresh_token"][..]));
 
         let access = &svc.auth_fields[0];
@@ -1846,13 +1846,25 @@ mod tests {
             "mcp-servers/slack/src/features.ts must declare `export const SLACK_FEATURES_FILE`",
         );
         assert_eq!(&cap[1], SLACK_FEATURES_FILE);
-        for feature in SLACK_FEATURES {
-            assert!(
-                src.contains(&format!("'{}'", feature.id)),
-                "mcp-servers/slack/src/features.ts must name feature id {}",
-                feature.id
-            );
-        }
+        let ids_re = regex::Regex::new(
+            r#"(?s)export\s+const\s+SLACK_FEATURE_IDS\s*=\s*\{(.*?)\}\s*as\s+const"#,
+        )
+        .unwrap();
+        let block = ids_re.captures(src).expect(
+            "mcp-servers/slack/src/features.ts must declare `export const SLACK_FEATURE_IDS`",
+        );
+        let value_re = regex::Regex::new(r#":\s*['"]([^'"]+)['"]"#).unwrap();
+        let mut ts_ids: Vec<&str> = value_re
+            .captures_iter(block.get(1).unwrap().as_str())
+            .map(|c| c.get(1).unwrap().as_str())
+            .collect();
+        let mut rust_ids: Vec<&str> = SLACK_FEATURES.iter().map(|f| f.id).collect();
+        ts_ids.sort_unstable();
+        rust_ids.sort_unstable();
+        assert_eq!(
+            ts_ids, rust_ids,
+            "features.ts SLACK_FEATURE_IDS must list exactly the ids of consts::SLACK_FEATURES"
+        );
     }
 
     const CREDENTIAL_LESS_SERVICES: &[&str] = &["playwright", "office"];

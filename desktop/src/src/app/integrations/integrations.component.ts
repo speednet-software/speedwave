@@ -447,6 +447,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
     this.unsubProjectSettled = this.projectState.onProjectSettled(async () => {
       if (this.activeOAuthRequestId || this.oauthStatus === 'starting') {
         await this.handleCancelOAuth();
+        this.slackFeatureError.set('');
       }
       await this.loadActiveProject();
       await this.loadIntegrations();
@@ -481,13 +482,18 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
           this.oauthStatus = payload.status;
           this.oauthStatusMessage = payload.message;
           if (service === 'slack') {
-            this.settleSlackFeatureEnable(payload);
+            this.settleSlackFlow(payload);
           }
           if (payload.status === 'awaiting_redirect') {
             this.oauthRedirectUri = payload.message;
           }
           if (payload.status === 'success') {
             const flowProject = this.oauthProjectAtStart;
+            const enabledFeature = service === 'slack' ? this.slackEnablingFeature : null;
+            if (service === 'slack') {
+              this.slackEnablingFeature = null;
+              this.slackFeatureError.set('');
+            }
             this.deviceCodeInfo = null;
             this.oauthRedirectUri = null;
             this.activeOAuthRequestId = null;
@@ -496,6 +502,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
             if (flowProject !== this.activeProject) return;
             await this.loadIntegrations();
             if (flowProject !== this.activeProject) return;
+            if (enabledFeature) this.reportFeatureNotGranted(enabledFeature);
             await this.autoEnableIfConfigured(service);
             this.projectState.requestRestart();
           }
@@ -654,17 +661,49 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Ends a pending feature enable when the Slack flow reaches a terminal status; a failure keeps its readable message inline.
+   * Shows a readable reason inline when a Slack sign-in fails or an enable is cancelled; success is settled after the integration list reloads.
    * @param payload - the Slack OAuth progress event
    */
-  private settleSlackFeatureEnable(payload: OAuthProgressEvent): void {
-    if (!this.slackEnablingFeature) return;
+  private settleSlackFlow(payload: OAuthProgressEvent): void {
+    const enabling = this.slackEnablingFeature;
     if (payload.status === 'error') {
       this.slackFeatureError.set(payload.message);
-    }
-    if (['success', 'error', 'expired', 'cancelled'].includes(payload.status)) {
+      this.slackEnablingFeature = null;
+    } else if (payload.status === 'cancelled' || payload.status === 'expired') {
+      if (enabling) this.reportFeatureEnableCancelled(enabling);
       this.slackEnablingFeature = null;
     }
+  }
+
+  /**
+   * Names the feature in the inline message for an enable the user abandoned.
+   * @param featureId - the feature whose enable did not finish
+   */
+  private reportFeatureEnableCancelled(featureId: string): void {
+    this.slackFeatureError.set(
+      `Enabling ${this.slackFeatureLabel(featureId)} was cancelled. The rest of the Slack integration keeps working.`
+    );
+  }
+
+  /**
+   * Names the feature in the inline message when a sign-in succeeded but the refreshed grant still lacks it.
+   * @param featureId - the feature the sign-in was meant to enable
+   */
+  private reportFeatureNotGranted(featureId: string): void {
+    const feature = this.slackFeatures().find((f) => f.id === featureId);
+    if (feature && !feature.enabled) {
+      this.slackFeatureError.set(
+        `Slack signed in but did not grant ${feature.label.toLowerCase()}. The rest of the Slack integration keeps working.`
+      );
+    }
+  }
+
+  private slackFeatureLabel(featureId: string): string {
+    return (
+      this.slackFeatures()
+        .find((f) => f.id === featureId)
+        ?.label.toLowerCase() ?? 'this feature'
+    );
   }
 
   /**
@@ -805,7 +844,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
     credentials: Record<string, string>;
     enableFeature?: string;
   }): Promise<void> {
-    if (this.oauthStatus === 'starting' || this.oauthStatus === 'polling') return;
+    if (this.oauthFlowRunning()) return;
 
     const myNonce = ++this.oauthStartNonce;
     this.oauthProjectAtStart = this.activeProject;
@@ -902,6 +941,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
     this.deviceCodeInfo = null;
     this.oauthStatus = null;
     this.oauthStatusMessage = '';
+    if (this.slackEnablingFeature) this.reportFeatureEnableCancelled(this.slackEnablingFeature);
     this.slackEnablingFeature = null;
     this.cdr.markForCheck();
   }
