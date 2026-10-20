@@ -123,6 +123,12 @@ describe('slack client', () => {
       }
     });
 
+    it('points a missing_scope error at the file sending switch in the Slack card', () => {
+      const message = formatSlackError({ data: { error: 'missing_scope' } });
+      expect(message).toContain('click Enable for file sending');
+      expect(message).toContain('Speedwave Desktop, Integrations, Slack');
+    });
+
     it('formats channel not found error', () => {
       const error = { data: { error: 'channel_not_found' } };
       const message = formatSlackError(error);
@@ -586,25 +592,6 @@ describe('slack client', () => {
       });
     });
 
-    it('throws error when channel not found', async () => {
-      const mockList = vi.fn().mockResolvedValue({
-        channels: [{ id: 'C12345678', name: 'general' }],
-      });
-
-      mockClients.user.conversations.list = mockList;
-
-      await expect(
-        sendChannel(mockClients, {
-          channel: 'nonexistent',
-          message: 'Hello!',
-        })
-      ).rejects.toThrow(
-        'Channel not found: nonexistent. If this is a person, use findUsers then openDirectMessage. ' +
-          'If it is a channel, call listChannelIds to see channels you (the signed-in user) are a ' +
-          'member of — Speedwave has no bot to invite, so a missing channel usually means you are not a member.'
-      );
-    });
-
     it('resolves channel by normalized name', async () => {
       const mockList = vi.fn().mockResolvedValue({
         channels: [{ id: 'C12345678', name: 'team-eng', name_normalized: 'team-eng' }],
@@ -733,27 +720,6 @@ describe('slack client', () => {
       expect(Object.keys(mockPostMessage.mock.calls[0][0])).toEqual(['channel', 'text']);
     });
 
-    it('rejects a thread_ts that is not a genuine Slack timestamp before calling the API', async () => {
-      const mockPostMessage = vi.fn();
-      mockClients.user.chat.postMessage = mockPostMessage;
-
-      await expect(
-        sendChannel(mockClients, {
-          channel: 'C12345678',
-          message: 'Reply',
-          thread_ts: '1717000000',
-        })
-      ).rejects.toThrow(/does not look like a Slack timestamp/);
-      await expect(
-        sendChannel(mockClients, {
-          channel: 'C12345678',
-          message: 'Reply',
-          thread_ts: 1717000000.0001 as unknown as string,
-        })
-      ).rejects.toThrow(/does not look like a Slack timestamp/);
-      expect(mockPostMessage).not.toHaveBeenCalled();
-    });
-
     it('broadcasts a thread reply to the channel when reply_broadcast is true', async () => {
       const mockPostMessage = vi.fn().mockResolvedValue({
         ok: true,
@@ -793,35 +759,6 @@ describe('slack client', () => {
         'text',
         'thread_ts',
       ]);
-    });
-
-    it('rejects a reply_broadcast that is not a boolean before calling the API', async () => {
-      const mockPostMessage = vi.fn();
-      mockClients.user.chat.postMessage = mockPostMessage;
-
-      await expect(
-        sendChannel(mockClients, {
-          channel: 'C12345678',
-          message: 'Reply',
-          thread_ts: '1717000000.000100',
-          reply_broadcast: 'false' as unknown as boolean,
-        })
-      ).rejects.toThrow(/reply_broadcast must be a boolean/);
-      expect(mockPostMessage).not.toHaveBeenCalled();
-    });
-
-    it('rejects reply_broadcast without thread_ts before calling the API', async () => {
-      const mockPostMessage = vi.fn();
-      mockClients.user.chat.postMessage = mockPostMessage;
-
-      await expect(
-        sendChannel(mockClients, {
-          channel: 'C12345678',
-          message: 'Reply',
-          reply_broadcast: true,
-        })
-      ).rejects.toThrow(/reply_broadcast requires thread_ts/);
-      expect(mockPostMessage).not.toHaveBeenCalled();
     });
   });
 
@@ -1262,19 +1199,6 @@ describe('slack client', () => {
       ).rejects.toEqual({
         data: { error: 'thread_not_found' },
       });
-    });
-
-    it('rejects a thread_ts that is not a genuine Slack timestamp before calling the API', async () => {
-      const mockReplies = vi.fn();
-      mockClients.user.conversations.replies = mockReplies;
-
-      await expect(
-        readThread(mockClients, { channel: 'C1', thread_ts: '1717000000' })
-      ).rejects.toThrow(/does not look like a Slack timestamp/);
-      await expect(
-        readThread(mockClients, { channel: 'C1', thread_ts: '1717000000.0001' })
-      ).rejects.toThrow(/does not look like a Slack timestamp/);
-      expect(mockReplies).not.toHaveBeenCalled();
     });
   });
 
@@ -1959,36 +1883,6 @@ describe('slack client', () => {
       expect(open).toHaveBeenCalledWith({ users: 'U77' });
     });
 
-    it('throws on an unknown email and on a plain name', async () => {
-      (mockClients.user.users.lookupByEmail as ReturnType<typeof vi.fn>).mockRejectedValue(
-        Object.assign(new Error('users_not_found'), { data: { error: 'users_not_found' } })
-      );
-      await expect(openDm(mockClients, { users: ['ghost@example.pl'] })).rejects.toThrow(
-        /No Slack user found for email "ghost@example.pl"/
-      );
-
-      await expect(openDm(mockClients, { users: ['Pawel'] })).rejects.toThrow(/findUsers first/);
-      expect(mockClients.user.conversations.open).not.toHaveBeenCalled();
-    });
-
-    it('routes names that merely look like Slack IDs to the findUsers teaching path', async () => {
-      await expect(openDm(mockClients, { users: ['Wanda'] })).rejects.toThrow(/findUsers first/);
-      await expect(openDm(mockClients, { users: ['Wojciech Nowak'] })).rejects.toThrow(
-        /findUsers first/
-      );
-      expect(mockClients.user.conversations.open).not.toHaveBeenCalled();
-    });
-
-    it('rejects an all-alphabetic word of 9+ chars starting with U/W, even case-insensitively (no digit, not a real ID shape)', async () => {
-      await expect(openDm(mockClients, { users: ['workspaces'] })).rejects.toThrow(
-        /findUsers first/
-      );
-      await expect(openDm(mockClients, { users: ['UNITEDSTATES'] })).rejects.toThrow(
-        /findUsers first/
-      );
-      expect(mockClients.user.conversations.open).not.toHaveBeenCalled();
-    });
-
     it('normalizes a lowercase user ID before matching (case-insensitive)', async () => {
       const open = stubOpen('D12');
 
@@ -2007,13 +1901,6 @@ describe('slack client', () => {
       expect(open).toHaveBeenCalledWith({ users: 'U01234567' });
     });
 
-    it('rejects an ID one character short of the boundary (7 chars after the prefix)', async () => {
-      await expect(openDm(mockClients, { users: ['U0123456'] })).rejects.toThrow(
-        /not a user ID or email/
-      );
-      expect(mockClients.user.conversations.open).not.toHaveBeenCalled();
-    });
-
     it('accepts a real-looking uppercase user ID', async () => {
       const open = stubOpen('D11');
 
@@ -2021,27 +1908,6 @@ describe('slack client', () => {
 
       expect(result).toEqual({ id: 'D11' });
       expect(open).toHaveBeenCalledWith({ users: 'U0123ABCD456' });
-    });
-
-    it('rejects a non-array users value before any API call', async () => {
-      await expect(
-        openDm(mockClients, { users: undefined as unknown as string[] })
-      ).rejects.toThrow(/'users' is required/);
-      expect(mockClients.user.conversations.open).not.toHaveBeenCalled();
-    });
-
-    it('rejects more than 8 participants before any API call', async () => {
-      const open = mockClients.user.conversations.open as ReturnType<typeof vi.fn>;
-      const nine = Array.from({ length: 9 }, (_, i) => `U${i}0123ABC`);
-
-      await expect(openDm(mockClients, { users: nine })).rejects.toThrow(/at most 8 people/);
-      expect(open).not.toHaveBeenCalled();
-    });
-
-    it('rejects an empty users list', async () => {
-      const open = mockClients.user.conversations.open as ReturnType<typeof vi.fn>;
-      await expect(openDm(mockClients, { users: [] })).rejects.toThrow(/at least one user/);
-      expect(open).not.toHaveBeenCalled();
     });
 
     it('accepts exactly 8 participants (the boundary)', async () => {

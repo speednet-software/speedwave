@@ -43,6 +43,13 @@ export interface IntegrationsResponse {
   os: OsIntegrationStatusEntry[];
 }
 
+/** One opt-in Slack feature of the signed-in grant (`get_slack_features`). */
+export interface SlackFeatureStatus {
+  id: string;
+  label: string;
+  enabled: boolean;
+}
+
 /** Result of starting a loopback (authorization_code) flow — Slack, plugins. */
 export interface LoopbackFlowStart {
   request_id: string;

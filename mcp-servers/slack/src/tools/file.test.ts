@@ -2,7 +2,10 @@
  * File Tools Tests
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtemp, rm, writeFile } from 'fs/promises';
+import { tmpdir } from 'os';
+import path from 'path';
 import { RefreshLock, META_KEYS, WRITE_ANNOTATIONS } from '@speedwave/mcp-shared';
 import {
   handleGetFileContent,
@@ -149,6 +152,61 @@ describe('file-tools', () => {
     });
   });
 
+  describe('handleUploadFile feature gate', () => {
+    let tokens: string;
+    let previous: string | undefined;
+
+    beforeEach(async () => {
+      previous = process.env.TOKENS_DIR;
+      tokens = await mkdtemp(path.join(tmpdir(), 'slack-upload-gate-'));
+      process.env.TOKENS_DIR = tokens;
+    });
+
+    afterEach(async () => {
+      if (previous === undefined) {
+        delete process.env.TOKENS_DIR;
+      } else {
+        process.env.TOKENS_DIR = previous;
+      }
+      await rm(tokens, { recursive: true, force: true });
+    });
+
+    const params = { channel: 'C1', filePaths: ['/workspace/report.pdf'] };
+
+    it('refuses before any Slack call when file sending is not enabled', async () => {
+      await writeFile(path.join(tokens, 'features.json'), '{"enabled":[]}');
+
+      const result = await handleUploadFile(presentClients(), params);
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('FEATURE_NOT_ENABLED');
+      expect(result.error?.message).toContain('uploadFile');
+      expect(result.error?.message).toContain('file_upload');
+      expect(result.error?.message).toContain('Speedwave Desktop, Integrations, Slack');
+      expect(result.error?.message).not.toContain('/workspace/report.pdf');
+      expect(client.uploadFile).not.toHaveBeenCalled();
+    });
+
+    it('uploads when file sending is enabled', async () => {
+      await writeFile(path.join(tokens, 'features.json'), '{"enabled":["file_upload"]}');
+      vi.mocked(client.uploadFile).mockResolvedValue({ ok: true, files: [], channel: 'C1' });
+
+      const result = await handleUploadFile(presentClients(), params);
+
+      expect(result.success).toBe(true);
+      expect(client.uploadFile).toHaveBeenCalledTimes(1);
+    });
+
+    it('uploads as before when no features file exists', async () => {
+      vi.mocked(client.uploadFile).mockResolvedValue({ ok: true, files: [], channel: 'C1' });
+
+      const result = await handleUploadFile(presentClients(), params);
+
+      expect(result.success).toBe(true);
+      expect(client.uploadFile).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe('handleUploadFile transfer errors', () => {
     it('keeps an UploadTransferError message verbatim', async () => {
       const message = 'Uploading report.pdf failed: fetch failed (ECONNRESET). No file was shared.';
@@ -208,13 +266,6 @@ describe('file-tools', () => {
       expect(Object.keys(upload.outputSchema?.properties as object).sort()).toEqual(
         ['channel', 'error', 'files', 'ok', 'success', 'thread_ts'].sort()
       );
-    });
-
-    it('rejects an upload call that omits a required parameter', async () => {
-      const upload = createFileTools(presentClients())[2];
-      const result = await upload.handler({ channel: 'C1' });
-      expect(result.isError).toBe(true);
-      expect(client.uploadFile).not.toHaveBeenCalled();
     });
 
     it('returns NOT_CONFIGURED for every tool when the worker has no token', async () => {

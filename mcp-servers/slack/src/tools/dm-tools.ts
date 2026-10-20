@@ -8,10 +8,9 @@ import {
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
   META_KEYS,
-  type ResultValidationOptions,
 } from '@speedwave/mcp-shared';
-import { withValidation, withClients, missingParamResult, ToolResult } from './validation.js';
-import { SlackClients, listDms, openDm, formatSlackError } from '../client.js';
+import { withValidation, withClients, failureResult, ToolResult } from './validation.js';
+import { SlackClients, listDms, openDm } from '../client.js';
 import { peekUserDirectory, displayNameOf } from '../user-directory.js';
 
 interface OpenDirectMessageParams {
@@ -134,7 +133,7 @@ export async function handleListDirectMessages(
     });
     return { success: true, data: { dms: named } };
   } catch (error) {
-    return { success: false, error: { code: 'LIST_FAILED', message: formatSlackError(error) } };
+    return failureResult('LIST_FAILED', error);
   }
 }
 
@@ -147,27 +146,12 @@ export async function handleOpenDirectMessage(
   clients: SlackClients,
   params: OpenDirectMessageParams
 ): Promise<ToolResult> {
-  if (!Array.isArray(params.users) || params.users.length === 0) {
-    return missingParamResult(
-      'users',
-      params.users,
-      'Provide an array of 1-8 user IDs (from findUsers) or exact e-mail addresses.'
-    );
-  }
   try {
     const result = await openDm(clients, params);
     return { success: true, data: result };
   } catch (error) {
-    return { success: false, error: { code: 'OPEN_FAILED', message: formatSlackError(error) } };
+    return failureResult('OPEN_FAILED', error);
   }
-}
-
-/**
- * Required-param options for {@link withValidation}, driven by the tool's own declared `inputSchema.required` so the guard can never drift from the schema.
- * @param tool - The tool whose schema drives the required-param set.
- */
-function requiredOf(tool: Tool): ResultValidationOptions {
-  return { required: tool.inputSchema.required ?? [], toolName: tool.name };
 }
 
 /**
@@ -184,10 +168,7 @@ export function createDmTools(clients: SlackClients): ToolDefinition[] {
     },
     {
       tool: openDirectMessageTool,
-      handler: withValidation<OpenDirectMessageParams>(
-        gate(handleOpenDirectMessage),
-        requiredOf(openDirectMessageTool)
-      ),
+      handler: withValidation<OpenDirectMessageParams>(gate(handleOpenDirectMessage)),
     },
   ];
 }

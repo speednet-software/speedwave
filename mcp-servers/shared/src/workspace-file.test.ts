@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { promises as fsp } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { readWorkspaceFile, resolveWorkspaceFile } from './workspace-file.js';
+import { readWorkspaceFile, resolveWorkspaceFile, WorkspaceFileError } from './workspace-file.js';
 
 describe('resolveWorkspaceFile', () => {
   let base: string;
@@ -80,6 +80,22 @@ describe('resolveWorkspaceFile', () => {
     await expect(resolveWorkspaceFile('big.bin', 10)).rejects.toThrow(
       'File is too large (11 bytes > 10 byte limit): big.bin. Split the file or reduce it.'
     );
+  });
+
+  it.each([
+    ['../outside/secret.txt', 'outside_workspace', 100],
+    ['missing.txt', 'not_found', 100],
+    ['dir', 'not_a_file', 100],
+    ['big.bin', 'too_large', 10],
+  ])('tells %s apart as %s without parsing the message', async (target, kind, cap) => {
+    await fsp.writeFile(path.join(outside, 'secret.txt'), 'x');
+    await fsp.mkdir(path.join(root, 'dir'));
+    await fsp.writeFile(path.join(root, 'big.bin'), Buffer.alloc(11));
+
+    const error = await resolveWorkspaceFile(target, cap).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(WorkspaceFileError);
+    expect((error as WorkspaceFileError).kind).toBe(kind);
   });
 
   it('accepts a file exactly at the cap', async () => {

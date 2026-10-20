@@ -17,7 +17,7 @@ fn required_scopes_for(service: &str) -> Option<Vec<String>> {
     match service {
         "sharepoint" => Some(sharepoint_required_scopes()),
         "slack" => Some(
-            speedwave_runtime::consts::SLACK_OAUTH_USER_SCOPES
+            speedwave_runtime::consts::SLACK_OAUTH_BASE_SCOPES
                 .iter()
                 .map(|s| s.to_lowercase())
                 .collect(),
@@ -1103,6 +1103,16 @@ pub fn save_redmine_mappings(
     Ok(())
 }
 
+fn remove_credential_files(svc_dir: &std::path::Path, files: &[&str]) -> Result<(), String> {
+    for &file in files {
+        let path = svc_dir.join(file);
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn delete_integration_credentials(project: String, service: String) -> Result<(), String> {
     check_project(&project)?;
@@ -1115,12 +1125,7 @@ pub fn delete_integration_credentials(project: String, service: String) -> Resul
         .join(&project)
         .join(&service);
 
-    for &field in allowed {
-        let path = svc_dir.join(field);
-        if path.exists() {
-            std::fs::remove_file(&path).map_err(|e| e.to_string())?;
-        }
-    }
+    remove_credential_files(&svc_dir, allowed)?;
 
     let svc_desc = speedwave_runtime::consts::find_mcp_service(&service);
     if svc_desc.is_some_and(|d| d.oauth_state_fields.is_some()) {
@@ -1605,7 +1610,7 @@ mod tests {
 
     /// Every currently-required slack scope, as Slack echoes them (SSOT-derived).
     fn all_slack_scopes() -> Vec<&'static str> {
-        speedwave_runtime::consts::SLACK_OAUTH_USER_SCOPES.to_vec()
+        speedwave_runtime::consts::SLACK_OAUTH_BASE_SCOPES.to_vec()
     }
 
     /// The pre-DM grant (8 scopes, shipped before im/mpim support). Deliberately
@@ -1633,6 +1638,40 @@ mod tests {
         let now = chrono::Utc::now().to_rfc3339();
         write_slack_state_for_detect(tmp.path(), &all_slack_scopes(), &now);
         assert!(detect_oauth_action_required_in(tmp.path(), "p", "slack").is_none());
+    }
+
+    #[test]
+    fn detect_oauth_action_required_slack_none_for_grant_without_any_feature_scope() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let granted = all_slack_scopes();
+        assert!(!granted.contains(&"files:write"));
+        write_slack_state_for_detect(tmp.path(), &granted, &now);
+        assert!(detect_oauth_action_required_in(tmp.path(), "p", "slack").is_none());
+    }
+
+    #[test]
+    fn detect_oauth_action_required_slack_none_when_a_feature_is_enabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut granted = all_slack_scopes();
+        granted.push("files:write");
+        write_slack_state_for_detect(tmp.path(), &granted, &now);
+        assert!(detect_oauth_action_required_in(tmp.path(), "p", "slack").is_none());
+    }
+
+    #[test]
+    fn detect_oauth_action_required_slack_some_when_a_base_scope_is_missing_despite_a_feature() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut granted = all_slack_scopes();
+        granted.retain(|s| *s != "im:write");
+        granted.push("files:write");
+        write_slack_state_for_detect(tmp.path(), &granted, &now);
+        assert_eq!(
+            detect_oauth_action_required_in(tmp.path(), "p", "slack"),
+            Some("scope_mismatch".to_string())
+        );
     }
 
     #[test]
@@ -2794,6 +2833,21 @@ mod tests {
                 key
             );
         }
+    }
+
+    #[test]
+    fn disconnecting_slack_removes_the_features_file_with_the_access_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let svc_dir = tmp.path().join("slack");
+        std::fs::create_dir_all(&svc_dir).unwrap();
+        for name in ["access_token", "features.json"] {
+            std::fs::write(svc_dir.join(name), "x").unwrap();
+        }
+
+        remove_credential_files(&svc_dir, get_allowed_fields("slack").unwrap()).unwrap();
+
+        assert!(!svc_dir.join("access_token").exists());
+        assert!(!svc_dir.join("features.json").exists());
     }
 
     #[test]
