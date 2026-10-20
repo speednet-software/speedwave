@@ -206,12 +206,17 @@ SCRIPT
     echo "[windows] Installing Python (PII NER model converter)..."
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = 'Stop'
-$pythonDir = 'C:\Program Files\Python312'
-if (Test-Path "$pythonDir\python.exe") { Write-Host "Python already installed: $pythonDir"; exit 0 }
-Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe' -OutFile "$env:TEMP\python-installer.exe"
-Invoke-Installer "$env:TEMP\python-installer.exe" '/quiet','InstallAllUsers=1','PrependPath=1','Include_test=0'
-Remove-Item "$env:TEMP\python-installer.exe"
-if (-not (Test-Path "$pythonDir\python.exe")) { Write-Error "Python installation completed but python.exe not found at $pythonDir"; exit 1 }
+$env:Path = [System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' + $env:Path
+python --version *> $null
+if ($LASTEXITCODE -eq 0) { Write-Host "Python already installed: $(python --version 2>&1)"; exit 0 }
+if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
+    Set-ExecutionPolicy Bypass -Scope Process -Force
+    [System.Net.ServicePointManager]::SecurityProtocol = 3072
+    Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+    $env:Path += ";$env:ProgramData\chocolatey\bin"
+}
+choco install python -y --no-progress
+if ($LASTEXITCODE -notin 0, 3010) { [Console]::Error.WriteLine("choco install python exited with $LASTEXITCODE"); exit $LASTEXITCODE }
 SCRIPT
 
     echo "[windows] Installing Ninja (cmake-crate generator for whisper-rs-sys)..."
