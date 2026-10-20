@@ -36,7 +36,7 @@ final class MailCommandBoundaryTests: XCTestCase {
         let replies = [
             "list_emails": "Work" + String(repeating: "\u{1D}", count: 5),
             "get_email": "S||A||D||true||b@x,||Body",
-            "search_emails": "Work\u{1D}",
+            "search_emails": "Work" + String(repeating: "\u{1D}", count: 5),
         ]
         for (command, params) in calls {
             harness.executor.reply(replies[command] ?? "")
@@ -238,7 +238,10 @@ final class MailCommandBoundaryTests: XCTestCase {
     }
 
     func testSearchResultsCarryMailIdsOfTheAccountTheLookupResolved() throws {
-        harness.executor.reply("Google\u{1D}<s@x>||Invoice||Bob||Monday\n")
+        harness.executor.reply(
+            mailListing(
+                account: "Google",
+                [ListingRow(messageId: "<s@x>", subject: "Invoice", sender: "Bob", received: "2026-10-20T09:15:00", read: true)]))
 
         let result = try harness.call("search_emails", ["query": "invoice", "mailbox": "INBOX"])
 

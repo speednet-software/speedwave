@@ -5,26 +5,6 @@ import XCTest
 final class ListEmailsTests: XCTestCase {
     private let harness = MailCommandHarness()
 
-    private struct Row {
-        let messageId: String
-        let subject: String
-        let sender: String
-        let received: String
-        let read: Bool
-    }
-
-    private func listing(account: String, _ rows: [Row]) -> String {
-        let field = { (value: (Row) -> String) in rows.map(value).joined(separator: "\u{1E}") }
-        return [
-            account,
-            field(\.messageId),
-            field(\.subject),
-            field(\.sender),
-            field(\.received),
-            field { $0.read ? "true" : "false" },
-        ].joined(separator: "\u{1D}")
-    }
-
     private func localISO(_ year: Int, _ month: Int, _ day: Int, _ hour: Int, _ minute: Int) throws -> String {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = .current
@@ -38,13 +18,13 @@ final class ListEmailsTests: XCTestCase {
     }
 
     private let threeMessages = [
-        Row(messageId: "<old@x>", subject: "Old", sender: "Anna <anna@x>", received: "2026-10-01T08:00:00", read: true),
-        Row(messageId: "<new@x>", subject: "New", sender: "Bob <bob@x>", received: "2026-10-20T09:15:00", read: false),
-        Row(messageId: "<mid@x>", subject: "Mid", sender: "Ewa <ewa@x>", received: "2026-10-10T12:30:00", read: true),
+        ListingRow(messageId: "<old@x>", subject: "Old", sender: "Anna <anna@x>", received: "2026-10-01T08:00:00", read: true),
+        ListingRow(messageId: "<new@x>", subject: "New", sender: "Bob <bob@x>", received: "2026-10-20T09:15:00", read: false),
+        ListingRow(messageId: "<mid@x>", subject: "Mid", sender: "Ewa <ewa@x>", received: "2026-10-10T12:30:00", read: true),
     ]
 
     func testListsTheNewestFirstWithMailIdsIsoDatesAndTheTotal() throws {
-        harness.executor.reply(listing(account: "Work", threeMessages))
+        harness.executor.reply(mailListing(account: "Work", threeMessages))
 
         let result = try harness.call("list_emails", ["mailbox": "INBOX", "account": "Work"])
 
@@ -63,7 +43,7 @@ final class ListEmailsTests: XCTestCase {
     }
 
     func testTheIdCarriesTheAccountTheLookupResolvedWhenNoneWasGiven() throws {
-        harness.executor.reply(listing(account: "On My Mac", Array(threeMessages.prefix(1))))
+        harness.executor.reply(mailListing(account: "On My Mac", Array(threeMessages.prefix(1))))
 
         let result = try harness.call("list_emails", ["mailbox": "Speedwave-Test"])
 
@@ -81,7 +61,7 @@ final class ListEmailsTests: XCTestCase {
             (50, 10, []),
         ]
         for (offset, limit, subjects) in cases {
-            harness.executor.reply(listing(account: "Work", threeMessages))
+            harness.executor.reply(mailListing(account: "Work", threeMessages))
 
             let result = try harness.call(
                 "list_emails", ["mailbox": "INBOX", "account": "Work", "offset": offset, "limit": limit])
@@ -93,9 +73,9 @@ final class ListEmailsTests: XCTestCase {
 
     func testTheDefaultPageIsTheTenNewest() throws {
         let rows = (1...12).map { day in
-            Row(messageId: "<\(day)@x>", subject: "\(day)", sender: "a", received: String(format: "2026-10-%02dT10:00:00", day), read: true)
+            ListingRow(messageId: "<\(day)@x>", subject: "\(day)", sender: "a", received: String(format: "2026-10-%02dT10:00:00", day), read: true)
         }
-        harness.executor.reply(listing(account: "Work", rows))
+        harness.executor.reply(mailListing(account: "Work", rows))
 
         let result = try harness.call("list_emails", ["mailbox": "INBOX", "account": "Work"])
 
@@ -104,7 +84,7 @@ final class ListEmailsTests: XCTestCase {
     }
 
     func testAnEmptyMailboxListsNothingWithATotalOfZero() throws {
-        harness.executor.reply(listing(account: "Work", []))
+        harness.executor.reply(mailListing(account: "Work", []))
 
         let result = try harness.call("list_emails", ["mailbox": "Archive", "account": "Work"])
 
@@ -114,10 +94,10 @@ final class ListEmailsTests: XCTestCase {
 
     func testAMessageWithoutAReadableDateIsListedLastWithoutADate() throws {
         let rows = [
-            Row(messageId: "<nodate@x>", subject: "NoDate", sender: "a", received: "", read: true),
+            ListingRow(messageId: "<nodate@x>", subject: "NoDate", sender: "a", received: "", read: true),
             threeMessages[0],
         ]
-        harness.executor.reply(listing(account: "Work", rows))
+        harness.executor.reply(mailListing(account: "Work", rows))
 
         let result = try harness.call("list_emails", ["mailbox": "INBOX", "account": "Work"])
 
@@ -127,7 +107,7 @@ final class ListEmailsTests: XCTestCase {
     }
 
     func testTheScriptReadsEachPropertyOfTheWholeMailboxInOneRequest() throws {
-        harness.executor.reply(listing(account: "Work", threeMessages))
+        harness.executor.reply(mailListing(account: "Work", threeMessages))
 
         _ = try harness.call("list_emails", ["mailbox": "Archive", "account": "Work", "limit": 2])
 
@@ -144,7 +124,7 @@ final class ListEmailsTests: XCTestCase {
     }
 
     func testUnreadOnlyAsksMailForTheUnreadMessagesOnly() throws {
-        harness.executor.reply(listing(account: "Work", [threeMessages[1]]))
+        harness.executor.reply(mailListing(account: "Work", [threeMessages[1]]))
 
         let result = try harness.call("list_emails", ["mailbox": "INBOX", "account": "Work", "unread_only": true])
 

@@ -33,6 +33,70 @@ enum AppleMailClient {
         }
     }
 
+    /// Which messages of a mailbox a listing reads; Mail evaluates every condition. A query matches the subject or
+    /// the sender, and with `searchBody` also the content, which Mail scans in a separate, slower request.
+    struct MessageFilter {
+        var unreadOnly = false
+        var sender: String?
+        var since: Date?
+        var before: Date?
+        var query: String?
+        var searchBody = false
+
+        var setup: String {
+            [since.map { dateVariable("spwSince", $0) }, before.map { dateVariable("spwBefore", $0) }]
+                .compactMap { $0 }
+                .joined()
+        }
+
+        var propertyScope: String {
+            scope(conditions(query: searchBody ? nil : queryCondition))
+        }
+
+        var bodyScope: String? {
+            guard searchBody, query != nil else { return nil }
+            return scope(conditions(query: queryCondition))
+        }
+
+        private var queryCondition: String? {
+            query.map { query in
+                let fields = searchBody ? ["subject", "sender", "content"] : ["subject", "sender"]
+                let queryEsc = escapeAppleScript(query)
+                return "(" + fields.map { "\($0) contains \"\(queryEsc)\"" }.joined(separator: " or ") + ")"
+            }
+        }
+
+        private func conditions(query: String?) -> [String] {
+            [
+                unreadOnly ? "read status is false" : nil,
+                sender.map { "sender contains \"\(escapeAppleScript($0))\"" },
+                since.map { _ in "date received is greater than or equal to spwSince" },
+                before.map { _ in "date received is less than spwBefore" },
+                query,
+            ].compactMap { $0 }
+        }
+
+        private func scope(_ conditions: [String]) -> String {
+            "every message of mb" + (conditions.isEmpty ? "" : " whose " + conditions.joined(separator: " and "))
+        }
+
+        private func dateVariable(_ name: String, _ date: Date) -> String {
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = .current
+            let parts = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
+            let seconds = (parts.hour ?? 0) * 3600 + (parts.minute ?? 0) * 60 + (parts.second ?? 0)
+            return """
+            set \(name) to current date
+            set day of \(name) to 1
+            set year of \(name) to \(parts.year ?? 0)
+            set month of \(name) to \(parts.month ?? 1)
+            set day of \(name) to \(parts.day ?? 1)
+            set time of \(name) to \(seconds)
+
+            """
+        }
+    }
+
     /// One `make new <kind> recipient...` AppleScript line per comma-separated address.
     static func recipientClauses(_ addresses: String, kind: String) -> String {
         splitAddressList(addresses)
@@ -160,34 +224,37 @@ enum AppleMailClient {
         }
     }
 
-    /// The newest-first page `offset..<offset+limit` of the mailbox, and the total the page is cut from.
+    /// The newest-first page `offset..<offset+limit` of the messages `filter` keeps, and the total the page is cut from.
     static func listEmails(
         scripts: MailScripts,
         mailbox: String,
         account: String?,
+        filter: MessageFilter,
         offset: Int,
-        limit: Int,
-        unreadOnly: Bool
+        limit: Int
     ) throws -> [String: Any] {
-        let script = listEmailsScript(mailbox: mailbox, account: account, unreadOnly: unreadOnly)
+        let script = listEmailsScript(mailbox: mailbox, account: account, filter: filter)
         let output = try scripts.run(script, mailbox: mailbox, account: account)
         let messages = newestFirst(try parseListing(output, mailbox: mailbox))
         let page = messages.dropFirst(offset).prefix(limit)
         return ["emails": page.map(\.json), "total": messages.count]
     }
 
-    /// Reads each property of every message in the mailbox with one Apple Event; prints the account name, then one
-    /// field per property, items joined by `listItemSeparator` and fields by `listFieldSeparator`.
-    static func listEmailsScript(mailbox: String, account: String?, unreadOnly: Bool) -> String {
-        let scope = "every message of mb" + (unreadOnly ? " whose read status is false" : "")
+    /// Reads each property of every message `filter` keeps with one Apple Event; prints the account name, then one
+    /// field per property, items joined by `listItemSeparator` and fields by `listFieldSeparator`. A body search adds
+    /// a last field with the Message-IDs whose content matched.
+    static func listEmailsScript(mailbox: String, account: String?, filter: MessageFilter) -> String {
+        let scope = filter.propertyScope
+        let bodyRead = filter.bodyScope.map { "\n    set spwBodyIds to message id of \($0)" } ?? ""
+        let bodyField = filter.bodyScope == nil ? "" : ", spwBodyIds as text"
         return """
-        tell application "Mail"
+        \(filter.setup)tell application "Mail"
         \(mailboxLookup(name: mailbox, account: account))
             set spwIds to message id of \(scope)
             set spwSubjects to subject of \(scope)
             set spwSenders to sender of \(scope)
             set spwDates to date received of \(scope)
-            set spwReads to read status of \(scope)
+            set spwReads to read status of \(scope)\(bodyRead)
         end tell
         set spwIsoDates to {}
         repeat with spwDateRef in spwDates
@@ -199,18 +266,20 @@ enum AppleMailClient {
             end if
         end repeat
         set AppleScript's text item delimiters to (character id 30)
-        set spwFields to {spwAcctName, spwIds as text, spwSubjects as text, spwSenders as text, spwIsoDates as text, spwReads as text}
+        set spwFields to {spwAcctName, spwIds as text, spwSubjects as text, spwSenders as text, spwIsoDates as text, spwReads as text\(bodyField)}
         set AppleScript's text item delimiters to (character id 29)
         return spwFields as text
         """
     }
 
-    /// The messages of a `listEmailsScript` output; fields of unequal length mean Mail changed the mailbox mid-read.
+    /// The messages of a `listEmailsScript` output, only those a body search matched when it carries their ids;
+    /// fields of unequal length mean Mail changed the mailbox mid-read.
     static func parseListing(_ output: String, mailbox: String) throws -> [ListedMessage] {
-        let fields = output.components(separatedBy: listFieldSeparator)
-        guard fields.count == 6 else {
+        var fields = output.components(separatedBy: listFieldSeparator)
+        guard fields.count == 6 || fields.count == 7 else {
             throw ScriptError.scriptFailed("Unexpected message list from Mail.app")
         }
+        let matched = fields.count == 7 ? Set(fields.removeLast().components(separatedBy: listItemSeparator)) : nil
         let count = fields[1].isEmpty ? 0 : fields[1].components(separatedBy: listItemSeparator).count
         let columns = fields.dropFirst().map { field in
             count == 0 ? [] : field.components(separatedBy: listItemSeparator)
@@ -219,7 +288,7 @@ enum AppleMailClient {
             throw MailFailure.mailboxChanged(mailbox: mailbox)
         }
         let account = fields[0]
-        return (0..<count).map { i in
+        return (0..<count).filter { matched?.contains(columns[0][$0]) ?? true }.map { i in
             ListedMessage(
                 id: MailId(account: account, mailbox: mailbox, messageId: columns[0][i]),
                 subject: columns[1][i],
@@ -276,50 +345,6 @@ enum AppleMailClient {
 
         let output = try scripts.run(script, mailbox: mailId.mailbox, account: mailId.account)
         return try parseEmailDetail(output, id: id)
-    }
-
-    static func searchEmails(scripts: MailScripts, query: String, limit: Int, mailbox: String, account: String?) throws -> [[String: Any]] {
-        let queryEsc = escapeAppleScript(query)
-        let script = """
-        tell application "Mail"
-        \(mailboxLookup(name: mailbox, account: account))
-            set output to ""
-            set msgCount to 0
-            set msgs to (every message of mb whose subject contains "\(queryEsc)" or content contains "\(queryEsc)")
-            repeat with m in msgs
-                if msgCount < \(limit) then
-                    set msgId to message id of m
-                    set subj to subject of m
-                    set sndr to sender of m
-                    set rcvd to date received of m as string
-                    set output to output & msgId & "||" & subj & "||" & sndr & "||" & rcvd & linefeed
-                    set msgCount to msgCount + 1
-                end if
-            end repeat
-            return spwAcctName & (character id 29) & output
-        end tell
-        """
-
-        let output = try scripts.run(script, mailbox: mailbox, account: account)
-        return try parseSearchResults(output, mailbox: mailbox)
-    }
-
-    /// Search rows, each with the mail id built from the account the lookup resolved and the mailbox searched.
-    static func parseSearchResults(_ output: String, mailbox: String) throws -> [[String: Any]] {
-        guard let split = output.range(of: listFieldSeparator) else {
-            throw ScriptError.scriptFailed("Unexpected search result from Mail.app")
-        }
-        let account = String(output[..<split.lowerBound])
-        let rows = parseDelimited(
-            String(output[split.upperBound...]), fields: ["message_id", "subject", "sender", "date"])
-        return rows.map { row in
-            var typed = row
-            let messageId = typed.removeValue(forKey: "message_id") as? String ?? ""
-            typed["id"] = MailId(account: account, mailbox: mailbox, messageId: messageId).encoded
-            typed["mailbox"] = mailbox
-            typed["account"] = account
-            return typed
-        }
     }
 
     static func sendEmail(scripts: MailScripts, to: String, subject: String, body: String, cc: String?, bcc: String? = nil) throws -> [String: Any] {

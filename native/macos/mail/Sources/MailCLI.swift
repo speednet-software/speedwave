@@ -84,22 +84,10 @@ func listMailboxes(scripts: MailScripts) throws -> [String: Any] {
 
 func listEmails(params: [String: Any], scripts: MailScripts) throws -> [String: Any] {
     let (mailbox, account) = try mailboxParams(params)
-    let limit = params["limit"] as? Int ?? 10
-    let offset = params["offset"] as? Int ?? 0
-    guard limit > 0 else {
-        throw MailError.invalidValue("limit", "must be at least 1")
-    }
-    guard offset >= 0 else {
-        throw MailError.invalidValue("offset", "must not be negative")
-    }
+    let (offset, limit) = try pageParams(params)
+    let filter = AppleMailClient.MessageFilter(unreadOnly: params["unread_only"] as? Bool ?? false)
     return try AppleMailClient.listEmails(
-        scripts: scripts,
-        mailbox: mailbox,
-        account: account,
-        offset: offset,
-        limit: limit,
-        unreadOnly: params["unread_only"] as? Bool ?? false
-    )
+        scripts: scripts, mailbox: mailbox, account: account, filter: filter, offset: offset, limit: limit)
 }
 
 func getEmail(params: [String: Any], scripts: MailScripts) throws -> [String: Any] {
@@ -113,9 +101,44 @@ func searchEmails(params: [String: Any], scripts: MailScripts) throws -> [String
     guard let query = params["query"] as? String else {
         throw MailError.missingField("query")
     }
-    let limit = params["limit"] as? Int ?? 10
+    guard !query.isEmpty else {
+        throw MailError.invalidValue("query", "must not be empty")
+    }
     let (mailbox, account) = try mailboxParams(params)
-    return ["emails": try AppleMailClient.searchEmails(scripts: scripts, query: query, limit: limit, mailbox: mailbox, account: account)]
+    let (offset, limit) = try pageParams(params)
+    let filter = AppleMailClient.MessageFilter(
+        unreadOnly: params["unread_only"] as? Bool ?? false,
+        sender: params["sender"] as? String,
+        since: try dateParam(params, "since"),
+        before: try dateParam(params, "before"),
+        query: query,
+        searchBody: params["search_body"] as? Bool ?? false
+    )
+    return try AppleMailClient.listEmails(
+        scripts: scripts, mailbox: mailbox, account: account, filter: filter, offset: offset, limit: limit)
+}
+
+/// The page of a listing: `offset` newest messages skipped (default 0), at most `limit` returned (default 10).
+func pageParams(_ params: [String: Any]) throws -> (offset: Int, limit: Int) {
+    let limit = params["limit"] as? Int ?? 10
+    let offset = params["offset"] as? Int ?? 0
+    guard limit > 0 else {
+        throw MailError.invalidValue("limit", "must be at least 1")
+    }
+    guard offset >= 0 else {
+        throw MailError.invalidValue("offset", "must not be negative")
+    }
+    return (offset, limit)
+}
+
+/// A date parameter as the instant it names on this Mac; a bare day starts at local midnight.
+func dateParam(_ params: [String: Any], _ name: String) throws -> Date? {
+    guard let raw = params[name] else { return nil }
+    guard let text = raw as? String, let date = parseISODateInput(text)?.date(in: .current) else {
+        throw MailError.invalidValue(
+            name, "must be an ISO 8601 day (2026-10-20) or date-time (2026-10-20T09:00:00 or 2026-10-20T09:00:00+02:00)")
+    }
+    return date
 }
 
 /// The mailbox name and its account, which may be left out when one account alone has the mailbox.

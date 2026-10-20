@@ -176,6 +176,80 @@ describe('mail-tools', () => {
       expect(result.error?.code).toBe('EMPTY_FIELDS');
       expect(result.error?.message).toContain('query');
     });
+
+    it('passes the filters, the page and a Unicode query with quotes through to mail-cli', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { emails: [], total: 0 } });
+      const tool = createMailTools().find((t) => t.tool.name === 'searchEmails')!;
+      const input = {
+        query: 'Zażółć "東京" \\ 🚀',
+        mailbox: 'INBOX',
+        account: 'iCloud',
+        sender: "o'brien@example.com",
+        since: '2026-10-01',
+        before: '2026-10-20T09:00:00+02:00',
+        unread_only: true,
+        offset: 10,
+        limit: 5,
+      };
+
+      const result = await tool.handler(input);
+
+      expect(result.isError).toBeFalsy();
+      expect(vi.mocked(runCommand).mock.calls[0][2]).toEqual(budgeted(input));
+    });
+
+    it('returns no hits with a total of zero', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { emails: [], total: 0 } });
+
+      const result = await handleSearchEmails({ query: 'nothing', mailbox: 'INBOX' });
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual({ emails: [], total: 0 });
+    });
+
+    it('gives a body search a longer time budget than a subject and sender search', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { emails: [], total: 0 } });
+
+      await handleSearchEmails({ query: 'x', mailbox: 'INBOX' });
+      await handleSearchEmails({ query: 'x', mailbox: 'INBOX', search_body: true });
+
+      const [fast, slow] = vi.mocked(runCommand).mock.calls;
+      const scriptMs = (call: typeof fast) =>
+        (call[2] as Record<string, unknown>).script_timeout_ms as number;
+      expect(scriptMs(slow)).toBeGreaterThan(scriptMs(fast));
+      expect(slow[3]).toBeGreaterThan(fast[3]!);
+      const tool = createMailTools().find((t) => t.tool.name === 'searchEmails')!;
+      expect(tool.tool._meta?.[META_KEYS.TIMEOUT_MS]).toBeGreaterThan(slow[3]!);
+      expect(tool.tool._meta?.[META_KEYS.TIMEOUT_CLASS]).toBe('long');
+    });
+
+    it('tells Claude that a body search is slow', () => {
+      const tool = createMailTools().find((t) => t.tool.name === 'searchEmails')!;
+      const schema = tool.tool.inputSchema as {
+        properties: Record<string, { description: string }>;
+      };
+
+      expect(tool.tool.description).toMatch(/subject.*sender/i);
+      expect(schema.properties.search_body.description).toMatch(/slow/i);
+    });
+
+    it.each([
+      [{ search_body: 'yes' }, 'INVALID_TYPE'],
+      [{ unread_only: 1 }, 'INVALID_TYPE'],
+      [{ offset: -1 }, 'OUT_OF_RANGE'],
+      [{ sender: 'a\x01b' }, 'INVALID_CHARACTERS'],
+      [{ since: 12 }, 'INVALID_TYPE'],
+    ])('rejects %o without calling mail-cli', async (extra, code) => {
+      const result = await handleSearchEmails({
+        query: 'x',
+        mailbox: 'INBOX',
+        ...(extra as object),
+      } as any);
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(code);
+      expect(runCommand).not.toHaveBeenCalled();
+    });
   });
 
   describe('handleSendEmail', () => {
@@ -508,11 +582,13 @@ describe('mail-tools', () => {
             id: MAIL_ID,
             subject: 'Hi',
             sender: 'Anna',
-            date: 'Monday',
+            date: '2026-10-20T09:15:00+02:00',
+            read: false,
             mailbox: 'INBOX',
             account: 'iCloud',
           },
         ],
+        total: 1,
       },
       sendEmail: { status: 'sent' },
       replyToEmail: { status: 'sent' },

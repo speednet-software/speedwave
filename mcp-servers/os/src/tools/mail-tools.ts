@@ -35,6 +35,8 @@ const SCRIPT_HEADROOM_MS = 3_000;
 
 const STANDARD_BUDGET = mailTimeBudget(30_000);
 
+const BODY_SEARCH_BUDGET = mailTimeBudget(180_000);
+
 const MAIL_FAILURE = /\b(MAIL_[A-Z_]+): ([\s\S]*)$/;
 
 const MAIL_FAILURE_TEACHING: Record<
@@ -111,14 +113,26 @@ interface GetEmailParams {
 
 /** Input parameters for the searchEmails tool. */
 interface SearchEmailsParams {
-  /** Search query string. */
+  /** Text the subject or the sender contains. */
   query: string;
   /** Mailbox path from listMailboxes. */
   mailbox: string;
   /** Account of the mailbox. */
   account?: string;
+  /** Also match the body; slow. */
+  search_body?: boolean;
+  /** Text the sender contains. */
+  sender?: string;
+  /** Received at or after this ISO 8601 day or date-time. */
+  since?: string;
+  /** Received before this ISO 8601 day or date-time. */
+  before?: string;
+  /** Only unread emails. */
+  unread_only?: boolean;
   /** Max results to return. */
   limit?: number;
+  /** Number of newest results to skip. */
+  offset?: number;
 }
 
 /** Input parameters for the sendEmail tool. */
@@ -157,6 +171,31 @@ interface CheckMailParams {
   /** Account to check; every account when omitted. */
   account?: string;
 }
+
+const EMAIL_LISTING_OUTPUT = {
+  type: 'object',
+  properties: {
+    emails: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'Mail id; pass it to getEmail or replyToEmail' },
+          subject: { type: 'string' },
+          sender: { type: 'string' },
+          date: {
+            type: 'string',
+            description: 'Date received, ISO 8601 with the UTC offset; absent when Mail has none',
+          },
+          read: { type: 'boolean' },
+          mailbox: { type: 'string' },
+          account: { type: 'string' },
+        },
+      },
+    },
+    total: { type: 'number', description: 'Number of emails the page is cut from' },
+  },
+};
 
 const detectMailClientsTool: Tool = {
   name: 'detectMailClients',
@@ -280,30 +319,7 @@ const listEmailsTool: Tool = {
     },
     required: ['mailbox'],
   },
-  outputSchema: {
-    type: 'object',
-    properties: {
-      emails: {
-        type: 'array',
-        items: {
-          type: 'object',
-          properties: {
-            id: { type: 'string', description: 'Mail id; pass it to getEmail or replyToEmail' },
-            subject: { type: 'string' },
-            sender: { type: 'string' },
-            date: {
-              type: 'string',
-              description: 'Date received, ISO 8601 with the UTC offset; absent when Mail has none',
-            },
-            read: { type: 'boolean' },
-            mailbox: { type: 'string' },
-            account: { type: 'string' },
-          },
-        },
-      },
-      total: { type: 'number', description: 'Number of emails the page is cut from' },
-    },
-  },
+  outputSchema: EMAIL_LISTING_OUTPUT,
   inputExamples: [
     {
       description: 'Minimal: the newest emails of a mailbox',
@@ -366,19 +382,24 @@ const getEmailTool: Tool = {
 const searchEmailsTool: Tool = {
   name: 'searchEmails',
   description:
-    'Search the emails of one mailbox by subject or body content. If limit is omitted, defaults to 10. Each id is a mail id that getEmail and replyToEmail take.',
+    'Search one mailbox for emails whose subject or sender contains the query, newest first. Narrow with sender, since/before (ISO 8601) and unread_only; page with offset and limit (default 10); total is the number of matches the page is cut from. Fast even in a large mailbox. Set search_body only when the user asks to search the email text: Mail then scans every body, which can take minutes. Each id is a mail id that getEmail and replyToEmail take.',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
-    [META_KEYS.TIMEOUT_MS]: STANDARD_BUDGET.toolMs,
+    [META_KEYS.TIMEOUT_CLASS]: 'long',
+    [META_KEYS.TIMEOUT_MS]: BODY_SEARCH_BUDGET.toolMs,
     [META_KEYS.OS_CATEGORY]: 'mail',
   },
-  keywords: ['os', 'mail', 'email', 'search', 'find', 'query'],
-  example: 'const { emails } = await os.searchEmails({ query: "quarterly report" })',
+  keywords: ['os', 'mail', 'email', 'search', 'find', 'query', 'sender', 'from'],
+  example:
+    'const { emails, total } = await os.searchEmails({ query: "invoice", mailbox: "INBOX", account: "iCloud" })',
   inputSchema: {
     type: 'object',
     properties: {
-      query: { type: 'string', description: 'Search query (matches subject and body)' },
+      query: {
+        type: 'string',
+        description: 'Text the subject or the sender contains (case-insensitive)',
+      },
       mailbox: {
         type: 'string',
         description: "Mailbox path to search: the name field from listMailboxes' output.",
@@ -388,37 +409,50 @@ const searchEmailsTool: Tool = {
         description:
           'Account of the mailbox (the account field from listMailboxes); needed when the mailbox name exists in several accounts.',
       },
+      search_body: {
+        type: 'boolean',
+        description:
+          'Also match the email text (default false). Slow: Mail scans every body of the mailbox, which can take minutes; use only when the user asks to search the content.',
+      },
+      sender: { type: 'string', description: 'Only emails whose sender contains this text' },
+      since: {
+        type: 'string',
+        description:
+          'Only emails received at or after this ISO 8601 day (2026-10-01, local midnight) or date-time',
+      },
+      before: {
+        type: 'string',
+        description: 'Only emails received before this ISO 8601 day or date-time',
+      },
+      unread_only: { type: 'boolean', description: 'Only unread emails (default false)' },
       limit: { type: 'number', description: 'Max results (default 10)' },
+      offset: {
+        type: 'number',
+        description: 'Number of newest matches to skip, for the next page (default 0)',
+      },
     },
     required: ['query', 'mailbox'],
   },
-  outputSchema: {
-    type: 'object',
-    properties: {
-      emails: {
-        type: 'array',
-        items: {
-          type: 'object',
-          properties: {
-            id: { type: 'string', description: 'Mail id; pass it to getEmail or replyToEmail' },
-            subject: { type: 'string' },
-            sender: { type: 'string' },
-            date: { type: 'string', description: 'Date received, as Apple Mail formats it' },
-            mailbox: { type: 'string' },
-            account: { type: 'string' },
-          },
-        },
-      },
-    },
-  },
+  outputSchema: EMAIL_LISTING_OUTPUT,
   inputExamples: [
     {
-      description: 'Minimal: search an inbox',
+      description: 'Minimal: subject or sender search in an inbox',
       input: { query: 'quarterly report', mailbox: 'INBOX', account: 'iCloud' },
     },
     {
-      description: 'Full: search a named mailbox with a result limit',
-      input: { query: 'invoice', mailbox: 'Archive', limit: 10 },
+      description: 'Full: unread mail from one sender this month, the email text included',
+      input: {
+        query: 'invoice',
+        mailbox: 'Archive',
+        account: 'Exchange',
+        sender: 'billing@example.com',
+        since: '2026-10-01',
+        before: '2026-11-01',
+        unread_only: true,
+        search_body: true,
+        limit: 20,
+        offset: 0,
+      },
     },
   ],
 };
@@ -727,22 +761,29 @@ export async function handleGetEmail(params: GetEmailParams): Promise<ToolResult
 }
 
 /**
- * Searches emails by query string.
+ * Searches one mailbox by subject and sender, and by body only when search_body is set.
  * @param params - Tool input parameters.
  */
 export async function handleSearchEmails(params: SearchEmailsParams): Promise<ToolResult> {
   const p = asRecord(params);
   const v = validateAll(p, {
     required: ['query', 'mailbox'],
+    booleans: ['search_body', 'unread_only'],
     strings: [
       ['query', MAX_LENGTHS.short, false],
       ['mailbox', MAX_LENGTHS.short, false],
       ['account', MAX_LENGTHS.short, false],
+      ['sender', MAX_LENGTHS.short, false],
+      ['since', MAX_LENGTHS.short, false],
+      ['before', MAX_LENGTHS.short, false],
     ],
-    numbers: [['limit', 1, 10_000]],
+    numbers: [
+      ['limit', 1, 10_000],
+      ['offset', 0, 1_000_000],
+    ],
   });
   if (!v.valid) return v.error;
-  return runMail('search_emails', p);
+  return runMail('search_emails', p, p.search_body === true ? BODY_SEARCH_BUDGET : STANDARD_BUDGET);
 }
 
 /**

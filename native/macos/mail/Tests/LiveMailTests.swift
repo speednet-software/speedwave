@@ -65,6 +65,34 @@ final class LiveMailTests: XCTestCase {
         XCTAssertEqual((read["email"] as? [String: Any])?["subject"] as? String, emails.first?["subject"] as? String)
     }
 
+    func testSearchEmailsFindsTheNewestMessageBySubjectAndNothingForAnUnmatchedQuery() throws {
+        let params: [String: Any] = ["mailbox": Self.testMailbox, "account": AppleMailClient.localAccountName]
+        let listed = try XCTUnwrap(try call("list_emails", params.merging(["limit": 1]) { $1 }) as? [String: Any])
+        guard let newest = (listed["emails"] as? [[String: Any]])?.first,
+              let id = newest["id"] as? String,
+              let subject = newest["subject"] as? String, !subject.isEmpty
+        else {
+            throw XCTSkip("\(Self.testMailbox) holds no message with a subject to search for")
+        }
+
+        for searchBody in [false, true] {
+            let query: [String: Any] = ["query": subject, "search_body": searchBody, "limit": 10_000]
+            let found = try XCTUnwrap(try call("search_emails", params.merging(query) { $1 }) as? [String: Any])
+            let ids = (found["emails"] as? [[String: Any]])?.compactMap { $0["id"] as? String } ?? []
+            XCTAssertTrue(ids.contains(id), "search_body \(searchBody): \(found)")
+            XCTAssertEqual(found["total"] as? Int, ids.count)
+        }
+
+        let unmatchedQuery = #"SPW "no-hit" \ Zażółć 東京 834"#
+        let unmatched = try XCTUnwrap(
+            try call("search_emails", params.merging(["query": unmatchedQuery]) { $1 }) as? [String: Any])
+        XCTAssertEqual(unmatched["total"] as? Int, 0)
+
+        let future = try XCTUnwrap(
+            try call("search_emails", params.merging(["query": subject, "since": "2999-01-01"]) { $1 }) as? [String: Any])
+        XCTAssertEqual(future["total"] as? Int, 0)
+    }
+
     func testAMailboxNoAccountHasIsReportedAsMailboxNotFound() {
         let mailbox = "SPW-Nonexistent-Mailbox-831"
         XCTAssertThrowsError(try call("list_emails", ["mailbox": mailbox, "limit": 1])) { error in
