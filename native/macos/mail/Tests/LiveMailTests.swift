@@ -39,4 +39,31 @@ final class LiveMailTests: XCTestCase {
             XCTAssertEqual(error as? MailFailure, .mailboxNotFound(mailbox: mailbox, account: nil))
         }
     }
+
+    func testListRulesReadsEveryRuleWithItsConditionsAndActions() throws {
+        let result = try XCTUnwrap(try call("list_rules") as? [String: Any])
+        let rules = try XCTUnwrap(result["rules"] as? [[String: Any]])
+        for rule in rules {
+            XCTAssertNotNil(rule["name"] as? String)
+            XCTAssertNotNil(rule["enabled"] as? Bool)
+            let conditions = try XCTUnwrap(rule["conditions"] as? [[String: String]])
+            for condition in conditions {
+                XCTAssertFalse(condition["field"]?.hasPrefix("\u{AB}") ?? true, "raw enum constant: \(condition)")
+                XCTAssertFalse(condition["qualifier"]?.hasPrefix("\u{AB}") ?? true, "raw enum constant: \(condition)")
+            }
+            XCTAssertNotNil(rule["actions"] as? [[String: String]])
+        }
+    }
+
+    func testCheckMailStartsAFetchForEveryAccount() throws {
+        let result = try XCTUnwrap(try call("check_mail") as? [String: Any])
+        XCTAssertEqual(result["status"] as? String, "started")
+    }
+
+    func testCheckMailForAnUnknownAccountIsReportedAsAccountNotFound() {
+        let account = "SPW-Nonexistent-Account-841"
+        XCTAssertThrowsError(try call("check_mail", ["account": account])) { error in
+            XCTAssertEqual(error as? MailFailure, .accountNotFound(account))
+        }
+    }
 }

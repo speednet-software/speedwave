@@ -12,6 +12,8 @@ import {
   handleSearchEmails,
   handleSendEmail,
   handleReplyToEmail,
+  handleListMailRules,
+  handleCheckMail,
   createMailTools,
 } from './mail-tools.js';
 
@@ -246,10 +248,10 @@ describe('mail-tools', () => {
   });
 
   describe('createMailTools', () => {
-    it('returns 7 tool definitions', () => {
+    it('returns 9 tool definitions', () => {
       const tools = createMailTools();
 
-      expect(tools).toHaveLength(7);
+      expect(tools).toHaveLength(9);
       expect(tools.map((t) => t.tool.name)).toEqual([
         'detectMailClients',
         'listMailboxes',
@@ -258,6 +260,8 @@ describe('mail-tools', () => {
         'searchEmails',
         'sendEmail',
         'replyToEmail',
+        'listMailRules',
+        'checkMail',
       ]);
     });
 
@@ -266,6 +270,103 @@ describe('mail-tools', () => {
       for (const t of tools) {
         expect(t.handler).toBeTypeOf('function');
       }
+    });
+  });
+
+  describe('mail rules', () => {
+    it('listMailRules reads the rules through mail-cli', async () => {
+      const rules = {
+        rules: [{ name: 'A', enabled: true, match_all: true, conditions: [], actions: [] }],
+      };
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: rules });
+
+      const result = await handleListMailRules({});
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual(rules);
+      expect(runCommand).toHaveBeenCalledWith('mail', 'list_rules', budgeted({}), PROCESS_TIMEOUT);
+    });
+
+    it('listMailRules is read-only', () => {
+      const tool = createMailTools().find((t) => t.tool.name === 'listMailRules')!;
+
+      expect(tool.tool.annotations?.readOnlyHint).toBe(true);
+      expect(tool.tool.annotations?.destructiveHint).toBe(false);
+    });
+
+    it('no mail tool creates, changes or deletes a rule', () => {
+      const ruleTools = createMailTools().filter((t) =>
+        /rule/i.test(`${t.tool.name} ${t.tool.keywords?.join(' ')}`)
+      );
+
+      expect(ruleTools.map((t) => t.tool.name)).toEqual(['listMailRules']);
+      expect(ruleTools.every((t) => t.tool.annotations?.readOnlyHint)).toBe(true);
+    });
+
+    it('listMailRules takes no arguments', async () => {
+      const tool = createMailTools().find((t) => t.tool.name === 'listMailRules')!;
+
+      const result = await tool.handler({ name: 'Forward all', enabled: false });
+
+      expect(result.isError).toBe(true);
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('check mail', () => {
+    it('checks every account when no account is given', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { status: 'started' } });
+
+      const result = await handleCheckMail({});
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual({ status: 'started' });
+      expect(runCommand).toHaveBeenCalledWith('mail', 'check_mail', budgeted({}), PROCESS_TIMEOUT);
+    });
+
+    it('checks only the named account', async () => {
+      vi.mocked(runCommand).mockResolvedValue({
+        stdout: '',
+        parsed: { status: 'started', account: 'Work' },
+      });
+
+      await handleCheckMail({ account: 'Work' });
+
+      expect(runCommand).toHaveBeenCalledWith(
+        'mail',
+        'check_mail',
+        budgeted({ account: 'Work' }),
+        PROCESS_TIMEOUT
+      );
+    });
+
+    it('rejects an account with control characters', async () => {
+      const result = await handleCheckMail({ account: 'Wo\x01rk' });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('INVALID_CHARACTERS');
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it('is a non-destructive write', () => {
+      const tool = createMailTools().find((t) => t.tool.name === 'checkMail')!;
+
+      expect(tool.tool.annotations?.readOnlyHint).toBe(false);
+      expect(tool.tool.annotations?.destructiveHint).toBe(false);
+    });
+
+    it('an unknown account points at listMailboxes', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        new Error("mail.check_mail failed: MAIL_ACCOUNT_NOT_FOUND: Account 'Nope' not found.")
+      );
+      const tool = createMailTools().find((t) => t.tool.name === 'checkMail')!;
+
+      const result = await tool.handler({ account: 'Nope' });
+
+      expect(result.isError).toBe(true);
+      const text = (result.content[0] as { text: string }).text;
+      expect(text).toContain('MAIL_ACCOUNT_NOT_FOUND');
+      expect(text).toContain('listMailboxes');
     });
   });
 
@@ -368,6 +469,30 @@ describe('mail-tools', () => {
       searchEmails: { emails: [{ id: '<a@x>', subject: 'Hi', sender: 'Anna', date: 'Monday' }] },
       sendEmail: { status: 'sent' },
       replyToEmail: { status: 'sent' },
+      listMailRules: {
+        rules: [
+          {
+            name: 'Invoices',
+            enabled: true,
+            match_all: false,
+            conditions: [
+              { field: 'from header', qualifier: 'does contain value', expression: 'billing@x' },
+              {
+                field: 'header key',
+                header: 'X-Mailer',
+                qualifier: 'begins with value',
+                expression: 'Acme',
+              },
+            ],
+            actions: [
+              { type: 'move', mailbox: 'Finance', account: 'Work' },
+              { type: 'forward', address: 'a@x' },
+              { type: 'reply', text: 'Away' },
+            ],
+          },
+        ],
+      },
+      checkMail: { status: 'started', account: 'Work' },
     };
 
     it('covers every mail tool', () => {
@@ -673,6 +798,8 @@ function validInput(name: string): Record<string, unknown> {
     searchEmails: { query: 'hi' },
     sendEmail: { to: 'a@x', subject: 's', body: 'b', confirm_send: true },
     replyToEmail: { id: '<a@x>', body: 'b', confirm_send: true },
+    listMailRules: {},
+    checkMail: {},
   };
   return inputs[name];
 }

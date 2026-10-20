@@ -13,9 +13,9 @@ vi.mock('./platform-runner.js', () => ({
 
 describe('mcp-os integration', () => {
   describe('createToolDefinitions', () => {
-    it('returns all 26 tools', () => {
+    it('returns all 28 tools', () => {
       const tools = createToolDefinitions();
-      expect(tools).toHaveLength(26);
+      expect(tools).toHaveLength(28);
     });
 
     it('all tool names are unique', () => {
@@ -68,6 +68,8 @@ describe('mcp-os integration', () => {
       expect(names).toContain('searchEmails');
       expect(names).toContain('sendEmail');
       expect(names).toContain('replyToEmail');
+      expect(names).toContain('listMailRules');
+      expect(names).toContain('checkMail');
     });
 
     it('contains all notes tools', () => {
