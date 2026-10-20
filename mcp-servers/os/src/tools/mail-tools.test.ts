@@ -23,6 +23,8 @@ import { runCommand } from '../platform-runner.js';
 
 const PROCESS_TIMEOUT = expect.any(Number);
 
+const MAIL_ID = 'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0';
+
 /**
  * The arguments mail-cli receives for a call: the tool's arguments plus the script time budget.
  * @param args - Tool arguments.
@@ -74,32 +76,66 @@ describe('mail-tools', () => {
   });
 
   describe('handleListEmails', () => {
-    it('returns emails of the inbox', async () => {
+    it('returns the emails of a mailbox', async () => {
       const mockData = {
-        emails: [{ id: 'msg-1', subject: 'Hello', sender: 'alice@example.com' }],
+        emails: [{ id: MAIL_ID, subject: 'Hello', sender: 'alice@example.com' }],
+        total: 1,
       };
       vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: mockData });
 
-      const result = await handleListEmails({ limit: 10 });
+      const result = await handleListEmails({ mailbox: 'INBOX', limit: 10 });
 
       expect(result.success).toBe(true);
+      expect(result.data).toEqual(mockData);
       expect(runCommand).toHaveBeenCalledWith(
         'mail',
         'list_emails',
-        budgeted({ limit: 10 }),
+        budgeted({ mailbox: 'INBOX', limit: 10 }),
         PROCESS_TIMEOUT
       );
+    });
+
+    it('passes the page and the unread filter through to mail-cli', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { emails: [], total: 0 } });
+      const tool = createMailTools().find((t) => t.tool.name === 'listEmails')!;
+      const input = { mailbox: 'INBOX', account: 'iCloud', limit: 5, offset: 0, unread_only: true };
+
+      const result = await tool.handler(input);
+
+      expect(result.isError).toBeFalsy();
+      expect(vi.mocked(runCommand).mock.calls[0][2]).toEqual(budgeted(input));
+    });
+
+    it('fails without a mailbox', async () => {
+      const result = await handleListEmails({} as any);
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('MISSING_FIELDS');
+      expect(result.error?.message).toContain('mailbox');
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [{ offset: -1 }, 'OUT_OF_RANGE'],
+      [{ offset: '10' }, 'INVALID_TYPE'],
+      [{ unread_only: 'true' }, 'INVALID_TYPE'],
+    ])('rejects %o without calling mail-cli', async (extra, code) => {
+      const result = await handleListEmails({ mailbox: 'INBOX', ...(extra as object) });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(code);
+      expect(runCommand).not.toHaveBeenCalled();
     });
   });
 
   describe('handleGetEmail', () => {
     it('returns email by ID', async () => {
       const mockData = {
-        email: { id: 'msg-1', subject: 'Hello', sender: 'alice@example.com', body: 'Hello world' },
+        email: { id: MAIL_ID, subject: 'Hello', sender: 'alice@example.com', body: 'Hello world' },
       };
       vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: mockData });
 
-      const result = await handleGetEmail({ id: 'msg-1' });
+      const result = await handleGetEmail({ id: MAIL_ID });
 
       expect(result.success).toBe(true);
       expect(result.data).toEqual(mockData);
@@ -116,23 +152,23 @@ describe('mail-tools', () => {
   describe('handleSearchEmails', () => {
     it('searches emails by query', async () => {
       const mockData = {
-        emails: [{ id: 'msg-2', subject: 'Invoice', sender: 'billing@example.com' }],
+        emails: [{ id: MAIL_ID, subject: 'Invoice', sender: 'billing@example.com' }],
       };
       vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: mockData });
 
-      const result = await handleSearchEmails({ query: 'invoice' });
+      const result = await handleSearchEmails({ query: 'invoice', mailbox: 'INBOX' });
 
       expect(result.success).toBe(true);
       expect(runCommand).toHaveBeenCalledWith(
         'mail',
         'search_emails',
-        budgeted({ query: 'invoice' }),
+        budgeted({ query: 'invoice', mailbox: 'INBOX' }),
         PROCESS_TIMEOUT
       );
     });
 
     it('fails when query is empty', async () => {
-      const result = await handleSearchEmails({ query: '' });
+      const result = await handleSearchEmails({ query: '', mailbox: 'INBOX' });
 
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('EMPTY_FIELDS');
@@ -213,7 +249,7 @@ describe('mail-tools', () => {
       vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: mockData });
 
       const result = await handleReplyToEmail({
-        id: 'msg-1',
+        id: MAIL_ID,
         body: 'Thanks!',
         confirm_send: true,
       });
@@ -224,7 +260,7 @@ describe('mail-tools', () => {
 
     it('rejects when confirm_send is false', async () => {
       const result = await handleReplyToEmail({
-        id: 'msg-1',
+        id: MAIL_ID,
         body: 'Thanks!',
         confirm_send: false,
       });
@@ -308,17 +344,6 @@ describe('mail-tools', () => {
       }
     });
 
-    it('listEmails rejects the pagination and unread filters mail-cli does not apply', async () => {
-      const tool = createMailTools().find((t) => t.tool.name === 'listEmails')!;
-
-      for (const extra of [{ offset: 10 }, { unread_only: true }]) {
-        const result = await tool.handler({ limit: 5, ...extra });
-        expect(result.isError).toBe(true);
-        expect((result.content[0] as { text: string }).text).toContain(Object.keys(extra)[0]);
-      }
-      expect(runCommand).not.toHaveBeenCalled();
-    });
-
     it.each(createMailTools().map((t) => [t.tool.name, t] as const))(
       '%s rejects a client argument without calling the native CLI',
       async (_name, t) => {
@@ -352,11 +377,22 @@ describe('mail-tools', () => {
       },
       listMailboxes: { mailboxes: [{ account: 'iCloud', name: 'INBOX', message_count: 3 }] },
       listEmails: {
-        emails: [{ id: '<a@x>', subject: 'Hi', sender: 'Anna', date: 'Monday', read: false }],
+        emails: [
+          {
+            id: MAIL_ID,
+            subject: 'Hi',
+            sender: 'Anna',
+            date: '2026-10-20T09:15:00+02:00',
+            read: false,
+            mailbox: 'INBOX',
+            account: 'iCloud',
+          },
+        ],
+        total: 1,
       },
       getEmail: {
         email: {
-          id: '<a@x>',
+          id: MAIL_ID,
           subject: 'Hi',
           sender: 'Anna',
           date: 'Monday',
@@ -365,7 +401,18 @@ describe('mail-tools', () => {
           body: 'Hello',
         },
       },
-      searchEmails: { emails: [{ id: '<a@x>', subject: 'Hi', sender: 'Anna', date: 'Monday' }] },
+      searchEmails: {
+        emails: [
+          {
+            id: MAIL_ID,
+            subject: 'Hi',
+            sender: 'Anna',
+            date: 'Monday',
+            mailbox: 'INBOX',
+            account: 'iCloud',
+          },
+        ],
+      },
       sendEmail: { status: 'sent' },
       replyToEmail: { status: 'sent' },
     };
@@ -433,7 +480,7 @@ describe('mail-tools', () => {
       });
 
       it('rejects limit as string', async () => {
-        const result = await handleListEmails({ limit: '20' as any });
+        const result = await handleListEmails({ mailbox: 'INBOX', limit: '20' as any });
         expect(result.success).toBe(false);
         expect(result.error?.code).toBe('INVALID_TYPE');
       });
@@ -441,13 +488,13 @@ describe('mail-tools', () => {
 
     describe('handleSearchEmails', () => {
       it('rejects query with control characters', async () => {
-        const result = await handleSearchEmails({ query: 'test\x00query' });
+        const result = await handleSearchEmails({ query: 'test\x00query', mailbox: 'INBOX' });
         expect(result.success).toBe(false);
         expect(result.error?.code).toBe('INVALID_CHARACTERS');
       });
 
       it('rejects limit = -1', async () => {
-        const result = await handleSearchEmails({ query: 'test', limit: -1 });
+        const result = await handleSearchEmails({ query: 'test', mailbox: 'INBOX', limit: -1 });
         expect(result.success).toBe(false);
         expect(result.error?.code).toBe('OUT_OF_RANGE');
       });
@@ -503,7 +550,7 @@ describe('mail-tools', () => {
     describe('handleReplyToEmail', () => {
       it('rejects confirm_send as string', async () => {
         const result = await handleReplyToEmail({
-          id: 'msg-1',
+          id: MAIL_ID,
           body: 'Thanks!',
           confirm_send: 'true' as any,
         });
@@ -513,7 +560,7 @@ describe('mail-tools', () => {
 
       it('rejects reply_all as number 1', async () => {
         const result = await handleReplyToEmail({
-          id: 'msg-1',
+          id: MAIL_ID,
           body: 'Thanks!',
           confirm_send: true,
           reply_all: 1 as any,
@@ -544,7 +591,7 @@ describe('mail-tools', () => {
     it('leaves Mail at least a few seconds of headroom before the process is killed', async () => {
       vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { emails: [] } });
 
-      await handleListEmails({});
+      await handleListEmails({ mailbox: 'INBOX' });
 
       const [, , args, processTimeoutMs] = vi.mocked(runCommand).mock.calls[0];
       const scriptTimeoutMs = (args as Record<string, unknown>).script_timeout_ms as number;
@@ -630,13 +677,44 @@ describe('mail-tools', () => {
       expect(result.error?.message).toContain('Exchange, Google');
     });
 
+    it('an id that is not a mail id points at the tools that return one', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        cliFailure(
+          'get_email',
+          "MAIL_INVALID_ID: '<a@x>' is not a mail id. Take the id from listEmails or searchEmails."
+        )
+      );
+
+      const result = await handleGetEmail({ id: '<a@x>' });
+
+      expect(result.error?.code).toBe('MAIL_INVALID_ID');
+      expect(result.error?.message).toContain('Invalid id (received: "<a@x>")');
+      expect(result.error?.message).toContain('listEmails');
+      expect(result.error?.message).toContain('searchEmails');
+    });
+
+    it('a mailbox that changed during the read asks for one retry', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        cliFailure(
+          'list_emails',
+          "MAIL_MAILBOX_CHANGED: Mailbox 'INBOX' changed while it was being read."
+        )
+      );
+
+      const result = await handleListEmails({ mailbox: 'INBOX' });
+
+      expect(result.error?.code).toBe('MAIL_MAILBOX_CHANGED');
+      expect(result.error?.message).toContain("Mailbox 'INBOX' changed while it was being read.");
+      expect(result.error?.message).toContain('retry');
+    });
+
     it('reaches Claude through the registered tool as an error result', async () => {
       vi.mocked(runCommand).mockRejectedValue(
         cliFailure('list_emails', 'MAIL_TIMEOUT: Mail.app did not answer within 25 s.')
       );
       const tool = createMailTools().find((t) => t.tool.name === 'listEmails')!;
 
-      const result = await tool.handler({ limit: 5 });
+      const result = await tool.handler({ mailbox: 'INBOX', limit: 5 });
 
       expect(result.isError).toBe(true);
       const text = (result.content[0] as { text: string }).text;
@@ -650,7 +728,7 @@ describe('mail-tools', () => {
       );
       const tool = createMailTools().find((t) => t.tool.name === 'getEmail')!;
 
-      const result = await tool.handler({ id: '<a@x>' });
+      const result = await tool.handler({ id: MAIL_ID });
 
       expect(result.isError).toBe(true);
       const text = (result.content[0] as { text: string }).text;
@@ -668,11 +746,11 @@ function validInput(name: string): Record<string, unknown> {
   const inputs: Record<string, Record<string, unknown>> = {
     detectMailClients: {},
     listMailboxes: {},
-    listEmails: {},
-    getEmail: { id: '<a@x>' },
-    searchEmails: { query: 'hi' },
+    listEmails: { mailbox: 'INBOX' },
+    getEmail: { id: MAIL_ID },
+    searchEmails: { query: 'hi', mailbox: 'INBOX' },
     sendEmail: { to: 'a@x', subject: 's', body: 'b', confirm_send: true },
-    replyToEmail: { id: '<a@x>', body: 'b', confirm_send: true },
+    replyToEmail: { id: MAIL_ID, body: 'b', confirm_send: true },
   };
   return inputs[name];
 }

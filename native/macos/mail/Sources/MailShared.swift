@@ -23,6 +23,8 @@ enum MailFailure: LocalizedError, Equatable {
     case mailboxNotFound(mailbox: String, account: String?)
     case accountNotFound(String)
     case mailboxAmbiguous(mailbox: String, accounts: [String])
+    case invalidMailId(String)
+    case mailboxChanged(mailbox: String)
 
     var code: String {
         switch self {
@@ -31,6 +33,8 @@ enum MailFailure: LocalizedError, Equatable {
         case .mailboxNotFound: return "MAIL_MAILBOX_NOT_FOUND"
         case .accountNotFound: return "MAIL_ACCOUNT_NOT_FOUND"
         case .mailboxAmbiguous: return "MAIL_MAILBOX_AMBIGUOUS"
+        case .invalidMailId: return "MAIL_INVALID_ID"
+        case .mailboxChanged: return "MAIL_MAILBOX_CHANGED"
         }
     }
 
@@ -51,7 +55,52 @@ enum MailFailure: LocalizedError, Equatable {
             return "Account '\(account)' not found."
         case .mailboxAmbiguous(let mailbox, let accounts):
             return "Mailbox '\(mailbox)' exists in several accounts: \(accounts.joined(separator: ", "))."
+        case .invalidMailId(let id):
+            return "'\(id)' is not a mail id. Take the id from listEmails or searchEmails."
+        case .mailboxChanged(let mailbox):
+            return "Mailbox '\(mailbox)' changed while it was being read."
         }
+    }
+}
+
+/// A mail's opaque id: its account, the mailbox path inside that account and its RFC Message-ID, encoded together
+/// as `mail1.` + unpadded base64url of the JSON array `[account, mailbox, messageId]`.
+struct MailId: Equatable {
+    static let prefix = "mail1."
+
+    let account: String
+    let mailbox: String
+    let messageId: String
+
+    var encoded: String {
+        let json = (try? JSONEncoder().encode([account, mailbox, messageId])) ?? Data()
+        let base64url = json.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        return Self.prefix + base64url
+    }
+
+    init(account: String, mailbox: String, messageId: String) {
+        self.account = account
+        self.mailbox = mailbox
+        self.messageId = messageId
+    }
+
+    init(decoding id: String) throws {
+        guard id.hasPrefix(Self.prefix) else { throw MailFailure.invalidMailId(id) }
+        var base64 = String(id.dropFirst(Self.prefix.count))
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        base64 += String(repeating: "=", count: (4 - base64.count % 4) % 4)
+        guard let data = Data(base64Encoded: base64),
+              let parts = try? JSONDecoder().decode([String].self, from: data),
+              parts.count == 3,
+              parts.allSatisfy({ !$0.isEmpty })
+        else {
+            throw MailFailure.invalidMailId(id)
+        }
+        self.init(account: parts[0], mailbox: parts[1], messageId: parts[2])
     }
 }
 

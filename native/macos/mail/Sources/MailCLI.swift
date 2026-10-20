@@ -79,9 +79,23 @@ func listMailboxes(scripts: MailScripts) throws -> [String: Any] {
 }
 
 func listEmails(params: [String: Any], scripts: MailScripts) throws -> [String: Any] {
-    let limit = params["limit"] as? Int ?? 10
     let (mailbox, account) = try mailboxParams(params)
-    return ["emails": try AppleMailClient.listEmails(scripts: scripts, limit: limit, mailbox: mailbox, account: account)]
+    let limit = params["limit"] as? Int ?? 10
+    let offset = params["offset"] as? Int ?? 0
+    guard limit > 0 else {
+        throw MailError.invalidValue("limit", "must be at least 1")
+    }
+    guard offset >= 0 else {
+        throw MailError.invalidValue("offset", "must not be negative")
+    }
+    return try AppleMailClient.listEmails(
+        scripts: scripts,
+        mailbox: mailbox,
+        account: account,
+        offset: offset,
+        limit: limit,
+        unreadOnly: params["unread_only"] as? Bool ?? false
+    )
 }
 
 func getEmail(params: [String: Any], scripts: MailScripts) throws -> [String: Any] {
@@ -100,14 +114,12 @@ func searchEmails(params: [String: Any], scripts: MailScripts) throws -> [String
     return ["emails": try AppleMailClient.searchEmails(scripts: scripts, query: query, limit: limit, mailbox: mailbox, account: account)]
 }
 
-/// The mailbox name and its account; an account means nothing without a mailbox to look up in it.
-func mailboxParams(_ params: [String: Any]) throws -> (mailbox: String?, account: String?) {
-    let mailbox = params["mailbox"] as? String
-    let account = params["account"] as? String
-    if account != nil && mailbox == nil {
+/// The mailbox name and its account, which may be left out when one account alone has the mailbox.
+func mailboxParams(_ params: [String: Any]) throws -> (mailbox: String, account: String?) {
+    guard let mailbox = params["mailbox"] as? String else {
         throw CLIError.missingField("mailbox")
     }
-    return (mailbox, account)
+    return (mailbox, params["account"] as? String)
 }
 
 func sendEmail(params: [String: Any], scripts: MailScripts) throws -> [String: Any] {
@@ -159,6 +171,7 @@ enum MailError: LocalizedError {
     case missingField(String)
     case confirmRequired
     case emptyRecipients(String)
+    case invalidValue(String, String)
 
     var errorDescription: String? {
         switch self {
@@ -168,6 +181,8 @@ enum MailError: LocalizedError {
             return "Send confirmation required. Set confirm_send: true to send the email."
         case .emptyRecipients(let field):
             return "The '\(field)' field is empty. Provide at least one recipient email address."
+        case .invalidValue(let field, let rule):
+            return "Invalid \(field): \(rule)."
         }
     }
 }

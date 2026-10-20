@@ -70,6 +70,16 @@ const MAIL_FAILURE_TEACHING: Record<
     correctValueTool: 'listMailboxes',
     nextStep: `${detail} Pass account together with mailbox to pick one of them.`,
   }),
+  MAIL_INVALID_ID: (detail, args) => ({
+    paramName: 'id',
+    received: args.id,
+    correctValueTool: 'listEmails',
+    nextStep: `${detail} Pass the id field of an email exactly as listEmails or searchEmails returns it.`,
+  }),
+  MAIL_MAILBOX_CHANGED: (detail) => ({
+    paramName: 'mailbox',
+    nextStep: `${detail} New mail arrived or messages moved during the read; retry the same call once.`,
+  }),
 };
 
 /** Input parameters for the detectMailClients tool (no params required). */
@@ -81,16 +91,20 @@ type ListMailboxesParams = Record<string, never>;
 /** Input parameters for the listEmails tool. */
 interface ListEmailsParams {
   /** Mailbox path from listMailboxes. */
-  mailbox?: string;
+  mailbox: string;
   /** Account of the mailbox. */
   account?: string;
   /** Max emails to return. */
   limit?: number;
+  /** Number of newest emails to skip. */
+  offset?: number;
+  /** List only unread emails. */
+  unread_only?: boolean;
 }
 
 /** Input parameters for the getEmail tool. */
 interface GetEmailParams {
-  /** Email message ID. */
+  /** Mail id from listEmails or searchEmails. */
   id: string;
 }
 
@@ -98,8 +112,8 @@ interface GetEmailParams {
 interface SearchEmailsParams {
   /** Search query string. */
   query: string;
-  /** Mailbox path from listMailboxes (default: Inbox). */
-  mailbox?: string;
+  /** Mailbox path from listMailboxes. */
+  mailbox: string;
   /** Account of the mailbox. */
   account?: string;
   /** Max results to return. */
@@ -124,7 +138,7 @@ interface SendEmailParams {
 
 /** Input parameters for the replyToEmail tool. */
 interface ReplyToEmailParams {
-  /** Email message ID to reply to. */
+  /** Mail id from listEmails or searchEmails. */
   id: string;
   /** Reply body in plain text. */
   body: string;
@@ -183,7 +197,7 @@ const detectMailClientsTool: Tool = {
 const listMailboxesTool: Tool = {
   name: 'listMailboxes',
   description:
-    "List mail accounts and mailboxes. Each mailbox's name is its path inside the account (Inbox/Clients for a nested one); pass it as listEmails/searchEmails's mailbox parameter (exact, case-sensitive) together with its account when the name exists in several accounts.",
+    'List the mailboxes of every account, the On My Mac mailboxes under the account "On My Mac". Each mailbox\'s name is its path inside the account (Inbox/Clients for a nested one); pass it as listEmails/searchEmails\'s mailbox parameter (exact, case-sensitive) together with its account.',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
@@ -225,7 +239,8 @@ const listMailboxesTool: Tool = {
 
 const listEmailsTool: Tool = {
   name: 'listEmails',
-  description: 'List emails in a mailbox. If limit is omitted, defaults to 10.',
+  description:
+    'List the emails of one mailbox, newest first. Page with offset and limit (default 10); total is the number of emails the page is cut from (unread ones only with unread_only). Each id is a mail id that getEmail and replyToEmail take.',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
@@ -233,22 +248,27 @@ const listEmailsTool: Tool = {
     [META_KEYS.OS_CATEGORY]: 'mail',
   },
   keywords: ['os', 'mail', 'email', 'list', 'inbox', 'messages'],
-  example: 'const { emails } = await os.listEmails({ limit: 10 })',
+  example: 'const { emails, total } = await os.listEmails({ mailbox: "INBOX", account: "iCloud" })',
   inputSchema: {
     type: 'object',
     properties: {
       mailbox: {
         type: 'string',
-        description:
-          "Mailbox path (default: the Inbox of every account). Use the name field from listMailboxes' output.",
+        description: "Mailbox path: the name field from listMailboxes' output.",
       },
       account: {
         type: 'string',
         description:
-          'Account of the mailbox (the account field from listMailboxes); needed when the mailbox name exists in several accounts. Requires mailbox.',
+          'Account of the mailbox (the account field from listMailboxes); needed when the mailbox name exists in several accounts.',
       },
       limit: { type: 'number', description: 'Max emails to return (default 10)' },
+      offset: {
+        type: 'number',
+        description: 'Number of newest emails to skip, for the next page (default 0)',
+      },
+      unread_only: { type: 'boolean', description: 'List only unread emails (default false)' },
     },
+    required: ['mailbox'],
   },
   outputSchema: {
     type: 'object',
@@ -258,24 +278,30 @@ const listEmailsTool: Tool = {
         items: {
           type: 'object',
           properties: {
-            id: { type: 'string' },
+            id: { type: 'string', description: 'Mail id; pass it to getEmail or replyToEmail' },
             subject: { type: 'string' },
             sender: { type: 'string' },
-            date: { type: 'string', description: 'Date received, as Apple Mail formats it' },
+            date: {
+              type: 'string',
+              description: 'Date received, ISO 8601 with the UTC offset; absent when Mail has none',
+            },
             read: { type: 'boolean' },
+            mailbox: { type: 'string' },
+            account: { type: 'string' },
           },
         },
       },
+      total: { type: 'number', description: 'Number of emails the page is cut from' },
     },
   },
   inputExamples: [
     {
-      description: 'Minimal: list recent inbox emails',
-      input: { limit: 10 },
+      description: 'Minimal: the newest emails of a mailbox',
+      input: { mailbox: 'INBOX', account: 'iCloud' },
     },
     {
-      description: 'Full: recent emails of a mailbox in one account',
-      input: { mailbox: 'Archive', account: 'Exchange', limit: 20 },
+      description: 'Full: the second page of unread emails',
+      input: { mailbox: 'Archive', account: 'Exchange', limit: 20, offset: 20, unread_only: true },
     },
   ],
 };
@@ -283,7 +309,7 @@ const listEmailsTool: Tool = {
 const getEmailTool: Tool = {
   name: 'getEmail',
   description:
-    'Get a specific email by ID with full body. Only searches the Inbox: ids from other mailboxes are not resolvable.',
+    'Get one email with its full body, by the mail id listEmails or searchEmails returned, from any mailbox.',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
@@ -291,13 +317,13 @@ const getEmailTool: Tool = {
     [META_KEYS.OS_CATEGORY]: 'mail',
   },
   keywords: ['os', 'mail', 'email', 'get', 'read', 'detail', 'body', 'content'],
-  example: 'const { email } = await os.getEmail({ id: "msg-456" })',
+  example: 'const { email } = await os.getEmail({ id: emails[0].id })',
   inputSchema: {
     type: 'object',
     properties: {
       id: {
         type: 'string',
-        description: 'Email message ID (must be from the Inbox)',
+        description: 'Mail id from listEmails or searchEmails',
       },
     },
     required: ['id'],
@@ -321,8 +347,8 @@ const getEmailTool: Tool = {
   },
   inputExamples: [
     {
-      description: 'Get email by ID',
-      input: { id: 'msg-456' },
+      description: 'Get email by its mail id',
+      input: { id: 'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0' },
     },
   ],
 };
@@ -330,7 +356,7 @@ const getEmailTool: Tool = {
 const searchEmailsTool: Tool = {
   name: 'searchEmails',
   description:
-    'Search emails by subject or body content. Scopes to the named mailbox/folder, or the Inbox when mailbox is omitted. If limit is omitted, defaults to 10.',
+    'Search the emails of one mailbox by subject or body content. If limit is omitted, defaults to 10. Each id is a mail id that getEmail and replyToEmail take.',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
@@ -345,17 +371,16 @@ const searchEmailsTool: Tool = {
       query: { type: 'string', description: 'Search query (matches subject and body)' },
       mailbox: {
         type: 'string',
-        description:
-          "Mailbox path to search (default: the Inbox of every account). Use the name field from listMailboxes' output.",
+        description: "Mailbox path to search: the name field from listMailboxes' output.",
       },
       account: {
         type: 'string',
         description:
-          'Account of the mailbox (the account field from listMailboxes); needed when the mailbox name exists in several accounts. Requires mailbox.',
+          'Account of the mailbox (the account field from listMailboxes); needed when the mailbox name exists in several accounts.',
       },
       limit: { type: 'number', description: 'Max results (default 10)' },
     },
-    required: ['query'],
+    required: ['query', 'mailbox'],
   },
   outputSchema: {
     type: 'object',
@@ -365,10 +390,12 @@ const searchEmailsTool: Tool = {
         items: {
           type: 'object',
           properties: {
-            id: { type: 'string' },
+            id: { type: 'string', description: 'Mail id; pass it to getEmail or replyToEmail' },
             subject: { type: 'string' },
             sender: { type: 'string' },
             date: { type: 'string', description: 'Date received, as Apple Mail formats it' },
+            mailbox: { type: 'string' },
+            account: { type: 'string' },
           },
         },
       },
@@ -376,8 +403,8 @@ const searchEmailsTool: Tool = {
   },
   inputExamples: [
     {
-      description: 'Minimal: search the inbox',
-      input: { query: 'quarterly report' },
+      description: 'Minimal: search an inbox',
+      input: { query: 'quarterly report', mailbox: 'INBOX', account: 'iCloud' },
     },
     {
       description: 'Full: search a named mailbox with a result limit',
@@ -446,7 +473,7 @@ const sendEmailTool: Tool = {
 const replyToEmailTool: Tool = {
   name: 'replyToEmail',
   description:
-    'Reply to an existing email. Requires confirm_send=true as safety check. Only searches the Inbox: ids from other mailboxes are not resolvable.',
+    'Reply to an email in any mailbox, by the mail id listEmails or searchEmails returned. Requires confirm_send=true as safety check.',
   annotations: DESTRUCTIVE_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
@@ -455,13 +482,13 @@ const replyToEmailTool: Tool = {
   },
   keywords: ['os', 'mail', 'email', 'reply', 'respond', 'answer'],
   example:
-    'await os.replyToEmail({ id: "msg-456", body: "Sounds good, let\'s proceed.", confirm_send: true })',
+    'await os.replyToEmail({ id: emails[0].id, body: "Sounds good, let\'s proceed.", confirm_send: true })',
   inputSchema: {
     type: 'object',
     properties: {
       id: {
         type: 'string',
-        description: 'Email message ID to reply to (must be from the Inbox)',
+        description: 'Mail id from listEmails or searchEmails',
       },
       body: { type: 'string', description: 'Reply body (plain text)' },
       reply_all: { type: 'boolean', description: 'Reply to all recipients (default false)' },
@@ -481,12 +508,16 @@ const replyToEmailTool: Tool = {
   inputExamples: [
     {
       description: 'Minimal: reply to sender only',
-      input: { id: 'msg-456', body: 'Thanks, acknowledged.', confirm_send: true },
+      input: {
+        id: 'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0',
+        body: 'Thanks, acknowledged.',
+        confirm_send: true,
+      },
     },
     {
       description: 'Full: reply all',
       input: {
-        id: 'msg-456',
+        id: 'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0',
         body: 'I agree with the proposed timeline.',
         reply_all: true,
         confirm_send: true,
@@ -520,11 +551,16 @@ export async function handleListMailboxes(_params: ListMailboxesParams): Promise
 export async function handleListEmails(params: ListEmailsParams): Promise<ToolResult> {
   const p = asRecord(params);
   const v = validateAll(p, {
+    required: ['mailbox'],
+    booleans: ['unread_only'],
     strings: [
       ['mailbox', MAX_LENGTHS.short, false],
       ['account', MAX_LENGTHS.short, false],
     ],
-    numbers: [['limit', 1, 10_000]],
+    numbers: [
+      ['limit', 1, 10_000],
+      ['offset', 0, 1_000_000],
+    ],
   });
   if (!v.valid) return v.error;
   return runMail('list_emails', p);
@@ -551,7 +587,7 @@ export async function handleGetEmail(params: GetEmailParams): Promise<ToolResult
 export async function handleSearchEmails(params: SearchEmailsParams): Promise<ToolResult> {
   const p = asRecord(params);
   const v = validateAll(p, {
-    required: ['query'],
+    required: ['query', 'mailbox'],
     strings: [
       ['query', MAX_LENGTHS.short, false],
       ['mailbox', MAX_LENGTHS.short, false],

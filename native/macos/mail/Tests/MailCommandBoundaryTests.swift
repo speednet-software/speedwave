@@ -4,6 +4,7 @@ import XCTest
 
 final class MailCommandBoundaryTests: XCTestCase {
     private let harness = MailCommandHarness()
+    private let mailId = MailId(account: "Work", mailbox: "INBOX", messageId: "<a@x>").encoded
 
     private func failure(_ command: String, _ params: [String: Any]) throws -> MailFailure {
         let error = harness.callFailing(command, params)
@@ -11,28 +12,34 @@ final class MailCommandBoundaryTests: XCTestCase {
     }
 
     func testListEmailsRunsItsScriptWithinTheGivenBudgetAndReturnsTheParsedRows() throws {
-        harness.executor.reply("<a@x>||Hi||Anna <anna@x>||Monday||false\n")
+        harness.executor.reply(["Work", "<a@x>", "Hi", "Anna <anna@x>", "2026-10-20T09:15:00", "false"]
+            .joined(separator: "\u{1D}"))
 
-        let result = try harness.call("list_emails", ["limit": 5, scriptTimeoutParam: 12_000])
+        let result = try harness.call("list_emails", ["mailbox": "INBOX", "limit": 5, scriptTimeoutParam: 12_000])
 
         XCTAssertEqual(harness.executor.calls.count, 1)
         XCTAssertEqual(harness.executor.calls.first?.timeout, 12)
         let emails = try XCTUnwrap(result["emails"] as? [[String: Any]])
-        XCTAssertEqual(emails.first?["id"] as? String, "<a@x>")
+        XCTAssertEqual(emails.first?["id"] as? String, mailId)
         XCTAssertEqual(emails.first?["read"] as? Bool, false)
     }
 
     func testEveryScriptedCommandRunsWithinTheBudget() throws {
         let calls: [(String, [String: Any])] = [
             ("list_mailboxes", [:]),
-            ("list_emails", [:]),
-            ("get_email", ["id": "<a@x>"]),
-            ("search_emails", ["query": "x"]),
+            ("list_emails", ["mailbox": "INBOX"]),
+            ("get_email", ["id": mailId]),
+            ("search_emails", ["query": "x", "mailbox": "INBOX"]),
             ("send_email", ["to": "a@x", "subject": "S", "body": "B", "confirm_send": true]),
-            ("reply_to_email", ["id": "<a@x>", "body": "B", "confirm_send": true]),
+            ("reply_to_email", ["id": mailId, "body": "B", "confirm_send": true]),
+        ]
+        let replies = [
+            "list_emails": "Work" + String(repeating: "\u{1D}", count: 5),
+            "get_email": "S||A||D||true||b@x,||Body",
+            "search_emails": "Work\u{1D}",
         ]
         for (command, params) in calls {
-            harness.executor.reply(command == "get_email" ? "S||A||D||true||b@x,||Body" : "")
+            harness.executor.reply(replies[command] ?? "")
             _ = try harness.call(command, params.merging([scriptTimeoutParam: 7_500]) { $1 })
         }
         XCTAssertEqual(harness.executor.calls.map(\.timeout), Array(repeating: 7.5, count: calls.count))
@@ -42,7 +49,7 @@ final class MailCommandBoundaryTests: XCTestCase {
         for budget in [nil, 0, -1, "25000"] as [Any?] {
             let params: [String: Any] = budget.map { [scriptTimeoutParam: $0] } ?? [:]
             let commands = mailCommands(executor: harness.executor.execute)
-            XCTAssertThrowsError(try commands["list_emails"]!(params)) { error in
+            XCTAssertThrowsError(try commands["list_emails"]!(params.merging(["mailbox": "INBOX"]) { $1 })) { error in
                 guard case CLIError.missingField(scriptTimeoutParam) = error else {
                     return XCTFail("expected missingField(\(scriptTimeoutParam)), got \(error)")
                 }
@@ -61,7 +68,7 @@ final class MailCommandBoundaryTests: XCTestCase {
     func testAScriptTimeoutIsReportedAsAMailTimeoutNamingTheBudget() throws {
         harness.executor.fail(ScriptError.timeout(12, nil))
 
-        let failure = try failure("list_emails", [scriptTimeoutParam: 12_000])
+        let failure = try failure("list_emails", ["mailbox": "INBOX", scriptTimeoutParam: 12_000])
 
         XCTAssertEqual(failure, .timeout(seconds: 12))
         XCTAssertEqual(failure.errorDescription, "MAIL_TIMEOUT: Mail.app did not answer within 12 s.")
@@ -70,7 +77,7 @@ final class MailCommandBoundaryTests: XCTestCase {
     func testAnAppleEventTimeoutIsReportedAsAMailTimeout() throws {
         harness.executor.fail(ScriptError.scriptFailed("execution error: Mail got an error: AppleEvent timed out. (-1712)"))
 
-        XCTAssertEqual(try failure("search_emails", ["query": "x"]), .timeout(seconds: 25))
+        XCTAssertEqual(try failure("search_emails", ["query": "x", "mailbox": "INBOX"]), .timeout(seconds: 25))
     }
 
     func testADeniedAutomationPermissionIsReportedAsAutomationDenied() throws {
@@ -86,7 +93,7 @@ final class MailCommandBoundaryTests: XCTestCase {
         let detail = "execution error: Not authorized to send Apple events to Mail. (-1743)"
         harness.executor.fail(ScriptError.scriptFailed(detail))
 
-        XCTAssertEqual(try failure("get_email", ["id": "<a@x>"]), .automationDenied(detail))
+        XCTAssertEqual(try failure("get_email", ["id": mailId]), .automationDenied(detail))
     }
 
     func testAMissingMailboxIsReportedAsMailboxNotFoundInAnyAccount() throws {
@@ -193,5 +200,62 @@ final class MailCommandBoundaryTests: XCTestCase {
         XCTAssertTrue(script.contains("address:\"alice@example.com\""), script)
         XCTAssertTrue(script.contains("address:\"bob@example.com\""), script)
         XCTAssertTrue(script.contains("send newMsg"), script)
+    }
+
+    func testACommandGivenSomethingOtherThanAMailIdRunsNothingAndSaysWhereIdsComeFrom() throws {
+        let calls: [(String, [String: Any])] = [
+            ("get_email", ["id": "<a@x>"]),
+            ("reply_to_email", ["id": "msg-1", "body": "B", "confirm_send": true]),
+        ]
+        for (command, params) in calls {
+            let failure = try failure(command, params)
+            XCTAssertEqual(failure, .invalidMailId(params["id"] as? String ?? ""))
+            XCTAssertTrue(failure.errorDescription?.hasPrefix("MAIL_INVALID_ID: ") == true)
+        }
+        XCTAssertTrue(harness.executor.calls.isEmpty)
+    }
+
+    func testGetEmailReadsTheMessageInTheMailboxAndAccountOfItsId() throws {
+        let id = MailId(account: "On My Mac", mailbox: "Speedwave-Test", messageId: "<z@x>").encoded
+        harness.executor.reply("S||A||D||false||b@x,||Body")
+
+        let result = try harness.call("get_email", ["id": id])
+
+        let email = try XCTUnwrap(result["email"] as? [String: Any])
+        XCTAssertEqual(email["id"] as? String, id)
+        let script = try XCTUnwrap(harness.executor.calls.first?.script)
+        XCTAssertTrue(script.contains("set mb to mailbox \"Speedwave-Test\"\n"), script)
+        XCTAssertTrue(script.contains("whose message id is \"<z@x>\""), script)
+        XCTAssertFalse(script.contains("of inbox"), script)
+    }
+
+    func testAMessageWhoseMailboxIsGoneIsReportedAsMailboxNotFoundInItsAccount() throws {
+        harness.executor.fail(ScriptError.scriptFailed("execution error: SPW_MAILBOX_NOT_FOUND (-2700)"))
+
+        XCTAssertEqual(
+            try failure("reply_to_email", ["id": mailId, "body": "B", "confirm_send": true]),
+            .mailboxNotFound(mailbox: "INBOX", account: "Work"))
+    }
+
+    func testSearchResultsCarryMailIdsOfTheAccountTheLookupResolved() throws {
+        harness.executor.reply("Google\u{1D}<s@x>||Invoice||Bob||Monday\n")
+
+        let result = try harness.call("search_emails", ["query": "invoice", "mailbox": "INBOX"])
+
+        let row = try XCTUnwrap((result["emails"] as? [[String: Any]])?.first)
+        XCTAssertEqual(
+            try MailId(decoding: try XCTUnwrap(row["id"] as? String)),
+            MailId(account: "Google", mailbox: "INBOX", messageId: "<s@x>"))
+        XCTAssertEqual(row["account"] as? String, "Google")
+        XCTAssertEqual(row["mailbox"] as? String, "INBOX")
+        XCTAssertNil(row["message_id"])
+    }
+
+    func testSearchEmailsNeedsAMailbox() {
+        let error = harness.callFailing("search_emails", ["query": "x"])
+        guard case CLIError.missingField("mailbox") = error else {
+            return XCTFail("expected missingField(mailbox), got \(error)")
+        }
+        XCTAssertTrue(harness.executor.calls.isEmpty)
     }
 }

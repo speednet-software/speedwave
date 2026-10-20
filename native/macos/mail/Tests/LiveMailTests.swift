@@ -33,6 +33,38 @@ final class LiveMailTests: XCTestCase {
         XCTAssertNotNil(result["mailboxes"] as? [[String: Any]])
     }
 
+    func testListMailboxesListsTheTestMailboxOnceUnderOnMyMac() throws {
+        let result = try XCTUnwrap(try call("list_mailboxes") as? [String: Any])
+        let mailboxes = try XCTUnwrap(result["mailboxes"] as? [[String: Any]])
+        let matches = mailboxes.filter { $0["name"] as? String == Self.testMailbox }
+        XCTAssertEqual(matches.count, 1, "\(matches)")
+        XCTAssertEqual(matches.first?["account"] as? String, AppleMailClient.localAccountName)
+    }
+
+    func testListEmailsPagesTheTestMailboxNewestFirstWithMailIdsGetEmailReads() throws {
+        let params: [String: Any] = ["mailbox": Self.testMailbox, "account": AppleMailClient.localAccountName]
+        let all = try XCTUnwrap(try call("list_emails", params.merging(["limit": 10_000]) { $1 }) as? [String: Any])
+        let emails = try XCTUnwrap(all["emails"] as? [[String: Any]])
+        XCTAssertEqual(all["total"] as? Int, emails.count)
+        let dates = emails.compactMap { $0["date"] as? String }.compactMap(parseISO8601)
+        XCTAssertEqual(dates, dates.sorted(by: >))
+
+        let second = try XCTUnwrap(
+            try call("list_emails", params.merging(["offset": 1, "limit": 1]) { $1 }) as? [String: Any])
+        let secondIds = (second["emails"] as? [[String: Any]])?.compactMap { $0["id"] as? String }
+        XCTAssertEqual(secondIds, emails.dropFirst().prefix(1).compactMap { $0["id"] as? String })
+
+        let unread = try XCTUnwrap(try call("list_emails", params.merging(["unread_only": true]) { $1 }) as? [String: Any])
+        XCTAssertEqual(unread["total"] as? Int, emails.filter { $0["read"] as? Bool == false }.count)
+
+        guard let newest = emails.first?["id"] as? String else {
+            throw XCTSkip("\(Self.testMailbox) holds no message to read by its mail id")
+        }
+        XCTAssertEqual(try MailId(decoding: newest).mailbox, Self.testMailbox)
+        let read = try XCTUnwrap(try call("get_email", ["id": newest]) as? [String: Any])
+        XCTAssertEqual((read["email"] as? [String: Any])?["subject"] as? String, emails.first?["subject"] as? String)
+    }
+
     func testAMailboxNoAccountHasIsReportedAsMailboxNotFound() {
         let mailbox = "SPW-Nonexistent-Mailbox-831"
         XCTAssertThrowsError(try call("list_emails", ["mailbox": mailbox, "limit": 1])) { error in

@@ -20,19 +20,6 @@ final class MailTests: XCTestCase {
         XCTAssertNil(rows[0]["message_count"])
     }
 
-    func testParseMessageListTypesReadAsABoolean() {
-        let rows = AppleMailClient.parseMessageList(
-            "<a@x>||Hi||Anna <anna@x>||Monday||false\n<b@x>||Re||Bob <bob@x>||Tuesday||true\n"
-        )
-        XCTAssertEqual(rows.count, 2)
-        XCTAssertEqual(rows[0]["id"] as? String, "<a@x>")
-        XCTAssertEqual(rows[0]["read"] as? Bool, false)
-        XCTAssertEqual(rows[1]["read"] as? Bool, true)
-    }
-
-    func testParseMessageListOfEmptyOutputIsEmpty() {
-        XCTAssertTrue(AppleMailClient.parseMessageList("").isEmpty)
-    }
 
 
     func testDetectClientsReportsAppleMailAsTheOnlySupportedClient() {
@@ -115,12 +102,16 @@ final class MailTests: XCTestCase {
         XCTAssertTrue(script.contains("set spwAcct to contents of spwAcctRef"), script)
         XCTAssertTrue(script.contains("exists mailbox \"Archive\" of spwAcct"), script)
         XCTAssertFalse(script.contains("exists account"), script)
+        XCTAssertTrue(script.contains("if exists mailbox \"Archive\" then"), script)
+        XCTAssertTrue(script.contains("set end of spwNames to \"On My Mac\""), script)
+        XCTAssertTrue(script.contains("set spwAcctName to item 1 of spwNames"), script)
     }
 
     func testMailboxLookupSearchesOnlyTheNamedAccount() {
         let script = AppleMailClient.mailboxLookup(name: "Archive", account: "Exchange")
         XCTAssertTrue(script.contains("if not (exists account \"Exchange\")"), script)
         XCTAssertTrue(script.contains("repeat with spwAcctRef in {account \"Exchange\"}"), script)
+        XCTAssertFalse(script.contains("if exists mailbox \"Archive\" then"), script)
     }
 
     func testMailboxLookupEscapesQuotesInNames() {
@@ -135,8 +126,28 @@ final class MailTests: XCTestCase {
         XCTAssertTrue(script.contains("set mbName to name of parentBox & \"/\" & mbName"), script)
     }
 
-    func testMailboxLookupWithoutANameIsTheInbox() {
-        XCTAssertEqual(AppleMailClient.mailboxLookup(name: nil, account: nil), "set mb to inbox")
+    func testMailboxLookupInOnMyMacAddressesTheLocalMailbox() {
+        let script = AppleMailClient.mailboxLookup(name: "Speedwave-Test", account: "On My Mac")
+        XCTAssertTrue(script.contains("set mb to mailbox \"Speedwave-Test\"\n"), script)
+        XCTAssertTrue(script.contains("set spwAcctName to \"On My Mac\""), script)
+        XCTAssertFalse(script.contains("spwAcct\n"), script)
+        XCTAssertFalse(script.contains("exists account"), script)
+    }
+
+    func testListMailboxesListsTheOnMyMacMailboxesUnderTheirOwnAccountName() {
+        let script = AppleMailClient.listMailboxesScript
+        XCTAssertTrue(script.contains("set acctName to \"On My Mac\""), script)
+        XCTAssertTrue(script.contains("repeat with mbRef in mailboxes\n"), script)
+        XCTAssertTrue(script.contains("if spwOwner is missing value then"), script)
+    }
+
+    func testMessageLookupFindsTheMessageInItsOwnMailboxAndAccount() {
+        let id = MailId(account: "Work", mailbox: "Archive", messageId: "<a\"b@x>")
+        let script = AppleMailClient.messageLookup(id)
+        XCTAssertTrue(script.contains("repeat with spwAcctRef in {account \"Work\"}"), script)
+        XCTAssertTrue(script.contains("mailbox \"Archive\" of spwAcct"), script)
+        XCTAssertTrue(script.contains("every message of mb whose message id is \"<a\\\"b@x>\""), script)
+        XCTAssertFalse(script.contains("of inbox"), script)
     }
 
     func testPermissionCheckScriptAccessesData() {
