@@ -111,6 +111,8 @@ const downloadFileTool: Tool = {
   ],
 };
 
+const UPLOAD_FILE_REQUIRED = ['channel', 'filePaths'];
+
 const uploadFileTool: Tool = {
   name: 'uploadFile',
   description: `Upload 1 to ${MAX_UPLOAD_FILES} files from /workspace to a Slack channel, DM or thread as the signed-in user (their name and avatar), all into the same target with one comment. Files are streamed, up to ${MAX_UPLOAD_BYTES / 1024 ** 3} GiB each. Files outside /workspace (e.g. /tmp, the home directory) must first be copied under /workspace/.speedwave/slack-out/. Pass \`thread_ts\` copied verbatim from getChannelMessages/getThreadMessages to post into that thread. If any file fails, nothing is shared. Needs the files:write scope: a missing_scope error means the user must re-authorise Slack in Speedwave Desktop. Irreversible and instantly visible: the user must confirm the recipient, the file list and the comment in the current conversation before calling.`,
@@ -140,7 +142,7 @@ const uploadFileTool: Tool = {
         description: 'Message posted together with the files',
       },
     },
-    required: ['channel', 'filePaths'],
+    required: UPLOAD_FILE_REQUIRED,
   },
   annotations: WRITE_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true, [META_KEYS.TIMEOUT_CLASS]: 'long' },
@@ -154,7 +156,7 @@ const uploadFileTool: Tool = {
       files: {
         type: 'array',
         items: { type: 'object' },
-        description: 'Uploaded files in call order: Slack file ID, original file name and title',
+        description: 'Uploaded files in call order: Slack file ID and original file name',
       },
       channel: { type: 'string', description: 'Channel ID the files were sent to' },
       thread_ts: { type: 'string', description: 'Thread the files were posted into, when given' },
@@ -255,7 +257,7 @@ export function createFileTools(clients: SlackClients): ToolDefinition[] {
     {
       tool: uploadFileTool,
       handler: withValidation<UploadFileParams>(gate(handleUploadFile), {
-        required: uploadFileTool.inputSchema.required ?? [],
+        required: UPLOAD_FILE_REQUIRED,
         toolName: uploadFileTool.name,
       }),
     },

@@ -462,7 +462,7 @@ export async function uploadFile(
   }
 ): Promise<{
   ok: boolean;
-  files: Array<{ id: string; name: string; title?: string }>;
+  files: Array<{ id: string; name: string }>;
   channel: string;
   thread_ts?: string;
 }> {
@@ -492,12 +492,8 @@ export async function uploadFile(
   );
 
   return {
-    ok: result.ok || false,
-    files: (result.files ?? []).flatMap((f) => {
-      if (!f.id) return [];
-      const name = staged.find((s) => s.id === f.id)?.name ?? f.name ?? f.id;
-      return [{ id: f.id, name, title: f.title }];
-    }),
+    ok: result.ok === true,
+    files: staged.map(({ id, name }) => ({ id, name })),
     channel: channelId,
     ...(params.thread_ts ? { thread_ts: params.thread_ts } : {}),
   };

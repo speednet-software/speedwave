@@ -109,7 +109,7 @@ describe('uploadFile', () => {
     expect(args).not.toHaveProperty('thread_ts');
     expect(result).toEqual({
       ok: true,
-      files: [{ id: 'F1', name: 'report.txt', title: 'report.txt' }],
+      files: [{ id: 'F1', name: 'report.txt' }],
       channel: 'C12345678',
     });
   });
@@ -247,6 +247,35 @@ describe('uploadFile', () => {
 
     await expect(failure).rejects.toThrow(/report\.txt.*500.*no file was shared/is);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(completeUploadExternal).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['upload_url', { ok: true, file_id: 'F1' }],
+    ['file_id', { ok: true, upload_url: 'https://files.slack.test/upload/1' }],
+  ])('refuses to continue when Slack returns no %s', async (_missing, response) => {
+    const { clients, getUploadURLExternal, completeUploadExternal } = uploadClients();
+    getUploadURLExternal.mockResolvedValue(response);
+
+    const failure = uploadFile(clients, { channel: 'C12345678', filePaths: ['report.txt'] });
+
+    await expect(failure).rejects.toThrow(/report\.txt.*no file was shared/is);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(completeUploadExternal).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['an Error', new Error('socket hang up'), 'socket hang up'],
+    ['a non-Error value', 'connection reset', 'connection reset'],
+  ])('names the file and the cause when fetch rejects with %s', async (_kind, rejection, cause) => {
+    const { clients, completeUploadExternal } = uploadClients();
+    fetchMock.mockRejectedValue(rejection);
+
+    const failure = uploadFile(clients, { channel: 'C12345678', filePaths: ['report.txt'] });
+
+    await expect(failure).rejects.toThrow(
+      new RegExp(`report\\.txt.*${cause}.*no file was shared`, 'is')
+    );
     expect(completeUploadExternal).not.toHaveBeenCalled();
   });
 

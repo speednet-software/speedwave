@@ -117,7 +117,7 @@ describe('file-tools', () => {
     it('passes the upload result through on success', async () => {
       const uploaded = {
         ok: true,
-        files: [{ id: 'F9', name: 'report.pdf', title: 'report.pdf' }],
+        files: [{ id: 'F9', name: 'report.pdf' }],
         channel: 'C1',
       };
       vi.mocked(client.uploadFile).mockResolvedValue(uploaded);
