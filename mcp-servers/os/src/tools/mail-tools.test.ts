@@ -149,6 +149,37 @@ describe('mail-tools', () => {
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('EMPTY_FIELDS');
     });
+
+    it('passes the headers and source requests to mail-cli', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { email: {} } });
+
+      await handleGetEmail({ id: MAIL_ID, include_headers: true, include_source: false });
+
+      expect(runCommand).toHaveBeenCalledWith(
+        'mail',
+        'get_email',
+        budgeted({ id: MAIL_ID, include_headers: true, include_source: false }),
+        PROCESS_TIMEOUT
+      );
+    });
+
+    it('refuses a headers request that is not a boolean without calling mail-cli', async () => {
+      const result = await handleGetEmail({ id: MAIL_ID, include_source: 'yes' as never });
+
+      expect(result.success).toBe(false);
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it('declares the truncation flags of the headers and the source', () => {
+      const tool = createMailTools().find((t) => t.tool.name === 'getEmail')!;
+      const email = (tool.tool.outputSchema as any).properties.email.properties;
+      const input = tool.tool.inputSchema.properties as Record<string, { type: string }>;
+
+      expect(email.source_truncated.description).toContain('100000');
+      expect(email.headers_truncated.type).toBe('boolean');
+      expect(input.include_headers.type).toBe('boolean');
+      expect(input.include_source.type).toBe('boolean');
+    });
   });
 
   describe('handleSearchEmails', () => {
@@ -496,10 +527,18 @@ describe('mail-tools', () => {
           id: MAIL_ID,
           subject: 'Hi',
           sender: 'Anna',
-          date: 'Monday',
-          read: true,
           to: ['me@x'],
+          cc: ['ewa@x'],
+          date: '2026-10-20T09:15:00+02:00',
+          read: true,
           body: 'Hello',
+          mailbox: 'Archive',
+          account: 'iCloud',
+          attachments: [{ index: 1, name: 'a.pdf', size: 1024, mime_type: 'application/pdf' }],
+          headers: 'Received: from mx',
+          headers_truncated: false,
+          source: 'Received: from mx',
+          source_truncated: true,
         },
       },
       searchEmails: {
@@ -847,9 +886,25 @@ describe('mail-tools', () => {
       expect(text).toContain('Mail.app did not answer within 25 s.');
     });
 
+    it('a mail no longer in its mailbox points at the tools that list the current ones', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        cliFailure(
+          'get_email',
+          "MAIL_NOT_FOUND: No email with this id in mailbox 'INBOX' of account 'iCloud'; it was moved or deleted."
+        )
+      );
+
+      const result = await handleGetEmail({ id: MAIL_ID });
+
+      expect(result.error?.code).toBe('MAIL_NOT_FOUND');
+      expect(result.error?.message).toContain('Invalid id');
+      expect(result.error?.message).toContain("mailbox 'INBOX' of account 'iCloud'");
+      expect(result.error?.message).toContain('listEmails');
+    });
+
     it('any other failure keeps its own message', async () => {
       vi.mocked(runCommand).mockRejectedValue(
-        cliFailure('get_email', 'AppleScript error: Email not found')
+        cliFailure('get_email', 'AppleScript error: Mail got an error: Can’t get message 1.')
       );
       const tool = createMailTools().find((t) => t.tool.name === 'getEmail')!;
 
@@ -858,7 +913,7 @@ describe('mail-tools', () => {
       expect(result.isError).toBe(true);
       const text = (result.content[0] as { text: string }).text;
       expect(text).toContain('HANDLER_ERROR');
-      expect(text).toContain('AppleScript error: Email not found');
+      expect(text).toContain('AppleScript error: Mail got an error: Can’t get message 1.');
     });
   });
 });

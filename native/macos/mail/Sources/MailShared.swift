@@ -4,6 +4,7 @@ import SharedCLI
 let mailboxNotFoundMarker = "SPW_MAILBOX_NOT_FOUND"
 let mailboxAmbiguousMarker = "SPW_MAILBOX_AMBIGUOUS:"
 let accountNotFoundMarker = "SPW_ACCOUNT_NOT_FOUND"
+let mailNotFoundMarker = "SPW_MAIL_NOT_FOUND"
 
 /// The JSON argument carrying the script time budget in milliseconds, set by the mail tools of the os worker.
 let scriptTimeoutParam = "script_timeout_ms"
@@ -25,6 +26,7 @@ enum MailFailure: LocalizedError, Equatable {
     case mailboxAmbiguous(mailbox: String, accounts: [String])
     case invalidMailId(String)
     case mailboxChanged(mailbox: String)
+    case mailNotFound(mailbox: String, account: String)
 
     var code: String {
         switch self {
@@ -35,6 +37,7 @@ enum MailFailure: LocalizedError, Equatable {
         case .mailboxAmbiguous: return "MAIL_MAILBOX_AMBIGUOUS"
         case .invalidMailId: return "MAIL_INVALID_ID"
         case .mailboxChanged: return "MAIL_MAILBOX_CHANGED"
+        case .mailNotFound: return "MAIL_NOT_FOUND"
         }
     }
 
@@ -59,6 +62,8 @@ enum MailFailure: LocalizedError, Equatable {
             return "'\(id)' is not a mail id. Take the id from listEmails or searchEmails."
         case .mailboxChanged(let mailbox):
             return "Mailbox '\(mailbox)' changed while it was being read."
+        case .mailNotFound(let mailbox, let account):
+            return "No email with this id in mailbox '\(mailbox)' of account '\(account)'; it was moved or deleted."
         }
     }
 }
@@ -152,6 +157,9 @@ struct MailScripts {
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty && !$0.hasPrefix("(") } ?? []
             return .mailboxAmbiguous(mailbox: mailbox ?? "", accounts: accounts)
+        }
+        if detail.contains(mailNotFoundMarker) {
+            return .mailNotFound(mailbox: mailbox ?? "", account: account ?? "")
         }
         if detail.contains(mailboxNotFoundMarker) {
             return .mailboxNotFound(mailbox: mailbox ?? "", account: account)
