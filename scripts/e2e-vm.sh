@@ -281,7 +281,7 @@ Remove-Item -Recurse -Force "C:\Speedwave" -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force "$env:USERPROFILE\.speedwave" -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force "C:\speedwave-e2e" -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force "C:\cb" -ErrorAction SilentlyContinue
-Remove-Item -Force "C:\speedwave-setup.exe" -ErrorAction SilentlyContinue
+Remove-Item -Force "$env:TEMP\speedwave-setup.exe" -ErrorAction SilentlyContinue
 
 # Remove WSL-side staging dir (in the build distro, not Speedwave distro).
 wsl.exe -d $WINDOWS_WSL_DISTRO -- rm -rf /home/windows/speedwave-e2e
@@ -496,7 +496,7 @@ Set-Location C:\speedwave-e2e
 $installer = Get-ChildItem "C:\cb\release\bundle\nsis\*.exe" -Recurse | Select-Object -First 1
 if (-not $installer) { Write-Error "NSIS installer not found"; exit 1 }
 Write-Host "Found: $($installer.FullName)"
-Copy-Item $installer.FullName "C:\speedwave-setup.exe"
+Copy-Item $installer.FullName "$env:TEMP\speedwave-setup.exe"
 Copy-Item $installer.FullName "$env:USERPROFILE\Desktop\speedwave-setup.exe"
 Write-Host "Step 5 DONE"
 SCRIPT
@@ -504,12 +504,12 @@ SCRIPT
     windows_clean_state
 
     echo "[windows] Phase 2: Installing app and running E2E tests (clean system)..."
-    echo 'Copy-Item "$env:USERPROFILE\Desktop\speedwave-setup.exe" "C:\speedwave-setup.exe"' | windows_ps
+    echo 'Copy-Item "$env:USERPROFILE\Desktop\speedwave-setup.exe" "$env:TEMP\speedwave-setup.exe"' | windows_ps
 
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = "Stop"
 Write-Host "── Installing Speedwave..."
-Start-Process -Wait -FilePath "C:\speedwave-setup.exe" -ArgumentList "/S","/D=C:\Speedwave"
+Start-Process -Wait -FilePath "$env:TEMP\speedwave-setup.exe" -ArgumentList "/S","/D=C:\Speedwave"
 if (Test-Path "C:\Speedwave\speedwave-desktop.exe") {
     Write-Host "Install OK"
 } else {
@@ -547,11 +547,11 @@ SCRIPT
     windows_clean_state
 
     echo "[windows] Reinstalling app..."
-    echo 'Copy-Item "$env:USERPROFILE\Desktop\speedwave-setup.exe" "C:\speedwave-setup.exe"' | windows_ps
+    echo 'Copy-Item "$env:USERPROFILE\Desktop\speedwave-setup.exe" "$env:TEMP\speedwave-setup.exe"' | windows_ps
 
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = "Stop"
-Start-Process -Wait -FilePath "C:\speedwave-setup.exe" -ArgumentList "/S","/D=C:\Speedwave"
+Start-Process -Wait -FilePath "$env:TEMP\speedwave-setup.exe" -ArgumentList "/S","/D=C:\Speedwave"
 if (Test-Path "C:\Speedwave\speedwave-desktop.exe") { Write-Host "Install OK" } else { Write-Error "Install failed"; exit 1 }
 SCRIPT
 
@@ -948,11 +948,11 @@ preview_windows() {
     windows_clean_state
 
     echo "[windows] Installing app from Desktop\\speedwave-setup.exe..."
-    echo 'Copy-Item "$env:USERPROFILE\Desktop\speedwave-setup.exe" "C:\speedwave-setup.exe"' | windows_ps
+    echo 'Copy-Item "$env:USERPROFILE\Desktop\speedwave-setup.exe" "$env:TEMP\speedwave-setup.exe"' | windows_ps
 
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = "Stop"
-Start-Process -Wait -FilePath "C:\speedwave-setup.exe" -ArgumentList "/S","/D=C:\Speedwave"
+Start-Process -Wait -FilePath "$env:TEMP\speedwave-setup.exe" -ArgumentList "/S","/D=C:\Speedwave"
 if (Test-Path "C:\Speedwave\speedwave-desktop.exe") { Write-Host "Install OK" } else { Write-Error "Install failed"; exit 1 }
 Start-Process -FilePath "C:\Speedwave\speedwave-desktop.exe"
 Write-Host "Launched"
