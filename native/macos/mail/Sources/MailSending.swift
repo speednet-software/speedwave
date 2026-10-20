@@ -96,17 +96,16 @@ enum MailSending {
         return sent(fields)
     }
 
-    /// The `forward_email` command: Mail's own forward of the mail `id`, with its attachments, to `to` and `cc`,
-    /// the optional `comment` above the forwarded text.
+    /// The `forward_email` command: Mail's own forward of the mail `id`, with its quote and attachments, to `to`
+    /// and `cc`; its content is never changed, since any change leaves only the changed text.
     static func forwardEmail(params: [String: Any], scripts: MailScripts) throws -> [String: Any] {
-        let comment = plainText(params["comment"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        return try passOn(params, scripts: scripts, gate: forwardGate, command: "forward", comment: comment)
+        try passOn(params, scripts: scripts, gate: forwardGate, command: "forward", readsOutgoingSubject: true)
     }
 
     /// The `redirect_email` command: Mail's redirect of the mail `id`, unchanged and from its original sender, to
     /// `to` and `cc`.
     static func redirectEmail(params: [String: Any], scripts: MailScripts) throws -> [String: Any] {
-        try passOn(params, scripts: scripts, gate: redirectGate, command: "redirect", comment: nil)
+        try passOn(params, scripts: scripts, gate: redirectGate, command: "redirect", readsOutgoingSubject: false)
     }
 
     /// The text of a reply: `body`, a blank line, the attribution line, and every line of `original` quoted with `>`.
@@ -247,7 +246,9 @@ enum MailSending {
             """
                 if not (exists account "\(escapeAppleScript(name))") then error "\(accountNotFoundMarker)"
                 set spwAccount to account "\(escapeAppleScript(name))"
-                set spwSender to (full name of spwAccount) & " <" & (item 1 of email addresses of spwAccount) & ">"
+                if not (enabled of spwAccount) then error "\(accountDisabledMarker)"
+                set spwAddresses to email addresses of spwAccount
+                set spwSender to (full name of spwAccount) & " <" & (item 1 of spwAddresses) & ">"
             """
         }
         let lines: [String?] = [
@@ -296,7 +297,7 @@ enum MailSending {
         scripts: MailScripts,
         gate: ConfirmationGate,
         command: String,
-        comment: String?
+        readsOutgoingSubject: Bool
     ) throws -> [String: Any] {
         guard let id = params["id"] as? String else {
             throw MailError.missingField("id")
@@ -305,20 +306,17 @@ enum MailSending {
         let to = try recipients(params, "to", required: true)
         let cc = try recipients(params, "cc", required: false)
         let read = try scripts.run(
-            originalReadScript(mailId, makeOutgoing: comment == nil ? nil : command),
+            originalReadScript(mailId, makeOutgoing: readsOutgoingSubject ? command : nil),
             mailbox: mailId.mailbox,
             account: mailId.account)
         var fields = try originalFields(read, id: mailId)
         fields["to"] = to
         fields["cc"] = cc
-        if let comment {
-            fields["comment"] = comment
-        }
         guard gate.isConfirmed(params) else {
             return gate.preview(fields)
         }
         _ = try scripts.run(
-            passOnScript(mailId, command: command, to: to, cc: cc, comment: comment ?? ""),
+            passOnScript(mailId, command: command, to: to, cc: cc),
             mailbox: mailId.mailbox,
             account: mailId.account)
         return sent(fields)
@@ -437,22 +435,17 @@ enum MailSending {
         ]
     }
 
-    private static func passOnScript(_ id: MailId, command: String, to: [String], cc: [String], comment: String)
-        -> String
-    {
+    private static func passOnScript(_ id: MailId, command: String, to: [String], cc: [String]) -> String {
         let clauses = [recipientClauses(to, kind: "to"), recipientClauses(cc, kind: "cc")]
             .filter { !$0.isEmpty }
             .joined(separator: "\n")
-        let commentLine = comment.isEmpty
-            ? ""
-            : "\n    make new paragraph at beginning of content of spwOut with data \"\(appleScriptText(comment + "\n\n"))\""
         return """
         tell application "Mail"
         \(AppleMailClient.messageLookup(id))
             set spwOut to \(command) m opening window false
             tell spwOut
         \(clauses)
-            end tell\(commentLine)
+            end tell
             if not (send spwOut) then error "\(sendFailedMarker)"
         end tell
         """

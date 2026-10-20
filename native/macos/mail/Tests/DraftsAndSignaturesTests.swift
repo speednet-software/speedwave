@@ -83,10 +83,11 @@ final class DraftsAndSignaturesTests: XCTestCase {
             script.contains("if not (exists account \"Work \\\"EU\\\"\") then error \"\(accountNotFoundMarker)\""),
             script)
         XCTAssertTrue(script.contains("set spwAccount to account \"Work \\\"EU\\\"\""), script)
+        XCTAssertTrue(script.contains("set spwAddresses to email addresses of spwAccount"), script)
         XCTAssertTrue(
-            script.contains(
-                "set spwSender to (full name of spwAccount) & \" <\" & (item 1 of email addresses of spwAccount) & \">\""),
+            script.contains("set spwSender to (full name of spwAccount) & \" <\" & (item 1 of spwAddresses) & \">\""),
             script)
+        XCTAssertFalse(script.contains("item 1 of email addresses"), script)
         let sender = try XCTUnwrap(script.range(of: "set spwSender to"))
         let message = try XCTUnwrap(script.range(of: "make new outgoing message"))
         XCTAssertLessThan(sender.lowerBound, message.lowerBound)
@@ -100,6 +101,21 @@ final class DraftsAndSignaturesTests: XCTestCase {
         let error = harness.callFailing("save_draft", draft.merging(["account": "Nope"]) { $1 })
 
         XCTAssertEqual(error as? MailFailure, .accountNotFound("Nope"))
+    }
+
+    func testADraftInATurnedOffAccountIsRefusedBeforeTheMessageIsMade() throws {
+        harness.executor.fail(ScriptError.scriptFailed("execution error: \(accountDisabledMarker) (-2700)"))
+
+        let error = harness.callFailing("save_draft", draft.merging(["account": "Google"]) { $1 })
+
+        XCTAssertEqual(error as? MailFailure, .accountDisabled("Google"))
+        XCTAssertEqual(
+            (error as? MailFailure)?.errorDescription,
+            "MAIL_ACCOUNT_DISABLED: Account 'Google' is turned off in Mail.app, so Mail would file the draft in another account.")
+        let script = try XCTUnwrap(harness.executor.calls.first?.script)
+        let check = try XCTUnwrap(script.range(of: "if not (enabled of spwAccount) then error \"\(accountDisabledMarker)\""))
+        let message = try XCTUnwrap(script.range(of: "make new outgoing message"))
+        XCTAssertLessThan(check.lowerBound, message.lowerBound)
     }
 
     func testSaveDraftRefusesAMissingSubjectBeforeRunningAScript() {

@@ -438,13 +438,13 @@ describe('mail-tools', () => {
     it('hands an unconfirmed forward to mail-cli, which answers with the preview', async () => {
       vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: FORWARD_PREVIEW });
 
-      const result = await handleForwardEmail({ id: MAIL_ID, to: 'bob@x', comment: 'FYI' });
+      const result = await handleForwardEmail({ id: MAIL_ID, to: 'bob@x' });
 
       expect(result.data).toEqual(FORWARD_PREVIEW);
       expect(runCommand).toHaveBeenCalledWith(
         'mail',
         'forward_email',
-        budgeted({ id: MAIL_ID, to: 'bob@x', comment: 'FYI' }),
+        budgeted({ id: MAIL_ID, to: 'bob@x' }),
         PROCESS_TIMEOUT
       );
     });
@@ -500,15 +500,19 @@ describe('mail-tools', () => {
       expect(runCommand).not.toHaveBeenCalled();
     });
 
-    it('redirectEmail takes no comment, since a redirect goes out unchanged', async () => {
-      const redirect = createMailTools().find((t) => t.tool.name === 'redirectEmail')!;
+    it.each(['forwardEmail', 'redirectEmail'])(
+      '%s takes no comment, since any change to a forward drops its quote and attachments',
+      async (name) => {
+        const tool = createMailTools().find((t) => t.tool.name === name)!;
 
-      expect(redirect.tool.inputSchema.properties).not.toHaveProperty('comment');
-      await expect(
-        redirect.handler({ id: MAIL_ID, to: 'bob@x', comment: 'Hi' })
-      ).resolves.toMatchObject({ isError: true });
-      expect(runCommand).not.toHaveBeenCalled();
-    });
+        expect(tool.tool.inputSchema.properties).not.toHaveProperty('comment');
+        expect(tool.tool.outputSchema?.properties).not.toHaveProperty('comment');
+        await expect(
+          tool.handler({ id: MAIL_ID, to: 'bob@x', comment: 'Hi' })
+        ).resolves.toMatchObject({ isError: true });
+        expect(runCommand).not.toHaveBeenCalled();
+      }
+    );
   });
 
   describe('createMailTools', () => {
@@ -1375,6 +1379,22 @@ describe('mail-tools', () => {
       expect(result.error?.message).toContain('listMailboxes');
     });
 
+    it('a turned-off account names it and tells how to turn it on', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        cliFailure(
+          'save_draft',
+          "MAIL_ACCOUNT_DISABLED: Account 'Google' is turned off in Mail.app, so Mail would file the draft in another account."
+        )
+      );
+
+      const result = await handleSaveDraft({ subject: 'S', account: 'Google' });
+
+      expect(result.error?.code).toBe('MAIL_ACCOUNT_DISABLED');
+      expect(result.error?.message).toContain('Invalid account (received: "Google")');
+      expect(result.error?.message).toContain('Mail > Settings > Accounts');
+      expect(runCommand).toHaveBeenCalledTimes(1);
+    });
+
     it('a mailbox in several accounts asks for the account', async () => {
       vi.mocked(runCommand).mockRejectedValue(
         cliFailure(
@@ -1535,7 +1555,6 @@ const FORWARD_PREVIEW = {
   to: ['bob@x'],
   cc: [],
   subject: 'Fwd: Hi',
-  comment: 'FYI',
   original: {
     id: MAIL_ID,
     subject: 'Hi',
@@ -1644,7 +1663,7 @@ function validInput(name: string): Record<string, unknown> {
     searchEmails: { query: 'hi', mailbox: 'INBOX' },
     sendEmail: { to: 'a@x', subject: 's', body: 'b', confirm_send: true },
     replyToEmail: { id: MAIL_ID, body: 'b', confirm_send: true },
-    forwardEmail: { id: MAIL_ID, to: 'a@x', comment: 'c', confirm_send: true },
+    forwardEmail: { id: MAIL_ID, to: 'a@x', confirm_send: true },
     redirectEmail: { id: MAIL_ID, to: 'a@x', confirm_send: true },
     listMailRules: {},
     checkMail: {},

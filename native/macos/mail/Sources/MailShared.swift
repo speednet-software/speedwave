@@ -4,6 +4,7 @@ import SharedCLI
 let mailboxNotFoundMarker = "SPW_MAILBOX_NOT_FOUND"
 let mailboxAmbiguousMarker = "SPW_MAILBOX_AMBIGUOUS:"
 let accountNotFoundMarker = "SPW_ACCOUNT_NOT_FOUND"
+let accountDisabledMarker = "SPW_ACCOUNT_DISABLED"
 let mailNotFoundMarker = "SPW_MAIL_NOT_FOUND"
 let signatureNotFoundMarker = "SPW_SIGNATURE_NOT_FOUND"
 
@@ -24,6 +25,7 @@ enum MailFailure: LocalizedError, Equatable {
     case automationDenied(String)
     case mailboxNotFound(mailbox: String, account: String?)
     case accountNotFound(String)
+    case accountDisabled(String)
     case mailboxAmbiguous(mailbox: String, accounts: [String])
     case invalidMailId(String)
     case mailboxChanged(mailbox: String)
@@ -45,6 +47,7 @@ enum MailFailure: LocalizedError, Equatable {
         case .automationDenied: return "MAIL_AUTOMATION_DENIED"
         case .mailboxNotFound: return "MAIL_MAILBOX_NOT_FOUND"
         case .accountNotFound: return "MAIL_ACCOUNT_NOT_FOUND"
+        case .accountDisabled: return "MAIL_ACCOUNT_DISABLED"
         case .mailboxAmbiguous: return "MAIL_MAILBOX_AMBIGUOUS"
         case .invalidMailId: return "MAIL_INVALID_ID"
         case .mailboxChanged: return "MAIL_MAILBOX_CHANGED"
@@ -77,6 +80,8 @@ enum MailFailure: LocalizedError, Equatable {
             return "Mailbox '\(mailbox)' not found in \(scope)."
         case .accountNotFound(let account):
             return "Account '\(account)' not found."
+        case .accountDisabled(let account):
+            return "Account '\(account)' is turned off in Mail.app, so Mail would file the draft in another account."
         case .mailboxAmbiguous(let mailbox, let accounts):
             return "Mailbox '\(mailbox)' exists in several accounts: \(accounts.joined(separator: ", "))."
         case .invalidMailId(let id):
@@ -193,6 +198,9 @@ struct MailScripts {
         }
         if detail.contains(accountNotFoundMarker) {
             return .accountNotFound(account ?? "")
+        }
+        if detail.contains(accountDisabledMarker) {
+            return .accountDisabled(account ?? "")
         }
         if detail.contains(mailboxAmbiguousMarker) {
             let accounts = detail.components(separatedBy: mailboxAmbiguousMarker).last?

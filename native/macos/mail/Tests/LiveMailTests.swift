@@ -1,4 +1,3 @@
-import AppKit
 import SharedCLI
 import XCTest
 @testable import mail_cli
@@ -13,7 +12,7 @@ final class LiveMailTests: XCTestCase {
         guard ProcessInfo.processInfo.environment[Self.optInVariable] == "1" else {
             throw XCTSkip("Live Mail.app tests run only with \(Self.optInVariable)=1")
         }
-        guard !NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.mail").isEmpty else {
+        guard try osascriptExecutor("application id \"com.apple.mail\" is running", 15) == "true" else {
             throw XCTSkip("Mail.app is not running")
         }
         let exists = try osascriptExecutor(
@@ -166,7 +165,7 @@ final class LiveMailTests: XCTestCase {
         }
     }
 
-    func testDeleteEmailsPreviewsFirstThenMovesTheMailToTheTrashWhereItCanBeRestored() throws {
+    func testDeleteEmailsPreviewsFirstThenMovesTheMailToTheOnMyMacTrashOrReportsThatThereIsNone() throws {
         let params: [String: Any] = ["mailbox": Self.testMailbox, "account": AppleMailClient.localAccountName]
         let before = try XCTUnwrap(try call("list_emails", params.merging(["limit": 1]) { $1 }) as? [String: Any])
         guard let newest = (before["emails"] as? [[String: Any]])?.first,
@@ -181,40 +180,76 @@ final class LiveMailTests: XCTestCase {
         let previewed = try XCTUnwrap((preview["emails"] as? [[String: Any]])?.first)
         XCTAssertEqual(previewed["ok"] as? Bool, true, "\(previewed)")
         XCTAssertEqual(previewed["subject"] as? String, newest["subject"] as? String)
+        XCTAssertNotNil(parseISO8601(try XCTUnwrap(previewed["date"] as? String)))
         let unchanged = try XCTUnwrap(try call("list_emails", params.merging(["limit": 1]) { $1 }) as? [String: Any])
         XCTAssertEqual(unchanged["total"] as? Int, total)
 
         let messageId = escapeAppleScript(try MailId(decoding: id).messageId)
+        let localTrash = try hasLocalChild("trash mailbox")
+        var restored = false
         defer {
-            _ = try? osascriptExecutor("""
-                tell application "Mail"
-                    repeat with spwBoxRef in ((mailboxes of trash mailbox) & {trash mailbox})
-                        set spwFound to (every message of (contents of spwBoxRef) whose message id is "\(messageId)")
-                        if (count of spwFound) > 0 then
-                            move item 1 of spwFound to mailbox "\(Self.testMailbox)"
-                            return "restored"
-                        end if
-                    end repeat
-                    return "missing"
-                end tell
-                """, 30)
+            if !restored { _ = try? restoreFromLocalChild("trash mailbox", messageId: messageId) }
         }
         let report = try XCTUnwrap(
             try call("delete_emails", ["ids": [id], "confirm_delete": true]) as? [String: Any])
+        let after = try XCTUnwrap(try call("list_emails", params.merging(["limit": 1]) { $1 }) as? [String: Any])
+
+        guard localTrash else {
+            XCTAssertEqual(report["status"] as? String, "failed", "\(report)")
+            let error = (report["emails"] as? [[String: Any]])?.first?["error"] as? String ?? ""
+            XCTAssertTrue(error.hasPrefix("MAIL_TRASH_NOT_FOUND: "), error)
+            XCTAssertEqual(after["total"] as? Int, total)
+            return
+        }
         XCTAssertEqual(report["status"] as? String, "completed", "\(report)")
         XCTAssertEqual(report["succeeded"] as? Int, 1)
-        let after = try XCTUnwrap(try call("list_emails", params.merging(["limit": 1]) { $1 }) as? [String: Any])
         XCTAssertEqual(after["total"] as? Int, total - 1)
-        let inTrash = try osascriptExecutor("""
+        restored = true
+        XCTAssertEqual(try restoreFromLocalChild("trash mailbox", messageId: messageId), "restored")
+        let home = try XCTUnwrap(try call("list_emails", params.merging(["limit": 1]) { $1 }) as? [String: Any])
+        XCTAssertEqual(home["total"] as? Int, total)
+    }
+
+    private func hasLocalChild(_ special: String) throws -> Bool {
+        try osascriptExecutor("""
             tell application "Mail"
-                set spwCount to 0
-                repeat with spwBoxRef in ((mailboxes of trash mailbox) & {trash mailbox})
-                    set spwCount to spwCount + (count of (every message of (contents of spwBoxRef) whose message id is "\(messageId)"))
+                repeat with spwBoxRef in mailboxes of \(special)
+                    try
+                        get name of account of (contents of spwBoxRef)
+                    on error
+                        return "true"
+                    end try
                 end repeat
-                return spwCount
+                return "false"
+            end tell
+            """, 30) == "true"
+    }
+
+    @discardableResult
+    private func restoreFromLocalChild(_ special: String, messageId: String) throws -> String {
+        try osascriptExecutor("""
+            tell application "Mail"
+                repeat with spwBoxRef in mailboxes of \(special)
+                    set spwBox to contents of spwBoxRef
+                    set spwLocal to false
+                    try
+                        get name of account of spwBox
+                    on error
+                        set spwLocal to true
+                    end try
+                    if spwLocal then
+                        set spwFound to (every message of spwBox whose message id is "\(messageId)")
+                        if (count of spwFound) > 0 then
+                            set spwMail to item 1 of spwFound
+                            if junk mail status of spwMail then set junk mail status of spwMail to false
+                            move spwMail to mailbox "\(Self.testMailbox)"
+                            return "restored"
+                        end if
+                    end if
+                end repeat
+                return "missing"
             end tell
             """, 30)
-        XCTAssertNotEqual(inTrash, "0", "the deleted mail is not in any Trash mailbox")
     }
 
     private func newestTestMail() throws -> (id: String, messageId: String, read: Bool) {
@@ -280,46 +315,45 @@ final class LiveMailTests: XCTestCase {
     func testCreateMailboxThenCopyAMailThereAndMoveTheCopyOn() throws {
         let mail = try newestTestMail()
         let local = AppleMailClient.localAccountName
-        let suffix = UUID().uuidString.prefix(8)
-        let copies = "Speedwave-Test-836-copies-\(suffix)"
-        let moved = "Speedwave-Test-836-moved-\(suffix)"
-        defer {
-            for name in [copies, moved] {
-                _ = try? osascriptExecutor(
-                    "tell application \"Mail\" to if exists mailbox \"\(name)\" then delete mailbox \"\(name)\"", 30)
-            }
-        }
+        let copies = "\(Self.testMailbox)-copies"
+        let moved = "\(Self.testMailbox)-moved"
         let testParams: [String: Any] = ["mailbox": Self.testMailbox, "account": local]
         let testTotal = try XCTUnwrap((try call("list_emails", testParams) as? [String: Any])?["total"] as? Int)
 
         for name in [copies, moved] {
-            let made = try XCTUnwrap(try call("create_mailbox", ["name": name, "account": local]) as? [String: Any])
-            XCTAssertEqual(made["status"] as? String, "created")
-        }
-        XCTAssertThrowsError(try call("create_mailbox", ["name": copies, "account": local])) { error in
-            XCTAssertEqual(error as? MailFailure, .mailboxExists(mailbox: copies, account: local))
+            let exists = try osascriptExecutor("tell application \"Mail\" to exists mailbox \"\(name)\"", 15)
+            if exists == "false" {
+                let made = try XCTUnwrap(try call("create_mailbox", ["name": name, "account": local]) as? [String: Any])
+                XCTAssertEqual(made["status"] as? String, "created")
+            }
+            XCTAssertThrowsError(try call("create_mailbox", ["name": name, "account": local])) { error in
+                XCTAssertEqual(error as? MailFailure, .mailboxExists(mailbox: name, account: local))
+            }
         }
         XCTAssertThrowsError(
             try call("move_emails", ["ids": [mail.id], "mailbox": "\(copies)-missing", "account": local])
         ) { error in
             XCTAssertEqual(error as? MailFailure, .mailboxNotFound(mailbox: "\(copies)-missing", account: local))
         }
-
+        let copiesParams: [String: Any] = ["mailbox": copies, "account": local]
+        let movedParams: [String: Any] = ["mailbox": moved, "account": local]
+        let copiesBefore = try XCTUnwrap((try call("list_emails", copiesParams) as? [String: Any])?["total"] as? Int)
+        let movedBefore = try XCTUnwrap((try call("list_emails", movedParams) as? [String: Any])?["total"] as? Int)
         let copied = try XCTUnwrap(
             try call("copy_emails", ["ids": [mail.id], "mailbox": copies, "account": local]) as? [String: Any])
         XCTAssertEqual(copied["status"] as? String, "completed", "\(copied)")
         XCTAssertEqual((try call("list_emails", testParams) as? [String: Any])?["total"] as? Int, testTotal)
-        let copiesParams: [String: Any] = ["mailbox": copies, "account": local]
         let inCopies = try XCTUnwrap(try call("list_emails", copiesParams) as? [String: Any])
-        XCTAssertEqual(inCopies["total"] as? Int, 1)
-        let copyId = try XCTUnwrap((inCopies["emails"] as? [[String: Any]])?.first?["id"] as? String)
+        XCTAssertEqual(inCopies["total"] as? Int, copiesBefore + 1)
+        let copyId = try XCTUnwrap(
+            (inCopies["emails"] as? [[String: Any]])?.compactMap { $0["id"] as? String }
+                .first { (try? MailId(decoding: $0).messageId) == (try? MailId(decoding: mail.id).messageId) })
 
         let movedReport = try XCTUnwrap(
             try call("move_emails", ["ids": [copyId], "mailbox": moved, "account": local]) as? [String: Any])
         XCTAssertEqual(movedReport["status"] as? String, "completed", "\(movedReport)")
-        XCTAssertEqual((try call("list_emails", copiesParams) as? [String: Any])?["total"] as? Int, 0)
-        let movedParams: [String: Any] = ["mailbox": moved, "account": local]
-        XCTAssertEqual((try call("list_emails", movedParams) as? [String: Any])?["total"] as? Int, 1)
+        XCTAssertEqual((try call("list_emails", copiesParams) as? [String: Any])?["total"] as? Int, copiesBefore)
+        XCTAssertEqual((try call("list_emails", movedParams) as? [String: Any])?["total"] as? Int, movedBefore + 1)
     }
 
     func testArchiveEmailsOnMyMacWithoutAnArchiveMailboxLeavesTheMailWhereItIs() throws {
@@ -337,34 +371,36 @@ final class LiveMailTests: XCTestCase {
         XCTAssertFalse(try testMailProperty("subject", messageId: mail.messageId).isEmpty)
     }
 
-    func testMarkEmailsSpamPreviewsFirstThenMovesTheMailToTheJunkWhereItCanBeRestored() throws {
+    func testMarkEmailsSpamPreviewsFirstThenMovesTheMailToTheOnMyMacJunkOrReportsThatThereIsNone() throws {
         let mail = try newestTestMail()
         let params: [String: Any] = ["mailbox": Self.testMailbox, "account": AppleMailClient.localAccountName]
         let total = try XCTUnwrap((try call("list_emails", params) as? [String: Any])?["total"] as? Int)
 
         let preview = try XCTUnwrap(try call("mark_emails_spam", ["ids": [mail.id]]) as? [String: Any])
         XCTAssertEqual(preview["status"] as? String, "confirmation_required")
+        XCTAssertEqual((preview["emails"] as? [[String: Any]])?.first?["ok"] as? Bool, true, "\(preview)")
         XCTAssertEqual((try call("list_emails", params) as? [String: Any])?["total"] as? Int, total)
 
+        let localJunk = try hasLocalChild("junk mailbox")
+        var restored = false
         defer {
-            _ = try? osascriptExecutor("""
-                tell application "Mail"
-                    repeat with spwBoxRef in ((mailboxes of junk mailbox) & {junk mailbox})
-                        set spwFound to (every message of (contents of spwBoxRef) whose message id is "\(mail.messageId)")
-                        if (count of spwFound) > 0 then
-                            set junk mail status of item 1 of spwFound to false
-                            move item 1 of spwFound to mailbox "\(Self.testMailbox)"
-                            return "restored"
-                        end if
-                    end repeat
-                    return "missing"
-                end tell
-                """, 30)
+            if !restored { _ = try? restoreFromLocalChild("junk mailbox", messageId: mail.messageId) }
         }
         let report = try XCTUnwrap(
             try call("mark_emails_spam", ["ids": [mail.id], "confirm_spam": true]) as? [String: Any])
+
+        guard localJunk else {
+            XCTAssertEqual(report["status"] as? String, "failed", "\(report)")
+            let error = (report["emails"] as? [[String: Any]])?.first?["error"] as? String ?? ""
+            XCTAssertTrue(error.hasPrefix("MAIL_JUNK_NOT_FOUND: "), error)
+            XCTAssertEqual((try call("list_emails", params) as? [String: Any])?["total"] as? Int, total)
+            XCTAssertEqual(try testMailProperty("junk mail status", messageId: mail.messageId), "false")
+            return
+        }
         XCTAssertEqual(report["status"] as? String, "completed", "\(report)")
         XCTAssertEqual((try call("list_emails", params) as? [String: Any])?["total"] as? Int, total - 1)
+        restored = true
+        XCTAssertEqual(try restoreFromLocalChild("junk mailbox", messageId: mail.messageId), "restored")
     }
 
     func testSendEmailPreviewsThenSendsOnlyToTheTestAddress() throws {
@@ -415,7 +451,7 @@ final class LiveMailTests: XCTestCase {
     }
 
     func testForwardOfTheNewestTestMailPreviewsThenSendsItWithItsAttachmentsOnlyToTheTestAddress() throws {
-        try passOnTheNewestTestMail("forward_email", extra: ["comment": "Speedwave live forward\nsecond line"])
+        try passOnTheNewestTestMail("forward_email", extra: [:])
     }
 
     func testRedirectOfTheNewestTestMailPreviewsThenSendsItUnchangedOnlyToTheTestAddress() throws {
@@ -468,8 +504,28 @@ final class LiveMailTests: XCTestCase {
         }
     }
 
+    func testADraftInATurnedOffAccountIsRefusedAndNothingIsSaved() throws {
+        let account = try osascriptExecutor(
+            "tell application \"Mail\" to if exists (first account whose enabled is false) then "
+                + "return name of first account whose enabled is false", 15)
+        guard !account.isEmpty else {
+            throw XCTSkip("Mail.app has no turned-off account")
+        }
+        let subject = "Speedwave live draft \(UUID().uuidString)"
+
+        XCTAssertThrowsError(try call("save_draft", ["subject": subject, "body": "B", "account": account])) { error in
+            XCTAssertEqual(error as? MailFailure, .accountDisabled(account))
+        }
+        Thread.sleep(forTimeInterval: 2)
+        XCTAssertEqual(
+            try osascriptExecutor(
+                "tell application \"Mail\" to count (every message of drafts mailbox whose subject is \"\(subject)\")", 30),
+            "0")
+    }
+
     func testSaveDraftInAnAccountLandsUnsentInThatAccountsDraftsOnce() throws {
-        let account = try osascriptExecutor("tell application \"Mail\" to name of item 1 of accounts", 15)
+        let account = try osascriptExecutor(
+            "tell application \"Mail\" to name of last account whose enabled is true", 15)
         let subject = "Speedwave live draft \(UUID().uuidString)"
         let signatures = try XCTUnwrap(try call("list_signatures") as? [String: Any])["signatures"] as? [String]
         var draft: [String: Any] = [
@@ -497,6 +553,17 @@ final class LiveMailTests: XCTestCase {
                 """, 30)
         }
         XCTAssertEqual(found, "1|\(account)")
+        let readBack = try osascriptExecutor(
+            """
+            tell application "Mail"
+                set spwDraft to item 1 of (every message of drafts mailbox whose subject is "\(subject)")
+                set spwAddresses to email addresses of account "\(escapeAppleScript(account))"
+                set spwAddress to item 1 of spwAddresses
+                return (content of spwDraft) & "|" & ((sender of spwDraft) contains spwAddress)
+            end tell
+            """, 30)
+        XCTAssertTrue(readBack.hasPrefix("Line one\nline two"), readBack)
+        XCTAssertTrue(readBack.hasSuffix("|true"), readBack)
         let sent = try osascriptExecutor(
             """
             tell application "Mail" to count (every message of sent mailbox whose subject is "\(subject)")

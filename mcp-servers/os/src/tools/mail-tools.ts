@@ -97,6 +97,13 @@ const MAIL_FAILURE_TEACHING: Record<
     correctValueTool: 'listMailboxes',
     nextStep: `${detail} Pass the account field of a mailbox listMailboxes returns.`,
   }),
+  MAIL_ACCOUNT_DISABLED: (detail, args) => ({
+    paramName: 'account',
+    received: args.account,
+    nextStep:
+      `${detail} Ask the user to turn the account on in Mail > Settings > Accounts, ` +
+      "or save the draft without account (it then goes to Mail's default account).",
+  }),
   MAIL_MAILBOX_AMBIGUOUS: (detail, args) => ({
     paramName: 'account',
     received: args.account,
@@ -257,8 +264,6 @@ interface ForwardEmailParams {
   to: string;
   /** CC recipient(s), comma-separated. */
   cc?: string;
-  /** Plain text above the forwarded email. */
-  comment?: string;
   /** Must be true, after the user agreed to the preview, to send. */
   confirm_send?: boolean;
 }
@@ -797,8 +802,8 @@ const replyToEmailTool: Tool = {
 const forwardEmailTool: Tool = {
   name: 'forwardEmail',
   description:
-    'Forward an email in any mailbox, by the mail id listEmails or searchEmails returned, with its attachments, through Mail\'s own forward (Mail picks the "Fwd:" subject and quotes the email); an optional plain-text comment goes above it. ' +
-    'Without confirm_send=true nothing is sent: the call returns a preview of the recipients, subject, comment, the forwarded email and its attachment names, and you must show it and ask the user before calling again with the same arguments and confirm_send=true. ' +
+    'Forward an email in any mailbox, by the mail id listEmails or searchEmails returned, with its attachments, through Mail\'s own forward (Mail picks the "Fwd:" subject and quotes the email). No text can be added: any change to a forward leaves only the added text, without the quote and the attachments, so for a note send a separate email. ' +
+    'Without confirm_send=true nothing is sent: the call returns a preview of the recipients, subject, the forwarded email and its attachment names, and you must show it and ask the user before calling again with the same arguments and confirm_send=true. ' +
     'Sending cannot be undone.',
   annotations: DESTRUCTIVE_ANNOTATIONS,
   _meta: {
@@ -808,34 +813,29 @@ const forwardEmailTool: Tool = {
   },
   keywords: ['os', 'mail', 'email', 'forward', 'fwd', 'share', 'pass on'],
   example:
-    'const preview = await os.forwardEmail({ id: emails[0].id, to: "bob@example.com", comment: "FYI" }); /* ask the user */ await os.forwardEmail({ id: emails[0].id, to: "bob@example.com", comment: "FYI", confirm_send: true })',
+    'const preview = await os.forwardEmail({ id: emails[0].id, to: "bob@example.com" }); /* ask the user */ await os.forwardEmail({ id: emails[0].id, to: "bob@example.com", confirm_send: true })',
   inputSchema: {
     type: 'object',
     properties: {
       id: { type: 'string', description: 'Mail id from listEmails or searchEmails' },
       to: { type: 'string', description: 'Recipient email address(es), comma-separated' },
       cc: { type: 'string', description: 'CC recipient(s), comma-separated' },
-      comment: {
-        type: 'string',
-        description: 'Text above the forwarded email. Plain text only: line breaks are kept.',
-      },
       confirm_send: confirmProperty('forward this email'),
     },
     required: ['id', 'to'],
   },
-  outputSchema: passOnOutputSchema(true),
+  outputSchema: passOnOutputSchema(),
   inputExamples: [
     {
       description: 'Minimal: preview a forward before asking the user',
       input: { id: 'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0', to: 'bob@example.com' },
     },
     {
-      description: 'Full: forward with a comment and CC after the user agreed',
+      description: 'Full: forward with CC after the user agreed',
       input: {
         id: 'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0',
         to: 'bob@example.com',
         cc: 'carol@example.com',
-        comment: 'Please handle this invoice.',
         confirm_send: true,
       },
     },
@@ -845,7 +845,7 @@ const forwardEmailTool: Tool = {
 const redirectEmailTool: Tool = {
   name: 'redirectEmail',
   description:
-    'Redirect an email in any mailbox, by the mail id listEmails or searchEmails returned: Mail sends it unchanged, with its attachments, and the recipients see it as coming from its original sender; no comment can be added (use forwardEmail for that). ' +
+    'Redirect an email in any mailbox, by the mail id listEmails or searchEmails returned: Mail sends it unchanged, with its attachments, and the recipients see it as coming from its original sender; no text can be added. ' +
     'Without confirm_send=true nothing is sent: the call returns a preview of the recipients, the redirected email and its attachment names, and you must show it and ask the user before calling again with the same arguments and confirm_send=true. ' +
     'Sending cannot be undone.',
   annotations: DESTRUCTIVE_ANNOTATIONS,
@@ -867,7 +867,7 @@ const redirectEmailTool: Tool = {
     },
     required: ['id', 'to'],
   },
-  outputSchema: passOnOutputSchema(false),
+  outputSchema: passOnOutputSchema(),
   inputExamples: [
     {
       description: 'Minimal: preview a redirect before asking the user',
@@ -1577,7 +1577,6 @@ export async function handleForwardEmail(params: ForwardEmailParams): Promise<To
       ['id', MAX_LENGTHS.id, false],
       ['to', MAX_LENGTHS.short, false],
       ['cc', MAX_LENGTHS.short, false],
-      ['comment', MAX_LENGTHS.body, true],
     ],
   });
   if (!v.valid) return v.error;
@@ -1889,9 +1888,8 @@ function sendOutputSchema(withBcc: boolean): Tool['outputSchema'] {
 
 /**
  * The output schema of a gated forward or redirect: its preview, or what was sent.
- * @param withComment - Whether the tool takes a comment.
  */
-function passOnOutputSchema(withComment: boolean): Tool['outputSchema'] {
+function passOnOutputSchema(): Tool['outputSchema'] {
   const addresses = (what: string) => ({
     type: 'array',
     items: { type: 'string' },
@@ -1913,9 +1911,6 @@ function passOnOutputSchema(withComment: boolean): Tool['outputSchema'] {
       to: addresses('To'),
       cc: addresses('CC'),
       subject: { type: 'string', description: 'Subject of the message that is sent' },
-      ...(withComment
-        ? { comment: { type: 'string', description: 'Text above the forwarded email' } }
-        : {}),
       original: {
         type: 'object',
         description: 'The email that is passed on',

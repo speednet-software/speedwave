@@ -36,7 +36,7 @@ enum MailRules {
                     set spwCond to contents of spwCondRef
                     set spwHeader to ""
                     try
-                        set spwHeader to header of spwCond
+                        set spwHeader to «property rhed» of spwCond
                     end try
                     if spwHeader is missing value then set spwHeader to ""
                     set output to output & "condition" & US & (rule type of spwCond as string) & US & spwHeader & US & (qualifier of spwCond as string) & US & (expression of spwCond) & RS

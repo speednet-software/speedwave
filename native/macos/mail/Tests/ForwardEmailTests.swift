@@ -23,7 +23,7 @@ final class ForwardEmailTests: XCTestCase {
 
         let result = try harness.call(
             "forward_email",
-            ["id": archived.encoded, "to": "bob@x, carol@x", "cc": "dave@x", "comment": "See below.\nThanks"])
+            ["id": archived.encoded, "to": "bob@x, carol@x", "cc": "dave@x"])
 
         XCTAssertEqual(harness.executor.calls.count, 1)
         let script = harness.executor.calls[0].script
@@ -40,7 +40,7 @@ final class ForwardEmailTests: XCTestCase {
         XCTAssertEqual(result["to"] as? [String], ["bob@x", "carol@x"])
         XCTAssertEqual(result["cc"] as? [String], ["dave@x"])
         XCTAssertEqual(result["subject"] as? String, "Fwd: Invoice 12")
-        XCTAssertEqual(result["comment"] as? String, "See below.\nThanks")
+        XCTAssertNil(result["comment"])
         XCTAssertEqual(result["attachments"] as? [String], ["invoice.pdf", "terms.pdf"])
         let original = try XCTUnwrap(result["original"] as? [String: Any])
         XCTAssertEqual(original["id"] as? String, archived.encoded)
@@ -51,25 +51,23 @@ final class ForwardEmailTests: XCTestCase {
         XCTAssertEqual(original["account"] as? String, "Work")
     }
 
-    func testForwardWithoutCommentOrCcPreviewsEmptyOnes() throws {
+    func testForwardWithoutCcPreviewsEmptyOnes() throws {
         harness.executor.reply(originalRead(received: "", attachments: []))
 
         let result = try harness.call("forward_email", ["id": archived.encoded, "to": "bob@x"])
 
         XCTAssertEqual(result["cc"] as? [String], [])
-        XCTAssertEqual(result["comment"] as? String, "")
         XCTAssertEqual(result["attachments"] as? [String], [])
         XCTAssertNil((result["original"] as? [String: Any])?["date"])
     }
 
-    func testConfirmedForwardSendsMailsOwnForwardToEveryRecipientWithTheCommentOnTop() throws {
+    func testConfirmedForwardSendsMailsOwnForwardUnchangedToEveryRecipient() throws {
         harness.executor.reply(originalRead())
 
         let result = try harness.call(
             "forward_email",
             [
-                "id": archived.encoded, "to": "bob@x", "cc": "dave@x", "comment": "Say \"yes\"\n\tok",
-                "confirm_send": true,
+                "id": archived.encoded, "to": "bob@x", "cc": "dave@x", "confirm_send": true,
             ])
 
         XCTAssertEqual(harness.executor.calls.count, 2)
@@ -80,26 +78,25 @@ final class ForwardEmailTests: XCTestCase {
             send.contains("make new to recipient at end of to recipients with properties {address:\"bob@x\"}"), send)
         XCTAssertTrue(
             send.contains("make new cc recipient at end of cc recipients with properties {address:\"dave@x\"}"), send)
-        XCTAssertTrue(
-            send.contains(
-                "make new paragraph at beginning of content of spwOut with data \"Say \\\"yes\\\"\\n\\tok\\n\\n\""),
-            send)
-        XCTAssertFalse(send.contains("set content of spwOut"), send)
+        XCTAssertFalse(send.contains("of spwOut"), send)
         XCTAssertTrue(send.contains("if not (send spwOut) then error \"\(sendFailedMarker)\""), send)
         XCTAssertEqual(result["status"] as? String, "sent")
         XCTAssertNil(result["confirm_param"])
         XCTAssertNil(result["instruction"])
         XCTAssertEqual(result["subject"] as? String, "Fwd: Invoice 12")
         XCTAssertEqual(result["attachments"] as? [String], ["invoice.pdf", "terms.pdf"])
+        XCTAssertNil(result["comment"])
     }
 
-    func testAConfirmedForwardWithoutACommentLeavesMailsTextAlone() throws {
+    func testAForwardIgnoresACommentAndNeverTouchesMailsText() throws {
         harness.executor.reply(originalRead())
 
-        _ = try harness.call(
-            "forward_email", ["id": archived.encoded, "to": "bob@x", "comment": " \n ", "confirm_send": true])
+        let result = try harness.call(
+            "forward_email", ["id": archived.encoded, "to": "bob@x", "comment": "FYI", "confirm_send": true])
 
-        XCTAssertFalse(harness.executor.calls[1].script.contains("content of spwOut"))
+        XCTAssertFalse(harness.executor.calls.contains { $0.script.contains("FYI") })
+        XCTAssertFalse(harness.executor.calls[1].script.contains("of spwOut"))
+        XCTAssertNil(result["comment"])
     }
 
     func testForwardConfirmationMustBeTheBooleanTrue() throws {

@@ -32,7 +32,7 @@ final class MailCommandBoundaryTests: XCTestCase {
             ("search_emails", ["query": "x", "mailbox": "INBOX"]),
             ("send_email", ["to": "a@x", "subject": "S", "body": "B", "confirm_send": true]),
             ("reply_to_email", ["id": mailId, "body": "B", "confirm_send": true]),
-            ("forward_email", ["id": mailId, "to": "a@x", "comment": "C", "confirm_send": true]),
+            ("forward_email", ["id": mailId, "to": "a@x", "confirm_send": true]),
             ("redirect_email", ["id": mailId, "to": "a@x", "confirm_send": true]),
         ]
         let replies = [
