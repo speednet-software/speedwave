@@ -40,7 +40,7 @@ const SPEAKER_COST_TEXT = {
 /**
  * Settings → Meeting transcription (ADR-056), written for someone who does not know what a model
  * is: one status line (ready, or the one download that makes it ready), the live-text choice, the
- * optional speaker attribution after Stop (ADR-097), permissions, and the disk the recordings
+ * optional speaker attribution after Stop (ADR-098), permissions, and the disk the recordings
  * take. Model names, acceleration and removing models sit in a collapsed Technical details.
  */
 @Component({

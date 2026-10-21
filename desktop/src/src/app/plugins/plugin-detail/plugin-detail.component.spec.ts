@@ -7,6 +7,8 @@ import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
 import { MockTauriService } from '../../testing/mock-tauri.service';
 import { createDeferred } from '../../testing/deferred';
+import { createFakeMermaid, fakeMermaidLoader } from '../../testing/fake-mermaid';
+import { MERMAID_LOADER } from '../../shared/mermaid-renderer.service';
 import { JsonSchema } from '../../models/plugin';
 
 const MOCK_SCHEMA: JsonSchema = {
@@ -133,6 +135,8 @@ function createRouteStub(slug: string) {
 
 const mockRouter = { navigate: vi.fn() };
 
+const MERMAID_FENCE = '```mermaid\ngraph TD\n  A --> B\n```';
+
 async function initAndDetect(
   component: PluginDetailComponent,
   fixture: ComponentFixture<PluginDetailComponent>
@@ -156,6 +160,7 @@ describe('PluginDetailComponent', () => {
         { provide: TauriService, useValue: mockTauri },
         { provide: ActivatedRoute, useValue: createRouteStub(slug) },
         { provide: Router, useValue: mockRouter },
+        { provide: MERMAID_LOADER, useValue: fakeMermaidLoader(createFakeMermaid()) },
       ],
     });
 
@@ -184,6 +189,20 @@ describe('PluginDetailComponent', () => {
       return defaultInvokeHandler(cmd);
     };
     return ctx;
+  }
+
+  async function diagramIn(
+    fixture: ComponentFixture<PluginDetailComponent>,
+    testId: string
+  ): Promise<SVGSVGElement> {
+    let svg: SVGSVGElement | null = null;
+    await vi.waitFor(async () => {
+      await fixture.whenStable();
+      const slot = fixture.nativeElement.querySelector(`[data-testid="${testId}"] .mermaid-slot`);
+      svg = slot?.shadowRoot?.querySelector('svg') ?? null;
+      expect(svg).not.toBeNull();
+    });
+    return svg as unknown as SVGSVGElement;
   }
 
   it('should create', () => {
@@ -424,6 +443,16 @@ describe('PluginDetailComponent', () => {
       (window as unknown as { __pwned?: boolean }).__pwned,
       'sanitiser must prevent inline-script execution'
     ).not.toBe(true);
+  });
+
+  it('draws a mermaid fence in the instructions as a diagram', async () => {
+    const { component, fixture } = setupWithPlugin({
+      instructions: `## Flow\n\n${MERMAID_FENCE}`,
+    });
+    await initAndDetect(component, fixture);
+
+    const svg = await diagramIn(fixture, 'plugin-instructions');
+    expect(svg.querySelector('text')?.textContent).toContain('A --> B');
   });
 
   it('omits the instructions block when the manifest has none', async () => {
@@ -675,6 +704,18 @@ describe('PluginDetailComponent', () => {
         (window as unknown as { __pwned_cl?: boolean }).__pwned_cl,
         'sanitiser must prevent inline-script execution'
       ).not.toBe(true);
+    });
+
+    it('draws a mermaid fence in the changelog as a diagram', async () => {
+      const { component, fixture } = setupWithPlugin({
+        changelog: `## 1.2.0\n\n${MERMAID_FENCE}`,
+      });
+      await initAndDetect(component, fixture);
+      component.selectTab('changelog');
+      fixture.detectChanges();
+
+      const svg = await diagramIn(fixture, 'plugin-changelog');
+      expect(svg.querySelector('text')?.textContent).toContain('A --> B');
     });
 
     it('shows the fallback message when the changelog tab is active without content', async () => {

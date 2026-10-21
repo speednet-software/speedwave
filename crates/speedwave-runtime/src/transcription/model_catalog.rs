@@ -1,5 +1,5 @@
 //! SSOT catalogue of the models downloaded on demand: Whisper (ADR-056), Silero VAD and the
-//! diarization model (ADR-097). Bump 1 const; Whisper comes from `ggerganov/whisper.cpp` on HF.
+//! diarization model (ADR-098). Bump 1 const; Whisper comes from `ggerganov/whisper.cpp` on HF.
 
 use crate::transcription::accel::GpuClass;
 
@@ -275,7 +275,7 @@ pub const VAD_MODEL: VadModelInfo = VadModelInfo {
     license: "MIT",
 };
 
-/// The speaker-diarization model of the optional offline-pass speaker attribution (ADR-097).
+/// The speaker-diarization model of the optional offline-pass speaker attribution (ADR-098).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiarizationModelInfo {
     /// Stable key used in Tauri commands, download progress and `ModelsUsed`.

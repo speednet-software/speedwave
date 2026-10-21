@@ -1,4 +1,4 @@
-//! Speaker diarization of the meeting channel (ADR-097): the `Diarizer` trait, the
+//! Speaker diarization of the meeting channel (ADR-098): the `Diarizer` trait, the
 //! Nemotron-3 engine over the vendored whisper.cpp code, and attribution to segments.
 
 use std::cmp::Reverse;

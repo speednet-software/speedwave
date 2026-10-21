@@ -22,6 +22,13 @@
             "polyfills": [],
             "styles": ["src/styles.css"],
             "scripts": [],
+            "externalDependencies": ["elkjs"],
+            "allowedCommonJsDependencies": [
+              "@braintree/sanitize-url",
+              "cytoscape-cose-bilkent",
+              "cytoscape-fcose",
+              "dayjs"
+            ],
             "assets": [
               {
                 "glob": "**/*",

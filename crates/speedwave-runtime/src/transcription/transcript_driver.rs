@@ -852,7 +852,7 @@ pub struct FinalizeConfig {
     pub transcribe_opts: TranscribeOptions,
     /// This pass's claim on the session ([`TranscriptStore::begin_offline_pass`]).
     pub pass: OfflinePass,
-    /// Loads the speaker diarizer of the meeting channel (ADR-097) once Whisper is done and
+    /// Loads the speaker diarizer of the meeting channel (ADR-098) once Whisper is done and
     /// released; `None` leaves the transcript without speaker labels.
     pub diarizer: Option<DiarizerLoader>,
 }

@@ -1,6 +1,6 @@
 //! Host-side meeting transcription — SSOT layer (ADR-056). Capture + Whisper + model store;
 //! gated behind `audio-transcription` (CLI never enables it). Optional speaker diarization of
-//! the meeting channel in the offline pass (ADR-097).
+//! the meeting channel in the offline pass (ADR-098).
 
 pub mod accel;
 pub mod audio;

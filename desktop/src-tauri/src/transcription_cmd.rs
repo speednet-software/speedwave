@@ -391,7 +391,7 @@ pub async fn pause_transcription(
 }
 
 /// Stops a capture and starts its offline pass; `speaker_mode` is the Settings switch "Tell
-/// speakers apart in the meeting audio" as it stands now (ADR-097, read at the pass's start).
+/// speakers apart in the meeting audio" as it stands now (ADR-098, read at the pass's start).
 #[tauri::command]
 pub async fn stop_transcription(
     session_id: String,
