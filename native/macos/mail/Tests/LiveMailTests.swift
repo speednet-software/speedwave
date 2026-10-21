@@ -515,6 +515,18 @@ final class LiveMailTests: XCTestCase {
         XCTAssertEqual(try restoreFromLocalChild("junk mailbox", messageId: mail.messageId), "restored")
     }
 
+    func testMarkEmailsNotSpamClearsTheJunkStatusAndLeavesAnOnMyMacMailWhereItIs() throws {
+        let mail = try newestTestMail()
+        let total = try self.total()
+
+        let report = try XCTUnwrap(try call("mark_emails_not_spam", ["ids": [mail.id]]) as? [String: Any])
+
+        XCTAssertEqual(report["status"] as? String, "completed", "\(report)")
+        XCTAssertEqual((report["emails"] as? [[String: Any]])?.first?["moved"] as? Bool, false, "\(report)")
+        XCTAssertEqual(try self.total(), total)
+        XCTAssertEqual(try testMailProperty("junk mail status", messageId: mail.messageId), "false")
+    }
+
     func testSendEmailPreviewsThenSendsOnlyToTheTestAddress() throws {
         guard let address = ProcessInfo.processInfo.environment[Self.sendToVariable], !address.isEmpty else {
             throw XCTSkip("Sending runs only with \(Self.sendToVariable) set to a test address")

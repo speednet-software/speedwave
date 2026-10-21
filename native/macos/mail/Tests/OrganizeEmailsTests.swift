@@ -369,6 +369,74 @@ final class OrganizeEmailsTests: XCTestCase {
         XCTAssertEqual(emails[0]["error"] as? String, MailFailure.junkNotFound(account: "Work").localizedDescription)
     }
 
+    func testNotSpamClearsTheJunkStatusWithoutConfirmationAndReportsWhetherEachMailWasMoved() throws {
+        harness.executor.reply(rows(
+            row("ok", "Invoice", "anna@x", "2026-10-20T09:15:00", "", "true"),
+            row("ok", "Lunch", "bob@x", "", "", "false")
+        ))
+
+        let result = try harness.call("mark_emails_not_spam", ["ids": [first.encoded, second.encoded]])
+
+        XCTAssertEqual(harness.executor.calls.count, 1)
+        let script = harness.executor.calls[0].script
+        XCTAssertTrue(script.contains("set junk mail status of m to false"), script)
+        XCTAssertNil(result["confirm_param"])
+        XCTAssertEqual(result["status"] as? String, "completed")
+        let emails = try XCTUnwrap(result["emails"] as? [[String: Any]])
+        XCTAssertEqual(emails.map { $0["moved"] as? Bool }, [true, false])
+        XCTAssertEqual(emails[0]["subject"] as? String, "Invoice")
+    }
+
+    func testNotSpamMovesOnlyAMailInTheJunkOfItsAccountToTheInboxOfThatAccount() throws {
+        harness.executor.reply(row("ok", "s", "a", "", "", "true"))
+
+        _ = try harness.call("mark_emails_not_spam", ["ids": [first.encoded]])
+
+        let script = harness.executor.calls[0].script
+        XCTAssertTrue(script.contains("repeat with spwBoxRef in mailboxes of junk mailbox"), script)
+        XCTAssertTrue(script.contains("repeat with spwBoxRef in mailboxes of inbox"), script)
+        XCTAssertTrue(script.contains("move m to spwInbox"), script)
+        XCTAssertTrue(script.contains("if mb is spwJunk then"), script)
+        let clear = try XCTUnwrap(script.range(of: "set junk mail status of m to false"))
+        let move = try XCTUnwrap(script.range(of: "move m to spwInbox"))
+        XCTAssertLessThan(clear.lowerBound, move.lowerBound)
+        XCTAssertFalse(script.contains("mailbox \"INBOX\" of account spwAcctName"), script)
+        XCTAssertNil(script.range(of: #"\bdelete\b"#, options: .regularExpression), script)
+    }
+
+    func testAMailNotSpamCouldNotBeFoundForIsReportedWithoutAMovedFlag() throws {
+        harness.executor.reply(rows(
+            row("ok", "s", "a", "", "", "false"),
+            row("error", "", "", "", "\(mailNotFoundMarker) (-2700)", "false")
+        ))
+
+        let result = try harness.call("mark_emails_not_spam", ["ids": [first.encoded, second.encoded]])
+
+        XCTAssertEqual(result["status"] as? String, "partial")
+        let emails = try XCTUnwrap(result["emails"] as? [[String: Any]])
+        XCTAssertEqual(emails[0]["moved"] as? Bool, false)
+        XCTAssertNil(emails[1]["moved"])
+        let error = try XCTUnwrap(emails[1]["error"] as? String)
+        XCTAssertTrue(error.hasPrefix("MAIL_NOT_FOUND: "), error)
+    }
+
+    func testANotSpamRowWithoutTheMovedFieldIsAnUnexpectedResult() {
+        harness.executor.reply(row("ok", "s", "a", "", ""))
+
+        let error = harness.callFailing("mark_emails_not_spam", ["ids": [first.encoded]])
+
+        XCTAssertTrue(error.localizedDescription.contains("Unexpected batch result"), error.localizedDescription)
+    }
+
+    func testNotSpamTakesAtMostTwentyFiveMails() {
+        let ids = (1...26).map { MailId(account: "iCloud", mailbox: "Junk", messageId: "<\($0)@x>").encoded }
+
+        let error = harness.callFailing("mark_emails_not_spam", ["ids": ids])
+
+        XCTAssertEqual(error as? MailFailure, .batchTooLarge(count: 26, limit: 25))
+        XCTAssertTrue(harness.executor.calls.isEmpty)
+    }
+
     func testSpamTakesAtMostTwentyFiveMails() {
         let ids = (1...26).map { MailId(account: "iCloud", mailbox: "INBOX", messageId: "<\($0)@x>").encoded }
 

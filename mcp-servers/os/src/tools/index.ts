@@ -70,6 +70,7 @@ export const ALLOWED_COMMANDS: Record<OsDomain, ReadonlySet<string>> = {
     'archive_emails',
     'create_mailbox',
     'mark_emails_spam',
+    'mark_emails_not_spam',
     'save_draft',
     'list_signatures',
   ]),

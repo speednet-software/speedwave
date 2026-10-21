@@ -368,6 +368,46 @@ export const markEmailsSpamTool: Tool = {
   ],
 };
 
+/** Input parameters for the markEmailsNotSpam tool. */
+interface MarkEmailsNotSpamParams {
+  /** 1 to 25 mail ids from listEmails or searchEmails. */
+  ids: string[];
+}
+
+export const markEmailsNotSpamTool: Tool = {
+  name: 'markEmailsNotSpam',
+  description:
+    "Mark 1 to 25 emails, by the mail ids listEmails or searchEmails returned, as not spam: Mail's junk filter learns from them, and an email in the Junk mailbox of its own account moves to the Inbox of that account. " +
+    'Reversible, so no confirmation is needed. An email outside the Junk mailbox only loses its junk mark and stays where it is, and so does every email of On My Mac, which has no Inbox. ' +
+    'Reports every email: ok with moved (true when it went to the Inbox), or the error that left it unchanged. A moved email gets a new mail id: list the Inbox to act on it again.',
+  annotations: WRITE_ANNOTATIONS,
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: BATCH_BUDGET.toolMs,
+    [META_KEYS.OS_CATEGORY]: 'mail',
+  },
+  keywords: ['os', 'mail', 'email', 'not spam', 'not junk', 'junk', 'restore', 'inbox', 'filter'],
+  example: 'await os.markEmailsNotSpam({ ids: [emails[0].id] })',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      ids: mailIdsProperty('Emails to mark as not spam'),
+    },
+    required: ['ids'],
+  },
+  outputSchema: batchReportOutputSchema({
+    moved: {
+      type: 'boolean',
+      description:
+        'Report only, for an email that was found: true when it moved from the Junk mailbox to the Inbox',
+    },
+  }),
+  inputExamples: [
+    { description: 'Minimal: one email back from Junk', input: { ids: [EXAMPLE_IDS[0]] } },
+    { description: 'Full: two emails back from Junk', input: { ids: EXAMPLE_IDS } },
+  ],
+};
+
 /**
  * Moves emails to the Trash of their account; without confirm_delete mail-cli only previews them.
  * @param params - Tool input parameters.
@@ -475,6 +515,19 @@ export async function handleMarkEmailsSpam(params: MarkEmailsSpamParams): Promis
 }
 
 /**
+ * Clears the junk mark of emails and moves those in their account's Junk mailbox to its Inbox.
+ * @param params - Tool input parameters.
+ */
+export async function handleMarkEmailsNotSpam(
+  params: MarkEmailsNotSpamParams
+): Promise<ToolResult> {
+  const p = asRecord(params);
+  const invalid = mailBatchError(p);
+  if (invalid) return invalid;
+  return runMail('mark_emails_not_spam', p, BATCH_BUDGET);
+}
+
+/**
  * The input schema of a batch tool's `ids`: 1 to {@link MAIL_BATCH_LIMIT} mail ids.
  * @param what - What the ids name.
  */
@@ -509,8 +562,11 @@ function gatedBatchOutputSchema(): Tool['outputSchema'] {
   };
 }
 
-/** The output schema of a batch tool's per-mail report. */
-function batchReportOutputSchema(): Tool['outputSchema'] & {
+/**
+ * The output schema of a batch tool's per-mail report.
+ * @param perMail - Keys the tool adds to each email of its report.
+ */
+function batchReportOutputSchema(perMail: Record<string, unknown> = {}): Tool['outputSchema'] & {
   properties: Record<string, unknown>;
 } {
   return {
@@ -536,6 +592,7 @@ function batchReportOutputSchema(): Tool['outputSchema'] & {
             mailbox: { type: 'string' },
             account: { type: 'string' },
             error: { type: 'string', description: 'Why this email was not found or not changed' },
+            ...perMail,
           },
         },
       },

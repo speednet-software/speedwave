@@ -542,10 +542,10 @@ describe('mail-tools', () => {
   });
 
   describe('createMailTools', () => {
-    it('returns 21 tool definitions', () => {
+    it('returns 22 tool definitions', () => {
       const tools = createMailTools();
 
-      expect(tools).toHaveLength(21);
+      expect(tools).toHaveLength(22);
       expect(tools.map((t) => t.tool.name)).toEqual([
         'detectMailClients',
         'listMailboxes',
@@ -566,6 +566,7 @@ describe('mail-tools', () => {
         'archiveEmails',
         'createMailbox',
         'markEmailsSpam',
+        'markEmailsNotSpam',
         'saveDraft',
         'listMailSignatures',
       ]);
@@ -863,6 +864,7 @@ describe('mail-tools', () => {
       archiveEmails: ORGANIZE_REPORT,
       createMailbox: { status: 'created', mailbox: 'Clients/Acme', account: 'Work' },
       markEmailsSpam: gatedBatchOutputs(DELETE_PREVIEW, DELETE_REPORT),
+      markEmailsNotSpam: NOT_SPAM_REPORT,
     };
 
     it('covers every mail tool', () => {
@@ -1124,6 +1126,7 @@ describe('mail-tools', () => {
       ['archiveEmails', 'archive_emails', { ids: [MAIL_ID] }],
       ['createMailbox', 'create_mailbox', { name: 'Clients/Acme', account: 'Work' }],
       ['markEmailsSpam', 'mark_emails_spam', { ids: [MAIL_ID], confirm_spam: true }],
+      ['markEmailsNotSpam', 'mark_emails_not_spam', { ids: [MAIL_ID] }],
     ])('%s passes its arguments to mail-cli %s', async (name, command, input) => {
       vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: ORGANIZE_REPORT });
 
@@ -1133,23 +1136,27 @@ describe('mail-tools', () => {
       expect(runCommand).toHaveBeenCalledWith('mail', command, budgeted(input), PROCESS_TIMEOUT);
     });
 
-    it.each(['markEmailsRead', 'flagEmails', 'moveEmails', 'copyEmails', 'archiveEmails'])(
-      '%s is reversible, so it needs no confirmation and is not destructive',
-      (name) => {
-        const t = tool(name).tool;
+    it.each([
+      'markEmailsRead',
+      'flagEmails',
+      'moveEmails',
+      'copyEmails',
+      'archiveEmails',
+      'markEmailsNotSpam',
+    ])('%s is reversible, so it needs no confirmation and is not destructive', (name) => {
+      const t = tool(name).tool;
 
-        expect(t.annotations?.readOnlyHint).toBe(false);
-        expect(t.annotations?.destructiveHint).toBe(false);
-        expect(Object.keys(t.inputSchema.properties).some((k) => k.startsWith('confirm_'))).toBe(
-          false
-        );
-        expect((t.inputSchema.properties as any).ids).toMatchObject({
-          type: 'array',
-          minItems: 1,
-          maxItems: 25,
-        });
-      }
-    );
+      expect(t.annotations?.readOnlyHint).toBe(false);
+      expect(t.annotations?.destructiveHint).toBe(false);
+      expect(Object.keys(t.inputSchema.properties).some((k) => k.startsWith('confirm_'))).toBe(
+        false
+      );
+      expect((t.inputSchema.properties as any).ids).toMatchObject({
+        type: 'array',
+        minItems: 1,
+        maxItems: 25,
+      });
+    });
 
     it('createMailbox is a reversible write', () => {
       const t = tool('createMailbox').tool;
@@ -1167,6 +1174,17 @@ describe('mail-tools', () => {
       expect(t.inputSchema.required).toEqual(['ids']);
       expect(t.description).toContain('ask the user');
       expect(t.description).toContain('Junk');
+    });
+
+    it('markEmailsNotSpam says which emails moved back to the Inbox and why one stays', () => {
+      const t = tool('markEmailsNotSpam').tool;
+      const row = (t.outputSchema as any).properties.emails.items.properties;
+
+      expect(t.inputSchema.required).toEqual(['ids']);
+      expect(row.moved.type).toBe('boolean');
+      expect(t.description).toContain('Inbox');
+      expect(t.description).toContain('On My Mac');
+      expect(t.description).toContain('moved');
     });
 
     it('moveEmails and copyEmails take the target mailbox together with its account', () => {
@@ -1203,6 +1221,8 @@ describe('mail-tools', () => {
       ['markEmailsRead', { ids: ids(26), read: true }, 'MAIL_BATCH_TOO_LARGE'],
       ['markEmailsSpam', { ids: ids(26), confirm_spam: true }, 'MAIL_BATCH_TOO_LARGE'],
       ['markEmailsSpam', { ids: [MAIL_ID], confirm_spam: 'true' }, 'INVALID_TYPE'],
+      ['markEmailsNotSpam', { ids: ids(26) }, 'MAIL_BATCH_TOO_LARGE'],
+      ['markEmailsNotSpam', {}, 'requires ids'],
       ['createMailbox', { name: 'Clients' }, 'requires account'],
       ['createMailbox', { name: '', account: 'Work' }, 'requires name'],
     ])('%s refuses %o before calling mail-cli', async (name, input, code) => {
@@ -1745,6 +1765,11 @@ const ORGANIZE_REPORT = {
   failed: 1,
 };
 
+const NOT_SPAM_REPORT = {
+  ...ORGANIZE_REPORT,
+  emails: [{ ...ORGANIZE_REPORT.emails[0], moved: true }, ORGANIZE_REPORT.emails[1]],
+};
+
 /**
  * One sample carrying every key a gated batch tool emits, from its preview and from its per-mail report.
  * @param preview - The unconfirmed answer.
@@ -1782,6 +1807,7 @@ function validInput(name: string): Record<string, unknown> {
     archiveEmails: { ids: [MAIL_ID] },
     createMailbox: { name: 'Clients', account: 'Work' },
     markEmailsSpam: { ids: [MAIL_ID], confirm_spam: true },
+    markEmailsNotSpam: { ids: [MAIL_ID] },
     saveDraft: { subject: 's', body: 'b' },
     listMailSignatures: {},
   };

@@ -100,6 +100,27 @@ func markEmailsSpam(params: [String: Any], scripts: MailScripts) throws -> [Stri
     )
 }
 
+/// The `mark_emails_not_spam` command: clears the junk status of each mail, which trains Mail's filter, and moves a
+/// mail in the Junk mailbox of its own account to the Inbox of that account; each mail reports whether it moved.
+func markEmailsNotSpam(params: [String: Any], scripts: MailScripts) throws -> [String: Any] {
+    let batch = try MailBatch(params: params)
+    return try batch.apply(scripts: scripts, action: MailAction(
+        lines: """
+                    set junk mail status of m to false
+            """ + "\n" + accountSpecialLookup("junk mailbox", into: "spwJunk") + "\n"
+            + accountSpecialLookup("inbox", into: "spwInbox") + """
+
+                    if spwJunk is not missing value and spwInbox is not missing value then
+                        if mb is spwJunk then
+                            move m to spwInbox
+                            set spwReported to true
+                        end if
+                    end if
+            """,
+        reports: "moved"
+    ))
+}
+
 /// The `create_mailbox` command: makes the mailbox path `name` in `account`, On My Mac included; an existing one is
 /// refused, never reused.
 func createMailbox(params: [String: Any], scripts: MailScripts) throws -> [String: Any] {
