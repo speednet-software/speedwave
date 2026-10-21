@@ -1,6 +1,7 @@
 #!/usr/bin/env bats
 
 SCRIPT="$BATS_TEST_DIRNAME/../../scripts/verify-bundled-assets.sh"
+SHA256_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/sha256.sh"
 
 setup() {
     ROOT="$(mktemp -d "${BATS_TEST_TMPDIR}/bundled-assets.XXXXXX")"
@@ -124,7 +125,8 @@ populate_windows() {
     scripts_dir="$ROOT/scripts-shim"
     mkdir -p "$scripts_dir"
     cp "$SCRIPT" "$scripts_dir/verify-bundled-assets.sh"
-    pin="$( (sha256sum "$ROOT/vulkan-1.dll" 2>/dev/null || shasum -a 256 "$ROOT/vulkan-1.dll") | cut -d' ' -f1)"
+    cp "$SHA256_SCRIPT" "$scripts_dir/sha256.sh"
+    pin="$("$SHA256_SCRIPT" "$ROOT/vulkan-1.dll")"
     printf "\$RuntimeDllSha256 = '%s'\n" "$pin" > "$scripts_dir/install-vulkan-sdk.ps1"
 
     run bash "$scripts_dir/verify-bundled-assets.sh" windows "$ROOT"
@@ -159,7 +161,8 @@ populate_windows() {
     populate_windows
     scripts_dir="$(mktemp -d "${BATS_TEST_TMPDIR}/scripts.XXXXXX")"
     cp "$SCRIPT" "$scripts_dir/verify-bundled-assets.sh"
-    pin="$( (sha256sum "$ROOT/vulkan-1.dll" 2>/dev/null || shasum -a 256 "$ROOT/vulkan-1.dll") | cut -d' ' -f1 | tr '[:lower:]' '[:upper:]')"
+    cp "$SHA256_SCRIPT" "$scripts_dir/sha256.sh"
+    pin="$("$SHA256_SCRIPT" "$ROOT/vulkan-1.dll" | tr '[:lower:]' '[:upper:]')"
     printf "\$RuntimeDllSha256 = '%s'\n" "$pin" > "$scripts_dir/install-vulkan-sdk.ps1"
 
     run bash "$scripts_dir/verify-bundled-assets.sh" windows "$ROOT"
@@ -172,7 +175,8 @@ populate_windows() {
     populate_windows
     scripts_dir="$(mktemp -d "${BATS_TEST_TMPDIR}/scripts.XXXXXX")"
     cp "$SCRIPT" "$scripts_dir/verify-bundled-assets.sh"
-    pin="$( (sha256sum "$ROOT/vulkan-1.dll" 2>/dev/null || shasum -a 256 "$ROOT/vulkan-1.dll") | cut -d' ' -f1)"
+    cp "$SHA256_SCRIPT" "$scripts_dir/sha256.sh"
+    pin="$("$SHA256_SCRIPT" "$ROOT/vulkan-1.dll")"
     printf "\$RuntimeDllSha256 = '%s'\n" "$pin" > "$scripts_dir/install-vulkan-sdk.ps1"
 
     run bash "$scripts_dir/verify-bundled-assets.sh" windows "$ROOT"

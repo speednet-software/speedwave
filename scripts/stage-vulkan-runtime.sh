@@ -30,7 +30,7 @@ if [ -z "$EXPECTED" ]; then
   echo "❌ Could not read \$RuntimeDllSha256 from $PIN_FILE." >&2
   exit 1
 fi
-ACTUAL="$( (sha256sum "$SRC" 2>/dev/null || shasum -a 256 "$SRC") | cut -d' ' -f1)"
+ACTUAL="$(bash "$(cd "$(dirname "$0")" && pwd)/sha256.sh" "$SRC")"
 if [ "$ACTUAL" != "$EXPECTED" ]; then
   echo "❌ vulkan-1.dll SHA256 mismatch at $SRC: got $ACTUAL, expected $EXPECTED." >&2
   echo "   Re-run scripts/install-vulkan-sdk.ps1, then open a new shell so VULKAN_SDK points at the pinned SDK." >&2
