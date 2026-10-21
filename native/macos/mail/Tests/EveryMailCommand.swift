@@ -12,6 +12,7 @@ struct MailCommandCall {
     static let mailId = MailId(account: "Work", mailbox: "INBOX", messageId: "<a@x>").encoded
 
     private static let batchRow = ["ok", "", "", "", ""].joined(separator: MailBatch.fieldSeparator)
+    private static let reported = MailBatch.fieldSeparator + "false"
     private static let listing = "Work" + String(repeating: "\u{1D}", count: 7)
     private static let originalRead = String(repeating: "\u{1D}", count: 4)
 
@@ -44,6 +45,10 @@ struct MailCommandCall {
             command: "send_email",
             params: ["to": "a@x", "subject": "S", "body": "B", "signature": "Sig", "confirm_send": true],
             replies: []),
+        MailCommandCall(command: "send_email", params: ["to": "a@x", "subject": "S", "body": "B"], replies: []),
+        MailCommandCall(
+            command: "send_email", params: ["to": "a@x", "subject": "S", "body": "B", "account": "Work"], replies: []),
+        MailCommandCall(command: "save_draft", params: ["subject": "S"], replies: []),
         MailCommandCall(
             command: "save_draft",
             params: ["to": "a@x", "subject": "S", "body": "B", "signature": "Sig", "account": "Work"],
@@ -51,6 +56,10 @@ struct MailCommandCall {
         MailCommandCall(
             command: "reply_to_email",
             params: ["id": mailId, "body": "B", "signature": "Sig", "confirm_send": true],
+            replies: [String(repeating: "\u{1D}", count: 5)]),
+        MailCommandCall(
+            command: "reply_to_email",
+            params: ["id": mailId, "body": "B", "cc": "c@x", "bcc": "d@x", "confirm_send": true],
             replies: [String(repeating: "\u{1D}", count: 5)]),
         MailCommandCall(
             command: "forward_email",
@@ -73,6 +82,14 @@ struct MailCommandCall {
         MailCommandCall(command: "archive_emails", params: ["ids": [mailId]], replies: [batchRow]),
         MailCommandCall(command: "create_mailbox", params: ["name": "Clients/2026", "account": "Work"], replies: []),
         MailCommandCall(command: "mark_emails_spam", params: ["ids": [mailId], "confirm_spam": true], replies: [batchRow]),
+        MailCommandCall(command: "mark_emails_not_spam", params: ["ids": [mailId]], replies: [batchRow + reported]),
+        MailCommandCall(
+            command: "rename_mailbox", params: ["mailbox": "Clients/2026", "account": "Work", "new_name": "2027"],
+            replies: []),
+        MailCommandCall(
+            command: "rename_mailbox",
+            params: ["mailbox": "Projects", "account": AppleMailClient.localAccountName, "new_name": "Done"],
+            replies: []),
     ]
 
     /// Every script the command ran; a command that fails part way fails the calling test.

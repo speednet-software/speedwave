@@ -33,12 +33,14 @@ struct ConfirmationGate {
 
 /// What a batch command does to each mail: `lines` run on every mail found (AppleScript using `m`, `mb` and
 /// `spwAcctName`), after `setup` ran once for the whole batch; a failed setup fails the call, its lookup failures
-/// naming `mailbox` and `account`.
+/// naming `mailbox` and `account`. With `reports`, the lines set the boolean `spwReported` (false before them), which
+/// each mail acted on carries under that key.
 struct MailAction {
     let lines: String
     var setup = ""
     var mailbox: String?
     var account: String?
+    var reports: String?
 }
 
 /// The mails of one batch command: 1 to `mailBatchLimit` distinct mail ids, all decoded before any script runs.
@@ -50,6 +52,7 @@ struct MailBatch {
         let sender: String
         let received: Date?
         let error: String?
+        var reported: (key: String, value: Bool)?
 
         var json: [String: Any] {
             var row: [String: Any] = [
@@ -64,6 +67,9 @@ struct MailBatch {
             }
             row["date"] = received.map { iso8601String(from: $0, timeZone: .current) }
             row["error"] = error
+            if error == nil, let reported = reported {
+                row[reported.key] = reported.value
+            }
             return row
         }
     }
@@ -126,24 +132,28 @@ struct MailBatch {
         guard rows.count == ids.count else {
             throw ScriptError.scriptFailed("Unexpected batch result from Mail.app")
         }
-        return try zip(ids, rows).map { id, row in try outcome(id, row: row, scripts: scripts) }
+        return try zip(ids, rows).map { id, row in
+            try outcome(id, row: row, reports: action?.reports, scripts: scripts)
+        }
     }
 
     private func script(action: MailAction?) -> String {
+        let reported = action?.reports == nil ? "" : ", spwReported"
         let perMail = ids.map { id in
             """
                 set spwSubject to ""
                 set spwSender to ""
                 set spwDate to missing value
+                set spwReported to false
                 try
             \(AppleMailClient.messageLookup(id))
                     set spwSubject to subject of m
                     set spwSender to sender of m
                     set spwDate to date received of m
             \(action?.lines ?? "")
-                    set end of spwRows to {"ok", spwSubject, spwSender, spwDate, ""}
+                    set end of spwRows to {"ok", spwSubject, spwSender, spwDate, ""\(reported)}
                 on error spwErr number spwNum
-                    set end of spwRows to {"error", spwSubject, spwSender, spwDate, spwErr & " (" & spwNum & ")"}
+                    set end of spwRows to {"error", spwSubject, spwSender, spwDate, spwErr & " (" & spwNum & ")"\(reported)}
                 end try
             """
         }.joined(separator: "\n")
@@ -161,6 +171,7 @@ struct MailBatch {
             if class of spwReceived is date then set spwIso to (spwReceived as «class isot» as string)
             set spwFields to {(contents of item 1 of spwRow) as text, (contents of item 2 of spwRow) as text, ¬
                 (contents of item 3 of spwRow) as text, spwIso, (contents of item 5 of spwRow) as text}
+            if (count of spwRow) > 5 then set end of spwFields to (contents of item 6 of spwRow) as text
             set AppleScript's text item delimiters to (character id 31)
             set end of spwLines to (spwFields as text)
         end repeat
@@ -169,9 +180,9 @@ struct MailBatch {
         """
     }
 
-    private func outcome(_ id: MailId, row: String, scripts: MailScripts) throws -> Outcome {
+    private func outcome(_ id: MailId, row: String, reports: String?, scripts: MailScripts) throws -> Outcome {
         let fields = row.components(separatedBy: Self.fieldSeparator)
-        guard fields.count == 5, ["ok", "error"].contains(fields[0]) else {
+        guard fields.count == (reports == nil ? 5 : 6), ["ok", "error"].contains(fields[0]) else {
             throw ScriptError.scriptFailed("Unexpected batch result from Mail.app")
         }
         var error: String?
@@ -183,7 +194,8 @@ struct MailBatch {
             subject: fields[1],
             sender: fields[2],
             received: AppleMailClient.localDate(fields[3]),
-            error: error
+            error: error,
+            reported: reports.map { ($0, fields[5] == "true") }
         )
     }
 

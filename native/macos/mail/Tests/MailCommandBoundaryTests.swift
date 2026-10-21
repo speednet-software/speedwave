@@ -77,6 +77,16 @@ final class MailCommandBoundaryTests: XCTestCase {
         }
     }
 
+    func testNoScriptOfAnyCommandCreatesAnInvisibleOutgoingMessage() throws {
+        let invisible = try NSRegularExpression(pattern: "visible\\s*:\\s*false", options: .caseInsensitive)
+        for call in MailCommandCall.all {
+            for script in try call.scripts() {
+                let range = NSRange(script.startIndex..., in: script)
+                XCTAssertNil(invisible.firstMatch(in: script, range: range), "\(call.command):\n\(script)")
+            }
+        }
+    }
+
     func testABudgetOfAFractionOfASecondStillGivesMailAWholeSecond() throws {
         harness.executor.reply("")
 

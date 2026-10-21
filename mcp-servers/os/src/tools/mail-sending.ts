@@ -16,6 +16,17 @@ const PLAIN_TEXT_ONLY =
 const SHOWN_AS_QUOTE =
   'Apple Mail shows the scripted text to the recipient as a quote (">" in plain text, a cited block in HTML), a Mail bug no script avoids: tell the user before they agree.';
 
+const ACCOUNT_PROPERTY = {
+  type: 'string',
+  description:
+    "Account the message goes from (the account field from listMailboxes); when omitted Mail's primary address, or else the first address of a turned-on account",
+};
+
+const FROM_PROPERTY = {
+  type: 'string',
+  description: 'The "Name <address>" the message goes from, as Mail reports it',
+};
+
 const SIGNATURE_PROPERTY = {
   type: 'string',
   description:
@@ -34,6 +45,8 @@ interface SendEmailParams {
   cc?: string;
   /** BCC recipient(s), comma-separated. */
   bcc?: string;
+  /** Account the message goes from. */
+  account?: string;
   /** Name of a Mail signature from listMailSignatures. */
   signature?: string;
   /** Must be true, after the user agreed to the preview, to send. */
@@ -69,6 +82,10 @@ interface ReplyToEmailParams {
   body: string;
   /** Whether to reply to all recipients. */
   reply_all?: boolean;
+  /** CC recipient(s) added to those Mail chose, comma-separated. */
+  cc?: string;
+  /** BCC recipient(s), comma-separated. */
+  bcc?: string;
   /** Name of a Mail signature from listMailSignatures. */
   signature?: string;
   /** Must be true, after the user agreed to the preview, to send. */
@@ -103,7 +120,8 @@ export const sendEmailTool: Tool = {
   name: 'sendEmail',
   description:
     `Send a new plain-text email through Apple Mail. ${PLAIN_TEXT_ONLY} ` +
-    'Without confirm_send=true nothing is sent: the call returns a preview of the recipients (to, cc, bcc), subject and text, and you must show it and ask the user before calling again with the same arguments and confirm_send=true. ' +
+    "It goes from account, or from Mail's primary address when account is omitted. " +
+    'Without confirm_send=true nothing is sent: the call returns a preview of the sender (from), recipients (to, cc, bcc), subject and text, and you must show it, from included, and ask the user before calling again with the same arguments and confirm_send=true. ' +
     `Sending cannot be undone. ${SHOWN_AS_QUOTE}`,
   annotations: DESTRUCTIVE_ANNOTATIONS,
   _meta: {
@@ -122,6 +140,7 @@ export const sendEmailTool: Tool = {
       body: { type: 'string', description: `Email text. ${PLAIN_TEXT_ONLY}` },
       cc: { type: 'string', description: 'CC recipient(s), comma-separated' },
       bcc: { type: 'string', description: 'BCC recipient(s), comma-separated' },
+      account: ACCOUNT_PROPERTY,
       signature: SIGNATURE_PROPERTY,
       confirm_send: confirmProperty('send this email'),
     },
@@ -138,13 +157,14 @@ export const sendEmailTool: Tool = {
       },
     },
     {
-      description: 'Full: send with CC and BCC after the user agreed',
+      description: 'Full: send from one account with CC and BCC after the user agreed',
       input: {
         to: 'alice@example.com',
         subject: 'Q4 Report',
         body: 'The Q4 numbers are below.',
         cc: 'bob@example.com',
         bcc: 'carol@example.com',
+        account: 'Work',
         confirm_send: true,
       },
     },
@@ -154,9 +174,9 @@ export const sendEmailTool: Tool = {
 export const replyToEmailTool: Tool = {
   name: 'replyToEmail',
   description:
-    'Reply to an email in any mailbox, by the mail id listEmails or searchEmails returned; Mail picks the recipients and the "Re:" subject, reply_all adds every recipient of the email. ' +
+    'Reply to an email in any mailbox, by the mail id listEmails or searchEmails returned; Mail picks the recipients and the "Re:" subject, reply_all adds every recipient of the email, and cc and bcc add more. ' +
     `The text goes above the quoted original, separated by a blank line and an "On <date>, <sender> wrote:" line. ${PLAIN_TEXT_ONLY} ` +
-    'Without confirm_send=true nothing is sent: the call returns a preview of the recipients, subject and the full text, and you must show it and ask the user before calling again with the same arguments and confirm_send=true. ' +
+    'Without confirm_send=true nothing is sent: the call returns a preview of every recipient (to, cc, bcc), subject and the full text, and you must show it and ask the user before calling again with the same arguments and confirm_send=true. ' +
     `Sending cannot be undone. ${SHOWN_AS_QUOTE}`,
   annotations: DESTRUCTIVE_ANNOTATIONS,
   _meta: {
@@ -176,6 +196,11 @@ export const replyToEmailTool: Tool = {
       },
       body: { type: 'string', description: `Reply text, without the quote. ${PLAIN_TEXT_ONLY}` },
       reply_all: { type: 'boolean', description: 'Reply to all recipients (default false)' },
+      cc: {
+        type: 'string',
+        description: 'CC recipient(s) added to those Mail chose, comma-separated',
+      },
+      bcc: { type: 'string', description: 'BCC recipient(s), comma-separated' },
       signature: SIGNATURE_PROPERTY,
       confirm_send: confirmProperty('send this reply'),
     },
@@ -191,11 +216,13 @@ export const replyToEmailTool: Tool = {
       },
     },
     {
-      description: 'Full: reply to all after the user agreed',
+      description: 'Full: reply to all, adding a CC and a BCC, after the user agreed',
       input: {
         id: 'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0',
         body: 'I agree with the proposed timeline.',
         reply_all: true,
+        cc: 'ewa@example.com',
+        bcc: 'boss@example.com',
         confirm_send: true,
       },
     },
@@ -292,7 +319,7 @@ export const saveDraftTool: Tool = {
   name: 'saveDraft',
   description:
     `Save a new plain-text email as a draft in Apple Mail without sending it, for the user to finish and send in Mail.app. ${PLAIN_TEXT_ONLY} ` +
-    "The draft lands in the Drafts mailbox of account (Mail's default account when omitted). No confirmation is needed: nothing is sent and the user can delete the draft. " +
+    "The draft goes from account and lands in its Drafts mailbox (from Mail's primary address when account is omitted); the answer's from names the sender. No confirmation is needed: nothing is sent and the user can delete the draft. " +
     `Recipients and text are optional. ${SHOWN_AS_QUOTE}`,
   annotations: WRITE_ANNOTATIONS,
   _meta: {
@@ -311,11 +338,7 @@ export const saveDraftTool: Tool = {
       to: { type: 'string', description: 'Recipient email address(es), comma-separated' },
       cc: { type: 'string', description: 'CC recipient(s), comma-separated' },
       bcc: { type: 'string', description: 'BCC recipient(s), comma-separated' },
-      account: {
-        type: 'string',
-        description:
-          "Account the draft is written from and whose Drafts keep it (the account field from listMailboxes); Mail's default account when omitted",
-      },
+      account: ACCOUNT_PROPERTY,
       signature: SIGNATURE_PROPERTY,
     },
     required: ['subject'],
@@ -324,6 +347,7 @@ export const saveDraftTool: Tool = {
     type: 'object',
     properties: {
       status: { type: 'string', description: '"saved": the draft is in Drafts, nothing was sent' },
+      from: FROM_PROPERTY,
       to: { type: 'array', items: { type: 'string' }, description: 'To addresses' },
       cc: { type: 'array', items: { type: 'string' }, description: 'CC addresses' },
       bcc: { type: 'array', items: { type: 'string' }, description: 'BCC addresses' },
@@ -402,6 +426,7 @@ export async function handleSendEmail(params: SendEmailParams): Promise<ToolResu
       ['body', MAX_LENGTHS.body, true],
       ['cc', MAX_LENGTHS.short, false],
       ['bcc', MAX_LENGTHS.short, false],
+      ['account', MAX_LENGTHS.short, false],
       ['signature', MAX_LENGTHS.short, false],
     ],
   });
@@ -421,6 +446,8 @@ export async function handleReplyToEmail(params: ReplyToEmailParams): Promise<To
     strings: [
       ['id', MAX_LENGTHS.id, false],
       ['body', MAX_LENGTHS.body, true],
+      ['cc', MAX_LENGTHS.short, false],
+      ['bcc', MAX_LENGTHS.short, false],
       ['signature', MAX_LENGTHS.short, false],
     ],
   });
@@ -500,9 +527,9 @@ export async function handleListMailSignatures(
 
 /**
  * The output schema of a gated send: its preview, or what was sent.
- * @param withBcc - Whether the tool takes bcc recipients.
+ * @param newMessage - Whether it is a new message, with a chosen sender.
  */
-function sendOutputSchema(withBcc: boolean): Tool['outputSchema'] {
+function sendOutputSchema(newMessage: boolean): Tool['outputSchema'] {
   const addresses = (what: string) => ({
     type: 'array',
     items: { type: 'string' },
@@ -521,9 +548,18 @@ function sendOutputSchema(withBcc: boolean): Tool['outputSchema'] {
         description: 'Preview only: the flag to set true once the user agreed',
       },
       instruction: { type: 'string', description: 'Preview only: what to ask the user' },
+      ...(newMessage
+        ? {
+            from: FROM_PROPERTY,
+            account: {
+              type: 'string',
+              description: 'The account given; absent for the default sender',
+            },
+          }
+        : {}),
       to: addresses('To'),
       cc: addresses('CC'),
-      ...(withBcc ? { bcc: addresses('BCC') } : {}),
+      bcc: addresses('BCC'),
       subject: { type: 'string' },
       body: { type: 'string', description: 'The full plain text that is sent' },
       signature: {

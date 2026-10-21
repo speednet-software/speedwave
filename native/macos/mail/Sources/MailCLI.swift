@@ -13,11 +13,11 @@ private let outlookUnsupportedInstructions =
 
 
 /// mail-cli <command> [json-args]
-/// Commands: check_permission, detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email, forward_email, redirect_email, list_rules, check_mail, delete_emails, mark_emails_read, flag_emails, move_emails, copy_emails, archive_emails, create_mailbox, mark_emails_spam, save_draft, list_signatures
+/// Commands: check_permission, detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email, forward_email, redirect_email, list_rules, check_mail, delete_emails, mark_emails_read, flag_emails, move_emails, copy_emails, archive_emails, create_mailbox, mark_emails_spam, mark_emails_not_spam, rename_mailbox, save_draft, list_signatures
 @main
 struct MailCLI {
     static let commandList =
-        "check_permission, detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email, forward_email, redirect_email, list_rules, check_mail, delete_emails, mark_emails_read, flag_emails, move_emails, copy_emails, archive_emails, create_mailbox, mark_emails_spam, save_draft, list_signatures"
+        "check_permission, detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email, forward_email, redirect_email, list_rules, check_mail, delete_emails, mark_emails_read, flag_emails, move_emails, copy_emails, archive_emails, create_mailbox, mark_emails_spam, mark_emails_not_spam, rename_mailbox, save_draft, list_signatures"
 
     static func main() {
         runCLI(
@@ -71,6 +71,8 @@ func mailCommands(executor: @escaping ScriptExecutor) -> [String: (_ params: [St
         "archive_emails": scripted(archiveEmails),
         "create_mailbox": scripted(createMailbox),
         "mark_emails_spam": scripted(markEmailsSpam),
+        "mark_emails_not_spam": scripted(markEmailsNotSpam),
+        "rename_mailbox": scripted(renameMailbox),
     ]
 }
 

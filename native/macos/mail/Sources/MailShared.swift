@@ -7,6 +7,7 @@ let accountNotFoundMarker = "SPW_ACCOUNT_NOT_FOUND"
 let accountDisabledMarker = "SPW_ACCOUNT_DISABLED"
 let mailNotFoundMarker = "SPW_MAIL_NOT_FOUND"
 let signatureNotFoundMarker = "SPW_SIGNATURE_NOT_FOUND"
+let noSenderMarker = "SPW_NO_SENDER"
 let mailboxesChangedMarker = "SPW_MAILBOXES_CHANGED"
 
 /// The JSON argument carrying the script time budget in milliseconds, set by the mail tools of the os worker.
@@ -42,8 +43,10 @@ enum MailFailure: LocalizedError, Equatable {
     case mailboxExists(mailbox: String, account: String)
     case targetIsTrash(mailbox: String, account: String)
     case targetIsJunk(mailbox: String, account: String)
+    case specialMailbox(mailbox: String, account: String)
     case sendFailed
     case signatureNotFound(String)
+    case noSender
 
     var code: String {
         switch self {
@@ -66,8 +69,10 @@ enum MailFailure: LocalizedError, Equatable {
         case .mailboxExists: return "MAIL_MAILBOX_EXISTS"
         case .targetIsTrash: return "MAIL_TARGET_IS_TRASH"
         case .targetIsJunk: return "MAIL_TARGET_IS_JUNK"
+        case .specialMailbox: return "MAIL_SPECIAL_MAILBOX"
         case .sendFailed: return "MAIL_SEND_FAILED"
         case .signatureNotFound: return "MAIL_SIGNATURE_NOT_FOUND"
+        case .noSender: return "MAIL_NO_SENDER"
         }
     }
 
@@ -87,7 +92,8 @@ enum MailFailure: LocalizedError, Equatable {
         case .accountNotFound(let account):
             return "Account '\(account)' not found."
         case .accountDisabled(let account):
-            return "Account '\(account)' is turned off in Mail.app, so Mail would file the draft in another account."
+            return "Account '\(account)' is turned off in Mail.app, "
+                + "so Mail would send or file the message from another account."
         case .mailboxAmbiguous(let mailbox, let accounts):
             return "Mailbox '\(mailbox)' exists in several accounts: \(accounts.joined(separator: ", "))."
         case .invalidMailId(let id):
@@ -117,17 +123,22 @@ enum MailFailure: LocalizedError, Equatable {
         case .alreadyArchived:
             return "The email is already in the Archive mailbox."
         case .mailboxExists(let mailbox, let account):
-            return "Mailbox '\(mailbox)' already exists in account '\(account)'; move emails to it as it is."
+            return "Mailbox '\(mailbox)' already exists in account '\(account)'."
         case .targetIsTrash(let mailbox, let account):
             return "Mailbox '\(mailbox)' is the Trash of account '\(account)', so no email was moved or copied. "
                 + "To delete emails use deleteEmails, which asks the user first."
         case .targetIsJunk(let mailbox, let account):
             return "Mailbox '\(mailbox)' is the Junk mailbox of account '\(account)', so no email was moved or copied. "
                 + "To mark emails as spam use markEmailsSpam, which asks the user first."
+        case .specialMailbox(let mailbox, let account):
+            return "Mailbox '\(mailbox)' is the Inbox, Drafts, Sent, Junk, Trash, Outbox or Archive mailbox of account "
+                + "'\(account)', which keeps its name, so nothing was renamed."
         case .sendFailed:
             return "Mail.app did not send the message; it may wait in the Outbox."
         case .signatureNotFound(let name):
             return "Mail.app has no signature named '\(name)'."
+        case .noSender:
+            return "Mail.app has no turned-on account with an email address to send from."
         }
     }
 }
@@ -265,8 +276,14 @@ struct MailScripts {
         if detail.contains(targetIsJunkMarker) {
             return .targetIsJunk(mailbox: mailbox ?? "", account: account ?? "")
         }
+        if detail.contains(specialMailboxMarker) {
+            return .specialMailbox(mailbox: mailbox ?? "", account: account ?? "")
+        }
         if detail.contains(sendFailedMarker) {
             return .sendFailed
+        }
+        if detail.contains(noSenderMarker) {
+            return .noSender
         }
         if detail.contains(mailNotFoundMarker) {
             return .mailNotFound(mailbox: mailbox ?? "", account: account ?? "")

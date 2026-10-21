@@ -39,6 +39,8 @@ final class DraftsAndSignaturesTests: XCTestCase {
     }
 
     func testSaveDraftSavesWithoutSendingOrAskingAndReportsWhatWasSaved() throws {
+        harness.executor.reply("Anna <anna@x>")
+
         let result = try harness.call("save_draft", draft)
 
         XCTAssertEqual(harness.executor.calls.count, 1)
@@ -55,8 +57,10 @@ final class DraftsAndSignaturesTests: XCTestCase {
             script)
         XCTAssertTrue(script.contains("save spwMsg"), script)
         XCTAssertFalse(script.contains("send spwMsg"), script)
-        XCTAssertFalse(script.contains("set sender"), script)
+        XCTAssertTrue(script.contains("set spwPrimary to primary email"), script)
+        XCTAssertTrue(script.contains("set sender of spwMsg to spwSender"), script)
         XCTAssertEqual(result["status"] as? String, "saved")
+        XCTAssertEqual(result["from"] as? String, "Anna <anna@x>")
         XCTAssertNil(result["confirm_param"])
         XCTAssertEqual(result["to"] as? [String], ["alice@example.com"])
         XCTAssertEqual(result["cc"] as? [String], ["carol@example.com"])
@@ -76,6 +80,8 @@ final class DraftsAndSignaturesTests: XCTestCase {
     }
 
     func testSaveDraftInAnAccountSendsFromItSoMailFilesItInThatAccountsDrafts() throws {
+        harness.executor.reply("Me <me@eu.example>")
+
         let result = try harness.call("save_draft", draft.merging(["account": "Work \"EU\""]) { $1 })
 
         let script = harness.executor.calls[0].script
@@ -84,15 +90,15 @@ final class DraftsAndSignaturesTests: XCTestCase {
             script)
         XCTAssertTrue(script.contains("set spwAccount to account \"Work \\\"EU\\\"\""), script)
         XCTAssertTrue(script.contains("set spwAddresses to email addresses of spwAccount"), script)
-        XCTAssertTrue(
-            script.contains("set spwSender to (full name of spwAccount) & \" <\" & (item 1 of spwAddresses) & \">\""),
-            script)
+        XCTAssertTrue(script.contains("set spwAddress to item 1 of spwAddresses"), script)
+        XCTAssertTrue(script.contains("set spwName to full name of spwAccount"), script)
         XCTAssertFalse(script.contains("item 1 of email addresses"), script)
         let sender = try XCTUnwrap(script.range(of: "set spwSender to"))
         let message = try XCTUnwrap(script.range(of: "make new outgoing message"))
         XCTAssertLessThan(sender.lowerBound, message.lowerBound)
         XCTAssertTrue(script.contains("set sender of spwMsg to spwSender"), script)
         XCTAssertEqual(result["account"] as? String, "Work \"EU\"")
+        XCTAssertEqual(result["from"] as? String, "Me <me@eu.example>")
     }
 
     func testADraftInAnUnknownAccountIsReportedAsAccountNotFound() {
@@ -111,7 +117,7 @@ final class DraftsAndSignaturesTests: XCTestCase {
         XCTAssertEqual(error as? MailFailure, .accountDisabled("Google"))
         XCTAssertEqual(
             (error as? MailFailure)?.errorDescription,
-            "MAIL_ACCOUNT_DISABLED: Account 'Google' is turned off in Mail.app, so Mail would file the draft in another account.")
+            "MAIL_ACCOUNT_DISABLED: Account 'Google' is turned off in Mail.app, so Mail would send or file the message from another account.")
         let script = try XCTUnwrap(harness.executor.calls.first?.script)
         let check = try XCTUnwrap(script.range(of: "if not (enabled of spwAccount) then error \"\(accountDisabledMarker)\""))
         let message = try XCTUnwrap(script.range(of: "make new outgoing message"))

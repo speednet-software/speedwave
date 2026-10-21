@@ -25,6 +25,7 @@ import {
   handleCreateMailbox,
   handleMoveEmails,
   handleCopyEmails,
+  handleRenameMailbox,
 } from './mail-organizing.js';
 import { createMailTools } from './mail-tools.js';
 
@@ -485,6 +486,34 @@ describe('mail-tools', () => {
       expect(result.error?.message).toContain('to');
     });
 
+    it('sends from the account given and tells to show the user the sender before asking', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: SEND_PREVIEW });
+      const tool = createMailTools().find((t) => t.tool.name === 'sendEmail')!.tool;
+
+      await handleSendEmail({ to: 'a@x', subject: 's', body: 'b', account: 'Work' });
+
+      expect(runCommand).toHaveBeenCalledWith(
+        'mail',
+        'send_email',
+        budgeted({ to: 'a@x', subject: 's', body: 'b', account: 'Work' }),
+        PROCESS_TIMEOUT
+      );
+      expect(tool.inputSchema.properties).toHaveProperty('account');
+      expect(tool.description).toMatch(/from.*show/);
+    });
+
+    it('refuses an over-long account before calling mail-cli', async () => {
+      const result = await handleSendEmail({
+        to: 'a@x',
+        subject: 's',
+        body: 'b',
+        account: 'x'.repeat(10_000),
+      });
+
+      expect(result.success).toBe(false);
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
     it('passes bcc through to the native CLI', async () => {
       vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { status: 'sent' } });
 
@@ -539,6 +568,37 @@ describe('mail-tools', () => {
         budgeted({ id: MAIL_ID, body: 'Thanks!', reply_all: true }),
         PROCESS_TIMEOUT
       );
+    });
+
+    it('passes cc and bcc to mail-cli, which adds them to the recipients Mail chose', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: REPLY_PREVIEW });
+      const tool = createMailTools().find((t) => t.tool.name === 'replyToEmail')!.tool;
+
+      await handleReplyToEmail({ id: MAIL_ID, body: 'Ok', cc: 'ewa@x', bcc: 'boss@x' });
+
+      expect(runCommand).toHaveBeenCalledWith(
+        'mail',
+        'reply_to_email',
+        budgeted({ id: MAIL_ID, body: 'Ok', cc: 'ewa@x', bcc: 'boss@x' }),
+        PROCESS_TIMEOUT
+      );
+      expect(Object.keys(tool.inputSchema.properties ?? {})).toEqual(
+        expect.arrayContaining(['cc', 'bcc'])
+      );
+      expect(tool.outputSchema?.properties).toHaveProperty('bcc');
+    });
+
+    it('refuses an over-long cc or bcc before calling mail-cli', async () => {
+      for (const field of ['cc', 'bcc']) {
+        const result = await handleReplyToEmail({
+          id: MAIL_ID,
+          body: 'Ok',
+          [field]: 'x'.repeat(10_000),
+        });
+
+        expect(result.success).toBe(false);
+      }
+      expect(runCommand).not.toHaveBeenCalled();
     });
 
     it('gives both scripts of a confirmed reply time to finish before mail-cli is killed', async () => {
@@ -645,10 +705,10 @@ describe('mail-tools', () => {
   });
 
   describe('createMailTools', () => {
-    it('returns 21 tool definitions', () => {
+    it('returns 23 tool definitions', () => {
       const tools = createMailTools();
 
-      expect(tools).toHaveLength(21);
+      expect(tools).toHaveLength(23);
       expect(tools.map((t) => t.tool.name)).toEqual([
         'detectMailClients',
         'listMailboxes',
@@ -669,6 +729,8 @@ describe('mail-tools', () => {
         'archiveEmails',
         'createMailbox',
         'markEmailsSpam',
+        'markEmailsNotSpam',
+        'renameMailbox',
         'saveDraft',
         'listMailSignatures',
       ]);
@@ -947,7 +1009,7 @@ describe('mail-tools', () => {
         ],
         total: 1,
       },
-      sendEmail: { ...SEND_PREVIEW, bcc: ['carol@x'], signature: 'Work' },
+      sendEmail: { ...SEND_PREVIEW, bcc: ['carol@x'], account: 'Work', signature: 'Work' },
       replyToEmail: { ...REPLY_PREVIEW, signature: 'Work' },
       saveDraft: DRAFT_SAVED,
       listMailSignatures: { signatures: ['Work', 'Private'] },
@@ -985,6 +1047,13 @@ describe('mail-tools', () => {
       archiveEmails: ORGANIZE_REPORT,
       createMailbox: { status: 'created', mailbox: 'Clients/Acme', account: 'Work' },
       markEmailsSpam: gatedBatchOutputs(DELETE_PREVIEW, DELETE_REPORT),
+      markEmailsNotSpam: NOT_SPAM_REPORT,
+      renameMailbox: {
+        status: 'renamed',
+        mailbox: 'Clients/Acme Corp',
+        previous_mailbox: 'Clients/Acme',
+        account: 'Work',
+      },
     };
 
     it('covers every mail tool', () => {
@@ -1246,6 +1315,12 @@ describe('mail-tools', () => {
       ['archiveEmails', 'archive_emails', { ids: [MAIL_ID] }],
       ['createMailbox', 'create_mailbox', { name: 'Clients/Acme', account: 'Work' }],
       ['markEmailsSpam', 'mark_emails_spam', { ids: [MAIL_ID], confirm_spam: true }],
+      ['markEmailsNotSpam', 'mark_emails_not_spam', { ids: [MAIL_ID] }],
+      [
+        'renameMailbox',
+        'rename_mailbox',
+        { mailbox: 'Clients/Acme', account: 'Work', new_name: 'Acme Corp' },
+      ],
     ])('%s passes its arguments to mail-cli %s', async (name, command, input) => {
       vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: ORGANIZE_REPORT });
 
@@ -1255,23 +1330,40 @@ describe('mail-tools', () => {
       expect(runCommand).toHaveBeenCalledWith('mail', command, budgeted(input), PROCESS_TIMEOUT);
     });
 
-    it.each(['markEmailsRead', 'flagEmails', 'moveEmails', 'copyEmails', 'archiveEmails'])(
-      '%s is reversible, so it needs no confirmation and is not destructive',
-      (name) => {
-        const t = tool(name).tool;
+    it.each([
+      'markEmailsRead',
+      'flagEmails',
+      'moveEmails',
+      'copyEmails',
+      'archiveEmails',
+      'markEmailsNotSpam',
+    ])('%s is reversible, so it needs no confirmation and is not destructive', (name) => {
+      const t = tool(name).tool;
 
-        expect(t.annotations?.readOnlyHint).toBe(false);
-        expect(t.annotations?.destructiveHint).toBe(false);
-        expect(Object.keys(t.inputSchema.properties).some((k) => k.startsWith('confirm_'))).toBe(
-          false
-        );
-        expect((t.inputSchema.properties as any).ids).toMatchObject({
-          type: 'array',
-          minItems: 1,
-          maxItems: 25,
-        });
-      }
-    );
+      expect(t.annotations?.readOnlyHint).toBe(false);
+      expect(t.annotations?.destructiveHint).toBe(false);
+      expect(Object.keys(t.inputSchema.properties).some((k) => k.startsWith('confirm_'))).toBe(
+        false
+      );
+      expect((t.inputSchema.properties as any).ids).toMatchObject({
+        type: 'array',
+        minItems: 1,
+        maxItems: 25,
+      });
+    });
+
+    it('renameMailbox is a reversible write that needs the mailbox, its account and the new name', () => {
+      const t = tool('renameMailbox').tool;
+
+      expect(t.annotations?.readOnlyHint).toBe(false);
+      expect(t.annotations?.destructiveHint).toBe(false);
+      expect(t.inputSchema.required).toEqual(['mailbox', 'account', 'new_name']);
+      expect(Object.keys(t.inputSchema.properties).some((k) => k.startsWith('confirm_'))).toBe(
+        false
+      );
+      expect(t.description).toContain('Inbox');
+      expect(t.description).toContain('MAIL_MAILBOX_EXISTS');
+    });
 
     it('createMailbox is a reversible write', () => {
       const t = tool('createMailbox').tool;
@@ -1289,6 +1381,17 @@ describe('mail-tools', () => {
       expect(t.inputSchema.required).toEqual(['ids']);
       expect(t.description).toContain('ask the user');
       expect(t.description).toContain('Junk');
+    });
+
+    it('markEmailsNotSpam says which emails moved back to the Inbox and why one stays', () => {
+      const t = tool('markEmailsNotSpam').tool;
+      const row = (t.outputSchema as any).properties.emails.items.properties;
+
+      expect(t.inputSchema.required).toEqual(['ids']);
+      expect(row.moved.type).toBe('boolean');
+      expect(t.description).toContain('Inbox');
+      expect(t.description).toContain('On My Mac');
+      expect(t.description).toContain('moved');
     });
 
     it('moveEmails and copyEmails take the target mailbox together with its account', () => {
@@ -1325,6 +1428,12 @@ describe('mail-tools', () => {
       ['markEmailsRead', { ids: ids(26), read: true }, 'MAIL_BATCH_TOO_LARGE'],
       ['markEmailsSpam', { ids: ids(26), confirm_spam: true }, 'MAIL_BATCH_TOO_LARGE'],
       ['markEmailsSpam', { ids: [MAIL_ID], confirm_spam: 'true' }, 'INVALID_TYPE'],
+      ['markEmailsNotSpam', { ids: ids(26) }, 'MAIL_BATCH_TOO_LARGE'],
+      ['markEmailsNotSpam', {}, 'requires ids'],
+      ['renameMailbox', { mailbox: 'Clients', account: 'Work' }, 'requires new_name'],
+      ['renameMailbox', { mailbox: 'Clients', new_name: 'A' }, 'requires account'],
+      ['renameMailbox', { mailbox: 'Clients', account: 'Work', new_name: '' }, 'requires new_name'],
+      ['renameMailbox', { mailbox: 'Clients', account: 'Work', new_name: 'A/B' }, 'INVALID_VALUE'],
       ['createMailbox', { name: 'Clients' }, 'requires account'],
       ['createMailbox', { name: '', account: 'Work' }, 'requires name'],
     ])('%s refuses %o before calling mail-cli', async (name, input, code) => {
@@ -1347,6 +1456,43 @@ describe('mail-tools', () => {
       expect(result.error?.code).toBe('MAIL_MAILBOX_EXISTS');
       expect(result.error?.message).toContain('Invalid name (received: "Clients")');
       expect(result.error?.message).toContain('moveEmails');
+    });
+
+    it('a new name the parent already has asks the user for another name', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        new Error(
+          "mail.rename_mailbox failed: MAIL_MAILBOX_EXISTS: Mailbox 'Clients/Acme Corp' already exists in account 'Work'."
+        )
+      );
+
+      const result = await handleRenameMailbox({
+        mailbox: 'Clients/Acme',
+        account: 'Work',
+        new_name: 'Acme Corp',
+      });
+
+      expect(result.error?.code).toBe('MAIL_MAILBOX_EXISTS');
+      expect(result.error?.message).toContain('Invalid new_name (received: "Acme Corp")');
+      expect(result.error?.message).toContain('another name');
+      expect(result.error?.message).not.toContain('moveEmails');
+    });
+
+    it('a special mailbox keeps its name and the error says so', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        new Error(
+          "mail.rename_mailbox failed: MAIL_SPECIAL_MAILBOX: Mailbox 'INBOX' is the Inbox, Drafts, Sent, Junk, Trash, Outbox or Archive mailbox of account 'Work', which keeps its name, so nothing was renamed."
+        )
+      );
+
+      const result = await handleRenameMailbox({
+        mailbox: 'INBOX',
+        account: 'Work',
+        new_name: 'In',
+      });
+
+      expect(result.error?.code).toBe('MAIL_SPECIAL_MAILBOX');
+      expect(result.error?.message).toContain('Invalid mailbox (received: "INBOX")');
+      expect(result.error?.message).toContain('createMailbox');
     });
 
     it('a target mailbox that does not exist points at listMailboxes and createMailbox', async () => {
@@ -1597,7 +1743,7 @@ describe('mail-tools', () => {
       vi.mocked(runCommand).mockRejectedValue(
         cliFailure(
           'save_draft',
-          "MAIL_ACCOUNT_DISABLED: Account 'Google' is turned off in Mail.app, so Mail would file the draft in another account."
+          "MAIL_ACCOUNT_DISABLED: Account 'Google' is turned off in Mail.app, so Mail would send or file the message from another account."
         )
       );
 
@@ -1700,6 +1846,20 @@ describe('mail-tools', () => {
       expect(result.error?.message).toContain('listEmails');
     });
 
+    it('a Mail without an address to send from asks the user to set up an account', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        cliFailure(
+          'send_email',
+          'MAIL_NO_SENDER: Mail.app has no turned-on account with an email address to send from.'
+        )
+      );
+
+      const result = await handleSendEmail({ to: 'a@x', subject: 's', body: 'b' });
+
+      expect(result.error?.code).toBe('MAIL_NO_SENDER');
+      expect(result.error?.message).toContain('Mail > Settings > Accounts');
+    });
+
     it('a send Mail did not complete asks the user instead of retrying', async () => {
       vi.mocked(runCommand).mockRejectedValue(
         cliFailure(
@@ -1758,6 +1918,7 @@ const SEND_PREVIEW = {
   confirm_param: 'confirm_send',
   instruction:
     'Nothing was changed. Show this preview to the user and ask the user: Send this email? …',
+  from: 'Me <me@example.com>',
   to: ['bob@example.com'],
   cc: [],
   bcc: [],
@@ -1772,6 +1933,7 @@ const REPLY_PREVIEW = {
     'Nothing was changed. Show this preview to the user and ask the user: Send this reply? …',
   to: ['anna@x'],
   cc: ['ewa@x'],
+  bcc: [],
   subject: 'Re: Hi',
   body: 'Thanks!\n\nOn 20 Oct 2026 at 09:15, Anna <anna@x> wrote:\n\n> Hello\n',
 };
@@ -1818,6 +1980,7 @@ const REDIRECT_SENT = {
 
 const DRAFT_SAVED = {
   status: 'saved',
+  from: 'Work Me <me@work.example>',
   to: ['bob@example.com'],
   cc: [],
   bcc: [],
@@ -1867,6 +2030,11 @@ const ORGANIZE_REPORT = {
   failed: 1,
 };
 
+const NOT_SPAM_REPORT = {
+  ...ORGANIZE_REPORT,
+  emails: [{ ...ORGANIZE_REPORT.emails[0], moved: true }, ORGANIZE_REPORT.emails[1]],
+};
+
 /**
  * One sample carrying every key a gated batch tool emits, from its preview and from its per-mail report.
  * @param preview - The unconfirmed answer.
@@ -1904,6 +2072,8 @@ function validInput(name: string): Record<string, unknown> {
     archiveEmails: { ids: [MAIL_ID] },
     createMailbox: { name: 'Clients', account: 'Work' },
     markEmailsSpam: { ids: [MAIL_ID], confirm_spam: true },
+    markEmailsNotSpam: { ids: [MAIL_ID] },
+    renameMailbox: { mailbox: 'Clients', account: 'Work', new_name: 'Customers' },
     saveDraft: { subject: 's', body: 'b' },
     listMailSignatures: {},
   };

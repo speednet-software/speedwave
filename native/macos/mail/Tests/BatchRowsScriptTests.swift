@@ -17,9 +17,11 @@ final class BatchRowsScriptTests: XCTestCase {
         set end of spwRows to {"error", "", "", missing value, "SPW_ARCHIVE_NOT_FOUND (-2700)"}
         """
 
-    private func rowsTail(of command: String, _ params: [String: Any]) throws -> String {
+    private func rowsTail(
+        of command: String, _ params: [String: Any], reply: [String] = ["ok", "", "", "", ""]
+    ) throws -> String {
         let harness = MailCommandHarness()
-        harness.executor.reply(["ok", "", "", "", ""].joined(separator: MailBatch.fieldSeparator))
+        harness.executor.reply(reply.joined(separator: MailBatch.fieldSeparator))
         _ = try harness.call(command, params)
         let script = try XCTUnwrap(harness.executor.calls.first?.script)
         let end = try XCTUnwrap(script.range(of: "end tell", options: .backwards))
@@ -45,5 +47,23 @@ final class BatchRowsScriptTests: XCTestCase {
                 lines.last?.components(separatedBy: MailBatch.fieldSeparator),
                 ["error", "", "", "", "SPW_ARCHIVE_NOT_FOUND (-2700)"], command)
         }
+    }
+
+    func testTheRowsOfABatchCommandThatReportsPerMailCarryTheReportedBooleanAsTextInRealAppleScript() throws {
+        let rows = syntheticRows
+            .replacingOccurrences(of: "spwReceived, \"\"}", with: "spwReceived, \"\", true}")
+            .replacingOccurrences(of: "(-2700)\"}", with: "(-2700)\", false}")
+        let tail = try rowsTail(
+            of: "mark_emails_not_spam", ["ids": [mail.encoded]], reply: ["ok", "", "", "", "", "false"])
+
+        let output = try osascriptExecutor(rows + tail, 15)
+
+        let lines = output.components(separatedBy: MailBatch.rowSeparator)
+        XCTAssertEqual(
+            lines.first?.components(separatedBy: MailBatch.fieldSeparator),
+            ["ok", "Zażółć \"q\"", "Anna <anna@x>", "2026-10-20T09:15:00", "", "true"])
+        XCTAssertEqual(
+            lines.last?.components(separatedBy: MailBatch.fieldSeparator),
+            ["error", "", "", "", "SPW_ARCHIVE_NOT_FOUND (-2700)", "false"])
     }
 }
