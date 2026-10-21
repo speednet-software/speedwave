@@ -152,12 +152,12 @@ export async function useCheapOpenRouterModel(): Promise<void> {
 }
 
 export async function saveProvider(): Promise<void> {
-  const saveBtn = await $('[data-testid="settings-llm-save"]');
-  await browser.waitUntil(async () => await saveBtn.isEnabled(), {
+  const saveBtn = '[data-testid="settings-llm-save"]';
+  await browser.waitUntil(async () => await $(saveBtn).isEnabled(), {
     timeout: 10_000,
     timeoutMsg: 'Save button did not become enabled',
   });
-  await saveBtn.click();
+  await (await $(saveBtn)).click();
   await (await $('[data-testid="settings-llm-saved"]')).waitForExist({ timeout: 15_000 });
 }
 
@@ -193,16 +193,17 @@ export async function toggleIntegration(service: string): Promise<void> {
 }
 
 export async function sendMessageNoWait(text: string): Promise<void> {
-  const input = await $('[data-testid="chat-input"]');
-  await input.waitForExist({ timeout: 15_000 });
-  await input.setValue(text);
-
-  const sendBtn = await $('[data-testid="chat-send"]');
-  await browser.waitUntil(async () => await sendBtn.isEnabled(), {
-    timeout: 60_000,
-    timeoutMsg: 'chat-send never became enabled',
-  });
-  await sendBtn.click();
+  await $('[data-testid="chat-input"]').waitForExist({ timeout: 15_000 });
+  await browser.waitUntil(
+    async () => {
+      const input = await $('[data-testid="chat-input"]');
+      if (!(await input.isExisting())) return false;
+      if ((await input.getValue()) !== text) await input.setValue(text);
+      return await $('[data-testid="chat-send"]').isEnabled();
+    },
+    { timeout: 60_000, interval: 500, timeoutMsg: 'chat-send never became enabled' }
+  );
+  await (await $('[data-testid="chat-send"]')).click();
 }
 
 export async function queueMessageViaEnter(text: string): Promise<void> {
