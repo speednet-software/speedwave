@@ -16,8 +16,7 @@ let mailFlagColors = ["red", "orange", "yellow", "green", "blue", "purple", "gra
 /// The mailbox paths `archive_emails` looks for, first match wins, inside the mail's own account.
 let archiveMailboxNames = ["Archive", "[Gmail]/All Mail"]
 
-/// The application properties of Mail's special mailboxes, each holding one child per account; `rename_mailbox`
-/// refuses them and the archive mailbox.
+/// The application properties of Mail's special mailboxes, which `rename_mailbox` refuses with the archive mailbox.
 private let specialMailboxProperties = [
     "inbox", "drafts mailbox", "sent mailbox", "junk mailbox", "trash mailbox", "outbox",
 ]
@@ -95,8 +94,8 @@ func markEmailsSpam(params: [String: Any], scripts: MailScripts) throws -> [Stri
     )
 }
 
-/// The `mark_emails_not_spam` command: clears the junk status of each mail, which trains Mail's filter, and moves a
-/// mail in the Junk mailbox of its own account to the Inbox of that account; each mail reports whether it moved.
+/// The `mark_emails_not_spam` command: clears the junk status of each mail and moves one in its account's Junk to
+/// that account's Inbox; each mail reports whether it moved.
 func markEmailsNotSpam(params: [String: Any], scripts: MailScripts) throws -> [String: Any] {
     let batch = try MailBatch(params: params)
     return try batch.apply(scripts: scripts, action: MailAction(
@@ -128,32 +127,25 @@ func createMailbox(params: [String: Any], scripts: MailScripts) throws -> [Strin
     guard let account = params["account"] as? String else {
         throw MailError.missingField("account")
     }
-    let nameEsc = escapeAppleScript(name)
-    let make = "make new mailbox with properties {name:\"\(nameEsc)\"}"
-    let body: String
-    if account == AppleMailClient.localAccountName {
-        body = """
-                if exists mailbox "\(nameEsc)" then error "\(mailboxExistsMarker)"
-                \(make)
-            """
-    } else {
-        let accountEsc = escapeAppleScript(account)
-        body = """
-                if not (exists account "\(accountEsc)") then error "\(accountNotFoundMarker)"
-                if exists mailbox "\(nameEsc)" of account "\(accountEsc)" then error "\(mailboxExistsMarker)"
-                tell account "\(accountEsc)" to \(make)
-            """
-    }
-    _ = try scripts.run("tell application \"Mail\"\n\(body)\nend tell", mailbox: name, account: account)
+    let make = "make new mailbox with properties {name:\"\(escapeAppleScript(name))\"}"
+    let local = account == AppleMailClient.localAccountName
+    let lines = [
+        "tell application \"Mail\"",
+        local ? nil : "        \(AppleMailClient.accountExistsCheck(account))",
+        "        if exists \(AppleMailClient.mailboxSpecifier(name, account: account)) then error \"\(mailboxExistsMarker)\"",
+        local ? "        \(make)" : "        tell account \"\(escapeAppleScript(account))\" to \(make)",
+        "end tell",
+    ]
+    _ = try scripts.run(lines.compactMap { $0 }.joined(separator: "\n"), mailbox: name, account: account)
     return ["status": "created", "mailbox": name, "account": account]
 }
 
-/// The `rename_mailbox` command: renames the mailbox path `mailbox` of `account` to `new_name` inside the same parent;
-/// refuses a special mailbox of the account, found by owner, the archive mailbox, and a name the parent already has.
+/// The `rename_mailbox` command: renames the mailbox `mailbox` of `account` to `new_name` inside the same parent,
+/// refusing a special or archive mailbox and a name the parent already has.
 func renameMailbox(params: [String: Any], scripts: MailScripts) throws -> [String: Any] {
     let (mailbox, account) = try mailboxParams(params)
     guard let account = account else {
-        throw CLIError.missingField("account")
+        throw MailError.missingField("account")
     }
     guard let newName = params["new_name"] as? String else {
         throw MailError.missingField("new_name")
@@ -163,10 +155,7 @@ func renameMailbox(params: [String: Any], scripts: MailScripts) throws -> [Strin
     }
     let parent = mailbox.split(separator: "/", omittingEmptySubsequences: false).dropLast().joined(separator: "/")
     let renamed = parent.isEmpty ? newName : "\(parent)/\(newName)"
-    let renamedEsc = escapeAppleScript(renamed)
-    let taken = account == AppleMailClient.localAccountName
-        ? "mailbox \"\(renamedEsc)\""
-        : "mailbox \"\(renamedEsc)\" of account \"\(escapeAppleScript(account))\""
+    let taken = AppleMailClient.mailboxSpecifier(renamed, account: account)
     let refuse = "        if mb is spwSpecial then error \"\(specialMailboxMarker)\""
     let checks = specialMailboxProperties.map { accountSpecialLookup($0, into: "spwSpecial") }
         + [archiveLookup(into: "spwSpecial")]

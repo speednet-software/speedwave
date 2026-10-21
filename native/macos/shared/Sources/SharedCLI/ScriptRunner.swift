@@ -47,7 +47,7 @@ public enum ScriptRunner {
     }
 }
 
-/// Drains a pipe on a background queue from the moment it is made, so a child never blocks on a full pipe.
+/// Drains a pipe on a background queue from the moment it is made.
 private final class PipeReader: @unchecked Sendable {
     private let done = DispatchGroup()
     private var collected = Data()

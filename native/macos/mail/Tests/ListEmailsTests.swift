@@ -174,7 +174,7 @@ final class ListEmailsTests: XCTestCase {
         let script = try XCTUnwrap(harness.executor.calls.first?.script)
         XCTAssertTrue(
             script.contains("set spwFlags to flag index of every message of mb whose read status is false\n"), script)
-        XCTAssertTrue(script.contains("spwReads as text, spwFlags as text, spwAttachmentCounts as text}"), script)
+        XCTAssertTrue(script.contains("spwReads as text, spwFlags as text, spwAttachments as text}"), script)
     }
 
     func testEachRowCarriesItsAttachmentCount() throws {

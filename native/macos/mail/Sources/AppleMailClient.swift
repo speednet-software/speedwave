@@ -8,9 +8,9 @@ enum AppleMailClient {
     /// The account name `listMailboxes` gives the On My Mac mailboxes, which belong to no account.
     static let localAccountName = "On My Mac"
 
-    static let listFieldSeparator = "\u{1D}"
-    static let listItemSeparator = "\u{1E}"
-    static let mailboxSeparator = "\u{1C}"
+    private static let listFieldSeparator = "\u{1D}"
+    private static let listItemSeparator = "\u{1E}"
+    private static let mailboxSeparator = "\u{1C}"
 
     /// One message of a listing, before paging.
     struct ListedMessage {
@@ -38,9 +38,8 @@ enum AppleMailClient {
         }
     }
 
-    /// Which messages of a mailbox a listing reads; Mail evaluates every condition. A recipient matches a To or Cc
-    /// address, a query the subject or the sender, and with `searchBody` also the content, which Mail scans in a
-    /// separate, slower request.
+    /// Which messages a listing reads, as one `whose` clause; a recipient matches a To or Cc address, a query the
+    /// subject or the sender, and with `searchBody` also the content, in a separate request.
     struct MessageFilter {
         var unreadOnly = false
         var flaggedOnly = false
@@ -119,6 +118,41 @@ enum AppleMailClient {
         }
     }
 
+    /// One message property a listing reads with one Apple Event, and the handler that turns Mail's answer into
+    /// text items when it is not text already.
+    private struct ListedColumn {
+        let variable: String
+        let read: String
+        var nested = false
+        var toText: String?
+
+        func reading(_ scope: String) -> String {
+            "    set \(variable) to \(read) \(nested ? "(\(scope))" : scope)"
+        }
+    }
+
+    /// The columns of a listing in output order.
+    private static let listedColumns = [
+        ListedColumn(variable: "spwIds", read: "message id of"),
+        ListedColumn(variable: "spwSubjects", read: "subject of"),
+        ListedColumn(variable: "spwSenders", read: "sender of"),
+        ListedColumn(variable: "spwDates", read: "date received of", toText: "spwIsoTexts"),
+        ListedColumn(variable: "spwReads", read: "read status of"),
+        ListedColumn(variable: "spwFlags", read: "flag index of"),
+        ListedColumn(variable: "spwAttachments", read: "name of mail attachments of", nested: true, toText: "spwCounts"),
+    ]
+
+    /// The AppleScript line that fails with `accountNotFoundMarker` unless Mail has the account `account`.
+    static func accountExistsCheck(_ account: String) -> String {
+        "if not (exists account \"\(escapeAppleScript(account))\") then error \"\(accountNotFoundMarker)\""
+    }
+
+    /// The AppleScript specifier of the mailbox path `path` in `account`; app-level for `localAccountName`.
+    static func mailboxSpecifier(_ path: String, account: String) -> String {
+        let mailbox = "mailbox \"\(escapeAppleScript(path))\""
+        return account == localAccountName ? mailbox : "\(mailbox) of account \"\(escapeAppleScript(account))\""
+    }
+
     /// AppleScript lines, run inside `tell application "Mail"`, that set `mb` to the mailbox named `name` in
     /// `account`, or in the one account or On My Mac that has it, and `spwAcctName` to that account's name.
     /// An app-level `mailbox "X"` reaches only On My Mac, so an account mailbox is always `mailbox "X" of account`.
@@ -126,9 +160,10 @@ enum AppleMailClient {
         let nameEsc = escapeAppleScript(name)
         let localEsc = escapeAppleScript(localAccountName)
         if account == localAccountName {
+            let local = mailboxSpecifier(name, account: localAccountName)
             return """
-                if not (exists mailbox "\(nameEsc)") then error "\(mailboxNotFoundMarker)"
-                set mb to mailbox "\(nameEsc)"
+                if not (exists \(local)) then error "\(mailboxNotFoundMarker)"
+                set mb to \(local)
                 set spwAcctName to "\(localEsc)"
             """
         }
@@ -136,9 +171,8 @@ enum AppleMailClient {
         var accountCheck = ""
         var localCheck = ""
         if let account = account {
-            let accountEsc = escapeAppleScript(account)
-            accounts = "{account \"\(accountEsc)\"}"
-            accountCheck = "    if not (exists account \"\(accountEsc)\") then error \"\(accountNotFoundMarker)\"\n"
+            accounts = "{account \"\(escapeAppleScript(account))\"}"
+            accountCheck = "    \(accountExistsCheck(account))\n"
         } else {
             localCheck = """
 
@@ -181,26 +215,20 @@ enum AppleMailClient {
         """
     }
 
-    /// Lists every mailbox of every account, then the On My Mac mailboxes under `localAccountName`, each with
-    /// `name` as its path inside the account (`Inbox/Clients`), the form `mailbox "<path>" of account` resolves;
-    /// Mail reports a nested mailbox by its last segment only. Each account costs six bulk reads, whatever its
-    /// number of mailboxes; the paths and counts are worked out after Mail answered.
-    static let listMailboxesScript = """
+    /// Lists every mailbox of every account, then the On My Mac mailboxes under `localAccountName`, each `name`
+    /// being its path inside the account (`Inbox/Clients`), with its message and unread counts.
+    private static let listMailboxesScript = """
         tell application "Mail"
             set spwScopes to {}
             repeat with spwAcctRef in accounts
                 set spwAcct to contents of spwAcctRef
                 set spwAcctName to name of spwAcct
-                set spwBoxes to every mailbox of spwAcct
-                set spwNames to name of every mailbox of spwAcct
-                set spwParents to container of every mailbox of spwAcct
+        \(mailboxReads(of: "spwAcct"))
                 set spwIds to id of every message of every mailbox of spwAcct
                 set spwUnread to unread count of every mailbox of spwAcct
                 set end of spwScopes to {spwAcctName, spwBoxes, spwNames, spwParents, spwIds, spwUnread, missing value}
             end repeat
-            set spwBoxes to every mailbox
-            set spwNames to name of every mailbox
-            set spwParents to container of every mailbox
+        \(mailboxReads(of: nil))
             set spwIds to id of every message of every mailbox
             set spwUnread to unread count of every mailbox
             set spwOwners to account of every mailbox
@@ -232,8 +260,18 @@ enum AppleMailClient {
         \(mailboxPathHandler)
         """
 
-    /// An AppleScript handler, placed after a script's statements, giving the path inside its account of mailbox
-    /// `spwI` of the bulk-read lists: every container that `is` another listed mailbox puts that one's name in front.
+    /// AppleScript lines that set `spwBoxes`, `spwNames` and `spwParents` to every mailbox of `owner` (the
+    /// application without one), its name and its container.
+    private static func mailboxReads(of owner: String?) -> String {
+        let mailboxes = "every mailbox" + (owner.map { " of \($0)" } ?? "")
+        return """
+                set spwBoxes to \(mailboxes)
+                set spwNames to name of \(mailboxes)
+                set spwParents to container of \(mailboxes)
+            """
+    }
+
+    /// An AppleScript handler giving the path inside its account of mailbox `spwI` of the bulk-read lists.
     private static let mailboxPathHandler = """
         on spwMailboxPath(spwI, spwBoxes, spwNames, spwParents)
             set spwCount to count of spwBoxes
@@ -267,9 +305,8 @@ enum AppleMailClient {
         }
     }
 
-    /// The newest-first page `offset..<offset+limit` of the messages `filter` keeps in `mailbox`, or without one in
-    /// every mailbox of `account` (every account and On My Mac without either) but its Trash and Junk, and the total
-    /// the page is cut from.
+    /// The newest-first page `offset..<offset+limit` of the messages `filter` keeps in `mailbox`, or else in every
+    /// mailbox of `account` (of all accounts) but its Trash and Junk, and the total the page is cut from.
     static func listEmails(
         scripts: MailScripts,
         mailbox: String?,
@@ -291,54 +328,36 @@ enum AppleMailClient {
         return ["emails": page.map(\.json), "total": sorted.count]
     }
 
-    /// Reads each property of every message `filter` keeps with one Apple Event; prints the account name, then one
-    /// field per property (the flag as Mail's `flag index`, -1 when unflagged, and the number of attachments), items
-    /// joined by `listItemSeparator` and fields by `listFieldSeparator`. A body search adds a last field with the
-    /// Message-IDs whose content matched.
-    static func listEmailsScript(mailbox: String, account: String?, filter: MessageFilter) -> String {
+    /// Reads each listed column of every message `filter` keeps in one mailbox, one Apple Event per column; prints
+    /// the account, then the columns, and for a body search the Message-IDs whose content matched.
+    private static func listEmailsScript(mailbox: String, account: String?, filter: MessageFilter) -> String {
         let bodyRead = filter.bodyScope.map { "\n    set spwBodyIds to message id of \($0)" } ?? ""
-        let bodyField = filter.bodyScope == nil ? "" : ", spwBodyIds as text"
+        let fields = ["spwAcctName"] + listedColumns.map { "\($0.variable) as text" }
+            + (filter.bodyScope == nil ? [] : ["spwBodyIds as text"])
+        let toText = listedColumns.compactMap { column in
+            column.toText.map { "set \(column.variable) to \($0)(\(column.variable))" }
+        }
         return """
         \(filter.setup)tell application "Mail"
         \(mailboxLookup(name: mailbox, account: account))
         \(propertyReads(filter.propertyScope(of: "mb")))\(bodyRead)
         end tell
-        set spwAttachmentCounts to spwCounts(spwAttachments)
-        set spwIsoDates to {}
-        repeat with spwDateRef in spwDates
-            set spwDate to contents of spwDateRef
-            if class of spwDate is date then
-                set end of spwIsoDates to (spwDate as «class isot» as string)
-            else
-                set end of spwIsoDates to ""
-            end if
-        end repeat
+        \(toText.joined(separator: "\n"))
         set AppleScript's text item delimiters to (character id 30)
-        set spwFields to {spwAcctName, spwIds as text, spwSubjects as text, spwSenders as text, spwIsoDates as text, spwReads as text, spwFlags as text, spwAttachmentCounts as text\(bodyField)}
+        set spwFields to {\(fields.joined(separator: ", "))}
         set AppleScript's text item delimiters to (character id 29)
         return spwFields as text
-        \(attachmentCountHandler)
+        \(listingHandlers)
         """
     }
 
-    /// AppleScript lines that read each listed property of the messages `scope` names with one Apple Event each.
-    /// The attachments are read through a parenthesized scope, since a `whose` clause filters the outermost
-    /// elements of a reference and would otherwise filter the attachments instead of the messages.
+    /// AppleScript lines that read each listed column of the messages `scope` names.
     private static func propertyReads(_ scope: String) -> String {
-        """
-            set spwIds to message id of \(scope)
-            set spwSubjects to subject of \(scope)
-            set spwSenders to sender of \(scope)
-            set spwDates to date received of \(scope)
-            set spwReads to read status of \(scope)
-            set spwFlags to flag index of \(scope)
-            set spwAttachments to name of mail attachments of (\(scope))
-        """
+        listedColumns.map { $0.reading(scope) }.joined(separator: "\n")
     }
 
-    /// An AppleScript handler, placed after a script's statements, giving the number of items of each list of
-    /// `spwLists` (0 for an item that is not a list): the attachment names Mail answers per message.
-    private static let attachmentCountHandler = """
+    /// The AppleScript handlers named by `ListedColumn.toText`, placed after a script's statements.
+    private static let listingHandlers = """
         on spwCounts(spwLists)
             set spwResult to {}
             repeat with spwListRef in spwLists
@@ -351,20 +370,30 @@ enum AppleMailClient {
             end repeat
             return spwResult
         end spwCounts
+        on spwIsoTexts(spwDates)
+            set spwResult to {}
+            repeat with spwDateRef in spwDates
+                set spwDate to contents of spwDateRef
+                if class of spwDate is date then
+                    set end of spwResult to (spwDate as «class isot» as string)
+                else
+                    set end of spwResult to ""
+                end if
+            end repeat
+            return spwResult
+        end spwIsoTexts
         """
 
-    /// Reads each property of the messages `filter` keeps in every mailbox of an account with one Apple Event,
-    /// which answers one list per mailbox; prints one section per mailbox that has any, `mailboxSeparator` between
-    /// them, each the account, the mailbox path and the fields of a `listEmailsScript` output. The account's Trash
-    /// and Junk are found as `accountSpecialLookup` finds them and left out.
-    static func searchAllMailboxesScript(account: String?, filter: MessageFilter) -> String {
+    /// Reads each listed column of the messages `filter` keeps in every mailbox of `account` (of all accounts) but
+    /// its Trash and Junk; prints one section per mailbox with hits: the account, the path and the columns.
+    private static func searchAllMailboxesScript(account: String?, filter: MessageFilter) -> String {
+        let columns = "{" + listedColumns.map(\.variable).joined(separator: ", ") + "}"
         var reads = ""
         if account != localAccountName {
             var accounts = "accounts"
             if let account {
-                let accountEsc = escapeAppleScript(account)
-                accounts = "{account \"\(accountEsc)\"}"
-                reads += "    if not (exists account \"\(accountEsc)\") then error \"\(accountNotFoundMarker)\"\n"
+                accounts = "{account \"\(escapeAppleScript(account))\"}"
+                reads += "    \(accountExistsCheck(account))\n"
             }
             reads += """
                 repeat with spwAcctRef in \(accounts)
@@ -372,11 +401,9 @@ enum AppleMailClient {
                     set spwAcctName to name of spwAcct
             \(accountSpecialLookup("trash mailbox", into: "spwTrash"))
             \(accountSpecialLookup("junk mailbox", into: "spwJunk"))
-                    set spwBoxes to every mailbox of spwAcct
-                    set spwNames to name of every mailbox of spwAcct
-                    set spwParents to container of every mailbox of spwAcct
+            \(mailboxReads(of: "spwAcct"))
             \(propertyReads(filter.propertyScope(of: "every mailbox of spwAcct")))
-                    set end of spwScopes to {spwAcctName, spwBoxes, spwNames, spwParents, missing value, spwTrash, spwJunk, {spwIds, spwSubjects, spwSenders, spwDates, spwReads, spwFlags, spwAttachments}}
+                    set end of spwScopes to {spwAcctName, spwBoxes, spwNames, spwParents, missing value, spwTrash, spwJunk, \(columns)}
                 end repeat
 
             """
@@ -386,15 +413,20 @@ enum AppleMailClient {
                 set spwAcctName to "\(escapeAppleScript(localAccountName))"
             \(accountSpecialLookup("trash mailbox", into: "spwTrash"))
             \(accountSpecialLookup("junk mailbox", into: "spwJunk"))
-                set spwBoxes to every mailbox
-                set spwNames to name of every mailbox
-                set spwParents to container of every mailbox
+            \(mailboxReads(of: nil))
                 set spwOwners to account of every mailbox
             \(propertyReads(filter.propertyScope(of: "every mailbox")))
-                set end of spwScopes to {spwAcctName, spwBoxes, spwNames, spwParents, spwOwners, spwTrash, spwJunk, {spwIds, spwSubjects, spwSenders, spwDates, spwReads, spwFlags, spwAttachments}}
+                set end of spwScopes to {spwAcctName, spwBoxes, spwNames, spwParents, spwOwners, spwTrash, spwJunk, \(columns)}
 
             """
         }
+        let sectionColumns = listedColumns.enumerated().map { index, column in
+            let toText = column.toText.map { "\n                set spwColumn to \($0)(spwColumn)" } ?? ""
+            return """
+                            set spwColumn to item spwI of item \(index + 1) of spwColumns\(toText)
+                            set end of spwFields to (spwColumn as text)
+                """
+        }.joined(separator: "\n")
         return """
         \(filter.setup)tell application "Mail"
             set spwScopes to {}
@@ -415,43 +447,22 @@ enum AppleMailClient {
             if spwOwners is not missing value then
                 if (count of spwOwners) is not spwCount then error "\(mailboxesChangedMarker)"
             end if
-            repeat with spwC from 1 to 7
-                set spwColumn to item spwC of spwColumns
+            if (count of spwColumns) is not \(listedColumns.count) then error "\(mailboxesChangedMarker)"
+            repeat with spwColumnRef in spwColumns
+                set spwColumn to contents of spwColumnRef
                 if (count of spwColumn) is not spwCount then error "\(mailboxesChangedMarker)"
             end repeat
             repeat with spwI from 1 to spwCount
                 set spwBox to item spwI of spwBoxes
-                set spwMessageIds to item spwI of item 1 of spwColumns
-                set spwKeep to (count of spwMessageIds) > 0
+                set spwKeep to (count of item spwI of item 1 of spwColumns) > 0
                 if spwOwners is not missing value then
                     if item spwI of spwOwners is not missing value then set spwKeep to false
                 end if
                 if spwBox is spwTrash or spwBox is spwJunk then set spwKeep to false
                 if spwKeep then
-                    set spwIsoDates to {}
-                    repeat with spwDateRef in item spwI of item 4 of spwColumns
-                        set spwDate to contents of spwDateRef
-                        if class of spwDate is date then
-                            set end of spwIsoDates to (spwDate as «class isot» as string)
-                        else
-                            set end of spwIsoDates to ""
-                        end if
-                    end repeat
                     set AppleScript's text item delimiters to (character id 30)
-                    set spwPath to spwMailboxPath(spwI, spwBoxes, spwNames, spwParents)
-                    set spwFields to {spwAcctName, spwPath}
-                    repeat with spwC from 1 to 7
-                        if spwC is 4 then
-                            set spwText to spwIsoDates as text
-                        else if spwC is 7 then
-                            set spwAttachmentCounts to spwCounts(item spwI of item 7 of spwColumns)
-                            set spwText to spwAttachmentCounts as text
-                        else
-                            set spwColumn to item spwI of item spwC of spwColumns
-                            set spwText to spwColumn as text
-                        end if
-                        set end of spwFields to spwText
-                    end repeat
+                    set spwFields to {spwAcctName, spwMailboxPath(spwI, spwBoxes, spwNames, spwParents)}
+        \(sectionColumns)
                     set AppleScript's text item delimiters to (character id 29)
                     set end of spwSections to (spwFields as text)
                 end if
@@ -460,16 +471,16 @@ enum AppleMailClient {
         set AppleScript's text item delimiters to (character id 28)
         return spwSections as text
         \(mailboxPathHandler)
-        \(attachmentCountHandler)
+        \(listingHandlers)
         """
     }
 
     /// The messages of a `searchAllMailboxesScript` output, each with the mailbox its section names.
-    static func parseAllMailboxes(_ output: String) throws -> [ListedMessage] {
+    private static func parseAllMailboxes(_ output: String) throws -> [ListedMessage] {
         guard !output.isEmpty else { return [] }
         return try output.components(separatedBy: mailboxSeparator).flatMap { section in
             var fields = section.components(separatedBy: listFieldSeparator)
-            guard fields.count == 9 else {
+            guard fields.count == 2 + listedColumns.count else {
                 throw ScriptError.scriptFailed("Unexpected message list from Mail.app")
             }
             let mailbox = fields.remove(at: 1)
@@ -479,12 +490,14 @@ enum AppleMailClient {
 
     /// The messages of a `listEmailsScript` output, only those a body search matched when it carries their ids;
     /// fields of unequal length mean Mail changed the mailbox mid-read.
-    static func parseListing(_ output: String, mailbox: String) throws -> [ListedMessage] {
+    private static func parseListing(_ output: String, mailbox: String) throws -> [ListedMessage] {
         var fields = output.components(separatedBy: listFieldSeparator)
-        guard fields.count == 8 || fields.count == 9 else {
+        let columnCount = listedColumns.count
+        guard fields.count == 1 + columnCount || fields.count == 2 + columnCount else {
             throw ScriptError.scriptFailed("Unexpected message list from Mail.app")
         }
-        let matched = fields.count == 9 ? Set(fields.removeLast().components(separatedBy: listItemSeparator)) : nil
+        let matched = fields.count == 2 + columnCount
+            ? Set(fields.removeLast().components(separatedBy: listItemSeparator)) : nil
         let count = fields[1].isEmpty ? 0 : fields[1].components(separatedBy: listItemSeparator).count
         let columns = fields.dropFirst().map { field in
             count == 0 ? [] : field.components(separatedBy: listItemSeparator)
@@ -512,7 +525,7 @@ enum AppleMailClient {
     }
 
     /// Newest first; a message without a date goes last, and equal dates keep Mail's order.
-    static func newestFirst(_ messages: [ListedMessage]) -> [ListedMessage] {
+    private static func newestFirst(_ messages: [ListedMessage]) -> [ListedMessage] {
         messages.enumerated().sorted { a, b in
             switch (a.element.received, b.element.received) {
             case let (x?, y?) where x != y: return x > y

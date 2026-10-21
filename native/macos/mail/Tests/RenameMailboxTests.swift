@@ -115,6 +115,14 @@ final class RenameMailboxTests: XCTestCase {
         XCTAssertTrue(harness.executor.calls.isEmpty)
     }
 
+    func testAMissingAccountIsAMailErrorLikeTheOtherMissingFields() {
+        let error = harness.callFailing("rename_mailbox", ["mailbox": "Clients", "new_name": "A"])
+
+        guard case MailError.missingField("account") = error else {
+            return XCTFail("expected MailError.missingField(account), got \(error)")
+        }
+    }
+
     func testRenamingNeverDeletesAnything() throws {
         harness.executor.reply("")
 

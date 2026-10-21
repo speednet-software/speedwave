@@ -770,7 +770,7 @@ final class LiveMailTests: XCTestCase {
         }
         let reply: [String: Any] = ["id": id, "body": "Speedwave live reply with bcc", "bcc": address]
 
-        let preview = try XCTUnwrap(try call("reply_to_email", reply) as? [String: Any])
+        let preview = try XCTUnwrap(try callLeavingNoOutgoing("reply_to_email", reply) as? [String: Any])
         XCTAssertEqual(preview["status"] as? String, "confirmation_required", "\(preview)")
         XCTAssertEqual(preview["bcc"] as? [String], [address])
         guard preview["to"] as? [String] == [address], (preview["cc"] as? [String])?.isEmpty == true else {
@@ -778,7 +778,7 @@ final class LiveMailTests: XCTestCase {
         }
 
         let sent = try XCTUnwrap(
-            try call("reply_to_email", reply.merging(["confirm_send": true]) { $1 }) as? [String: Any])
+            try callLeavingNoOutgoing("reply_to_email", reply.merging(["confirm_send": true]) { $1 }) as? [String: Any])
         XCTAssertEqual(sent["status"] as? String, "sent", "\(sent)")
         XCTAssertEqual(sent["bcc"] as? [String], [address])
     }
@@ -929,10 +929,10 @@ final class LiveMailTests: XCTestCase {
         let subject = "Speedwave live sender \(UUID().uuidString)"
         let message: [String: Any] = ["to": "nobody@example.invalid", "subject": subject, "body": "B"]
 
-        let preview = try XCTUnwrap(try call("send_email", message) as? [String: Any])
+        let preview = try XCTUnwrap(try callLeavingNoOutgoing("send_email", message) as? [String: Any])
         let from = try XCTUnwrap(preview["from"] as? String, "\(preview)")
         XCTAssertTrue(from.contains("@"), from)
-        let saved = try XCTUnwrap(try call("save_draft", message) as? [String: Any])
+        let saved = try XCTUnwrap(try callLeavingNoOutgoing("save_draft", message) as? [String: Any])
         defer {
             _ = try? osascriptExecutor(
                 "tell application \"Mail\" to delete (every message of drafts mailbox whose subject is \"\(subject)\")", 30)
@@ -972,12 +972,13 @@ final class LiveMailTests: XCTestCase {
             "to": address, "subject": "Speedwave live send from \(UUID().uuidString)", "body": "From", "account": account,
         ]
 
-        let preview = try XCTUnwrap(try call("send_email", message) as? [String: Any])
+        let preview = try XCTUnwrap(try callLeavingNoOutgoing("send_email", message) as? [String: Any])
         let from = try XCTUnwrap(preview["from"] as? String, "\(preview)")
         XCTAssertTrue(from.contains(accountAddress), from)
         XCTAssertEqual(preview["account"] as? String, account)
 
-        let sent = try XCTUnwrap(try call("send_email", message.merging(["confirm_send": true]) { $1 }) as? [String: Any])
+        let sent = try XCTUnwrap(
+            try callLeavingNoOutgoing("send_email", message.merging(["confirm_send": true]) { $1 }) as? [String: Any])
         XCTAssertEqual(sent["status"] as? String, "sent", "\(sent)")
         XCTAssertEqual(sent["from"] as? String, from)
     }

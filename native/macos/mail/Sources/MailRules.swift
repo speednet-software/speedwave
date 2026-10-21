@@ -106,7 +106,7 @@ enum MailRules {
         let accountEsc = escapeAppleScript(account)
         return """
             tell application "Mail"
-                if not (exists account "\(accountEsc)") then error "\(accountNotFoundMarker)"
+                \(AppleMailClient.accountExistsCheck(account))
                 check for new mail for account "\(accountEsc)"
             end tell
             """

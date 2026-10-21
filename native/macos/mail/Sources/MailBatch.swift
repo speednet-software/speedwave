@@ -31,10 +31,8 @@ struct ConfirmationGate {
     }
 }
 
-/// What a batch command does to each mail: `lines` run on every mail found (AppleScript using `m`, `mb` and
-/// `spwAcctName`), after `setup` ran once for the whole batch; a failed setup fails the call, its lookup failures
-/// naming `mailbox` and `account`. With `reports`, the lines set the boolean `spwReported` (false before them), which
-/// each mail acted on carries under that key.
+/// What a batch command does: `setup` once, then `lines` on every mail found (`m`, `mb`, `spwAcctName`); with
+/// `reports`, the lines set the boolean `spwReported`, which each mail acted on carries under that key.
 struct MailAction {
     let lines: String
     var setup = ""
