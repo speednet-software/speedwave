@@ -275,6 +275,42 @@ describe('ThemeService', () => {
       for (const call of sync.mock.calls) expect(call).toEqual([null]);
     });
 
+    it('effectiveMode resolves auto against the system and follows its changes', () => {
+      const svc = create();
+      expect(svc.effectiveMode()).toBe('light');
+      media.fireChange(true);
+      expect(svc.effectiveMode()).toBe('dark');
+      media.fireChange(false);
+      expect(svc.effectiveMode()).toBe('light');
+    });
+
+    it('effectiveMode follows explicit modes and ignores the system while explicit', () => {
+      const svc = create();
+      svc.setMode('dark');
+      expect(svc.effectiveMode()).toBe('dark');
+      media.fireChange(false);
+      expect(svc.effectiveMode()).toBe('dark');
+      svc.setMode('light');
+      media.fireChange(true);
+      expect(svc.effectiveMode()).toBe('light');
+    });
+
+    it('effectiveMode is resolved at construction from the persisted mode', () => {
+      localStorage.setItem(MODE_STORAGE_KEY, 'dark');
+      expect(create().effectiveMode()).toBe('dark');
+    });
+
+    it('effectiveMode falls back to light when matchMedia is unavailable in auto', () => {
+      media.restore();
+      const original = Object.getOwnPropertyDescriptor(window, 'matchMedia');
+      Reflect.deleteProperty(window as unknown as Record<string, unknown>, 'matchMedia');
+      try {
+        expect(create().effectiveMode()).toBe('light');
+      } finally {
+        if (original) Object.defineProperty(window, 'matchMedia', original);
+      }
+    });
+
     it('reacts to prefers-color-scheme changes while in auto mode', () => {
       const svc = create();
       svc.setMode('auto');

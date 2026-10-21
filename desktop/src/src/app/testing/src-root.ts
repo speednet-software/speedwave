@@ -5,7 +5,7 @@ import { statSync } from 'node:fs';
  * Walks up from this file's own directory until it finds the source root, handling
  * __dirname variance under coverage.
  * @returns Absolute path of `desktop/src/src`.
- * @throws When no ancestor within six levels carries the source-root markers.
+ * @throws {Error} When no ancestor within six levels carries the source-root markers.
  */
 export function findSrcRoot(): string {
   const candidates: string[] = [];
