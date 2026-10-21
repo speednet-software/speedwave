@@ -347,6 +347,18 @@ describe('mail-tools', () => {
       expect(tool.description).toContain('Plain text only');
     });
 
+    it('warns that Mail shows scripted text as a quote only where a script sets the text', () => {
+      const description = (name: string) =>
+        createMailTools().find((t) => t.tool.name === name)!.tool.description;
+
+      for (const name of ['sendEmail', 'replyToEmail', 'saveDraft']) {
+        expect(description(name), name).toMatch(/as a quote.*tell the user/);
+      }
+      for (const name of ['forwardEmail', 'redirectEmail']) {
+        expect(description(name), name).not.toMatch(/as a quote/);
+      }
+    });
+
     it('fails when required fields are empty', async () => {
       const result = await handleSendEmail({
         to: '',

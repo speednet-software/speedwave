@@ -13,6 +13,9 @@ const READ_THEN_SEND_BUDGET = mailTimeBudget(60_000, 2);
 const PLAIN_TEXT_ONLY =
   'Plain text only: line breaks are kept, HTML is sent as literal text, and no file can be attached.';
 
+const SHOWN_AS_QUOTE =
+  'Apple Mail shows the scripted text to the recipient as a quote (">" in plain text, a cited block in HTML), a Mail bug no script avoids: tell the user before they agree.';
+
 const SIGNATURE_PROPERTY = {
   type: 'string',
   description:
@@ -101,7 +104,7 @@ export const sendEmailTool: Tool = {
   description:
     `Send a new plain-text email through Apple Mail. ${PLAIN_TEXT_ONLY} ` +
     'Without confirm_send=true nothing is sent: the call returns a preview of the recipients (to, cc, bcc), subject and text, and you must show it and ask the user before calling again with the same arguments and confirm_send=true. ' +
-    'Sending cannot be undone.',
+    `Sending cannot be undone. ${SHOWN_AS_QUOTE}`,
   annotations: DESTRUCTIVE_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
@@ -154,7 +157,7 @@ export const replyToEmailTool: Tool = {
     'Reply to an email in any mailbox, by the mail id listEmails or searchEmails returned; Mail picks the recipients and the "Re:" subject, reply_all adds every recipient of the email. ' +
     `The text goes above the quoted original, separated by a blank line and an "On <date>, <sender> wrote:" line. ${PLAIN_TEXT_ONLY} ` +
     'Without confirm_send=true nothing is sent: the call returns a preview of the recipients, subject and the full text, and you must show it and ask the user before calling again with the same arguments and confirm_send=true. ' +
-    'Sending cannot be undone.',
+    `Sending cannot be undone. ${SHOWN_AS_QUOTE}`,
   annotations: DESTRUCTIVE_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
@@ -290,7 +293,7 @@ export const saveDraftTool: Tool = {
   description:
     `Save a new plain-text email as a draft in Apple Mail without sending it, for the user to finish and send in Mail.app. ${PLAIN_TEXT_ONLY} ` +
     "The draft lands in the Drafts mailbox of account (Mail's default account when omitted). No confirmation is needed: nothing is sent and the user can delete the draft. " +
-    'Recipients and text are optional.',
+    `Recipients and text are optional. ${SHOWN_AS_QUOTE}`,
   annotations: WRITE_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
