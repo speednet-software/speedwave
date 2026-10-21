@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::transcription::audio::{AudioSourceInfo, CaptureWarning};
-use crate::transcription::transcriber::{Language, Segment};
+use crate::transcription::transcriber::{Language, Segment, TranscriptSource};
 
 /// On-disk filename for the persisted session.
 pub const TRANSCRIPT_JSON: &str = "transcript.json";
@@ -47,7 +47,7 @@ pub enum TranscriptStatus {
     },
 }
 
-/// Which Whisper model was used for each pass.
+/// Which model was used for each pass.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModelsUsed {
     /// Whisper catalogue key used for the live pass; `None` = record-only (no live pass ran
@@ -55,7 +55,26 @@ pub struct ModelsUsed {
     pub live: Option<String>,
     /// Whisper catalogue key used for the higher-quality offline pass.
     pub finalize: Option<String>,
+    /// Diarization model key when the offline pass that made the transcript told speakers
+    /// apart (ADR-098); `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diarization: Option<String>,
 }
+
+/// What an offline pass that told speakers apart records: its diarization model and the
+/// seconds that took.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiarizationRecord {
+    /// Diarization model key.
+    pub model: String,
+    /// Seconds the diarization took.
+    pub secs: f64,
+}
+
+const SPEAKER_LABEL: &str = "Speaker";
+const SPEAKERS_NOTE: &str = "told apart from the meeting audio; approximate: one person can get \
+several labels and one label several people; a 'Meeting' line without a number has no \
+recognised speaker";
 
 /// One transcript session — the persisted artifact.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -89,6 +108,10 @@ pub struct TranscriptSession {
     pub active_warnings: Vec<CaptureWarning>,
     /// What models were used for each pass.
     pub models_used: ModelsUsed,
+    /// Seconds the speaker diarization of the offline pass that made the transcript took;
+    /// `None` when that pass did not tell speakers apart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diarization_secs: Option<f64>,
     /// Last event seq emitted for this session — for snapshot+stream resume.
     pub last_seq: u64,
     /// Uncommitted tail of the latest live decode — replace-only display state,
@@ -169,6 +192,7 @@ impl TranscriptSession {
             audio_parts: Vec::new(),
             active_warnings: Vec::new(),
             models_used: ModelsUsed::default(),
+            diarization_secs: None,
             last_seq: 0,
             live_draft: String::new(),
             prior_live_model: None,
@@ -196,9 +220,19 @@ impl TranscriptSession {
         }
     }
 
-    /// Installs `final_segments` from the higher-quality offline pass.
-    pub fn set_final_segments(&mut self, final_segs: Vec<Segment>) {
+    /// Installs `final_segments` from the higher-quality offline pass with the diarization
+    /// record of that pass, replacing the record of the transcript they replace.
+    pub fn set_final_segments(
+        &mut self,
+        final_segs: Vec<Segment>,
+        diarization: Option<DiarizationRecord>,
+    ) {
         self.final_segments = Some(final_segs);
+        let (model, secs) = diarization
+            .map(|d| (Some(d.model), Some(d.secs)))
+            .unwrap_or_default();
+        self.models_used.diarization = model;
+        self.diarization_secs = secs;
     }
 
     /// The recordings-list row for this session; `dir` is its directory, read for the audio
@@ -244,7 +278,8 @@ impl TranscriptSession {
     }
 
     /// Renders the transcript as markdown: a header plus one timestamped line per segment,
-    /// channel-labelled on paired captures (channel attribution, not diarization — ADR-075).
+    /// channel-labelled on paired captures, with the speaker number on diarized meeting-channel
+    /// segments (ADR-098).
     pub fn to_markdown(&self) -> String {
         let mut s = String::new();
         match &self.title {
@@ -256,7 +291,27 @@ impl TranscriptSession {
         }
         s.push_str(&format!("- Language: `{}`\n", self.language.code()));
         s.push_str(&format!("- Source: {}\n", self.audio_source.label));
-        s.push_str(&format!("- Status: {}\n\n", status_label(&self.status)));
+        s.push_str(&format!("- Status: {}\n", status_label(&self.status)));
+        if self.models_used.diarization.is_some() {
+            let mut speakers: Vec<u32> = self
+                .effective_segments()
+                .iter()
+                .filter_map(|seg| seg.speaker_id)
+                .collect();
+            speakers.sort_unstable();
+            speakers.dedup();
+            if !speakers.is_empty() {
+                let names: Vec<String> = speakers
+                    .iter()
+                    .map(|n| format!("{SPEAKER_LABEL} {n}"))
+                    .collect();
+                s.push_str(&format!(
+                    "- Speakers: {} ({SPEAKERS_NOTE})\n",
+                    names.join(", ")
+                ));
+            }
+        }
+        s.push('\n');
         let mut segments: Vec<&Segment> = self.effective_segments().iter().collect();
         segments.sort_by_key(|seg| seg.start);
         for seg in segments {
@@ -264,9 +319,12 @@ impl TranscriptSession {
             if text.is_empty() {
                 continue;
             }
-            let label = match seg.source {
-                Some(src) => format!(" {}:", src.label()),
-                None => String::new(),
+            let label = match (seg.source, seg.speaker_id) {
+                (Some(src @ TranscriptSource::System), Some(n)) => {
+                    format!(" {} · {SPEAKER_LABEL} {n}:", src.label())
+                }
+                (Some(src), _) => format!(" {}:", src.label()),
+                (None, _) => String::new(),
             };
             s.push_str(&format!("**({}){label}** {text}\n\n", fmt_ts(seg.start)));
         }
@@ -400,6 +458,11 @@ mod tests {
     use crate::transcription::audio::AudioSource;
     use std::time::Duration;
 
+    fn ts_interface_body<'a>(src: &'a str, name: &str) -> &'a str {
+        let start = src.find(&format!("export interface {name} {{")).unwrap();
+        &src[start..start + src[start..].find("\n}").unwrap()]
+    }
+
     fn mk_source() -> AudioSourceInfo {
         AudioSourceInfo {
             source: AudioSource::SystemWide,
@@ -413,6 +476,7 @@ mod tests {
             text: text.to_string(),
             words: vec![],
             source: None,
+            speaker_id: None,
         }
     }
 
@@ -453,9 +517,46 @@ mod tests {
         s.live_segments = vec![seg(0.0, 1.0, "live")];
         assert_eq!(s.effective_segments().len(), 1);
         assert_eq!(s.effective_segments()[0].text, "live");
-        s.set_final_segments(vec![seg(0.0, 2.0, "final")]);
+        s.set_final_segments(vec![seg(0.0, 2.0, "final")], None);
         assert_eq!(s.effective_segments().len(), 1);
         assert_eq!(s.effective_segments()[0].text, "final");
+    }
+
+    #[test]
+    fn new_final_segments_carry_their_own_diarization_record_and_drop_the_old_one() {
+        let mut s = diarized_session();
+        s.diarization_secs = Some(3.0);
+        s.set_final_segments(vec![seg(0.0, 1.0, "nowe")], None);
+        assert_eq!(s.models_used.diarization, None);
+        assert_eq!(s.diarization_secs, None);
+        assert_eq!(s.effective_segments()[0].text, "nowe");
+
+        s.set_final_segments(
+            vec![seg(0.0, 1.0, "nowsze")],
+            Some(DiarizationRecord {
+                model: "m".to_string(),
+                secs: 12.5,
+            }),
+        );
+        assert_eq!(s.models_used.diarization.as_deref(), Some("m"));
+        assert_eq!(s.diarization_secs, Some(12.5));
+    }
+
+    #[test]
+    fn speaker_label_matches_ts_mirrors() {
+        let pane = include_str!(
+            "../../../../desktop/src/src/app/meeting-transcription/live-transcript/live-transcript.component.ts"
+        );
+        let service =
+            include_str!("../../../../desktop/src/src/app/services/transcription.service.ts");
+        assert!(
+            pane.contains(&format!("`Meeting · {SPEAKER_LABEL} ${{n}}`")),
+            "live-transcript.component.ts must label a diarized meeting line `Meeting · {SPEAKER_LABEL} N`"
+        );
+        assert!(
+            service.contains(&format!("'{SPEAKER_LABEL} N'")),
+            "transcription.service.ts SPEAKER_LABELS_PROMPT must name the labels as '{SPEAKER_LABEL} N'"
+        );
     }
 
     #[test]
@@ -471,7 +572,10 @@ mod tests {
         assert!(md.contains("Language: `pl`"));
         assert!(md.contains("**(00:00.00)** Cześć!"));
         assert!(md.contains("**(00:02.50)** Witaj."));
-        assert!(!md.contains("Speaker"), "no speaker labels after ADR-075");
+        assert!(
+            !md.contains("Speaker"),
+            "no speaker labels without diarization"
+        );
         assert!(md.ends_with("_Transcript generated locally by Speedwave._\n"));
     }
 
@@ -488,6 +592,80 @@ mod tests {
         assert!(md.contains("**(00:00.00) Meeting:** Dzień dobry państwu."));
         assert!(md.contains("**(00:02.00) You:** Cześć."));
         assert!(md.contains("**(00:03.00)** bez kanału"));
+    }
+
+    fn diarized_session() -> TranscriptSession {
+        let mut s = TranscriptSession::new(Language::Pl, mk_source(), PathBuf::from("/a.wav"));
+        let labelled = |start: f32, text: &str, src: TranscriptSource, n: Option<u32>| {
+            let mut x = seg(start, start + 1.0, text);
+            x.source = Some(src);
+            x.speaker_id = n;
+            x
+        };
+        s.final_segments = Some(vec![
+            labelled(0.0, "Zaczynamy.", TranscriptSource::System, Some(1)),
+            labelled(1.0, "Cześć.", TranscriptSource::Mic, None),
+            labelled(2.0, "Mam pytanie.", TranscriptSource::System, Some(10)),
+            labelled(3.0, "Odpowiadam.", TranscriptSource::System, Some(2)),
+            labelled(4.0, "Mhm.", TranscriptSource::System, None),
+        ]);
+        s.models_used.diarization = Some("nemotron-3-diarization-q8_0".to_string());
+        s
+    }
+
+    #[test]
+    fn to_markdown_labels_diarized_meeting_segments_with_their_speaker() {
+        let md = diarized_session().to_markdown();
+        assert!(md.contains("**(00:00.00) Meeting · Speaker 1:** Zaczynamy."));
+        assert!(md.contains("**(00:01.00) You:** Cześć."));
+        assert!(md.contains("**(00:03.00) Meeting · Speaker 2:** Odpowiadam."));
+        assert!(md.contains("**(00:04.00) Meeting:** Mhm."));
+    }
+
+    #[test]
+    fn to_markdown_lists_the_speakers_in_numeric_order_in_the_header() {
+        let md = diarized_session().to_markdown();
+        assert!(
+            md.contains(&format!(
+                "- Status: recording\n- Speakers: Speaker 1, Speaker 2, Speaker 10 ({SPEAKERS_NOTE})\n\n"
+            )),
+            "{md}"
+        );
+        assert!(md.contains("approximate: one person can get several labels and one label several people; a 'Meeting' line without a number has no recognised speaker)\n"));
+    }
+
+    #[test]
+    fn to_markdown_lists_no_speakers_without_diarization_or_without_any_label() {
+        let mut no_model = diarized_session();
+        no_model.models_used.diarization = None;
+        assert!(!no_model.to_markdown().contains("- Speakers:"));
+
+        let mut no_labels = diarized_session();
+        for seg in no_labels.final_segments.as_mut().unwrap() {
+            seg.speaker_id = None;
+        }
+        let md = no_labels.to_markdown();
+        assert!(!md.contains("Speaker"));
+        assert!(md.contains("- Status: recording\n\n"));
+    }
+
+    #[test]
+    fn diarization_fields_are_written_only_when_set_and_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = TranscriptSession::new(Language::Pl, mk_source(), PathBuf::from("/a.wav"));
+        s.save(dir.path()).unwrap();
+        let body = std::fs::read_to_string(dir.path().join(TRANSCRIPT_JSON)).unwrap();
+        assert!(!body.contains("diarization"));
+
+        s.models_used.diarization = Some("nemotron-3-diarization-q8_0".to_string());
+        s.diarization_secs = Some(41.5);
+        s.save(dir.path()).unwrap();
+        let loaded = TranscriptSession::load(dir.path()).unwrap();
+        assert_eq!(
+            loaded.models_used.diarization.as_deref(),
+            Some("nemotron-3-diarization-q8_0")
+        );
+        assert_eq!(loaded.diarization_secs, Some(41.5));
     }
 
     #[test]
@@ -584,10 +762,10 @@ mod tests {
         s.audio_parts.push(second);
         s.title = Some("Retro".to_string());
         s.live_segments = vec![seg(0.0, 1.0, "live only")];
-        s.set_final_segments(vec![
-            seg(5.0, 6.0, "później"),
-            seg(0.0, 1.0, "  Dzień dobry "),
-        ]);
+        s.set_final_segments(
+            vec![seg(5.0, 6.0, "później"), seg(0.0, 1.0, "  Dzień dobry ")],
+            None,
+        );
         s.save(dir.path()).unwrap();
 
         let sum = s.summary(dir.path());
@@ -612,7 +790,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut s = TranscriptSession::new(Language::Pl, mk_source(), dir.path().join("a.wav"));
         assert!(s.live_segments.is_empty());
-        s.set_final_segments(vec![seg(0.0, 1.0, "tekst")]);
+        s.set_final_segments(vec![seg(0.0, 1.0, "tekst")], None);
         assert_eq!(s.summary(dir.path()).segment_count, 1);
     }
 
@@ -646,8 +824,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = TranscriptSession::new(Language::En, mk_source(), dir.path().join("a.wav"));
         let json = serde_json::to_value(s.summary(dir.path())).unwrap();
-        let start = src.find("export interface TranscriptSummary {").unwrap();
-        let body = &src[start..start + src[start..].find("\n}").unwrap()];
+        let body = ts_interface_body(src, "TranscriptSummary");
         for key in json.as_object().unwrap().keys() {
             assert!(
                 body.contains(&format!("  {key}:")),
@@ -685,6 +862,31 @@ mod tests {
             src.contains("audio_parts?: string[]"),
             "models/transcript.ts TranscriptSession must carry the optional audio_parts field"
         );
+    }
+
+    #[test]
+    fn diarization_fields_match_ts_mirror() {
+        let src = include_str!("../../../../desktop/src/src/app/models/transcript.ts");
+        let field_in =
+            |interface: &str, field: &str| ts_interface_body(src, interface).contains(field);
+        assert!(
+            field_in("Segment", "  speaker_id?: number | null;"),
+            "models/transcript.ts Segment must carry the optional speaker_id field"
+        );
+        assert!(
+            field_in("ModelsUsed", "  diarization?: string | null;"),
+            "models/transcript.ts ModelsUsed must carry the optional diarization field"
+        );
+        assert!(
+            field_in("TranscriptSession", "  diarization_secs?: number | null;"),
+            "models/transcript.ts TranscriptSession must carry the optional diarization_secs field"
+        );
+        let mut s = TranscriptSession::new(Language::Pl, mk_source(), PathBuf::from("/a.wav"));
+        s.models_used.diarization = Some("k".to_string());
+        s.diarization_secs = Some(1.0);
+        let json = serde_json::to_value(&s).unwrap();
+        assert!(json["models_used"].get("diarization").is_some());
+        assert!(json.get("diarization_secs").is_some());
     }
 
     #[test]
@@ -781,6 +983,7 @@ mod tests {
         let s = TranscriptSession::load(dir.path()).unwrap();
         assert_eq!(s.live_segments.len(), 1);
         assert_eq!(s.live_segments[0].text, "hej");
+        assert_eq!(s.live_segments[0].speaker_id, None);
         assert_eq!(s.models_used.live.as_deref(), Some("small"));
         assert_eq!(s.last_seq, 7);
         s.save(dir.path()).unwrap();
@@ -788,6 +991,7 @@ mod tests {
         assert!(!body.contains("speaker_names"));
         assert!(!body.contains("diarization"));
         assert!(!body.contains("expected_speakers"));
+        assert!(!body.contains("speaker_id"));
     }
 
     #[test]

@@ -6,10 +6,11 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use speedwave_runtime::transcription::{
-    self, AudioSource, AudioSourceInfo, CaptureCapabilities, DriverConfig, DriverError,
-    FinalizeConfig, Language, ModelStatusEntry, ModelStore, StopSignal, StoreError,
-    TranscribeOptions, TranscriptDriver, TranscriptEvent, TranscriptSession, TranscriptStatus,
-    TranscriptStore, TranscriptSummary, WhisperCppTranscriber,
+    self, AudioSource, AudioSourceInfo, CaptureCapabilities, Diarizer, DiarizerLoader,
+    DriverConfig, DriverError, FinalizeConfig, GpuClass, Language, ModelStatusEntry, ModelStore,
+    NemotronDiarizer, StopSignal, StoreError, TranscribeOptions, TranscriptDriver, TranscriptEvent,
+    TranscriptSession, TranscriptStatus, TranscriptStore, TranscriptSummary, WhisperCppTranscriber,
+    DIARIZATION_MODEL,
 };
 use tauri::{AppHandle, Emitter};
 use tokio::sync::broadcast;
@@ -389,9 +390,12 @@ pub async fn pause_transcription(
     Ok(())
 }
 
+/// Stops a capture and starts its offline pass; `speaker_mode` is the Settings switch "Tell
+/// speakers apart in the meeting audio" as it stands now (ADR-098, read at the pass's start).
 #[tauri::command]
 pub async fn stop_transcription(
     session_id: String,
+    speaker_mode: bool,
     store: tauri::State<'_, TranscriptStoreHandle>,
     models: tauri::State<'_, ModelStoreHandle>,
     drivers: tauri::State<'_, DriversHandle>,
@@ -421,6 +425,7 @@ pub async fn stop_transcription(
         models.inner().clone(),
         id,
         audio_paths,
+        speaker_mode,
     );
     Ok(())
 }
@@ -428,10 +433,11 @@ pub async fn stop_transcription(
 /// Runs the offline pass again over a session's recorded parts: a failed one (an interrupted
 /// recording, or a model missing at Stop), a finished one made with a smaller model, or one the
 /// user put off. The session goes back to `Finalizing` and ends `Done`, `Failed`, or `Postponed`
-/// when it is put off again.
+/// when it is put off again. `speaker_mode` is as in `stop_transcription`.
 #[tauri::command]
 pub async fn transcribe_transcript(
     session_id: String,
+    speaker_mode: bool,
     store: tauri::State<'_, TranscriptStoreHandle>,
     models: tauri::State<'_, ModelStoreHandle>,
     drivers: tauri::State<'_, DriversHandle>,
@@ -451,6 +457,7 @@ pub async fn transcribe_transcript(
         models.inner().clone(),
         id,
         audio_paths,
+        speaker_mode,
     );
     Ok(())
 }
@@ -489,12 +496,14 @@ fn take_offline_pass_turn(store: &TranscriptStore, id: Uuid) -> std::sync::Mutex
 /// Loads the offline-pass model and transcribes `audio_paths` on a blocking task, one pass at a
 /// time; every failure lands on the session as `Failed`, so the UI always learns how it ended. It
 /// first waits for a capture driver still winding down after Stop, and a pass whose recording was
-/// put off or deleted meanwhile ends without touching it.
+/// put off or deleted meanwhile ends without touching it. With `speaker_mode` it also tells the
+/// meeting-channel speakers apart when the diarization model loads.
 fn spawn_offline_pass(
     store_arc: TranscriptStoreHandle,
     models_arc: ModelStoreHandle,
     id: Uuid,
     audio_paths: Vec<std::path::PathBuf>,
+    speaker_mode: bool,
 ) {
     tokio::task::spawn_blocking(move || {
         match store_arc.wait_while_recording(id) {
@@ -560,6 +569,7 @@ fn spawn_offline_pass(
                     return;
                 }
             };
+        let diarizer = offline_diarizer(&models_arc, speaker_mode, transcription::gpu_class());
         let cfg = FinalizeConfig {
             id,
             store: store_arc.clone(),
@@ -567,6 +577,7 @@ fn spawn_offline_pass(
             transcriber,
             transcribe_opts: TranscribeOptions::for_language(session_language(&store_arc, id)),
             pass,
+            diarizer,
         };
         match speedwave_runtime::transcription::run_finalize(cfg) {
             Ok(()) => {}
@@ -585,6 +596,26 @@ fn spawn_offline_pass(
             Err(e) => log::warn!("offline finalize for {} failed: {e}", short_id(id)),
         }
     });
+}
+
+fn offline_diarizer(
+    models: &ModelStore,
+    speaker_mode: bool,
+    class: GpuClass,
+) -> Option<DiarizerLoader> {
+    if !speaker_mode {
+        return None;
+    }
+    let models = models.clone();
+    Some(Box::new(move || {
+        if !models.diarization_is_present() {
+            return Err(transcription::DiarizeError::ModelMissing(
+                DIARIZATION_MODEL.file.to_string(),
+            ));
+        }
+        NemotronDiarizer::load(&models.diarization_path(), class)
+            .map(|d| Box::new(d) as Box<dyn Diarizer>)
+    }))
 }
 
 /// Logs a store refusal of an offline pass: a recording the user put off, replaced or deleted is
@@ -1074,15 +1105,20 @@ pub struct RecommendedModelEntry {
 }
 
 /// The models Speedwave needs on this hardware: one for the live pass and, when they differ,
-/// one for the higher-quality offline pass. The UI offers exactly these, with no picker.
+/// one for the higher-quality offline pass, plus the optional speaker-diarization model. The UI
+/// offers exactly these, with no picker.
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct RecommendedModelAck {
     /// The live-pass model.
     pub live: RecommendedModelEntry,
     /// The offline-pass model, or `None` when the live model serves both passes.
     pub finalize: Option<RecommendedModelEntry>,
+    /// The speaker-diarization model; Settings offers its download next to the switch.
+    pub diarization: RecommendedModelEntry,
     /// Acceleration label for the UI (e.g. `"Metal (GPU)"`, `"CPU"`).
     pub accel_label: String,
+    /// The host's GPU class, for the Settings text on what diarization costs here.
+    pub gpu_class: GpuClass,
 }
 
 /// Resolves one catalogue model to its UI entry (on-disk state plus any in-flight download).
@@ -1106,6 +1142,17 @@ fn model_entry(
     })
 }
 
+fn diarization_entry(models: &ModelStore, downloads: &DownloadsHandle) -> RecommendedModelEntry {
+    let status = models.diarization_status();
+    RecommendedModelEntry {
+        key: status.key,
+        display_name: DIARIZATION_MODEL.display_name.to_string(),
+        size_bytes: status.size_bytes,
+        downloaded: status.downloaded,
+        downloading: is_downloading(downloads, DIARIZATION_MODEL.key),
+    }
+}
+
 #[tauri::command]
 pub async fn recommended_transcription_model(
     models: tauri::State<'_, ModelStoreHandle>,
@@ -1126,7 +1173,9 @@ pub async fn recommended_transcription_model(
         Ok(RecommendedModelAck {
             live,
             finalize,
+            diarization: diarization_entry(&models, &downloads),
             accel_label: transcription::accel_label(),
+            gpu_class: transcription::gpu_class(),
         })
     })
     .await
@@ -1154,18 +1203,14 @@ pub async fn download_transcription_model(
     let models = models.inner().clone();
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         let _slot = slot;
-        if let Err(e) = models.ensure_vad_model() {
-            log::warn!(target: "transcription::models", "VAD model download failed: {e}");
-        }
-        models
-            .ensure_model(&model_id, &mut |p| {
-                let _ = app.emit(MODEL_PROGRESS_EVENT, &p);
-            })
-            .map(|_| ())
-            .map_err(|e| {
-                log::warn!(target: "transcription::models", "download of '{model_id}' failed: {e}");
-                e.to_string()
-            })
+        let mut progress = |p: transcription::DownloadProgress| {
+            let _ = app.emit(MODEL_PROGRESS_EVENT, &p);
+        };
+        let result = download_model_by_key(&models, &model_id, &mut progress);
+        result.map(|_| ()).map_err(|e| {
+            log::warn!(target: "transcription::models", "download of '{model_id}' failed: {e}");
+            e.to_string()
+        })
     })
     .await
     .map_err(|e| format!("download task panicked: {e}"))??;
@@ -1178,6 +1223,22 @@ pub async fn delete_transcription_model(
     models: tauri::State<'_, ModelStoreHandle>,
 ) -> Result<(), String> {
     models.delete_model(&model_id).map_err(|e| e.to_string())
+}
+
+fn download_model_by_key(
+    models: &ModelStore,
+    key: &str,
+    progress: &mut dyn FnMut(transcription::DownloadProgress),
+) -> Result<std::path::PathBuf, transcription::ModelStoreError> {
+    if matches!(
+        transcription::catalog_model(key),
+        Some(transcription::CatalogModel::Whisper(_))
+    ) {
+        if let Err(e) = models.ensure_vad_model() {
+            log::warn!(target: "transcription::models", "VAD model download failed: {e}");
+        }
+    }
+    models.ensure_model(key, progress)
 }
 
 #[cfg(test)]
@@ -1677,6 +1738,7 @@ mod tests {
                     text: "hi".to_string(),
                     words: vec![],
                     source: None,
+                    speaker_id: None,
                 },
             )
             .unwrap();
@@ -1695,6 +1757,155 @@ mod tests {
         assert_eq!(session_language(&store, id), Language::Pl);
         let missing = Uuid::new_v4();
         assert_eq!(session_language(&store, missing), Language::Pl);
+    }
+
+    fn write_sparse_diarization_model(models: &ModelStore) {
+        let path = models.diarization_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(DIARIZATION_MODEL.approx_bytes)
+            .unwrap();
+    }
+
+    #[test]
+    fn offline_diarizer_is_off_without_speaker_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let models = ModelStore::with_root(dir.path().join("m"));
+        write_sparse_diarization_model(&models);
+        assert!(offline_diarizer(&models, false, GpuClass::None).is_none());
+    }
+
+    #[test]
+    fn offline_diarizer_hands_the_pass_a_loader_that_reports_a_missing_model_only_when_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let models = ModelStore::with_root(dir.path().join("m"));
+        let load = offline_diarizer(&models, true, GpuClass::None)
+            .expect("the switch alone yields a loader");
+        assert!(matches!(
+            load().map(|_| ()),
+            Err(transcription::DiarizeError::ModelMissing(ref model)) if model == DIARIZATION_MODEL.file
+        ));
+    }
+
+    #[test]
+    fn offline_diarizer_reports_a_truncated_model_as_missing_like_settings_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let models = ModelStore::with_root(dir.path().join("m"));
+        let path = models.diarization_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(DIARIZATION_MODEL.approx_bytes / 2)
+            .unwrap();
+        assert!(!models.diarization_is_present());
+        let load = offline_diarizer(&models, true, GpuClass::None).unwrap();
+        assert!(matches!(
+            load().map(|_| ()),
+            Err(transcription::DiarizeError::ModelMissing(ref model)) if model == DIARIZATION_MODEL.file
+        ));
+    }
+
+    #[test]
+    fn offline_diarizer_hands_the_pass_a_loader_that_reports_a_model_that_does_not_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let models = ModelStore::with_root(dir.path().join("m"));
+        write_sparse_diarization_model(&models);
+        let load = offline_diarizer(&models, true, GpuClass::None)
+            .expect("a present model yields a loader");
+        assert!(matches!(
+            load().map(|_| ()),
+            Err(transcription::DiarizeError::ModelLoad { ref model, .. }) if model == DIARIZATION_MODEL.file
+        ));
+    }
+
+    #[test]
+    fn diarization_entry_reports_the_download_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let models = ModelStore::with_root(dir.path());
+        let downloads = DownloadsHandle::default();
+        let entry = diarization_entry(&models, &downloads);
+        assert_eq!(entry.key, DIARIZATION_MODEL.key);
+        assert_eq!(entry.display_name, DIARIZATION_MODEL.display_name);
+        assert_eq!(entry.size_bytes, DIARIZATION_MODEL.approx_bytes);
+        assert!(!entry.downloaded && !entry.downloading);
+
+        let slot = try_begin_download(&downloads, DIARIZATION_MODEL.key).unwrap();
+        assert!(diarization_entry(&models, &downloads).downloading);
+        drop(slot);
+        write_sparse_diarization_model(&models);
+        let entry = diarization_entry(&models, &downloads);
+        assert!(entry.downloaded && !entry.downloading);
+    }
+
+    #[test]
+    fn download_model_by_key_fetches_the_vad_model_only_beside_a_whisper_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let models = ModelStore::with_root(dir.path());
+        write_sparse_diarization_model(&models);
+        let path = download_model_by_key(&models, DIARIZATION_MODEL.key, &mut |_| {}).unwrap();
+        assert_eq!(path, models.diarization_path());
+        assert!(
+            !models.vad_is_present(),
+            "the diarization model is downloaded without the VAD model"
+        );
+        assert!(matches!(
+            download_model_by_key(&models, "nope", &mut |_| {}).unwrap_err(),
+            transcription::ModelStoreError::UnknownModel(_)
+        ));
+        assert!(
+            !models.vad_is_present(),
+            "an unknown key is refused before any download"
+        );
+    }
+
+    #[test]
+    fn recommended_model_ack_fields_match_ts_mirror() {
+        let src = include_str!("../../src/src/app/models/transcript.ts");
+        let entry = RecommendedModelEntry {
+            key: "k".to_string(),
+            display_name: "K".to_string(),
+            size_bytes: 1,
+            downloaded: false,
+            downloading: false,
+        };
+        let ack = RecommendedModelAck {
+            live: entry.clone(),
+            finalize: None,
+            diarization: entry,
+            accel_label: "CPU".to_string(),
+            gpu_class: GpuClass::None,
+        };
+        assert_eq!(
+            crate::ts_mirror::rust_fields(&ack),
+            crate::ts_mirror::ts_interface_fields(src, "RecommendedModelAck"),
+            "models/transcript.ts RecommendedModelAck must carry exactly the Rust fields"
+        );
+        for class in [GpuClass::None, GpuClass::Integrated, GpuClass::Discrete] {
+            let wire = serde_json::to_string(&class).unwrap();
+            let wire = wire.trim_matches('"');
+            assert!(
+                src.contains(&format!("'{wire}'")),
+                "models/transcript.ts GpuClass must carry '{wire}'"
+            );
+        }
+        assert!(src.contains("export type GpuClass = 'none' | 'integrated' | 'discrete';"));
+    }
+
+    #[test]
+    fn stop_and_transcribe_hand_the_speaker_mode_to_the_offline_pass() {
+        let src = include_str!("transcription_cmd.rs");
+        for name in ["stop_transcription", "transcribe_transcript"] {
+            assert!(
+                fn_body(src, name).contains("speaker_mode,\n"),
+                "{name} must pass the Settings speaker mode to spawn_offline_pass"
+            );
+        }
+        let body = fn_body(src, "spawn_offline_pass");
+        assert!(
+            body.find("WhisperCppTranscriber::load").unwrap() < body.find("offline_diarizer(").unwrap(),
+            "the diarizer is handed over only after the pass survived the cancel check and loaded Whisper"
+        );
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! Host-side meeting transcription — SSOT layer (ADR-056). Capture + Whisper + model store;
-//! gated behind `audio-transcription` (CLI never enables it). Diarization removed (ADR-075).
+//! gated behind `audio-transcription` (CLI never enables it). Optional speaker diarization of
+//! the meeting channel in the offline pass (ADR-098).
 
 pub mod accel;
 pub mod audio;
@@ -7,6 +8,7 @@ pub mod audio;
 pub mod audio_macos;
 #[cfg(windows)]
 pub mod audio_windows;
+pub mod diarizer;
 mod gpu_probe;
 pub mod mix;
 pub mod model_catalog;
@@ -26,15 +28,22 @@ pub use audio::{
     AudioStream, CaptureCapabilities, CaptureError, CaptureWarning, FileAudioCapture,
     CHUNK_DURATION, DEFAULT_MIXED_SOURCE_LABEL, SAMPLE_RATE_HZ,
 };
+pub use diarizer::{DiarizeError, Diarizer, DiarizerLoader, NemotronDiarizer, SpeakerTurn};
 pub use mix::{poll_paired_chunk, MixBuffer, MixSource, CHUNK_SAMPLES};
-pub use model_catalog::{whisper_model, ModelRole, Quantization, WhisperModelInfo, WHISPER_MODELS};
+pub use model_catalog::{
+    catalog_model, whisper_model, CatalogModel, ModelRole, Quantization, WhisperModelInfo,
+    DIARIZATION_MODEL, WHISPER_MODELS,
+};
 pub use model_store::{
     no_progress, DownloadProgress, ModelStatusEntry, ModelStore, ModelStoreError,
 };
 pub use transcriber::{
-    Language, Segment, TranscribeError, TranscribeOptions, Transcriber, WhisperCppTranscriber, Word,
+    DecodeCancel, Language, Segment, TranscribeError, TranscribeOptions, Transcriber,
+    WhisperCppTranscriber, Word,
 };
-pub use transcript::{ModelsUsed, TranscriptSession, TranscriptStatus, TranscriptSummary};
+pub use transcript::{
+    DiarizationRecord, ModelsUsed, TranscriptSession, TranscriptStatus, TranscriptSummary,
+};
 pub use transcript_driver::{
     run_finalize, DriverConfig, DriverError, FinalizeConfig, StopSignal, TranscriptDriver,
 };

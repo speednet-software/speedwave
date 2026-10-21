@@ -344,7 +344,13 @@ describe('ChatComponent', () => {
       const transcription = TestBed.inject(TranscriptionService);
       const prior = mockTauri.invokeHandler;
       mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'get_transcript') return { language: 'en', created_at: '2026-10-12T07:28:04Z' };
+        if (cmd === 'get_transcript') {
+          return {
+            language: 'en',
+            created_at: '2026-10-12T07:28:04Z',
+            models_used: { live: null, finalize: null },
+          };
+        }
         if (cmd === 'get_transcript_markdown') return '# Meeting transcript';
         return prior(cmd);
       };

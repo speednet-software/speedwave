@@ -1,8 +1,7 @@
-Speech-recognition model weights downloaded on demand by Speedwave's
-meeting-transcription feature. These files are NOT bundled in the installer —
-they are fetched (with SHA-256 verification) from the upstream host listed
-below the first time the user enables a model, and stored under
-`~/.speedwave/models/`.
+Speech model weights downloaded on demand by Speedwave's meeting-transcription
+feature. These files are NOT bundled in the installer — they are fetched (with
+SHA-256 verification) from the upstream host listed below the first time they
+are needed, and stored under `~/.speedwave/models/`.
 
 --- Whisper speech-to-text weights (ggml format) ---
 
@@ -12,6 +11,23 @@ Upstream: https://huggingface.co/ggerganov/whisper.cpp
 Original model: https://github.com/openai/whisper
 License: MIT (OpenAI's Whisper models are released under the MIT license; the
 ggml repackaging adds no additional restrictions).
+
+--- Silero VAD voice-activity weights (ggml format) ---
+
+Silero VAD v5.1.2, converted to whisper.cpp's `ggml` format, used to skip
+silence before transcription.
+
+Upstream: https://huggingface.co/ggml-org/whisper-vad
+Original model: https://github.com/snakers4/silero-vad
+License: MIT (Copyright (c) 2020-present Silero Team).
+
+--- Nemotron-3 Diarization weights (GGUF format) ---
+
+NVIDIA Nemotron-3 Diarization, q8_0 GGUF, used only when the user turns on
+"Tell speakers apart in the meeting audio" in Settings.
+
+Upstream: https://huggingface.co/nvidia/Nemotron-3-Diarization
+License: OpenMDW-1.1, https://openmdw.ai/license/1-1/
 
 Speedwave only downloads and runs these weights locally; it does not
 redistribute them. If you redistribute a copy of `~/.speedwave/models/`, the

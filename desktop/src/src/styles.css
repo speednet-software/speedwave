@@ -196,6 +196,8 @@
      they hit WCAG AA contrast on the light --bg (#ffffff). */
   --teal: #0d8a72;
   --amber: #9a6b00;
+  --green: #047857;
+  --violet: #6d28d9;
   --red: #b91c1c;
 
   /* Ember default — same #d73c04 in light + dark; white ink clears AA at

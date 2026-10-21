@@ -893,6 +893,73 @@ describe('TranscriptionService', () => {
     });
   });
 
+  describe('speaker attribution', () => {
+    function freshService(): TranscriptionService {
+      TestBed.resetTestingModule();
+      TestBed.configureTestingModule({
+        providers: [
+          TranscriptionService,
+          { provide: TauriService, useValue: mockTauri },
+          { provide: ChatStateService, useValue: mockChat },
+        ],
+      });
+      return TestBed.inject(TranscriptionService);
+    }
+
+    beforeEach(() => {
+      localStorage.clear();
+    });
+
+    it('is off when nothing is stored, and a choice survives a new service', () => {
+      expect(svc.speakerAttribution()).toBe(false);
+      svc.setSpeakerAttribution(true);
+      expect(svc.speakerAttribution()).toBe(true);
+      expect(freshService().speakerAttribution()).toBe(true);
+      svc.setSpeakerAttribution(false);
+      expect(freshService().speakerAttribution()).toBe(false);
+    });
+
+    it('stays off for a stored value other than its own on', () => {
+      svc.setSpeakerAttribution(true);
+      const key = Object.keys(localStorage).find((k) => localStorage.getItem(k) === 'on');
+      expect(key).toBeDefined();
+      for (const value of ['ON', 'true', '1', '']) {
+        localStorage.setItem(key as string, value);
+        expect(svc.speakerAttribution()).toBe(false);
+      }
+    });
+
+    it('reads as off when storage throws, and a failed save throws nothing', () => {
+      const get = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+        throw new Error('denied');
+      });
+      const set = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+        throw new Error('quota');
+      });
+      expect(svc.speakerAttribution()).toBe(false);
+      expect(() => svc.setSpeakerAttribution(true)).not.toThrow();
+      get.mockRestore();
+      set.mockRestore();
+    });
+
+    it('stop and transcribe hand the current choice to the backend', async () => {
+      const calls: [string, unknown][] = [];
+      mockTauri.invokeHandler = async (cmd, args) => {
+        calls.push([cmd, args]);
+        return undefined;
+      };
+      await svc.stopRecording('sess-1');
+      svc.setSpeakerAttribution(true);
+      await svc.transcribe('other');
+      await svc.stopRecording('sess-2');
+      expect(calls).toEqual([
+        ['stop_transcription', { sessionId: 'sess-1', speakerMode: false }],
+        ['transcribe_transcript', { sessionId: 'other', speakerMode: true }],
+        ['stop_transcription', { sessionId: 'sess-2', speakerMode: true }],
+      ]);
+    });
+  });
+
   describe('recordings list', () => {
     function summary(id: string, overrides: Partial<TranscriptSummary> = {}): TranscriptSummary {
       return {
@@ -1113,6 +1180,38 @@ describe('TranscriptionService', () => {
       expect(mockChat.tab('tab-1').composerPromptDraft()).toContain('podsumowanie');
       expect(mockChat.tab('tab-1').stagedTranscript()?.markdown).toBe('# Meeting transcript');
       expect(mockChat.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('adds one speaker-label sentence to the prompt only for a diarized transcript, in both languages', async () => {
+      const expected = {
+        pl: ['są przybliżone', 'tylko na podstawie treści', 'niepewne przypisania'],
+        en: ['are approximate', 'only on evidence in the text', 'uncertain attributions'],
+      } as const;
+      for (const language of ['pl', 'en'] as const) {
+        mockTauri.invokeHandler = transcriptHandler(language);
+        await svc.stageForChat('sess-1');
+        const plain = mockChat.tab('tab-1').composerPromptDraft();
+        expect(plain).not.toContain('Speaker N');
+        mockTauri.invokeHandler = async (cmd: string) => {
+          if (cmd === 'get_transcript') {
+            return snapshot({
+              language,
+              models_used: { live: null, finalize: 'large-v3', diarization: 'nemotron' },
+            });
+          }
+          if (cmd === 'get_transcript_markdown') return '# Meeting transcript';
+          return undefined;
+        };
+        await svc.stageForChat('sess-1');
+        const draft = mockChat.tab('tab-1').composerPromptDraft();
+        expect(draft).toContain("'Speaker N'");
+        for (const phrase of expected[language]) {
+          expect(draft).toContain(phrase);
+        }
+        expect(draft).not.toContain(language === 'pl' ? 'kilka etykiet' : 'more than one label');
+        expect(draft.startsWith(plain)).toBe(true);
+        expect(draft.length - plain.length).toBeLessThan(130);
+      }
     });
 
     it('says the transcript is attached, not "below", in both languages', async () => {

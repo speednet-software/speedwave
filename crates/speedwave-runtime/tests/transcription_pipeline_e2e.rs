@@ -115,6 +115,7 @@ fn full_pipeline_capture_transcribe_finalize_markdown() {
         pass: store
             .begin_offline_pass(id)
             .expect("a stopped recording waits for its offline pass"),
+        diarizer: None,
     })
     .expect("finalize run");
 

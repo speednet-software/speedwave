@@ -40,6 +40,8 @@ export const LIVE_TRANSCRIPT_STORAGE_KEY = 'speedwave-live-transcript-v2';
 /** Pre-`-v2` key, removed on first use so a stale default-on pick does not linger. */
 const LEGACY_LIVE_TRANSCRIPT_STORAGE_KEY = 'speedwave-live-transcript';
 
+const SPEAKER_ATTRIBUTION_STORAGE_KEY = 'speedwave-speaker-attribution';
+
 /** localStorage key of the language, source and microphone the last recording used. */
 export const RECORDING_CHOICE_STORAGE_KEY = 'speedwave-recording-choice';
 
@@ -66,6 +68,15 @@ const TRANSCRIPT_PROMPT_DEFAULTS: Record<Language, string> = {
     'Attached is a meeting transcript. Write a concise summary: key topics, decisions made, ' +
     'and an action item list (who, what, by when — where stated). ' +
     'The transcript may contain speech-recognition errors; flag unclear fragments.',
+};
+
+const SPEAKER_LABELS_PROMPT: Record<Language, string> = {
+  pl:
+    " Etykiety 'Speaker N' są przybliżone; imiona przypisuj tylko na podstawie treści " +
+    'i zaznacz niepewne przypisania.',
+  en:
+    " 'Speaker N' labels are approximate; assign names only on evidence in the text " +
+    'and flag uncertain attributions.',
 };
 
 /**
@@ -224,6 +235,25 @@ export class TranscriptionService {
     } catch {}
   }
 
+  /** Whether the offline pass tells meeting speakers apart; off unless the user turned it on. */
+  speakerAttribution(): boolean {
+    try {
+      return localStorage.getItem(SPEAKER_ATTRIBUTION_STORAGE_KEY) === 'on';
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Persists the speaker-attribution choice for the next offline pass (tolerates storage failures).
+   * @param on - the user's pick.
+   */
+  setSpeakerAttribution(on: boolean): void {
+    try {
+      localStorage.setItem(SPEAKER_ATTRIBUTION_STORAGE_KEY, on ? 'on' : 'off');
+    } catch {}
+  }
+
   /** The language, source and microphone the last recording used; null when none is stored. */
   recordingChoice(): RecordingChoice | null {
     try {
@@ -322,7 +352,10 @@ export class TranscriptionService {
       await this.attachRecordingListener(ack.event_name, ack.snapshot);
     } catch (e) {
       try {
-        await this.tauri.invoke<void>('stop_transcription', { sessionId: ack.session_id });
+        await this.tauri.invoke<void>('stop_transcription', {
+          sessionId: ack.session_id,
+          speakerMode: this.speakerAttribution(),
+        });
         this.resetInProgressRecording();
       } catch {
         this.recordingSessionIdSignal.set(ack.session_id);
@@ -343,7 +376,10 @@ export class TranscriptionService {
    */
   async stopRecording(sessionId: string): Promise<void> {
     try {
-      await this.tauri.invoke<void>('stop_transcription', { sessionId });
+      await this.tauri.invoke<void>('stop_transcription', {
+        sessionId,
+        speakerMode: this.speakerAttribution(),
+      });
     } finally {
       this.clearInProgressRecording(sessionId);
     }
@@ -452,7 +488,10 @@ export class TranscriptionService {
    * @param sessionId - the recording to transcribe.
    */
   async transcribe(sessionId: string): Promise<void> {
-    await this.tauri.invoke<void>('transcribe_transcript', { sessionId });
+    await this.tauri.invoke<void>('transcribe_transcript', {
+      sessionId,
+      speakerMode: this.speakerAttribution(),
+    });
     if (this.activeSignal()?.id === sessionId) await this.subscribeToTranscript(sessionId);
   }
 
@@ -514,7 +553,10 @@ export class TranscriptionService {
       target === 'new-chat' ? await this.chatState.openNewChat(originTabId) : originTabId;
     const store = this.chatState.claimTab(tabId);
     store.stageTranscript({ markdown: md, name: recordingName(session) });
-    store.composerPromptDraft.set(TRANSCRIPT_PROMPT_DEFAULTS[session.language]);
+    store.composerPromptDraft.set(
+      TRANSCRIPT_PROMPT_DEFAULTS[session.language] +
+        (session.models_used.diarization ? SPEAKER_LABELS_PROMPT[session.language] : '')
+    );
   }
 
   /** The single best model for this hardware + its download state. */

@@ -164,6 +164,49 @@ describe('LiveTranscriptComponent', () => {
     expect(chips[0].textContent).toContain('You');
   });
 
+  it('labels diarized meeting segments with their speaker in one colour per number', () => {
+    const sys = (start: number, text: string, speaker_id?: number) => ({
+      ...seg(start, text),
+      source: 'system' as const,
+      speaker_id,
+    });
+    fixture.componentRef.setInput(
+      'session',
+      session({
+        final_segments: [
+          sys(0, 'zaczynamy', 1),
+          { ...seg(1, 'cześć'), source: 'mic' as const },
+          sys(2, 'pytanie', 2),
+          sys(3, 'dalej', 1),
+          sys(4, 'mhm'),
+          sys(5, 'szósty', 6),
+        ],
+        models_used: { live: null, finalize: 'large-v3', diarization: 'nemotron' },
+      })
+    );
+    fixture.detectChanges();
+    const lines = component.lines();
+    expect(lines.map((l) => l.speaker)).toEqual([
+      'Meeting · Speaker 1',
+      'You',
+      'Meeting · Speaker 2',
+      'Meeting · Speaker 1',
+      'Meeting',
+      'Meeting · Speaker 6',
+    ]);
+    expect(lines[0].speakerColor).toBe(lines[3].speakerColor);
+    expect(lines[0].speakerColor).not.toBe(lines[2].speakerColor);
+    expect(lines[5].speakerColor).toBeNull();
+    expect(lines[1].speakerColor).toBeNull();
+    expect(lines[4].speakerColor).toBeNull();
+    const chips: HTMLElement[] = Array.from(
+      fixture.nativeElement.querySelectorAll('[data-testid="line-speaker"]')
+    );
+    expect(chips[0].textContent?.trim()).toBe('Meeting · Speaker 1');
+    expect(chips[0].style.color).toBe('var(--teal)');
+    expect(chips[1].style.color).toBe('');
+  });
+
   it('sorts a copy, never mutating the session segment array', () => {
     const segs = [seg(2, 'later'), seg(0, 'earlier')];
     fixture.componentRef.setInput('session', session({ live_segments: segs }));
@@ -1080,6 +1123,20 @@ describe('LiveTranscriptComponent', () => {
       expect(q('reveal-btn')).not.toBeNull();
       expect(q('resume-item')).not.toBeNull();
       expect(q('delete-item')!.textContent).toContain('13 min · 12');
+    });
+
+    it('warns that speaker numbers can change only when the transcript has speakers', () => {
+      expect(q('retranscribe-item')!.textContent).not.toContain('Speaker numbers');
+      fixture.componentRef.setInput(
+        'session',
+        session({
+          status: { state: 'done' },
+          live_segments: [seg(0, 'hi')],
+          models_used: { live: null, finalize: 'large-v3', diarization: 'nemotron' },
+        })
+      );
+      fixture.detectChanges();
+      expect(q('retranscribe-item')!.textContent).toContain('Speaker numbers can change.');
     });
 
     it('runs Transcribe again on a finished recording and closes the menu', async () => {

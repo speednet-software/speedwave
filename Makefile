@@ -435,6 +435,7 @@ test-transcription: guard-not-prod-data-dir
 	@if [ "$(OS)" = "Windows_NT" ]; then bash scripts/check-vulkan-path-budget.sh "$(CURDIR)" "root workspace build dir"; fi
 	@echo "🧪 Testing speedwave-runtime with the audio-transcription feature..."
 	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime --features audio-transcription transcription::)
+	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime --features audio-transcription --example diarize)
 	@echo "✅ audio-transcription tests passed"
 
 test-mcp-os-bundle: build-mcp guard-not-prod-data-dir
