@@ -105,6 +105,11 @@ WINDOWS_BATS_ENGINE_PREAMBLE="[ -x $WINDOWS_BATS ] || curl -fsSL https://github.
 MACOS_ENGINE_BATS_PREAMBLE='command -v bats >/dev/null 2>&1 || brew install bats-core
 env LIMA_HOME="$HOME/.speedwave/lima" "$HOME/Applications/Speedwave.app/Contents/Resources/lima/bin/limactl" start speedwave'
 
+windows_restore_interop() {
+    # shellcheck disable=SC2086
+    ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -u root -- sh -c \"[ -e /proc/sys/fs/binfmt_misc/WSLInterop ] || { echo :WSLInterop:M::MZ::/init:PF > /proc/sys/fs/binfmt_misc/register && echo WSLInterop re-registered; }\""
+}
+
 ps_squote() {
     printf '%s' "$1" | sed "s/'/''/g"
 }
@@ -572,6 +577,10 @@ SCRIPT
 
     if [ "$exit_code" -eq 0 ]; then
         echo "[windows] Running engine-contract suite (staging distro -> WSL interop -> Speedwave distro)..."
+        windows_restore_interop || exit_code=$?
+    fi
+
+    if [ "$exit_code" -eq 0 ]; then
         # shellcheck disable=SC2086
         ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -lc \"$WINDOWS_BATS_ENGINE_PREAMBLE $WINDOWS_BATS --print-output-on-failure $WINDOWS_CONTRACT_STAGING/engine-contract.bats\"" || exit_code=$?
     fi
@@ -587,6 +596,7 @@ SCRIPT
         else
             local windows_data_dir="${windows_cli_path%/bin/*}"
             echo "[windows] Running update-dirty-state suite (staging distro -> WSL interop -> Speedwave distro)..."
+            windows_restore_interop || exit_code=$?
             # shellcheck disable=SC2086
             ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -lc \"$WINDOWS_BATS_ENGINE_PREAMBLE SPW_E2E_PROJECT=e2e-test SPEEDWAVE_DATA_DIR=$windows_data_dir SPEEDWAVE_BIN=$windows_cli_path $WINDOWS_BATS --print-output-on-failure $WINDOWS_CONTRACT_STAGING/update-dirty-state.bats\"" || exit_code=$?
         fi
