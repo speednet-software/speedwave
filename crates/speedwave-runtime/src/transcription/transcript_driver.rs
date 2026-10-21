@@ -1045,7 +1045,10 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
     final_segs.sort_by_key(|s| s.start);
 
     drop(transcriber);
-    let diarization = match diarizer.filter(|_| !system_pcm.is_empty()) {
+    let meeting_speech = final_segs
+        .iter()
+        .any(|s| s.source == Some(TranscriptSource::System));
+    let diarization = match diarizer.filter(|_| meeting_speech) {
         Some(load) => diarize_meeting_channel(
             &store,
             id,
@@ -4085,6 +4088,41 @@ mod tests {
             .iter()
             .all(|s| s.speaker_id.is_none()));
         assert_eq!(snap.models_used.diarization, None);
+        assert!(snap.active_warnings.is_empty());
+    }
+
+    #[test]
+    fn run_finalize_never_calls_the_diarizer_when_whisper_heard_nothing_on_the_meeting_channel() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session(&store, &store_dir.path().join("a.wav"));
+        let wav = store_dir.path().join("stereo.wav");
+        write_test_wav(&wav, 2, 4.0);
+        let (diarizer, received) = ScriptedDiarizer::new(Ok(vec![turn_secs(0, 4, 0)]));
+        let loaded = Arc::new(AtomicBool::new(false));
+        let loaded_flag = loaded.clone();
+        let load: DiarizerLoader = Box::new(move || {
+            loaded_flag.store(true, Ordering::SeqCst);
+            Ok(Box::new(diarizer) as Box<dyn Diarizer>)
+        });
+        let transcriber = ScriptedTranscriber {
+            script: vec![Vec::new(), vec![seg_at(0.0, 2.0, "mic")]],
+            call: 0,
+        };
+
+        finalize_with_transcriber(&store, id, vec![wav], Box::new(transcriber), Some(load))
+            .unwrap();
+
+        assert!(!loaded.load(Ordering::SeqCst), "the model is never loaded");
+        assert!(received.lock().unwrap().is_empty());
+        let snap = store.get(id).unwrap();
+        assert!(matches!(snap.status, TranscriptStatus::Done));
+        assert_eq!(
+            speakers_by_source(&snap.final_segments.unwrap()),
+            vec![(Duration::ZERO, Some(TranscriptSource::Mic), None)]
+        );
+        assert_eq!(snap.models_used.diarization, None);
+        assert_eq!(snap.diarization_secs, None);
         assert!(snap.active_warnings.is_empty());
     }
 
