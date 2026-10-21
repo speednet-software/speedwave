@@ -120,11 +120,8 @@ func getEmail(params: [String: Any], scripts: MailScripts) throws -> [String: An
 }
 
 func searchEmails(params: [String: Any], scripts: MailScripts) throws -> [String: Any] {
-    guard let query = params["query"] as? String else {
-        throw MailError.missingField("query")
-    }
-    guard !query.isEmpty else {
-        throw MailError.invalidValue("query", "must not be empty")
+    for text in ["query", "recipient"] where (params[text] as? String)?.isEmpty == true {
+        throw MailError.invalidValue(text, "must not be empty")
     }
     let (mailbox, account) = try mailboxParams(params)
     let (offset, limit) = try pageParams(params)
@@ -132,11 +129,18 @@ func searchEmails(params: [String: Any], scripts: MailScripts) throws -> [String
         unreadOnly: params["unread_only"] as? Bool ?? false,
         flaggedOnly: params["flagged_only"] as? Bool ?? false,
         sender: params["sender"] as? String,
+        recipient: params["recipient"] as? String,
         since: try dateParam(params, "since"),
         before: try dateParam(params, "before"),
-        query: query,
+        query: params["query"] as? String,
         searchBody: params["search_body"] as? Bool ?? false
     )
+    guard filter.narrows else {
+        throw MailError.noSearchFilter
+    }
+    guard !filter.searchBody || filter.query != nil else {
+        throw MailError.missingField("query")
+    }
     return try AppleMailClient.listEmails(
         scripts: scripts, mailbox: mailbox, account: account, filter: filter, offset: offset, limit: limit)
 }
@@ -176,6 +180,7 @@ enum MailError: LocalizedError {
     case missingField(String)
     case emptyRecipients(String)
     case invalidValue(String, String)
+    case noSearchFilter
 
     var errorDescription: String? {
         switch self {
@@ -185,6 +190,9 @@ enum MailError: LocalizedError {
             return "The '\(field)' field is empty. Provide at least one recipient email address."
         case .invalidValue(let field, let rule):
             return "Invalid \(field): \(rule)."
+        case .noSearchFilter:
+            return "A search needs at least one of query, sender, recipient, since, before, unread_only or "
+                + "flagged_only; list a whole mailbox with list_emails."
         }
     }
 }

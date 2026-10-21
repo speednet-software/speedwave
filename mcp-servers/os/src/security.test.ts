@@ -148,7 +148,7 @@ describe('Security', () => {
             params[field] = 'test-value';
           }
         }
-        await handler(params);
+        await handler({ ...params, ...tool.inputExamples?.[0]?.input });
       }
 
       expect(calledCommands.length).toBe(tools.length);

@@ -209,10 +209,82 @@ final class SearchEmailsTests: XCTestCase {
         XCTAssertTrue(harness.executor.calls.isEmpty)
     }
 
+    func testWithoutAQueryTheOtherFiltersAloneDecideWhatIsListed() throws {
+        harness.executor.reply(mailListing(account: "Work", messages))
+
+        let result = try harness.call("search_emails", ["mailbox": "INBOX", "since": "2026-10-05"])
+
+        let script = try script()
+        XCTAssertTrue(
+            script.contains("subject of every message of mb whose date received is greater than or equal to spwSince\n"),
+            script)
+        XCTAssertFalse(script.contains("subject contains"), script)
+        XCTAssertEqual(result["total"] as? Int, 3)
+    }
+
+    func testARecipientMatchesAToOrCcAddressInTheClauseItSharesWithTheOtherFilters() throws {
+        harness.executor.reply(mailListing(account: "Work", [messages[0]]))
+
+        let result = try harness.call(
+            "search_emails", ["mailbox": "Sent", "recipient": "anna@x", "query": "invoice", "unread_only": true])
+
+        let scope = "every message of mb whose read status is false and "
+            + "((address of every to recipient) contains \"anna@x\" or (address of every cc recipient) contains \"anna@x\") and "
+            + "(subject contains \"invoice\" or sender contains \"invoice\")"
+        let script = try script()
+        for property in ["message id", "subject", "sender", "date received", "read status", "flag index"] {
+            XCTAssertTrue(script.contains("\(property) of \(scope)"), "\(property): \(script)")
+        }
+        XCTAssertEqual(try emails(result).map { $0["subject"] as? String }, ["Invoice 1"])
+    }
+
+    func testARecipientAloneIsASearchAndNoHitsListNothing() throws {
+        harness.executor.reply(mailListing(account: "Work", []))
+
+        let result = try harness.call("search_emails", ["mailbox": "Sent", "recipient": "nobody@x"])
+
+        XCTAssertTrue(try script().contains("every message of mb whose ((address of every to recipient) contains \"nobody@x\""))
+        XCTAssertEqual(result["total"] as? Int, 0)
+    }
+
+    func testAUnicodeRecipientWithQuotesAndBackslashesIsEscapedForAppleScript() throws {
+        harness.executor.reply(mailListing(account: "Work", []))
+
+        _ = try harness.call("search_emails", ["mailbox": "Sent", "recipient": #"zażółć"o\@東京.pl"#])
+
+        let script = try script()
+        XCTAssertTrue(script.contains(#"(address of every to recipient) contains "zażółć\"o\\@東京.pl""#), script)
+        XCTAssertTrue(script.contains(#"(address of every cc recipient) contains "zażółć\"o\\@東京.pl""#), script)
+    }
+
+    func testASearchWithoutAnyFilterRunsNothingAndPointsAtListEmails() {
+        for params: [String: Any] in [
+            ["mailbox": "INBOX"],
+            ["mailbox": "INBOX", "unread_only": false, "flagged_only": false],
+        ] {
+            let error = harness.callFailing("search_emails", params)
+            XCTAssertTrue(error.localizedDescription.contains("list_emails"), "\(params): \(error.localizedDescription)")
+            for filter in ["query", "sender", "recipient", "since", "before", "unread_only", "flagged_only"] {
+                XCTAssertTrue(error.localizedDescription.contains(filter), "\(filter): \(error.localizedDescription)")
+            }
+        }
+        XCTAssertTrue(harness.executor.calls.isEmpty)
+    }
+
+    func testABodySearchStillNeedsAQuery() {
+        let error = harness.callFailing("search_emails", ["mailbox": "INBOX", "sender": "bob@x", "search_body": true])
+
+        guard case MailError.missingField("query") = error else {
+            return XCTFail("expected missingField(query), got \(error)")
+        }
+        XCTAssertTrue(harness.executor.calls.isEmpty)
+    }
+
     func testAMissingOrEmptyQueryOrABadPageRunsNothing() {
         let cases: [[String: Any]] = [
             ["mailbox": "INBOX"],
             ["mailbox": "INBOX", "query": ""],
+            ["mailbox": "INBOX", "recipient": ""],
             ["mailbox": "INBOX", "query": "x", "limit": 0],
             ["mailbox": "INBOX", "query": "x", "offset": -1],
         ]

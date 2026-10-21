@@ -300,6 +300,8 @@ describe('mail-tools', () => {
       [{ flagged_only: 0 }, 'INVALID_TYPE'],
       [{ offset: -1 }, 'OUT_OF_RANGE'],
       [{ sender: 'a\x01b' }, 'INVALID_CHARACTERS'],
+      [{ recipient: 'a\nb' }, 'INVALID_CHARACTERS'],
+      [{ recipient: 7 }, 'INVALID_TYPE'],
       [{ since: 12 }, 'INVALID_TYPE'],
     ])('rejects %o without calling mail-cli', async (extra, code) => {
       const result = await handleSearchEmails({
@@ -311,6 +313,63 @@ describe('mail-tools', () => {
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe(code);
       expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [{ since: '2026-10-13', before: '2026-10-20' }],
+      [{ recipient: 'anna@example.com' }],
+      [{ unread_only: true }],
+      [{ flagged_only: true }],
+      [{ sender: 'Zażółć "東京" \\' }],
+    ])('searches without a query when %o narrows the mailbox', async (filters) => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { emails: [], total: 0 } });
+
+      const result = await handleSearchEmails({ mailbox: 'Sent', ...filters });
+
+      expect(result.success).toBe(true);
+      expect(vi.mocked(runCommand).mock.calls[0][2]).toEqual(
+        budgeted({ mailbox: 'Sent', ...filters })
+      );
+    });
+
+    it.each([[{}], [{ unread_only: false, flagged_only: false }]])(
+      'a search without any filter (%o) runs nothing and points at listEmails',
+      async (extra) => {
+        const result = await handleSearchEmails({ mailbox: 'INBOX', ...extra } as any);
+
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('MISSING_FIELDS');
+        expect(result.error?.message).toContain('listEmails');
+        for (const filter of ['query', 'sender', 'recipient', 'since', 'before']) {
+          expect(result.error?.message).toContain(filter);
+        }
+        expect(runCommand).not.toHaveBeenCalled();
+      }
+    );
+
+    it('a body search without a query runs nothing and asks for one', async () => {
+      const result = await handleSearchEmails({
+        mailbox: 'INBOX',
+        sender: 'bob@x',
+        search_body: true,
+      } as any);
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('MISSING_FIELDS');
+      expect(result.error?.message).toContain('query');
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it('declares recipient and requires only the mailbox', () => {
+      const tool = createMailTools().find((t) => t.tool.name === 'searchEmails')!.tool;
+      const schema = tool.inputSchema as {
+        properties: Record<string, { type: string; description: string }>;
+        required: string[];
+      };
+
+      expect(schema.required).toEqual(['mailbox']);
+      expect(schema.properties.recipient.type).toBe('string');
+      expect(schema.properties.recipient.description).toMatch(/to.*cc/i);
     });
   });
 

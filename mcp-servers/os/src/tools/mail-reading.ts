@@ -1,10 +1,20 @@
-import { Tool, READ_ONLY_ANNOTATIONS, META_KEYS } from '@speedwave/mcp-shared';
+import { Tool, READ_ONLY_ANNOTATIONS, META_KEYS, teachingToolResult } from '@speedwave/mcp-shared';
 import { ToolResult, validateAll, asRecord, MAX_LENGTHS } from './validation.js';
 import { STANDARD_BUDGET, MAIL_FLAG_VALUES, mailTimeBudget, runMail } from './mail-shared.js';
 
 const BODY_SEARCH_BUDGET = mailTimeBudget(180_000);
 
 const RAW_TEXT_LIMIT = 100_000;
+
+const SEARCH_FILTERS = [
+  'query',
+  'sender',
+  'recipient',
+  'since',
+  'before',
+  'unread_only',
+  'flagged_only',
+];
 
 /** Input parameters for the detectMailClients tool (no params required). */
 type DetectMailClientsParams = Record<string, never>;
@@ -41,7 +51,7 @@ interface GetEmailParams {
 /** Input parameters for the searchEmails tool. */
 interface SearchEmailsParams {
   /** Text the subject or the sender contains. */
-  query: string;
+  query?: string;
   /** Mailbox path from listMailboxes. */
   mailbox: string;
   /** Account of the mailbox. */
@@ -50,6 +60,8 @@ interface SearchEmailsParams {
   search_body?: boolean;
   /** Text the sender contains. */
   sender?: string;
+  /** Address of a To or Cc recipient. */
+  recipient?: string;
   /** Received at or after this ISO 8601 day or date-time. */
   since?: string;
   /** Received before this ISO 8601 day or date-time. */
@@ -350,7 +362,7 @@ export const getEmailTool: Tool = {
 export const searchEmailsTool: Tool = {
   name: 'searchEmails',
   description:
-    'Search one mailbox for emails whose subject or sender contains the query, newest first. Narrow with sender, since/before (ISO 8601), unread_only and flagged_only; page with offset and limit (default 10); total is the number of matches the page is cut from. Fast even in a large mailbox. Set search_body only when the user asks to search the email text: Mail then scans every body, which can take minutes. Each id is a mail id that getEmail and replyToEmail take.',
+    'Search one mailbox, newest first, for the emails every given filter matches: query (subject or sender contains it), sender, recipient (a To or Cc address), since/before (ISO 8601), unread_only and flagged_only. Give at least one filter; to list a whole mailbox use listEmails. Page with offset and limit (default 10); total is the number of matches the page is cut from. Fast even in a large mailbox. Set search_body only when the user asks to search the email text: Mail then scans every body for the query, which can take minutes. Each id is a mail id that getEmail and replyToEmail take.',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
@@ -380,9 +392,14 @@ export const searchEmailsTool: Tool = {
       search_body: {
         type: 'boolean',
         description:
-          'Also match the email text (default false). Slow: Mail scans every body of the mailbox, which can take minutes; use only when the user asks to search the content.',
+          'Also match the query in the email text (default false; needs query). Slow: Mail scans every body of the mailbox, which can take minutes; use only when the user asks to search the content.',
       },
       sender: { type: 'string', description: 'Only emails whose sender contains this text' },
+      recipient: {
+        type: 'string',
+        description:
+          'Only emails sent to this email address, as a To or Cc recipient (the whole address, e.g. anna@example.com)',
+      },
       since: {
         type: 'string',
         description:
@@ -400,13 +417,22 @@ export const searchEmailsTool: Tool = {
         description: 'Number of newest matches to skip, for the next page (default 0)',
       },
     },
-    required: ['query', 'mailbox'],
+    required: ['mailbox'],
   },
   outputSchema: EMAIL_LISTING_OUTPUT,
   inputExamples: [
     {
       description: 'Minimal: subject or sender search in an inbox',
       input: { query: 'quarterly report', mailbox: 'INBOX', account: 'iCloud' },
+    },
+    {
+      description: 'No query: what was sent to one address since a day',
+      input: {
+        mailbox: 'Sent Items',
+        account: 'Exchange',
+        recipient: 'anna@example.com',
+        since: '2026-10-13',
+      },
     },
     {
       description: 'Full: unread mail from one sender this month, the email text included',
@@ -482,19 +508,23 @@ export async function handleGetEmail(params: GetEmailParams): Promise<ToolResult
 }
 
 /**
- * Searches one mailbox by subject and sender, and by body only when search_body is set.
+ * Searches one mailbox by the filters given, and the query in the body only when search_body is set.
  * @param params - Tool input parameters.
  */
 export async function handleSearchEmails(params: SearchEmailsParams): Promise<ToolResult> {
   const p = asRecord(params);
+  const textFilters = ['query', 'sender', 'recipient'].filter(
+    (name) => typeof p[name] === 'string'
+  );
   const v = validateAll(p, {
-    required: ['query', 'mailbox'],
+    required: ['mailbox', ...textFilters],
     booleans: ['search_body', 'unread_only', 'flagged_only'],
     strings: [
       ['query', MAX_LENGTHS.short, false],
       ['mailbox', MAX_LENGTHS.short, false],
       ['account', MAX_LENGTHS.short, false],
       ['sender', MAX_LENGTHS.short, false],
+      ['recipient', MAX_LENGTHS.short, false],
       ['since', MAX_LENGTHS.short, false],
       ['before', MAX_LENGTHS.short, false],
     ],
@@ -504,5 +534,35 @@ export async function handleSearchEmails(params: SearchEmailsParams): Promise<To
     ],
   });
   if (!v.valid) return v.error;
+  const filterError = searchFilterError(p);
+  if (filterError) return filterError;
   return runMail('search_emails', p, p.search_body === true ? BODY_SEARCH_BUDGET : STANDARD_BUDGET);
+}
+
+/**
+ * The teaching error for a search that no filter narrows, or a body search without a query.
+ * @param p - Tool arguments.
+ */
+function searchFilterError(p: Record<string, unknown>): ToolResult | undefined {
+  const given = SEARCH_FILTERS.filter((name) => p[name] !== undefined && p[name] !== false);
+  if (given.length === 0) {
+    return teachingToolResult(
+      {
+        paramName: SEARCH_FILTERS.join(', '),
+        nextStep: `Give at least one of ${SEARCH_FILTERS.join(', ')}. To list a whole mailbox, call listEmails instead.`,
+      },
+      'MISSING_FIELDS'
+    );
+  }
+  if (p.search_body === true && p.query === undefined) {
+    return teachingToolResult(
+      {
+        paramName: 'query',
+        nextStep:
+          'search_body searches the email text for the query: pass query too, or leave search_body out.',
+      },
+      'MISSING_FIELDS'
+    );
+  }
+  return undefined;
 }

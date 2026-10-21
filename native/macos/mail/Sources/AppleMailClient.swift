@@ -35,16 +35,23 @@ enum AppleMailClient {
         }
     }
 
-    /// Which messages of a mailbox a listing reads; Mail evaluates every condition. A query matches the subject or
-    /// the sender, and with `searchBody` also the content, which Mail scans in a separate, slower request.
+    /// Which messages of a mailbox a listing reads; Mail evaluates every condition. A recipient matches a To or Cc
+    /// address, a query the subject or the sender, and with `searchBody` also the content, which Mail scans in a
+    /// separate, slower request.
     struct MessageFilter {
         var unreadOnly = false
         var flaggedOnly = false
         var sender: String?
+        var recipient: String?
         var since: Date?
         var before: Date?
         var query: String?
         var searchBody = false
+
+        var narrows: Bool {
+            unreadOnly || flaggedOnly || sender != nil || recipient != nil || since != nil || before != nil
+                || query != nil
+        }
 
         var setup: String {
             [since.map { dateVariable("spwSince", $0) }, before.map { dateVariable("spwBefore", $0) }]
@@ -74,6 +81,12 @@ enum AppleMailClient {
                 unreadOnly ? "read status is false" : nil,
                 flaggedOnly ? "flagged status is true" : nil,
                 sender.map { "sender contains \"\(escapeAppleScript($0))\"" },
+                recipient.map { recipient in
+                    let addresses = ["to", "cc"].map {
+                        "(address of every \($0) recipient) contains \"\(escapeAppleScript(recipient))\""
+                    }
+                    return "(" + addresses.joined(separator: " or ") + ")"
+                },
                 since.map { _ in "date received is greater than or equal to spwSince" },
                 before.map { _ in "date received is less than spwBefore" },
                 query,

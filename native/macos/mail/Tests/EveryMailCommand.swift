@@ -27,6 +27,10 @@ struct MailCommandCall {
             params: ["mailbox": "INBOX", "query": "x", "since": "2026-01-01", "search_body": true, "flagged_only": true],
             replies: [listing + "\u{1D}"]),
         MailCommandCall(
+            command: "search_emails",
+            params: ["mailbox": "Sent", "account": "Work", "recipient": "anna@x", "before": "2026-10-01"],
+            replies: [listing]),
+        MailCommandCall(
             command: "get_email",
             params: ["id": mailId, "include_headers": true, "include_source": true],
             replies: [String(repeating: "\u{1D}", count: 12)]),

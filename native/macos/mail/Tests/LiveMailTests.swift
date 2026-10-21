@@ -116,6 +116,37 @@ final class LiveMailTests: XCTestCase {
         XCTAssertEqual(future["total"] as? Int, 0)
     }
 
+    func testSearchEmailsWithoutAQueryFindsTheNewestTestMailByItsDateAndByEachToAndCcRecipient() throws {
+        let params: [String: Any] = ["mailbox": Self.testMailbox, "account": AppleMailClient.localAccountName]
+        let listed = try XCTUnwrap(try call("list_emails", params.merging(["limit": 1]) { $1 }) as? [String: Any])
+        guard let newest = (listed["emails"] as? [[String: Any]])?.first, let id = newest["id"] as? String,
+              let date = newest["date"] as? String
+        else {
+            throw XCTSkip("\(Self.testMailbox) holds no dated message to search for")
+        }
+        let ids = { (result: Any) in
+            ((result as? [String: Any])?["emails"] as? [[String: Any]])?.compactMap { $0["id"] as? String } ?? []
+        }
+
+        let byDate = try call("search_emails", params.merging(["since": String(date.prefix(10)), "limit": 10_000]) { $1 })
+        XCTAssertTrue(ids(byDate).contains(id), "\(byDate)")
+
+        let email = try XCTUnwrap((try call("get_email", ["id": id]) as? [String: Any])?["email"] as? [String: Any])
+        let recipients = ((email["to"] as? [String]) ?? []) + ((email["cc"] as? [String]) ?? [])
+        guard !recipients.isEmpty else {
+            throw XCTSkip("The newest \(Self.testMailbox) mail has no To or Cc recipient")
+        }
+        for recipient in recipients {
+            let address = recipient.split(separator: "<").last.map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "> ")) }
+            let found = try call(
+                "search_emails", params.merging(["recipient": address ?? recipient, "limit": 10_000]) { $1 })
+            XCTAssertTrue(ids(found).contains(id), "\(recipient): \(found)")
+        }
+
+        let nobody = try call("search_emails", params.merging(["recipient": "spw-nobody-847@example.invalid"]) { $1 })
+        XCTAssertEqual((nobody as? [String: Any])?["total"] as? Int, 0)
+    }
+
     func testGetEmailReadsCcAttachmentsHeadersAndSourceOfTheNewestTestMail() throws {
         let params: [String: Any] = [
             "mailbox": Self.testMailbox, "account": AppleMailClient.localAccountName, "limit": 1,
