@@ -26,31 +26,37 @@ enum MailSending {
         return formatter
     }()
 
-    /// The `send_email` command: a new message to `to`, `cc` and `bcc`.
+    /// The `send_email` command: a new message to `to`, `cc` and `bcc`, from `account` (Mail's default sending
+    /// address when omitted); the preview and the report carry the `from` Mail reads for it.
     static func sendEmail(params: [String: Any], scripts: MailScripts) throws -> [String: Any] {
         let signature = try signatureParam(params)
-        let fields = try newMessageFields(params, draft: false, signature: signature)
+        let account = try accountParam(params)
+        var fields = try newMessageFields(params, draft: false, signature: signature)
+        fields["account"] = account
         guard sendGate.isConfirmed(params) else {
-            if let signature {
-                _ = try run(signatureCheckScript(signature), scripts: scripts, signature: signature)
-            }
+            fields["from"] = try run(
+                senderScript(signature: signature, account: account),
+                scripts: scripts,
+                signature: signature,
+                account: account)
             return sendGate.preview(fields)
         }
-        _ = try run(
-            newMessageScript(fields, signature: signature, account: nil, finish: sendLine("spwMsg")),
+        fields["from"] = try run(
+            newMessageScript(fields, signature: signature, account: account, finish: sendLine("spwMsg")),
             scripts: scripts,
-            signature: signature)
+            signature: signature,
+            account: account)
         return sent(fields)
     }
 
-    /// The `save_draft` command: a new message saved, not sent, in the Drafts of `account` (Mail's default account
-    /// when omitted), without a confirmation gate.
+    /// The `save_draft` command: a new message saved, not sent, in the Drafts of `account` (Mail's default sending
+    /// address when omitted), without a confirmation gate.
     static func saveDraft(params: [String: Any], scripts: MailScripts) throws -> [String: Any] {
         let signature = try signatureParam(params)
         let account = try accountParam(params)
         var fields = try newMessageFields(params, draft: true, signature: signature)
         fields["account"] = account
-        _ = try run(
+        fields["from"] = try run(
             newMessageScript(fields, signature: signature, account: account, finish: draftLines),
             scripts: scripts,
             signature: signature,
@@ -224,8 +230,58 @@ enum MailSending {
             + (signature.map { "signature \"\(escapeAppleScript($0))\"" } ?? "missing value")
     }
 
-    private static func signatureCheckScript(_ signature: String) -> String {
-        ["tell application \"Mail\"", signatureCheck(signature), "end tell"].compactMap { $0 }.joined(separator: "\n")
+    /// Reads, without making a message, the `Name <address>` a new message goes from: the first address of
+    /// `account`, or else Mail's primary address, or the first address of a turned-on account.
+    private static func senderScript(signature: String?, account: String?) -> String {
+        let lines: [String?] = [
+            MailReading.cleanHandler,
+            "",
+            "tell application \"Mail\"",
+            signatureCheck(signature),
+            senderLines(account: account),
+            "end tell",
+            "return my spwClean(spwSender)",
+        ]
+        return lines.compactMap { $0 }.joined(separator: "\n")
+    }
+
+    private static func senderLines(account: String?) -> String {
+        let address = account.map { name in
+            """
+                if not (exists account "\(escapeAppleScript(name))") then error "\(accountNotFoundMarker)"
+                set spwAccount to account "\(escapeAppleScript(name))"
+                if not (enabled of spwAccount) then error "\(accountDisabledMarker)"
+                set spwAddresses to email addresses of spwAccount
+                if (count of spwAddresses) is 0 then error "\(noSenderMarker)"
+                set spwAddress to item 1 of spwAddresses
+                set spwName to full name of spwAccount
+            """
+        } ?? """
+                set spwPrimary to primary email
+                set spwAddress to ""
+                set spwName to ""
+                repeat with spwCandidate in accounts
+                    if enabled of spwCandidate then
+                        set spwCandidateAddresses to email addresses of spwCandidate
+                        if spwCandidateAddresses contains spwPrimary then
+                            set spwAddress to spwPrimary
+                            set spwName to full name of spwCandidate
+                            exit repeat
+                        end if
+                        if spwAddress is "" and (count of spwCandidateAddresses) > 0 then
+                            set spwAddress to item 1 of spwCandidateAddresses
+                            set spwName to full name of spwCandidate
+                        end if
+                    end if
+                end repeat
+                if spwAddress is "" then error "\(noSenderMarker)"
+            """
+        return address + """
+
+                if spwName is missing value then set spwName to ""
+                set spwSender to spwAddress
+                if spwName is not "" then set spwSender to spwName & " <" & spwAddress & ">"
+            """
     }
 
     private static func sendLine(_ message: String) -> String {
@@ -244,26 +300,20 @@ enum MailSending {
             .joined(separator: "\n")
         let subject = escapeAppleScript(fields["subject"] as? String ?? "")
         let content = appleScriptText(fields["body"] as? String ?? "")
-        let accountLines = account.map { name in
-            """
-                if not (exists account "\(escapeAppleScript(name))") then error "\(accountNotFoundMarker)"
-                set spwAccount to account "\(escapeAppleScript(name))"
-                if not (enabled of spwAccount) then error "\(accountDisabledMarker)"
-                set spwAddresses to email addresses of spwAccount
-                set spwSender to (full name of spwAccount) & " <" & (item 1 of spwAddresses) & ">"
-            """
-        }
         let lines: [String?] = [
+            MailReading.cleanHandler,
+            "",
             "tell application \"Mail\"",
             signatureCheck(signature),
-            accountLines,
+            senderLines(account: account),
             "    set spwMsg to make new outgoing message with properties "
                 + "{subject:\"\(subject)\", content:\"\(content)\", visible:true}",
-            account.map { _ in "    set sender of spwMsg to spwSender" },
+            "    set sender of spwMsg to spwSender",
             clauses.isEmpty ? nil : "    tell spwMsg\n\(clauses)\n    end tell",
             signatureApply(signature, to: "spwMsg"),
             finish,
             "end tell",
+            "return my spwClean(spwSender)",
         ]
         return lines.compactMap { $0 }.joined(separator: "\n")
     }

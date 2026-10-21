@@ -27,21 +27,103 @@ final class SendEmailTests: XCTestCase {
             .joined(separator: "\u{1D}")
     }
 
-    func testSendEmailWithoutConfirmationRunsNoScriptAndPreviewsExactlyWhatWouldGoOut() throws {
+    func testSendEmailWithoutConfirmationOnlyReadsTheSenderAndPreviewsExactlyWhatWouldGoOut() throws {
+        harness.executor.reply("Anna Nowak <anna@work.example>")
+
         let result = try harness.call("send_email", message)
 
-        XCTAssertTrue(harness.executor.calls.isEmpty)
+        XCTAssertEqual(harness.executor.calls.count, 1)
+        let script = harness.executor.calls[0].script
+        XCTAssertTrue(script.contains("set spwPrimary to primary email"), script)
+        XCTAssertTrue(script.contains("return my spwClean(spwSender)"), script)
+        XCTAssertFalse(script.contains("outgoing message"), script)
+        XCTAssertFalse(script.contains("send "), script)
         XCTAssertEqual(result["status"] as? String, "confirmation_required")
         XCTAssertEqual(result["confirm_param"] as? String, "confirm_send")
         let instruction = try XCTUnwrap(result["instruction"] as? String)
         XCTAssertTrue(instruction.contains("sendEmail"), instruction)
         XCTAssertTrue(instruction.contains("confirm_send: true"), instruction)
+        XCTAssertEqual(result["from"] as? String, "Anna Nowak <anna@work.example>")
+        XCTAssertNil(result["account"])
         XCTAssertEqual(result["to"] as? [String], ["alice@example.com", "bob@example.com"])
         XCTAssertEqual(result["cc"] as? [String], ["carol@example.com"])
         XCTAssertEqual(result["bcc"] as? [String], ["dave@example.com"])
         XCTAssertEqual(result["subject"] as? String, "Q4 report")
         XCTAssertEqual(result["body"] as? String, "Hi all,\nsee the numbers.")
         XCTAssertNil(result["attachments"])
+    }
+
+    func testWithoutAnAccountTheSenderIsMailsPrimaryAddressOrElseTheFirstAddressOfATurnedOnAccount() throws {
+        _ = try harness.call("send_email", message)
+
+        let script = harness.executor.calls[0].script
+        XCTAssertTrue(script.contains("repeat with spwCandidate in accounts"), script)
+        XCTAssertTrue(script.contains("if enabled of spwCandidate then"), script)
+        XCTAssertTrue(script.contains("if spwCandidateAddresses contains spwPrimary then"), script)
+        XCTAssertTrue(script.contains("if spwAddress is \"\" then error \"\(noSenderMarker)\""), script)
+        XCTAssertTrue(
+            script.contains("if spwName is not \"\" then set spwSender to spwName & \" <\" & spwAddress & \">\""),
+            script)
+    }
+
+    func testSendEmailFromAnAccountPreviewsTheAddressOfThatAccount() throws {
+        harness.executor.reply("Work Me <me@work.example>")
+
+        let result = try harness.call("send_email", message.merging(["account": "Work \"EU\""]) { $1 })
+
+        XCTAssertEqual(harness.executor.calls.count, 1)
+        let script = harness.executor.calls[0].script
+        XCTAssertTrue(
+            script.contains("if not (exists account \"Work \\\"EU\\\"\") then error \"\(accountNotFoundMarker)\""),
+            script)
+        XCTAssertTrue(script.contains("if not (enabled of spwAccount) then error \"\(accountDisabledMarker)\""), script)
+        XCTAssertFalse(script.contains("primary email"), script)
+        XCTAssertFalse(script.contains("outgoing message"), script)
+        XCTAssertEqual(result["from"] as? String, "Work Me <me@work.example>")
+        XCTAssertEqual(result["account"] as? String, "Work \"EU\"")
+    }
+
+    func testSendEmailFromAnUnknownOrTurnedOffAccountIsRefusedByName() {
+        harness.executor.fail(ScriptError.scriptFailed("execution error: \(accountNotFoundMarker) (-2700)"))
+        harness.executor.fail(ScriptError.scriptFailed("execution error: \(accountDisabledMarker) (-2700)"))
+
+        let unknown = harness.callFailing("send_email", message.merging(["account": "Nope"]) { $1 })
+        let disabled = harness.callFailing(
+            "send_email", message.merging(["account": "Google", "confirm_send": true]) { $1 })
+
+        XCTAssertEqual(unknown as? MailFailure, .accountNotFound("Nope"))
+        XCTAssertEqual(disabled as? MailFailure, .accountDisabled("Google"))
+    }
+
+    func testAMailWithoutAnyAddressToSendFromIsReportedAsNoSender() {
+        harness.executor.fail(ScriptError.scriptFailed("execution error: \(noSenderMarker) (-2700)"))
+
+        let error = harness.callFailing("send_email", message)
+
+        XCTAssertEqual(error as? MailFailure, .noSender)
+        XCTAssertTrue((error as? MailFailure)?.errorDescription?.hasPrefix("MAIL_NO_SENDER: ") == true)
+    }
+
+    func testConfirmedSendGoesFromTheSenderItReadsAndReportsIt() throws {
+        harness.executor.reply("Work Me <me@work.example>")
+
+        let result = try harness.call(
+            "send_email", message.merging(["account": "Work", "confirm_send": true]) { $1 })
+
+        XCTAssertEqual(harness.executor.calls.count, 1)
+        let script = harness.executor.calls[0].script
+        let read = try XCTUnwrap(script.range(of: "set spwAddresses to email addresses of spwAccount"))
+        let make = try XCTUnwrap(script.range(of: "make new outgoing message"))
+        let sender = try XCTUnwrap(script.range(of: "set sender of spwMsg to spwSender"))
+        let send = try XCTUnwrap(script.range(of: "send spwMsg"))
+        let report = try XCTUnwrap(script.range(of: "return my spwClean(spwSender)"))
+        XCTAssertLessThan(read.lowerBound, make.lowerBound)
+        XCTAssertLessThan(make.lowerBound, sender.lowerBound)
+        XCTAssertLessThan(sender.lowerBound, send.lowerBound)
+        XCTAssertLessThan(send.lowerBound, report.lowerBound)
+        XCTAssertEqual(result["status"] as? String, "sent")
+        XCTAssertEqual(result["from"] as? String, "Work Me <me@work.example>")
+        XCTAssertEqual(result["account"] as? String, "Work")
     }
 
     func testSendEmailWithoutCcOrBccPreviewsEmptyLists() throws {
@@ -56,7 +138,8 @@ final class SendEmailTests: XCTestCase {
             let result = try harness.call("send_email", message.merging(["confirm_send": flag]) { $1 })
             XCTAssertEqual(result["status"] as? String, "confirmation_required")
         }
-        XCTAssertTrue(harness.executor.calls.isEmpty)
+        XCTAssertEqual(harness.executor.calls.count, 3)
+        XCTAssertFalse(harness.executor.calls.contains { $0.script.contains("outgoing message") })
     }
 
     func testConfirmedSendEmailSendsToEveryRecipientAndReportsWhatWentOut() throws {

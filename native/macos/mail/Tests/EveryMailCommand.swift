@@ -34,6 +34,10 @@ struct MailCommandCall {
             command: "send_email",
             params: ["to": "a@x", "subject": "S", "body": "B", "signature": "Sig", "confirm_send": true],
             replies: []),
+        MailCommandCall(command: "send_email", params: ["to": "a@x", "subject": "S", "body": "B"], replies: []),
+        MailCommandCall(
+            command: "send_email", params: ["to": "a@x", "subject": "S", "body": "B", "account": "Work"], replies: []),
+        MailCommandCall(command: "save_draft", params: ["subject": "S"], replies: []),
         MailCommandCall(
             command: "save_draft",
             params: ["to": "a@x", "subject": "S", "body": "B", "signature": "Sig", "account": "Work"],

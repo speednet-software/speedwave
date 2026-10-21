@@ -698,4 +698,61 @@ final class LiveMailTests: XCTestCase {
         XCTAssertEqual(sent["status"] as? String, "sent", "\(sent)")
         XCTAssertEqual(sent["signature"] as? String, signature)
     }
+
+    func testTheSenderASendPreviewNamesIsTheSenderOfTheSameMessageSavedAsADraft() throws {
+        let subject = "Speedwave live sender \(UUID().uuidString)"
+        let message: [String: Any] = ["to": "nobody@example.invalid", "subject": subject, "body": "B"]
+
+        let preview = try XCTUnwrap(try call("send_email", message) as? [String: Any])
+        let from = try XCTUnwrap(preview["from"] as? String, "\(preview)")
+        XCTAssertTrue(from.contains("@"), from)
+        let saved = try XCTUnwrap(try call("save_draft", message) as? [String: Any])
+        defer {
+            _ = try? osascriptExecutor(
+                "tell application \"Mail\" to delete (every message of drafts mailbox whose subject is \"\(subject)\")", 30)
+        }
+        XCTAssertEqual(saved["from"] as? String, from)
+
+        var sender = ""
+        for _ in 0..<10 where sender.isEmpty {
+            Thread.sleep(forTimeInterval: 1)
+            sender = try osascriptExecutor(
+                """
+                tell application "Mail"
+                    set spwFound to every message of drafts mailbox whose subject is "\(subject)"
+                    if (count of spwFound) is 0 then return ""
+                    set spwDraft to item 1 of spwFound
+                    return sender of spwDraft
+                end tell
+                """, 30)
+        }
+        XCTAssertEqual(sender, from)
+    }
+
+    func testSendFromAnAccountGoesFromItsAddressOnlyToTheTestAddress() throws {
+        guard let address = ProcessInfo.processInfo.environment[Self.sendToVariable], !address.isEmpty else {
+            throw XCTSkip("Sending runs only with \(Self.sendToVariable) set to a test address")
+        }
+        let account = try osascriptExecutor(
+            "tell application \"Mail\" to name of last account whose enabled is true", 15)
+        let accountAddress = try osascriptExecutor(
+            """
+            tell application "Mail"
+                set spwAddresses to email addresses of account "\(escapeAppleScript(account))"
+                return item 1 of spwAddresses
+            end tell
+            """, 15)
+        let message: [String: Any] = [
+            "to": address, "subject": "Speedwave live send from \(UUID().uuidString)", "body": "From", "account": account,
+        ]
+
+        let preview = try XCTUnwrap(try call("send_email", message) as? [String: Any])
+        let from = try XCTUnwrap(preview["from"] as? String, "\(preview)")
+        XCTAssertTrue(from.contains(accountAddress), from)
+        XCTAssertEqual(preview["account"] as? String, account)
+
+        let sent = try XCTUnwrap(try call("send_email", message.merging(["confirm_send": true]) { $1 }) as? [String: Any])
+        XCTAssertEqual(sent["status"] as? String, "sent", "\(sent)")
+        XCTAssertEqual(sent["from"] as? String, from)
+    }
 }
