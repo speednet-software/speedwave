@@ -82,21 +82,12 @@ interface TranscriptLine {
   startLabel: string;
   /** Channel label ('You' / 'Meeting', 'Meeting · Speaker N' when diarized), else null. */
   speaker: string | null;
-  /** Colour token of one of the first diarized speakers, the same on every line; else null. */
   speakerColor: string | null;
   text: string;
 }
 
-/**
- * Colours of the first told-apart speakers, semantic theme tokens with a light-mode variant;
- * later speakers keep the chip's default colour and differ by number alone.
- */
 const SPEAKER_COLORS = ['var(--teal)', 'var(--violet)', 'var(--amber)', 'var(--green)'];
 
-/**
- * Label and colour of one segment's channel and, on a diarized meeting segment, its speaker.
- * @param seg - the segment to label.
- */
 function speakerOf(seg: Segment): Pick<TranscriptLine, 'speaker' | 'speakerColor'> {
   if (seg.source === 'mic') return { speaker: 'You', speakerColor: null };
   if (seg.source !== 'system') return { speaker: null, speakerColor: null };

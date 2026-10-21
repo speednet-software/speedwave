@@ -4,7 +4,6 @@ import { signal } from '@angular/core';
 import {
   LIVE_TRANSCRIPT_STORAGE_KEY,
   RECORDING_CHOICE_STORAGE_KEY,
-  SPEAKER_ATTRIBUTION_STORAGE_KEY,
   TranscriptionService,
 } from './transcription.service';
 import { TauriService } from './tauri.service';
@@ -858,18 +857,39 @@ describe('TranscriptionService', () => {
   });
 
   describe('speaker attribution', () => {
+    function freshService(): TranscriptionService {
+      TestBed.resetTestingModule();
+      TestBed.configureTestingModule({
+        providers: [
+          TranscriptionService,
+          { provide: TauriService, useValue: mockTauri },
+          { provide: ChatStateService, useValue: mockChat },
+        ],
+      });
+      return TestBed.inject(TranscriptionService);
+    }
+
     beforeEach(() => {
-      localStorage.removeItem(SPEAKER_ATTRIBUTION_STORAGE_KEY);
+      localStorage.clear();
     });
 
-    it('is off when nothing is stored and round-trips a stored choice', () => {
+    it('is off when nothing is stored, and a choice survives a new service', () => {
       expect(svc.speakerAttribution()).toBe(false);
       svc.setSpeakerAttribution(true);
       expect(svc.speakerAttribution()).toBe(true);
-      expect(localStorage.getItem(SPEAKER_ATTRIBUTION_STORAGE_KEY)).toBe('on');
+      expect(freshService().speakerAttribution()).toBe(true);
       svc.setSpeakerAttribution(false);
-      expect(svc.speakerAttribution()).toBe(false);
-      expect(localStorage.getItem(SPEAKER_ATTRIBUTION_STORAGE_KEY)).toBe('off');
+      expect(freshService().speakerAttribution()).toBe(false);
+    });
+
+    it('stays off for a stored value other than its own on', () => {
+      svc.setSpeakerAttribution(true);
+      const key = Object.keys(localStorage).find((k) => localStorage.getItem(k) === 'on');
+      expect(key).toBeDefined();
+      for (const value of ['ON', 'true', '1', '']) {
+        localStorage.setItem(key as string, value);
+        expect(svc.speakerAttribution()).toBe(false);
+      }
     });
 
     it('reads as off when storage throws, and a failed save throws nothing', () => {

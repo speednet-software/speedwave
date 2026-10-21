@@ -71,8 +71,6 @@ pub struct DiarizationRecord {
     pub secs: f64,
 }
 
-/// The word in front of a speaker number in every label: the Markdown export, the transcript
-/// pane and the summary prompt (`speaker_label_matches_ts_mirrors`).
 const SPEAKER_LABEL: &str = "Speaker";
 const SPEAKERS_NOTE: &str = "told apart from the meeting audio; approximate: one person can get \
 several labels and one label several people; a 'Meeting' line without a number has no \
@@ -460,7 +458,6 @@ mod tests {
     use crate::transcription::audio::AudioSource;
     use std::time::Duration;
 
-    /// The body of `export interface <name> { ... }` in a TS source, for mirror checks.
     fn ts_interface_body<'a>(src: &'a str, name: &str) -> &'a str {
         let start = src.find(&format!("export interface {name} {{")).unwrap();
         &src[start..start + src[start..].find("\n}").unwrap()]

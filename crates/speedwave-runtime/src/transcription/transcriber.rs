@@ -69,7 +69,6 @@ impl DecodeCancel {
         self.0.load(Ordering::Acquire)
     }
 
-    /// The shared flag itself, for the ggml abort hooks of Whisper and the diarizer.
     pub(crate) fn flag(&self) -> &AtomicBool {
         &self.0
     }
@@ -563,8 +562,6 @@ fn full_with_cancel(
     state.full(params, pcm)
 }
 
-/// The ggml abort hook of Whisper and the diarizer: `true` (abort) once the `AtomicBool`
-/// behind `data` is raised.
 #[expect(
     unsafe_code,
     reason = "ggml abort-callback FFI boundary of Whisper and the diarizer; every block has a SAFETY comment"

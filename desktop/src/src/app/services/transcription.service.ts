@@ -40,11 +40,7 @@ export const LIVE_TRANSCRIPT_STORAGE_KEY = 'speedwave-live-transcript-v2';
 /** Pre-`-v2` key, removed on first use so a stale default-on pick does not linger. */
 const LEGACY_LIVE_TRANSCRIPT_STORAGE_KEY = 'speedwave-live-transcript';
 
-/**
- * localStorage key for the "Tell speakers apart in the meeting audio" choice (only `'on'` turns it
- * on), read when an offline pass starts (ADR-097).
- */
-export const SPEAKER_ATTRIBUTION_STORAGE_KEY = 'speedwave-speaker-attribution';
+const SPEAKER_ATTRIBUTION_STORAGE_KEY = 'speedwave-speaker-attribution';
 
 /** localStorage key of the language, source and microphone the last recording used. */
 export const RECORDING_CHOICE_STORAGE_KEY = 'speedwave-recording-choice';
@@ -74,7 +70,6 @@ const TRANSCRIPT_PROMPT_DEFAULTS: Record<Language, string> = {
     'The transcript may contain speech-recognition errors; flag unclear fragments.',
 };
 
-/** Prompt sentence added for a transcript whose meeting speakers were told apart (ADR-097). */
 const SPEAKER_LABELS_PROMPT: Record<Language, string> = {
   pl:
     " Etykiety 'Speaker N' są przybliżone; imiona przypisuj tylko na podstawie treści " +

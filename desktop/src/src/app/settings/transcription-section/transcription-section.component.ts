@@ -28,7 +28,6 @@ interface ModelRow {
   idSuffix: string;
 }
 
-/** What telling speakers apart costs on each kind of host (ADR-097). */
 const SPEAKER_COST_TEXT = {
   macos: { text: 'Adds under a minute per hour of recording.', warn: false },
   windowsGpu: { text: 'Adds some time after each recording.', warn: false },
@@ -373,10 +372,8 @@ export class TranscriptionSectionComponent implements OnInit {
     return rows;
   });
 
-  /** The speaker-diarization model; `null` while loading. */
   readonly diarizationModel = computed(() => this.model()?.diarization ?? null);
 
-  /** What telling speakers apart costs on this computer; `null` while loading. */
   readonly speakerCost = computed(() => {
     const m = this.model();
     if (!m) return null;
@@ -423,7 +420,6 @@ export class TranscriptionSectionComponent implements OnInit {
 
   /** Whether new recordings show live text (off unless the user turned it on). */
   readonly liveTranscript = signal(this.transcription.liveTranscriptPreferred());
-  /** Whether the offline pass tells meeting speakers apart (off unless the user turned it on). */
   readonly speakerAttribution = signal(this.transcription.speakerAttribution());
 
   private readonly tauri = inject(TauriService);

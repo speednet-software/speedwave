@@ -34,7 +34,6 @@ export interface Segment {
   text: string;
   words: Word[];
   source?: TranscriptSource | null;
-  /** Speaker number 1..N on a diarized meeting-channel segment (absent otherwise). */
   speaker_id?: number | null;
 }
 
@@ -43,7 +42,6 @@ export interface ModelsUsed {
   /** Live-pass model key; null = record-only for the current part (drives the record-only UI). */
   live: string | null;
   finalize: string | null;
-  /** Diarization model key when the pass that made the transcript told speakers apart. */
   diarization?: string | null;
 }
 
@@ -92,7 +90,6 @@ export interface TranscriptSession {
   /** Capture warnings currently raised, in arrival order (absent when none are). */
   active_warnings?: CaptureWarning[];
   models_used: ModelsUsed;
-  /** Seconds speaker diarization took in the pass that made the transcript (absent if none). */
   diarization_secs?: number | null;
   last_seq: number;
 }
@@ -198,10 +195,8 @@ export type GpuClass = 'none' | 'integrated' | 'discrete';
 export interface RecommendedModelAck {
   live: RecommendedModelEntry;
   finalize: RecommendedModelEntry | null;
-  /** The speaker-diarization model; Settings offers its download next to the switch. */
   diarization: RecommendedModelEntry;
   accel_label: string;
-  /** Sets the Settings text on what telling speakers apart costs on this computer. */
   gpu_class: GpuClass;
 }
 

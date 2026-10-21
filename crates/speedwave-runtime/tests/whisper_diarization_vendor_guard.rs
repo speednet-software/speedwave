@@ -39,6 +39,10 @@ fn vendored_sources() -> String {
     read_vendor_file("whisper-diarization.cpp") + &read_vendor_file("whisper-diarization-arch.h")
 }
 
+fn without_whitespace(source: &str) -> String {
+    source.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
 fn called_identifiers(source: &str, prefix: &str) -> BTreeSet<String> {
     let re = regex::Regex::new(&format!(r"\b({prefix}[a-z0-9_]+)\s*\(")).expect("valid regex");
     re.captures_iter(source).map(|c| c[1].to_owned()).collect()
@@ -191,13 +195,21 @@ fn the_vendored_code_loads_no_backend_library() {
 }
 
 #[test]
+fn source_matches_ignore_how_the_code_is_laid_out() {
+    let one_line = without_whitespace("if (a) { WARN(x); }");
+    assert_eq!(one_line, without_whitespace("if (a)\n{\n\tWARN( x );\n}"));
+    assert_ne!(one_line, without_whitespace("if (b) { WARN(x); }"));
+    assert_eq!(without_whitespace(" \n\t"), "");
+}
+
+#[test]
 fn the_backend_choice_takes_an_integrated_gpu_like_whisper_cpp() {
     let source = read_vendor_file("whisper-diarization.cpp");
     let init = source
         .split("static bool whisper_diar_backend_init(")
         .nth(1)
         .expect("whisper_diar_backend_init is defined");
-    let body = &init[..init.find("\n}\n").expect("the function ends")];
+    let body = without_whitespace(&init[..init.find("\n}\n").expect("the function ends")]);
     for device_type in [
         "GGML_BACKEND_DEVICE_TYPE_GPU",
         "GGML_BACKEND_DEVICE_TYPE_IGPU",
@@ -209,7 +221,9 @@ fn the_backend_choice_takes_an_integrated_gpu_like_whisper_cpp() {
         );
     }
     assert!(
-        body.contains("if (backends.empty()) {\n            WHISPER_LOG_WARN("),
+        body.contains(&without_whitespace(
+            "if (backends.empty()) { WHISPER_LOG_WARN("
+        )),
         "a GPU request that ends on the CPU is logged as a warning (UPSTREAM, local change 10)"
     );
 }
@@ -221,27 +235,29 @@ fn the_chunk_loop_reads_the_abort_callback_before_every_chunk() {
         .split("bool whisper_diar_detect_speakers(")
         .nth(1)
         .expect("whisper_diar_detect_speakers is defined");
-    let body = &detect[..detect.find("\n}\n").expect("the function ends")];
+    let body = without_whitespace(&detect[..detect.find("\n}\n").expect("the function ends")]);
+    let parameters =
+        without_whitespace("ggml_abort_callback abort_callback, void * abort_callback_data");
     assert!(
-        body.contains("ggml_abort_callback abort_callback, void * abort_callback_data"),
+        body.contains(&parameters),
         "the function takes the abort callback and its data (UPSTREAM, local change 8)"
     );
     let chunk_loop = body
-        .find("for (int64_t i = 0; i < n_mel_frames;")
+        .find(&without_whitespace("for (int64_t i = 0; i < n_mel_frames;"))
         .expect("the chunk loop");
     let check = body
-        .find("if (abort_callback && abort_callback(abort_callback_data))")
+        .find(&without_whitespace(
+            "if (abort_callback && abort_callback(abort_callback_data))",
+        ))
         .expect("the loop reads the abort callback");
     assert!(
         check > chunk_loop,
         "the abort check sits inside the chunk loop"
     );
     assert!(
-        body.contains("ggml_abort_callback abort_callback, void * abort_callback_data"),
+        without_whitespace(&read_vendor_file("whisper-diarization.h")).contains(&parameters),
         "the header declaration carries the same two parameters"
     );
-    assert!(read_vendor_file("whisper-diarization.h")
-        .contains("ggml_abort_callback abort_callback, void * abort_callback_data"));
 }
 
 #[test]

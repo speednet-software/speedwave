@@ -1070,10 +1070,6 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
     Ok(())
 }
 
-/// Tells the speakers of `system_pcm` apart with the diarizer `load` gives, after Whisper is
-/// released, and labels the `System` segments of `final_segs`; a model that is missing, does not
-/// load or fails only raises a capture warning and leaves them unlabelled. Returns what the
-/// session records about the run, or the error that ends a put-off, replaced or deleted pass.
 fn diarize_meeting_channel(
     store: &TranscriptStore,
     id: Uuid,
@@ -1127,8 +1123,6 @@ fn diarize_meeting_channel(
     Ok(record)
 }
 
-/// How a pass ends once its claim was cancelled: `Deleted` when the session is gone, else
-/// `Superseded` (put off or replaced by a newer pass).
 fn stopped_pass_error(store: &TranscriptStore, id: Uuid) -> DriverError {
     match store.get(id) {
         Err(e) => pass_stopped(&e).unwrap_or(DriverError::Superseded),
@@ -1136,16 +1130,11 @@ fn stopped_pass_error(store: &TranscriptStore, id: Uuid) -> DriverError {
     }
 }
 
-/// Copies `pcm` into `buf` starting at `offset` (16 kHz), padding the gap with silence, so the
-/// meeting channel of every part sits on the same timeline as the transcript segments.
 fn append_at(buf: &mut Vec<f32>, offset: Duration, pcm: &[f32]) {
     buf.resize(frame_at(offset), 0.0);
     buf.extend_from_slice(pcm);
 }
 
-/// Length the meeting-channel buffer reaches once a part of `frames` frames at `part_base`
-/// is appended: its end frame when its first channel is `System`, else 0, so a mono part
-/// reserves nothing.
 fn system_pcm_end(part_base: Duration, frames: u64, channels: usize) -> u64 {
     if lane_sources(channels).first() == Some(&Some(TranscriptSource::System)) {
         frame_at(part_base) as u64 + frames
@@ -1154,7 +1143,6 @@ fn system_pcm_end(part_base: Duration, frames: u64, channels: usize) -> u64 {
     }
 }
 
-/// The 16 kHz frame index of `offset` on the transcript timeline.
 fn frame_at(offset: Duration) -> usize {
     (offset.as_secs_f64() * f64::from(SAMPLE_RATE_HZ)).round() as usize
 }
@@ -4010,7 +3998,6 @@ mod tests {
         })
     }
 
-    /// A transcriber that raises `dropped` when the pass releases it.
     struct DroppedFlagTranscriber {
         inner: MockTranscriber,
         dropped: Arc<AtomicBool>,

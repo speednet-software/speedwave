@@ -598,9 +598,6 @@ fn spawn_offline_pass(
     });
 }
 
-/// The diarizer loader for an offline pass, `None` without `speaker_mode`. `run_finalize` runs it
-/// after Whisper and only for a recording with a meeting channel, so a model that is not
-/// downloaded is judged there, where it raises `SpeakerModelMissing`.
 fn offline_diarizer(
     models: &ModelStore,
     speaker_mode: bool,
@@ -609,9 +606,15 @@ fn offline_diarizer(
     if !speaker_mode {
         return None;
     }
-    let path = models.diarization_path();
+    let models = models.clone();
     Some(Box::new(move || {
-        NemotronDiarizer::load(&path, class).map(|d| Box::new(d) as Box<dyn Diarizer>)
+        if !models.diarization_is_present() {
+            return Err(transcription::DiarizeError::ModelMissing(
+                DIARIZATION_MODEL.file.to_string(),
+            ));
+        }
+        NemotronDiarizer::load(&models.diarization_path(), class)
+            .map(|d| Box::new(d) as Box<dyn Diarizer>)
     }))
 }
 
@@ -1139,7 +1142,6 @@ fn model_entry(
     })
 }
 
-/// The speaker-diarization model's UI entry.
 fn diarization_entry(models: &ModelStore, downloads: &DownloadsHandle) -> RecommendedModelEntry {
     let status = models.diarization_status();
     RecommendedModelEntry {
@@ -1223,14 +1225,15 @@ pub async fn delete_transcription_model(
     models.delete_model(&model_id).map_err(|e| e.to_string())
 }
 
-/// Downloads the model with catalogue key `key`; a Whisper model brings the VAD model along,
-/// whose failure only warns.
 fn download_model_by_key(
     models: &ModelStore,
     key: &str,
     progress: &mut dyn FnMut(transcription::DownloadProgress),
 ) -> Result<std::path::PathBuf, transcription::ModelStoreError> {
-    if transcription::whisper_model(key).is_some() {
+    if matches!(
+        transcription::catalog_model(key),
+        Some(transcription::CatalogModel::Whisper(_))
+    ) {
         if let Err(e) = models.ensure_vad_model() {
             log::warn!(target: "transcription::models", "VAD model download failed: {e}");
         }
@@ -1779,6 +1782,24 @@ mod tests {
         let models = ModelStore::with_root(dir.path().join("m"));
         let load = offline_diarizer(&models, true, GpuClass::None)
             .expect("the switch alone yields a loader");
+        assert!(matches!(
+            load().map(|_| ()),
+            Err(transcription::DiarizeError::ModelMissing(ref model)) if model == DIARIZATION_MODEL.file
+        ));
+    }
+
+    #[test]
+    fn offline_diarizer_reports_a_truncated_model_as_missing_like_settings_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let models = ModelStore::with_root(dir.path().join("m"));
+        let path = models.diarization_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(DIARIZATION_MODEL.approx_bytes / 2)
+            .unwrap();
+        assert!(!models.diarization_is_present());
+        let load = offline_diarizer(&models, true, GpuClass::None).unwrap();
         assert!(matches!(
             load().map(|_| ()),
             Err(transcription::DiarizeError::ModelMissing(ref model)) if model == DIARIZATION_MODEL.file

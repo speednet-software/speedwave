@@ -1,5 +1,5 @@
-//! Development tool: runs `NemotronDiarizer` on a 16 kHz WAV and prints one line per speaker turn,
-//! optionally for a grid of activation thresholds, with a dump of the model's probabilities.
+//! Development tool: runs `NemotronDiarizer` on a 16 kHz WAV, prints one line per speaker turn
+//! and the load and processing times, on the CPU or the GPU, to measure a host.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -8,20 +8,16 @@ use std::time::Instant;
 
 use speedwave_runtime::transcription::audio::parse_wav_to_channels_f32;
 use speedwave_runtime::transcription::{
-    decode_threads, ActivationThresholds, DecodeCancel, Diarizer, GpuClass, NemotronDiarizer,
-    SpeakerTurn, SAMPLE_RATE_HZ,
+    decode_threads, DecodeCancel, Diarizer, GpuClass, NemotronDiarizer, SpeakerTurn, SAMPLE_RATE_HZ,
 };
 
-const USAGE: &str = "usage: diarize -m MODEL [-t THREADS] [--gpu] \
-                     [--thresholds START/STOP[,START/STOP...]] [--probs FILE] AUDIO_FILE";
+const USAGE: &str = "usage: diarize -m MODEL [-t THREADS] [--gpu] AUDIO_FILE";
 
 #[derive(Debug, PartialEq)]
 struct Args {
     model: PathBuf,
     threads: i32,
     gpu: bool,
-    thresholds: Option<Vec<ActivationThresholds>>,
-    probs: Option<PathBuf>,
     audio: PathBuf,
 }
 
@@ -35,7 +31,6 @@ fn main() -> ExitCode {
     }
 }
 
-/// The tool's one stderr sink: errors and the timing lines, so stdout carries only the turns.
 fn note(line: &str) {
     let _ = writeln!(std::io::stderr().lock(), "{line}");
 }
@@ -64,33 +59,7 @@ fn run(argv: impl Iterator<Item = String>) -> Result<(), String> {
         (t_done - t_process).as_secs_f64() * 1000.0,
         pcm.len() as f64 / f64::from(SAMPLE_RATE_HZ)
     ));
-    if let Some(path) = &args.probs {
-        let probs = diarizer.probabilities();
-        write_probs(path, &probs.values)?;
-        note(&format!(
-            "probs: frames={} speakers={} file={}",
-            probs
-                .values
-                .len()
-                .checked_div(probs.n_speakers)
-                .unwrap_or(0),
-            probs.n_speakers,
-            path.display()
-        ));
-    }
-    let mut out = std::io::stdout().lock();
-    match &args.thresholds {
-        None => write_turns(&mut out, &turns),
-        Some(grid) => {
-            for &t in grid {
-                writeln!(out, "# thresholds start={} stop={}", t.start, t.stop)
-                    .map_err(|e| e.to_string())?;
-                let turns = diarizer.turns(t).map_err(|e| e.to_string())?;
-                write_turns(&mut out, &turns)?;
-            }
-            Ok(())
-        }
-    }
+    write_turns(&mut std::io::stdout().lock(), &turns)
 }
 
 fn write_turns(out: &mut impl Write, turns: &[SpeakerTurn]) -> Result<(), String> {
@@ -107,14 +76,8 @@ fn write_turns(out: &mut impl Write, turns: &[SpeakerTurn]) -> Result<(), String
     Ok(())
 }
 
-fn write_probs(path: &Path, values: &[f32]) -> Result<(), String> {
-    let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
-    std::fs::write(path, bytes).map_err(|e| format!("{}: {e}", path.display()))
-}
-
 fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
     let (mut model, mut audio, mut threads, mut gpu) = (None, None, decode_threads(), false);
-    let (mut thresholds, mut probs) = (None, None);
     while let Some(arg) = argv.next() {
         match arg.as_str() {
             "-m" | "--model" => model = Some(PathBuf::from(value_of(&arg, argv.next())?)),
@@ -125,8 +88,6 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
                     .map_err(|_| format!("invalid thread count: {value}"))?;
             }
             "--gpu" => gpu = true,
-            "--thresholds" => thresholds = Some(parse_grid(&value_of(&arg, argv.next())?)?),
-            "--probs" => probs = Some(PathBuf::from(value_of(&arg, argv.next())?)),
             other if !other.starts_with('-') => audio = Some(PathBuf::from(other)),
             other => return Err(format!("unknown argument: {other}\n{USAGE}")),
         }
@@ -135,39 +96,14 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
         model: model.ok_or_else(|| format!("model path is required (-m)\n{USAGE}"))?,
         threads,
         gpu,
-        thresholds,
-        probs,
         audio: audio.ok_or_else(|| format!("audio file is required\n{USAGE}"))?,
     })
-}
-
-fn parse_grid(value: &str) -> Result<Vec<ActivationThresholds>, String> {
-    value
-        .split(',')
-        .map(|pair| {
-            let (start, stop) = pair
-                .split_once('/')
-                .ok_or_else(|| format!("expected START/STOP, got {pair:?}"))?;
-            let number = |v: &str| {
-                v.trim()
-                    .parse::<f32>()
-                    .map_err(|_| format!("invalid threshold {v:?} in {pair:?}"))
-            };
-            ActivationThresholds {
-                start: number(start)?,
-                stop: number(stop)?,
-            }
-            .validated()
-            .map_err(|e| e.to_string())
-        })
-        .collect()
 }
 
 fn value_of(flag: &str, value: Option<String>) -> Result<String, String> {
     value.ok_or_else(|| format!("{flag} needs a value\n{USAGE}"))
 }
 
-/// The first channel of a 16 kHz WAV, through the runtime's own reader.
 fn read_wav(path: &Path) -> Result<Vec<f32>, String> {
     let (channels, rate) =
         parse_wav_to_channels_f32(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -216,74 +152,12 @@ mod tests {
                 model: "m.gguf".into(),
                 threads: 6,
                 gpu: true,
-                thresholds: None,
-                probs: None,
                 audio: "a.wav".into()
             }
         );
         let defaults = args(&["--model", "m.gguf", "a.wav"]).unwrap();
         assert_eq!(defaults.threads, decode_threads());
         assert!(!defaults.gpu);
-    }
-
-    #[test]
-    fn parses_a_threshold_grid_and_a_probability_file() {
-        let a = args(&[
-            "-m",
-            "m.gguf",
-            "--thresholds",
-            "0.641/0.561, 0.55/0.47",
-            "--probs",
-            "p.f32",
-            "a.wav",
-        ])
-        .unwrap();
-        assert_eq!(
-            a.thresholds.unwrap(),
-            vec![
-                ActivationThresholds {
-                    start: 0.641,
-                    stop: 0.561
-                },
-                ActivationThresholds {
-                    start: 0.55,
-                    stop: 0.47
-                },
-            ]
-        );
-        assert_eq!(a.probs.unwrap(), PathBuf::from("p.f32"));
-    }
-
-    #[test]
-    fn rejects_a_malformed_or_invalid_threshold_grid() {
-        for (grid, message) in [
-            ("0.6", "expected START/STOP"),
-            ("0.6/x", "invalid threshold"),
-            ("0.5/0.6", "invalid activation thresholds"),
-            ("1.2/0.5", "invalid activation thresholds"),
-            ("0.6/0.5,", "expected START/STOP"),
-        ] {
-            let err = args(&["-m", "m", "--thresholds", grid, "a.wav"]).unwrap_err();
-            assert!(err.contains(message), "{grid}: {err}");
-        }
-        assert!(args(&["-m", "m", "--thresholds"])
-            .unwrap_err()
-            .contains("needs a value"));
-    }
-
-    #[test]
-    fn writes_probabilities_as_little_endian_f32() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("p.f32");
-        write_probs(&path, &[0.25, -1.0]).unwrap();
-        let bytes = std::fs::read(&path).unwrap();
-        assert_eq!(
-            bytes,
-            [0.25f32.to_le_bytes(), (-1.0f32).to_le_bytes()].concat()
-        );
-        write_probs(&path, &[]).unwrap();
-        assert!(std::fs::read(&path).unwrap().is_empty());
-        assert!(write_probs(&dir.path().join("absent/p.f32"), &[1.0]).is_err());
     }
 
     #[test]
@@ -315,6 +189,9 @@ mod tests {
         assert!(args(&["-m", "m", "--fast", "a.wav"])
             .unwrap_err()
             .contains("unknown argument: --fast"));
+        assert!(args(&["-m", "m", "--thresholds", "0.6/0.5", "a.wav"])
+            .unwrap_err()
+            .contains("unknown argument: --thresholds"));
     }
 
     #[test]
