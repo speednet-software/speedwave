@@ -17,6 +17,8 @@ public enum ScriptRunner {
         process.terminationHandler = { _ in semaphore.signal() }
 
         try process.run()
+        let stdoutReader = PipeReader(stdoutPipe)
+        let stderrReader = PipeReader(stderrPipe)
 
         if semaphore.wait(timeout: .now() + timeout) == .timedOut {
             process.terminate()
@@ -24,10 +26,10 @@ public enum ScriptRunner {
             throw ScriptError.timeout(timeout, nil)
         }
 
-        let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-        let stdout = String(data: stdoutData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let stderr = String(data: stderrData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let stdout = String(data: stdoutReader.data(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let stderr = String(data: stderrReader.data(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
         guard process.terminationStatus == 0 else {
             throw classifyFailure(stderr: stderr)
@@ -42,6 +44,25 @@ public enum ScriptRunner {
             return .automationPermission(stderr)
         }
         return .scriptFailed(stderr)
+    }
+}
+
+/// Drains a pipe on a background queue from the moment it is made, so a child never blocks on a full pipe.
+private final class PipeReader: @unchecked Sendable {
+    private let done = DispatchGroup()
+    private var collected = Data()
+
+    init(_ pipe: Pipe) {
+        done.enter()
+        DispatchQueue.global().async {
+            self.collected = pipe.fileHandleForReading.readDataToEndOfFile()
+            self.done.leave()
+        }
+    }
+
+    func data() -> Data {
+        done.wait()
+        return collected
     }
 }
 

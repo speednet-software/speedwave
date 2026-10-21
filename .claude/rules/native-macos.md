@@ -24,6 +24,8 @@ The native OS integrations (Mail, Calendar, Reminders, Notes) run as Swift CLIs 
 
 Extending a Mail/Notes gate or adding a new native automation gate must keep this shape — "simplifying" back to bundle-id addressing reintroduces the non-deterministic failure.
 
+- **`ScriptRunner.run` (SharedCLI) reads `osascript`'s stdout and stderr while the script runs** (`PipeReader`), never after it exits: a script printing more than a pipe buffer (64 KB) blocks on the write and was killed at the timeout, which made `list_emails` of any mailbox with a few hundred mails fail with `MAIL_TIMEOUT` (live, 2026-10-21: Exchange Inbox of 352 mails, 1.1 s after the fix). `ScriptRunnerTests` runs scripts with 256 KB of output and of error text.
+
 ## TCC and entitlements
 
 - macOS entitlements plists live in `desktop/src-tauri/entitlements/` (one per restricted API: apple-events, audio-capture, calendars, node, reminders, virtualization). Add a new plist for a new restricted API — never relax an existing one. The single-key shape of each plist (two keys for node, by design) and the mapping from plist to binary are a manual alignment (`.claude/rules/alignments.md`); `_tests/desktop/sign-bundled-binaries.bats` and `_tests/desktop/native-cli-info-plist.bats` only check that signing and the embedded identifiers behave correctly, not the plist content itself.

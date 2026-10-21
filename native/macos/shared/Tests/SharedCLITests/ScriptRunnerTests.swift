@@ -319,4 +319,45 @@ final class ScriptRunnerTests: XCTestCase {
         let err = ScriptRunner.classifyFailure(stderr: "")
         guard case .scriptFailed = err else { return XCTFail("expected .scriptFailed") }
     }
+
+    func testRunReturnsOutputLargerThanAPipeBufferWithoutWaitingForTheTimeout() throws {
+        let script = """
+        set s to "a"
+        repeat 18 times
+            set s to s & s
+        end repeat
+        return s
+        """
+        let started = Date()
+
+        let output = try ScriptRunner.run(script, timeout: 20)
+
+        XCTAssertEqual(output.count, 262_144)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 10)
+    }
+
+    func testRunReturnsAFailureWithStderrLargerThanAPipeBuffer() {
+        let script = """
+        set s to "e"
+        repeat 17 times
+            set s to s & s
+        end repeat
+        error s
+        """
+
+        XCTAssertThrowsError(try ScriptRunner.run(script, timeout: 20)) { error in
+            guard case .scriptFailed(let stderr) = error as? ScriptError else {
+                return XCTFail("expected .scriptFailed, got \(error)")
+            }
+            XCTAssertGreaterThan(stderr.count, 131_072)
+        }
+    }
+
+    func testRunStillTimesOutAScriptThatNeverEnds() {
+        XCTAssertThrowsError(try ScriptRunner.run("delay 30", timeout: 1)) { error in
+            guard case .timeout = error as? ScriptError else {
+                return XCTFail("expected .timeout, got \(error)")
+            }
+        }
+    }
 }
