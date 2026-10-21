@@ -12,7 +12,7 @@ final class MailCommandBoundaryTests: XCTestCase {
     }
 
     func testListEmailsRunsItsScriptWithinTheGivenBudgetAndReturnsTheParsedRows() throws {
-        harness.executor.reply(["Work", "<a@x>", "Hi", "Anna <anna@x>", "2026-10-20T09:15:00", "false", "-1"]
+        harness.executor.reply(["Work", "<a@x>", "Hi", "Anna <anna@x>", "2026-10-20T09:15:00", "false", "-1", "0"]
             .joined(separator: "\u{1D}"))
 
         let result = try harness.call("list_emails", ["mailbox": "INBOX", "limit": 5, scriptTimeoutParam: 12_000])
@@ -36,9 +36,9 @@ final class MailCommandBoundaryTests: XCTestCase {
             ("redirect_email", ["id": mailId, "to": "a@x", "confirm_send": true]),
         ]
         let replies = [
-            "list_emails": "Work" + String(repeating: "\u{1D}", count: 6),
+            "list_emails": "Work" + String(repeating: "\u{1D}", count: 7),
             "get_email": String(repeating: "\u{1D}", count: 12),
-            "search_emails": "Work" + String(repeating: "\u{1D}", count: 6),
+            "search_emails": "Work" + String(repeating: "\u{1D}", count: 7),
             "reply_to_email": String(repeating: "\u{1D}", count: 5),
             "forward_email": String(repeating: "\u{1D}", count: 4),
             "redirect_email": String(repeating: "\u{1D}", count: 4),

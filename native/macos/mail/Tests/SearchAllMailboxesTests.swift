@@ -33,12 +33,13 @@ final class SearchAllMailboxesTests: XCTestCase {
             {{"Anna <anna@x>"}, {}, {"Ewa <ewa@x>"}, {"T <t@x>"}, {"J <j@x>"}}, ¬
             {{spwD1}, {}, {spwD3}, {spwD2}, {spwD2}}, ¬
             {{false}, {}, {true}, {true}, {true}}, ¬
-            {{-1}, {}, {2}, {-1}, {-1}}}}
-        set end of spwScopes to {"Empty", {}, {}, {}, missing value, missing value, missing value, {{}, {}, {}, {}, {}, {}}}
+            {{-1}, {}, {2}, {-1}, {-1}}, ¬
+            {{{"a.pdf", "b.png"}}, {}, {{}}, {{"t.txt"}}, {{}}}}}
+        set end of spwScopes to {"Empty", {}, {}, {}, missing value, missing value, missing value, {{}, {}, {}, {}, {}, {}, {}}}
         set end of spwScopes to {"On My Mac", {"local1", "local2"}, {"Speedwave-Test", "Shared"}, {"root", "root"}, ¬
             {missing value, "an account"}, missing value, missing value, ¬
             {{{"<l@x>"}, {"<z@x>"}}, {{"Local"}, {"Not local"}}, {{"L <l@x>"}, {"Z <z@x>"}}, ¬
-            {{spwD2}, {spwD2}}, {{true}, {true}}, {{-1}, {-1}}}}
+            {{spwD2}, {spwD2}}, {{true}, {true}}, {{-1}, {-1}}, {{{"x"}}, {{}}}}}
         """
 
     private func script() throws -> String {
@@ -67,7 +68,26 @@ final class SearchAllMailboxesTests: XCTestCase {
         XCTAssertEqual(rows.map { $0["account"] as? String }, ["Work", "On My Mac", "Work"])
         XCTAssertEqual(rows.map { $0["flag"] as? String }, ["none", "none", "yellow"])
         XCTAssertEqual(rows.map { $0["read"] as? Bool }, [false, true, true])
+        XCTAssertEqual(rows.map { $0["attachment_count"] as? Int }, [2, 1, 0])
         XCTAssertEqual(result["total"] as? Int, 3)
+    }
+
+    func testAttachmentsAreReadForEveryMailboxOfTheAccountInOneRequest() throws {
+        harness.executor.reply("")
+
+        _ = try harness.call("search_emails", ["query": "x"])
+
+        let script = try script()
+        XCTAssertTrue(
+            script.contains(
+                "name of mail attachments of (every message of every mailbox of spwAcct whose "
+                    + "(subject contains \"x\" or sender contains \"x\"))\n"),
+            script)
+        XCTAssertTrue(
+            script.contains(
+                "name of mail attachments of (every message of every mailbox whose "
+                    + "(subject contains \"x\" or sender contains \"x\"))\n"),
+            script)
     }
 
     func testEachRowsMailIdNamesTheMailboxTheMailIsIn() throws {
@@ -165,7 +185,7 @@ final class SearchAllMailboxesTests: XCTestCase {
         _ = try harness.call("search_emails", ["query": "x"])
         let torn = """
             set spwScopes to {{"Work", {"box1", "box2"}, {"Inbox", "Sent"}, {"work", "work"}, missing value, ¬
-                missing value, missing value, {{{}, {}}, {{}}, {{}, {}}, {{}, {}}, {{}, {}}, {{}, {}}}}}
+                missing value, missing value, {{{}, {}}, {{}}, {{}, {}}, {{}, {}}, {{}, {}}, {{}, {}}, {{}, {}}}}}
             """
 
         XCTAssertThrowsError(try osascriptExecutor(torn + (try sectionsTail(of: try script())), 15)) { error in
@@ -174,7 +194,8 @@ final class SearchAllMailboxesTests: XCTestCase {
     }
 
     func testAMailboxWhoseColumnsDifferInLengthFailsAsThatMailboxChanged() {
-        let section = ["Work", "Inbox", "<a@x>\u{1E}<b@x>", "One", "A", "", "true", "-1"].joined(separator: "\u{1D}")
+        let section = ["Work", "Inbox", "<a@x>\u{1E}<b@x>", "One", "A", "", "true", "-1", "0"]
+            .joined(separator: "\u{1D}")
         harness.executor.reply(section)
 
         let error = harness.callFailing("search_emails", ["query": "x"])

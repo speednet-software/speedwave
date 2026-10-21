@@ -6,6 +6,9 @@ const BODY_SEARCH_BUDGET = mailTimeBudget(180_000);
 
 const RAW_TEXT_LIMIT = 100_000;
 
+const ATTACHMENT_COUNT_NOTE =
+  'attachment_count is the number of attachments Mail lists for the email, which may include embedded images (pictures inside the text); getEmail gives the exact list.';
+
 const SEARCH_FILTERS = [
   'query',
   'sender',
@@ -99,6 +102,10 @@ const EMAIL_LISTING_OUTPUT = {
           },
           read: { type: 'boolean' },
           flag: FLAG_OUTPUT,
+          attachment_count: {
+            type: 'number',
+            description: ATTACHMENT_COUNT_NOTE,
+          },
           mailbox: { type: 'string' },
           account: { type: 'string' },
         },
@@ -201,7 +208,8 @@ export const listMailboxesTool: Tool = {
 export const listEmailsTool: Tool = {
   name: 'listEmails',
   description:
-    'List the emails of one mailbox, newest first. Page with offset and limit (default 10); total is the number of emails the page is cut from (unread ones only with unread_only, flagged ones only with flagged_only). Each email carries its flag color, or none. Each id is a mail id that getEmail and replyToEmail take.',
+    'List the emails of one mailbox, newest first. Page with offset and limit (default 10); total is the number of emails the page is cut from (unread ones only with unread_only, flagged ones only with flagged_only). Each email carries its flag color, or none. Each id is a mail id that getEmail and replyToEmail take. ' +
+    ATTACHMENT_COUNT_NOTE,
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
@@ -362,7 +370,8 @@ export const getEmailTool: Tool = {
 export const searchEmailsTool: Tool = {
   name: 'searchEmails',
   description:
-    "Search emails, newest first, for the ones every given filter matches: query (subject or sender contains it), sender, recipient (a To or Cc address), since/before (ISO 8601), unread_only and flagged_only. Give at least one filter; to list a whole mailbox use listEmails. With mailbox it searches that one mailbox; without mailbox it searches every mailbox of account, or of every account and On My Mac without account, leaving out each account's Trash and Junk (name one as mailbox to search it). Each row names its mailbox and account. Page with offset and limit (default 10); total is the number of matches the page is cut from. Fast even in a large mailbox. Set search_body only when the user asks to search the email text; it needs mailbox and query, and Mail then scans every body of that mailbox, which can take minutes. Each id is a mail id that getEmail and replyToEmail take.",
+    "Search emails, newest first, for the ones every given filter matches: query (subject or sender contains it), sender, recipient (a To or Cc address), since/before (ISO 8601), unread_only and flagged_only. Give at least one filter; to list a whole mailbox use listEmails. With mailbox it searches that one mailbox; without mailbox it searches every mailbox of account, or of every account and On My Mac without account, leaving out each account's Trash and Junk (name one as mailbox to search it). Each row names its mailbox and account. Page with offset and limit (default 10); total is the number of matches the page is cut from. Fast even in a large mailbox. Set search_body only when the user asks to search the email text; it needs mailbox and query, and Mail then scans every body of that mailbox, which can take minutes. Each id is a mail id that getEmail and replyToEmail take. " +
+    ATTACHMENT_COUNT_NOTE,
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,

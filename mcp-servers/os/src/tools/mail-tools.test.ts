@@ -841,6 +841,21 @@ describe('mail-tools', () => {
     });
   });
 
+  describe('attachment counts on the listing', () => {
+    it.each(['listEmails', 'searchEmails'])(
+      '%s rows carry attachment_count, which may include embedded images, with getEmail for the list',
+      (name) => {
+        const tool = createMailTools().find((t) => t.tool.name === name)!.tool;
+        const row = (tool.outputSchema as any).properties.emails.items.properties;
+
+        expect(row.attachment_count.type).toBe('number');
+        expect(tool.description).toContain('attachment_count');
+        expect(tool.description).toMatch(/embedded images/i);
+        expect(tool.description).toContain('getEmail');
+      }
+    );
+  });
+
   describe('flags on the read side', () => {
     const flagEnum = (name: string, path: (schema: any) => any) =>
       path(createMailTools().find((t) => t.tool.name === name)!.tool.outputSchema).enum;
@@ -889,6 +904,7 @@ describe('mail-tools', () => {
             date: '2026-10-20T09:15:00+02:00',
             read: false,
             flag: 'blue',
+            attachment_count: 2,
             mailbox: 'INBOX',
             account: 'iCloud',
           },
@@ -924,6 +940,7 @@ describe('mail-tools', () => {
             date: '2026-10-20T09:15:00+02:00',
             read: false,
             flag: 'blue',
+            attachment_count: 2,
             mailbox: 'INBOX',
             account: 'iCloud',
           },

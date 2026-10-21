@@ -174,7 +174,54 @@ final class ListEmailsTests: XCTestCase {
         let script = try XCTUnwrap(harness.executor.calls.first?.script)
         XCTAssertTrue(
             script.contains("set spwFlags to flag index of every message of mb whose read status is false\n"), script)
-        XCTAssertTrue(script.contains("spwReads as text, spwFlags as text}"), script)
+        XCTAssertTrue(script.contains("spwReads as text, spwFlags as text, spwAttachmentCounts as text}"), script)
+    }
+
+    func testEachRowCarriesItsAttachmentCount() throws {
+        var withTwo = threeMessages[1]
+        withTwo.attachments = 2
+        harness.executor.reply(mailListing(account: "Work", [threeMessages[0], withTwo]))
+
+        let result = try harness.call("list_emails", ["mailbox": "INBOX", "account": "Work"])
+
+        XCTAssertEqual(try emails(result).map { $0["attachment_count"] as? Int }, [2, 0])
+    }
+
+    func testTheScriptReadsTheAttachmentsOfTheSameScopeInOneRequest() throws {
+        harness.executor.reply(mailListing(account: "Work", threeMessages))
+
+        _ = try harness.call("list_emails", ["mailbox": "INBOX", "account": "Work", "unread_only": true])
+
+        let script = try XCTUnwrap(harness.executor.calls.first?.script)
+        XCTAssertTrue(
+            script.contains(
+                "set spwAttachments to name of mail attachments of (every message of mb whose read status is false)\n"),
+            script)
+        XCTAssertEqual(script.components(separatedBy: "mail attachments of").count - 1, 1, script)
+    }
+
+    func testTheAttachmentNamesOfEachMessageBecomeItsCountInRealAppleScript() throws {
+        harness.executor.reply(mailListing(account: "Work", []))
+        _ = try harness.call("list_emails", ["mailbox": "INBOX", "account": "Work"])
+        let script = try XCTUnwrap(harness.executor.calls.first?.script)
+        let tail = String(script[try XCTUnwrap(script.range(of: "end tell", options: .backwards)).upperBound...])
+        let synthetic = """
+            set spwAcctName to "Work"
+            set spwIds to {"<a@x>", "<b@x>", "<c@x>"}
+            set spwSubjects to {"A", "B", "C"}
+            set spwSenders to {"a", "b", "c"}
+            set spwDates to {missing value, missing value, missing value}
+            set spwReads to {true, false, true}
+            set spwFlags to {-1, -1, 3}
+            set spwAttachments to {{"a.pdf", "Zażółć.png"}, {}, {"x"}}
+            """
+
+        harness.executor.reply(try osascriptExecutor(synthetic + tail, 15))
+        let result = try harness.call("list_emails", ["mailbox": "INBOX", "account": "Work"])
+
+        let counts = Dictionary(
+            uniqueKeysWithValues: try emails(result).map { ($0["subject"] as? String ?? "", $0["attachment_count"] as? Int) })
+        XCTAssertEqual(counts, ["A": 2, "B": 0, "C": 1])
     }
 
     func testFlaggedOnlyAsksMailForTheFlaggedMessagesOnly() throws {
@@ -212,7 +259,8 @@ final class ListEmailsTests: XCTestCase {
     }
 
     func testAListWhosePropertyCountsDisagreeIsRefusedAsAChangedMailbox() {
-        let torn = ["Work", "<a@x>\u{1E}<b@x>", "A", "s", "2026-10-01T08:00:00", "true", "-1"].joined(separator: "\u{1D}")
+        let torn = ["Work", "<a@x>\u{1E}<b@x>", "A", "s", "2026-10-01T08:00:00", "true", "-1", "0"]
+            .joined(separator: "\u{1D}")
         harness.executor.reply(torn)
 
         let error = harness.callFailing("list_emails", ["mailbox": "INBOX", "account": "Work"])

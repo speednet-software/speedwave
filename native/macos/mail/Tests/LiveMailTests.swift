@@ -147,6 +147,29 @@ final class LiveMailTests: XCTestCase {
         XCTAssertEqual((nobody as? [String: Any])?["total"] as? Int, 0)
     }
 
+    func testEveryListedMailCarriesTheAttachmentCountGetEmailListsForIt() throws {
+        let params: [String: Any] = [
+            "mailbox": Self.testMailbox, "account": AppleMailClient.localAccountName, "limit": 10_000,
+        ]
+        let listed = try XCTUnwrap(try call("list_emails", params) as? [String: Any])
+        let emails = try XCTUnwrap(listed["emails"] as? [[String: Any]])
+        guard !emails.isEmpty else {
+            throw XCTSkip("\(Self.testMailbox) holds no message")
+        }
+        for email in emails.prefix(5) {
+            let count = try XCTUnwrap(email["attachment_count"] as? Int, "\(email)")
+            let read = try XCTUnwrap(try call("get_email", ["id": try XCTUnwrap(email["id"] as? String)]) as? [String: Any])
+            let attachments = try XCTUnwrap((read["email"] as? [String: Any])?["attachments"] as? [[String: Any]])
+            XCTAssertEqual(count, attachments.count, "\(email)")
+        }
+
+        let found = try XCTUnwrap(
+            try call("search_emails", ["account": AppleMailClient.localAccountName, "since": "2000-01-01"]) as? [String: Any])
+        for email in try XCTUnwrap(found["emails"] as? [[String: Any]]) {
+            XCTAssertNotNil(email["attachment_count"] as? Int, "\(email)")
+        }
+    }
+
     func testSearchEmailsWithoutAMailboxFindsTheNewestTestMailInItsMailboxAndNothingInATrash() throws {
         let listed = try XCTUnwrap(
             try call(

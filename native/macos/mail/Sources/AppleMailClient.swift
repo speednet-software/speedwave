@@ -20,6 +20,7 @@ enum AppleMailClient {
         let received: Date?
         let read: Bool
         let flag: String
+        let attachmentCount: Int
 
         var json: [String: Any] {
             var row: [String: Any] = [
@@ -28,6 +29,7 @@ enum AppleMailClient {
                 "sender": sender,
                 "read": read,
                 "flag": flag,
+                "attachment_count": attachmentCount,
                 "mailbox": id.mailbox,
                 "account": id.account,
             ]
@@ -290,8 +292,9 @@ enum AppleMailClient {
     }
 
     /// Reads each property of every message `filter` keeps with one Apple Event; prints the account name, then one
-    /// field per property (the flag as Mail's `flag index`, -1 when unflagged), items joined by `listItemSeparator` and fields by `listFieldSeparator`. A body search adds
-    /// a last field with the Message-IDs whose content matched.
+    /// field per property (the flag as Mail's `flag index`, -1 when unflagged, and the number of attachments), items
+    /// joined by `listItemSeparator` and fields by `listFieldSeparator`. A body search adds a last field with the
+    /// Message-IDs whose content matched.
     static func listEmailsScript(mailbox: String, account: String?, filter: MessageFilter) -> String {
         let bodyRead = filter.bodyScope.map { "\n    set spwBodyIds to message id of \($0)" } ?? ""
         let bodyField = filter.bodyScope == nil ? "" : ", spwBodyIds as text"
@@ -300,6 +303,7 @@ enum AppleMailClient {
         \(mailboxLookup(name: mailbox, account: account))
         \(propertyReads(filter.propertyScope(of: "mb")))\(bodyRead)
         end tell
+        set spwAttachmentCounts to spwCounts(spwAttachments)
         set spwIsoDates to {}
         repeat with spwDateRef in spwDates
             set spwDate to contents of spwDateRef
@@ -310,13 +314,16 @@ enum AppleMailClient {
             end if
         end repeat
         set AppleScript's text item delimiters to (character id 30)
-        set spwFields to {spwAcctName, spwIds as text, spwSubjects as text, spwSenders as text, spwIsoDates as text, spwReads as text, spwFlags as text\(bodyField)}
+        set spwFields to {spwAcctName, spwIds as text, spwSubjects as text, spwSenders as text, spwIsoDates as text, spwReads as text, spwFlags as text, spwAttachmentCounts as text\(bodyField)}
         set AppleScript's text item delimiters to (character id 29)
         return spwFields as text
+        \(attachmentCountHandler)
         """
     }
 
     /// AppleScript lines that read each listed property of the messages `scope` names with one Apple Event each.
+    /// The attachments are read through a parenthesized scope, since a `whose` clause filters the outermost
+    /// elements of a reference and would otherwise filter the attachments instead of the messages.
     private static func propertyReads(_ scope: String) -> String {
         """
             set spwIds to message id of \(scope)
@@ -325,8 +332,26 @@ enum AppleMailClient {
             set spwDates to date received of \(scope)
             set spwReads to read status of \(scope)
             set spwFlags to flag index of \(scope)
+            set spwAttachments to name of mail attachments of (\(scope))
         """
     }
+
+    /// An AppleScript handler, placed after a script's statements, giving the number of items of each list of
+    /// `spwLists` (0 for an item that is not a list): the attachment names Mail answers per message.
+    private static let attachmentCountHandler = """
+        on spwCounts(spwLists)
+            set spwResult to {}
+            repeat with spwListRef in spwLists
+                set spwList to contents of spwListRef
+                if class of spwList is list then
+                    set end of spwResult to (count of spwList)
+                else
+                    set end of spwResult to 0
+                end if
+            end repeat
+            return spwResult
+        end spwCounts
+        """
 
     /// Reads each property of the messages `filter` keeps in every mailbox of an account with one Apple Event,
     /// which answers one list per mailbox; prints one section per mailbox that has any, `mailboxSeparator` between
@@ -351,7 +376,7 @@ enum AppleMailClient {
                     set spwNames to name of every mailbox of spwAcct
                     set spwParents to container of every mailbox of spwAcct
             \(propertyReads(filter.propertyScope(of: "every mailbox of spwAcct")))
-                    set end of spwScopes to {spwAcctName, spwBoxes, spwNames, spwParents, missing value, spwTrash, spwJunk, {spwIds, spwSubjects, spwSenders, spwDates, spwReads, spwFlags}}
+                    set end of spwScopes to {spwAcctName, spwBoxes, spwNames, spwParents, missing value, spwTrash, spwJunk, {spwIds, spwSubjects, spwSenders, spwDates, spwReads, spwFlags, spwAttachments}}
                 end repeat
 
             """
@@ -366,7 +391,7 @@ enum AppleMailClient {
                 set spwParents to container of every mailbox
                 set spwOwners to account of every mailbox
             \(propertyReads(filter.propertyScope(of: "every mailbox")))
-                set end of spwScopes to {spwAcctName, spwBoxes, spwNames, spwParents, spwOwners, spwTrash, spwJunk, {spwIds, spwSubjects, spwSenders, spwDates, spwReads, spwFlags}}
+                set end of spwScopes to {spwAcctName, spwBoxes, spwNames, spwParents, spwOwners, spwTrash, spwJunk, {spwIds, spwSubjects, spwSenders, spwDates, spwReads, spwFlags, spwAttachments}}
 
             """
         }
@@ -390,7 +415,7 @@ enum AppleMailClient {
             if spwOwners is not missing value then
                 if (count of spwOwners) is not spwCount then error "\(mailboxesChangedMarker)"
             end if
-            repeat with spwC from 1 to 6
+            repeat with spwC from 1 to 7
                 set spwColumn to item spwC of spwColumns
                 if (count of spwColumn) is not spwCount then error "\(mailboxesChangedMarker)"
             end repeat
@@ -415,9 +440,12 @@ enum AppleMailClient {
                     set AppleScript's text item delimiters to (character id 30)
                     set spwPath to spwMailboxPath(spwI, spwBoxes, spwNames, spwParents)
                     set spwFields to {spwAcctName, spwPath}
-                    repeat with spwC from 1 to 6
+                    repeat with spwC from 1 to 7
                         if spwC is 4 then
                             set spwText to spwIsoDates as text
+                        else if spwC is 7 then
+                            set spwAttachmentCounts to spwCounts(item spwI of item 7 of spwColumns)
+                            set spwText to spwAttachmentCounts as text
                         else
                             set spwColumn to item spwI of item spwC of spwColumns
                             set spwText to spwColumn as text
@@ -432,6 +460,7 @@ enum AppleMailClient {
         set AppleScript's text item delimiters to (character id 28)
         return spwSections as text
         \(mailboxPathHandler)
+        \(attachmentCountHandler)
         """
     }
 
@@ -440,7 +469,7 @@ enum AppleMailClient {
         guard !output.isEmpty else { return [] }
         return try output.components(separatedBy: mailboxSeparator).flatMap { section in
             var fields = section.components(separatedBy: listFieldSeparator)
-            guard fields.count == 8 else {
+            guard fields.count == 9 else {
                 throw ScriptError.scriptFailed("Unexpected message list from Mail.app")
             }
             let mailbox = fields.remove(at: 1)
@@ -452,10 +481,10 @@ enum AppleMailClient {
     /// fields of unequal length mean Mail changed the mailbox mid-read.
     static func parseListing(_ output: String, mailbox: String) throws -> [ListedMessage] {
         var fields = output.components(separatedBy: listFieldSeparator)
-        guard fields.count == 7 || fields.count == 8 else {
+        guard fields.count == 8 || fields.count == 9 else {
             throw ScriptError.scriptFailed("Unexpected message list from Mail.app")
         }
-        let matched = fields.count == 8 ? Set(fields.removeLast().components(separatedBy: listItemSeparator)) : nil
+        let matched = fields.count == 9 ? Set(fields.removeLast().components(separatedBy: listItemSeparator)) : nil
         let count = fields[1].isEmpty ? 0 : fields[1].components(separatedBy: listItemSeparator).count
         let columns = fields.dropFirst().map { field in
             count == 0 ? [] : field.components(separatedBy: listItemSeparator)
@@ -471,7 +500,8 @@ enum AppleMailClient {
                 sender: columns[2][i],
                 received: localDate(columns[3][i]),
                 read: columns[4][i] == "true",
-                flag: flagName(columns[5][i])
+                flag: flagName(columns[5][i]),
+                attachmentCount: Int(columns[6][i]) ?? 0
             )
         }
     }
