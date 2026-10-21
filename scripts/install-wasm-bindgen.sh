@@ -26,14 +26,6 @@ host_target() {
   esac
 }
 
-sha256_of() {
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" | awk '{ print $1 }'
-  else
-    shasum -a 256 "$1" | awk '{ print $1 }'
-  fi
-}
-
 [ -f "$LOCKFILE" ] || fail "lockfile not found: $LOCKFILE"
 version="$(locked_version)"
 [ -n "$version" ] || fail "wasm-bindgen is not in $LOCKFILE"
@@ -48,7 +40,7 @@ curl -fsSL --retry 3 -o "$work/$name.tar.gz" "$RELEASES_URL/$version/$name.tar.g
 curl -fsSL --retry 3 -o "$work/$name.tar.gz.sha256sum" "$RELEASES_URL/$version/$name.tar.gz.sha256sum"
 
 expected="$(awk '{ print $1 }' "$work/$name.tar.gz.sha256sum")"
-actual="$(sha256_of "$work/$name.tar.gz")"
+actual="$(bash "$REPO_ROOT/scripts/sha256.sh" "$work/$name.tar.gz")"
 if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
   fail "sha256 mismatch for $name.tar.gz: release says '$expected', downloaded file is '$actual'"
 fi

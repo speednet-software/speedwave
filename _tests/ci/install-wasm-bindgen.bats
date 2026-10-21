@@ -2,13 +2,7 @@
 
 SCRIPT="$BATS_TEST_DIRNAME/../../scripts/install-wasm-bindgen.sh"
 
-sha256_of() {
-    if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$1" | awk '{ print $1 }'
-    else
-        shasum -a 256 "$1" | awk '{ print $1 }'
-    fi
-}
+SHA256="$BATS_TEST_DIRNAME/../../scripts/sha256.sh"
 
 write_lockfile() {
     cat >"$LOCK" <<EOT
@@ -34,7 +28,7 @@ publish_release() {
     chmod +x "$pkg/wasm-bindgen"
     echo license >"$pkg/LICENSE-MIT"
     tar -czf "$SERVED/$version/$name.tar.gz" -C "$SERVED/pkg" "$name"
-    printf '%s  gh-release/%s.tar.gz\n' "$(sha256_of "$SERVED/$version/$name.tar.gz")" "$name" >"$SERVED/$version/$name.tar.gz.sha256sum"
+    printf '%s  gh-release/%s.tar.gz\n' "$("$SHA256" "$SERVED/$version/$name.tar.gz")" "$name" >"$SERVED/$version/$name.tar.gz.sha256sum"
 }
 
 setup() {
