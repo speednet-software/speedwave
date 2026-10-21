@@ -28,6 +28,21 @@ final class LiveMailTests: XCTestCase {
         return try handler(params.merging([scriptTimeoutParam: Self.scriptTimeoutMs]) { current, _ in current })
     }
 
+    private func callLeavingNoOutgoing(
+        _ command: String, _ params: [String: Any], line: UInt = #line
+    ) throws -> Any {
+        let count = "tell application \"Mail\" to count of outgoing messages"
+        let before = try osascriptExecutor(count, 15)
+        let result = Result { try call(command, params) }
+        var after = try osascriptExecutor(count, 15)
+        for _ in 0..<10 where after != before {
+            Thread.sleep(forTimeInterval: 1)
+            after = try osascriptExecutor(count, 15)
+        }
+        XCTAssertEqual(after, before, "\(command) left an outgoing message in Mail", line: line)
+        return try result.get()
+    }
+
     private func total(_ mailbox: String = testMailbox) throws -> Int {
         let params: [String: Any] = ["mailbox": mailbox, "account": AppleMailClient.localAccountName, "limit": 1]
         let listed = try XCTUnwrap(try call("list_emails", params) as? [String: Any])
@@ -525,11 +540,12 @@ final class LiveMailTests: XCTestCase {
             "body": "Line \"one\"\nC:\\temp\tend",
         ]
 
-        let preview = try XCTUnwrap(try call("send_email", message) as? [String: Any])
+        let preview = try XCTUnwrap(try callLeavingNoOutgoing("send_email", message) as? [String: Any])
         XCTAssertEqual(preview["status"] as? String, "confirmation_required")
         XCTAssertEqual(preview["to"] as? [String], [address])
 
-        let sent = try XCTUnwrap(try call("send_email", message.merging(["confirm_send": true]) { $1 }) as? [String: Any])
+        let sent = try XCTUnwrap(
+            try callLeavingNoOutgoing("send_email", message.merging(["confirm_send": true]) { $1 }) as? [String: Any])
         XCTAssertEqual(sent["status"] as? String, "sent", "\(sent)")
         XCTAssertEqual(sent["body"] as? String, message["body"] as? String)
     }
@@ -542,7 +558,7 @@ final class LiveMailTests: XCTestCase {
         }
         let reply: [String: Any] = ["id": id, "body": "Speedwave live reply"]
 
-        let preview = try XCTUnwrap(try call("reply_to_email", reply) as? [String: Any])
+        let preview = try XCTUnwrap(try callLeavingNoOutgoing("reply_to_email", reply) as? [String: Any])
         XCTAssertEqual(preview["status"] as? String, "confirmation_required", "\(preview)")
         let body = try XCTUnwrap(preview["body"] as? String)
         XCTAssertTrue(body.hasPrefix("Speedwave live reply\n\n"), body)
@@ -555,7 +571,7 @@ final class LiveMailTests: XCTestCase {
             throw XCTSkip("The reply would not go only to \(Self.sendToVariable); it was previewed, not sent")
         }
         let sent = try XCTUnwrap(
-            try call("reply_to_email", reply.merging(["confirm_send": true]) { $1 }) as? [String: Any])
+            try callLeavingNoOutgoing("reply_to_email", reply.merging(["confirm_send": true]) { $1 }) as? [String: Any])
         XCTAssertEqual(sent["status"] as? String, "sent", "\(sent)")
         XCTAssertEqual(sent["body"] as? String, body)
     }
@@ -581,14 +597,15 @@ final class LiveMailTests: XCTestCase {
         let names = (email?["attachments"] as? [[String: Any]] ?? []).compactMap { $0["name"] as? String }
         let request = extra.merging(["id": id, "to": address]) { $1 }
 
-        let preview = try XCTUnwrap(try call(command, request) as? [String: Any])
+        let preview = try XCTUnwrap(try callLeavingNoOutgoing(command, request) as? [String: Any])
         XCTAssertEqual(preview["status"] as? String, "confirmation_required", "\(preview)")
         XCTAssertEqual(preview["to"] as? [String], [address])
         XCTAssertEqual(preview["attachments"] as? [String], names)
         XCTAssertEqual((preview["original"] as? [String: Any])?["subject"] as? String, email?["subject"] as? String)
         XCTAssertEqual(try total(), listed["total"] as? Int)
 
-        let sent = try XCTUnwrap(try call(command, request.merging(["confirm_send": true]) { $1 }) as? [String: Any])
+        let sent = try XCTUnwrap(
+            try callLeavingNoOutgoing(command, request.merging(["confirm_send": true]) { $1 }) as? [String: Any])
         XCTAssertEqual(sent["status"] as? String, "sent", "\(sent)")
         XCTAssertEqual(sent["subject"] as? String, preview["subject"] as? String)
     }
@@ -604,7 +621,7 @@ final class LiveMailTests: XCTestCase {
 
     func testAnUnknownSignatureIsRefusedBeforeAnythingIsSent() {
         XCTAssertThrowsError(
-            try call(
+            try callLeavingNoOutgoing(
                 "send_email",
                 ["to": "nobody@example.invalid", "subject": "S", "body": "B", "signature": "Speedwave no such \(UUID())"])
         ) { error in
@@ -621,7 +638,8 @@ final class LiveMailTests: XCTestCase {
         }
         let subject = "Speedwave live draft \(UUID().uuidString)"
 
-        XCTAssertThrowsError(try call("save_draft", ["subject": subject, "body": "B", "account": account])) { error in
+        let draft: [String: Any] = ["subject": subject, "body": "B", "account": account]
+        XCTAssertThrowsError(try callLeavingNoOutgoing("save_draft", draft)) { error in
             XCTAssertEqual(error as? MailFailure, .accountDisabled(account))
         }
         Thread.sleep(forTimeInterval: 2)
@@ -641,7 +659,7 @@ final class LiveMailTests: XCTestCase {
         ]
         draft["signature"] = signatures?.first
 
-        let saved = try XCTUnwrap(try call("save_draft", draft) as? [String: Any])
+        let saved = try XCTUnwrap(try callLeavingNoOutgoing("save_draft", draft) as? [String: Any])
         XCTAssertEqual(saved["status"] as? String, "saved", "\(saved)")
         defer {
             _ = try? osascriptExecutor(
@@ -692,9 +710,10 @@ final class LiveMailTests: XCTestCase {
             "signature": signature,
         ]
 
-        let preview = try XCTUnwrap(try call("send_email", message) as? [String: Any])
+        let preview = try XCTUnwrap(try callLeavingNoOutgoing("send_email", message) as? [String: Any])
         XCTAssertEqual(preview["signature"] as? String, signature)
-        let sent = try XCTUnwrap(try call("send_email", message.merging(["confirm_send": true]) { $1 }) as? [String: Any])
+        let sent = try XCTUnwrap(
+            try callLeavingNoOutgoing("send_email", message.merging(["confirm_send": true]) { $1 }) as? [String: Any])
         XCTAssertEqual(sent["status"] as? String, "sent", "\(sent)")
         XCTAssertEqual(sent["signature"] as? String, signature)
     }
