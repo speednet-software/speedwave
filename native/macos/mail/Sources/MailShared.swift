@@ -7,6 +7,7 @@ let accountNotFoundMarker = "SPW_ACCOUNT_NOT_FOUND"
 let accountDisabledMarker = "SPW_ACCOUNT_DISABLED"
 let mailNotFoundMarker = "SPW_MAIL_NOT_FOUND"
 let signatureNotFoundMarker = "SPW_SIGNATURE_NOT_FOUND"
+let noSenderMarker = "SPW_NO_SENDER"
 let mailboxesChangedMarker = "SPW_MAILBOXES_CHANGED"
 
 /// The JSON argument carrying the script time budget in milliseconds, set by the mail tools of the os worker.
@@ -45,6 +46,7 @@ enum MailFailure: LocalizedError, Equatable {
     case specialMailbox(mailbox: String, account: String)
     case sendFailed
     case signatureNotFound(String)
+    case noSender
 
     var code: String {
         switch self {
@@ -70,6 +72,7 @@ enum MailFailure: LocalizedError, Equatable {
         case .specialMailbox: return "MAIL_SPECIAL_MAILBOX"
         case .sendFailed: return "MAIL_SEND_FAILED"
         case .signatureNotFound: return "MAIL_SIGNATURE_NOT_FOUND"
+        case .noSender: return "MAIL_NO_SENDER"
         }
     }
 
@@ -89,7 +92,8 @@ enum MailFailure: LocalizedError, Equatable {
         case .accountNotFound(let account):
             return "Account '\(account)' not found."
         case .accountDisabled(let account):
-            return "Account '\(account)' is turned off in Mail.app, so Mail would file the draft in another account."
+            return "Account '\(account)' is turned off in Mail.app, "
+                + "so Mail would send or file the message from another account."
         case .mailboxAmbiguous(let mailbox, let accounts):
             return "Mailbox '\(mailbox)' exists in several accounts: \(accounts.joined(separator: ", "))."
         case .invalidMailId(let id):
@@ -133,6 +137,8 @@ enum MailFailure: LocalizedError, Equatable {
             return "Mail.app did not send the message; it may wait in the Outbox."
         case .signatureNotFound(let name):
             return "Mail.app has no signature named '\(name)'."
+        case .noSender:
+            return "Mail.app has no turned-on account with an email address to send from."
         }
     }
 }
@@ -275,6 +281,9 @@ struct MailScripts {
         }
         if detail.contains(sendFailedMarker) {
             return .sendFailed
+        }
+        if detail.contains(noSenderMarker) {
+            return .noSender
         }
         if detail.contains(mailNotFoundMarker) {
             return .mailNotFound(mailbox: mailbox ?? "", account: account ?? "")

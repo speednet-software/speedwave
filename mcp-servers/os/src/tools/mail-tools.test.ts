@@ -383,6 +383,34 @@ describe('mail-tools', () => {
       expect(result.error?.message).toContain('to');
     });
 
+    it('sends from the account given and tells to show the user the sender before asking', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: SEND_PREVIEW });
+      const tool = createMailTools().find((t) => t.tool.name === 'sendEmail')!.tool;
+
+      await handleSendEmail({ to: 'a@x', subject: 's', body: 'b', account: 'Work' });
+
+      expect(runCommand).toHaveBeenCalledWith(
+        'mail',
+        'send_email',
+        budgeted({ to: 'a@x', subject: 's', body: 'b', account: 'Work' }),
+        PROCESS_TIMEOUT
+      );
+      expect(tool.inputSchema.properties).toHaveProperty('account');
+      expect(tool.description).toMatch(/from.*show/);
+    });
+
+    it('refuses an over-long account before calling mail-cli', async () => {
+      const result = await handleSendEmail({
+        to: 'a@x',
+        subject: 's',
+        body: 'b',
+        account: 'x'.repeat(10_000),
+      });
+
+      expect(result.success).toBe(false);
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
     it('passes bcc through to the native CLI', async () => {
       vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { status: 'sent' } });
 
@@ -437,6 +465,37 @@ describe('mail-tools', () => {
         budgeted({ id: MAIL_ID, body: 'Thanks!', reply_all: true }),
         PROCESS_TIMEOUT
       );
+    });
+
+    it('passes cc and bcc to mail-cli, which adds them to the recipients Mail chose', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: REPLY_PREVIEW });
+      const tool = createMailTools().find((t) => t.tool.name === 'replyToEmail')!.tool;
+
+      await handleReplyToEmail({ id: MAIL_ID, body: 'Ok', cc: 'ewa@x', bcc: 'boss@x' });
+
+      expect(runCommand).toHaveBeenCalledWith(
+        'mail',
+        'reply_to_email',
+        budgeted({ id: MAIL_ID, body: 'Ok', cc: 'ewa@x', bcc: 'boss@x' }),
+        PROCESS_TIMEOUT
+      );
+      expect(Object.keys(tool.inputSchema.properties ?? {})).toEqual(
+        expect.arrayContaining(['cc', 'bcc'])
+      );
+      expect(tool.outputSchema?.properties).toHaveProperty('bcc');
+    });
+
+    it('refuses an over-long cc or bcc before calling mail-cli', async () => {
+      for (const field of ['cc', 'bcc']) {
+        const result = await handleReplyToEmail({
+          id: MAIL_ID,
+          body: 'Ok',
+          [field]: 'x'.repeat(10_000),
+        });
+
+        expect(result.success).toBe(false);
+      }
+      expect(runCommand).not.toHaveBeenCalled();
     });
 
     it('gives both scripts of a confirmed reply time to finish before mail-cli is killed', async () => {
@@ -828,7 +887,7 @@ describe('mail-tools', () => {
         ],
         total: 1,
       },
-      sendEmail: { ...SEND_PREVIEW, bcc: ['carol@x'], signature: 'Work' },
+      sendEmail: { ...SEND_PREVIEW, bcc: ['carol@x'], account: 'Work', signature: 'Work' },
       replyToEmail: { ...REPLY_PREVIEW, signature: 'Work' },
       saveDraft: DRAFT_SAVED,
       listMailSignatures: { signatures: ['Work', 'Private'] },
@@ -1562,7 +1621,7 @@ describe('mail-tools', () => {
       vi.mocked(runCommand).mockRejectedValue(
         cliFailure(
           'save_draft',
-          "MAIL_ACCOUNT_DISABLED: Account 'Google' is turned off in Mail.app, so Mail would file the draft in another account."
+          "MAIL_ACCOUNT_DISABLED: Account 'Google' is turned off in Mail.app, so Mail would send or file the message from another account."
         )
       );
 
@@ -1665,6 +1724,20 @@ describe('mail-tools', () => {
       expect(result.error?.message).toContain('listEmails');
     });
 
+    it('a Mail without an address to send from asks the user to set up an account', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        cliFailure(
+          'send_email',
+          'MAIL_NO_SENDER: Mail.app has no turned-on account with an email address to send from.'
+        )
+      );
+
+      const result = await handleSendEmail({ to: 'a@x', subject: 's', body: 'b' });
+
+      expect(result.error?.code).toBe('MAIL_NO_SENDER');
+      expect(result.error?.message).toContain('Mail > Settings > Accounts');
+    });
+
     it('a send Mail did not complete asks the user instead of retrying', async () => {
       vi.mocked(runCommand).mockRejectedValue(
         cliFailure(
@@ -1723,6 +1796,7 @@ const SEND_PREVIEW = {
   confirm_param: 'confirm_send',
   instruction:
     'Nothing was changed. Show this preview to the user and ask the user: Send this email? …',
+  from: 'Me <me@example.com>',
   to: ['bob@example.com'],
   cc: [],
   bcc: [],
@@ -1737,6 +1811,7 @@ const REPLY_PREVIEW = {
     'Nothing was changed. Show this preview to the user and ask the user: Send this reply? …',
   to: ['anna@x'],
   cc: ['ewa@x'],
+  bcc: [],
   subject: 'Re: Hi',
   body: 'Thanks!\n\nOn 20 Oct 2026 at 09:15, Anna <anna@x> wrote:\n\n> Hello\n',
 };
@@ -1783,6 +1858,7 @@ const REDIRECT_SENT = {
 
 const DRAFT_SAVED = {
   status: 'saved',
+  from: 'Work Me <me@work.example>',
   to: ['bob@example.com'],
   cc: [],
   bcc: [],

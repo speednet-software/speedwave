@@ -77,7 +77,10 @@ const MAIL_FAILURE_TEACHING: Record<string, (detail: string, args: MailArgs) => 
     received: args.account,
     nextStep:
       `${detail} Ask the user to turn the account on in Mail > Settings > Accounts, ` +
-      "or save the draft without account (it then goes to Mail's default account).",
+      "or call again without account (it then goes from Mail's primary address) and show the user the new from.",
+  }),
+  MAIL_NO_SENDER: (detail) => ({
+    nextStep: `${detail} Ask the user to add or turn on a mail account in Mail > Settings > Accounts; nothing was sent or saved.`,
   }),
   MAIL_MAILBOX_AMBIGUOUS: (detail, args) => ({
     paramName: 'account',
