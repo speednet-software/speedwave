@@ -19,6 +19,7 @@ import { BetaService } from './beta.service';
 import {
   ChatSessionStore,
   MAX_CHAT_TABS,
+  projectBlockedReason,
   type ChatStoreDeps,
   type ModelSelectionInput,
 } from './chat-session-store';
@@ -81,6 +82,10 @@ export {
   toChatMessages,
   type LegacyStateSnapshot,
 } from './chat-session-store';
+
+export const NEW_CHAT_TAB_LIMIT = 'Close a chat tab to open a new one.';
+
+export const CHAT_TAB_CLOSED = 'That chat tab was closed. Try again.';
 
 /** Singleton service that holds chat session state across navigation. */
 @Injectable({ providedIn: 'root' })
@@ -278,6 +283,18 @@ export class ChatStateService {
   }
 
   /**
+   * Activates a tab and returns its store; throws {@link CHAT_TAB_CLOSED} once it closed.
+   * @param tabId - Id of the tab.
+   * @returns The tab's store.
+   */
+  claimTab(tabId: string): ChatSessionStore {
+    const store = this._tabs().get(tabId);
+    if (!store) throw new Error(CHAT_TAB_CLOSED);
+    this.activateTab(tabId);
+    return store;
+  }
+
+  /**
    * Switches the active tab; a no-op for an unknown tab id.
    * @param tabId - Id of the tab to activate.
    */
@@ -440,6 +457,12 @@ export class ChatStateService {
     this.activeStore().newConversationBlockedReason()
   );
 
+  readonly newChatBlockedReason: Signal<string> = computed(() => {
+    if (!this.beta.enabled()) return this.newConversationBlockedReason();
+    if (!this.canOpenTab()) return NEW_CHAT_TAB_LIMIT;
+    return projectBlockedReason(this.projectState);
+  });
+
   readonly sessionStartInFlightFromState: Signal<boolean> = computed(() =>
     this.activeStore().sessionStartInFlightFromState()
   );
@@ -527,6 +550,22 @@ export class ChatStateService {
    */
   startNewConversation(): Promise<void> {
     return this.activeStore().startNewConversation();
+  }
+
+  /**
+   * Opens a new tab with beta, else restarts the conversation in `originTabId`.
+   * @param originTabId - Tab the request came from.
+   * @returns Id of the tab that holds the new chat.
+   */
+  async openNewChat(originTabId: string): Promise<string> {
+    if (!this.beta.enabled()) {
+      this.claimTab(originTabId);
+      await this.startNewConversation();
+      return originTabId;
+    }
+    const blocked = this.newChatBlockedReason();
+    if (blocked) throw new Error(blocked);
+    return this.openTab();
   }
 
   /**

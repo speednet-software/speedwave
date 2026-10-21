@@ -59,7 +59,7 @@ make check-all
 
 ## Commit Conventions
 
-This project uses [Conventional Commits](https://www.conventionalcommits.org/). The PR title is validated by commitlint in the required `validate` check (`.github/workflows/pr-title.yml`), since a squash merge turns it into the commit message on `dev`.
+This project uses [Conventional Commits](https://www.conventionalcommits.org/). The PR title is validated by commitlint in the required `validate` check (`.github/workflows/pr-title.yml`), since a squash merge turns it into the commit message on `dev`. GitHub appends ` (#<number>)` to that message, so the check counts the suffix toward the 100-character header limit.
 
 Format: `type(scope): description`
 

@@ -798,7 +798,7 @@ export class LiveTranscriptComponent {
    * transcript-readiness gates, so the disabled state matches what the send would refuse.
    */
   readonly sendBlockedReason = computed(
-    () => this.transcriptBlockedReason() || this.chat.newConversationBlockedReason()
+    () => this.transcriptBlockedReason() || this.chat.newChatBlockedReason()
   );
 
   /**

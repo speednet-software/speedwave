@@ -8,6 +8,7 @@ import { LiveTranscriptComponent } from './live-transcript.component';
 import { TranscriptionService } from '../../services/transcription.service';
 import {
   ChatStateService,
+  NEW_CHAT_TAB_LIMIT,
   NEW_CONVERSATION_BUSY,
   NEW_CONVERSATION_STREAMING,
 } from '../../services/chat-state.service';
@@ -91,7 +92,7 @@ describe('LiveTranscriptComponent', () => {
   let chat: {
     hasConversation: WritableSignal<boolean>;
     isStreamingFromState: WritableSignal<boolean>;
-    newConversationBlockedReason: WritableSignal<string>;
+    newChatBlockedReason: WritableSignal<string>;
   };
 
   beforeEach(async () => {
@@ -118,7 +119,7 @@ describe('LiveTranscriptComponent', () => {
     chat = {
       hasConversation: signal(false),
       isStreamingFromState: signal(false),
-      newConversationBlockedReason: signal(''),
+      newChatBlockedReason: signal(''),
     };
     await TestBed.configureTestingModule({
       imports: [LiveTranscriptComponent],
@@ -329,7 +330,7 @@ describe('LiveTranscriptComponent', () => {
     it('disables both send buttons while the chat is still replying, and says so', () => {
       chat.hasConversation.set(true);
       chat.isStreamingFromState.set(true);
-      chat.newConversationBlockedReason.set(NEW_CONVERSATION_STREAMING);
+      chat.newChatBlockedReason.set(NEW_CONVERSATION_STREAMING);
       fixture.componentRef.setInput(
         'session',
         session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })
@@ -349,7 +350,7 @@ describe('LiveTranscriptComponent', () => {
 
     it('disables both buttons on a refusal the chat service owns', () => {
       chat.hasConversation.set(true);
-      chat.newConversationBlockedReason.set(NEW_CONVERSATION_BUSY);
+      chat.newChatBlockedReason.set(NEW_CONVERSATION_BUSY);
       fixture.componentRef.setInput(
         'session',
         session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })
@@ -359,6 +360,27 @@ describe('LiveTranscriptComponent', () => {
       expect(fixture.nativeElement.querySelector('[data-testid="send-to-chat-btn"]').disabled).toBe(
         true
       );
+    });
+
+    it('disables "Attach to new chat" with the tab-limit reason in its tooltip and stages nothing', async () => {
+      chat.hasConversation.set(true);
+      chat.newChatBlockedReason.set(NEW_CHAT_TAB_LIMIT);
+      fixture.componentRef.setInput(
+        'session',
+        session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })
+      );
+      fixture.detectChanges();
+      const btn = fixture.nativeElement.querySelector('[data-testid="send-to-chat-btn"]');
+      expect(btn.disabled).toBe(true);
+      expect(btn.getAttribute('aria-label')).toContain(NEW_CHAT_TAB_LIMIT);
+      const tooltip = fixture.debugElement
+        .query(By.css('[data-testid="send-to-chat-btn"]'))
+        .parent?.injector.get(TooltipDirective)
+        .label();
+      expect(tooltip).toBe(NEW_CHAT_TAB_LIMIT);
+      await component.stageForChat();
+      expect(svc.stageForChat).not.toHaveBeenCalled();
+      expect(component.appendBlockedReason()).toBe('');
     });
 
     it('disables the append item and says why under it when no chat is open', () => {
