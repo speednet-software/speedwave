@@ -19,6 +19,11 @@ import { createDeferred } from '../testing/deferred';
 import { makeMockLogger } from '../testing/mock-logger';
 import { makeStagedImage } from '../testing/attachments';
 
+function composerOf(f: ComponentFixture<ChatComponent>): ComposerComponent {
+  return f.debugElement.query(By.directive(ComposerComponent))
+    .componentInstance as ComposerComponent;
+}
+
 describe('ChatComponent', () => {
   let component: ChatComponent;
   let fixture: ComponentFixture<ChatComponent>;
@@ -335,7 +340,7 @@ describe('ChatComponent', () => {
   });
 
   describe('staged meeting transcript', () => {
-    async function stage(): Promise<TranscriptionService> {
+    async function stage(target: 'new-chat' | 'current-chat' = 'current-chat'): Promise<void> {
       const transcription = TestBed.inject(TranscriptionService);
       const prior = mockTauri.invokeHandler;
       mockTauri.invokeHandler = async (cmd: string) => {
@@ -343,13 +348,12 @@ describe('ChatComponent', () => {
         if (cmd === 'get_transcript_markdown') return '# Meeting transcript';
         return prior(cmd);
       };
-      await transcription.stageForChat('sess-1', 'current-chat');
+      await transcription.stageForChat('sess-1', target);
       mockTauri.invokeHandler = prior;
-      return transcription;
     }
 
     it('appends the transcript after a blank line and unstages it', async () => {
-      const transcription = await stage();
+      await stage();
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       invokeSpy.mockResolvedValue(undefined);
 
@@ -360,7 +364,7 @@ describe('ChatComponent', () => {
         displayText: 'summarize this',
         tabId: chatState.tabId,
       });
-      expect(transcription.stagedTranscript()).toBe('');
+      expect(chatState.activeStore().stagedTranscript()).toBeNull();
     });
 
     it('shows only the typed text in the local bubble', async () => {
@@ -373,8 +377,8 @@ describe('ChatComponent', () => {
     });
 
     it('sends the message alone once the transcript is unpinned', async () => {
-      const transcription = await stage();
-      transcription.clearStagedTranscript();
+      await stage();
+      chatState.activeStore().unstageTranscript();
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       invokeSpy.mockResolvedValue(undefined);
 
@@ -388,19 +392,19 @@ describe('ChatComponent', () => {
     });
 
     it('rides along with a message queued mid-stream', async () => {
-      const transcription = await stage();
+      await stage();
       await component.onQueueRequested('summarize this');
       expect(chatState.pendingQueueFromState()?.text).toBe(
         'summarize this\n\n# Meeting transcript'
       );
-      expect(transcription.stagedTranscript()).toBe('');
+      expect(chatState.activeStore().stagedTranscript()).toBeNull();
     });
 
     it('keeps the transcript staged when the send is refused mid-stream', async () => {
-      const transcription = await stage();
+      await stage();
       chatState.isStreaming = true;
       await component.sendMessage({ payload: 'summarize this', displayText: 'summarize this' });
-      expect(transcription.stagedTranscript()).toBe('# Meeting transcript');
+      expect(chatState.activeStore().stagedTranscript()?.markdown).toBe('# Meeting transcript');
     });
 
     it('marks the composer while a transcript is staged', async () => {
@@ -419,8 +423,8 @@ describe('ChatComponent', () => {
       fixture.detectChanges();
       await fixture.whenStable();
 
-      const transcription = await stage();
-      const stagedPrompt = transcription.chatPromptDraft();
+      await stage();
+      const stagedPrompt = chatState.activeStore().composerPromptDraft();
       expect(stagedPrompt).not.toBe('');
 
       fixture.destroy();
@@ -436,6 +440,124 @@ describe('ChatComponent', () => {
       expect(composer2.text.value).toBe(stagedPrompt);
 
       fixture2.destroy();
+    });
+
+    describe('with chat tabs (beta)', () => {
+      function transcriptChip(): Element | null {
+        return fixture.nativeElement.querySelector('[data-testid="composer-transcript"]');
+      }
+
+      async function render(): Promise<void> {
+        fixture.detectChanges();
+        await fixture.whenStable();
+        fixture.detectChanges();
+      }
+
+      beforeEach(async () => {
+        betaEnabled.set(true);
+        projectState.activeProject.set('test');
+        projectState.status.set('ready');
+        await component.ngOnInit();
+        await render();
+      });
+
+      it('attaches to a new active tab and leaves the open conversation as it is', async () => {
+        const tab1 = chatState.activeTabId();
+        chatState._setState({
+          messages: [
+            { role: 'user', blocks: [{ type: 'text', content: 'earlier' }], timestamp: 1 },
+          ],
+        });
+
+        await stage('new-chat');
+        await render();
+
+        expect(chatState.tabs().size).toBe(2);
+        expect(chatState.activeTabId()).not.toBe(tab1);
+        expect(composerOf(fixture).text.value).toMatch(/^Attached is a meeting transcript\./);
+        expect(transcriptChip()).toBeTruthy();
+        const store1 = chatState.tabs().get(tab1)!;
+        expect(store1.messagesFromState()).toHaveLength(1);
+        expect(store1.stagedTranscript()).toBeNull();
+      });
+
+      it('sends no transcript from another tab and still shows it back in its own tab', async () => {
+        const tab1 = chatState.activeTabId();
+        await stage('new-chat');
+        const tab2 = chatState.activeTabId();
+        await render();
+
+        chatState.activateTab(tab1);
+        await render();
+        expect(transcriptChip()).toBeNull();
+        expect(composerOf(fixture).text.value).toBe('');
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+        invokeSpy.mockResolvedValue(undefined);
+        await component.sendMessage({ payload: 'hello', displayText: 'hello' });
+        expect(invokeSpy).toHaveBeenCalledWith('send_message', {
+          blocks: [{ type: 'text', text: 'hello' }],
+          displayText: 'hello',
+          tabId: tab1,
+        });
+
+        chatState.activateTab(tab2);
+        await render();
+        expect(chatState.activeStore().stagedTranscript()?.markdown).toBe('# Meeting transcript');
+        expect(transcriptChip()).toBeTruthy();
+        expect(composerOf(fixture).text.value).toMatch(/^Attached is a meeting transcript\./);
+      });
+
+      it('unstages only the transcript a send took, not one staged while it was in flight', async () => {
+        await stage();
+        const store = chatState.activeStore();
+        const sendGate = createDeferred<void>();
+        vi.spyOn(chatState, 'sendMessage').mockImplementation(() => sendGate.promise);
+
+        const sending = component.sendMessage({ payload: 'first', displayText: 'first' });
+        const newer = { markdown: '# Newer meeting', name: 'Newer' };
+        store.stageTranscript(newer);
+        sendGate.resolve();
+        await sending;
+
+        expect(store.stagedTranscript()).toBe(newer);
+      });
+
+      it('unstages only the transcript a queued send took, not one staged while it was in flight', async () => {
+        await stage();
+        const store = chatState.activeStore();
+        const queueGate = createDeferred<string | null>();
+        vi.spyOn(chatState, 'queueMessage').mockImplementation(() => queueGate.promise);
+
+        const queuing = component.onQueueRequested('first');
+        const newer = { markdown: '# Newer meeting', name: 'Newer' };
+        store.stageTranscript(newer);
+        queueGate.resolve(null);
+        await queuing;
+
+        expect(store.stagedTranscript()).toBe(newer);
+      });
+
+      it('unpins and applies the prompt only in the tab on screen', async () => {
+        const tab1 = chatState.activeTabId();
+        await stage('current-chat');
+        await stage('new-chat');
+        const tab2 = chatState.activeTabId();
+        const store1 = chatState.tabs().get(tab1)!;
+        const store2 = chatState.tabs().get(tab2)!;
+        await render();
+
+        expect(store2.composerPromptDraft()).toBe('');
+        expect(store1.composerPromptDraft()).not.toBe('');
+        composerOf(fixture).transcriptDetached.emit();
+        expect(store2.stagedTranscript()).toBeNull();
+        expect(store1.stagedTranscript()?.markdown).toBe('# Meeting transcript');
+
+        chatState.activateTab(tab1);
+        await render();
+        expect(composerOf(fixture).text.value).toMatch(/^Attached is a meeting transcript\./);
+        expect(store1.composerPromptDraft()).toBe('');
+        expect(transcriptChip()).toBeTruthy();
+      });
     });
   });
 
@@ -1664,11 +1786,6 @@ describe('ChatComponent', () => {
   });
 
   describe('per-tab composer draft and scroll restore (SPEED-388 phase 3)', () => {
-    function composerInstance(): ComposerComponent {
-      return fixture.debugElement.query(By.directive(ComposerComponent))
-        .componentInstance as ComposerComponent;
-    }
-
     function scrollEl(): HTMLDivElement {
       return fixture.nativeElement.querySelector(
         '[data-testid="chat-message-list"]'
@@ -1681,7 +1798,7 @@ describe('ChatComponent', () => {
       await component.ngOnInit();
       fixture.detectChanges();
 
-      const composer = composerInstance();
+      const composer = composerOf(fixture);
       composer.setText('draft on tab one');
       const el = scrollEl();
       Object.defineProperty(el, 'scrollHeight', { value: 1000, configurable: true });
@@ -1713,7 +1830,7 @@ describe('ChatComponent', () => {
       await component.ngOnInit();
       fixture.detectChanges();
 
-      const composer = composerInstance();
+      const composer = composerOf(fixture);
       composer.setText('half-written thought');
       composer.togglePlanMode();
       fixture.detectChanges();
@@ -1743,7 +1860,7 @@ describe('ChatComponent', () => {
       await component.ngOnInit();
       fixture.detectChanges();
 
-      const composer = composerInstance();
+      const composer = composerOf(fixture);
       composer.setText('alpha');
 
       const tab1 = chatState.activeTabId();
@@ -1765,7 +1882,7 @@ describe('ChatComponent', () => {
       await component.ngOnInit();
       fixture.detectChanges();
 
-      const composer = composerInstance();
+      const composer = composerOf(fixture);
       composer.setText('saved before auth hiccup');
       fixture.detectChanges();
 
@@ -1791,12 +1908,12 @@ describe('ChatComponent', () => {
       fixture.detectChanges();
 
       const tab1 = chatState.activeTabId();
-      composerInstance().setText('draft on tab one');
+      composerOf(fixture).setText('draft on tab one');
 
       const tab2 = await chatState.openTab();
       fixture.detectChanges();
       await fixture.whenStable();
-      composerInstance().setText('draft on tab two');
+      composerOf(fixture).setText('draft on tab two');
       fixture.detectChanges();
 
       fixture.destroy();
@@ -1926,7 +2043,7 @@ describe('ChatComponent', () => {
       await component.ngOnInit();
       fixture.detectChanges();
 
-      const composer = composerInstance();
+      const composer = composerOf(fixture);
       composer.setText('typing');
       const tab1 = chatState.activeTabId();
 
@@ -1943,7 +2060,7 @@ describe('ChatComponent', () => {
       await component.ngOnInit();
       fixture.detectChanges();
 
-      const composer = composerInstance();
+      const composer = composerOf(fixture);
       const tab1 = chatState.activeTabId();
       const store1 = chatState.tabs().get(tab1)!;
       await store1.composerAttachments.add(

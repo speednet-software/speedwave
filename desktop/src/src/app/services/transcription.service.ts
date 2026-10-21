@@ -97,9 +97,6 @@ export class TranscriptionService {
   private readonly audioLevelsSignal = signal<number[] | null>(null);
   private readonly recordingWarningsSignal = signal<readonly CaptureWarning[]>([]);
   private readonly recommendedSignal = signal<RecommendedModelAck | null>(null);
-  private readonly stagedTranscriptSignal = signal<string>('');
-  private readonly stagedTranscriptNameSignal = signal<string>('');
-  private readonly chatPromptDraftSignal = signal<string>('');
   private readonly recordingsSignal = signal<TranscriptSummary[]>([]);
   private readonly recordingsErrorSignal = signal('');
   private recordingsUnlisten: UnlistenFn | null = null;
@@ -188,15 +185,6 @@ export class TranscriptionService {
 
   /** Uncommitted tail of the latest live decode ('' = none); replace-only. */
   readonly liveDraft: Signal<string> = this.liveDraftSignal.asReadonly();
-
-  /** Transcript markdown waiting to ride along with the next chat message ('' = none). */
-  readonly stagedTranscript: Signal<string> = this.stagedTranscriptSignal.asReadonly();
-
-  /** Name of the staged recording (its title, else its start time), for the composer chip. */
-  readonly stagedTranscriptName: Signal<string> = this.stagedTranscriptNameSignal.asReadonly();
-
-  /** Prompt text the chat composer should load into its field ('' = nothing pending). */
-  readonly chatPromptDraft: Signal<string> = this.chatPromptDraftSignal.asReadonly();
 
   /** Latest per-channel capture RMS ([system, mic] or one entry; null until the first `audio_level` event of a recording). */
   readonly audioLevels: Signal<number[] | null> = this.audioLevelsSignal.asReadonly();
@@ -517,42 +505,16 @@ export class TranscriptionService {
    * Stages the transcript for the chat composer: the default prompt goes into the text field, the
    * markdown rides along with whatever the user sends next.
    * @param sessionId - the session to stage.
-   * @param target - `'new-chat'` (default) opens a fresh conversation first; `'current-chat'` keeps the active thread.
+   * @param target - `'new-chat'` (default) opens a new chat first; `'current-chat'` keeps the tab that was active.
    */
   async stageForChat(sessionId: string, target: SendTarget = 'new-chat'): Promise<void> {
     const originTabId = this.chatState.activeTabId();
     const [session, md] = await Promise.all([this.get(sessionId), this.getMarkdown(sessionId)]);
-    this.reclaimOriginTab(originTabId);
-    if (target === 'new-chat') {
-      await this.chatState.startNewConversation();
-      this.reclaimOriginTab(originTabId);
-    }
-    this.stagedTranscriptSignal.set(md);
-    this.stagedTranscriptNameSignal.set(recordingName(session));
-    this.chatPromptDraftSignal.set(TRANSCRIPT_PROMPT_DEFAULTS[session.language]);
-  }
-
-  /**
-   * Re-activates the tab that was active when `stageForChat` started, so the transcript lands on
-   * that conversation; a closed tab fails loudly instead of misattaching it.
-   * @param tabId - tab id captured at the start of `stageForChat`.
-   */
-  private reclaimOriginTab(tabId: string): void {
-    if (!this.chatState.tabs().has(tabId)) {
-      throw new Error('the chat tab this transcript was staged for was closed');
-    }
-    if (this.chatState.activeTabId() !== tabId) this.chatState.activateTab(tabId);
-  }
-
-  /** Drops the draft once the composer has loaded it, so a later render does not overwrite edits. */
-  clearChatPromptDraft(): void {
-    this.chatPromptDraftSignal.set('');
-  }
-
-  /** Drops the staged transcript — the user unpinned it, or it went out with a message. */
-  clearStagedTranscript(): void {
-    this.stagedTranscriptSignal.set('');
-    this.stagedTranscriptNameSignal.set('');
+    const tabId =
+      target === 'new-chat' ? await this.chatState.openNewChat(originTabId) : originTabId;
+    const store = this.chatState.claimTab(tabId);
+    store.stageTranscript({ markdown: md, name: recordingName(session) });
+    store.composerPromptDraft.set(TRANSCRIPT_PROMPT_DEFAULTS[session.language]);
   }
 
   /** The single best model for this hardware + its download state. */
