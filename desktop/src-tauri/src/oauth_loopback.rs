@@ -7,7 +7,26 @@ use tokio_util::sync::CancellationToken;
 #[derive(Debug)]
 pub(crate) enum CallbackFailure {
     Cancelled,
+    TimedOut,
+    /// The provider redirected back with an `error` (or without a code); `provider_error` is the
+    /// provider's `error` code when it sent one.
+    Denied {
+        provider_error: Option<String>,
+        message: String,
+    },
     Error(String),
+}
+
+impl CallbackFailure {
+    /// Display text of a failure that ends the flow.
+    pub(crate) fn message(&self) -> &str {
+        match self {
+            CallbackFailure::Cancelled => "OAuth flow cancelled",
+            CallbackFailure::TimedOut => "OAuth flow timed out",
+            CallbackFailure::Denied { message, .. } => message,
+            CallbackFailure::Error(message) => message,
+        }
+    }
 }
 
 /// Builds the authorize redirect URL with PKCE + state. `scope_param` is the scopes query key:
@@ -48,7 +67,7 @@ pub(crate) async fn wait_for_callback(
         loop {
             let (mut stream, _) = accept_any(listener, secondary)
                 .await
-                .map_err(|e| format!("callback accept failed: {e}"))?;
+                .map_err(|e| CallbackFailure::Error(format!("callback accept failed: {e}")))?;
             match read_callback_request(&mut stream).await {
                 Ok(Some(query)) => match parse_callback_query(&query, expected_state) {
                     CallbackOutcome::Code(code) => {
@@ -59,13 +78,19 @@ pub(crate) async fn wait_for_callback(
                         .await;
                         return Ok(code);
                     }
-                    CallbackOutcome::Denied(e) => {
+                    CallbackOutcome::Denied {
+                        provider_error,
+                        message,
+                    } => {
                         let _ = write_http_response(
                             &mut stream,
                             "Authorization failed. You can close this tab.",
                         )
                         .await;
-                        return Err(e);
+                        return Err(CallbackFailure::Denied {
+                            provider_error,
+                            message,
+                        });
                     }
                     CallbackOutcome::StateMismatch => {
                         log::debug!("oauth callback with wrong state ignored");
@@ -86,9 +111,9 @@ pub(crate) async fn wait_for_callback(
     tokio::select! {
         _ = cancel.cancelled() => Err(CallbackFailure::Cancelled),
         _ = tokio::time::sleep(Duration::from_secs(300)) => {
-            Err(CallbackFailure::Error("OAuth flow timed out".to_string()))
+            Err(CallbackFailure::TimedOut)
         }
-        res = accept => res.map_err(CallbackFailure::Error),
+        res = accept => res,
     }
 }
 
@@ -144,7 +169,10 @@ pub(crate) enum CallbackOutcome {
     /// State matched and an authorization code was present.
     Code(String),
     /// State matched but the provider denied or omitted the code — terminal.
-    Denied(String),
+    Denied {
+        provider_error: Option<String>,
+        message: String,
+    },
     /// State absent or mismatched — a forged/stray request; keep waiting.
     StateMismatch,
 }
@@ -165,11 +193,17 @@ pub(crate) fn parse_callback_query(query: &str, expected_state: &str) -> Callbac
         return CallbackOutcome::StateMismatch;
     }
     if let Some(e) = err {
-        return CallbackOutcome::Denied(format!("authorization denied: {e}"));
+        return CallbackOutcome::Denied {
+            message: format!("authorization denied: {e}"),
+            provider_error: Some(e),
+        };
     }
     match code {
         Some(c) if !c.is_empty() => CallbackOutcome::Code(c),
-        _ => CallbackOutcome::Denied("callback missing authorization code".to_string()),
+        _ => CallbackOutcome::Denied {
+            provider_error: None,
+            message: "callback missing authorization code".to_string(),
+        },
     }
 }
 
@@ -274,7 +308,13 @@ mod tests {
     #[test]
     fn parse_callback_query_surfaces_provider_error() {
         match parse_callback_query("error=access_denied&state=xyz", "xyz") {
-            CallbackOutcome::Denied(e) => assert!(e.contains("access_denied")),
+            CallbackOutcome::Denied {
+                provider_error,
+                message,
+            } => {
+                assert!(message.contains("access_denied"));
+                assert_eq!(provider_error.as_deref(), Some("access_denied"));
+            }
             other => panic!("expected Denied, got {other:?}"),
         }
     }
@@ -282,7 +322,13 @@ mod tests {
     #[test]
     fn parse_callback_query_rejects_missing_code() {
         match parse_callback_query("state=xyz", "xyz") {
-            CallbackOutcome::Denied(e) => assert!(e.contains("missing authorization code")),
+            CallbackOutcome::Denied {
+                provider_error,
+                message,
+            } => {
+                assert!(message.contains("missing authorization code"));
+                assert_eq!(provider_error, None);
+            }
             other => panic!("expected Denied, got {other:?}"),
         }
     }
@@ -298,7 +344,13 @@ mod tests {
     #[test]
     fn parse_callback_query_empty_code_with_valid_state_is_terminal() {
         match parse_callback_query("code=&state=xyz", "xyz") {
-            CallbackOutcome::Denied(e) => assert!(e.contains("missing authorization code")),
+            CallbackOutcome::Denied {
+                provider_error,
+                message,
+            } => {
+                assert!(message.contains("missing authorization code"));
+                assert_eq!(provider_error, None);
+            }
             other => panic!("expected Denied, got {other:?}"),
         }
     }

@@ -5,15 +5,18 @@
 import {
   withResultValidation,
   notConfiguredMessage,
-  missingParamResult,
-  type ResultValidationOptions,
+  teachingToolResult,
   type ToolResult,
   type ToolsCallResult,
 } from '@speedwave/mcp-shared';
-import type { SlackClients } from '../client.js';
+import {
+  InvalidParamError,
+  UploadTransferError,
+  formatSlackError,
+  type SlackClients,
+} from '../client.js';
 
 export type { ToolResult };
-export { missingParamResult };
 
 /**
  * Gate: returns NOT_CONFIGURED when clients._tokensStatus is 'missing'.
@@ -36,14 +39,26 @@ export function withClients(clients: SlackClients) {
 }
 
 /**
- * Wrap handler with parameter validation (pretty-printed JSON output) and
- * optional required-param enforcement driven by the tool's `inputSchema.required`.
+ * Wrap handler with parameter validation (pretty-printed JSON output).
  * @param handler - Tool handler function.
- * @param options - Optional required-param list and tool name for teaching errors.
  */
 export function withValidation<T>(
-  handler: (params: T) => ToolResult | Promise<ToolResult>,
-  options?: ResultValidationOptions
+  handler: (params: T) => ToolResult | Promise<ToolResult>
 ): (params: Record<string, unknown>) => Promise<ToolsCallResult> {
-  return withResultValidation(handler, 2, options);
+  return withResultValidation(handler, 2);
+}
+
+/**
+ * Failure result for a thrown error: a rejected parameter becomes a teaching error, a failed upload transfer keeps its own message under `UPLOAD_FAILED`, anything else a Slack-formatted failure under `code`.
+ * @param code - Failure code of the tool for a non-parameter error.
+ * @param error - The thrown value.
+ */
+export function failureResult(code: string, error: unknown): ToolResult {
+  if (error instanceof InvalidParamError) {
+    return teachingToolResult(error.teaching);
+  }
+  if (error instanceof UploadTransferError) {
+    return { success: false, error: { code: 'UPLOAD_FAILED', message: error.message } };
+  }
+  return { success: false, error: { code, message: formatSlackError(error) } };
 }

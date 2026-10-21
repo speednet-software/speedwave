@@ -3,7 +3,9 @@
  * Error convention: `initializeSlackClients` returns a `_tokensStatus:'missing'` container on config failures (never throws); instance methods throw on API failures.
  */
 
+import { createReadStream } from 'fs';
 import { mkdir, writeFile } from 'fs/promises';
+import { Readable } from 'stream';
 import type { UserDirectoryCache } from './user-directory.js';
 import path from 'path';
 import {
@@ -26,7 +28,14 @@ import {
   RefreshLock,
   OAuthRefreshError,
   clampPageSize,
+  resolveWorkspaceFile,
+  workspaceRoot,
+  buildTeachingMessage,
+  WorkspaceFileError,
   type AuthedTokenState,
+  type TeachingErrorParams,
+  type WorkspaceFile,
+  type WorkspaceFileErrorKind,
 } from '@speedwave/mcp-shared';
 
 /** Whether the Slack access token was loadable at startup. */
@@ -204,8 +213,9 @@ const AUTH_FAILURE_MESSAGE = withSetupGuidance(
   'Slack authentication failed. Reconnect Slack in Speedwave Desktop (Integrations → Slack).'
 );
 const MISSING_SCOPE_MESSAGE = withSetupGuidance(
-  'Permission denied: the Slack sign-in lacks a newly required permission. ' +
-    'Re-authorise Slack in Speedwave Desktop (Integrations → Slack) and retry.'
+  'Permission denied: the Slack sign-in lacks a required permission. ' +
+    'If this was file sending, ask the user to click Enable for file sending in the Slack card ' +
+    '(Speedwave Desktop, Integrations, Slack); otherwise re-authorise Slack there and retry.'
 );
 const MALFORMED_FIELD_MESSAGE =
   'Slack rejected the request: a required field was missing or malformed (e.g. empty message text).';
@@ -303,6 +313,20 @@ export function formatSlackError(error: unknown): string {
   return e.message || 'Slack API error';
 }
 
+/** Thrown when a tool parameter is rejected; the tool layer turns it into a teaching error. */
+export class InvalidParamError extends Error {
+  readonly teaching: TeachingErrorParams;
+
+  /**
+   * Build the error from the teaching-error fields of the rejected parameter.
+   * @param teaching - What was wrong, where a correct value comes from, and what to do next.
+   */
+  constructor(teaching: TeachingErrorParams) {
+    super(buildTeachingMessage(teaching));
+    this.teaching = teaching;
+  }
+}
+
 const CHANNEL_LIST_PAGE_LIMIT = 1000;
 
 /** Hard cap on pagination (20k channels) — runaway-cursor backstop. */
@@ -373,11 +397,13 @@ async function resolveChannelId(clients: SlackClients, channel: string): Promise
     }
   }
 
-  throw new Error(
-    `Channel not found: ${channel}. If this is a person, use findUsers then openDirectMessage. ` +
-      'If it is a channel, call listChannelIds to see channels you (the signed-in user) are a ' +
-      'member of — Speedwave has no bot to invite, so a missing channel usually means you are not a member.'
-  );
+  throw new InvalidParamError({
+    paramName: 'channel',
+    correctValueTool: 'listChannelIds',
+    nextStep:
+      'If this is a person, use findUsers then openDirectMessage. A missing channel usually means ' +
+      'the signed-in user is not a member of it: Speedwave has no bot to invite.',
+  });
 }
 
 /**
@@ -394,26 +420,22 @@ export async function sendChannel(
   clients: SlackClients,
   params: { channel: string; message: string; thread_ts?: string; reply_broadcast?: boolean }
 ): Promise<{ ok: boolean; ts?: string; channel?: string }> {
-  if (params.thread_ts && !looksLikeSlackTs(params.thread_ts)) {
-    throw new Error(
-      `thread_ts "${params.thread_ts}" does not look like a Slack timestamp (expected e.g. ` +
-        '"1717000000.000100"). Copy it exactly from a getChannelMessages/getThreadMessages ' +
-        'result — do not reformat or round it. Slack accepts a malformed thread_ts silently and ' +
-        'posts the message to the channel instead of the thread.'
-    );
-  }
+  assertThreadTsShape(params.thread_ts);
   const broadcast = params.reply_broadcast ?? false;
   if (typeof broadcast !== 'boolean') {
-    throw new Error(
-      `reply_broadcast must be a boolean, got ${typeof broadcast}. Pass true or false; the ` +
-        'string "false" would be read as true and surface the reply to the whole channel.'
-    );
+    throw new InvalidParamError({
+      paramName: 'reply_broadcast',
+      nextStep:
+        'Pass true or false; the string "false" would be read as true and surface the reply to the whole channel.',
+    });
   }
   if (broadcast && !params.thread_ts) {
-    throw new Error(
-      'reply_broadcast requires thread_ts: it surfaces a thread reply in the channel, so there ' +
-        'must be a thread. Pass the thread parent ts, or drop reply_broadcast to post at channel level.'
-    );
+    throw new InvalidParamError({
+      paramName: 'reply_broadcast',
+      nextStep:
+        'reply_broadcast surfaces a thread reply in the channel, so it needs thread_ts: pass the thread ' +
+        'parent ts copied from getChannelMessages or getThreadMessages, or drop reply_broadcast to post at channel level.',
+    });
   }
 
   const channelId = await resolveChannelId(clients, params.channel);
@@ -437,6 +459,172 @@ export async function sendChannel(
     ts: result.ts,
     channel: result.channel,
   };
+}
+
+/** Slack's per-file upload limit (1 GB). */
+export const MAX_UPLOAD_BYTES = 1000 * 1000 * 1000;
+
+/** Most files accepted in one uploadFile call. */
+export const MAX_UPLOAD_FILES = 10;
+
+type StagedFile = { id: string; name: string };
+
+/** Thrown when moving file bytes to Slack fails; its message is safe to show verbatim. */
+export class UploadTransferError extends Error {}
+
+/**
+ * Stream 1 to MAX_UPLOAD_FILES workspace files to a channel, DM or thread as the signed-in user in one share.
+ * All checks run before any Slack call; nothing is shared unless every file uploaded and the completion succeeded.
+ * @param clients - The Slack client container.
+ * @param params - Files, target and optional comment.
+ * @param params.channel - Channel name (with or without `#`) or channel/DM ID.
+ * @param params.filePaths - Paths under /workspace of the files to upload.
+ * @param params.thread_ts - Thread parent's Slack timestamp; omit to post at channel level.
+ * @param params.initial_comment - Message posted together with the files.
+ */
+export async function uploadFile(
+  clients: SlackClients,
+  params: {
+    channel: string;
+    filePaths: string[];
+    thread_ts?: string;
+    initial_comment?: string;
+  }
+): Promise<{
+  ok: boolean;
+  files: StagedFile[];
+  channel: string;
+  thread_ts?: string;
+}> {
+  assertThreadTsShape(params.thread_ts);
+  const resolved = await resolveUploadFiles(params.filePaths);
+  const channelId = await resolveChannelId(clients, params.channel);
+
+  const staged: StagedFile[] = [];
+  for (const file of resolved) {
+    const target = await slackCall(clients, (c) =>
+      c.files.getUploadURLExternal({ filename: file.name, length: file.size })
+    );
+    if (!target.upload_url || !target.file_id) {
+      throw new UploadTransferError(
+        `Slack returned no upload URL for ${file.name}. No file was shared.`
+      );
+    }
+    await postFileStream(target.upload_url, file);
+    staged.push({ id: target.file_id, name: file.name });
+  }
+
+  const result = await slackCall(clients, (c) =>
+    c.files.completeUploadExternal({
+      files: toCompletionFiles(staged),
+      channel_id: channelId,
+      ...(params.thread_ts ? { thread_ts: params.thread_ts } : {}),
+      ...(params.initial_comment ? { initial_comment: params.initial_comment } : {}),
+    })
+  );
+
+  return {
+    ok: result.ok === true,
+    files: staged,
+    channel: channelId,
+    ...(params.thread_ts ? { thread_ts: params.thread_ts } : {}),
+  };
+}
+
+async function resolveUploadFiles(filePaths: string[]): Promise<WorkspaceFile[]> {
+  if (!Array.isArray(filePaths) || filePaths.length === 0) {
+    throw new InvalidParamError({
+      paramName: 'filePaths',
+      nextStep:
+        'Pass a non-empty array of non-empty path strings under /workspace, e.g. ["/workspace/report.pdf"].',
+    });
+  }
+  const badEntry = filePaths.findIndex((p) => typeof p !== 'string' || p === '');
+  if (badEntry !== -1) {
+    throw new InvalidParamError({
+      paramName: 'filePaths',
+      nextStep: `filePaths[${badEntry}] is not a non-empty path string. Pass every entry as a path under /workspace, e.g. "/workspace/report.pdf".`,
+    });
+  }
+  if (filePaths.length > MAX_UPLOAD_FILES) {
+    throw new InvalidParamError({
+      paramName: 'filePaths',
+      nextStep: `filePaths has ${filePaths.length} entries; at most ${MAX_UPLOAD_FILES} files per call. Split them into several calls.`,
+    });
+  }
+  const resolved: WorkspaceFile[] = [];
+  for (const [index, p] of filePaths.entries()) {
+    const file = await resolveUploadFile(p, index);
+    if (resolved.some((r) => r.path === file.path)) {
+      throw new InvalidParamError({
+        paramName: 'filePaths',
+        nextStep: `filePaths[${index}] is the same file as an earlier entry. Remove the duplicate.`,
+      });
+    }
+    resolved.push(file);
+  }
+  return resolved;
+}
+
+const WORKSPACE_FILE_FAILURE: Record<WorkspaceFileErrorKind, string> = {
+  not_found: 'was not found under /workspace. Check the path with a directory listing.',
+  outside_workspace:
+    'resolves outside the workspace. Only files under /workspace can be uploaded; copy the file there first.',
+  not_a_file: 'is not a regular file. Pass a file, not a directory.',
+  too_large: 'is too large to upload. Split the file or reduce it.',
+};
+
+async function resolveUploadFile(filePath: string, index: number): Promise<WorkspaceFile> {
+  try {
+    return await resolveWorkspaceFile(filePath, MAX_UPLOAD_BYTES);
+  } catch (error) {
+    if (error instanceof WorkspaceFileError) {
+      throw new InvalidParamError({
+        paramName: 'filePaths',
+        nextStep: `filePaths[${index}] ${WORKSPACE_FILE_FAILURE[error.kind]}`,
+      });
+    }
+    throw error;
+  }
+}
+
+async function postFileStream(uploadUrl: string, file: WorkspaceFile): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetch(uploadUrl, {
+      method: 'POST',
+      body: Readable.toWeb(createReadStream(file.path)) as ReadableStream,
+      duplex: 'half',
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'Content-Length': String(file.size),
+      },
+    } as RequestInit);
+  } catch (error) {
+    throw new UploadTransferError(
+      `Uploading ${file.name} failed: ${describeTransferFailure(error)}. No file was shared.`
+    );
+  }
+  if (!response.ok) {
+    throw new UploadTransferError(
+      `Uploading ${file.name} failed with HTTP ${response.status}. No file was shared; retry the call.`
+    );
+  }
+}
+
+function describeTransferFailure(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+  const cause = error.cause;
+  if (!(cause instanceof Error)) return error.message;
+  const code = (cause as NodeJS.ErrnoException).code;
+  return `${error.message} (${code ?? cause.message})`;
+}
+
+function toCompletionFiles(
+  staged: StagedFile[]
+): [{ id: string; title: string }, ...Array<{ id: string; title: string }>] {
+  const [first, ...rest] = staged.map((f) => ({ id: f.id, title: f.name }));
+  return [first, ...rest];
 }
 
 /**
@@ -573,6 +761,23 @@ function looksLikeSlackTs(value: string): boolean {
 }
 
 /**
+ * Throw a teaching error when `value` is set but is not a genuine Slack `ts`.
+ * @param value - The candidate thread timestamp, or undefined.
+ */
+function assertThreadTsShape(value: string | undefined): void {
+  if (value && !looksLikeSlackTs(value)) {
+    throw new InvalidParamError({
+      paramName: 'thread_ts',
+      correctValueTool: 'getChannelMessages',
+      nextStep:
+        'Slack silently accepts a malformed thread_ts and posts to the channel instead of the thread. ' +
+        'Copy the ts exactly as returned by getChannelMessages or getThreadMessages ' +
+        '(e.g. "1717000000.000100"); never reformat or round it.',
+    });
+  }
+}
+
+/**
  * Read one page of a thread (`conversations.replies`) — the first item on the first page is the thread parent, rest are replies (oldest first).
  * `limit` defaults to 50, clamped 1-100; throws if reading fails or `thread_ts` is not a genuine Slack timestamp.
  * @param clients - The Slack client container.
@@ -586,13 +791,7 @@ export async function readThread(
   clients: SlackClients,
   params: { channel: string; thread_ts: string; limit?: number; cursor?: string }
 ): Promise<SlackHistoryPage> {
-  if (!looksLikeSlackTs(params.thread_ts)) {
-    throw new Error(
-      `thread_ts "${params.thread_ts}" does not look like a Slack timestamp (expected e.g. ` +
-        '"1717000000.000100"). Copy it exactly from a getChannelMessages/getThreadMessages ' +
-        'result — do not reformat or round it.'
-    );
-  }
+  assertThreadTsShape(params.thread_ts);
   const channelId = await resolveChannelId(clients, params.channel);
   const limit = clampPageSize(params.limit, 50, 100);
 
@@ -752,11 +951,6 @@ export async function getFileContent(
 /** Hidden workspace subpath for downloads — keeps the project root clean (same convention as office's `.speedwave/office`). */
 const SLACK_DOWNLOAD_SUBPATH = path.join('.speedwave', 'slack');
 
-/** Workspace mount root (env override for tests). */
-function workspaceDir(): string {
-  return process.env.WORKSPACE_DIR || '/workspace';
-}
-
 /**
  * Reduce a filename to a safe basename (no separators, no leading dots).
  * @param name - Raw filename from Slack's files.info.
@@ -796,7 +990,7 @@ export async function downloadFile(
         'Ask the user to share it another way.'
     );
   }
-  const dir = path.join(workspaceDir(), SLACK_DOWNLOAD_SUBPATH);
+  const dir = path.join(workspaceRoot(), SLACK_DOWNLOAD_SUBPATH);
   await mkdir(dir, { recursive: true });
   const target = path.join(dir, `${sanitizeFilename(meta.id)}-${sanitizeFilename(meta.name)}`);
   await writeFile(target, body);
@@ -1001,35 +1195,17 @@ export async function openDm(
   clients: SlackClients,
   params: { users: string[] }
 ): Promise<{ id: string }> {
-  if (!Array.isArray(params.users)) {
-    throw new Error("'users' is required: an array of 1-8 user IDs or e-mail addresses.");
-  }
-  if (params.users.length === 0) {
-    throw new Error('openDirectMessage needs at least one user.');
+  if (!Array.isArray(params.users) || params.users.length === 0) {
+    throw invalidUsers('Pass an array of 1-8 user IDs or exact e-mail addresses.');
   }
   if (params.users.length > MAX_DM_PARTICIPANTS) {
-    throw new Error(
-      `A Slack DM holds at most ${MAX_DM_PARTICIPANTS} people; got ${params.users.length}.`
+    throw invalidUsers(
+      `A Slack DM holds at most ${MAX_DM_PARTICIPANTS} people; got ${params.users.length}. Pass 1-8 user IDs or exact e-mail addresses.`
     );
   }
   const ids: string[] = [];
-  for (const entry of params.users) {
-    const normalized = entry.toUpperCase();
-    if (USER_ID_RE.test(normalized)) {
-      ids.push(normalized);
-    } else if (entry.includes('@')) {
-      const found = await getUsers(clients, { email: entry });
-      if (!found.user) {
-        throw new Error(
-          `No Slack user found for email "${entry}". Check for typos/whitespace, or use findUsers to search by name instead.`
-        );
-      }
-      ids.push(found.user.id);
-    } else {
-      throw new Error(
-        `'${entry}' is not a user ID or email. Find the person with findUsers first.`
-      );
-    }
+  for (const [index, entry] of params.users.entries()) {
+    ids.push(await resolveDmUserId(clients, entry, index));
   }
 
   const result = await slackCall(clients, (c) => c.conversations.open({ users: ids.join(',') }));
@@ -1038,4 +1214,33 @@ export async function openDm(
     throw new Error('Slack did not return a conversation ID from conversations.open.');
   }
   return { id: channel.id };
+}
+
+function invalidUsers(nextStep: string): InvalidParamError {
+  return new InvalidParamError({ paramName: 'users', correctValueTool: 'findUsers', nextStep });
+}
+
+async function resolveDmUserId(
+  clients: SlackClients,
+  entry: unknown,
+  index: number
+): Promise<string> {
+  if (typeof entry === 'string') {
+    const normalized = entry.toUpperCase();
+    if (USER_ID_RE.test(normalized)) {
+      return normalized;
+    }
+    if (entry.includes('@')) {
+      const found = await getUsers(clients, { email: entry });
+      if (found.user) {
+        return found.user.id;
+      }
+      throw invalidUsers(
+        `No Slack user has this e-mail address (users[${index}]). Check for typos or whitespace, or search by name with findUsers.`
+      );
+    }
+  }
+  throw invalidUsers(
+    `users[${index}] is not a user ID or e-mail address. Find the person with findUsers, then pass the returned id.`
+  );
 }

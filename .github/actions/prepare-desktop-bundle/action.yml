@@ -50,6 +50,11 @@ runs:
         rustup target add wasm32-unknown-unknown
         npm install -g wasm-pack
 
+    - name: Install prebuilt wasm-bindgen (wasm-pack has none for Apple silicon)
+      if: contains(inputs.platform, 'macos')
+      shell: bash
+      run: scripts/install-wasm-bindgen.sh
+
     - name: Bundle build context and mcp-os
       shell: bash
       run: scripts/bundle-build-context.sh --ci
