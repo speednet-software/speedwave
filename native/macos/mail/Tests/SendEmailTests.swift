@@ -34,7 +34,7 @@ final class SendEmailTests: XCTestCase {
 
         XCTAssertEqual(harness.executor.calls.count, 1)
         let script = harness.executor.calls[0].script
-        XCTAssertTrue(script.contains("set spwPrimary to primary email"), script)
+        XCTAssertNotNil(script.range(of: #"try\s+set spwPrimary to primary email\s+end try"#, options: .regularExpression), script)
         XCTAssertTrue(script.contains("return my spwClean(spwSender)"), script)
         XCTAssertFalse(script.contains("outgoing message"), script)
         XCTAssertFalse(script.contains("send "), script)

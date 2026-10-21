@@ -57,7 +57,7 @@ final class DraftsAndSignaturesTests: XCTestCase {
             script)
         XCTAssertTrue(script.contains("save spwMsg"), script)
         XCTAssertFalse(script.contains("send spwMsg"), script)
-        XCTAssertTrue(script.contains("set spwPrimary to primary email"), script)
+        XCTAssertNotNil(script.range(of: #"try\s+set spwPrimary to primary email\s+end try"#, options: .regularExpression), script)
         XCTAssertTrue(script.contains("set sender of spwMsg to spwSender"), script)
         XCTAssertEqual(result["status"] as? String, "saved")
         XCTAssertEqual(result["from"] as? String, "Anna <anna@x>")

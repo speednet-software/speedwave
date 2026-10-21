@@ -272,7 +272,10 @@ enum MailSending {
                 set spwName to full name of spwAccount
             """
         } ?? """
-                set spwPrimary to primary email
+                set spwPrimary to ""
+                try
+                    set spwPrimary to primary email
+                end try
                 set spwAddress to ""
                 set spwName to ""
                 repeat with spwCandidate in accounts
