@@ -194,13 +194,6 @@ final class MailCommandBoundaryTests: XCTestCase {
         XCTAssertTrue(harness.executor.calls.isEmpty)
     }
 
-    func testSearchEmailsRefusesAnAccountWithoutAMailbox() {
-        let error = harness.callFailing("search_emails", ["query": "x", "account": "Exchange"])
-        guard case CLIError.missingField("mailbox") = error else {
-            return XCTFail("expected missingField(mailbox), got \(error)")
-        }
-    }
-
     func testSendEmailRefusesARecipientFieldWithoutAnAddress() {
         let cases: [(String, [String: Any])] = [
             ("to", ["to": ""]),
@@ -284,13 +277,5 @@ final class MailCommandBoundaryTests: XCTestCase {
         XCTAssertEqual(row["account"] as? String, "Google")
         XCTAssertEqual(row["mailbox"] as? String, "INBOX")
         XCTAssertNil(row["message_id"])
-    }
-
-    func testSearchEmailsNeedsAMailbox() {
-        let error = harness.callFailing("search_emails", ["query": "x"])
-        guard case CLIError.missingField("mailbox") = error else {
-            return XCTFail("expected missingField(mailbox), got \(error)")
-        }
-        XCTAssertTrue(harness.executor.calls.isEmpty)
     }
 }

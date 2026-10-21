@@ -115,7 +115,6 @@ describe('mcp-os integration', () => {
         'updateEvent',
         'deleteEvent',
         'getEmail',
-        'searchEmails',
         'sendEmail',
         'replyToEmail',
         'forwardEmail',

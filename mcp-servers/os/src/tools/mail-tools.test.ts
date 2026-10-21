@@ -360,16 +360,50 @@ describe('mail-tools', () => {
       expect(runCommand).not.toHaveBeenCalled();
     });
 
-    it('declares recipient and requires only the mailbox', () => {
+    it('declares recipient and requires no parameter', () => {
       const tool = createMailTools().find((t) => t.tool.name === 'searchEmails')!.tool;
       const schema = tool.inputSchema as {
         properties: Record<string, { type: string; description: string }>;
-        required: string[];
+        required?: string[];
       };
 
-      expect(schema.required).toEqual(['mailbox']);
+      expect(schema.required ?? []).toEqual([]);
       expect(schema.properties.recipient.type).toBe('string');
       expect(schema.properties.recipient.description).toMatch(/to.*cc/i);
+    });
+
+    it.each([[{}], [{ account: 'Work' }], [{ account: 'On My Mac' }]])(
+      'searches every mailbox without a mailbox (%o)',
+      async (scope) => {
+        vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { emails: [], total: 0 } });
+
+        const result = await handleSearchEmails({ query: 'invoice', ...scope });
+
+        expect(result.success).toBe(true);
+        expect(vi.mocked(runCommand).mock.calls[0][2]).toEqual(
+          budgeted({ query: 'invoice', ...scope })
+        );
+      }
+    );
+
+    it('a body search without a mailbox runs nothing and asks for one', async () => {
+      const result = await handleSearchEmails({ query: 'net 30', search_body: true });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('MISSING_FIELDS');
+      expect(result.error?.message).toContain('mailbox');
+      expect(result.error?.message).toContain('listMailboxes');
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it('tells Claude a search without a mailbox skips Trash and Junk', () => {
+      const tool = createMailTools().find((t) => t.tool.name === 'searchEmails')!.tool;
+      const schema = tool.inputSchema as { properties: Record<string, { description: string }> };
+
+      expect(tool.description).toMatch(/without mailbox/i);
+      expect(tool.description).toMatch(/trash/i);
+      expect(tool.description).toMatch(/junk/i);
+      expect(schema.properties.mailbox.description).toMatch(/every mailbox/i);
     });
   });
 
@@ -1838,7 +1872,7 @@ function validInput(name: string): Record<string, unknown> {
     listMailboxes: {},
     listEmails: { mailbox: 'INBOX' },
     getEmail: { id: MAIL_ID },
-    searchEmails: { query: 'hi', mailbox: 'INBOX' },
+    searchEmails: { query: 'hi' },
     sendEmail: { to: 'a@x', subject: 's', body: 'b', confirm_send: true },
     replyToEmail: { id: MAIL_ID, body: 'b', confirm_send: true },
     forwardEmail: { id: MAIL_ID, to: 'a@x', confirm_send: true },

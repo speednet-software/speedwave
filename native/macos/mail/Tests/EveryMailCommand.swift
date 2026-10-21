@@ -31,6 +31,12 @@ struct MailCommandCall {
             params: ["mailbox": "Sent", "account": "Work", "recipient": "anna@x", "before": "2026-10-01"],
             replies: [listing]),
         MailCommandCall(
+            command: "search_emails", params: ["query": "x", "since": "2026-01-01", "unread_only": true], replies: [""]),
+        MailCommandCall(command: "search_emails", params: ["sender": "a@x", "account": "Work"], replies: [""]),
+        MailCommandCall(
+            command: "search_emails", params: ["flagged_only": true, "account": AppleMailClient.localAccountName],
+            replies: [""]),
+        MailCommandCall(
             command: "get_email",
             params: ["id": mailId, "include_headers": true, "include_source": true],
             replies: [String(repeating: "\u{1D}", count: 12)]),

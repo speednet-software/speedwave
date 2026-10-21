@@ -52,9 +52,9 @@ interface GetEmailParams {
 interface SearchEmailsParams {
   /** Text the subject or the sender contains. */
   query?: string;
-  /** Mailbox path from listMailboxes. */
-  mailbox: string;
-  /** Account of the mailbox. */
+  /** Mailbox path from listMailboxes; every mailbox when absent. */
+  mailbox?: string;
+  /** Account of the mailbox, or the account whose mailboxes to search. */
   account?: string;
   /** Also match the body; slow. */
   search_body?: boolean;
@@ -362,7 +362,7 @@ export const getEmailTool: Tool = {
 export const searchEmailsTool: Tool = {
   name: 'searchEmails',
   description:
-    'Search one mailbox, newest first, for the emails every given filter matches: query (subject or sender contains it), sender, recipient (a To or Cc address), since/before (ISO 8601), unread_only and flagged_only. Give at least one filter; to list a whole mailbox use listEmails. Page with offset and limit (default 10); total is the number of matches the page is cut from. Fast even in a large mailbox. Set search_body only when the user asks to search the email text: Mail then scans every body for the query, which can take minutes. Each id is a mail id that getEmail and replyToEmail take.',
+    "Search emails, newest first, for the ones every given filter matches: query (subject or sender contains it), sender, recipient (a To or Cc address), since/before (ISO 8601), unread_only and flagged_only. Give at least one filter; to list a whole mailbox use listEmails. With mailbox it searches that one mailbox; without mailbox it searches every mailbox of account, or of every account and On My Mac without account, leaving out each account's Trash and Junk (name one as mailbox to search it). Each row names its mailbox and account. Page with offset and limit (default 10); total is the number of matches the page is cut from. Fast even in a large mailbox. Set search_body only when the user asks to search the email text; it needs mailbox and query, and Mail then scans every body of that mailbox, which can take minutes. Each id is a mail id that getEmail and replyToEmail take.",
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
@@ -382,17 +382,18 @@ export const searchEmailsTool: Tool = {
       },
       mailbox: {
         type: 'string',
-        description: "Mailbox path to search: the name field from listMailboxes' output.",
+        description:
+          "Mailbox path to search: the name field from listMailboxes' output. Leave it out to search every mailbox but Trash and Junk.",
       },
       account: {
         type: 'string',
         description:
-          'Account of the mailbox (the account field from listMailboxes); needed when the mailbox name exists in several accounts.',
+          'Account of the mailbox (the account field from listMailboxes); needed when the mailbox name exists in several accounts. Without mailbox, the one account whose mailboxes to search ("On My Mac" for the local ones).',
       },
       search_body: {
         type: 'boolean',
         description:
-          'Also match the query in the email text (default false; needs query). Slow: Mail scans every body of the mailbox, which can take minutes; use only when the user asks to search the content.',
+          'Also match the query in the email text (default false; needs query and mailbox). Slow: Mail scans every body of the mailbox, which can take minutes; use only when the user asks to search the content.',
       },
       sender: { type: 'string', description: 'Only emails whose sender contains this text' },
       recipient: {
@@ -417,12 +418,15 @@ export const searchEmailsTool: Tool = {
         description: 'Number of newest matches to skip, for the next page (default 0)',
       },
     },
-    required: ['mailbox'],
   },
   outputSchema: EMAIL_LISTING_OUTPUT,
   inputExamples: [
     {
-      description: 'Minimal: subject or sender search in an inbox',
+      description: 'Minimal: subject or sender search in every mailbox',
+      input: { query: 'quarterly report' },
+    },
+    {
+      description: 'One mailbox: subject or sender search in an inbox',
       input: { query: 'quarterly report', mailbox: 'INBOX', account: 'iCloud' },
     },
     {
@@ -508,16 +512,16 @@ export async function handleGetEmail(params: GetEmailParams): Promise<ToolResult
 }
 
 /**
- * Searches one mailbox by the filters given, and the query in the body only when search_body is set.
+ * Searches one mailbox, or every mailbox but Trash and Junk, by the filters given; the body only with search_body.
  * @param params - Tool input parameters.
  */
 export async function handleSearchEmails(params: SearchEmailsParams): Promise<ToolResult> {
   const p = asRecord(params);
-  const textFilters = ['query', 'sender', 'recipient'].filter(
+  const givenTexts = ['mailbox', 'query', 'sender', 'recipient'].filter(
     (name) => typeof p[name] === 'string'
   );
   const v = validateAll(p, {
-    required: ['mailbox', ...textFilters],
+    required: givenTexts,
     booleans: ['search_body', 'unread_only', 'flagged_only'],
     strings: [
       ['query', MAX_LENGTHS.short, false],
@@ -540,7 +544,7 @@ export async function handleSearchEmails(params: SearchEmailsParams): Promise<To
 }
 
 /**
- * The teaching error for a search that no filter narrows, or a body search without a query.
+ * The teaching error for a search that no filter narrows, or a body search without a query or a mailbox.
  * @param p - Tool arguments.
  */
 function searchFilterError(p: Record<string, unknown>): ToolResult | undefined {
@@ -560,6 +564,16 @@ function searchFilterError(p: Record<string, unknown>): ToolResult | undefined {
         paramName: 'query',
         nextStep:
           'search_body searches the email text for the query: pass query too, or leave search_body out.',
+      },
+      'MISSING_FIELDS'
+    );
+  }
+  if (p.search_body === true && p.mailbox === undefined) {
+    return teachingToolResult(
+      {
+        paramName: 'mailbox',
+        nextStep:
+          'A body search reads every email text of one mailbox: pass mailbox (and account) from listMailboxes, or leave search_body out to search every mailbox by subject and sender.',
       },
       'MISSING_FIELDS'
     );

@@ -123,7 +123,8 @@ func searchEmails(params: [String: Any], scripts: MailScripts) throws -> [String
     for text in ["query", "recipient"] where (params[text] as? String)?.isEmpty == true {
         throw MailError.invalidValue(text, "must not be empty")
     }
-    let (mailbox, account) = try mailboxParams(params)
+    let mailbox = params["mailbox"] as? String
+    let account = params["account"] as? String
     let (offset, limit) = try pageParams(params)
     let filter = AppleMailClient.MessageFilter(
         unreadOnly: params["unread_only"] as? Bool ?? false,
@@ -140,6 +141,9 @@ func searchEmails(params: [String: Any], scripts: MailScripts) throws -> [String
     }
     guard !filter.searchBody || filter.query != nil else {
         throw MailError.missingField("query")
+    }
+    guard !filter.searchBody || mailbox != nil else {
+        throw MailError.missingField("mailbox")
     }
     return try AppleMailClient.listEmails(
         scripts: scripts, mailbox: mailbox, account: account, filter: filter, offset: offset, limit: limit)

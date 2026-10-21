@@ -10,6 +10,7 @@ enum AppleMailClient {
 
     static let listFieldSeparator = "\u{1D}"
     static let listItemSeparator = "\u{1E}"
+    static let mailboxSeparator = "\u{1C}"
 
     /// One message of a listing, before paging.
     struct ListedMessage {
@@ -59,13 +60,14 @@ enum AppleMailClient {
                 .joined()
         }
 
-        var propertyScope: String {
-            scope(conditions(query: searchBody ? nil : queryCondition))
+        /// The messages of `mailboxes` (`mb`, `every mailbox of spwAcct`) whose properties a listing reads.
+        func propertyScope(of mailboxes: String) -> String {
+            scope(mailboxes, conditions(query: searchBody ? nil : queryCondition))
         }
 
         var bodyScope: String? {
             guard searchBody, query != nil else { return nil }
-            return scope(conditions(query: queryCondition))
+            return scope("mb", conditions(query: queryCondition))
         }
 
         private var queryCondition: String? {
@@ -93,8 +95,9 @@ enum AppleMailClient {
             ].compactMap { $0 }
         }
 
-        private func scope(_ conditions: [String]) -> String {
-            "every message of mb" + (conditions.isEmpty ? "" : " whose " + conditions.joined(separator: " and "))
+        private func scope(_ mailboxes: String, _ conditions: [String]) -> String {
+            "every message of \(mailboxes)"
+                + (conditions.isEmpty ? "" : " whose " + conditions.joined(separator: " and "))
         }
 
         private func dateVariable(_ name: String, _ date: Date) -> String {
@@ -217,23 +220,34 @@ enum AppleMailClient {
                 set spwLocal to true
                 if spwOwners is not missing value then set spwLocal to (item spwI of spwOwners is missing value)
                 if spwLocal then
-                    set spwPath to item spwI of spwNames
-                    set spwParent to item spwI of spwParents
-                    repeat spwCount times
-                        set spwJ to 0
-                        repeat with spwK from 1 to spwCount
-                            if item spwK of spwBoxes is spwParent then set spwJ to spwK
-                        end repeat
-                        if spwJ is 0 then exit repeat
-                        set spwPath to (item spwJ of spwNames) & "/" & spwPath
-                        set spwParent to item spwJ of spwParents
-                    end repeat
+                    set spwPath to spwMailboxPath(spwI, spwBoxes, spwNames, spwParents)
                     set end of spwLines to spwAcctName & "||" & spwPath & "||" & (count of item spwI of spwIds) & "||" & (item spwI of spwUnread)
                 end if
             end repeat
         end repeat
         set AppleScript's text item delimiters to linefeed
         return spwLines as text
+        \(mailboxPathHandler)
+        """
+
+    /// An AppleScript handler, placed after a script's statements, giving the path inside its account of mailbox
+    /// `spwI` of the bulk-read lists: every container that `is` another listed mailbox puts that one's name in front.
+    private static let mailboxPathHandler = """
+        on spwMailboxPath(spwI, spwBoxes, spwNames, spwParents)
+            set spwCount to count of spwBoxes
+            set spwPath to item spwI of spwNames
+            set spwParent to item spwI of spwParents
+            repeat spwCount times
+                set spwJ to 0
+                repeat with spwK from 1 to spwCount
+                    if item spwK of spwBoxes is spwParent then set spwJ to spwK
+                end repeat
+                if spwJ is 0 then exit repeat
+                set spwPath to (item spwJ of spwNames) & "/" & spwPath
+                set spwParent to item spwJ of spwParents
+            end repeat
+            return spwPath
+        end spwMailboxPath
         """
 
     static func listMailboxes(scripts: MailScripts) throws -> [[String: Any]] {
@@ -251,38 +265,40 @@ enum AppleMailClient {
         }
     }
 
-    /// The newest-first page `offset..<offset+limit` of the messages `filter` keeps, and the total the page is cut from.
+    /// The newest-first page `offset..<offset+limit` of the messages `filter` keeps in `mailbox`, or without one in
+    /// every mailbox of `account` (every account and On My Mac without either) but its Trash and Junk, and the total
+    /// the page is cut from.
     static func listEmails(
         scripts: MailScripts,
-        mailbox: String,
+        mailbox: String?,
         account: String?,
         filter: MessageFilter,
         offset: Int,
         limit: Int
     ) throws -> [String: Any] {
-        let script = listEmailsScript(mailbox: mailbox, account: account, filter: filter)
-        let output = try scripts.run(script, mailbox: mailbox, account: account)
-        let messages = newestFirst(try parseListing(output, mailbox: mailbox))
-        let page = messages.dropFirst(offset).prefix(limit)
-        return ["emails": page.map(\.json), "total": messages.count]
+        let messages: [ListedMessage]
+        if let mailbox {
+            let script = listEmailsScript(mailbox: mailbox, account: account, filter: filter)
+            messages = try parseListing(try scripts.run(script, mailbox: mailbox, account: account), mailbox: mailbox)
+        } else {
+            let script = searchAllMailboxesScript(account: account, filter: filter)
+            messages = try parseAllMailboxes(try scripts.run(script, account: account))
+        }
+        let sorted = newestFirst(messages)
+        let page = sorted.dropFirst(offset).prefix(limit)
+        return ["emails": page.map(\.json), "total": sorted.count]
     }
 
     /// Reads each property of every message `filter` keeps with one Apple Event; prints the account name, then one
     /// field per property (the flag as Mail's `flag index`, -1 when unflagged), items joined by `listItemSeparator` and fields by `listFieldSeparator`. A body search adds
     /// a last field with the Message-IDs whose content matched.
     static func listEmailsScript(mailbox: String, account: String?, filter: MessageFilter) -> String {
-        let scope = filter.propertyScope
         let bodyRead = filter.bodyScope.map { "\n    set spwBodyIds to message id of \($0)" } ?? ""
         let bodyField = filter.bodyScope == nil ? "" : ", spwBodyIds as text"
         return """
         \(filter.setup)tell application "Mail"
         \(mailboxLookup(name: mailbox, account: account))
-            set spwIds to message id of \(scope)
-            set spwSubjects to subject of \(scope)
-            set spwSenders to sender of \(scope)
-            set spwDates to date received of \(scope)
-            set spwReads to read status of \(scope)
-            set spwFlags to flag index of \(scope)\(bodyRead)
+        \(propertyReads(filter.propertyScope(of: "mb")))\(bodyRead)
         end tell
         set spwIsoDates to {}
         repeat with spwDateRef in spwDates
@@ -298,6 +314,138 @@ enum AppleMailClient {
         set AppleScript's text item delimiters to (character id 29)
         return spwFields as text
         """
+    }
+
+    /// AppleScript lines that read each listed property of the messages `scope` names with one Apple Event each.
+    private static func propertyReads(_ scope: String) -> String {
+        """
+            set spwIds to message id of \(scope)
+            set spwSubjects to subject of \(scope)
+            set spwSenders to sender of \(scope)
+            set spwDates to date received of \(scope)
+            set spwReads to read status of \(scope)
+            set spwFlags to flag index of \(scope)
+        """
+    }
+
+    /// Reads each property of the messages `filter` keeps in every mailbox of an account with one Apple Event,
+    /// which answers one list per mailbox; prints one section per mailbox that has any, `mailboxSeparator` between
+    /// them, each the account, the mailbox path and the fields of a `listEmailsScript` output. The account's Trash
+    /// and Junk are found as `accountSpecialLookup` finds them and left out.
+    static func searchAllMailboxesScript(account: String?, filter: MessageFilter) -> String {
+        var reads = ""
+        if account != localAccountName {
+            var accounts = "accounts"
+            if let account {
+                let accountEsc = escapeAppleScript(account)
+                accounts = "{account \"\(accountEsc)\"}"
+                reads += "    if not (exists account \"\(accountEsc)\") then error \"\(accountNotFoundMarker)\"\n"
+            }
+            reads += """
+                repeat with spwAcctRef in \(accounts)
+                    set spwAcct to contents of spwAcctRef
+                    set spwAcctName to name of spwAcct
+            \(accountSpecialLookup("trash mailbox", into: "spwTrash"))
+            \(accountSpecialLookup("junk mailbox", into: "spwJunk"))
+                    set spwBoxes to every mailbox of spwAcct
+                    set spwNames to name of every mailbox of spwAcct
+                    set spwParents to container of every mailbox of spwAcct
+            \(propertyReads(filter.propertyScope(of: "every mailbox of spwAcct")))
+                    set end of spwScopes to {spwAcctName, spwBoxes, spwNames, spwParents, missing value, spwTrash, spwJunk, {spwIds, spwSubjects, spwSenders, spwDates, spwReads, spwFlags}}
+                end repeat
+
+            """
+        }
+        if account == nil || account == localAccountName {
+            reads += """
+                set spwAcctName to "\(escapeAppleScript(localAccountName))"
+            \(accountSpecialLookup("trash mailbox", into: "spwTrash"))
+            \(accountSpecialLookup("junk mailbox", into: "spwJunk"))
+                set spwBoxes to every mailbox
+                set spwNames to name of every mailbox
+                set spwParents to container of every mailbox
+                set spwOwners to account of every mailbox
+            \(propertyReads(filter.propertyScope(of: "every mailbox")))
+                set end of spwScopes to {spwAcctName, spwBoxes, spwNames, spwParents, spwOwners, spwTrash, spwJunk, {spwIds, spwSubjects, spwSenders, spwDates, spwReads, spwFlags}}
+
+            """
+        }
+        return """
+        \(filter.setup)tell application "Mail"
+            set spwScopes to {}
+        \(reads)end tell
+        set spwSections to {}
+        repeat with spwScopeRef in spwScopes
+            set spwScope to contents of spwScopeRef
+            set spwAcctName to item 1 of spwScope
+            set spwBoxes to item 2 of spwScope
+            set spwNames to item 3 of spwScope
+            set spwParents to item 4 of spwScope
+            set spwOwners to item 5 of spwScope
+            set spwTrash to item 6 of spwScope
+            set spwJunk to item 7 of spwScope
+            set spwColumns to item 8 of spwScope
+            set spwCount to count of spwBoxes
+            if (count of spwNames) is not spwCount or (count of spwParents) is not spwCount then error "\(mailboxesChangedMarker)"
+            if spwOwners is not missing value then
+                if (count of spwOwners) is not spwCount then error "\(mailboxesChangedMarker)"
+            end if
+            repeat with spwC from 1 to 6
+                set spwColumn to item spwC of spwColumns
+                if (count of spwColumn) is not spwCount then error "\(mailboxesChangedMarker)"
+            end repeat
+            repeat with spwI from 1 to spwCount
+                set spwBox to item spwI of spwBoxes
+                set spwMessageIds to item spwI of item 1 of spwColumns
+                set spwKeep to (count of spwMessageIds) > 0
+                if spwOwners is not missing value then
+                    if item spwI of spwOwners is not missing value then set spwKeep to false
+                end if
+                if spwBox is spwTrash or spwBox is spwJunk then set spwKeep to false
+                if spwKeep then
+                    set spwIsoDates to {}
+                    repeat with spwDateRef in item spwI of item 4 of spwColumns
+                        set spwDate to contents of spwDateRef
+                        if class of spwDate is date then
+                            set end of spwIsoDates to (spwDate as «class isot» as string)
+                        else
+                            set end of spwIsoDates to ""
+                        end if
+                    end repeat
+                    set AppleScript's text item delimiters to (character id 30)
+                    set spwPath to spwMailboxPath(spwI, spwBoxes, spwNames, spwParents)
+                    set spwFields to {spwAcctName, spwPath}
+                    repeat with spwC from 1 to 6
+                        if spwC is 4 then
+                            set spwText to spwIsoDates as text
+                        else
+                            set spwColumn to item spwI of item spwC of spwColumns
+                            set spwText to spwColumn as text
+                        end if
+                        set end of spwFields to spwText
+                    end repeat
+                    set AppleScript's text item delimiters to (character id 29)
+                    set end of spwSections to (spwFields as text)
+                end if
+            end repeat
+        end repeat
+        set AppleScript's text item delimiters to (character id 28)
+        return spwSections as text
+        \(mailboxPathHandler)
+        """
+    }
+
+    /// The messages of a `searchAllMailboxesScript` output, each with the mailbox its section names.
+    static func parseAllMailboxes(_ output: String) throws -> [ListedMessage] {
+        guard !output.isEmpty else { return [] }
+        return try output.components(separatedBy: mailboxSeparator).flatMap { section in
+            var fields = section.components(separatedBy: listFieldSeparator)
+            guard fields.count == 8 else {
+                throw ScriptError.scriptFailed("Unexpected message list from Mail.app")
+            }
+            let mailbox = fields.remove(at: 1)
+            return try parseListing(fields.joined(separator: listFieldSeparator), mailbox: mailbox)
+        }
     }
 
     /// The messages of a `listEmailsScript` output, only those a body search matched when it carries their ids;

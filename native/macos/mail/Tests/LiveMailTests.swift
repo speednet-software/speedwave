@@ -147,6 +147,51 @@ final class LiveMailTests: XCTestCase {
         XCTAssertEqual((nobody as? [String: Any])?["total"] as? Int, 0)
     }
 
+    func testSearchEmailsWithoutAMailboxFindsTheNewestTestMailInItsMailboxAndNothingInATrash() throws {
+        let listed = try XCTUnwrap(
+            try call(
+                "list_emails",
+                ["mailbox": Self.testMailbox, "account": AppleMailClient.localAccountName, "limit": 1]
+            ) as? [String: Any])
+        guard let newest = (listed["emails"] as? [[String: Any]])?.first, let id = newest["id"] as? String,
+              let subject = newest["subject"] as? String, !subject.isEmpty
+        else {
+            throw XCTSkip("\(Self.testMailbox) holds no message with a subject to search for")
+        }
+        let trashes = try osascriptExecutor("""
+            tell application "Mail"
+                set spwNames to {}
+                repeat with spwBox in mailboxes of trash mailbox
+                    set end of spwNames to name of spwBox
+                end repeat
+                set end of spwNames to name of trash mailbox
+            end tell
+            set AppleScript's text item delimiters to linefeed
+            return spwNames as text
+            """, 60).components(separatedBy: "\n")
+
+        for scope in [["account": AppleMailClient.localAccountName], [:]] as [[String: Any]] {
+            let params = scope.merging(["query": subject, "limit": 10_000]) { $1 }
+            let found = try XCTUnwrap(try call("search_emails", params) as? [String: Any])
+            let rows = try XCTUnwrap(found["emails"] as? [[String: Any]])
+            let hit = rows.first { $0["id"] as? String == id }
+            XCTAssertEqual(hit?["mailbox"] as? String, Self.testMailbox, "\(scope): \(found)")
+            XCTAssertEqual(found["total"] as? Int, rows.count)
+            let dates = rows.compactMap { $0["date"] as? String }.compactMap(parseISO8601)
+            XCTAssertEqual(dates, dates.sorted(by: >))
+            for row in rows {
+                XCTAssertEqual(try MailId(decoding: try XCTUnwrap(row["id"] as? String)).mailbox, row["mailbox"] as? String)
+                XCTAssertFalse(trashes.contains(row["mailbox"] as? String ?? ""), "\(row)")
+            }
+        }
+
+        XCTAssertThrowsError(try call("search_emails", ["query": subject, "search_body": true])) { error in
+            guard case MailError.missingField("mailbox") = error else {
+                return XCTFail("expected missingField(mailbox), got \(error)")
+            }
+        }
+    }
+
     func testGetEmailReadsCcAttachmentsHeadersAndSourceOfTheNewestTestMail() throws {
         let params: [String: Any] = [
             "mailbox": Self.testMailbox, "account": AppleMailClient.localAccountName, "limit": 1,
