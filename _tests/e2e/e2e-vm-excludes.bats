@@ -201,3 +201,60 @@ _run_installer() {
     [ "$status" -eq 0 ]
     [ "$output" = "after" ]
 }
+
+_load_rig_lock() {
+    eval "$(sed -n '/^RIG_LOCK_STALE_MINUTES=/p;/^RIG_LOCK_POLL_SECONDS=/p;/^RIG_LOCK_WAIT_SECONDS=/p;/^with_rig_lock()/,/^}/p;/^rig_lock_try_script()/,/^}/p' "$SCRIPT")"
+    RIG_LOCK_POLL_SECONDS=0
+    LOCK="$BATS_TEST_TMPDIR/rig.lock"
+}
+
+_record_run() {
+    echo ran >>"$BATS_TEST_TMPDIR/runs"
+    return "${1:-0}"
+}
+
+@test "with_rig_lock runs the command under the lock and releases it" {
+    _load_rig_lock
+    run with_rig_lock bash "$LOCK" bash -c '[ -d "$0" ] && echo held' "$LOCK"
+    [ "$status" -eq 0 ]
+    [ "$output" = "held" ]
+    [ ! -e "$LOCK" ]
+}
+
+@test "with_rig_lock returns the command's exit code and still releases the lock" {
+    _load_rig_lock
+    run with_rig_lock bash "$LOCK" _record_run 7
+    [ "$status" -eq 7 ]
+    [ "$(cat "$BATS_TEST_TMPDIR/runs")" = "ran" ]
+    [ ! -e "$LOCK" ]
+}
+
+@test "with_rig_lock gives up on a fresh lock held by another run without running the command" {
+    _load_rig_lock
+    RIG_LOCK_WAIT_SECONDS=0
+    mkdir "$LOCK"
+    run with_rig_lock bash "$LOCK" _record_run
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"still held"* ]]
+    [ ! -e "$BATS_TEST_TMPDIR/runs" ]
+    [ -d "$LOCK" ]
+}
+
+@test "with_rig_lock takes over a lock older than the stale limit" {
+    _load_rig_lock
+    mkdir "$LOCK"
+    touch -t 202001010000 "$LOCK"
+    run with_rig_lock bash "$LOCK" _record_run
+    [ "$status" -eq 0 ]
+    [ "$(cat "$BATS_TEST_TMPDIR/runs")" = "ran" ]
+    [ ! -e "$LOCK" ]
+}
+
+@test "with_rig_lock fails at once when the rig cannot be reached" {
+    _load_rig_lock
+    _unreachable() { cat >/dev/null; return 255; }
+    run with_rig_lock _unreachable "$LOCK" _record_run
+    [ "$status" -eq 255 ]
+    [[ "$output" == *"could not reach the rig"* ]]
+    [ ! -e "$BATS_TEST_TMPDIR/runs" ]
+}

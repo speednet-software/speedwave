@@ -12,6 +12,10 @@ Rules for the clean-install rig pipeline and the engine-level bats suites (`_tes
 
 - macOS only: the `.dmg` build runs with `CI=true`, which makes Tauri pass `--skip-jenkins` to `bundle_dmg.sh` and skip its Finder AppleScript window layout. Over SSH Finder answers no Apple Events (`AppleEvent timed out (-1712)`) and the bundle step fails; the lane only mounts the image, so the layout is not needed.
 
+## One run per rig
+
+- Each `e2e.yml` job has its machine's concurrency group (`rig-macos`, `rig-windows`) with `cancel-in-progress: false`, and `scripts/e2e-vm.sh` takes a lock directory on the rig itself before it touches it (`with_rig_lock`: `$HOME/.speedwave-e2e.lock` on macOS, `/home/windows/.speedwave-e2e.lock` in the Windows staging distro), so a run started from a developer's machine and a CI job never share a rig. A lock older than `RIG_LOCK_STALE_MINUTES` (beyond the job's 120-minute timeout) belongs to a run that was killed and is taken over; a fresh one is waited on for up to `RIG_LOCK_WAIT_SECONDS`, and an unreachable rig fails at once. Guarded by `e2e-vm-excludes.bats`. A concurrency group keeps only one pending job: a third job queued for the same rig cancels the pending one, which the merge queue's one-PR-at-a-time setting avoids.
+
 ## Windows transport rules (all empirically verified on the rig)
 
 - Anything crossing the `wsl.exe ... --` interop boundary is re-parsed by the distro's default shell: payloads carrying `$`-constructs meant for the inner shell MUST be base64-wrapped (`echo <b64> | base64 -d | sh` — the runtime's `wrap_base64_sh` shape). Quoted metachar payloads without `$` survive as data; bare-spliced scripts do not.

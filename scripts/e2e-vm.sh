@@ -106,6 +106,50 @@ MACOS_ENGINE_BATS_PREAMBLE='[ -x "$HOME/.local/bats-core-'"$BATS_VERSION"'/bin/b
 export PATH="$HOME/.local/bats-core-'"$BATS_VERSION"'/bin:$PATH"
 env LIMA_HOME="$HOME/.speedwave/lima" "$HOME/Applications/Speedwave.app/Contents/Resources/lima/bin/limactl" start speedwave'
 
+RIG_LOCK_STALE_MINUTES=150
+RIG_LOCK_POLL_SECONDS=30
+RIG_LOCK_WAIT_SECONDS=1800
+
+with_rig_lock() {
+    local runner="$1" lock="$2" waited=0 rc=0
+    shift 2
+    while :; do
+        rc=0
+        rig_lock_try_script "$lock" | "$runner" || rc=$?
+        [ "$rc" -eq 0 ] && break
+        if [ "$rc" -ne 1 ]; then
+            echo "could not reach the rig to take its lock $lock (exit $rc)" >&2
+            return "$rc"
+        fi
+        if [ "$waited" -ge "$RIG_LOCK_WAIT_SECONDS" ]; then
+            echo "the rig lock $lock is still held after ${waited}s; another run is using this machine" >&2
+            return 1
+        fi
+        echo "the rig lock $lock is held by another run, waiting..."
+        sleep "$RIG_LOCK_POLL_SECONDS"
+        waited=$((waited + RIG_LOCK_POLL_SECONDS))
+    done
+    rc=0
+    ("$@") || rc=$?
+    printf 'rm -rf "%s"\n' "$lock" | "$runner" || true
+    return "$rc"
+}
+
+rig_lock_try_script() {
+    cat <<SCRIPT
+lock="$1"
+if mkdir "\$lock" 2>/dev/null; then exit 0; fi
+if [ -n "\$(find "\$lock" -maxdepth 0 -mmin +$RIG_LOCK_STALE_MINUTES)" ]; then
+    rm -rf "\$lock" && mkdir "\$lock" && exit 0
+fi
+exit 1
+SCRIPT
+}
+
+macos_bash() {
+    macos_ssh bash
+}
+
 windows_restore_interop() {
     # shellcheck disable=SC2086
     ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -u root -- sh -c \"[ -e /proc/sys/fs/binfmt_misc/WSLInterop ] || { echo :WSLInterop:M::MZ::/init:PF > /proc/sys/fs/binfmt_misc/register && echo WSLInterop re-registered; }\""
@@ -1006,15 +1050,26 @@ SCRIPT
 }
 
 
+WINDOWS_RIG_LOCK="/home/windows/.speedwave-e2e.lock"
+MACOS_RIG_LOCK='$HOME/.speedwave-e2e.lock'
+
+locked_run_windows() {
+    with_rig_lock windows_wsl "$WINDOWS_RIG_LOCK" run_windows
+}
+
+locked_run_macos() {
+    with_rig_lock macos_bash "$MACOS_RIG_LOCK" run_macos
+}
+
 TARGET="${1:-all}"
 
 case "$TARGET" in
-    windows|win)    run_windows ;;
-    windows-audio|win-audio) run_windows_audio ;;
-    macos|mac)      run_macos ;;
+    windows|win)    locked_run_windows ;;
+    windows-audio|win-audio) with_rig_lock windows_wsl "$WINDOWS_RIG_LOCK" run_windows_audio ;;
+    macos|mac)      locked_run_macos ;;
     all)
         PIDS=()
-        for fn in run_windows run_macos; do
+        for fn in locked_run_windows locked_run_macos; do
             $fn &
             PIDS+=($!)
         done

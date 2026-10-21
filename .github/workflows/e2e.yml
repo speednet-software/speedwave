@@ -11,6 +11,9 @@ permissions:
 jobs:
   e2e-macos:
     if: github.event_name != 'pull_request'
+    concurrency:
+      group: rig-macos
+      cancel-in-progress: false
     runs-on: [self-hosted, macOS, ARM64]
     environment: e2e
     timeout-minutes: 120
@@ -30,6 +33,9 @@ jobs:
 
   e2e-windows:
     if: github.event_name != 'pull_request'
+    concurrency:
+      group: rig-windows
+      cancel-in-progress: false
     runs-on: [self-hosted, Windows, X64]
     environment: e2e
     timeout-minutes: 120
