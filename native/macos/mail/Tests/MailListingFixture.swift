@@ -6,6 +6,7 @@ struct ListingRow {
     let sender: String
     let received: String
     let read: Bool
+    var flag = -1
 }
 
 /// The output a listing script prints for `rows` of a mailbox the lookup resolved to `account`; `matchedIds`
@@ -19,6 +20,7 @@ func mailListing(account: String, _ rows: [ListingRow], matchedIds: [String]? = 
         field(\.sender),
         field(\.received),
         field { $0.read ? "true" : "false" },
+        field { "\($0.flag)" },
     ]
     if let matchedIds {
         fields.append(matchedIds.joined(separator: "\u{1E}"))

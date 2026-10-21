@@ -155,6 +155,6 @@ Two kinds: **test-guarded** (a failing test names the fix — trust it, never by
 - Updater config: `tauri.conf.json`'s `plugins.updater.endpoints[0]` ↔ `updater.rs::UPDATE_ENDPOINT`, `plugins.updater.pubkey` ↔ the minisign keypair, `bundle.createUpdaterArtifacts` (`true` since SPEED-766) ↔ `scripts/verify-release-assets.sh`'s `SIGNED_ASSETS`/required `latest.json` platform keys. No automated guard. Update all four by hand in the same commit; `verify-release-assets.bats` still catches a release that is actually missing the required assets or `latest.json` keys, it just does not catch `tauri.conf.json` drifting from `updater.rs` ahead of a release.
 - **Mail tools (TS, `mcp-servers/os/src/tools/mail-*.ts`) ↔ `mail-cli` (Swift, `native/macos/mail/Sources/`)**, no automated guard, change both sides in one commit:
   - `mail-shared.ts::MAIL_BATCH_LIMIT` ↔ `MailBatch.swift::mailBatchLimit` (25 mail ids per batch call).
-  - `mail-organizing.ts::MAIL_FLAG_VALUES` ↔ `MailOrganizing.swift::mailFlagColors` plus `none` (Mail's `flag index` order).
+  - `mail-shared.ts::MAIL_FLAG_VALUES` ↔ `MailOrganizing.swift::mailFlagColors` plus `none` (Mail's `flag index` order): the colors `flag_emails` sets and the `flag` key `list_emails`, `search_emails` and `get_email` return (`AppleMailClient.flagName`).
   - `mail-reading.ts::RAW_TEXT_LIMIT` ↔ `MailReading.swift::MailReading.rawTextLimit` (headers/source cut).
   - Every `MailFailure` code a command can throw (`MailShared.swift`) ↔ an entry of `mail-shared.ts::MAIL_FAILURE_TEACHING`.

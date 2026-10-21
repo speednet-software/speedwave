@@ -97,7 +97,10 @@ func listMailboxes(scripts: MailScripts) throws -> [String: Any] {
 func listEmails(params: [String: Any], scripts: MailScripts) throws -> [String: Any] {
     let (mailbox, account) = try mailboxParams(params)
     let (offset, limit) = try pageParams(params)
-    let filter = AppleMailClient.MessageFilter(unreadOnly: params["unread_only"] as? Bool ?? false)
+    let filter = AppleMailClient.MessageFilter(
+        unreadOnly: params["unread_only"] as? Bool ?? false,
+        flaggedOnly: params["flagged_only"] as? Bool ?? false
+    )
     return try AppleMailClient.listEmails(
         scripts: scripts, mailbox: mailbox, account: account, filter: filter, offset: offset, limit: limit)
 }
@@ -127,6 +130,7 @@ func searchEmails(params: [String: Any], scripts: MailScripts) throws -> [String
     let (offset, limit) = try pageParams(params)
     let filter = AppleMailClient.MessageFilter(
         unreadOnly: params["unread_only"] as? Bool ?? false,
+        flaggedOnly: params["flagged_only"] as? Bool ?? false,
         sender: params["sender"] as? String,
         since: try dateParam(params, "since"),
         before: try dateParam(params, "before"),

@@ -24,6 +24,18 @@ export const STANDARD_BUDGET = mailTimeBudget(30_000);
 /** The most mails one batch tool acts on; mail-cli's `mailBatchLimit` holds the same number. */
 export const MAIL_BATCH_LIMIT = 25;
 
+/** Flag colors in the order of Mail's flag index, then `none`; mail-cli's `mailFlagColors` holds the same colors. */
+export const MAIL_FLAG_VALUES = [
+  'red',
+  'orange',
+  'yellow',
+  'green',
+  'blue',
+  'purple',
+  'gray',
+  'none',
+];
+
 export const SPLIT_BATCH_STEP = `Split the mail ids into batches of at most ${MAIL_BATCH_LIMIT} and confirm each batch with the user separately.`;
 
 export const EXAMPLE_IDS = [

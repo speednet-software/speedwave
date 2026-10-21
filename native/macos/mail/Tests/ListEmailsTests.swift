@@ -138,8 +138,81 @@ final class ListEmailsTests: XCTestCase {
         XCTAssertEqual(result["total"] as? Int, 1)
     }
 
+    func testEachRowCarriesItsFlagColorOrNoneWhenUnflagged() throws {
+        let rows = mailFlagColors.indices.map { index in
+            ListingRow(
+                messageId: "<\(index)@x>", subject: "\(index)", sender: "a",
+                received: String(format: "2026-10-%02dT10:00:00", index + 1), read: true, flag: index)
+        } + [ListingRow(messageId: "<off@x>", subject: "off", sender: "a", received: "", read: true, flag: -1)]
+        harness.executor.reply(mailListing(account: "Work", rows))
+
+        let result = try harness.call("list_emails", ["mailbox": "INBOX", "account": "Work", "limit": 20])
+
+        let flags = Dictionary(
+            uniqueKeysWithValues: try emails(result).map { ($0["subject"] as? String ?? "", $0["flag"] as? String) })
+        XCTAssertEqual(
+            flags,
+            ["0": "red", "1": "orange", "2": "yellow", "3": "green", "4": "blue", "5": "purple", "6": "gray", "off": "none"])
+    }
+
+    func testAFlagIndexOutsideMailsColorsListsAsNone() throws {
+        let rows = [7, 42, -2].map { index in
+            ListingRow(messageId: "<\(index)@x>", subject: "\(index)", sender: "a", received: "", read: true, flag: index)
+        }
+        harness.executor.reply(mailListing(account: "Work", rows))
+
+        let result = try harness.call("list_emails", ["mailbox": "INBOX", "account": "Work"])
+
+        XCTAssertEqual(try emails(result).map { $0["flag"] as? String }, ["none", "none", "none"])
+    }
+
+    func testTheScriptReadsTheFlagIndexOfTheSameScopeInOneRequest() throws {
+        harness.executor.reply(mailListing(account: "Work", threeMessages))
+
+        _ = try harness.call("list_emails", ["mailbox": "INBOX", "account": "Work", "unread_only": true])
+
+        let script = try XCTUnwrap(harness.executor.calls.first?.script)
+        XCTAssertTrue(
+            script.contains("set spwFlags to flag index of every message of mb whose read status is false\n"), script)
+        XCTAssertTrue(script.contains("spwReads as text, spwFlags as text}"), script)
+    }
+
+    func testFlaggedOnlyAsksMailForTheFlaggedMessagesOnly() throws {
+        harness.executor.reply(mailListing(account: "Work", [threeMessages[0]]))
+
+        let result = try harness.call(
+            "list_emails", ["mailbox": "INBOX", "account": "Work", "flagged_only": true, "unread_only": true])
+
+        let script = try XCTUnwrap(harness.executor.calls.first?.script)
+        for property in ["message id", "subject", "sender", "date received", "read status", "flag index"] {
+            XCTAssertTrue(
+                script.contains("\(property) of every message of mb whose read status is false and flagged status is true\n"),
+                "\(property): \(script)")
+        }
+        XCTAssertEqual(result["total"] as? Int, 1)
+    }
+
+    func testWithoutFlaggedOnlyTheScriptHasNoFlaggedCondition() throws {
+        harness.executor.reply(mailListing(account: "Work", threeMessages))
+
+        _ = try harness.call("list_emails", ["mailbox": "INBOX", "account": "Work", "flagged_only": false])
+
+        let script = try XCTUnwrap(harness.executor.calls.first?.script)
+        XCTAssertFalse(script.contains("flagged status"), script)
+        XCTAssertFalse(script.contains(" whose "), script)
+    }
+
+    func testAnEmptyMailboxReadsNoFlags() throws {
+        harness.executor.reply(mailListing(account: "Work", []))
+
+        let result = try harness.call("list_emails", ["mailbox": "INBOX", "account": "Work", "flagged_only": true])
+
+        XCTAssertEqual(try emails(result).count, 0)
+        XCTAssertEqual(result["total"] as? Int, 0)
+    }
+
     func testAListWhosePropertyCountsDisagreeIsRefusedAsAChangedMailbox() {
-        let torn = ["Work", "<a@x>\u{1E}<b@x>", "A", "s", "2026-10-01T08:00:00", "true"].joined(separator: "\u{1D}")
+        let torn = ["Work", "<a@x>\u{1E}<b@x>", "A", "s", "2026-10-01T08:00:00", "true", "-1"].joined(separator: "\u{1D}")
         harness.executor.reply(torn)
 
         let error = harness.callFailing("list_emails", ["mailbox": "INBOX", "account": "Work"])

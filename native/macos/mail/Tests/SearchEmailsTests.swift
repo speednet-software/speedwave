@@ -109,6 +109,40 @@ final class SearchEmailsTests: XCTestCase {
         XCTAssertEqual(try emails(result).map { $0["subject"] as? String }, ["Invoice 3"])
     }
 
+    func testFlaggedOnlyJoinsTheOtherConditionsMailEvaluatesAndRowsCarryTheirFlag() throws {
+        var flagged = messages[1]
+        flagged.flag = 2
+        harness.executor.reply(mailListing(account: "Work", [flagged]))
+
+        let result = try harness.call(
+            "search_emails",
+            [
+                "query": "invoice", "mailbox": "INBOX", "sender": "bob@x", "since": "2026-10-05",
+                "unread_only": true, "flagged_only": true,
+            ])
+
+        let script = try script()
+        let scope = "every message of mb whose read status is false and flagged status is true and "
+            + "sender contains \"bob@x\" and date received is greater than or equal to spwSince and "
+            + "(subject contains \"invoice\" or sender contains \"invoice\")"
+        for property in ["message id", "subject", "flag index"] {
+            XCTAssertTrue(script.contains("\(property) of \(scope)"), "\(property): \(script)")
+        }
+        XCTAssertEqual(try emails(result).map { $0["flag"] as? String }, ["yellow"])
+    }
+
+    func testABodySearchKeepsTheFlaggedConditionInItsContentScan() throws {
+        harness.executor.reply(mailListing(account: "Work", messages, matchedIds: []))
+
+        _ = try harness.call(
+            "search_emails", ["query": "net 30", "mailbox": "INBOX", "search_body": true, "flagged_only": true])
+
+        XCTAssertTrue(
+            try script().contains(
+                "message id of every message of mb whose flagged status is true and "
+                    + "(subject contains \"net 30\" or sender contains \"net 30\" or content contains \"net 30\")"))
+    }
+
     func testADateRangeIsBuiltFromLocalCalendarFieldsAndFilteredByMail() throws {
         harness.executor.reply(mailListing(account: "Work", []))
 

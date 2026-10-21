@@ -316,6 +316,34 @@ final class LiveMailTests: XCTestCase {
         XCTAssertEqual(try testMailProperty("flagged status", messageId: mail.messageId), "false")
     }
 
+    func testAFlaggedMailListsWithItsColorUnderFlaggedOnlyAndAsNoneOnceTheFlagIsOff() throws {
+        let mail = try newestTestMail()
+        let flagIndex = try testMailProperty("flag index", messageId: mail.messageId)
+        defer {
+            let restore = mailFlagColors.indices.contains(Int(flagIndex) ?? -1) ? mailFlagColors[Int(flagIndex) ?? 0] : "none"
+            _ = try? call("flag_emails", ["ids": [mail.id], "flag": restore])
+        }
+        let params: [String: Any] = [
+            "mailbox": Self.testMailbox, "account": AppleMailClient.localAccountName, "limit": 10_000,
+        ]
+        let row = { (flaggedOnly: Bool) throws -> [String: Any]? in
+            let listed = try XCTUnwrap(
+                try self.call("list_emails", params.merging(["flagged_only": flaggedOnly]) { $1 }) as? [String: Any])
+            return (listed["emails"] as? [[String: Any]])?.first { $0["id"] as? String == mail.id }
+        }
+
+        let blue = try XCTUnwrap(try call("flag_emails", ["ids": [mail.id], "flag": "blue"]) as? [String: Any])
+        XCTAssertEqual(blue["status"] as? String, "completed", "\(blue)")
+        XCTAssertEqual(try row(true)?["flag"] as? String, "blue")
+        let read = try XCTUnwrap(try call("get_email", ["id": mail.id]) as? [String: Any])
+        XCTAssertEqual((read["email"] as? [String: Any])?["flag"] as? String, "blue")
+
+        let none = try XCTUnwrap(try call("flag_emails", ["ids": [mail.id], "flag": "none"]) as? [String: Any])
+        XCTAssertEqual(none["status"] as? String, "completed", "\(none)")
+        XCTAssertNil(try row(true))
+        XCTAssertEqual(try row(false)?["flag"] as? String, "none")
+    }
+
     func testCreateMailboxThenCopyAMailThereMoveTheCopyOnAndDeleteItLeavingBothMailboxesEmpty() throws {
         let mail = try newestTestMail()
         let local = AppleMailClient.localAccountName

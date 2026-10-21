@@ -18,6 +18,7 @@ final class GetEmailTests: XCTestCase {
         var headersTruncated = false
         var source = ""
         var sourceTruncated = false
+        var flag = "-1"
         var body = "Hello,\nsee attached."
 
         var output: String {
@@ -33,6 +34,7 @@ final class GetEmailTests: XCTestCase {
                 headersTruncated ? "true" : "false",
                 source,
                 sourceTruncated ? "true" : "false",
+                flag,
                 body,
             ].joined(separator: "\u{1D}")
         }
@@ -82,6 +84,16 @@ final class GetEmailTests: XCTestCase {
         XCTAssertTrue(script.contains("whose message id is \"<a@x>\""), script)
         XCTAssertTrue(script.contains("cc recipients of m"), script)
         XCTAssertTrue(script.contains("mail attachments of m"), script)
+    }
+
+    func testReportsTheFlagColorOfAFlaggedMailAndNoneOfAnUnflaggedOne() throws {
+        for (index, flag) in [("4", "blue"), ("0", "red"), ("6", "gray"), ("-1", "none"), ("9", "none")] {
+            var reply = Reply()
+            reply.flag = index
+
+            XCTAssertEqual(try email(reply: reply)["flag"] as? String, flag, index)
+        }
+        XCTAssertTrue(try script().contains("set spwFlag to flag index of m\n"))
     }
 
     func testAPlainReadAsksMailForNeitherHeadersNorSource() throws {

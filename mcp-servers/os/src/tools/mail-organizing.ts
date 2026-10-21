@@ -14,12 +14,10 @@ import {
   mailTimeBudget,
   runMail,
   confirmProperty,
+  MAIL_FLAG_VALUES,
 } from './mail-shared.js';
 
 const BATCH_BUDGET = mailTimeBudget(120_000);
-
-/** Flag colors in the order of Mail's flag index, then `none`; mail-cli's `mailFlagColors` holds the same colors. */
-const MAIL_FLAG_VALUES = ['red', 'orange', 'yellow', 'green', 'blue', 'purple', 'gray', 'none'];
 
 /** Input parameters for the deleteEmails tool. */
 interface DeleteEmailsParams {

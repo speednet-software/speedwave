@@ -12,7 +12,7 @@ struct MailCommandCall {
     static let mailId = MailId(account: "Work", mailbox: "INBOX", messageId: "<a@x>").encoded
 
     private static let batchRow = ["ok", "", "", "", ""].joined(separator: MailBatch.fieldSeparator)
-    private static let listing = "Work" + String(repeating: "\u{1D}", count: 5)
+    private static let listing = "Work" + String(repeating: "\u{1D}", count: 6)
     private static let originalRead = String(repeating: "\u{1D}", count: 4)
 
     static let all: [MailCommandCall] = [
@@ -20,16 +20,16 @@ struct MailCommandCall {
         MailCommandCall(command: "list_emails", params: ["mailbox": "INBOX", "account": "Work"], replies: [listing]),
         MailCommandCall(
             command: "list_emails",
-            params: ["mailbox": "Speedwave-Test", "account": AppleMailClient.localAccountName],
+            params: ["mailbox": "Speedwave-Test", "account": AppleMailClient.localAccountName, "flagged_only": true],
             replies: [listing]),
         MailCommandCall(
             command: "search_emails",
-            params: ["mailbox": "INBOX", "query": "x", "since": "2026-01-01", "search_body": true],
+            params: ["mailbox": "INBOX", "query": "x", "since": "2026-01-01", "search_body": true, "flagged_only": true],
             replies: [listing + "\u{1D}"]),
         MailCommandCall(
             command: "get_email",
             params: ["id": mailId, "include_headers": true, "include_source": true],
-            replies: [String(repeating: "\u{1D}", count: 11)]),
+            replies: [String(repeating: "\u{1D}", count: 12)]),
         MailCommandCall(
             command: "send_email",
             params: ["to": "a@x", "subject": "S", "body": "B", "signature": "Sig", "confirm_send": true],

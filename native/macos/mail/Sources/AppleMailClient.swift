@@ -18,6 +18,7 @@ enum AppleMailClient {
         let sender: String
         let received: Date?
         let read: Bool
+        let flag: String
 
         var json: [String: Any] {
             var row: [String: Any] = [
@@ -25,6 +26,7 @@ enum AppleMailClient {
                 "subject": subject,
                 "sender": sender,
                 "read": read,
+                "flag": flag,
                 "mailbox": id.mailbox,
                 "account": id.account,
             ]
@@ -37,6 +39,7 @@ enum AppleMailClient {
     /// the sender, and with `searchBody` also the content, which Mail scans in a separate, slower request.
     struct MessageFilter {
         var unreadOnly = false
+        var flaggedOnly = false
         var sender: String?
         var since: Date?
         var before: Date?
@@ -69,6 +72,7 @@ enum AppleMailClient {
         private func conditions(query: String?) -> [String] {
             [
                 unreadOnly ? "read status is false" : nil,
+                flaggedOnly ? "flagged status is true" : nil,
                 sender.map { "sender contains \"\(escapeAppleScript($0))\"" },
                 since.map { _ in "date received is greater than or equal to spwSince" },
                 before.map { _ in "date received is less than spwBefore" },
@@ -246,7 +250,7 @@ enum AppleMailClient {
     }
 
     /// Reads each property of every message `filter` keeps with one Apple Event; prints the account name, then one
-    /// field per property, items joined by `listItemSeparator` and fields by `listFieldSeparator`. A body search adds
+    /// field per property (the flag as Mail's `flag index`, -1 when unflagged), items joined by `listItemSeparator` and fields by `listFieldSeparator`. A body search adds
     /// a last field with the Message-IDs whose content matched.
     static func listEmailsScript(mailbox: String, account: String?, filter: MessageFilter) -> String {
         let scope = filter.propertyScope
@@ -259,7 +263,8 @@ enum AppleMailClient {
             set spwSubjects to subject of \(scope)
             set spwSenders to sender of \(scope)
             set spwDates to date received of \(scope)
-            set spwReads to read status of \(scope)\(bodyRead)
+            set spwReads to read status of \(scope)
+            set spwFlags to flag index of \(scope)\(bodyRead)
         end tell
         set spwIsoDates to {}
         repeat with spwDateRef in spwDates
@@ -271,7 +276,7 @@ enum AppleMailClient {
             end if
         end repeat
         set AppleScript's text item delimiters to (character id 30)
-        set spwFields to {spwAcctName, spwIds as text, spwSubjects as text, spwSenders as text, spwIsoDates as text, spwReads as text\(bodyField)}
+        set spwFields to {spwAcctName, spwIds as text, spwSubjects as text, spwSenders as text, spwIsoDates as text, spwReads as text, spwFlags as text\(bodyField)}
         set AppleScript's text item delimiters to (character id 29)
         return spwFields as text
         """
@@ -281,10 +286,10 @@ enum AppleMailClient {
     /// fields of unequal length mean Mail changed the mailbox mid-read.
     static func parseListing(_ output: String, mailbox: String) throws -> [ListedMessage] {
         var fields = output.components(separatedBy: listFieldSeparator)
-        guard fields.count == 6 || fields.count == 7 else {
+        guard fields.count == 7 || fields.count == 8 else {
             throw ScriptError.scriptFailed("Unexpected message list from Mail.app")
         }
-        let matched = fields.count == 7 ? Set(fields.removeLast().components(separatedBy: listItemSeparator)) : nil
+        let matched = fields.count == 8 ? Set(fields.removeLast().components(separatedBy: listItemSeparator)) : nil
         let count = fields[1].isEmpty ? 0 : fields[1].components(separatedBy: listItemSeparator).count
         let columns = fields.dropFirst().map { field in
             count == 0 ? [] : field.components(separatedBy: listItemSeparator)
@@ -299,9 +304,15 @@ enum AppleMailClient {
                 subject: columns[1][i],
                 sender: columns[2][i],
                 received: localDate(columns[3][i]),
-                read: columns[4][i] == "true"
+                read: columns[4][i] == "true",
+                flag: flagName(columns[5][i])
             )
         }
+    }
+
+    /// The `mailFlagColors` name of a Mail `flag index`, or `none` for -1 and any index outside the colors.
+    static func flagName(_ index: String) -> String {
+        Int(index).flatMap { mailFlagColors.indices.contains($0) ? mailFlagColors[$0] : nil } ?? "none"
     }
 
     /// Newest first; a message without a date goes last, and equal dates keep Mail's order.

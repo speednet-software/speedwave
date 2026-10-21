@@ -1,7 +1,7 @@
 import Foundation
 import SharedCLI
 
-/// Reads one mail by its mail id: recipients, cc, ISO date, body, attachments and, on request, headers or source.
+/// Reads one mail by its mail id: recipients, cc, ISO date, flag, body, attachments and, on request, headers or source.
 enum MailReading {
     /// The longest headers or source, in characters, a read returns; a longer one is cut and flagged truncated.
     static let rawTextLimit = 100_000
@@ -9,7 +9,7 @@ enum MailReading {
     private static let fieldSeparator = "\u{1D}"
     private static let itemSeparator = "\u{1E}"
     private static let subfieldSeparator = "\u{1F}"
-    private static let fieldCount = 12
+    private static let fieldCount = 13
 
     /// The AppleScript handler `spwClean(t)`: `t` as text without ASCII GS, RS and US, "" for missing value.
     static let cleanHandler = """
@@ -56,6 +56,7 @@ enum MailReading {
             set spwSender to sender of m
             set spwDate to date received of m
             set spwRead to read status of m as string
+            set spwFlag to flag index of m
             set spwTo to {}
             repeat with spwRecipient in to recipients of m
                 set end of spwTo to my spwClean(address of spwRecipient)
@@ -88,7 +89,7 @@ enum MailReading {
         set spwSender to my spwClean(spwSender)
         set spwBody to my spwClean(spwBody)
         set AppleScript's text item delimiters to (character id 30)
-        set spwFields to {spwSubject, spwSender, spwIsoDate, spwRead, spwTo as text, spwCc as text, spwAttachments as text, item 1 of spwHeaderPart, item 2 of spwHeaderPart, item 1 of spwSourcePart, item 2 of spwSourcePart, spwBody}
+        set spwFields to {spwSubject, spwSender, spwIsoDate, spwRead, spwTo as text, spwCc as text, spwAttachments as text, item 1 of spwHeaderPart, item 2 of spwHeaderPart, item 1 of spwSourcePart, item 2 of spwSourcePart, spwFlag as string, spwBody}
         set AppleScript's text item delimiters to (character id 29)
         return spwFields as text
         """
@@ -113,7 +114,8 @@ enum MailReading {
             "to": items(fields[4]),
             "cc": items(fields[5]),
             "attachments": attachments(fields[6]),
-            "body": fields[11],
+            "flag": AppleMailClient.flagName(fields[11]),
+            "body": fields[12],
             "mailbox": id.mailbox,
             "account": id.account,
         ]

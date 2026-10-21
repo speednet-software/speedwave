@@ -1,6 +1,6 @@
 import { Tool, READ_ONLY_ANNOTATIONS, META_KEYS } from '@speedwave/mcp-shared';
 import { ToolResult, validateAll, asRecord, MAX_LENGTHS } from './validation.js';
-import { STANDARD_BUDGET, mailTimeBudget, runMail } from './mail-shared.js';
+import { STANDARD_BUDGET, MAIL_FLAG_VALUES, mailTimeBudget, runMail } from './mail-shared.js';
 
 const BODY_SEARCH_BUDGET = mailTimeBudget(180_000);
 
@@ -24,6 +24,8 @@ interface ListEmailsParams {
   offset?: number;
   /** List only unread emails. */
   unread_only?: boolean;
+  /** List only flagged emails. */
+  flagged_only?: boolean;
 }
 
 /** Input parameters for the getEmail tool. */
@@ -54,11 +56,19 @@ interface SearchEmailsParams {
   before?: string;
   /** Only unread emails. */
   unread_only?: boolean;
+  /** Only flagged emails. */
+  flagged_only?: boolean;
   /** Max results to return. */
   limit?: number;
   /** Number of newest results to skip. */
   offset?: number;
 }
+
+const FLAG_OUTPUT = {
+  type: 'string',
+  enum: MAIL_FLAG_VALUES,
+  description: 'Flag color, or none when the email is not flagged',
+};
 
 const EMAIL_LISTING_OUTPUT = {
   type: 'object',
@@ -76,6 +86,7 @@ const EMAIL_LISTING_OUTPUT = {
             description: 'Date received, ISO 8601 with the UTC offset; absent when Mail has none',
           },
           read: { type: 'boolean' },
+          flag: FLAG_OUTPUT,
           mailbox: { type: 'string' },
           account: { type: 'string' },
         },
@@ -177,7 +188,7 @@ export const listMailboxesTool: Tool = {
 export const listEmailsTool: Tool = {
   name: 'listEmails',
   description:
-    'List the emails of one mailbox, newest first. Page with offset and limit (default 10); total is the number of emails the page is cut from (unread ones only with unread_only). Each id is a mail id that getEmail and replyToEmail take.',
+    'List the emails of one mailbox, newest first. Page with offset and limit (default 10); total is the number of emails the page is cut from (unread ones only with unread_only, flagged ones only with flagged_only). Each email carries its flag color, or none. Each id is a mail id that getEmail and replyToEmail take.',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
@@ -204,6 +215,7 @@ export const listEmailsTool: Tool = {
         description: 'Number of newest emails to skip, for the next page (default 0)',
       },
       unread_only: { type: 'boolean', description: 'List only unread emails (default false)' },
+      flagged_only: { type: 'boolean', description: 'List only flagged emails (default false)' },
     },
     required: ['mailbox'],
   },
@@ -282,6 +294,7 @@ export const getEmailTool: Tool = {
               'Date received, ISO 8601 with the offset of the host; absent when Mail has none',
           },
           read: { type: 'boolean' },
+          flag: FLAG_OUTPUT,
           body: { type: 'string', description: 'Email body (plain text)' },
           mailbox: { type: 'string' },
           account: { type: 'string' },
@@ -336,7 +349,7 @@ export const getEmailTool: Tool = {
 export const searchEmailsTool: Tool = {
   name: 'searchEmails',
   description:
-    'Search one mailbox for emails whose subject or sender contains the query, newest first. Narrow with sender, since/before (ISO 8601) and unread_only; page with offset and limit (default 10); total is the number of matches the page is cut from. Fast even in a large mailbox. Set search_body only when the user asks to search the email text: Mail then scans every body, which can take minutes. Each id is a mail id that getEmail and replyToEmail take.',
+    'Search one mailbox for emails whose subject or sender contains the query, newest first. Narrow with sender, since/before (ISO 8601), unread_only and flagged_only; page with offset and limit (default 10); total is the number of matches the page is cut from. Fast even in a large mailbox. Set search_body only when the user asks to search the email text: Mail then scans every body, which can take minutes. Each id is a mail id that getEmail and replyToEmail take.',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
@@ -379,6 +392,7 @@ export const searchEmailsTool: Tool = {
         description: 'Only emails received before this ISO 8601 day or date-time',
       },
       unread_only: { type: 'boolean', description: 'Only unread emails (default false)' },
+      flagged_only: { type: 'boolean', description: 'Only flagged emails (default false)' },
       limit: { type: 'number', description: 'Max results (default 10)' },
       offset: {
         type: 'number',
@@ -437,7 +451,7 @@ export async function handleListEmails(params: ListEmailsParams): Promise<ToolRe
   const p = asRecord(params);
   const v = validateAll(p, {
     required: ['mailbox'],
-    booleans: ['unread_only'],
+    booleans: ['unread_only', 'flagged_only'],
     strings: [
       ['mailbox', MAX_LENGTHS.short, false],
       ['account', MAX_LENGTHS.short, false],
@@ -474,7 +488,7 @@ export async function handleSearchEmails(params: SearchEmailsParams): Promise<To
   const p = asRecord(params);
   const v = validateAll(p, {
     required: ['query', 'mailbox'],
-    booleans: ['search_body', 'unread_only'],
+    booleans: ['search_body', 'unread_only', 'flagged_only'],
     strings: [
       ['query', MAX_LENGTHS.short, false],
       ['mailbox', MAX_LENGTHS.short, false],

@@ -108,10 +108,17 @@ describe('mail-tools', () => {
       );
     });
 
-    it('passes the page and the unread filter through to mail-cli', async () => {
+    it('passes the page and the unread and flagged filters through to mail-cli', async () => {
       vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { emails: [], total: 0 } });
       const tool = createMailTools().find((t) => t.tool.name === 'listEmails')!;
-      const input = { mailbox: 'INBOX', account: 'iCloud', limit: 5, offset: 0, unread_only: true };
+      const input = {
+        mailbox: 'INBOX',
+        account: 'iCloud',
+        limit: 5,
+        offset: 0,
+        unread_only: true,
+        flagged_only: true,
+      };
 
       const result = await tool.handler(input);
 
@@ -132,6 +139,7 @@ describe('mail-tools', () => {
       [{ offset: -1 }, 'OUT_OF_RANGE'],
       [{ offset: '10' }, 'INVALID_TYPE'],
       [{ unread_only: 'true' }, 'INVALID_TYPE'],
+      [{ flagged_only: 'true' }, 'INVALID_TYPE'],
     ])('rejects %o without calling mail-cli', async (extra, code) => {
       const result = await handleListEmails({ mailbox: 'INBOX', ...(extra as object) });
 
@@ -230,6 +238,7 @@ describe('mail-tools', () => {
         since: '2026-10-01',
         before: '2026-10-20T09:00:00+02:00',
         unread_only: true,
+        flagged_only: true,
         offset: 10,
         limit: 5,
       };
@@ -278,6 +287,7 @@ describe('mail-tools', () => {
     it.each([
       [{ search_body: 'yes' }, 'INVALID_TYPE'],
       [{ unread_only: 1 }, 'INVALID_TYPE'],
+      [{ flagged_only: 0 }, 'INVALID_TYPE'],
       [{ offset: -1 }, 'OUT_OF_RANGE'],
       [{ sender: 'a\x01b' }, 'INVALID_CHARACTERS'],
       [{ since: 12 }, 'INVALID_TYPE'],
@@ -728,6 +738,34 @@ describe('mail-tools', () => {
     });
   });
 
+  describe('flags on the read side', () => {
+    const flagEnum = (name: string, path: (schema: any) => any) =>
+      path(createMailTools().find((t) => t.tool.name === name)!.tool.outputSchema).enum;
+    const flagEmailsColors = (
+      createMailTools().find((t) => t.tool.name === 'flagEmails')!.tool.inputSchema as any
+    ).properties.flag.enum;
+
+    it.each([
+      ['listEmails', (s: any) => s.properties.emails.items.properties.flag],
+      ['searchEmails', (s: any) => s.properties.emails.items.properties.flag],
+      ['getEmail', (s: any) => s.properties.email.properties.flag],
+    ])('%s reports a flag with the colors flagEmails sets, plus none', (name, path) => {
+      expect(flagEnum(name, path)).toEqual(flagEmailsColors);
+      expect(flagEmailsColors).toContain('none');
+    });
+
+    it.each(['listEmails', 'searchEmails'])(
+      '%s declares flagged_only and mentions it in its description',
+      (name) => {
+        const tool = createMailTools().find((t) => t.tool.name === name)!.tool;
+        const schema = tool.inputSchema as { properties: Record<string, { type: string }> };
+
+        expect(schema.properties.flagged_only.type).toBe('boolean');
+        expect(tool.description).toContain('flagged_only');
+      }
+    );
+  });
+
   describe('outputSchema matches what mail-cli emits', () => {
     const NATIVE_OUTPUT: Record<string, Record<string, unknown>> = {
       detectMailClients: {
@@ -745,6 +783,7 @@ describe('mail-tools', () => {
             sender: 'Anna',
             date: '2026-10-20T09:15:00+02:00',
             read: false,
+            flag: 'blue',
             mailbox: 'INBOX',
             account: 'iCloud',
           },
@@ -760,6 +799,7 @@ describe('mail-tools', () => {
           cc: ['ewa@x'],
           date: '2026-10-20T09:15:00+02:00',
           read: true,
+          flag: 'none',
           body: 'Hello',
           mailbox: 'Archive',
           account: 'iCloud',
@@ -778,6 +818,7 @@ describe('mail-tools', () => {
             sender: 'Anna',
             date: '2026-10-20T09:15:00+02:00',
             read: false,
+            flag: 'blue',
             mailbox: 'INBOX',
             account: 'iCloud',
           },
