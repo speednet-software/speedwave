@@ -98,7 +98,9 @@ ensure_provisioned_macos() {
 WINDOWS_WSL_STAGING="/home/windows/speedwave-e2e"
 WINDOWS_CONTRACT_STAGING="/home/windows/speedwave-contract-suite"
 
-WINDOWS_BATS_ENGINE_PREAMBLE="command -v bats >/dev/null || (sudo apt-get update -o Acquire::Retries=3 && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y bats); ENGINE_EXEC='env WSL_UTF8=1 wsl.exe -d Speedwave -u root --'"
+WINDOWS_BATS_VERSION="1.11.1"
+WINDOWS_BATS="/home/windows/bats-core-${WINDOWS_BATS_VERSION}/bin/bats"
+WINDOWS_BATS_ENGINE_PREAMBLE="[ -x $WINDOWS_BATS ] || curl -fsSL https://github.com/bats-core/bats-core/archive/refs/tags/v${WINDOWS_BATS_VERSION}.tar.gz | tar -xz -C /home/windows; ENGINE_EXEC='env WSL_UTF8=1 wsl.exe -d Speedwave -u root --'"
 
 MACOS_ENGINE_BATS_PREAMBLE='command -v bats >/dev/null 2>&1 || brew install bats-core
 env LIMA_HOME="$HOME/.speedwave/lima" "$HOME/Applications/Speedwave.app/Contents/Resources/lima/bin/limactl" start speedwave'
@@ -571,7 +573,7 @@ SCRIPT
     if [ "$exit_code" -eq 0 ]; then
         echo "[windows] Running engine-contract suite (staging distro -> WSL interop -> Speedwave distro)..."
         # shellcheck disable=SC2086
-        ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -lc \"$WINDOWS_BATS_ENGINE_PREAMBLE bats --print-output-on-failure $WINDOWS_CONTRACT_STAGING/engine-contract.bats\"" || exit_code=$?
+        ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -lc \"$WINDOWS_BATS_ENGINE_PREAMBLE $WINDOWS_BATS --print-output-on-failure $WINDOWS_CONTRACT_STAGING/engine-contract.bats\"" || exit_code=$?
     fi
 
     if [ "$exit_code" -eq 0 ]; then
@@ -586,7 +588,7 @@ SCRIPT
             local windows_data_dir="${windows_cli_path%/bin/*}"
             echo "[windows] Running update-dirty-state suite (staging distro -> WSL interop -> Speedwave distro)..."
             # shellcheck disable=SC2086
-            ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -lc \"$WINDOWS_BATS_ENGINE_PREAMBLE SPW_E2E_PROJECT=e2e-test SPEEDWAVE_DATA_DIR=$windows_data_dir SPEEDWAVE_BIN=$windows_cli_path bats --print-output-on-failure $WINDOWS_CONTRACT_STAGING/update-dirty-state.bats\"" || exit_code=$?
+            ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -lc \"$WINDOWS_BATS_ENGINE_PREAMBLE SPW_E2E_PROJECT=e2e-test SPEEDWAVE_DATA_DIR=$windows_data_dir SPEEDWAVE_BIN=$windows_cli_path $WINDOWS_BATS --print-output-on-failure $WINDOWS_CONTRACT_STAGING/update-dirty-state.bats\"" || exit_code=$?
         fi
     fi
 

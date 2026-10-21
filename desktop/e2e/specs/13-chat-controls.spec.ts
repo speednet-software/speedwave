@@ -45,6 +45,21 @@ function newPastes(before: ReadonlySet<string>): string[] {
   return pastedFileNames(PROJECT).filter((name) => !before.has(name));
 }
 
+async function waitForNewPaste(before: ReadonlySet<string>, suffix: string): Promise<string> {
+  let found: string | undefined;
+  await browser.waitUntil(
+    async () => {
+      found = newPastes(before).find((name) => name.endsWith(suffix));
+      return found !== undefined;
+    },
+    {
+      timeout: 30_000,
+      timeoutMsg: `no pasted file ending in ${suffix} reached the pastes directory`,
+    }
+  );
+  return found as string;
+}
+
 async function waitForUploadToSettle(): Promise<void> {
   await $('[data-testid="composer-attachment-file"]').waitForExist({
     timeout: 20_000,
@@ -227,11 +242,9 @@ describe('Chat Controls', function () {
     }, CHUNKED_SIZE);
     await waitForUploadToSettle();
 
-    const added = newPastes(before);
-    const uploaded = added.find((name) => name.endsWith('-e2e-chunked.bin'));
-    expect(uploaded).toBeDefined();
-    expect(added.filter((name) => name.endsWith('.part'))).toEqual([]);
-    const uploadedPath = pastedFilePath(PROJECT, uploaded as string);
+    const uploaded = await waitForNewPaste(before, '-e2e-chunked.bin');
+    expect(newPastes(before).filter((name) => name.endsWith('.part'))).toEqual([]);
+    const uploadedPath = pastedFilePath(PROJECT, uploaded);
     const onDisk = fs.readFileSync(uploadedPath);
     expect(onDisk.length).toBe(CHUNKED_SIZE);
     expect(sha256(onDisk)).toBe(sha256(chunkedBytes(CHUNKED_SIZE)));
@@ -261,9 +274,8 @@ describe('Chat Controls', function () {
     }, NOTE_TEXT);
     await waitForUploadToSettle();
 
-    const note = newPastes(before).find((name) => name.endsWith('-e2e-note.txt'));
-    expect(note).toBeDefined();
-    expect(fs.readFileSync(pastedFilePath(PROJECT, note as string), 'utf8')).toBe(NOTE_TEXT);
+    const note = await waitForNewPaste(before, '-e2e-note.txt');
+    expect(fs.readFileSync(pastedFilePath(PROJECT, note), 'utf8')).toBe(NOTE_TEXT);
 
     await sendMessageNoWait('Reply with the single word RECEIVED.');
     await $('[data-testid="user-message-file"]').waitForExist({
