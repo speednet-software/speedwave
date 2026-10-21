@@ -66,7 +66,7 @@ Every change must work on **both** platforms. `make check` compiles the host tar
      - Executable carries load-time `vulkan-1.dll` import; bundled loader staged by `scripts/stage-vulkan-runtime.sh` must never be dropped from Windows resources.
 - `bats` execution on Windows:
   - `bats` suites never run on host Windows: no `bats`/`bats-core` package exists on Chocolatey.
-  - Windows e2e rig installs `bats` inside WSL, not on host: bats-core `WINDOWS_BATS_VERSION` from its GitHub tag archive into `/home/windows` (`scripts/e2e-vm.sh`), because Ubuntu 22.04's apt `bats` is 1.2.1, which rejects `--print-output-on-failure` (added in 1.5.0).
+  - Windows e2e rig installs `bats` inside WSL, not on host: bats-core `BATS_VERSION` from its GitHub tag archive into `/home/windows` (`scripts/e2e-vm.sh`), because Ubuntu 22.04's apt `bats` is 1.2.1, which rejects `--print-output-on-failure` (added in 1.5.0).
   - `setup-dev-windows` does not provision it. `make setup-dev` reports it as not-applicable (`BATS_HINT`).
   - Do not add `bats` back to the toolchain list (manual alignment, no automated guard).
 - MSVC linker resolution on Git Bash:

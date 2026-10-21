@@ -98,11 +98,12 @@ ensure_provisioned_macos() {
 WINDOWS_WSL_STAGING="/home/windows/speedwave-e2e"
 WINDOWS_CONTRACT_STAGING="/home/windows/speedwave-contract-suite"
 
-WINDOWS_BATS_VERSION="1.11.1"
-WINDOWS_BATS="/home/windows/bats-core-${WINDOWS_BATS_VERSION}/bin/bats"
-WINDOWS_BATS_ENGINE_PREAMBLE="[ -x $WINDOWS_BATS ] || curl -fsSL https://github.com/bats-core/bats-core/archive/refs/tags/v${WINDOWS_BATS_VERSION}.tar.gz | tar -xz -C /home/windows; ENGINE_EXEC='env WSL_UTF8=1 wsl.exe -d Speedwave -u root --'"
+BATS_VERSION="1.11.1"
+WINDOWS_BATS="/home/windows/bats-core-${BATS_VERSION}/bin/bats"
+WINDOWS_BATS_ENGINE_PREAMBLE="[ -x $WINDOWS_BATS ] || curl -fsSL https://github.com/bats-core/bats-core/archive/refs/tags/v${BATS_VERSION}.tar.gz | tar -xz -C /home/windows; ENGINE_EXEC='env WSL_UTF8=1 wsl.exe -d Speedwave -u root --'"
 
-MACOS_ENGINE_BATS_PREAMBLE='command -v bats >/dev/null 2>&1 || brew install bats-core
+MACOS_ENGINE_BATS_PREAMBLE='[ -x "$HOME/.local/bats-core-'"$BATS_VERSION"'/bin/bats" ] || { mkdir -p "$HOME/.local" && curl -fsSL https://github.com/bats-core/bats-core/archive/refs/tags/v'"$BATS_VERSION"'.tar.gz | tar -xz -C "$HOME/.local"; }
+export PATH="$HOME/.local/bats-core-'"$BATS_VERSION"'/bin:$PATH"
 env LIMA_HOME="$HOME/.speedwave/lima" "$HOME/Applications/Speedwave.app/Contents/Resources/lima/bin/limactl" start speedwave'
 
 windows_restore_interop() {
