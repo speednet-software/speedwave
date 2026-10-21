@@ -82,6 +82,10 @@ interface ReplyToEmailParams {
   body: string;
   /** Whether to reply to all recipients. */
   reply_all?: boolean;
+  /** CC recipient(s) added to those Mail chose, comma-separated. */
+  cc?: string;
+  /** BCC recipient(s), comma-separated. */
+  bcc?: string;
   /** Name of a Mail signature from listMailSignatures. */
   signature?: string;
   /** Must be true, after the user agreed to the preview, to send. */
@@ -170,9 +174,9 @@ export const sendEmailTool: Tool = {
 export const replyToEmailTool: Tool = {
   name: 'replyToEmail',
   description:
-    'Reply to an email in any mailbox, by the mail id listEmails or searchEmails returned; Mail picks the recipients and the "Re:" subject, reply_all adds every recipient of the email. ' +
+    'Reply to an email in any mailbox, by the mail id listEmails or searchEmails returned; Mail picks the recipients and the "Re:" subject, reply_all adds every recipient of the email, and cc and bcc add more. ' +
     `The text goes above the quoted original, separated by a blank line and an "On <date>, <sender> wrote:" line. ${PLAIN_TEXT_ONLY} ` +
-    'Without confirm_send=true nothing is sent: the call returns a preview of the recipients, subject and the full text, and you must show it and ask the user before calling again with the same arguments and confirm_send=true. ' +
+    'Without confirm_send=true nothing is sent: the call returns a preview of every recipient (to, cc, bcc), subject and the full text, and you must show it and ask the user before calling again with the same arguments and confirm_send=true. ' +
     `Sending cannot be undone. ${SHOWN_AS_QUOTE}`,
   annotations: DESTRUCTIVE_ANNOTATIONS,
   _meta: {
@@ -192,6 +196,11 @@ export const replyToEmailTool: Tool = {
       },
       body: { type: 'string', description: `Reply text, without the quote. ${PLAIN_TEXT_ONLY}` },
       reply_all: { type: 'boolean', description: 'Reply to all recipients (default false)' },
+      cc: {
+        type: 'string',
+        description: 'CC recipient(s) added to those Mail chose, comma-separated',
+      },
+      bcc: { type: 'string', description: 'BCC recipient(s), comma-separated' },
       signature: SIGNATURE_PROPERTY,
       confirm_send: confirmProperty('send this reply'),
     },
@@ -207,11 +216,13 @@ export const replyToEmailTool: Tool = {
       },
     },
     {
-      description: 'Full: reply to all after the user agreed',
+      description: 'Full: reply to all, adding a CC and a BCC, after the user agreed',
       input: {
         id: 'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0',
         body: 'I agree with the proposed timeline.',
         reply_all: true,
+        cc: 'ewa@example.com',
+        bcc: 'boss@example.com',
         confirm_send: true,
       },
     },
@@ -435,6 +446,8 @@ export async function handleReplyToEmail(params: ReplyToEmailParams): Promise<To
     strings: [
       ['id', MAX_LENGTHS.id, false],
       ['body', MAX_LENGTHS.body, true],
+      ['cc', MAX_LENGTHS.short, false],
+      ['bcc', MAX_LENGTHS.short, false],
       ['signature', MAX_LENGTHS.short, false],
     ],
   });
@@ -514,7 +527,7 @@ export async function handleListMailSignatures(
 
 /**
  * The output schema of a gated send: its preview, or what was sent.
- * @param newMessage - Whether it is a new message, with bcc recipients and a chosen sender.
+ * @param newMessage - Whether it is a new message, with a chosen sender.
  */
 function sendOutputSchema(newMessage: boolean): Tool['outputSchema'] {
   const addresses = (what: string) => ({
@@ -546,7 +559,7 @@ function sendOutputSchema(newMessage: boolean): Tool['outputSchema'] {
         : {}),
       to: addresses('To'),
       cc: addresses('CC'),
-      ...(newMessage ? { bcc: addresses('BCC') } : {}),
+      bcc: addresses('BCC'),
       subject: { type: 'string' },
       body: { type: 'string', description: 'The full plain text that is sent' },
       signature: {

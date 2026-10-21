@@ -466,6 +466,37 @@ describe('mail-tools', () => {
       );
     });
 
+    it('passes cc and bcc to mail-cli, which adds them to the recipients Mail chose', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: REPLY_PREVIEW });
+      const tool = createMailTools().find((t) => t.tool.name === 'replyToEmail')!.tool;
+
+      await handleReplyToEmail({ id: MAIL_ID, body: 'Ok', cc: 'ewa@x', bcc: 'boss@x' });
+
+      expect(runCommand).toHaveBeenCalledWith(
+        'mail',
+        'reply_to_email',
+        budgeted({ id: MAIL_ID, body: 'Ok', cc: 'ewa@x', bcc: 'boss@x' }),
+        PROCESS_TIMEOUT
+      );
+      expect(Object.keys(tool.inputSchema.properties ?? {})).toEqual(
+        expect.arrayContaining(['cc', 'bcc'])
+      );
+      expect(tool.outputSchema?.properties).toHaveProperty('bcc');
+    });
+
+    it('refuses an over-long cc or bcc before calling mail-cli', async () => {
+      for (const field of ['cc', 'bcc']) {
+        const result = await handleReplyToEmail({
+          id: MAIL_ID,
+          body: 'Ok',
+          [field]: 'x'.repeat(10_000),
+        });
+
+        expect(result.success).toBe(false);
+      }
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
     it('gives both scripts of a confirmed reply time to finish before mail-cli is killed', async () => {
       vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: REPLY_PREVIEW });
 
@@ -1693,6 +1724,7 @@ const REPLY_PREVIEW = {
     'Nothing was changed. Show this preview to the user and ask the user: Send this reply? …',
   to: ['anna@x'],
   cc: ['ewa@x'],
+  bcc: [],
   subject: 'Re: Hi',
   body: 'Thanks!\n\nOn 20 Oct 2026 at 09:15, Anna <anna@x> wrote:\n\n> Hello\n',
 };

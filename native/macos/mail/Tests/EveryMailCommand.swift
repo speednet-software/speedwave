@@ -47,6 +47,10 @@ struct MailCommandCall {
             params: ["id": mailId, "body": "B", "signature": "Sig", "confirm_send": true],
             replies: [String(repeating: "\u{1D}", count: 5)]),
         MailCommandCall(
+            command: "reply_to_email",
+            params: ["id": mailId, "body": "B", "cc": "c@x", "bcc": "d@x", "confirm_send": true],
+            replies: [String(repeating: "\u{1D}", count: 5)]),
+        MailCommandCall(
             command: "forward_email",
             params: ["id": mailId, "to": "a@x", "cc": "b@x", "confirm_send": true],
             replies: [originalRead]),

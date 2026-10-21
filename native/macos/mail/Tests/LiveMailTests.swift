@@ -560,6 +560,30 @@ final class LiveMailTests: XCTestCase {
         XCTAssertEqual(sent["body"] as? String, body)
     }
 
+    func testReplyWithABccPreviewsItAndSendsOnlyWhenEveryRecipientIsTheTestAddress() throws {
+        guard let address = ProcessInfo.processInfo.environment[Self.sendToVariable], !address.isEmpty else {
+            throw XCTSkip("Sending runs only with \(Self.sendToVariable) set to a test address")
+        }
+        let params: [String: Any] = ["mailbox": Self.testMailbox, "account": AppleMailClient.localAccountName]
+        let listed = try XCTUnwrap(try call("list_emails", params.merging(["limit": 1]) { $1 }) as? [String: Any])
+        guard let id = (listed["emails"] as? [[String: Any]])?.first?["id"] as? String else {
+            throw XCTSkip("\(Self.testMailbox) holds no message to reply to")
+        }
+        let reply: [String: Any] = ["id": id, "body": "Speedwave live reply with bcc", "bcc": address]
+
+        let preview = try XCTUnwrap(try call("reply_to_email", reply) as? [String: Any])
+        XCTAssertEqual(preview["status"] as? String, "confirmation_required", "\(preview)")
+        XCTAssertEqual(preview["bcc"] as? [String], [address])
+        guard preview["to"] as? [String] == [address], (preview["cc"] as? [String])?.isEmpty == true else {
+            throw XCTSkip("The reply would not go only to \(Self.sendToVariable); it was previewed, not sent")
+        }
+
+        let sent = try XCTUnwrap(
+            try call("reply_to_email", reply.merging(["confirm_send": true]) { $1 }) as? [String: Any])
+        XCTAssertEqual(sent["status"] as? String, "sent", "\(sent)")
+        XCTAssertEqual(sent["bcc"] as? [String], [address])
+    }
+
     func testForwardOfTheNewestTestMailPreviewsThenSendsItWithItsAttachmentsOnlyToTheTestAddress() throws {
         try passOnTheNewestTestMail("forward_email", extra: [:])
     }

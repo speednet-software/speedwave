@@ -71,7 +71,7 @@ enum MailSending {
     }
 
     /// The `reply_to_email` command: Mail's own reply to the mail `id`, in any mailbox, the user's text above the
-    /// quoted original.
+    /// quoted original; `cc` and `bcc` are added to the recipients Mail chose.
     static func replyToEmail(params: [String: Any], scripts: MailScripts) throws -> [String: Any] {
         guard let id = params["id"] as? String else {
             throw MailError.missingField("id")
@@ -80,6 +80,8 @@ enum MailSending {
             throw MailError.missingField("body")
         }
         let signature = try signatureParam(params)
+        let extraCc = try recipients(params, "cc", required: false)
+        let bcc = try recipients(params, "bcc", required: false)
         let mailId = try MailId(decoding: id)
         let replyAll = params["reply_all"] as? Bool ?? false
         let read = try run(
@@ -89,12 +91,24 @@ enum MailSending {
             mailbox: mailId.mailbox,
             account: mailId.account)
         var fields = try replyFields(read, body: body)
+        let chosen = (fields["to"] as? [String] ?? []) + (fields["cc"] as? [String] ?? [])
+        let added = newAddresses(extraCc, besides: chosen)
+        fields["cc"] = (fields["cc"] as? [String] ?? []) + added
+        fields["bcc"] = bcc
         fields["signature"] = signature
         guard replyGate.isConfirmed(params) else {
             return replyGate.preview(fields)
         }
+        let clauses = [recipientClauses(added, kind: "cc"), recipientClauses(bcc, kind: "bcc")]
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
         _ = try run(
-            replySendScript(mailId, replyAll: replyAll, text: fields["body"] as? String ?? "", signature: signature),
+            replySendScript(
+                mailId,
+                replyAll: replyAll,
+                text: fields["body"] as? String ?? "",
+                recipients: clauses,
+                signature: signature),
             scripts: scripts,
             signature: signature,
             mailbox: mailId.mailbox,
@@ -344,6 +358,12 @@ enum MailSending {
         return addresses
     }
 
+    /// The addresses of `addresses` not already in `existing`, each once, compared without case.
+    private static func newAddresses(_ addresses: [String], besides existing: [String]) -> [String] {
+        var seen = Set(existing.map { $0.lowercased() })
+        return addresses.filter { seen.insert($0.lowercased()).inserted }
+    }
+
     private static func passOn(
         _ params: [String: Any],
         scripts: MailScripts,
@@ -503,12 +523,20 @@ enum MailSending {
         """
     }
 
-    private static func replySendScript(_ id: MailId, replyAll: Bool, text: String, signature: String?) -> String {
-        """
+    private static func replySendScript(
+        _ id: MailId,
+        replyAll: Bool,
+        text: String,
+        recipients: String,
+        signature: String?
+    ) -> String {
+        let added = recipients.isEmpty ? "" : "    tell spwReply\n\(recipients)\n    end tell"
+        return """
         tell application "Mail"
         \(signatureCheck(signature) ?? "")
         \(AppleMailClient.messageLookup(id))
             \(replyCommand(replyAll))
+        \(added)
             set content of spwReply to "\(appleScriptText(text))"
         \(signatureApply(signature, to: "spwReply"))
             if not (send spwReply) then error "\(sendFailedMarker)"

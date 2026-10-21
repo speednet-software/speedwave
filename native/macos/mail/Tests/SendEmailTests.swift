@@ -207,7 +207,8 @@ final class SendEmailTests: XCTestCase {
         XCTAssertTrue((result["instruction"] as? String)?.contains("replyToEmail") == true)
         XCTAssertEqual(result["to"] as? [String], ["anna@x"])
         XCTAssertEqual(result["cc"] as? [String], ["ewa@x"])
-        XCTAssertNil(result["bcc"])
+        XCTAssertEqual(result["bcc"] as? [String], [])
+        XCTAssertFalse(script.contains("make new"), script)
         XCTAssertEqual(result["subject"] as? String, "Re: Invoice 12")
         XCTAssertEqual(
             result["body"] as? String,
@@ -241,6 +242,63 @@ final class SendEmailTests: XCTestCase {
         XCTAssertTrue(send.contains("if not (send spwReply) then error \"\(sendFailedMarker)\""), send)
         XCTAssertEqual(result["status"] as? String, "sent")
         XCTAssertEqual(result["body"] as? String, "Yes.\n\nOn 20 Oct 2026 at 09:15, Anna <anna@x> wrote:\n\n> Say \"yes\"\n")
+    }
+
+    func testReplyPreviewAddsTheGivenCcAndBccToTheRecipientsMailChose() throws {
+        harness.executor.reply(replyRead(to: ["anna@x"], cc: ["ewa@x"]))
+
+        let result = try harness.call(
+            "reply_to_email",
+            ["id": archived.encoded, "body": "Ok", "cc": "jan@x, ANNA@x, Ewa@x, jan@x", "bcc": "boss@x"])
+
+        XCTAssertEqual(harness.executor.calls.count, 1)
+        XCTAssertFalse(harness.executor.calls[0].script.contains("make new"))
+        XCTAssertEqual(result["to"] as? [String], ["anna@x"])
+        XCTAssertEqual(result["cc"] as? [String], ["ewa@x", "jan@x"])
+        XCTAssertEqual(result["bcc"] as? [String], ["boss@x"])
+    }
+
+    func testConfirmedReplyAddsTheSameCcAndBccThePreviewShowed() throws {
+        harness.executor.reply(replyRead(to: ["anna@x"], cc: ["ewa@x"]))
+
+        let result = try harness.call(
+            "reply_to_email",
+            ["id": archived.encoded, "body": "Ok", "cc": "jan@x, ewa@x", "bcc": "boss@x", "confirm_send": true])
+
+        XCTAssertEqual(harness.executor.calls.count, 2)
+        let send = harness.executor.calls[1].script
+        let reply = try XCTUnwrap(send.range(of: "set spwReply to reply m"))
+        let cc = try XCTUnwrap(
+            send.range(of: "make new cc recipient at end of cc recipients with properties {address:\"jan@x\"}"))
+        let bcc = try XCTUnwrap(
+            send.range(of: "make new bcc recipient at end of bcc recipients with properties {address:\"boss@x\"}"))
+        let sending = try XCTUnwrap(send.range(of: "send spwReply"))
+        XCTAssertLessThan(reply.lowerBound, cc.lowerBound)
+        XCTAssertLessThan(cc.lowerBound, bcc.lowerBound)
+        XCTAssertLessThan(bcc.lowerBound, sending.lowerBound)
+        XCTAssertTrue(send.contains("tell spwReply\n"), send)
+        XCTAssertFalse(send.contains("{address:\"ewa@x\"}"), send)
+        XCTAssertEqual(result["status"] as? String, "sent")
+        XCTAssertEqual(result["cc"] as? [String], ["ewa@x", "jan@x"])
+        XCTAssertEqual(result["bcc"] as? [String], ["boss@x"])
+    }
+
+    func testConfirmedReplyWithoutExtraRecipientsAddsNone() throws {
+        harness.executor.reply(replyRead())
+
+        _ = try harness.call("reply_to_email", ["id": archived.encoded, "body": "Ok", "confirm_send": true])
+
+        XCTAssertFalse(harness.executor.calls[1].script.contains("make new"))
+    }
+
+    func testReplyRefusesAnEmptyCcOrBccBeforeRunningAScript() {
+        for field in ["cc", "bcc"] {
+            let error = harness.callFailing("reply_to_email", ["id": archived.encoded, "body": "Ok", field: " , "])
+            guard case MailError.emptyRecipients(field) = error else {
+                return XCTFail("expected emptyRecipients(\(field)), got \(error)")
+            }
+        }
+        XCTAssertTrue(harness.executor.calls.isEmpty)
     }
 
     func testAReplyToAMailWithoutADateQuotesOnlyTheSender() {
