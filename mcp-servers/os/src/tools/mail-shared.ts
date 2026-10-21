@@ -115,10 +115,24 @@ const MAIL_FAILURE_TEACHING: Record<string, (detail: string, args: MailArgs) => 
     paramName: 'ids',
     nextStep: `${detail} ${SPLIT_BATCH_STEP}`,
   }),
-  MAIL_MAILBOX_EXISTS: (detail, args) => ({
-    paramName: 'name',
-    received: args.name,
-    nextStep: `${detail} Do not create it again: pass it to moveEmails or copyEmails as it is.`,
+  MAIL_MAILBOX_EXISTS: (detail, args) =>
+    args.new_name === undefined
+      ? {
+          paramName: 'name',
+          received: args.name,
+          nextStep: `${detail} Do not create it again: pass it to moveEmails or copyEmails as it is.`,
+        }
+      : {
+          paramName: 'new_name',
+          received: args.new_name,
+          nextStep: `${detail} Nothing was renamed. Ask the user for another name.`,
+        },
+  MAIL_SPECIAL_MAILBOX: (detail, args) => ({
+    paramName: 'mailbox',
+    received: args.mailbox,
+    nextStep:
+      `${detail} Tell the user that Mail's own mailboxes keep their names. ` +
+      'If they want a mailbox with the new name, create it with createMailbox and move emails there.',
   }),
   MAIL_TARGET_IS_TRASH: (detail, args) => ({
     paramName: 'mailbox',

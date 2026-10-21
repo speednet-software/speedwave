@@ -42,6 +42,7 @@ enum MailFailure: LocalizedError, Equatable {
     case mailboxExists(mailbox: String, account: String)
     case targetIsTrash(mailbox: String, account: String)
     case targetIsJunk(mailbox: String, account: String)
+    case specialMailbox(mailbox: String, account: String)
     case sendFailed
     case signatureNotFound(String)
 
@@ -66,6 +67,7 @@ enum MailFailure: LocalizedError, Equatable {
         case .mailboxExists: return "MAIL_MAILBOX_EXISTS"
         case .targetIsTrash: return "MAIL_TARGET_IS_TRASH"
         case .targetIsJunk: return "MAIL_TARGET_IS_JUNK"
+        case .specialMailbox: return "MAIL_SPECIAL_MAILBOX"
         case .sendFailed: return "MAIL_SEND_FAILED"
         case .signatureNotFound: return "MAIL_SIGNATURE_NOT_FOUND"
         }
@@ -117,13 +119,16 @@ enum MailFailure: LocalizedError, Equatable {
         case .alreadyArchived:
             return "The email is already in the Archive mailbox."
         case .mailboxExists(let mailbox, let account):
-            return "Mailbox '\(mailbox)' already exists in account '\(account)'; move emails to it as it is."
+            return "Mailbox '\(mailbox)' already exists in account '\(account)'."
         case .targetIsTrash(let mailbox, let account):
             return "Mailbox '\(mailbox)' is the Trash of account '\(account)', so no email was moved or copied. "
                 + "To delete emails use deleteEmails, which asks the user first."
         case .targetIsJunk(let mailbox, let account):
             return "Mailbox '\(mailbox)' is the Junk mailbox of account '\(account)', so no email was moved or copied. "
                 + "To mark emails as spam use markEmailsSpam, which asks the user first."
+        case .specialMailbox(let mailbox, let account):
+            return "Mailbox '\(mailbox)' is the Inbox, Drafts, Sent, Junk, Trash, Outbox or Archive mailbox of account "
+                + "'\(account)', which keeps its name, so nothing was renamed."
         case .sendFailed:
             return "Mail.app did not send the message; it may wait in the Outbox."
         case .signatureNotFound(let name):
@@ -264,6 +269,9 @@ struct MailScripts {
         }
         if detail.contains(targetIsJunkMarker) {
             return .targetIsJunk(mailbox: mailbox ?? "", account: account ?? "")
+        }
+        if detail.contains(specialMailboxMarker) {
+            return .specialMailbox(mailbox: mailbox ?? "", account: account ?? "")
         }
         if detail.contains(sendFailedMarker) {
             return .sendFailed

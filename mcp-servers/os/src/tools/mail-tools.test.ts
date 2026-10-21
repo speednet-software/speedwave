@@ -25,6 +25,7 @@ import {
   handleCreateMailbox,
   handleMoveEmails,
   handleCopyEmails,
+  handleRenameMailbox,
 } from './mail-organizing.js';
 import { createMailTools } from './mail-tools.js';
 
@@ -542,10 +543,10 @@ describe('mail-tools', () => {
   });
 
   describe('createMailTools', () => {
-    it('returns 22 tool definitions', () => {
+    it('returns 23 tool definitions', () => {
       const tools = createMailTools();
 
-      expect(tools).toHaveLength(22);
+      expect(tools).toHaveLength(23);
       expect(tools.map((t) => t.tool.name)).toEqual([
         'detectMailClients',
         'listMailboxes',
@@ -567,6 +568,7 @@ describe('mail-tools', () => {
         'createMailbox',
         'markEmailsSpam',
         'markEmailsNotSpam',
+        'renameMailbox',
         'saveDraft',
         'listMailSignatures',
       ]);
@@ -865,6 +867,12 @@ describe('mail-tools', () => {
       createMailbox: { status: 'created', mailbox: 'Clients/Acme', account: 'Work' },
       markEmailsSpam: gatedBatchOutputs(DELETE_PREVIEW, DELETE_REPORT),
       markEmailsNotSpam: NOT_SPAM_REPORT,
+      renameMailbox: {
+        status: 'renamed',
+        mailbox: 'Clients/Acme Corp',
+        previous_mailbox: 'Clients/Acme',
+        account: 'Work',
+      },
     };
 
     it('covers every mail tool', () => {
@@ -1127,6 +1135,11 @@ describe('mail-tools', () => {
       ['createMailbox', 'create_mailbox', { name: 'Clients/Acme', account: 'Work' }],
       ['markEmailsSpam', 'mark_emails_spam', { ids: [MAIL_ID], confirm_spam: true }],
       ['markEmailsNotSpam', 'mark_emails_not_spam', { ids: [MAIL_ID] }],
+      [
+        'renameMailbox',
+        'rename_mailbox',
+        { mailbox: 'Clients/Acme', account: 'Work', new_name: 'Acme Corp' },
+      ],
     ])('%s passes its arguments to mail-cli %s', async (name, command, input) => {
       vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: ORGANIZE_REPORT });
 
@@ -1156,6 +1169,19 @@ describe('mail-tools', () => {
         minItems: 1,
         maxItems: 25,
       });
+    });
+
+    it('renameMailbox is a reversible write that needs the mailbox, its account and the new name', () => {
+      const t = tool('renameMailbox').tool;
+
+      expect(t.annotations?.readOnlyHint).toBe(false);
+      expect(t.annotations?.destructiveHint).toBe(false);
+      expect(t.inputSchema.required).toEqual(['mailbox', 'account', 'new_name']);
+      expect(Object.keys(t.inputSchema.properties).some((k) => k.startsWith('confirm_'))).toBe(
+        false
+      );
+      expect(t.description).toContain('Inbox');
+      expect(t.description).toContain('MAIL_MAILBOX_EXISTS');
     });
 
     it('createMailbox is a reversible write', () => {
@@ -1223,6 +1249,10 @@ describe('mail-tools', () => {
       ['markEmailsSpam', { ids: [MAIL_ID], confirm_spam: 'true' }, 'INVALID_TYPE'],
       ['markEmailsNotSpam', { ids: ids(26) }, 'MAIL_BATCH_TOO_LARGE'],
       ['markEmailsNotSpam', {}, 'requires ids'],
+      ['renameMailbox', { mailbox: 'Clients', account: 'Work' }, 'requires new_name'],
+      ['renameMailbox', { mailbox: 'Clients', new_name: 'A' }, 'requires account'],
+      ['renameMailbox', { mailbox: 'Clients', account: 'Work', new_name: '' }, 'requires new_name'],
+      ['renameMailbox', { mailbox: 'Clients', account: 'Work', new_name: 'A/B' }, 'INVALID_VALUE'],
       ['createMailbox', { name: 'Clients' }, 'requires account'],
       ['createMailbox', { name: '', account: 'Work' }, 'requires name'],
     ])('%s refuses %o before calling mail-cli', async (name, input, code) => {
@@ -1245,6 +1275,43 @@ describe('mail-tools', () => {
       expect(result.error?.code).toBe('MAIL_MAILBOX_EXISTS');
       expect(result.error?.message).toContain('Invalid name (received: "Clients")');
       expect(result.error?.message).toContain('moveEmails');
+    });
+
+    it('a new name the parent already has asks the user for another name', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        new Error(
+          "mail.rename_mailbox failed: MAIL_MAILBOX_EXISTS: Mailbox 'Clients/Acme Corp' already exists in account 'Work'."
+        )
+      );
+
+      const result = await handleRenameMailbox({
+        mailbox: 'Clients/Acme',
+        account: 'Work',
+        new_name: 'Acme Corp',
+      });
+
+      expect(result.error?.code).toBe('MAIL_MAILBOX_EXISTS');
+      expect(result.error?.message).toContain('Invalid new_name (received: "Acme Corp")');
+      expect(result.error?.message).toContain('another name');
+      expect(result.error?.message).not.toContain('moveEmails');
+    });
+
+    it('a special mailbox keeps its name and the error says so', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        new Error(
+          "mail.rename_mailbox failed: MAIL_SPECIAL_MAILBOX: Mailbox 'INBOX' is the Inbox, Drafts, Sent, Junk, Trash, Outbox or Archive mailbox of account 'Work', which keeps its name, so nothing was renamed."
+        )
+      );
+
+      const result = await handleRenameMailbox({
+        mailbox: 'INBOX',
+        account: 'Work',
+        new_name: 'In',
+      });
+
+      expect(result.error?.code).toBe('MAIL_SPECIAL_MAILBOX');
+      expect(result.error?.message).toContain('Invalid mailbox (received: "INBOX")');
+      expect(result.error?.message).toContain('createMailbox');
     });
 
     it('a target mailbox that does not exist points at listMailboxes and createMailbox', async () => {
@@ -1808,6 +1875,7 @@ function validInput(name: string): Record<string, unknown> {
     createMailbox: { name: 'Clients', account: 'Work' },
     markEmailsSpam: { ids: [MAIL_ID], confirm_spam: true },
     markEmailsNotSpam: { ids: [MAIL_ID] },
+    renameMailbox: { mailbox: 'Clients', account: 'Work', new_name: 'Customers' },
     saveDraft: { subject: 's', body: 'b' },
     listMailSignatures: {},
   };

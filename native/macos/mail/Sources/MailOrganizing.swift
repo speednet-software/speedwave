@@ -8,12 +8,19 @@ let alreadyArchivedMarker = "SPW_ALREADY_ARCHIVED"
 let mailboxExistsMarker = "SPW_MAILBOX_EXISTS"
 let targetIsTrashMarker = "SPW_TARGET_IS_TRASH"
 let targetIsJunkMarker = "SPW_TARGET_IS_JUNK"
+let specialMailboxMarker = "SPW_SPECIAL_MAILBOX"
 
 /// The flag colors in the order of Mail's `flag index` (0 is red); `none` takes the flag off.
 let mailFlagColors = ["red", "orange", "yellow", "green", "blue", "purple", "gray"]
 
 /// The mailbox paths `archive_emails` looks for, first match wins, inside the mail's own account.
 let archiveMailboxNames = ["Archive", "[Gmail]/All Mail"]
+
+/// The application properties of Mail's special mailboxes, each holding one child per account; `rename_mailbox`
+/// refuses them and the archive mailbox.
+private let specialMailboxProperties = [
+    "inbox", "drafts mailbox", "sent mailbox", "junk mailbox", "trash mailbox", "outbox",
+]
 
 /// The `mark_emails_read` command: sets or clears the read status of each mail.
 func markEmailsRead(params: [String: Any], scripts: MailScripts) throws -> [String: Any] {
@@ -59,20 +66,8 @@ func copyEmails(params: [String: Any], scripts: MailScripts) throws -> [String: 
 /// The `archive_emails` command: moves each mail to the archive mailbox of its own account, never anywhere else.
 func archiveEmails(params: [String: Any], scripts: MailScripts) throws -> [String: Any] {
     let batch = try MailBatch(params: params)
-    let names = "{" + archiveMailboxNames.map { "\"\(escapeAppleScript($0))\"" }.joined(separator: ", ") + "}"
-    let local = escapeAppleScript(AppleMailClient.localAccountName)
-    return try batch.apply(scripts: scripts, action: MailAction(lines: """
-                set spwArchive to missing value
-                repeat with spwNameRef in \(names)
-                    set spwName to contents of spwNameRef
-                    if spwArchive is missing value then
-                        if spwAcctName is "\(local)" then
-                            if exists mailbox spwName then set spwArchive to mailbox spwName
-                        else
-                            if exists mailbox spwName of account spwAcctName then set spwArchive to mailbox spwName of account spwAcctName
-                        end if
-                    end if
-                end repeat
+    return try batch.apply(scripts: scripts, action: MailAction(lines: archiveLookup(into: "spwArchive") + """
+
                 if spwArchive is missing value then error "\(archiveNotFoundMarker)"
                 if name of mb is name of spwArchive then error "\(alreadyArchivedMarker)"
                 move m to spwArchive
@@ -151,6 +146,65 @@ func createMailbox(params: [String: Any], scripts: MailScripts) throws -> [Strin
     }
     _ = try scripts.run("tell application \"Mail\"\n\(body)\nend tell", mailbox: name, account: account)
     return ["status": "created", "mailbox": name, "account": account]
+}
+
+/// The `rename_mailbox` command: renames the mailbox path `mailbox` of `account` to `new_name` inside the same parent;
+/// refuses a special mailbox of the account, found by owner, the archive mailbox, and a name the parent already has.
+func renameMailbox(params: [String: Any], scripts: MailScripts) throws -> [String: Any] {
+    let (mailbox, account) = try mailboxParams(params)
+    guard let account = account else {
+        throw CLIError.missingField("account")
+    }
+    guard let newName = params["new_name"] as? String else {
+        throw MailError.missingField("new_name")
+    }
+    guard !newName.isEmpty, !newName.contains("/") else {
+        throw MailError.invalidValue("new_name", "must be one mailbox name, not empty and without /")
+    }
+    let parent = mailbox.split(separator: "/", omittingEmptySubsequences: false).dropLast().joined(separator: "/")
+    let renamed = parent.isEmpty ? newName : "\(parent)/\(newName)"
+    let renamedEsc = escapeAppleScript(renamed)
+    let taken = account == AppleMailClient.localAccountName
+        ? "mailbox \"\(renamedEsc)\""
+        : "mailbox \"\(renamedEsc)\" of account \"\(escapeAppleScript(account))\""
+    let refuse = "        if mb is spwSpecial then error \"\(specialMailboxMarker)\""
+    let checks = specialMailboxProperties.map { accountSpecialLookup($0, into: "spwSpecial") }
+        + [archiveLookup(into: "spwSpecial")]
+    let script = (
+        ["tell application \"Mail\"", AppleMailClient.mailboxLookup(name: mailbox, account: account)]
+            + checks.flatMap { [$0, refuse] }
+            + [
+                "        if exists \(taken) then error \"\(mailboxExistsMarker)\"",
+                "        set name of mb to \"\(escapeAppleScript(newName))\"",
+                "end tell",
+            ]
+    ).joined(separator: "\n")
+    do {
+        _ = try scripts.run(script, mailbox: mailbox, account: account)
+    } catch MailFailure.mailboxExists {
+        throw MailFailure.mailboxExists(mailbox: renamed, account: account)
+    }
+    return ["status": "renamed", "mailbox": renamed, "previous_mailbox": mailbox, "account": account]
+}
+
+/// AppleScript lines that set `variable` to the first of `archiveMailboxNames` in the account `spwAcctName` (app-level
+/// for On My Mac), else to `missing value`.
+private func archiveLookup(into variable: String) -> String {
+    let names = "{" + archiveMailboxNames.map { "\"\(escapeAppleScript($0))\"" }.joined(separator: ", ") + "}"
+    let local = escapeAppleScript(AppleMailClient.localAccountName)
+    return """
+            set \(variable) to missing value
+            repeat with spwNameRef in \(names)
+                set spwName to contents of spwNameRef
+                if \(variable) is missing value then
+                    if spwAcctName is "\(local)" then
+                        if exists mailbox spwName then set \(variable) to mailbox spwName
+                    else
+                        if exists mailbox spwName of account spwAcctName then set \(variable) to mailbox spwName of account spwAcctName
+                    end if
+                end if
+            end repeat
+    """
 }
 
 /// The action of `move_emails`/`copy_emails`: looks the target up once, `mailbox` inside `account`, refuses the

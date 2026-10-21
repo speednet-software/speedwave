@@ -19,8 +19,8 @@ const ALL_TOOLS = [
 ];
 
 describe('OS tool metadata', () => {
-  it('registers exactly 41 tools', () => {
-    expect(ALL_TOOLS).toHaveLength(41);
+  it('registers exactly 42 tools', () => {
+    expect(ALL_TOOLS).toHaveLength(42);
   });
 
   describe.each(ALL_TOOLS.map((td) => [td.tool.name, td] as const))('%s', (_name, td) => {
@@ -97,6 +97,7 @@ describe('OS tool metadata', () => {
       'archiveEmails',
       'createMailbox',
       'markEmailsNotSpam',
+      'renameMailbox',
       'saveDraft',
     ];
     const deleteTools = [

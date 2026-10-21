@@ -469,6 +469,61 @@ final class LiveMailTests: XCTestCase {
             reference.components(separatedBy: "\n"))
     }
 
+    func testRenameMailboxRenamesAnOnMyMacMailboxAndBackAndRefusesATakenName() throws {
+        let local = AppleMailClient.localAccountName
+        let name = "\(Self.testMailbox)-rename"
+        let renamed = "\(name)d"
+        let exists = { (mailbox: String) in
+            try osascriptExecutor("tell application \"Mail\" to exists mailbox \"\(mailbox)\"", 15) == "true"
+        }
+        if try exists(renamed) {
+            _ = try call("rename_mailbox", ["mailbox": renamed, "account": local, "new_name": name])
+        }
+        if try !exists(name) {
+            _ = try call("create_mailbox", ["name": name, "account": local])
+        }
+
+        let report = try XCTUnwrap(
+            try call("rename_mailbox", ["mailbox": name, "account": local, "new_name": renamed]) as? [String: Any])
+        defer { _ = try? call("rename_mailbox", ["mailbox": renamed, "account": local, "new_name": name]) }
+
+        XCTAssertEqual(report["status"] as? String, "renamed", "\(report)")
+        XCTAssertEqual(report["mailbox"] as? String, renamed)
+        XCTAssertTrue(try exists(renamed))
+        XCTAssertFalse(try exists(name))
+        XCTAssertThrowsError(
+            try call("rename_mailbox", ["mailbox": renamed, "account": local, "new_name": Self.testMailbox])
+        ) { error in
+            XCTAssertEqual(error as? MailFailure, .mailboxExists(mailbox: Self.testMailbox, account: local))
+        }
+        XCTAssertThrowsError(
+            try call("rename_mailbox", ["mailbox": "\(name)-missing", "account": local, "new_name": "x"])
+        ) { error in
+            XCTAssertEqual(error as? MailFailure, .mailboxNotFound(mailbox: "\(name)-missing", account: local))
+        }
+
+        let back = try XCTUnwrap(
+            try call("rename_mailbox", ["mailbox": renamed, "account": local, "new_name": name]) as? [String: Any])
+        XCTAssertEqual(back["status"] as? String, "renamed", "\(back)")
+        XCTAssertTrue(try exists(name))
+        XCTAssertFalse(try exists(renamed))
+    }
+
+    func testRenameMailboxRefusesTheOnMyMacTrash() throws {
+        guard try hasLocalChild("trash mailbox") else {
+            throw XCTSkip("On My Mac has no Trash yet")
+        }
+        let local = AppleMailClient.localAccountName
+        let trash = "Deleted Messages"
+
+        XCTAssertThrowsError(
+            try call("rename_mailbox", ["mailbox": trash, "account": local, "new_name": "\(trash) renamed"])
+        ) { error in
+            XCTAssertEqual(error as? MailFailure, .specialMailbox(mailbox: trash, account: local))
+        }
+        XCTAssertEqual(try osascriptExecutor("tell application \"Mail\" to exists mailbox \"\(trash)\"", 15), "true")
+    }
+
     func testArchiveEmailsOnMyMacWithoutAnArchiveMailboxLeavesTheMailWhereItIs() throws {
         let exists = try osascriptExecutor("tell application \"Mail\" to exists mailbox \"Archive\"", 15)
         guard exists == "false" else {

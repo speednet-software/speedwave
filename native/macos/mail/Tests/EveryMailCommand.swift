@@ -65,6 +65,13 @@ struct MailCommandCall {
         MailCommandCall(command: "create_mailbox", params: ["name": "Clients/2026", "account": "Work"], replies: []),
         MailCommandCall(command: "mark_emails_spam", params: ["ids": [mailId], "confirm_spam": true], replies: [batchRow]),
         MailCommandCall(command: "mark_emails_not_spam", params: ["ids": [mailId]], replies: [batchRow + reported]),
+        MailCommandCall(
+            command: "rename_mailbox", params: ["mailbox": "Clients/2026", "account": "Work", "new_name": "2027"],
+            replies: []),
+        MailCommandCall(
+            command: "rename_mailbox",
+            params: ["mailbox": "Projects", "account": AppleMailClient.localAccountName, "new_name": "Done"],
+            replies: []),
     ]
 
     /// Every script the command ran; a command that fails part way fails the calling test.

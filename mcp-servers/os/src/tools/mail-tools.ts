@@ -26,6 +26,7 @@ import {
   createMailboxTool,
   markEmailsSpamTool,
   markEmailsNotSpamTool,
+  renameMailboxTool,
   handleDeleteEmails,
   handleMarkEmailsRead,
   handleFlagEmails,
@@ -35,6 +36,7 @@ import {
   handleCreateMailbox,
   handleMarkEmailsSpam,
   handleMarkEmailsNotSpam,
+  handleRenameMailbox,
 } from './mail-organizing.js';
 import {
   sendEmailTool,
@@ -80,6 +82,7 @@ export function createMailTools(): ToolDefinition[] {
     guardedTool(createMailboxTool, handleCreateMailbox),
     guardedTool(markEmailsSpamTool, handleMarkEmailsSpam),
     guardedTool(markEmailsNotSpamTool, handleMarkEmailsNotSpam),
+    guardedTool(renameMailboxTool, handleRenameMailbox),
     guardedTool(saveDraftTool, handleSaveDraft),
     guardedTool(listMailSignaturesTool, handleListMailSignatures),
   ];

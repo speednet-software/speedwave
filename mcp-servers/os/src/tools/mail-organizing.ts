@@ -408,6 +408,74 @@ export const markEmailsNotSpamTool: Tool = {
   ],
 };
 
+/** Input parameters for the renameMailbox tool. */
+interface RenameMailboxParams {
+  /** Path of the mailbox to rename. */
+  mailbox: string;
+  /** Account of the mailbox. */
+  account: string;
+  /** New name, one path component. */
+  new_name: string;
+}
+
+export const renameMailboxTool: Tool = {
+  name: 'renameMailbox',
+  description:
+    'Rename a mailbox of an account (mailbox and account exactly as listMailboxes returns them); it stays inside the same parent mailbox, so new_name is one name without /. ' +
+    'Reversible, so no confirmation is needed: renaming it back undoes it. ' +
+    "The account's own mailboxes keep their names: Inbox, Drafts, Sent, Junk, Trash, Outbox and the archive mailbox are refused with MAIL_SPECIAL_MAILBOX. " +
+    'A name the parent already has is refused with MAIL_MAILBOX_EXISTS. Emails in the renamed mailbox get new mail ids: list it again to act on them.',
+  annotations: WRITE_ANNOTATIONS,
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: STANDARD_BUDGET.toolMs,
+    [META_KEYS.OS_CATEGORY]: 'mail',
+  },
+  keywords: ['os', 'mail', 'email', 'mailbox', 'folder', 'rename', 'name'],
+  example:
+    'await os.renameMailbox({ mailbox: "Clients/Acme", account: "iCloud", new_name: "Acme Corp" })',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      mailbox: {
+        type: 'string',
+        description: 'Path of the mailbox to rename: the name field from listMailboxes',
+      },
+      account: {
+        type: 'string',
+        description: 'Account of the mailbox: the account field from listMailboxes, or "On My Mac"',
+      },
+      new_name: {
+        type: 'string',
+        description: 'New name inside the same parent, without /, e.g. Acme Corp',
+      },
+    },
+    required: ['mailbox', 'account', 'new_name'],
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      status: { type: 'string', description: '"renamed"' },
+      mailbox: {
+        type: 'string',
+        description: 'New path of the mailbox; pass it to the mail tools',
+      },
+      previous_mailbox: { type: 'string', description: 'Path the mailbox had before' },
+      account: { type: 'string' },
+    },
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: rename a mailbox of an account',
+      input: { mailbox: 'Receipts', account: 'iCloud', new_name: 'Invoices' },
+    },
+    {
+      description: 'Full: rename a nested mailbox on this Mac',
+      input: { mailbox: 'Clients/Acme', account: 'On My Mac', new_name: 'Acme Corp' },
+    },
+  ],
+};
+
 /**
  * Moves emails to the Trash of their account; without confirm_delete mail-cli only previews them.
  * @param params - Tool input parameters.
@@ -499,6 +567,35 @@ export async function handleCreateMailbox(params: CreateMailboxParams): Promise<
   });
   if (!v.valid) return v.error;
   return runMail('create_mailbox', p);
+}
+
+/**
+ * Renames a mailbox of an account inside its parent.
+ * @param params - Tool input parameters.
+ */
+export async function handleRenameMailbox(params: RenameMailboxParams): Promise<ToolResult> {
+  const p = asRecord(params);
+  const v = validateAll(p, {
+    required: ['mailbox', 'account', 'new_name'],
+    strings: [
+      ['mailbox', MAX_LENGTHS.short, false],
+      ['account', MAX_LENGTHS.short, false],
+      ['new_name', MAX_LENGTHS.short, false],
+    ],
+  });
+  if (!v.valid) return v.error;
+  if ((p.new_name as string).includes('/')) {
+    return teachingToolResult(
+      {
+        paramName: 'new_name',
+        received: p.new_name,
+        nextStep:
+          'Pass one name without /: the mailbox stays in its parent. To move it elsewhere, create the new mailbox with createMailbox and move the emails with moveEmails.',
+      },
+      'INVALID_VALUE'
+    );
+  }
+  return runMail('rename_mailbox', p);
 }
 
 /**
