@@ -45,9 +45,10 @@ export const EXAMPLE_IDS = [
 
 const MAIL_FAILURE = /\b(MAIL_[A-Z_]+): ([\s\S]*)$/;
 
-type MailFailureStep = TeachingErrorParams | { nextStep: string };
-
-const MAIL_FAILURE_TEACHING: Record<string, (detail: string, args: MailArgs) => MailFailureStep> = {
+const MAIL_FAILURE_TEACHING: Record<
+  string,
+  (detail: string, args: MailArgs, command: string) => TeachingErrorParams
+> = {
   MAIL_TIMEOUT: (detail) => ({
     nextStep:
       `${detail} Retry once; for a list or a search pass a specific mailbox or a smaller limit. ` +
@@ -72,12 +73,16 @@ const MAIL_FAILURE_TEACHING: Record<string, (detail: string, args: MailArgs) => 
     correctValueTool: 'listMailboxes',
     nextStep: `${detail} Pass the account field of a mailbox listMailboxes returns.`,
   }),
-  MAIL_ACCOUNT_DISABLED: (detail, args) => ({
+  MAIL_ACCOUNT_DISABLED: (detail, args, command) => ({
     paramName: 'account',
     received: args.account,
     nextStep:
-      `${detail} Ask the user to turn the account on in Mail > Settings > Accounts, ` +
-      "or call again without account (it then goes from Mail's primary address) and show the user the new from.",
+      command === 'send_email'
+        ? `${detail} Nothing was sent. Ask the user whether to turn the account on in Mail > Settings > Accounts ` +
+          'or to send from another account; do not retry on your own. For another account, call again with that ' +
+          'account, or without account for the default sender, and show the user the new from in the preview.'
+        : `${detail} Ask the user to turn the account on in Mail > Settings > Accounts, ` +
+          "or call again without account (it then goes from Mail's primary address) and show the user the new from.",
   }),
   MAIL_NO_SENDER: (detail) => ({
     nextStep: `${detail} Ask the user to add or turn on a mail account in Mail > Settings > Accounts; nothing was sent or saved.`,
@@ -183,7 +188,7 @@ export async function runMail(
     );
     return { success: true, data: result.parsed };
   } catch (error) {
-    const failure = mailFailureResult(error, args);
+    const failure = mailFailureResult(error, command, args);
     if (failure) return failure;
     throw error;
   }
@@ -192,16 +197,18 @@ export async function runMail(
 /**
  * The teaching error for a mail-cli failure that starts with a known `MAIL_*` code, or undefined.
  * @param error - What runCommand threw.
+ * @param command - mail-cli command of the failed call.
  * @param args - Tool arguments of the failed call.
  */
-function mailFailureResult(error: unknown, args: MailArgs): ToolResult | undefined {
+function mailFailureResult(
+  error: unknown,
+  command: string,
+  args: MailArgs
+): ToolResult | undefined {
   const match = error instanceof Error ? MAIL_FAILURE.exec(error.message) : null;
   const teaching = match ? MAIL_FAILURE_TEACHING[match[1]] : undefined;
   if (!match || !teaching) return undefined;
-  const step = teaching(match[2].trim(), args);
-  return 'paramName' in step
-    ? teachingToolResult(step, match[1])
-    : { success: false, error: { code: match[1], message: step.nextStep } };
+  return teachingToolResult(teaching(match[2].trim(), args, command), match[1]);
 }
 
 /**

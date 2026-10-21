@@ -283,6 +283,30 @@ final class SendEmailTests: XCTestCase {
         XCTAssertEqual(result["bcc"] as? [String], ["boss@x"])
     }
 
+    func testReplyBccLeavesOutAddressesAlreadyInToOrCcAndRepeatsIgnoringCase() throws {
+        harness.executor.reply(replyRead(to: ["anna@x"], cc: ["ewa@x"]))
+
+        let result = try harness.call(
+            "reply_to_email",
+            ["id": archived.encoded, "body": "Ok", "cc": "jan@x", "bcc": "Anna@x, EWA@x, JAN@x, boss@x, Boss@x"])
+
+        XCTAssertEqual(result["cc"] as? [String], ["ewa@x", "jan@x"])
+        XCTAssertEqual(result["bcc"] as? [String], ["boss@x"])
+    }
+
+    func testConfirmedReplyAddsOnlyTheBccThePreviewShowed() throws {
+        harness.executor.reply(replyRead(to: ["anna@x"]))
+
+        let result = try harness.call(
+            "reply_to_email",
+            ["id": archived.encoded, "body": "Ok", "bcc": "ANNA@x, boss@x, boss@x", "confirm_send": true])
+
+        let send = harness.executor.calls[1].script
+        XCTAssertEqual(send.components(separatedBy: "make new bcc recipient").count - 1, 1, send)
+        XCTAssertTrue(send.contains("{address:\"boss@x\"}"), send)
+        XCTAssertEqual(result["bcc"] as? [String], ["boss@x"])
+    }
+
     func testConfirmedReplyWithoutExtraRecipientsAddsNone() throws {
         harness.executor.reply(replyRead())
 

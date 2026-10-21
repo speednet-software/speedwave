@@ -527,9 +527,9 @@ export async function handleListMailSignatures(
 
 /**
  * The output schema of a gated send: its preview, or what was sent.
- * @param newMessage - Whether it is a new message, with a chosen sender.
+ * @param withFromAndAccount - Whether the result carries the from and account of a new message.
  */
-function sendOutputSchema(newMessage: boolean): Tool['outputSchema'] {
+function sendOutputSchema(withFromAndAccount: boolean): Tool['outputSchema'] {
   const addresses = (what: string) => ({
     type: 'array',
     items: { type: 'string' },
@@ -548,7 +548,7 @@ function sendOutputSchema(newMessage: boolean): Tool['outputSchema'] {
         description: 'Preview only: the flag to set true once the user agreed',
       },
       instruction: { type: 'string', description: 'Preview only: what to ask the user' },
-      ...(newMessage
+      ...(withFromAndAccount
         ? {
             from: FROM_PROPERTY,
             account: {

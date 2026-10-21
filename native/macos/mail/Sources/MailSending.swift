@@ -26,8 +26,8 @@ enum MailSending {
         return formatter
     }()
 
-    /// The `send_email` command: a new message to `to`, `cc` and `bcc`, from `account` (Mail's default sending
-    /// address when omitted); the preview and the report carry the `from` Mail reads for it.
+    /// The `send_email` command: a new message to `to`, `cc` and `bcc` from `account` or the default sender; the
+    /// preview and the report carry its `from`.
     static func sendEmail(params: [String: Any], scripts: MailScripts) throws -> [String: Any] {
         let signature = try signatureParam(params)
         let account = try accountParam(params)
@@ -49,8 +49,7 @@ enum MailSending {
         return sent(fields)
     }
 
-    /// The `save_draft` command: a new message saved, not sent, in the Drafts of `account` (Mail's default sending
-    /// address when omitted), without a confirmation gate.
+    /// The `save_draft` command: a new message from `account` or the default sender, saved unsent in its Drafts.
     static func saveDraft(params: [String: Any], scripts: MailScripts) throws -> [String: Any] {
         let signature = try signatureParam(params)
         let account = try accountParam(params)
@@ -70,8 +69,8 @@ enum MailSending {
         return ["signatures": output.components(separatedBy: itemSeparator).filter { !$0.isEmpty }]
     }
 
-    /// The `reply_to_email` command: Mail's own reply to the mail `id`, in any mailbox, the user's text above the
-    /// quoted original; `cc` and `bcc` are added to the recipients Mail chose.
+    /// The `reply_to_email` command: Mail's own reply to the mail `id`, the user's text above the quoted original,
+    /// with `cc` and `bcc` added to the recipients Mail chose.
     static func replyToEmail(params: [String: Any], scripts: MailScripts) throws -> [String: Any] {
         guard let id = params["id"] as? String else {
             throw MailError.missingField("id")
@@ -93,13 +92,14 @@ enum MailSending {
         var fields = try replyFields(read, body: body)
         let chosen = (fields["to"] as? [String] ?? []) + (fields["cc"] as? [String] ?? [])
         let added = newAddresses(extraCc, besides: chosen)
+        let blind = newAddresses(bcc, besides: chosen + added)
         fields["cc"] = (fields["cc"] as? [String] ?? []) + added
-        fields["bcc"] = bcc
+        fields["bcc"] = blind
         fields["signature"] = signature
         guard replyGate.isConfirmed(params) else {
             return replyGate.preview(fields)
         }
-        let clauses = [recipientClauses(added, kind: "cc"), recipientClauses(bcc, kind: "bcc")]
+        let clauses = [recipientClauses(added, kind: "cc"), recipientClauses(blind, kind: "bcc")]
             .filter { !$0.isEmpty }
             .joined(separator: "\n")
         _ = try run(
@@ -244,8 +244,7 @@ enum MailSending {
             + (signature.map { "signature \"\(escapeAppleScript($0))\"" } ?? "missing value")
     }
 
-    /// Reads, without making a message, the `Name <address>` a new message goes from: the first address of
-    /// `account`, or else Mail's primary address, or the first address of a turned-on account.
+    /// Reads, without making a message, the `Name <address>` a new message goes from.
     private static func senderScript(signature: String?, account: String?) -> String {
         let lines: [String?] = [
             MailReading.cleanHandler,
@@ -259,10 +258,12 @@ enum MailSending {
         return lines.compactMap { $0 }.joined(separator: "\n")
     }
 
+    /// AppleScript lines that set `spwSender` to the first address of `account`, or else to Mail's primary address
+    /// or the first address of a turned-on account.
     private static func senderLines(account: String?) -> String {
         let address = account.map { name in
             """
-                if not (exists account "\(escapeAppleScript(name))") then error "\(accountNotFoundMarker)"
+                \(AppleMailClient.accountExistsCheck(name))
                 set spwAccount to account "\(escapeAppleScript(name))"
                 if not (enabled of spwAccount) then error "\(accountDisabledMarker)"
                 set spwAddresses to email addresses of spwAccount

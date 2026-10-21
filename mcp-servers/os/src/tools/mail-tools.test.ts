@@ -1447,7 +1447,7 @@ describe('mail-tools', () => {
     it('a mailbox that already exists teaches to use it', async () => {
       vi.mocked(runCommand).mockRejectedValue(
         new Error(
-          "mail.create_mailbox failed: MAIL_MAILBOX_EXISTS: Mailbox 'Clients' already exists in account 'Work'; move emails to it as it is."
+          "mail.create_mailbox failed: MAIL_MAILBOX_EXISTS: Mailbox 'Clients' already exists in account 'Work'."
         )
       );
 
@@ -1753,6 +1753,27 @@ describe('mail-tools', () => {
       expect(result.error?.message).toContain('Invalid account (received: "Google")');
       expect(result.error?.message).toContain('Mail > Settings > Accounts');
       expect(runCommand).toHaveBeenCalledTimes(1);
+    });
+
+    it('a send from a turned-off account asks the user instead of retrying', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        cliFailure(
+          'send_email',
+          "MAIL_ACCOUNT_DISABLED: Account 'Google' is turned off in Mail.app, so Mail would send or file the message from another account."
+        )
+      );
+
+      const result = await handleSendEmail({
+        to: 'a@example.com',
+        subject: 'S',
+        body: 'B',
+        account: 'Google',
+      });
+
+      expect(result.error?.code).toBe('MAIL_ACCOUNT_DISABLED');
+      expect(result.error?.message).toContain('Ask the user whether to turn the account on');
+      expect(result.error?.message).toContain('do not retry on your own');
+      expect(result.error?.message).toContain('new from');
     });
 
     it('a mailbox in several accounts asks for the account', async () => {
