@@ -12,14 +12,20 @@ run_script() {
     PATH="$STUB_DIR:$PATH" run bash "$SCRIPT"
 }
 
-@test "pull_request event resolves to the PR title" {
-    EVENT_NAME=pull_request PR_TITLE='feat(release): add changelog job' run_script
+@test "pull_request event resolves to the PR title with the squash suffix GitHub appends in the queue" {
+    EVENT_NAME=pull_request PR_TITLE='feat(release): add changelog job' PR_NUMBER=1373 run_script
     [ "$status" -eq 0 ]
-    [ "$output" = "feat(release): add changelog job" ]
+    [ "$output" = "feat(release): add changelog job (#1373)" ]
+}
+
+@test "pull_request event without a PR number fails loud" {
+    EVENT_NAME=pull_request PR_TITLE='feat(release): add changelog job' PR_NUMBER='' run_script
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"PR_NUMBER is required"* ]]
 }
 
 @test "pull_request event with an empty title fails loud" {
-    EVENT_NAME=pull_request PR_TITLE='' run_script
+    EVENT_NAME=pull_request PR_TITLE='' PR_NUMBER=1373 run_script
     [ "$status" -ne 0 ]
     [[ "$output" == *"no commit message resolved"* ]]
 }
