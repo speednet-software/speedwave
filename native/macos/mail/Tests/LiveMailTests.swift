@@ -47,6 +47,23 @@ final class LiveMailTests: XCTestCase {
         XCTAssertEqual(matches.first?["account"] as? String, AppleMailClient.localAccountName)
     }
 
+    func testListMailboxesGivesEveryMailboxTheUnreadCountAnUnreadListingTotals() throws {
+        let result = try XCTUnwrap(try call("list_mailboxes") as? [String: Any])
+        let mailboxes = try XCTUnwrap(result["mailboxes"] as? [[String: Any]])
+        for mailbox in mailboxes {
+            XCTAssertNotNil(mailbox["unread_count"] as? Int, "\(mailbox)")
+        }
+        let testBox = try XCTUnwrap(mailboxes.first {
+            $0["name"] as? String == Self.testMailbox && $0["account"] as? String == AppleMailClient.localAccountName
+        })
+        let unread = try XCTUnwrap(
+            try call(
+                "list_emails",
+                ["mailbox": Self.testMailbox, "account": AppleMailClient.localAccountName, "unread_only": true, "limit": 1]
+            ) as? [String: Any])
+        XCTAssertEqual(testBox["unread_count"] as? Int, unread["total"] as? Int)
+    }
+
     func testListEmailsPagesTheTestMailboxNewestFirstWithMailIdsGetEmailReads() throws {
         let params: [String: Any] = ["mailbox": Self.testMailbox, "account": AppleMailClient.localAccountName]
         let all = try XCTUnwrap(try call("list_emails", params.merging(["limit": 10_000]) { $1 }) as? [String: Any])

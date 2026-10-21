@@ -165,7 +165,7 @@ enum AppleMailClient {
 
     /// Lists every mailbox of every account, then the On My Mac mailboxes under `localAccountName`, each with
     /// `name` as its path inside the account (`Inbox/Clients`), the form `mailbox "<path>" of account` resolves;
-    /// Mail reports a nested mailbox by its last segment only. Each account costs five bulk reads, whatever its
+    /// Mail reports a nested mailbox by its last segment only. Each account costs six bulk reads, whatever its
     /// number of mailboxes; the paths and counts are worked out after Mail answered.
     static let listMailboxesScript = """
         tell application "Mail"
@@ -177,14 +177,16 @@ enum AppleMailClient {
                 set spwNames to name of every mailbox of spwAcct
                 set spwParents to container of every mailbox of spwAcct
                 set spwIds to id of every message of every mailbox of spwAcct
-                set end of spwScopes to {spwAcctName, spwBoxes, spwNames, spwParents, spwIds, missing value}
+                set spwUnread to unread count of every mailbox of spwAcct
+                set end of spwScopes to {spwAcctName, spwBoxes, spwNames, spwParents, spwIds, spwUnread, missing value}
             end repeat
             set spwBoxes to every mailbox
             set spwNames to name of every mailbox
             set spwParents to container of every mailbox
             set spwIds to id of every message of every mailbox
+            set spwUnread to unread count of every mailbox
             set spwOwners to account of every mailbox
-            set end of spwScopes to {"\(escapeAppleScript(localAccountName))", spwBoxes, spwNames, spwParents, spwIds, spwOwners}
+            set end of spwScopes to {"\(escapeAppleScript(localAccountName))", spwBoxes, spwNames, spwParents, spwIds, spwUnread, spwOwners}
         end tell
         set spwLines to {}
         repeat with spwScopeRef in spwScopes
@@ -194,9 +196,10 @@ enum AppleMailClient {
             set spwNames to item 3 of spwScope
             set spwParents to item 4 of spwScope
             set spwIds to item 5 of spwScope
-            set spwOwners to item 6 of spwScope
+            set spwUnread to item 6 of spwScope
+            set spwOwners to item 7 of spwScope
             set spwCount to count of spwBoxes
-            if (count of spwNames) is not spwCount or (count of spwParents) is not spwCount or (count of spwIds) is not spwCount then error "\(mailboxesChangedMarker)"
+            if (count of spwNames) is not spwCount or (count of spwParents) is not spwCount or (count of spwIds) is not spwCount or (count of spwUnread) is not spwCount then error "\(mailboxesChangedMarker)"
             repeat with spwI from 1 to spwCount
                 set spwLocal to true
                 if spwOwners is not missing value then set spwLocal to (item spwI of spwOwners is missing value)
@@ -212,7 +215,7 @@ enum AppleMailClient {
                         set spwPath to (item spwJ of spwNames) & "/" & spwPath
                         set spwParent to item spwJ of spwParents
                     end repeat
-                    set end of spwLines to spwAcctName & "||" & spwPath & "||" & (count of item spwI of spwIds)
+                    set end of spwLines to spwAcctName & "||" & spwPath & "||" & (count of item spwI of spwIds) & "||" & (item spwI of spwUnread)
                 end if
             end repeat
         end repeat
@@ -224,11 +227,13 @@ enum AppleMailClient {
         return parseMailboxes(try scripts.run(listMailboxesScript))
     }
 
-    /// Mailbox rows with `message_count` as a number; a count that is not an integer is left out.
+    /// Mailbox rows with `message_count` and `unread_count` as numbers; a count that is not an integer is left out.
     static func parseMailboxes(_ output: String) -> [[String: Any]] {
-        parseDelimited(output, fields: ["account", "name", "message_count"]).map { row in
+        parseDelimited(output, fields: ["account", "name", "message_count", "unread_count"]).map { row in
             var typed = row
-            typed["message_count"] = (row["message_count"] as? String).flatMap { Int($0) }
+            for count in ["message_count", "unread_count"] {
+                typed[count] = (row[count] as? String).flatMap { Int($0) }
+            }
             return typed
         }
     }

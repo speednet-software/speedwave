@@ -77,7 +77,9 @@ describe('mail-tools', () => {
   describe('handleListMailboxes', () => {
     it('returns mailboxes on success', async () => {
       const mockData = {
-        mailboxes: [{ name: 'INBOX', account: 'john@example.com', message_count: 5 }],
+        mailboxes: [
+          { name: 'INBOX', account: 'john@example.com', message_count: 5, unread_count: 2 },
+        ],
       };
       vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: mockData });
 
@@ -85,6 +87,14 @@ describe('mail-tools', () => {
 
       expect(result.success).toBe(true);
       expect(result.data).toEqual(mockData);
+    });
+
+    it('tells Claude every mailbox carries its unread count', () => {
+      const tool = createMailTools().find((t) => t.tool.name === 'listMailboxes')!.tool;
+      const mailbox = (tool.outputSchema as any).properties.mailboxes.items.properties;
+
+      expect(mailbox.unread_count.type).toBe('number');
+      expect(tool.description).toContain('unread_count');
     });
   });
 
@@ -774,7 +784,9 @@ describe('mail-tools', () => {
           { name: 'Microsoft Outlook', supported: false, instructions: 'Add the account…' },
         ],
       },
-      listMailboxes: { mailboxes: [{ account: 'iCloud', name: 'INBOX', message_count: 3 }] },
+      listMailboxes: {
+        mailboxes: [{ account: 'iCloud', name: 'INBOX', message_count: 3, unread_count: 1 }],
+      },
       listEmails: {
         emails: [
           {

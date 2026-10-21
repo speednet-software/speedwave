@@ -5,19 +5,22 @@ import XCTest
 final class MailTests: XCTestCase {
 
 
-    func testParseMailboxesTypesMessageCountAsANumber() {
-        let rows = AppleMailClient.parseMailboxes("iCloud||INBOX||42\nWork||Archive||0\n")
+    func testParseMailboxesTypesTheMessageAndUnreadCountsAsNumbers() {
+        let rows = AppleMailClient.parseMailboxes("iCloud||INBOX||42||7\nWork||Archive||0||0\n")
         XCTAssertEqual(rows.count, 2)
         XCTAssertEqual(rows[0]["account"] as? String, "iCloud")
         XCTAssertEqual(rows[0]["name"] as? String, "INBOX")
         XCTAssertEqual(rows[0]["message_count"] as? Int, 42)
+        XCTAssertEqual(rows[0]["unread_count"] as? Int, 7)
         XCTAssertEqual(rows[1]["message_count"] as? Int, 0)
+        XCTAssertEqual(rows[1]["unread_count"] as? Int, 0)
     }
 
-    func testParseMailboxesOmitsAMessageCountThatIsNotAnInteger() {
-        let rows = AppleMailClient.parseMailboxes("iCloud||INBOX||missing value\n")
+    func testParseMailboxesOmitsACountThatIsNotAnInteger() {
+        let rows = AppleMailClient.parseMailboxes("iCloud||INBOX||missing value||missing value\n")
         XCTAssertEqual(rows.count, 1)
         XCTAssertNil(rows[0]["message_count"])
+        XCTAssertNil(rows[0]["unread_count"])
     }
 
 

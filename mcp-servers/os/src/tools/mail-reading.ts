@@ -145,7 +145,7 @@ export const detectMailClientsTool: Tool = {
 export const listMailboxesTool: Tool = {
   name: 'listMailboxes',
   description:
-    'List the mailboxes of every account, the On My Mac mailboxes under the account "On My Mac". Each mailbox\'s name is its path inside the account (Inbox/Clients for a nested one); pass it as listEmails/searchEmails\'s mailbox parameter (exact, case-sensitive) together with its account.',
+    'List the mailboxes of every account, the On My Mac mailboxes under the account "On My Mac". Each mailbox\'s name is its path inside the account (Inbox/Clients for a nested one); pass it as listEmails/searchEmails\'s mailbox parameter (exact, case-sensitive) together with its account. Each mailbox carries message_count and unread_count, so one call answers how many unread emails there are.',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
@@ -172,6 +172,7 @@ export const listMailboxesTool: Tool = {
             },
             account: { type: 'string', description: 'Account this mailbox belongs to' },
             message_count: { type: 'number', description: 'Total message count in this mailbox' },
+            unread_count: { type: 'number', description: 'Unread message count in this mailbox' },
           },
         },
       },
