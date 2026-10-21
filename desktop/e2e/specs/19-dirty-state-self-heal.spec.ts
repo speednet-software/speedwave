@@ -96,9 +96,9 @@ describe('Dirty-state self-heal', function () {
       const psToken = token.replace(/'/g, "''");
       const script = [
         "$ErrorActionPreference = 'Stop'",
-        `$acl = Get-Acl -LiteralPath '${psToken}'`,
+        '$acl = New-Object System.Security.AccessControl.FileSecurity',
         "$acl.SetSecurityDescriptorSddlForm('D:P', 'Access')",
-        `Set-Acl -LiteralPath '${psToken}' -AclObject $acl`,
+        `[System.IO.File]::SetAccessControl('${psToken}', $acl)`,
         `$sddl = (Get-Acl -LiteralPath '${psToken}').Sddl`,
         'if ($sddl -notmatch \'D:P(AI)?(?!\\()\') { throw "plant no-op: unexpected SDDL $sddl" }',
         'try {',
