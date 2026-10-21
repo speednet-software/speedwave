@@ -41,14 +41,22 @@ export async function storedProviderModel(providerId: string): Promise<string | 
 }
 
 export async function configureOpenRouter(apiKey: string): Promise<void> {
-  await clickUntil(
-    '[data-testid="settings-llm-extra-select-openrouter"]',
-    '[data-testid="settings-llm-extra-key-openrouter"]',
-    { timeout: 20_000, timeoutMsg: 'OpenRouter key input never appeared after selecting it' }
+  const refresh = '[data-testid="settings-llm-extra-refresh-openrouter"]';
+  await browser.waitUntil(
+    async () => {
+      const keyInput = await $('[data-testid="settings-llm-extra-key-openrouter"]');
+      if (!(await keyInput.isExisting())) {
+        const select = await $('[data-testid="settings-llm-extra-select-openrouter"]');
+        if ((await select.getAttribute('aria-checked')) !== 'true') await select.click();
+        return false;
+      }
+      if ((await keyInput.getValue()) !== apiKey) await keyInput.setValue(apiKey);
+      return (await keyInput.getValue()) === apiKey && (await $(refresh).isEnabled());
+    },
+    { timeout: 20_000, interval: 500, timeoutMsg: 'OpenRouter key never stuck in its input' }
   );
-  await (await $('[data-testid="settings-llm-extra-key-openrouter"]')).setValue(apiKey);
 
-  await (await $('[data-testid="settings-llm-extra-refresh-openrouter"]')).click();
+  await (await $(refresh)).click();
   const success = await $('[data-testid="settings-llm-extra-test-success-openrouter"]');
   const orError = await $('[data-testid="settings-llm-extra-discovery-error-openrouter"]');
   await browser.waitUntil(

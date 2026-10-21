@@ -97,7 +97,7 @@ describe('Dirty-state self-heal', function () {
       const script = [
         "$ErrorActionPreference = 'Stop'",
         `$acl = Get-Acl -LiteralPath '${psToken}'`,
-        "$acl.SetSecurityDescriptorSddlForm('D:P')",
+        "$acl.SetSecurityDescriptorSddlForm('D:P', 'Access')",
         `Set-Acl -LiteralPath '${psToken}' -AclObject $acl`,
         `$sddl = (Get-Acl -LiteralPath '${psToken}').Sddl`,
         'if ($sddl -notmatch \'D:P(AI)?(?!\\()\') { throw "plant no-op: unexpected SDDL $sddl" }',
