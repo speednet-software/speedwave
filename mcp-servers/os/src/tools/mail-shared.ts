@@ -33,18 +33,15 @@ export const EXAMPLE_IDS = [
 
 const MAIL_FAILURE = /\b(MAIL_[A-Z_]+): ([\s\S]*)$/;
 
-const MAIL_FAILURE_TEACHING: Record<
-  string,
-  (detail: string, args: MailArgs) => TeachingErrorParams
-> = {
+type MailFailureStep = TeachingErrorParams | { nextStep: string };
+
+const MAIL_FAILURE_TEACHING: Record<string, (detail: string, args: MailArgs) => MailFailureStep> = {
   MAIL_TIMEOUT: (detail) => ({
-    paramName: 'request',
     nextStep:
       `${detail} Retry once; for a list or a search pass a specific mailbox or a smaller limit. ` +
       'Before retrying a send or a reply, check the Sent mailbox, since Mail.app may have sent it anyway.',
   }),
   MAIL_AUTOMATION_DENIED: (detail) => ({
-    paramName: 'Mail automation permission',
     nextStep:
       `${detail} Ask the user to allow Speedwave to control Mail in ` +
       'System Settings > Privacy & Security > Automation, then retry.',
@@ -89,11 +86,9 @@ const MAIL_FAILURE_TEACHING: Record<
     nextStep: `${detail} List or search that mailbox again with listEmails or searchEmails and use a current id.`,
   }),
   MAIL_MAILBOX_CHANGED: (detail) => ({
-    paramName: 'mailbox',
     nextStep: `${detail} New mail arrived or messages moved during the read; retry the same call once.`,
   }),
   MAIL_SEND_FAILED: (detail) => ({
-    paramName: 'request',
     nextStep:
       `${detail} Tell the user the message was not sent and ask them to check the Outbox in Mail.app; ` +
       'do not retry without asking.',
@@ -174,7 +169,10 @@ function mailFailureResult(error: unknown, args: MailArgs): ToolResult | undefin
   const match = error instanceof Error ? MAIL_FAILURE.exec(error.message) : null;
   const teaching = match ? MAIL_FAILURE_TEACHING[match[1]] : undefined;
   if (!match || !teaching) return undefined;
-  return teachingToolResult(teaching(match[2].trim(), args), match[1]);
+  const step = teaching(match[2].trim(), args);
+  return 'paramName' in step
+    ? teachingToolResult(step, match[1])
+    : { success: false, error: { code: match[1], message: step.nextStep } };
 }
 
 /**

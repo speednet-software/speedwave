@@ -1492,6 +1492,21 @@ describe('mail-tools', () => {
       expect(result.error?.message).toContain('retry');
     });
 
+    it.each([
+      ['MAIL_TIMEOUT', 'Mail.app did not answer within 25 s.'],
+      ['MAIL_AUTOMATION_DENIED', 'Speedwave is not allowed to control Mail.app.'],
+      ['MAIL_MAILBOX_CHANGED', "Mailbox 'INBOX' changed while it was being read."],
+      ['MAIL_SEND_FAILED', 'Mail.app did not send the message; it may wait in the Outbox.'],
+    ])('%s is not reported as an invalid argument', async (code, detail) => {
+      vi.mocked(runCommand).mockRejectedValue(cliFailure('list_emails', `${code}: ${detail}`));
+
+      const result = await handleListEmails({ mailbox: 'INBOX' });
+
+      expect(result.error?.code).toBe(code);
+      expect(result.error?.message.startsWith(detail)).toBe(true);
+      expect(result.error?.message).not.toContain('Invalid');
+    });
+
     it('reaches Claude through the registered tool as an error result', async () => {
       vi.mocked(runCommand).mockRejectedValue(
         cliFailure('list_emails', 'MAIL_TIMEOUT: Mail.app did not answer within 25 s.')
