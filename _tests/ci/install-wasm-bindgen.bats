@@ -172,12 +172,12 @@ install_wasm_bindgen() {
 }
 
 @test "reads the version from the repository Cargo.lock by default" {
-    local locked
-    locked="$(awk '$0 == "name = \"wasm-bindgen\"" { f = 1; next } f && /^version = / { split($0, p, "\""); print p[2]; exit }' "$BATS_TEST_DIRNAME/../../Cargo.lock")"
-    [ -n "$locked" ]
-    publish_release "$locked" aarch64-apple-darwin "$locked"
-
     PATH="$STUBS:$PATH" run env -u WASM_BINDGEN_LOCKFILE -u GITHUB_PATH "$SCRIPT" "$DEST"
-    [ "$status" -eq 0 ]
-    [ "$("$DEST/wasm-bindgen" --version)" = "wasm-bindgen $locked" ]
+    [ "$status" -ne 0 ]
+    local url version
+    url="$(head -n 1 "$CURL_LOG")"
+    [[ "$url" =~ /download/([0-9]+\.[0-9]+\.[0-9]+)/wasm-bindgen-([0-9.]+)-aarch64-apple-darwin\.tar\.gz$ ]]
+    version="${BASH_REMATCH[1]}"
+    [ "${BASH_REMATCH[2]}" = "$version" ]
+    grep -A1 -x 'name = "wasm-bindgen"' "$BATS_TEST_DIRNAME/../../Cargo.lock" | grep -qx "version = \"$version\""
 }

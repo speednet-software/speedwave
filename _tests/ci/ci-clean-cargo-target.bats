@@ -144,7 +144,7 @@ run_clean() {
     head -c 3145728 /dev/zero >"$TARGET/release/bundle/nsis/Speedwave_setup.exe"
     run_clean
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "went from 3 MiB to 0 MiB" ]]
+    [[ "$output" =~ "ci-clean-cargo-target: $TARGET went from 3 MiB to 0 MiB" ]]
 }
 
 @test "a second run changes nothing more" {
@@ -160,7 +160,7 @@ run_clean() {
     run "$SCRIPT" "$BATS_TEST_TMPDIR/absent" "$MANIFEST_A"
     [ "$status" -eq 0 ]
     [[ "$output" =~ "::warning::" ]]
-    [[ "$output" =~ "does not exist" ]]
+    [[ "$output" =~ "target directory $BATS_TEST_TMPDIR/absent does not exist" ]]
 }
 
 @test "a cargo metadata failure warns, succeeds and deletes nothing" {
