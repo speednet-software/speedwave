@@ -68,6 +68,23 @@ tree_fingerprint() {
     done
 }
 
+setup_file() {
+    SHARED_DEST="$(mktemp -d "${TMPDIR:-/tmp}/bundle-bats-shared.XXXXXX")"
+    SHARED_WASM_LOCK="$SHARED_DEST/wasm/.wasm-build.lock"
+    export SHARED_DEST SHARED_WASM_LOCK
+    local log="$SHARED_DEST.log"
+    if ! BUNDLE_DEST="$SHARED_DEST" BUNDLE_WASM_PKG_DIR="$SHARED_DEST/wasm/wasm-pkg" "$SCRIPT" > "$log" 2>&1; then
+        cat "$log"
+        return 1
+    fi
+    rm -f "$log"
+}
+
+teardown_file() {
+    rm_with_retry "$SHARED_DEST"
+    rm -f "$SHARED_DEST.log"
+}
+
 setup() {
     DEST="$(mktemp -d "${TMPDIR:-/tmp}/bundle-bats.XXXXXX")"
     export BUNDLE_DEST="$DEST"
@@ -81,16 +98,14 @@ teardown() {
 }
 
 @test "bundle script creates build-context/containers/ with its dotfiles and nested dirs" {
-    run "$SCRIPT"
-    [ "$status" -eq 0 ]
+    local DEST="$SHARED_DEST"
     [ -d "$DEST/build-context/containers" ]
     [ -f "$DEST/build-context/containers/.dockerignore" ]
     [ -f "$DEST/build-context/containers/proxy/src/main.rs" ]
 }
 
 @test "bundle script lists every file each build-context tree ships, once staging is complete" {
-    run "$SCRIPT"
-    [ "$status" -eq 0 ]
+    local DEST="$SHARED_DEST"
     local tree list
     for tree in containers mcp-servers; do
         list="$DEST/build-context/$tree/.speedwave-shipped-files"
@@ -107,14 +122,12 @@ teardown() {
 }
 
 @test "bundle script copies Containerfile.claude" {
-    run "$SCRIPT"
-    [ "$status" -eq 0 ]
+    local DEST="$SHARED_DEST"
     [ -f "$DEST/build-context/containers/Containerfile.claude" ]
 }
 
 @test "bundle script vendors crates/pii-engine into containers/crates for the proxy build context" {
-    run "$SCRIPT"
-    [ "$status" -eq 0 ]
+    local DEST="$SHARED_DEST"
     [ -d "$DEST/build-context/containers/crates/pii-engine/src" ]
     [ -f "$DEST/build-context/containers/crates/pii-engine/Cargo.toml" ]
     [ ! -d "$DEST/build-context/containers/crates/pii-engine/target" ]
@@ -122,8 +135,7 @@ teardown() {
 }
 
 @test "every ImageDef hash input resolves inside the staged build-context" {
-    run "$SCRIPT"
-    [ "$status" -eq 0 ]
+    local DEST="$SHARED_DEST"
     local build_rs="$BATS_TEST_DIRNAME/../../crates/speedwave-runtime/src/build.rs"
     local inputs
     inputs="$(awk '/^pub const IMAGES/,/^\];/' "$build_rs" \
@@ -230,14 +242,12 @@ EOF
 }
 
 @test "bundle script creates mcp-servers with tsconfig.base.json" {
-    run "$SCRIPT"
-    [ "$status" -eq 0 ]
+    local DEST="$SHARED_DEST"
     [ -f "$DEST/build-context/mcp-servers/tsconfig.base.json" ]
 }
 
 @test "bundle script creates all MCP service directories" {
-    run "$SCRIPT"
-    [ "$status" -eq 0 ]
+    local DEST="$SHARED_DEST"
     for svc in shared policies hub slack sharepoint redmine gitlab; do
         [ -d "$DEST/build-context/mcp-servers/$svc" ]
         [ -f "$DEST/build-context/mcp-servers/$svc/package.json" ]
@@ -246,15 +256,13 @@ EOF
 }
 
 @test "bundle script copies policies templates" {
-    run "$SCRIPT"
-    [ "$status" -eq 0 ]
+    local DEST="$SHARED_DEST"
     [ -d "$DEST/build-context/mcp-servers/policies/templates" ]
     [ -f "$DEST/build-context/mcp-servers/policies/templates/strict.yaml" ]
 }
 
 @test "bundle script builds and stages a real policies/wasm-pkg artifact" {
-    run "$SCRIPT"
-    [ "$status" -eq 0 ]
+    local DEST="$SHARED_DEST"
     [ -d "$DEST/build-context/mcp-servers/policies/wasm-pkg" ]
     shopt -s nullglob
     local staged=("$DEST/build-context/mcp-servers/policies/wasm-pkg"/*_bg.wasm)
@@ -358,27 +366,23 @@ EOF
 }
 
 @test "bundle script does not include os service in build-context" {
-    run "$SCRIPT"
-    [ "$status" -eq 0 ]
+    local DEST="$SHARED_DEST"
     [ ! -d "$DEST/build-context/mcp-servers/os" ]
 }
 
 @test "bundle script creates mcp-os/os/dist/ and mcp-os/shared/dist/" {
-    run "$SCRIPT"
-    [ "$status" -eq 0 ]
+    local DEST="$SHARED_DEST"
     [ -d "$DEST/mcp-os/os/dist" ]
     [ -d "$DEST/mcp-os/shared/dist" ]
 }
 
 @test "bundle script installs express in mcp-os/shared/node_modules" {
-    run "$SCRIPT"
-    [ "$status" -eq 0 ]
+    local DEST="$SHARED_DEST"
     [ -d "$DEST/mcp-os/shared/node_modules/express" ]
 }
 
 @test "bundle script strips devDependencies from the staged shared package.json" {
-    run "$SCRIPT"
-    [ "$status" -eq 0 ]
+    local DEST="$SHARED_DEST"
     run grep -q '"devDependencies"' "$DEST/mcp-os/shared/package.json"
     [ "$status" -ne 0 ]
     run grep -q '"devDependencies"' "$DEST/oauth/shared/package.json"
@@ -386,16 +390,14 @@ EOF
 }
 
 @test "bundle script creates @speedwave/mcp-shared directory in mcp-os/os" {
-    run "$SCRIPT"
-    [ "$status" -eq 0 ]
+    local DEST="$SHARED_DEST"
     [ -d "$DEST/mcp-os/os/node_modules/@speedwave/mcp-shared" ]
     [ ! -L "$DEST/mcp-os/os/node_modules/@speedwave/mcp-shared" ]
     [ -d "$DEST/mcp-os/os/node_modules/@speedwave/mcp-shared/dist" ]
 }
 
 @test "mcp-os bundle: full import chain resolves (spawn and check)" {
-    run "$SCRIPT"
-    [ "$status" -eq 0 ]
+    local DEST="$SHARED_DEST"
     local script="$DEST/mcp-os/os/dist/index.js"
     local tmpout
     tmpout="$(mktemp)"
@@ -426,8 +428,7 @@ EOF
 }
 
 @test "bundle script copies hub Containerfile" {
-    run "$SCRIPT"
-    [ "$status" -eq 0 ]
+    local DEST="$SHARED_DEST"
     [ -f "$DEST/build-context/mcp-servers/hub/Containerfile" ]
 }
 
@@ -449,8 +450,7 @@ EOF
 }
 
 @test "mcp-os/shared standalone lockfile resolves without workspace context" {
-    run "$SCRIPT"
-    [ "$status" -eq 0 ]
+    local DEST="$SHARED_DEST"
     [ -f "$DEST/mcp-os/shared/package-lock.json" ]
     local tmpdir
     tmpdir="$(mktemp -d)"
@@ -462,8 +462,7 @@ EOF
 }
 
 @test "bundle script normalises shell scripts to LF in build-context" {
-    run "$SCRIPT"
-    [ "$status" -eq 0 ]
+    local DEST="$SHARED_DEST"
     while IFS= read -r f; do
         if grep -q $'\r' "$f"; then
             echo "CRLF detected in $f"
@@ -486,8 +485,7 @@ EOF
 }
 
 @test "bundle script preserves source script permissions" {
-    run "$SCRIPT"
-    [ "$status" -eq 0 ]
+    local DEST="$SHARED_DEST"
 
     local src="$BATS_TEST_DIRNAME/../../containers/install-claude.sh"
     local dst="$DEST/build-context/containers/install-claude.sh"
@@ -500,8 +498,7 @@ EOF
 }
 
 @test "bundle script releases both locks on success" {
-    run "$SCRIPT"
-    [ "$status" -eq 0 ]
+    local DEST="$SHARED_DEST" WASM_LOCK="$SHARED_WASM_LOCK"
     [ ! -d "$DEST/.bundle.lock" ]
     [ ! -d "$WASM_LOCK" ]
 }
@@ -600,9 +597,8 @@ EOF
 }
 
 @test "every COPY source in bundled Containerfiles exists in the staged tree" {
-    run bash "$SCRIPT"
-    [ "$status" -eq 0 ]
-    ctx="$BUNDLE_DEST/build-context"
+    local DEST="$SHARED_DEST"
+    ctx="$DEST/build-context"
     [ -d "$ctx" ] || { echo "staged context missing: $ctx"; return 1; }
     found_any=""
     fail=""

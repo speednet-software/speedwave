@@ -20,10 +20,9 @@ import { ChatStateService } from '../services/chat-state.service';
 import { PlanUsageService } from '../services/plan-usage.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { UiStateService } from '../services/ui-state.service';
-import { TranscriptionService } from '../services/transcription.service';
 import { LoggerService } from '../services/logger.service';
 import { BetaService } from '../services/beta.service';
-import type { ConversationSummary, ChatAttachment } from '../models/chat';
+import type { ConversationSummary, ChatAttachment, StagedTranscript } from '../models/chat';
 import { formatContextLabel } from '../models/llm';
 import { ChatHeaderComponent } from './header/chat-header.component';
 import { ChatMessageListComponent } from './message-list/chat-message-list.component';
@@ -102,7 +101,6 @@ export class ChatComponent implements OnInit, OnDestroy {
   readonly projectState = inject(ProjectStateService);
   private readonly planUsage = inject(PlanUsageService);
   readonly ui = inject(UiStateService);
-  readonly transcription = inject(TranscriptionService);
   private readonly beta = inject(BetaService);
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
@@ -200,7 +198,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   private restoreIncomingTabState(tabId: string): void {
     const store = this.chat.tabs().get(tabId);
     if (!store) return;
-    const transcriptPending = this.transcription.chatPromptDraft() !== '';
+    const transcriptPending = store.composerPromptDraft() !== '';
     const applyDraft = (): void => {
       if (this.pendingRestoreTabId === tabId) this.pendingRestoreTabId = null;
       if (!this.composer || this.chat.activeTabId() !== tabId) return;
@@ -323,11 +321,13 @@ export class ChatComponent implements OnInit, OnDestroy {
     if (this.chat.isStreaming) return;
     if (!event?.payload && attachments.length === 0) return;
     this.cdr.markForCheck();
+    const store = this.chat.activeStore();
+    const staged = store.stagedTranscript();
     await this.chat.sendMessage(
-      { text: this.withStagedTranscript(event.payload ?? ''), attachments },
+      { text: withStagedTranscript(event.payload ?? '', staged), attachments },
       event.displayText
     );
-    this.transcription.clearStagedTranscript();
+    if (staged) store.unstageTranscript(staged);
   }
 
   /**
@@ -336,14 +336,11 @@ export class ChatComponent implements OnInit, OnDestroy {
    */
   async onQueueRequested(text: string): Promise<void> {
     if (!text) return;
-    await this.chat.queueMessage(this.withStagedTranscript(text));
-    this.transcription.clearStagedTranscript();
+    const store = this.chat.activeStore();
+    const staged = store.stagedTranscript();
+    await this.chat.queueMessage(withStagedTranscript(text, staged));
+    if (staged) store.unstageTranscript(staged);
     this.cdr.markForCheck();
-  }
-
-  private withStagedTranscript(text: string): string {
-    const staged = this.transcription.stagedTranscript();
-    return staged ? `${text}\n\n${staged}` : text;
   }
 
   /** ADR-045 — composer signalled queue cancellation (X button). */
@@ -572,4 +569,8 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.contextOverflowResolve = null;
     resolve?.('fresh');
   }
+}
+
+function withStagedTranscript(text: string, staged: StagedTranscript | null): string {
+  return staged ? `${text}\n\n${staged.markdown}` : text;
 }

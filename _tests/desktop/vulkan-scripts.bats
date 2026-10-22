@@ -3,6 +3,7 @@
 STAGE_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/stage-vulkan-runtime.sh"
 BUDGET_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/check-vulkan-path-budget.sh"
 RESOLVER_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/cargo-target-dir.sh"
+SHA256_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/sha256.sh"
 
 setup() {
     WORK="$(mktemp -d "${BATS_TEST_TMPDIR}/vulkan.XXXXXX")"
@@ -13,12 +14,13 @@ teardown() {
 }
 
 hash_of() {
-    (sha256sum "$1" 2>/dev/null || shasum -a 256 "$1") | cut -d' ' -f1
+    "$BATS_TEST_DIRNAME/../../scripts/sha256.sh" "$1"
 }
 
 stage_rig() {
     mkdir -p "$WORK/repo/scripts" "$WORK/repo/desktop/src-tauri" "$WORK/sdk/runtime/x64"
     cp "$STAGE_SCRIPT" "$WORK/repo/scripts/stage-vulkan-runtime.sh"
+    cp "$SHA256_SCRIPT" "$WORK/repo/scripts/sha256.sh"
     printf 'fake loader bytes' > "$WORK/sdk/runtime/x64/vulkan-1.dll"
 }
 

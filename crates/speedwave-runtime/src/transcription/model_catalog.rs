@@ -1,14 +1,45 @@
-//! SSOT catalogue of Whisper transcription models downloaded on demand (ADR-056; diarization
-//! removed — ADR-075). Bump 1 const; from `ggerganov/whisper.cpp` on HF, not `ggml-org` (401s).
+//! SSOT catalogue of the models downloaded on demand: Whisper (ADR-056), Silero VAD and the
+//! diarization model (ADR-098). Bump 1 const; Whisper comes from `ggerganov/whisper.cpp` on HF.
 
 use crate::transcription::accel::GpuClass;
 
-/// Hugging Face repo path the Whisper GGML models are downloaded from.
-pub const WHISPER_HF_REPO: &str = "ggerganov/whisper.cpp";
+const WHISPER_HF_REPO: &str = "ggerganov/whisper.cpp";
+const VAD_HF_REPO: &str = "ggml-org/whisper-vad";
+const DIARIZATION_HF_REPO: &str = "nvidia/Nemotron-3-Diarization";
 
-/// Builds the download URL for a Whisper GGML model file in [`WHISPER_HF_REPO`].
-pub fn whisper_model_url(file: &str) -> String {
-    format!("https://huggingface.co/{WHISPER_HF_REPO}/resolve/main/{file}")
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ModelFile {
+    pub(crate) key: &'static str,
+    pub(crate) repo: &'static str,
+    pub(crate) file: &'static str,
+    pub(crate) sha256: &'static str,
+    pub(crate) approx_bytes: u64,
+}
+
+impl ModelFile {
+    pub(crate) fn url(&self) -> String {
+        format!(
+            "https://huggingface.co/{}/resolve/main/{}",
+            self.repo, self.file
+        )
+    }
+}
+
+/// A downloadable model named by its catalogue key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatalogModel {
+    /// A Whisper model of [`WHISPER_MODELS`].
+    Whisper(&'static WhisperModelInfo),
+    /// [`DIARIZATION_MODEL`].
+    Diarization,
+}
+
+/// Resolves a catalogue key to its model; `None` for a key the catalogue does not carry.
+pub fn catalog_model(key: &str) -> Option<CatalogModel> {
+    if key == DIARIZATION_MODEL.key {
+        return Some(CatalogModel::Diarization);
+    }
+    whisper_model(key).map(CatalogModel::Whisper)
 }
 
 /// Where in the pipeline a model fits. Tier names, not scenarios — the class→role mapping lives
@@ -50,7 +81,7 @@ pub struct WhisperModelInfo {
     /// Stable catalogue key (e.g. `"small"`, `"large-v3-turbo-q5_0"`). Used in
     /// config and Tauri commands; never derived from the filename.
     pub key: &'static str,
-    /// The GGML filename in [`WHISPER_HF_REPO`] (e.g. `"ggml-small.bin"`).
+    /// The GGML filename on Hugging Face (e.g. `"ggml-small.bin"`).
     pub file: &'static str,
     /// Human-readable label for the UI (e.g. `"Small (multilingual)"`).
     pub display_name: &'static str,
@@ -71,9 +102,14 @@ pub struct WhisperModelInfo {
 }
 
 impl WhisperModelInfo {
-    /// Download URL for this model.
-    pub fn url(&self) -> String {
-        whisper_model_url(self.file)
+    pub(crate) fn download(&self) -> ModelFile {
+        ModelFile {
+            key: self.key,
+            repo: WHISPER_HF_REPO,
+            file: self.file,
+            sha256: self.sha256,
+            approx_bytes: self.approx_bytes,
+        }
     }
 
     /// `true` when this model can serve the live pass on a host of GPU class `class`.
@@ -202,14 +238,12 @@ pub fn whisper_model(key: &str) -> Option<&'static WhisperModelInfo> {
     WHISPER_MODELS.iter().find(|m| m.key == key)
 }
 
-/// Hugging Face repo the Silero VAD GGML model comes from — whisper.cpp's
-/// official conversion; `WHISPER_HF_REPO` carries no VAD files.
-pub const VAD_HF_REPO: &str = "ggml-org/whisper-vad";
-
 /// The Silero VAD model gating decode windows against hallucinations (ADR-056 Amendment 8).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VadModelInfo {
-    /// The GGML filename in [`VAD_HF_REPO`].
+    /// Key the download is logged and capped under.
+    pub key: &'static str,
+    /// The GGML filename on Hugging Face (whisper.cpp's official conversion).
     pub file: &'static str,
     /// Download size in bytes (the SHA256 check is authoritative).
     pub approx_bytes: u64,
@@ -220,22 +254,64 @@ pub struct VadModelInfo {
 }
 
 impl VadModelInfo {
-    /// Download URL for this model.
-    pub fn url(&self) -> String {
-        format!(
-            "https://huggingface.co/{VAD_HF_REPO}/resolve/main/{}",
-            self.file
-        )
+    pub(crate) fn download(&self) -> ModelFile {
+        ModelFile {
+            key: self.key,
+            repo: VAD_HF_REPO,
+            file: self.file,
+            sha256: self.sha256,
+            approx_bytes: self.approx_bytes,
+        }
     }
 }
 
 /// The one VAD model this build uses. v5.1.2 is the version whisper.cpp ships
 /// its VAD support against; bump = edit this const.
 pub const VAD_MODEL: VadModelInfo = VadModelInfo {
+    key: "silero-vad",
     file: "ggml-silero-v5.1.2.bin",
     approx_bytes: 885_098,
     sha256: "29940d98d42b91fbd05ce489f3ecf7c72f0a42f027e4875919a28fb4c04ea2cf",
     license: "MIT",
+};
+
+/// The speaker-diarization model of the optional offline-pass speaker attribution (ADR-098).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiarizationModelInfo {
+    /// Stable key used in Tauri commands, download progress and `ModelsUsed`.
+    pub key: &'static str,
+    /// The GGUF filename on Hugging Face.
+    pub file: &'static str,
+    /// Human-readable label for the UI.
+    pub display_name: &'static str,
+    /// Download size in bytes (the SHA256 check is authoritative).
+    pub approx_bytes: u64,
+    /// SHA256 of the file (lowercase hex). Verified on download.
+    pub sha256: &'static str,
+    /// SPDX-ish licence string for the model weights.
+    pub license: &'static str,
+}
+
+impl DiarizationModelInfo {
+    pub(crate) fn download(&self) -> ModelFile {
+        ModelFile {
+            key: self.key,
+            repo: DIARIZATION_HF_REPO,
+            file: self.file,
+            sha256: self.sha256,
+            approx_bytes: self.approx_bytes,
+        }
+    }
+}
+
+/// The one diarization model this build uses: Nemotron-3 Diarization, q8_0 GGUF.
+pub const DIARIZATION_MODEL: DiarizationModelInfo = DiarizationModelInfo {
+    key: "nemotron-3-diarization-q8_0",
+    file: "Nemotron-3-Diarization.q8_0.gguf",
+    display_name: "Nemotron-3 Diarization",
+    approx_bytes: 107_012_128,
+    sha256: "08456d9e22cd9a323c0364d98375f3746d6e68507ebb705cd46438c534c7a3a1",
+    license: "OpenMDW-1.1",
 };
 
 #[cfg(test)]
@@ -284,7 +360,7 @@ mod tests {
                 m.key
             );
             assert!(!m.license.is_empty(), "Whisper {} license empty", m.key);
-            let url = m.url();
+            let url = m.download().url();
             assert!(
                 url.starts_with("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/"),
                 "Whisper {} url not from the expected HF repo: {url}",
@@ -332,10 +408,88 @@ mod tests {
         assert!(is_hex64(m.sha256));
         assert!(m.approx_bytes > 100_000 && m.approx_bytes < 10_000_000);
         assert!(!m.license.is_empty());
-        let url = m.url();
+        let url = m.download().url();
         assert!(url.starts_with("https://huggingface.co/ggml-org/whisper-vad/resolve/main/"));
         assert!(url.ends_with(m.file));
         assert!(WHISPER_MODELS.iter().all(|w| w.file != m.file));
+    }
+
+    #[test]
+    fn diarization_model_is_well_formed() {
+        let m = DIARIZATION_MODEL;
+        assert!(m.file.ends_with(".gguf"), "bad GGUF filename: {}", m.file);
+        assert!(is_hex64(m.sha256));
+        assert!(m.approx_bytes > 10_000_000 && m.approx_bytes < 1_000_000_000);
+        assert!(!m.license.is_empty());
+        assert!(!m.display_name.is_empty());
+        let url = m.download().url();
+        assert!(
+            url.starts_with("https://huggingface.co/nvidia/Nemotron-3-Diarization/resolve/main/")
+        );
+        assert!(url.ends_with(m.file));
+        let host = reqwest::Url::parse(&url).unwrap();
+        assert!(crate::consts::TRANSCRIPTION_MODEL_ALLOWED_REDIRECT_HOSTS
+            .contains(&host.host_str().unwrap()));
+    }
+
+    #[test]
+    fn a_catalogue_key_resolves_to_its_model_and_an_unknown_key_to_none() {
+        assert_eq!(
+            catalog_model(DIARIZATION_MODEL.key),
+            Some(CatalogModel::Diarization)
+        );
+        assert_eq!(
+            catalog_model("small"),
+            Some(CatalogModel::Whisper(whisper_model("small").unwrap()))
+        );
+        assert_eq!(catalog_model(VAD_MODEL.key), None);
+        assert_eq!(catalog_model(""), None);
+        assert_eq!(catalog_model("nope"), None);
+    }
+
+    #[test]
+    fn every_download_carries_its_own_key_file_hash_and_size() {
+        let small = whisper_model("small").unwrap();
+        for (file, key, name, sha, bytes) in [
+            (
+                small.download(),
+                small.key,
+                small.file,
+                small.sha256,
+                small.approx_bytes,
+            ),
+            (
+                VAD_MODEL.download(),
+                VAD_MODEL.key,
+                VAD_MODEL.file,
+                VAD_MODEL.sha256,
+                VAD_MODEL.approx_bytes,
+            ),
+            (
+                DIARIZATION_MODEL.download(),
+                DIARIZATION_MODEL.key,
+                DIARIZATION_MODEL.file,
+                DIARIZATION_MODEL.sha256,
+                DIARIZATION_MODEL.approx_bytes,
+            ),
+        ] {
+            assert_eq!(
+                (file.key, file.file, file.sha256, file.approx_bytes),
+                (key, name, sha, bytes)
+            );
+            assert_eq!(
+                file.url(),
+                format!("https://huggingface.co/{}/resolve/main/{name}", file.repo)
+            );
+        }
+    }
+
+    #[test]
+    fn diarization_model_key_and_file_never_collide_with_other_models() {
+        let m = DIARIZATION_MODEL;
+        assert!(whisper_model(m.key).is_none());
+        assert!(WHISPER_MODELS.iter().all(|w| w.file != m.file));
+        assert_ne!(VAD_MODEL.file, m.file);
     }
 
     #[test]
@@ -372,7 +526,9 @@ mod tests {
             .iter()
             .filter(|m| matches!(m.quantization, Quantization::Full))
             .map(|m| m.approx_bytes)
-            .sum();
+            .sum::<u64>()
+            + VAD_MODEL.approx_bytes
+            + DIARIZATION_MODEL.approx_bytes;
         assert!(
             total < crate::consts::MAX_TOTAL_TRANSCRIPTION_MODELS_BYTES,
             "realistic model set ({total} B = {:.1} GiB) exceeds the global dome ({} B = {:.1} GiB) — raise MAX_TOTAL_TRANSCRIPTION_MODELS_BYTES",

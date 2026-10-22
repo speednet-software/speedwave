@@ -1206,6 +1206,293 @@ describe('IntegrationsComponent', () => {
     });
   });
 
+  describe('Slack features', () => {
+    const FILE_UPLOAD_OFF = { id: 'file_upload', label: 'File sending', enabled: false };
+    const FILE_UPLOAD_ON = { id: 'file_upload', label: 'File sending', enabled: true };
+    let features: (typeof FILE_UPLOAD_OFF)[];
+
+    function slackService(configured: boolean): Record<string, unknown> {
+      return {
+        service: 'slack',
+        enabled: true,
+        configured,
+        display_name: 'Slack',
+        description: 'Team messaging',
+        auth_fields: [
+          {
+            key: 'access_token',
+            label: 'Slack Access Token',
+            field_type: 'password',
+            placeholder: 'xoxe.xoxp-...',
+            oauth_flow: true,
+          },
+        ],
+        current_values: {},
+        oauth_provider_label: 'Slack',
+      };
+    }
+
+    function setupSlackFeatures(configured: boolean): void {
+      const base = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+        switch (cmd) {
+          case 'list_projects':
+            return {
+              projects: [{ name: 'test-project', dir: '/tmp/test' }],
+              active_project: 'test-project',
+            };
+          case 'get_integrations':
+            return { services: [slackService(configured)], os: [] };
+          case 'get_slack_features':
+            return features;
+          case 'start_slack_oauth':
+            return { request_id: 'sl-feat-1' };
+          default:
+            return base(cmd, args);
+        }
+      };
+    }
+
+    async function render(): Promise<void> {
+      await component.ngOnInit();
+      component.toggleExpand('slack');
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      await fixture.whenStable();
+    }
+
+    function testId(id: string): HTMLElement | null {
+      return fixture.nativeElement.querySelector(`[data-testid="${id}"]`);
+    }
+
+    beforeEach(() => {
+      features = [FILE_UPLOAD_OFF];
+    });
+
+    it('loads the features of a signed-in Slack for the active project', async () => {
+      setupSlackFeatures(true);
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      await component.ngOnInit();
+
+      expect(invokeSpy).toHaveBeenCalledWith('get_slack_features', { project: 'test-project' });
+      expect(component.slackFeatures()).toEqual([FILE_UPLOAD_OFF]);
+    });
+
+    it('shows no features and asks for none while Slack is not signed in', async () => {
+      setupSlackFeatures(false);
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      await component.ngOnInit();
+
+      expect(invokeSpy).not.toHaveBeenCalledWith('get_slack_features', expect.anything());
+      expect(component.slackFeatures()).toEqual([]);
+    });
+
+    it('renders an Enable button for a feature that is not enabled', async () => {
+      setupSlackFeatures(true);
+      await render();
+
+      expect(testId('integrations-slack-features')?.textContent).toContain('File sending');
+      expect(testId('integrations-slack-feature-enable-file_upload')?.textContent).toContain(
+        'Enable'
+      );
+      expect(testId('integrations-slack-feature-enabled-file_upload')).toBeNull();
+    });
+
+    it('renders an enabled feature without an Enable button', async () => {
+      features = [FILE_UPLOAD_ON];
+      setupSlackFeatures(true);
+      await render();
+
+      expect(testId('integrations-slack-feature-enabled-file_upload')).toBeTruthy();
+      expect(testId('integrations-slack-feature-enable-file_upload')).toBeNull();
+    });
+
+    it('starts the Slack sign-in with the feature when Enable is clicked', async () => {
+      setupSlackFeatures(true);
+      await render();
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      testId('integrations-slack-feature-enable-file_upload')?.click();
+      await vi.waitFor(() =>
+        expect(invokeSpy).toHaveBeenCalledWith('start_slack_oauth', {
+          project: 'test-project',
+          enableFeature: 'file_upload',
+        })
+      );
+      await vi.waitFor(() => expect(component.oauthStatus).toBe('polling'));
+      expect(component.oauthService).toBe('slack');
+    });
+
+    it('does not start a second flow while one is running', async () => {
+      setupSlackFeatures(true);
+      await component.ngOnInit();
+      component.oauthStatus = 'polling';
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      await component.handleEnableSlackFeature(component.services[0], 'file_upload');
+
+      expect(invokeSpy).not.toHaveBeenCalledWith('start_slack_oauth', expect.anything());
+    });
+
+    it('shows the readable refusal inline and never raises the banner error', async () => {
+      setupSlackFeatures(true);
+      await render();
+      await component.handleEnableSlackFeature(component.services[0], 'file_upload');
+      const refusal =
+        'Slack did not allow enabling file sending. The rest of the Slack integration keeps working.';
+
+      mockTauri.dispatchEvent('slack_oauth_progress', {
+        status: 'error',
+        message: refusal,
+        request_id: 'sl-feat-1',
+      });
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      expect(component.slackFeatureError()).toBe(refusal);
+      expect(testId('integrations-slack-feature-error')?.textContent).toContain(refusal);
+      expect(testId('integrations-oauth-reauth-banner')).toBeNull();
+      expect(component.error).toBe('');
+    });
+
+    it('clears the refusal when Enable is clicked again', async () => {
+      setupSlackFeatures(true);
+      await component.ngOnInit();
+      await component.handleEnableSlackFeature(component.services[0], 'file_upload');
+      mockTauri.dispatchEvent('slack_oauth_progress', {
+        status: 'error',
+        message: 'refused',
+        request_id: 'sl-feat-1',
+      });
+      await vi.waitFor(() => expect(component.slackFeatureError()).toBe('refused'));
+
+      await component.handleEnableSlackFeature(component.services[0], 'file_upload');
+
+      expect(component.slackFeatureError()).toBe('');
+    });
+
+    function dispatchSlack(status: string, message = ''): void {
+      mockTauri.dispatchEvent('slack_oauth_progress', {
+        status,
+        message,
+        request_id: 'sl-feat-1',
+      });
+    }
+
+    it('shows a failed plain sign-in inline so a reconnect is never silent', async () => {
+      setupSlackFeatures(true);
+      await component.ngOnInit();
+      await component.handleStartOAuth({ svc: component.services[0], credentials: {} });
+
+      dispatchSlack('error', 'token exchange failed: invalid_code');
+      await vi.waitFor(() =>
+        expect(component.slackFeatureError()).toBe('token exchange failed: invalid_code')
+      );
+    });
+
+    it('names the feature when the user cancels an enable', async () => {
+      setupSlackFeatures(true);
+      await component.ngOnInit();
+      await component.handleEnableSlackFeature(component.services[0], 'file_upload');
+
+      await component.handleCancelOAuth();
+      dispatchSlack('cancelled', 'OAuth flow cancelled');
+      await Promise.resolve();
+
+      expect(component.slackFeatureError()).toBe(
+        'Enabling file sending was cancelled. The rest of the Slack integration keeps working.'
+      );
+    });
+
+    it('names the feature when the backend reports the enable as cancelled', async () => {
+      setupSlackFeatures(true);
+      await component.ngOnInit();
+      await component.handleEnableSlackFeature(component.services[0], 'file_upload');
+
+      dispatchSlack('cancelled', 'OAuth flow cancelled');
+
+      await vi.waitFor(() =>
+        expect(component.slackFeatureError()).toBe(
+          'Enabling file sending was cancelled. The rest of the Slack integration keeps working.'
+        )
+      );
+    });
+
+    it('does not claim a cancelled enable for a cancelled plain sign-in', async () => {
+      setupSlackFeatures(true);
+      await component.ngOnInit();
+      await component.handleStartOAuth({ svc: component.services[0], credentials: {} });
+
+      dispatchSlack('cancelled', 'OAuth flow cancelled');
+      await Promise.resolve();
+
+      expect(component.slackFeatureError()).toBe('');
+    });
+
+    it('refreshes the features and asks for a restart after a successful enable', async () => {
+      setupSlackFeatures(true);
+      await component.ngOnInit();
+      await component.handleEnableSlackFeature(component.services[0], 'file_upload');
+      features = [FILE_UPLOAD_ON];
+      const restartSpy = vi.spyOn(projectState, 'requestRestart');
+
+      dispatchSlack('success');
+      await vi.waitFor(() => expect(restartSpy).toHaveBeenCalled());
+
+      expect(component.slackFeatures()).toEqual([FILE_UPLOAD_ON]);
+      expect(component.slackFeatureError()).toBe('');
+    });
+
+    it('says so when a successful sign-in still lacks the requested feature', async () => {
+      setupSlackFeatures(true);
+      await component.ngOnInit();
+      await component.handleEnableSlackFeature(component.services[0], 'file_upload');
+      const restartSpy = vi.spyOn(projectState, 'requestRestart');
+
+      dispatchSlack('success');
+      await vi.waitFor(() => expect(restartSpy).toHaveBeenCalled());
+
+      expect(component.slackFeatureError()).toBe(
+        'Slack signed in but did not grant file sending. The rest of the Slack integration keeps working.'
+      );
+    });
+
+    it('clears an old refusal after a later successful plain sign-in', async () => {
+      setupSlackFeatures(true);
+      await component.ngOnInit();
+      component.slackFeatureError.set('Slack did not allow enabling file sending.');
+      await component.handleStartOAuth({ svc: component.services[0], credentials: {} });
+      const restartSpy = vi.spyOn(projectState, 'requestRestart');
+
+      dispatchSlack('success');
+      await vi.waitFor(() => expect(restartSpy).toHaveBeenCalled());
+
+      expect(component.slackFeatureError()).toBe('');
+    });
+
+    it('ignores a second sign-in while one is starting', async () => {
+      setupSlackFeatures(true);
+      await component.ngOnInit();
+      component.oauthStatus = 'starting';
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      await component.handleStartOAuth({ svc: component.services[0], credentials: {} });
+
+      expect(invokeSpy).not.toHaveBeenCalledWith('start_slack_oauth', expect.anything());
+    });
+
+    it('treats a missing feature list as empty', async () => {
+      setupSlackFeatures(true);
+      features = undefined as unknown as typeof features;
+
+      await component.ngOnInit();
+
+      expect(component.slackFeatures()).toEqual([]);
+    });
+  });
+
   describe('GitHub OAuth flow', () => {
     it('invokes start_github_oauth with project (no client_id/tenant_id)', async () => {
       await component.ngOnInit();

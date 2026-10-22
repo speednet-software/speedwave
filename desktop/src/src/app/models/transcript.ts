@@ -34,6 +34,7 @@ export interface Segment {
   text: string;
   words: Word[];
   source?: TranscriptSource | null;
+  speaker_id?: number | null;
 }
 
 /** Which models were used for each pass of a session. */
@@ -41,6 +42,7 @@ export interface ModelsUsed {
   /** Live-pass model key; null = record-only for the current part (drives the record-only UI). */
   live: string | null;
   finalize: string | null;
+  diarization?: string | null;
 }
 
 /** Lifecycle of a recording. */
@@ -88,6 +90,7 @@ export interface TranscriptSession {
   /** Capture warnings currently raised, in arrival order (absent when none are). */
   active_warnings?: CaptureWarning[];
   models_used: ModelsUsed;
+  diarization_secs?: number | null;
   last_seq: number;
 }
 
@@ -119,7 +122,9 @@ export type CaptureWarning =
   | 'microphone_stalled'
   | 'system_audio_stalled'
   | 'audio_dropped'
-  | 'recording_part_missing';
+  | 'recording_part_missing'
+  | 'speaker_attribution_failed'
+  | 'speaker_model_missing';
 
 /** `request_microphone_permission` outcome — mirrors Rust `MicPermission`. */
 export type MicPermission = 'granted' | 'denied' | 'previously_denied';
@@ -179,14 +184,20 @@ export interface RecommendedModelEntry {
   downloading: boolean;
 }
 
+/** The host's GPU class (ADR-085); mirrors Rust `GpuClass`. */
+export type GpuClass = 'none' | 'integrated' | 'discrete';
+
 /**
  * `recommended_transcription_model` — the live model plus the offline-pass model when this
- * host needs a different one. Mirrors Rust `RecommendedModelAck`.
+ * host needs a different one, and the optional speaker-diarization model. Mirrors Rust
+ * `RecommendedModelAck`.
  */
 export interface RecommendedModelAck {
   live: RecommendedModelEntry;
   finalize: RecommendedModelEntry | null;
+  diarization: RecommendedModelEntry;
   accel_label: string;
+  gpu_class: GpuClass;
 }
 
 /** Per-update payload of the `transcription_model_status` Tauri event. */

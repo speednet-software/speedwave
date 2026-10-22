@@ -86,6 +86,7 @@ export { sanitize } from './sanitizer.js';
 export { notConfiguredMessage, withSetupGuidance } from './errors.js';
 
 export {
+  buildTeachingMessage,
   teachingErrorResult,
   teachingToolResult,
   clampPageSize,
@@ -142,5 +143,10 @@ export type { MemoizedPromiseOptions } from './promise-memo.js';
 export { classifyConnectionError } from './connection-test.js';
 export type { ConnectionTestResult, ConnectionErrorType } from './connection-test.js';
 
-export { readWorkspaceFile, resolveWorkspaceFile, workspaceRoot } from './workspace-file.js';
-export type { WorkspaceFile } from './workspace-file.js';
+export {
+  readWorkspaceFile,
+  resolveWorkspaceFile,
+  workspaceRoot,
+  WorkspaceFileError,
+} from './workspace-file.js';
+export type { WorkspaceFile, WorkspaceFileErrorKind } from './workspace-file.js';

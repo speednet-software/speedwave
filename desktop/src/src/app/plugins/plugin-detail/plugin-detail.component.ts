@@ -7,7 +7,6 @@ import {
   inject,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { Marked } from 'marked';
 import { ActivatedRoute, Router } from '@angular/router';
 import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
@@ -26,7 +25,8 @@ import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-sett
 import { PluginCredentialsFormComponent } from '../plugin-credentials-form/plugin-credentials-form.component';
 import { ProjectPillComponent } from '../../project-switcher/project-pill.component';
 import { TooltipDirective } from '../../shared/tooltip.directive';
-import { parseMarkdownSync } from '../../shared/markdown';
+import { parseMarkdownSync, pluginMarkdown } from '../../shared/markdown';
+import { MermaidSlotsDirective } from '../../shared/mermaid-slots.directive';
 import { BridgeConnectionComponent } from '../bridge-connection/bridge-connection.component';
 
 /** Tabs available in the plugin-detail view. */
@@ -34,25 +34,6 @@ export type PluginDetailTab = 'dashboard' | 'settings' | 'changelog' | 'logs';
 
 /** Shown when a mutation is attempted with no active project / loaded plugin. */
 const NO_ACTIVE_PROJECT_MSG = 'No active project — open or create a project first.';
-
-/**
- * Escape a string for interpolation into an HTML attribute value.
- * @param s the string to escape
- * @returns `s` with `&` → `&amp;` and `"` → `&quot;`
- */
-function escAttr(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
-}
-
-/** Scoped `marked` for the `instructions` and `changelog` blocks; forces `<a>` to open in a new tab with `rel="noopener noreferrer"`. */
-const pluginMarked = new Marked({
-  renderer: {
-    link({ href, title, text }) {
-      const titleAttr = title ? ` title="${escAttr(title)}"` : '';
-      return `<a href="${escAttr(href)}" target="_blank" rel="noopener noreferrer"${titleAttr}>${text}</a>`;
-    },
-  },
-});
 
 /** Detail page for a single plugin with Dashboard / Settings / Changelog / Logs tabs. */
 @Component({
@@ -64,6 +45,7 @@ const pluginMarked = new Marked({
     ProjectPillComponent,
     TooltipDirective,
     BridgeConnectionComponent,
+    MermaidSlotsDirective,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
@@ -192,6 +174,7 @@ const pluginMarked = new Marked({
                     class="prose-sw border-t border-[var(--line)] px-4 py-3 text-[13px] leading-relaxed"
                     data-testid="plugin-instructions"
                     [innerHTML]="renderedInstructions()"
+                    [appMermaidSlots]="renderedInstructions()"
                   ></div>
                 </details>
               }
@@ -410,6 +393,7 @@ const pluginMarked = new Marked({
                   class="prose-sw text-[13px] leading-relaxed"
                   data-testid="plugin-changelog"
                   [innerHTML]="renderedChangelog()"
+                  [appMermaidSlots]="renderedChangelog()"
                 ></div>
               } @else {
                 <p class="mono text-[12px] text-[var(--ink-mute)]" data-testid="no-changelog-msg">
@@ -503,7 +487,7 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
     const src = this.plugin?.instructions ?? '';
     if (!src) return '';
     if (this.instructionsCache?.src !== src) {
-      this.instructionsCache = { src, html: parseMarkdownSync(pluginMarked, src) };
+      this.instructionsCache = { src, html: parseMarkdownSync(pluginMarkdown, src) };
     }
     return this.instructionsCache.html;
   }
@@ -519,7 +503,7 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
     const src = this.plugin?.changelog ?? '';
     if (!src) return '';
     if (this.changelogCache?.src !== src) {
-      this.changelogCache = { src, html: parseMarkdownSync(pluginMarked, src) };
+      this.changelogCache = { src, html: parseMarkdownSync(pluginMarkdown, src) };
     }
     return this.changelogCache.html;
   }

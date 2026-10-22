@@ -3,8 +3,8 @@
  */
 
 import { Tool, ToolDefinition, READ_ONLY_ANNOTATIONS, META_KEYS } from '@speedwave/mcp-shared';
-import { withValidation, withClients, ToolResult } from './validation.js';
-import { SlackClients, getUsers, getCurrentUser, formatSlackError } from '../client.js';
+import { withValidation, withClients, failureResult, ToolResult } from './validation.js';
+import { SlackClients, getUsers, getCurrentUser } from '../client.js';
 import { searchUsers } from '../user-directory.js';
 
 interface GetUsersParams {
@@ -151,7 +151,7 @@ export async function handleFindUsers(
     const users = await searchUsers(clients, params);
     return { success: true, data: { users, count: users.length } };
   } catch (error) {
-    return { success: false, error: { code: 'SEARCH_FAILED', message: formatSlackError(error) } };
+    return failureResult('SEARCH_FAILED', error);
   }
 }
 
@@ -168,7 +168,7 @@ export async function handleGetUsers(
     const result = await getUsers(clients, params);
     return { success: true, data: result };
   } catch (error) {
-    return { success: false, error: { code: 'LOOKUP_FAILED', message: formatSlackError(error) } };
+    return failureResult('LOOKUP_FAILED', error);
   }
 }
 
@@ -185,7 +185,7 @@ export async function handleGetCurrentUser(
     const user = await getCurrentUser(clients);
     return { success: true, data: user };
   } catch (error) {
-    return { success: false, error: { code: 'LOOKUP_FAILED', message: formatSlackError(error) } };
+    return failureResult('LOOKUP_FAILED', error);
   }
 }
 

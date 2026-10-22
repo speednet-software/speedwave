@@ -21,6 +21,7 @@ jobs:
           rust-cache-workspaces: |
             . -> target
             ./desktop/src-tauri -> target
+          rust-cache-definition: .github/workflows/lane-audit.yml
           node-cache-dependency-path: |
             mcp-servers/package-lock.json
             desktop/src/package-lock.json

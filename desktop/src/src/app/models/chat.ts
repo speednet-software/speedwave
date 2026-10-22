@@ -342,6 +342,12 @@ export interface StagedAttachment<K extends AttachmentKind = AttachmentKind> {
   discard: () => void;
 }
 
+/** A meeting transcript staged for a tab's next message. */
+export interface StagedTranscript {
+  readonly markdown: string;
+  readonly name: string;
+}
+
 /** What `save_pasted_image` and `finish_paste_upload` return (`paste_cmd.rs::SavedPaste`). */
 export interface SavedPaste {
   paste_id: number;

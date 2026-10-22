@@ -38,7 +38,7 @@ require_pinned_vulkan_dll() {
   pin_file="$(cd "$(dirname "$0")" && pwd)/install-vulkan-sdk.ps1"
   expected="$(sed -n "s/^\\\$RuntimeDllSha256 = '\([0-9a-fA-F]\{64\}\)'.*/\1/p" "$pin_file" | tr '[:upper:]' '[:lower:]')"
   [[ -n "$expected" ]] || fail "Could not read \$RuntimeDllSha256 from $pin_file"
-  actual="$( (sha256sum "$path" 2>/dev/null || shasum -a 256 "$path") | cut -d' ' -f1)"
+  actual="$(bash "$(cd "$(dirname "$0")" && pwd)/sha256.sh" "$path")"
   [[ "$actual" == "$expected" ]] || fail "vulkan-1.dll SHA256 mismatch: got $actual, expected $expected"
 }
 

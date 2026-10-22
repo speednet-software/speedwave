@@ -25,6 +25,7 @@ jobs:
           rust-cache-workspaces: |
             . -> target
             desktop/src-tauri -> target
+          rust-cache-definition: .github/workflows/lane-test-macos.yml
           node-cache-dependency-path: desktop/src/package-lock.json
 
       - name: Install bats
@@ -34,6 +35,9 @@ jobs:
         run: |
           rustup target add wasm32-unknown-unknown
           npm install -g wasm-pack
+
+      - name: Install prebuilt wasm-bindgen (wasm-pack has none for Apple silicon)
+        run: scripts/install-wasm-bindgen.sh
 
       - name: Install dependencies
         working-directory: desktop/src-tauri

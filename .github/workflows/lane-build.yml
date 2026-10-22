@@ -98,3 +98,8 @@ jobs:
         if: env.DESKTOP_BUILD == 'true'
         shell: bash
         run: git diff --exit-code
+
+      - name: Clean the cargo target directory before the cache is saved
+        if: env.DESKTOP_BUILD == 'true' && matrix.platform == 'windows-latest' && (github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/release/'))
+        shell: bash
+        run: scripts/ci-clean-cargo-target.sh "$CARGO_TARGET_DIR" Cargo.toml desktop/src-tauri/Cargo.toml

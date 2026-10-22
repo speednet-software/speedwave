@@ -1,0 +1,64 @@
+Vendored whisper.cpp speaker diarization (Nemotron-3 Diarization / Sortformer)
+
+source-pull-request: https://github.com/ggml-org/whisper.cpp/pull/4095
+source-repository: https://github.com/danbev/whisper.cpp
+source-commit: 1cd623724fd5b4c38e45dab36346b2352fd78bec
+license: MIT, see LICENSE (copied from the same commit)
+
+files:
+  whisper-diarization.cpp       src/whisper-diarization.cpp without its comments, with the
+                                local changes below
+  whisper-diarization-arch.h    src/whisper-diarization-arch.h, unchanged
+  whisper-diarization.h         the "Experimental diarization" block of include/whisper.h
+                                (lines 695-761) without its comments, wrapped in a header
+                                of its own with an empty WHISPER_API and the declarations
+                                of speedwave_diar_log_set and speedwave_diar_abi_sizes
+  ggml/                         ggml.h, ggml-alloc.h, ggml-backend.h, gguf.h, unchanged
+
+The comments were removed with a string-aware pass (// to end of line, /* */ blocks, runs of
+blank lines collapsed to one). To diff against the source, apply the same pass to the
+upstream file first; the local changes below are the only other differences.
+
+ggml-headers-source: whisper-rs-sys 0.15.0, whisper.cpp/ggml/include
+ggml-headers-whisper-cpp-version: 1.8.3
+
+build.rs refuses to build when whisper-rs-sys reports a different whisper.cpp version
+(DEP_WHISPER_WHISPER_CPP_VERSION) than ggml-headers-whisper-cpp-version.
+
+local changes in whisper-diarization.cpp:
+  1. gguf_get_tensor_ne does not exist in ggml 1.8.3. whisper_diar_model_load asks
+     gguf_init_from_file for a no_alloc ggml context of the file's tensors (file_ctx)
+     and reads each tensor's shape from it with ggml_get_tensor(file_ctx, name)->ne.
+     The shape check against the expected tensor stays as upstream.
+  2. whisper_diar_log_callback_default forwards every line to the callback installed
+     with speedwave_diar_log_set (new extern "C" function) and prints nothing without
+     one, so the log reaches the Rust log facade instead of stderr.
+  3. #include "whisper-diarization.h" instead of #include "whisper.h".
+  4. speedwave_diar_abi_sizes (new extern "C" function) reports the sizes of
+     whisper_diar_context_params and whisper_diar_params, so a Rust test can compare
+     them with its #[repr(C)] mirrors.
+  5. whisper_diar_model_load opens the model for reading with a UTF-16 path under
+     MSVC, as whisper.cpp 1.8.3 does in whisper_init_from_file_with_params_no_state;
+     a narrow std::ifstream path is read in the ANSI code page there and fails for a
+     data directory with non-ASCII characters. gguf_init_from_file already handles
+     UTF-8 through ggml_fopen.
+  6. whisper_diar_cache_params carries the geometry of NeMo-Speech.cpp's v3-offline
+     preset (DiarGeometry::v3_offline in src/asr/diar/aosc_state.h: speaker cache 264,
+     FIFO 0, chunk 264, cache update period 188, left and right context 1) instead of
+     the low-latency streaming one (264, 80, 13, 40, no left context). The chunk loop
+     in whisper_diar_detect_speakers, whisper_diar_process and whisper_diar_cache_update
+     take a left context: its frames enter the graph but neither the output
+     probabilities nor the FIFO, as in NeMo-Speech.cpp's AoscState::update.
+  7. whisper_diar_backend_init does not call ggml_backend_load_all, which searches the
+     executable's directory, the working directory and GGML_BACKEND_PATH for backend
+     libraries and loads every match; the backends this build links are registered
+     statically, as for whisper.cpp itself. It logs the name of every backend it picks.
+  8. whisper_diar_detect_speakers takes a ggml_abort_callback and its data pointer, read
+     before every chunk; a true answer clears the probabilities, resets the scheduler and
+     returns false, so a put-off offline pass stops within one chunk.
+  9. whisper_diar_backend_init takes an integrated GPU (GGML_BACKEND_DEVICE_TYPE_IGPU) as a
+     GPU device, as whisper_backend_init_gpu does in whisper.cpp 1.8.3; the source matched
+     GGML_BACKEND_DEVICE_TYPE_GPU alone, so a laptop whose Vulkan device is its integrated
+     GPU ran Whisper on it and the diarization on the CPU.
+ 10. whisper_diar_backend_init logs a warning when it was asked for a GPU and found none
+     it could start, instead of falling back to the CPU without a word.

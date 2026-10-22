@@ -26,6 +26,7 @@ jobs:
           rust-cache-workspaces: |
             . -> target
             desktop/src-tauri -> target
+          rust-cache-definition: .github/workflows/lane-test-windows.yml
           rust-cache-directories: D:\st
 
       - name: cargo test (full suite incl. test-support)
@@ -94,3 +95,7 @@ jobs:
         env:
           SPEEDWAVE_ALLOW_BUNDLE_STUBS: "1"
         run: cargo test
+
+      - name: Clean the cargo target directory before the cache is saved
+        if: (github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/release/'))
+        run: scripts/ci-clean-cargo-target.sh "$CARGO_TARGET_DIR" Cargo.toml desktop/src-tauri/Cargo.toml

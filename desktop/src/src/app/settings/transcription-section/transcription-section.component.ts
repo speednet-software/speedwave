@@ -28,11 +28,20 @@ interface ModelRow {
   idSuffix: string;
 }
 
+const SPEAKER_COST_TEXT = {
+  macos: { text: 'Adds under a minute per hour of recording.', warn: false },
+  windowsGpu: { text: 'Adds some time after each recording.', warn: false },
+  windowsCpu: {
+    text: 'No graphics acceleration here: runs on the processor and takes longer after each recording.',
+    warn: true,
+  },
+};
+
 /**
  * Settings → Meeting transcription (ADR-056), written for someone who does not know what a model
- * is: one status line (ready, or the one download that makes it ready), the live-text choice,
- * permissions, and the disk the recordings take. Model names, acceleration and removing models sit
- * in a collapsed Technical details.
+ * is: one status line (ready, or the one download that makes it ready), the live-text choice, the
+ * optional speaker attribution after Stop (ADR-098), permissions, and the disk the recordings
+ * take. Model names, acceleration and removing models sit in a collapsed Technical details.
  */
 @Component({
   selector: 'app-transcription-section',
@@ -125,6 +134,72 @@ interface ModelRow {
             </div>
           }
         }
+      </div>
+
+      <div
+        class="mt-4 rounded border border-[var(--line)] bg-[var(--bg-1)] px-3 py-3"
+        data-testid="speaker-attribution"
+      >
+        <div class="mono mb-2 text-[11px] uppercase tracking-wider text-[var(--ink-mute)]">
+          After you stop
+        </div>
+        <div class="flex items-center justify-between gap-3">
+          <div>
+            <div class="text-[12px] text-[var(--ink)]">
+              Tell speakers apart in the meeting audio
+            </div>
+            <div class="text-[11px] leading-relaxed text-[var(--ink-mute)]">
+              Labels the people in the meeting audio as Speaker 1, Speaker 2, … Your microphone
+              stays "You". Runs on this computer.
+            </div>
+          </div>
+          <app-toggle
+            testId="speaker-attribution-toggle"
+            ariaLabel="Tell speakers apart in the meeting audio"
+            [checked]="speakerAttribution()"
+            (changed)="onSpeakerToggle($event)"
+          />
+        </div>
+        @if (speakerCost(); as cost) {
+          <p
+            class="mt-2 text-[11px] leading-relaxed"
+            [class]="cost.warn ? 'text-amber-300' : 'text-[var(--ink-mute)]'"
+            data-testid="speaker-hardware"
+          >
+            {{ cost.text }}
+          </p>
+        }
+        @if (speakerAttribution() && diarizationModel(); as dm) {
+          @if (!dm.downloaded) {
+            <div class="mt-2 flex items-center justify-between gap-3 text-[11px] text-amber-300">
+              <span>Needs one download ({{ size(dm) }}).</span>
+              <button
+                type="button"
+                class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-40"
+                data-testid="download-diarization-model"
+                [disabled]="busy()"
+                (click)="download(dm.key)"
+              >
+                {{ downloadLabel(dm) }}
+              </button>
+            </div>
+          }
+        }
+        <details class="mt-2" data-testid="speaker-limits">
+          <summary class="cursor-pointer select-none text-[11.5px] text-[var(--ink-dim)]">
+            Limits
+          </summary>
+          <ul
+            class="mt-2 list-disc space-y-1 pl-4 text-[11px] leading-relaxed text-[var(--ink-mute)]"
+          >
+            <li>
+              One person can get two labels and one label can cover two people, most often when
+              people talk over each other.
+            </li>
+            <li>Up to 8 people. Transcribing again can number them differently.</li>
+            <li>People in the room with you are picked up by your microphone and labelled You.</li>
+          </ul>
+        </details>
       </div>
 
       @if (isMacos()) {
@@ -253,37 +328,57 @@ export class TranscriptionSectionComponent implements OnInit {
   /** The recommended models + their state; `null` while loading. */
   readonly model = signal<RecommendedModelAck | null>(null);
 
-  /** Rows the card renders: the live model, plus the offline one when it is a different model. */
+  /**
+   * Rows the card renders: the live model, plus the offline one when it is a different model, plus
+   * the speaker-diarization model once it is on disk or downloading.
+   */
   readonly modelRows = computed<ModelRow[]>(() => {
     const m = this.model();
     if (!m) {
       return [];
     }
     const live = m.live;
-    if (!m.finalize) {
-      return [
-        {
-          entry: live,
-          title: 'Speech recognition model',
-          hint: 'best quality for your hardware',
-          idSuffix: '',
-        },
-      ];
+    const rows: ModelRow[] = m.finalize
+      ? [
+          {
+            entry: live,
+            title: 'Live transcription model',
+            hint: 'fast enough to keep up while you record',
+            idSuffix: '',
+          },
+          {
+            entry: m.finalize,
+            title: 'Final transcript model',
+            hint: 'higher quality, runs after you stop recording',
+            idSuffix: '-finalize',
+          },
+        ]
+      : [
+          {
+            entry: live,
+            title: 'Speech recognition model',
+            hint: 'best quality for your hardware',
+            idSuffix: '',
+          },
+        ];
+    if (m.diarization.downloaded || m.diarization.downloading) {
+      rows.push({
+        entry: m.diarization,
+        title: 'Speaker model',
+        hint: 'tells speakers apart in the meeting audio after you stop',
+        idSuffix: '-diarization',
+      });
     }
-    return [
-      {
-        entry: live,
-        title: 'Live transcription model',
-        hint: 'fast enough to keep up while you record',
-        idSuffix: '',
-      },
-      {
-        entry: m.finalize,
-        title: 'Final transcript model',
-        hint: 'higher quality, runs after you stop recording',
-        idSuffix: '-finalize',
-      },
-    ];
+    return rows;
+  });
+
+  readonly diarizationModel = computed(() => this.model()?.diarization ?? null);
+
+  readonly speakerCost = computed(() => {
+    const m = this.model();
+    if (!m) return null;
+    if (this.isMacos()) return SPEAKER_COST_TEXT.macos;
+    return m.gpu_class === 'none' ? SPEAKER_COST_TEXT.windowsCpu : SPEAKER_COST_TEXT.windowsGpu;
   });
   /** Local error string. */
   readonly error = signal('');
@@ -325,6 +420,8 @@ export class TranscriptionSectionComponent implements OnInit {
 
   /** Whether new recordings show live text (off unless the user turned it on). */
   readonly liveTranscript = signal(this.transcription.liveTranscriptPreferred());
+  readonly speakerAttribution = signal(this.transcription.speakerAttribution());
+
   private readonly tauri = inject(TauriService);
   private readonly cdr = inject(ChangeDetectorRef);
 
@@ -404,6 +501,16 @@ export class TranscriptionSectionComponent implements OnInit {
     const on = (event.target as HTMLInputElement).checked;
     this.liveTranscript.set(on);
     this.transcription.setLiveTranscriptPreferred(on);
+  }
+
+  /**
+   * Persists the speaker-attribution choice; it applies from the next offline pass.
+   * @param event - the toggle's change event.
+   */
+  onSpeakerToggle(event: Event): void {
+    const on = (event.target as HTMLInputElement).checked;
+    this.speakerAttribution.set(on);
+    this.transcription.setSpeakerAttribution(on);
   }
 
   /** Opens System Settings → Privacy → Microphone. */

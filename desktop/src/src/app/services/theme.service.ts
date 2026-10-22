@@ -120,11 +120,16 @@ export class ThemeService implements OnDestroy {
   private readonly modeSignal = signal<ThemeMode>(
     readStoredChoice(MODE_STORAGE_KEY, THEME_MODES, DEFAULT_THEME_MODE)
   );
+  private readonly effectiveModeSignal = signal<EffectiveMode>(
+    resolveEffectiveMode(this.modeSignal())
+  );
 
   /** Read-only signal of the current accent theme id. */
   readonly theme: Signal<ThemeId> = this.themeSignal.asReadonly();
   /** Read-only signal of the current appearance mode (light/dark/auto). */
   readonly mode: Signal<ThemeMode> = this.modeSignal.asReadonly();
+  /** Read-only signal of the light/dark mode in effect, with `auto` resolved against the OS. */
+  readonly effectiveMode: Signal<EffectiveMode> = this.effectiveModeSignal.asReadonly();
 
   private readonly mediaQuery = getDarkMQ();
   private readonly mediaListener = (): void => {
@@ -190,6 +195,7 @@ export class ThemeService implements OnDestroy {
   private applyMode(mode: ThemeMode): void {
     const effective = resolveEffectiveMode(mode);
     applyModeClass(effective);
+    this.effectiveModeSignal.set(effective);
     this.native.syncWindowTheme(mode === 'auto' ? null : effective);
   }
 }

@@ -1,22 +1,29 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { marked } from 'marked';
+import { chatMarkdown } from '../../shared/markdown';
+import { MERMAID_LOADER, MermaidRendererService } from '../../shared/mermaid-renderer.service';
+import { createFakeMermaid, fakeMermaidLoader, type FakeMermaid } from '../../testing/fake-mermaid';
 import { TextBlockComponent } from './text-block.component';
 
 describe('TextBlockComponent', () => {
   let component: TextBlockComponent;
   let fixture: ComponentFixture<TextBlockComponent>;
   let el: HTMLElement;
+  let mermaid: FakeMermaid;
 
   beforeEach(async () => {
+    mermaid = createFakeMermaid();
     await TestBed.configureTestingModule({
       imports: [TextBlockComponent],
+      providers: [{ provide: MERMAID_LOADER, useValue: fakeMermaidLoader(mermaid) }],
     }).compileComponents();
 
     fixture = TestBed.createComponent(TextBlockComponent);
     component = fixture.componentInstance;
     el = fixture.nativeElement as HTMLElement;
   });
+
+  afterEach(() => vi.restoreAllMocks());
 
   it('renders markdown content as HTML', () => {
     fixture.componentRef.setInput('content', '**bold text**');
@@ -85,7 +92,7 @@ describe('TextBlockComponent', () => {
   });
 
   it('rendered() throws if marked.parse returns a Promise', () => {
-    vi.spyOn(marked, 'parse').mockReturnValueOnce(Promise.resolve('<p>hi</p>') as never);
+    vi.spyOn(chatMarkdown, 'parse').mockReturnValueOnce(Promise.resolve('<p>hi</p>') as never);
     fixture.componentRef.setInput('content', 'irrelevant');
     expect(() => component.rendered()).toThrow(
       'marked.parse returned a Promise; async option must remain false'
@@ -165,5 +172,103 @@ describe('TextBlockComponent', () => {
 
     expect(el.getAttribute('role')).toBeNull();
     expect(el.getAttribute('aria-live')).toBeNull();
+  });
+
+  describe('rich Markdown (SPEED-759)', () => {
+    const closed = '```mermaid\ngraph TD\n  A --> B\n```';
+
+    function slot(): HTMLElement | null {
+      return el.querySelector('.mermaid-slot');
+    }
+
+    async function diagramDrawn(): Promise<SVGSVGElement> {
+      let svg: SVGSVGElement | null = null;
+      await vi.waitFor(async () => {
+        await fixture.whenStable();
+        svg = slot()?.shadowRoot?.querySelector('svg') ?? null;
+        expect(svg).not.toBeNull();
+      });
+      return svg as unknown as SVGSVGElement;
+    }
+
+    it('draws a closed mermaid fence as a diagram', async () => {
+      fixture.componentRef.setInput('content', `Flow:\n\n${closed}`);
+      fixture.detectChanges();
+      const svg = await diagramDrawn();
+      expect(svg.querySelector('text')?.textContent).toContain('A --> B');
+      expect(el.querySelector('p')?.textContent).toBe('Flow:');
+    });
+
+    it('keeps an invalid diagram as its code block in an intact message and logs no error', async () => {
+      const error = vi.spyOn(console, 'error');
+      const source = 'graph invalid';
+      fixture.componentRef.setInput(
+        'content',
+        `Before\n\n\`\`\`mermaid\n${source}\n\`\`\`\n\nAfter`
+      );
+      fixture.detectChanges();
+      const renderer = TestBed.inject(MermaidRendererService);
+      await vi.waitFor(() => expect(renderer.lookup(source)).toEqual({ kind: 'failed' }));
+      await fixture.whenStable();
+      expect(slot()?.shadowRoot ?? null).toBeNull();
+      expect(slot()?.querySelector('code')?.textContent).toContain(source);
+      expect(Array.from(el.querySelectorAll('p'), (p) => p.textContent)).toEqual([
+        'Before',
+        'After',
+      ]);
+      expect(error).not.toHaveBeenCalled();
+    });
+
+    it('shows a streaming fence as code and draws it once the fence closes', async () => {
+      const open = '```mermaid\ngraph TD\n  A --> B';
+      fixture.componentRef.setInput('streaming', true);
+      fixture.componentRef.setInput('content', open);
+      fixture.detectChanges();
+      await fixture.whenStable();
+      expect(slot()).toBeNull();
+      expect(el.querySelector('pre code.language-mermaid')?.textContent).toContain('A --> B');
+      expect(mermaid.parse).not.toHaveBeenCalled();
+
+      fixture.componentRef.setInput('content', `${open}\n\`\`\``);
+      fixture.detectChanges();
+      expect(slot()?.shadowRoot ?? null).toBeNull();
+      expect(slot()?.querySelector('pre code')?.textContent).toContain('A --> B');
+      await diagramDrawn();
+      expect(mermaid.render).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps the drawn diagram through further streamed deltas without rendering it again', async () => {
+      fixture.componentRef.setInput('streaming', true);
+      fixture.componentRef.setInput('content', closed);
+      fixture.detectChanges();
+      await diagramDrawn();
+      fixture.componentRef.setInput('content', `${closed}\n\nMore text`);
+      fixture.detectChanges();
+      await fixture.whenStable();
+      expect(slot()?.shadowRoot?.querySelector('svg') ?? null).not.toBeNull();
+      expect(mermaid.render).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps highlighting, footnotes, alerts and task lists through the sanitizer', () => {
+      fixture.componentRef.setInput(
+        'content',
+        [
+          '```ts\nconst x = 1;\n```',
+          'See[^1].',
+          '> [!TIP]\n> Try it.',
+          '- [ ] todo',
+          '[^1]: The note.',
+        ].join('\n\n')
+      );
+      fixture.detectChanges();
+      expect(el.querySelector('pre code span.hljs-keyword')?.textContent).toBe('const');
+      expect(el.querySelector('sup.footnote-ref')?.textContent).toBe('1');
+      expect(el.querySelector('section.footnotes li')?.textContent).toContain('The note.');
+      expect(el.querySelector('.markdown-alert-tip .markdown-alert-title')?.textContent).toBe(
+        'Tip'
+      );
+      expect(el.querySelector('span.task-checkbox')?.getAttribute('aria-checked')).toBe('false');
+      expect(el.querySelector('input')).toBeNull();
+    });
   });
 });
