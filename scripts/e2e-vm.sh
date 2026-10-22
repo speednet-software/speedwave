@@ -332,7 +332,6 @@ if ($bridges) {
 Remove-Item -Recurse -Force "C:\Speedwave" -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force "$env:USERPROFILE\.speedwave" -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force "C:\speedwave-e2e" -ErrorAction SilentlyContinue
-Remove-Item -Recurse -Force "C:\cb" -ErrorAction SilentlyContinue
 Remove-Item -Force "$env:TEMP\speedwave-setup.exe" -ErrorAction SilentlyContinue
 
 # Remove WSL-side staging dir (in the build distro, not Speedwave distro).
@@ -532,9 +531,12 @@ New-Item -ItemType Directory -Path $env:CARGO_TARGET_DIR -Force | Out-Null
 $env:CMAKE_GENERATOR = 'Ninja'
 Set-Location C:\speedwave-e2e
 
+Remove-Item -Recurse -Force "$env:CARGO_TARGET_DIR\release\bundle" -ErrorAction SilentlyContinue
+Set-Content -Path C:\speedwave-e2e\e2e-nsis.conf.json -Value '{"bundle":{"windows":{"nsis":{"compression":"none"}}}}'
+
 Write-Host "── Building Tauri release with NSIS bundle (e2e feature = WebDriver on :4445)..."
 Set-Location desktop\src-tauri
-cargo tauri build --features e2e --no-sign --bundles nsis
+cargo tauri build --features e2e --no-sign --bundles nsis --config C:\speedwave-e2e\e2e-nsis.conf.json
 Assert-ExitCode
 Set-Location ..\..
 Write-Host "Step 4 DONE"
@@ -790,6 +792,10 @@ run_macos() {
 
     macos_ssh bash <<'SCRIPT'
 set -euo pipefail
+mkdir -p ~/speedwave-e2e-target/root ~/speedwave-e2e-target/desktop
+rm -rf ~/speedwave-e2e-target/desktop/release/bundle
+ln -sfn ~/speedwave-e2e-target/root /tmp/speedwave-e2e/target
+ln -sfn ~/speedwave-e2e-target/desktop /tmp/speedwave-e2e/desktop/src-tauri/target
 cd /tmp/speedwave-e2e
 export PATH="$HOME/.cargo/bin:$PATH"
 eval "$(/opt/homebrew/bin/brew shellenv)"
