@@ -76,10 +76,16 @@ describe('TranscriptionSectionComponent', () => {
       recommendedModel,
       recommended,
       loadRecommendedModel: vi.fn(async () => {
+        const ack = await recommendedModel();
+        recommended.set(ack);
+        return ack;
+      }),
+      downloadModel: vi.fn(async () => {
         recommended.set(await recommendedModel());
       }),
-      downloadModel: vi.fn(async () => undefined),
-      deleteModel: vi.fn(async () => undefined),
+      deleteModel: vi.fn(async () => {
+        recommended.set(await recommendedModel());
+      }),
       resumeDownloadTracking: vi.fn(async () => undefined),
       clearDownloadTracking: vi.fn(() => undefined),
       microphonePermissionStatus: vi.fn(async (): Promise<MicPermissionStatus> => 'granted'),
@@ -310,21 +316,23 @@ describe('TranscriptionSectionComponent', () => {
     expect(state.textContent).toContain('Downloaded');
   });
 
-  it('download() invokes downloadModel then re-reads state', async () => {
+  it('download() invokes downloadModel and shows the state the service re-read', async () => {
     await component.ngOnInit();
     svc.recommendedModel.mockResolvedValueOnce(downloaded);
     await component.download('large-v3');
     expect(svc.downloadModel).toHaveBeenCalledWith('large-v3');
+    expect(svc.loadRecommendedModel).toHaveBeenCalledTimes(1);
     expect(component.model()?.live.downloaded).toBe(true);
     expect(component.busy()).toBe(false);
   });
 
-  it('remove() invokes deleteModel then re-reads state', async () => {
+  it('remove() invokes deleteModel and shows the state the service re-read', async () => {
     svc.recommendedModel.mockResolvedValueOnce(downloaded);
     await component.ngOnInit();
     svc.recommendedModel.mockResolvedValueOnce(notDownloaded);
     await component.remove('large-v3');
     expect(svc.deleteModel).toHaveBeenCalledWith('large-v3');
+    expect(svc.loadRecommendedModel).toHaveBeenCalledTimes(1);
     expect(component.model()?.live.downloaded).toBe(false);
   });
 
@@ -637,9 +645,9 @@ describe('TranscriptionSectionComponent', () => {
     it('surfaces a failed download as an error and keeps the switch on', async () => {
       svc.downloadModel.mockRejectedValue(new Error('network down'));
       component.speakerAttribution.set(true);
-      await component.ngOnInit();
       fixture.detectChanges();
-      await new Promise((r) => setTimeout(r, 0));
+      await fixture.whenStable();
+      fixture.detectChanges();
       q('download-diarization-model')?.click();
       await fixture.whenStable();
       fixture.detectChanges();

@@ -1661,6 +1661,49 @@ describe('TranscriptionService', () => {
       expect(svc.modelReady()).toBe(false);
     });
 
+    it('keeps the download tracked until modelReady is read, so the gate never shows Download in between', async () => {
+      const pendingList = createDeferred<{ whisper: { key: string; downloaded: boolean }[] }>();
+      mockTauri.invokeHandler = async (cmd) => {
+        if (cmd === 'list_transcription_models') return pendingList.promise;
+        if (cmd === 'recommended_transcription_model') return recommended(true);
+        return undefined;
+      };
+      const done = svc.downloadModel('large-v3');
+      await new Promise((r) => setTimeout(r, 0));
+      expect(svc.downloadingModelKey()).toBe('large-v3');
+      expect(svc.modelReady()).toBeNull();
+      pendingList.resolve(list(true));
+      await done;
+      expect(svc.modelReady()).toBe(true);
+      expect(svc.downloadingModelKey()).toBeNull();
+    });
+
+    it('drops a read overtaken by a newer one', async () => {
+      const first = createDeferred<{ whisper: { key: string; downloaded: boolean }[] }>();
+      const second = createDeferred<{ whisper: { key: string; downloaded: boolean }[] }>();
+      let calls = 0;
+      mockTauri.invokeHandler = async () => (++calls === 1 ? first.promise : second.promise);
+      const a = svc.refreshModelReady();
+      const b = svc.refreshModelReady();
+      second.resolve(list(false));
+      await b;
+      expect(svc.modelReady()).toBe(false);
+      first.resolve(list(true));
+      await a;
+      expect(svc.modelReady()).toBe(false);
+    });
+
+    it('keeps the same recommended object while the backend reports the same state', async () => {
+      mockTauri.invokeHandler = async () => recommended(false);
+      await svc.loadRecommendedModel();
+      const before = svc.recommended();
+      await svc.loadRecommendedModel();
+      expect(svc.recommended()).toBe(before);
+      mockTauri.invokeHandler = async () => recommended(true);
+      await svc.loadRecommendedModel();
+      expect(svc.recommended()).not.toBe(before);
+    });
+
     it('turns false again after a model is deleted', async () => {
       let downloaded = true;
       mockTauri.invokeHandler = async (cmd) => {
@@ -1880,6 +1923,39 @@ describe('TranscriptionService', () => {
         downloading = false;
         await vi.advanceTimersByTimeAsync(2000);
         expect(svc.downloadingModelKey()).toBeNull();
+      });
+
+      it('clears a resumed download of the speaker model, which is its own ack entry', async () => {
+        let downloading = true;
+        mockTauri.invokeHandler = async (cmd) =>
+          cmd === 'recommended_transcription_model'
+            ? {
+                live: {
+                  key: 'large-v3',
+                  display_name: 'Large v3',
+                  size_bytes: 1,
+                  downloaded: true,
+                  downloading: false,
+                },
+                finalize: null,
+                diarization: {
+                  key: 'nemotron-3-diarization-q8_0',
+                  display_name: 'Nemotron-3 Diarization',
+                  size_bytes: 1,
+                  downloaded: !downloading,
+                  downloading,
+                },
+                accel_label: 'Metal (GPU)',
+              }
+            : { whisper: [], total_bytes_used: 0 };
+        await svc.resumeDownloadTracking('nemotron-3-diarization-q8_0');
+        await vi.advanceTimersByTimeAsync(2000);
+        expect(svc.downloadingModelKey()).toBe('nemotron-3-diarization-q8_0');
+        expect(svc.recommended()?.diarization.downloading).toBe(true);
+        downloading = false;
+        await vi.advanceTimersByTimeAsync(2000);
+        expect(svc.downloadingModelKey()).toBeNull();
+        expect(svc.recommended()?.diarization.downloaded).toBe(true);
       });
 
       it('stops polling once tracking is cleared by another path', async () => {

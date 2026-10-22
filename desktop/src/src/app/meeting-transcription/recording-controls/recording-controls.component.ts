@@ -10,7 +10,6 @@ import {
 } from '@angular/core';
 
 import { TranscriptionService } from '../../services/transcription.service';
-import { LoggerService } from '../../services/logger.service';
 import { TooltipDirective } from '../../shared/tooltip.directive';
 import { IconComponent } from '../../shared/icon.component';
 import type {
@@ -226,15 +225,13 @@ export class RecordingControlsComponent implements OnInit {
   readonly busy = signal(false);
   /** Whether the language/source pickers are open. */
   readonly optionsOpen = signal(false);
-  /** `false` until the model list has been read at least once. */
-  readonly modelsKnown = signal(false);
-  /** `true` if at least one Whisper model is downloaded (Record needs one). */
-  readonly hasModel = signal(false);
-  /**
-   * Display name of this host's high-quality model when it is not downloaded, else null. Record
-   * stays allowed (the pass falls back to the smaller model), but the cost shows before it.
-   */
-  readonly missingFinalizeModel = signal<string | null>(null);
+  private readonly transcription = inject(TranscriptionService);
+  readonly modelsKnown = computed(() => this.transcription.modelReady() !== null);
+  readonly hasModel = computed(() => this.transcription.modelReady() === true);
+  readonly missingFinalizeModel = computed(() => {
+    const fin = this.transcription.recommended()?.finalize;
+    return fin && !fin.downloaded && !fin.downloading ? fin.display_name : null;
+  });
   /** `true` when the chosen source is the mixed (system + mic) one. */
   readonly mixedSourceSelected = computed(
     () => this.sources()[this.sourceIndex()]?.source.kind === 'mixed'
@@ -253,8 +250,6 @@ export class RecordingControlsComponent implements OnInit {
     return k === 'mixed' || k === 'microphone';
   });
 
-  private readonly transcription = inject(TranscriptionService);
-  private readonly log = inject(LoggerService);
   private readonly cdr = inject(ChangeDetectorRef);
 
   /** "Polish · Whole meeting": what the next recording uses, on the chooser. */
@@ -291,7 +286,7 @@ export class RecordingControlsComponent implements OnInit {
   readonly postponing = signal(false);
   protected readonly shortcutHint = RECORD_SHORTCUT_HINT;
 
-  /** Loads the source list and model availability, and restores the last recording's choice. */
+  /** Loads the source list and restores the last recording's choice. */
   async ngOnInit(): Promise<void> {
     try {
       const list = await this.transcription.listAudioSources();
@@ -300,7 +295,6 @@ export class RecordingControlsComponent implements OnInit {
     } catch (e: unknown) {
       this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
     }
-    await this.refreshModelAvailability();
     this.cdr.markForCheck();
   }
 
@@ -323,27 +317,6 @@ export class RecordingControlsComponent implements OnInit {
     const mixedIdx = list.findIndex((s) => s.source.kind === 'mixed');
     const sysIdx = list.findIndex((s) => s.source.kind === 'system_wide');
     this.sourceIndex.set(mixedIdx >= 0 ? mixedIdx : sysIdx >= 0 ? sysIdx : 0);
-  }
-
-  /** Re-reads whether a Whisper model is downloaded and whether the high-quality one is. */
-  async refreshModelAvailability(): Promise<void> {
-    try {
-      const ack = await this.transcription.listModels();
-      this.hasModel.set(ack.whisper.some((m) => m.downloaded));
-      this.modelsKnown.set(true);
-    } catch {
-      this.modelsKnown.set(false);
-    }
-    try {
-      const fin = (await this.transcription.recommendedModel()).finalize;
-      this.missingFinalizeModel.set(
-        fin && !fin.downloaded && !fin.downloading ? fin.display_name : null
-      );
-    } catch (e: unknown) {
-      this.log.warn(`recommended-model check failed: ${e instanceof Error ? e.message : e}`);
-      this.missingFinalizeModel.set(null);
-    }
-    this.cdr.markForCheck();
   }
 
   /**

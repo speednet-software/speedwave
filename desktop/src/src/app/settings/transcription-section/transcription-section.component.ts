@@ -11,11 +11,7 @@ import {
 
 import { TauriService } from '../../services/tauri.service';
 import { TranscriptionService } from '../../services/transcription.service';
-import type {
-  MicPermissionStatus,
-  RecommendedModelAck,
-  RecommendedModelEntry,
-} from '../../models/transcript';
+import type { MicPermissionStatus, RecommendedModelEntry } from '../../models/transcript';
 import { formatBytes } from '../../shared/format-bytes';
 import { ToggleComponent } from '../../shared/toggle.component';
 
@@ -327,7 +323,7 @@ export class TranscriptionSectionComponent implements OnInit {
   /** Forwards errors to the Settings shell banner. */
   readonly errorOccurred = output<string>();
 
-  readonly model = computed<RecommendedModelAck | null>(() => this.transcription.recommended());
+  readonly model = this.transcription.recommended;
 
   /**
    * Rows the card renders: the live model, plus the offline one when it is a different model, plus
@@ -549,7 +545,7 @@ export class TranscriptionSectionComponent implements OnInit {
   async download(key: string): Promise<void> {
     try {
       await this.transcription.downloadModel(key);
-      await this.refresh();
+      this.error.set('');
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       this.error.set(msg);
@@ -566,7 +562,7 @@ export class TranscriptionSectionComponent implements OnInit {
     this.removeBusy.set(true);
     try {
       await this.transcription.deleteModel(key);
-      await this.refresh();
+      this.error.set('');
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       this.error.set(msg);

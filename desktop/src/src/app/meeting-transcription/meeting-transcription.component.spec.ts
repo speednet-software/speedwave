@@ -10,6 +10,7 @@ import type {
   CaptureWarning,
   DownloadProgress,
   Language,
+  RecommendedModelAck,
   RecommendedModelEntry,
   TranscriptSession,
   TranscriptStatus,
@@ -29,6 +30,7 @@ describe('MeetingTranscriptionComponent', () => {
     listAudioSources: ReturnType<typeof vi.fn>;
     liveTranscriptPreferred: ReturnType<typeof vi.fn>;
     modelReady: typeof modelReadySig;
+    recommended: Signal<RecommendedModelAck | null>;
     refreshModelReady: ReturnType<typeof vi.fn>;
     refreshModelState: ReturnType<typeof vi.fn>;
     watchRecordings: ReturnType<typeof vi.fn>;
@@ -105,6 +107,7 @@ describe('MeetingTranscriptionComponent', () => {
       listAudioSources: vi.fn(async () => []),
       liveTranscriptPreferred: vi.fn(() => false),
       modelReady: modelReadySig,
+      recommended: signal<RecommendedModelAck | null>(null),
       refreshModelReady: vi.fn(async () => undefined),
       refreshModelState: vi.fn(async () => undefined),
       watchRecordings: vi.fn(async () => undefined),
