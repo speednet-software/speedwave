@@ -18,7 +18,7 @@ enum MailSending {
     private static let itemSeparator = "\u{1E}"
     private static let replyReadFieldCount = 10
     private static let forwardReadFieldCount = 8
-    private static let redirectReadFieldCount = 6
+    private static let redirectReadFieldCount = 5
 
     private static let quoteDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -71,9 +71,8 @@ enum MailSending {
         return ["signatures": output.components(separatedBy: itemSeparator).filter { !$0.isEmpty }]
     }
 
-    /// The `reply_to_email` command: a reply to the mail `id`, the user's text above the quoted original, to its
-    /// Reply-To or sender (with `reply_all` also its other recipients but the user's own addresses), with `cc` and
-    /// `bcc` added; the preview reads the original only, since every message Mail makes keeps a Mail thread busy.
+    /// The `reply_to_email` command: the user's text above the quoted mail `id`, to the recipients `replyPreview`
+    /// works out from the original without making a message, plus `cc` and `bcc`.
     static func replyToEmail(params: [String: Any], scripts: MailScripts) throws -> [String: Any] {
         guard let id = params["id"] as? String else {
             throw MailError.missingField("id")
@@ -119,9 +118,8 @@ enum MailSending {
         return sent(fields)
     }
 
-    /// The `forward_email` command: Mail's own forward of the mail `id`, with its quote and attachments, to `to`
-    /// and `cc`; its content is never changed, since any change leaves only the changed text. The preview reads the
-    /// original only, since every message Mail makes keeps a Mail thread busy.
+    /// The `forward_email` command: Mail's own forward of the mail `id`, content never changed, to `to` and `cc`;
+    /// the preview reads the original without making a message.
     static func forwardEmail(params: [String: Any], scripts: MailScripts) throws -> [String: Any] {
         let (mailId, to, cc) = try passOnParams(params)
         let read = try scripts.run(forwardReadScript(mailId), mailbox: mailId.mailbox, account: mailId.account)
@@ -504,15 +502,16 @@ enum MailSending {
     /// The reply a preview shows and a send checks Mail's reply against: Reply-To or sender, with `replyAll` the
     /// original's To and Cc without the user's own addresses, each once whatever its case.
     private static func replyPreview(_ output: String, body: String, replyAll: Bool) throws -> ReplyPreview {
-        let fields = output.components(separatedBy: fieldSeparator)
-        guard fields.count == replyReadFieldCount else {
-            throw ScriptError.scriptFailed("Unexpected reply from Mail.app")
-        }
+        let fields = try readFields(output, count: replyReadFieldCount)
         let originalTo = addresses(fields[3])
         let originalCc = addresses(fields[4])
         let own = addresses(fields[7])
         let replyTo = splitAddressList(fields[2]).map(bareAddress).filter { !$0.isEmpty }
-        let targets = replyTo.isEmpty ? [bareAddress(fields[1])].filter { !$0.isEmpty } : replyTo
+        let originalSender = bareAddress(fields[1])
+        let sentByUser = own.contains { $0.lowercased() == originalSender.lowercased() }
+        let targets = !replyTo.isEmpty ? replyTo
+            : sentByUser ? newAddresses(originalTo, besides: own)
+            : [originalSender].filter { !$0.isEmpty }
         var to = newAddresses(targets, besides: [])
         var cc: [String] = []
         if replyAll {
@@ -557,10 +556,7 @@ enum MailSending {
     }
 
     private static func forwardPreview(_ output: String, id: MailId) throws -> PassOnPreview {
-        let fields = output.components(separatedBy: fieldSeparator)
-        guard fields.count == forwardReadFieldCount else {
-            throw ScriptError.scriptFailed("Unexpected reply from Mail.app")
-        }
+        let fields = try readFields(output, count: forwardReadFieldCount)
         let sender = try sender(
             name: fields[6], addresses: addresses(fields[7]), recipients: addresses(fields[4]) + addresses(fields[5]))
         let subject = prefixed(fields[0], "Fwd:")
@@ -603,23 +599,28 @@ enum MailSending {
         set spwIsoDate to ""
         if class of spwDate is date then set spwIsoDate to (spwDate as «class isot» as string)
         set AppleScript's text item delimiters to (character id 30)
-        set spwFields to {spwSubject, spwSubject, spwSender, spwIsoDate, spwNames as text, spwFrom}
+        set spwFields to {spwSubject, spwSender, spwIsoDate, spwNames as text, spwFrom}
         set AppleScript's text item delimiters to (character id 29)
         return spwFields as text
         """
     }
 
     private static func redirectFields(_ output: String, id: MailId) throws -> [String: Any] {
-        let fields = output.components(separatedBy: fieldSeparator)
-        guard fields.count == redirectReadFieldCount else {
-            throw ScriptError.scriptFailed("Unexpected reply from Mail.app")
-        }
+        let fields = try readFields(output, count: redirectReadFieldCount)
         return [
             "subject": fields[0],
-            "from": fields[5],
-            "original": original(id, subject: fields[1], sender: fields[2], received: fields[3]),
-            "attachments": items(fields[4]),
+            "from": fields[4],
+            "original": original(id, subject: fields[0], sender: fields[1], received: fields[2]),
+            "attachments": items(fields[3]),
         ]
+    }
+
+    private static func readFields(_ output: String, count: Int) throws -> [String] {
+        let fields = output.components(separatedBy: fieldSeparator)
+        guard fields.count == count else {
+            throw ScriptError.scriptFailed("Unexpected reply from Mail.app")
+        }
+        return fields
     }
 
     private static func original(_ id: MailId, subject: String, sender: String, received: String) -> [String: Any] {
@@ -698,13 +699,14 @@ enum MailSending {
         return lines.joined(separator: "\n")
     }
 
-    /// The handler `previewCheck` compares address lists with: the same count, and every seen address expected, in
-    /// any case.
+    /// The handler `previewCheck` compares address lists with: as sets, in any case, repeats ignored.
     private static let sameAddressesHandler = """
         on spwSameAddresses(spwSeen, spwExpected)
-            if (count of spwSeen) is not (count of spwExpected) then return false
             repeat with spwAddress in spwSeen
                 if spwExpected does not contain (contents of spwAddress) then return false
+            end repeat
+            repeat with spwAddress in spwExpected
+                if spwSeen does not contain (contents of spwAddress) then return false
             end repeat
             return true
         end spwSameAddresses
@@ -727,7 +729,7 @@ enum MailSending {
         \(enabledAccountCheck)
             set spwOut to \(command) m opening window false
         \(closingOnError("spwOut", work))
-            if not (send spwOut) then error "\(sendFailedMarker)"
+        \(sendLine("spwOut"))
         end tell
         """
     }
@@ -755,7 +757,7 @@ enum MailSending {
         \(enabledAccountCheck)
             set spwReply to reply m opening window false reply to all \(replyAll)
         \(closingOnError("spwReply", changes))
-            if not (send spwReply) then error "\(sendFailedMarker)"
+        \(sendLine("spwReply"))
         end tell
         """
     }

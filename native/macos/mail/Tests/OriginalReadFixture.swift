@@ -34,8 +34,8 @@ func forwardRead(
         .joined(separator: "\u{1D}")
 }
 
-/// The output the read script of `redirect_email` prints: the subject and sender of Mail's redirect and the
-/// original's subject, sender, date and attachment names.
+/// The output the read script of `redirect_email` prints: the original's subject, sender, date and attachment names
+/// and the sender of Mail's redirect.
 func redirectRead(
     subject: String = "Invoice 12",
     sender: String = "Anna <anna@x>",
@@ -43,7 +43,7 @@ func redirectRead(
     attachments: [String] = ["invoice.pdf", "terms.pdf"],
     from: String = "Me <me@work.example>"
 ) -> String {
-    [subject, subject, sender, received, items(attachments), from].joined(separator: "\u{1D}")
+    [subject, sender, received, items(attachments), from].joined(separator: "\u{1D}")
 }
 
 private func items(_ values: [String]) -> String {

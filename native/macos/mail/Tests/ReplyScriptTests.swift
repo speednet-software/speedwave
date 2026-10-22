@@ -26,7 +26,7 @@ final class ReplyScriptTests: XCTestCase {
         return String(script[end.upperBound...])
     }
 
-    func testTheSendCheckComparesAddressListsInAnyCaseAndOrderAndCountsThem() throws {
+    func testTheSendCheckComparesAddressListsAsSetsInAnyCaseAndOrder() throws {
         let send = try XCTUnwrap(
             try scripts("reply_to_email", ["id": mail.encoded, "body": "b", "confirm_send": true], reply: replyRead())
                 .last)
@@ -37,12 +37,13 @@ final class ReplyScriptTests: XCTestCase {
                 my spwSameAddresses({"anna@x", "bob@x"}, {"anna@x"}), ¬
                 my spwSameAddresses({}, {}), ¬
                 my spwSameAddresses({"zoë@przykład.pl"}, {"ZOË@PRZYKŁAD.PL"}), ¬
-                my spwSameAddresses({"a@x"}, {"b@x"})}
+                my spwSameAddresses({"a@x"}, {"b@x"}), ¬
+                my spwSameAddresses({"a@x", "A@x"}, {"a@x"})}
             """
 
         let output = try osascriptExecutor(handler + "\n" + cases, 15)
 
-        XCTAssertEqual(output, "true, false, false, true, true, false")
+        XCTAssertEqual(output, "true, false, false, true, true, false, true")
     }
 
     func testTheReplyReadJoinsEveryFieldThePreviewReadsInRealAppleScript() throws {

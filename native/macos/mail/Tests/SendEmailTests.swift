@@ -242,6 +242,28 @@ final class SendEmailTests: XCTestCase {
         XCTAssertEqual(result["cc"] as? [String], ["carol@x"])
     }
 
+    func testAReplyToAMailTheUserSentGoesToItsRecipientsInsteadOfBackToTheUser() throws {
+        harness.executor.reply(
+            replyRead(sender: "Me <ME@home.example>", to: ["bob@x", "me@work.example"], cc: ["carol@x"]))
+        let plain = try harness.call("reply_to_email", ["id": archived.encoded, "body": "Ok"])
+        harness.executor.reply(
+            replyRead(sender: "Me <ME@home.example>", to: ["bob@x", "me@work.example"], cc: ["carol@x"]))
+        let all = try harness.call("reply_to_email", ["id": archived.encoded, "body": "Ok", "reply_all": true])
+
+        XCTAssertEqual(plain["to"] as? [String], ["bob@x"])
+        XCTAssertEqual(plain["cc"] as? [String], [])
+        XCTAssertEqual(all["to"] as? [String], ["bob@x"])
+        XCTAssertEqual(all["cc"] as? [String], ["carol@x"])
+    }
+
+    func testAReplyToAMailTheUserSentWithAReplyToGoesThere() throws {
+        harness.executor.reply(replyRead(sender: "me@home.example", replyTo: "list@x", to: ["bob@x"]))
+
+        let result = try harness.call("reply_to_email", ["id": archived.encoded, "body": "Ok"])
+
+        XCTAssertEqual(result["to"] as? [String], ["list@x"])
+    }
+
     func testAReplySubjectGetsOneRePrefixWhateverItsCase() throws {
         let cases = [
             ("Invoice 12", "Re: Invoice 12"),

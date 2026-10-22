@@ -2112,6 +2112,8 @@ describe('mail-tools', () => {
         expect(result.error?.message).toContain('closed unsent');
         expect(result.error?.message).toContain('without confirm_send');
         expect(result.error?.message).toContain('new preview');
+        expect(result.error?.message).toContain('do not loop');
+        expect(result.error?.message).toContain('sendEmail');
         expect(result.error?.message).not.toContain('Invalid');
       }
     );

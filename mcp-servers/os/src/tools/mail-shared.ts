@@ -57,7 +57,8 @@ const MAIL_FAILURE = /\b(MAIL_[A-Z_]+): ([\s\S]*)$/;
 
 const STUCK_MAIL_STEP =
   'If a mail tool already timed out earlier in this conversation, Mail.app may have stopped answering until it ' +
-  'restarts: stop calling mail tools and ask the user to quit and reopen Mail.app, then continue.';
+  'restarts: stop calling mail tools, the checks above included, and ask the user to quit and reopen Mail.app, ' +
+  'then continue.';
 
 const BATCH_COMMANDS = [
   'delete_emails',
@@ -156,7 +157,9 @@ const MAIL_FAILURE_TEACHING: Record<
   MAIL_PREVIEW_CHANGED: (detail) => ({
     nextStep:
       `${detail} Nothing was sent. Call again with the same arguments without confirm_send to get a new preview, ` +
-      'show it to the user and send only after their yes.',
+      'show it to the user and send only after their yes. If the confirmed call fails this way again, do not loop: ' +
+      'tell the user that Mail picks other recipients, subject or sender than the preview shows, and offer to send ' +
+      'the text as a new email with sendEmail to the recipients they choose.',
   }),
   MAIL_SIGNATURE_NOT_FOUND: (detail, args) => ({
     paramName: 'signature',
