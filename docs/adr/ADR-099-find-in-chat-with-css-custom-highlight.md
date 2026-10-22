@@ -26,7 +26,7 @@
 - Diagram text is not searched, and neither is a mermaid source that failed to render and stays a visible code block, since the whole slot is skipped. A collapsed block is searched only once it is expanded, and expanding one changes the count.
 - A match is highlighted on the text nodes found at the last recompute; a streamed delta replaces the message HTML, and the highlight follows at the next debounced recompute.
 - A regex the user types runs on the main thread over every message; a pattern with catastrophic backtracking stalls the UI until it finishes, on the user's own input.
-- None of this ran in a webview: the build container has no browser. Highlight rendering, the caret in the field under WKWebView and WebView2, and the scroll centering are checked by the manual test on macOS and Windows.
+- The build container has no browser, so the specs run in jsdom. Highlight rendering, its clearing on close and on an emptied query, the caret in the field and the scroll centering were checked by hand on macOS 27.0.1 (WKWebView, Apple M2 Pro) on 2026-10-22; the same manual check on Windows (WebView2) is still open.
 
 ## Rejected alternatives
 
