@@ -15,14 +15,16 @@ export const DEFAULT_FIND_STATE: ChatFindState = {
   current: 0,
 };
 
+/** The part of the state that decides what matches. */
+export type FindQuery = Pick<ChatFindState, 'query' | 'regex' | 'matchCase'>;
+
 /** A match as character offsets into the concatenated text of one search scope. */
 export interface MatchSpan {
   start: number;
   end: number;
 }
 
-/** A text node and where its text starts in the scope's concatenated text. */
-export interface TextSegment {
+interface TextSegment {
   node: Text;
   start: number;
 }
@@ -33,20 +35,29 @@ export interface SearchScope {
   segments: readonly TextSegment[];
 }
 
-/** Attribute that marks an element whose rendered text the find bar searches. */
-export const FIND_SCOPE_ATTR = 'data-find-scope';
+/** Registry name of the current-match highlight; styled by `::highlight(chat-find)` in `styles.css`. */
+const HIGHLIGHT_NAME = 'chat-find';
 
-/** Elements skipped inside a scope: a diagram slot (its shadow root draws the diagram) and a closed `<details>`. */
+const SCOPE_SELECTOR = '[data-find-scope]';
+
+/** Elements skipped inside a scope: a diagram slot (its shadow root draws the diagram), a closed `<details>`, hidden content. */
 const SKIPPED_SELECTOR = '.mermaid-slot, details:not([open]), [hidden], [aria-hidden="true"]';
+
+/** Elements whose start ends the text of the element before them, so a match never runs across two paragraphs. */
+const BLOCK_SELECTOR =
+  'p, div, li, ul, ol, pre, h1, h2, h3, h4, h5, h6, blockquote, table, thead, tbody, tr, td, th, section, details, summary, hr, br, dl, dt, dd, figure, figcaption';
+
+const BLOCK_BOUNDARY = '\n';
 
 /**
  * Collects every scope under `root`, in document order, each with its visible text concatenated across
- * inline elements so a match may span formatting (`foo **bar**`, highlight.js spans in code).
+ * inline elements so a match may span formatting (`foo **bar**`, highlight.js spans in code), with a
+ * line break where a block element starts so text never runs from one paragraph into the next.
  * @param root - The message list container.
  */
 export function collectSearchScopes(root: ParentNode): SearchScope[] {
   const scopes: SearchScope[] = [];
-  for (const el of root.querySelectorAll(`[${FIND_SCOPE_ATTR}]`)) {
+  for (const el of root.querySelectorAll(SCOPE_SELECTOR)) {
     if (el.closest(SKIPPED_SELECTOR)) continue;
     const scope = collectScope(el);
     if (scope.text.length > 0) scopes.push(scope);
@@ -54,46 +65,25 @@ export function collectSearchScopes(root: ParentNode): SearchScope[] {
   return scopes;
 }
 
-function collectScope(el: Element): SearchScope {
-  const doc = el.ownerDocument;
-  const walker = doc.createTreeWalker(el, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
-    acceptNode: (node) => {
-      if (node.nodeType === Node.ELEMENT_NODE) {
-        return (node as Element).matches(SKIPPED_SELECTOR)
-          ? NodeFilter.FILTER_REJECT
-          : NodeFilter.FILTER_SKIP;
-      }
-      return NodeFilter.FILTER_ACCEPT;
-    },
-  });
-  const segments: TextSegment[] = [];
-  let text = '';
-  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-    const data = (node as Text).data;
-    if (data.length === 0) continue;
-    segments.push({ node: node as Text, start: text.length });
-    text += data;
-  }
-  return { text, segments };
-}
-
 /**
  * Builds the matcher for a query, or `null` for an empty query or a regex that does not compile.
- * @param query - The typed query.
- * @param regex - Whether the query is a JavaScript regular expression.
- * @param matchCase - Whether letter case must match.
+ * @param find - The query and its toggles.
  */
-export function compileQuery(query: string, regex: boolean, matchCase: boolean): RegExp | null {
-  if (query.length === 0) return null;
-  const source = regex ? query : escapeRegExp(query);
+export function compileQuery(find: FindQuery): RegExp | null {
+  if (find.query.length === 0) return null;
+  const source = find.regex ? find.query : escapeRegExp(find.query);
   try {
-    return new RegExp(source, matchCase ? 'g' : 'gi');
+    return new RegExp(source, find.matchCase ? 'g' : 'gi');
   } catch {
     return null;
   }
 }
 
-function escapeRegExp(text: string): string {
+/**
+ * Escapes `text` so a regex built from it matches it literally.
+ * @param text - Plain text, such as a selection prefilled while the regex toggle is on.
+ */
+export function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
@@ -117,28 +107,18 @@ export function findMatches(text: string, matcher: RegExp): MatchSpan[] {
 }
 
 /**
- * Maps a span of the scope text back to a DOM `Range` over the text nodes it covers.
+ * Maps a span of the scope text back to a DOM `Range` over the text nodes it covers; a span edge that
+ * falls on a block boundary snaps to the nearest text node.
  * @param scope - The scope the span was found in.
  * @param span - Offsets into `scope.text`.
  */
 export function rangeForSpan(scope: SearchScope, span: MatchSpan): Range {
-  const startSeg = segmentAt(scope.segments, span.start);
-  const endSeg = segmentAt(scope.segments, span.end - 1);
-  const range = startSeg.node.ownerDocument.createRange();
-  range.setStart(startSeg.node, span.start - startSeg.start);
-  range.setEnd(endSeg.node, span.end - endSeg.start);
+  const start = locate(scope.segments, span.start, 'start');
+  const end = locate(scope.segments, span.end, 'end');
+  const range = start.node.ownerDocument.createRange();
+  range.setStart(start.node, start.offset);
+  range.setEnd(end.node, end.offset);
   return range;
-}
-
-function segmentAt(segments: readonly TextSegment[], offset: number): TextSegment {
-  let lo = 0;
-  let hi = segments.length - 1;
-  while (lo < hi) {
-    const mid = (lo + hi + 1) >> 1;
-    if (segments[mid].start <= offset) lo = mid;
-    else hi = mid - 1;
-  }
-  return segments[lo];
 }
 
 /**
@@ -168,28 +148,69 @@ export function firstIndexAtOrBelow(tops: readonly number[], viewportTop: number
  * @param range - A range from {@link rangeForSpan}.
  */
 export function matchRect(range: Range): DOMRect {
-  const own =
-    typeof range.getBoundingClientRect === 'function' ? range.getBoundingClientRect() : null;
+  const own = range.getBoundingClientRect?.();
   if (own && (own.width > 0 || own.height > 0)) return own;
   const el = range.startContainer.parentElement;
   return el ? el.getBoundingClientRect() : new DOMRect();
 }
 
-/** Registry name of the current-match highlight; styled by `::highlight(chat-find)` in `styles.css`. */
-export const FIND_HIGHLIGHT_NAME = 'chat-find';
-
-/** Whether this engine has the CSS Custom Highlight API (WebView2; WKWebView from Safari 17.2). */
-export function highlightsSupported(): boolean {
-  return typeof CSS !== 'undefined' && 'highlights' in CSS && typeof Highlight === 'function';
-}
-
 /**
- * Highlights `range` as the current match, or clears the highlight; a no-op where the API is missing,
- * so scrolling and the counter still work without it.
+ * Highlights `range` as the current match, or clears the highlight; a no-op where the CSS Custom
+ * Highlight API is missing (WKWebView before Safari 17.2), so scrolling and the counter still work.
  * @param range - The current match, or `null` to clear.
  */
 export function setCurrentHighlight(range: Range | null): void {
-  if (!highlightsSupported()) return;
-  if (range) CSS.highlights.set(FIND_HIGHLIGHT_NAME, new Highlight(range));
-  else CSS.highlights.delete(FIND_HIGHLIGHT_NAME);
+  if (typeof CSS === 'undefined' || !('highlights' in CSS) || typeof Highlight !== 'function')
+    return;
+  if (range) CSS.highlights.set(HIGHLIGHT_NAME, new Highlight(range));
+  else CSS.highlights.delete(HIGHLIGHT_NAME);
+}
+
+function collectScope(el: Element): SearchScope {
+  const segments: TextSegment[] = [];
+  let text = '';
+  const boundary = (): void => {
+    if (text.length > 0 && !text.endsWith(BLOCK_BOUNDARY)) text += BLOCK_BOUNDARY;
+  };
+  const walk = (parent: Node): void => {
+    for (const child of parent.childNodes) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        const data = (child as Text).data;
+        if (data.length === 0) continue;
+        segments.push({ node: child as Text, start: text.length });
+        text += data;
+        continue;
+      }
+      if (child.nodeType !== Node.ELEMENT_NODE) continue;
+      const element = child as Element;
+      const block = element.matches(BLOCK_SELECTOR);
+      if (block) boundary();
+      if (!element.matches(SKIPPED_SELECTOR)) walk(element);
+      if (block) boundary();
+    }
+  };
+  walk(el);
+  return { text: text.endsWith(BLOCK_BOUNDARY) ? text.slice(0, -1) : text, segments };
+}
+
+function locate(
+  segments: readonly TextSegment[],
+  offset: number,
+  edge: 'start' | 'end'
+): { node: Text; offset: number } {
+  let lo = 0;
+  let hi = segments.length - 1;
+  const probe = edge === 'start' ? offset : offset - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (segments[mid].start <= probe) lo = mid;
+    else hi = mid - 1;
+  }
+  let segment = segments[lo];
+  let inNode = offset - segment.start;
+  if (edge === 'start' && inNode >= segment.node.length && lo + 1 < segments.length) {
+    segment = segments[lo + 1];
+    inNode = 0;
+  }
+  return { node: segment.node, offset: Math.min(inNode, segment.node.length) };
 }

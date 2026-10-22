@@ -20,30 +20,12 @@ import type { ChatMessage, MessageBlock } from '../../models/chat';
 import { ChatMessageComponent } from '../message/chat-message.component';
 import { SpinIconComponent } from '../../shared/spin-icon.component';
 import { IconComponent } from '../../shared/icon.component';
+import { onRequestCounter } from '../../shared/request-counter';
 import { ChatFindBarComponent } from '../find/chat-find-bar.component';
-import {
-  DEFAULT_FIND_STATE,
-  collectSearchScopes,
-  compileQuery,
-  findMatches,
-  firstIndexAtOrBelow,
-  matchRect,
-  rangeForSpan,
-  setCurrentHighlight,
-  wrapIndex,
-  type ChatFindState,
-  type MatchSpan,
-  type SearchScope,
-} from '../find/chat-find';
+import { ChatFindSession } from '../find/chat-find-session';
+import { DEFAULT_FIND_STATE, type ChatFindState } from '../find/chat-find';
 
 const SCROLL_BOTTOM_THRESHOLD_PX = 16;
-/** Typing and streamed deltas recompute the matches after this pause. */
-export const FIND_DEBOUNCE_MS = 150;
-
-interface FoundMatch {
-  scope: SearchScope;
-  span: MatchSpan;
-}
 
 /** Scrollable message list with auto-scroll-to-bottom that pauses while the user reads earlier messages. */
 @Component({
@@ -157,20 +139,20 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges, On
 
   /** Whether the viewport shows the end of the list; drives the jump-to-bottom button. */
   readonly atBottom = signal(true);
-  readonly findTotal = signal(0);
-  readonly findInvalid = signal(false);
+
+  private readonly findSession = new ChatFindSession({
+    container: () => this.scrollContainer?.nativeElement ?? null,
+    state: () => this.find(),
+    changed: (next) => this.findChanged.emit(next),
+  });
+  readonly findTotal = this.findSession.total;
+  readonly findInvalid = this.findSession.invalid;
 
   private shouldAutoScroll = true;
   private pendingScrollSync = false;
   private lastAutoScrollRequest = 0;
   private lastConversationKey: string | null = null;
   private rederiveFromViewport = false;
-
-  private matches: FoundMatch[] = [];
-  private findTimer: ReturnType<typeof setTimeout> | null = null;
-  private lastFindQueryKey: string | null = null;
-  private lastFindContent: readonly unknown[] = [];
-  private lastFindFocusRequest = 0;
 
   /** Wires the streaming-aware scroll sync, re-run on every signal-input change. */
   constructor() {
@@ -201,18 +183,13 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges, On
 
     effect(() => {
       const state = this.find();
-      const content = [this.messages(), this.currentBlocks(), this.conversationKey()];
-      untracked(() => this.onFindInputsChanged(state, content));
+      const key = this.conversationKey();
+      untracked(() => this.findSession.update(state, key));
     });
 
-    effect(() => {
-      const request = this.findFocusRequest();
-      untracked(() => {
-        if (request === this.lastFindFocusRequest) return;
-        this.lastFindFocusRequest = request;
-        afterNextRender(() => this.findBar()?.focusInput(), { injector: this.injector });
-      });
-    });
+    onRequestCounter(this.findFocusRequest, () =>
+      afterNextRender(() => this.findBar()?.focusInput(), { injector: this.injector })
+    );
   }
 
   private isAtBottom(): boolean {
@@ -275,6 +252,16 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges, On
     this.atBottom.set(true);
   }
 
+  /** The chat's text selection when it is a single line inside this list, else an empty string. */
+  selectedText(): string {
+    const selection = document.getSelection();
+    const list = this.scrollContainer?.nativeElement;
+    if (!selection || !list || selection.isCollapsed || !selection.anchorNode) return '';
+    if (!list.contains(selection.anchorNode)) return '';
+    const text = selection.toString();
+    return text.includes('\n') ? '' : text;
+  }
+
   /** Pins to the bottom after each render when the user has not scrolled up. */
   ngAfterViewChecked(): void {
     if (!this.pendingScrollSync) return;
@@ -287,10 +274,9 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges, On
     }
   }
 
-  /** Drops a pending recompute and the highlight it would have drawn. */
+  /** Stops the find session: its observer, a pending recompute and the highlight. */
   ngOnDestroy(): void {
-    this.clearFindTimer();
-    setCurrentHighlight(null);
+    this.findSession.dispose();
   }
 
   /**
@@ -315,94 +301,11 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges, On
 
   /** Moves to the next match, wrapping to the first after the last. */
   findNext(): void {
-    this.stepFind(1);
+    this.findSession.next();
   }
 
   /** Moves to the previous match, wrapping to the last before the first. */
   findPrevious(): void {
-    this.stepFind(-1);
-  }
-
-  private stepFind(delta: number): void {
-    const total = this.matches.length;
-    if (total === 0) return;
-    const current = wrapIndex(this.find().current + delta, total);
-    this.showMatch(current, true);
-    this.findChanged.emit({ ...this.find(), current });
-  }
-
-  private onFindInputsChanged(state: ChatFindState, content: readonly unknown[]): void {
-    if (!state.open) {
-      this.clearFindTimer();
-      this.lastFindQueryKey = null;
-      this.matches = [];
-      this.findTotal.set(0);
-      this.findInvalid.set(false);
-      setCurrentHighlight(null);
-      return;
-    }
-    const queryKey = `${state.regex ? 'r' : 'p'}${state.matchCase ? 'c' : 'i'}:${state.query}`;
-    const queryChanged = queryKey !== this.lastFindQueryKey;
-    const contentChanged =
-      content.length !== this.lastFindContent.length ||
-      content.some((item, i) => item !== this.lastFindContent[i]);
-    if (!queryChanged && !contentChanged) return;
-    this.lastFindQueryKey = queryKey;
-    this.lastFindContent = content;
-    this.clearFindTimer();
-    this.findTimer = setTimeout(() => {
-      this.findTimer = null;
-      this.recomputeFind(queryChanged ? 'query' : 'content');
-    }, FIND_DEBOUNCE_MS);
-  }
-
-  private clearFindTimer(): void {
-    if (this.findTimer === null) return;
-    clearTimeout(this.findTimer);
-    this.findTimer = null;
-  }
-
-  private recomputeFind(reason: 'query' | 'content'): void {
-    const state = this.find();
-    const container = this.scrollContainer?.nativeElement;
-    if (!state.open || !container) return;
-    const matcher = compileQuery(state.query, state.regex, state.matchCase);
-    this.findInvalid.set(state.regex && state.query.length > 0 && matcher === null);
-    const found: FoundMatch[] = [];
-    if (matcher) {
-      for (const scope of collectSearchScopes(container)) {
-        for (const span of findMatches(scope.text, matcher)) found.push({ scope, span });
-      }
-    }
-    this.matches = found;
-    this.findTotal.set(found.length);
-    if (found.length === 0) {
-      setCurrentHighlight(null);
-      if (state.current !== 0) this.findChanged.emit({ ...state, current: 0 });
-      return;
-    }
-    let current: number;
-    if (reason === 'query') {
-      const viewportTop = container.getBoundingClientRect().top;
-      const tops = found.map((m) => matchRect(rangeForSpan(m.scope, m.span)).top);
-      current = firstIndexAtOrBelow(tops, viewportTop);
-    } else {
-      current = Math.min(state.current, found.length - 1);
-    }
-    this.showMatch(current, reason === 'query');
-    if (current !== state.current) this.findChanged.emit({ ...state, current });
-  }
-
-  private showMatch(index: number, scroll: boolean): void {
-    const match = this.matches[index];
-    const container = this.scrollContainer?.nativeElement;
-    if (!match || !container) return;
-    const range = rangeForSpan(match.scope, match.span);
-    setCurrentHighlight(range);
-    if (!scroll) return;
-    const rect = matchRect(range);
-    const viewport = container.getBoundingClientRect();
-    const offset = rect.top - viewport.top - (container.clientHeight - rect.height) / 2;
-    container.scrollTop += offset;
+    this.findSession.previous();
   }
 }

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { DebugElement } from '@angular/core';
-import { ChatMessageListComponent, FIND_DEBOUNCE_MS } from './chat-message-list.component';
+import { ChatMessageListComponent } from './chat-message-list.component';
 import { ChatMessageComponent } from '../message/chat-message.component';
 import { ToolNormalizerService } from '../../services/tool-normalizer.service';
 import type { ChatMessage, MessageBlock } from '../../models/chat';
@@ -445,6 +445,7 @@ describe('ChatMessageListComponent', () => {
   });
 
   describe('find in chat', () => {
+    const FIND_DEBOUNCE_MS = 150;
     const registry = new Map<string, { range: Range }>();
     let emitted: ChatFindState[];
 
@@ -489,6 +490,12 @@ describe('ChatMessageListComponent', () => {
       fixture.detectChanges();
     }
 
+    /** Lets the MutationObserver deliver (a microtask) before the debounce runs. */
+    async function settleAfterDom(): Promise<void> {
+      await Promise.resolve();
+      settle();
+    }
+
     function bar(): HTMLElement | null {
       return fixture.nativeElement.querySelector('[data-testid="chat-find-bar"]');
     }
@@ -503,6 +510,12 @@ describe('ChatMessageListComponent', () => {
 
     function currentHighlight(): string {
       return registry.get('chat-find')?.range.toString() ?? '';
+    }
+
+    function container(): HTMLDivElement {
+      return fixture.nativeElement.querySelector(
+        '[data-testid="chat-message-list"]'
+      ) as HTMLDivElement;
     }
 
     it('renders no bar while the state is closed', () => {
@@ -584,12 +597,11 @@ describe('ChatMessageListComponent', () => {
       expect(emitted.length).toBe(before);
     });
 
-    it('keeps the current match and recounts when streamed content lands', () => {
+    it('keeps the current match and recounts when streamed content lands', async () => {
       fixture.componentRef.setInput('messages', conversation);
-      setFind({ query: 'needle' });
+      setFind({ query: 'needle', current: 2 });
       settle();
       expect(component.findTotal()).toBe(3);
-      setFind({ query: 'needle', current: 2 });
       const before = emitted.length;
 
       fixture.componentRef.setInput('currentBlocks', [{ type: 'text', content: 'needle needle' }]);
@@ -597,14 +609,14 @@ describe('ChatMessageListComponent', () => {
       fakeOnChanges();
       fixture.detectChanges();
       expect(component.findTotal()).toBe(3);
-      settle();
+      await settleAfterDom();
 
       expect(component.findTotal()).toBe(5);
       expect(emitted.slice(before)).toEqual([]);
       expect(currentHighlight()).toBe('needle');
     });
 
-    it('clamps the current match when content shrinks below it', () => {
+    it('clamps the current match when content shrinks below it', async () => {
       fixture.componentRef.setInput('messages', conversation);
       setFind({ query: 'needle', current: 2 });
       settle();
@@ -612,10 +624,65 @@ describe('ChatMessageListComponent', () => {
       fixture.componentRef.setInput('messages', [conversation[0]]);
       fakeOnChanges();
       fixture.detectChanges();
-      settle();
+      await settleAfterDom();
 
       expect(component.findTotal()).toBe(1);
       expect(emitted.at(-1)?.current).toBe(0);
+    });
+
+    it('recounts when a thinking block is expanded or collapsed', async () => {
+      fixture.componentRef.setInput('messages', [
+        {
+          role: 'assistant',
+          blocks: [
+            { type: 'thinking', content: 'the needle is here', collapsed: true },
+            { type: 'text', content: 'needle' },
+          ],
+          timestamp: 1,
+        },
+      ]);
+      setFind({ query: 'needle' });
+      settle();
+      expect(component.findTotal()).toBe(1);
+
+      const details = container().querySelector('details') as HTMLDetailsElement;
+      details.open = true;
+      await settleAfterDom();
+      expect(component.findTotal()).toBe(2);
+
+      details.open = false;
+      await settleAfterDom();
+      expect(component.findTotal()).toBe(1);
+    });
+
+    it('searches an expanded tool result and not a collapsed one', async () => {
+      fixture.componentRef.setInput('messages', [
+        {
+          role: 'assistant',
+          blocks: [
+            {
+              type: 'tool_use',
+              tool: {
+                id: 't1',
+                tool_name: 'Read',
+                input_json: '{"file_path":"/src/needle.rs"}',
+                status: 'done',
+                result: 'needle needle',
+                result_is_error: false,
+              },
+            },
+          ],
+          timestamp: 1,
+        },
+      ]);
+      setFind({ query: 'needle' });
+      settle();
+      expect(component.findTotal()).toBe(0);
+
+      (container().querySelector('[aria-expanded="false"]') as HTMLElement).click();
+      fixture.detectChanges();
+      await settleAfterDom();
+      expect(component.findTotal()).toBe(2);
     });
 
     it('forwards the bar: typing, the toggles and close', () => {
@@ -658,15 +725,55 @@ describe('ChatMessageListComponent', () => {
       expect(component.findTotal()).toBe(0);
     });
 
+    it('restores the stored current match on reopen without moving the view', () => {
+      fixture.componentRef.setInput('messages', conversation);
+      setFind({ query: 'needle', current: 2 });
+      settle();
+      setFind({ open: false, query: 'needle', current: 2 });
+      const list = container();
+      list.getBoundingClientRect = () => new DOMRect(0, 100, 600, 400);
+      list.scrollTop = 333;
+
+      setFind({ query: 'needle', current: 2 });
+      settle();
+
+      expect(component.findTotal()).toBe(3);
+      expect(countText()).toBe('3/3');
+      expect(emitted).toEqual([]);
+      expect(list.scrollTop).toBe(333);
+      expect(
+        registry
+          .get('chat-find')!
+          .range.startContainer.parentElement?.closest('[data-role="assistant"]')
+      ).not.toBeNull();
+    });
+
+    it('keeps the incoming tab stored match and viewport on a tab switch, even with another query', () => {
+      fixture.componentRef.setInput('conversationKey', 't1');
+      fixture.componentRef.setInput('messages', conversation);
+      setFind({ query: 'haystack' });
+      settle();
+      expect(component.findTotal()).toBe(1);
+
+      fixture.componentRef.setInput('conversationKey', 't2');
+      const list = container();
+      list.scrollTop = 222;
+      setFind({ query: 'needle', current: 1 });
+      settle();
+
+      expect(component.findTotal()).toBe(3);
+      expect(countText()).toBe('2/3');
+      expect(emitted).toEqual([]);
+      expect(list.scrollTop).toBe(222);
+    });
+
     it('picks the first match at or below the viewport when the query changes, and scrolls it into view', () => {
       fixture.componentRef.setInput('messages', conversation);
-      fakeOnChanges();
-      fixture.detectChanges();
-      const container = fixture.nativeElement.querySelector(
-        '[data-testid="chat-message-list"]'
-      ) as HTMLDivElement;
-      Object.defineProperty(container, 'clientHeight', { configurable: true, value: 400 });
-      container.getBoundingClientRect = () => new DOMRect(0, 100, 600, 400);
+      setFind({ query: '' });
+      settle();
+      const list = container();
+      Object.defineProperty(list, 'clientHeight', { configurable: true, value: 400 });
+      list.getBoundingClientRect = () => new DOMRect(0, 100, 600, 400);
       const articles = Array.from(
         fixture.nativeElement.querySelectorAll('[data-testid="chat-message"]')
       ) as HTMLElement[];
@@ -680,7 +787,7 @@ describe('ChatMessageListComponent', () => {
       settle();
 
       expect(emitted.at(-1)?.current).toBe(1);
-      expect(container.scrollTop).toBe(700 - 100 - (400 - 20) / 2);
+      expect(list.scrollTop).toBe(700 - 100 - (400 - 20) / 2);
     });
 
     it('focuses the bar on a focus request', async () => {
@@ -691,6 +798,29 @@ describe('ChatMessageListComponent', () => {
       await fixture.whenStable();
       const input = fixture.nativeElement.querySelector('[data-testid="chat-find-input"]');
       expect(document.activeElement).toBe(input);
+    });
+
+    it('reports the single-line selection inside the list and nothing else', () => {
+      fixture.componentRef.setInput('messages', conversation);
+      fakeOnChanges();
+      fixture.detectChanges();
+      const inside = container().querySelector('[data-find-scope]')!.firstChild;
+      const stub = (text: string, anchor: Node | null, collapsed = false): void => {
+        vi.spyOn(document, 'getSelection').mockReturnValue({
+          anchorNode: anchor,
+          isCollapsed: collapsed,
+          toString: () => text,
+        } as unknown as Selection);
+      };
+
+      stub('needle', inside);
+      expect(component.selectedText()).toBe('needle');
+      stub('two\nlines', inside);
+      expect(component.selectedText()).toBe('');
+      stub('needle', inside, true);
+      expect(component.selectedText()).toBe('');
+      stub('needle', document.body);
+      expect(component.selectedText()).toBe('');
     });
 
     it('drops a pending recompute and the highlight on destroy', () => {

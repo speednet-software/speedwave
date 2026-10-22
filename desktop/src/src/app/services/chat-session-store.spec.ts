@@ -321,6 +321,12 @@ describe('ChatSessionStore', () => {
       });
     });
 
+    it('escapes the selection while the regex toggle is on, so it is found as typed', () => {
+      store.find.update((s) => ({ ...s, regex: true }));
+      store.openFind('a.b(c)');
+      expect(store.find()).toMatchObject({ open: true, query: 'a\\.b\\(c\\)', regex: true });
+    });
+
     it('closes without forgetting the query or the toggles', () => {
       store.openFind('kept');
       store.find.update((s) => ({ ...s, regex: true, matchCase: true, current: 2 }));

@@ -445,7 +445,6 @@
     animation: blink 1s step-end infinite;
   }
 
-  /* The current find-in-chat match (CSS Custom Highlight API; no DOM mutation). */
   ::highlight(chat-find) {
     background-color: var(--accent);
     color: var(--on-accent);

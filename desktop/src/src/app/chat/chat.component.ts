@@ -32,6 +32,7 @@ import { MemoryPanelComponent } from './memory-panel/memory-panel.component';
 import { ConversationsSidebarComponent } from './conversations-sidebar/conversations-sidebar.component';
 import { ModalOverlayComponent } from '../shell/modal-overlay/modal-overlay.component';
 import { capitalizeLevel } from './composer/model-selector/effort-slider.component';
+import { onRequestCounter } from '../shared/request-counter';
 
 /** Chat component that handles message rendering, user input, and streaming responses from Claude. */
 @Component({
@@ -154,25 +155,8 @@ export class ChatComponent implements OnInit, OnDestroy {
       });
     });
 
-    effect(() => {
-      const requested = this.ui.restartRequested();
-      untracked(() => {
-        const previous = this.previousRestartRequest;
-        this.previousRestartRequest = requested;
-        if (previous === null || previous === requested) return;
-        void this.newConversation();
-      });
-    });
-
-    effect(() => {
-      const requested = this.ui.findRequested();
-      untracked(() => {
-        const previous = this.previousFindRequest;
-        this.previousFindRequest = requested;
-        if (previous === null || previous === requested) return;
-        this.openFind();
-      });
-    });
+    onRequestCounter(this.ui.restartRequested, () => void this.newConversation());
+    onRequestCounter(this.ui.findRequested, () => this.openFind());
 
     this.restoreIncomingTabState(this.previousTabId);
   }
@@ -180,13 +164,6 @@ export class ChatComponent implements OnInit, OnDestroy {
   private previousTabId: string = this.chat.activeTabId();
   /** Tab id whose composer restore is still queued; guards against saving its stale pre-restore content. */
   private pendingRestoreTabId: string | null = null;
-  /**
-   * Last seen value of `UiStateService.restartRequested`; `null` until the first effect run so a
-   * component (re)mount never replays a request bumped before it existed (shell's ⌘R channel).
-   */
-  private previousRestartRequest: number | null = null;
-  /** Last seen value of `UiStateService.findRequested`; same `null` guard as the restart channel. */
-  private previousFindRequest: number | null = null;
   /** Bumped on every ⌘F so the message list puts the caret into the find bar. */
   readonly findFocusRequest = signal(0);
 
@@ -195,7 +172,7 @@ export class ChatComponent implements OnInit, OnDestroy {
    * inside the message list), else with the tab's last query, and focuses the field.
    */
   openFind(): void {
-    this.chat.activeStore().openFind(this.selectedChatText());
+    this.chat.activeStore().openFind(this.messageList?.selectedText() ?? '');
     this.findFocusRequest.update((n) => n + 1);
     this.cdr.markForCheck();
   }
@@ -205,15 +182,6 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.chat.activeStore().closeFind();
     this.composer?.focusInput();
     this.cdr.markForCheck();
-  }
-
-  private selectedChatText(): string {
-    const selection = document.getSelection();
-    const list = this.messageList?.scrollContainer?.nativeElement;
-    if (!selection || !list || selection.isCollapsed || !selection.anchorNode) return '';
-    if (!list.contains(selection.anchorNode)) return '';
-    const text = selection.toString();
-    return text.includes('\n') ? '' : text;
   }
 
   /**

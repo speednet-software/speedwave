@@ -983,18 +983,6 @@ describe('ChatComponent', () => {
       fixture.detectChanges();
     }
 
-    function messageList(): HTMLElement {
-      return fixture.nativeElement.querySelector('[data-testid="chat-message-list"]');
-    }
-
-    function stubSelection(text: string, anchor: Node | null, collapsed = false): void {
-      vi.spyOn(document, 'getSelection').mockReturnValue({
-        anchorNode: anchor,
-        isCollapsed: collapsed,
-        toString: () => text,
-      } as unknown as Selection);
-    }
-
     it('does not open the bar on initial render', () => {
       renderReadyChat();
       expect(chatState.activeStore().find().open).toBe(false);
@@ -1018,12 +1006,11 @@ describe('ChatComponent', () => {
       expect(fixture.nativeElement.querySelector('[data-testid="chat-find-bar"]')).not.toBeNull();
     });
 
-    it('takes a single-line selection inside the message list as the query', async () => {
+    it('takes the selection the message list reports as the query', async () => {
       renderReadyChat();
-      const list = messageList();
-      const anchor = document.createTextNode('needle in the chat');
-      list.appendChild(anchor);
-      stubSelection('needle', anchor);
+      const list = fixture.debugElement.query(By.directive(ChatMessageListComponent))
+        .componentInstance as ChatMessageListComponent;
+      vi.spyOn(list, 'selectedText').mockReturnValue('needle');
 
       uiState.requestFind();
       fixture.detectChanges();
@@ -1032,15 +1019,12 @@ describe('ChatComponent', () => {
       expect(chatState.activeStore().find()).toMatchObject({ open: true, query: 'needle' });
     });
 
-    it.each([
-      ['a selection outside the list', 'outside', () => document.body, false],
-      ['a collapsed selection', 'x', null, true],
-      ['a multi-line selection', 'two\nlines', null, false],
-    ])('keeps the last query for %s', async (_label, text, anchorOf, collapsed) => {
+    it('keeps the last query when the list reports no selection', async () => {
       renderReadyChat();
       chatState.activeStore().find.update((s) => ({ ...s, query: 'kept' }));
-      const anchor = anchorOf ? anchorOf() : messageList();
-      stubSelection(text, anchor, collapsed);
+      const list = fixture.debugElement.query(By.directive(ChatMessageListComponent))
+        .componentInstance as ChatMessageListComponent;
+      vi.spyOn(list, 'selectedText').mockReturnValue('');
 
       uiState.requestFind();
       fixture.detectChanges();
