@@ -36,6 +36,9 @@ url = "2"
 tokio-tungstenite = "0.30"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "client", "http1"] }
+hyper-util = { version = "0.1", features = ["server", "tokio"] }
 zip = { version = "8", default-features = false, features = ["deflate"] }
 tempfile = "3"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }

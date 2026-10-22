@@ -3,6 +3,7 @@ members = [
     "crates/speedwave-runtime",
     "crates/speedwave-cli",
     "crates/speedwave-version",
+    "crates/ip-policy",
     "crates/pii-engine",
     "crates/pii-engine-wasm",
     "crates/pii-ner",

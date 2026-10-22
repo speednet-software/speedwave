@@ -3,6 +3,9 @@
  * Parses ENABLED_SERVICES env var; zero hub-module imports.
  */
 
+/** Service id prefix of custom MCP servers (Rust SSOT `consts::CUSTOM_MCP_SERVICE_PREFIX`). */
+export const CUSTOM_SERVICE_PREFIX = 'custom-';
+
 /**
  * Get explicitly enabled service names from ENABLED_SERVICES env var.
  * @returns Array of enabled service names

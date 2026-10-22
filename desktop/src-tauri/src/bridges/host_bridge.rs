@@ -1,4 +1,4 @@
-//! Generic host-side WebSocket bridge. See ADR-063.
+//! Generic host-side bridge: WebSocket endpoint/pairing or HTTP forwarding. See ADR-063.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -21,6 +21,9 @@ use tokio_tungstenite::WebSocketStream;
 
 use speedwave_runtime::consts;
 use speedwave_runtime::fs_perms as runtime_fs_perms;
+
+use super::http_forward::run_http_forward_loop;
+pub use super::http_forward::{HttpForwardConfig, RouteTable, Upstream};
 
 /// How clients authenticate the WebSocket upgrade request.
 #[derive(Clone, Debug)]
@@ -81,7 +84,11 @@ pub enum RoleCollisionPolicy {
 pub enum ConnectionMode {
     Endpoint,
     Pairing(PairingConfig),
+    HttpForward(HttpForwardConfig),
 }
+
+/// Called on every watchdog relay re-ensure tick (~30 s) with the bridge's bind port.
+pub type WatchdogTick = Arc<dyn Fn(u16) + Send + Sync + 'static>;
 
 pub type LockBodyBuilder =
     Arc<dyn Fn(LockBodyContext<'_>) -> serde_json::Value + Send + Sync + 'static>;
@@ -108,6 +115,9 @@ pub struct HostBridgeConfig {
     /// Name the lock file with the container-facing (relay) port instead of the raw bind
     /// port — only for locks READ BY THE CONTAINER (the IDE bridge). ADR-080.
     pub container_facing_lock: bool,
+    /// Lock directory override; `None` = `<data_dir>/<name>-bridge`.
+    pub lock_dir: Option<PathBuf>,
+    pub on_watchdog_tick: Option<WatchdogTick>,
 }
 
 impl HostBridgeConfig {
@@ -123,6 +133,8 @@ impl HostBridgeConfig {
             watchdog_interval: Duration::from_secs(5),
             stale_probe_timeout: Duration::from_millis(200),
             container_facing_lock: false,
+            lock_dir: None,
+            on_watchdog_tick: None,
         }
     }
 }
@@ -138,6 +150,8 @@ pub struct HostBridgeConfigBuilder {
     watchdog_interval: Duration,
     stale_probe_timeout: Duration,
     container_facing_lock: bool,
+    lock_dir: Option<PathBuf>,
+    on_watchdog_tick: Option<WatchdogTick>,
 }
 
 impl HostBridgeConfigBuilder {
@@ -150,6 +164,28 @@ impl HostBridgeConfigBuilder {
     pub fn pairing(mut self, cfg: PairingConfig) -> Self {
         self.mode = Some(ConnectionMode::Pairing(cfg));
         self.auth = None;
+        self
+    }
+
+    /// HTTP forwarding mode: routes carry the bearers, so no top-level auth scheme.
+    pub fn http_forward(mut self, cfg: HttpForwardConfig) -> Self {
+        self.mode = Some(ConnectionMode::HttpForward(cfg));
+        self.auth = None;
+        self
+    }
+
+    /// Writes the lock under `dir` instead of `<data_dir>/<name>-bridge`.
+    pub fn lock_dir(mut self, dir: PathBuf) -> Self {
+        self.lock_dir = Some(dir);
+        self
+    }
+
+    /// See [`WatchdogTick`].
+    pub fn on_watchdog_tick<F>(mut self, f: F) -> Self
+    where
+        F: Fn(u16) + Send + Sync + 'static,
+    {
+        self.on_watchdog_tick = Some(Arc::new(f));
         self
     }
 
@@ -215,6 +251,16 @@ impl HostBridgeConfigBuilder {
                     anyhow::bail!("Pairing mode requires at least one role");
                 }
             }
+            ConnectionMode::HttpForward(_) => {
+                if self.auth.is_some() {
+                    anyhow::bail!(
+                        "HttpForward mode must not set a top-level auth (routes carry the bearers)"
+                    );
+                }
+                if !matches!(origin_policy, OriginPolicy::RejectIfPresent) {
+                    anyhow::bail!("HttpForward mode requires OriginPolicy::RejectIfPresent");
+                }
+            }
         }
 
         if matches!(&origin_policy, OriginPolicy::AcceptIfAuthIsQueryParam) {
@@ -226,6 +272,7 @@ impl HostBridgeConfigBuilder {
                     .roles
                     .values()
                     .any(|s| matches!(s, AuthScheme::QueryParam(_))),
+                ConnectionMode::HttpForward(_) => false,
             };
             if !has_query_param {
                 anyhow::bail!(
@@ -245,6 +292,8 @@ impl HostBridgeConfigBuilder {
             watchdog_interval: self.watchdog_interval,
             stale_probe_timeout: self.stale_probe_timeout,
             container_facing_lock: self.container_facing_lock,
+            lock_dir: self.lock_dir,
+            on_watchdog_tick: self.on_watchdog_tick,
         })
     }
 }
@@ -396,8 +445,10 @@ impl HostBridge {
         let port = listener.local_addr()?.port();
         let token = load_or_create_persistent_token(opts.persistent_token_path.as_deref())?;
 
-        let data_dir = consts::data_dir();
-        let lock_dir = data_dir.join(format!("{}-bridge", &config.name));
+        let lock_dir = config
+            .lock_dir
+            .clone()
+            .unwrap_or_else(|| consts::data_dir().join(format!("{}-bridge", &config.name)));
         let lock_file_path = lock_dir.join(lock_file_name(port, config.container_facing_lock));
 
         Ok(Self {
@@ -446,6 +497,15 @@ impl HostBridge {
             anyhow::bail!("start_pairing() requires ConnectionMode::Pairing");
         }
         self.start_inner(StartHandler::Pairing(event_cb))
+    }
+
+    /// Start the bridge in HttpForward mode. Bails for WebSocket configs.
+    pub fn start_http_forward(&mut self) -> anyhow::Result<()> {
+        let ConnectionMode::HttpForward(cfg) = &self.config.mode else {
+            anyhow::bail!("start_http_forward() requires ConnectionMode::HttpForward");
+        };
+        let cfg = cfg.clone();
+        self.start_inner(StartHandler::HttpForward(cfg))
     }
 
     fn start_inner(&mut self, handler: StartHandler) -> anyhow::Result<()> {
@@ -514,6 +574,15 @@ impl HostBridge {
                             run_pairing_loop(async_listener, auth, config_arc, cb, shutdown_rx)
                                 .await
                         }
+                        StartHandler::HttpForward(cfg) => {
+                            run_http_forward_loop(
+                                async_listener,
+                                cfg,
+                                config_arc.name.clone(),
+                                shutdown_rx,
+                            )
+                            .await
+                        }
                     }
                 });
             })?;
@@ -537,6 +606,7 @@ impl HostBridge {
         let watchdog_port = self.tcp_port;
         let watchdog_interval = self.config.watchdog_interval;
         let container_facing_lock = self.config.container_facing_lock;
+        let watchdog_tick = self.config.on_watchdog_tick.clone();
         let mut watchdog_shutdown = shutdown_tx.subscribe();
         let watchdog_handle = std::thread::Builder::new()
             .name(format!("host_bridge::{}::watchdog", self.config.name))
@@ -585,6 +655,9 @@ impl HostBridge {
                                             &watchdog_body_cb,
                                             &watchdog_token,
                                         );
+                                    }
+                                    if let Some(tick) = &watchdog_tick {
+                                        tick(watchdog_port);
                                     }
                                 }
                             }
@@ -796,6 +869,8 @@ impl HostBridgeConfig {
             watchdog_interval: self.watchdog_interval,
             stale_probe_timeout: self.stale_probe_timeout,
             container_facing_lock: self.container_facing_lock,
+            lock_dir: self.lock_dir.clone(),
+            on_watchdog_tick: self.on_watchdog_tick.clone(),
         }
     }
 }
@@ -803,6 +878,7 @@ impl HostBridgeConfig {
 enum StartHandler {
     Endpoint(ConnectionHandler),
     Pairing(Option<PairingEventCallback>),
+    HttpForward(HttpForwardConfig),
 }
 
 async fn run_endpoint_loop(

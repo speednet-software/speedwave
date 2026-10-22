@@ -1,0 +1,29 @@
+[package]
+name = "ip-policy"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "AI platform connecting Claude Code with external services"
+authors = ["Speednet"]
+license = "Apache-2.0"
+repository = "https://github.com/speednet-software/speedwave"
+homepage = "https://github.com/speednet-software/speedwave"
+
+[dependencies]
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+todo = "deny"
+unimplemented = "deny"
+wildcard_imports = "deny"
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+
+[lints.rust]
+unsafe_code = "deny"
+unused_must_use = "deny"
+missing_docs = "warn"

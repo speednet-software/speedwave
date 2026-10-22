@@ -115,6 +115,8 @@ pub(crate) fn collect_security_paths(
         data_dir.join(consts::OAUTH_SUBDIR).join(project),
         data_dir.join(consts::CLAUDE_MANAGED_SUBDIR),
         data_dir.join(consts::CLAUDE_MANAGED_SUBDIR).join(project),
+        data_dir.join(consts::CUSTOM_MCP_STATE_DIR),
+        data_dir.join(consts::CUSTOM_MCP_STATE_DIR).join(project),
     ];
 
     let mut files: Vec<std::path::PathBuf> = Vec::new();
@@ -191,7 +193,56 @@ pub(crate) fn collect_security_paths(
         data_dir, project,
     ));
 
+    collect_custom_mcp_paths(
+        &data_dir.join(consts::CUSTOM_MCP_STATE_DIR).join(project),
+        &mut dirs,
+        &mut files,
+    );
+
     (dirs, files)
+}
+
+/// Per-server Custom MCP state under `custom-mcp/<project>/`: its regular files (`relay-port`),
+/// every `<name>/` or `relay-<name>/` directory, their subdirectories and the regular files in them.
+#[cfg(unix)]
+fn collect_custom_mcp_paths(
+    project_dir: &std::path::Path,
+    dirs: &mut Vec<std::path::PathBuf>,
+    files: &mut Vec<std::path::PathBuf>,
+) {
+    let children = |dir: &std::path::Path| -> Vec<(std::path::PathBuf, std::fs::FileType)> {
+        std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter_map(|e| e.file_type().ok().map(|ft| (e.path(), ft)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    for (server, ft) in children(project_dir) {
+        if ft.is_file() {
+            files.push(server);
+            continue;
+        }
+        if !ft.is_dir() {
+            continue;
+        }
+        dirs.push(server.clone());
+        for (path, ft) in children(&server) {
+            if ft.is_file() {
+                files.push(path);
+            } else if ft.is_dir() {
+                dirs.push(path.clone());
+                files.extend(
+                    children(&path)
+                        .into_iter()
+                        .filter(|(_, ft)| ft.is_file())
+                        .map(|(p, _)| p),
+                );
+            }
+        }
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -274,7 +325,9 @@ mod tests {
 
         let (dirs, files) = collect_security_paths(data_dir, "proj");
 
-        assert_eq!(dirs.len(), 16, "expected 16 dirs, got: {dirs:?}");
+        assert_eq!(dirs.len(), 18, "expected 18 dirs, got: {dirs:?}");
+        assert!(dirs.contains(&data_dir.join("custom-mcp")));
+        assert!(dirs.contains(&data_dir.join("custom-mcp/proj")));
         assert!(dirs.contains(&data_dir.join("secrets")));
         assert!(dirs.contains(&data_dir.join("secrets/proj")));
         assert!(dirs.contains(&data_dir.join("snapshots")));
@@ -384,6 +437,148 @@ mod tests {
             violations.is_empty(),
             "SecurityCheck should pass after autofix, got: {violations:?}"
         );
+    }
+
+    fn create_custom_mcp_tree(data_dir: &std::path::Path, dir_mode: u32, file_mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        for dir in [
+            "custom-mcp",
+            "custom-mcp/proj",
+            "custom-mcp/proj/figma",
+            "custom-mcp/proj/figma/guard",
+            "custom-mcp/proj/figma/egress",
+            "custom-mcp/proj/figma/build",
+            "custom-mcp/proj/linear",
+            "custom-mcp/proj/relay-desk",
+            "custom-mcp/proj/relay",
+            "custom-mcp/other",
+            "custom-mcp/other/x",
+        ] {
+            let path = data_dir.join(dir);
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(dir_mode)).unwrap();
+        }
+        for file in [
+            "custom-mcp/proj/figma/guard/policy.json",
+            "custom-mcp/proj/figma/egress/egress.json",
+            "custom-mcp/proj/figma/build/package.json",
+            "custom-mcp/proj/figma/build/.npmrc",
+            "custom-mcp/proj/figma/build/package-lock.json",
+            "custom-mcp/proj/figma/note.txt",
+            "custom-mcp/proj/relay-port",
+            "custom-mcp/proj/relay-desk/token",
+            "custom-mcp/proj/relay-desk/endpoint.json",
+            "custom-mcp/proj/relay/4000.lock",
+            "custom-mcp/other/x/secret",
+        ] {
+            let path = data_dir.join(file);
+            std::fs::write(&path, "{}").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(file_mode)).unwrap();
+        }
+    }
+
+    #[test]
+    fn custom_mcp_state_of_the_project_is_collected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        create_custom_mcp_tree(data_dir, 0o700, 0o600);
+        let (dirs, files) = collect_security_paths(data_dir, "proj");
+        for dir in [
+            "custom-mcp",
+            "custom-mcp/proj",
+            "custom-mcp/proj/figma",
+            "custom-mcp/proj/figma/guard",
+            "custom-mcp/proj/figma/egress",
+            "custom-mcp/proj/figma/build",
+            "custom-mcp/proj/linear",
+        ] {
+            assert!(
+                dirs.contains(&data_dir.join(dir)),
+                "{dir} missing: {dirs:?}"
+            );
+        }
+        for file in [
+            "custom-mcp/proj/figma/guard/policy.json",
+            "custom-mcp/proj/figma/egress/egress.json",
+            "custom-mcp/proj/figma/build/package.json",
+            "custom-mcp/proj/figma/build/.npmrc",
+            "custom-mcp/proj/figma/build/package-lock.json",
+            "custom-mcp/proj/figma/note.txt",
+            "custom-mcp/proj/relay-port",
+            "custom-mcp/proj/relay-desk/token",
+            "custom-mcp/proj/relay-desk/endpoint.json",
+            "custom-mcp/proj/relay/4000.lock",
+        ] {
+            assert!(
+                files.contains(&data_dir.join(file)),
+                "{file} missing: {files:?}"
+            );
+        }
+        assert!(!dirs.contains(&data_dir.join("custom-mcp/other/x")));
+        assert!(!files.contains(&data_dir.join("custom-mcp/other/x/secret")));
+    }
+
+    #[test]
+    fn custom_mcp_state_permissions_are_fixed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        create_custom_mcp_tree(data_dir, 0o755, 0o644);
+        ensure_data_dir_permissions_in(data_dir, "proj").unwrap();
+        assert_eq!(get_mode(&data_dir.join("custom-mcp")), 0o700);
+        assert_eq!(
+            get_mode(&data_dir.join("custom-mcp/proj/figma/guard")),
+            0o700
+        );
+        assert_eq!(get_mode(&data_dir.join("custom-mcp/proj/linear")), 0o700);
+        assert_eq!(
+            get_mode(&data_dir.join("custom-mcp/proj/figma/guard/policy.json")),
+            0o600
+        );
+        assert_eq!(
+            get_mode(&data_dir.join("custom-mcp/proj/figma/build/package-lock.json")),
+            0o600
+        );
+        assert_eq!(
+            get_mode(&data_dir.join("custom-mcp/proj/relay-port")),
+            0o600
+        );
+        assert_eq!(
+            get_mode(&data_dir.join("custom-mcp/proj/relay-desk")),
+            0o700
+        );
+        assert_eq!(
+            get_mode(&data_dir.join("custom-mcp/proj/relay-desk/token")),
+            0o600
+        );
+        assert_eq!(get_mode(&data_dir.join("custom-mcp/other/x")), 0o755);
+    }
+
+    #[test]
+    fn custom_mcp_symlinks_are_never_followed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(outside.path().join("guard")).unwrap();
+        std::fs::write(outside.path().join("guard/policy.json"), "{}").unwrap();
+        std::fs::create_dir_all(data_dir.join("custom-mcp/proj/real")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), data_dir.join("custom-mcp/proj/linked"))
+            .unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("guard"),
+            data_dir.join("custom-mcp/proj/real/guard"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("guard/policy.json"),
+            data_dir.join("custom-mcp/proj/relay-port"),
+        )
+        .unwrap();
+        let (dirs, files) = collect_security_paths(data_dir, "proj");
+        assert!(!files.contains(&data_dir.join("custom-mcp/proj/relay-port")));
+        assert!(!dirs.contains(&data_dir.join("custom-mcp/proj/linked")));
+        assert!(!dirs.contains(&data_dir.join("custom-mcp/proj/real/guard")));
+        assert!(!files.iter().any(|f| f.starts_with(outside.path())));
+        assert!(dirs.contains(&data_dir.join("custom-mcp/proj/real")));
     }
 
     #[test]

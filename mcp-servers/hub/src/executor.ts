@@ -32,6 +32,8 @@ import {
 } from './tool-registry.js';
 import { resolveSandboxGlobals, type SandboxGlobalResolution } from './service-list.js';
 import { toCamelCase } from './tool-discovery.js';
+import { piiModeFor, type PiiMode } from './pii-mode.js';
+import { countTokenSpans } from './token-spans.js';
 
 let bridgesInitialized = false;
 
@@ -137,14 +139,14 @@ interface AuditEntry {
  */
 interface AuditContext {
   /** Log a tool execution */
-  log: (service: string, tool: string, params: unknown) => void;
+  log: (service: string, tool: string, params: unknown, piiMode: PiiMode) => void;
 }
 
 /** Create audit context: logs each tool call; PII Tokenizer protects sensitive data first. */
 function createAuditContext(): AuditContext {
   const entries: AuditEntry[] = [];
   return {
-    log: (service, tool, params) => {
+    log: (service, tool, params, piiMode) => {
       const category = deriveAuditCategory(service, tool);
       const entry: AuditEntry = {
         timestamp: new Date().toISOString(),
@@ -154,7 +156,9 @@ function createAuditContext(): AuditContext {
         params: (params ?? {}) as Record<string, unknown>,
       };
       entries.push(entry);
-      console.log(`${ts()} [${category}] ${service}.${tool}(${JSON.stringify(params ?? {})})`);
+      console.log(
+        `${ts()} [${category}] ${service}.${tool}(${JSON.stringify(params ?? {})}) pii_mode=${piiMode}`
+      );
     },
   };
 }
@@ -310,10 +314,17 @@ function createToolWrappers(
   };
 
   /**
-   * Detokenize and validate params helper
-   * @param params - Parameters containing tokenized PII data to be detokenized
+   * Prepare params for a worker: `plaintext` detokenizes; `tokens` forwards them untouched and audits the token spans per category.
+   * @param params - Parameters that may carry PII tokens
+   * @param piiMode - The service's PII mode
+   * @param tool - `service.method`, for audit attribution
    */
-  const prepareParams: PrepareParamsFn = <T>(params: T): T => {
+  const prepareParams: PrepareParamsFn = <T>(params: T, piiMode: PiiMode, tool: string): T => {
+    if (piiMode === 'tokens') {
+      const detections = countTokenSpans(params);
+      if (detections.length > 0) detectionBatches.push({ layer: 'tool-args', tool, detections });
+      return params;
+    }
     return getEngine().detokenize(params) as T;
   };
 
@@ -329,7 +340,7 @@ function createToolWrappers(
     fn: (params: TParams) => Promise<TResult>
   ) => {
     return async (params: TParams): Promise<TResult> => {
-      auditContext.log(service, tool, params);
+      auditContext.log(service, tool, params, piiModeFor(service));
       return fn(params);
     };
   };

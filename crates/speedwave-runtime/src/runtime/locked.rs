@@ -149,16 +149,55 @@ impl LockedRuntime {
         })
     }
 
-    /// Removes every egress-less network the project can have, and the compose-created network of
-    /// an earlier release (project lock); a missing network is skipped, any other failure returned.
-    pub fn remove_egress_less_networks(&self, project: &str) -> anyhow::Result<()> {
+    /// Removes every egress-less network the project can have (under the per-project lock): the
+    /// fixed ones, those of the Custom MCP servers `custom_servers`, every one its rendered compose
+    /// declares, and the compose-created ones of an earlier release; a missing one is skipped.
+    pub fn remove_egress_less_networks(
+        &self,
+        project: &str,
+        custom_servers: &[String],
+    ) -> anyhow::Result<()> {
         with_acquired(project, || {
-            for name in crate::compose::egress_less_network_names(project) {
+            let mut names = crate::compose::egress_less_network_names(project);
+            names.extend(crate::compose::custom_server_network_names(
+                project,
+                custom_servers,
+            ));
+            names.extend(crate::compose::compose_egress_less_networks_in(
+                self.data_dir(),
+                project,
+            )?);
+            names.extend(
+                crate::compose::egress_less_network_owners(project)
+                    .into_iter()
+                    .map(|(name, _)| crate::compose::legacy_compose_network_name(project, &name)),
+            );
+            let mut seen = std::collections::HashSet::new();
+            for name in names.into_iter().filter(|n| seen.insert(n.clone())) {
                 self.inner.remove_network(&name)?;
-                self.inner
-                    .remove_network(&crate::compose::legacy_compose_network_name(project, &name))?;
             }
             Ok(())
+        })
+    }
+
+    /// Removes the networks of Custom MCP server `server` of `project` (under the per-project
+    /// lock): its pre-created `_cx_` network and its compose-created `_eg_` bridge. Call it once
+    /// a render without the server is up; a missing network is skipped.
+    pub fn remove_custom_mcp_server_networks(
+        &self,
+        project: &str,
+        server: &str,
+    ) -> anyhow::Result<()> {
+        crate::custom_mcp::model::validate_server_name(server)?;
+        with_acquired(project, || {
+            let main = crate::compose::project_network_name(project);
+            self.inner
+                .remove_network(&crate::compose::custom_server_network_name(&main, server))?;
+            self.inner
+                .remove_network(&crate::compose::legacy_compose_network_name(
+                    project,
+                    &crate::compose::custom_egress_network_name(&main, server),
+                ))
         })
     }
 
@@ -272,6 +311,13 @@ impl LockedRuntime {
         self.inner.reset_vm()
     }
 
+    /// Runs a hardened one-shot container to completion (no compose lock: it touches no
+    /// compose.yml); refused once [`super::begin_engine_teardown`] ran.
+    pub fn run_oneshot(&self, spec: &super::OneshotSpec) -> anyhow::Result<String> {
+        self.refuse_during_engine_teardown()?;
+        self.inner.run_oneshot(spec)
+    }
+
     /// Runs a command inside the VM with stdin and a timeout.
     pub fn vm_exec(
         &self,
@@ -328,7 +374,7 @@ impl LockedRuntime {
         let mut legacy = Vec::new();
         for name in crate::compose::compose_egress_less_networks_in(self.data_dir(), project)? {
             self.inner.ensure_internal_network(&name, project)?;
-            if settled {
+            if settled || !crate::compose::is_builtin_egress_less_network(&name) {
                 continue;
             }
             probed = true;
@@ -905,6 +951,32 @@ mod tests {
     }
 
     #[test]
+    fn custom_mcp_networks_are_isolated_on_every_start_but_never_probed_for_a_pre_isolation_copy() {
+        let project = "locked-net-custom";
+        let net = crate::compose::project_network_name(project);
+        let hub = crate::compose::custom_network_name(&net);
+        let server = crate::compose::custom_server_network_name(&net, "figma");
+        let office = crate::compose::egress_less_network_names(project).remove(0);
+        let yaml = format!(
+            "services: {{}}\nnetworks:\n  {office}:\n    name: {office}\n    external: true\n  {hub}:\n    name: {hub}\n    external: true\n  {server}:\n    name: {server}\n    external: true\n"
+        );
+        let data_dir = rendered(project, &yaml);
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_data_dir(data_dir.path())
+            .with_existing_network(&crate::compose::legacy_compose_network_name(project, &hub))
+            .with_existing_network(&crate::compose::legacy_compose_network_name(
+                project, &server,
+            ))
+            .build();
+        rt.compose_up(project).unwrap();
+        assert_eq!(handles.ensured_networks(), vec![office, hub, server]);
+        assert_eq!(handles.probed_networks(), vec![legacy_office(project)]);
+        assert!(!handles.was_recreated());
+        assert!(handles.removed_networks().is_empty());
+        assert_eq!(handles.up_projects(), vec![project.to_string()]);
+    }
+
+    #[test]
     fn a_start_after_one_that_found_no_compose_created_network_probes_no_more() {
         let project = "locked-net-settled";
         let data_dir = rendered(project, &compose_with_office(project));
@@ -1087,26 +1159,108 @@ mod tests {
 
     #[test]
     fn removing_egress_less_networks_removes_every_one_of_the_project() {
-        let (rt, handles) = MockRuntimeBuilder::new().build();
-        rt.remove_egress_less_networks("gone").unwrap();
-        let expected: Vec<String> = crate::compose::egress_less_network_names("gone")
-            .into_iter()
-            .flat_map(|name| {
-                let legacy = crate::compose::legacy_compose_network_name("gone", &name);
-                [name, legacy]
-            })
-            .collect();
+        let data_dir = tempfile::tempdir().unwrap();
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_data_dir(data_dir.path())
+            .build();
+        rt.remove_egress_less_networks("gone", &[]).unwrap();
+        let fixed = crate::compose::egress_less_network_names("gone");
+        let mut expected = fixed.clone();
+        expected.extend(pre_isolation_networks("gone"));
         assert_eq!(handles.removed_networks(), expected);
+        assert!(fixed.iter().any(|n| n.ends_with("_network_custom")));
+        let custom =
+            crate::compose::custom_network_name(&crate::compose::project_network_name("gone"));
+        assert!(
+            !expected.contains(&crate::compose::legacy_compose_network_name(
+                "gone", &custom
+            ))
+        );
+    }
+
+    fn pre_isolation_networks(project: &str) -> Vec<String> {
+        crate::compose::egress_less_network_owners(project)
+            .into_iter()
+            .map(|(name, _)| crate::compose::legacy_compose_network_name(project, &name))
+            .collect()
+    }
+
+    #[test]
+    fn removing_egress_less_networks_covers_custom_servers_from_config_and_compose() {
+        let project = "locked-custom-gone";
+        let net = crate::compose::project_network_name(project);
+        let rendered_cx = crate::compose::custom_server_network_name(&net, "rendered");
+        let data_dir = rendered(
+            project,
+            &format!(
+                "services: {{}}\nnetworks:\n  {rendered_cx}:\n    name: {rendered_cx}\n    external: true\n"
+            ),
+        );
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_data_dir(data_dir.path())
+            .build();
+        rt.remove_egress_less_networks(project, &["disabled".to_string(), "rendered".to_string()])
+            .unwrap();
+        let removed = handles.removed_networks();
+        let mut expected = crate::compose::egress_less_network_names(project);
+        expected.push(crate::compose::custom_server_network_name(&net, "disabled"));
+        expected.push(rendered_cx);
+        expected.extend(pre_isolation_networks(project));
+        assert_eq!(removed, expected, "each network once");
     }
 
     #[test]
     fn removing_egress_less_networks_returns_the_engine_error() {
+        let data_dir = tempfile::tempdir().unwrap();
         let (rt, handles) = MockRuntimeBuilder::new()
+            .with_data_dir(data_dir.path())
             .with_remove_network_error("network is in use")
             .build();
-        let err = rt.remove_egress_less_networks("busy").unwrap_err();
+        let err = rt.remove_egress_less_networks("busy", &[]).unwrap_err();
         assert!(err.to_string().contains("in use"), "{err}");
         assert_eq!(handles.removed_networks().len(), 1);
+    }
+
+    #[test]
+    fn removing_a_custom_server_removes_its_two_networks() {
+        let (rt, handles) = MockRuntimeBuilder::new().build();
+        rt.remove_custom_mcp_server_networks("acme", "figma")
+            .unwrap();
+        let net = crate::compose::project_network_name("acme");
+        assert_eq!(
+            handles.removed_networks(),
+            vec![
+                crate::compose::custom_server_network_name(&net, "figma"),
+                crate::compose::legacy_compose_network_name(
+                    "acme",
+                    &crate::compose::custom_egress_network_name(&net, "figma")
+                ),
+            ]
+        );
+        assert!(rt
+            .remove_custom_mcp_server_networks("acme", "../x")
+            .is_err());
+        assert_eq!(handles.removed_networks().len(), 2);
+    }
+
+    #[test]
+    fn every_start_isolates_the_custom_mcp_networks() {
+        let project = "locked-custom-start";
+        let net = crate::compose::project_network_name(project);
+        let custom = crate::compose::custom_network_name(&net);
+        let cx = crate::compose::custom_server_network_name(&net, "figma");
+        let eg = crate::compose::custom_egress_network_name(&net, "figma");
+        let data_dir = rendered(
+            project,
+            &format!(
+                "services: {{}}\nnetworks:\n  {custom}:\n    name: {custom}\n    external: true\n  {cx}:\n    name: {cx}\n    external: true\n  {eg}:\n    driver: bridge\n"
+            ),
+        );
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_data_dir(data_dir.path())
+            .build();
+        rt.compose_up_recreate(project).unwrap();
+        assert_eq!(handles.ensured_networks(), vec![custom, cx]);
     }
 
     #[test]

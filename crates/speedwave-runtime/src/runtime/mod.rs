@@ -13,9 +13,11 @@ pub mod locked;
 #[cfg(any(test, feature = "test-support"))]
 pub mod mock_runtime;
 pub(crate) mod networks;
+pub mod oneshot;
 pub(crate) mod wsl;
 
 pub use locked::LockedRuntime;
+pub use oneshot::{OneshotMount, OneshotNetwork, OneshotSpec};
 pub use wsl::decode_wsl_output;
 
 /// Integration-test hook: returns the global lock-acquisition counter.
@@ -105,6 +107,10 @@ pub(crate) trait ContainerRuntime: Send + Sync {
     fn remove_network(&self, name: &str) -> anyhow::Result<()>;
 
     fn network_exists(&self, name: &str) -> anyhow::Result<bool>;
+
+    /// Runs a hardened `nerdctl run --rm` container to completion, bounded by the spec's
+    /// deadline and reaped by name when cut short (see [`oneshot::run_and_reap`]); returns stdout.
+    fn run_oneshot(&self, spec: &OneshotSpec) -> anyhow::Result<String>;
 
     /// Validates compose.yml as the engine sees it. Every impl MUST run the engine's
     /// `compose config` so a silent no-op cannot mask a torn/invalid file.
@@ -5020,6 +5026,9 @@ impl ContainerRuntime for NoopRuntime {
     }
     fn network_exists(&self, _: &str) -> anyhow::Result<bool> {
         Ok(false)
+    }
+    fn run_oneshot(&self, _: &OneshotSpec) -> anyhow::Result<String> {
+        Ok(String::new())
     }
     fn compose_validate(&self, _: &str) -> anyhow::Result<()> {
         Ok(())

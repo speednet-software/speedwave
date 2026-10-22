@@ -1,5 +1,5 @@
 //! Drift detector: every `SecurityExpectedPaths::compute` call site must chain
-//! `.with_telemetry_locked(...)` or the MDM mount requirement silently degrades.
+//! `.with_telemetry_locked(...)` and `.with_custom_mcp(...)`, or a gate silently degrades.
 
 #![expect(clippy::expect_used, reason = "test code")]
 
@@ -29,8 +29,7 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-#[test]
-fn every_compute_call_site_chains_with_telemetry_locked() {
+fn compute_sites_missing(chain: &str) -> Vec<String> {
     let root = repo_root();
     let mut files = Vec::new();
     for scan in SCAN_ROOTS {
@@ -56,17 +55,35 @@ fn every_compute_call_site_chains_with_telemetry_locked() {
             if src[prev_line_start..line_start].contains("// SSOT-allow:") {
                 continue;
             }
-            let tail_end = (abs + 300).min(src.len());
-            if !src[abs..tail_end].contains(".with_telemetry_locked(") {
+            let tail_end = (abs + 600).min(src.len());
+            let statement_end = src[abs..tail_end].find(';').map_or(tail_end, |e| abs + e);
+            if !src[abs..statement_end].contains(chain) {
                 let line_no = src[..abs].lines().count();
                 violations.push(format!("{}:{line_no}", file.display()));
             }
         }
     }
+    violations
+}
+
+#[test]
+fn every_compute_call_site_chains_with_telemetry_locked() {
+    let violations = compute_sites_missing(".with_telemetry_locked(");
     assert!(
         violations.is_empty(),
         "SecurityExpectedPaths::compute without .with_telemetry_locked (add the chain, \
          or a preceding `// SSOT-allow: <reason>` line):\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn every_compute_call_site_chains_with_custom_mcp() {
+    let violations = compute_sites_missing(".with_custom_mcp(");
+    assert!(
+        violations.is_empty(),
+        "SecurityExpectedPaths::compute without .with_custom_mcp(custom_mcp::expectations_for(..)) \
+         (add the chain, or a preceding `// SSOT-allow: <reason>` line):\n{}",
         violations.join("\n")
     );
 }

@@ -134,6 +134,14 @@ teardown() {
     [ -f "$DEST/build-context/containers/mcp-servers/policies/rules.yaml" ]
 }
 
+@test "bundle script vendors crates/ip-policy into containers/crates for the proxy build context" {
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ -f "$DEST/build-context/containers/crates/ip-policy/src/lib.rs" ]
+    [ -f "$DEST/build-context/containers/crates/ip-policy/Cargo.toml" ]
+    [ ! -d "$DEST/build-context/containers/crates/ip-policy/target" ]
+}
+
 @test "every ImageDef hash input resolves inside the staged build-context" {
     local DEST="$SHARED_DEST"
     local build_rs="$BATS_TEST_DIRNAME/../../crates/speedwave-runtime/src/build.rs"
@@ -236,9 +244,10 @@ EOF
 
     REAL_TAR="$real_tar" TAR_STUB_LOG="$stub_log" PATH="$stub_dir:$PATH" run "$SCRIPT"
     [ "$status" -eq 0 ]
-    [ "$(wc -l <"$stub_log" | tr -d ' ')" -eq 2 ]
+    [ "$(wc -l <"$stub_log" | tr -d ' ')" -eq 3 ]
     [ -f "$DEST/build-context/containers/proxy/src/main.rs" ]
     [ -f "$DEST/build-context/containers/crates/pii-engine/Cargo.toml" ]
+    [ -f "$DEST/build-context/containers/crates/ip-policy/Cargo.toml" ]
 }
 
 @test "bundle script creates mcp-servers with tsconfig.base.json" {
@@ -432,6 +441,16 @@ EOF
     [ -f "$DEST/build-context/mcp-servers/hub/Containerfile" ]
 }
 
+@test "bundle script ships the custom MCP guard image and the server image template" {
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ -f "$DEST/build-context/mcp-servers/custom-guard/Dockerfile" ]
+    [ -f "$DEST/build-context/mcp-servers/custom-launcher/Containerfile.npm.template" ]
+    [ -d "$DEST/build-context/mcp-servers/custom-launcher/src" ]
+    grep -qx 'custom-launcher/Containerfile.npm.template' \
+        "$DEST/build-context/mcp-servers/.speedwave-shipped-files"
+}
+
 @test "bundle script is idempotent (running twice succeeds)" {
     run "$SCRIPT"
     [ "$status" -eq 0 ]
@@ -609,6 +628,9 @@ EOF
         esac
         while IFS= read -r src; do
             found_any=1
+            case "$df:$src" in
+                *.npm.template:server/*) continue ;;
+            esac
             matches=$(cd "$root" 2>/dev/null && compgen -G "$src" | head -1)
             [ -n "$matches" ] || fail="$fail\n$df: missing COPY source '$src'"
         done < <(grep -E '^(COPY|ADD) ' "$df" \

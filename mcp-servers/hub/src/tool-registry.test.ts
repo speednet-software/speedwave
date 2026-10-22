@@ -25,8 +25,9 @@ import {
   refreshServiceTools,
   _setDiscoveryRetryDelaysForTesting,
   _setEmptyRecheckBaseMsForTesting,
+  CUSTOM_REFRESH_MS,
 } from './tool-registry.js';
-import { TIMEOUTS } from '@speedwave/mcp-shared';
+import { TIMEOUTS, LATEST_PROTOCOL_VERSION, type Tool } from '@speedwave/mcp-shared';
 import type { ToolMetadata } from './hub-types.js';
 import { populateRegistryWithMockTools, _resetRegistryForTesting } from './test-helpers.js';
 
@@ -186,6 +187,39 @@ describe('tool-registry', () => {
       await bridge.listIssueIds();
 
       expect(mockCallWorker).toHaveBeenCalledWith('redmine', 'listIssueIds', {}, undefined);
+    });
+
+    it('builds prototype-less bridges and wrappers that keep a __proto__ method as own data', async () => {
+      const registry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
+      const tools: Record<string, ToolMetadata> = Object.create(null);
+      for (const name of ['__proto__', 'constructor']) {
+        tools[name] = {
+          ...registry.slack.sendChannel,
+          name,
+          workerToolName: `${name}_worker`,
+          service: 'evil',
+        };
+      }
+      registry.evil = tools;
+      const mockCallWorker = vi.fn().mockResolvedValue({ ok: true });
+      const bridge = buildServiceBridge('evil', mockCallWorker);
+      expect(Object.getPrototypeOf(bridge)).toBeNull();
+      expect(Object.keys(bridge).sort()).toEqual(['__proto__', 'constructor']);
+      const wrappers = buildExecutorWrappers(
+        'evil',
+        bridge,
+        (_s, _t, fn) => fn,
+        (params) => params,
+        (call) => call()
+      );
+      expect(Object.getPrototypeOf(wrappers)).toBeNull();
+      await wrappers['__proto__']({ a: 1 });
+      await wrappers.constructor({});
+      expect(mockCallWorker.mock.calls.map((c) => c[1])).toEqual([
+        '__proto___worker',
+        'constructor_worker',
+      ]);
+      delete registry.evil;
     });
 
     it('should throw for unknown service', () => {
@@ -540,21 +574,174 @@ describe('tool-registry', () => {
       expect(TOOL_REGISTRY['redmine']['listItems'].name).toBe('listItems');
     });
 
-    it('worker fails during operation → keeps last known tools', async () => {
-      _resetRegistryForTesting();
+    describe('through the real discovery path', () => {
+      const savedWorkerUrl = process.env.WORKER_REDMINE_URL;
+      let worker: { up: boolean; tools: Tool[]; hang: boolean };
+      let fetchMock: ReturnType<typeof vi.fn>;
 
-      const { discoverAndMergeService } = await import('./tool-discovery.js');
-      vi.mocked(discoverAndMergeService).mockResolvedValueOnce({ listItems: mockTool });
+      const workerTool = (name: string): Tool => ({
+        name,
+        description: `${name} tool`,
+        inputSchema: { type: 'object', properties: {} },
+        _meta: { deferLoading: false },
+      });
 
-      process.env.ENABLED_SERVICES = 'redmine';
-      await initializeRegistry();
-      expect(Object.keys(TOOL_REGISTRY['redmine']).length).toBe(1);
+      const toolsListCalls = () =>
+        fetchMock.mock.calls.filter(
+          ([, init]) => JSON.parse(String(init?.body ?? '{}')).method === 'tools/list'
+        ).length;
 
-      vi.mocked(discoverAndMergeService).mockRejectedValueOnce(new Error('worker crashed'));
-      await refreshServiceTools('redmine');
+      beforeEach(async () => {
+        _resetRegistryForTesting();
+        process.env.ENABLED_SERVICES = 'redmine';
+        process.env.WORKER_REDMINE_URL = 'http://mcp-redmine:3000';
+        worker = { up: true, tools: [workerTool('list_items')], hang: false };
+        fetchMock = vi.fn(async (_url: string | URL, init?: RequestInit) => {
+          if (worker.hang) return new Promise<Response>(() => {});
+          if (!worker.up) {
+            throw new TypeError('fetch failed', {
+              cause: Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }),
+            });
+          }
+          const message = JSON.parse(String(init?.body ?? '{}'));
+          const respond = (result: unknown) =>
+            new Response(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }), {
+              status: 200,
+              headers: { 'content-type': 'application/json' },
+            });
+          if (message.method === 'initialize') {
+            return respond({
+              protocolVersion: LATEST_PROTOCOL_VERSION,
+              capabilities: {},
+              serverInfo: { name: 'mcp-redmine', version: '1.0.0' },
+            });
+          }
+          if (message.method === 'notifications/initialized') {
+            return new Response(null, { status: 202 });
+          }
+          return respond({ tools: worker.tools });
+        });
+        vi.stubGlobal('fetch', fetchMock);
+        const actual =
+          await vi.importActual<typeof import('./tool-discovery.js')>('./tool-discovery.js');
+        const { discoverAndMergeService } = await import('./tool-discovery.js');
+        vi.mocked(discoverAndMergeService).mockImplementation(actual.discoverAndMergeService);
+      });
 
-      expect(Object.keys(TOOL_REGISTRY['redmine']).length).toBe(1);
-      expect(TOOL_REGISTRY['redmine']['listItems'].name).toBe('listItems');
+      afterEach(async () => {
+        vi.useRealTimers();
+        vi.unstubAllGlobals();
+        const { discoverAndMergeService } = await import('./tool-discovery.js');
+        vi.mocked(discoverAndMergeService).mockReset().mockResolvedValue({});
+        if (savedWorkerUrl === undefined) delete process.env.WORKER_REDMINE_URL;
+        else process.env.WORKER_REDMINE_URL = savedWorkerUrl;
+        _setEmptyRecheckBaseMsForTesting(10_000);
+      });
+
+      it('worker refused during a background refresh → keeps last known tools', async () => {
+        vi.useFakeTimers();
+        await initializeRegistry();
+        expect(Object.keys(TOOL_REGISTRY['redmine'])).toEqual(['listItems']);
+
+        worker.up = false;
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1);
+        warnSpy.mockRestore();
+
+        expect(fetchMock).toHaveBeenCalledTimes(4);
+        expect(Object.keys(TOOL_REGISTRY['redmine'])).toEqual(['listItems']);
+        expect(TOOL_REGISTRY['redmine']['listItems'].name).toBe('listItems');
+      });
+
+      it('warns once when a worker starts failing and once when it recovers', async () => {
+        await initializeRegistry();
+        worker.up = false;
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+        await refreshServiceTools('redmine');
+        await refreshServiceTools('redmine');
+        const failing = warnSpy.mock.calls.filter((c) => String(c[0]).includes('Refresh failed'));
+        expect(failing).toHaveLength(1);
+        expect(String(failing[0][1])).toContain('fetch failed');
+
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+        worker.up = true;
+        await refreshServiceTools('redmine');
+        await refreshServiceTools('redmine');
+        const recovered = logSpy.mock.calls.filter((c) => String(c[0]).includes('reachable again'));
+        expect(recovered).toHaveLength(1);
+        expect(
+          warnSpy.mock.calls.filter((c) => String(c[0]).includes('Refresh failed'))
+        ).toHaveLength(1);
+        logSpy.mockRestore();
+        warnSpy.mockRestore();
+      });
+
+      it('an empty tools/list replaces the entry with no tools', async () => {
+        await initializeRegistry();
+        worker.tools = [];
+
+        await refreshServiceTools('redmine');
+
+        expect(TOOL_REGISTRY['redmine']).toEqual({});
+      });
+
+      it('a failure while the entry is empty arms the recheck, which restores the tools', async () => {
+        _setEmptyRecheckBaseMsForTesting(5);
+        await initializeRegistry();
+        worker.tools = [];
+        await refreshServiceTools('redmine');
+        expect(TOOL_REGISTRY['redmine']).toEqual({});
+
+        worker.up = false;
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        await refreshServiceTools('redmine');
+        warnSpy.mockRestore();
+        const callsAfterFailure = fetchMock.mock.calls.length;
+
+        worker.up = true;
+        worker.tools = [workerTool('list_items'), workerTool('create_item')];
+        await vi.waitFor(() =>
+          expect(Object.keys(TOOL_REGISTRY['redmine']).sort()).toEqual(['createItem', 'listItems'])
+        );
+        expect(fetchMock.mock.calls.length).toBeGreaterThan(callsAfterFailure);
+      });
+
+      it('a refresh that is still running makes the next interval tick skip', async () => {
+        vi.useFakeTimers();
+        await initializeRegistry();
+        expect(toolsListCalls()).toBe(1);
+
+        worker.hang = true;
+        await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1);
+        const callsDuringHang = fetchMock.mock.calls.length;
+        await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1);
+
+        expect(fetchMock.mock.calls.length).toBe(callsDuringHang);
+        expect(Object.keys(TOOL_REGISTRY['redmine'])).toEqual(['listItems']);
+      });
+
+      it('startup with a dead worker completes with an empty entry and a pending recheck', async () => {
+        _setEmptyRecheckBaseMsForTesting(5);
+        worker.up = false;
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+        await initializeRegistry();
+
+        expect(TOOL_REGISTRY['redmine']).toEqual({});
+        expect(
+          warnSpy.mock.calls.some((c) => String(c[0]).includes('discovery attempt 1 failed'))
+        ).toBe(true);
+
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+        worker.up = true;
+        await vi.waitFor(() =>
+          expect(Object.keys(TOOL_REGISTRY['redmine'])).toEqual(['listItems'])
+        );
+        expect(logSpy.mock.calls.some((c) => String(c[0]).includes('reachable again'))).toBe(true);
+        logSpy.mockRestore();
+        warnSpy.mockRestore();
+      });
     });
 
     it('worker returns with different tools → registry replaced', async () => {
@@ -750,6 +937,90 @@ describe('tool-registry', () => {
       await vi.runAllTimersAsync();
 
       expect(TOOL_REGISTRY['slack']).toBeDefined();
+    });
+  });
+
+  describe('custom MCP refresh interval', () => {
+    const savedEnabled = process.env.ENABLED_SERVICES;
+
+    const tool = (service: string, name: string): ToolMetadata => ({
+      name,
+      description: `${name} tool`,
+      keywords: [],
+      inputSchema: { type: 'object', properties: {} },
+      example: '',
+      service,
+      deferLoading: false,
+    });
+
+    afterEach(async () => {
+      vi.useRealTimers();
+      if (savedEnabled === undefined) delete process.env.ENABLED_SERVICES;
+      else process.env.ENABLED_SERVICES = savedEnabled;
+      const { discoverAndMergeService } = await import('./tool-discovery.js');
+      vi.mocked(discoverAndMergeService).mockReset().mockResolvedValue({});
+      resetServiceCaches();
+      _resetRegistryForTesting();
+      populateRegistryWithMockTools();
+    });
+
+    it('shows a newly allowed custom tool after one 30 s tick without refreshing built-ins', async () => {
+      _resetRegistryForTesting();
+      process.env.ENABLED_SERVICES = 'slack,custom-figma';
+      let allowed = ['getFile'];
+      const { discoverAndMergeService } = await import('./tool-discovery.js');
+      const mockDiscover = vi.mocked(discoverAndMergeService);
+      mockDiscover.mockReset().mockImplementation(async (service: string) => {
+        if (service === 'slack') return { sendChannel: tool('slack', 'sendChannel') };
+        return Object.fromEntries(allowed.map((name) => [name, tool('custom-figma', name)]));
+      });
+
+      vi.useFakeTimers();
+      await initializeRegistry();
+      expect(Object.keys(TOOL_REGISTRY['custom-figma'])).toEqual(['getFile']);
+      mockDiscover.mockClear();
+
+      allowed = ['getFile', 'postComment'];
+      await vi.advanceTimersByTimeAsync(CUSTOM_REFRESH_MS + 1);
+
+      expect(Object.keys(TOOL_REGISTRY['custom-figma']).sort()).toEqual(['getFile', 'postComment']);
+      expect(mockDiscover.mock.calls.map(([service]) => service)).toEqual(['custom-figma']);
+    });
+
+    it('does not run a 30 s refresh when no custom service is enabled', async () => {
+      _resetRegistryForTesting();
+      process.env.ENABLED_SERVICES = 'slack';
+      const { discoverAndMergeService } = await import('./tool-discovery.js');
+      const mockDiscover = vi.mocked(discoverAndMergeService);
+      mockDiscover.mockReset().mockResolvedValue({ sendChannel: tool('slack', 'sendChannel') });
+
+      vi.useFakeTimers();
+      await initializeRegistry();
+      mockDiscover.mockClear();
+
+      await vi.advanceTimersByTimeAsync(4 * CUSTOM_REFRESH_MS);
+
+      expect(mockDiscover).not.toHaveBeenCalled();
+    });
+
+    it('skips a 30 s tick while another refresh is still running', async () => {
+      _resetRegistryForTesting();
+      process.env.ENABLED_SERVICES = 'custom-figma';
+      const { discoverAndMergeService } = await import('./tool-discovery.js');
+      const mockDiscover = vi.mocked(discoverAndMergeService);
+      mockDiscover
+        .mockReset()
+        .mockResolvedValueOnce({ getFile: tool('custom-figma', 'getFile') })
+        .mockImplementation(() => new Promise(() => {}));
+
+      vi.useFakeTimers();
+      await initializeRegistry();
+      mockDiscover.mockClear();
+
+      await vi.advanceTimersByTimeAsync(3 * CUSTOM_REFRESH_MS + 1);
+
+      expect(mockDiscover).toHaveBeenCalledTimes(1);
+      expect(Object.keys(TOOL_REGISTRY['custom-figma'])).toEqual(['getFile']);
     });
   });
 

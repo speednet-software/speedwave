@@ -5,7 +5,7 @@
     reason = "test-support builder/mock: unwrap on locked test fixtures is sound"
 )]
 
-use super::{ContainerRuntime, LockedRuntime, VmExecOutput};
+use super::{ContainerRuntime, LockedRuntime, OneshotSpec, VmExecOutput};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::process::Command;
@@ -13,6 +13,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 type RemoveImagesCall = (Vec<String>, bool);
+
+/// Behaviour of `run_oneshot`: gets the recorded spec, returns the run's stdout or failure.
+pub type OneshotHandler = Arc<dyn Fn(&OneshotSpec) -> anyhow::Result<String> + Send + Sync>;
 
 /// Shared introspection handles cloned into the mock before wrapping.
 #[derive(Clone, Default)]
@@ -57,6 +60,8 @@ pub struct MockHandles {
     pub remove_network_calls: Arc<Mutex<Vec<String>>>,
     /// Recorded `network_exists` name args.
     pub network_exists_calls: Arc<Mutex<Vec<String>>>,
+    /// Recorded `run_oneshot` specs.
+    pub oneshot_calls: Arc<Mutex<Vec<OneshotSpec>>>,
 }
 
 /// Recorded arguments of a `build_image` call.
@@ -153,6 +158,10 @@ impl MockHandles {
     pub fn probed_networks(&self) -> Vec<String> {
         self.network_exists_calls.lock().unwrap().clone()
     }
+    /// Specs passed to `run_oneshot`, in call order.
+    pub fn oneshot_specs(&self) -> Vec<OneshotSpec> {
+        self.oneshot_calls.lock().unwrap().clone()
+    }
 }
 
 /// Builder for a fully-configurable mock runtime.
@@ -169,6 +178,7 @@ pub struct MockRuntimeBuilder {
     logs_response: String,
     logs_error: Option<String>,
     container_logs_response: String,
+    container_logs_error: Option<String>,
     image_exists: Arc<Mutex<HashMap<String, bool>>>,
     image_exists_default: bool,
     image_missing_substrings: Vec<String>,
@@ -200,6 +210,7 @@ pub struct MockRuntimeBuilder {
     remove_network_error: Option<String>,
     existing_networks: HashSet<String>,
     network_exists_error: Option<String>,
+    oneshot_handler: Option<OneshotHandler>,
     data_dir: Option<std::path::PathBuf>,
 }
 
@@ -247,6 +258,7 @@ impl MockRuntimeBuilder {
             logs_response: String::new(),
             logs_error: None,
             container_logs_response: String::new(),
+            container_logs_error: None,
             image_exists: Arc::new(Mutex::new(HashMap::new())),
             image_exists_default: false,
             image_missing_substrings: Vec::new(),
@@ -278,6 +290,7 @@ impl MockRuntimeBuilder {
             remove_network_error: None,
             existing_networks: HashSet::new(),
             network_exists_error: None,
+            oneshot_handler: None,
             data_dir: None,
         }
     }
@@ -347,6 +360,16 @@ impl MockRuntimeBuilder {
     /// Makes every `compose_ps` call fail with `msg`.
     pub fn with_ps_error(mut self, msg: &str) -> Self {
         self.ps_error = Some(msg.to_string());
+        self
+    }
+    /// Sets the text every `container_logs` call returns (default: empty).
+    pub fn with_container_logs_response(mut self, text: &str) -> Self {
+        self.container_logs_response = text.to_string();
+        self
+    }
+    /// Makes every `container_logs` call fail with `msg`.
+    pub fn with_container_logs_error(mut self, msg: &str) -> Self {
+        self.container_logs_error = Some(msg.to_string());
         self
     }
     /// Sets the exact `image_exists` result for `tag`.
@@ -498,6 +521,12 @@ impl MockRuntimeBuilder {
         self.network_exists_error = Some(msg.to_string());
         self
     }
+    /// Runs `handler` for every `run_oneshot` (the spec is recorded first); without one a run
+    /// succeeds with empty stdout.
+    pub fn with_oneshot_handler(mut self, handler: OneshotHandler) -> Self {
+        self.oneshot_handler = Some(handler);
+        self
+    }
     /// Sets the path `prepare_build_context` returns.
     pub fn with_prepare_build_context_root(mut self, root: std::path::PathBuf) -> Self {
         self.prepare_build_context_root = Some(root);
@@ -529,6 +558,7 @@ impl MockRuntimeBuilder {
             logs_response: self.logs_response,
             logs_error: self.logs_error,
             container_logs_response: self.container_logs_response,
+            container_logs_error: self.container_logs_error,
             image_exists: self.image_exists,
             image_exists_default: self.image_exists_default,
             image_missing_substrings: self.image_missing_substrings,
@@ -559,6 +589,7 @@ impl MockRuntimeBuilder {
             remove_network_error: self.remove_network_error,
             existing_networks: Mutex::new(self.existing_networks),
             network_exists_error: self.network_exists_error,
+            oneshot_handler: self.oneshot_handler,
         };
         (
             LockedRuntime::new(Box::new(mock), self.engine_teardown_check)
@@ -582,6 +613,7 @@ struct MockRuntime {
     logs_response: String,
     logs_error: Option<String>,
     container_logs_response: String,
+    container_logs_error: Option<String>,
     image_exists: Arc<Mutex<HashMap<String, bool>>>,
     image_exists_default: bool,
     image_missing_substrings: Vec<String>,
@@ -612,6 +644,7 @@ struct MockRuntime {
     remove_network_error: Option<String>,
     existing_networks: Mutex<HashSet<String>>,
     network_exists_error: Option<String>,
+    oneshot_handler: Option<OneshotHandler>,
 }
 
 impl ContainerRuntime for MockRuntime {
@@ -813,6 +846,9 @@ impl ContainerRuntime for MockRuntime {
             .lock()
             .unwrap()
             .push(container.to_string());
+        if let Some(err) = &self.container_logs_error {
+            anyhow::bail!("{err}");
+        }
         Ok(self.container_logs_response.clone())
     }
 
@@ -907,6 +943,19 @@ impl ContainerRuntime for MockRuntime {
         match &self.network_exists_error {
             Some(msg) => anyhow::bail!("{msg}"),
             None => Ok(self.existing_networks.lock().unwrap().contains(name)),
+        }
+    }
+
+    fn run_oneshot(&self, spec: &OneshotSpec) -> anyhow::Result<String> {
+        spec.nerdctl_run_args()?;
+        self.handles
+            .oneshot_calls
+            .lock()
+            .unwrap()
+            .push(spec.clone());
+        match &self.oneshot_handler {
+            Some(handler) => handler(spec),
+            None => Ok(String::new()),
         }
     }
 
@@ -1042,6 +1091,24 @@ mod tests {
         let err = rt.ensure_ready().unwrap_err();
         assert!(err.to_string().contains("vm not ready"));
         assert_eq!(handles.ensure_ready_count(), 1);
+    }
+
+    #[test]
+    fn container_logs_return_the_scripted_text_or_error() {
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_container_logs_response("line\n")
+            .build();
+        assert_eq!(rt.container_logs("c1", 10).unwrap(), "line\n");
+        assert_eq!(*handles.logs_calls.lock().unwrap(), vec!["c1"]);
+        let (rt, _) = MockRuntimeBuilder::new()
+            .with_container_logs_response("line\n")
+            .with_container_logs_error("no such container")
+            .build();
+        assert!(rt
+            .container_logs("c1", 10)
+            .unwrap_err()
+            .to_string()
+            .contains("no such container"));
     }
 
     #[test]

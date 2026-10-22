@@ -39,3 +39,22 @@ Per tool, `_meta` may carry the MCP-spec-compliant prefixed keys[^1] from mcp-sh
 - The hub holds no hardcoded knowledge of any specific tool or service.
 
 [^1]: [MCP specification 2025-06-18, Basic Protocol, "`_meta`"](https://modelcontextprotocol.io/specification/2025-06-18/basic): the `_meta` property is reserved by MCP for attaching additional metadata, with a defined prefix/name key format for implementation-specific keys.
+
+## Amendment (2026-10-08): the custom MCP guard owns `_meta` for third-party servers
+
+A custom MCP server (ADR-100) is third-party code, so it cannot be the source of its own hub policy. Its tools reach the hub only through the Speedwave-owned guard worker (`mcp-servers/custom-guard/`), and for those services the guard, not the upstream server, is the worker this ADR talks about:
+
+- The guard drops every `_meta` key the upstream sends, including `speedwave.pl/*` keys, the legacy unprefixed fallbacks and foreign keys (`custom-guard/src/guard.ts::CustomGuardHandler.present`; the shared sanitizer `mcp-servers/shared/src/tool-gate.ts::sanitizeMeta` strips only the Speedwave and legacy subset). It then sets its own: `speedwave.pl/tool-state`, `speedwave.pl/upstream-name`, `speedwave.pl/defer-loading` and `speedwave.pl/timeout-class`, the last two from the guard policy file.
+- `speedwave.pl/tool-state` (`allowed` / `pending` / `blocked` / `changed`) and `speedwave.pl/upstream-name` are new `META_KEYS` entries that exist only in prefixed form: they have no legacy key and are not read through `metaValue`.
+- The hub parses both in `mergeToolWithMeta` and drops every tool whose state is not `allowed` in `discoverAndMergeService`, the single drop point that `search_tools` and the `execute_code` sandbox both read from. For a built-in or plugin worker, which has no gate, an absent state is `allowed`; for a `custom-*` service an absent state is `pending`, and an unknown value falls back the same way with a warning (`tool-discovery.ts::parseToolState`). The guard enforces the decision on every `tools/call`, so the hub-side state only controls what the model sees.
+- Before that drop, the hub writes the raw listing of each `custom-*` service to `/audit/tool-catalog-<service>.json` (`mcp-servers/hub/src/tool-catalog.ts`), so Desktop can show pending and changed tools for review without a new mount.
+- The per-service PII mode is not a `_meta` key. The hub reads it from its own policy file (ADR-083 amendment of the same date), so a guard that fails to set a key can never cause plaintext to reach a third-party server.
+
+## Amendment (2026-10-12): a failed refresh keeps the last known tools
+
+The background refresh described above replaced a service's entry with whatever discovery returned. Discovery turned every worker error into an empty tool list, so a worker that was briefly unreachable during a refresh had all its tools hidden until the next cycle, and the empty-service recheck, armed only at startup, did not bring them back sooner.
+
+- `mcp-servers/hub/src/tool-discovery.ts::discoverServiceTools` now rejects when `initialize` or `tools/list` fails (connection error, timeout, non-2xx answer, JSON-RPC error). A worker that answers with an empty `tools/list` still yields an empty entry, and a missing or SSRF-rejected worker URL still resolves to no tools.
+- `mcp-servers/hub/src/tool-registry.ts::refreshServiceTools` keeps the previous entry when discovery fails and arms the empty-service recheck (10 s backoff to 60 s) when that entry has no tools. It logs a warning when a service starts failing and a line when it recovers, not on every cycle.
+- Startup keeps its retry with backoff and never blocks on a dead worker: the service starts with an empty entry and the recheck fills it once the worker answers.
+- Custom MCP services are also refreshed every 30 seconds (ADR-103 amendment of the same date); the same keep-last-tools rule applies to them.

@@ -680,6 +680,19 @@ impl ContainerRuntime for WslRuntime {
         super::networks::network_exists_with(name, &|args| self.network_command(args))
     }
 
+    fn run_oneshot(&self, spec: &super::OneshotSpec) -> anyhow::Result<String> {
+        super::oneshot::run_and_reap(spec, &|args, timeout| {
+            let mut argv = vec!["nerdctl"];
+            argv.extend(args.iter().map(String::as_str));
+            let remote_cmd = super::shell_quote_argv(&argv);
+            self.runner.run_bounded(
+                "wsl.exe",
+                &["-d", self.distro(), "--", "sh", "-c", &remote_cmd],
+                timeout,
+            )
+        })
+    }
+
     fn compose_validate(&self, project: &str) -> anyhow::Result<()> {
         let distro = self.distro();
         let compose_file = wsl_compose_file_path(project)?;
@@ -3346,6 +3359,37 @@ mod tests {
             .ensure_internal_network("speedwave_acme_network_office", "acme")
             .unwrap_err();
         assert!(format!("{err:#}").contains("E_UNEXPECTED"), "{err:#}");
+    }
+
+    #[test]
+    fn run_oneshot_runs_in_the_distro_bounded_by_the_spec_deadline() {
+        let spec = crate::runtime::oneshot::tests::sample_spec();
+        let (rt, calls) = network_script(&[Ok("resolved")]);
+        assert_eq!(rt.run_oneshot(&spec).unwrap(), "resolved");
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let args = spec.nerdctl_run_args().unwrap();
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        assert_eq!(calls[0].0, distro_network_key(&argv));
+        assert_eq!(calls[0].1, spec.timeout);
+        assert!(!calls[0].0.contains('$'), "{}", calls[0].0);
+        assert!(calls[0].0.contains("--cap-drop ALL"), "{}", calls[0].0);
+    }
+
+    #[test]
+    fn run_oneshot_reaps_the_container_after_a_failed_run_in_the_distro() {
+        let spec = crate::runtime::oneshot::tests::sample_spec();
+        let (rt, calls) = network_script(&[Err("npm ERR! 404"), Ok("")]);
+        let err = rt.run_oneshot(&spec).unwrap_err();
+        assert!(format!("{err:#}").contains("404"), "{err:#}");
+        let calls = calls.lock().unwrap();
+        assert_eq!(
+            calls[1],
+            (
+                distro_network_key(&["rm", "-f", "spw-oneshot-test"]),
+                consts::CONTAINER_EXEC_PROBE_TIMEOUT
+            )
+        );
     }
 
     #[test]

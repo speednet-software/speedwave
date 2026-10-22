@@ -242,6 +242,7 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
     let project_path = std::path::Path::new(project_dir);
     let resolved = config::resolve_claude_config(project_path, &user_config, project);
     let integrations = config::resolve_integrations(project_path, &user_config, project);
+    crate::custom_mcp_cmd::relays::sync_before_render(project, integrations.effective_custom_mcp());
     let yaml = compose::render_compose(
         project,
         project_dir,
@@ -256,7 +257,12 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
         Vec::new()
     });
     let expected_paths = compose::SecurityExpectedPaths::compute(project, project_dir)?
-        .with_telemetry_locked(resolved.telemetry.any_locked);
+        .with_telemetry_locked(resolved.telemetry.any_locked)
+        .with_custom_mcp(speedwave_runtime::custom_mcp::expectations_for(
+            &user_config,
+            project,
+            speedwave_runtime::custom_mcp::effective::current_managed_policy().as_ref(),
+        ));
     speedwave_runtime::fs_security::ensure_data_dir_permissions(project)?;
     let violations = compose::SecurityCheck::run(&yaml, project, &manifests, &expected_paths);
     if !violations.is_empty() {
@@ -1128,6 +1134,7 @@ mod tests {
             plugin_settings: None,
             policy: None,
             effort_pin: None,
+            custom_mcp: None,
         }
     }
 
@@ -1184,6 +1191,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             ..Default::default()
         };
@@ -1201,6 +1209,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             ..Default::default()
         };
@@ -1380,6 +1389,7 @@ mod tests {
             plugin_settings: None,
             policy: None,
             effort_pin: None,
+            custom_mcp: None,
         }
     }
 
@@ -1460,6 +1470,7 @@ mod tests {
             plugin_settings: None,
             policy: None,
             effort_pin: None,
+            custom_mcp: None,
         };
         let cfg = SpeedwaveUserConfig {
             projects: vec![entry],

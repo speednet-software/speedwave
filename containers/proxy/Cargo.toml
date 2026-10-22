@@ -9,6 +9,10 @@ edition = "2021"
 name = "proxy"
 path = "src/main.rs"
 
+[[bin]]
+name = "spw-egress"
+path = "src/bin/spw-egress/main.rs"
+
 [dependencies]
 axum = "0.8"
 tokio = { version = "1", default-features = false, features = [
@@ -18,6 +22,7 @@ tokio = { version = "1", default-features = false, features = [
     "io-util",
     "sync",
     "time",
+    "signal",
 ] }
 tokio-stream = "0.1"
 reqwest = { version = "0.12", default-features = false, features = [
@@ -35,6 +40,7 @@ rand = "0.8"
 sha2 = "0.11"
 env_logger = { version = "0.11", default-features = false }
 speedwave-pii-engine = { path = "../../crates/pii-engine" }
+ip-policy = { path = "../../crates/ip-policy" }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

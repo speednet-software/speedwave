@@ -243,6 +243,38 @@ pub struct ResolvedPiiPolicy {
     pub rules: Vec<RuleOutput>,
     /// Literal keyword substitutions, union of the effective policy set.
     pub keywords: Vec<KeywordV3>,
+    /// Per-service hub settings keyed by hub service id: one explicit entry per running Custom
+    /// MCP server. Omitted when empty so a project without one keeps its policy bytes.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub services: std::collections::BTreeMap<String, ServicePiiPolicy>,
+}
+
+/// How the hub hands tool arguments to one service (`services.<id>` in `policy.json`).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServicePiiPolicy {
+    /// `tokens` keeps PII tokens in arguments, `plaintext` detokenizes them.
+    pub pii_mode: crate::custom_mcp::model::CustomPiiMode,
+}
+
+impl ResolvedPiiPolicy {
+    /// Replaces `services` with one explicit entry per running Custom MCP server.
+    pub fn with_custom_services(
+        mut self,
+        servers: &[crate::custom_mcp::effective::EffectiveCustomMcp],
+    ) -> Self {
+        self.services = servers
+            .iter()
+            .map(|s| {
+                (
+                    s.service_id.clone(),
+                    ServicePiiPolicy {
+                        pii_mode: s.pii_mode,
+                    },
+                )
+            })
+            .collect();
+        self
+    }
 }
 
 impl Default for ResolvedPiiPolicy {
@@ -275,6 +307,7 @@ fn safe_default_policy() -> ResolvedPiiPolicy {
         source: ResolvedPiiPolicySource::default(),
         rules,
         keywords: Vec::new(),
+        services: Default::default(),
     }
 }
 
@@ -286,6 +319,7 @@ pub fn disabled_policy() -> ResolvedPiiPolicy {
         source: ResolvedPiiPolicySource::default(),
         rules: Vec::new(),
         keywords: Vec::new(),
+        services: Default::default(),
     }
 }
 
@@ -1042,6 +1076,7 @@ pub fn resolve_pii_policy(
         },
         rules,
         keywords,
+        services: Default::default(),
     })
 }
 
@@ -1055,7 +1090,7 @@ fn pii_policy_error_implicates_mdm(
 }
 
 /// Global boot gate for the active project's PII policy (mirrors
-/// `check_telemetry_policy_at_boot`): any config error hard-stops at startup.
+/// `config::check_managed_policy_at_boot`): any config error hard-stops at startup.
 pub fn check_pii_policy_at_boot() -> Result<(), String> {
     let user_config = crate::config::load_user_config().unwrap_or_default();
     let policy = user_config
@@ -2212,6 +2247,77 @@ keywords: []
                 & 0o777;
             assert_eq!(dir_mode, 0o700, "policy dir must be owner-only");
         }
+    }
+
+    fn effective_server(
+        name: &str,
+        pii_mode: crate::custom_mcp::model::CustomPiiMode,
+    ) -> crate::custom_mcp::effective::EffectiveCustomMcp {
+        let mut entries = std::collections::BTreeMap::new();
+        entries.insert(
+            name.to_string(),
+            crate::custom_mcp::policy::tests::approved(crate::custom_mcp::model::CustomMcpEntry {
+                pii_mode,
+                ..crate::custom_mcp::policy::tests::npm_entry()
+            }),
+        );
+        crate::custom_mcp::effective::resolve_effective(&entries, true, None)
+            .effective
+            .remove(0)
+    }
+
+    #[test]
+    fn custom_services_are_written_with_an_explicit_snake_case_pii_mode() {
+        use crate::custom_mcp::model::CustomPiiMode;
+        let tmp = tempfile::tempdir().unwrap();
+        let policy = ResolvedPiiPolicy::default().with_custom_services(&[
+            effective_server("figma", CustomPiiMode::Tokens),
+            effective_server("linear", CustomPiiMode::Plaintext),
+        ]);
+        write_policy_config_in(tmp.path(), "proj", &policy).unwrap();
+        let text = std::fs::read_to_string(policy_config_path_in(tmp.path(), "proj")).unwrap();
+        let written: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            written["services"],
+            serde_json::json!({
+                "custom-figma": {"pii_mode": "tokens"},
+                "custom-linear": {"pii_mode": "plaintext"}
+            })
+        );
+        speedwave_pii_engine::compile_policy_v3(&text)
+            .expect("the engine (proxy and hub WASM) must accept the services field");
+        let back: ResolvedPiiPolicy = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, policy);
+    }
+
+    #[test]
+    fn policy_without_custom_services_omits_the_field() {
+        let policy = ResolvedPiiPolicy::default().with_custom_services(&[]);
+        let value = serde_json::to_value(&policy).unwrap();
+        assert!(value.get("services").is_none());
+        assert_eq!(policy, ResolvedPiiPolicy::default());
+        let disabled = serde_json::to_value(disabled_policy()).unwrap();
+        assert!(disabled.get("services").is_none());
+    }
+
+    #[test]
+    fn a_pii_mode_change_changes_the_hub_policy_digest() {
+        use crate::custom_mcp::model::CustomPiiMode;
+        let tmp = tempfile::tempdir().unwrap();
+        write_policy_config_in(tmp.path(), "proj", &ResolvedPiiPolicy::default()).unwrap();
+        let none = policy_state_digest_in(tmp.path(), "proj");
+        let tokens = ResolvedPiiPolicy::default()
+            .with_custom_services(&[effective_server("figma", CustomPiiMode::Tokens)]);
+        write_policy_config_in(tmp.path(), "proj", &tokens).unwrap();
+        let with_tokens = policy_state_digest_in(tmp.path(), "proj");
+        let plaintext = ResolvedPiiPolicy::default()
+            .with_custom_services(&[effective_server("figma", CustomPiiMode::Plaintext)]);
+        write_policy_config_in(tmp.path(), "proj", &plaintext).unwrap();
+        let with_plaintext = policy_state_digest_in(tmp.path(), "proj");
+        assert_ne!(none, with_tokens);
+        assert_ne!(with_tokens, with_plaintext);
+        write_policy_config_in(tmp.path(), "proj", &plaintext).unwrap();
+        assert_eq!(with_plaintext, policy_state_digest_in(tmp.path(), "proj"));
     }
 
     #[test]

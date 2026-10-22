@@ -27,6 +27,8 @@ import { ServiceCardComponent, SaveCredentialsEvent } from './service-card/servi
 import { RedmineConfigComponent } from './redmine-config/redmine-config.component';
 import { IdeBridgeComponent } from './ide-bridge/ide-bridge.component';
 import { ProjectPillComponent } from '../project-switcher/project-pill.component';
+import { CustomMcpSectionComponent } from '../custom-mcp/custom-mcp-section.component';
+import { RecreateOnDirective } from '../shared/recreate-on.directive';
 
 /** Per-service dot colour cycle used in the table. */
 const SERVICE_DOT_COLOURS: readonly string[] = [
@@ -50,7 +52,14 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
 /** Manages MCP service integrations and native OS integration toggles. */
 @Component({
   selector: 'app-integrations',
-  imports: [ServiceCardComponent, RedmineConfigComponent, IdeBridgeComponent, ProjectPillComponent],
+  imports: [
+    ServiceCardComponent,
+    RedmineConfigComponent,
+    IdeBridgeComponent,
+    ProjectPillComponent,
+    CustomMcpSectionComponent,
+    RecreateOnDirective,
+  ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div
@@ -340,6 +349,15 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
           }
         }
 
+        @if (betaEnabled()) {
+          <div class="mt-6" data-testid="integrations-custom-mcp-slot">
+            <app-custom-mcp-section
+              *appRecreateOn="currentProject()"
+              [project]="currentProject()"
+            />
+          </div>
+        }
+
         <div class="mt-6" data-testid="integrations-ide-bridge-slot">
           <app-ide-bridge />
         </div>
@@ -430,6 +448,8 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   private unsubStatusRefresher: (() => void) | null = null;
 
   readonly betaEnabled = this.beta.enabled;
+  /** The active project the Custom MCP section is built for; a switch rebuilds it. */
+  readonly currentProject = this.projectState.activeProject;
 
   /** Re-fetch on beta toggle — response.services is not cached, so filter-only won't reveal beta-only services. */
   constructor() {

@@ -10,10 +10,20 @@ pub(crate) async fn read_body_limited(
     resp: reqwest::Response,
     label: &str,
 ) -> Result<Vec<u8>, String> {
+    read_body_capped(resp, label, MAX_RESPONSE_BODY_BYTES).await
+}
+
+/// [`read_body_limited`] with an explicit byte cap, for the few responses the default cap does
+/// not fit (an npm packument).
+pub(crate) async fn read_body_capped(
+    resp: reqwest::Response,
+    label: &str,
+    max_bytes: usize,
+) -> Result<Vec<u8>, String> {
     if let Some(len) = resp.content_length() {
-        if len > MAX_RESPONSE_BODY_BYTES as u64 {
+        if len > max_bytes as u64 {
             return Err(format!(
-                "{label} response too large ({len} bytes, limit {MAX_RESPONSE_BODY_BYTES})"
+                "{label} response too large ({len} bytes, limit {max_bytes})"
             ));
         }
     }
@@ -22,7 +32,7 @@ pub(crate) async fn read_body_limited(
         resp.content_length()
             .map(|l| l as usize)
             .unwrap_or(4096)
-            .min(MAX_RESPONSE_BODY_BYTES),
+            .min(max_bytes),
     );
 
     let mut stream = resp;
@@ -31,9 +41,9 @@ pub(crate) async fn read_body_limited(
         .await
         .map_err(|e| format!("Failed to read {label} response chunk: {e}"))?
     {
-        if buf.len().saturating_add(chunk.len()) > MAX_RESPONSE_BODY_BYTES {
+        if buf.len().saturating_add(chunk.len()) > max_bytes {
             return Err(format!(
-                "{label} response too large (exceeded {MAX_RESPONSE_BODY_BYTES} byte limit)"
+                "{label} response too large (exceeded {max_bytes} byte limit)"
             ));
         }
         buf.extend_from_slice(&chunk);
@@ -156,6 +166,67 @@ mod tests {
         let chain = error_chain(&err);
         assert!(chain.len() > err.to_string().len(), "{chain}");
         assert!(chain.contains("os error"), "{chain}");
+    }
+
+    async fn serve_once(head: &'static str, body: &'static str) -> u16 {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 2048];
+            let _ = sock.read(&mut buf).await;
+            let _ = sock
+                .write_all(format!("{head}\r\n\r\n{body}").as_bytes())
+                .await;
+            let _ = sock.shutdown().await;
+        });
+        port
+    }
+
+    async fn get(port: u16) -> reqwest::Response {
+        build_hardened_client(None)
+            .unwrap()
+            .get(format!("http://127.0.0.1:{port}/"))
+            .send()
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_read_body_capped_reads_a_body_within_the_cap() {
+        let port = serve_once(
+            "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close",
+            "hello",
+        )
+        .await;
+        let body = read_body_capped(get(port).await, "probe", 5).await.unwrap();
+        assert_eq!(body, b"hello");
+    }
+
+    #[tokio::test]
+    async fn test_read_body_capped_refuses_a_declared_length_above_the_cap() {
+        let port = serve_once(
+            "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close",
+            "hello",
+        )
+        .await;
+        let err = read_body_capped(get(port).await, "probe", 4)
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("probe response too large (5 bytes, limit 4)"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_body_capped_refuses_an_undeclared_body_above_the_cap() {
+        let port = serve_once("HTTP/1.1 200 OK\r\nConnection: close", "hello world").await;
+        let err = read_body_capped(get(port).await, "probe", 4)
+            .await
+            .unwrap_err();
+        assert!(err.contains("exceeded 4 byte limit"), "{err}");
     }
 
     #[test]

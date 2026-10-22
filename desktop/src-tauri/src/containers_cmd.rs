@@ -319,6 +319,7 @@ pub(crate) fn render_and_save_compose(project: &str) -> Result<(), String> {
     let (resolved, integrations) =
         config::resolve_project_config(project_path, &user_config, project);
 
+    crate::custom_mcp_cmd::relays::sync_before_render(project, integrations.effective_custom_mcp());
     let yaml = speedwave_runtime::compose::render_compose(
         project,
         &project_dir,
@@ -336,7 +337,12 @@ pub(crate) fn render_and_save_compose(project: &str) -> Result<(), String> {
     let expected_paths =
         speedwave_runtime::compose::SecurityExpectedPaths::compute(project, &project_dir)
             .map_err(|e| e.to_string())?
-            .with_telemetry_locked(resolved.telemetry.any_locked);
+            .with_telemetry_locked(resolved.telemetry.any_locked)
+            .with_custom_mcp(speedwave_runtime::custom_mcp::expectations_for(
+                &user_config,
+                project,
+                speedwave_runtime::custom_mcp::effective::current_managed_policy().as_ref(),
+            ));
     let prereq_violations = speedwave_runtime::os_prereqs::check_os_prereqs();
     if !prereq_violations.is_empty() {
         return Err(format!(
@@ -564,6 +570,7 @@ pub async fn add_project(
         log::warn!("clearing the chat sessions after adding the project did not finish: {je}");
     }
 
+    crate::custom_mcp_cmd::relays::stop_relays_except(&name);
     if let Some(prev) = pending_teardown {
         spawn_background_teardown(prev);
     }
@@ -579,6 +586,7 @@ pub async fn add_project(
 pub(crate) fn remove_project_core(
     name: &str,
     rt: &speedwave_runtime::runtime::LockedRuntime,
+    custom_servers: &[String],
     check_fn: &dyn Fn(&str) -> Result<(), String>,
     remove_fn: &dyn Fn(&str) -> Result<(), String>,
 ) -> Result<(), String> {
@@ -597,15 +605,30 @@ pub(crate) fn remove_project_core(
             speedwave_runtime::build::user_facing_engine_error(&e)
         )
     })?;
-    rt.remove_egress_less_networks(name).map_err(|e| {
-        log::error!("removing the egress-less networks of '{name}' failed: {e:#}");
-        format!(
-            "Failed to remove the networks of '{name}': {}",
-            speedwave_runtime::build::user_facing_engine_error(&e)
-        )
-    })?;
+    rt.remove_egress_less_networks(name, custom_servers)
+        .map_err(|e| {
+            log::error!("removing the egress-less networks of '{name}' failed: {e:#}");
+            format!(
+                "Failed to remove the networks of '{name}': {}",
+                speedwave_runtime::build::user_facing_engine_error(&e)
+            )
+        })?;
     log::info!("removing project name={name}");
     remove_fn(name)
+}
+
+fn configured_custom_mcp_servers(project: &str) -> Vec<String> {
+    match config::load_user_config() {
+        Ok(user_config) => user_config
+            .find_project(project)
+            .and_then(|p| p.custom_mcp.as_ref())
+            .map(|servers| servers.keys().cloned().collect())
+            .unwrap_or_default(),
+        Err(e) => {
+            log::warn!("cannot read the custom MCP servers of '{project}' to remove: {e}");
+            Vec::new()
+        }
+    }
 }
 
 #[tauri::command]
@@ -618,8 +641,10 @@ pub async fn remove_project(name: String) -> Result<(), String> {
         remove_project_core(
             &name,
             &rt,
+            &configured_custom_mcp_servers(&name),
             &|n| speedwave_runtime::project::check_removable(n).map_err(|e| e.to_string()),
             &|n| {
+                crate::custom_mcp_cmd::relays::stop_relay_of(n);
                 speedwave_runtime::project::remove_project(n).map_err(|e| {
                     log::error!("failed to remove project: {e}");
                     e.to_string()
@@ -2030,7 +2055,10 @@ fn validate_provider_entries(
     Ok(())
 }
 
-fn ensure_saving_for_active_project(active: &str, expected: Option<&str>) -> anyhow::Result<()> {
+pub(crate) fn ensure_saving_for_active_project(
+    active: &str,
+    expected: Option<&str>,
+) -> anyhow::Result<()> {
     match expected {
         Some(project) if project != active => anyhow::bail!(
             "the active project is now '{active}', not '{project}'; nothing was saved"
@@ -2409,6 +2437,7 @@ mod tests {
                     plugin_settings: None,
                     policy: None,
                     effort_pin: None,
+                    custom_mcp: None,
                 },
                 ProjectUserEntry {
                     name: "beta".to_string(),
@@ -2430,6 +2459,7 @@ mod tests {
                     plugin_settings: None,
                     policy: None,
                     effort_pin: None,
+                    custom_mcp: None,
                 },
             ],
             active_project: Some("alpha".to_string()),
@@ -2537,6 +2567,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -2564,6 +2595,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: Some("nonexistent".to_string()),
             selected_ide: None,
@@ -2598,6 +2630,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: Some("proj".to_string()),
             selected_ide: None,
@@ -5383,7 +5416,7 @@ mod tests {
     fn remove_project_core_happy_path() {
         let (rt, handles) = MockRuntimeBuilder::new().build();
         let removed = RefCell::new(Vec::<String>::new());
-        let result = remove_project_core("alpha", &rt, &ok_check, &|n| {
+        let result = remove_project_core("alpha", &rt, &[], &ok_check, &|n| {
             removed.borrow_mut().push(n.to_string());
             Ok(())
         });
@@ -5391,11 +5424,28 @@ mod tests {
         assert_eq!(handles.ensure_ready_count(), 1);
         assert_eq!(handles.down_projects(), vec!["alpha"]);
         let (reference_rt, reference_handles) = MockRuntimeBuilder::new().build();
-        reference_rt.remove_egress_less_networks("alpha").unwrap();
+        reference_rt
+            .remove_egress_less_networks("alpha", &[])
+            .unwrap();
         let expected = reference_handles.removed_networks();
         assert!(!expected.is_empty());
         assert_eq!(handles.removed_networks(), expected);
         assert_eq!(*removed.borrow(), vec!["alpha"]);
+    }
+
+    #[test]
+    fn remove_project_core_removes_the_networks_of_configured_custom_servers() {
+        let (rt, handles) = MockRuntimeBuilder::new().build();
+        let result =
+            remove_project_core("alpha", &rt, &["figma".to_string()], &ok_check, &|_| Ok(()));
+        assert!(result.is_ok(), "{result:?}");
+        let networks = handles.removed_networks();
+        assert!(
+            networks
+                .iter()
+                .any(|n| n.ends_with("_alpha_network_cx_figma")),
+            "{networks:?}"
+        );
     }
 
     #[test]
@@ -5404,7 +5454,7 @@ mod tests {
             .with_remove_network_error("network is in use by container \"abc\"")
             .build();
         let remove_calls = RefCell::new(0u32);
-        let result = remove_project_core("alpha", &rt, &ok_check, &|_| {
+        let result = remove_project_core("alpha", &rt, &[], &ok_check, &|_| {
             *remove_calls.borrow_mut() += 1;
             Ok(())
         });
@@ -5425,7 +5475,7 @@ mod tests {
     fn remove_project_core_starts_a_stopped_engine_before_teardown() {
         let (rt, handles) = MockRuntimeBuilder::new().with_is_available(false).build();
         let removed = RefCell::new(Vec::<String>::new());
-        let result = remove_project_core("alpha", &rt, &ok_check, &|n| {
+        let result = remove_project_core("alpha", &rt, &[], &ok_check, &|n| {
             removed.borrow_mut().push(n.to_string());
             Ok(())
         });
@@ -5443,7 +5493,7 @@ mod tests {
             )
             .build();
         let remove_calls = RefCell::new(0u32);
-        let result = remove_project_core("alpha", &rt, &ok_check, &|_| {
+        let result = remove_project_core("alpha", &rt, &[], &ok_check, &|_| {
             *remove_calls.borrow_mut() += 1;
             Ok(())
         });
@@ -5468,6 +5518,7 @@ mod tests {
         let result = remove_project_core(
             "alpha",
             &rt,
+            &[],
             &|n| {
                 Err(format!(
                     "{}Cannot remove the active project '{n}'.",
@@ -5495,7 +5546,7 @@ mod tests {
             .with_fail_on_down(&["alpha"])
             .build();
         let remove_calls = RefCell::new(0u32);
-        let result = remove_project_core("alpha", &rt, &ok_check, &|_| {
+        let result = remove_project_core("alpha", &rt, &[], &ok_check, &|_| {
             *remove_calls.borrow_mut() += 1;
             Ok(())
         });

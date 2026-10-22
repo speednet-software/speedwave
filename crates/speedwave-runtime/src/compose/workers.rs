@@ -24,20 +24,17 @@ pub(crate) fn apply_credentials_digests_in(
 /// Testable core of [`apply_credentials_digests_in`] with explicit roots.
 fn apply_credentials_digests(yaml: &str, tokens_root: &std::path::Path) -> anyhow::Result<String> {
     let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
-    let service_names: Vec<String> = doc
+    let targets: Vec<(String, String)> = doc
         .get("services")
         .and_then(|s| s.as_mapping())
         .map(|m| {
-            m.keys()
-                .filter_map(|k| k.as_str())
-                .filter(|n| n.starts_with("mcp-") && *n != "mcp-hub")
-                .map(str::to_string)
+            m.iter()
+                .filter_map(|(k, svc)| credentials_target(k.as_str()?, svc))
                 .collect()
         })
         .unwrap_or_default();
-    for name in service_names {
-        let key = name.strip_prefix("mcp-").unwrap_or(&name);
-        match credentials_digest(&tokens_root.join(key)) {
+    for (name, key) in targets {
+        match credentials_digest(&tokens_root.join(&key)) {
             Ok(Some(digest)) => {
                 add_service_env_var(&mut doc, &name, "SPW_CREDENTIALS_DIGEST", &digest)?;
             }
@@ -48,6 +45,20 @@ fn apply_credentials_digests(yaml: &str, tokens_root: &std::path::Path) -> anyho
         }
     }
     Ok(serde_yaml_ng::to_string(&doc)?)
+}
+
+/// The worker whose `/tokens` a service mounts, as `(service, token dir key)`: `mcp-<key>`,
+/// except that a Custom MCP server reads `custom-<id>` and its guard and egress mount no tokens.
+fn credentials_target(name: &str, service: &serde_yaml_ng::Value) -> Option<(String, String)> {
+    if !name.starts_with("mcp-") || name == "mcp-hub" {
+        return None;
+    }
+    let key = match super::custom_mcp::role_of(service) {
+        Some((super::custom_mcp::Role::Server, id)) => crate::custom_mcp::model::service_id(&id),
+        Some(_) => return None,
+        None => name.strip_prefix("mcp-").unwrap_or(name).to_string(),
+    };
+    Some((name.to_string(), key))
 }
 
 /// Machine-written files in a token dir that must NOT trigger recreate: `access_token` is rotated by
@@ -121,7 +132,7 @@ pub(crate) fn apply_worker_auth_tokens_in(
 
 /// Reads or generates one worker's Bearer auth token, writes it atomically at 0o600,
 /// injects the env var into the worker, and mounts the token file into the hub.
-fn ensure_worker_auth_token(
+pub(crate) fn ensure_worker_auth_token(
     doc: &mut serde_yaml_ng::Value,
     secrets_dir: &std::path::Path,
     token_key: &str,
@@ -130,6 +141,29 @@ fn ensure_worker_auth_token(
 ) -> anyhow::Result<()> {
     let token_file_name = format!("{token_key}-auth-token");
     let token_path = secrets_dir.join(&token_file_name);
+    let token = read_or_mint_secret(secrets_dir, &token_file_name)?;
+
+    add_service_env_var(doc, compose_name, env_key, &token)?;
+
+    add_hub_volume(
+        doc,
+        &format!(
+            "{}:/secrets/{}:ro",
+            to_engine_path(&token_path)?,
+            token_file_name
+        ),
+    )?;
+
+    Ok(())
+}
+
+/// Reads `secrets_dir/file_name`, or a fresh UUID v4 when it is missing, empty, unreadable or
+/// not a regular file, and writes it back atomically at 0o600; renders stay stable across runs.
+pub(crate) fn read_or_mint_secret(
+    secrets_dir: &std::path::Path,
+    file_name: &str,
+) -> anyhow::Result<String> {
+    let token_path = secrets_dir.join(file_name);
 
     let token = if !token_path.is_symlink() && token_path.is_file() {
         match std::fs::read_to_string(&token_path) {
@@ -168,19 +202,7 @@ fn ensure_worker_auth_token(
     };
 
     crate::fs_perms::write_restricted_file_atomic(&token_path, &token)?;
-
-    add_service_env_var(doc, compose_name, env_key, &token)?;
-
-    add_hub_volume(
-        doc,
-        &format!(
-            "{}:/secrets/{}:ro",
-            to_engine_path(&token_path)?,
-            token_file_name
-        ),
-    )?;
-
-    Ok(())
+    Ok(token)
 }
 
 /// Testable version: accepts explicit secrets directory and plugin list.
@@ -226,7 +248,7 @@ pub(crate) fn apply_worker_auth_tokens_with_dir(
 }
 
 /// SSOT for `apply_integrations_filter`'s `ENABLED_SERVICES`: enabled built-in MCP keys, `os` when
-/// any OS sub-integration is on, and plugin service IDs backed by an MCP manifest (never a slug).
+/// any OS sub-integration is on, MCP plugin service IDs (never a slug), then running `custom-*` ids.
 pub fn enabled_hub_service_ids(
     integrations: &ResolvedIntegrationsConfig,
     plugin_manifests: &[plugin::PluginManifest],
@@ -249,6 +271,12 @@ pub fn enabled_hub_service_ids(
             .into_iter()
             .filter(|id| mcp_plugin_ids.contains(*id))
             .map(String::from),
+    );
+    ids.extend(
+        integrations
+            .effective_custom_mcp()
+            .iter()
+            .map(|server| server.service_id.clone()),
     );
     ids
 }

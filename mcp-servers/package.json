@@ -21,7 +21,9 @@
     "office",
     "context7",
     "os",
-    "oauth"
+    "oauth",
+    "custom-launcher",
+    "custom-guard"
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",

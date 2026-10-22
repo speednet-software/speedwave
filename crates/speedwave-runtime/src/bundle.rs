@@ -684,7 +684,7 @@ fn validate_bundled_asset(
 
 /// A hash input is repo-root-relative; in the bundled build-context the bundle scripts stage
 /// vendored sources under `containers/`, so a missing direct path falls back to that layout.
-fn resolve_hash_input(build_root: &Path, input: &str) -> anyhow::Result<PathBuf> {
+pub(crate) fn resolve_hash_input(build_root: &Path, input: &str) -> anyhow::Result<PathBuf> {
     let direct = build_root.join(input);
     if direct.exists() {
         return Ok(direct);
@@ -715,6 +715,20 @@ pub(crate) fn resolve_hash_input_for_test(
     input: &str,
 ) -> anyhow::Result<PathBuf> {
     resolve_hash_input(build_root, input)
+}
+
+/// Files of the repo-root-relative `inputs` under `build_root` as `(path, bytes)` pairs sorted by
+/// path, exactly what the image digests hash: build-output dirs skipped, symlinks refused.
+pub(crate) fn read_build_inputs(
+    build_root: &Path,
+    inputs: &[&str],
+) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
+    let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
+    for input in inputs {
+        collect_directory_entries(&resolve_hash_input(build_root, input)?, input, &mut entries)?;
+    }
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(entries)
 }
 
 fn digest_paths(paths: &[(&str, &Path)]) -> anyhow::Result<String> {

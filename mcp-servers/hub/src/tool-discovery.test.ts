@@ -193,16 +193,59 @@ describe('tool-discovery', () => {
       expect(tools[0].name).toBe('send_channel');
     });
 
-    it('returns empty array on fetch error', async () => {
+    it('rejects on fetch error instead of reporting an empty tool list', async () => {
       process.env.WORKER_SLACK_URL = 'http://mcp-slack:3001';
       const mockFetch = vi.fn().mockRejectedValue(new Error('Connection refused'));
       vi.stubGlobal('fetch', mockFetch);
 
-      const tools = await discoverServiceTools('slack');
-      expect(tools).toEqual([]);
+      await expect(discoverServiceTools('slack')).rejects.toThrow('Connection refused');
     });
 
-    it('returns empty array on JSON-RPC error in tools/list', async () => {
+    it('rejects when initialize answers with a non-2xx status', async () => {
+      process.env.WORKER_SLACK_URL = 'http://mcp-slack:3001';
+      const mockFetch = vi
+        .fn()
+        .mockResolvedValueOnce(mockJsonResponse({ status: 'error' }, { ok: false, status: 503 }));
+      vi.stubGlobal('fetch', mockFetch);
+
+      await expect(discoverServiceTools('slack')).rejects.toThrow('Worker initialize returned 503');
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects when tools/list answers with a non-2xx status', async () => {
+      process.env.WORKER_SLACK_URL = 'http://mcp-slack:3001';
+      const healthy = createMcpMockFetch([]);
+      const mockFetch = vi.fn().mockImplementation((...args: unknown[]) => {
+        if (mockFetch.mock.calls.length >= 3) {
+          return Promise.resolve(mockJsonResponse(null, { ok: false, status: 502 }));
+        }
+        return healthy(...args);
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      await expect(discoverServiceTools('slack')).rejects.toThrow('Worker returned 502');
+    });
+
+    it('rejects when the worker times out', async () => {
+      process.env.WORKER_SLACK_URL = 'http://mcp-slack:3001';
+      const mockFetch = vi
+        .fn()
+        .mockRejectedValue(
+          new DOMException('The operation was aborted due to timeout', 'TimeoutError')
+        );
+      vi.stubGlobal('fetch', mockFetch);
+
+      await expect(discoverServiceTools('slack')).rejects.toThrow('timeout');
+    });
+
+    it('returns an empty array when the worker lists no tools', async () => {
+      process.env.WORKER_SLACK_URL = 'http://mcp-slack:3001';
+      vi.stubGlobal('fetch', createMcpMockFetch([]));
+
+      await expect(discoverServiceTools('slack')).resolves.toEqual([]);
+    });
+
+    it('rejects on JSON-RPC error in tools/list', async () => {
       process.env.WORKER_SLACK_URL = 'http://mcp-slack:3001';
 
       let callIndex = 0;
@@ -231,8 +274,7 @@ describe('tool-discovery', () => {
       });
       vi.stubGlobal('fetch', mockFetch);
 
-      const tools = await discoverServiceTools('slack');
-      expect(tools).toEqual([]);
+      await expect(discoverServiceTools('slack')).rejects.toThrow('Internal error');
     });
 
     it('sends Authorization: Bearer header when auth token exists', async () => {
@@ -734,6 +776,62 @@ describe('tool-discovery', () => {
         warnCalls.some((m) => m.includes('assigned_to') && m.includes('is not an input parameter'))
       ).toBe(true);
       warnSpy.mockRestore();
+    });
+
+    it('keeps prototype-named tools from a malicious worker as plain own entries', async () => {
+      process.env.WORKER_EXAMPLE_PLUGIN_URL = 'http://mcp-example-plugin:4010';
+      const schema = { type: 'object', properties: {} };
+      const mockTools = ['__proto__', 'constructor', 'prototype', 'toString'].map((name) => ({
+        name,
+        description: `${name} tool`,
+        inputSchema: schema,
+        _meta: { deferLoading: false },
+      })) as Tool[];
+
+      vi.stubGlobal('fetch', createMcpMockFetch(mockTools));
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const result = await discoverAndMergeService('example-plugin');
+
+      expect(Object.getPrototypeOf(result)).toBeNull();
+      expect(Object.keys(result).sort()).toEqual(
+        ['_Proto__', 'constructor', 'prototype', 'toString'].sort()
+      );
+      expect(new Map(Object.entries(result)).get('constructor')?.description).toBe(
+        'constructor tool'
+      );
+      expect(({} as Record<string, unknown>).constructor).toBe(Object);
+      expect(Object.prototype).not.toHaveProperty('description');
+    });
+
+    it('drops a currentUserTool or selfParam that names only an inherited object key', async () => {
+      process.env.WORKER_REDMINE_URL = 'http://mcp-redmine:3003';
+
+      const mockTools: Tool[] = [
+        {
+          name: 'list_issue_ids',
+          description: 'List Redmine issue IDs',
+          inputSchema: { type: 'object', properties: { status: { type: 'string' } } },
+          _meta: { deferLoading: false, userScoped: true, currentUserTool: 'toString' },
+        },
+        {
+          name: 'list_mine',
+          description: 'List mine',
+          inputSchema: { type: 'object', properties: { status: { type: 'string' } } },
+          _meta: { deferLoading: false, userScoped: true, selfParam: 'constructor' },
+        },
+      ];
+
+      vi.stubGlobal('fetch', createMcpMockFetch(mockTools));
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const result = await discoverAndMergeService('redmine');
+
+      expect(result['listIssueIds'].currentUserTool).toBeUndefined();
+      expect(result['listMine'].selfParam).toBeUndefined();
+      const warnCalls = warnSpy.mock.calls.map((c) => c.join(' '));
+      expect(warnCalls.some((m) => m.includes("currentUserTool 'toString'"))).toBe(true);
+      expect(warnCalls.some((m) => m.includes("selfParam 'constructor'"))).toBe(true);
     });
 
     it('warns once at discovery when a userScoped tool declares no companion, keeping the tool', async () => {

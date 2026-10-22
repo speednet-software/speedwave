@@ -32,7 +32,7 @@ There are two plugin types: an **MCP service plugin** has a `service_id` and a r
 ## Service ID constants (current values — verify against `consts.rs`)
 
 - `consts::BUILT_IN_SERVICES` (compose names, for SecurityCheck): `claude`, `mcp-hub`, `mcp-slack`, `mcp-sharepoint`, `mcp-redmine`, `mcp-gitlab`, `mcp-github`, `mcp-atlassian`, `mcp-office`, `mcp-playwright`, `mcp-context7`.
-- `consts::BUILT_IN_SERVICE_IDS` (logical IDs, for plugin collision check): `slack`, `sharepoint`, `redmine`, `gitlab`, `github`, `atlassian`, `office`, `playwright`, `context7`, `os`, `oauth`, `ide`. (`oauth` and `ide` have no compose service — they are host-side workers/bridges reserved purely so a plugin slug cannot shadow them; ADR-060, ADR-063.)
+- `consts::BUILT_IN_SERVICE_IDS` (logical IDs, for plugin collision check): `slack`, `sharepoint`, `redmine`, `gitlab`, `github`, `atlassian`, `office`, `playwright`, `context7`, `os`, `oauth`, `ide`, `llm`. (`oauth` and `ide` have no compose service — they are host-side workers/bridges reserved purely so a plugin slug cannot shadow them; ADR-060, ADR-063. `llm` names the LLM proxy's token directory `tokens/<project>/llm/`; ADR-073.)
 - A guard test verifies no overlap between the two lists.
 
 ## Where it lives in code
@@ -54,6 +54,14 @@ There are two plugin types: an **MCP service plugin** has a `service_id` and a r
 - **Compose fragment merge (the old addon system):** rejected — fragments could not be validated or hardened consistently; plugin services are now generated programmatically with the same shape as built-in workers.
 - **`read_write` token mount for plugins:** rejected — the `:rw` mount is reserved for built-in OAuth refresh (ADR-009). A plugin that must persist data writes to the `:rw` `/workspace` mount instead.
 - **One unified regex flavour for both `auth_fields` and `settings_schema`:** rejected — the two surfaces have different lifecycles and storage (per-field token files vs. one JSON settings blob), so they keep RE2-subset and ECMA-262 respectively.
+
+## Amendment (2026-10-08): the `custom-` prefix is reserved
+
+**Context.** Custom MCP servers, MCP servers a user approves outside the built-in and plugin catalog, get service ids of the form `custom-<name>`. Those ids name their compose services, hub discovery env and token directories, the same derived keys a plugin slug drives (see "Slug drives all paths/keys" above). A plugin whose slug or `service_id` starts with `custom-` would collide with them.
+
+**Decision.** The prefix `custom-` (`consts.rs::CUSTOM_MCP_SERVICE_PREFIX`) is reserved. `plugin.rs::validate_manifest` rejects a slug or a `service_id` that starts with it, and the error names the reserved prefix. Only the prefix with its dash is reserved: `custom`, `customer` and `my-custom-x` stay valid slugs. Because `compose/plugins.rs` re-runs `validate_manifest` at every render, the check also covers plugins installed before this change.
+
+**Consequences.** An installed plugin with a `custom-` slug stops rendering after an upgrade and must be renamed and re-signed. Speednet signs every plugin, so the rename lands in the `speedwave-plugins` repo before such a plugin could ship. The reservation is in place before Custom MCP exists, so no plugin can claim the namespace in the meantime.
 
 ## References
 

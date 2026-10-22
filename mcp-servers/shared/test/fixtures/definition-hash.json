@@ -1,0 +1,169 @@
+{
+  "version": 1,
+  "canonicalJson": [
+    {
+      "name": "object keys sorted at every level",
+      "input": { "b": 1, "a": 2, "c": { "z": true, "y": false } },
+      "canonical": "{\"a\":2,\"b\":1,\"c\":{\"y\":false,\"z\":true}}"
+    },
+    {
+      "name": "numbers as JavaScript JSON.stringify writes them",
+      "input": [1, 1.0, 1.5, -0, 0.1, -12.25, 1e2, 1e21, 1e-7, 123456789012345680000, 0.000001],
+      "canonical": "[1,1,1.5,0,0.1,-12.25,100,1e+21,1e-7,123456789012345680000,0.000001]"
+    },
+    {
+      "name": "keys sorted by code point, not UTF-16 unit",
+      "input": { "！": 1, "😀": 2, "é": 3, "z": 4, "Z": 5, "": 6 },
+      "canonical": "{\"\":6,\"Z\":5,\"z\":4,\"é\":3,\"！\":1,\"😀\":2}"
+    },
+    {
+      "name": "string escapes match JSON.stringify",
+      "input": "quote \" backslash \\ slash / nl \n tab \t cr \r bs \b ff \f unit \u001f nul \u0000 del \u007f nbsp   ls \u2028 zwj \u200d emoji 😀",
+      "canonical": "\"quote \\\" backslash \\\\ slash / nl \\n tab \\t cr \\r bs \\b ff \\f unit \\u001f nul \\u0000 del \u007f nbsp   ls \u2028 zwj \u200d emoji 😀\""
+    },
+    {
+      "name": "empty containers, null and booleans",
+      "input": { "e": false, "d": true, "c": null, "b": {}, "a": [] },
+      "canonical": "{\"a\":[],\"b\":{},\"c\":null,\"d\":true,\"e\":false}"
+    },
+    {
+      "name": "array order is preserved while nested keys are sorted",
+      "input": [[3, 2, 1], { "k": [{ "b": 1, "a": 0 }] }, "x", null],
+      "canonical": "[[3,2,1],{\"k\":[{\"a\":0,\"b\":1}]},\"x\",null]"
+    },
+    {
+      "name": "top-level string",
+      "input": "zażółć gęślą jaźń",
+      "canonical": "\"zażółć gęślą jaźń\""
+    },
+    {
+      "name": "top-level number zero",
+      "input": 0,
+      "canonical": "0"
+    },
+    {
+      "name": "key that parses as an own __proto__ property",
+      "input": { "z": 1, "__proto__": { "polluted": true } },
+      "canonical": "{\"__proto__\":{\"polluted\":true},\"z\":1}"
+    }
+  ],
+  "definitionHash": [
+    {
+      "name": "minimal tool without description and annotations",
+      "tool": { "name": "get_file", "inputSchema": { "type": "object" } },
+      "canonical": "{\"annotations\":null,\"description\":\"\",\"inputSchema\":{\"type\":\"object\"},\"name\":\"get_file\",\"outputSchema\":null}",
+      "hash": "sha256:67d8244eaec6dab87fcf51d875136a5979597a001d5f3cb6523699d37b4aa7be"
+    },
+    {
+      "name": "full tool with unsorted keys",
+      "tool": {
+        "name": "post_comment",
+        "description": "Add a comment to a file.",
+        "inputSchema": {
+          "type": "object",
+          "required": ["file_key", "message"],
+          "properties": {
+            "message": { "type": "string", "description": "Comment text" },
+            "file_key": { "type": "string" }
+          }
+        },
+        "annotations": { "readOnlyHint": false, "destructiveHint": false, "title": "Post comment" }
+      },
+      "canonical": "{\"annotations\":{\"destructiveHint\":false,\"readOnlyHint\":false,\"title\":\"Post comment\"},\"description\":\"Add a comment to a file.\",\"inputSchema\":{\"properties\":{\"file_key\":{\"type\":\"string\"},\"message\":{\"description\":\"Comment text\",\"type\":\"string\"}},\"required\":[\"file_key\",\"message\"],\"type\":\"object\"},\"name\":\"post_comment\",\"outputSchema\":null}",
+      "hash": "sha256:2ec4cbea7982be0b82d0444193766a46a56e2f244f341e6c80cddf482c73dec2"
+    },
+    {
+      "name": "description stripped of controls, bidi and zero-width characters",
+      "tool": {
+        "name": "search",
+        "description": "Find\u202e files\u2066 now\u200b\u200c\u200d\ufeff.\r\nTab\there\u0007\u0085\u061c\u200e\u200f\u2060",
+        "inputSchema": { "type": "object", "properties": {} }
+      },
+      "canonical": "{\"annotations\":null,\"description\":\"Find files now.\\nTab\\there\",\"inputSchema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"search\",\"outputSchema\":null}",
+      "hash": "sha256:3e9446f92f5aac493f0d81470bb01490b16733cb496b4e871dbc00b6ddb005f1"
+    },
+    {
+      "name": "description cut to 1024 UTF-8 bytes on a code point boundary",
+      "tool": {
+        "name": "long",
+        "description": "a€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€ tail",
+        "inputSchema": { "type": "object" }
+      },
+      "canonical": "{\"annotations\":null,\"description\":\"a€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€\",\"inputSchema\":{\"type\":\"object\"},\"name\":\"long\",\"outputSchema\":null}",
+      "hash": "sha256:2cb86207c6ace84ac68684e3b558763545aa64302cf1606b0dde858e5d1ee1a3"
+    },
+    {
+      "name": "unicode and dotted upstream name",
+      "tool": {
+        "name": "pliki.pobierz_ąę",
+        "description": "Pobiera plik 😀",
+        "inputSchema": { "type": "object", "properties": { "ścieżka": { "type": "string" } } }
+      },
+      "canonical": "{\"annotations\":null,\"description\":\"Pobiera plik 😀\",\"inputSchema\":{\"properties\":{\"ścieżka\":{\"type\":\"string\"}},\"type\":\"object\"},\"name\":\"pliki.pobierz_ąę\",\"outputSchema\":null}",
+      "hash": "sha256:6a0e0085a068421ed3dc11a94d4fd3d4d7d8579c28747b65609e2ff1aeaf9292"
+    },
+    {
+      "name": "empty input schema",
+      "tool": { "name": "ping_server", "description": "", "inputSchema": {} },
+      "canonical": "{\"annotations\":null,\"description\":\"\",\"inputSchema\":{},\"name\":\"ping_server\",\"outputSchema\":null}",
+      "hash": "sha256:d72ef576d9755ffde399863aa607821b52e97c80cd7013fa924c9830887a4404"
+    },
+    {
+      "name": "numbers inside the schema",
+      "tool": {
+        "name": "numbers",
+        "description": "n",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "n": { "type": "number", "minimum": -0, "maximum": 1.0, "multipleOf": 1.5, "default": 1e21 }
+          }
+        }
+      },
+      "canonical": "{\"annotations\":null,\"description\":\"n\",\"inputSchema\":{\"properties\":{\"n\":{\"default\":1e+21,\"maximum\":1,\"minimum\":0,\"multipleOf\":1.5,\"type\":\"number\"}},\"type\":\"object\"},\"name\":\"numbers\",\"outputSchema\":null}",
+      "hash": "sha256:93322982bcade6c70af0c7bb67e3496ed5daa60c902584e26bacbfcec4c96946"
+    },
+    {
+      "name": "description made only of stripped characters",
+      "tool": {
+        "name": "blank",
+        "description": "\u200b\u202a\u0001",
+        "inputSchema": { "type": "object" },
+        "annotations": {}
+      },
+      "canonical": "{\"annotations\":{},\"description\":\"\",\"inputSchema\":{\"type\":\"object\"},\"name\":\"blank\",\"outputSchema\":null}",
+      "hash": "sha256:f32b7fcfa42eab5933c8be9a3360e1b65eb794b5ab28309cdbf856ff00c07835"
+    },
+    {
+      "name": "fields outside the hash are ignored",
+      "tool": {
+        "name": "get_file",
+        "inputSchema": { "type": "object" },
+        "title": "ignored",
+        "_meta": { "speedwave.pl/defer-loading": false }
+      },
+      "canonical": "{\"annotations\":null,\"description\":\"\",\"inputSchema\":{\"type\":\"object\"},\"name\":\"get_file\",\"outputSchema\":null}",
+      "hash": "sha256:67d8244eaec6dab87fcf51d875136a5979597a001d5f3cb6523699d37b4aa7be"
+    },
+    {
+      "name": "output schema is covered by the hash",
+      "tool": {
+        "name": "get_file",
+        "inputSchema": { "type": "object" },
+        "outputSchema": {
+          "type": "object",
+          "required": ["content"],
+          "properties": { "content": { "type": "string" }, "size": { "type": "integer" } }
+        }
+      },
+      "canonical": "{\"annotations\":null,\"description\":\"\",\"inputSchema\":{\"type\":\"object\"},\"name\":\"get_file\",\"outputSchema\":{\"properties\":{\"content\":{\"type\":\"string\"},\"size\":{\"type\":\"integer\"}},\"required\":[\"content\"],\"type\":\"object\"}}",
+      "hash": "sha256:3db3ac2b0e554d09db69a0fdbca8aec48ad823804d6e1207282872e3750ea84f"
+    },
+    {
+      "name": "null output schema hashes like an absent one",
+      "tool": { "name": "get_file", "inputSchema": { "type": "object" }, "outputSchema": null },
+      "canonical": "{\"annotations\":null,\"description\":\"\",\"inputSchema\":{\"type\":\"object\"},\"name\":\"get_file\",\"outputSchema\":null}",
+      "hash": "sha256:67d8244eaec6dab87fcf51d875136a5979597a001d5f3cb6523699d37b4aa7be"
+    }
+  ]
+}

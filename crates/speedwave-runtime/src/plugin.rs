@@ -899,12 +899,26 @@ fn validate_speedwave_compat(compat: Option<&str>) -> anyhow::Result<()> {
     check_speedwave_compat_against(compat, &current_version)
 }
 
+fn reject_custom_mcp_prefix(field: &str, value: &str) -> anyhow::Result<()> {
+    if value.starts_with(consts::CUSTOM_MCP_SERVICE_PREFIX) {
+        anyhow::bail!(
+            "Plugin {field} '{value}' uses the prefix '{}', which is reserved for Custom MCP servers",
+            consts::CUSTOM_MCP_SERVICE_PREFIX
+        );
+    }
+    Ok(())
+}
+
 /// Validates manifest constraints at install time.
 pub(crate) fn validate_manifest(
     manifest: &PluginManifest,
     plugin_dir: &Path,
 ) -> anyhow::Result<()> {
     validate_slug(&manifest.slug)?;
+    reject_custom_mcp_prefix("slug", &manifest.slug)?;
+    if let Some(sid) = &manifest.service_id {
+        reject_custom_mcp_prefix("service_id", sid)?;
+    }
     validate_speedwave_compat(manifest.speedwave_compat.as_deref())?;
 
     if let Some(instructions) = &manifest.instructions {
@@ -5721,6 +5735,65 @@ mod tests {
         }"#;
         let field: AuthFieldDef = serde_json::from_str(json).unwrap();
         assert!(field.validation.unwrap().message.is_none());
+    }
+
+    fn manifest_with_ids(slug: &str, service_id: Option<&str>) -> PluginManifest {
+        let mut m = manifest_with_validation(None);
+        m.slug = slug.to_string();
+        m.service_id = service_id.map(str::to_string);
+        m
+    }
+
+    #[test]
+    fn validate_manifest_rejects_custom_mcp_prefixed_slug() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&manifest_with_ids("custom-x", None), tmp.path())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("slug 'custom-x'"), "unexpected error: {err}");
+        assert!(
+            err.contains(consts::CUSTOM_MCP_SERVICE_PREFIX) && err.contains("reserved"),
+            "error must name the reserved prefix, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_manifest_rejects_custom_mcp_prefixed_service_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("Containerfile"), "FROM scratch\n").unwrap();
+        let err = validate_manifest(&manifest_with_ids("plain", Some("custom-x")), tmp.path())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("service_id 'custom-x'") && err.contains("'custom-'"),
+            "service_id must be rejected for the reserved prefix before the slug match, got: {err}"
+        );
+        let both = validate_manifest(&manifest_with_ids("custom-x", Some("custom-x")), tmp.path())
+            .unwrap_err()
+            .to_string();
+        assert!(both.contains("reserved"), "unexpected error: {both}");
+    }
+
+    #[test]
+    fn validate_manifest_accepts_names_that_only_resemble_the_custom_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("Containerfile"), "FROM scratch\n").unwrap();
+        for name in ["customer", "custom", "customx", "my-custom-x", "custom1-x"] {
+            assert!(
+                validate_manifest(&manifest_with_ids(name, None), tmp.path()).is_ok(),
+                "slug '{name}' must be accepted"
+            );
+            assert!(
+                validate_manifest(&manifest_with_ids(name, Some(name)), tmp.path()).is_ok(),
+                "service_id '{name}' must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_manifest_rejects_uppercase_custom_prefix_through_the_slug_regex() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(validate_manifest(&manifest_with_ids("Custom-x", None), tmp.path()).is_err());
     }
 
     #[test]

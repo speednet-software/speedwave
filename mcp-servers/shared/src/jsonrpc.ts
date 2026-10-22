@@ -13,6 +13,7 @@ import type {
 } from './types.js';
 import { JSONRPCErrorCode, SUPPORTED_PROTOCOL_VERSIONS, LATEST_PROTOCOL_VERSION } from './types.js';
 import { validateJSONRPCMessage, validateToolName } from './security.js';
+import type { ToolGate } from './tool-gate.js';
 import { sessionManager } from './session.js';
 import { ts } from './logger.js';
 
@@ -79,6 +80,8 @@ export interface JSONRPCHandlerOptions {
   version: string;
   /** Optional human-readable instructions for the client (included in initialize result) */
   instructions?: string;
+  /** Optional tool gate: filters `tools/list`, authorizes `tools/call` and sanitizes its results */
+  toolGate?: ToolGate;
 }
 
 /** JSON-RPC handler that processes MCP protocol messages. */
@@ -87,6 +90,7 @@ export class JSONRPCHandler {
   private toolHandlers: Map<string, ToolHandler> = new Map();
   private serverInfo: { name: string; version: string };
   private instructions?: string;
+  private toolGate?: ToolGate;
 
   /**
    * Creates a new JSON-RPC handler instance with server identification.
@@ -95,6 +99,7 @@ export class JSONRPCHandler {
   constructor(options: JSONRPCHandlerOptions) {
     this.serverInfo = { name: options.name, version: options.version };
     this.instructions = options.instructions;
+    this.toolGate = options.toolGate;
   }
 
   /**
@@ -295,7 +300,8 @@ export class JSONRPCHandler {
       sessionManager.createSession({ name: 'auto-reconnect', version: '1.0' });
     }
 
-    const allTools = Array.from(this.tools.values());
+    const registered = Array.from(this.tools.values());
+    const allTools = this.toolGate ? this.toolGate.filterToolsList(registered) : registered;
     const cursor = request.params?.cursor as string | undefined;
     let startIndex = 0;
     if (cursor) {
@@ -377,6 +383,14 @@ export class JSONRPCHandler {
       );
     }
 
+    if (this.toolGate) {
+      const decision = this.toolGate.authorizeCall(name);
+      if (!decision.allowed) {
+        console.warn(`${ts()} 🚫 Tool call denied by gate: ${name}`);
+        return { jsonrpc: '2.0', id: request.id, result: decision.result };
+      }
+    }
+
     const handler = this.toolHandlers.get(name);
     if (!handler) {
       const registeredTools = Array.from(this.toolHandlers.keys());
@@ -392,6 +406,9 @@ export class JSONRPCHandler {
     try {
       console.log(`${ts()} 🔧 Executing tool: ${name}`);
       const result = context === undefined ? await handler(args) : await handler(args, context);
+      if (this.toolGate) {
+        return { jsonrpc: '2.0', id: request.id, result: this.toolGate.sanitizeCallResult(result) };
+      }
       return { jsonrpc: '2.0', id: request.id, result };
     } catch (error) {
       return this.buildErrorResponse(request.id, JSONRPCErrorBuilder.internalError(error));

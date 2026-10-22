@@ -420,6 +420,15 @@ pub fn sweep_stale_atomic_write_temp_files(dir: &Path, min_age: std::time::Durat
 /// Reads a file without following a final-component symlink (Unix `O_NOFOLLOW`; Windows
 /// `FILE_FLAG_OPEN_REPARSE_POINT` + handle reparse check); regular-file confirmed via the handle.
 pub fn read_regular_file_no_follow(path: &Path) -> Result<Option<String>, String> {
+    read_regular_file_no_follow_capped(path, u64::MAX)
+}
+
+/// [`read_regular_file_no_follow`] that refuses a file larger than `max_bytes`, checked on the
+/// open handle and again while reading, so a file growing after the check is refused too.
+pub fn read_regular_file_no_follow_capped(
+    path: &Path,
+    max_bytes: u64,
+) -> Result<Option<String>, String> {
     use std::io::Read;
 
     let mut opts = std::fs::OpenOptions::new();
@@ -436,7 +445,7 @@ pub fn read_regular_file_no_follow(path: &Path) -> Result<Option<String>, String
         use std::os::windows::fs::OpenOptionsExt;
         opts.custom_flags(0x0020_0000);
     }
-    let mut file = match opts.open(path) {
+    let file = match opts.open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(format!("cannot open {}: {e}", path.display())),
@@ -456,9 +465,17 @@ pub fn read_regular_file_no_follow(path: &Path) -> Result<Option<String>, String
     if !meta.file_type().is_file() {
         return Err(format!("not a regular file: {}", path.display()));
     }
+    let too_large = || format!("{} is larger than {max_bytes} bytes", path.display());
+    if meta.len() > max_bytes {
+        return Err(too_large());
+    }
     let mut buf = String::new();
-    file.read_to_string(&mut buf)
+    file.take(max_bytes.saturating_add(1))
+        .read_to_string(&mut buf)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    if buf.len() as u64 > max_bytes {
+        return Err(too_large());
+    }
     Ok(Some(buf))
 }
 
@@ -515,6 +532,28 @@ mod tests {
         assert_eq!(
             read_regular_file_no_follow(&path).unwrap(),
             Some("line1\nline2\n".to_string())
+        );
+    }
+
+    #[test]
+    fn read_no_follow_capped_reads_up_to_the_cap_and_refuses_more() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.json");
+        std::fs::write(&path, "12345").unwrap();
+        assert_eq!(
+            read_regular_file_no_follow_capped(&path, 5).unwrap(),
+            Some("12345".to_string())
+        );
+        let err = read_regular_file_no_follow_capped(&path, 4).unwrap_err();
+        assert!(err.contains("larger than 4 bytes"), "{err}");
+        assert_eq!(
+            read_regular_file_no_follow_capped(&dir.path().join("nope"), 1).unwrap(),
+            None
+        );
+        std::fs::write(&path, "").unwrap();
+        assert_eq!(
+            read_regular_file_no_follow_capped(&path, 0).unwrap(),
+            Some(String::new())
         );
     }
 

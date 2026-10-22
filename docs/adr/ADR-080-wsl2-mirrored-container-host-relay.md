@@ -59,6 +59,18 @@ End-to-end validated on a live mirrored distro: a container on the project netwo
 
 The host listener stays on `127.0.0.1`; the relay address lives on `lo` and is routable only from the guest's own container networks, so no host worker is exposed to the LAN — preserving ADR-067's security goal without binding the LAN IP.
 
+## Amendment (2026-10-08): the Custom MCP host relay is a supervised listener, one port per project
+
+**Context.** "Known limitations" says only Speedwave-supervised listeners are relayed, and names a hand-run host MCP endpoint as unreachable under mirrored mode. Custom MCP host servers (a user-approved HTTP MCP server already running on the host's loopback) must be reachable from their host-mode guard containers on every platform, mirrored mode included.
+
+**Decision.** Desktop fronts them with one supervised listener per project, `bridges/custom_host_relay.rs::CustomHostRelay`, a `HostBridge` in `HttpForward` mode (ADR-063 amendment of the same date). Because it is a `HostBridge`, the relay inherits the full lifecycle of this ADR: ensure after bind, re-ensure on the ~30 s watchdog tick, remove on stop. The host apps themselves are not relayed: the relay dials them on host loopback, so one relay port per project covers every host server of that project, multiplexed by bearer.
+
+- **State** lives under `<data_dir>/custom-mcp/<project>/` (owner-only dirs, `0o600` files): `relay/<port>.lock` (`{project, pid, port}`), `relay-port` (the preferred listen port, reused on the next start; when it is busy the relay binds an ephemeral port and rewrites the file), and per server `relay-<name>/token` (a persistent UUID per project and server, reused while it is 16 to 512 printable ASCII characters) and `relay-<name>/endpoint.json` (`{"url":"http://host.docker.internal:<container_facing_port>/","available":true|false}`).
+- **The URL is container-facing.** It is built from `compose::container_facing_port(bound port)`, so under mirrored mode it names the relay port. The watchdog tick recomputes it, and when the addressing mode flips the relay rewrites every `endpoint.json`; the guard re-reads the file per request, so no container is recreated. The guard mounts the `relay-<name>/` directory, never the files, because an atomic rename replaces the file's inode and a single-file bind mount would keep serving the old one (Linux bind-mount semantics[^6]; not separately verified on Lima virtiofs or WSL drvfs).
+- **Lifecycle.** `start` ensures the Windows firewall rule before binding, binds, writes the lock, and rewrites the existing endpoint files as unavailable on the new port. `set_routes` mints or loads the tokens, swaps the route table, marks the endpoints available and removes the `relay-<name>/` directories of servers no longer listed. On exit, `reconcile.rs::stop_custom_host_relays` marks every endpoint unavailable, then stops the relay (lock and mirror relay removed). `probe_upstream` checks a host app with a plain TCP connect, never an MCP `initialize`, which would open a session in the app.
+
+**Consequences.** The "Only Speedwave-supervised listeners are relayed" limitation no longer applies to host MCP servers configured through Custom MCP; it still applies to Playwright targets and local LLM servers. The relay is Desktop-only: the CLI never starts it, and with Desktop closed the endpoint files say `available:false`.
+
 ## Alternatives rejected
 
 - **Default to NAT networking.** Simplest (NAT gateway is bindable and container-reachable) but NAT breaks WSL2 internet under a VPN[^1] — the exact case mirrored was adopted for.
@@ -74,3 +86,5 @@ The host listener stays on `127.0.0.1`; the relay address lives on `lo` and is r
 [^4]: `socat` multipurpose relay: <http://www.dest-unreach.org/socat/doc/socat.html>
 
 [^5]: `systemd-run` transient units are managed by the service manager and are independent of the invoking process: <https://www.freedesktop.org/software/systemd/man/latest/systemd-run.html>
+
+[^6]: A bind mount of a single file follows the inode, not the path, so a host save that renames a new file into place is not seen in the container until it restarts (moby/moby#15793, reported against Docker; that nerdctl/containerd behave the same is the Linux bind-mount semantics, not separately cited): <https://github.com/moby/moby/issues/15793#issuecomment-135411504>

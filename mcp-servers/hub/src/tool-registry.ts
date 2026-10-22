@@ -4,10 +4,11 @@
  */
 
 import { ToolMetadata, TimeoutClass } from './hub-types.js';
-import { getAllServiceNames } from './service-list.js';
+import { getAllServiceNames, CUSTOM_SERVICE_PREFIX } from './service-list.js';
 import { discoverAndMergeService } from './tool-discovery.js';
 import { ts, TIMEOUTS } from '@speedwave/mcp-shared';
 import { DISCOVERY_RETRY_DELAYS_MS } from './http-bridge.js';
+import { piiModeFor, type PiiMode } from './pii-mode.js';
 
 /**
  * Escape special regex characters in a string to prevent regex injection.
@@ -32,6 +33,15 @@ let _initialized = false;
  * Background refresh interval handle
  */
 let _refreshInterval: ReturnType<typeof setInterval> | null = null;
+
+/** Handle of the interval that refreshes only custom MCP services. */
+let _customRefreshInterval: ReturnType<typeof setInterval> | null = null;
+
+/** Interval of the full background refresh of every enabled service. */
+const REFRESH_MS = 5 * 60 * 1000;
+
+/** Interval of the refresh of `custom-*` services, so a tool the user allows shows up without waiting for the full refresh. */
+export const CUSTOM_REFRESH_MS = 30_000;
 
 /** Read-only view of the registry for consumers; keys and values may change after refresh. */
 export function getRegistry(): Readonly<Record<string, Readonly<Record<string, ToolMetadata>>>> {
@@ -73,11 +83,14 @@ export function _setDiscoveryRetryDelaysForTesting(delaysMs: readonly number[]):
  */
 async function discoverWithStartupRetry(service: string): Promise<Record<string, ToolMetadata>> {
   const attempts = discoveryRetryDelays.length + 1;
+  let lastAttemptFailed = false;
   for (let attempt = 0; attempt < attempts; attempt++) {
     try {
       const tools = await discoverAndMergeService(service);
+      lastAttemptFailed = false;
       if (Object.keys(tools).length > 0) return tools;
     } catch (error) {
+      lastAttemptFailed = true;
       console.warn(
         `${ts()} [tool-registry] ${service}: discovery attempt ${attempt + 1} failed — ` +
           (error instanceof Error ? error.message : String(error))
@@ -91,6 +104,7 @@ async function discoverWithStartupRetry(service: string): Promise<Record<string,
     );
     await new Promise((resolve) => setTimeout(resolve, delay));
   }
+  if (lastAttemptFailed) _failingServices.add(service);
   console.warn(
     `${ts()} [tool-registry] ${service}: registry empty after ${discoveryRetryDelays.length + 1} attempts — will populate on next background refresh`
   );
@@ -123,21 +137,36 @@ export async function initializeRegistry(): Promise<void> {
   );
 }
 
+/** Services whose last discovery failed; refresh logs only when a service enters or leaves this set. */
+const _failingServices = new Set<string>();
+
 /**
  * Refresh tools for a service from its worker; called by background refresh or on-demand.
+ * A failed discovery keeps the last known tools and arms the empty-service recheck when there are none.
  * @param service - Service name to refresh
  */
 export async function refreshServiceTools(service: string): Promise<void> {
+  let tools: Record<string, ToolMetadata>;
   try {
-    const tools = await discoverAndMergeService(service);
-    _registry[service] = tools;
-    cachedLongTimeoutTools = null;
+    tools = await discoverAndMergeService(service);
   } catch (error) {
-    console.warn(
-      `${ts()} [tool-registry] Refresh failed for ${service}:`,
-      error instanceof Error ? error.message : error
-    );
+    if (!_failingServices.has(service)) {
+      _failingServices.add(service);
+      console.warn(
+        `${ts()} [tool-registry] Refresh failed for ${service}, keeping its last known tools:`,
+        error instanceof Error ? error.message : error
+      );
+    }
+    if (Object.keys(_registry[service] ?? {}).length === 0 && !_emptyServiceTimers.has(service)) {
+      _scheduleEmptyServiceRecheck(service, 0);
+    }
+    return;
   }
+  if (_failingServices.delete(service)) {
+    console.log(`${ts()} [tool-registry] ${service}: worker reachable again, tools refreshed`);
+  }
+  _registry[service] = tools;
+  cachedLongTimeoutTools = null;
 }
 
 /**
@@ -171,29 +200,46 @@ interface EmptyServiceState {
 const _emptyServiceTimers = new Map<string, EmptyServiceState>();
 
 /**
- * Start background refresh of all enabled services.
+ * Refresh the selected services every `ms`, skipping a tick while another refresh runs.
+ * @param ms - Interval in milliseconds.
+ * @param select - Which enabled services this interval refreshes.
+ */
+function _refreshEvery(
+  ms: number,
+  select: (service: string) => boolean
+): ReturnType<typeof setInterval> {
+  const handle = setInterval(async () => {
+    if (_refreshInProgress) return;
+    _refreshInProgress = true;
+    try {
+      for (const service of SERVICE_NAMES) {
+        if (select(service)) await refreshServiceTools(service);
+      }
+    } finally {
+      _refreshInProgress = false;
+    }
+  }, ms);
+
+  /* c8 ignore next 3 — Node.js setInterval returns Timeout with .unref(), browser returns number */
+  if (handle && typeof handle === 'object' && 'unref' in handle) {
+    handle.unref();
+  }
+  return handle;
+}
+
+/**
+ * Start background refresh: every enabled service every 5 minutes, custom MCP services every 30 seconds.
  */
 function _startBackgroundRefresh(): void {
   /* c8 ignore next — guard for re-entrant callers; initializeRegistry() only
    * calls this once (returns early on duplicate calls via _initialized flag) */
   if (_refreshInterval) return;
 
-  const REFRESH_MS = 5 * 60 * 1000;
-  _refreshInterval = setInterval(async () => {
-    if (_refreshInProgress) return;
-    _refreshInProgress = true;
-    try {
-      for (const service of SERVICE_NAMES) {
-        await refreshServiceTools(service);
-      }
-    } finally {
-      _refreshInProgress = false;
-    }
-  }, REFRESH_MS);
-
-  /* c8 ignore next 3 — Node.js setInterval returns Timeout with .unref(), browser returns number */
-  if (_refreshInterval && typeof _refreshInterval === 'object' && 'unref' in _refreshInterval) {
-    _refreshInterval.unref();
+  _refreshInterval = _refreshEvery(REFRESH_MS, () => true);
+  if (SERVICE_NAMES.some((service) => service.startsWith(CUSTOM_SERVICE_PREFIX))) {
+    _customRefreshInterval = _refreshEvery(CUSTOM_REFRESH_MS, (service) =>
+      service.startsWith(CUSTOM_SERVICE_PREFIX)
+    );
   }
 
   for (const service of SERVICE_NAMES) {
@@ -255,6 +301,10 @@ export function stopBackgroundRefresh(): void {
     clearInterval(_refreshInterval);
     _refreshInterval = null;
   }
+  if (_customRefreshInterval) {
+    clearInterval(_customRefreshInterval);
+    _customRefreshInterval = null;
+  }
   for (const { timer } of _emptyServiceTimers.values()) {
     if (timer) clearTimeout(timer);
   }
@@ -272,6 +322,7 @@ export function _resetRegistryForTesting(): void {
   }
   _initialized = false;
   _refreshInProgress = false;
+  _failingServices.clear();
   SERVICE_NAMES = [];
   cachedLongTimeoutTools = null;
   stopBackgroundRefresh();
@@ -468,7 +519,8 @@ export function buildServiceBridge(
     throw new Error(`Unknown service in registry: ${service}`);
   }
 
-  const bridge: Record<string, (params?: Record<string, unknown>) => Promise<unknown>> = {};
+  const bridge: Record<string, (params?: Record<string, unknown>) => Promise<unknown>> =
+    Object.create(null);
 
   for (const methodName of Object.keys(tools)) {
     const metadata = tools[methodName];
@@ -495,9 +547,10 @@ export type WrapWithAuditFn = <TParams, TResult>(
 ) => (params: TParams) => Promise<TResult>;
 
 /**
- * Function type for preparing parameters before bridge call.
+ * Function type for preparing parameters before bridge call: detokenize in `plaintext` mode, pass through in `tokens` mode.
+ * @param tool - `service.method`, for audit attribution.
  */
-export type PrepareParamsFn = <T>(params: T) => T;
+export type PrepareParamsFn = <T>(params: T, piiMode: PiiMode, tool: string) => T;
 
 /**
  * Function type for wrapping bridge calls with error handling.
@@ -531,7 +584,9 @@ export function buildExecutorWrappers(
     throw new Error(`Unknown service in registry: ${service}`);
   }
 
-  const wrappers: Record<string, (params?: Record<string, unknown>) => Promise<unknown>> = {};
+  const wrappers: Record<string, (params?: Record<string, unknown>) => Promise<unknown>> =
+    Object.create(null);
+  const piiMode = piiModeFor(service);
 
   for (const [methodName, metadata] of Object.entries(tools)) {
     if (
@@ -554,7 +609,7 @@ export function buildExecutorWrappers(
       service,
       methodName,
       async (params?: Record<string, unknown>) => {
-        const p = prepareParams(params || {});
+        const p = prepareParams(params || {}, piiMode, `${service}.${methodName}`);
         return wrapBridgeCall(() => bridgeMethod(p), service, methodName);
       }
     );

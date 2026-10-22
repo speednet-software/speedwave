@@ -14,6 +14,7 @@ mod cloudstorage_cmd;
 mod container_logs_cmd;
 mod containers_cmd;
 mod control_channel;
+mod custom_mcp_cmd;
 mod diagnostics;
 #[cfg(any(test, feature = "e2e"))]
 mod e2e_support;
@@ -82,8 +83,8 @@ use tauri::tray::TrayIconBuilder;
 use tauri::Manager;
 
 use reconcile::{
-    ExitCleanupContext, SharedAutoCheckHandle, SharedIdeBridge, SharedMcpOs, SharedOauth,
-    SharedPluginBridges,
+    ExitCleanupContext, SharedAutoCheckHandle, SharedCustomHostRelays, SharedIdeBridge,
+    SharedMcpOs, SharedOauth, SharedPluginBridges,
 };
 
 pub(crate) use project_cmd::{clear_chat_sessions, rollback_and_emit_failed};
@@ -708,6 +709,8 @@ fn main() {
     let clipboard_bridge_slot: clipboard_bridge::SharedClipboardBridge = Arc::new(Mutex::new(None));
     let plugin_bridges: SharedPluginBridges =
         Arc::new(Mutex::new(std::collections::HashMap::new()));
+    let custom_host_relays: SharedCustomHostRelays =
+        Arc::new(Mutex::new(std::collections::HashMap::new()));
     let mcp_os: SharedMcpOs = Arc::new(Mutex::new(None));
     let pii_ner: pii_ner_service::SharedPiiNer = Arc::new(Mutex::new(None));
     let oauth: SharedOauth = Arc::new(Mutex::new(std::collections::HashMap::new()));
@@ -715,6 +718,7 @@ fn main() {
 
     reconcile::set_global_plugin_bridges(plugin_bridges.clone());
     pii_ner_service::set_global_pii_ner(pii_ner.clone());
+    custom_mcp_cmd::relays::set_global_custom_host_relays(custom_host_relays.clone());
 
     let tray_available = Arc::new(AtomicBool::new(false));
     let tray_available_setup = tray_available.clone();
@@ -723,6 +727,7 @@ fn main() {
     let cleanup_ctx = ExitCleanupContext {
         ide_bridge: ide_bridge.clone(),
         plugin_bridges: plugin_bridges.clone(),
+        custom_host_relays: custom_host_relays.clone(),
         mcp_os: mcp_os.clone(),
         pii_ner: pii_ner.clone(),
         oauth: oauth.clone(),
@@ -842,6 +847,8 @@ fn main() {
         .manage(ide_bridge.clone())
         .manage(clipboard_bridge_slot.clone())
         .manage(plugin_bridges.clone())
+        .manage(custom_host_relays.clone())
+        .manage(custom_mcp_cmd::SharedPendingPreviews::default())
         .manage(mcp_os.clone())
         .manage(oauth.clone())
         .manage(queue_service.clone())
@@ -879,12 +886,12 @@ fn main() {
                 show_audit_failure_dialog_and_exit(app.handle(), "Plugin verification failed", body);
             }
 
-            if let Err(e) = speedwave_runtime::config::check_telemetry_policy_at_boot() {
+            if let Err(e) = speedwave_runtime::config::check_managed_policy_at_boot() {
                 let body = format!(
-                    "Speedwave could not apply the organization telemetry policy.\n\n{e}\n\n\
+                    "Speedwave could not apply the organization policy.\n\n{e}\n\n\
                      Contact your administrator to correct the managed configuration."
                 );
-                log::error!("telemetry policy check failed: {}", e);
+                log::error!("managed policy check failed: {}", e);
                 show_audit_failure_dialog_and_exit(app.handle(), "Organization policy error", body);
             }
 
@@ -1152,6 +1159,18 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            custom_mcp_cmd::custom_mcp_get,
+            custom_mcp_cmd::custom_mcp_scan_repo,
+            custom_mcp_cmd::custom_mcp_preview,
+            custom_mcp_cmd::custom_mcp_approve,
+            custom_mcp_cmd::custom_mcp_set_tools,
+            custom_mcp_cmd::custom_mcp_set_pii_mode,
+            custom_mcp_cmd::custom_mcp_set_file_access,
+            custom_mcp_cmd::custom_mcp_set_enabled,
+            custom_mcp_cmd::custom_mcp_allow_domain,
+            custom_mcp_cmd::custom_mcp_remove_domain,
+            custom_mcp_cmd::custom_mcp_egress_denials,
+            custom_mcp_cmd::custom_mcp_remove,
             containers_cmd::check_runtime,
             containers_cmd::init_vm,
             containers_cmd::create_project,
@@ -1727,6 +1746,29 @@ mod tests {
         assert_eq!(
             mcp_os_health_outcome(false, 4, 5),
             (HealthOutcome::Cooldown, 0)
+        );
+    }
+
+    #[test]
+    fn setup_exits_when_the_managed_policy_boot_check_fails() {
+        let source = include_str!("main.rs");
+        let call = source
+            .find("config::check_managed_policy_at_boot()")
+            .expect("Desktop must run the managed policy boot check");
+        let rest = &source[call..];
+        let exit = rest
+            .find("show_audit_failure_dialog_and_exit(")
+            .expect("managed policy failure must show the dialog and exit");
+        let next = rest
+            .find("check_pii_policy_at_boot")
+            .expect("PII boot check anchor");
+        assert!(
+            exit < next,
+            "a managed policy error must exit before anything else runs"
+        );
+        assert!(
+            rest[exit..next].contains("\"Organization policy error\""),
+            "the managed policy dialog must keep its title"
         );
     }
 

@@ -11,8 +11,13 @@ import {
   getEnabledServices,
   getDisabledOsCategories,
 } from './tool-registry.js';
-import { sandboxGlobalName } from './service-list.js';
+import { sandboxGlobalName, CUSTOM_SERVICE_PREFIX } from './service-list.js';
 import { enabledSandboxGlobals } from './executor.js';
+import { piiModeFor } from './pii-mode.js';
+
+/** Sentence appended to the description of every tool of a `tokens`-mode service. */
+export const TOKENS_MODE_SENTENCE =
+  'Personal data in arguments reaches this server still tokenized; pass tokens through unchanged, the server cannot resolve them.';
 
 /** Valid detail levels for search_tools, ascending verbosity (SSOT for schema and validation). */
 export const DETAIL_LEVELS = ['names_only', 'with_descriptions', 'full_schema'] as const;
@@ -69,6 +74,7 @@ enum MatchTier {
   NameSubstring,
   Keyword,
   Description,
+  Service,
 }
 
 /** Per-tool computed match info used for ranking before result shaping. */
@@ -113,6 +119,8 @@ interface LowercasedToolFields {
   nameLower: string;
   descriptionLower: string;
   keywordsLower: string[];
+  /** Lowercased names the tool's server answers to: service id, id without `custom-`, sandbox global. */
+  serviceNamesLower: ReadonlySet<string>;
 }
 
 /**
@@ -120,6 +128,18 @@ interface LowercasedToolFields {
  * replaces tool objects wholesale (tool-registry.ts), so stale entries fall out naturally.
  */
 const lowercaseFieldsCache = new WeakMap<ToolMetadata, LowercasedToolFields>();
+
+/**
+ * Lowercased names a service is searchable by: its id, its id without `custom-`, and its sandbox global.
+ * @param service - Service id
+ */
+function serviceNames(service: string): ReadonlySet<string> {
+  const names = new Set([service.toLowerCase(), sandboxGlobalName(service).toLowerCase()]);
+  if (service.startsWith(CUSTOM_SERVICE_PREFIX)) {
+    names.add(service.slice(CUSTOM_SERVICE_PREFIX.length).toLowerCase());
+  }
+  return names;
+}
 
 /**
  * Lowercase the searchable name/description/keywords of a tool, cached per tool object.
@@ -133,23 +153,25 @@ function lowercaseFields(tool: ToolMetadata): LowercasedToolFields {
     nameLower: tool.name.toLowerCase(),
     descriptionLower: tool.description.toLowerCase(),
     keywordsLower: tool.keywords.map((k) => k.toLowerCase()),
+    serviceNamesLower: serviceNames(tool.service),
   };
   lowercaseFieldsCache.set(tool, fields);
   return fields;
 }
 
 /**
- * Best match tier for a token, or undefined if absent from name/keyword/description.
+ * Best match tier for a token, or undefined if absent from name/keyword/description and not a name of the tool's server.
  * @param fields - Lowercased searchable fields of the tool
  * @param token - Lowercased query token
  */
 function tokenMatchTier(fields: LowercasedToolFields, token: string): MatchTier | undefined {
-  const { nameLower, descriptionLower, keywordsLower } = fields;
+  const { nameLower, descriptionLower, keywordsLower, serviceNamesLower } = fields;
   if (nameLower === token) return MatchTier.ExactName;
   if (nameLower.startsWith(token)) return MatchTier.NamePrefix;
   if (nameLower.includes(token)) return MatchTier.NameSubstring;
   if (keywordsLower.some((k) => k.includes(token))) return MatchTier.Keyword;
   if (descriptionLower.includes(token)) return MatchTier.Description;
+  if (serviceNamesLower.has(token)) return MatchTier.Service;
   return undefined;
 }
 
@@ -182,7 +204,7 @@ function scoreTool(tool: ToolMetadata, contentTokens: string[]): MatchTier | und
 
 /**
  * Search tools via tokenized, ranked matching: exact-name, name-prefix, substring, keyword,
- * description (in that order); self-reference queries boost userScoped tools.
+ * description, server name (in that order); self-reference queries boost userScoped tools.
  * @param params - Search parameters including query, detailLevel, service filter, and includeDeferred flag
  */
 export async function searchTools(params: SearchToolsParams): Promise<SearchToolsResult> {
@@ -242,7 +264,13 @@ export async function searchTools(params: SearchToolsParams): Promise<SearchTool
   };
 
   if (results.length === 0) {
-    result.hint = buildZeroMatchHint(service, serviceFilterInvalid, serviceDisabled, enabled);
+    result.hint = buildZeroMatchHint(
+      service,
+      serviceFilterInvalid,
+      serviceDisabled,
+      enabled,
+      servicesToSearch
+    );
   }
 
   return result;
@@ -276,7 +304,7 @@ function buildSearchResult(
   }
 
   if (detailLevel === 'with_descriptions' || detailLevel === 'full_schema') {
-    result.description = renderDescriptionWithIdentity(tool);
+    result.description = renderServedDescription(tool);
   }
 
   if (detailLevel === 'full_schema') {
@@ -322,18 +350,31 @@ export function renderDescriptionWithIdentity(tool: ToolMetadata): string {
 }
 
 /**
+ * Render the description search serves: the identity sentence for userScoped tools, then the tokens-mode sentence for services whose arguments stay tokenized.
+ * @param tool - Tool metadata (stored, read-only)
+ */
+export function renderServedDescription(tool: ToolMetadata): string {
+  const description = renderDescriptionWithIdentity(tool);
+  return piiModeFor(tool.service) === 'tokens'
+    ? `${description} ${TOKENS_MODE_SENTENCE}`
+    : description;
+}
+
+/**
  * Build the `hint` field for a zero-match search: names the invalid or disabled service
  * filter (with valid services listed) or suggests broadening the query.
  * @param service - The requested service filter, if any
  * @param serviceFilterInvalid - Whether `service` was provided but unrecognized
  * @param serviceDisabled - Whether `service` is known but not enabled for this project
  * @param enabled - Set of currently enabled service names
+ * @param searched - Services the query was matched against
  */
 function buildZeroMatchHint(
   service: string | undefined,
   serviceFilterInvalid: boolean,
   serviceDisabled: boolean,
-  enabled: Set<string>
+  enabled: Set<string>,
+  searched: readonly string[]
 ): string {
   if (serviceFilterInvalid) {
     const known = [...SERVICE_NAMES].filter((s) => enabled.has(s)).sort();
@@ -346,7 +387,11 @@ function buildZeroMatchHint(
   if (service) {
     return `No tools in service "${service}" matched this query. Retry with a single keyword, or query:"*" with detail_level:"names_only" to list all tools in this service.`;
   }
-  return 'No tools matched this query. Retry with a single keyword instead of a full sentence, or use query:"*" with detail_level:"names_only" to list all available tools.';
+  const services = [...searched].sort().map((s) => {
+    const global = sandboxGlobalName(s);
+    return global === s ? s : `${s} (sandbox global ${global})`;
+  });
+  return `No tools matched this query. Retry with a single keyword instead of a full sentence, or use query:"*" with detail_level:"names_only" to list all available tools. Enabled services, searchable by name: ${services.join(', ') || '(none)'}.`;
 }
 
 /**

@@ -19,7 +19,22 @@ export const META_KEYS = Object.freeze({
   TIMEOUT_MS: 'speedwave.pl/timeout-ms',
   /** OS sub-integration category (os service only). */
   OS_CATEGORY: 'speedwave.pl/os-category',
+  /** Gate-assigned tool state (`allowed`/`pending`/`blocked`/`changed`); prefixed only, no legacy key. */
+  TOOL_STATE: 'speedwave.pl/tool-state',
+  /** Gate-assigned name the upstream server knows the tool by; prefixed only, no legacy key. */
+  UPSTREAM_NAME: 'speedwave.pl/upstream-name',
 } as const);
+
+/** Legacy unprefixed `_meta` keys the hub still reads as fallbacks; a gate strips them from upstream tools. */
+export const LEGACY_META_KEYS: readonly string[] = Object.freeze([
+  'userScoped',
+  'currentUserTool',
+  'selfParam',
+  'deferLoading',
+  'timeoutClass',
+  'timeoutMs',
+  'osCategory',
+]);
 
 /** Union of all prefixed `_meta` key string values. */
 export type MetaKey = (typeof META_KEYS)[keyof typeof META_KEYS];

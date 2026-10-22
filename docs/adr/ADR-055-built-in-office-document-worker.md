@@ -72,7 +72,7 @@ Three layers select tools across the large tool set: `_meta.keywords` + `_meta.d
 
 [^3]: [WeasyPrint API reference, `url_fetcher`](https://doc.courtbouillon.org/weasyprint/stable/api_reference.html): `HTML`/`CSS` accept a custom `url_fetcher` callable that can restrict or reject fetched URL schemes.
 
-[^4]: [SheetJS issue #3214](https://git.sheetjs.com/sheetjs/sheetjs/issues/3214): reading and re-writing a file with the Community Edition does not preserve cell styles; styling and chart-writing support is reserved for the Pro edition.
+[^4]: [SheetJS issue #3214](https://git.sheetjs.com/sheetjs/sheetjs/issues/3214) (sign-in required; title "reading and writing with cellStyles: true does not perpetuate styles"): reading and re-writing a file with the Community Edition does not preserve cell styles; styling and chart-writing support is reserved for the Pro edition.
 
 [^5]: [nerdctl v2.2.2 `pkg/composer/up_network.go` L39-L92](https://github.com/containerd/nerdctl/blob/v2.2.2/pkg/composer/up_network.go#L39-L92): `UnknownNonEmptyFields(&net, "Name", "Ipam", "Driver", "DriverOpts")` logs `Ignoring: network …`, and the `network create` argv carries only the compose labels, `--driver`, `--opt` and the IPAM flags.
 

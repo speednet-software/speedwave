@@ -24,6 +24,15 @@ import { ThinkingBlockComponent } from './chat/blocks/thinking-block.component';
 import { TextBlockComponent } from './chat/blocks/text-block.component';
 import { AskUserBlockComponent } from './chat/blocks/ask-user-block.component';
 import { ToolBlockComponent } from './chat/blocks/tool-block.component';
+import { CustomMcpSectionComponent } from './custom-mcp/custom-mcp-section.component';
+import { CustomMcpCardComponent } from './custom-mcp/custom-mcp-card.component';
+import { CustomMcpReviewComponent } from './custom-mcp/custom-mcp-review.component';
+import {
+  makeHostEntry,
+  makeNpmEntry,
+  makeNpmPreview,
+  makeTool,
+} from './testing/custom-mcp-fixtures';
 
 import { TauriService } from './services/tauri.service';
 import { MockTauriService } from './testing/mock-tauri.service';
@@ -107,6 +116,15 @@ function buildMockTauri(): MockTauriService {
         return null;
       case 'get_integration_statuses':
         return { services: [] };
+      case 'custom_mcp_egress_denials':
+        return {
+          container_running: true,
+          hosts: [
+            { host: 'cdn.figma.com', port: 443, count: 3, allowed_by_policy: true },
+            { host: 'cdn.example.com', port: 443, count: 1, allowed_by_policy: false },
+          ],
+          other: [{ reason: 'private_address', count: 2 }],
+        };
       default:
         return undefined;
     }
@@ -142,6 +160,7 @@ async function render(view: ViewUnderTest, mockTauri: MockTauriService): Promise
   view.prepare?.(fixture);
   fixture.detectChanges();
   await fixture.whenStable();
+  await new Promise((resolve) => setTimeout(resolve, 0));
   fixture.detectChanges();
   return fixture.nativeElement as HTMLElement;
 }
@@ -196,6 +215,47 @@ const VIEWS: readonly ViewUnderTest[] = [
         current_index: 0,
         answers: [null],
       });
+    },
+  },
+  {
+    name: 'CustomMcpSectionComponent',
+    component: CustomMcpSectionComponent,
+    prepare: (fixture) => {
+      fixture.componentRef.setInput('project', 'demo');
+    },
+  },
+  {
+    name: 'CustomMcpCardComponent',
+    component: CustomMcpCardComponent,
+    prepare: (fixture) => {
+      fixture.componentRef.setInput('project', 'demo');
+      fixture.componentRef.setInput(
+        'entry',
+        makeNpmEntry({
+          proposed_by_repo: true,
+          tools: [
+            makeTool('get_file', { state: 'allowed', read_only_hint: true }),
+            makeTool('rename_file', { state: 'changed' }),
+          ],
+          domains_blocked_by_policy: ['cdn.example.com:443'],
+        })
+      );
+    },
+  },
+  {
+    name: 'CustomMcpCardComponent (host)',
+    component: CustomMcpCardComponent,
+    prepare: (fixture) => {
+      fixture.componentRef.setInput('project', 'demo');
+      fixture.componentRef.setInput('entry', makeHostEntry({ host_app_available: false }));
+    },
+  },
+  {
+    name: 'CustomMcpReviewComponent',
+    component: CustomMcpReviewComponent,
+    prepare: (fixture) => {
+      fixture.componentRef.setInput('project', 'demo');
+      fixture.componentRef.setInput('preview', makeNpmPreview({ host_warning: true }));
     },
   },
   {

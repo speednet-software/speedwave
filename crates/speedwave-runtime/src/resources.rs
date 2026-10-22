@@ -83,6 +83,39 @@ pub const STANDARD_WORKER_RESOURCES: ContainerResources = ContainerResources {
     shm_mib: None,
 };
 
+/// Custom MCP guard (Node, one per server): protocol filter, policy re-read per request.
+pub const CUSTOM_MCP_GUARD_RESOURCES: ContainerResources = ContainerResources {
+    mem_mib: 128,
+    cpus: 0.25,
+    tmpfs_mib: 32,
+    shm_mib: None,
+};
+
+/// Custom MCP npm server: the launcher plus a third-party package of unknown appetite.
+pub const CUSTOM_MCP_SERVER_RESOURCES: ContainerResources = ContainerResources {
+    mem_mib: 256,
+    cpus: 1.0,
+    tmpfs_mib: 128,
+    shm_mib: None,
+};
+
+/// Custom MCP egress proxy (`spw-egress`, Rust CONNECT relay), one per npm server.
+pub const CUSTOM_MCP_EGRESS_RESOURCES: ContainerResources = ContainerResources {
+    mem_mib: 32,
+    cpus: 0.25,
+    tmpfs_mib: 16,
+    shm_mib: None,
+};
+
+/// One-shot npm resolver (`npm install --package-lock-only`): metadata only, but large trees
+/// need memory and its npm cache lives on `/tmp`.
+pub const CUSTOM_MCP_RESOLVER_RESOURCES: ContainerResources = ContainerResources {
+    mem_mib: 1024,
+    cpus: 1.0,
+    tmpfs_mib: 512,
+    shm_mib: None,
+};
+
 /// Converts raw bytes to GiB using floor division (never over-reports host RAM).
 #[cfg(any(target_os = "macos", test))]
 fn bytes_to_gib(bytes: u64) -> u32 {

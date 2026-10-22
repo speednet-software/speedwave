@@ -6,6 +6,7 @@ WORKDIR /build
 
 COPY proxy /build/containers/proxy
 COPY crates/pii-engine /build/crates/pii-engine
+COPY crates/ip-policy /build/crates/ip-policy
 COPY mcp-servers/policies/rules.yaml /build/mcp-servers/policies/rules.yaml
 WORKDIR /build/containers/proxy
 
@@ -18,5 +19,6 @@ FROM scratch
 COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
 
 COPY --from=builder /build/containers/proxy/target/release/proxy /proxy
+COPY --from=builder /build/containers/proxy/target/release/spw-egress /spw-egress
 
 ENTRYPOINT ["/proxy"]
