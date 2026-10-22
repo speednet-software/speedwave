@@ -22,6 +22,7 @@ import {
 import { handleListMailRules, handleCheckMail } from './mail-rules.js';
 import {
   handleDeleteEmails,
+  handleFlagEmails,
   handleCreateMailbox,
   handleMoveEmails,
   handleCopyEmails,
@@ -1346,6 +1347,36 @@ describe('mail-tools', () => {
     const tool = (name: string) => createMailTools().find((t) => t.tool.name === name)!;
 
     it.each([
+      ['flagEmails without valid ids', () => handleFlagEmails({ ids: [], flag: 'red' }), 'ids'],
+      [
+        'flagEmails with a flag that is not text',
+        () => handleFlagEmails({ ids: [MAIL_ID], flag: 3 as unknown as string }),
+        'flag',
+      ],
+      [
+        'moveEmails without valid ids',
+        () => handleMoveEmails({ ids: [], mailbox: 'A', account: 'W' }),
+        'ids',
+      ],
+      [
+        'createMailbox with a name that is not text',
+        () => handleCreateMailbox({ name: 7 as unknown as string, account: 'W' }),
+        'name',
+      ],
+      [
+        'renameMailbox with a new name that is not text',
+        () => handleRenameMailbox({ mailbox: 'A', account: 'W', new_name: 7 as unknown as string }),
+        'new_name',
+      ],
+    ])('refuses %s before calling mail-cli', async (_case, call, param) => {
+      const result = await call();
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain(param);
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it.each([
       ['markEmailsRead', 'mark_emails_read', { ids: [MAIL_ID], read: false }],
       ['flagEmails', 'flag_emails', { ids: [MAIL_ID], flag: 'purple' }],
       ['moveEmails', 'move_emails', { ids: [MAIL_ID], mailbox: 'Clients/Acme', account: 'Work' }],
@@ -2138,6 +2169,14 @@ describe('mail-tools', () => {
         expect(result.error?.message).toContain('stop calling mail tools');
       }
     );
+
+    it('a failure that is not an Error reaches the caller unchanged', async () => {
+      vi.mocked(runCommand).mockRejectedValue('MAIL_TIMEOUT: not an Error');
+
+      await expect(handleListEmails({ mailbox: 'INBOX' })).rejects.toBe(
+        'MAIL_TIMEOUT: not an Error'
+      );
+    });
 
     it('any other failure keeps its own message', async () => {
       vi.mocked(runCommand).mockRejectedValue(
