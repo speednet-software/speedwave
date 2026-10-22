@@ -260,7 +260,8 @@ final class LiveMailTests: XCTestCase {
 
     func testGetEmailOfAMessageIdTheMailboxDoesNotHoldIsReportedAsMailNotFound() {
         let id = MailId(
-            account: AppleMailClient.localAccountName, mailbox: Self.testMailbox, messageId: "<spw-missing-833@x>")
+            accountId: "", account: AppleMailClient.localAccountName, mailbox: Self.testMailbox,
+            messageId: "<spw-missing-833@x>")
         XCTAssertThrowsError(try call("get_email", ["id": id.encoded])) { error in
             XCTAssertEqual(
                 error as? MailFailure,

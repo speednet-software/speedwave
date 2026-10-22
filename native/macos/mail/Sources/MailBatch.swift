@@ -244,32 +244,36 @@ let moveToTrashAction = accountSpecialMailbox(
     """
 
 /// AppleScript lines that set `variable` to the child of Mail's `special` mailbox (`trash mailbox`, `junk mailbox`)
-/// that belongs to the account `spwAcctName`, else to `special` itself when it belongs to that account; none is
-/// error `missing`, and `m` already in it is error `already`.
+/// that belongs to the account `spwAcctId`, else to `special` itself when it belongs to that account; none is
+/// error `missing`, and `m` already in that very mailbox is error `already`.
 func accountSpecialMailbox(_ special: String, into variable: String, missing: String, already: String) -> String {
     accountSpecialLookup(special, into: variable) + """
 
             if \(variable) is missing value then error "\(missing)"
-            if name of mb is name of \(variable) then error "\(already)"
+            if mb is \(variable) then error "\(already)"
     """
 }
 
-/// AppleScript lines that set `variable` to the child of Mail's `special` mailbox that belongs to the account
-/// `spwAcctName`, else to `special` itself when it belongs to that account, else to `missing value`.
+/// AppleScript lines that set `variable` to the child of Mail's `special` mailbox whose account has the Mail id
+/// `spwAcctId` ("" for On My Mac, whose mailboxes have no account), else to `special` itself when it belongs to that
+/// account, else to `missing value`; ids, unlike names, tell apart two accounts with one name.
 func accountSpecialLookup(_ special: String, into variable: String) -> String {
     """
             set \(variable) to missing value
             repeat with spwBoxRef in mailboxes of \(special)
                 set spwBox to contents of spwBoxRef
-                set spwOwner to "\(escapeAppleScript(AppleMailClient.localAccountName))"
+                set spwOwner to ""
                 try
-                    set spwOwner to name of account of spwBox
+                    set spwOwner to id of account of spwBox
                 end try
-                if spwOwner is spwAcctName then set \(variable) to spwBox
+                if spwOwner is spwAcctId then
+                    set \(variable) to spwBox
+                    exit repeat
+                end if
             end repeat
             if \(variable) is missing value then
                 try
-                    if name of account of \(special) is spwAcctName then set \(variable) to \(special)
+                    if id of account of \(special) is spwAcctId then set \(variable) to \(special)
                 end try
             end if
     """

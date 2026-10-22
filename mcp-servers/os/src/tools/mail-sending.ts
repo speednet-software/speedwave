@@ -211,14 +211,14 @@ export const replyToEmailTool: Tool = {
     {
       description: 'Minimal: preview a reply to the sender before asking the user',
       input: {
-        id: 'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0',
+        id: 'mail2.WyI1RjNBMkMxRS0wQjdELTRDMUEtOUUyRi03QTFCM0M0RDVFNkYiLCJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0',
         body: 'Thanks, acknowledged.',
       },
     },
     {
       description: 'Full: reply to all, adding a CC and a BCC, after the user agreed',
       input: {
-        id: 'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0',
+        id: 'mail2.WyI1RjNBMkMxRS0wQjdELTRDMUEtOUUyRi03QTFCM0M0RDVFNkYiLCJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0',
         body: 'I agree with the proposed timeline.',
         reply_all: true,
         cc: 'ewa@example.com',
@@ -258,12 +258,15 @@ export const forwardEmailTool: Tool = {
   inputExamples: [
     {
       description: 'Minimal: preview a forward before asking the user',
-      input: { id: 'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0', to: 'bob@example.com' },
+      input: {
+        id: 'mail2.WyI1RjNBMkMxRS0wQjdELTRDMUEtOUUyRi03QTFCM0M0RDVFNkYiLCJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0',
+        to: 'bob@example.com',
+      },
     },
     {
       description: 'Full: forward with CC after the user agreed',
       input: {
-        id: 'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0',
+        id: 'mail2.WyI1RjNBMkMxRS0wQjdELTRDMUEtOUUyRi03QTFCM0M0RDVFNkYiLCJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0',
         to: 'bob@example.com',
         cc: 'carol@example.com',
         confirm_send: true,
@@ -301,12 +304,15 @@ export const redirectEmailTool: Tool = {
   inputExamples: [
     {
       description: 'Minimal: preview a redirect before asking the user',
-      input: { id: 'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0', to: 'bob@example.com' },
+      input: {
+        id: 'mail2.WyI1RjNBMkMxRS0wQjdELTRDMUEtOUUyRi03QTFCM0M0RDVFNkYiLCJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0',
+        to: 'bob@example.com',
+      },
     },
     {
       description: 'Full: redirect with CC after the user agreed',
       input: {
-        id: 'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0',
+        id: 'mail2.WyI1RjNBMkMxRS0wQjdELTRDMUEtOUUyRi03QTFCM0M0RDVFNkYiLCJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0',
         to: 'bob@example.com',
         cc: 'carol@example.com',
         confirm_send: true,

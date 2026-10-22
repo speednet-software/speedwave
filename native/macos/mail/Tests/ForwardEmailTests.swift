@@ -5,7 +5,7 @@ import XCTest
 final class ForwardEmailTests: XCTestCase {
     private let harness = MailCommandHarness()
 
-    private let archived = MailId(account: "Work", mailbox: "Archive/2026", messageId: "<a@x>")
+    private let archived = MailId(accountId: "Work-ID", account: "Work", mailbox: "Archive/2026", messageId: "<a@x>")
 
     private func originalRead(
         subject: String = "Fwd: Invoice 12",

@@ -10,12 +10,14 @@ struct ListingRow {
     var attachments = 0
 }
 
-/// The output a listing script prints for `rows` of a mailbox the lookup resolved to `account`; `matchedIds`
+/// The output a listing script prints for `rows` of a mailbox the lookup resolved to `account`, whose Mail id is
+/// `<account>-ID` (empty for On My Mac); `matchedIds`
 /// adds the ids a body search matched.
 func mailListing(account: String, _ rows: [ListingRow], matchedIds: [String]? = nil) -> String {
     let field = { (value: (ListingRow) -> String) in rows.map(value).joined(separator: "\u{1E}") }
     var fields = [
         account,
+        account == "On My Mac" ? "" : "\(account)-ID",
         field(\.messageId),
         field(\.subject),
         field(\.sender),

@@ -5,8 +5,8 @@ import XCTest
 final class DeleteEmailsTests: XCTestCase {
     private let harness = MailCommandHarness()
 
-    private let first = MailId(account: "iCloud", mailbox: "INBOX", messageId: "<a@x>")
-    private let second = MailId(account: "Work", mailbox: "Archive/2026", messageId: "<b@x>")
+    private let first = MailId(accountId: "iCloud-ID", account: "iCloud", mailbox: "INBOX", messageId: "<a@x>")
+    private let second = MailId(accountId: "Work-ID", account: "Work", mailbox: "Archive/2026", messageId: "<b@x>")
 
     private func row(_ fields: String...) -> String {
         fields.joined(separator: "\u{1F}")
@@ -90,7 +90,7 @@ final class DeleteEmailsTests: XCTestCase {
         let script = harness.executor.calls[0].script
         XCTAssertTrue(script.contains("move m to spwTrash"), script)
         XCTAssertTrue(script.contains("mailboxes of trash mailbox"), script)
-        XCTAssertTrue(script.contains("is spwAcctName"), script)
+        XCTAssertTrue(script.contains("is spwAcctId"), script)
         XCTAssertTrue(script.contains("\"<a@x>\""), script)
         XCTAssertTrue(script.contains("\"<b@x>\""), script)
         XCTAssertTrue(script.contains("mailbox \"Archive/2026\" of"), script)
@@ -116,7 +116,7 @@ final class DeleteEmailsTests: XCTestCase {
     }
 
     func testAPartialFailureNamesWhichMailsWereMovedAndWhyTheOthersWereNot() throws {
-        let third = MailId(account: "On My Mac", mailbox: "Speedwave-Test", messageId: "<c@x>")
+        let third = MailId(accountId: "", account: "On My Mac", mailbox: "Speedwave-Test", messageId: "<c@x>")
         harness.executor.reply(rows(
             row("ok", "Invoice 12", "Anna", "", ""),
             row("error", "Lunch?", "Bob", "", "SPW_ALREADY_IN_TRASH (-2700)"),
@@ -173,7 +173,7 @@ final class DeleteEmailsTests: XCTestCase {
     }
 
     func testTwentyFiveMailsAreAcceptedInOneCall() throws {
-        let ids = (1...mailBatchLimit).map { MailId(account: "iCloud", mailbox: "INBOX", messageId: "<\($0)@x>").encoded }
+        let ids = (1...mailBatchLimit).map { MailId(accountId: "iCloud-ID", account: "iCloud", mailbox: "INBOX", messageId: "<\($0)@x>").encoded }
         harness.executor.reply(ids.map { _ in row("ok", "s", "a", "", "") }.joined(separator: "\u{1E}"))
 
         let result = try harness.call("delete_emails", ["ids": ids])
@@ -183,7 +183,7 @@ final class DeleteEmailsTests: XCTestCase {
     }
 
     func testMoreThanTwentyFiveMailsAreRefusedBeforeAnyScriptRunsWithTheInstructionToSplitThem() {
-        let ids = (1...26).map { MailId(account: "iCloud", mailbox: "INBOX", messageId: "<\($0)@x>").encoded }
+        let ids = (1...26).map { MailId(accountId: "iCloud-ID", account: "iCloud", mailbox: "INBOX", messageId: "<\($0)@x>").encoded }
 
         let error = harness.callFailing("delete_emails", ["ids": ids, "confirm_delete": true])
 

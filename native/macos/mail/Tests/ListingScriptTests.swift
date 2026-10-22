@@ -21,6 +21,7 @@ final class ListingScriptTests: XCTestCase {
     private func listingValues(count: Int, subject: String = "\"S\" & i") -> String {
         """
         set spwAcctName to "Work"
+        set spwAcctId to "Work-ID"
         script spwBuild
             property ids : {}
             property subjects : {}

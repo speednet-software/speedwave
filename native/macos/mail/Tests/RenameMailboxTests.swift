@@ -15,7 +15,7 @@ final class RenameMailboxTests: XCTestCase {
         XCTAssertEqual(harness.executor.calls.count, 1)
         let script = harness.executor.calls[0].script
         XCTAssertTrue(script.contains("mailbox \"Clients/Acme\" of spwAcct"), script)
-        XCTAssertTrue(script.contains("{account \"Work\"}"), script)
+        XCTAssertTrue(script.contains("every account whose name is \"Work\""), script)
         XCTAssertTrue(script.contains("set name of mb to \"Acme Corp\""), script)
         XCTAssertEqual(result["status"] as? String, "renamed")
         XCTAssertEqual(result["mailbox"] as? String, "Clients/Acme Corp")
@@ -30,7 +30,7 @@ final class RenameMailboxTests: XCTestCase {
 
         let script = harness.executor.calls[0].script
         let exists = try XCTUnwrap(script.range(
-            of: "if exists mailbox \"Clients/Acme Corp\" of account \"Work\" then error \"\(mailboxExistsMarker)\""),
+            of: "if exists mailbox \"Clients/Acme Corp\" of spwAcct then error \"\(mailboxExistsMarker)\""),
             script)
         let set = try XCTUnwrap(script.range(of: "set name of mb to"))
         XCTAssertLessThan(exists.lowerBound, set.lowerBound)

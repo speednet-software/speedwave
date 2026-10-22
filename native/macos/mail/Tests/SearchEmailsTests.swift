@@ -31,7 +31,7 @@ final class SearchEmailsTests: XCTestCase {
         let newest = try XCTUnwrap(rows.first)
         XCTAssertEqual(
             try MailId(decoding: try XCTUnwrap(newest["id"] as? String)),
-            MailId(account: "Work", mailbox: "INBOX", messageId: "<new@x>"))
+            MailId(accountId: "Work-ID", account: "Work", mailbox: "INBOX", messageId: "<new@x>"))
         XCTAssertEqual(newest["read"] as? Bool, false)
         XCTAssertNotNil(parseISO8601(try XCTUnwrap(newest["date"] as? String)))
         XCTAssertEqual(newest["mailbox"] as? String, "INBOX")

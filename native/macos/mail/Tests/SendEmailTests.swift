@@ -5,7 +5,7 @@ import XCTest
 final class SendEmailTests: XCTestCase {
     private let harness = MailCommandHarness()
 
-    private let archived = MailId(account: "Work", mailbox: "Archive/2026", messageId: "<a@x>")
+    private let archived = MailId(accountId: "Work-ID", account: "Work", mailbox: "Archive/2026", messageId: "<a@x>")
 
     private let message: [String: Any] = [
         "to": "alice@example.com, bob@example.com",
@@ -73,9 +73,8 @@ final class SendEmailTests: XCTestCase {
 
         XCTAssertEqual(harness.executor.calls.count, 1)
         let script = harness.executor.calls[0].script
-        XCTAssertTrue(
-            script.contains("if not (exists account \"Work \\\"EU\\\"\") then error \"\(accountNotFoundMarker)\""),
-            script)
+        XCTAssertTrue(script.contains("set spwNamed to (every account whose name is \"Work \\\"EU\\\"\")"), script)
+        XCTAssertTrue(script.contains("if (count of spwNamed) is 0 then error \"\(accountNotFoundMarker)\""), script)
         XCTAssertTrue(script.contains("if not (enabled of spwAccount) then error \"\(accountDisabledMarker)\""), script)
         XCTAssertFalse(script.contains("primary email"), script)
         XCTAssertFalse(script.contains("outgoing message"), script)
@@ -194,9 +193,8 @@ final class SendEmailTests: XCTestCase {
 
         XCTAssertEqual(harness.executor.calls.count, 1)
         let script = harness.executor.calls[0].script
-        XCTAssertTrue(script.contains("set mb to item 1 of spwMatches"), script)
-        XCTAssertTrue(script.contains("mailbox \"Archive/2026\" of spwAcct"), script)
-        XCTAssertTrue(script.contains("{account \"Work\"}"), script)
+        XCTAssertTrue(script.contains("set mb to mailbox \"Archive/2026\" of spwAcct"), script)
+        XCTAssertTrue(script.contains("set spwAcct to account id \"Work-ID\""), script)
         XCTAssertTrue(script.contains("whose message id is \"<a@x>\""), script)
         XCTAssertFalse(script.contains("of inbox"), script)
         XCTAssertTrue(script.contains("set spwReply to reply m opening window false reply to all false"), script)

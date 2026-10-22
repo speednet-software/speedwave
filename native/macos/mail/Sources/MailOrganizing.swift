@@ -68,7 +68,7 @@ func archiveEmails(params: [String: Any], scripts: MailScripts) throws -> [Strin
     return try batch.apply(scripts: scripts, action: MailAction(lines: archiveLookup(into: "spwArchive") + """
 
                 if spwArchive is missing value then error "\(archiveNotFoundMarker)"
-                if name of mb is name of spwArchive then error "\(alreadyArchivedMarker)"
+                if mb is spwArchive then error "\(alreadyArchivedMarker)"
                 move m to spwArchive
         """))
 }
@@ -131,9 +131,9 @@ func createMailbox(params: [String: Any], scripts: MailScripts) throws -> [Strin
     let local = account == AppleMailClient.localAccountName
     let lines = [
         "tell application \"Mail\"",
-        local ? nil : "        \(AppleMailClient.accountExistsCheck(account))",
-        "        if exists \(AppleMailClient.mailboxSpecifier(name, account: account)) then error \"\(mailboxExistsMarker)\"",
-        local ? "        \(make)" : "        tell account \"\(escapeAppleScript(account))\" to \(make)",
+        local ? nil : AppleMailClient.accountLookup(account, into: "spwAcct"),
+        "        if exists \(mailboxIn(name, local: local)) then error \"\(mailboxExistsMarker)\"",
+        local ? "        \(make)" : "        tell spwAcct to \(make)",
         "end tell",
     ]
     _ = try scripts.run(lines.compactMap { $0 }.joined(separator: "\n"), mailbox: name, account: account)
@@ -155,7 +155,7 @@ func renameMailbox(params: [String: Any], scripts: MailScripts) throws -> [Strin
     }
     let parent = mailbox.split(separator: "/", omittingEmptySubsequences: false).dropLast().joined(separator: "/")
     let renamed = parent.isEmpty ? newName : "\(parent)/\(newName)"
-    let taken = AppleMailClient.mailboxSpecifier(renamed, account: account)
+    let taken = mailboxIn(renamed, local: account == AppleMailClient.localAccountName)
     let refuse = "        if mb is spwSpecial then error \"\(specialMailboxMarker)\""
     let checks = specialMailboxProperties.map { accountSpecialLookup($0, into: "spwSpecial") }
         + [archiveLookup(into: "spwSpecial")]
@@ -176,20 +176,24 @@ func renameMailbox(params: [String: Any], scripts: MailScripts) throws -> [Strin
     return ["status": "renamed", "mailbox": renamed, "previous_mailbox": mailbox, "account": account]
 }
 
-/// AppleScript lines that set `variable` to the first of `archiveMailboxNames` in the account `spwAcctName` (app-level
-/// for On My Mac), else to `missing value`.
+/// The AppleScript specifier of the mailbox path `path` in the account `spwAcct`, app-level when `local`.
+private func mailboxIn(_ path: String, local: Bool) -> String {
+    "mailbox \"\(escapeAppleScript(path))\"" + (local ? "" : " of spwAcct")
+}
+
+/// AppleScript lines that set `variable` to the first of `archiveMailboxNames` in the account with Mail id
+/// `spwAcctId` (app-level for On My Mac), else to `missing value`.
 private func archiveLookup(into variable: String) -> String {
     let names = "{" + archiveMailboxNames.map { "\"\(escapeAppleScript($0))\"" }.joined(separator: ", ") + "}"
-    let local = escapeAppleScript(AppleMailClient.localAccountName)
     return """
             set \(variable) to missing value
             repeat with spwNameRef in \(names)
                 set spwName to contents of spwNameRef
                 if \(variable) is missing value then
-                    if spwAcctName is "\(local)" then
+                    if spwAcctId is "" then
                         if exists mailbox spwName then set \(variable) to mailbox spwName
                     else
-                        if exists mailbox spwName of account spwAcctName then set \(variable) to mailbox spwName of account spwAcctName
+                        if exists mailbox spwName of account id spwAcctId then set \(variable) to mailbox spwName of account id spwAcctId
                     end if
                 end if
             end repeat
@@ -197,8 +201,8 @@ private func archiveLookup(into variable: String) -> String {
 }
 
 /// The action of `move_emails`/`copy_emails`: looks the target up once, `mailbox` inside `account`, refuses the
-/// Trash and the Junk mailbox of that account, which only the gated `delete_emails` and `mark_emails_spam` reach,
-/// then runs `verb` (`move` or `duplicate`) on each mail.
+/// Trash and the Junk mailbox of that account and every mailbox inside them, which only the gated `delete_emails`
+/// and `mark_emails_spam` reach, then runs `verb` (`move` or `duplicate`) on each mail.
 private func targetAction(_ params: [String: Any], verb: String) throws -> MailAction {
     let (mailbox, account) = try mailboxParams(params)
     guard let account = account else {
@@ -210,8 +214,17 @@ private func targetAction(_ params: [String: Any], verb: String) throws -> MailA
             + accountSpecialLookup("trash mailbox", into: "spwTargetTrash") + "\n"
             + accountSpecialLookup("junk mailbox", into: "spwTargetJunk") + """
 
-                if mb is spwTargetTrash then error "\(targetIsTrashMarker)"
-                if mb is spwTargetJunk then error "\(targetIsJunkMarker)"
+                set spwUp to mb
+                repeat 100 times
+                    if spwUp is spwTargetTrash then error "\(targetIsTrashMarker)"
+                    if spwUp is spwTargetJunk then error "\(targetIsJunkMarker)"
+                    try
+                        set spwUp to container of spwUp
+                        if class of spwUp is not container and class of spwUp is not mailbox then exit repeat
+                    on error
+                        exit repeat
+                    end try
+                end repeat
                 set spwTarget to mb
             """,
         mailbox: mailbox,

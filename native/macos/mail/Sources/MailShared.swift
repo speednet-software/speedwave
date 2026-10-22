@@ -4,6 +4,7 @@ import SharedCLI
 let mailboxNotFoundMarker = "SPW_MAILBOX_NOT_FOUND"
 let mailboxAmbiguousMarker = "SPW_MAILBOX_AMBIGUOUS:"
 let accountNotFoundMarker = "SPW_ACCOUNT_NOT_FOUND"
+let accountAmbiguousMarker = "SPW_ACCOUNT_AMBIGUOUS"
 let accountDisabledMarker = "SPW_ACCOUNT_DISABLED"
 let mailNotFoundMarker = "SPW_MAIL_NOT_FOUND"
 let signatureNotFoundMarker = "SPW_SIGNATURE_NOT_FOUND"
@@ -27,6 +28,7 @@ enum MailFailure: LocalizedError, Equatable {
     case automationDenied(String)
     case mailboxNotFound(mailbox: String, account: String?)
     case accountNotFound(String)
+    case accountAmbiguous(String)
     case accountDisabled(String)
     case mailboxAmbiguous(mailbox: String, accounts: [String])
     case invalidMailId(String)
@@ -54,6 +56,7 @@ enum MailFailure: LocalizedError, Equatable {
         case .automationDenied: return "MAIL_AUTOMATION_DENIED"
         case .mailboxNotFound: return "MAIL_MAILBOX_NOT_FOUND"
         case .accountNotFound: return "MAIL_ACCOUNT_NOT_FOUND"
+        case .accountAmbiguous: return "MAIL_ACCOUNT_AMBIGUOUS"
         case .accountDisabled: return "MAIL_ACCOUNT_DISABLED"
         case .mailboxAmbiguous: return "MAIL_MAILBOX_AMBIGUOUS"
         case .invalidMailId: return "MAIL_INVALID_ID"
@@ -91,6 +94,8 @@ enum MailFailure: LocalizedError, Equatable {
             return "Mailbox '\(mailbox)' not found in \(scope)."
         case .accountNotFound(let account):
             return "Account '\(account)' not found."
+        case .accountAmbiguous(let account):
+            return "Several Mail accounts are named '\(account)', so the name does not say which one is meant."
         case .accountDisabled(let account):
             return "Account '\(account)' is turned off in Mail.app, "
                 + "so Mail would send or file the message from another account."
@@ -143,17 +148,18 @@ enum MailFailure: LocalizedError, Equatable {
     }
 }
 
-/// A mail's opaque id: its account, the mailbox path inside that account and its RFC Message-ID, encoded together
-/// as `mail1.` + unpadded base64url of the JSON array `[account, mailbox, messageId]`.
+/// A mail's opaque id: its account's Mail id (empty for On My Mac) and name, the mailbox path inside that account
+/// and its RFC Message-ID, encoded as `mail2.` + unpadded base64url of `[accountId, account, mailbox, messageId]`.
 struct MailId: Equatable {
-    static let prefix = "mail1."
+    static let prefix = "mail2."
 
+    let accountId: String
     let account: String
     let mailbox: String
     let messageId: String
 
     var encoded: String {
-        let json = (try? JSONEncoder().encode([account, mailbox, messageId])) ?? Data()
+        let json = (try? JSONEncoder().encode([accountId, account, mailbox, messageId])) ?? Data()
         let base64url = json.base64EncodedString()
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
@@ -161,7 +167,8 @@ struct MailId: Equatable {
         return Self.prefix + base64url
     }
 
-    init(account: String, mailbox: String, messageId: String) {
+    init(accountId: String, account: String, mailbox: String, messageId: String) {
+        self.accountId = accountId
         self.account = account
         self.mailbox = mailbox
         self.messageId = messageId
@@ -175,12 +182,12 @@ struct MailId: Equatable {
         base64 += String(repeating: "=", count: (4 - base64.count % 4) % 4)
         guard let data = Data(base64Encoded: base64),
               let parts = try? JSONDecoder().decode([String].self, from: data),
-              parts.count == 3,
-              parts.allSatisfy({ !$0.isEmpty })
+              parts.count == 4,
+              parts.dropFirst().allSatisfy({ !$0.isEmpty })
         else {
             throw MailFailure.invalidMailId(id)
         }
-        self.init(account: parts[0], mailbox: parts[1], messageId: parts[2])
+        self.init(accountId: parts[0], account: parts[1], mailbox: parts[2], messageId: parts[3])
     }
 }
 
@@ -250,6 +257,9 @@ struct MailScripts {
         }
         if detail.contains("(-1712)") {
             return .timeout(seconds: timeout)
+        }
+        if detail.contains(accountAmbiguousMarker) {
+            return .accountAmbiguous(account ?? "")
         }
         if detail.contains(accountNotFoundMarker) {
             return .accountNotFound(account ?? "")

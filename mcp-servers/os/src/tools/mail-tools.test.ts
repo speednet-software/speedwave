@@ -37,7 +37,8 @@ import { runCommand } from '../platform-runner.js';
 
 const PROCESS_TIMEOUT = expect.any(Number);
 
-const MAIL_ID = 'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0';
+const MAIL_ID =
+  'mail2.WyI1RjNBMkMxRS0wQjdELTRDMUEtOUUyRi03QTFCM0M0RDVFNkYiLCJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0';
 
 /**
  * The arguments mail-cli receives for a call: the tool's arguments plus the script time budget.
@@ -1265,7 +1266,7 @@ describe('mail-tools', () => {
       ['an empty list', { ids: [] }, 'EMPTY_FIELDS'],
       ['ids as a string', { ids: MAIL_ID }, 'INVALID_TYPE'],
       ['a number among the ids', { ids: [MAIL_ID, 7] }, 'INVALID_TYPE'],
-      ['an id with control characters', { ids: ['mail1.\x01'] }, 'INVALID_CHARACTERS'],
+      ['an id with control characters', { ids: ['mail2.\x01'] }, 'INVALID_CHARACTERS'],
       ['an over-long id', { ids: ['m'.repeat(513)] }, 'FIELD_TOO_LONG'],
       ['confirm_delete as a string', { ids: [MAIL_ID], confirm_delete: 'true' }, 'INVALID_TYPE'],
     ])('refuses %s before calling mail-cli', async (_case, input, code) => {
@@ -1739,6 +1740,22 @@ describe('mail-tools', () => {
       expect(result.error?.code).toBe('MAIL_ACCOUNT_NOT_FOUND');
       expect(result.error?.message).toContain('Invalid account (received: "Nope")');
       expect(result.error?.message).toContain('listMailboxes');
+    });
+
+    it('an account name several accounts share asks the user to rename one instead of picking', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        cliFailure(
+          'move_emails',
+          "MAIL_ACCOUNT_AMBIGUOUS: Several Mail accounts are named 'Work', so the name does not say which one is meant."
+        )
+      );
+
+      const result = await handleMoveEmails({ ids: [MAIL_ID], mailbox: 'Done', account: 'Work' });
+
+      expect(result.error?.code).toBe('MAIL_ACCOUNT_AMBIGUOUS');
+      expect(result.error?.message).toContain('Invalid account (received: "Work")');
+      expect(result.error?.message).toContain('Nothing was done');
+      expect(result.error?.message).toContain('Mail > Settings > Accounts');
     });
 
     it('a turned-off account names it and tells how to turn it on', async () => {

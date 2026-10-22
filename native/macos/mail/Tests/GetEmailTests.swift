@@ -4,7 +4,7 @@ import XCTest
 
 final class GetEmailTests: XCTestCase {
     private let harness = MailCommandHarness()
-    private let mailId = MailId(account: "Work", mailbox: "Archive/2026", messageId: "<a@x>")
+    private let mailId = MailId(accountId: "Work-ID", account: "Work", mailbox: "Archive/2026", messageId: "<a@x>")
 
     private struct Reply {
         var subject = "Quarterly report"

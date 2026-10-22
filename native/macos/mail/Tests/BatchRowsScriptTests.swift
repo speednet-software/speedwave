@@ -3,7 +3,7 @@ import XCTest
 @testable import mail_cli
 
 final class BatchRowsScriptTests: XCTestCase {
-    private let mail = MailId(account: "iCloud", mailbox: "INBOX", messageId: "<a@x>")
+    private let mail = MailId(accountId: "iCloud-ID", account: "iCloud", mailbox: "INBOX", messageId: "<a@x>")
 
     private let syntheticRows = """
         set spwReceived to current date

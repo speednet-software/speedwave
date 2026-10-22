@@ -102,14 +102,18 @@ export const deleteEmailsTool: Tool = {
   inputExamples: [
     {
       description: 'Minimal: preview one email before asking the user',
-      input: { ids: ['mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0'] },
+      input: {
+        ids: [
+          'mail2.WyI1RjNBMkMxRS0wQjdELTRDMUEtOUUyRi03QTFCM0M0RDVFNkYiLCJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0',
+        ],
+      },
     },
     {
       description: 'Full: move two emails to the Trash after the user agreed',
       input: {
         ids: [
-          'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0',
-          'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxiQHg-Il0',
+          'mail2.WyI1RjNBMkMxRS0wQjdELTRDMUEtOUUyRi03QTFCM0M0RDVFNkYiLCJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0',
+          'mail2.WyI1RjNBMkMxRS0wQjdELTRDMUEtOUUyRi03QTFCM0M0RDVFNkYiLCJpQ2xvdWQiLCJJTkJPWCIsIjxiQHg-Il0',
         ],
         confirm_delete: true,
       },

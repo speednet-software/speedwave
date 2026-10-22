@@ -34,7 +34,7 @@ final class ListEmailsTests: XCTestCase {
         let newest = try XCTUnwrap(rows.first)
         XCTAssertEqual(
             try MailId(decoding: try XCTUnwrap(newest["id"] as? String)),
-            MailId(account: "Work", mailbox: "INBOX", messageId: "<new@x>"))
+            MailId(accountId: "Work-ID", account: "Work", mailbox: "INBOX", messageId: "<new@x>"))
         XCTAssertEqual(newest["sender"] as? String, "Bob <bob@x>")
         XCTAssertEqual(newest["read"] as? Bool, false)
         XCTAssertEqual(newest["date"] as? String, try localISO(2026, 10, 20, 9, 15))
@@ -207,6 +207,7 @@ final class ListEmailsTests: XCTestCase {
         let tail = String(script[try XCTUnwrap(script.range(of: "end tell", options: .backwards)).upperBound...])
         let synthetic = """
             set spwAcctName to "Work"
+            set spwAcctId to "Work-ID"
             set spwIds to {"<a@x>", "<b@x>", "<c@x>"}
             set spwSubjects to {"A", "B", "C"}
             set spwSenders to {"a", "b", "c"}
@@ -246,7 +247,7 @@ final class ListEmailsTests: XCTestCase {
 
         let script = try XCTUnwrap(harness.executor.calls.first?.script)
         XCTAssertFalse(script.contains("flagged status"), script)
-        XCTAssertFalse(script.contains(" whose "), script)
+        XCTAssertFalse(script.contains("message of mb whose"), script)
     }
 
     func testAnEmptyMailboxReadsNoFlags() throws {
@@ -259,7 +260,7 @@ final class ListEmailsTests: XCTestCase {
     }
 
     func testAListWhosePropertyCountsDisagreeIsRefusedAsAChangedMailbox() {
-        let torn = ["Work", "<a@x>\u{1E}<b@x>", "A", "s", "2026-10-01T08:00:00", "true", "-1", "0"]
+        let torn = ["Work", "Work-ID", "<a@x>\u{1E}<b@x>", "A", "s", "2026-10-01T08:00:00", "true", "-1", "0"]
             .joined(separator: "\u{1D}")
         harness.executor.reply(torn)
 

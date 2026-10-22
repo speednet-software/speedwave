@@ -5,7 +5,7 @@ import XCTest
 final class DraftsAndSignaturesTests: XCTestCase {
     private let harness = MailCommandHarness()
 
-    private let archived = MailId(account: "Work", mailbox: "Archive/2026", messageId: "<a@x>")
+    private let archived = MailId(accountId: "Work-ID", account: "Work", mailbox: "Archive/2026", messageId: "<a@x>")
 
     private let draft: [String: Any] = [
         "to": "alice@example.com",
@@ -85,10 +85,9 @@ final class DraftsAndSignaturesTests: XCTestCase {
         let result = try harness.call("save_draft", draft.merging(["account": "Work \"EU\""]) { $1 })
 
         let script = harness.executor.calls[0].script
-        XCTAssertTrue(
-            script.contains("if not (exists account \"Work \\\"EU\\\"\") then error \"\(accountNotFoundMarker)\""),
-            script)
-        XCTAssertTrue(script.contains("set spwAccount to account \"Work \\\"EU\\\"\""), script)
+        XCTAssertTrue(script.contains("set spwNamed to (every account whose name is \"Work \\\"EU\\\"\")"), script)
+        XCTAssertTrue(script.contains("if (count of spwNamed) is 0 then error \"\(accountNotFoundMarker)\""), script)
+        XCTAssertTrue(script.contains("set spwAccount to item 1 of spwNamed"), script)
         XCTAssertTrue(script.contains("set spwAddresses to email addresses of spwAccount"), script)
         XCTAssertTrue(script.contains("set spwAddress to item 1 of spwAddresses"), script)
         XCTAssertTrue(script.contains("set spwName to full name of spwAccount"), script)

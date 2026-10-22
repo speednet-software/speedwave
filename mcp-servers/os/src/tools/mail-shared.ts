@@ -39,8 +39,8 @@ export const MAIL_FLAG_VALUES = [
 export const SPLIT_BATCH_STEP = `Split the mail ids into batches of at most ${MAIL_BATCH_LIMIT} and confirm each batch with the user separately.`;
 
 export const EXAMPLE_IDS = [
-  'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0',
-  'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxiQHg-Il0',
+  'mail2.WyI1RjNBMkMxRS0wQjdELTRDMUEtOUUyRi03QTFCM0M0RDVFNkYiLCJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0',
+  'mail2.WyI1RjNBMkMxRS0wQjdELTRDMUEtOUUyRi03QTFCM0M0RDVFNkYiLCJpQ2xvdWQiLCJJTkJPWCIsIjxiQHg-Il0',
 ];
 
 const MAIL_FAILURE = /\b(MAIL_[A-Z_]+): ([\s\S]*)$/;
@@ -72,6 +72,13 @@ const MAIL_FAILURE_TEACHING: Record<
     received: args.account,
     correctValueTool: 'listMailboxes',
     nextStep: `${detail} Pass the account field of a mailbox listMailboxes returns.`,
+  }),
+  MAIL_ACCOUNT_AMBIGUOUS: (detail, args) => ({
+    paramName: 'account',
+    received: args.account,
+    nextStep:
+      `${detail} Nothing was done. Tell the user and ask them to give one of these accounts another ` +
+      'description in Mail > Settings > Accounts, then call again with the new name from listMailboxes.',
   }),
   MAIL_ACCOUNT_DISABLED: (detail, args, command) => ({
     paramName: 'account',

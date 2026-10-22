@@ -5,8 +5,8 @@ import XCTest
 final class OrganizeEmailsTests: XCTestCase {
     private let harness = MailCommandHarness()
 
-    private let first = MailId(account: "iCloud", mailbox: "INBOX", messageId: "<a@x>")
-    private let second = MailId(account: "Work", mailbox: "Archive/2026", messageId: "<b@x>")
+    private let first = MailId(accountId: "iCloud-ID", account: "iCloud", mailbox: "INBOX", messageId: "<a@x>")
+    private let second = MailId(accountId: "Work-ID", account: "Work", mailbox: "Archive/2026", messageId: "<b@x>")
 
     private func row(_ fields: String...) -> String {
         fields.joined(separator: "\u{1F}")
@@ -59,7 +59,7 @@ final class OrganizeEmailsTests: XCTestCase {
     }
 
     func testMarkingReadTakesAtMostTwentyFiveMailsLikeEveryBatch() {
-        let ids = (1...26).map { MailId(account: "iCloud", mailbox: "INBOX", messageId: "<\($0)@x>").encoded }
+        let ids = (1...26).map { MailId(accountId: "iCloud-ID", account: "iCloud", mailbox: "INBOX", messageId: "<\($0)@x>").encoded }
 
         let error = harness.callFailing("mark_emails_read", ["ids": ids, "read": true])
 
@@ -114,7 +114,7 @@ final class OrganizeEmailsTests: XCTestCase {
         XCTAssertEqual(harness.executor.calls.count, 1)
         let script = harness.executor.calls[0].script
         XCTAssertTrue(script.contains("mailbox \"Clients/Acme\" of spwAcct"), script)
-        XCTAssertTrue(script.contains("{account \"Work\"}"), script)
+        XCTAssertTrue(script.contains("every account whose name is \"Work\""), script)
         XCTAssertTrue(script.contains("set spwTarget to mb"), script)
         XCTAssertTrue(script.contains("move m to spwTarget"), script)
         let setup = try XCTUnwrap(script.range(of: "set spwTarget to mb"))
@@ -170,8 +170,9 @@ final class OrganizeEmailsTests: XCTestCase {
                 XCTAssertTrue(script.contains("repeat with spwBoxRef in mailboxes of \(special)"), script)
             }
             let trashCheck = try XCTUnwrap(
-                script.range(of: "if mb is spwTargetTrash then error \"\(targetIsTrashMarker)\""), script)
-            XCTAssertNotNil(script.range(of: "if mb is spwTargetJunk then error \"\(targetIsJunkMarker)\""), script)
+                script.range(of: "if spwUp is spwTargetTrash then error \"\(targetIsTrashMarker)\""), script)
+            XCTAssertNotNil(script.range(of: "if spwUp is spwTargetJunk then error \"\(targetIsJunkMarker)\""), script)
+            XCTAssertNotNil(script.range(of: "set spwUp to container of spwUp"), script)
             let firstMail = try XCTUnwrap(script.range(of: "\"<a@x>\""))
             XCTAssertLessThan(trashCheck.lowerBound, firstMail.lowerBound)
         }
@@ -218,7 +219,7 @@ final class OrganizeEmailsTests: XCTestCase {
         let result = try harness.call("archive_emails", ["ids": [first.encoded, second.encoded]])
 
         let script = harness.executor.calls[0].script
-        XCTAssertTrue(script.contains("of account spwAcctName"), script)
+        XCTAssertTrue(script.contains("of account id spwAcctId"), script)
         XCTAssertTrue(script.contains("\"Archive\""), script)
         XCTAssertTrue(script.contains("move m to spwArchive"), script)
         XCTAssertNil(script.range(of: #"\bdelete\b"#, options: .regularExpression), script)
@@ -253,10 +254,10 @@ final class OrganizeEmailsTests: XCTestCase {
         let result = try harness.call("create_mailbox", ["name": "Clients/Acme", "account": "Work"])
 
         let script = harness.executor.calls[0].script
-        XCTAssertTrue(script.contains("if not (exists account \"Work\") then error \"\(accountNotFoundMarker)\""), script)
-        XCTAssertTrue(script.contains("exists mailbox \"Clients/Acme\" of account \"Work\""), script)
+        XCTAssertTrue(script.contains("every account whose name is \"Work\""), script)
+        XCTAssertTrue(script.contains("exists mailbox \"Clients/Acme\" of spwAcct"), script)
         XCTAssertTrue(script.contains("make new mailbox with properties {name:\"Clients/Acme\"}"), script)
-        XCTAssertTrue(script.contains("tell account \"Work\""), script)
+        XCTAssertTrue(script.contains("tell spwAcct to make new mailbox"), script)
         XCTAssertEqual(result["status"] as? String, "created")
         XCTAssertEqual(result["mailbox"] as? String, "Clients/Acme")
         XCTAssertEqual(result["account"] as? String, "Work")
@@ -429,7 +430,7 @@ final class OrganizeEmailsTests: XCTestCase {
     }
 
     func testNotSpamTakesAtMostTwentyFiveMails() {
-        let ids = (1...26).map { MailId(account: "iCloud", mailbox: "Junk", messageId: "<\($0)@x>").encoded }
+        let ids = (1...26).map { MailId(accountId: "iCloud-ID", account: "iCloud", mailbox: "Junk", messageId: "<\($0)@x>").encoded }
 
         let error = harness.callFailing("mark_emails_not_spam", ["ids": ids])
 
@@ -438,7 +439,7 @@ final class OrganizeEmailsTests: XCTestCase {
     }
 
     func testSpamTakesAtMostTwentyFiveMails() {
-        let ids = (1...26).map { MailId(account: "iCloud", mailbox: "INBOX", messageId: "<\($0)@x>").encoded }
+        let ids = (1...26).map { MailId(accountId: "iCloud-ID", account: "iCloud", mailbox: "INBOX", messageId: "<\($0)@x>").encoded }
 
         let error = harness.callFailing("mark_emails_spam", ["ids": ids, "confirm_spam": true])
 

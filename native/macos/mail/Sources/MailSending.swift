@@ -262,9 +262,8 @@ enum MailSending {
     /// or the first address of a turned-on account.
     private static func senderLines(account: String?) -> String {
         let address = account.map { name in
-            """
-                \(AppleMailClient.accountExistsCheck(name))
-                set spwAccount to account "\(escapeAppleScript(name))"
+            AppleMailClient.accountLookup(name, into: "spwAccount") + """
+
                 if not (enabled of spwAccount) then error "\(accountDisabledMarker)"
                 set spwAddresses to email addresses of spwAccount
                 if (count of spwAddresses) is 0 then error "\(noSenderMarker)"

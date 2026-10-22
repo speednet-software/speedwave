@@ -101,21 +101,21 @@ final class MailTests: XCTestCase {
         XCTAssertTrue(script.contains("exists mailbox \"Archive\" of spwAcct"), script)
         XCTAssertFalse(script.contains("exists account"), script)
         XCTAssertTrue(script.contains("if exists mailbox \"Archive\" then"), script)
-        XCTAssertTrue(script.contains("set end of spwNames to \"On My Mac\""), script)
-        XCTAssertTrue(script.contains("set spwAcctName to item 1 of spwNames"), script)
+        XCTAssertTrue(script.contains("set end of spwOwners to missing value"), script)
+        XCTAssertTrue(script.contains("set spwAcctId to id of spwAcct"), script)
     }
 
     func testMailboxLookupSearchesOnlyTheNamedAccount() {
         let script = AppleMailClient.mailboxLookup(name: "Archive", account: "Exchange")
-        XCTAssertTrue(script.contains("if not (exists account \"Exchange\")"), script)
-        XCTAssertTrue(script.contains("repeat with spwAcctRef in {account \"Exchange\"}"), script)
+        XCTAssertTrue(script.contains("set spwNamed to (every account whose name is \"Exchange\")"), script)
+        XCTAssertTrue(script.contains("set mb to mailbox \"Archive\" of spwAcct"), script)
         XCTAssertFalse(script.contains("if exists mailbox \"Archive\" then"), script)
     }
 
     func testMailboxLookupEscapesQuotesInNames() {
         let script = AppleMailClient.mailboxLookup(name: "My \"Box\"", account: "Work \"A\"")
         XCTAssertTrue(script.contains("mailbox \"My \\\"Box\\\"\" of spwAcct"), script)
-        XCTAssertTrue(script.contains("account \"Work \\\"A\\\"\""), script)
+        XCTAssertTrue(script.contains("whose name is \"Work \\\"A\\\"\""), script)
     }
 
     func testMailboxLookupInOnMyMacAddressesTheLocalMailbox() {
@@ -127,9 +127,9 @@ final class MailTests: XCTestCase {
     }
 
     func testMessageLookupFindsTheMessageInItsOwnMailboxAndAccount() {
-        let id = MailId(account: "Work", mailbox: "Archive", messageId: "<a\"b@x>")
+        let id = MailId(accountId: "Work-ID", account: "Work", mailbox: "Archive", messageId: "<a\"b@x>")
         let script = AppleMailClient.messageLookup(id)
-        XCTAssertTrue(script.contains("repeat with spwAcctRef in {account \"Work\"}"), script)
+        XCTAssertTrue(script.contains("set spwAcct to account id \"Work-ID\""), script)
         XCTAssertTrue(script.contains("mailbox \"Archive\" of spwAcct"), script)
         XCTAssertTrue(script.contains("every message of mb whose message id is \"<a\\\"b@x>\""), script)
         XCTAssertFalse(script.contains("of inbox"), script)

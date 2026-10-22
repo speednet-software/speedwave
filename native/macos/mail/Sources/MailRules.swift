@@ -103,11 +103,10 @@ enum MailRules {
         guard let account = account else {
             return "tell application \"Mail\" to check for new mail"
         }
-        let accountEsc = escapeAppleScript(account)
         return """
             tell application "Mail"
-                \(AppleMailClient.accountExistsCheck(account))
-                check for new mail for account "\(accountEsc)"
+            \(AppleMailClient.accountLookup(account, into: "spwAcct"))
+                check for new mail for spwAcct
             end tell
             """
     }

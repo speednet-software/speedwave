@@ -103,8 +103,8 @@ final class MailRulesAndCheckTests: XCTestCase {
         let result = try harness.call("check_mail", ["account": "Work \"Exchange\""])
 
         let script = try XCTUnwrap(harness.executor.calls.first?.script)
-        XCTAssertTrue(script.contains(#"check for new mail for account "Work \"Exchange\"""#))
-        XCTAssertTrue(script.contains(#"exists account "Work \"Exchange\"""#))
+        XCTAssertTrue(script.contains("check for new mail for spwAcct\n"), script)
+        XCTAssertTrue(script.contains(#"every account whose name is "Work \"Exchange\"""#), script)
         XCTAssertEqual(result as NSDictionary, ["status": "started", "account": "Work \"Exchange\""])
     }
 

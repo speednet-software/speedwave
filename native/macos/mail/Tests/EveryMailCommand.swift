@@ -9,11 +9,11 @@ struct MailCommandCall {
     let params: [String: Any]
     let replies: [String]
 
-    static let mailId = MailId(account: "Work", mailbox: "INBOX", messageId: "<a@x>").encoded
+    static let mailId = MailId(accountId: "Work-ID", account: "Work", mailbox: "INBOX", messageId: "<a@x>").encoded
 
     private static let batchRow = ["ok", "", "", "", ""].joined(separator: MailBatch.fieldSeparator)
     private static let reported = MailBatch.fieldSeparator + "false"
-    private static let listing = "Work" + String(repeating: "\u{1D}", count: 7)
+    private static let listing = "Work\u{1D}Work-ID" + String(repeating: "\u{1D}", count: 7)
     private static let originalRead = String(repeating: "\u{1D}", count: 4)
 
     static let all: [MailCommandCall] = [

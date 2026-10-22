@@ -359,12 +359,14 @@ export const getEmailTool: Tool = {
   inputExamples: [
     {
       description: 'Minimal: read an email by its mail id',
-      input: { id: 'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0' },
+      input: {
+        id: 'mail2.WyI1RjNBMkMxRS0wQjdELTRDMUEtOUUyRi03QTFCM0M0RDVFNkYiLCJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0',
+      },
     },
     {
       description: 'Full: read a suspicious email with its headers and source',
       input: {
-        id: 'mail1.WyJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0',
+        id: 'mail2.WyI1RjNBMkMxRS0wQjdELTRDMUEtOUUyRi03QTFCM0M0RDVFNkYiLCJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0',
         include_headers: true,
         include_source: true,
       },
