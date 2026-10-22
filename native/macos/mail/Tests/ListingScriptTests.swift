@@ -4,6 +4,7 @@ import XCTest
 
 final class ListingScriptTests: XCTestCase {
     private let harness = MailCommandHarness()
+    private let wellWithinTheBudget = TimeInterval(MailCommandHarness.scriptTimeoutMs) / 1000 / 3
 
     private func tail(of command: String, _ params: [String: Any]) throws -> String {
         let probe = MailCommandHarness()
@@ -59,7 +60,7 @@ final class ListingScriptTests: XCTestCase {
 
         let output = try osascriptExecutor(script, 60)
 
-        XCTAssertLessThan(Date().timeIntervalSince(started), 3)
+        XCTAssertLessThan(Date().timeIntervalSince(started), wellWithinTheBudget)
         harness.executor.reply(output)
         let result = try harness.call("list_emails", params.merging(["limit": 2]) { $1 })
         XCTAssertEqual(result["total"] as? Int, 6_000)
@@ -149,7 +150,7 @@ final class ListingScriptTests: XCTestCase {
 
         let output = try osascriptExecutor(scopes + (try tail(of: "list_mailboxes", [:])), 60)
 
-        XCTAssertLessThan(Date().timeIntervalSince(started), 3)
+        XCTAssertLessThan(Date().timeIntervalSince(started), wellWithinTheBudget)
         let rows = AppleMailClient.parseMailboxes(output)
         XCTAssertEqual(rows.count, 800)
         XCTAssertEqual(rows[3]["name"] as? String, "N1/N2/N3/N4")

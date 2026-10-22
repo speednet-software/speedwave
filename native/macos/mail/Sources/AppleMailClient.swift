@@ -407,7 +407,8 @@ enum AppleMailClient {
             listing = try parseListing(try scripts.run(script, mailbox: mailbox, account: account), mailbox: mailbox)
         } else {
             let script = searchAllMailboxesScript(account: account, filter: filter)
-            listing = try parseAllMailboxes(try scripts.run(script, account: account))
+            let found = try parseAllMailboxes(try scripts.run(script, account: account))
+            listing = Listing(messages: onePerMail(found.messages), withoutId: found.withoutId)
         }
         let sorted = newestFirst(listing.messages)
         let page = sorted.dropFirst(offset).prefix(limit)
@@ -659,6 +660,29 @@ enum AppleMailClient {
     /// The items of one listing field; an empty field has none.
     private static func items(_ field: String) -> [String] {
         field.isEmpty ? [] : field.components(separatedBy: listItemSeparator)
+    }
+
+    /// One row per Message-ID and account, since Gmail shows one mail in a folder per label: the row from INBOX,
+    /// else from a folder outside `[Gmail]/`, else the first in Mail's order.
+    private static func onePerMail(_ messages: [ListedMessage]) -> [ListedMessage] {
+        let rank = { (message: ListedMessage) -> Int in
+            message.id.mailbox.caseInsensitiveCompare("INBOX") == .orderedSame ? 0
+                : message.id.mailbox.hasPrefix("[Gmail]/") ? 2 : 1
+        }
+        var kept: [String: Int] = [:]
+        var rows: [ListedMessage] = []
+        for message in messages {
+            let key = message.id.accountId + "\u{1F}" + message.id.account + "\u{1F}" + message.id.messageId
+            guard let index = kept[key] else {
+                kept[key] = rows.count
+                rows.append(message)
+                continue
+            }
+            if rank(message) < rank(rows[index]) {
+                rows[index] = message
+            }
+        }
+        return rows
     }
 
     /// The `mailFlagColors` name of a Mail `flag index`, or `none` for -1 and any index outside the colors.

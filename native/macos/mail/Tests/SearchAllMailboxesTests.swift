@@ -230,6 +230,44 @@ final class SearchAllMailboxesTests: XCTestCase {
         XCTAssertFalse(script.contains("spwTrash"), script)
     }
 
+    private func section(_ account: String, _ path: String, ids: [String], flag: Int = -1, read: Bool = true) -> String {
+        let column = { (value: String) in ids.map { _ in value }.joined(separator: "\u{1E}") }
+        return [
+            account, "\(account)-ID", path, ids.joined(separator: "\u{1E}"), column("Hi"), column("Anna <a@x>"),
+            column("2026-10-20T09:15:00"), column(read ? "true" : "false"), column("\(flag)"), column("0"),
+        ].joined(separator: "\u{1D}")
+    }
+
+    func testAGmailMailInSeveralLabelFoldersIsOneResultFromItsInboxAndCountsOnce() throws {
+        harness.executor.reply([
+            section("Gmail", "[Gmail]/All Mail", ids: ["<g@x>", "<h@x>"]),
+            section("Gmail", "Projects", ids: ["<g@x>"], flag: 0, read: false),
+            section("Gmail", "INBOX", ids: ["<g@x>"], flag: 0, read: false),
+            section("Gmail", "[Gmail]/Important", ids: ["<h@x>"]),
+            section("Work", "Inbox", ids: ["<g@x>"]),
+        ].joined(separator: "\u{1C}"))
+
+        let result = try harness.call("search_emails", ["flagged_only": true])
+
+        let rows = try XCTUnwrap(result["emails"] as? [[String: Any]])
+        XCTAssertEqual(result["total"] as? Int, 3)
+        let mailboxes = rows.map { "\($0["account"] as? String ?? "")/\($0["mailbox"] as? String ?? "")" }
+        XCTAssertEqual(Set(mailboxes), ["Gmail/INBOX", "Gmail/[Gmail]/All Mail", "Work/Inbox"])
+        let gmailInbox = try XCTUnwrap(rows.first { $0["mailbox"] as? String == "INBOX" })
+        XCTAssertEqual(gmailInbox["flag"] as? String, "red")
+    }
+
+    func testAMailInOneMailboxOfANonGmailAccountKeepsThatMailbox() throws {
+        harness.executor.reply([
+            section("Work", "Archive", ids: ["<a@x>"]),
+            section("Work", "Projects/Trash", ids: ["<b@x>"]),
+        ].joined(separator: "\u{1C}"))
+
+        let result = try harness.call("search_emails", ["query": "x"])
+
+        XCTAssertEqual(result["total"] as? Int, 2)
+    }
+
     func testABodySearchWithoutAMailboxRunsNothing() {
         let error = harness.callFailing("search_emails", ["query": "x", "search_body": true])
 
