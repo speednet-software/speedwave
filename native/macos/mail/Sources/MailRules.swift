@@ -1,6 +1,9 @@
 import Foundation
 import SharedCLI
 
+/// What `list_rules` prints as the mailbox of a move or copy whose target Mail can no longer read.
+let ruleTargetMissingMarker = "SPW_RULE_TARGET_MISSING"
+
 /// Read-only access to Mail's rules and the request to fetch new mail; nothing here creates, changes or deletes a rule.
 enum MailRules {
     private static let recordSeparator: Character = "\u{1E}"
@@ -11,17 +14,23 @@ enum MailRules {
     static let listRulesScript = """
         on spwMailboxFields(mb)
             tell application "Mail"
-                set mbName to name of mb
-                set parentBox to container of mb
-                repeat while class of parentBox is mailbox
-                    set mbName to name of parentBox & "/" & mbName
-                    set parentBox to container of parentBox
-                end repeat
-                set acctName to ""
                 try
-                    set acctName to name of account of mb
+                    set mbName to ""
+        \(AppleMailClient.containerWalk(from: "mb", into: "spwUp", body: """
+                    if mbName is "" then
+                        set mbName to name of spwUp
+                    else
+                        set mbName to (name of spwUp) & "/" & mbName
+                    end if
+        """))
+                    set acctName to ""
+                    try
+                        set acctName to name of account of mb
+                    end try
+                    return mbName & (character id 31) & acctName
+                on error
+                    return "\(ruleTargetMissingMarker)" & (character id 31)
                 end try
-                return mbName & (character id 31) & acctName
             end tell
         end spwMailboxFields
 
@@ -79,8 +88,8 @@ enum MailRules {
                     "name": fields[1],
                     "enabled": fields[2] == "true",
                     "match_all": fields[3] == "true",
-                    "conditions": [[String: String]](),
-                    "actions": [[String: String]](),
+                    "conditions": [[String: Any]](),
+                    "actions": [[String: Any]](),
                 ])
             case "condition" where fields.count == 5 && !rules.isEmpty:
                 let condition = nonEmpty([
@@ -88,9 +97,12 @@ enum MailRules {
                 ])
                 append(condition, to: "conditions", of: &rules)
             case "action" where fields.count == 6 && !rules.isEmpty:
-                let action = nonEmpty([
-                    "type": fields[1], "mailbox": fields[2], "account": fields[3], "address": fields[4], "text": fields[5],
+                let missing = fields[2] == ruleTargetMissingMarker
+                var action: [String: Any] = nonEmpty([
+                    "type": fields[1], "mailbox": missing ? "" : fields[2], "account": fields[3], "address": fields[4],
+                    "text": fields[5],
                 ])
+                action["target_missing"] = missing ? true : nil
                 append(action, to: "actions", of: &rules)
             default:
                 continue
@@ -122,8 +134,8 @@ enum MailRules {
         fields.filter { !$0.value.isEmpty }
     }
 
-    private static func append(_ item: [String: String], to key: String, of rules: inout [[String: Any]]) {
-        var items = rules[rules.count - 1][key] as? [[String: String]] ?? []
+    private static func append(_ item: [String: Any], to key: String, of rules: inout [[String: Any]]) {
+        var items = rules[rules.count - 1][key] as? [[String: Any]] ?? []
         items.append(item)
         rules[rules.count - 1][key] = items
     }

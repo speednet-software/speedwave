@@ -79,6 +79,11 @@ export const listMailRulesTool: Tool = {
                     description: 'Target mailbox path of a move or copy',
                   },
                   account: { type: 'string', description: 'Account of that mailbox' },
+                  target_missing: {
+                    type: 'boolean',
+                    description:
+                      'true when the target mailbox of a move or copy no longer exists or Mail cannot read it; mailbox and account are then absent',
+                  },
                   address: { type: 'string', description: 'Recipient of a forward or redirect' },
                   text: {
                     type: 'string',

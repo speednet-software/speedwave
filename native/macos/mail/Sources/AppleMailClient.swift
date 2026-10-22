@@ -160,6 +160,23 @@ enum AppleMailClient {
         """
     }
 
+    /// AppleScript lines that run `body` with `variable` set to `start`, then to each mailbox containing it in turn,
+    /// up to the account or app level: a container of another class, or one whose class Mail cannot read, ends it.
+    static func containerWalk(from start: String, into variable: String, body: String) -> String {
+        """
+            set \(variable) to \(start)
+            repeat 100 times
+        \(body)
+                try
+                    set \(variable) to container of \(variable)
+                    if class of \(variable) is not container and class of \(variable) is not mailbox then exit repeat
+                on error
+                    exit repeat
+                end try
+            end repeat
+        """
+    }
+
     /// AppleScript lines, run inside `tell application "Mail"`, that set `mb` to the mailbox named `name` in
     /// `account`, or in the one account or On My Mac that has it, `spwAcct` to that account (missing value for On
     /// My Mac), `spwAcctName` to its name and `spwAcctId` to its Mail id ("" for On My Mac). An app-level

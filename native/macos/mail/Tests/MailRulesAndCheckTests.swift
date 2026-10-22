@@ -47,6 +47,32 @@ final class MailRulesAndCheckTests: XCTestCase {
         ])
     }
 
+    func testARuleWhoseTargetMailboxIsGoneIsListedWithItsTargetMarkedMissing() throws {
+        harness.executor.reply(
+            record("rule", "Old", "true", "true")
+                + record("action", "move", ruleTargetMissingMarker, "", "", "")
+                + record("action", "copy", "Archive/2026", "Work", "", "")
+        )
+
+        let result = try harness.call("list_rules")
+
+        let actions = try XCTUnwrap((result["rules"] as? [[String: Any]])?.first?["actions"] as? [[String: Any]])
+        XCTAssertEqual(actions.count, 2)
+        XCTAssertEqual(actions[0]["type"] as? String, "move")
+        XCTAssertEqual(actions[0]["target_missing"] as? Bool, true)
+        XCTAssertNil(actions[0]["mailbox"])
+        XCTAssertEqual(actions[1]["mailbox"] as? String, "Archive/2026")
+        XCTAssertNil(actions[1]["target_missing"])
+    }
+
+    func testTheRuleTargetPathWalksContainersOfEitherClassAndAMissingTargetDoesNotFailTheCall() {
+        let script = MailRules.listRulesScript
+
+        XCTAssertFalse(script.contains("repeat while class of parentBox is mailbox"), script)
+        XCTAssertTrue(script.contains("if class of spwUp is not container and class of spwUp is not mailbox then exit repeat"), script)
+        XCTAssertTrue(script.contains("return \"\(ruleTargetMissingMarker)\""), script)
+    }
+
     func testListRulesWithNoRulesReturnsAnEmptyList() throws {
         harness.executor.reply("")
 

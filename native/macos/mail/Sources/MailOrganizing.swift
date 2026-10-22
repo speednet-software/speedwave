@@ -214,17 +214,10 @@ private func targetAction(_ params: [String: Any], verb: String) throws -> MailA
             + accountSpecialLookup("trash mailbox", into: "spwTargetTrash") + "\n"
             + accountSpecialLookup("junk mailbox", into: "spwTargetJunk") + """
 
-                set spwUp to mb
-                repeat 100 times
+            \(AppleMailClient.containerWalk(from: "mb", into: "spwUp", body: """
                     if spwUp is spwTargetTrash then error "\(targetIsTrashMarker)"
                     if spwUp is spwTargetJunk then error "\(targetIsJunkMarker)"
-                    try
-                        set spwUp to container of spwUp
-                        if class of spwUp is not container and class of spwUp is not mailbox then exit repeat
-                    on error
-                        exit repeat
-                    end try
-                end repeat
+            """))
                 set spwTarget to mb
             """,
         mailbox: mailbox,

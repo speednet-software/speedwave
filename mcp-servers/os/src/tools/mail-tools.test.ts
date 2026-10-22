@@ -1051,6 +1051,7 @@ describe('mail-tools', () => {
             ],
             actions: [
               { type: 'move', mailbox: 'Finance', account: 'Work' },
+              { type: 'copy', target_missing: true },
               { type: 'forward', address: 'a@x' },
               { type: 'reply', text: 'Away' },
             ],
