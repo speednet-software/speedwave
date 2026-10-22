@@ -1,12 +1,6 @@
 import { RESTART_WAIT_MS } from './shell';
 import { invokeOr } from './tauri-invoke';
 
-const OPENROUTER_SELECT = '[data-testid="settings-llm-extra-select-openrouter"]';
-const OPENROUTER_KEY = '[data-testid="settings-llm-extra-key-openrouter"]';
-const OPENROUTER_REFRESH = '[data-testid="settings-llm-extra-refresh-openrouter"]';
-const OPENROUTER_SUCCESS = '[data-testid="settings-llm-extra-test-success-openrouter"]';
-const OPENROUTER_ERROR = '[data-testid="settings-llm-extra-discovery-error-openrouter"]';
-
 function requireEnv(name: string): string {
   const value = process.env[name];
   if (!value) {
@@ -47,47 +41,33 @@ export async function storedProviderModel(providerId: string): Promise<string | 
 }
 
 export async function configureOpenRouter(apiKey: string): Promise<void> {
-  for (let attempt = 1; ; attempt++) {
-    await fillOpenRouterKey(apiKey);
-    await (await $(OPENROUTER_REFRESH)).click();
-    await browser.waitUntil(
-      async () =>
-        (await $(OPENROUTER_SUCCESS).isExisting()) || (await $(OPENROUTER_ERROR).isExisting()),
-      { timeout: 60_000, timeoutMsg: 'OpenRouter connection test never settled' }
-    );
-    if (await $(OPENROUTER_ERROR).isExisting()) {
-      throw new Error(`OpenRouter connection test failed: ${await $(OPENROUTER_ERROR).getText()}`);
-    }
-    if (await openRouterHoldsKey(apiKey)) break;
-    if (attempt === 3) {
-      throw new Error('the OpenRouter row lost its selection or key after the connection test');
-    }
-  }
-
-  await saveProvider();
-}
-
-async function fillOpenRouterKey(apiKey: string): Promise<void> {
+  const refresh = '[data-testid="settings-llm-extra-refresh-openrouter"]';
   await browser.waitUntil(
     async () => {
-      const select = await $(OPENROUTER_SELECT);
-      if ((await select.getAttribute('aria-checked')) !== 'true') {
-        await select.click();
+      const keyInput = await $('[data-testid="settings-llm-extra-key-openrouter"]');
+      if (!(await keyInput.isExisting())) {
+        const select = await $('[data-testid="settings-llm-extra-select-openrouter"]');
+        if ((await select.getAttribute('aria-checked')) !== 'true') await select.click();
         return false;
       }
-      const keyInput = await $(OPENROUTER_KEY);
-      if (!(await keyInput.isExisting())) return false;
       if ((await keyInput.getValue()) !== apiKey) await keyInput.setValue(apiKey);
-      return (await keyInput.getValue()) === apiKey && (await $(OPENROUTER_REFRESH).isEnabled());
+      return (await keyInput.getValue()) === apiKey && (await $(refresh).isEnabled());
     },
     { timeout: 20_000, interval: 500, timeoutMsg: 'OpenRouter key never stuck in its input' }
   );
-}
 
-async function openRouterHoldsKey(apiKey: string): Promise<boolean> {
-  if ((await $(OPENROUTER_SELECT).getAttribute('aria-checked')) !== 'true') return false;
-  const keyInput = await $(OPENROUTER_KEY);
-  return (await keyInput.isExisting()) && (await keyInput.getValue()) === apiKey;
+  await (await $(refresh)).click();
+  const success = await $('[data-testid="settings-llm-extra-test-success-openrouter"]');
+  const orError = await $('[data-testid="settings-llm-extra-discovery-error-openrouter"]');
+  await browser.waitUntil(
+    async () => (await success.isExisting()) || (await orError.isExisting()),
+    { timeout: 60_000, timeoutMsg: 'OpenRouter connection test never settled' }
+  );
+  if (await orError.isExisting()) {
+    throw new Error(`OpenRouter connection test failed: ${await orError.getText()}`);
+  }
+
+  await saveProvider();
 }
 
 async function clickUntil(
