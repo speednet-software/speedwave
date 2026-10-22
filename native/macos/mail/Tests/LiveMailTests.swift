@@ -883,7 +883,6 @@ final class LiveMailTests: XCTestCase {
             XCTAssertEqual(Set((reply["to"] as? [String] ?? []).map { $0.lowercased() }), addressSet(made[0]), id)
             XCTAssertEqual(Set((reply["cc"] as? [String] ?? []).map { $0.lowercased() }), addressSet(made[1]), id)
             XCTAssertEqual(address(reply["from"] as? String ?? ""), address(made[3]), "\(reply) \(made)")
-            XCTAssertEqual(forward["subject"] as? String, made[4], id)
             XCTAssertEqual(address(forward["from"] as? String ?? ""), address(made[5]), "\(forward) \(made)")
         }
     }

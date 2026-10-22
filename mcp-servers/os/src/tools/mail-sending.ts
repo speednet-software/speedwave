@@ -185,7 +185,7 @@ export const sendEmailTool: Tool = {
 export const replyToEmailTool: Tool = {
   name: 'replyToEmail',
   description:
-    'Reply to an email in any mailbox, by the mail id listEmails or searchEmails returned; it goes to the Reply-To of the email, else its sender, with a "Re:" subject, reply_all adds every other To and Cc recipient of the email but the user\'s own addresses, and cc and bcc add more. ' +
+    'Reply to an email in any mailbox, by the mail id listEmails or searchEmails returned; it goes to the Reply-To of the email, else its sender, with a "Re:" subject, reply_all adds every other To and Cc recipient of the email but the user\'s own addresses as cc, and cc and bcc add more. ' +
     `The text goes above the quoted original, separated by a blank line and an "On <date>, <sender> wrote:" line. ${PLAIN_TEXT_ONLY} ` +
     'Without confirm_send=true nothing is sent: the call returns a preview of the sender (from), every recipient (to, cc, bcc), subject and the full text, and you must show it, from included, and ask the user before calling again with the same arguments and confirm_send=true. ' +
     `${PREVIEW_CHECKED} ` +

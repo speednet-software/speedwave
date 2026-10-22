@@ -94,8 +94,7 @@ final class ForwardEmailTests: XCTestCase {
         let send = harness.executor.calls[1].script
         XCTAssertTrue(send.contains("whose message id is \"<a@x>\""), send)
         XCTAssertTrue(send.contains("set spwOut to forward m opening window false"), send)
-        let subject = try XCTUnwrap(
-            send.range(of: "if (subject of spwOut) is not \"Fwd: Invoice 12\" then error \"\(previewChangedMarker)\""))
+        let subject = try XCTUnwrap(send.range(of: "set subject of spwOut to \"Fwd: Invoice 12\""))
         let sender = try XCTUnwrap(
             send.range(
                 of: "if (extract address from (sender of spwOut)) is not \"me@work.example\" then error \"\(previewChangedMarker)\""))

@@ -68,8 +68,8 @@ final class ReplyScriptTests: XCTestCase {
         let result = try harness.call("reply_to_email", ["id": mail.encoded, "body": "Ok", "reply_all": true])
 
         XCTAssertEqual(result["subject"] as? String, "Re: Zażółć \"q\"")
-        XCTAssertEqual(result["to"] as? [String], ["billing@x", "bob@x"])
-        XCTAssertEqual(result["cc"] as? [String], ["carol@x"])
+        XCTAssertEqual(result["to"] as? [String], ["billing@x"])
+        XCTAssertEqual(result["cc"] as? [String], ["bob@x", "carol@x"])
         XCTAssertEqual(result["from"] as? String, "Me <me@work.example>")
         XCTAssertEqual(
             result["body"] as? String, "Ok\n\nOn 20 Oct 2026 at 09:15, Anna <anna@x> wrote:\n\n> Hi\n> there\n")

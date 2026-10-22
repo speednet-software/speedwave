@@ -229,7 +229,7 @@ final class SendEmailTests: XCTestCase {
         XCTAssertEqual(result["cc"] as? [String], [])
     }
 
-    func testReplyAllAddsTheOriginalsToAndCcWithoutTheUsersOwnAddressesOrRepeatsIgnoringCase() throws {
+    func testReplyAllCopiesTheOriginalsOtherToAndCcRecipientsWithoutTheUsersOwnAddressesOrRepeatsIgnoringCase() throws {
         harness.executor.reply(
             replyRead(
                 sender: "Anna <Anna@x>",
@@ -238,8 +238,8 @@ final class SendEmailTests: XCTestCase {
 
         let result = try harness.call("reply_to_email", ["id": archived.encoded, "body": "Ok", "reply_all": true])
 
-        XCTAssertEqual(result["to"] as? [String], ["Anna@x", "bob@x", "zoë@x"])
-        XCTAssertEqual(result["cc"] as? [String], ["carol@x"])
+        XCTAssertEqual(result["to"] as? [String], ["Anna@x"])
+        XCTAssertEqual(result["cc"] as? [String], ["bob@x", "zoë@x", "carol@x"])
     }
 
     func testAReplyToAMailTheUserSentGoesToItsRecipientsInsteadOfBackToTheUser() throws {
@@ -360,8 +360,8 @@ final class SendEmailTests: XCTestCase {
 
         let send = harness.executor.calls[1].script
         XCTAssertTrue(send.contains("reply to all true"), send)
-        XCTAssertTrue(send.contains("spwSameAddresses(spwSeenTo, {\"anna@x\", \"bob@x\"})"), send)
-        XCTAssertTrue(send.contains("spwSameAddresses(spwSeenCc, {\"carol@x\"})"), send)
+        XCTAssertTrue(send.contains("spwSameAddresses(spwSeenTo, {\"anna@x\"})"), send)
+        XCTAssertTrue(send.contains("spwSameAddresses(spwSeenCc, {\"bob@x\", \"carol@x\"})"), send)
     }
 
     func testAReplyMailWouldSendOtherwiseThanPreviewedIsReportedAsPreviewChanged() {

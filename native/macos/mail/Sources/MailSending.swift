@@ -19,7 +19,7 @@ private struct ReplyPreview {
     let sender: Sender
 }
 
-/// The fields a forward preview shows, with the subject and sender its send checks Mail's forward against.
+/// The fields a forward preview shows, with the subject its send sets and the sender it checks Mail's forward for.
 private struct PassOnPreview {
     let fields: [String: Any]
     let subject: String
@@ -183,7 +183,10 @@ enum MailSending {
         guard forwardGate.isConfirmed(params) else {
             return forwardGate.preview(fields)
         }
-        let check = previewCheck("spwOut", subject: forward.subject, sender: forward.sender.address)
+        let check = [
+            "    set subject of spwOut to \"\(escapeAppleScript(forward.subject))\"",
+            previewCheck("spwOut", sender: forward.sender.address),
+        ].joined(separator: "\n")
         _ = try scripts.run(
             passOnScript(request, command: "forward", check: check), mailbox: mail.mailbox, account: mail.account)
         return sent(fields)
@@ -542,8 +545,8 @@ enum MailSending {
             """
     }
 
-    /// The reply a preview shows and a send checks Mail's reply against: Reply-To or sender, with `replyAll` the
-    /// original's To and Cc without the user's own addresses, each once whatever its case.
+    /// The reply a preview shows, as Mail makes it: to the Reply-To or sender, with `replyAll` every other To and Cc
+    /// recipient of the original as Cc, without the user's own addresses, each once whatever its case.
     private static func replyPreview(_ output: String, body: String, replyAll: Bool) throws -> ReplyPreview {
         let fields = try readFields(output, count: replyReadFieldCount)
         let originalTo = addresses(fields[3])
@@ -555,12 +558,8 @@ enum MailSending {
         let targets = !replyTo.isEmpty ? replyTo
             : sentByUser ? newAddresses(originalTo, besides: own)
             : [originalSender].filter { !$0.isEmpty }
-        var to = newAddresses(targets, besides: [])
-        var cc: [String] = []
-        if replyAll {
-            to += newAddresses(originalTo, besides: own + to)
-            cc = newAddresses(originalCc, besides: own + to)
-        }
+        let to = newAddresses(targets, besides: [])
+        let cc = replyAll ? newAddresses(originalTo + originalCc, besides: own + to) : []
         return ReplyPreview(
             to: to,
             cc: cc,
@@ -711,14 +710,8 @@ enum MailSending {
     }
 
     /// AppleScript lines that raise `previewChangedMarker` unless the outgoing `message` Mail made has the previewed
-    /// sender address and, when given, the previewed subject and exactly the previewed To and Cc addresses.
-    private static func previewCheck(
-        _ message: String,
-        to: [String]? = nil,
-        cc: [String]? = nil,
-        subject: String?,
-        sender: String
-    ) -> String {
+    /// sender address and, when given, exactly the previewed To and Cc addresses.
+    private static func previewCheck(_ message: String, to: [String]? = nil, cc: [String]? = nil, sender: String) -> String {
         let changed = "error \"\(previewChangedMarker)\""
         var lines: [String] = []
         for (kind, expected) in [("to", to), ("cc", cc)] {
@@ -731,13 +724,6 @@ enum MailSending {
                 "        set end of \(seen) to address of spwRecipient",
                 "    end repeat",
                 "    if not my spwSameAddresses(\(seen), {\(list)}) then \(changed)",
-            ]
-        }
-        if let subject {
-            lines += [
-                "    considering case",
-                "        if (subject of \(message)) is not \"\(escapeAppleScript(subject))\" then \(changed)",
-                "    end considering",
             ]
         }
         lines.append(
@@ -772,7 +758,7 @@ enum MailSending {
         let changes = [
             "    set subject of spwReply to \"\(escapeAppleScript(reply.subject))\"",
             "    set sender of spwReply to \"\(escapeAppleScript(reply.sender.display))\"",
-            previewCheck("spwReply", to: reply.to, cc: reply.cc, subject: nil, sender: reply.sender.address),
+            previewCheck("spwReply", to: reply.to, cc: reply.cc, sender: reply.sender.address),
             added,
             "    set content of spwReply to \"\(appleScriptText(reply.body))\"",
             signatureApply(signature, to: "spwReply"),
