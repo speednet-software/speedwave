@@ -9,6 +9,7 @@ import { ToolResult, validateAll, asRecord, MAX_LENGTHS } from './validation.js'
 import {
   STANDARD_BUDGET,
   ASK_USER_FIRST,
+  MAIL_ID_MAX_LENGTH,
   mailTimeBudget,
   runMail,
   confirmProperty,
@@ -458,7 +459,7 @@ export async function handleReplyToEmail(params: ReplyToEmailParams): Promise<To
     required: ['id', 'body'],
     booleans: ['confirm_send', 'reply_all'],
     strings: [
-      ['id', MAX_LENGTHS.id, false],
+      ['id', MAIL_ID_MAX_LENGTH, false],
       ['body', MAX_LENGTHS.body, true],
       ['cc', MAX_LENGTHS.short, false],
       ['bcc', MAX_LENGTHS.short, false],
@@ -479,7 +480,7 @@ export async function handleForwardEmail(params: ForwardEmailParams): Promise<To
     required: ['id', 'to'],
     booleans: ['confirm_send'],
     strings: [
-      ['id', MAX_LENGTHS.id, false],
+      ['id', MAIL_ID_MAX_LENGTH, false],
       ['to', MAX_LENGTHS.short, false],
       ['cc', MAX_LENGTHS.short, false],
     ],
@@ -498,7 +499,7 @@ export async function handleRedirectEmail(params: RedirectEmailParams): Promise<
     required: ['id', 'to'],
     booleans: ['confirm_send'],
     strings: [
-      ['id', MAX_LENGTHS.id, false],
+      ['id', MAIL_ID_MAX_LENGTH, false],
       ['to', MAX_LENGTHS.short, false],
       ['cc', MAX_LENGTHS.short, false],
     ],

@@ -158,3 +158,6 @@ Two kinds: **test-guarded** (a failing test names the fix — trust it, never by
   - `mail-shared.ts::MAIL_FLAG_VALUES` ↔ `MailOrganizing.swift::mailFlagColors` plus `none` (Mail's `flag index` order): the colors `flag_emails` sets and the `flag` key `list_emails`, `search_emails` and `get_email` return (`AppleMailClient.flagName`).
   - `mail-reading.ts::RAW_TEXT_LIMIT` ↔ `MailReading.swift::MailReading.rawTextLimit` (headers/source cut).
   - Every `MailFailure` code a command can throw (`MailShared.swift`) ↔ an entry of `mail-shared.ts::MAIL_FAILURE_TEACHING`.
+  - The `script_timeout_ms` argument `mail-shared.ts::runMail` adds to every call ↔ `MailShared.swift::scriptTimeoutParam`, which `MailScripts` requires as a positive integer before any script runs.
+  - `mail-shared.ts::MAIL_ID_MAX_LENGTH` ↔ the `MailId` encoding in `MailShared.swift` (base64url of the JSON of account id, account name, mailbox path and Message-ID): a change to the encoding re-checks that the longest id still fits.
+  - `mail-shared.ts::timeoutStep`'s command lists (reads, `BATCH_COMMANDS`, sends, draft, mailbox writes) ↔ the command keys of `MailCLI.swift::mailCommands`: a new command that changes mail joins a list there, or a timeout teaches it as a read.

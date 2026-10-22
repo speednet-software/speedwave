@@ -36,6 +36,12 @@ export const MAIL_FLAG_VALUES = [
   'none',
 ];
 
+/**
+ * The longest mail id a tool accepts: base64url of the JSON of an account id, an account name and a mailbox path of up
+ * to 1,000 characters each and a Message-ID of up to 998 (RFC 5322 line limit), with room for JSON escapes.
+ */
+export const MAIL_ID_MAX_LENGTH = 8_192;
+
 /** The step every mail tool that changes mail without a confirm flag names: Claude asks before calling it. */
 export const ASK_USER_FIRST =
   'It changes Mail at once, with no confirm flag, so tell the user what it will do and call it only after their yes.';

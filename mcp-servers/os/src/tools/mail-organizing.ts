@@ -16,6 +16,7 @@ import {
   confirmProperty,
   MAIL_FLAG_VALUES,
   ASK_USER_FIRST,
+  MAIL_ID_MAX_LENGTH,
 } from './mail-shared.js';
 
 const BATCH_BUDGET = mailTimeBudget(120_000);
@@ -761,7 +762,7 @@ function mailBatchError(p: Record<string, unknown>): ToolResult | undefined {
       'MAIL_BATCH_TOO_LARGE'
     );
   }
-  const v = validateAll(p, { stringArrays: [['ids', MAIL_BATCH_LIMIT, MAX_LENGTHS.id]] });
+  const v = validateAll(p, { stringArrays: [['ids', MAIL_BATCH_LIMIT, MAIL_ID_MAX_LENGTH]] });
   return v.valid ? undefined : v.error;
 }
 

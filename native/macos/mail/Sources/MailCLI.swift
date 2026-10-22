@@ -160,8 +160,8 @@ func searchEmails(params: [String: Any], scripts: MailScripts) throws -> [String
 
 /// The page of a listing: `offset` newest messages skipped (default 0), at most `limit` returned (default 10).
 func pageParams(_ params: [String: Any]) throws -> (offset: Int, limit: Int) {
-    let limit = params["limit"] as? Int ?? 10
-    let offset = params["offset"] as? Int ?? 0
+    let limit = try wholeNumberParam(params, "limit") ?? 10
+    let offset = try wholeNumberParam(params, "offset") ?? 0
     guard limit > 0 else {
         throw MailError.invalidValue("limit", "must be at least 1")
     }
@@ -169,6 +169,17 @@ func pageParams(_ params: [String: Any]) throws -> (offset: Int, limit: Int) {
         throw MailError.invalidValue("offset", "must not be negative")
     }
     return (offset, limit)
+}
+
+/// A JSON number parameter that must be a whole number; nil when absent, refused when fractional, text or boolean.
+func wholeNumberParam(_ params: [String: Any], _ name: String) throws -> Int? {
+    guard let raw = params[name] else { return nil }
+    guard let number = raw as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+          let value = Int(exactly: number.doubleValue)
+    else {
+        throw MailError.invalidValue(name, "must be a whole number")
+    }
+    return value
 }
 
 /// A date parameter as the instant it names on this Mac; a bare day starts at local midnight.

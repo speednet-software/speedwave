@@ -288,6 +288,19 @@ describe('paginate', () => {
       }
     });
 
+    it('pages the emails of a mail listing until a short page', async () => {
+      const mockFetcher = vi.fn().mockImplementation((offset: number) =>
+        Promise.resolve({
+          emails: offset === 0 ? [{ id: 'a' }, { id: 'b' }] : [{ id: 'c' }],
+          total: 3,
+        })
+      );
+
+      const items = await collectPages(paginate(mockFetcher, { limit: 2 }));
+
+      expect(items).toEqual([{ id: 'a' }, { id: 'b' }, { id: 'c' }]);
+    });
+
     it('provides correct hasMore indicator', async () => {
       const mockFetcher = vi.fn().mockImplementation((offset) => {
         if (offset === 0) {

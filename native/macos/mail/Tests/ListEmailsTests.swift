@@ -277,6 +277,28 @@ final class ListEmailsTests: XCTestCase {
         XCTAssertTrue(harness.executor.calls.isEmpty)
     }
 
+    func testAFractionalTextOrBooleanPageValueIsRefusedInsteadOfTurningIntoTheDefault() {
+        for params in [["limit": 2.5], ["offset": 0.5], ["limit": "5"], ["offset": true]] as [[String: Any]] {
+            for command in ["list_emails", "search_emails"] {
+                let error = harness.callFailing(command, params.merging(["mailbox": "INBOX", "query": "x"]) { $1 })
+                guard case MailError.invalidValue(let name, _) = error else {
+                    return XCTFail("expected invalidValue for \(params) in \(command), got \(error)")
+                }
+                XCTAssertEqual(name, params.keys.first)
+                XCTAssertTrue(error.localizedDescription.contains("whole number"), error.localizedDescription)
+            }
+        }
+        XCTAssertTrue(harness.executor.calls.isEmpty)
+    }
+
+    func testAWholeNumberSentAsADecimalPagesLikeTheInteger() throws {
+        harness.executor.reply(mailListing(account: "Work", threeMessages))
+
+        let result = try harness.call("list_emails", ["mailbox": "INBOX", "account": "Work", "limit": 2.0])
+
+        XCTAssertEqual(try emails(result).count, 2)
+    }
+
     func testANegativeOffsetOrANonPositiveLimitRunsNothing() {
         for params in [["offset": -1], ["limit": 0], ["limit": -5]] as [[String: Any]] {
             let error = harness.callFailing("list_emails", params.merging(["mailbox": "INBOX"]) { $1 })

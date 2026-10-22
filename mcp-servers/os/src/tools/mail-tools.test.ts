@@ -151,6 +151,8 @@ describe('mail-tools', () => {
     it.each([
       [{ offset: -1 }, 'OUT_OF_RANGE'],
       [{ offset: '10' }, 'INVALID_TYPE'],
+      [{ limit: 2.5 }, 'INVALID_TYPE'],
+      [{ offset: 0.5 }, 'INVALID_TYPE'],
       [{ unread_only: 'true' }, 'INVALID_TYPE'],
       [{ flagged_only: 'true' }, 'INVALID_TYPE'],
     ])('rejects %o without calling mail-cli', async (extra, code) => {
@@ -322,6 +324,9 @@ describe('mail-tools', () => {
       [{ recipient: 'a\nb' }, 'INVALID_CHARACTERS'],
       [{ recipient: 7 }, 'INVALID_TYPE'],
       [{ since: 12 }, 'INVALID_TYPE'],
+      [{ limit: 1.5 }, 'INVALID_TYPE'],
+      [{ since: 'yesterday' }, 'INVALID_DATE'],
+      [{ before: '2026-10-1' }, 'INVALID_DATE'],
     ])('rejects %o without calling mail-cli', async (extra, code) => {
       const result = await handleSearchEmails({
         query: 'x',
@@ -1285,7 +1290,7 @@ describe('mail-tools', () => {
       ['ids as a string', { ids: MAIL_ID }, 'INVALID_TYPE'],
       ['a number among the ids', { ids: [MAIL_ID, 7] }, 'INVALID_TYPE'],
       ['an id with control characters', { ids: ['mail2.\x01'] }, 'INVALID_CHARACTERS'],
-      ['an over-long id', { ids: ['m'.repeat(513)] }, 'FIELD_TOO_LONG'],
+      ['an over-long id', { ids: ['m'.repeat(8_193)] }, 'FIELD_TOO_LONG'],
       ['confirm_delete as a string', { ids: [MAIL_ID], confirm_delete: 'true' }, 'INVALID_TYPE'],
     ])('refuses %s before calling mail-cli', async (_case, input, code) => {
       const result = await handleDeleteEmails(input as any);
@@ -1741,6 +1746,22 @@ describe('mail-tools', () => {
   describe('mail-cli failures reach Claude as teaching errors', () => {
     const cliFailure = (command: string, stderr: string): Error =>
       new Error(`mail.${command} failed: ${stderr}`);
+
+    it('a mail id of a long Message-ID in a deep mailbox reaches mail-cli from every tool that takes one', async () => {
+      const longId = 'mail2.' + 'A'.repeat(2_000);
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: {} });
+
+      const results = await Promise.all([
+        handleGetEmail({ id: longId }),
+        handleReplyToEmail({ id: longId, body: 'b' }),
+        handleForwardEmail({ id: longId, to: 'a@x' }),
+        handleRedirectEmail({ id: longId, to: 'a@x' }),
+        handleDeleteEmails({ ids: [longId] }),
+      ]);
+
+      expect(results.map((r) => r.success)).toEqual([true, true, true, true, true]);
+      expect(runCommand).toHaveBeenCalledTimes(5);
+    });
 
     it('a timed-out listing teaches to narrow it, not to retry it with a smaller limit', async () => {
       vi.mocked(runCommand).mockRejectedValue(

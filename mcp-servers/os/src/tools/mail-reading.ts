@@ -1,6 +1,12 @@
 import { Tool, READ_ONLY_ANNOTATIONS, META_KEYS, teachingToolResult } from '@speedwave/mcp-shared';
 import { ToolResult, validateAll, asRecord, MAX_LENGTHS } from './validation.js';
-import { STANDARD_BUDGET, MAIL_FLAG_VALUES, mailTimeBudget, runMail } from './mail-shared.js';
+import {
+  STANDARD_BUDGET,
+  MAIL_FLAG_VALUES,
+  MAIL_ID_MAX_LENGTH,
+  mailTimeBudget,
+  runMail,
+} from './mail-shared.js';
 
 const BODY_SEARCH_BUDGET = mailTimeBudget(180_000);
 
@@ -503,7 +509,7 @@ export async function handleListEmails(params: ListEmailsParams): Promise<ToolRe
       ['mailbox', MAX_LENGTHS.short, false],
       ['account', MAX_LENGTHS.short, false],
     ],
-    numbers: [
+    integers: [
       ['limit', 1, 10_000],
       ['offset', 0, 1_000_000],
     ],
@@ -521,7 +527,7 @@ export async function handleGetEmail(params: GetEmailParams): Promise<ToolResult
   const v = validateAll(p, {
     required: ['id'],
     booleans: ['include_headers', 'include_source'],
-    strings: [['id', MAX_LENGTHS.id, false]],
+    strings: [['id', MAIL_ID_MAX_LENGTH, false]],
   });
   if (!v.valid) return v.error;
   return runMail('get_email', p);
@@ -548,10 +554,11 @@ export async function handleSearchEmails(params: SearchEmailsParams): Promise<To
       ['since', MAX_LENGTHS.short, false],
       ['before', MAX_LENGTHS.short, false],
     ],
-    numbers: [
+    integers: [
       ['limit', 1, 10_000],
       ['offset', 0, 1_000_000],
     ],
+    dates: ['since', 'before'],
   });
   if (!v.valid) return v.error;
   const filterError = searchFilterError(p);
