@@ -157,13 +157,16 @@ export function matchRect(range: Range): DOMRect {
 /**
  * Highlights `range` as the current match, or clears the highlight; a no-op where the CSS Custom
  * Highlight API is missing (WKWebView before Safari 17.2), so scrolling and the counter still work.
+ * The previous highlight's ranges are emptied before its entry is dropped, so the engine repaints
+ * the text it covered whether it watches the registry or the highlight's range set.
  * @param range - The current match, or `null` to clear.
  */
 export function setCurrentHighlight(range: Range | null): void {
   if (typeof CSS === 'undefined' || !('highlights' in CSS) || typeof Highlight !== 'function')
     return;
+  CSS.highlights.get(HIGHLIGHT_NAME)?.clear();
+  CSS.highlights.delete(HIGHLIGHT_NAME);
   if (range) CSS.highlights.set(HIGHLIGHT_NAME, new Highlight(range));
-  else CSS.highlights.delete(HIGHLIGHT_NAME);
 }
 
 function collectScope(el: Element): SearchScope {

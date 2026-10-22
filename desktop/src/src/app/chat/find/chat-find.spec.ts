@@ -210,10 +210,14 @@ describe('setCurrentHighlight', () => {
     expect(() => setCurrentHighlight(null)).not.toThrow();
   });
 
-  it('registers the current match under one name and clears it with null', () => {
+  it('registers one highlight, empties the previous one before replacing it, and clears with null', () => {
     const registry = new Map<string, unknown>();
+    const cleared: FakeHighlight[] = [];
     class FakeHighlight {
       constructor(readonly range: Range) {}
+      clear(): void {
+        cleared.push(this);
+      }
     }
     Object.defineProperty(globalThis, 'CSS', {
       configurable: true,
@@ -221,12 +225,21 @@ describe('setCurrentHighlight', () => {
     });
     Object.defineProperty(globalThis, 'Highlight', { configurable: true, value: FakeHighlight });
     const [scope] = scopesFrom('<div data-find-scope>abc</div>');
-    const range = rangeForSpan(scope, { start: 1, end: 2 });
+    const first = rangeForSpan(scope, { start: 1, end: 2 });
+    const second = rangeForSpan(scope, { start: 2, end: 3 });
 
-    setCurrentHighlight(range);
-    expect((registry.get('chat-find') as FakeHighlight).range).toBe(range);
+    setCurrentHighlight(first);
+    const registered = registry.get('chat-find') as FakeHighlight;
+    expect(registered.range).toBe(first);
+    expect(cleared).toEqual([]);
+
+    setCurrentHighlight(second);
+    expect(cleared).toEqual([registered]);
+    expect((registry.get('chat-find') as FakeHighlight).range).toBe(second);
+    expect(registry.size).toBe(1);
 
     setCurrentHighlight(null);
+    expect(cleared).toHaveLength(2);
     expect(registry.has('chat-find')).toBe(false);
   });
 });

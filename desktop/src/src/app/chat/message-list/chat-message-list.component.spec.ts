@@ -454,6 +454,7 @@ describe('ChatMessageListComponent', () => {
       registry.clear();
       class FakeHighlight {
         constructor(readonly range: Range) {}
+        clear(): void {}
       }
       Object.defineProperty(globalThis, 'CSS', {
         configurable: true,
