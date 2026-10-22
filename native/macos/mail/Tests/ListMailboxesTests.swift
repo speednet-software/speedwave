@@ -52,8 +52,9 @@ final class ListMailboxesTests: XCTestCase {
         ] {
             XCTAssertTrue(script.contains(read), "\(read):\n\(script)")
         }
+        let mailReads = String(script[..<(try XCTUnwrap(script.range(of: "end tell", options: .backwards))).lowerBound])
         for perMailbox in ["count of messages of", "repeat with mbRef", "class of", "unread count of spw"] {
-            XCTAssertFalse(script.contains(perMailbox), "\(perMailbox):\n\(script)")
+            XCTAssertFalse(mailReads.contains(perMailbox), "\(perMailbox):\n\(script)")
         }
     }
 

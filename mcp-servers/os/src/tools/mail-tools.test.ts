@@ -972,6 +972,7 @@ describe('mail-tools', () => {
           },
         ],
         total: 1,
+        without_id: 1,
       },
       getEmail: {
         email: {
@@ -1008,6 +1009,7 @@ describe('mail-tools', () => {
           },
         ],
         total: 1,
+        without_id: 1,
       },
       sendEmail: { ...SEND_PREVIEW, bcc: ['carol@x'], account: 'Work', signature: 'Work' },
       replyToEmail: { ...REPLY_PREVIEW, signature: 'Work' },

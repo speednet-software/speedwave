@@ -112,6 +112,11 @@ const EMAIL_LISTING_OUTPUT = {
       },
     },
     total: { type: 'number', description: 'Number of emails the page is cut from' },
+    without_id: {
+      type: 'number',
+      description:
+        'Present when some emails matched but have no Message-ID header: no mail id can name them, so they are left out of emails and total',
+    },
   },
 };
 

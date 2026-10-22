@@ -72,6 +72,23 @@ final class SearchAllMailboxesTests: XCTestCase {
         XCTAssertEqual(result["total"] as? Int, 3)
     }
 
+    func testSeparatorCharactersInASubjectOrAMailboxNameAreDroppedInsteadOfBreakingTheSearchInRealAppleScript() throws {
+        harness.executor.reply("")
+        _ = try harness.call("search_emails", ["query": "x"])
+        let crafted = syntheticScopes
+            .replacingOccurrences(of: "{{\"Hello\"}", with: "{{\"He\" & (character id 28) & \"l\" & (character id 29) & \"lo\"}")
+            .replacingOccurrences(of: "\"Inbox\", \"Clients\"", with: "\"In\" & (character id 30) & \"box\", \"Clients\"")
+        let output = try osascriptExecutor(crafted + (try sectionsTail(of: try script())), 15)
+        harness.executor.reply(output)
+
+        let result = try harness.call("search_emails", ["query": "x"])
+
+        let rows = try XCTUnwrap(result["emails"] as? [[String: Any]])
+        XCTAssertEqual(rows.first?["subject"] as? String, "Hello")
+        XCTAssertEqual(rows.first?["mailbox"] as? String, "Inbox")
+        XCTAssertEqual(result["total"] as? Int, 3)
+    }
+
     func testAttachmentsAreReadForEveryMailboxOfTheAccountInOneRequest() throws {
         harness.executor.reply("")
 

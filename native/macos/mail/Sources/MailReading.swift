@@ -11,12 +11,12 @@ enum MailReading {
     private static let subfieldSeparator = "\u{1F}"
     private static let fieldCount = 13
 
-    /// The AppleScript handler `spwClean(t)`: `t` as text without ASCII GS, RS and US, "" for missing value.
+    /// The AppleScript handler `spwClean(t)`: `t` as text without ASCII FS, GS, RS and US, "" for missing value.
     static let cleanHandler = """
         on spwClean(t)
             if t is missing value then return ""
             set spwOld to AppleScript's text item delimiters
-            set AppleScript's text item delimiters to {character id 29, character id 30, character id 31}
+            set AppleScript's text item delimiters to {character id 28, character id 29, character id 30, character id 31}
             set spwParts to text items of (t as text)
             set AppleScript's text item delimiters to ""
             set spwText to spwParts as text
