@@ -11,6 +11,7 @@ import { DEFAULT_ALIAS } from './model-picker.service';
 import type { ClaudeContextUsage, ModelSwitchOutcome } from '../models/claude-control';
 import { isBlankOrSlashOnly, isControlShaped } from '../chat/slash/slash.service';
 import { ComposerAttachments } from '../chat/composer/composer-attachments';
+import { DEFAULT_FIND_STATE, type ChatFindState } from '../chat/find/chat-find';
 import {
   DEFAULT_CONTEXT_TOKENS,
   isAnthropicKind,
@@ -883,6 +884,24 @@ export class ChatSessionStore {
   private readonly _stagedTranscript = signal<StagedTranscript | null>(null);
   readonly stagedTranscript: Signal<StagedTranscript | null> = this._stagedTranscript.asReadonly();
   readonly composerPromptDraft = signal('');
+  /** Per-tab find-in-chat state (query, toggles, open flag, current match); the count comes from the DOM. */
+  readonly find = signal<ChatFindState>(DEFAULT_FIND_STATE);
+
+  /**
+   * Opens this tab's find bar, replacing the query with `prefill` when given, and otherwise keeping
+   * the last query so a reopen restores it.
+   * @param prefill - The chat's current text selection, if any.
+   */
+  openFind(prefill = ''): void {
+    this.find.update((s) =>
+      prefill ? { ...s, open: true, query: prefill, current: 0 } : { ...s, open: true }
+    );
+  }
+
+  /** Hides this tab's find bar; the query and the toggles stay for the next open. */
+  closeFind(): void {
+    this.find.update((s) => ({ ...s, open: false }));
+  }
 
   private readonly _sessionEnded = signal(false);
   /** Set for a background tab whose backend session ended without this store driving it (phase 3 surfaces this). */

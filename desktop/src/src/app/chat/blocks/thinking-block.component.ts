@@ -33,6 +33,7 @@ import { IconComponent } from '../../shared/icon.component';
       <div
         [id]="panelId"
         data-testid="thinking-content"
+        data-find-scope
         class="mt-2 whitespace-pre-wrap text-[13px] leading-relaxed text-[var(--ink-mute)]"
       >
         {{ content() }}

@@ -293,6 +293,48 @@ describe('ChatSessionStore', () => {
     });
   });
 
+  describe('find-in-chat state', () => {
+    it('starts closed with an empty query, plain matching and case folding', () => {
+      expect(store.find()).toEqual({
+        open: false,
+        query: '',
+        regex: false,
+        matchCase: false,
+        current: 0,
+      });
+    });
+
+    it('opens with the last query when no prefill is given', () => {
+      store.find.update((s) => ({ ...s, query: 'needle', current: 3, regex: true }));
+      store.openFind();
+      expect(store.find()).toMatchObject({ open: true, query: 'needle', current: 3, regex: true });
+    });
+
+    it('opens with the selection as the query and restarts from the first match', () => {
+      store.find.update((s) => ({ ...s, query: 'old', current: 3, matchCase: true }));
+      store.openFind('selected text');
+      expect(store.find()).toMatchObject({
+        open: true,
+        query: 'selected text',
+        current: 0,
+        matchCase: true,
+      });
+    });
+
+    it('closes without forgetting the query or the toggles', () => {
+      store.openFind('kept');
+      store.find.update((s) => ({ ...s, regex: true, matchCase: true, current: 2 }));
+      store.closeFind();
+      expect(store.find()).toEqual({
+        open: false,
+        query: 'kept',
+        regex: true,
+        matchCase: true,
+        current: 2,
+      });
+    });
+  });
+
   describe('dispose', () => {
     it('clears the resume decider', () => {
       store.setResumeDecider(() => Promise.resolve('resume'));

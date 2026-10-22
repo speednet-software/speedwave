@@ -8,6 +8,7 @@ export class UiStateService {
   private readonly paletteOpenSignal = signal<boolean>(false);
   private readonly projectSwitcherOpenSignal = signal<boolean>(false);
   private readonly restartRequestedSignal = signal<number>(0);
+  private readonly findRequestedSignal = signal<number>(0);
 
   /** Read-only signal reflecting the conversations sidebar drawer's open state. */
   readonly sidebarOpen: Signal<boolean> = this.sidebarOpenSignal.asReadonly();
@@ -26,6 +27,12 @@ export class UiStateService {
    * turns into the same `newConversation()` path the header's plus button uses.
    */
   readonly restartRequested: Signal<number> = this.restartRequestedSignal.asReadonly();
+
+  /**
+   * Shell-to-chat find channel: a counter bumped by {@link requestFind} (⌘F), which `ChatComponent`
+   * turns into opening the active tab's find bar.
+   */
+  readonly findRequested: Signal<number> = this.findRequestedSignal.asReadonly();
 
   /** Flips the conversations sidebar drawer; closes the memory drawer first (shared left-edge anchor). */
   toggleSidebar(): void {
@@ -78,5 +85,10 @@ export class UiStateService {
   /** Bumps {@link restartRequested}, asking the chat view to restart its current conversation. */
   requestRestart(): void {
     this.restartRequestedSignal.update((n) => n + 1);
+  }
+
+  /** Bumps {@link findRequested}, asking the chat view to open the find bar of its active tab. */
+  requestFind(): void {
+    this.findRequestedSignal.update((n) => n + 1);
   }
 }

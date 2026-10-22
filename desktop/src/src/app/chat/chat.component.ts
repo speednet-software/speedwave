@@ -164,6 +164,16 @@ export class ChatComponent implements OnInit, OnDestroy {
       });
     });
 
+    effect(() => {
+      const requested = this.ui.findRequested();
+      untracked(() => {
+        const previous = this.previousFindRequest;
+        this.previousFindRequest = requested;
+        if (previous === null || previous === requested) return;
+        this.openFind();
+      });
+    });
+
     this.restoreIncomingTabState(this.previousTabId);
   }
 
@@ -175,6 +185,36 @@ export class ChatComponent implements OnInit, OnDestroy {
    * component (re)mount never replays a request bumped before it existed (shell's ⌘R channel).
    */
   private previousRestartRequest: number | null = null;
+  /** Last seen value of `UiStateService.findRequested`; same `null` guard as the restart channel. */
+  private previousFindRequest: number | null = null;
+  /** Bumped on every ⌘F so the message list puts the caret into the find bar. */
+  readonly findFocusRequest = signal(0);
+
+  /**
+   * Opens the active tab's find bar with the chat's current selection as the query (a single line
+   * inside the message list), else with the tab's last query, and focuses the field.
+   */
+  openFind(): void {
+    this.chat.activeStore().openFind(this.selectedChatText());
+    this.findFocusRequest.update((n) => n + 1);
+    this.cdr.markForCheck();
+  }
+
+  /** Closes the active tab's find bar and hands the focus back to the composer. */
+  onFindClosed(): void {
+    this.chat.activeStore().closeFind();
+    this.composer?.focusInput();
+    this.cdr.markForCheck();
+  }
+
+  private selectedChatText(): string {
+    const selection = document.getSelection();
+    const list = this.messageList?.scrollContainer?.nativeElement;
+    if (!selection || !list || selection.isCollapsed || !selection.anchorNode) return '';
+    if (!list.contains(selection.anchorNode)) return '';
+    const text = selection.toString();
+    return text.includes('\n') ? '' : text;
+  }
 
   /**
    * Snapshots the outgoing tab's draft, plan mode and scroll offset before the view rebinds.

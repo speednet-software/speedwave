@@ -1,10 +1,11 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { DebugElement } from '@angular/core';
-import { ChatMessageListComponent } from './chat-message-list.component';
+import { ChatMessageListComponent, FIND_DEBOUNCE_MS } from './chat-message-list.component';
 import { ChatMessageComponent } from '../message/chat-message.component';
 import { ToolNormalizerService } from '../../services/tool-normalizer.service';
 import type { ChatMessage, MessageBlock } from '../../models/chat';
+import { DEFAULT_FIND_STATE, type ChatFindState } from '../find/chat-find';
 
 describe('ChatMessageListComponent', () => {
   let fixture: ComponentFixture<ChatMessageListComponent>;
@@ -398,5 +399,309 @@ describe('ChatMessageListComponent', () => {
     });
 
     expect(captured).toEqual({ toolId: 't1', questionIdx: 0, value: 'a' });
+  });
+
+  describe('jump-to-bottom button', () => {
+    function jumpButton(): HTMLButtonElement | null {
+      return fixture.nativeElement.querySelector('[data-testid="chat-jump-to-bottom"]');
+    }
+
+    it('is hidden while the viewport shows the end of the list', () => {
+      fixture.componentRef.setInput('messages', [first]);
+      fakeOnChanges();
+      fixture.detectChanges();
+      scrollListTo(600);
+      fixture.detectChanges();
+      expect(jumpButton()).toBeNull();
+    });
+
+    it('appears once the reader scrolls up, whether or not a find bar is open', () => {
+      fixture.componentRef.setInput('messages', [first]);
+      fakeOnChanges();
+      fixture.detectChanges();
+      scrollListTo(100);
+      fixture.detectChanges();
+      expect(jumpButton()).not.toBeNull();
+      expect(jumpButton()!.getAttribute('aria-label')).toBe('Scroll to bottom');
+    });
+
+    it('scrolls to the end, pins new output there again and hides itself when clicked', () => {
+      renderStreamingTurn();
+      const container = scrollListTo(100);
+      fixture.detectChanges();
+      expect(component.followsNewOutput()).toBe(false);
+
+      jumpButton()!.click();
+      fixture.detectChanges();
+
+      expect(container.scrollTop).toBe(1000);
+      expect(component.followsNewOutput()).toBe(true);
+      expect(jumpButton()).toBeNull();
+
+      container.scrollTop = 600;
+      landBelow(container, reply);
+      expect(container.scrollTop).toBe(1400);
+    });
+  });
+
+  describe('find in chat', () => {
+    const registry = new Map<string, { range: Range }>();
+    let emitted: ChatFindState[];
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      registry.clear();
+      class FakeHighlight {
+        constructor(readonly range: Range) {}
+      }
+      Object.defineProperty(globalThis, 'CSS', {
+        configurable: true,
+        value: { highlights: registry },
+      });
+      Object.defineProperty(globalThis, 'Highlight', { configurable: true, value: FakeHighlight });
+      emitted = [];
+      component.findChanged.subscribe((s) => emitted.push(s));
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+      delete (globalThis as { CSS?: unknown }).CSS;
+      delete (globalThis as { Highlight?: unknown }).Highlight;
+    });
+
+    const conversation: ChatMessage[] = [
+      { role: 'user', blocks: [{ type: 'text', content: 'find the needle' }], timestamp: 1 },
+      {
+        role: 'assistant',
+        blocks: [{ type: 'text', content: 'A **needle** in a haystack, and another needle.' }],
+        timestamp: 2,
+      },
+    ];
+
+    function setFind(patch: Partial<ChatFindState>): void {
+      fixture.componentRef.setInput('find', { ...DEFAULT_FIND_STATE, open: true, ...patch });
+      fakeOnChanges();
+      fixture.detectChanges();
+    }
+
+    function settle(): void {
+      vi.advanceTimersByTime(FIND_DEBOUNCE_MS);
+      fixture.detectChanges();
+    }
+
+    function bar(): HTMLElement | null {
+      return fixture.nativeElement.querySelector('[data-testid="chat-find-bar"]');
+    }
+
+    function countText(): string {
+      return (
+        fixture.nativeElement
+          .querySelector('[data-testid="chat-find-count"]')
+          ?.textContent?.trim() ?? ''
+      );
+    }
+
+    function currentHighlight(): string {
+      return registry.get('chat-find')?.range.toString() ?? '';
+    }
+
+    it('renders no bar while the state is closed', () => {
+      fixture.componentRef.setInput('messages', conversation);
+      fakeOnChanges();
+      fixture.detectChanges();
+      expect(bar()).toBeNull();
+    });
+
+    it('counts every occurrence across messages and formatting after the debounce, and highlights the current one', () => {
+      fixture.componentRef.setInput('messages', conversation);
+      setFind({ query: 'needle' });
+      expect(countText()).toBe('0/0');
+
+      settle();
+
+      expect(component.findTotal()).toBe(3);
+      expect(countText()).toBe('1/3');
+      expect(currentHighlight()).toBe('needle');
+      expect(
+        registry.get('chat-find')!.range.startContainer.parentElement?.closest('[data-role="user"]')
+      ).not.toBeNull();
+    });
+
+    it('matches across bold formatting in the rendered text, not the Markdown source', () => {
+      fixture.componentRef.setInput('messages', conversation);
+      setFind({ query: 'A needle in' });
+      settle();
+      expect(component.findTotal()).toBe(1);
+      expect(currentHighlight()).toBe('A needle in');
+    });
+
+    it('honours match case and regex, and flags a regex that does not compile', () => {
+      fixture.componentRef.setInput('messages', conversation);
+      setFind({ query: 'Needle', matchCase: true });
+      settle();
+      expect(component.findTotal()).toBe(0);
+      expect(countText()).toBe('0/0');
+      expect(registry.has('chat-find')).toBe(false);
+
+      setFind({ query: 'need\\w+', regex: true });
+      settle();
+      expect(component.findTotal()).toBe(3);
+      expect(component.findInvalid()).toBe(false);
+
+      setFind({ query: 'need(', regex: true });
+      settle();
+      expect(component.findTotal()).toBe(0);
+      expect(component.findInvalid()).toBe(true);
+      expect(countText()).toBe('0/0');
+    });
+
+    it('steps forward and backward with wrap-around and reports the moved index', () => {
+      fixture.componentRef.setInput('messages', conversation);
+      setFind({ query: 'needle' });
+      settle();
+
+      component.findNext();
+      expect(emitted.at(-1)?.current).toBe(1);
+      setFind({ query: 'needle', current: 1 });
+      component.findNext();
+      expect(emitted.at(-1)?.current).toBe(2);
+      setFind({ query: 'needle', current: 2 });
+      component.findNext();
+      expect(emitted.at(-1)?.current).toBe(0);
+      setFind({ query: 'needle', current: 0 });
+      component.findPrevious();
+      expect(emitted.at(-1)?.current).toBe(2);
+      expect(currentHighlight()).toBe('needle');
+    });
+
+    it('is inert without matches', () => {
+      fixture.componentRef.setInput('messages', conversation);
+      setFind({ query: 'zzz' });
+      settle();
+      const before = emitted.length;
+      component.findNext();
+      component.findPrevious();
+      expect(emitted.length).toBe(before);
+    });
+
+    it('keeps the current match and recounts when streamed content lands', () => {
+      fixture.componentRef.setInput('messages', conversation);
+      setFind({ query: 'needle' });
+      settle();
+      expect(component.findTotal()).toBe(3);
+      setFind({ query: 'needle', current: 2 });
+      const before = emitted.length;
+
+      fixture.componentRef.setInput('currentBlocks', [{ type: 'text', content: 'needle needle' }]);
+      fixture.componentRef.setInput('isStreaming', true);
+      fakeOnChanges();
+      fixture.detectChanges();
+      expect(component.findTotal()).toBe(3);
+      settle();
+
+      expect(component.findTotal()).toBe(5);
+      expect(emitted.slice(before)).toEqual([]);
+      expect(currentHighlight()).toBe('needle');
+    });
+
+    it('clamps the current match when content shrinks below it', () => {
+      fixture.componentRef.setInput('messages', conversation);
+      setFind({ query: 'needle', current: 2 });
+      settle();
+
+      fixture.componentRef.setInput('messages', [conversation[0]]);
+      fakeOnChanges();
+      fixture.detectChanges();
+      settle();
+
+      expect(component.findTotal()).toBe(1);
+      expect(emitted.at(-1)?.current).toBe(0);
+    });
+
+    it('forwards the bar: typing, the toggles and close', () => {
+      fixture.componentRef.setInput('messages', conversation);
+      setFind({ query: '' });
+      let closed = 0;
+      component.findClosed.subscribe(() => (closed += 1));
+      const input = fixture.nativeElement.querySelector(
+        '[data-testid="chat-find-input"]'
+      ) as HTMLInputElement;
+      input.value = 'nee';
+      input.dispatchEvent(new Event('input'));
+      expect(emitted.at(-1)).toMatchObject({ query: 'nee' });
+
+      (
+        fixture.nativeElement.querySelector('[data-testid="chat-find-regex"]') as HTMLElement
+      ).click();
+      expect(emitted.at(-1)?.regex).toBe(true);
+      (
+        fixture.nativeElement.querySelector('[data-testid="chat-find-case"]') as HTMLElement
+      ).click();
+      expect(emitted.at(-1)?.matchCase).toBe(true);
+
+      (
+        fixture.nativeElement.querySelector('[data-testid="chat-find-close"]') as HTMLElement
+      ).click();
+      expect(closed).toBe(1);
+    });
+
+    it('clears the highlight and the count when the bar closes', () => {
+      fixture.componentRef.setInput('messages', conversation);
+      setFind({ query: 'needle' });
+      settle();
+      expect(registry.has('chat-find')).toBe(true);
+
+      setFind({ open: false, query: 'needle' });
+
+      expect(bar()).toBeNull();
+      expect(registry.has('chat-find')).toBe(false);
+      expect(component.findTotal()).toBe(0);
+    });
+
+    it('picks the first match at or below the viewport when the query changes, and scrolls it into view', () => {
+      fixture.componentRef.setInput('messages', conversation);
+      fakeOnChanges();
+      fixture.detectChanges();
+      const container = fixture.nativeElement.querySelector(
+        '[data-testid="chat-message-list"]'
+      ) as HTMLDivElement;
+      Object.defineProperty(container, 'clientHeight', { configurable: true, value: 400 });
+      container.getBoundingClientRect = () => new DOMRect(0, 100, 600, 400);
+      const articles = Array.from(
+        fixture.nativeElement.querySelectorAll('[data-testid="chat-message"]')
+      ) as HTMLElement[];
+      const userScope = articles[0].querySelector('[data-find-scope]') as HTMLElement;
+      userScope.getBoundingClientRect = () => new DOMRect(0, 20, 600, 20);
+      for (const el of Array.from(articles[1].querySelectorAll('*')) as HTMLElement[]) {
+        el.getBoundingClientRect = () => new DOMRect(0, 700, 600, 20);
+      }
+
+      setFind({ query: 'needle' });
+      settle();
+
+      expect(emitted.at(-1)?.current).toBe(1);
+      expect(container.scrollTop).toBe(700 - 100 - (400 - 20) / 2);
+    });
+
+    it('focuses the bar on a focus request', async () => {
+      fixture.componentRef.setInput('messages', conversation);
+      setFind({ query: 'needle' });
+      fixture.componentRef.setInput('findFocusRequest', 1);
+      fixture.detectChanges();
+      await fixture.whenStable();
+      const input = fixture.nativeElement.querySelector('[data-testid="chat-find-input"]');
+      expect(document.activeElement).toBe(input);
+    });
+
+    it('drops a pending recompute and the highlight on destroy', () => {
+      fixture.componentRef.setInput('messages', conversation);
+      setFind({ query: 'needle' });
+      settle();
+      setFind({ query: 'needles' });
+      fixture.destroy();
+      vi.advanceTimersByTime(FIND_DEBOUNCE_MS);
+      expect(registry.has('chat-find')).toBe(false);
+      expect(emitted.at(-1)?.query).toBeUndefined();
+    });
   });
 });

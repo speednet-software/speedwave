@@ -6,6 +6,7 @@ import { RouterModule } from '@angular/router';
 import { By } from '@angular/platform-browser';
 import { ChatComponent } from './chat.component';
 import { ComposerComponent } from './composer/composer.component';
+import { ChatMessageListComponent } from './message-list/chat-message-list.component';
 import { ModalOverlayComponent } from '../shell/modal-overlay/modal-overlay.component';
 import { TauriService } from '../services/tauri.service';
 import { ChatStateService } from '../services/chat-state.service';
@@ -972,6 +973,119 @@ describe('ChatComponent', () => {
       expect(chatState.messages).toEqual([]);
       expect(component.showHistory).toBe(false);
       expect(component.showMemory).toBe(false);
+    });
+  });
+
+  describe('find request channel (⌘F)', () => {
+    function renderReadyChat(): void {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      fixture.detectChanges();
+    }
+
+    function messageList(): HTMLElement {
+      return fixture.nativeElement.querySelector('[data-testid="chat-message-list"]');
+    }
+
+    function stubSelection(text: string, anchor: Node | null, collapsed = false): void {
+      vi.spyOn(document, 'getSelection').mockReturnValue({
+        anchorNode: anchor,
+        isCollapsed: collapsed,
+        toString: () => text,
+      } as unknown as Selection);
+    }
+
+    it('does not open the bar on initial render', () => {
+      renderReadyChat();
+      expect(chatState.activeStore().find().open).toBe(false);
+      expect(component.findFocusRequest()).toBe(0);
+    });
+
+    it('opens the active tab bar with its last query and asks the list to focus it', async () => {
+      renderReadyChat();
+      chatState.activeStore().find.update((s) => ({ ...s, query: 'earlier', current: 1 }));
+
+      uiState.requestFind();
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      expect(chatState.activeStore().find()).toMatchObject({
+        open: true,
+        query: 'earlier',
+        current: 1,
+      });
+      expect(component.findFocusRequest()).toBe(1);
+      expect(fixture.nativeElement.querySelector('[data-testid="chat-find-bar"]')).not.toBeNull();
+    });
+
+    it('takes a single-line selection inside the message list as the query', async () => {
+      renderReadyChat();
+      const list = messageList();
+      const anchor = document.createTextNode('needle in the chat');
+      list.appendChild(anchor);
+      stubSelection('needle', anchor);
+
+      uiState.requestFind();
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      expect(chatState.activeStore().find()).toMatchObject({ open: true, query: 'needle' });
+    });
+
+    it.each([
+      ['a selection outside the list', 'outside', () => document.body, false],
+      ['a collapsed selection', 'x', null, true],
+      ['a multi-line selection', 'two\nlines', null, false],
+    ])('keeps the last query for %s', async (_label, text, anchorOf, collapsed) => {
+      renderReadyChat();
+      chatState.activeStore().find.update((s) => ({ ...s, query: 'kept' }));
+      const anchor = anchorOf ? anchorOf() : messageList();
+      stubSelection(text, anchor, collapsed);
+
+      uiState.requestFind();
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      expect(chatState.activeStore().find()).toMatchObject({ open: true, query: 'kept' });
+    });
+
+    it('a second ⌘F while open bumps the focus request again without closing', async () => {
+      renderReadyChat();
+      uiState.requestFind();
+      fixture.detectChanges();
+      await fixture.whenStable();
+      uiState.requestFind();
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      expect(chatState.activeStore().find().open).toBe(true);
+      expect(component.findFocusRequest()).toBe(2);
+    });
+
+    it('closing the bar hides it, keeps the query and hands the focus back to the composer', async () => {
+      renderReadyChat();
+      chatState.activeStore().openFind('kept');
+      fixture.detectChanges();
+      const focus = vi.spyOn(composerOf(fixture), 'focusInput');
+
+      component.onFindClosed();
+      fixture.detectChanges();
+
+      expect(chatState.activeStore().find()).toMatchObject({ open: false, query: 'kept' });
+      expect(fixture.nativeElement.querySelector('[data-testid="chat-find-bar"]')).toBeNull();
+      expect(focus).toHaveBeenCalledTimes(1);
+    });
+
+    it('a state the list reports lands on the active tab store', () => {
+      renderReadyChat();
+      chatState.activeStore().openFind();
+      fixture.detectChanges();
+      const list = fixture.debugElement.query(By.directive(ChatMessageListComponent))
+        .componentInstance as ChatMessageListComponent;
+
+      list.onFindQuery('typed');
+
+      expect(chatState.activeStore().find()).toMatchObject({ open: true, query: 'typed' });
     });
   });
 

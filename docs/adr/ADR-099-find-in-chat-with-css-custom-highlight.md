@@ -1,0 +1,45 @@
+# ADR-099: Find in the active chat tab with the CSS Custom Highlight API
+
+> **Status:** Accepted (2026-10-22).
+> **Context:** SPEED-864 asks for a classic find-in-page in the chat: ⌘F / Ctrl+F opens a box with a query, a regex and a match-case toggle, a `current/total` counter and previous/next arrows, the view scrolls to the current match, and a button brings the reader back to the end of the conversation. Assistant text reaches the page as Markdown rendered through `[innerHTML]` (`desktop/src/src/app/chat/blocks/text-block.component.ts`), where Angular's sanitizer is the XSS boundary and ADR-097 keeps every HTML string on that one path, so wrapping matches in `<mark>` would mean a second writer of that HTML, re-rendered on every keystroke, and would also fail inside the diagram slots, whose SVG lives in a shadow root. The message list is not virtualized (`chat-message-list.component.ts` renders every entry of `messages()` in one `@for`), so every message of the active tab is in the DOM.
+
+## Decision
+
+1. **The current match is highlighted through the CSS Custom Highlight API, never through DOM mutation.** `chat/find/chat-find.ts::setCurrentHighlight` registers one `Range` under the name `chat-find` in `CSS.highlights`, and `styles.css` styles it with `::highlight(chat-find)` (accent background, `--on-accent` text). The API styles text ranges without changing the DOM[^1], so Markdown still renders only through `shared/markdown.ts` and `[innerHTML]` (ADR-097), and nothing is inserted into message HTML. Only the current match is highlighted; the other matches are counted, not drawn.
+2. **The API is feature-detected and its absence degrades to no highlight.** `highlightsSupported` checks `CSS.highlights` and the `Highlight` constructor. WebView2 has had the API since Chromium 105 and WKWebView since Safari 17.2[^2]; Safari 17.2 shipped for macOS 12, 13 and 14[^3], while the app's `minimumSystemVersion` is 10.15 (`desktop/src-tauri/tauri.macos.conf.json`), so on macOS 10.15 and 11 the counter, the arrows and the scrolling work and no match is highlighted. On Windows the Evergreen WebView2 Runtime updates itself[^4], and the app pins no runtime version (`desktop/src-tauri/tauri.windows.conf.json`). No `<mark>` fallback: it would be a second highlight mechanism on the path decision 1 keeps closed.
+3. **Matching runs over the rendered text, per scope, concatenated across inline elements.** An element carrying `data-find-scope` is a scope: the `.prose-sw` container of a text block, a user message's text, and the content of a thinking block. `collectSearchScopes` walks each scope's text nodes, skipping a `.mermaid-slot` (its light-DOM code block is the fallback for a diagram the shadow root draws), a closed `<details>`, and `hidden` or `aria-hidden` elements, and skips a scope that sits inside a closed `<details>`; it concatenates the text with the offset of every node, so `foo bar` matches `foo **bar**` and a phrase split by highlight.js spans, and `rangeForSpan` maps a match back to a `Range` over the text nodes it covers. UI chrome (timestamps, tool names, buttons) and tool-block bodies carry no scope and are not searched.
+4. **The query is a JavaScript `RegExp`.** A plain query is escaped; the regex toggle passes it as written; the flags are `g`, plus `i` unless match case is on; a regex that does not compile shows `0/0` and `aria-invalid` on the field; a zero-length match is skipped so `a*` does not count every gap.
+5. **State lives on the tab, the count on the DOM.** `ChatSessionStore.find` holds `open`, `query`, `regex`, `matchCase` and `current` per tab (the `composerDraft` shape of the desktop-ui rules), so each tab keeps its own query and a reopen restores the last one; the total and the invalid flag are signals of `ChatMessageListComponent`, recomputed from the DOM. Nothing is persisted across app runs.
+6. **Recomputes are debounced and keep the current match.** A changed query, toggle, message list, streamed block or conversation key schedules one recompute after `FIND_DEBOUNCE_MS` (150 ms). After a query change the current match is the first one at or below the top of the viewport (`firstIndexAtOrBelow`) and the view scrolls to it instantly, the match centered; after a content change the index is kept, clamped to the new total, and the view does not move. Next and previous wrap around. Enter and Shift+Enter in the field step, Escape closes; the bar stops those three keys so the chat's document-level Escape, which stops a streaming turn, never sees them. Closing clears the highlight and hands the focus back to the composer.
+7. **⌘F goes through the shell's one keyboard handler.** `ShellComponent.onKeydown` handles `f` only on the chat route with a `ready` project, bumps `UiStateService.findRequested`, and `ChatComponent` opens the active tab's bar, prefilled with the chat's text selection when it is a single line inside the message list. A second ⌘F while the bar is open focuses the field and selects the query.
+8. **Jump to bottom is a general affordance.** `ChatMessageListComponent` shows a floating button above the composer whenever the viewport is not at the end (its `atBottom` signal, fed by the scroll handler); the button scrolls to the end and re-arms the pin to new output (SPEED-760). It is not tied to the find bar.
+
+## Why
+
+- The highlight API is the one way to mark text in a page whose HTML is sanitizer-owned without touching that HTML, and it works across element boundaries, which a `<mark>` wrapper does not without splitting the DOM.
+- One highlighted range keeps the WebKit repaint cost flat; a page with hundreds of small highlights repaints several times slower in WebKit[^5], which is what "highlight all" would have meant for a one-letter query in a long transcript.
+- Searching the rendered text rather than the Markdown source means the counter matches what the user sees: `*` in `**bold**` is not a hit, and a code block's text is.
+
+## Known limitations
+
+- No highlight on macOS 10.15 and 11 (decision 2).
+- Diagram text is not searched; a collapsed block is not searched until it is expanded, and expanding one changes the count.
+- A match is highlighted on the text nodes found at the last recompute; a streamed delta replaces the message HTML, and the highlight follows at the next debounced recompute.
+- None of this ran in a webview: the build container has no browser. Highlight rendering, the caret in the field under WKWebView and WebView2, and the scroll centering are checked by the manual test on macOS and Windows.
+
+## Rejected alternatives
+
+- **`<mark>` wrappers through `innerHTML`.** A second writer of sanitizer-owned HTML (ADR-097), re-rendered per keystroke, blind to diagram slots.
+- **Browser `Selection` as the highlight.** Works on every macOS version, but it replaces the user's selection and conflicts with prefilling the query from that selection.
+- **Highlight every match.** The WebKit repaint cost (Why) for no information the counter does not already give.
+- **Searching the Markdown source.** Counts formatting characters the user does not see.
+
+[^1]: MDN, CSS Custom Highlight API: "Using the CSS Custom Highlight API, you can programmatically create text ranges and highlight them without affecting the DOM structure in the page"; `Highlight`, `HighlightRegistry` (`CSS.highlights`) and the `::highlight()` pseudo-element: <https://developer.mozilla.org/en-US/docs/Web/API/CSS_Custom_Highlight_API>.
+
+[^2]: Can I use, Highlight API: first supported in Chrome 105, Edge 105, Safari 17.2 and Firefox 140: <https://caniuse.com/mdn-api_highlight>.
+
+[^3]: WebKit, "WebKit Features in Safari 17.2": Safari 17.2 adds the Custom Highlight API and is available for macOS Sonoma, macOS Ventura and macOS Monterey: <https://webkit.org/blog/14787/webkit-features-in-safari-17-2/>.
+
+[^4]: Microsoft Learn, "Distribute your app and the WebView2 Runtime", the Evergreen Runtime distribution mode: "The WebView2 Runtime updates automatically without requiring any action from you": <https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution>.
+
+[^5]: WebKit, pull request #73511, "CSS Custom Highlight API: registering a few hundred small highlights makes every viewport repaint several times slower, and can lock the tab for minutes": <https://github.com/WebKit/WebKit/pull/73511>.
