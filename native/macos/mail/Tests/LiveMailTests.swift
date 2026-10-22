@@ -54,6 +54,41 @@ final class LiveMailTests: XCTestCase {
         XCTAssertNotNil(result["mailboxes"] as? [[String: Any]])
     }
 
+    func testTheLargestAccountMailboxIsListedSearchedAndPreviewedForDeleteWithinTheBudget() throws {
+        let result = try XCTUnwrap(try call("list_mailboxes") as? [String: Any])
+        let mailboxes = try XCTUnwrap(result["mailboxes"] as? [[String: Any]])
+        let largest = try XCTUnwrap(
+            mailboxes.filter { $0["account"] as? String != AppleMailClient.localAccountName }
+                .max { ($0["message_count"] as? Int ?? 0) < ($1["message_count"] as? Int ?? 0) },
+            "no account mailbox")
+        let place: [String: Any] = ["mailbox": try XCTUnwrap(largest["name"]), "account": try XCTUnwrap(largest["account"])]
+
+        var started = Date()
+        let listed = try XCTUnwrap(try call("list_emails", place.merging(["limit": 25]) { $1 }) as? [String: Any])
+        XCTAssertLessThan(Date().timeIntervalSince(started), Double(Self.scriptTimeoutMs) / 1000, "\(largest)")
+        let rows = try XCTUnwrap(listed["emails"] as? [[String: Any]])
+        let total = try XCTUnwrap(listed["total"] as? Int)
+        XCTAssertEqual(total + (listed["without_id"] as? Int ?? 0), largest["message_count"] as? Int, "\(largest)")
+
+        let subject = try XCTUnwrap(rows.first?["subject"] as? String)
+        started = Date()
+        let found = try XCTUnwrap(
+            try call("search_emails", place.merging(["query": subject, "limit": 5]) { $1 }) as? [String: Any])
+        XCTAssertLessThan(Date().timeIntervalSince(started), Double(Self.scriptTimeoutMs) / 1000, "\(largest)")
+        XCTAssertTrue(
+            (found["emails"] as? [[String: Any]] ?? []).contains { $0["id"] as? String == rows.first?["id"] as? String })
+
+        var seen = Set<String>()
+        let ids = rows.compactMap { $0["id"] as? String }.filter { seen.insert($0).inserted }
+        started = Date()
+        let preview = try XCTUnwrap(try call("delete_emails", ["ids": ids]) as? [String: Any])
+        XCTAssertLessThan(Date().timeIntervalSince(started), Double(Self.scriptTimeoutMs) / 1000, "\(largest)")
+        XCTAssertEqual(preview["status"] as? String, "confirmation_required")
+        let previewed = try XCTUnwrap(preview["emails"] as? [[String: Any]])
+        XCTAssertEqual(previewed.compactMap { $0["id"] as? String }, ids)
+        XCTAssertEqual(previewed.compactMap { $0["ok"] as? Bool }, Array(repeating: true, count: ids.count), "\(previewed)")
+    }
+
     func testListMailboxesListsTheTestMailboxOnceUnderOnMyMac() throws {
         let result = try XCTUnwrap(try call("list_mailboxes") as? [String: Any])
         let mailboxes = try XCTUnwrap(result["mailboxes"] as? [[String: Any]])

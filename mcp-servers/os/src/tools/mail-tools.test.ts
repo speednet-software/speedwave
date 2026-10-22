@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { META_KEYS } from '@speedwave/mcp-shared';
+import { META_KEYS, TIMEOUTS } from '@speedwave/mcp-shared';
 import {
   handleDetectMailClients,
   handleListMailboxes,
@@ -284,6 +284,22 @@ describe('mail-tools', () => {
       const tool = createMailTools().find((t) => t.tool.name === 'searchEmails')!;
       expect(tool.tool._meta?.[META_KEYS.TIMEOUT_MS]).toBeGreaterThan(slow[3]!);
       expect(tool.tool._meta?.[META_KEYS.TIMEOUT_CLASS]).toBe('long');
+    });
+
+    it("declares the long timeout class on every tool whose budget does not fit the hub's standard execute_code limit", () => {
+      const tooLong = createMailTools().filter(
+        (t) => (t.tool._meta?.[META_KEYS.TIMEOUT_MS] as number) >= TIMEOUTS.EXECUTION_MS
+      );
+
+      expect(tooLong.map((t) => t.tool.name)).toEqual(
+        expect.arrayContaining(['deleteEmails', 'moveEmails', 'copyEmails', 'markEmailsSpam'])
+      );
+      for (const t of tooLong) {
+        expect([t.tool.name, t.tool._meta?.[META_KEYS.TIMEOUT_CLASS]]).toEqual([
+          t.tool.name,
+          'long',
+        ]);
+      }
     });
 
     it('tells Claude that a body search is slow', () => {
@@ -1683,7 +1699,7 @@ describe('mail-tools', () => {
     const cliFailure = (command: string, stderr: string): Error =>
       new Error(`mail.${command} failed: ${stderr}`);
 
-    it('a timeout says how long Mail had and how to retry safely', async () => {
+    it('a timed-out listing teaches to narrow it, not to retry it with a smaller limit', async () => {
       vi.mocked(runCommand).mockRejectedValue(
         cliFailure('list_emails', 'MAIL_TIMEOUT: Mail.app did not answer within 25 s.')
       );
@@ -1693,9 +1709,73 @@ describe('mail-tools', () => {
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('MAIL_TIMEOUT');
       expect(result.error?.message).toContain('Mail.app did not answer within 25 s.');
-      expect(result.error?.message).toContain('smaller limit');
-      expect(result.error?.message).toContain('Sent');
+      expect(result.error?.message).toContain('unread_only');
+      expect(result.error?.message).toContain('Do not repeat the same call');
+      expect(result.error?.message).not.toContain('limit');
+      expect(result.error?.message).not.toMatch(/retry once/i);
     });
+
+    it.each([
+      [
+        'a batch',
+        'copy_emails',
+        () => handleCopyEmails({ ids: [MAIL_ID], mailbox: 'A', account: 'W' }),
+        ['may already have changed', 'Never repeat copyEmails'],
+      ],
+      [
+        'a send',
+        'reply_to_email',
+        () => handleReplyToEmail({ id: MAIL_ID, body: 'b', confirm_send: true }),
+        ['Mail.app may have sent it', 'Sent mailbox'],
+      ],
+      ['a draft', 'save_draft', () => handleSaveDraft({ subject: 's' }), ['Drafts mailbox']],
+      [
+        'a rename',
+        'rename_mailbox',
+        () => handleRenameMailbox({ mailbox: 'A', account: 'W', new_name: 'B' }),
+        ['listMailboxes'],
+      ],
+    ])(
+      'a timed-out change (%s) says not to retry and what to check first',
+      async (_kind, command, call, phrases) => {
+        vi.mocked(runCommand).mockRejectedValue(
+          cliFailure(command, 'MAIL_TIMEOUT: Mail.app did not answer within 115 s.')
+        );
+
+        const result = await call();
+
+        expect(result.error?.code).toBe('MAIL_TIMEOUT');
+        expect(result.error?.message).toContain('Do not retry');
+        for (const phrase of phrases) expect(result.error?.message).toContain(phrase);
+      }
+    );
+
+    it.each([
+      [
+        'getEmail',
+        () => handleGetEmail({ id: MAIL_ID }),
+        'id',
+        "MAIL_MAILBOX_NOT_FOUND: Mailbox 'INBOX' not found in account 'iCloud'.",
+      ],
+      [
+        'deleteEmails',
+        () => handleDeleteEmails({ ids: [MAIL_ID] }),
+        'ids',
+        "MAIL_ACCOUNT_NOT_FOUND: Account 'iCloud' not found.",
+      ],
+    ])(
+      '%s failing on the mailbox or account of a mail id teaches a fresh id, not a mailbox or account parameter',
+      async (_tool, call, param, stderr) => {
+        vi.mocked(runCommand).mockRejectedValue(cliFailure('get_email', stderr));
+
+        const result = await call();
+
+        expect(result.error?.message).toContain(`Invalid ${param}`);
+        expect(result.error?.message).not.toContain('Invalid mailbox');
+        expect(result.error?.message).not.toContain('Invalid account');
+        expect(result.error?.message).toContain('use a current id');
+      }
+    );
 
     it('a denied Automation permission tells the user where to allow it', async () => {
       vi.mocked(runCommand).mockRejectedValue(

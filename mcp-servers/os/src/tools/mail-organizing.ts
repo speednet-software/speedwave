@@ -84,6 +84,7 @@ export const deleteEmailsTool: Tool = {
   annotations: DESTRUCTIVE_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_CLASS]: 'long',
     [META_KEYS.TIMEOUT_MS]: BATCH_BUDGET.toolMs,
     [META_KEYS.OS_CATEGORY]: 'mail',
   },
@@ -129,6 +130,7 @@ export const markEmailsReadTool: Tool = {
   annotations: WRITE_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_CLASS]: 'long',
     [META_KEYS.TIMEOUT_MS]: BATCH_BUDGET.toolMs,
     [META_KEYS.OS_CATEGORY]: 'mail',
   },
@@ -157,6 +159,7 @@ export const flagEmailsTool: Tool = {
   annotations: WRITE_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_CLASS]: 'long',
     [META_KEYS.TIMEOUT_MS]: BATCH_BUDGET.toolMs,
     [META_KEYS.OS_CATEGORY]: 'mail',
   },
@@ -194,6 +197,7 @@ export const moveEmailsTool: Tool = {
   annotations: WRITE_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_CLASS]: 'long',
     [META_KEYS.TIMEOUT_MS]: BATCH_BUDGET.toolMs,
     [META_KEYS.OS_CATEGORY]: 'mail',
   },
@@ -232,6 +236,7 @@ export const copyEmailsTool: Tool = {
   annotations: WRITE_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_CLASS]: 'long',
     [META_KEYS.TIMEOUT_MS]: BATCH_BUDGET.toolMs,
     [META_KEYS.OS_CATEGORY]: 'mail',
   },
@@ -268,6 +273,7 @@ export const archiveEmailsTool: Tool = {
   annotations: WRITE_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_CLASS]: 'long',
     [META_KEYS.TIMEOUT_MS]: BATCH_BUDGET.toolMs,
     [META_KEYS.OS_CATEGORY]: 'mail',
   },
@@ -345,6 +351,7 @@ export const markEmailsSpamTool: Tool = {
   annotations: DESTRUCTIVE_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_CLASS]: 'long',
     [META_KEYS.TIMEOUT_MS]: BATCH_BUDGET.toolMs,
     [META_KEYS.OS_CATEGORY]: 'mail',
   },
@@ -387,6 +394,7 @@ export const markEmailsNotSpamTool: Tool = {
   annotations: WRITE_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_CLASS]: 'long',
     [META_KEYS.TIMEOUT_MS]: BATCH_BUDGET.toolMs,
     [META_KEYS.OS_CATEGORY]: 'mail',
   },

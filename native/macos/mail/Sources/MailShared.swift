@@ -42,6 +42,7 @@ enum MailFailure: LocalizedError, Equatable {
     case alreadyInJunk
     case archiveNotFound(account: String)
     case alreadyArchived
+    case notAttempted
     case mailboxExists(mailbox: String, account: String)
     case targetIsTrash(mailbox: String, account: String)
     case targetIsJunk(mailbox: String, account: String)
@@ -69,6 +70,7 @@ enum MailFailure: LocalizedError, Equatable {
         case .alreadyInJunk: return "MAIL_ALREADY_IN_JUNK"
         case .archiveNotFound: return "MAIL_ARCHIVE_NOT_FOUND"
         case .alreadyArchived: return "MAIL_ALREADY_ARCHIVED"
+        case .notAttempted: return "MAIL_NOT_ATTEMPTED"
         case .mailboxExists: return "MAIL_MAILBOX_EXISTS"
         case .targetIsTrash: return "MAIL_TARGET_IS_TRASH"
         case .targetIsJunk: return "MAIL_TARGET_IS_JUNK"
@@ -127,6 +129,9 @@ enum MailFailure: LocalizedError, Equatable {
                 + "the email there with moveEmails, passing that mailbox and the account."
         case .alreadyArchived:
             return "The email is already in the Archive mailbox."
+        case .notAttempted:
+            return "The batch ran out of time before this email, so it was left unchanged. "
+                + "Call again with the ids of the emails that were not attempted."
         case .mailboxExists(let mailbox, let account):
             return "Mailbox '\(mailbox)' already exists in account '\(account)'."
         case .targetIsTrash(let mailbox, let account):

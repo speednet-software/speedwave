@@ -45,34 +45,45 @@ export const EXAMPLE_IDS = [
 
 const MAIL_FAILURE = /\b(MAIL_[A-Z_]+): ([\s\S]*)$/;
 
+const BATCH_COMMANDS = [
+  'delete_emails',
+  'mark_emails_read',
+  'flag_emails',
+  'move_emails',
+  'copy_emails',
+  'archive_emails',
+  'mark_emails_spam',
+  'mark_emails_not_spam',
+];
+
 const MAIL_FAILURE_TEACHING: Record<
   string,
   (detail: string, args: MailArgs, command: string) => TeachingErrorParams
 > = {
-  MAIL_TIMEOUT: (detail) => ({
-    nextStep:
-      `${detail} Retry once; for a list or a search pass a specific mailbox or a smaller limit. ` +
-      'Before retrying a send or a reply, check the Sent mailbox, since Mail.app may have sent it anyway.',
+  MAIL_TIMEOUT: (detail, _args, command) => ({
+    nextStep: `${detail} ${timeoutStep(command)}`,
   }),
   MAIL_AUTOMATION_DENIED: (detail) => ({
     nextStep:
       `${detail} Ask the user to allow Speedwave to control Mail in ` +
       'System Settings > Privacy & Security > Automation, then retry.',
   }),
-  MAIL_MAILBOX_NOT_FOUND: (detail, args) => ({
-    paramName: 'mailbox',
-    received: args.mailbox,
-    correctValueTool: 'listMailboxes',
-    nextStep:
-      `${detail} Pass the name and account of a mailbox exactly as listMailboxes returns them; ` +
-      'a mailbox the user wants that does not exist yet is made with createMailbox.',
-  }),
-  MAIL_ACCOUNT_NOT_FOUND: (detail, args) => ({
-    paramName: 'account',
-    received: args.account,
-    correctValueTool: 'listMailboxes',
-    nextStep: `${detail} Pass the account field of a mailbox listMailboxes returns.`,
-  }),
+  MAIL_MAILBOX_NOT_FOUND: (detail, args) =>
+    staleMailIdTeaching(detail, args) ?? {
+      paramName: 'mailbox',
+      received: args.mailbox,
+      correctValueTool: 'listMailboxes',
+      nextStep:
+        `${detail} Pass the name and account of a mailbox exactly as listMailboxes returns them; ` +
+        'a mailbox the user wants that does not exist yet is made with createMailbox.',
+    },
+  MAIL_ACCOUNT_NOT_FOUND: (detail, args) =>
+    staleMailIdTeaching(detail, args) ?? {
+      paramName: 'account',
+      received: args.account,
+      correctValueTool: 'listMailboxes',
+      nextStep: `${detail} Pass the account field of a mailbox listMailboxes returns.`,
+    },
   MAIL_ACCOUNT_AMBIGUOUS: (detail, args) => ({
     paramName: 'account',
     received: args.account,
@@ -94,12 +105,13 @@ const MAIL_FAILURE_TEACHING: Record<
   MAIL_NO_SENDER: (detail) => ({
     nextStep: `${detail} Ask the user to add or turn on a mail account in Mail > Settings > Accounts; nothing was sent or saved.`,
   }),
-  MAIL_MAILBOX_AMBIGUOUS: (detail, args) => ({
-    paramName: 'account',
-    received: args.account,
-    correctValueTool: 'listMailboxes',
-    nextStep: `${detail} Pass account together with mailbox to pick one of them.`,
-  }),
+  MAIL_MAILBOX_AMBIGUOUS: (detail, args) =>
+    staleMailIdTeaching(detail, args) ?? {
+      paramName: 'account',
+      received: args.account,
+      correctValueTool: 'listMailboxes',
+      nextStep: `${detail} Pass account together with mailbox to pick one of them.`,
+    },
   MAIL_INVALID_ID: (detail, args) => ({
     paramName: 'id',
     received: args.id,
@@ -228,5 +240,57 @@ export function confirmProperty(action: string): Record<string, unknown> {
     description:
       `Set true only after the user saw the preview and agreed to ${action}. ` +
       'Without it nothing changes and the call returns the preview.',
+  };
+}
+
+/**
+ * What to do after a timeout of `command`: narrow a read, or for a change check what Mail already did, never retry.
+ * @param command - mail-cli command of the failed call.
+ */
+function timeoutStep(command: string): string {
+  if (['list_emails', 'search_emails'].includes(command)) {
+    return (
+      'Do not repeat the same call: narrow it with unread_only, flagged_only, since, before or sender, ' +
+      'or search one mailbox (with its account) instead of every mailbox.'
+    );
+  }
+  if (BATCH_COMMANDS.includes(command)) {
+    return (
+      'Some of the emails may already have changed. Do not retry: list or search their mailboxes again to see ' +
+      'which ones changed, tell the user, and ask before acting on the rest. Never repeat copyEmails, which would ' +
+      'make second copies.'
+    );
+  }
+  if (['send_email', 'reply_to_email', 'forward_email', 'redirect_email'].includes(command)) {
+    return (
+      'Do not retry: Mail.app may have sent it anyway. Search the Sent mailbox for it, tell the user what you ' +
+      'found, and send again only if the user asks.'
+    );
+  }
+  if (command === 'save_draft') {
+    return 'Do not retry: list the Drafts mailbox first, since Mail.app may have saved it, and tell the user.';
+  }
+  if (['create_mailbox', 'rename_mailbox'].includes(command)) {
+    return 'Do not retry: call listMailboxes to see whether the mailbox changed, and tell the user.';
+  }
+  return 'Mail.app is busy or not responding: try once more, and if it times out again tell the user.';
+}
+
+/**
+ * The teaching for a mailbox or account failure of a call that named its mail by `id` or `ids` and no mailbox: the
+ * mail id is out of date, not a parameter the tool takes; undefined for any other call.
+ * @param detail - mail-cli's description of the failure.
+ * @param args - Tool arguments of the failed call.
+ */
+function staleMailIdTeaching(detail: string, args: MailArgs): TeachingErrorParams | undefined {
+  if (args.mailbox !== undefined || (args.id === undefined && args.ids === undefined))
+    return undefined;
+  return {
+    paramName: args.id !== undefined ? 'id' : 'ids',
+    received: args.id,
+    correctValueTool: 'listEmails',
+    nextStep:
+      `${detail} The mailbox or account a mail id names no longer exists or was renamed in Mail; ` +
+      'list or search again with listEmails or searchEmails and use a current id.',
   };
 }

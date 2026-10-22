@@ -75,6 +75,10 @@ struct MailBatch {
     static let fieldSeparator = "\u{1F}"
     static let rowSeparator = "\u{1E}"
 
+    /// Seconds before the end of the script budget after which a batch tries no further mail, so the script still
+    /// prints its per-mail report.
+    static let stopHeadroomSeconds = 5
+
     let ids: [MailId]
 
     init(params: [String: Any]) throws {
@@ -125,7 +129,9 @@ struct MailBatch {
     /// Looks up every mail in one script, each in its own `try`, and runs `action` on each one found; nil only reads
     /// the mails.
     func run(scripts: MailScripts, action: MailAction?) throws -> [Outcome] {
-        let output = try scripts.run(script(action: action), mailbox: action?.mailbox, account: action?.account)
+        let seconds = max(1, Int(scripts.timeout) - Self.stopHeadroomSeconds)
+        let output = try scripts.run(
+            script(action: action, seconds: seconds), mailbox: action?.mailbox, account: action?.account)
         let rows = output.isEmpty ? [] : output.components(separatedBy: Self.rowSeparator)
         guard rows.count == ids.count else {
             throw ScriptError.scriptFailed("Unexpected batch result from Mail.app")
@@ -135,16 +141,68 @@ struct MailBatch {
         }
     }
 
-    private func script(action: MailAction?) -> String {
+    /// The batch script: each mailbox of the batch is looked up once and its Message-IDs and Mail message ids read in
+    /// two requests, then each mail is found in those lists and addressed by its Mail id, which a move of another
+    /// mail does not shift; a mail is not tried once the script's time is nearly up.
+    private func script(action: MailAction?, seconds: Int) -> String {
         let reported = action?.reports == nil ? "" : ", spwReported"
-        let perMail = ids.map { id in
+        var groups: [MailId] = []
+        for id in ids where !groups.contains(where: { $0.accountId == id.accountId && $0.mailbox == id.mailbox }) {
+            groups.append(id)
+        }
+        let groupOf = { (id: MailId) in
+            groups.firstIndex { $0.accountId == id.accountId && $0.mailbox == id.mailbox } ?? 0
+        }
+        let stores = groups.indices.map { group in
             """
+            script spwGroup\(group)
+                property spwGKeys : {}
+                property spwGIds : {}
+                property spwGBox : missing value
+                property spwGName : ""
+                property spwGAcct : ""
+                property spwGError : ""
+                property spwGNumber : 0
+            end script
+            """
+        }.joined(separator: "\n")
+        let loads = groups.enumerated().map { group, id in
+            """
+                try
+            \(AppleMailClient.mailboxLookup(path: id.mailbox, accountId: id.accountId))
+                    set spwGKeys of spwGroup\(group) to (message id of every message of mb)
+                    set spwGIds of spwGroup\(group) to (id of every message of mb)
+                    set spwGBox of spwGroup\(group) to mb
+                    set spwGName of spwGroup\(group) to spwAcctName
+                    set spwGAcct of spwGroup\(group) to spwAcctId
+                on error spwErr number spwNum
+                    set spwGError of spwGroup\(group) to spwErr
+                    set spwGNumber of spwGroup\(group) to spwNum
+                end try
+            """
+        }.joined(separator: "\n")
+        let perMail = ids.map { id in
+            let group = "spwGroup\(groupOf(id))"
+            let key = escapeAppleScript(id.messageId)
+            return """
                 set spwSubject to ""
                 set spwSender to ""
                 set spwDate to missing value
                 set spwReported to false
                 try
-            \(AppleMailClient.messageLookup(id))
+                    if (current date) > spwDeadline then error "\(batchStoppedMarker)"
+                    if spwGError of \(group) is not "" then error (spwGError of \(group)) number (spwGNumber of \(group))
+                    set mb to spwGBox of \(group)
+                    set spwAcctName to spwGName of \(group)
+                    set spwAcctId to spwGAcct of \(group)
+                    set spwMailId to my spwFind(\(group), "\(key)")
+                    if spwMailId is 0 then error "\(mailNotFoundMarker)"
+                    set m to «class mssg» id spwMailId of mb
+                    if message id of m is not "\(key)" then
+                        set spwFound to (every message of mb whose message id is "\(key)")
+                        if (count of spwFound) is 0 then error "\(mailNotFoundMarker)"
+                        set m to item 1 of spwFound
+                    end if
                     set spwSubject to subject of m
                     set spwSender to sender of m
                     set spwDate to date received of m
@@ -156,9 +214,12 @@ struct MailBatch {
             """
         }.joined(separator: "\n")
         return """
+        \(stores)
         set spwRows to {}
+        set spwDeadline to (current date) + \(seconds)
         tell application "Mail"
         \(action?.setup ?? "")
+        \(loads)
         \(perMail)
         end tell
         set spwLines to {}
@@ -167,16 +228,31 @@ struct MailBatch {
             set spwIso to ""
             set spwReceived to contents of item 4 of spwRow
             if class of spwReceived is date then set spwIso to (spwReceived as «class isot» as string)
-            set spwFields to {(contents of item 1 of spwRow) as text, (contents of item 2 of spwRow) as text, ¬
-                (contents of item 3 of spwRow) as text, spwIso, (contents of item 5 of spwRow) as text}
+            set spwFields to {(contents of item 1 of spwRow) as text, my spwClean(contents of item 2 of spwRow), ¬
+                my spwClean(contents of item 3 of spwRow), spwIso, my spwClean(contents of item 5 of spwRow)}
             if (count of spwRow) > 5 then set end of spwFields to (contents of item 6 of spwRow) as text
             set AppleScript's text item delimiters to (character id 31)
             set end of spwLines to (spwFields as text)
         end repeat
         set AppleScript's text item delimiters to (character id 30)
         return spwLines as text
+        \(Self.findHandler)
+        \(MailReading.cleanHandler)
         """
     }
+
+    /// The AppleScript handler `spwFind(group, key)`: the Mail id of the message whose Message-ID is `key`, compared
+    /// with case, in a group's lists, or 0; the lists are script object properties, read in time linear overall.
+    static let findHandler = """
+        on spwFind(spwGroup, spwKey)
+            considering case
+                repeat with spwI from 1 to count of spwGKeys of spwGroup
+                    if item spwI of spwGKeys of spwGroup is spwKey then return item spwI of spwGIds of spwGroup
+                end repeat
+            end considering
+            return 0
+        end spwFind
+        """
 
     private func outcome(_ id: MailId, row: String, reports: String?, scripts: MailScripts) throws -> Outcome {
         let fields = row.components(separatedBy: Self.fieldSeparator)
@@ -212,11 +288,13 @@ struct MailBatch {
             (alreadyInJunkMarker, .alreadyInJunk),
             (archiveNotFoundMarker, .archiveNotFound(account: id.account)),
             (alreadyArchivedMarker, .alreadyArchived),
+            (batchStoppedMarker, .notAttempted),
         ]
         return perMail.first { detail.contains($0.marker) }?.failure.localizedDescription ?? detail
     }
 }
 
+let batchStoppedMarker = "SPW_BATCH_STOPPED"
 let trashNotFoundMarker = "SPW_TRASH_NOT_FOUND"
 let alreadyInTrashMarker = "SPW_ALREADY_IN_TRASH"
 
