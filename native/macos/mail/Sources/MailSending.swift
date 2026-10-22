@@ -4,6 +4,35 @@ import SharedCLI
 let sendFailedMarker = "SPW_SEND_FAILED"
 let previewChangedMarker = "SPW_PREVIEW_CHANGED"
 
+/// The sender a reply or forward goes from: `Name <address>` as previewed, and the address a send checks.
+private struct Sender {
+    let display: String
+    let address: String
+}
+
+/// What a reply preview shows, and what its send sets on Mail's reply or checks it against.
+private struct ReplyPreview {
+    let to: [String]
+    let cc: [String]
+    let subject: String
+    let body: String
+    let sender: Sender
+}
+
+/// The fields a forward preview shows, with the subject and sender its send checks Mail's forward against.
+private struct PassOnPreview {
+    let fields: [String: Any]
+    let subject: String
+    let sender: Sender
+}
+
+/// The mail a forward or redirect passes on and the recipients it goes to.
+private struct PassOnRequest {
+    let mail: MailId
+    let to: [String]
+    let cc: [String]
+}
+
 /// Sends plain-text mail through Mail.app behind the `confirm_send` gate: unconfirmed, a command previews the
 /// recipients, subject and full text that would go out; confirmed, it sends exactly that and reports it.
 enum MailSending {
@@ -27,6 +56,31 @@ enum MailSending {
         formatter.dateFormat = "d MMM yyyy 'at' HH:mm"
         return formatter
     }()
+
+    /// AppleScript lines that read the addresses of the original's To and Cc recipients into `spwTo` and `spwCc`.
+    private static let originalRecipientLines = """
+            set spwTo to {}
+            repeat with spwRecipient in to recipients of m
+                set end of spwTo to my spwClean(address of spwRecipient)
+            end repeat
+            set spwCc to {}
+            repeat with spwRecipient in cc recipients of m
+                set end of spwCc to my spwClean(address of spwRecipient)
+            end repeat
+        """
+
+    /// The handler `previewCheck` compares address lists with: as sets, in any case, repeats ignored.
+    private static let sameAddressesHandler = """
+        on spwSameAddresses(spwSeen, spwExpected)
+            repeat with spwAddress in spwSeen
+                if spwExpected does not contain (contents of spwAddress) then return false
+            end repeat
+            repeat with spwAddress in spwExpected
+                if spwSeen does not contain (contents of spwAddress) then return false
+            end repeat
+            return true
+        end spwSameAddresses
+        """
 
     /// The `send_email` command: a new message to `to`, `cc` and `bcc` from `account` or the default sender; the
     /// preview and the report carry its `from`.
@@ -121,34 +175,33 @@ enum MailSending {
     /// The `forward_email` command: Mail's own forward of the mail `id`, content never changed, to `to` and `cc`;
     /// the preview reads the original without making a message.
     static func forwardEmail(params: [String: Any], scripts: MailScripts) throws -> [String: Any] {
-        let (mailId, to, cc) = try passOnParams(params)
-        let read = try scripts.run(forwardReadScript(mailId), mailbox: mailId.mailbox, account: mailId.account)
-        let forward = try forwardPreview(read, id: mailId)
-        let fields = forward.fields.merging(["to": to, "cc": cc]) { _, given in given }
+        let request = try passOnRequest(params)
+        let mail = request.mail
+        let read = try scripts.run(forwardReadScript(mail), mailbox: mail.mailbox, account: mail.account)
+        let forward = try forwardPreview(read, id: mail)
+        let fields = forward.fields.merging(["to": request.to, "cc": request.cc]) { _, given in given }
         guard forwardGate.isConfirmed(params) else {
             return forwardGate.preview(fields)
         }
         let check = previewCheck("spwOut", subject: forward.subject, sender: forward.sender.address)
         _ = try scripts.run(
-            passOnScript(mailId, command: "forward", to: to, cc: cc, check: check),
-            mailbox: mailId.mailbox,
-            account: mailId.account)
+            passOnScript(request, command: "forward", check: check), mailbox: mail.mailbox, account: mail.account)
         return sent(fields)
     }
 
     /// The `redirect_email` command: Mail's redirect of the mail `id`, unchanged and from its original sender, to
     /// `to` and `cc`.
     static func redirectEmail(params: [String: Any], scripts: MailScripts) throws -> [String: Any] {
-        let (mailId, to, cc) = try passOnParams(params)
-        let read = try scripts.run(redirectReadScript(mailId), mailbox: mailId.mailbox, account: mailId.account)
-        let fields = try redirectFields(read, id: mailId).merging(["to": to, "cc": cc]) { _, given in given }
+        let request = try passOnRequest(params)
+        let mail = request.mail
+        let read = try scripts.run(redirectReadScript(mail), mailbox: mail.mailbox, account: mail.account)
+        let fields = try redirectFields(read, id: mail)
+            .merging(["to": request.to, "cc": request.cc]) { _, given in given }
         guard redirectGate.isConfirmed(params) else {
             return redirectGate.preview(fields)
         }
         _ = try scripts.run(
-            passOnScript(mailId, command: "redirect", to: to, cc: cc, check: nil),
-            mailbox: mailId.mailbox,
-            account: mailId.account)
+            passOnScript(request, command: "redirect", check: nil), mailbox: mail.mailbox, account: mail.account)
         return sent(fields)
     }
 
@@ -422,12 +475,14 @@ enum MailSending {
         return addresses.filter { seen.insert($0.lowercased()).inserted }
     }
 
-    private static func passOnParams(_ params: [String: Any]) throws -> (MailId, [String], [String]) {
+    private static func passOnRequest(_ params: [String: Any]) throws -> PassOnRequest {
         guard let id = params["id"] as? String else {
             throw MailError.missingField("id")
         }
-        let mailId = try MailId(decoding: id)
-        return (mailId, try recipients(params, "to", required: true), try recipients(params, "cc", required: false))
+        return PassOnRequest(
+            mail: try MailId(decoding: id),
+            to: try recipients(params, "to", required: true),
+            cc: try recipients(params, "cc", required: false))
     }
 
     private static func sent(_ fields: [String: Any]) -> [String: Any] {
@@ -470,18 +525,6 @@ enum MailSending {
         return spwFields as text
         """
     }
-
-    /// AppleScript lines that read the addresses of the original's To and Cc recipients into `spwTo` and `spwCc`.
-    private static let originalRecipientLines = """
-            set spwTo to {}
-            repeat with spwRecipient in to recipients of m
-                set end of spwTo to my spwClean(address of spwRecipient)
-            end repeat
-            set spwCc to {}
-            repeat with spwRecipient in cc recipients of m
-                set end of spwCc to my spwClean(address of spwRecipient)
-            end repeat
-        """
 
     /// AppleScript lines that set `spwFromName` and `spwFromAddresses` to the full name and addresses of the mail's
     /// account, or for an On My Mac mail, which has no account, to Mail's default sender.
@@ -668,12 +711,12 @@ enum MailSending {
     }
 
     /// AppleScript lines that raise `previewChangedMarker` unless the outgoing `message` Mail made has the previewed
-    /// subject and sender address and, when given, exactly the previewed To and Cc addresses in any case.
+    /// sender address and, when given, the previewed subject and exactly the previewed To and Cc addresses.
     private static func previewCheck(
         _ message: String,
         to: [String]? = nil,
         cc: [String]? = nil,
-        subject: String,
+        subject: String?,
         sender: String
     ) -> String {
         let changed = "error \"\(previewChangedMarker)\""
@@ -690,42 +733,26 @@ enum MailSending {
                 "    if not my spwSameAddresses(\(seen), {\(list)}) then \(changed)",
             ]
         }
-        lines += [
-            "    considering case",
-            "        if (subject of \(message)) is not \"\(escapeAppleScript(subject))\" then \(changed)",
-            "    end considering",
-            "    if (extract address from (sender of \(message))) is not \"\(escapeAppleScript(sender))\" then \(changed)",
-        ]
+        if let subject {
+            lines += [
+                "    considering case",
+                "        if (subject of \(message)) is not \"\(escapeAppleScript(subject))\" then \(changed)",
+                "    end considering",
+            ]
+        }
+        lines.append(
+            "    if (extract address from (sender of \(message))) is not \"\(escapeAppleScript(sender))\" then \(changed)")
         return lines.joined(separator: "\n")
     }
 
-    /// The handler `previewCheck` compares address lists with: as sets, in any case, repeats ignored.
-    private static let sameAddressesHandler = """
-        on spwSameAddresses(spwSeen, spwExpected)
-            repeat with spwAddress in spwSeen
-                if spwExpected does not contain (contents of spwAddress) then return false
-            end repeat
-            repeat with spwAddress in spwExpected
-                if spwSeen does not contain (contents of spwAddress) then return false
-            end repeat
-            return true
-        end spwSameAddresses
-        """
-
-    private static func passOnScript(
-        _ id: MailId,
-        command: String,
-        to: [String],
-        cc: [String],
-        check: String?
-    ) -> String {
-        let clauses = [recipientClauses(to, kind: "to"), recipientClauses(cc, kind: "cc")]
+    private static func passOnScript(_ request: PassOnRequest, command: String, check: String?) -> String {
+        let clauses = [recipientClauses(request.to, kind: "to"), recipientClauses(request.cc, kind: "cc")]
             .filter { !$0.isEmpty }
             .joined(separator: "\n")
         let work = [check, "    tell spwOut\n\(clauses)\n    end tell"].compactMap { $0 }.joined(separator: "\n")
         return """
         tell application "Mail"
-        \(AppleMailClient.messageLookup(id))
+        \(AppleMailClient.messageLookup(request.mail))
         \(enabledAccountCheck)
             set spwOut to \(command) m opening window false
         \(closingOnError("spwOut", work))
@@ -743,7 +770,9 @@ enum MailSending {
     ) -> String {
         let added = recipients.isEmpty ? nil : "    tell spwReply\n\(recipients)\n    end tell"
         let changes = [
-            previewCheck("spwReply", to: reply.to, cc: reply.cc, subject: reply.subject, sender: reply.sender.address),
+            "    set subject of spwReply to \"\(escapeAppleScript(reply.subject))\"",
+            "    set sender of spwReply to \"\(escapeAppleScript(reply.sender.display))\"",
+            previewCheck("spwReply", to: reply.to, cc: reply.cc, subject: nil, sender: reply.sender.address),
             added,
             "    set content of spwReply to \"\(appleScriptText(reply.body))\"",
             signatureApply(signature, to: "spwReply"),
@@ -761,26 +790,4 @@ enum MailSending {
         end tell
         """
     }
-}
-
-/// The sender a reply or forward goes from: `Name <address>` as previewed, and the address a send checks.
-private struct Sender {
-    let display: String
-    let address: String
-}
-
-/// What a reply preview shows and its send checks Mail's reply against.
-private struct ReplyPreview {
-    let to: [String]
-    let cc: [String]
-    let subject: String
-    let body: String
-    let sender: Sender
-}
-
-/// The fields a forward preview shows, with the subject and sender its send checks Mail's forward against.
-private struct PassOnPreview {
-    let fields: [String: Any]
-    let subject: String
-    let sender: Sender
 }

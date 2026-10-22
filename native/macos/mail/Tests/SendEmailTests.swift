@@ -330,18 +330,19 @@ final class SendEmailTests: XCTestCase {
         let send = harness.executor.calls[1].script
         XCTAssertTrue(send.contains("whose message id is \"<a@x>\""), send)
         XCTAssertTrue(send.contains("set spwReply to reply m opening window false reply to all false"), send)
-        let checks = [
+        let steps = [
+            "set subject of spwReply to \"Re: Invoice 12\"",
+            "set sender of spwReply to \"Me <me@work.example>\"",
             "if not my spwSameAddresses(spwSeenTo, {\"anna@x\"}) then error \"\(previewChangedMarker)\"",
             "if not my spwSameAddresses(spwSeenCc, {}) then error \"\(previewChangedMarker)\"",
-            "if (subject of spwReply) is not \"Re: Invoice 12\" then error \"\(previewChangedMarker)\"",
             "if (extract address from (sender of spwReply)) is not \"me@work.example\" then error \"\(previewChangedMarker)\"",
+            "set content of spwReply",
         ]
-        let content = try XCTUnwrap(send.range(of: "set content of spwReply"))
-        for check in checks {
-            let found = try XCTUnwrap(send.range(of: check), "\(check)\n\(send)")
-            XCTAssertLessThan(found.lowerBound, content.lowerBound, check)
+        let positions = try steps.map { step in
+            try XCTUnwrap(send.range(of: step), "\(step)\n\(send)").lowerBound
         }
-        XCTAssertTrue(send.contains("considering case"), send)
+        XCTAssertEqual(positions, positions.sorted(), send)
+        XCTAssertFalse(send.contains("subject of spwReply) is not"), send)
         XCTAssertTrue(
             send.contains(
                 "set content of spwReply to \"Yes.\\n\\nOn 20 Oct 2026 at 09:15, Anna <anna@x> wrote:\\n\\n> Say \\\"yes\\\"\\n\""),

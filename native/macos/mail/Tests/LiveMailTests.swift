@@ -857,25 +857,50 @@ final class LiveMailTests: XCTestCase {
     }
 
     func testReplyAndForwardPreviewsShowWhatMailsOwnReplyAndForwardCarry() throws {
+        var ids: [String] = []
         let params: [String: Any] = ["mailbox": Self.testMailbox, "account": AppleMailClient.localAccountName]
         let listed = try XCTUnwrap(try call("list_emails", params.merging(["limit": 1]) { $1 }) as? [String: Any])
-        guard let id = (listed["emails"] as? [[String: Any]])?.first?["id"] as? String else {
-            throw XCTSkip("\(Self.testMailbox) holds no message to reply to")
+        if let id = (listed["emails"] as? [[String: Any]])?.first?["id"] as? String {
+            ids.append(id)
         }
-        let reply = try XCTUnwrap(
-            try callLeavingNoOutgoing("reply_to_email", ["id": id, "body": "x", "reply_all": true]) as? [String: Any])
-        let forward = try XCTUnwrap(
-            try callLeavingNoOutgoing("forward_email", ["id": id, "to": "nobody@example.invalid"]) as? [String: Any])
+        if let id = try newestAccountInboxMail() {
+            ids.append(id)
+        }
+        guard !ids.isEmpty else {
+            throw XCTSkip("Neither \(Self.testMailbox) nor an account inbox holds a message to reply to")
+        }
+        for id in ids {
+            let reply = try XCTUnwrap(
+                try callLeavingNoOutgoing("reply_to_email", ["id": id, "body": "x", "reply_all": true])
+                    as? [String: Any])
+            let forward = try XCTUnwrap(
+                try callLeavingNoOutgoing("forward_email", ["id": id, "to": "nobody@example.invalid"])
+                    as? [String: Any])
 
-        let made = try mailsOwnReplyAndForward(of: try MailId(decoding: id)).components(separatedBy: "\u{1D}")
+            let made = try mailsOwnReplyAndForward(of: try MailId(decoding: id)).components(separatedBy: "\u{1D}")
 
-        XCTAssertEqual(made.count, 6, "\(made)")
-        XCTAssertEqual(Set((reply["to"] as? [String] ?? []).map { $0.lowercased() }), addressSet(made[0]))
-        XCTAssertEqual(Set((reply["cc"] as? [String] ?? []).map { $0.lowercased() }), addressSet(made[1]))
-        XCTAssertEqual(reply["subject"] as? String, made[2])
-        XCTAssertEqual(address(reply["from"] as? String ?? ""), address(made[3]), "\(reply) \(made)")
-        XCTAssertEqual(forward["subject"] as? String, made[4])
-        XCTAssertEqual(address(forward["from"] as? String ?? ""), address(made[5]), "\(forward) \(made)")
+            XCTAssertEqual(made.count, 6, "\(made)")
+            XCTAssertEqual(Set((reply["to"] as? [String] ?? []).map { $0.lowercased() }), addressSet(made[0]), id)
+            XCTAssertEqual(Set((reply["cc"] as? [String] ?? []).map { $0.lowercased() }), addressSet(made[1]), id)
+            XCTAssertEqual(address(reply["from"] as? String ?? ""), address(made[3]), "\(reply) \(made)")
+            XCTAssertEqual(forward["subject"] as? String, made[4], id)
+            XCTAssertEqual(address(forward["from"] as? String ?? ""), address(made[5]), "\(forward) \(made)")
+        }
+    }
+
+    /// The mail id of the newest mail in the inbox of a Mail account, so the reply check also covers a mail with
+    /// account addresses, aliases and Cc; nil when no account inbox holds one.
+    private func newestAccountInboxMail() throws -> String? {
+        let result = try XCTUnwrap(try call("list_mailboxes") as? [String: Any])
+        let inbox = (result["mailboxes"] as? [[String: Any]] ?? []).first { row in
+            row["account"] as? String != AppleMailClient.localAccountName
+                && (row["name"] as? String ?? "").lowercased() == "inbox"
+                && (row["message_count"] as? Int ?? 0) > 0
+        }
+        guard let inbox else { return nil }
+        let params: [String: Any] = ["mailbox": inbox["name"] ?? "", "account": inbox["account"] ?? "", "limit": 1]
+        let listed = try XCTUnwrap(try call("list_emails", params) as? [String: Any])
+        return (listed["emails"] as? [[String: Any]])?.first?["id"] as? String
     }
 
     private func addressSet(_ field: String) -> Set<String> {

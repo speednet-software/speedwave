@@ -24,7 +24,7 @@ const SHOWN_AS_QUOTE =
   'Apple Mail shows the scripted text to the recipient as a quote (">" in plain text, a cited block in HTML), a Mail bug no script avoids: tell the user before they agree.';
 
 const PREVIEW_CHECKED =
-  'The preview makes no message in Mail; the confirmed call makes it and sends nothing (MAIL_PREVIEW_CHANGED) when Mail picked other recipients, another subject or another sender than the preview showed.';
+  'The preview makes no message in Mail; the confirmed call makes it and sends nothing (MAIL_PREVIEW_CHANGED) when Mail would send it to other recipients, under another subject or from another sender than the preview showed.';
 
 const ACCOUNT_PROPERTY = {
   type: 'string',
