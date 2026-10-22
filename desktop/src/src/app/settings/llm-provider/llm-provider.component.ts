@@ -587,7 +587,9 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
 
   private loadedActiveKey = '';
 
-  private loadedFormSnapshot = signal('');
+  private loadedConfigSnapshot = signal('');
+
+  private loadedAuthSnapshot = signal('');
 
   private initialConfigLoaded = false;
   private initialAuthStatusLoaded = false;
@@ -1140,7 +1142,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     return this.provider() === 'anthropic' ? 'anthropic' : 'local';
   });
 
-  private computeFormSnapshot(): string {
+  private computeConfigSnapshot(): string {
     const extras = this.extraProviders()
       .map((e) => `${e.id}:${e.model}:${e.keyTouched}`)
       .join(',');
@@ -1148,10 +1150,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
       this.selectedTarget(),
       this.provider(),
       this.authMethod(),
-      this.apiKeyConfigured(),
       this.model(),
-      this.oauthAuthenticated(),
-      this.oauthSignIn(),
       this.baseUrl(),
       this.apiKeyTouched(),
       this.customHeadersTouched(),
@@ -1159,20 +1158,32 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     ].join('|');
   }
 
+  private computeAuthSnapshot(): string {
+    return [this.apiKeyConfigured(), this.oauthAuthenticated(), this.oauthSignIn()].join('|');
+  }
+
   private maybeSnapshotInitialLoad(half: 'config' | 'authStatus'): void {
     if (half === 'config') {
       this.initialConfigLoaded = true;
+      this.loadedConfigSnapshot.set(this.computeConfigSnapshot());
     } else {
       this.initialAuthStatusLoaded = true;
     }
     const authHalfDone = this.initialAuthStatusLoaded || !this.activeProject();
     if (this.initialConfigLoaded && authHalfDone) {
-      this.loadedFormSnapshot.set(this.computeFormSnapshot());
+      this.loadedAuthSnapshot.set(this.computeAuthSnapshot());
     }
   }
 
+  private snapshotSavedForm(): void {
+    this.loadedConfigSnapshot.set(this.computeConfigSnapshot());
+    this.loadedAuthSnapshot.set(this.computeAuthSnapshot());
+  }
+
   protected readonly isDirty = computed<boolean>(
-    () => this.computeFormSnapshot() !== this.loadedFormSnapshot()
+    () =>
+      this.computeConfigSnapshot() !== this.loadedConfigSnapshot() ||
+      this.computeAuthSnapshot() !== this.loadedAuthSnapshot()
   );
 
   /** A verified or saved sign-in lets the card be selected/saved; readiness re-verifies at start. */
@@ -1390,7 +1401,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
       const activeKey = this.computeActiveKey(active.provider_id, active.model, update.providers);
       await this.applySavedConfig(project, forceRestart || activeKey !== this.loadedActiveKey);
       this.loadedActiveKey = activeKey;
-      this.loadedFormSnapshot.set(this.computeFormSnapshot());
+      this.snapshotSavedForm();
       setTimeout(() => {
         this.saved.set(false);
         this.cdr.markForCheck();
@@ -1428,10 +1439,13 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
 
   private async loadConfig(): Promise<void> {
     this.testedLocalConnection = null;
+    let rowPickedWhileLoading: ExtraProviderEdit | undefined;
+    let loadedActiveRow: ExtraProviderEdit | undefined;
     try {
       const config = await this.tauri.invoke<LlmConfigResponse>('get_llm_config', {
         project: this.activeProject(),
       });
+      rowPickedWhileLoading = this.extraProviders().find((p) => p.id === this.selectedTarget());
       const persistedProvider = config.provider || 'anthropic';
       if (LEGACY_LOCAL_PROVIDERS.includes(persistedProvider)) {
         this.legacyMigrationProvider.set(persistedProvider);
@@ -1504,9 +1518,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
         this.selectedTarget.set(activeRow.id);
         this.expandedExtraId = activeRow.id;
         activeRow.model = activeRow.model || config.active?.model || '';
-        if (activeRow.kind === 'open_router') {
-          void this.discoverExtraModels(activeRow);
-        }
+        loadedActiveRow = activeRow;
       } else {
         this.selectedTarget.set(provider === 'anthropic' ? 'anthropic' : 'local');
       }
@@ -1525,6 +1537,25 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
       }
     }
     this.maybeSnapshotInitialLoad('config');
+    if (rowPickedWhileLoading) this.keepRowPickedWhileLoading(rowPickedWhileLoading);
+    const shownActiveRow = loadedActiveRow && this.findExtraRow(loadedActiveRow.id);
+    if (shownActiveRow?.kind === 'open_router') {
+      void this.discoverExtraModels(shownActiveRow);
+    }
     this.cdr.markForCheck();
+  }
+
+  private keepRowPickedWhileLoading(picked: ExtraProviderEdit): void {
+    const loaded = this.findExtraRow(picked.id, picked.kind);
+    if (loaded && loaded !== picked) {
+      picked.baseUrl = loaded.baseUrl;
+      picked.model = loaded.model;
+      picked.hasKey = loaded.hasKey;
+      picked.contextTokens = loaded.contextTokens;
+      picked.savedFp = loaded.savedFp;
+      this.extraProviders.set(this.extraProviders().map((r) => (r === loaded ? picked : r)));
+    }
+    this.selectedTarget.set(picked.id);
+    this.expandedExtraId = picked.id;
   }
 }
