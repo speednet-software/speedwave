@@ -592,6 +592,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   private loadedAuthSnapshot = signal('');
 
   private initialConfigLoaded = false;
+  private targetPickedWhileLoading: ProviderTarget | null = null;
   private initialAuthStatusLoaded = false;
 
   legacyMigrationProvider = signal<string | null>(null);
@@ -709,6 +710,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
    * @param id - the clicked provider card id
    */
   async selectProvider(id: ProviderCardId): Promise<void> {
+    this.notePickWhileLoading(id);
     this.selectedTarget.set(id);
     if (this.provider() === id) return;
     this.provider.set(id);
@@ -734,9 +736,14 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
    * @param entry - the remote provider row to activate
    */
   selectExtraProvider(entry: ExtraProviderEdit): void {
+    this.notePickWhileLoading(entry.id);
     this.snapshotAnthropicModel();
     this.selectedTarget.set(entry.id);
     this.expandedExtraId = entry.id;
+  }
+
+  private notePickWhileLoading(id: ProviderTarget): void {
+    if (!this.initialConfigLoaded) this.targetPickedWhileLoading = id;
   }
 
   /**
@@ -1445,7 +1452,9 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
       const config = await this.tauri.invoke<LlmConfigResponse>('get_llm_config', {
         project: this.activeProject(),
       });
-      rowPickedWhileLoading = this.extraProviders().find((p) => p.id === this.selectedTarget());
+      rowPickedWhileLoading = this.extraProviders().find(
+        (p) => p.id === this.targetPickedWhileLoading
+      );
       const persistedProvider = config.provider || 'anthropic';
       if (LEGACY_LOCAL_PROVIDERS.includes(persistedProvider)) {
         this.legacyMigrationProvider.set(persistedProvider);
@@ -1537,7 +1546,13 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
       }
     }
     this.maybeSnapshotInitialLoad('config');
-    if (rowPickedWhileLoading) this.keepRowPickedWhileLoading(rowPickedWhileLoading);
+    const targetPicked = this.targetPickedWhileLoading;
+    this.targetPickedWhileLoading = null;
+    if (rowPickedWhileLoading) {
+      this.keepRowPickedWhileLoading(rowPickedWhileLoading);
+    } else if (targetPicked === 'anthropic' || targetPicked === 'local') {
+      await this.selectProvider(targetPicked);
+    }
     const shownActiveRow = loadedActiveRow && this.findExtraRow(loadedActiveRow.id);
     if (shownActiveRow?.kind === 'open_router') {
       void this.discoverExtraModels(shownActiveRow);

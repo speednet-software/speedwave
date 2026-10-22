@@ -2111,6 +2111,8 @@ describe('LlmProviderComponent', () => {
             return pendingAuthStatus.promise;
           case 'discover_llm_models':
             return { models: [{ id: 'deepseek/deepseek-v4-flash' }] };
+          case 'get_default_base_url':
+            return 'http://host.docker.internal:11434';
           default:
             return undefined;
         }
@@ -2201,6 +2203,55 @@ describe('LlmProviderComponent', () => {
       expect(row.contextTokens).toBe(163840);
       expect(row.lastTest).toEqual({ fp: 'v:sk-or-v1-replacement', passed: true });
       expect(el<HTMLButtonElement>(SAVE).disabled).toBe(false);
+    });
+
+    it('keeps the local card picked before the config lands and lets it be saved', async () => {
+      fixture.detectChanges();
+      el<HTMLButtonElement>('[data-testid="settings-llm-provider-local"]').click();
+      await flushMicrotasks();
+
+      pendingConfig.resolve(anthropicConfig);
+      await flushMicrotasks();
+      fixture.detectChanges();
+
+      expect(component.selectedTarget()).toBe('local');
+      expect(component.provider()).toBe('local');
+      expect(component.baseUrl()).toBe('http://host.docker.internal:11434');
+      expect(el<HTMLButtonElement>(SAVE).disabled).toBe(false);
+    });
+
+    it('keeps the anthropic card picked before a config with an active OpenRouter lands', async () => {
+      fixture.detectChanges();
+      el<HTMLButtonElement>('[data-testid="settings-llm-provider-anthropic"]').click();
+      await flushMicrotasks();
+
+      pendingConfig.resolve({
+        ...anthropicConfig,
+        providers: [
+          { id: 'anthropic', kind: 'anthropic_oauth', has_api_key: false },
+          { id: 'openrouter', kind: 'open_router', has_api_key: true, model: 'deepseek/x' },
+        ],
+        active: { provider_id: 'openrouter', model: 'deepseek/x' },
+      });
+      await flushMicrotasks();
+      fixture.detectChanges();
+
+      expect(component.selectedTarget()).toBe('anthropic');
+      expect(component.provider()).toBe('anthropic');
+    });
+
+    it('applies only the last pick made while the config loads', async () => {
+      fixture.detectChanges();
+      el<HTMLButtonElement>(SELECT).click();
+      el<HTMLButtonElement>('[data-testid="settings-llm-provider-local"]').click();
+      await flushMicrotasks();
+
+      pendingConfig.resolve(anthropicConfig);
+      await flushMicrotasks();
+      fixture.detectChanges();
+
+      expect(component.selectedTarget()).toBe('local');
+      expect(component.provider()).toBe('local');
     });
   });
 
