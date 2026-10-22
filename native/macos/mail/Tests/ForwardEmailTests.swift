@@ -14,7 +14,7 @@ final class ForwardEmailTests: XCTestCase {
         received: String = "2026-10-20T09:15:00",
         attachments: [String] = ["invoice.pdf", "terms.pdf"]
     ) -> String {
-        [subject, originalSubject, sender, received, attachments.joined(separator: "\u{1E}")]
+        [subject, originalSubject, sender, received, attachments.joined(separator: "\u{1E}"), "Me <me@x>"]
             .joined(separator: "\u{1D}")
     }
 
@@ -141,7 +141,7 @@ final class ForwardEmailTests: XCTestCase {
         XCTAssertEqual(harness.executor.calls.count, 1)
     }
 
-    func testRedirectWithoutConfirmationReadsTheMailWithoutMakingARedirect() throws {
+    func testRedirectWithoutConfirmationReadsTheSenderOfMailsRedirectClosesItUnsavedAndKeepsTheOriginalSubject() throws {
         harness.executor.reply(originalRead(subject: "Invoice 12"))
 
         let result = try harness.call("redirect_email", ["id": archived.encoded, "to": "bob@x"])
@@ -149,8 +149,12 @@ final class ForwardEmailTests: XCTestCase {
         XCTAssertEqual(harness.executor.calls.count, 1)
         let script = harness.executor.calls[0].script
         XCTAssertTrue(script.contains("whose message id is \"<a@x>\""), script)
-        XCTAssertFalse(script.contains("redirect m"), script)
+        XCTAssertTrue(script.contains("set spwOut to redirect m opening window false"), script)
+        XCTAssertTrue(script.contains("set spwSubject to my spwClean(subject of m)"), script)
+        XCTAssertTrue(script.contains("close spwOut saving no"), script)
+        XCTAssertFalse(script.contains("send spwOut"), script)
         XCTAssertFalse(script.contains("forward m"), script)
+        XCTAssertEqual(result["from"] as? String, "Me <me@x>")
         XCTAssertEqual(result["status"] as? String, "confirmation_required")
         let instruction = try XCTUnwrap(result["instruction"] as? String)
         XCTAssertTrue(instruction.contains("redirectEmail"), instruction)

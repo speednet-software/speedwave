@@ -24,7 +24,8 @@ const ACCOUNT_PROPERTY = {
 
 const FROM_PROPERTY = {
   type: 'string',
-  description: 'The "Name <address>" the message goes from, as Mail reports it',
+  description:
+    'The "Name <address>" the message goes from, as Mail reports it; name it to the user before they agree',
 };
 
 const SIGNATURE_PROPERTY = {
@@ -176,7 +177,7 @@ export const replyToEmailTool: Tool = {
   description:
     'Reply to an email in any mailbox, by the mail id listEmails or searchEmails returned; Mail picks the recipients and the "Re:" subject, reply_all adds every recipient of the email, and cc and bcc add more. ' +
     `The text goes above the quoted original, separated by a blank line and an "On <date>, <sender> wrote:" line. ${PLAIN_TEXT_ONLY} ` +
-    'Without confirm_send=true nothing is sent: the call returns a preview of every recipient (to, cc, bcc), subject and the full text, and you must show it and ask the user before calling again with the same arguments and confirm_send=true. ' +
+    'Without confirm_send=true nothing is sent: the call returns a preview of the sender (from), every recipient (to, cc, bcc), subject and the full text, and you must show it, from included, and ask the user before calling again with the same arguments and confirm_send=true. ' +
     `Sending cannot be undone. ${SHOWN_AS_QUOTE}`,
   annotations: DESTRUCTIVE_ANNOTATIONS,
   _meta: {
@@ -233,7 +234,7 @@ export const forwardEmailTool: Tool = {
   name: 'forwardEmail',
   description:
     'Forward an email in any mailbox, by the mail id listEmails or searchEmails returned, with its attachments, through Mail\'s own forward (Mail picks the "Fwd:" subject and quotes the email). No text can be added: any change to a forward leaves only the added text, without the quote and the attachments, so for a note send a separate email. ' +
-    'Without confirm_send=true nothing is sent: the call returns a preview of the recipients, subject, the forwarded email and its attachment names, and you must show it and ask the user before calling again with the same arguments and confirm_send=true. ' +
+    'Without confirm_send=true nothing is sent: the call returns a preview of the sender (from), the recipients, subject, the forwarded email and its attachment names, and you must show it, from included, and ask the user before calling again with the same arguments and confirm_send=true. ' +
     'Sending cannot be undone.',
   annotations: DESTRUCTIVE_ANNOTATIONS,
   _meta: {
@@ -279,7 +280,7 @@ export const redirectEmailTool: Tool = {
   name: 'redirectEmail',
   description:
     'Redirect an email in any mailbox, by the mail id listEmails or searchEmails returned: Mail sends it unchanged, with its attachments, and the recipients see it as coming from its original sender; no text can be added. ' +
-    'Without confirm_send=true nothing is sent: the call returns a preview of the recipients, the redirected email and its attachment names, and you must show it and ask the user before calling again with the same arguments and confirm_send=true. ' +
+    'Without confirm_send=true nothing is sent: the call returns a preview of the sender (from, who redirects it), the recipients, the redirected email and its attachment names, and you must show it, from included, and ask the user before calling again with the same arguments and confirm_send=true. ' +
     'Sending cannot be undone.',
   annotations: DESTRUCTIVE_ANNOTATIONS,
   _meta: {
@@ -533,9 +534,9 @@ export async function handleListMailSignatures(
 
 /**
  * The output schema of a gated send: its preview, or what was sent.
- * @param withFromAndAccount - Whether the result carries the from and account of a new message.
+ * @param withAccount - Whether the result carries the account of a new message.
  */
-function sendOutputSchema(withFromAndAccount: boolean): Tool['outputSchema'] {
+function sendOutputSchema(withAccount: boolean): Tool['outputSchema'] {
   const addresses = (what: string) => ({
     type: 'array',
     items: { type: 'string' },
@@ -554,9 +555,9 @@ function sendOutputSchema(withFromAndAccount: boolean): Tool['outputSchema'] {
         description: 'Preview only: the flag to set true once the user agreed',
       },
       instruction: { type: 'string', description: 'Preview only: what to ask the user' },
-      ...(withFromAndAccount
+      from: FROM_PROPERTY,
+      ...(withAccount
         ? {
-            from: FROM_PROPERTY,
             account: {
               type: 'string',
               description: 'The account given; absent for the default sender',
@@ -598,6 +599,7 @@ function passOnOutputSchema(): Tool['outputSchema'] {
         description: 'Preview only: the flag to set true once the user agreed',
       },
       instruction: { type: 'string', description: 'Preview only: what to ask the user' },
+      from: FROM_PROPERTY,
       to: addresses('To'),
       cc: addresses('CC'),
       subject: { type: 'string', description: 'Subject of the message that is sent' },

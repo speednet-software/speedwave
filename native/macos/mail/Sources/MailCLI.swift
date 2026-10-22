@@ -61,7 +61,14 @@ func mailCommands(executor: @escaping ScriptExecutor) -> [String: (_ params: [St
         "list_signatures": scripted { _, scripts in try MailSending.listSignatures(scripts: scripts) },
         "list_rules": scripted { _, scripts in ["rules": try MailRules.listRules(scripts: scripts)] },
         "check_mail": scripted { params, scripts in
-            try MailRules.checkMail(scripts: scripts, account: params["account"] as? String)
+            let account = params["account"] as? String
+            guard account != AppleMailClient.localAccountName else {
+                throw MailError.invalidValue(
+                    "account",
+                    "On My Mac has no mail server, so there is no new mail to fetch for it; leave account out to "
+                        + "check every account")
+            }
+            return try MailRules.checkMail(scripts: scripts, account: account)
         },
         "delete_emails": scripted(deleteEmails),
         "mark_emails_read": scripted(markEmailsRead),

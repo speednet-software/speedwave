@@ -15,8 +15,8 @@ enum MailSending {
 
     private static let fieldSeparator = "\u{1D}"
     private static let itemSeparator = "\u{1E}"
-    private static let replyReadFieldCount = 6
-    private static let originalReadFieldCount = 5
+    private static let replyReadFieldCount = 7
+    private static let originalReadFieldCount = 6
 
     private static let quoteDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -207,7 +207,14 @@ enum MailSending {
     }
 
     private static func accountParam(_ params: [String: Any]) throws -> String? {
-        try nameParam(params, "account", rule: "must be an account name from listMailboxes")
+        let account = try nameParam(params, "account", rule: "must be an account name from listMailboxes")
+        guard account != AppleMailClient.localAccountName else {
+            throw MailError.invalidValue(
+                "account",
+                "On My Mac has no mail server, so nothing can be sent or saved from it; pass another account from "
+                    + "listMailboxes, or leave account out for the default sender")
+        }
+        return account
     }
 
     private static func nameParam(_ params: [String: Any], _ field: String, rule: String) throws -> String? {
@@ -301,6 +308,28 @@ enum MailSending {
             """
     }
 
+    /// AppleScript lines that run `body` and, when any of it fails, close the outgoing message `message` unsaved and
+    /// raise the same error, so a failure never leaves a windowless message in Mail.
+    private static func closingOnError(_ message: String, _ body: String) -> String {
+        """
+            try
+        \(body)
+            on error spwErr number spwNum
+                try
+                    close \(message) saving no
+                end try
+                error spwErr number spwNum
+            end try
+        """
+    }
+
+    /// The AppleScript line that refuses a mail whose account is turned off, since Mail would then send its reply,
+    /// forward or redirect from another account.
+    private static let enabledAccountCheck =
+        "    if spwAcct is not missing value then\n"
+        + "        if not (enabled of spwAcct) then error \"\(accountDisabledMarker)\"\n"
+        + "    end if"
+
     private static func sendLine(_ message: String) -> String {
         "    if not (send \(message)) then error \"\(sendFailedMarker)\""
     }
@@ -325,9 +354,11 @@ enum MailSending {
             senderLines(account: account),
             "    set spwMsg to make new outgoing message with properties "
                 + "{subject:\"\(subject)\", content:\"\(content)\", visible:true}",
-            "    set sender of spwMsg to spwSender",
-            clauses.isEmpty ? nil : "    tell spwMsg\n\(clauses)\n    end tell",
-            signatureApply(signature, to: "spwMsg"),
+            closingOnError("spwMsg", [
+                "    set sender of spwMsg to spwSender",
+                clauses.isEmpty ? nil : "    tell spwMsg\n\(clauses)\n    end tell",
+                signatureApply(signature, to: "spwMsg"),
+            ].compactMap { $0 }.joined(separator: "\n")),
             finish,
             "end tell",
             "return my spwClean(spwSender)",
@@ -354,7 +385,7 @@ enum MailSending {
             if required { throw MailError.missingField(field) }
             return []
         }
-        let addresses = splitAddressList(raw)
+        let addresses = splitAddressList(raw).map(singleLine).filter { !$0.isEmpty }
         guard !addresses.isEmpty else {
             throw MailError.emptyRecipients(field)
         }
@@ -381,7 +412,7 @@ enum MailSending {
         let to = try recipients(params, "to", required: true)
         let cc = try recipients(params, "cc", required: false)
         let read = try scripts.run(
-            originalReadScript(mailId, makeOutgoing: readsOutgoingSubject ? command : nil),
+            originalReadScript(mailId, command: command, readsOutgoingSubject: readsOutgoingSubject),
             mailbox: mailId.mailbox,
             account: mailId.account)
         var fields = try originalFields(read, id: mailId)
@@ -405,36 +436,41 @@ enum MailSending {
         "set spwReply to reply m opening window false reply to all \(replyAll)"
     }
 
-    /// Creates Mail's reply to read its recipients and subject, closes it unsaved, and reads the original's sender,
-    /// date and text; fields joined by GS, list items by RS, free text stripped of both.
+    /// Creates Mail's reply to read its recipients, subject and sender, closes it unsaved, and reads the original's
+    /// sender, date and text; fields joined by GS, list items by RS, free text stripped of both.
     private static func replyReadScript(_ id: MailId, replyAll: Bool, signature: String?) -> String {
-        """
+        let reads = closingOnError("spwReply", """
+                set spwTo to {}
+                repeat with spwRecipient in to recipients of spwReply
+                    set end of spwTo to my spwClean(address of spwRecipient)
+                end repeat
+                set spwCc to {}
+                repeat with spwRecipient in cc recipients of spwReply
+                    set end of spwCc to my spwClean(address of spwRecipient)
+                end repeat
+                set spwSubject to my spwClean(subject of spwReply)
+                set spwFrom to my spwClean(sender of spwReply)
+                set spwSender to my spwClean(sender of m)
+                set spwDate to date received of m
+                set spwOriginal to my spwClean(content of m)
+            """)
+        return """
         \(MailReading.cleanHandler)
 
         tell application "Mail"
         \(signatureCheck(signature) ?? "")
         \(AppleMailClient.messageLookup(id))
+        \(enabledAccountCheck)
             \(replyCommand(replyAll))
-            set spwTo to {}
-            repeat with spwRecipient in to recipients of spwReply
-                set end of spwTo to my spwClean(address of spwRecipient)
-            end repeat
-            set spwCc to {}
-            repeat with spwRecipient in cc recipients of spwReply
-                set end of spwCc to my spwClean(address of spwRecipient)
-            end repeat
-            set spwSubject to my spwClean(subject of spwReply)
+        \(reads)
             try
                 close spwReply saving no
             end try
-            set spwSender to my spwClean(sender of m)
-            set spwDate to date received of m
-            set spwOriginal to my spwClean(content of m)
         end tell
         set spwIsoDate to ""
         if class of spwDate is date then set spwIsoDate to (spwDate as «class isot» as string)
         set AppleScript's text item delimiters to (character id 30)
-        set spwFields to {spwSubject, spwTo as text, spwCc as text, spwSender, spwIsoDate, spwOriginal}
+        set spwFields to {spwSubject, spwTo as text, spwCc as text, spwSender, spwIsoDate, spwOriginal, spwFrom}
         set AppleScript's text item delimiters to (character id 29)
         return spwFields as text
         """
@@ -452,27 +488,29 @@ enum MailSending {
             "subject": fields[0],
             "body": replyText(
                 body: body, sender: fields[3], received: AppleMailClient.localDate(fields[4]), original: fields[5]),
+            "from": fields[6],
         ]
     }
 
-    /// Reads the subject the outgoing message gets (that of Mail's own `makeOutgoing` message, created and closed
-    /// unsaved, or else the original's), the original's subject, sender and date, and its attachment names.
-    private static func originalReadScript(_ id: MailId, makeOutgoing: String?) -> String {
-        let subject = makeOutgoing.map { command in
-            """
-                set spwOut to \(command) m opening window false
-                set spwSubject to my spwClean(subject of spwOut)
-                try
-                    close spwOut saving no
-                end try
-            """
-        } ?? "    set spwSubject to my spwClean(subject of m)"
+    /// Makes Mail's own forward or redirect (`command`) of the mail to read the subject (a forward's, else the
+    /// original's) and the sender it goes from, closes it unsaved, and reads the original's subject, sender, date and
+    /// attachment names.
+    private static func originalReadScript(_ id: MailId, command: String, readsOutgoingSubject: Bool) -> String {
+        let reads = closingOnError("spwOut", """
+                set spwSubject to my spwClean(subject of \(readsOutgoingSubject ? "spwOut" : "m"))
+                set spwFrom to my spwClean(sender of spwOut)
+            """)
         return """
         \(MailReading.cleanHandler)
 
         tell application "Mail"
         \(AppleMailClient.messageLookup(id))
-        \(subject)
+        \(enabledAccountCheck)
+            set spwOut to \(command) m opening window false
+        \(reads)
+            try
+                close spwOut saving no
+            end try
             set spwOriginalSubject to my spwClean(subject of m)
             set spwSender to my spwClean(sender of m)
             set spwDate to date received of m
@@ -484,7 +522,7 @@ enum MailSending {
         set spwIsoDate to ""
         if class of spwDate is date then set spwIsoDate to (spwDate as «class isot» as string)
         set AppleScript's text item delimiters to (character id 30)
-        set spwFields to {spwSubject, spwOriginalSubject, spwSender, spwIsoDate, spwNames as text}
+        set spwFields to {spwSubject, spwOriginalSubject, spwSender, spwIsoDate, spwNames as text, spwFrom}
         set AppleScript's text item delimiters to (character id 29)
         return spwFields as text
         """
@@ -505,6 +543,7 @@ enum MailSending {
         original["date"] = AppleMailClient.localDate(fields[3]).map { iso8601String(from: $0, timeZone: .current) }
         return [
             "subject": fields[0],
+            "from": fields[5],
             "original": original,
             "attachments": fields[4].components(separatedBy: itemSeparator).filter { !$0.isEmpty },
         ]
@@ -517,10 +556,9 @@ enum MailSending {
         return """
         tell application "Mail"
         \(AppleMailClient.messageLookup(id))
+        \(enabledAccountCheck)
             set spwOut to \(command) m opening window false
-            tell spwOut
-        \(clauses)
-            end tell
+        \(closingOnError("spwOut", "    tell spwOut\n\(clauses)\n    end tell"))
             if not (send spwOut) then error "\(sendFailedMarker)"
         end tell
         """
@@ -533,15 +571,19 @@ enum MailSending {
         recipients: String,
         signature: String?
     ) -> String {
-        let added = recipients.isEmpty ? "" : "    tell spwReply\n\(recipients)\n    end tell"
+        let added = recipients.isEmpty ? nil : "    tell spwReply\n\(recipients)\n    end tell"
+        let changes = [
+            added,
+            "    set content of spwReply to \"\(appleScriptText(text))\"",
+            signatureApply(signature, to: "spwReply"),
+        ].compactMap { $0 }.joined(separator: "\n")
         return """
         tell application "Mail"
         \(signatureCheck(signature) ?? "")
         \(AppleMailClient.messageLookup(id))
+        \(enabledAccountCheck)
             \(replyCommand(replyAll))
-        \(added)
-            set content of spwReply to "\(appleScriptText(text))"
-        \(signatureApply(signature, to: "spwReply"))
+        \(closingOnError("spwReply", changes))
             if not (send spwReply) then error "\(sendFailedMarker)"
         end tell
         """

@@ -15,7 +15,7 @@ final class DraftsAndSignaturesTests: XCTestCase {
     ]
 
     private func replyRead() -> String {
-        ["Re: Invoice 12", "anna@x", "", "Anna <anna@x>", "2026-10-20T09:15:00", "Please pay."]
+        ["Re: Invoice 12", "anna@x", "", "Anna <anna@x>", "2026-10-20T09:15:00", "Please pay.", "Me <me@x>"]
             .joined(separator: "\u{1D}")
     }
 

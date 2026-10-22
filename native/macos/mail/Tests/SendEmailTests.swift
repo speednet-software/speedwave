@@ -23,7 +23,7 @@ final class SendEmailTests: XCTestCase {
         received: String = "2026-10-20T09:15:00",
         original: String = "Please pay.\n\nThanks"
     ) -> String {
-        [subject, to.joined(separator: "\u{1E}"), cc.joined(separator: "\u{1E}"), sender, received, original]
+        [subject, to.joined(separator: "\u{1E}"), cc.joined(separator: "\u{1E}"), sender, received, original, "Me <me@x>"]
             .joined(separator: "\u{1D}")
     }
 

@@ -39,9 +39,9 @@ final class MailCommandBoundaryTests: XCTestCase {
             "list_emails": "Work\u{1D}Work-ID" + String(repeating: "\u{1D}", count: 7),
             "get_email": String(repeating: "\u{1D}", count: 12),
             "search_emails": "Work\u{1D}Work-ID" + String(repeating: "\u{1D}", count: 7),
-            "reply_to_email": String(repeating: "\u{1D}", count: 5),
-            "forward_email": String(repeating: "\u{1D}", count: 4),
-            "redirect_email": String(repeating: "\u{1D}", count: 4),
+            "reply_to_email": String(repeating: "\u{1D}", count: 6),
+            "forward_email": String(repeating: "\u{1D}", count: 5),
+            "redirect_email": String(repeating: "\u{1D}", count: 5),
         ]
         for (command, params) in calls {
             harness.executor.reply(replies[command] ?? "")

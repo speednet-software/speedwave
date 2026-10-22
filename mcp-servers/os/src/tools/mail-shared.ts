@@ -91,17 +91,24 @@ const MAIL_FAILURE_TEACHING: Record<
       `${detail} Nothing was done. Tell the user and ask them to give one of these accounts another ` +
       'description in Mail > Settings > Accounts, then call again with the new name from listMailboxes.',
   }),
-  MAIL_ACCOUNT_DISABLED: (detail, args, command) => ({
-    paramName: 'account',
-    received: args.account,
-    nextStep:
-      command === 'send_email'
-        ? `${detail} Nothing was sent. Ask the user whether to turn the account on in Mail > Settings > Accounts ` +
-          'or to send from another account; do not retry on your own. For another account, call again with that ' +
-          'account, or without account for the default sender, and show the user the new from in the preview.'
-        : `${detail} Ask the user to turn the account on in Mail > Settings > Accounts, ` +
-          "or call again without account (it then goes from Mail's primary address) and show the user the new from.",
-  }),
+  MAIL_ACCOUNT_DISABLED: (detail, args, command) =>
+    args.id !== undefined && args.account === undefined
+      ? {
+          nextStep:
+            `${detail} The email's own account is turned off, so nothing was sent. Ask the user to turn it on in ` +
+            'Mail > Settings > Accounts; do not retry on your own.',
+        }
+      : {
+          paramName: 'account',
+          received: args.account,
+          nextStep:
+            command === 'send_email'
+              ? `${detail} Nothing was sent. Ask the user whether to turn the account on in Mail > Settings > Accounts ` +
+                'or to send from another account; do not retry on your own. For another account, call again with that ' +
+                'account, or without account for the default sender, and show the user the new from in the preview.'
+              : `${detail} Ask the user to turn the account on in Mail > Settings > Accounts, ` +
+                "or call again without account (it then goes from Mail's primary address) and show the user the new from.",
+        },
   MAIL_NO_SENDER: (detail) => ({
     nextStep: `${detail} Ask the user to add or turn on a mail account in Mail > Settings > Accounts; nothing was sent or saved.`,
   }),

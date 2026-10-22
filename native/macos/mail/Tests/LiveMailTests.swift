@@ -782,6 +782,7 @@ final class LiveMailTests: XCTestCase {
         let body = try XCTUnwrap(preview["body"] as? String)
         XCTAssertTrue(body.hasPrefix("Speedwave live reply\n\n"), body)
         XCTAssertTrue(body.contains(" wrote:\n"), body)
+        XCTAssertTrue((preview["from"] as? String ?? "").contains("@"), "\(preview)")
         XCTAssertEqual(try total(), listed["total"] as? Int)
 
         guard let address = ProcessInfo.processInfo.environment[Self.sendToVariable], !address.isEmpty,
@@ -825,6 +826,20 @@ final class LiveMailTests: XCTestCase {
 
     func testRedirectOfTheNewestTestMailPreviewsThenSendsItUnchangedOnlyToTheTestAddress() throws {
         try passOnTheNewestTestMail("redirect_email", extra: [:])
+    }
+
+    func testForwardAndRedirectPreviewsNameTheSenderMailUsesAndLeaveNoOutgoingMessage() throws {
+        let params: [String: Any] = ["mailbox": Self.testMailbox, "account": AppleMailClient.localAccountName]
+        let listed = try XCTUnwrap(try call("list_emails", params.merging(["limit": 1]) { $1 }) as? [String: Any])
+        guard let id = (listed["emails"] as? [[String: Any]])?.first?["id"] as? String else {
+            throw XCTSkip("\(Self.testMailbox) holds no message to pass on")
+        }
+        for command in ["forward_email", "redirect_email"] {
+            let preview = try XCTUnwrap(
+                try callLeavingNoOutgoing(command, ["id": id, "to": "nobody@example.invalid"]) as? [String: Any])
+            XCTAssertEqual(preview["status"] as? String, "confirmation_required", "\(command): \(preview)")
+            XCTAssertTrue((preview["from"] as? String ?? "").contains("@"), "\(command): \(preview)")
+        }
     }
 
     private func passOnTheNewestTestMail(_ command: String, extra: [String: Any]) throws {

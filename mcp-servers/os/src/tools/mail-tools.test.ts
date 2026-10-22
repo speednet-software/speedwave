@@ -1854,6 +1854,22 @@ describe('mail-tools', () => {
       expect(runCommand).toHaveBeenCalledTimes(1);
     });
 
+    it('a reply to a mail whose own account is turned off is not taught as a bad account parameter', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        cliFailure(
+          'reply_to_email',
+          "MAIL_ACCOUNT_DISABLED: Account 'Google' is turned off in Mail.app, so Mail would send or file the message from another account."
+        )
+      );
+
+      const result = await handleReplyToEmail({ id: MAIL_ID, body: 'b' });
+
+      expect(result.error?.code).toBe('MAIL_ACCOUNT_DISABLED');
+      expect(result.error?.message).not.toContain('Invalid account');
+      expect(result.error?.message).toContain("email's own account is turned off");
+      expect(result.error?.message).toContain('do not retry on your own');
+    });
+
     it('a send from a turned-off account asks the user instead of retrying', async () => {
       vi.mocked(runCommand).mockRejectedValue(
         cliFailure(
@@ -2054,6 +2070,7 @@ const REPLY_PREVIEW = {
   to: ['anna@x'],
   cc: ['ewa@x'],
   bcc: [],
+  from: 'Me <me@x>',
   subject: 'Re: Hi',
   body: 'Thanks!\n\nOn 20 Oct 2026 at 09:15, Anna <anna@x> wrote:\n\n> Hello\n',
 };
@@ -2065,6 +2082,7 @@ const FORWARD_PREVIEW = {
     'Nothing was changed. Show this preview to the user and ask the user: Forward this email? …',
   to: ['bob@x'],
   cc: [],
+  from: 'Me <me@x>',
   subject: 'Fwd: Hi',
   original: {
     id: MAIL_ID,
@@ -2084,6 +2102,7 @@ const REDIRECT_PREVIEW = {
     'Nothing was changed. Show this preview to the user and ask the user: Redirect this email? …',
   to: ['bob@x'],
   cc: [],
+  from: 'Me <me@x>',
   subject: 'Hi',
   original: FORWARD_PREVIEW.original,
   attachments: ['invoice.pdf'],
@@ -2093,6 +2112,7 @@ const REDIRECT_SENT = {
   status: 'sent',
   to: ['bob@x'],
   cc: ['carol@x'],
+  from: 'Me <me@x>',
   subject: 'Hi',
   original: { id: MAIL_ID, subject: 'Hi', sender: 'Anna', mailbox: 'INBOX', account: 'iCloud' },
   attachments: [],
