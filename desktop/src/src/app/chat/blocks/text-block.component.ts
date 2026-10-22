@@ -17,7 +17,12 @@ import { MermaidSlotsDirective } from '../../shared/mermaid-slots.directive';
     '[attr.aria-live]': "streaming() ? 'polite' : null",
   },
   template: `
-    <div class="prose-sw" [innerHTML]="rendered()" [appMermaidSlots]="rendered()"></div>
+    <div
+      class="prose-sw"
+      data-find-scope
+      [innerHTML]="rendered()"
+      [appMermaidSlots]="rendered()"
+    ></div>
     @if (streaming()) {
       <span
         data-testid="streaming-caret"

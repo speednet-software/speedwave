@@ -3,24 +3,36 @@ import {
   ChangeDetectionStrategy,
   Component,
   ElementRef,
+  Injector,
   OnChanges,
+  OnDestroy,
   ViewChild,
+  afterNextRender,
   effect,
+  inject,
   input,
   output,
+  signal,
+  untracked,
+  viewChild,
 } from '@angular/core';
 import type { ChatMessage, MessageBlock } from '../../models/chat';
 import { ChatMessageComponent } from '../message/chat-message.component';
 import { SpinIconComponent } from '../../shared/spin-icon.component';
+import { IconComponent } from '../../shared/icon.component';
+import { onRequestCounter } from '../../shared/request-counter';
+import { ChatFindBarComponent } from '../find/chat-find-bar.component';
+import { ChatFindSession } from '../find/chat-find-session';
+import { DEFAULT_FIND_STATE, type ChatFindState } from '../find/chat-find';
 
 const SCROLL_BOTTOM_THRESHOLD_PX = 16;
 
 /** Scrollable message list with auto-scroll-to-bottom that pauses while the user reads earlier messages. */
 @Component({
   selector: 'app-chat-message-list',
-  imports: [ChatMessageComponent, SpinIconComponent],
+  imports: [ChatMessageComponent, SpinIconComponent, IconComponent, ChatFindBarComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
-  host: { class: 'flex min-h-0 flex-1 flex-col' },
+  host: { class: 'relative flex min-h-0 flex-1 flex-col' },
   template: `
     <div
       #scrollContainer
@@ -68,9 +80,38 @@ const SCROLL_BOTTOM_THRESHOLD_PX = 16;
         }
       </div>
     </div>
+    @if (find().open) {
+      <app-chat-find-bar
+        class="absolute right-4 top-2 z-10 md:right-6"
+        [query]="find().query"
+        [regex]="find().regex"
+        [matchCase]="find().matchCase"
+        [invalid]="findInvalid()"
+        [current]="find().current"
+        [total]="findTotal()"
+        (queryChange)="onFindQuery($event)"
+        (regexToggled)="onFindRegexToggled()"
+        (caseToggled)="onFindCaseToggled()"
+        (next)="findNext()"
+        (previous)="findPrevious()"
+        (closed)="findClosed.emit()"
+      />
+    }
+    @if (!atBottom()) {
+      <button
+        type="button"
+        data-testid="chat-jump-to-bottom"
+        class="absolute bottom-3 left-1/2 z-10 flex h-8 w-8 -translate-x-1/2 items-center justify-center rounded-full border border-[var(--line-strong)] bg-[var(--bg-2)] text-[var(--ink-dim)] shadow-lg hover:text-[var(--ink)]"
+        aria-label="Scroll to bottom"
+        title="Scroll to bottom"
+        (click)="jumpToBottom()"
+      >
+        <app-icon name="chevron-down" [strokeWidth]="2" class="h-4 w-4" />
+      </button>
+    }
   `,
 })
-export class ChatMessageListComponent implements AfterViewChecked, OnChanges {
+export class ChatMessageListComponent implements AfterViewChecked, OnChanges, OnDestroy {
   readonly messages = input.required<readonly ChatMessage[]>();
   readonly currentBlocks = input<readonly MessageBlock[]>([]);
   readonly isStreaming = input(false);
@@ -81,10 +122,31 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges {
   /** Identity of the rendered conversation (tab id); a change resets the per-conversation scroll tracking. */
   readonly conversationKey = input('');
   readonly autoScrollRequest = input(0);
+  /** The active tab's find state; the bar renders while it is open. */
+  readonly find = input<ChatFindState>(DEFAULT_FIND_STATE);
+  /** A counter whose change puts the caret into the open find bar (⌘F). */
+  readonly findFocusRequest = input(0);
 
   readonly questionAnswered = output<{ toolId: string; questionIdx: number; value: string }>();
+  /** The next find state after a typed query, a toggle, or a moved current match. */
+  readonly findChanged = output<ChatFindState>();
+  /** The bar asked to close (Escape or its button). */
+  readonly findClosed = output<void>();
 
   @ViewChild('scrollContainer') scrollContainer!: ElementRef<HTMLDivElement>;
+  private readonly findBar = viewChild(ChatFindBarComponent);
+  private readonly injector = inject(Injector);
+
+  /** Whether the viewport shows the end of the list; drives the jump-to-bottom button. */
+  readonly atBottom = signal(true);
+
+  private readonly findSession = new ChatFindSession({
+    container: () => this.scrollContainer?.nativeElement ?? null,
+    state: () => this.find(),
+    changed: (next) => this.findChanged.emit(next),
+  });
+  readonly findTotal = this.findSession.total;
+  readonly findInvalid = this.findSession.invalid;
 
   private shouldAutoScroll = true;
   private pendingScrollSync = false;
@@ -118,6 +180,16 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges {
       }
       this.pendingScrollSync = true;
     });
+
+    effect(() => {
+      const state = this.find();
+      const key = this.conversationKey();
+      untracked(() => this.findSession.update(state, key));
+    });
+
+    onRequestCounter(this.findFocusRequest, () =>
+      afterNextRender(() => this.findBar()?.focusInput(), { injector: this.injector })
+    );
   }
 
   private isAtBottom(): boolean {
@@ -168,6 +240,26 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges {
   onScroll(): void {
     if (!this.scrollContainer?.nativeElement) return;
     this.shouldAutoScroll = this.isAtBottom();
+    this.atBottom.set(this.shouldAutoScroll);
+  }
+
+  /** Scrolls to the end and pins new output there again (the jump-to-bottom button). */
+  jumpToBottom(): void {
+    const el = this.scrollContainer?.nativeElement;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    this.shouldAutoScroll = true;
+    this.atBottom.set(true);
+  }
+
+  /** The chat's text selection when it is a single line inside this list, else an empty string. */
+  selectedText(): string {
+    const selection = document.getSelection();
+    const list = this.scrollContainer?.nativeElement;
+    if (!selection || !list || selection.isCollapsed || !selection.anchorNode) return '';
+    if (!list.contains(selection.anchorNode)) return '';
+    const text = selection.toString();
+    return text.includes('\n') ? '' : text;
   }
 
   /** Pins to the bottom after each render when the user has not scrolled up. */
@@ -180,5 +272,40 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges {
     if (el.scrollTop + el.clientHeight < el.scrollHeight - 1) {
       el.scrollTop = el.scrollHeight;
     }
+  }
+
+  /** Stops the find session: its observer, a pending recompute and the highlight. */
+  ngOnDestroy(): void {
+    this.findSession.dispose();
+  }
+
+  /**
+   * The bar's field changed.
+   * @param query - The typed text.
+   */
+  onFindQuery(query: string): void {
+    this.findChanged.emit({ ...this.find(), query });
+  }
+
+  /** The regex toggle was pressed. */
+  onFindRegexToggled(): void {
+    const state = this.find();
+    this.findChanged.emit({ ...state, regex: !state.regex });
+  }
+
+  /** The match-case toggle was pressed. */
+  onFindCaseToggled(): void {
+    const state = this.find();
+    this.findChanged.emit({ ...state, matchCase: !state.matchCase });
+  }
+
+  /** Moves to the next match, wrapping to the first after the last. */
+  findNext(): void {
+    this.findSession.next();
+  }
+
+  /** Moves to the previous match, wrapping to the last before the first. */
+  findPrevious(): void {
+    this.findSession.previous();
   }
 }

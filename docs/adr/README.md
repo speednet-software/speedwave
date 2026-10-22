@@ -104,6 +104,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-096](ADR-096-host-side-pii-ner-detector-for-the-proxy.md)         | Host-side PII NER detector served from the Desktop process; proxy seals its spans with the existing engine                  | Accepted                                                                           |
 | [ADR-097](ADR-097-mermaid-diagrams-and-full-markdown-in-desktop.md)    | Mermaid diagrams and full Markdown in the Desktop UI: slot hydration, own DOMPurify pass, dagre layout without elkjs        | Accepted                                                                           |
 | [ADR-098](ADR-098-optional-speaker-attribution.md)                     | Optional speaker attribution: Nemotron-3 diarization of the meeting channel in the offline pass                             | Accepted                                                                           |
+| [ADR-099](ADR-099-find-in-chat-with-css-custom-highlight.md)           | Find in the active chat tab: rendered-text matching, one highlighted match through the CSS Custom Highlight API             | Accepted                                                                           |
 
 ## Creating a New ADR
 
