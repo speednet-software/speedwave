@@ -11989,6 +11989,66 @@ services:
         assert!(env
             .iter()
             .any(|v| v == "SPW_PLUGIN_DIGESTS=digplug:f00ddeadbeefcafe"));
+        let hub_env = get_service_env_seq(&doc, "mcp-hub");
+        assert!(
+            hub_env.iter().any(|v| v == "SPW_PLUGIN_DIGESTS=digplug:f00ddeadbeefcafe"),
+            "hub must carry the plugin digest so a plugin update recreates it: {hub_env:?}"
+        );
+    }
+
+    #[test]
+    fn plugin_update_changes_hub_definition() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("digplug");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let mut integrations = crate::config::ResolvedIntegrationsConfig::default();
+        integrations.plugins.insert("digplug".to_string(), true);
+        let ctx = ApplyPluginsCtx {
+            project_name: "proj",
+            project_dir: "/tmp/proj",
+            integrations: &integrations,
+            network_name: "net",
+            tokens_dir: tmp.path(),
+            bridges: &Default::default(),
+        };
+        let hub_for = |vp: plugin::VerifiedPlugin| {
+            let out = apply_plugins_from_verified(VALID_COMPOSE, &ctx, &[vp]).unwrap();
+            let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&out).unwrap();
+            doc["services"]["mcp-hub"].clone()
+        };
+        let before = hub_for(fixture_verified_plugin(
+            "digplug",
+            Some("digplug"),
+            &plugin_dir,
+            None,
+        ));
+        let after = hub_for(plugin::VerifiedPlugin::new(
+            fixture_plugin_manifest("digplug", Some("digplug")),
+            plugin_dir.clone(),
+            "0123456789abcdef0123456789abcdef".to_string(),
+        ));
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn disabled_plugin_leaves_hub_env_without_digests() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("digplug");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let vp = fixture_verified_plugin("digplug", Some("digplug"), &plugin_dir, None);
+        let integrations = crate::config::ResolvedIntegrationsConfig::default();
+        let ctx = ApplyPluginsCtx {
+            project_name: "proj",
+            project_dir: "/tmp/proj",
+            integrations: &integrations,
+            network_name: "net",
+            tokens_dir: tmp.path(),
+            bridges: &Default::default(),
+        };
+        let out = apply_plugins_from_verified(VALID_COMPOSE, &ctx, &[vp]).unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&out).unwrap();
+        let hub_env = get_service_env_seq(&doc, "mcp-hub");
+        assert!(!hub_env.iter().any(|v| v.starts_with("SPW_PLUGIN_DIGESTS=")), "{hub_env:?}");
     }
 
     #[test]

@@ -189,6 +189,11 @@ function _startBackgroundRefresh(): void {
     } finally {
       _refreshInProgress = false;
     }
+    for (const service of SERVICE_NAMES) {
+      if (Object.keys(_registry[service] ?? {}).length === 0 && !_emptyServiceTimers.has(service)) {
+        _scheduleEmptyServiceRecheck(service, 0);
+      }
+    }
   }, REFRESH_MS);
 
   /* c8 ignore next 3 — Node.js setInterval returns Timeout with .unref(), browser returns number */
