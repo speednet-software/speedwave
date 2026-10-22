@@ -54,10 +54,18 @@ const EXPORT_TOOLTIP = 'Saves the transcript as Markdown.';
 /** How long the "Copied" confirmation stays. */
 const COPIED_FEEDBACK_MS = 2000;
 /**
- * Progress at which the offline pass has decoded every part (`run_finalize` reports 0.05 → 0.60
- * while decoding, then installs the result); the time estimate extrapolates to this point.
+ * Offline-pass progress bands, mirrored from `transcript_driver.rs` (`finalize_progress_bands_match_ts_mirror`):
+ * the decode, then the optional speaker pass; the time estimate covers the decode only.
  */
+const DECODE_START_PROGRESS = 0.05;
 const DECODE_DONE_PROGRESS = 0.6;
+const DIARIZE_START_PROGRESS = 0.62;
+const DIARIZE_DONE_PROGRESS = 0.85;
+/** How far back the decode pace is measured, so a lane with more speech changes the estimate within minutes. */
+const ETA_PACE_WINDOW_MS = 120_000;
+/** The estimate needs this much decoded, and this much time, since the decode started. */
+const ETA_MIN_MOVED = 0.05;
+const ETA_MIN_ELAPSED_MS = 5000;
 
 /**
  * Seconds → `MM:SS`. Segment timestamps are serde `Duration` `{secs,nanos}`; the caller passes
@@ -108,11 +116,20 @@ interface QualityLine {
 /** Which of the pane's menus is open. */
 type OpenMenu = 'chat' | 'more' | null;
 
-/** Where the transcription progress stood when this pane first saw it, for the time estimate. */
-interface ProgressAnchor {
-  sessionId: string;
+/** One progress report of the offline pass, as this pane saw it. */
+interface ProgressSample {
   at: number;
   progress: number;
+}
+
+/**
+ * The decode reports this pane saw for one recording: the first one at or past the decode start,
+ * and those of the last {@link ETA_PACE_WINDOW_MS}, for the time estimate.
+ */
+interface ProgressTrack {
+  sessionId: string;
+  anchor: ProgressSample;
+  samples: ProgressSample[];
 }
 
 /**
@@ -818,18 +835,33 @@ export class LiveTranscriptComponent {
     return st?.state === 'finalizing' ? Math.round(st.progress * 100) : 0;
   });
 
-  /** Where the progress stood when this pane first saw the pass running. */
-  private readonly progressAnchor = signal<ProgressAnchor | null>(null);
+  /** The decode reports seen for the shown recording, from the decode start on. */
+  private readonly progressTrack = signal<ProgressTrack | null>(null);
 
-  /** Rough time left, re-read on every progress event, once there is enough to extrapolate. */
+  /**
+   * What the progress bar is doing: the rough decode time left from the pace of the last minutes
+   * (never from the model load before the decode), then the phase that follows the decode.
+   */
   readonly eta = computed(() => {
     const st = this.session()?.status;
-    const anchor = this.progressAnchor();
-    if (st?.state !== 'finalizing' || !anchor || anchor.sessionId !== this.session()?.id) return '';
-    const moved = st.progress - anchor.progress;
-    const elapsedMs = Date.now() - anchor.at;
-    if (moved < 0.05 || elapsedMs < 5000 || st.progress >= DECODE_DONE_PROGRESS) return '';
-    const leftMs = (elapsedMs / moved) * (DECODE_DONE_PROGRESS - st.progress);
+    if (st?.state !== 'finalizing') return '';
+    if (st.progress >= DIARIZE_START_PROGRESS && st.progress < DIARIZE_DONE_PROGRESS) {
+      return 'telling speakers apart';
+    }
+    if (st.progress >= DECODE_DONE_PROGRESS) return 'almost done';
+    const track = this.progressTrack();
+    if (!track || track.sessionId !== this.session()?.id) return '';
+    const latest = track.samples[track.samples.length - 1];
+    if (
+      latest.progress - track.anchor.progress < ETA_MIN_MOVED ||
+      latest.at - track.anchor.at < ETA_MIN_ELAPSED_MS
+    ) {
+      return '';
+    }
+    const from = track.samples.length > 1 ? track.samples[0] : track.anchor;
+    const moved = latest.progress - from.progress;
+    if (moved <= 0) return '';
+    const leftMs = ((latest.at - from.at) / moved) * (DECODE_DONE_PROGRESS - latest.progress);
     return leftMs < 60_000
       ? 'less than a minute left'
       : `about ${Math.ceil(leftMs / 60_000)} min left`;
@@ -869,11 +901,19 @@ export class LiveTranscriptComponent {
     effect(() => {
       const st = this.session()?.status;
       const id = this.sessionId();
-      const anchor = untracked(() => this.progressAnchor());
-      if (st?.state !== 'finalizing') {
-        if (anchor) this.progressAnchor.set(null);
-      } else if (!anchor || anchor.sessionId !== id) {
-        this.progressAnchor.set({ sessionId: id, at: Date.now(), progress: st.progress });
+      const track = untracked(() => this.progressTrack());
+      if (st?.state !== 'finalizing' || st.progress < DECODE_START_PROGRESS) {
+        if (track) this.progressTrack.set(null);
+        return;
+      }
+      const sample = { at: Date.now(), progress: st.progress };
+      if (!track || track.sessionId !== id) {
+        this.progressTrack.set({ sessionId: id, anchor: sample, samples: [sample] });
+      } else if (sample.progress !== track.samples[track.samples.length - 1].progress) {
+        const samples = [...track.samples, sample].filter(
+          (s) => s.at >= sample.at - ETA_PACE_WINDOW_MS
+        );
+        this.progressTrack.set({ ...track, samples });
       }
     });
   }
