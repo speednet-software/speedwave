@@ -1,6 +1,6 @@
 # ADR-075: Remove Speaker Diarization — Clean Timestamped Transcript
 
-**Status:** Accepted
+**Status:** Accepted (amended by [ADR-098](ADR-098-optional-speaker-attribution.md): optional diarization of the meeting channel)
 
 **Date:** 2026-06-19
 

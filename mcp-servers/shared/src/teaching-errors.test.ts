@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   teachingErrorResult,
+  buildTeachingMessage,
   teachingToolResult,
   clampPageSize,
   missingParamResult,
@@ -127,6 +128,18 @@ describe('missingParamResult', () => {
     const result = missingParamResult('ts', '', 'Provide a ts.');
 
     expect(result.error?.message).toContain('received: ""');
+  });
+});
+
+describe('buildTeachingMessage', () => {
+  it('orders what was wrong, the tool for a correct value, then the next step, with no value echo', () => {
+    const message = buildTeachingMessage({
+      paramName: 'channel',
+      correctValueTool: 'listChannelIds',
+      nextStep: 'Pick one.',
+    });
+
+    expect(message).toBe('Invalid channel. Get a valid value from listChannelIds. Pick one.');
   });
 });
 

@@ -874,6 +874,81 @@ describe('ShellComponent', () => {
     });
   });
 
+  describe('Cmd+F / Ctrl+F find-in-chat shortcut', () => {
+    function pressCmdF(ctrl = false): KeyboardEvent {
+      const event = new KeyboardEvent('keydown', {
+        key: 'f',
+        metaKey: !ctrl,
+        ctrlKey: ctrl,
+        cancelable: true,
+      });
+      document.dispatchEvent(event);
+      return event;
+    }
+
+    it('asks the chat to open its find bar on the chat route with a ready project, and eats the key', async () => {
+      const router = TestBed.inject(Router);
+      await router.navigate(['/chat']);
+      projectState.status.set('ready');
+      fixture.detectChanges();
+      const ui = TestBed.inject(UiStateService);
+      const before = ui.findRequested();
+
+      const event = pressCmdF();
+
+      expect(ui.findRequested()).toBe(before + 1);
+      expect(event.defaultPrevented).toBe(true);
+    });
+
+    it('takes Ctrl+F the same way, for Windows', async () => {
+      const router = TestBed.inject(Router);
+      await router.navigate(['/chat']);
+      projectState.status.set('ready');
+      fixture.detectChanges();
+      const ui = TestBed.inject(UiStateService);
+      const before = ui.findRequested();
+
+      pressCmdF(true);
+
+      expect(ui.findRequested()).toBe(before + 1);
+    });
+
+    it('is inert off the chat route and leaves the key to the webview', async () => {
+      const router = TestBed.inject(Router);
+      await router.navigate(['/settings']);
+      projectState.status.set('ready');
+      fixture.detectChanges();
+      const ui = TestBed.inject(UiStateService);
+      const before = ui.findRequested();
+
+      const event = pressCmdF();
+
+      expect(ui.findRequested()).toBe(before);
+      expect(event.defaultPrevented).toBe(false);
+    });
+
+    it('is inert while the project is not ready (no message list rendered)', async () => {
+      const router = TestBed.inject(Router);
+      await router.navigate(['/chat']);
+      projectState.status.set('auth_required');
+      fixture.detectChanges();
+      const ui = TestBed.inject(UiStateService);
+      const before = ui.findRequested();
+
+      const event = pressCmdF();
+
+      expect(ui.findRequested()).toBe(before);
+      expect(event.defaultPrevented).toBe(false);
+    });
+
+    it('ignores a plain `f` keypress', () => {
+      const ui = TestBed.inject(UiStateService);
+      const before = ui.findRequested();
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'f' }));
+      expect(ui.findRequested()).toBe(before);
+    });
+  });
+
   describe('Cmd+W / Ctrl+W close-tab shortcut', () => {
     function pressCmdW(): KeyboardEvent {
       const event = new KeyboardEvent('keydown', { key: 'w', metaKey: true, cancelable: true });

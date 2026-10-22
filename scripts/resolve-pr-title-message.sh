@@ -6,7 +6,13 @@ EVENT_NAME="${EVENT_NAME:-}"
 
 case "$EVENT_NAME" in
 pull_request)
-    MESSAGE="${PR_TITLE:-}"
+    PR_NUMBER="${PR_NUMBER:-}"
+    if [[ -z "$PR_NUMBER" ]]; then
+        echo "::error::resolve-pr-title-message: PR_NUMBER is required for pull_request, the queue validates the squash message '<title> (#<number>)'" >&2
+        exit 1
+    fi
+    MESSAGE=""
+    [[ -n "${PR_TITLE:-}" ]] && MESSAGE="$PR_TITLE (#$PR_NUMBER)"
     ;;
 merge_group)
     MESSAGE="${MERGE_GROUP_MESSAGE:-}"

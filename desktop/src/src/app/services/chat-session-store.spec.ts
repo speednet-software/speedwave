@@ -262,6 +262,85 @@ describe('ChatSessionStore', () => {
     });
   });
 
+  describe('staged transcript', () => {
+    const first = { markdown: '# First meeting', name: 'First' };
+    const second = { markdown: '# Second meeting', name: 'Second' };
+
+    it('holds nothing until a transcript is staged, then the latest one', () => {
+      expect(store.stagedTranscript()).toBeNull();
+      store.stageTranscript(first);
+      store.stageTranscript(second);
+      expect(store.stagedTranscript()).toBe(second);
+    });
+
+    it('drops the staged transcript when asked without a sent one', () => {
+      store.stageTranscript(first);
+      store.unstageTranscript();
+      expect(store.stagedTranscript()).toBeNull();
+    });
+
+    it('drops the transcript a send took', () => {
+      store.stageTranscript(first);
+      store.unstageTranscript(first);
+      expect(store.stagedTranscript()).toBeNull();
+    });
+
+    it('keeps a transcript staged while the send that took an earlier one was in flight', () => {
+      store.stageTranscript(first);
+      store.stageTranscript(second);
+      store.unstageTranscript(first);
+      expect(store.stagedTranscript()).toBe(second);
+    });
+  });
+
+  describe('find-in-chat state', () => {
+    it('starts closed with an empty query, plain matching and case folding', () => {
+      expect(store.find()).toEqual({
+        open: false,
+        query: '',
+        regex: false,
+        matchCase: false,
+        current: 0,
+      });
+    });
+
+    it('opens with the last query when no prefill is given', () => {
+      store.find.update((s) => ({ ...s, query: 'needle', current: 3, regex: true }));
+      store.openFind();
+      expect(store.find()).toMatchObject({ open: true, query: 'needle', current: 3, regex: true });
+    });
+
+    it('opens with the selection as the query and restarts from the first match', () => {
+      store.find.update((s) => ({ ...s, query: 'old', current: 3, matchCase: true }));
+      store.openFind('selected text');
+      expect(store.find()).toMatchObject({
+        open: true,
+        query: 'selected text',
+        current: 0,
+        matchCase: true,
+      });
+    });
+
+    it('escapes the selection while the regex toggle is on, so it is found as typed', () => {
+      store.find.update((s) => ({ ...s, regex: true }));
+      store.openFind('a.b(c)');
+      expect(store.find()).toMatchObject({ open: true, query: 'a\\.b\\(c\\)', regex: true });
+    });
+
+    it('closes without forgetting the query or the toggles', () => {
+      store.openFind('kept');
+      store.find.update((s) => ({ ...s, regex: true, matchCase: true, current: 2 }));
+      store.closeFind();
+      expect(store.find()).toEqual({
+        open: false,
+        query: 'kept',
+        regex: true,
+        matchCase: true,
+        current: 2,
+      });
+    });
+  });
+
   describe('dispose', () => {
     it('clears the resume decider', () => {
       store.setResumeDecider(() => Promise.resolve('resume'));

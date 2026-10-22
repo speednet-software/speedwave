@@ -8,6 +8,7 @@ import { LiveTranscriptComponent } from './live-transcript.component';
 import { TranscriptionService } from '../../services/transcription.service';
 import {
   ChatStateService,
+  NEW_CHAT_TAB_LIMIT,
   NEW_CONVERSATION_BUSY,
   NEW_CONVERSATION_STREAMING,
 } from '../../services/chat-state.service';
@@ -91,7 +92,7 @@ describe('LiveTranscriptComponent', () => {
   let chat: {
     hasConversation: WritableSignal<boolean>;
     isStreamingFromState: WritableSignal<boolean>;
-    newConversationBlockedReason: WritableSignal<string>;
+    newChatBlockedReason: WritableSignal<string>;
   };
 
   beforeEach(async () => {
@@ -118,7 +119,7 @@ describe('LiveTranscriptComponent', () => {
     chat = {
       hasConversation: signal(false),
       isStreamingFromState: signal(false),
-      newConversationBlockedReason: signal(''),
+      newChatBlockedReason: signal(''),
     };
     await TestBed.configureTestingModule({
       imports: [LiveTranscriptComponent],
@@ -161,6 +162,49 @@ describe('LiveTranscriptComponent', () => {
     const chips = fixture.nativeElement.querySelectorAll('[data-testid="line-speaker"]');
     expect(chips.length).toBe(2);
     expect(chips[0].textContent).toContain('You');
+  });
+
+  it('labels diarized meeting segments with their speaker in one colour per number', () => {
+    const sys = (start: number, text: string, speaker_id?: number) => ({
+      ...seg(start, text),
+      source: 'system' as const,
+      speaker_id,
+    });
+    fixture.componentRef.setInput(
+      'session',
+      session({
+        final_segments: [
+          sys(0, 'zaczynamy', 1),
+          { ...seg(1, 'cześć'), source: 'mic' as const },
+          sys(2, 'pytanie', 2),
+          sys(3, 'dalej', 1),
+          sys(4, 'mhm'),
+          sys(5, 'szósty', 6),
+        ],
+        models_used: { live: null, finalize: 'large-v3', diarization: 'nemotron' },
+      })
+    );
+    fixture.detectChanges();
+    const lines = component.lines();
+    expect(lines.map((l) => l.speaker)).toEqual([
+      'Meeting · Speaker 1',
+      'You',
+      'Meeting · Speaker 2',
+      'Meeting · Speaker 1',
+      'Meeting',
+      'Meeting · Speaker 6',
+    ]);
+    expect(lines[0].speakerColor).toBe(lines[3].speakerColor);
+    expect(lines[0].speakerColor).not.toBe(lines[2].speakerColor);
+    expect(lines[5].speakerColor).toBeNull();
+    expect(lines[1].speakerColor).toBeNull();
+    expect(lines[4].speakerColor).toBeNull();
+    const chips: HTMLElement[] = Array.from(
+      fixture.nativeElement.querySelectorAll('[data-testid="line-speaker"]')
+    );
+    expect(chips[0].textContent?.trim()).toBe('Meeting · Speaker 1');
+    expect(chips[0].style.color).toBe('var(--teal)');
+    expect(chips[1].style.color).toBe('');
   });
 
   it('sorts a copy, never mutating the session segment array', () => {
@@ -286,7 +330,7 @@ describe('LiveTranscriptComponent', () => {
     it('disables both send buttons while the chat is still replying, and says so', () => {
       chat.hasConversation.set(true);
       chat.isStreamingFromState.set(true);
-      chat.newConversationBlockedReason.set(NEW_CONVERSATION_STREAMING);
+      chat.newChatBlockedReason.set(NEW_CONVERSATION_STREAMING);
       fixture.componentRef.setInput(
         'session',
         session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })
@@ -306,7 +350,7 @@ describe('LiveTranscriptComponent', () => {
 
     it('disables both buttons on a refusal the chat service owns', () => {
       chat.hasConversation.set(true);
-      chat.newConversationBlockedReason.set(NEW_CONVERSATION_BUSY);
+      chat.newChatBlockedReason.set(NEW_CONVERSATION_BUSY);
       fixture.componentRef.setInput(
         'session',
         session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })
@@ -316,6 +360,27 @@ describe('LiveTranscriptComponent', () => {
       expect(fixture.nativeElement.querySelector('[data-testid="send-to-chat-btn"]').disabled).toBe(
         true
       );
+    });
+
+    it('disables "Attach to new chat" with the tab-limit reason in its tooltip and stages nothing', async () => {
+      chat.hasConversation.set(true);
+      chat.newChatBlockedReason.set(NEW_CHAT_TAB_LIMIT);
+      fixture.componentRef.setInput(
+        'session',
+        session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })
+      );
+      fixture.detectChanges();
+      const btn = fixture.nativeElement.querySelector('[data-testid="send-to-chat-btn"]');
+      expect(btn.disabled).toBe(true);
+      expect(btn.getAttribute('aria-label')).toContain(NEW_CHAT_TAB_LIMIT);
+      const tooltip = fixture.debugElement
+        .query(By.css('[data-testid="send-to-chat-btn"]'))
+        .parent?.injector.get(TooltipDirective)
+        .label();
+      expect(tooltip).toBe(NEW_CHAT_TAB_LIMIT);
+      await component.stageForChat();
+      expect(svc.stageForChat).not.toHaveBeenCalled();
+      expect(component.appendBlockedReason()).toBe('');
     });
 
     it('disables the append item and says why under it when no chat is open', () => {
@@ -1058,6 +1123,20 @@ describe('LiveTranscriptComponent', () => {
       expect(q('reveal-btn')).not.toBeNull();
       expect(q('resume-item')).not.toBeNull();
       expect(q('delete-item')!.textContent).toContain('13 min · 12');
+    });
+
+    it('warns that speaker numbers can change only when the transcript has speakers', () => {
+      expect(q('retranscribe-item')!.textContent).not.toContain('Speaker numbers');
+      fixture.componentRef.setInput(
+        'session',
+        session({
+          status: { state: 'done' },
+          live_segments: [seg(0, 'hi')],
+          models_used: { live: null, finalize: 'large-v3', diarization: 'nemotron' },
+        })
+      );
+      fixture.detectChanges();
+      expect(q('retranscribe-item')!.textContent).toContain('Speaker numbers can change.');
     });
 
     it('runs Transcribe again on a finished recording and closes the menu', async () => {

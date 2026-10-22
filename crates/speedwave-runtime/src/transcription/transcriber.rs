@@ -69,8 +69,7 @@ impl DecodeCancel {
         self.0.load(Ordering::Acquire)
     }
 
-    /// The shared flag itself, for whisper.cpp's abort hook.
-    fn flag(&self) -> &AtomicBool {
+    pub(crate) fn flag(&self) -> &AtomicBool {
         &self.0
     }
 }
@@ -95,7 +94,7 @@ pub struct Word {
 }
 
 /// Which captured channel a segment was decoded from. Deterministic channel
-/// attribution, not speaker diarization (ADR-075 stays in force).
+/// attribution; telling speakers apart on the `System` channel is `diarizer.rs` (ADR-098).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TranscriptSource {
@@ -115,8 +114,8 @@ impl TranscriptSource {
     }
 }
 
-/// One transcript segment: a span of audio, its text, and optional per-word
-/// timings. (Speaker diarization was removed — ADR-075.)
+/// One transcript segment: a span of audio, its text, optional per-word timings,
+/// and, on the meeting channel of a diarized offline pass, a speaker number (ADR-098).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Segment {
     /// Start offset from the start of the audio.
@@ -131,6 +130,10 @@ pub struct Segment {
     /// pre-Amendment-9 transcripts).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<TranscriptSource>,
+    /// Speaker number 1..N in order of first appearance, set only on `System` segments
+    /// by speaker diarization. The pre-ADR-075 `speaker` field is never read into it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker_id: Option<u32>,
 }
 
 /// Transcriber errors.
@@ -462,6 +465,7 @@ impl WhisperCppTranscriber {
                 text,
                 words: Vec::new(),
                 source: None,
+                speaker_id: None,
             });
         }
         if opts.word_timestamps {
@@ -558,14 +562,14 @@ fn full_with_cancel(
     state.full(params, pcm)
 }
 
-/// whisper.cpp's abort hook: `true` (abort) once the `AtomicBool` behind `data` is raised.
 #[expect(
     unsafe_code,
-    reason = "whisper.cpp abort-callback FFI boundary; every block has a SAFETY comment"
+    reason = "ggml abort-callback FFI boundary of Whisper and the diarizer; every block has a SAFETY comment"
 )]
-unsafe extern "C" fn abort_when_cancelled(data: *mut std::ffi::c_void) -> bool {
-    // SAFETY: the only caller is whisper.cpp with the pointer `full_with_cancel` installed, an
-    // `AtomicBool` that stays alive for the whole decode.
+pub(crate) unsafe extern "C" fn abort_when_cancelled(data: *mut std::ffi::c_void) -> bool {
+    // SAFETY: the callers are whisper.cpp, with the pointer `full_with_cancel` installed, and
+    // the vendored diarizer, with the one `NemotronDiarizer::diarize` passes; both point at the
+    // `AtomicBool` of a `DecodeCancel` that outlives the decode or diarization reading it.
     unsafe { &*data.cast::<AtomicBool>() }.load(Ordering::Acquire)
 }
 
@@ -616,6 +620,7 @@ impl Transcriber for MockTranscriber {
                 text: self.text_template.replace("{n}", &i.to_string()),
                 words: Vec::new(),
                 source: None,
+                speaker_id: None,
             })
             .collect())
     }
@@ -802,10 +807,14 @@ mod tests {
             (TranscriptSource::Mic, "mic"),
             (TranscriptSource::System, "system"),
         ] {
-            let expr = format!("seg.source === '{ts_tag}' ? '{}'", variant.label());
+            let tag = format!("seg.source {{}}== '{ts_tag}'");
+            let label = format!("speaker: '{}'", variant.label());
+            let compared = ["=", "!"]
+                .iter()
+                .any(|op| src.contains(&tag.replace("{}", op)));
             assert!(
-                src.contains(&expr),
-                "live-transcript.component.ts must label the {ts_tag} channel '{}' (expected fragment: {expr})",
+                compared && src.contains(&label),
+                "live-transcript.component.ts must compare seg.source with '{ts_tag}' and label that channel '{}' (expected fragment: {label})",
                 variant.label()
             );
         }
@@ -928,6 +937,7 @@ mod tests {
                 end: Duration::from_millis(2000),
             }],
             source: None,
+            speaker_id: None,
         };
         assert_eq!(
             serde_json::from_str::<Segment>(&serde_json::to_string(&seg).unwrap()).unwrap(),
@@ -948,6 +958,24 @@ mod tests {
         let seg: Segment = serde_json::from_str(legacy).unwrap();
         assert_eq!(seg.text, "hej");
         assert_eq!(seg.start, Duration::from_secs(1));
+        assert_eq!(seg.speaker_id, None);
+    }
+
+    #[test]
+    fn speaker_id_is_written_only_when_set_and_round_trips() {
+        let mut seg = Segment {
+            start: Duration::from_secs(1),
+            end: Duration::from_secs(2),
+            text: "hej".to_string(),
+            words: vec![],
+            source: Some(TranscriptSource::System),
+            speaker_id: None,
+        };
+        assert!(!serde_json::to_string(&seg).unwrap().contains("speaker_id"));
+        seg.speaker_id = Some(2);
+        let json = serde_json::to_string(&seg).unwrap();
+        assert!(json.contains(r#""speaker_id":2"#));
+        assert_eq!(serde_json::from_str::<Segment>(&json).unwrap(), seg);
     }
 
     #[test]

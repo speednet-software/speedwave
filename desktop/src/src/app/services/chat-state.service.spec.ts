@@ -4,8 +4,11 @@ import { TestBed } from '@angular/core/testing';
 import { signal } from '@angular/core';
 import {
   ChatStateService,
+  CHAT_TAB_CLOSED,
   MAX_CHAT_TABS,
+  NEW_CHAT_TAB_LIMIT,
   NEW_CONVERSATION_BUSY,
+  NEW_CONVERSATION_STREAMING,
   SESSION_KEPT_MARKER,
   modelSwitchRefused,
 } from './chat-state.service';
@@ -517,6 +520,133 @@ describe('ChatStateService', () => {
         const store2 = service.tabs().get(tab2)!;
 
         expect((store2 as unknown as { _resumeDecider: unknown })._resumeDecider).toBeNull();
+      });
+    });
+
+    describe('claimTab', () => {
+      it('activates an open tab and returns its store', async () => {
+        const tab1 = service.activeTabId();
+        await service.openTab();
+
+        const store = service.claimTab(tab1);
+
+        expect(service.activeTabId()).toBe(tab1);
+        expect(store).toBe(service.tabs().get(tab1));
+      });
+
+      it('fails for a closed tab and leaves the active tab as it is', async () => {
+        const tab2 = await service.openTab();
+
+        expect(() => service.claimTab('closed-tab')).toThrow(CHAT_TAB_CLOSED);
+        expect(service.activeTabId()).toBe(tab2);
+      });
+    });
+
+    describe('openNewChat', () => {
+      const conversation = [
+        {
+          role: 'user' as const,
+          blocks: [{ type: 'text' as const, content: 'kept' }],
+          timestamp: 1,
+        },
+      ];
+
+      beforeEach(() => {
+        const projectState = TestBed.inject(ProjectStateService);
+        projectState.activeProject.set('test');
+        projectState.status.set('ready');
+      });
+
+      it('with beta opens a new active tab and leaves the open conversation as it is', async () => {
+        betaEnabled.set(true);
+        const tab1 = service.activeTabId();
+        service._setState({ messages: conversation });
+        const store1 = service.tabs().get(tab1)!;
+        const restart = vi.spyOn(store1, 'startNewConversation');
+
+        const tab2 = await service.openNewChat(service.activeTabId());
+
+        expect(tab2).not.toBe(tab1);
+        expect(service.tabs().size).toBe(2);
+        expect(service.activeTabId()).toBe(tab2);
+        expect(restart).not.toHaveBeenCalled();
+        expect(store1.messagesFromState()).toHaveLength(1);
+      });
+
+      it('with beta opens a new tab while the active tab is still replying', async () => {
+        betaEnabled.set(true);
+        service.isStreaming = true;
+        service._setState({ messages: conversation });
+        expect(service.isStreamingFromState()).toBe(true);
+
+        expect(service.newChatBlockedReason()).toBe('');
+        await service.openNewChat(service.activeTabId());
+
+        expect(service.tabs().size).toBe(2);
+      });
+
+      it('with beta at the tab cap refuses with the tab-limit reason and replaces nothing', async () => {
+        betaEnabled.set(true);
+        while (service.canOpenTab()) await service.openTab();
+        const active = service.activeTabId();
+        service._setState({ messages: conversation });
+        const restart = vi.spyOn(service.activeStore(), 'startNewConversation');
+
+        expect(service.newChatBlockedReason()).toBe(NEW_CHAT_TAB_LIMIT);
+        await expect(service.openNewChat(service.activeTabId())).rejects.toThrow(
+          NEW_CHAT_TAB_LIMIT
+        );
+
+        expect(service.tabs().size).toBe(MAX_CHAT_TABS);
+        expect(service.activeTabId()).toBe(active);
+        expect(restart).not.toHaveBeenCalled();
+        expect(service.messagesFromState()).toHaveLength(1);
+      });
+
+      it('with beta refuses while no project is ready, opening no tab', async () => {
+        betaEnabled.set(true);
+        TestBed.inject(ProjectStateService).status.set('loading');
+
+        expect(service.newChatBlockedReason()).toBe(NEW_CONVERSATION_BUSY);
+        await expect(service.openNewChat(service.activeTabId())).rejects.toThrow(
+          NEW_CONVERSATION_BUSY
+        );
+        expect(service.tabs().size).toBe(1);
+      });
+
+      it('without beta restarts the active conversation in place, as before tabs', async () => {
+        const tab1 = service.activeTabId();
+        const restart = vi
+          .spyOn(service.activeStore(), 'startNewConversation')
+          .mockResolvedValue(undefined);
+
+        expect(await service.openNewChat(service.activeTabId())).toBe(tab1);
+
+        expect(restart).toHaveBeenCalledTimes(1);
+        expect(service.tabs().size).toBe(1);
+      });
+
+      it('without beta refuses once the origin tab closed, restarting nothing', async () => {
+        const restart = vi.spyOn(service.activeStore(), 'startNewConversation');
+
+        await expect(service.openNewChat('closed-tab')).rejects.toThrow(CHAT_TAB_CLOSED);
+
+        expect(restart).not.toHaveBeenCalled();
+      });
+
+      it('with beta opens a new tab even when the origin tab already closed', async () => {
+        betaEnabled.set(true);
+
+        const tab2 = await service.openNewChat('closed-tab');
+
+        expect(service.activeTabId()).toBe(tab2);
+        expect(service.tabs().size).toBe(2);
+      });
+
+      it('without beta keeps the restart gate of the active conversation', () => {
+        service.isStreaming = true;
+        service._setState({ messages: conversation });
+        expect(service.newChatBlockedReason()).toBe(NEW_CONVERSATION_STREAMING);
       });
     });
 

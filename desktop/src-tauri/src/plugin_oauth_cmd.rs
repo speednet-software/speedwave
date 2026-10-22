@@ -138,12 +138,12 @@ pub async fn start_plugin_oauth(
                 );
                 return;
             }
-            Err(CallbackFailure::Error(e)) => {
+            Err(failure) => {
                 oauth_flow::emit_terminal(
                     &app,
                     &FLOW_STATE,
                     ProgressStatus::Error,
-                    &e,
+                    failure.message(),
                     &request_id,
                 );
                 return;

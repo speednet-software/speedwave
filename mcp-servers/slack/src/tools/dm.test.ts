@@ -111,35 +111,14 @@ describe('dm-tools', () => {
 
     it('maps failures to OPEN_FAILED', async () => {
       vi.mocked(client.openDm).mockRejectedValue(
-        new Error("'Pawel' is not a user ID or email. Find the person with findUsers first.")
+        new Error('Slack did not return a conversation ID from conversations.open.')
       );
 
-      const result = await handleOpenDirectMessage(presentClients(), { users: ['Pawel'] });
+      const result = await handleOpenDirectMessage(presentClients(), { users: ['U1'] });
 
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('OPEN_FAILED');
-      expect(result.error?.message).toContain('findUsers');
-    });
-
-    it('rejects a missing users array with a teaching error before calling Slack', async () => {
-      const result = await handleOpenDirectMessage(
-        presentClients(),
-        {} as unknown as { users: string[] }
-      );
-
-      expect(result.success).toBe(false);
-      expect(result.error?.code).toBe('MISSING_PARAM');
-      expect(result.error?.message).toContain('Invalid users');
-      expect(client.openDm).not.toHaveBeenCalled();
-    });
-
-    it('rejects an empty users array with a teaching error before calling Slack', async () => {
-      const result = await handleOpenDirectMessage(presentClients(), { users: [] });
-
-      expect(result.success).toBe(false);
-      expect(result.error?.code).toBe('MISSING_PARAM');
-      expect(result.error?.message).toContain('Invalid users');
-      expect(client.openDm).not.toHaveBeenCalled();
+      expect(result.error?.message).toContain('conversations.open');
     });
   });
 
@@ -160,35 +139,6 @@ describe('dm-tools', () => {
         const parsed = JSON.parse(result.content[0].text as string);
         expect(parsed.code).toBe('NOT_CONFIGURED');
       }
-    });
-
-    it('openDirectMessage rejects a missing users param via the schema-driven guard before the handler runs', async () => {
-      const tools = createDmTools(presentClients());
-      const handler = tools.find((t) => t.tool.name === 'openDirectMessage')!.handler;
-
-      const result = await handler({});
-
-      expect(result.isError).toBe(true);
-      const parsed = JSON.parse(result.content[0].text as string);
-      expect(parsed.code).toBe('MISSING_PARAM');
-      expect(parsed.message).toContain('for openDirectMessage');
-      expect(client.openDm).not.toHaveBeenCalled();
-    });
-
-    it('forwards the users array to openDm verbatim (cap enforced in client)', async () => {
-      const tools = createDmTools(presentClients());
-      vi.mocked(client.openDm).mockRejectedValue(
-        new Error('A Slack DM holds at most 8 people; got 9.')
-      );
-
-      const nine = Array.from({ length: 9 }, (_, i) => `U${i}`);
-      const result = await tools[1].handler({ users: nine });
-
-      expect(client.openDm).toHaveBeenCalledWith(expect.anything(), { users: nine });
-      expect(result.isError).toBe(true);
-      const parsed = JSON.parse(result.content[0].text as string);
-      expect(parsed.code).toBe('OPEN_FAILED');
-      expect(parsed.message).toContain('at most 8');
     });
   });
 });

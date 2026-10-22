@@ -205,6 +205,7 @@ $ {{ asBash(normalized()).command }}</pre>
               </div>
               <pre
                 data-testid="result-content"
+                data-find-scope
                 class="mono max-h-[300px] overflow-x-auto overflow-y-auto rounded border p-3 text-[11.5px] leading-[1.6]"
                 [class]="resultPaneClass()"
                 >{{ resultText() }}</pre>

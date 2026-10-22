@@ -34,3 +34,11 @@ dafb3d312f1a88da6caf759eed219f5579da6b20:desktop/src/src/app/services/transcript
 desktop/src/src/app/settings/transcription-section/transcription-section.component.spec.ts:generic-api-key:110
 desktop/src/src/app/settings/transcription-section/transcription-section.component.spec.ts:generic-api-key:139
 desktop/src/src/app/settings/transcription-section/transcription-section.component.spec.ts:generic-api-key:152
+
+crates/speedwave-runtime/src/transcription/model_catalog.rs:generic-api-key:272
+desktop/src/src/app/settings/transcription-section/transcription-section.component.spec.ts:generic-api-key:46
+desktop/src/src/app/settings/transcription-section/transcription-section.component.spec.ts:generic-api-key:607
+
+crates/speedwave-runtime/src/transcription/model_catalog.rs:generic-api-key:309
+desktop/src/src/app/settings/transcription-section/transcription-section.component.spec.ts:generic-api-key:48
+desktop/src/src/app/settings/transcription-section/transcription-section.component.spec.ts:generic-api-key:585

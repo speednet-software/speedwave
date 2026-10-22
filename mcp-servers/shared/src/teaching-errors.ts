@@ -53,7 +53,7 @@ export interface TeachingErrorParams {
  * Compose the teaching-style message body (no envelope): what was wrong, which tool provides a correct value, and the suggested next step — in that order.
  * @param params - What was wrong, where a correct value comes from, and what to do next.
  */
-function buildTeachingMessage(params: TeachingErrorParams): string {
+export function buildTeachingMessage(params: TeachingErrorParams): string {
   const { paramName, correctValueTool, nextStep } = params;
   const parts: string[] = [];
   if (paramName !== undefined) {
@@ -108,7 +108,7 @@ export function clampPageSize(value: unknown, def: number, max?: number): number
 }
 
 /**
- * Build a MISSING_PARAM teaching {@link ToolResult}: names the missing param, the received value, and the next step. Shared by slack / sharepoint required-param guards.
+ * Build a MISSING_PARAM teaching {@link ToolResult}: names the missing param, the received value, and the next step. Used by sharepoint's file tools and by {@link withResultValidation}'s required-param check.
  * @param paramName - Name of the missing or invalid parameter.
  * @param received - The value actually received.
  * @param nextStep - What the caller should do instead.

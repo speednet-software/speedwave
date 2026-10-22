@@ -80,9 +80,23 @@ function bySegmentStart(a: Segment, b: Segment): number {
 /** A timestamped transcript line, for rendering. */
 interface TranscriptLine {
   startLabel: string;
-  /** Channel label ('You' / 'Meeting') on paired captures, else null. */
+  /** Channel label ('You' / 'Meeting', 'Meeting · Speaker N' when diarized), else null. */
   speaker: string | null;
+  speakerColor: string | null;
   text: string;
+}
+
+const SPEAKER_COLORS = ['var(--teal)', 'var(--violet)', 'var(--amber)', 'var(--green)'];
+
+function speakerOf(seg: Segment): Pick<TranscriptLine, 'speaker' | 'speakerColor'> {
+  if (seg.source === 'mic') return { speaker: 'You', speakerColor: null };
+  if (seg.source !== 'system') return { speaker: null, speakerColor: null };
+  const n = seg.speaker_id;
+  if (n == null || n < 1) return { speaker: 'Meeting', speakerColor: null };
+  return {
+    speaker: `Meeting · Speaker ${n}`,
+    speakerColor: SPEAKER_COLORS[n - 1] ?? null,
+  };
 }
 
 /** The quality line under the title: its words and colour. */
@@ -490,6 +504,7 @@ interface ProgressAnchor {
                   <span
                     class="rounded bg-[var(--bg-2)] px-1 font-medium text-[var(--ink-dim)]"
                     data-testid="line-speaker"
+                    [style.color]="line.speakerColor"
                     >{{ line.speaker }}</span
                   >
                 }
@@ -557,7 +572,7 @@ export class LiveTranscriptComponent {
     const ordered = [...this.segments()].sort(bySegmentStart);
     return ordered.map((seg) => ({
       startLabel: fmtTs(seg.start.secs),
-      speaker: seg.source === 'mic' ? 'You' : seg.source === 'system' ? 'Meeting' : null,
+      ...speakerOf(seg),
       text: seg.text.trim(),
     }));
   });
@@ -715,9 +730,14 @@ export class LiveTranscriptComponent {
   });
 
   /** Which model Transcribe again would use. */
-  readonly retranscribeHint = computed(() =>
-    this.bestModelReady() ? 'with the high-quality model' : 'with the model on this machine'
-  );
+  readonly retranscribeHint = computed(() => {
+    const model = this.bestModelReady()
+      ? 'with the high-quality model'
+      : 'with the model on this machine';
+    return this.session()?.models_used.diarization
+      ? `${model}. Speaker numbers can change.`
+      : model;
+  });
 
   /** Why the last transcription failed, while the session is failed. */
   readonly failureReason = computed(() => {
@@ -778,7 +798,7 @@ export class LiveTranscriptComponent {
    * transcript-readiness gates, so the disabled state matches what the send would refuse.
    */
   readonly sendBlockedReason = computed(
-    () => this.transcriptBlockedReason() || this.chat.newConversationBlockedReason()
+    () => this.transcriptBlockedReason() || this.chat.newChatBlockedReason()
   );
 
   /**

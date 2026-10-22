@@ -1,6 +1,6 @@
 /** Central registry for all Slack tools (domain-tools pattern). */
 
-import { ToolDefinition } from '@speedwave/mcp-shared';
+import { ToolDefinition, withDeclaredParams } from '@speedwave/mcp-shared';
 import { SlackClients } from '../client.js';
 
 export { withValidation, ToolResult } from './validation.js';
@@ -20,5 +20,5 @@ export function createToolDefinitions(clients: SlackClients): ToolDefinition[] {
     ...createDmTools(clients),
     ...createFileTools(clients),
     ...createUserTools(clients),
-  ];
+  ].map(({ tool, handler }) => ({ tool, handler: withDeclaredParams(tool, handler) }));
 }

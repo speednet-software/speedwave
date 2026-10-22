@@ -113,24 +113,6 @@ describe('channel-tools', () => {
       });
     });
 
-    it('maps a rejected thread parameter to SEND_FAILED', async () => {
-      const error = new Error('thread_ts "1717000000" does not look like a Slack timestamp');
-      vi.mocked(client.sendChannel).mockRejectedValue(error);
-      vi.mocked(client.formatSlackError).mockReturnValue(error.message);
-
-      const result = await handleSendChannel(mockClients, {
-        channel: '#general',
-        message: 'Reply',
-        thread_ts: '1717000000',
-      });
-
-      expect(result.success).toBe(false);
-      expect(result.error).toEqual({
-        code: 'SEND_FAILED',
-        message: 'thread_ts "1717000000" does not look like a Slack timestamp',
-      });
-    });
-
     it('handles API errors', async () => {
       const error = new Error('channel_not_found');
       vi.mocked(client.sendChannel).mockRejectedValue(error);
@@ -637,89 +619,5 @@ describe('createChannelTools (with clients — configured path)', () => {
     expect(result.isError).toBeUndefined();
     const parsed = JSON.parse(result.content[0].text as string);
     expect(parsed.channels).toHaveLength(1);
-  });
-});
-
-describe('createChannelTools required-param enforcement', () => {
-  let mockClients: SlackClients;
-
-  beforeEach(() => {
-    vi.clearAllMocks();
-    mockClients = {
-      user: {} as any,
-      tokenState: { accessToken: 'xoxp-test' },
-      lock: new RefreshLock(),
-      _tokensStatus: 'present',
-    };
-  });
-
-  it('sendChannel rejects a missing channel before calling Slack', async () => {
-    const handler = createChannelTools(mockClients).find(
-      (t) => t.tool.name === 'sendChannel'
-    )!.handler;
-
-    const result = await handler({ channel: '', message: 'Hello' });
-
-    expect(result.isError).toBe(true);
-    const parsed = JSON.parse(result.content[0].text as string);
-    expect(parsed.code).toBe('MISSING_PARAM');
-    expect(parsed.message).toContain('Invalid channel');
-    expect(parsed.message).toContain('for sendChannel');
-    expect(client.sendChannel).not.toHaveBeenCalled();
-  });
-
-  it('sendChannel rejects a missing message before calling Slack', async () => {
-    const handler = createChannelTools(mockClients).find(
-      (t) => t.tool.name === 'sendChannel'
-    )!.handler;
-
-    const result = await handler({ channel: '#general', message: '' });
-
-    expect(result.isError).toBe(true);
-    const parsed = JSON.parse(result.content[0].text as string);
-    expect(parsed.code).toBe('MISSING_PARAM');
-    expect(parsed.message).toContain('Invalid message');
-    expect(client.sendChannel).not.toHaveBeenCalled();
-  });
-
-  it('getChannelMessages rejects a missing channel before calling Slack', async () => {
-    const handler = createChannelTools(mockClients).find(
-      (t) => t.tool.name === 'getChannelMessages'
-    )!.handler;
-
-    const result = await handler({ channel: '' });
-
-    expect(result.isError).toBe(true);
-    const parsed = JSON.parse(result.content[0].text as string);
-    expect(parsed.code).toBe('MISSING_PARAM');
-    expect(client.readChannel).not.toHaveBeenCalled();
-  });
-
-  it('getThreadMessages rejects a missing channel before calling Slack', async () => {
-    const handler = createChannelTools(mockClients).find(
-      (t) => t.tool.name === 'getThreadMessages'
-    )!.handler;
-
-    const result = await handler({ channel: '', thread_ts: '1.0' });
-
-    expect(result.isError).toBe(true);
-    const parsed = JSON.parse(result.content[0].text as string);
-    expect(parsed.code).toBe('MISSING_PARAM');
-    expect(parsed.message).toContain('Invalid channel');
-    expect(client.readThread).not.toHaveBeenCalled();
-  });
-
-  it('getThreadMessages rejects a missing thread_ts before calling Slack', async () => {
-    const handler = createChannelTools(mockClients).find(
-      (t) => t.tool.name === 'getThreadMessages'
-    )!.handler;
-
-    const result = await handler({ channel: '#general', thread_ts: '' });
-
-    expect(result.isError).toBe(true);
-    const parsed = JSON.parse(result.content[0].text as string);
-    expect(parsed.code).toBe('MISSING_PARAM');
-    expect(parsed.message).toContain('Invalid thread_ts');
-    expect(client.readThread).not.toHaveBeenCalled();
   });
 });

@@ -20,10 +20,9 @@ import { ChatStateService } from '../services/chat-state.service';
 import { PlanUsageService } from '../services/plan-usage.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { UiStateService } from '../services/ui-state.service';
-import { TranscriptionService } from '../services/transcription.service';
 import { LoggerService } from '../services/logger.service';
 import { BetaService } from '../services/beta.service';
-import type { ConversationSummary, ChatAttachment } from '../models/chat';
+import type { ConversationSummary, ChatAttachment, StagedTranscript } from '../models/chat';
 import { formatContextLabel } from '../models/llm';
 import { ChatHeaderComponent } from './header/chat-header.component';
 import { ChatMessageListComponent } from './message-list/chat-message-list.component';
@@ -33,6 +32,7 @@ import { MemoryPanelComponent } from './memory-panel/memory-panel.component';
 import { ConversationsSidebarComponent } from './conversations-sidebar/conversations-sidebar.component';
 import { ModalOverlayComponent } from '../shell/modal-overlay/modal-overlay.component';
 import { capitalizeLevel } from './composer/model-selector/effort-slider.component';
+import { onRequestCounter } from '../shared/request-counter';
 
 /** Chat component that handles message rendering, user input, and streaming responses from Claude. */
 @Component({
@@ -102,7 +102,6 @@ export class ChatComponent implements OnInit, OnDestroy {
   readonly projectState = inject(ProjectStateService);
   private readonly planUsage = inject(PlanUsageService);
   readonly ui = inject(UiStateService);
-  readonly transcription = inject(TranscriptionService);
   private readonly beta = inject(BetaService);
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
@@ -156,15 +155,8 @@ export class ChatComponent implements OnInit, OnDestroy {
       });
     });
 
-    effect(() => {
-      const requested = this.ui.restartRequested();
-      untracked(() => {
-        const previous = this.previousRestartRequest;
-        this.previousRestartRequest = requested;
-        if (previous === null || previous === requested) return;
-        void this.newConversation();
-      });
-    });
+    onRequestCounter(this.ui.restartRequested, () => void this.newConversation());
+    onRequestCounter(this.ui.findRequested, () => this.openFind());
 
     this.restoreIncomingTabState(this.previousTabId);
   }
@@ -172,11 +164,25 @@ export class ChatComponent implements OnInit, OnDestroy {
   private previousTabId: string = this.chat.activeTabId();
   /** Tab id whose composer restore is still queued; guards against saving its stale pre-restore content. */
   private pendingRestoreTabId: string | null = null;
+  /** Bumped on every ⌘F so the message list puts the caret into the find bar. */
+  readonly findFocusRequest = signal(0);
+
   /**
-   * Last seen value of `UiStateService.restartRequested`; `null` until the first effect run so a
-   * component (re)mount never replays a request bumped before it existed (shell's ⌘R channel).
+   * Opens the active tab's find bar with the chat's current selection as the query (a single line
+   * inside the message list), else with the tab's last query, and focuses the field.
    */
-  private previousRestartRequest: number | null = null;
+  openFind(): void {
+    this.chat.activeStore().openFind(this.messageList?.selectedText() ?? '');
+    this.findFocusRequest.update((n) => n + 1);
+    this.cdr.markForCheck();
+  }
+
+  /** Closes the active tab's find bar and hands the focus back to the composer. */
+  onFindClosed(): void {
+    this.chat.activeStore().closeFind();
+    this.composer?.focusInput();
+    this.cdr.markForCheck();
+  }
 
   /**
    * Snapshots the outgoing tab's draft, plan mode and scroll offset before the view rebinds.
@@ -200,7 +206,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   private restoreIncomingTabState(tabId: string): void {
     const store = this.chat.tabs().get(tabId);
     if (!store) return;
-    const transcriptPending = this.transcription.chatPromptDraft() !== '';
+    const transcriptPending = store.composerPromptDraft() !== '';
     const applyDraft = (): void => {
       if (this.pendingRestoreTabId === tabId) this.pendingRestoreTabId = null;
       if (!this.composer || this.chat.activeTabId() !== tabId) return;
@@ -323,11 +329,13 @@ export class ChatComponent implements OnInit, OnDestroy {
     if (this.chat.isStreaming) return;
     if (!event?.payload && attachments.length === 0) return;
     this.cdr.markForCheck();
+    const store = this.chat.activeStore();
+    const staged = store.stagedTranscript();
     await this.chat.sendMessage(
-      { text: this.withStagedTranscript(event.payload ?? ''), attachments },
+      { text: withStagedTranscript(event.payload ?? '', staged), attachments },
       event.displayText
     );
-    this.transcription.clearStagedTranscript();
+    if (staged) store.unstageTranscript(staged);
   }
 
   /**
@@ -336,14 +344,11 @@ export class ChatComponent implements OnInit, OnDestroy {
    */
   async onQueueRequested(text: string): Promise<void> {
     if (!text) return;
-    await this.chat.queueMessage(this.withStagedTranscript(text));
-    this.transcription.clearStagedTranscript();
+    const store = this.chat.activeStore();
+    const staged = store.stagedTranscript();
+    await this.chat.queueMessage(withStagedTranscript(text, staged));
+    if (staged) store.unstageTranscript(staged);
     this.cdr.markForCheck();
-  }
-
-  private withStagedTranscript(text: string): string {
-    const staged = this.transcription.stagedTranscript();
-    return staged ? `${text}\n\n${staged}` : text;
   }
 
   /** ADR-045 — composer signalled queue cancellation (X button). */
@@ -572,4 +577,8 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.contextOverflowResolve = null;
     resolve?.('fresh');
   }
+}
+
+function withStagedTranscript(text: string, staged: StagedTranscript | null): string {
+  return staged ? `${text}\n\n${staged.markdown}` : text;
 }

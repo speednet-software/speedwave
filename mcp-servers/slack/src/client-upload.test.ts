@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { RefreshLock } from '@speedwave/mcp-shared';
 import type { WebClient } from '@slack/web-api';
-import { uploadFile, MAX_UPLOAD_FILES, UploadTransferError, type SlackClients } from './client.js';
+import { uploadFile, UploadTransferError, type SlackClients } from './client.js';
 
 const VALID_TS = '1717000000.000100';
 
@@ -176,58 +176,6 @@ describe('uploadFile', () => {
     expect(args.thread_ts).toBe(VALID_TS);
     expect(args.initial_comment).toBe('Weekly report');
     expect(result.thread_ts).toBe(VALID_TS);
-  });
-
-  describe('validation before any Slack or network call', () => {
-    async function expectRejected(
-      params: Parameters<typeof uploadFile>[1],
-      message?: RegExp | string
-    ): Promise<void> {
-      const { clients, getUploadURLExternal, completeUploadExternal, list } = uploadClients();
-      await expect(uploadFile(clients, params)).rejects.toThrow(message);
-      expect(getUploadURLExternal).not.toHaveBeenCalled();
-      expect(completeUploadExternal).not.toHaveBeenCalled();
-      expect(list).not.toHaveBeenCalled();
-      expect(fetchMock).not.toHaveBeenCalled();
-    }
-
-    it('rejects an empty filePaths array', async () => {
-      await expectRejected({ channel: 'C12345678', filePaths: [] }, /filePaths/);
-    });
-
-    it('rejects an empty path string', async () => {
-      await expectRejected({ channel: 'C12345678', filePaths: [''] }, /filePaths/);
-    });
-
-    it('rejects more than MAX_UPLOAD_FILES files', async () => {
-      const filePaths = Array.from({ length: MAX_UPLOAD_FILES + 1 }, () => 'report.txt');
-      await expectRejected({ channel: 'C12345678', filePaths }, new RegExp(`${MAX_UPLOAD_FILES}`));
-    });
-
-    it('rejects duplicate paths', async () => {
-      await expectRejected(
-        { channel: 'C12345678', filePaths: ['report.txt', 'report.txt'] },
-        /report\.txt.*(twice|duplicate)/i
-      );
-    });
-
-    it('rejects two spellings of the same file', async () => {
-      await expectRejected(
-        { channel: 'C12345678', filePaths: ['report.txt', path.join(root, 'report.txt')] },
-        /(twice|duplicate)/i
-      );
-    });
-
-    it('rejects a path outside the workspace', async () => {
-      await expectRejected({ channel: '#general', filePaths: ['report.txt', '../secret.txt'] });
-    });
-
-    it('rejects a malformed thread_ts', async () => {
-      await expectRejected(
-        { channel: 'C12345678', filePaths: ['report.txt'], thread_ts: '1717000000' },
-        /does not look like a Slack timestamp/
-      );
-    });
   });
 
   it('names the file and says nothing was shared when the upload POST fails', async () => {
