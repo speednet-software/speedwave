@@ -819,7 +819,7 @@ describe('TranscriptionService', () => {
       expect(svc.highQualityModel()?.key).toBe('turbo');
     });
 
-    it('keeps the last read when a re-read fails', async () => {
+    it('keeps the last read and rethrows when a re-read fails', async () => {
       mockTauri.invokeHandler = async () => ({
         live: entry('small', true),
         finalize: entry('large', true),
@@ -829,8 +829,27 @@ describe('TranscriptionService', () => {
       mockTauri.invokeHandler = async () => {
         throw new Error('ipc down');
       };
-      await svc.loadRecommendedModel();
+      await expect(svc.loadRecommendedModel()).rejects.toThrow('ipc down');
       expect(svc.highQualityModel()?.key).toBe('large');
+      expect(svc.recommended()?.finalize?.key).toBe('large');
+    });
+
+    it('refreshModelState keeps the last read when the recommended-model read fails', async () => {
+      mockTauri.invokeHandler = async (cmd) => {
+        if (cmd === 'recommended_transcription_model') {
+          return { live: entry('small', true), finalize: null, accel_label: 'CPU' };
+        }
+        return { whisper: [], total_bytes_used: 0 };
+      };
+      await svc.refreshModelState();
+      expect(svc.highQualityModel()?.key).toBe('small');
+      mockTauri.invokeHandler = async (cmd) => {
+        if (cmd === 'recommended_transcription_model') throw new Error('ipc down');
+        return { whisper: [{ key: 'small', downloaded: true, size_bytes: 1, path: '/m' }] };
+      };
+      await svc.refreshModelState();
+      expect(svc.highQualityModel()?.key).toBe('small');
+      expect(svc.modelReady()).toBe(true);
     });
 
     it('re-reads it after a download finishes', async () => {
@@ -1584,6 +1603,109 @@ describe('TranscriptionService', () => {
       await subscribeWith(snapshot({ last_seq: 5 }));
       warn('capture_warning', 'system_audio_silent', 3);
       expect(svc.captureWarnings()).toEqual([]);
+    });
+  });
+
+  describe('model ready', () => {
+    const list = (downloaded: boolean) => ({
+      whisper: [{ key: 'large-v3', downloaded, size_bytes: 1, path: downloaded ? '/m' : null }],
+      total_bytes_used: downloaded ? 1 : 0,
+    });
+    const recommended = (downloaded: boolean, downloading = false) => ({
+      live: { key: 'large-v3', display_name: 'Large v3', size_bytes: 1, downloaded, downloading },
+      finalize: null,
+      accel_label: 'CPU',
+    });
+
+    it('is null until the first read, then whether any Whisper model is downloaded', async () => {
+      expect(svc.modelReady()).toBeNull();
+      mockTauri.invokeHandler = async () => list(false);
+      await svc.refreshModelReady();
+      expect(svc.modelReady()).toBe(false);
+      mockTauri.invokeHandler = async () => list(true);
+      await svc.refreshModelReady();
+      expect(svc.modelReady()).toBe(true);
+    });
+
+    it('fails open on a read error', async () => {
+      mockTauri.invokeHandler = async () => {
+        throw new Error('ipc down');
+      };
+      await svc.refreshModelReady();
+      expect(svc.modelReady()).toBe(true);
+    });
+
+    it('turns true when a download finishes, with no component re-read', async () => {
+      let downloaded = false;
+      mockTauri.invokeHandler = async (cmd) => {
+        if (cmd === 'download_transcription_model') downloaded = true;
+        if (cmd === 'list_transcription_models') return list(downloaded);
+        if (cmd === 'recommended_transcription_model') return recommended(downloaded);
+        return undefined;
+      };
+      await svc.refreshModelState();
+      expect(svc.modelReady()).toBe(false);
+      await svc.downloadModel('large-v3');
+      expect(svc.modelReady()).toBe(true);
+      expect(svc.recommended()?.live.downloaded).toBe(true);
+    });
+
+    it('stays as it was when the download fails', async () => {
+      mockTauri.invokeHandler = async (cmd) => {
+        if (cmd === 'download_transcription_model') throw new Error('integrity check failed');
+        if (cmd === 'list_transcription_models') return list(false);
+        return recommended(false);
+      };
+      await svc.refreshModelState();
+      await expect(svc.downloadModel('large-v3')).rejects.toThrow('integrity check');
+      expect(svc.modelReady()).toBe(false);
+    });
+
+    it('turns false again after a model is deleted', async () => {
+      let downloaded = true;
+      mockTauri.invokeHandler = async (cmd) => {
+        if (cmd === 'delete_transcription_model') downloaded = false;
+        if (cmd === 'list_transcription_models') return list(downloaded);
+        if (cmd === 'recommended_transcription_model') return recommended(downloaded);
+        return undefined;
+      };
+      await svc.refreshModelState();
+      expect(svc.modelReady()).toBe(true);
+      await svc.deleteModel('large-v3');
+      expect(svc.modelReady()).toBe(false);
+      expect(svc.recommended()?.live.downloaded).toBe(false);
+    });
+
+    describe('a resumed download', () => {
+      beforeEach(() => {
+        vi.useFakeTimers();
+      });
+
+      afterEach(() => {
+        vi.useRealTimers();
+      });
+
+      it('sets modelReady and the recommended state once the poll sees it finish', async () => {
+        let downloading = true;
+        mockTauri.invokeHandler = async (cmd) => {
+          if (cmd === 'list_transcription_models') return list(!downloading);
+          if (cmd === 'recommended_transcription_model') {
+            return recommended(!downloading, downloading);
+          }
+          return undefined;
+        };
+        await svc.refreshModelState();
+        expect(svc.modelReady()).toBe(false);
+        await svc.resumeDownloadTracking('large-v3');
+        await vi.advanceTimersByTimeAsync(2000);
+        expect(svc.recommended()?.live.downloading).toBe(true);
+        expect(svc.modelReady()).toBe(false);
+        downloading = false;
+        await vi.advanceTimersByTimeAsync(2000);
+        expect(svc.downloadingModelKey()).toBeNull();
+        expect(svc.recommended()?.live.downloaded).toBe(true);
+        expect(svc.modelReady()).toBe(true);
+      });
     });
   });
 

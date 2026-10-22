@@ -28,7 +28,9 @@ describe('MeetingTranscriptionComponent', () => {
     recommendedModel: ReturnType<typeof vi.fn>;
     listAudioSources: ReturnType<typeof vi.fn>;
     liveTranscriptPreferred: ReturnType<typeof vi.fn>;
-    listModels: ReturnType<typeof vi.fn>;
+    modelReady: typeof modelReadySig;
+    refreshModelReady: ReturnType<typeof vi.fn>;
+    refreshModelState: ReturnType<typeof vi.fn>;
     watchRecordings: ReturnType<typeof vi.fn>;
     recordings: Signal<TranscriptSummary[]>;
     recordingsError: Signal<string>;
@@ -50,11 +52,11 @@ describe('MeetingTranscriptionComponent', () => {
     highQualityModel: typeof highQualityModelSig;
     downloadingModelKey: typeof downloadingModelKeySig;
     downloadProgress: typeof downloadProgressSig;
-    loadRecommendedModel: ReturnType<typeof vi.fn>;
     downloadModel: ReturnType<typeof vi.fn>;
     recordingChoice: ReturnType<typeof vi.fn>;
     setRecordingChoice: ReturnType<typeof vi.fn>;
   };
+  const modelReadySig = signal<boolean | null>(null);
   const pausedRecordingSig = signal<TranscriptSummary | null>(null);
   const highQualityModelSig = signal<RecommendedModelEntry | null>(null);
   const downloadingModelKeySig = signal<string | null>(null);
@@ -76,12 +78,8 @@ describe('MeetingTranscriptionComponent', () => {
     accel_label: 'CPU',
   });
 
-  const models = (downloaded: boolean) => ({
-    whisper: [{ key: 'large-v3', downloaded, size_bytes: 3_100_000_000, path: null }],
-    total_bytes_used: downloaded ? 3_100_000_000 : 0,
-  });
-
   beforeEach(async () => {
+    modelReadySig.set(true);
     activeSig.set(null);
     captureWarningsSig.set([]);
     recordingSessionIdSig.set(null);
@@ -106,7 +104,9 @@ describe('MeetingTranscriptionComponent', () => {
       recommendedModel: vi.fn(async () => recommended(true)),
       listAudioSources: vi.fn(async () => []),
       liveTranscriptPreferred: vi.fn(() => false),
-      listModels: vi.fn(async () => models(true)),
+      modelReady: modelReadySig,
+      refreshModelReady: vi.fn(async () => undefined),
+      refreshModelState: vi.fn(async () => undefined),
       watchRecordings: vi.fn(async () => undefined),
       recordings: signal<TranscriptSummary[]>([]),
       recordingsError: signal(''),
@@ -133,8 +133,9 @@ describe('MeetingTranscriptionComponent', () => {
       highQualityModel: highQualityModelSig,
       downloadingModelKey: downloadingModelKeySig,
       downloadProgress: downloadProgressSig,
-      loadRecommendedModel: vi.fn(async () => undefined),
-      downloadModel: vi.fn(async () => undefined),
+      downloadModel: vi.fn(async () => {
+        modelReadySig.set(true);
+      }),
       recordingChoice: vi.fn(() => null),
       setRecordingChoice: vi.fn(),
     };
@@ -161,7 +162,7 @@ describe('MeetingTranscriptionComponent', () => {
   });
 
   it('shows the model-required gate (and hides the panes) when no model is downloaded', async () => {
-    svc.listModels.mockResolvedValue(models(false));
+    modelReadySig.set(false);
     await component.ngOnInit();
     fixture.detectChanges();
     const gate = fixture.nativeElement.querySelector('[data-testid="model-required-gate"]');
@@ -178,45 +179,64 @@ describe('MeetingTranscriptionComponent', () => {
     expect(fixture.nativeElement.querySelector('header')).toBeNull();
   });
 
-  it('fails open (shows the panes) if the model check errors', async () => {
-    svc.listModels.mockRejectedValue(new Error('boom'));
+  it('shows the panes while the model state is still unknown', async () => {
+    modelReadySig.set(null);
     await component.ngOnInit();
     fixture.detectChanges();
-    expect(component.modelReady()).toBe(true);
     expect(fixture.nativeElement.querySelector('[data-testid="model-required-gate"]')).toBeNull();
     expect(fixture.nativeElement.querySelector('app-recording-controls')).not.toBeNull();
   });
 
+  it('reads the model state through the service on init', async () => {
+    await component.ngOnInit();
+    expect(svc.refreshModelState).toHaveBeenCalled();
+  });
+
   it('clears the gate when the window regains focus after a Settings download', async () => {
-    svc.listModels.mockResolvedValue(models(false));
+    modelReadySig.set(false);
     await component.ngOnInit();
     fixture.detectChanges();
-    expect(component.modelReady()).toBe(false);
-    svc.listModels.mockResolvedValue(models(true));
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="model-required-gate"]')
+    ).not.toBeNull();
+    svc.refreshModelReady.mockImplementationOnce(async () => {
+      modelReadySig.set(true);
+    });
     window.dispatchEvent(new Event('focus'));
     await Promise.resolve();
     await Promise.resolve();
     fixture.detectChanges();
-    expect(component.modelReady()).toBe(true);
+    expect(svc.refreshModelReady).toHaveBeenCalledTimes(1);
     expect(fixture.nativeElement.querySelector('[data-testid="model-required-gate"]')).toBeNull();
+  });
+
+  it('skips the re-check when the document goes hidden', async () => {
+    await component.ngOnInit();
+    const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+    document.dispatchEvent(new Event('visibilitychange'));
+    await Promise.resolve();
+    expect(svc.refreshModelReady).not.toHaveBeenCalled();
+    visibility.mockReturnValue('visible');
+    document.dispatchEvent(new Event('visibilitychange'));
+    await Promise.resolve();
+    expect(svc.refreshModelReady).toHaveBeenCalledTimes(1);
+    visibility.mockRestore();
   });
 
   it('registers the focus/visibility listeners even if resumeActiveRecording rejects', async () => {
     svc.resumeActiveRecording.mockRejectedValueOnce(new Error('subscribe_transcript failed'));
     await component.ngOnInit();
-    svc.listModels.mockClear();
     window.dispatchEvent(new Event('focus'));
     await Promise.resolve();
-    expect(svc.listModels).toHaveBeenCalled();
+    expect(svc.refreshModelReady).toHaveBeenCalled();
   });
 
   it('removes the focus/visibility listeners on destroy', async () => {
     await component.ngOnInit();
     await component.ngOnDestroy();
-    svc.listModels.mockClear();
     window.dispatchEvent(new Event('focus'));
     await Promise.resolve();
-    expect(svc.listModels).not.toHaveBeenCalled();
+    expect(svc.refreshModelReady).not.toHaveBeenCalled();
   });
 
   it('says in one line that everything stays local until a transcript is sent', () => {
@@ -268,11 +288,6 @@ describe('MeetingTranscriptionComponent', () => {
     expect(link.getAttribute('href')).toContain('/settings');
   });
 
-  it('loads which model is the high-quality one on init', async () => {
-    await component.ngOnInit();
-    expect(svc.loadRecommendedModel).toHaveBeenCalled();
-  });
-
   it('opens the recording the bar names, and not again when it is already open', async () => {
     await component.onOpenById('sess-2');
     expect(svc.subscribeToTranscript).toHaveBeenCalledWith('sess-2');
@@ -284,7 +299,7 @@ describe('MeetingTranscriptionComponent', () => {
 
   describe('first-run gate', () => {
     beforeEach(async () => {
-      svc.listModels.mockResolvedValue(models(false));
+      modelReadySig.set(false);
       highQualityModelSig.set({
         key: 'large-v3',
         display_name: 'Large v3',
@@ -297,12 +312,23 @@ describe('MeetingTranscriptionComponent', () => {
     });
 
     it('downloads the high-quality model in place and lifts the gate', async () => {
-      svc.listModels.mockResolvedValue(models(true));
       fixture.nativeElement.querySelector('[data-testid="gate-download"]').click();
       await fixture.whenStable();
       fixture.detectChanges();
       expect(svc.downloadModel).toHaveBeenCalledWith('large-v3');
-      expect(component.modelReady()).toBe(true);
+      expect(fixture.nativeElement.querySelector('[data-testid="model-required-gate"]')).toBeNull();
+    });
+
+    it('lifts the gate when a download another instance started finishes after this mount', async () => {
+      downloadingModelKeySig.set('large-v3');
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('[data-testid="gate-progress"]')).not.toBeNull();
+      downloadingModelKeySig.set(null);
+      modelReadySig.set(true);
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('[data-testid="model-required-gate"]')).toBeNull();
+      expect(fixture.nativeElement.querySelector('[data-testid="gate-download"]')).toBeNull();
+      expect(fixture.nativeElement.querySelector('app-recording-controls')).not.toBeNull();
     });
 
     it('shows the progress while the download runs', () => {
@@ -323,7 +349,9 @@ describe('MeetingTranscriptionComponent', () => {
       svc.downloadModel.mockRejectedValueOnce(new Error('network down'));
       await component.downloadFromGate();
       fixture.detectChanges();
-      expect(component.modelReady()).toBe(false);
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="model-required-gate"]')
+      ).not.toBeNull();
       expect(
         fixture.nativeElement.querySelector('[data-testid="gate-error"]').textContent
       ).toContain('network down');

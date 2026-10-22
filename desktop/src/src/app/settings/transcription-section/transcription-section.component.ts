@@ -322,11 +322,13 @@ const SPEAKER_COST_TEXT = {
   `,
 })
 export class TranscriptionSectionComponent implements OnInit {
+  private readonly transcription = inject(TranscriptionService);
+
   /** Forwards errors to the Settings shell banner. */
   readonly errorOccurred = output<string>();
 
-  /** The recommended models + their state; `null` while loading. */
-  readonly model = signal<RecommendedModelAck | null>(null);
+  /** The recommended models + their state, read from the service; `null` while loading. */
+  readonly model = computed<RecommendedModelAck | null>(() => this.transcription.recommended());
 
   /**
    * Rows the card renders: the live model, plus the offline one when it is a different model, plus
@@ -415,8 +417,6 @@ export class TranscriptionSectionComponent implements OnInit {
     }
     return `Speech recognition needs one download (${this.size(best)}). After that it works offline.`;
   });
-
-  private readonly transcription = inject(TranscriptionService);
 
   /** Whether new recordings show live text (off unless the user turned it on). */
   readonly liveTranscript = signal(this.transcription.liveTranscriptPreferred());
@@ -526,8 +526,7 @@ export class TranscriptionSectionComponent implements OnInit {
   /** Re-reads the recommended-model state and re-syncs download tracking. */
   private async refresh(): Promise<void> {
     try {
-      const ack = await this.transcription.recommendedModel();
-      this.model.set(ack);
+      await this.transcription.loadRecommendedModel();
       const inFlight = this.modelRows().find((r) => r.entry.downloading);
       const tracked = this.transcription.downloadingModelKey();
       if (inFlight && tracked !== inFlight.entry.key) {

@@ -39,7 +39,7 @@ import { SessionListComponent } from './session-list/session-list.component';
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <section class="flex h-full flex-1 flex-col overflow-hidden bg-[var(--bg)] text-[var(--ink)]">
-      @if (modelReady() === false) {
+      @if (transcription.modelReady() === false) {
         <section
           class="flex flex-1 flex-col items-center justify-center bg-[var(--bg)] p-8"
           data-testid="model-required-gate"
@@ -206,8 +206,6 @@ import { SessionListComponent } from './session-list/session-list.component';
 export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
   /** Latest error string (rendered in a banner). */
   readonly error = signal('');
-  /** `null` while loading, `true` if the model is downloaded, `false` shows the gate. */
-  readonly modelReady = signal<boolean | null>(null);
 
   protected readonly transcription = inject(TranscriptionService);
   private readonly log = inject(LoggerService);
@@ -273,14 +271,15 @@ export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
 
   /** Re-checks model availability when the window/tab regains focus. */
   private readonly onActivate = (): void => {
-    void this.refreshModelReady();
+    if (document.visibilityState === 'hidden') return;
+    void this.transcription.refreshModelReady();
   };
 
   /** Checks model availability on first paint and re-checks on re-activation. */
   async ngOnInit(): Promise<void> {
     window.addEventListener('focus', this.onActivate);
     document.addEventListener('visibilitychange', this.onActivate);
-    await Promise.all([this.refreshModelReady(), this.transcription.loadRecommendedModel()]);
+    await this.transcription.refreshModelState();
     try {
       await this.transcription.resumeActiveRecording();
     } catch (err) {
@@ -293,21 +292,6 @@ export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
     window.removeEventListener('focus', this.onActivate);
     document.removeEventListener('visibilitychange', this.onActivate);
     if (!this.transcription.liveStreamNeeded()) await this.transcription.detach();
-  }
-
-  /**
-   * Lifts the gate when any Whisper model is downloaded — the same predicate
-   * recording-controls uses for `hasModel()`. Fails open on a read error.
-   */
-  private async refreshModelReady(): Promise<void> {
-    if (document.visibilityState === 'hidden') return;
-    try {
-      const ack = await this.transcription.listModels();
-      this.modelReady.set(ack.whisper.some((m) => m.downloaded));
-    } catch (err) {
-      this.log.warn(`model-availability check failed: ${String(err)}`);
-      this.modelReady.set(true);
-    }
   }
 
   /**
@@ -345,14 +329,13 @@ export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
     }
   }
 
-  /** Downloads the high-quality model from the gate, then lifts the gate. */
+  /** Downloads the high-quality model from the gate; the service lifts the gate when it lands. */
   async downloadFromGate(): Promise<void> {
     const best = this.transcription.highQualityModel();
     if (!best) return;
     this.error.set('');
     try {
       await this.transcription.downloadModel(best.key);
-      await this.refreshModelReady();
     } catch (err: unknown) {
       this.error.set(err instanceof Error ? err.message : String(err));
     }

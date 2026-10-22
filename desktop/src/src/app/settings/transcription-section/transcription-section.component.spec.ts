@@ -17,8 +17,11 @@ describe('TranscriptionSectionComponent', () => {
   let fixture: ComponentFixture<TranscriptionSectionComponent>;
   let downloadingModelKey: ReturnType<typeof signal<string | null>>;
   let downloadProgress: ReturnType<typeof signal<DownloadProgress | null>>;
+  let recommended: ReturnType<typeof signal<RecommendedModelAck | null>>;
   let svc: {
     recommendedModel: ReturnType<typeof vi.fn>;
+    recommended: typeof recommended;
+    loadRecommendedModel: ReturnType<typeof vi.fn>;
     downloadModel: ReturnType<typeof vi.fn>;
     deleteModel: ReturnType<typeof vi.fn>;
     resumeDownloadTracking: ReturnType<typeof vi.fn>;
@@ -66,9 +69,15 @@ describe('TranscriptionSectionComponent', () => {
   beforeEach(async () => {
     downloadingModelKey = signal<string | null>(null);
     downloadProgress = signal<DownloadProgress | null>(null);
+    recommended = signal<RecommendedModelAck | null>(null);
     platform = 'macos';
+    const recommendedModel = vi.fn(async (): Promise<RecommendedModelAck> => notDownloaded);
     svc = {
-      recommendedModel: vi.fn(async () => notDownloaded),
+      recommendedModel,
+      recommended,
+      loadRecommendedModel: vi.fn(async () => {
+        recommended.set(await recommendedModel());
+      }),
       downloadModel: vi.fn(async () => undefined),
       deleteModel: vi.fn(async () => undefined),
       resumeDownloadTracking: vi.fn(async () => undefined),
@@ -336,6 +345,18 @@ describe('TranscriptionSectionComponent', () => {
     await component.ngOnInit();
     expect(errSpy).toHaveBeenCalledWith('boom');
     expect(component.model()).toBeNull();
+  });
+
+  it('shows a download that finishes while this instance is mounted, without a re-read', async () => {
+    await component.ngOnInit();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-testid="download-model"]')).not.toBeNull();
+    svc.loadRecommendedModel.mockClear();
+    recommended.set(downloaded);
+    fixture.detectChanges();
+    expect(svc.loadRecommendedModel).not.toHaveBeenCalled();
+    expect(component.statusTitle()).toBe('Ready to record');
+    expect(fixture.nativeElement.querySelector('[data-testid="download-model"]')).toBeNull();
   });
 
   it('a fresh instance reflects a download already in flight in the service', async () => {
@@ -618,6 +639,7 @@ describe('TranscriptionSectionComponent', () => {
       component.speakerAttribution.set(true);
       await component.ngOnInit();
       fixture.detectChanges();
+      await new Promise((r) => setTimeout(r, 0));
       q('download-diarization-model')?.click();
       await fixture.whenStable();
       fixture.detectChanges();
