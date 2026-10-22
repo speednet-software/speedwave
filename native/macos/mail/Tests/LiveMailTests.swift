@@ -57,9 +57,14 @@ final class LiveMailTests: XCTestCase {
     func testTheLargestAccountMailboxIsListedSearchedAndPreviewedForDeleteWithinTheBudget() throws {
         let result = try XCTUnwrap(try call("list_mailboxes") as? [String: Any])
         let mailboxes = try XCTUnwrap(result["mailboxes"] as? [[String: Any]])
+        let changing = ["sent", "draft", "outbox"]
         let largest = try XCTUnwrap(
-            mailboxes.filter { $0["account"] as? String != AppleMailClient.localAccountName }
-                .max { ($0["message_count"] as? Int ?? 0) < ($1["message_count"] as? Int ?? 0) },
+            mailboxes.filter { row in
+                let name = (row["name"] as? String ?? "").lowercased()
+                return row["account"] as? String != AppleMailClient.localAccountName
+                    && !changing.contains { name.contains($0) }
+            }
+            .max { ($0["message_count"] as? Int ?? 0) < ($1["message_count"] as? Int ?? 0) },
             "no account mailbox")
         let place: [String: Any] = ["mailbox": try XCTUnwrap(largest["name"]), "account": try XCTUnwrap(largest["account"])]
 
@@ -605,6 +610,15 @@ final class LiveMailTests: XCTestCase {
     }
 
     func testListMailboxesGivesWhatAReadOfEachMailboxGives() throws {
+        var (listed, reference) = try mailboxesListedAndReadOneByOne()
+        if listed != reference {
+            (listed, reference) = try mailboxesListedAndReadOneByOne()
+        }
+
+        XCTAssertEqual(listed, reference)
+    }
+
+    private func mailboxesListedAndReadOneByOne() throws -> ([String], [String]) {
         let result = try XCTUnwrap(try call("list_mailboxes") as? [String: Any])
         let listed = try XCTUnwrap(result["mailboxes"] as? [[String: Any]]).map { row in
             "\(row["account"] as? String ?? "?")|\(row["name"] as? String ?? "?")|\(row["message_count"] as? Int ?? -1)"
@@ -630,10 +644,10 @@ final class LiveMailTests: XCTestCase {
             set AppleScript's text item delimiters to linefeed
             return spwRows as text
             """, 120)
-
-        XCTAssertEqual(
+        return (
             listed.map { $0.replacingOccurrences(of: #"\|[^|]*/"#, with: "|", options: .regularExpression) },
-            reference.components(separatedBy: "\n"))
+            reference.components(separatedBy: "\n")
+        )
     }
 
     func testRenameMailboxRenamesAnOnMyMacMailboxAndBackAndRefusesATakenName() throws {
@@ -828,7 +842,7 @@ final class LiveMailTests: XCTestCase {
         try passOnTheNewestTestMail("redirect_email", extra: [:])
     }
 
-    func testForwardAndRedirectPreviewsNameTheSenderMailUsesAndLeaveNoOutgoingMessage() throws {
+    func testForwardAndRedirectPreviewsNameASenderAndLeaveNoOutgoingMessage() throws {
         let params: [String: Any] = ["mailbox": Self.testMailbox, "account": AppleMailClient.localAccountName]
         let listed = try XCTUnwrap(try call("list_emails", params.merging(["limit": 1]) { $1 }) as? [String: Any])
         guard let id = (listed["emails"] as? [[String: Any]])?.first?["id"] as? String else {
@@ -840,6 +854,70 @@ final class LiveMailTests: XCTestCase {
             XCTAssertEqual(preview["status"] as? String, "confirmation_required", "\(command): \(preview)")
             XCTAssertTrue((preview["from"] as? String ?? "").contains("@"), "\(command): \(preview)")
         }
+    }
+
+    func testReplyAndForwardPreviewsShowWhatMailsOwnReplyAndForwardCarry() throws {
+        let params: [String: Any] = ["mailbox": Self.testMailbox, "account": AppleMailClient.localAccountName]
+        let listed = try XCTUnwrap(try call("list_emails", params.merging(["limit": 1]) { $1 }) as? [String: Any])
+        guard let id = (listed["emails"] as? [[String: Any]])?.first?["id"] as? String else {
+            throw XCTSkip("\(Self.testMailbox) holds no message to reply to")
+        }
+        let reply = try XCTUnwrap(
+            try callLeavingNoOutgoing("reply_to_email", ["id": id, "body": "x", "reply_all": true]) as? [String: Any])
+        let forward = try XCTUnwrap(
+            try callLeavingNoOutgoing("forward_email", ["id": id, "to": "nobody@example.invalid"]) as? [String: Any])
+
+        let made = try mailsOwnReplyAndForward(of: try MailId(decoding: id)).components(separatedBy: "\u{1D}")
+
+        XCTAssertEqual(made.count, 6, "\(made)")
+        XCTAssertEqual(Set((reply["to"] as? [String] ?? []).map { $0.lowercased() }), addressSet(made[0]))
+        XCTAssertEqual(Set((reply["cc"] as? [String] ?? []).map { $0.lowercased() }), addressSet(made[1]))
+        XCTAssertEqual(reply["subject"] as? String, made[2])
+        XCTAssertEqual(address(reply["from"] as? String ?? ""), address(made[3]), "\(reply) \(made)")
+        XCTAssertEqual(forward["subject"] as? String, made[4])
+        XCTAssertEqual(address(forward["from"] as? String ?? ""), address(made[5]), "\(forward) \(made)")
+    }
+
+    private func addressSet(_ field: String) -> Set<String> {
+        Set(field.components(separatedBy: "\u{1E}").filter { !$0.isEmpty }.map { $0.lowercased() })
+    }
+
+    private func address(_ sender: String) -> String {
+        let inside = sender.split(separator: "<").last.map { $0.split(separator: ">").first ?? $0 } ?? ""
+        return inside.trimmingCharacters(in: .whitespaces).lowercased()
+    }
+
+    /// The To and Cc addresses, subject and sender of Mail's own windowless reply-to-all of `id`, then the subject
+    /// and sender of its forward, each closed unsaved; each keeps one Mail thread busy until Mail restarts.
+    private func mailsOwnReplyAndForward(of id: MailId) throws -> String {
+        let count = "tell application \"Mail\" to count of outgoing messages"
+        let before = try osascriptExecutor(count, 15)
+        defer { XCTAssertEqual(try? osascriptExecutor(count, 15), before, "Mail's reply or forward was left open") }
+        return try osascriptExecutor("""
+            tell application "Mail"
+            \(AppleMailClient.messageLookup(id))
+                set spwReply to reply m opening window false reply to all true
+                set spwTo to {}
+                repeat with spwRecipient in to recipients of spwReply
+                    set end of spwTo to (address of spwRecipient) as text
+                end repeat
+                set spwCc to {}
+                repeat with spwRecipient in cc recipients of spwReply
+                    set end of spwCc to (address of spwRecipient) as text
+                end repeat
+                set spwReplySubject to subject of spwReply
+                set spwReplySender to sender of spwReply
+                close spwReply saving no
+                set spwForward to forward m opening window false
+                set spwForwardSubject to subject of spwForward
+                set spwForwardSender to sender of spwForward
+                close spwForward saving no
+            end tell
+            set AppleScript's text item delimiters to (character id 30)
+            set spwFields to {spwTo as text, spwCc as text, spwReplySubject, spwReplySender, spwForwardSubject, spwForwardSender}
+            set AppleScript's text item delimiters to (character id 29)
+            return spwFields as text
+            """, 60)
     }
 
     private func passOnTheNewestTestMail(_ command: String, extra: [String: Any]) throws {

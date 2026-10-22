@@ -14,7 +14,6 @@ struct MailCommandCall {
     private static let batchRow = ["ok", "", "", "", ""].joined(separator: MailBatch.fieldSeparator)
     private static let reported = MailBatch.fieldSeparator + "false"
     private static let listing = "Work\u{1D}Work-ID" + String(repeating: "\u{1D}", count: 7)
-    private static let originalRead = String(repeating: "\u{1D}", count: 5)
 
     static let all: [MailCommandCall] = [
         MailCommandCall(command: "list_mailboxes", params: [:], replies: []),
@@ -56,18 +55,26 @@ struct MailCommandCall {
         MailCommandCall(
             command: "reply_to_email",
             params: ["id": mailId, "body": "B", "signature": "Sig", "confirm_send": true],
-            replies: [String(repeating: "\u{1D}", count: 6)]),
+            replies: [replyRead()]),
         MailCommandCall(
             command: "reply_to_email",
-            params: ["id": mailId, "body": "B", "cc": "c@x", "bcc": "d@x", "confirm_send": true],
-            replies: [String(repeating: "\u{1D}", count: 6)]),
+            params: ["id": mailId, "body": "B", "cc": "c@x", "bcc": "d@x", "reply_all": true, "confirm_send": true],
+            replies: [replyRead(to: ["b@x"], cc: ["e@x"])]),
+        MailCommandCall(
+            command: "reply_to_email",
+            params: [
+                "id": MailId(accountId: "", account: "On My Mac", mailbox: "Speedwave-Test", messageId: "<a@x>").encoded,
+                "body": "B",
+            ],
+            replies: [replyRead()]),
         MailCommandCall(
             command: "forward_email",
             params: ["id": mailId, "to": "a@x", "cc": "b@x", "confirm_send": true],
-            replies: [originalRead]),
+            replies: [forwardRead()]),
+        MailCommandCall(command: "forward_email", params: ["id": mailId, "to": "a@x"], replies: [forwardRead()]),
         MailCommandCall(
             command: "redirect_email", params: ["id": mailId, "to": "a@x", "confirm_send": true],
-            replies: [originalRead]),
+            replies: [redirectRead()]),
         MailCommandCall(command: "list_signatures", params: [:], replies: []),
         MailCommandCall(command: "list_rules", params: [:], replies: []),
         MailCommandCall(command: "check_mail", params: ["account": "Work"], replies: []),

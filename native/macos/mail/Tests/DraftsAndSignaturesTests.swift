@@ -14,11 +14,6 @@ final class DraftsAndSignaturesTests: XCTestCase {
         "body": "Hi,\nnumbers below.",
     ]
 
-    private func replyRead() -> String {
-        ["Re: Invoice 12", "anna@x", "", "Anna <anna@x>", "2026-10-20T09:15:00", "Please pay.", "Me <me@x>"]
-            .joined(separator: "\u{1D}")
-    }
-
     func testListSignaturesReturnsTheNamesMailHasInItsOrder() throws {
         harness.executor.reply("Work\u{1E}Private \"short\"")
 

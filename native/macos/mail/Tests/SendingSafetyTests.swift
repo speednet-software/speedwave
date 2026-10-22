@@ -7,14 +7,6 @@ final class SendingSafetyTests: XCTestCase {
     private let mail = MailId(accountId: "W-1", account: "Work", mailbox: "INBOX", messageId: "<a@x>")
     private let from = "Me <me@work.example>"
 
-    private func replyRead() -> String {
-        ["Re: Hi", "anna@x", "", "Anna <anna@x>", "2026-10-20T09:15:00", "Hello", from].joined(separator: "\u{1D}")
-    }
-
-    private func originalRead() -> String {
-        ["Fwd: Hi", "Hi", "Anna <anna@x>", "2026-10-20T09:15:00", "a.pdf", from].joined(separator: "\u{1D}")
-    }
-
     private func assertClosesOnError(_ script: String, _ message: String, file: StaticString = #filePath, line: UInt = #line) {
         let cleanup = """
             on error spwErr number spwNum
@@ -28,12 +20,10 @@ final class SendingSafetyTests: XCTestCase {
 
     func testEveryScriptThatMakesAnOutgoingMessageClosesItUnsavedWhenAnythingFailsBeforeItIsSentAndReraises() throws {
         let calls: [(String, [String: Any], [String], String)] = [
-            ("reply_to_email", ["id": mail.encoded, "body": "b"], [replyRead()], "spwReply"),
             ("reply_to_email", ["id": mail.encoded, "body": "b", "confirm_send": true], [replyRead()], "spwReply"),
-            ("forward_email", ["id": mail.encoded, "to": "b@x"], [originalRead()], "spwOut"),
-            ("forward_email", ["id": mail.encoded, "to": "b@x", "confirm_send": true], [originalRead()], "spwOut"),
-            ("redirect_email", ["id": mail.encoded, "to": "b@x"], [originalRead()], "spwOut"),
-            ("redirect_email", ["id": mail.encoded, "to": "b@x", "confirm_send": true], [originalRead()], "spwOut"),
+            ("forward_email", ["id": mail.encoded, "to": "b@x", "confirm_send": true], [forwardRead()], "spwOut"),
+            ("redirect_email", ["id": mail.encoded, "to": "b@x"], [redirectRead()], "spwOut"),
+            ("redirect_email", ["id": mail.encoded, "to": "b@x", "confirm_send": true], [redirectRead()], "spwOut"),
             ("send_email", ["to": "a@x", "subject": "s", "body": "b", "confirm_send": true], [], "spwMsg"),
             ("save_draft", ["subject": "s"], [], "spwMsg"),
         ]
@@ -54,27 +44,32 @@ final class SendingSafetyTests: XCTestCase {
         }
     }
 
-    func testAReplyPreviewNamesTheSenderOfTheReplyMailMakes() throws {
-        harness.executor.reply(replyRead())
-
-        let result = try harness.call("reply_to_email", ["id": mail.encoded, "body": "b"])
-
-        XCTAssertEqual(result["from"] as? String, from)
-        XCTAssertTrue(try XCTUnwrap(harness.executor.calls.first?.script).contains("sender of spwReply"))
-    }
-
-    func testAForwardAndARedirectPreviewNameTheSenderOfTheMessageMailMakes() throws {
-        for command in ["forward_email", "redirect_email"] {
+    func testAReplyOrForwardPreviewMakesNoMessageInMailWhileARedirectPreviewNamesTheSenderOfMailsRedirect() throws {
+        let previews: [(String, [String: Any], String)] = [
+            ("reply_to_email", ["id": mail.encoded, "body": "b"], replyRead()),
+            ("reply_to_email", ["id": mail.encoded, "body": "b", "reply_all": true], replyRead()),
+            ("forward_email", ["id": mail.encoded, "to": "b@x"], forwardRead()),
+        ]
+        for (command, params, read) in previews {
             let probe = MailCommandHarness()
-            probe.executor.reply(originalRead())
+            probe.executor.reply(read)
 
-            let result = try probe.call(command, ["id": mail.encoded, "to": "b@x"])
+            let result = try probe.call(command, params)
 
             XCTAssertEqual(result["from"] as? String, from, command)
             let script = try XCTUnwrap(probe.executor.calls.first?.script)
-            XCTAssertTrue(script.contains("\(command.replacingOccurrences(of: "_email", with: "")) m opening window false"), script)
-            XCTAssertTrue(script.contains("sender of spwOut"), script)
+            XCTAssertEqual(probe.executor.calls.count, 1, command)
+            for maker in ["reply m", "forward m", "redirect m", "opening window", "outgoing message", "make new"] {
+                XCTAssertFalse(script.contains(maker), "\(command): \(maker)\n\(script)")
+            }
         }
+
+        harness.executor.reply(redirectRead())
+        let result = try harness.call("redirect_email", ["id": mail.encoded, "to": "b@x"])
+        XCTAssertEqual(result["from"] as? String, from)
+        let script = try XCTUnwrap(harness.executor.calls.first?.script)
+        XCTAssertTrue(script.contains("redirect m opening window false"), script)
+        XCTAssertTrue(script.contains("sender of spwOut"), script)
     }
 
     func testAReplyForwardOrRedirectOfAMailInATurnedOffAccountIsRefusedBeforeAnythingIsMade() throws {
@@ -90,10 +85,12 @@ final class SendingSafetyTests: XCTestCase {
             let error = probe.callFailing(command, params)
 
             XCTAssertEqual(error as? MailFailure, .accountDisabled("Work"), command)
+            XCTAssertEqual(probe.executor.calls.count, 1, command)
             let script = try XCTUnwrap(probe.executor.calls.first?.script)
             let check = try XCTUnwrap(script.range(of: "if not (enabled of spwAcct) then error \"\(accountDisabledMarker)\""))
-            let make = try XCTUnwrap(script.range(of: "opening window false"))
-            XCTAssertLessThan(check.lowerBound, make.lowerBound, command)
+            if let make = script.range(of: "opening window false") {
+                XCTAssertLessThan(check.lowerBound, make.lowerBound, command)
+            }
         }
     }
 

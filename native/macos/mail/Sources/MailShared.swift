@@ -48,6 +48,7 @@ enum MailFailure: LocalizedError, Equatable {
     case targetIsJunk(mailbox: String, account: String)
     case specialMailbox(mailbox: String, account: String)
     case sendFailed
+    case previewChanged
     case signatureNotFound(String)
     case noSender
 
@@ -76,6 +77,7 @@ enum MailFailure: LocalizedError, Equatable {
         case .targetIsJunk: return "MAIL_TARGET_IS_JUNK"
         case .specialMailbox: return "MAIL_SPECIAL_MAILBOX"
         case .sendFailed: return "MAIL_SEND_FAILED"
+        case .previewChanged: return "MAIL_PREVIEW_CHANGED"
         case .signatureNotFound: return "MAIL_SIGNATURE_NOT_FOUND"
         case .noSender: return "MAIL_NO_SENDER"
         }
@@ -145,6 +147,9 @@ enum MailFailure: LocalizedError, Equatable {
                 + "'\(account)', which keeps its name, so nothing was renamed."
         case .sendFailed:
             return "Mail.app did not send the message; it may wait in the Outbox."
+        case .previewChanged:
+            return "The message Mail.app made differs from the preview in its recipients, subject or sender, "
+                + "so it was closed unsent; the original changed or Mail chose differently."
         case .signatureNotFound(let name):
             return "Mail.app has no signature named '\(name)'."
         case .noSender:
@@ -296,6 +301,9 @@ struct MailScripts {
         }
         if detail.contains(sendFailedMarker) {
             return .sendFailed
+        }
+        if detail.contains(previewChangedMarker) {
+            return .previewChanged
         }
         if detail.contains(noSenderMarker) {
             return .noSender

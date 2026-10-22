@@ -23,6 +23,9 @@ const PLAIN_TEXT_ONLY =
 const SHOWN_AS_QUOTE =
   'Apple Mail shows the scripted text to the recipient as a quote (">" in plain text, a cited block in HTML), a Mail bug no script avoids: tell the user before they agree.';
 
+const PREVIEW_CHECKED =
+  'The preview makes no message in Mail; the confirmed call makes it and sends nothing (MAIL_PREVIEW_CHANGED) when Mail picked other recipients, another subject or another sender than the preview showed.';
+
 const ACCOUNT_PROPERTY = {
   type: 'string',
   description:
@@ -182,9 +185,10 @@ export const sendEmailTool: Tool = {
 export const replyToEmailTool: Tool = {
   name: 'replyToEmail',
   description:
-    'Reply to an email in any mailbox, by the mail id listEmails or searchEmails returned; Mail picks the recipients and the "Re:" subject, reply_all adds every recipient of the email, and cc and bcc add more. ' +
+    'Reply to an email in any mailbox, by the mail id listEmails or searchEmails returned; it goes to the Reply-To of the email, else its sender, with a "Re:" subject, reply_all adds every other To and Cc recipient of the email but the user\'s own addresses, and cc and bcc add more. ' +
     `The text goes above the quoted original, separated by a blank line and an "On <date>, <sender> wrote:" line. ${PLAIN_TEXT_ONLY} ` +
     'Without confirm_send=true nothing is sent: the call returns a preview of the sender (from), every recipient (to, cc, bcc), subject and the full text, and you must show it, from included, and ask the user before calling again with the same arguments and confirm_send=true. ' +
+    `${PREVIEW_CHECKED} ` +
     `Sending cannot be undone. ${SHOWN_AS_QUOTE}`,
   annotations: DESTRUCTIVE_ANNOTATIONS,
   _meta: {
@@ -242,7 +246,7 @@ export const forwardEmailTool: Tool = {
   description:
     'Forward an email in any mailbox, by the mail id listEmails or searchEmails returned, with its attachments, through Mail\'s own forward (Mail picks the "Fwd:" subject and quotes the email). No text can be added: any change to a forward leaves only the added text, without the quote and the attachments, so for a note send a separate email. ' +
     'Without confirm_send=true nothing is sent: the call returns a preview of the sender (from), the recipients, subject, the forwarded email and its attachment names, and you must show it, from included, and ask the user before calling again with the same arguments and confirm_send=true. ' +
-    'Sending cannot be undone.',
+    `${PREVIEW_CHECKED} Sending cannot be undone.`,
   annotations: DESTRUCTIVE_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,

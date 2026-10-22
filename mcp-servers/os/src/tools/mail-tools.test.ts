@@ -496,6 +496,18 @@ describe('mail-tools', () => {
       }
     });
 
+    it('says a reply goes to the Reply-To or sender and a reply or forward that Mail makes otherwise is not sent', () => {
+      const description = (name: string) =>
+        createMailTools().find((t) => t.tool.name === name)!.tool.description;
+
+      expect(description('replyToEmail')).toContain('Reply-To');
+      expect(description('replyToEmail')).toMatch(/reply_all.*own addresses/);
+      for (const name of ['replyToEmail', 'forwardEmail']) {
+        expect(description(name), name).toContain('MAIL_PREVIEW_CHANGED');
+      }
+      expect(description('redirectEmail')).not.toContain('MAIL_PREVIEW_CHANGED');
+    });
+
     it('fails when required fields are empty', async () => {
       const result = await handleSendEmail({
         to: '',
@@ -2006,6 +2018,7 @@ describe('mail-tools', () => {
       ['MAIL_AUTOMATION_DENIED', 'Speedwave is not allowed to control Mail.app.'],
       ['MAIL_MAILBOX_CHANGED', "Mailbox 'INBOX' changed while it was being read."],
       ['MAIL_SEND_FAILED', 'Mail.app did not send the message; it may wait in the Outbox.'],
+      ['MAIL_PREVIEW_CHANGED', 'The message Mail.app made differs from the preview.'],
     ])('%s is not reported as an invalid argument', async (code, detail) => {
       vi.mocked(runCommand).mockRejectedValue(cliFailure('list_emails', `${code}: ${detail}`));
 
@@ -2079,6 +2092,50 @@ describe('mail-tools', () => {
       expect(result.error?.message).toContain('Outbox');
       expect(result.error?.message).toContain('do not retry without asking');
     });
+
+    it.each([
+      ['reply_to_email', () => handleReplyToEmail({ id: MAIL_ID, body: 'b', confirm_send: true })],
+      ['forward_email', () => handleForwardEmail({ id: MAIL_ID, to: 'a@x', confirm_send: true })],
+    ])(
+      'a %s Mail would send otherwise than previewed asks for a new preview instead of sending',
+      async (command, call) => {
+        vi.mocked(runCommand).mockRejectedValue(
+          cliFailure(
+            command,
+            'MAIL_PREVIEW_CHANGED: The message Mail.app made differs from the preview in its recipients, subject or sender, so it was closed unsent; the original changed or Mail chose differently.'
+          )
+        );
+
+        const result = await call();
+
+        expect(result.error?.code).toBe('MAIL_PREVIEW_CHANGED');
+        expect(result.error?.message).toContain('closed unsent');
+        expect(result.error?.message).toContain('without confirm_send');
+        expect(result.error?.message).toContain('new preview');
+        expect(result.error?.message).not.toContain('Invalid');
+      }
+    );
+
+    it.each([
+      ['list_emails', () => handleListEmails({ mailbox: 'INBOX' })],
+      ['get_email', () => handleGetEmail({ id: MAIL_ID })],
+      ['reply_to_email', () => handleReplyToEmail({ id: MAIL_ID, body: 'b', confirm_send: true })],
+      ['save_draft', () => handleSaveDraft({ subject: 's' })],
+      ['copy_emails', () => handleCopyEmails({ ids: [MAIL_ID], mailbox: 'A', account: 'W' })],
+    ])(
+      'a timeout of %s says a repeated timeout means Mail is stuck and the user restarts it',
+      async (command, call) => {
+        vi.mocked(runCommand).mockRejectedValue(
+          cliFailure(command, 'MAIL_TIMEOUT: Mail.app did not answer within 25 s.')
+        );
+
+        const result = await call();
+
+        expect(result.error?.code).toBe('MAIL_TIMEOUT');
+        expect(result.error?.message).toContain('quit and reopen Mail.app');
+        expect(result.error?.message).toContain('stop calling mail tools');
+      }
+    );
 
     it('any other failure keeps its own message', async () => {
       vi.mocked(runCommand).mockRejectedValue(

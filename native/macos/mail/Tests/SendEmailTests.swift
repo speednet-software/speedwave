@@ -15,18 +15,6 @@ final class SendEmailTests: XCTestCase {
         "body": "Hi all,\nsee the numbers.",
     ]
 
-    private func replyRead(
-        subject: String = "Re: Invoice 12",
-        to: [String] = ["anna@x"],
-        cc: [String] = [],
-        sender: String = "Anna <anna@x>",
-        received: String = "2026-10-20T09:15:00",
-        original: String = "Please pay.\n\nThanks"
-    ) -> String {
-        [subject, to.joined(separator: "\u{1E}"), cc.joined(separator: "\u{1E}"), sender, received, original, "Me <me@x>"]
-            .joined(separator: "\u{1D}")
-    }
-
     func testSendEmailWithoutConfirmationOnlyReadsTheSenderAndPreviewsExactlyWhatWouldGoOut() throws {
         harness.executor.reply("Anna Nowak <anna@work.example>")
 
@@ -186,8 +174,8 @@ final class SendEmailTests: XCTestCase {
         XCTAssertTrue((error as? MailFailure)?.errorDescription?.hasPrefix("MAIL_SEND_FAILED: ") == true)
     }
 
-    func testReplyWithoutConfirmationReadsTheReplyMailWouldSendAndSendsNothing() throws {
-        harness.executor.reply(replyRead(to: ["anna@x"], cc: ["ewa@x"]))
+    func testReplyPreviewOnlyReadsTheOriginalAndMakesNoMessageInMail() throws {
+        harness.executor.reply(replyRead())
 
         let result = try harness.call("reply_to_email", ["id": archived.encoded, "body": "Paid today."])
 
@@ -196,43 +184,142 @@ final class SendEmailTests: XCTestCase {
         XCTAssertTrue(script.contains("set mb to mailbox \"Archive/2026\" of spwAcct"), script)
         XCTAssertTrue(script.contains("set spwAcct to account id \"Work-ID\""), script)
         XCTAssertTrue(script.contains("whose message id is \"<a@x>\""), script)
+        XCTAssertTrue(script.contains("reply to of m"), script)
         XCTAssertFalse(script.contains("of inbox"), script)
-        XCTAssertTrue(script.contains("set spwReply to reply m opening window false reply to all false"), script)
-        XCTAssertTrue(script.contains("close spwReply saving no"), script)
-        XCTAssertFalse(script.contains("send spwReply"), script)
+        XCTAssertFalse(script.contains("reply m"), script)
+        XCTAssertFalse(script.contains("opening window"), script)
+        XCTAssertFalse(script.contains("outgoing message"), script)
+        XCTAssertFalse(script.contains("make new"), script)
+        XCTAssertFalse(script.contains("send "), script)
         XCTAssertEqual(result["status"] as? String, "confirmation_required")
         XCTAssertEqual(result["confirm_param"] as? String, "confirm_send")
         XCTAssertTrue((result["instruction"] as? String)?.contains("replyToEmail") == true)
         XCTAssertEqual(result["to"] as? [String], ["anna@x"])
-        XCTAssertEqual(result["cc"] as? [String], ["ewa@x"])
+        XCTAssertEqual(result["cc"] as? [String], [])
         XCTAssertEqual(result["bcc"] as? [String], [])
-        XCTAssertFalse(script.contains("make new"), script)
         XCTAssertEqual(result["subject"] as? String, "Re: Invoice 12")
+        XCTAssertEqual(result["from"] as? String, "Me <me@work.example>")
         XCTAssertEqual(
             result["body"] as? String,
             "Paid today.\n\nOn 20 Oct 2026 at 09:15, Anna <anna@x> wrote:\n\n> Please pay.\n>\n> Thanks\n")
     }
 
-    func testReplyAllAsksMailForTheReplyToAll() throws {
-        harness.executor.reply(replyRead(to: ["anna@x", "bob@x"]))
+    func testAReplyGoesToTheReplyToAddressesOfTheOriginalWhenItHasThem() throws {
+        harness.executor.reply(replyRead(replyTo: "Billing <billing@x>, \"Help, desk\" <help@x>, Billing@X"))
 
-        let result = try harness.call(
-            "reply_to_email", ["id": archived.encoded, "body": "Paid.", "reply_all": true])
+        let result = try harness.call("reply_to_email", ["id": archived.encoded, "body": "Ok"])
 
-        XCTAssertTrue(harness.executor.calls[0].script.contains("reply to all true"))
-        XCTAssertEqual(result["to"] as? [String], ["anna@x", "bob@x"])
+        XCTAssertEqual(result["to"] as? [String], ["billing@x", "help@x"])
     }
 
-    func testConfirmedReplySendsTheReplyWithTheTextOfThePreview() throws {
+    func testAReplyToASenderWithoutANameGoesToItsAddress() throws {
+        harness.executor.reply(replyRead(sender: "  zoë@przykład.pl "))
+
+        let result = try harness.call("reply_to_email", ["id": archived.encoded, "body": "Ok"])
+
+        XCTAssertEqual(result["to"] as? [String], ["zoë@przykład.pl"])
+    }
+
+    func testAPlainReplyLeavesTheOtherRecipientsOfTheOriginalOut() throws {
+        harness.executor.reply(replyRead(to: ["me@work.example", "bob@x"], cc: ["carol@x"]))
+
+        let result = try harness.call("reply_to_email", ["id": archived.encoded, "body": "Ok"])
+
+        XCTAssertEqual(result["to"] as? [String], ["anna@x"])
+        XCTAssertEqual(result["cc"] as? [String], [])
+    }
+
+    func testReplyAllAddsTheOriginalsToAndCcWithoutTheUsersOwnAddressesOrRepeatsIgnoringCase() throws {
+        harness.executor.reply(
+            replyRead(
+                sender: "Anna <Anna@x>",
+                to: ["ME@work.example", "Bob <bob@x>", "anna@X", "Zoë <zoë@x>"],
+                cc: ["carol@x", "me@HOME.example", "BOB@x", "carol@x"]))
+
+        let result = try harness.call("reply_to_email", ["id": archived.encoded, "body": "Ok", "reply_all": true])
+
+        XCTAssertEqual(result["to"] as? [String], ["Anna@x", "bob@x", "zoë@x"])
+        XCTAssertEqual(result["cc"] as? [String], ["carol@x"])
+    }
+
+    func testAReplySubjectGetsOneRePrefixWhateverItsCase() throws {
+        let cases = [
+            ("Invoice 12", "Re: Invoice 12"),
+            ("RE: Invoice 12", "RE: Invoice 12"),
+            ("re:Invoice 12", "re:Invoice 12"),
+            ("  Re: Invoice", "  Re: Invoice"),
+            ("Fwd: Zażółć", "Re: Fwd: Zażółć"),
+            ("Reminder", "Re: Reminder"),
+            ("", "Re: "),
+        ]
+        for (original, expected) in cases {
+            let probe = MailCommandHarness()
+            probe.executor.reply(replyRead(subject: original))
+            let result = try probe.call("reply_to_email", ["id": archived.encoded, "body": "Ok"])
+            XCTAssertEqual(result["subject"] as? String, expected, original)
+        }
+    }
+
+    func testAReplyGoesFromTheAddressOfTheAccountTheOriginalWasSentTo() throws {
+        let addresses = ["me@work.example", "sales@work.example"]
+        let cases: [([String], [String], String, String)] = [
+            (["SALES@work.example"], [], "Work Me", "Work Me <sales@work.example>"),
+            (["bob@x"], ["sales@work.example"], "Work Me", "Work Me <sales@work.example>"),
+            (["bob@x"], [], "Work Me", "Work Me <me@work.example>"),
+            (["sales@work.example"], [], "", "sales@work.example"),
+        ]
+        for (to, cc, name, from) in cases {
+            let probe = MailCommandHarness()
+            probe.executor.reply(replyRead(to: to, cc: cc, fromName: name, fromAddresses: addresses))
+            let result = try probe.call("reply_to_email", ["id": archived.encoded, "body": "Ok"])
+            XCTAssertEqual(result["from"] as? String, from, "\(to) \(cc)")
+        }
+    }
+
+    func testAReplyFromAnAccountWithoutAnAddressIsReportedAsNoSender() {
+        harness.executor.reply(replyRead(fromAddresses: []))
+
+        let error = harness.callFailing("reply_to_email", ["id": archived.encoded, "body": "Ok", "confirm_send": true])
+
+        XCTAssertEqual(error as? MailFailure, .noSender)
+        XCTAssertEqual(harness.executor.calls.count, 1)
+    }
+
+    func testAReplyToAnOnMyMacMailGoesFromMailsDefaultSender() throws {
+        let local = MailId(accountId: "", account: "On My Mac", mailbox: "Speedwave-Test", messageId: "<a@x>")
+        harness.executor.reply(replyRead(fromName: "Me", fromAddresses: ["me@home.example"]))
+
+        let result = try harness.call("reply_to_email", ["id": local.encoded, "body": "Ok"])
+
+        let script = harness.executor.calls[0].script
+        XCTAssertTrue(script.contains("set spwPrimary to primary email"), script)
+        XCTAssertFalse(script.contains("email addresses of spwAcct"), script)
+        XCTAssertEqual(result["from"] as? String, "Me <me@home.example>")
+    }
+
+    func testConfirmedReplySendsMailsReplyOnlyWhenItMatchesThePreviewAndWithThePreviewedText() throws {
         harness.executor.reply(replyRead(original: "Say \"yes\""))
 
         let result = try harness.call(
             "reply_to_email", ["id": archived.encoded, "body": "Yes.\n", "confirm_send": true])
 
         XCTAssertEqual(harness.executor.calls.count, 2)
+        XCTAssertFalse(harness.executor.calls[0].script.contains("reply m"))
         let send = harness.executor.calls[1].script
         XCTAssertTrue(send.contains("whose message id is \"<a@x>\""), send)
         XCTAssertTrue(send.contains("set spwReply to reply m opening window false reply to all false"), send)
+        let checks = [
+            "if not my spwSameAddresses(spwSeenTo, {\"anna@x\"}) then error \"\(previewChangedMarker)\"",
+            "if not my spwSameAddresses(spwSeenCc, {}) then error \"\(previewChangedMarker)\"",
+            "if (subject of spwReply) is not \"Re: Invoice 12\" then error \"\(previewChangedMarker)\"",
+            "if (extract address from (sender of spwReply)) is not \"me@work.example\" then error \"\(previewChangedMarker)\"",
+        ]
+        let content = try XCTUnwrap(send.range(of: "set content of spwReply"))
+        for check in checks {
+            let found = try XCTUnwrap(send.range(of: check), "\(check)\n\(send)")
+            XCTAssertLessThan(found.lowerBound, content.lowerBound, check)
+        }
+        XCTAssertTrue(send.contains("considering case"), send)
         XCTAssertTrue(
             send.contains(
                 "set content of spwReply to \"Yes.\\n\\nOn 20 Oct 2026 at 09:15, Anna <anna@x> wrote:\\n\\n> Say \\\"yes\\\"\\n\""),
@@ -242,36 +329,65 @@ final class SendEmailTests: XCTestCase {
         XCTAssertEqual(result["body"] as? String, "Yes.\n\nOn 20 Oct 2026 at 09:15, Anna <anna@x> wrote:\n\n> Say \"yes\"\n")
     }
 
-    func testReplyPreviewAddsTheGivenCcAndBccToTheRecipientsMailChose() throws {
-        harness.executor.reply(replyRead(to: ["anna@x"], cc: ["ewa@x"]))
+    func testConfirmedReplyAllChecksMailsReplyAgainstTheRecipientsOfThePreview() throws {
+        harness.executor.reply(replyRead(to: ["me@work.example", "bob@x"], cc: ["carol@x"]))
+
+        _ = try harness.call(
+            "reply_to_email", ["id": archived.encoded, "body": "Ok", "reply_all": true, "confirm_send": true])
+
+        let send = harness.executor.calls[1].script
+        XCTAssertTrue(send.contains("reply to all true"), send)
+        XCTAssertTrue(send.contains("spwSameAddresses(spwSeenTo, {\"anna@x\", \"bob@x\"})"), send)
+        XCTAssertTrue(send.contains("spwSameAddresses(spwSeenCc, {\"carol@x\"})"), send)
+    }
+
+    func testAReplyMailWouldSendOtherwiseThanPreviewedIsReportedAsPreviewChanged() {
+        harness.executor.reply(replyRead())
+        harness.executor.fail(ScriptError.scriptFailed("execution error: \(previewChangedMarker) (-2700)"))
+
+        let error = harness.callFailing("reply_to_email", ["id": archived.encoded, "body": "Ok", "confirm_send": true])
+
+        XCTAssertEqual(error as? MailFailure, .previewChanged)
+        XCTAssertTrue((error as? MailFailure)?.errorDescription?.hasPrefix("MAIL_PREVIEW_CHANGED: ") == true)
+    }
+
+    func testReplyPreviewAddsTheGivenCcAndBccToTheRecipientsOfTheReply() throws {
+        harness.executor.reply(replyRead(cc: ["ewa@x"]))
 
         let result = try harness.call(
             "reply_to_email",
-            ["id": archived.encoded, "body": "Ok", "cc": "jan@x, ANNA@x, Ewa@x, jan@x", "bcc": "boss@x"])
+            [
+                "id": archived.encoded, "body": "Ok", "reply_all": true,
+                "cc": "jan@x, ANNA@x, Ewa@x, jan@x", "bcc": "boss@x",
+            ])
 
         XCTAssertEqual(harness.executor.calls.count, 1)
-        XCTAssertFalse(harness.executor.calls[0].script.contains("make new"))
         XCTAssertEqual(result["to"] as? [String], ["anna@x"])
         XCTAssertEqual(result["cc"] as? [String], ["ewa@x", "jan@x"])
         XCTAssertEqual(result["bcc"] as? [String], ["boss@x"])
     }
 
-    func testConfirmedReplyAddsTheSameCcAndBccThePreviewShowed() throws {
-        harness.executor.reply(replyRead(to: ["anna@x"], cc: ["ewa@x"]))
+    func testConfirmedReplyAddsTheSameCcAndBccThePreviewShowedAfterTheCheck() throws {
+        harness.executor.reply(replyRead(cc: ["ewa@x"]))
 
         let result = try harness.call(
             "reply_to_email",
-            ["id": archived.encoded, "body": "Ok", "cc": "jan@x, ewa@x", "bcc": "boss@x", "confirm_send": true])
+            [
+                "id": archived.encoded, "body": "Ok", "reply_all": true, "cc": "jan@x, ewa@x", "bcc": "boss@x",
+                "confirm_send": true,
+            ])
 
         XCTAssertEqual(harness.executor.calls.count, 2)
         let send = harness.executor.calls[1].script
         let reply = try XCTUnwrap(send.range(of: "set spwReply to reply m"))
+        let check = try XCTUnwrap(send.range(of: "spwSameAddresses(spwSeenCc, {\"ewa@x\"})"))
         let cc = try XCTUnwrap(
             send.range(of: "make new cc recipient at end of cc recipients with properties {address:\"jan@x\"}"))
         let bcc = try XCTUnwrap(
             send.range(of: "make new bcc recipient at end of bcc recipients with properties {address:\"boss@x\"}"))
         let sending = try XCTUnwrap(send.range(of: "send spwReply"))
-        XCTAssertLessThan(reply.lowerBound, cc.lowerBound)
+        XCTAssertLessThan(reply.lowerBound, check.lowerBound)
+        XCTAssertLessThan(check.lowerBound, cc.lowerBound)
         XCTAssertLessThan(cc.lowerBound, bcc.lowerBound)
         XCTAssertLessThan(bcc.lowerBound, sending.lowerBound)
         XCTAssertTrue(send.contains("tell spwReply\n"), send)
@@ -282,18 +398,21 @@ final class SendEmailTests: XCTestCase {
     }
 
     func testReplyBccLeavesOutAddressesAlreadyInToOrCcAndRepeatsIgnoringCase() throws {
-        harness.executor.reply(replyRead(to: ["anna@x"], cc: ["ewa@x"]))
+        harness.executor.reply(replyRead(cc: ["ewa@x"]))
 
         let result = try harness.call(
             "reply_to_email",
-            ["id": archived.encoded, "body": "Ok", "cc": "jan@x", "bcc": "Anna@x, EWA@x, JAN@x, boss@x, Boss@x"])
+            [
+                "id": archived.encoded, "body": "Ok", "reply_all": true, "cc": "jan@x",
+                "bcc": "Anna@x, EWA@x, JAN@x, boss@x, Boss@x",
+            ])
 
         XCTAssertEqual(result["cc"] as? [String], ["ewa@x", "jan@x"])
         XCTAssertEqual(result["bcc"] as? [String], ["boss@x"])
     }
 
     func testConfirmedReplyAddsOnlyTheBccThePreviewShowed() throws {
-        harness.executor.reply(replyRead(to: ["anna@x"]))
+        harness.executor.reply(replyRead())
 
         let result = try harness.call(
             "reply_to_email",

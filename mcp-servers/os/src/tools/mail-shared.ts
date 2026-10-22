@@ -55,6 +55,10 @@ export const EXAMPLE_IDS = [
 
 const MAIL_FAILURE = /\b(MAIL_[A-Z_]+): ([\s\S]*)$/;
 
+const STUCK_MAIL_STEP =
+  'If a mail tool already timed out earlier in this conversation, Mail.app may have stopped answering until it ' +
+  'restarts: stop calling mail tools and ask the user to quit and reopen Mail.app, then continue.';
+
 const BATCH_COMMANDS = [
   'delete_emails',
   'mark_emails_read',
@@ -71,7 +75,7 @@ const MAIL_FAILURE_TEACHING: Record<
   (detail: string, args: MailArgs, command: string) => TeachingErrorParams
 > = {
   MAIL_TIMEOUT: (detail, _args, command) => ({
-    nextStep: `${detail} ${timeoutStep(command)}`,
+    nextStep: `${detail} ${timeoutStep(command)} ${STUCK_MAIL_STEP}`,
   }),
   MAIL_AUTOMATION_DENIED: (detail) => ({
     nextStep:
@@ -148,6 +152,11 @@ const MAIL_FAILURE_TEACHING: Record<
     nextStep:
       `${detail} Tell the user the message was not sent and ask them to check the Outbox in Mail.app; ` +
       'do not retry without asking.',
+  }),
+  MAIL_PREVIEW_CHANGED: (detail) => ({
+    nextStep:
+      `${detail} Nothing was sent. Call again with the same arguments without confirm_send to get a new preview, ` +
+      'show it to the user and send only after their yes.',
   }),
   MAIL_SIGNATURE_NOT_FOUND: (detail, args) => ({
     paramName: 'signature',
@@ -290,7 +299,7 @@ function timeoutStep(command: string): string {
   if (['create_mailbox', 'rename_mailbox'].includes(command)) {
     return 'Do not retry: call listMailboxes to see whether the mailbox changed, and tell the user.';
   }
-  return 'Mail.app is busy or not responding: try once more, and if it times out again tell the user.';
+  return 'Mail.app is busy or not responding: try once more.';
 }
 
 /**
