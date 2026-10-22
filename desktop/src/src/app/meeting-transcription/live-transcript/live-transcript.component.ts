@@ -53,17 +53,11 @@ const SECONDARY_BTN =
 const EXPORT_TOOLTIP = 'Saves the transcript as Markdown.';
 /** How long the "Copied" confirmation stays. */
 const COPIED_FEEDBACK_MS = 2000;
-/**
- * Offline-pass progress bands, mirrored from `transcript_driver.rs` (`finalize_progress_bands_match_ts_mirror`):
- * the decode, then the optional speaker pass; the time estimate covers the decode only.
- */
 const DECODE_START_PROGRESS = 0.05;
 const DECODE_DONE_PROGRESS = 0.6;
 const DIARIZE_START_PROGRESS = 0.62;
 const DIARIZE_DONE_PROGRESS = 0.85;
-/** How far back the decode pace is measured, so a lane with more speech changes the estimate within minutes. */
 const ETA_PACE_WINDOW_MS = 120_000;
-/** The estimate needs this much decoded, and this much time, since the decode started. */
 const ETA_MIN_MOVED = 0.05;
 const ETA_MIN_ELAPSED_MS = 5000;
 
@@ -116,16 +110,11 @@ interface QualityLine {
 /** Which of the pane's menus is open. */
 type OpenMenu = 'chat' | 'more' | null;
 
-/** One progress report of the offline pass, as this pane saw it. */
 interface ProgressSample {
   at: number;
   progress: number;
 }
 
-/**
- * The decode reports this pane saw for one recording: the first one at or past the decode start,
- * and those of the last {@link ETA_PACE_WINDOW_MS}, for the time estimate.
- */
 interface ProgressTrack {
   sessionId: string;
   anchor: ProgressSample;
@@ -835,13 +824,8 @@ export class LiveTranscriptComponent {
     return st?.state === 'finalizing' ? Math.round(st.progress * 100) : 0;
   });
 
-  /** The decode reports seen for the shown recording, from the decode start on. */
   private readonly progressTrack = signal<ProgressTrack | null>(null);
 
-  /**
-   * What the progress bar is doing: the rough decode time left from the pace of the last minutes
-   * (never from the model load before the decode), then the phase that follows the decode.
-   */
   readonly eta = computed(() => {
     const st = this.session()?.status;
     if (st?.state !== 'finalizing') return '';

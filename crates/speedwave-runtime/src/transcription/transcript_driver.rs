@@ -865,15 +865,10 @@ const FINALIZE_WINDOW_SECS: f32 = 30.0;
 /// *next* window's overlap are dropped from the previous window's output to avoid duplicates.
 const FINALIZE_WINDOW_OVERLAP_SECS: f32 = 3.0;
 
-/// Offline-pass progress at which decoding starts: the audio is read and the model loaded.
-/// Mirrored by `live-transcript.component.ts` (`finalize_progress_bands_match_ts_mirror`).
 const FINALIZE_DECODE_START_PROGRESS: f32 = 0.05;
-/// Offline-pass progress at which every part is decoded.
 const FINALIZE_DECODE_DONE_PROGRESS: f32 = 0.60;
-/// Offline-pass progress while the meeting channel is diarized (ADR-098), start and end.
 const FINALIZE_DIARIZE_START_PROGRESS: f32 = 0.62;
 const FINALIZE_DIARIZE_DONE_PROGRESS: f32 = 0.85;
-/// Offline-pass progress once the segments are ordered and about to be installed.
 const FINALIZE_RESULT_PROGRESS: f32 = 0.9;
 
 /// Runs the offline pass: transcribes the recorded WAV, diarizes the meeting channel when a loader
