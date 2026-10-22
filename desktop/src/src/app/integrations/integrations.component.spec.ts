@@ -152,6 +152,13 @@ function setupMockTauri(mockTauri: MockTauriService): void {
         return null;
       case 'validate_os_integrations_on_startup':
         return [];
+      case 'custom_mcp_get':
+        return {
+          project: 'test-project',
+          beta_enabled: true,
+          managed_disabled: false,
+          servers: [],
+        };
       default:
         return undefined;
     }
@@ -923,6 +930,62 @@ describe('IntegrationsComponent', () => {
       );
       expect(slot).not.toBeNull();
       expect(slot.querySelector('app-ide-bridge')).not.toBeNull();
+    });
+  });
+
+  describe('custom MCP servers section', () => {
+    function customMcpCalls(spy: { mock: { calls: unknown[][] } }): unknown[] {
+      return spy.mock.calls.filter((c) => c[0] === 'custom_mcp_get').map((c) => c[1]);
+    }
+
+    async function render(): Promise<void> {
+      await component.ngOnInit();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      await fixture.whenStable();
+    }
+
+    it('is hidden while beta features are off', async () => {
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      await render();
+      expect(fixture.nativeElement.querySelector('app-custom-mcp-section')).toBeNull();
+      expect(customMcpCalls(spy)).toEqual([]);
+    });
+
+    it('sits after the services and before the IDE bridge, for the active project', async () => {
+      betaEnabled.set(true);
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      await render();
+      const section = fixture.nativeElement.querySelector(
+        '[data-testid="integrations-custom-mcp-slot"] app-custom-mcp-section'
+      ) as HTMLElement;
+      expect(section).not.toBeNull();
+      const ide = fixture.nativeElement.querySelector(
+        '[data-testid="integrations-ide-bridge-slot"]'
+      ) as HTMLElement;
+      const table = fixture.nativeElement.querySelector(
+        '[data-testid="integrations-table-wrapper"]'
+      ) as HTMLElement;
+      expect(
+        table.compareDocumentPosition(section) & Node.DOCUMENT_POSITION_FOLLOWING
+      ).toBeTruthy();
+      expect(section.compareDocumentPosition(ide) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(customMcpCalls(spy)).toEqual([{ project: 'test-project' }]);
+    });
+
+    it('is rebuilt for the new project on a switch', async () => {
+      betaEnabled.set(true);
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      await render();
+      const before = fixture.nativeElement.querySelector('app-custom-mcp-section');
+      projectState.activeProject.set('other-project');
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      await fixture.whenStable();
+      const after = fixture.nativeElement.querySelector('app-custom-mcp-section');
+      expect(after).not.toBeNull();
+      expect(after).not.toBe(before);
+      expect(customMcpCalls(spy)).toContainEqual({ project: 'other-project' });
     });
   });
 

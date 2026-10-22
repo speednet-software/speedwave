@@ -105,6 +105,10 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-097](ADR-097-mermaid-diagrams-and-full-markdown-in-desktop.md)    | Mermaid diagrams and full Markdown in the Desktop UI: slot hydration, own DOMPurify pass, dagre layout without elkjs        | Accepted                                                                           |
 | [ADR-098](ADR-098-optional-speaker-attribution.md)                     | Optional speaker attribution: Nemotron-3 diarization of the meeting channel in the offline pass                             | Accepted                                                                           |
 | [ADR-099](ADR-099-find-in-chat-with-css-custom-highlight.md)           | Find in the active chat tab: rendered-text matching, one highlighted match through the CSS Custom Highlight API             | Accepted                                                                           |
+| [ADR-100](ADR-100-custom-mcp-servers-behind-a-per-server-guard.md)       | Custom MCP servers behind a per-server guard                                                                                | Accepted                                                                           |
+| [ADR-101](ADR-101-custom-mcp-pinning-and-local-images.md)                | Custom MCP pinning and locally built server images (resolver with full internet)                                            | Accepted                                                                           |
+| [ADR-102](ADR-102-custom-mcp-network-isolation-and-per-server-egress.md) | Custom MCP network isolation and per-server egress                                                                          | Accepted                                                                           |
+| [ADR-103](ADR-103-custom-mcp-tool-gate-and-definition-pinning.md)        | Custom MCP tool gate and definition pinning                                                                                 | Accepted                                                                           |
 
 ## Creating a New ADR
 

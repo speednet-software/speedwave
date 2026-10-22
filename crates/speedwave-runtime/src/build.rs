@@ -51,6 +51,8 @@ pub const IMAGE_MCP_OFFICE: &str = "speedwave-mcp-office";
 pub const IMAGE_MCP_PLAYWRIGHT: &str = "speedwave-mcp-playwright";
 /// Context7 MCP worker image name.
 pub const IMAGE_MCP_CONTEXT7: &str = "speedwave-mcp-context7";
+/// Custom MCP guard image name, shared by every Custom MCP server's guard container.
+pub const IMAGE_MCP_CUSTOM_GUARD: &str = "speedwave-mcp-custom-guard";
 
 /// All container images built by Speedwave (SSOT, aligned with `bundle-build-context.sh`).
 pub const IMAGES: &[ImageDef] = &[
@@ -75,6 +77,7 @@ pub const IMAGES: &[ImageDef] = &[
             "containers/Containerfile.proxy",
             "containers/proxy",
             "crates/pii-engine",
+            "crates/ip-policy",
             "mcp-servers/policies/rules.yaml",
         ],
     },
@@ -185,17 +188,34 @@ pub const IMAGES: &[ImageDef] = &[
             "mcp-servers/tsconfig.base.json",
         ],
     },
+    ImageDef {
+        name: IMAGE_MCP_CUSTOM_GUARD,
+        context_dir: "mcp-servers",
+        containerfile: "mcp-servers/custom-guard/Dockerfile",
+        build_args: &[],
+        hash_inputs: &[
+            "mcp-servers/custom-guard",
+            "mcp-servers/shared",
+            "mcp-servers/tsconfig.base.json",
+        ],
+    },
 ];
 
-/// Build set for the given integrations: `claude` + `mcp-hub` always, plus each enabled built-in
-/// MCP worker image. Plugin images go through `plugin::ensure_plugin_images`; `os` has no image.
+/// Build set for the given integrations: `claude` + `mcp-hub` always, each enabled built-in MCP
+/// worker image, and the Custom MCP guard while at least one Custom MCP server runs. Plugin and
+/// per-server Custom MCP images go through their own ensure paths; `os` has no image.
 pub fn enabled_images(integrations: &ResolvedIntegrationsConfig) -> Vec<&'static ImageDef> {
     IMAGES
         .iter()
-        .filter(|img| match img.name.strip_prefix(MCP_IMAGE_PREFIX) {
-            None => true,
-            Some("hub") => true,
-            Some(key) => integrations.is_service_enabled(key) == Some(true),
+        .filter(|img| {
+            if img.name == IMAGE_MCP_CUSTOM_GUARD {
+                return !integrations.effective_custom_mcp().is_empty();
+            }
+            match img.name.strip_prefix(MCP_IMAGE_PREFIX) {
+                None => true,
+                Some("hub") => true,
+                Some(key) => integrations.is_service_enabled(key) == Some(true),
+            }
         })
         .collect()
 }
@@ -2201,7 +2221,7 @@ mod tests {
 
     #[test]
     fn test_images_count() {
-        assert_eq!(IMAGES.len(), 12);
+        assert_eq!(IMAGES.len(), 13);
     }
 
     #[test]
@@ -2233,6 +2253,71 @@ mod tests {
         );
     }
 
+    fn with_custom_mcp(servers: usize) -> ResolvedIntegrationsConfig {
+        let entries: std::collections::BTreeMap<String, crate::custom_mcp::model::CustomMcpEntry> =
+            (0..servers)
+                .map(|i| {
+                    (
+                        format!("srv{i}"),
+                        crate::custom_mcp::policy::tests::approved(
+                            crate::custom_mcp::policy::tests::npm_entry(),
+                        ),
+                    )
+                })
+                .collect();
+        ResolvedIntegrationsConfig {
+            custom_mcp: crate::custom_mcp::effective::resolve_effective(&entries, true, None),
+            ..ResolvedIntegrationsConfig::default()
+        }
+    }
+
+    #[test]
+    fn test_enabled_images_builds_the_guard_only_with_a_running_custom_server() {
+        let none: Vec<&str> = enabled_images(&with_custom_mcp(0))
+            .iter()
+            .map(|i| i.name)
+            .collect();
+        assert!(!none.contains(&IMAGE_MCP_CUSTOM_GUARD), "{none:?}");
+        let one: Vec<&str> = enabled_images(&with_custom_mcp(1))
+            .iter()
+            .map(|i| i.name)
+            .collect();
+        assert_eq!(
+            one,
+            vec![
+                IMAGE_CLAUDE,
+                IMAGE_PROXY,
+                IMAGE_MCP_HUB,
+                IMAGE_MCP_CUSTOM_GUARD
+            ]
+        );
+        let two = enabled_images(&with_custom_mcp(2));
+        assert_eq!(
+            two.iter()
+                .filter(|i| i.name == IMAGE_MCP_CUSTOM_GUARD)
+                .count(),
+            1,
+            "one guard image serves every server"
+        );
+    }
+
+    #[test]
+    fn test_enabled_images_skips_the_guard_for_excluded_servers() {
+        let entries = std::collections::BTreeMap::from([(
+            "srv".to_string(),
+            crate::custom_mcp::policy::tests::approved(
+                crate::custom_mcp::policy::tests::npm_entry(),
+            ),
+        )]);
+        let cfg = ResolvedIntegrationsConfig {
+            custom_mcp: crate::custom_mcp::effective::resolve_effective(&entries, false, None),
+            ..ResolvedIntegrationsConfig::default()
+        };
+        assert!(!enabled_images(&cfg)
+            .iter()
+            .any(|i| i.name == IMAGE_MCP_CUSTOM_GUARD));
+    }
+
     #[test]
     fn test_enabled_images_ignores_plugins() {
         let mut cfg = ResolvedIntegrationsConfig::default();
@@ -2252,7 +2337,7 @@ mod tests {
                 );
                 continue;
             };
-            if suffix == "hub" {
+            if suffix == "hub" || img.name == IMAGE_MCP_CUSTOM_GUARD {
                 continue;
             }
             assert!(

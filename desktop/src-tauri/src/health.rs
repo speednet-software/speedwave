@@ -164,7 +164,10 @@ impl HealthMonitor {
 
 /// Parses compose ps JSON entries into `ContainerHealth` structs; handles field name differences
 /// across nerdctl versions: `Name`/`name`, `State`/`Status`/`state`/`status`.
-fn parse_container_entries(entries: &[serde_json::Value], project: &str) -> Vec<ContainerHealth> {
+pub(crate) fn parse_container_entries(
+    entries: &[serde_json::Value],
+    project: &str,
+) -> Vec<ContainerHealth> {
     entries
         .iter()
         .map(|entry| {

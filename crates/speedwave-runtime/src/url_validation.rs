@@ -1,36 +1,7 @@
 //! SSOT for host-side SSRF URL validation (ADR-041 §SSRF policy).
 //! Shared by LLM discovery, Redmine, and plugin OAuth endpoint validation.
 
-/// Returns `true` if the given IP address is loopback, private, link-local,
-/// or otherwise reserved (not globally routable).
-pub fn is_private_or_reserved(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => {
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_unspecified()
-                || v4.is_link_local()
-                || v4.octets()[0] == 0
-                || v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64
-                || (v4.octets()[0] == 192 && v4.octets()[1] == 0 && v4.octets()[2] == 2)
-                || (v4.octets()[0] == 198 && v4.octets()[1] == 51 && v4.octets()[2] == 100)
-                || (v4.octets()[0] == 203 && v4.octets()[1] == 0 && v4.octets()[2] == 113)
-                || (v4.octets()[0] == 198 && (v4.octets()[1] & 0xfe) == 18)
-        }
-        std::net::IpAddr::V6(v6) => {
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || (v6.segments()[0] & 0xfe00) == 0xfc00
-                || (v6.segments()[0] & 0xffc0) == 0xfe80
-                || (v6.segments()[0] & 0xffc0) == 0xfec0
-                || (v6.segments()[0] == 0x2001 && v6.segments()[1] == 0x0db8)
-                || (v6.segments()[0] == 0x0100
-                    && v6.segments()[1] == 0
-                    && v6.segments()[2] == 0
-                    && v6.segments()[3] == 0)
-        }
-    }
-}
+pub use ip_policy::is_private_or_reserved;
 
 /// SSOT loopback-host predicate: 127.0.0.0/8, `::1`, IPv6-mapped IPv4
 /// loopback, or the exact `localhost` domain (case-insensitive).
@@ -129,7 +100,7 @@ fn host_block_reason(url: &url::Url, policy: PrivatePolicy) -> Option<String> {
                     ipv6
                 ));
             }
-            ipv6.to_ipv4_mapped()
+            ip_policy::embedded_ipv4(ipv6)
                 .filter(|m| blocked(IpAddr::V4(*m)))
                 .map(|m| format!("Blocked URL host '{}': maps to private IPv4 {}", ipv6, m))
         }
@@ -387,6 +358,52 @@ mod tests {
     }
 
     #[test]
+    fn validate_url_blocks_compatible_6to4_and_nat64_embeddings_of_private_ipv4() {
+        for url in [
+            "https://[::7f00:1]/",
+            "https://[::a00:1]/",
+            "https://[2002:7f00:1::]/",
+            "https://[2002:a9fe:a9fe::1]/",
+            "https://[64:ff9b::c0a8:101]/",
+        ] {
+            let err = validate_url(url).unwrap_err();
+            assert!(err.contains("private"), "{url}: {err}");
+        }
+    }
+
+    #[test]
+    fn validate_url_blocks_teredo_and_local_use_nat64() {
+        for url in ["https://[2001::1]/", "https://[64:ff9b:1::808:808]/"] {
+            let err = validate_url(url).unwrap_err();
+            assert!(err.contains("private/reserved IPv6"), "{url}: {err}");
+        }
+    }
+
+    #[test]
+    fn validate_url_allows_public_embeddings() {
+        for url in [
+            "https://[::808:808]/",
+            "https://[2002:808:808::]/",
+            "https://[64:ff9b::808:808]/",
+        ] {
+            assert!(validate_url(url).is_ok(), "{url}");
+        }
+    }
+
+    #[test]
+    fn validate_collector_url_allow_loopback_accepts_an_on_premise_6to4_embedding() {
+        assert!(
+            validate_collector_url("http://[2002:a00:1::]:4318", PrivatePolicy::AllowLoopback)
+                .is_ok()
+        );
+        assert!(validate_collector_url(
+            "http://[2002:a9fe:a9fe::]:4318",
+            PrivatePolicy::AllowLoopback
+        )
+        .is_err());
+    }
+
+    #[test]
     fn validate_url_allows_public_ip() {
         assert!(validate_url("https://8.8.8.8/").is_ok());
     }
@@ -399,36 +416,6 @@ mod tests {
     #[test]
     fn validate_url_allows_public_ipv6() {
         assert!(validate_url("https://[2606:4700::1]/").is_ok());
-    }
-
-    #[test]
-    fn private_reserved_blocks_0_x_range() {
-        let ip: std::net::IpAddr = "0.1.2.3".parse().unwrap();
-        assert!(is_private_or_reserved(ip));
-    }
-
-    #[test]
-    fn private_reserved_allows_1_0_0_1() {
-        let ip: std::net::IpAddr = "1.0.0.1".parse().unwrap();
-        assert!(!is_private_or_reserved(ip));
-    }
-
-    #[test]
-    fn private_reserved_blocks_fc00_unique_local() {
-        let ip: std::net::IpAddr = "fc00::1".parse().unwrap();
-        assert!(is_private_or_reserved(ip));
-    }
-
-    #[test]
-    fn private_reserved_blocks_fdff_unique_local() {
-        let ip: std::net::IpAddr = "fdff::1".parse().unwrap();
-        assert!(is_private_or_reserved(ip));
-    }
-
-    #[test]
-    fn private_reserved_allows_fe00() {
-        let ip: std::net::IpAddr = "fe00::1".parse().unwrap();
-        assert!(!is_private_or_reserved(ip));
     }
 
     #[test]
@@ -498,18 +485,6 @@ mod tests {
     #[test]
     fn validate_url_allows_real_public_ipv6() {
         assert!(validate_url("https://[2606:4700::1]/").is_ok());
-    }
-
-    #[test]
-    fn private_reserved_blocks_rfc6666_discard_prefix() {
-        let ip: std::net::IpAddr = "100::1".parse().unwrap();
-        assert!(is_private_or_reserved(ip));
-    }
-
-    #[test]
-    fn private_reserved_allows_non_discard_0100() {
-        let ip: std::net::IpAddr = "100:0:0:1::1".parse().unwrap();
-        assert!(!is_private_or_reserved(ip));
     }
 
     #[test]

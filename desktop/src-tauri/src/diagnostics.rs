@@ -16,6 +16,8 @@ pub(crate) struct DiagnosticsInput {
     pub entrypoint_log: Option<std::path::PathBuf>,
     /// Path to the proxy's usage JSONL (ZIP-only; not shown in `/logs`).
     pub proxy_usage_log: Option<std::path::PathBuf>,
+    /// The hub's Custom MCP tool catalogs (ZIP-only; untrusted server text, sanitized).
+    pub tool_catalogs: Vec<std::path::PathBuf>,
 }
 
 /// Writes one ZIP entry; content always passes through `log_sanitizer::sanitize()` first
@@ -109,6 +111,26 @@ pub(crate) fn build_diagnostics_zip(
         }
     }
 
+    for path in &input.tool_catalogs {
+        let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        match speedwave_runtime::fs_perms::read_regular_file_no_follow_capped(
+            path,
+            speedwave_runtime::custom_mcp::catalog::MAX_TOOL_CATALOG_BYTES,
+        ) {
+            Ok(Some(content)) => {
+                let name = format!("{}{file_name}", zip_entry("tool-catalogs"));
+                write_sanitized_entry(&mut zip, options, &name, &content)?;
+            }
+            Ok(None) => {}
+            Err(reason) => log::warn!(
+                "diagnostics skips the tool catalog {file_name}: {}",
+                speedwave_runtime::log_sanitizer::sanitize(&reason)
+            ),
+        }
+    }
+
     let sys_info = format!(
         "os: {}\narch: {}\nversion: {}\nclaude_pinned: {}\n",
         std::env::consts::OS,
@@ -160,6 +182,11 @@ pub(crate) async fn export_diagnostics(project: String) -> Result<String, String
             claude_session_log: resolve("claude"),
             entrypoint_log: resolve("entrypoint"),
             proxy_usage_log: resolve("proxy-usage"),
+            tool_catalogs: speedwave_runtime::diagnostic_sources::resolve_dir_files(
+                "tool-catalogs",
+                data_dir,
+                &project,
+            ),
         };
 
         build_diagnostics_zip(&zip_path, &input)?;
@@ -265,6 +292,7 @@ mod tests {
             claude_session_log: None,
             entrypoint_log: None,
             proxy_usage_log: Some(usage_path),
+            tool_catalogs: Vec::new(),
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -343,6 +371,7 @@ mod tests {
             claude_session_log: None,
             entrypoint_log: None,
             proxy_usage_log: None,
+            tool_catalogs: Vec::new(),
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -389,6 +418,7 @@ mod tests {
             claude_session_log: None,
             entrypoint_log: None,
             proxy_usage_log: None,
+            tool_catalogs: Vec::new(),
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -429,6 +459,7 @@ mod tests {
             claude_session_log: None,
             entrypoint_log: None,
             proxy_usage_log: None,
+            tool_catalogs: Vec::new(),
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -461,6 +492,7 @@ mod tests {
             claude_session_log: None,
             entrypoint_log: None,
             proxy_usage_log: None,
+            tool_catalogs: Vec::new(),
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -490,6 +522,7 @@ mod tests {
             claude_session_log: None,
             entrypoint_log: None,
             proxy_usage_log: None,
+            tool_catalogs: Vec::new(),
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -519,6 +552,7 @@ mod tests {
             claude_session_log: None,
             entrypoint_log: None,
             proxy_usage_log: None,
+            tool_catalogs: Vec::new(),
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -554,6 +588,7 @@ mod tests {
             claude_session_log: Some(session_log),
             entrypoint_log: None,
             proxy_usage_log: None,
+            tool_catalogs: Vec::new(),
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -588,6 +623,7 @@ mod tests {
             claude_session_log: None,
             entrypoint_log: Some(log),
             proxy_usage_log: None,
+            tool_catalogs: Vec::new(),
         };
         build_diagnostics_zip(&out, &input).unwrap();
 
@@ -635,6 +671,7 @@ mod tests {
             claude_session_log: Some(mk("claude.log", secrets[4])),
             entrypoint_log: Some(mk("entrypoint.log", secrets[5])),
             proxy_usage_log: Some(mk("usage.jsonl", secrets[6])),
+            tool_catalogs: Vec::new(),
         };
         build_diagnostics_zip(&zip_path, &input).unwrap();
 
@@ -673,6 +710,7 @@ mod tests {
             claude_session_log: None,
             entrypoint_log: None,
             proxy_usage_log: None,
+            tool_catalogs: Vec::new(),
         };
         build_diagnostics_zip(&zip_path, &input).unwrap();
 
@@ -727,6 +765,7 @@ mod tests {
             claude_session_log: None,
             entrypoint_log: None,
             proxy_usage_log: Some(unreadable),
+            tool_catalogs: Vec::new(),
         };
         build_diagnostics_zip(&zip_path, &input).unwrap();
 
@@ -760,6 +799,7 @@ mod tests {
             claude_session_log: None,
             entrypoint_log: None,
             proxy_usage_log: Some(tmp.path().join("nope.jsonl")),
+            tool_catalogs: Vec::new(),
         };
         build_diagnostics_zip(&zip_path, &input).unwrap();
         let names = zip_entry_names(&zip_path);
@@ -787,6 +827,7 @@ mod tests {
             claude_session_log: None,
             entrypoint_log: None,
             proxy_usage_log: None,
+            tool_catalogs: Vec::new(),
         };
         build_diagnostics_zip(&zip_path, &input).unwrap();
         let placeholder =
@@ -795,6 +836,50 @@ mod tests {
             !placeholder.contains("xoxb-1234567890-abcdefghij"),
             "placeholder reason must be sanitized: {placeholder}"
         );
+    }
+
+    #[test]
+    fn tool_catalogs_are_zipped_sanitized_and_symlinks_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("diag-catalogs.zip");
+        let catalog = tmp.path().join("tool-catalog-custom-figma.json");
+        std::fs::write(
+            &catalog,
+            r#"{"tools":[{"description":"key xoxb-1234567890-abcdefghij"}]}"#,
+        )
+        .unwrap();
+        let mut catalogs = vec![catalog];
+        #[cfg(unix)]
+        {
+            let secret = tmp.path().join("secret.txt");
+            std::fs::write(&secret, "sk-ant-SECRET").unwrap();
+            let link = tmp.path().join("tool-catalog-custom-link.json");
+            std::os::unix::fs::symlink(&secret, &link).unwrap();
+            catalogs.push(link);
+        }
+        let input = DiagnosticsInput {
+            log_dir: None,
+            serial_log: None,
+            container_logs: None,
+            mcp_os_log: None,
+            compose_path: None,
+            claude_session_log: None,
+            entrypoint_log: None,
+            proxy_usage_log: None,
+            tool_catalogs: catalogs,
+        };
+        build_diagnostics_zip(&zip_path, &input).unwrap();
+        let body = read_zip_entry(
+            &zip_path,
+            "audit/tool-catalogs/tool-catalog-custom-figma.json",
+        )
+        .unwrap();
+        assert!(!body.contains("xoxb-1234567890-abcdefghij"), "{body}");
+        assert!(read_zip_entry(
+            &zip_path,
+            "audit/tool-catalogs/tool-catalog-custom-link.json"
+        )
+        .is_none());
     }
 
     /// Parity: every ZIP entry must trace to a registry `zip_entry`. A stray
@@ -821,14 +906,21 @@ mod tests {
             claude_session_log: Some(mk("claude.log")),
             entrypoint_log: Some(mk("entrypoint.log")),
             proxy_usage_log: Some(mk("usage.jsonl")),
+            tool_catalogs: vec![mk("tool-catalog-custom-figma.json")],
         };
         build_diagnostics_zip(&zip_path, &input).unwrap();
+        assert!(zip_entry_names(&zip_path)
+            .iter()
+            .any(|n| n == "audit/tool-catalogs/tool-catalog-custom-figma.json"));
 
         let registry_entries: Vec<&str> = DIAGNOSTIC_SOURCES.iter().map(|s| s.zip_entry).collect();
         for name in zip_entry_names(&zip_path) {
             let traced = name == "system-info.txt"
                 || name.starts_with("logs/")
                 || registry_entries.contains(&name.as_str())
+                || registry_entries
+                    .iter()
+                    .any(|e| e.ends_with('/') && name.starts_with(e))
                 || name
                     .strip_suffix(".unavailable.txt")
                     .is_some_and(|base| registry_entries.contains(&base));

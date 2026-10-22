@@ -288,7 +288,7 @@ fn save_redmine_credentials(
 }
 
 /// Validates a credential field name and value.
-fn validate_credential_field(key: &str, value: &str) -> Result<(), String> {
+pub(crate) fn validate_credential_field(key: &str, value: &str) -> Result<(), String> {
     if key.contains('/') || key.contains('\\') || key.contains("..") || key.contains('\0') {
         return Err(format!("invalid field name: {}", key));
     }
@@ -1184,6 +1184,13 @@ pub fn ensure_project_images_built(
     let enabled_plugin_ids = integrations.enabled_plugin_service_ids();
     speedwave_runtime::plugin::ensure_plugin_images(rt, &enabled_plugin_ids)
         .map_err(|e| speedwave_runtime::build::user_facing_engine_error(&e))?;
+    speedwave_runtime::custom_mcp::build::ensure_custom_images(
+        rt,
+        speedwave_runtime::consts::data_dir(),
+        project,
+        integrations.effective_custom_mcp(),
+    )
+    .map_err(|e| speedwave_runtime::build::user_facing_engine_error(&e))?;
     Ok(())
 }
 
@@ -1222,6 +1229,27 @@ fn prune_unused_worker_images(rt: &speedwave_runtime::runtime::LockedRuntime, pr
     {
         log::warn!("failed to prune unused worker images: {e}");
     }
+    if let Err(e) = speedwave_runtime::custom_mcp::build::prune_custom_images(
+        rt,
+        project,
+        integrations.effective_custom_mcp(),
+    ) {
+        log::warn!("failed to prune unused custom MCP server images: {e:#}");
+    }
+}
+
+/// Turns off the Custom MCP server a `custom-<name>` service id names; `false` when it names none.
+fn disable_custom_server(entry: &mut config::ProjectUserEntry, service: &str) -> bool {
+    match service
+        .strip_prefix(speedwave_runtime::consts::CUSTOM_MCP_SERVICE_PREFIX)
+        .and_then(|name| entry.custom_mcp.as_mut()?.get_mut(name))
+    {
+        Some(server) => {
+            server.enabled = false;
+            true
+        }
+        None => false,
+    }
 }
 
 /// Rolls a service back to `enabled: false`; called when on-demand build fails.
@@ -1231,6 +1259,9 @@ fn rollback_integration_to_disabled(project: &str, service: &str) {
         let entry = user_config
             .find_project_mut(project)
             .ok_or_else(|| anyhow::anyhow!("project '{project}' not found"))?;
+        if disable_custom_server(entry, service) {
+            return config::save_user_config(&user_config);
+        }
         let integrations = entry.integrations.get_or_insert_with(Default::default);
         let cfg = config::IntegrationConfig {
             enabled: Some(false),
@@ -1360,6 +1391,25 @@ mod tests {
             got, expected,
             "Desktop providerData descriptor keys drifted from runtime IDENTITY_KEYS"
         );
+    }
+
+    #[test]
+    fn rollback_turns_off_the_named_custom_server_only() {
+        let mut cfg: config::SpeedwaveUserConfig = serde_json::from_value(serde_json::json!({
+            "projects": [{"name": "acme", "dir": "/tmp/acme", "custom_mcp": {
+                "desk": {"enabled": true, "source": {"kind": "host", "port": 3845, "path": "/mcp"}},
+                "pen": {"enabled": true, "source": {"kind": "host", "port": 3846, "path": "/mcp"}}
+            }}]
+        }))
+        .unwrap();
+        let entry = cfg.find_project_mut("acme").unwrap();
+        assert!(disable_custom_server(entry, "custom-desk"));
+        let servers = entry.custom_mcp.as_ref().unwrap();
+        assert!(!servers["desk"].enabled);
+        assert!(servers["pen"].enabled);
+        assert!(!disable_custom_server(entry, "custom-nope"));
+        assert!(!disable_custom_server(entry, "desk"));
+        assert!(!disable_custom_server(entry, "slack"));
     }
 
     #[test]
@@ -2167,6 +2217,33 @@ mod tests {
         assert!(
             body.contains("set_plugin_enabled"),
             "plugin enable failure must be rollback-able (set_service has no plugin arm)"
+        );
+    }
+
+    #[test]
+    fn project_image_hooks_cover_custom_mcp_server_images() {
+        let source = include_str!("integrations_cmd.rs");
+        let body_of = |name: &str| {
+            let start = source
+                .find(&format!("fn {name}("))
+                .unwrap_or_else(|| panic!("{name} must exist"));
+            let end = source[start..]
+                .find("\n}\n")
+                .map(|e| start + e)
+                .unwrap_or_else(|| panic!("{name} must end"));
+            &source[start..end]
+        };
+        let ensure = body_of("ensure_project_images_built");
+        assert!(
+            ensure.contains("custom_mcp::build::ensure_custom_images(")
+                && ensure.contains("integrations.effective_custom_mcp()"),
+            "the lazy build must build the images of the project's running custom MCP servers"
+        );
+        let prune = body_of("prune_unused_worker_images");
+        assert!(
+            prune.contains("custom_mcp::build::prune_custom_images(")
+                && prune.contains("integrations.effective_custom_mcp()"),
+            "the prune must keep exactly the images of the project's running custom MCP servers"
         );
     }
 

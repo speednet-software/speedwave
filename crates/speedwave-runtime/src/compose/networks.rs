@@ -2,6 +2,10 @@ use crate::consts;
 use std::path::Path;
 
 const PROJECT_NETWORK_SUFFIX: &str = "network";
+const CUSTOM_NETWORK_KEY: &str = "custom";
+const CUSTOM_HOST_NETWORK_KEY: &str = "custom_host";
+const CUSTOM_SERVER_NETWORK_INFIX: &str = "cx_";
+const CUSTOM_EGRESS_NETWORK_INFIX: &str = "eg_";
 
 pub(crate) fn compose_egress_less_networks_in(
     data_dir: &Path,
@@ -39,11 +43,30 @@ pub(crate) fn external_egress_less_networks(yaml: &str) -> anyhow::Result<Vec<St
 }
 
 pub(crate) fn is_egress_less_network(key: &str) -> bool {
-    egress_less_config_keys().any(|config_key| {
-        key.strip_suffix(config_key)
-            .and_then(|rest| rest.strip_suffix('_'))
-            .is_some_and(|rest| rest.ends_with(&format!("_{PROJECT_NETWORK_SUFFIX}")))
-    })
+    is_builtin_egress_less_network(key)
+        || ends_with_network_of(key, CUSTOM_NETWORK_KEY)
+        || custom_server_of_network(key).is_some()
+}
+
+pub(crate) fn is_builtin_egress_less_network(key: &str) -> bool {
+    egress_less_config_keys().any(|config_key| ends_with_network_of(key, config_key))
+}
+
+fn ends_with_network_of(key: &str, config_key: &str) -> bool {
+    key.strip_suffix(config_key)
+        .and_then(|rest| rest.strip_suffix('_'))
+        .is_some_and(ends_with_project_network)
+}
+
+fn ends_with_project_network(rest: &str) -> bool {
+    rest.ends_with(&format!("_{PROJECT_NETWORK_SUFFIX}"))
+}
+
+pub(crate) fn custom_server_of_network(key: &str) -> Option<&str> {
+    let marker = format!("_{PROJECT_NETWORK_SUFFIX}_{CUSTOM_SERVER_NETWORK_INFIX}");
+    let (prefix, server) = key.rsplit_once(&marker)?;
+    (!prefix.is_empty() && crate::custom_mcp::model::validate_server_name(server).is_ok())
+        .then_some(server)
 }
 
 fn egress_less_config_keys() -> impl Iterator<Item = &'static str> {
@@ -58,9 +81,19 @@ pub(crate) fn declares_external(decl: &serde_yaml_ng::Value) -> bool {
 }
 
 pub(crate) fn egress_less_network_names(project: &str) -> Vec<String> {
+    let custom = custom_network_name(&project_network_name(project));
     egress_less_network_owners(project)
         .into_iter()
         .map(|(name, _)| name)
+        .chain(std::iter::once(custom))
+        .collect()
+}
+
+pub(crate) fn custom_server_network_names(project: &str, servers: &[String]) -> Vec<String> {
+    let network_name = project_network_name(project);
+    servers
+        .iter()
+        .map(|server| custom_server_network_name(&network_name, server))
         .collect()
 }
 
@@ -89,8 +122,40 @@ pub(crate) fn egress_less_network_name(network_name: &str, config_key: &str) -> 
     format!("{network_name}_{config_key}")
 }
 
+pub(crate) fn custom_network_name(network_name: &str) -> String {
+    egress_less_network_name(network_name, CUSTOM_NETWORK_KEY)
+}
+
+pub(crate) fn custom_host_network_name(network_name: &str) -> String {
+    egress_less_network_name(network_name, CUSTOM_HOST_NETWORK_KEY)
+}
+
+pub(crate) fn custom_server_network_name(network_name: &str, server: &str) -> String {
+    format!("{network_name}_{CUSTOM_SERVER_NETWORK_INFIX}{server}")
+}
+
+pub(crate) fn custom_egress_network_name(network_name: &str, server: &str) -> String {
+    format!("{network_name}_{CUSTOM_EGRESS_NETWORK_INFIX}{server}")
+}
+
 pub(crate) fn legacy_compose_network_name(project: &str, key: &str) -> String {
     format!("{project}_{key}")
+}
+
+pub(crate) fn effective_network_name(
+    project: &str,
+    key: &str,
+    decl: &serde_yaml_ng::Value,
+) -> Option<String> {
+    let external = match decl.get("external") {
+        None => false,
+        Some(value) => value.as_bool()?,
+    };
+    match decl.get("name") {
+        Some(name) => name.as_str().map(str::to_string),
+        None if external => Some(key.to_string()),
+        None => Some(legacy_compose_network_name(project, key)),
+    }
 }
 
 #[cfg(test)]
@@ -122,13 +187,9 @@ mod tests {
         let expected: Vec<String> = consts::TOGGLEABLE_MCP_SERVICES
             .iter()
             .filter(|svc| svc.egress_less)
-            .map(|svc| {
-                format!(
-                    "{}_acme_network_{}",
-                    consts::compose_prefix(),
-                    svc.config_key
-                )
-            })
+            .map(|svc| svc.config_key)
+            .chain(std::iter::once("custom"))
+            .map(|key| format!("{}_acme_network_{key}", consts::compose_prefix()))
             .collect();
         assert_eq!(names, expected);
         assert!(names.iter().any(|n| n.ends_with("_network_office")));
@@ -138,9 +199,14 @@ mod tests {
     #[test]
     fn egress_less_network_owners_pair_each_network_with_its_worker() {
         let owners = egress_less_network_owners("acme");
+        let mut fixed = egress_less_network_names("acme");
+        assert_eq!(
+            fixed.pop(),
+            Some(custom_network_name(&project_network_name("acme")))
+        );
         assert_eq!(
             owners.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(),
-            egress_less_network_names("acme")
+            fixed
         );
         let office = consts::TOGGLEABLE_MCP_SERVICES
             .iter()
@@ -154,6 +220,76 @@ mod tests {
     }
 
     #[test]
+    fn custom_network_names_derive_from_the_project_network() {
+        let net = project_network_name("acme");
+        assert_eq!(custom_network_name(&net), format!("{net}_custom"));
+        assert_eq!(custom_host_network_name(&net), format!("{net}_custom_host"));
+        assert_eq!(
+            custom_server_network_name(&net, "figma"),
+            format!("{net}_cx_figma")
+        );
+        assert_eq!(
+            custom_egress_network_name(&net, "figma"),
+            format!("{net}_eg_figma")
+        );
+        assert!(egress_less_network_names("acme").contains(&custom_network_name(&net)));
+        assert_eq!(
+            custom_server_network_names("acme", &["a".to_string(), "b-c".to_string()]),
+            vec![format!("{net}_cx_a"), format!("{net}_cx_b-c")]
+        );
+    }
+
+    #[test]
+    fn custom_hub_and_server_networks_are_egress_less_but_their_bridges_are_not() {
+        assert!(is_egress_less_network("speedwave_acme_network_custom"));
+        assert!(is_egress_less_network("speedwave_acme_network_cx_figma"));
+        assert!(is_egress_less_network(
+            "sw-dev_my-proj_network_cx_figma-desk"
+        ));
+        assert_eq!(
+            custom_server_of_network("speedwave_acme_network_cx_figma-desk"),
+            Some("figma-desk")
+        );
+        for not_internal in [
+            "speedwave_acme_network_custom_host",
+            "speedwave_acme_network_eg_figma",
+            "speedwave_acme_network_cx_",
+            "speedwave_acme_network_cx_Figma",
+            "speedwave_acme_network_cx_figma-up",
+            "speedwave_acme_network_cx_figma_x",
+            "_network_cx_figma",
+            "speedwave_acme_networkcustom",
+            "custom",
+        ] {
+            assert!(!is_egress_less_network(not_internal), "{not_internal}");
+        }
+    }
+
+    #[test]
+    fn external_egress_less_networks_lists_custom_networks() {
+        let yaml = r#"
+networks:
+  speedwave_acme_network_custom:
+    name: speedwave_acme_network_custom
+    external: true
+  speedwave_acme_network_cx_figma:
+    name: speedwave_acme_network_cx_figma
+    external: true
+  speedwave_acme_network_eg_figma:
+    driver: bridge
+  speedwave_acme_network_custom_host:
+    driver: bridge
+"#;
+        assert_eq!(
+            external_egress_less_networks(yaml).unwrap(),
+            vec![
+                "speedwave_acme_network_custom".to_string(),
+                "speedwave_acme_network_cx_figma".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn is_egress_less_network_matches_only_egress_less_suffixes() {
         assert!(is_egress_less_network("speedwave_test_network_office"));
         assert!(is_egress_less_network("sw-dev_my-proj_network_office"));
@@ -163,6 +299,28 @@ mod tests {
         assert!(!is_egress_less_network("office"));
         assert!(!is_egress_less_network("_office"));
         assert!(!is_egress_less_network(""));
+    }
+
+    #[test]
+    fn only_the_networks_of_egress_less_services_are_built_in() {
+        assert!(is_builtin_egress_less_network(
+            "speedwave_acme_network_office"
+        ));
+        assert!(is_builtin_egress_less_network(
+            "sw-dev_my-proj_network_office"
+        ));
+        for custom in [
+            "speedwave_acme_network_custom",
+            "speedwave_acme_network_cx_figma",
+            "speedwave_acme_network_custom_host",
+            "speedwave_acme_network_eg_figma",
+            "speedwave_acme_network",
+            "",
+        ] {
+            assert!(!is_builtin_egress_less_network(custom), "{custom}");
+        }
+        assert!(is_egress_less_network("speedwave_acme_network_custom"));
+        assert!(is_egress_less_network("speedwave_acme_network_cx_figma"));
     }
 
     #[test]
@@ -219,6 +377,48 @@ networks:
                 err.to_string()
                     .contains("speedwave_test_network_office is not declared external: true"),
                 "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn effective_network_name_follows_how_compose_names_the_network() {
+        let decl = |yaml: &str| serde_yaml_ng::from_str::<serde_yaml_ng::Value>(yaml).unwrap();
+        assert_eq!(
+            effective_network_name("acme", "net", &decl("{driver: bridge}")).as_deref(),
+            Some("acme_net")
+        );
+        assert_eq!(
+            effective_network_name("acme", "net", &serde_yaml_ng::Value::Null).as_deref(),
+            Some("acme_net")
+        );
+        assert_eq!(
+            effective_network_name("acme", "net", &decl("{external: true}")).as_deref(),
+            Some("net")
+        );
+        assert_eq!(
+            effective_network_name("acme", "net", &decl("{name: other, external: true}"))
+                .as_deref(),
+            Some("other")
+        );
+        assert_eq!(
+            effective_network_name("acme", "net", &decl("{name: other, driver: bridge}"))
+                .as_deref(),
+            Some("other")
+        );
+        assert_eq!(
+            effective_network_name("acme", "net", &decl("{external: false}")).as_deref(),
+            Some("acme_net")
+        );
+        for bad in [
+            "{external: {name: other}}",
+            "{external: 'true'}",
+            "{name: 5}",
+            "{name: [a]}",
+        ] {
+            assert!(
+                effective_network_name("acme", "net", &decl(bad)).is_none(),
+                "{bad}"
             );
         }
     }

@@ -1,3 +1,4 @@
+use crate::bridges::custom_host_relay::CustomHostRelay;
 use crate::bridges::ide_bridge;
 use crate::bridges::plugin_host_bridge::PluginHostBridge;
 use crate::types::BundleReconcileStatus;
@@ -17,6 +18,9 @@ use tauri::Emitter;
 pub(crate) type SharedIdeBridge = Arc<Mutex<Option<ide_bridge::IdeBridge>>>;
 
 pub(crate) type SharedPluginBridges = Arc<Mutex<HashMap<String, PluginHostBridge>>>;
+
+/// Per-project Custom MCP host relays, keyed by project name.
+pub(crate) type SharedCustomHostRelays = Arc<Mutex<HashMap<String, CustomHostRelay>>>;
 
 static GLOBAL_PLUGIN_BRIDGES: OnceLock<SharedPluginBridges> = OnceLock::new();
 
@@ -64,6 +68,7 @@ pub(crate) type SharedAutoCheckHandle = Arc<Mutex<Option<tauri::async_runtime::J
 pub(crate) struct ExitCleanupContext {
     pub(crate) ide_bridge: SharedIdeBridge,
     pub(crate) plugin_bridges: SharedPluginBridges,
+    pub(crate) custom_host_relays: SharedCustomHostRelays,
     pub(crate) mcp_os: SharedMcpOs,
     /// In-process PII NER detector service (ADR-096) — stopped + lock removed on exit.
     pub(crate) pii_ner: crate::pii_ner_service::SharedPiiNer,
@@ -977,6 +982,7 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
 
     let ide_bridge = ctx.ide_bridge.clone();
     let plugin_bridges = ctx.plugin_bridges.clone();
+    let custom_host_relays = ctx.custom_host_relays.clone();
     let mcp_os = ctx.mcp_os.clone();
     let pii_ner = ctx.pii_ner.clone();
     let oauth = ctx.oauth.clone();
@@ -1023,6 +1029,7 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
             }
             Err(e) => log::warn!("pii-ner cleanup skipped, mutex poisoned: {e}"),
         }
+        stop_custom_host_relays(&custom_host_relays);
         match mcp_os.lock() {
             Ok(mut guard) => {
                 if let Some(proc) = guard.take() {
@@ -1050,6 +1057,11 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
         }
     });
     Some(handle)
+}
+
+/// Exit path: every relay first marks its endpoints unavailable, then stops listening.
+pub(crate) fn stop_custom_host_relays(relays: &SharedCustomHostRelays) {
+    crate::custom_mcp_cmd::relays::stop_relays_where(relays, |_| true);
 }
 
 pub(crate) fn stop_worker<I: crate::mirror_relay::RelayWorkerInner>(
@@ -1384,6 +1396,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }
         }
 
@@ -1459,6 +1472,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }
         }
 
@@ -1632,6 +1646,7 @@ mod tests {
                         plugin_settings: None,
                         policy: None,
                         effort_pin: None,
+                        custom_mcp: None,
                     })
                     .collect(),
                 ..Default::default()
@@ -1744,6 +1759,7 @@ mod tests {
                     plugin_settings: None,
                     policy: None,
                     effort_pin: None,
+                    custom_mcp: None,
                 }],
                 ..Default::default()
             }
@@ -2729,6 +2745,7 @@ mod tests {
         let ctx = ExitCleanupContext {
             ide_bridge: SharedIdeBridge::default(),
             plugin_bridges: SharedPluginBridges::default(),
+            custom_host_relays: SharedCustomHostRelays::default(),
             mcp_os: SharedMcpOs::default(),
             oauth: SharedOauth::default(),
             auto_check_handle: SharedAutoCheckHandle::default(),

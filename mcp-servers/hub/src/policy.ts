@@ -10,16 +10,18 @@
 
 import { loadEngine } from '@speedwave/policy-engine';
 import type { PiiEngine } from '@speedwave/policy-engine';
+import { loadServicePiiModes } from './pii-mode.js';
 
 let engine: PiiEngine | undefined;
 
 /**
- * Load and initialize the PII engine for this process. Called once at server startup.
+ * Load and initialize the PII engine and the per-service PII modes for this process. Called once at server startup.
  * Throws (never exits) when `POLICY_FILE` is present but invalid, or its key is missing/bad
  * — fail-closed.
  */
 export function loadPolicy(): void {
   engine = loadEngine();
+  loadServicePiiModes();
 }
 
 /**

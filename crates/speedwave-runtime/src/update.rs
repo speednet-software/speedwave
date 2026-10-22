@@ -361,7 +361,12 @@ pub fn update_containers(
         Vec::new()
     });
     let expected_paths = compose::SecurityExpectedPaths::compute(project, &project_dir)?
-        .with_telemetry_locked(resolved.telemetry.any_locked);
+        .with_telemetry_locked(resolved.telemetry.any_locked)
+        .with_custom_mcp(crate::custom_mcp::expectations_for(
+            &user_config,
+            project,
+            crate::custom_mcp::effective::current_managed_policy().as_ref(),
+        ));
     let violations = SecurityCheck::run(&compose_yml, project, &manifests, &expected_paths);
     if !violations.is_empty() {
         let msgs: Vec<String> = violations
@@ -439,7 +444,7 @@ pub fn update_containers(
 
 /// Which compose a rollback should recreate from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RollbackComposeChoice {
+pub(crate) enum RollbackComposeChoice {
     /// Snapshot passed the security check — restore it verbatim.
     UseSnapshot,
     /// Snapshot predates a new invariant; a clean fresh render supersedes it.
@@ -450,7 +455,7 @@ enum RollbackComposeChoice {
 
 /// Picks the rollback source: snapshot if it passes, else a clean fresh render (forward-fix for
 /// snapshots predating a new invariant), else abort. `fresh` is `None` when no render was produced.
-fn choose_rollback_compose(
+pub(crate) fn choose_rollback_compose(
     snapshot_violations: &[compose::SecurityViolation],
     fresh: Option<(&str, &[compose::SecurityViolation])>,
 ) -> RollbackComposeChoice {
@@ -490,7 +495,12 @@ pub fn rollback_containers(
         config::resolve_project_config(&project_path, &user_config, project)
     };
     let expected_paths = compose::SecurityExpectedPaths::compute(project, &project_dir)?
-        .with_telemetry_locked(resolved.telemetry.any_locked);
+        .with_telemetry_locked(resolved.telemetry.any_locked)
+        .with_custom_mcp(crate::custom_mcp::expectations_for(
+            &user_config,
+            project,
+            crate::custom_mcp::effective::current_managed_policy().as_ref(),
+        ));
     let snapshot_violations = SecurityCheck::run(
         &snapshot.compose_yml,
         project,

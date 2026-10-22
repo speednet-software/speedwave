@@ -102,6 +102,23 @@ struct PolicyFileV3 {
     rules: Vec<RuleV3>,
     #[serde(default)]
     keywords: Vec<KeywordV3>,
+    #[serde(default, rename = "services")]
+    _services: std::collections::BTreeMap<String, ServicePolicyV3>,
+}
+
+/// Per-service hub settings (`services.<id>`); read by the hub, validated and ignored here.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServicePolicyV3 {
+    #[serde(rename = "pii_mode")]
+    _pii_mode: ServicePiiModeV3,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ServicePiiModeV3 {
+    Tokens,
+    Plaintext,
 }
 
 /// Policy provenance metadata; parsed and validated structurally but not
@@ -404,6 +421,44 @@ mod tests {
         match compile_policy_v3("{ not json") {
             Err(PolicyError::Parse(msg)) => assert!(msg.contains("line")),
             other => panic!("expected a parse error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v3_services_field_is_accepted_and_does_not_change_compilation() {
+        let json = VALID_V3_POLICY.replacen(
+            "\"version\": 3,",
+            "\"version\": 3, \"services\": {\"custom-figma\": {\"pii_mode\": \"tokens\"}, \"custom-desk\": {\"pii_mode\": \"plaintext\"}},",
+            1,
+        );
+        let with = compile_policy_v3(&json).expect("services is a known optional field");
+        let without = compile_policy_v3(VALID_V3_POLICY).expect("valid policy");
+        assert_eq!(with.rules().len(), without.rules().len());
+        assert_eq!(with.keywords().len(), without.keywords().len());
+        let empty =
+            VALID_V3_POLICY.replacen("\"version\": 3,", "\"version\": 3, \"services\": {},", 1);
+        compile_policy_v3(&empty).expect("an empty services map compiles");
+    }
+
+    #[test]
+    fn v3_malformed_services_field_is_rejected() {
+        for services in [
+            r#"{"custom-figma": {"pii_mode": "detokenize"}}"#,
+            r#"{"custom-figma": {"pii_mode": "Tokens"}}"#,
+            r#"{"custom-figma": {}}"#,
+            r#"{"custom-figma": {"pii_mode": "tokens", "extra": 1}}"#,
+            r#"{"custom-figma": "tokens"}"#,
+            r#"["custom-figma"]"#,
+        ] {
+            let json = VALID_V3_POLICY.replacen(
+                "\"version\": 3,",
+                &format!("\"version\": 3, \"services\": {services},"),
+                1,
+            );
+            assert!(
+                matches!(compile_policy_v3(&json), Err(PolicyError::Parse(_))),
+                "{services} must be rejected"
+            );
         }
     }
 

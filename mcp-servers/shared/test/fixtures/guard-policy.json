@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "service": "custom-figma",
+  "mode": "npm",
+  "consentDigest": "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0",
+  "maxResultBytes": 262144,
+  "tools": {
+    "get_file": {
+      "state": "allowed",
+      "defHash": "sha256:67d8244eaec6dab87fcf51d875136a5979597a001d5f3cb6523699d37b4aa7be",
+      "exposedName": "get_file",
+      "definition": { "name": "get_file", "inputSchema": { "type": "object" } },
+      "deferLoading": true,
+      "timeoutClass": "standard"
+    },
+    "post_comment": {
+      "state": "blocked",
+      "defHash": "sha256:2ec4cbea7982be0b82d0444193766a46a56e2f244f341e6c80cddf482c73dec2",
+      "exposedName": "post_comment",
+      "definition": {
+        "name": "post_comment",
+        "description": "Add a comment to a file.",
+        "inputSchema": {
+          "type": "object",
+          "required": ["file_key", "message"],
+          "properties": {
+            "message": { "type": "string", "description": "Comment text" },
+            "file_key": { "type": "string" }
+          }
+        },
+        "annotations": { "readOnlyHint": false, "destructiveHint": false, "title": "Post comment" }
+      },
+      "timeoutClass": "long"
+    },
+    "search": {
+      "state": "pending",
+      "defHash": "sha256:3b6f9f1a4e6c2d8b7a5e4f3c2b1a0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c"
+    }
+  }
+}

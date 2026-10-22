@@ -4,6 +4,7 @@
  */
 
 import { createMCPServer, type MCPServerOptions } from './server.js';
+import type { JSONRPCHandler } from './jsonrpc.js';
 import { ts } from './logger.js';
 import { notConfiguredMessage } from './errors.js';
 import { retryAsync } from './retry.js';
@@ -37,6 +38,8 @@ export interface BootWorkerOptions<C> {
   makeTools: (client: C | null) => MCPServerOptions['tools'];
   /** Build the health check from the (possibly null) client. Omit for none. */
   makeHealthCheck?: (client: C | null, configured: boolean) => MCPServerOptions['healthCheck'];
+  /** JSON-RPC handler to serve instead of a new one; for workers whose tool set is not static. */
+  rpcHandler?: JSONRPCHandler;
 }
 
 /**
@@ -57,6 +60,7 @@ export async function bootWorker<C>(opts: BootWorkerOptions<C>): Promise<number>
     onNotConfigured = 'warn',
     makeTools,
     makeHealthCheck,
+    rpcHandler,
   } = opts;
 
   console.log(`${ts()} 🚀 Starting ${serverName}...`);
@@ -108,6 +112,7 @@ export async function bootWorker<C>(opts: BootWorkerOptions<C>): Promise<number>
     tools: makeTools(client),
     ...(authToken ? { auth: { token: authToken } } : {}),
     ...(makeHealthCheck ? { healthCheck: makeHealthCheck(client, configured) } : {}),
+    ...(rpcHandler ? { rpcHandler } : {}),
   });
 
   const actualPort = await server.start();

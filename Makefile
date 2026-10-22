@@ -388,7 +388,7 @@ endif
 	@echo "✅ Build phase complete"
 
 test-rust-run: guard-not-prod-data-dir
-	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner -p speedwave-version --features speedwave-runtime/test-support,speedwave-version/cli)
+	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner -p speedwave-version -p ip-policy --features speedwave-runtime/test-support,speedwave-version/cli)
 	"$(MAKE)" test-transcription
 	@echo "✅ Rust tests passed"
 
@@ -427,7 +427,7 @@ test-proxy: guard-not-prod-data-dir
 	@echo "✅ proxy tests passed"
 
 test-rust: guard-not-prod-data-dir
-	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner -p speedwave-version --features speedwave-runtime/test-support,speedwave-version/cli)
+	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner -p speedwave-version -p ip-policy --features speedwave-runtime/test-support,speedwave-version/cli)
 	"$(MAKE)" test-transcription
 	@echo "✅ Rust tests passed"
 
@@ -526,7 +526,7 @@ coverage: coverage-rust coverage-mcp coverage-angular
 
 coverage-rust:
 	@command -v cargo-llvm-cov >/dev/null 2>&1 || { echo "❌ cargo-llvm-cov not found. Install: cargo install cargo-llvm-cov"; exit 1; }
-	cargo llvm-cov -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner -p speedwave-version --features speedwave-version/cli --fail-under-lines 70
+	cargo llvm-cov -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner -p speedwave-version -p ip-policy --features speedwave-version/cli --fail-under-lines 70
 	@echo "✅ Rust coverage passed (≥70% lines)"
 
 coverage-mcp: build-mcp
@@ -539,7 +539,7 @@ coverage-angular: $(ANGULAR_NPM_INSTALL)
 
 coverage-html: build-mcp
 	@command -v cargo-llvm-cov >/dev/null 2>&1 || { echo "❌ cargo-llvm-cov not found. Install: cargo install cargo-llvm-cov"; exit 1; }
-	cargo llvm-cov -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-version/cli --html --output-dir target/coverage/rust
+	cargo llvm-cov -p speedwave-runtime -p speedwave-cli -p speedwave-version -p ip-policy --features speedwave-version/cli --html --output-dir target/coverage/rust
 	cd mcp-servers && $(NPM) run test:coverage
 	"$(MAKE)" coverage-angular
 	@echo "\n✅ Coverage reports generated:"
@@ -711,7 +711,7 @@ setup-e2e-vms:
 	@bash scripts/e2e-vm-setup.sh all
 
 check-clippy:
-	cargo clippy -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner -p speedwave-version --features speedwave-version/cli --all-targets -- -D warnings
+	cargo clippy -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner -p speedwave-version -p ip-policy --features speedwave-version/cli --all-targets -- -D warnings
 	cargo clippy -p speedwave-runtime --all-targets --features test-support,audio-transcription -- -D warnings
 	cargo clippy -p speedwave-pii-ner --all-targets --features bench,model-e2e -- -D warnings
 	@echo "✅ Clippy: 0 warnings"
@@ -734,7 +734,7 @@ check-mcp: $(MCP_NPM_INSTALL)
 	@cd mcp-servers/policies && $(NPM) run build:wasm
 	@echo "  Building mcp-servers/policies (required by hub)..."
 	@cd mcp-servers/policies && $(NPX) tsc
-	@for ws in shared policies hub slack sharepoint redmine gitlab github atlassian office os oauth; do \
+	@for ws in shared policies hub slack sharepoint redmine gitlab github atlassian office context7 os oauth custom-launcher custom-guard; do \
 		echo "  tsc --noEmit mcp-servers/$$ws"; \
 		(cd mcp-servers/$$ws && $(NPX) tsc --noEmit) || exit 1; \
 	done
@@ -830,7 +830,7 @@ fmt:
 	@echo "✅ Formatted"
 
 lint: $(MCP_NPM_INSTALL) $(ANGULAR_NPM_INSTALL)
-	cargo clippy -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-ner -p speedwave-version --features speedwave-version/cli -- -D warnings
+	cargo clippy -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-ner -p speedwave-version -p ip-policy --features speedwave-version/cli -- -D warnings
 	cd desktop/src-tauri && cargo clippy -- -D warnings
 	cd mcp-servers && $(NPX) eslint --fix .
 	cd desktop/src && $(NPX) eslint --fix 'src/**/*.ts'
@@ -983,9 +983,9 @@ endif
 
 status: guard-not-prod-data-dir $(MCP_NPM_INSTALL) $(ANGULAR_NPM_INSTALL)
 	@echo "=== Rust ==="
-	@$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-runtime/test-support,speedwave-version/cli 2>&1 | grep "test result" || true)
+	@$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-version -p ip-policy --features speedwave-runtime/test-support,speedwave-version/cli 2>&1 | grep "test result" || true)
 	@echo "\n=== Clippy ==="
-	@echo "Warnings: $$(cargo clippy -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-version/cli 2>&1 | grep -c '^warning' || echo 0)"
+	@echo "Warnings: $$(cargo clippy -p speedwave-runtime -p speedwave-cli -p speedwave-version -p ip-policy --features speedwave-version/cli 2>&1 | grep -c '^warning' || echo 0)"
 	@echo "\n=== MCP Servers ==="
 	@cd mcp-servers && $(NPM) test 2>&1 | grep -E "Tests|Test Files" | tail -2 || true
 	@echo "\n=== Angular ==="

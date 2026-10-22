@@ -473,6 +473,45 @@ mod tests {
         ));
     }
 
+    fn policy_with_services(services: serde_json::Value) -> String {
+        let mut policy: serde_json::Value =
+            serde_json::from_str(&default_policy_json()).expect("default policy is JSON");
+        policy["services"] = services;
+        policy.to_string()
+    }
+
+    #[test]
+    fn policy_file_with_hub_services_loads_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.json");
+        std::fs::write(
+            &path,
+            policy_with_services(json!({
+                "custom-figma": {"pii_mode": "tokens"},
+                "custom-desk": {"pii_mode": "plaintext"}
+            })),
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("key"), "ab".repeat(32)).unwrap();
+        assert!(matches!(
+            load_from_file(&path),
+            PiiEngineState::Ready { .. }
+        ));
+    }
+
+    #[test]
+    fn policy_file_with_malformed_hub_services_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.json");
+        std::fs::write(
+            &path,
+            policy_with_services(json!({"custom-figma": {"pii_mode": "raw"}})),
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("key"), "ab".repeat(32)).unwrap();
+        assert!(matches!(load_from_file(&path), PiiEngineState::Failed(_)));
+    }
+
     #[test]
     fn scan_request_tokenizes_system_and_message_content() {
         let (policy, key) = test_policy_and_key();

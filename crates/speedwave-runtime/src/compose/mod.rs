@@ -11,6 +11,8 @@ use crate::{build, bundle};
 use std::path::{Path, PathBuf};
 
 mod addressing;
+mod custom_host;
+pub(crate) mod custom_mcp;
 mod llm;
 mod networks;
 mod pii_ner;
@@ -58,9 +60,13 @@ pub use llm::{
     read_local_llm_token_opt_in, strip_trailing_v1, validate_base_url,
 };
 
+#[cfg(test)]
+pub(crate) use networks::custom_network_name;
 pub(crate) use networks::{
-    compose_egress_less_networks_in, egress_less_network_name, egress_less_network_names,
-    legacy_compose_network_name,
+    compose_egress_less_networks_in, custom_egress_network_name, custom_server_network_name,
+    custom_server_network_names, egress_less_network_name, egress_less_network_names,
+    egress_less_network_owners, is_builtin_egress_less_network, legacy_compose_network_name,
+    project_network_name,
 };
 use plugins::apply_plugins_from_verified;
 pub(crate) use plugins::ApplyPluginsCtx;
@@ -69,7 +75,7 @@ pub use tokens::{
     ensure_token_dir, ensure_token_dir_in, init_secrets_dir, llm_provider_key_path_in, tokens_path,
     tokens_path_in, LLM_TOKEN_FILE_SUFFIX, LLM_TOKEN_SERVICE,
 };
-pub(crate) use tokens::{init_secrets_dir_in, resolve_tokens_dir_in};
+pub(crate) use tokens::{init_secrets_dir_in, resolve_tokens_dir_in, secrets_dir_in};
 
 pub(crate) use workers::{
     apply_integrations_filter, apply_worker_auth_tokens_in, apply_worker_config, worker_gateway_url,
@@ -96,6 +102,11 @@ const IMAGE_PLACEHOLDERS: &[(&str, &str)] = &[
     ("${IMAGE_MCP_PLAYWRIGHT}", build::IMAGE_MCP_PLAYWRIGHT),
     ("${IMAGE_MCP_CONTEXT7}", build::IMAGE_MCP_CONTEXT7),
 ];
+
+/// Catalogue images the template never names: only a renderer step that adds their services
+/// reads their tag, so a project without those services renders exactly as before.
+#[cfg(test)]
+const RENDERED_ONLY_IMAGES: &[&str] = &[build::IMAGE_MCP_CUSTOM_GUARD];
 
 /// One live host-side bridge compose advertises to a worker. The plugin manifest's
 /// `host_bridge` drives `slug` + env-var names; Desktop supplies `port`/`auth_token`.
@@ -376,6 +387,12 @@ pub fn render_compose_in(
     if let Some(rt) = runtime {
         let enabled_ids = integrations.enabled_plugin_service_ids();
         plugin::ensure_plugin_images(rt, &enabled_ids)?;
+        crate::custom_mcp::build::ensure_custom_images(
+            rt,
+            data_dir,
+            project_name,
+            integrations.effective_custom_mcp(),
+        )?;
     }
 
     yaml = apply_plugins_from_verified(
@@ -389,6 +406,19 @@ pub fn render_compose_in(
             bridges,
         },
         &verified_plugins,
+    )?;
+
+    yaml = custom_mcp::apply_custom_mcp(
+        &yaml,
+        &custom_mcp::CustomMcpCtx {
+            data_dir,
+            project_name,
+            project_dir,
+            network_name: &network_name,
+            tokens_dir: &tokens_dir,
+            bundle_manifest,
+        },
+        integrations.effective_custom_mcp(),
     )?;
 
     let host_tz = crate::tz::detect_host_timezone();
@@ -1158,7 +1188,7 @@ mod tests {
     use super::*;
     use strum::IntoEnumIterator;
 
-    const SECURITY_RULE_COUNT: usize = 54;
+    const SECURITY_RULE_COUNT: usize = 61;
 
     fn test_bundle_manifest() -> bundle::BundleManifest {
         bundle::BundleManifest {
@@ -2946,15 +2976,30 @@ services:
     #[test]
     fn image_placeholders_align_with_catalogue_and_template() {
         assert_eq!(
-            IMAGE_PLACEHOLDERS.len(),
+            IMAGE_PLACEHOLDERS.len() + RENDERED_ONLY_IMAGES.len(),
             build::IMAGES.len(),
-            "one placeholder entry per catalogue image"
+            "one placeholder entry or rendered-only entry per catalogue image"
         );
         for img in build::IMAGES {
-            assert!(
-                IMAGE_PLACEHOLDERS.iter().any(|(_, name)| *name == img.name),
-                "catalogue image '{}' has no placeholder entry",
+            let placeholders = IMAGE_PLACEHOLDERS
+                .iter()
+                .filter(|(_, name)| *name == img.name)
+                .count();
+            let rendered_only = RENDERED_ONLY_IMAGES
+                .iter()
+                .filter(|name| **name == img.name)
+                .count();
+            assert_eq!(
+                placeholders + rendered_only,
+                1,
+                "catalogue image '{}' must have exactly one placeholder or rendered-only entry",
                 img.name
+            );
+        }
+        for name in RENDERED_ONLY_IMAGES {
+            assert!(
+                !COMPOSE_TEMPLATE.contains(name),
+                "rendered-only image {name} must not appear in compose.template.yml"
             );
         }
         for (placeholder, _) in IMAGE_PLACEHOLDERS {
@@ -2976,6 +3021,47 @@ services:
                 rest = &tail[end..];
             }
         }
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn render_with_a_runtime_builds_missing_custom_mcp_server_images() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let entry =
+            crate::custom_mcp::build::tests::pinned_entry(data_dir.path(), "test-project", "figma");
+        let tag = match &entry.source {
+            crate::custom_mcp::model::CustomMcpSource::Npm { lock } => lock.image_tag.clone(),
+            crate::custom_mcp::model::CustomMcpSource::Host { .. } => unreachable!(),
+        };
+        let integrations = ResolvedIntegrationsConfig {
+            custom_mcp: crate::custom_mcp::effective::resolve_effective(
+                &std::collections::BTreeMap::from([("figma".to_string(), entry)]),
+                true,
+                None,
+            ),
+            ..ResolvedIntegrationsConfig::default()
+        };
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: configured_anthropic_llm(),
+            ..Default::default()
+        };
+        let (rt, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
+            .with_image_exists_default(true)
+            .with_image_missing_substring("speedwave-mcp-custom-figma")
+            .build();
+        render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            tmp_project_dir(),
+            &config,
+            &integrations,
+            Some(&rt),
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+        assert_eq!(handles.build_tags(), vec![tag]);
     }
 
     #[test]
@@ -5664,17 +5750,7 @@ services:
         service: crate::host_mcp_process::lock::LockService,
     ) -> (std::path::PathBuf, std::path::PathBuf) {
         use crate::host_mcp_process::lock::{self, LockFile};
-        // SSOT-allow: test fixture spawn
-        let mut child = std::process::Command::new("true")
-            .spawn()
-            .or_else(|_| {
-                std::process::Command::new("cmd")
-                    .args(["/C", "exit"])
-                    .spawn()
-            })
-            .expect("spawn a trivially-exiting child");
-        let dead_pid = child.id();
-        child.wait().expect("reap child");
+        let dead_pid = crate::host_mcp_process::probe::exited_pid();
 
         let token_path = tmp.join("auth-token");
         let lock_path = tmp.join(consts::PER_PROJECT_LOCK_FILE);
@@ -6912,17 +6988,7 @@ services:
 
     #[test]
     fn test_oauth_config_skipped_when_worker_pid_is_dead() {
-        // SSOT-allow: test fixture spawn
-        let mut child = std::process::Command::new("true")
-            .spawn()
-            .or_else(|_| {
-                std::process::Command::new("cmd")
-                    .args(["/C", "exit"])
-                    .spawn()
-            })
-            .expect("spawn a trivially-exiting child");
-        let dead_pid = child.id();
-        child.wait().expect("reap child");
+        let dead_pid = crate::host_mcp_process::probe::exited_pid();
 
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
@@ -7779,6 +7845,8 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     tmpfs: ["/tmp:noexec,nosuid,size=64m"]
+    labels:
+      speedwave.plugin-service: "true"
     ports:
       - "127.0.0.1:4006:4006"
 "#;
@@ -7794,6 +7862,41 @@ services:
                 .iter()
                 .any(|v| v.rule == SecurityRule::NoPortsWorkers),
             "Addon services may expose ports (they are not in consts::BUILT_IN_SERVICES)"
+        );
+        assert!(
+            !violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::UnknownService),
+            "a labelled plugin service is a known service"
+        );
+    }
+
+    #[test]
+    fn test_security_unlabelled_unknown_service_fails() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = r#"
+services:
+  mcp-example-plugin:
+    image: speedwave-mcp-example-plugin:latest
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: ["/tmp:noexec,nosuid,size=64m"]
+"#;
+        let violations = SecurityCheck::run_with_data_dir(
+            yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::UnknownService
+                    && v.container == "mcp-example-plugin"),
+            "a service that is neither built-in, a plugin nor Custom MCP must not start: \
+             {violations:?}"
         );
     }
 

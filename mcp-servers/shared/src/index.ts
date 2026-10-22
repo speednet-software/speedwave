@@ -103,8 +103,64 @@ export type {
   NumericIdParamsResult,
 } from './numeric-id.js';
 
-export { META_KEYS, metaValue } from './meta-keys.js';
+export { META_KEYS, LEGACY_META_KEYS, metaValue } from './meta-keys.js';
 export type { MetaKey } from './meta-keys.js';
+
+export {
+  createToolGate,
+  canonicalJson,
+  definitionHash,
+  definitionHashInput,
+  sanitizeDescription,
+  withDescriptionPlaceholder,
+  EMPTY_DESCRIPTION_PLACEHOLDER,
+  sanitizeMeta,
+  sanitizeToolResult,
+  mapToolNames,
+  parseToolGatePolicy,
+  MAX_DESCRIPTION_BYTES,
+  DEFAULT_MAX_RESULT_BYTES,
+} from './tool-gate.js';
+export type {
+  ToolGate,
+  ToolGateOptions,
+  ToolGatePolicy,
+  ToolPolicyEntry,
+  ToolState,
+  PolicyToolState,
+  ToolListMode,
+  ExposedTool,
+  GateDecision,
+  HashableToolDefinition,
+} from './tool-gate.js';
+
+export {
+  McpClient,
+  McpClientError,
+  parseSseData,
+  DEFAULT_MAX_RESPONSE_BYTES,
+  DEFAULT_MAX_LIST_PAGES,
+} from './mcp-client.js';
+export type {
+  McpClientOptions,
+  McpCallOptions,
+  McpSessionInfo,
+  McpClientErrorKind,
+} from './mcp-client.js';
+
+export {
+  createWorkspacePathMapper,
+  isPathLikeProperty,
+  WORKSPACE_ROOT,
+  CONTAINER_HOME,
+} from './workspace-paths.js';
+export type {
+  WorkspacePathMapper,
+  WorkspacePathMapperOptions,
+  PathStyle,
+  PathClass,
+  RewriteArgsResult,
+} from './workspace-paths.js';
 
 export { retryAsync } from './retry.js';
 export type { RetryOptions } from './retry.js';

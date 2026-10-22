@@ -713,6 +713,15 @@ impl ContainerRuntime for LimaRuntime {
         super::networks::network_exists_with(name, &|args| self.network_command(args))
     }
 
+    fn run_oneshot(&self, spec: &super::OneshotSpec) -> anyhow::Result<String> {
+        self.require_running()?;
+        super::oneshot::run_and_reap(spec, &|args, timeout| {
+            let mut argv = vec!["shell", consts::lima_vm_name(), "--", "sudo", "nerdctl"];
+            argv.extend(args.iter().map(String::as_str));
+            self.runner.run_bounded("limactl", &argv, timeout)
+        })
+    }
+
     fn compose_validate(&self, project: &str) -> anyhow::Result<()> {
         self.require_running()?;
         let compose_file = self.compose_file_path(project)?;
@@ -3968,6 +3977,47 @@ mod tests {
     }
 
     #[test]
+    fn run_oneshot_runs_sudo_nerdctl_run_bounded_by_the_spec_deadline() {
+        let spec = crate::runtime::oneshot::tests::sample_spec();
+        let (rt, calls) = network_script(&[Ok("resolved")]);
+        assert_eq!(rt.run_oneshot(&spec).unwrap(), "resolved");
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let expected = format!(
+            "limactl shell {} -- sudo nerdctl {}",
+            consts::lima_vm_name(),
+            spec.nerdctl_run_args().unwrap().join(" ")
+        );
+        assert_eq!(calls[0].0, expected);
+        assert!(calls[0]
+            .0
+            .contains(" run --rm --name spw-oneshot-test --read-only "));
+        assert_eq!(calls[0].1, spec.timeout);
+    }
+
+    #[test]
+    fn run_oneshot_reaps_the_container_after_a_failed_run() {
+        let spec = crate::runtime::oneshot::tests::sample_spec();
+        let (rt, calls) = network_script(&[
+            Err("command 'limactl' timed out after 600s"),
+            Ok("spw-oneshot-test"),
+        ]);
+        let err = rt.run_oneshot(&spec).unwrap_err();
+        assert!(format!("{err:#}").contains("timed out"), "{err:#}");
+        let calls = calls.lock().unwrap();
+        assert_eq!(
+            calls[1],
+            (
+                format!(
+                    "limactl shell {} -- sudo nerdctl rm -f spw-oneshot-test",
+                    consts::lima_vm_name()
+                ),
+                consts::CONTAINER_EXEC_PROBE_TIMEOUT
+            )
+        );
+    }
+
+    #[test]
     fn a_create_cut_by_eof_without_the_network_fails_without_a_second_create() {
         use crate::runtime::networks::tests::NOT_FOUND;
         let name = "speedwave_acme_network_office";
@@ -4000,5 +4050,16 @@ mod tests {
         assert!(calls
             .iter()
             .all(|(k, _)| k.ends_with(&format!("network rm {name}"))));
+    }
+
+    #[test]
+    fn run_oneshot_fails_when_the_vm_is_stopped() {
+        let runner = MockRunner::new()
+            .with_response("limactl --version", "limactl version 1.0.0")
+            .with_response(&vm_status_key(), "Stopped");
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        assert!(rt
+            .run_oneshot(&crate::runtime::oneshot::tests::sample_spec())
+            .is_err());
     }
 }

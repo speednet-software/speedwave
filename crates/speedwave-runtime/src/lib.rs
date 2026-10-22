@@ -12,6 +12,7 @@ pub mod cloudstorage;
 pub mod compose;
 pub mod config;
 pub mod consts;
+pub mod custom_mcp;
 pub mod defaults;
 pub mod diagnostic_sources;
 pub mod engine_path;

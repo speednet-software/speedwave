@@ -71,6 +71,27 @@ pub fn host_bind_address_for_probe() -> String {
     }
 }
 
+/// PID of a child that was spawned, exited and reaped: a PID no live process holds.
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "test fixture: a failed spawn must abort the test"
+)]
+pub(crate) fn exited_pid() -> u32 {
+    // SSOT-allow: test fixture spawn
+    let mut child = std::process::Command::new("true")
+        .spawn()
+        .or_else(|_| {
+            std::process::Command::new("cmd")
+                .args(["/C", "exit"])
+                .spawn()
+        })
+        .expect("spawn a trivially-exiting child");
+    let pid = child.id();
+    child.wait().expect("reap child");
+    pid
+}
+
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "test assertions may unwrap freely")]
 mod tests {
@@ -86,6 +107,11 @@ mod tests {
     #[test]
     fn is_pid_alive_false_for_definitely_dead_pid() {
         let _ = is_pid_alive(999_999);
+    }
+
+    #[test]
+    fn is_pid_alive_false_for_an_exited_child() {
+        assert!(!is_pid_alive(exited_pid()));
     }
 
     #[test]

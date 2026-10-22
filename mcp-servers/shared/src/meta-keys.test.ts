@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { META_KEYS, metaValue } from './meta-keys.js';
+import { LEGACY_META_KEYS, META_KEYS, metaValue } from './meta-keys.js';
 
 describe('META_KEYS', () => {
-  it('exposes all seven prefixed keys under the speedwave.pl/ namespace', () => {
-    expect(Object.values(META_KEYS)).toHaveLength(7);
+  it('exposes all nine prefixed keys under the speedwave.pl/ namespace', () => {
+    expect(Object.values(META_KEYS)).toHaveLength(9);
     for (const key of Object.values(META_KEYS)) {
       expect(key.startsWith('speedwave.pl/')).toBe(true);
     }
@@ -17,6 +17,8 @@ describe('META_KEYS', () => {
     expect(META_KEYS.TIMEOUT_CLASS).toBe('speedwave.pl/timeout-class');
     expect(META_KEYS.TIMEOUT_MS).toBe('speedwave.pl/timeout-ms');
     expect(META_KEYS.OS_CATEGORY).toBe('speedwave.pl/os-category');
+    expect(META_KEYS.TOOL_STATE).toBe('speedwave.pl/tool-state');
+    expect(META_KEYS.UPSTREAM_NAME).toBe('speedwave.pl/upstream-name');
   });
 
   it('is frozen (cannot be mutated)', () => {
@@ -52,5 +54,31 @@ describe('metaValue', () => {
   it('treats an explicit null prefixed value as present (does not fall back)', () => {
     const meta = { [META_KEYS.SELF_PARAM]: null, self_param: 'user_id' };
     expect(metaValue(meta, META_KEYS.SELF_PARAM, 'self_param')).toBeNull();
+  });
+});
+
+describe('LEGACY_META_KEYS', () => {
+  it('lists every legacy fallback key the hub reads', () => {
+    expect([...LEGACY_META_KEYS].sort()).toEqual(
+      [
+        'currentUserTool',
+        'deferLoading',
+        'osCategory',
+        'selfParam',
+        'timeoutClass',
+        'timeoutMs',
+        'userScoped',
+      ].sort()
+    );
+  });
+
+  it('has one legacy key per prefixed key except the prefixed-only gate keys', () => {
+    expect(LEGACY_META_KEYS).toHaveLength(Object.values(META_KEYS).length - 2);
+    expect(LEGACY_META_KEYS).not.toContain('toolState');
+    expect(LEGACY_META_KEYS).not.toContain('upstreamName');
+  });
+
+  it('is frozen', () => {
+    expect(Object.isFrozen(LEGACY_META_KEYS)).toBe(true);
   });
 });

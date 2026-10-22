@@ -15,10 +15,15 @@ pub fn init_secrets_dir(project: &str) -> anyhow::Result<PathBuf> {
     init_secrets_dir_in(consts::data_dir(), project)
 }
 
+/// `<data_dir>/secrets/<project>`, the directory of the project's bearer files.
+pub(crate) fn secrets_dir_in(data_dir: &Path, project: &str) -> PathBuf {
+    data_dir.join("secrets").join(project)
+}
+
 /// Testable variant: accepts explicit data_dir.
 pub(crate) fn init_secrets_dir_in(data_dir: &Path, project: &str) -> anyhow::Result<PathBuf> {
     crate::validation::validate_project_name(project)?;
-    let secrets_dir = data_dir.join("secrets").join(project);
+    let secrets_dir = secrets_dir_in(data_dir, project);
     std::fs::create_dir_all(&secrets_dir)?;
 
     crate::fs_perms::set_owner_only_dir(&secrets_dir).map_err(anyhow::Error::msg)?;

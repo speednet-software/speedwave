@@ -9,8 +9,8 @@ import { join } from 'node:path';
 import type { Detection } from '@speedwave/policy-engine';
 import { ts } from '@speedwave/mcp-shared';
 
-/** Sandbox boundary a detection crossed: bridge result, or the sandbox code's own return value. */
-export type AuditLayer = 'tool-result' | 'sandbox-return';
+/** Boundary a detection crossed: bridge result, sandbox return value, or tool arguments forwarded still tokenized. */
+export type AuditLayer = 'tool-result' | 'sandbox-return' | 'tool-args';
 
 /** One audit row: category/action/count metadata only, never the scanned data itself. */
 export interface PiiAuditEvent {

@@ -42,6 +42,8 @@ export interface MCPServerOptions {
   host?: string;
   /** Tools to register */
   tools?: ToolDefinition[];
+  /** JSON-RPC handler to serve instead of a new one; for workers whose tool set is not static. */
+  rpcHandler?: JSONRPCHandler;
   /** Custom health check — runs as a connectivity probe; return value is discarded to prevent metadata leakage */
   healthCheck?: () => Promise<void>;
   /** Bearer token auth — when set, all requests except publicPaths require Authorization header */
@@ -98,7 +100,7 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
 
   const app = express();
   app.disable('x-powered-by');
-  const rpcHandler = new JSONRPCHandler({ name, version });
+  const rpcHandler = options.rpcHandler ?? new JSONRPCHandler({ name, version });
 
   let server: ReturnType<Express['listen']> | null = null;
   let rateLimitCleanupInterval: ReturnType<typeof setInterval> | null = null;

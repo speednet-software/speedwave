@@ -1,0 +1,37 @@
+FROM node:24-bookworm-slim@sha256:2c87ef9bd3c6a3bd4b472b4bec2ce9d16354b0c574f736c476489d09f560a203 AS launcher
+WORKDIR /build
+
+COPY tsconfig.base.json ./
+COPY custom-launcher/package.json ./custom-launcher/
+RUN --mount=type=cache,target=/root/.npm cd custom-launcher && npm install --ignore-scripts --no-audit --no-fund
+COPY custom-launcher/src ./custom-launcher/src
+COPY custom-launcher/tsconfig.json ./custom-launcher/
+RUN cd custom-launcher && npm run build
+
+FROM node:24-bookworm-slim@sha256:2c87ef9bd3c6a3bd4b472b4bec2ce9d16354b0c574f736c476489d09f560a203 AS server
+WORKDIR /opt/spw/server
+
+COPY server/package.json server/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm npm ci --ignore-scripts --omit=dev --no-audit --no-fund
+
+FROM node:24-bookworm-slim@sha256:2c87ef9bd3c6a3bd4b472b4bec2ce9d16354b0c574f736c476489d09f560a203
+
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=launcher /build/custom-launcher/package.json /opt/spw/launcher/
+COPY --from=launcher /build/custom-launcher/dist /opt/spw/launcher/dist
+COPY --from=server /opt/spw/server /opt/spw/server
+COPY server/entry.json /opt/spw/entry.json
+
+WORKDIR /opt/spw/server
+USER 1000:1000
+
+ENV PORT=3000 \
+    NODE_ENV=production \
+    SPW_LAUNCHER_ENTRY=/opt/spw/entry.json \
+    TOKENS_DIR=/tokens
+
+EXPOSE 3000
+
+ENTRYPOINT ["node", "/opt/spw/launcher/dist/index.js"]

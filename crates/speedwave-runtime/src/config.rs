@@ -3,7 +3,7 @@
 use crate::defaults;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 /// LLM config schema version. v2: provider list + active (ADR-073). v3:
@@ -593,9 +593,16 @@ pub struct ResolvedIntegrationsConfig {
     pub os_notes: bool,
     /// Plugin enabled state keyed by slug / service_id.
     pub plugins: HashMap<String, bool>,
+    /// Which configured Custom MCP servers run (`custom_mcp::effective::resolve_effective`).
+    pub custom_mcp: crate::custom_mcp::effective::CustomMcpResolution,
 }
 
 impl ResolvedIntegrationsConfig {
+    /// Custom MCP servers that run for the project, in name order.
+    pub fn effective_custom_mcp(&self) -> &[crate::custom_mcp::effective::EffectiveCustomMcp] {
+        &self.custom_mcp.effective
+    }
+
     /// `true` if any macOS native integration is enabled.
     pub fn any_os_enabled(&self) -> bool {
         self.os_reminders || self.os_calendar || self.os_mail || self.os_notes
@@ -677,6 +684,10 @@ pub struct ProjectUserEntry {
     /// `None` = no pin, so the spawn omits `--effort` (Claude Code's default applies).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort_pin: Option<String>,
+    /// User-approved Custom MCP servers keyed by server name (user-only; a repo file can only
+    /// propose one through Desktop, never set it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_mcp: Option<BTreeMap<String, crate::custom_mcp::model::CustomMcpEntry>>,
 }
 
 /// The IDE selected for the IDE bridge.
@@ -1402,12 +1413,26 @@ fn check_telemetry_policy(
     ))
 }
 
+fn check_managed_policy(
+    user: &SpeedwaveUserConfig,
+    managed: Option<&crate::managed_config::ManagedConfig>,
+) -> anyhow::Result<()> {
+    check_telemetry_policy(
+        user.telemetry.as_ref(),
+        managed.and_then(|m| m.telemetry.as_ref()),
+    )?;
+    if let Some(custom_mcp) = managed.and_then(|m| m.custom_mcp.as_ref()) {
+        custom_mcp.validate()?;
+    }
+    Ok(())
+}
+
 /// Global boot gate (ADR-076): every MDM-implicated error class fails closed at
-/// startup; a user-layer endpoint rejection logs and degrades instead.
-pub fn check_telemetry_policy_at_boot() -> anyhow::Result<()> {
+/// startup; a user-layer telemetry endpoint rejection logs and degrades instead.
+pub fn check_managed_policy_at_boot() -> anyhow::Result<()> {
     let user = load_user_config().unwrap_or_default();
-    let managed = crate::managed_config::load_managed_config()?.and_then(|m| m.telemetry);
-    check_telemetry_policy(user.telemetry.as_ref(), managed.as_ref())
+    let managed = crate::managed_config::load_managed_config()?;
+    check_managed_policy(&user, managed.as_ref())
 }
 
 /// Top-level user config at `~/.speedwave/config.json` (highest merge priority).
@@ -1531,9 +1556,9 @@ pub(crate) fn resolve_project_config_in_with_load(
 ) -> (ResolvedClaudeConfig, ResolvedIntegrationsConfig) {
     match managed_load {
         Ok(managed) => {
-            let (managed_telemetry, managed_pii_policy) = match managed {
-                Some(m) => (m.telemetry, m.pii_policy),
-                None => (None, None),
+            let (managed_telemetry, managed_pii_policy, managed_custom_mcp) = match managed {
+                Some(m) => (m.telemetry, m.pii_policy, m.custom_mcp),
+                None => (None, None, None),
             };
             resolve_project_config_in_with_managed(
                 data_dir,
@@ -1542,9 +1567,11 @@ pub(crate) fn resolve_project_config_in_with_load(
                 project_name,
                 managed_telemetry.as_ref(),
                 managed_pii_policy.as_ref(),
+                managed_custom_mcp.as_ref(),
             )
         }
         Err(e) => {
+            let unreadable = crate::custom_mcp::effective::unreadable_managed_policy();
             let (mut claude, integrations) = resolve_project_config_in_with_managed(
                 data_dir,
                 project_dir,
@@ -1552,6 +1579,7 @@ pub(crate) fn resolve_project_config_in_with_load(
                 project_name,
                 None,
                 None,
+                Some(&unreadable),
             );
             let disabled = ResolvedTelemetry::disabled();
             for f in crate::telemetry_env::TelemetryField::ALL {
@@ -1578,6 +1606,7 @@ pub(crate) fn resolve_project_config_in_with_managed(
     project_name: &str,
     managed_telemetry: Option<&ManagedTelemetryConfig>,
     managed_pii_policy: Option<&ManagedPiiPolicyConfig>,
+    managed_custom_mcp: Option<&crate::custom_mcp::model::ManagedCustomMcpConfig>,
 ) -> (ResolvedClaudeConfig, ResolvedIntegrationsConfig) {
     let repo = load_repo_config_logged(project_dir);
 
@@ -1682,6 +1711,13 @@ pub(crate) fn resolve_project_config_in_with_managed(
         managed_pii_policy,
         project_policy,
     );
+    let custom_mcp = crate::custom_mcp::effective::resolve_for_project(
+        user_config,
+        project_name,
+        managed_custom_mcp,
+    );
+    let pii_policy = pii_policy.map(|p| p.with_custom_services(&custom_mcp.effective));
+    integrations.custom_mcp = custom_mcp;
 
     let claude = ResolvedClaudeConfig {
         env,
@@ -1783,6 +1819,14 @@ fn apply_integrations_layer(result: &mut ResolvedIntegrationsConfig, layer: &Int
     }
     if let Some(ref plugins) = layer.plugins {
         for (service_id, cfg) in plugins {
+            if service_id.starts_with(crate::consts::CUSTOM_MCP_SERVICE_PREFIX) {
+                log::warn!(
+                    "ignoring the plugin toggle {service_id}: the {} prefix is reserved for \
+                     Custom MCP servers",
+                    crate::consts::CUSTOM_MCP_SERVICE_PREFIX
+                );
+                continue;
+            }
             if let Some(enabled) = cfg.enabled {
                 result.plugins.insert(service_id.clone(), enabled);
             }
@@ -2021,6 +2065,7 @@ fn resolve_project_config_in_for_test(
         project_dir,
         user_config,
         project_name,
+        None,
         None,
         None,
     )
@@ -2615,6 +2660,7 @@ mod tests {
             "mcp-desc",
             None,
             None,
+            None,
         );
 
         assert_eq!(
@@ -2722,6 +2768,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -3037,6 +3084,102 @@ mod tests {
         assert_eq!(r.endpoint.as_deref(), Some("https://corp.example.com:4318"));
     }
 
+    fn managed_with(
+        telemetry: Option<ManagedTelemetryConfig>,
+        custom_mcp: Option<crate::custom_mcp::model::ManagedCustomMcpConfig>,
+    ) -> crate::managed_config::ManagedConfig {
+        crate::managed_config::ManagedConfig {
+            telemetry,
+            pii_policy: None,
+            custom_mcp,
+        }
+    }
+
+    #[test]
+    fn managed_policy_ok_without_a_managed_file_or_with_valid_custom_mcp() {
+        let user = SpeedwaveUserConfig::default();
+        assert!(check_managed_policy(&user, None).is_ok());
+        assert!(check_managed_policy(&user, Some(&managed_with(None, None))).is_ok());
+        let custom = crate::custom_mcp::model::ManagedCustomMcpConfig {
+            enabled: Some(false),
+            allowed_scopes: Some(vec!["@acme".into()]),
+            allowed_domains: Some(vec!["*.acme.dev".into()]),
+            min_release_age_days: Some(30),
+            ..Default::default()
+        };
+        assert!(check_managed_policy(&user, Some(&managed_with(None, Some(custom)))).is_ok());
+    }
+
+    #[test]
+    fn managed_policy_rejects_invalid_custom_mcp() {
+        let user = SpeedwaveUserConfig::default();
+        let custom = crate::custom_mcp::model::ManagedCustomMcpConfig {
+            allowed_domains: Some(vec!["https://acme.dev".into()]),
+            ..Default::default()
+        };
+        let err = check_managed_policy(&user, Some(&managed_with(None, Some(custom))))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("custom_mcp.allowed_domains"), "got: {err}");
+    }
+
+    #[test]
+    fn managed_policy_keeps_telemetry_verdicts() {
+        let forced_on_without_endpoint = ManagedTelemetryConfig {
+            enabled: Some(true),
+            ..Default::default()
+        };
+        let user = SpeedwaveUserConfig::default();
+        let managed = managed_with(Some(forced_on_without_endpoint.clone()), None);
+        assert_eq!(
+            check_managed_policy(&user, Some(&managed))
+                .unwrap_err()
+                .to_string(),
+            check_telemetry_policy(None, Some(&forced_on_without_endpoint))
+                .unwrap_err()
+                .to_string()
+        );
+        let degraded = SpeedwaveUserConfig {
+            telemetry: Some(TelemetryConfig {
+                enabled: Some(true),
+                endpoint: Some("http://198.18.0.10:4318".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(check_managed_policy(&degraded, None).is_ok());
+        let local_error = SpeedwaveUserConfig {
+            telemetry: Some(TelemetryConfig {
+                enabled: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(check_managed_policy(&local_error, None)
+            .unwrap_err()
+            .to_string()
+            .contains("invalid local telemetry configuration"));
+    }
+
+    #[test]
+    fn managed_policy_checks_telemetry_before_custom_mcp() {
+        let bad_telemetry = ManagedTelemetryConfig {
+            enabled: Some(true),
+            ..Default::default()
+        };
+        let bad_custom = crate::custom_mcp::model::ManagedCustomMcpConfig {
+            min_release_age_days: Some(u32::MAX),
+            ..Default::default()
+        };
+        let err = check_managed_policy(
+            &SpeedwaveUserConfig::default(),
+            Some(&managed_with(Some(bad_telemetry), Some(bad_custom))),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(!err.contains("custom_mcp"), "got: {err}");
+    }
+
     #[test]
     fn boot_check_other_user_errors_stay_fatal() {
         let no_endpoint = TelemetryConfig {
@@ -3234,6 +3377,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -3252,6 +3396,7 @@ mod tests {
             &user_config,
             "p",
             Some(&managed),
+            None,
             None,
         )
         .0;
@@ -3285,6 +3430,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -3301,6 +3447,7 @@ mod tests {
             &user_config,
             "p",
             Some(&managed),
+            None,
             None,
         )
         .0;
@@ -3333,6 +3480,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -3350,6 +3498,7 @@ mod tests {
             &user_config,
             "p",
             Some(&managed),
+            None,
             None,
         )
         .0;
@@ -3377,6 +3526,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -3393,6 +3543,7 @@ mod tests {
             tmp.path(),
             &user_config,
             "p",
+            None,
             None,
             None,
         )
@@ -3415,6 +3566,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -3453,6 +3605,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -3486,6 +3639,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -3551,6 +3705,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -4024,6 +4179,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             ..Default::default()
         };
@@ -4080,6 +4236,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             ..Default::default()
         };
@@ -4442,6 +4599,7 @@ mod tests {
             plugin_settings: None,
             policy: None,
             effort_pin: None,
+            custom_mcp: None,
         };
         let config = SpeedwaveUserConfig {
             projects: vec![proj("with-creds", "/x"), proj("fresh", "/y")],
@@ -4644,6 +4802,7 @@ mod tests {
             plugin_settings: None,
             policy: None,
             effort_pin: None,
+            custom_mcp: None,
         };
         let config = SpeedwaveUserConfig {
             projects: vec![
@@ -4913,6 +5072,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -5035,6 +5195,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: Some("acme".to_string()),
             selected_ide: None,
@@ -5062,6 +5223,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: Some("test".to_string()),
             selected_ide: None,
@@ -5109,6 +5271,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: Some("test".to_string()),
             selected_ide: None,
@@ -5168,6 +5331,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: Some("durable".to_string()),
             selected_ide: None,
@@ -5199,6 +5363,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: Some("v1".to_string()),
             selected_ide: None,
@@ -5216,6 +5381,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: Some("v2".to_string()),
             selected_ide: None,
@@ -5259,6 +5425,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -5458,6 +5625,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -5680,6 +5848,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -5751,6 +5920,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -5791,6 +5961,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -6074,6 +6245,7 @@ mod tests {
                     ..Default::default()
                 }),
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -6087,6 +6259,7 @@ mod tests {
             tmp.path(),
             &user_config,
             "p",
+            None,
             None,
             None,
         );
@@ -6116,6 +6289,7 @@ mod tests {
                     ..Default::default()
                 }),
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -6127,6 +6301,7 @@ mod tests {
             tmp.path(),
             &user_config,
             "p",
+            None,
             None,
             None,
         );
@@ -6154,6 +6329,7 @@ mod tests {
                     ..Default::default()
                 }),
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -6165,6 +6341,7 @@ mod tests {
             tmp.path(),
             &user_config,
             "p",
+            None,
             None,
             None,
         );
@@ -6187,6 +6364,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -6203,6 +6381,7 @@ mod tests {
             "p",
             None,
             Some(&managed),
+            None,
         );
         let resolved = claude.pii_policy.unwrap();
         assert_eq!(
@@ -6231,6 +6410,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -6247,6 +6427,7 @@ mod tests {
             "p",
             None,
             Some(&managed),
+            None,
         );
         assert!(
             claude.pii_policy.is_err(),
@@ -6288,6 +6469,248 @@ mod tests {
     }
 
     #[test]
+    fn repo_speedwave_json_cannot_set_custom_mcp() {
+        let hostile = tempfile::tempdir().unwrap();
+        std::fs::write(
+            hostile.path().join(".speedwave.json"),
+            r#"{
+                "custom_mcp": {"figma": {"enabled": true, "source": {"kind": "host", "port": 3845, "path": "/mcp"}}},
+                "integrations": {"plugins": {"custom-figma": {"enabled": true}}},
+                "ui": {"beta_enabled": true}
+            }"#,
+        )
+        .unwrap();
+        let clean = tempfile::tempdir().unwrap();
+
+        for beta in [false, true] {
+            let user_config = SpeedwaveUserConfig {
+                ui: Some(UiPrefsConfig {
+                    beta_enabled: Some(beta),
+                }),
+                ..Default::default()
+            };
+            let (claude_hostile, integrations_hostile) =
+                resolve_project_config(hostile.path(), &user_config, "p");
+            let (claude_clean, integrations_clean) =
+                resolve_project_config(clean.path(), &user_config, "p");
+
+            assert!(
+                integrations_hostile.enabled_plugin_service_ids().is_empty(),
+                "a repo file must never enable a custom- service"
+            );
+            assert!(!integrations_hostile.is_plugin_enabled("custom-figma"));
+            assert_eq!(
+                integrations_hostile.enabled_plugin_service_ids(),
+                integrations_clean.enabled_plugin_service_ids()
+            );
+            assert_eq!(claude_hostile.env, claude_clean.env);
+            assert_eq!(claude_hostile.flags, claude_clean.flags);
+            assert_eq!(
+                serde_json::to_value(claude_hostile.pii_policy.unwrap()).unwrap(),
+                serde_json::to_value(claude_clean.pii_policy.unwrap()).unwrap(),
+                "repo .speedwave.json must never reach the hub policy's services"
+            );
+        }
+        let repo = load_repo_config(hostile.path()).unwrap();
+        let reserialized = serde_json::to_value(&repo).unwrap();
+        assert!(reserialized.get("custom_mcp").is_none());
+        assert!(reserialized.get("ui").is_none());
+    }
+
+    #[test]
+    fn custom_prefixed_plugin_toggles_are_ignored_in_the_user_layer_too() {
+        let mut plugins = HashMap::new();
+        plugins.insert(
+            "custom-figma".to_string(),
+            IntegrationConfig {
+                enabled: Some(true),
+            },
+        );
+        plugins.insert(
+            "customer".to_string(),
+            IntegrationConfig {
+                enabled: Some(true),
+            },
+        );
+        let mut resolved = ResolvedIntegrationsConfig::default();
+        apply_integrations_layer(
+            &mut resolved,
+            &IntegrationsConfig {
+                plugins: Some(plugins),
+                ..Default::default()
+            },
+        );
+        assert_eq!(resolved.enabled_plugin_service_ids(), vec!["customer"]);
+    }
+
+    #[test]
+    fn user_custom_mcp_round_trips_and_is_omitted_when_absent() {
+        let without = ProjectUserEntry {
+            name: "p".into(),
+            dir: "/tmp/p".into(),
+            claude: None,
+            integrations: None,
+            plugin_settings: None,
+            policy: None,
+            effort_pin: None,
+            custom_mcp: None,
+        };
+        let json = serde_json::to_value(&without).unwrap();
+        assert!(json.get("custom_mcp").is_none());
+
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            "figma".to_string(),
+            crate::custom_mcp::policy::tests::npm_entry(),
+        );
+        let with = ProjectUserEntry {
+            custom_mcp: Some(entries.clone()),
+            ..without
+        };
+        let back: ProjectUserEntry =
+            serde_json::from_value(serde_json::to_value(&with).unwrap()).unwrap();
+        assert_eq!(back.custom_mcp, Some(entries));
+
+        let legacy: ProjectUserEntry = serde_json::from_str(
+            r#"{"name":"p","dir":"/tmp/p","claude":null,"integrations":null}"#,
+        )
+        .unwrap();
+        assert!(legacy.custom_mcp.is_none());
+    }
+
+    fn user_config_with_custom(beta: bool) -> (tempfile::TempDir, SpeedwaveUserConfig) {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            "figma".to_string(),
+            crate::custom_mcp::policy::tests::approved(
+                crate::custom_mcp::policy::tests::npm_entry(),
+            ),
+        );
+        entries.insert(
+            "pending".to_string(),
+            crate::custom_mcp::policy::tests::npm_entry(),
+        );
+        let user_config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "p".to_string(),
+                dir: tmp.path().to_string_lossy().to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+                policy: None,
+                effort_pin: None,
+                custom_mcp: Some(entries),
+            }],
+            ui: Some(UiPrefsConfig {
+                beta_enabled: Some(beta),
+            }),
+            ..Default::default()
+        };
+        (tmp, user_config)
+    }
+
+    #[test]
+    fn running_custom_servers_reach_the_hub_policy_services() {
+        let (tmp, user_config) = user_config_with_custom(true);
+        let (claude, _) = resolve_project_config_in_with_managed(
+            tmp.path(),
+            tmp.path(),
+            &user_config,
+            "p",
+            None,
+            None,
+            None,
+        );
+        let services = claude.pii_policy.unwrap().services;
+        assert_eq!(
+            services.len(),
+            1,
+            "only the approved server runs: {services:?}"
+        );
+        assert_eq!(
+            services["custom-figma"].pii_mode,
+            crate::custom_mcp::model::CustomPiiMode::Tokens
+        );
+
+        let forced = crate::custom_mcp::model::ManagedCustomMcpConfig {
+            force_pii_mode: Some(crate::custom_mcp::model::CustomPiiMode::Plaintext),
+            ..Default::default()
+        };
+        let (claude, _) = resolve_project_config_in_with_managed(
+            tmp.path(),
+            tmp.path(),
+            &user_config,
+            "p",
+            None,
+            None,
+            Some(&forced),
+        );
+        assert_eq!(
+            claude.pii_policy.unwrap().services["custom-figma"].pii_mode,
+            crate::custom_mcp::model::CustomPiiMode::Plaintext
+        );
+
+        let off = crate::custom_mcp::model::ManagedCustomMcpConfig {
+            enabled: Some(false),
+            ..Default::default()
+        };
+        let (claude, _) = resolve_project_config_in_with_managed(
+            tmp.path(),
+            tmp.path(),
+            &user_config,
+            "p",
+            None,
+            None,
+            Some(&off),
+        );
+        assert!(claude.pii_policy.unwrap().services.is_empty());
+    }
+
+    #[test]
+    fn custom_servers_stay_out_of_the_hub_policy_with_beta_off() {
+        let (tmp, user_config) = user_config_with_custom(false);
+        let (claude, _) = resolve_project_config_in_with_managed(
+            tmp.path(),
+            tmp.path(),
+            &user_config,
+            "p",
+            None,
+            None,
+            None,
+        );
+        assert!(claude.pii_policy.unwrap().services.is_empty());
+    }
+
+    #[test]
+    fn managed_custom_mcp_is_read_from_the_managed_file_layer() {
+        let (tmp, user_config) = user_config_with_custom(true);
+        let managed = crate::managed_config::ManagedConfig {
+            custom_mcp: Some(crate::custom_mcp::model::ManagedCustomMcpConfig {
+                enabled: Some(false),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let (claude, _) = resolve_project_config_in_with_load(
+            tmp.path(),
+            tmp.path(),
+            &user_config,
+            "p",
+            Ok(Some(managed)),
+        );
+        assert!(claude.pii_policy.unwrap().services.is_empty());
+        let (claude, _) = resolve_project_config_in_with_load(
+            tmp.path(),
+            tmp.path(),
+            &user_config,
+            "p",
+            Ok(None),
+        );
+        assert_eq!(claude.pii_policy.unwrap().services.len(), 1);
+    }
+
+    #[test]
     fn repo_speedwave_json_cannot_set_effort_pin() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -6308,6 +6731,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             ..Default::default()
         };
@@ -6479,6 +6903,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -6506,6 +6931,7 @@ mod tests {
                     plugin_settings: None,
                     policy: None,
                     effort_pin: None,
+                    custom_mcp: None,
                 },
                 ProjectUserEntry {
                     name: "beta".to_string(),
@@ -6515,6 +6941,7 @@ mod tests {
                     plugin_settings: None,
                     policy: None,
                     effort_pin: None,
+                    custom_mcp: None,
                 },
             ],
             active_project: None,
@@ -6583,6 +7010,7 @@ mod tests {
                     plugin_settings: None,
                     policy: None,
                     effort_pin: None,
+                    custom_mcp: None,
                 },
                 ProjectUserEntry {
                     name: "beta".to_string(),
@@ -6592,6 +7020,7 @@ mod tests {
                     plugin_settings: None,
                     policy: None,
                     effort_pin: None,
+                    custom_mcp: None,
                 },
             ],
             active_project: Some("beta".to_string()),
@@ -6621,6 +7050,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: Some("deleted-project".to_string()),
             selected_ide: None,
@@ -6904,6 +7334,7 @@ mod plugin_order_tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: None,
             selected_ide: None,

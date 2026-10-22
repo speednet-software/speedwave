@@ -46,6 +46,20 @@ The privacy gates that send conversation/code content (`OTEL_LOG_USER_PROMPTS`, 
 - **Org-policy interaction is a known limitation.** A Claude Team/Enterprise org telemetry policy set in the Claude console (server-managed settings) never reaches Claude Code inside Speedwave: server-managed settings are bypassed for any non-default `ANTHROPIC_BASE_URL`, which the per-project proxy always sets.[^7] Speedwave delivers policy through the endpoint-managed channel (`/etc/claude-code/managed-settings.json`) generated from `managed-config.json` instead; admins must be told to use that channel, not the Claude console. This ADR's telemetry `env` block does not conflict with plugin policy; a sibling effort that also writes `/etc/claude-code/managed-settings.json` for plugin policy must merge into a single writer.
 - **DISABLE_TELEMETRY is untouched.** Anthropic's own Statsig-backed operational telemetry is independent of OTLP and out of scope; disabling it breaks feature flags and killswitches, so this feature never sets it.[^6]
 
+## Amendment (2026-10-08): the boot check covers every managed section; `custom_mcp` key
+
+**Context.** `managed_config.rs::ManagedConfig` rejects unknown root keys (`deny_unknown_fields`), so that an admin typo fails closed. The same rule means a binary that does not know a key refuses to boot once an admin deploys it. Custom MCP servers will be governed by an MDM key `custom_mcp`. If the key shipped together with the feature, an admin rolling the policy out to a fleet with older binaries would stop every machine that has not upgraded yet.
+
+**Decision.**
+
+- `ManagedConfig` gains `custom_mcp: Option<ManagedCustomMcpConfig>` (`custom_mcp/model.rs`, `deny_unknown_fields`) now, before the feature. Its fields are `enabled`, `host_servers_enabled`, `allowed_scopes`, `allowed_domains`, `max_workspace_mode` (`none`/`read_only`/`read_write`), `force_pii_mode` (`tokens`/`plaintext`) and `min_release_age_days`. Presence is the lock, as for telemetry.
+- The key is parsed and validated, and nothing else reads it yet. `ManagedCustomMcpConfig::validate` rejects an `allowed_scopes` entry that is not `@` followed by lowercase letters, digits, `-`, `.`, `_` or `~`; an `allowed_domains` entry that is not a lowercase hostname, optionally prefixed with `*.`, or that carries a scheme, port, path or IP literal; and a `min_release_age_days` above `consts.rs::CUSTOM_MCP_MAX_MIN_RELEASE_AGE_DAYS` (3650). Each error names the field.
+- `config::check_telemetry_policy_at_boot` becomes `config::check_managed_policy_at_boot`, a thin loader over the pure `config::check_managed_policy`, which runs the telemetry check unchanged and then validates `custom_mcp`. Desktop (`desktop/src-tauri/src/main.rs`) and CLI (`crates/speedwave-cli/src/main.rs`) call it at the same point as before and hard-stop the same way: the "Organization policy error" dialog and exit on Desktop, stderr and exit code 2 on the CLI. Every `custom_mcp` error is MDM-implicated, because the key has no user layer, so there is no degraded path for it.
+
+**Consequences.** Admins can deploy `custom_mcp` once the fleet runs a release that contains this amendment; an older binary still refuses to boot on it. An invalid `custom_mcp` value blocks startup on every machine that receives it, like an invalid telemetry policy. The feature phase that enforces the key changes only what reads it, not its shape.
+
+**Status note.** That phase is ADR-100: `custom_mcp/effective.rs::resolve_effective` now reads and enforces the key, so "nothing else reads it yet" above describes the state when this amendment was written.
+
 ## Footnotes
 
 [^1]: https://code.claude.com/docs/en/monitoring-usage.md - Claude Code monitoring & telemetry: `CLAUDE_CODE_ENABLE_TELEMETRY`, the `OTEL_*` exporter/endpoint/header variables, and the privacy gates including `OTEL_LOG_TOOL_DETAILS` (works with logs export) vs `OTEL_LOG_TOOL_CONTENT` (traces/spans only).

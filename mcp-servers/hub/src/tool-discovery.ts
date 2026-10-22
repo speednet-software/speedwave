@@ -6,11 +6,30 @@
 import { randomUUID } from 'crypto';
 import type { Tool } from '@speedwave/mcp-shared';
 import { TIMEOUTS, LATEST_PROTOCOL_VERSION, ts, META_KEYS, metaValue } from '@speedwave/mcp-shared';
-import type { ToolMetadata } from './hub-types.js';
+import type { ToolMetadata, ToolState } from './hub-types.js';
 import { getAuthToken } from './auth-tokens.js';
 import { validateWorkerUrl } from '@speedwave/mcp-shared';
 import { parseResponse, buildWorkerHeaders } from './http-bridge.js';
 import { deriveWorkerEnv } from './worker-env.js';
+import { writeToolCatalog } from './tool-catalog.js';
+import { CUSTOM_SERVICE_PREFIX } from './service-list.js';
+
+const TOOL_STATES: ReadonlySet<string> = new Set(['allowed', 'pending', 'blocked', 'changed']);
+
+/**
+ * Read the gate-assigned tool state; absent or unknown is `pending` (hidden) for a `custom-*` service and `allowed` for built-in and plugin workers, which have no gate.
+ * @param raw - Raw `speedwave.pl/tool-state` value.
+ * @param service - Service name.
+ * @param label - `service.method` for the warning.
+ */
+function parseToolState(raw: unknown, service: string, label: string): ToolState {
+  if (typeof raw === 'string' && TOOL_STATES.has(raw)) return raw as ToolState;
+  const fallback: ToolState = service.startsWith(CUSTOM_SERVICE_PREFIX) ? 'pending' : 'allowed';
+  if (raw !== undefined) {
+    console.warn(`${ts()} [tool-discovery] ${label}: unknown tool-state — treating as ${fallback}`);
+  }
+  return fallback;
+}
 
 /**
  * Convert snake_case tool name to camelCase (workers use snake_case, hub uses camelCase).
@@ -48,6 +67,9 @@ export async function initializeWorker(
     redirect: 'error',
   });
 
+  if (!response.ok) {
+    throw new Error(`Worker initialize returned ${response.status}`);
+  }
   const initResult = await parseResponse(response);
   if (initResult.error) {
     throw new Error(
@@ -132,9 +154,10 @@ export async function fetchAllTools(
 }
 
 /**
- * Fetch tool list from a worker via MCP initialize + paginated tools/list; empty on failure.
+ * Fetch tool list from a worker via MCP initialize + paginated tools/list; empty when no valid worker URL is configured.
  * @param service - Service name (e.g., 'redmine', 'gitlab')
- * @returns Array of Tool definitions from the worker, or empty array on failure
+ * @returns Array of Tool definitions from the worker
+ * @throws {Error} When the worker cannot be reached, times out, or answers initialize or tools/list with an error
  */
 export async function discoverServiceTools(service: string): Promise<Tool[]> {
   const envKey = deriveWorkerEnv(service);
@@ -149,21 +172,15 @@ export async function discoverServiceTools(service: string): Promise<Tool[]> {
     return [];
   }
 
-  try {
-    const authToken = getAuthToken(service);
-    const headers = buildWorkerHeaders(authToken);
+  const authToken = getAuthToken(service);
+  const headers = buildWorkerHeaders(authToken);
 
-    const sessionId = await initializeWorker(url, headers);
-    const toolHeaders = sessionId ? { ...headers, 'Mcp-Session-Id': sessionId } : headers;
+  const sessionId = await initializeWorker(url, headers);
+  const toolHeaders = sessionId ? { ...headers, 'Mcp-Session-Id': sessionId } : headers;
 
-    const tools = await fetchAllTools(url, toolHeaders);
-    console.log(`${ts()} [tool-discovery] Discovered ${tools.length} tools from ${service}`);
-    return tools;
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    console.warn(`${ts()} [tool-discovery] Failed to discover ${service}: ${msg}`);
-    return [];
-  }
+  const tools = await fetchAllTools(url, toolHeaders);
+  console.log(`${ts()} [tool-discovery] Discovered ${tools.length} tools from ${service}`);
+  return tools;
 }
 
 /**
@@ -187,6 +204,7 @@ export function mergeToolWithMeta(tool: Tool, service: string, methodName: strin
   const userScoped = metaValue(meta, META_KEYS.USER_SCOPED, 'userScoped');
   const currentUserTool = metaValue(meta, META_KEYS.CURRENT_USER_TOOL, 'currentUserTool');
   const selfParam = metaValue(meta, META_KEYS.SELF_PARAM, 'selfParam');
+  const upstreamName = meta[META_KEYS.UPSTREAM_NAME];
 
   const validOsCategories = ['reminders', 'calendar', 'mail', 'notes'] as const;
   const rawOsCategory = typeof osCategoryRaw === 'string' ? osCategoryRaw : undefined;
@@ -213,6 +231,8 @@ export function mergeToolWithMeta(tool: Tool, service: string, methodName: strin
     userScoped: typeof userScoped === 'boolean' ? userScoped : undefined,
     currentUserTool: typeof currentUserTool === 'string' ? currentUserTool : undefined,
     selfParam: typeof selfParam === 'string' ? selfParam : undefined,
+    toolState: parseToolState(meta[META_KEYS.TOOL_STATE], service, `${service}.${methodName}`),
+    upstreamName: typeof upstreamName === 'string' ? upstreamName : undefined,
   };
 }
 
@@ -253,17 +273,20 @@ export function validateMergeResult(
 }
 
 /**
- * Discover and merge tools for a service: fetch from worker, merge with `_meta`, validate.
+ * Discover and merge tools for a service: fetch from worker, write a custom server's raw catalog, merge with `_meta`, validate,
+ * and keep only `allowed` tools (the single drop point for gated tools; search and the sandbox read the result).
  * Single unified path for all services (built-in and plugin).
  * @param service - Service name
- * @returns Record of camelCase method names to ToolMetadata
+ * @returns Prototype-less record of camelCase method names to ToolMetadata
  */
 export async function discoverAndMergeService(
   service: string
 ): Promise<Record<string, ToolMetadata>> {
-  const result: Record<string, ToolMetadata> = {};
+  const result: Record<string, ToolMetadata> = Object.create(null);
   const workerTools = await discoverServiceTools(service);
+  if (service.startsWith(CUSTOM_SERVICE_PREFIX)) writeToolCatalog(service, workerTools);
 
+  let hidden = 0;
   for (const tool of workerTools) {
     const methodName = toCamelCase(tool.name);
     const merged = mergeToolWithMeta(tool, service, methodName);
@@ -272,9 +295,16 @@ export async function discoverAndMergeService(
       console.warn(
         `${ts()} [tool-discovery] Validation errors for ${service}.${methodName}: ${errors.join('; ')} — skipping`
       );
+    } else if (merged.toolState !== 'allowed') {
+      hidden++;
     } else {
       result[methodName] = merged;
     }
+  }
+  if (hidden > 0) {
+    console.log(
+      `${ts()} [tool-discovery] ${service}: ${hidden} tools not allowed in this project — hidden`
+    );
   }
 
   dropDanglingCurrentUserTool(service, result);
@@ -318,7 +348,7 @@ function dropDanglingSelfParam(service: string, tools: Record<string, ToolMetada
     if (!metadata.selfParam) continue;
     const leadingParam = metadata.selfParam.match(/^[A-Za-z_][A-Za-z0-9_]*/)?.[0];
     const schema = metadata.inputSchema as { properties?: Record<string, unknown> };
-    if (!leadingParam || !(leadingParam in (schema.properties ?? {}))) {
+    if (!leadingParam || !Object.hasOwn(schema.properties ?? {}, leadingParam)) {
       console.warn(
         `${ts()} [tool-discovery] ${service}.${methodName}: selfParam '${metadata.selfParam}' is not an input parameter; dropping`
       );

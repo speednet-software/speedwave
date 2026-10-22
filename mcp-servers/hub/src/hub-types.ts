@@ -91,6 +91,9 @@ export interface ToolInputExample {
 /** Timeout class: 'standard' (default, EXECUTION_MS) or 'long' (slow ops, LONG_OPERATION_MS). */
 export type TimeoutClass = 'standard' | 'long';
 
+/** Gate-assigned state of a custom MCP tool; only `allowed` tools enter the registry. */
+export type ToolState = import('@speedwave/mcp-shared').ToolState;
+
 /**
  * Tool file metadata (for progressive disclosure)
  */
@@ -129,6 +132,10 @@ export interface ToolMetadata {
   currentUserTool?: string;
   /** Name of the input param that accepts a self-referential value (e.g. "me"). */
   selfParam?: string;
+  /** Gate-assigned tool state (`speedwave.pl/tool-state`); absent means a worker without a gate. */
+  toolState?: ToolState;
+  /** Name the upstream server knows the tool by (`speedwave.pl/upstream-name`). */
+  upstreamName?: string;
 }
 
 /**

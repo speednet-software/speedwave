@@ -5,7 +5,10 @@ import { CommandPaletteComponent } from './command-palette.component';
 import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
 import { UiStateService } from '../../services/ui-state.service';
+import { BetaService } from '../../services/beta.service';
+import { CustomMcpService } from '../../services/custom-mcp.service';
 import { MockTauriService } from '../../testing/mock-tauri.service';
+import { signal } from '@angular/core';
 
 /**
  * Query the document-level CDK overlay container.
@@ -30,7 +33,10 @@ describe('CommandPaletteComponent', () => {
   let projectState: ProjectStateService;
   let router: Router;
 
+  const betaEnabled = signal(false);
+
   beforeEach(async () => {
+    betaEnabled.set(false);
     mockTauri = new MockTauriService();
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'list_projects')
@@ -56,7 +62,10 @@ describe('CommandPaletteComponent', () => {
           { path: 'logs', component: CommandPaletteComponent },
         ]),
       ],
-      providers: [{ provide: TauriService, useValue: mockTauri }],
+      providers: [
+        { provide: TauriService, useValue: mockTauri },
+        { provide: BetaService, useValue: { enabled: betaEnabled.asReadonly() } },
+      ],
     }).compileComponents();
 
     fixture = TestBed.createComponent(CommandPaletteComponent);
@@ -224,6 +233,33 @@ describe('CommandPaletteComponent', () => {
       component.activeIndex.set(0);
       input.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }));
       expect(component.activeIndex()).toBe(component.filteredItems().length - 1);
+    });
+  });
+
+  describe('add MCP server', () => {
+    beforeEach(async () => {
+      await component.ngOnInit();
+    });
+
+    it('is not offered while beta features are off', () => {
+      ui.togglePalette();
+      fixture.detectChanges();
+      expect(q('[data-testid="palette-item-action-add-mcp-server"]')).toBeNull();
+    });
+
+    it('opens the add-server form of the Custom MCP section on Integrations', async () => {
+      betaEnabled.set(true);
+      ui.togglePalette();
+      fixture.detectChanges();
+      const navSpy = vi.spyOn(router, 'navigateByUrl').mockResolvedValue(true);
+      const btn = q('[data-testid="palette-item-action-add-mcp-server"]') as HTMLElement;
+      expect(btn.textContent).toContain('add MCP server...');
+      btn.click();
+      await fixture.whenStable();
+      expect(navSpy).toHaveBeenCalledWith('/integrations');
+      expect(TestBed.inject(CustomMcpService).addServerRequested()).toBe(true);
+      expect(ui.paletteOpen()).toBe(false);
+      navSpy.mockRestore();
     });
   });
 

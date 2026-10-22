@@ -229,6 +229,23 @@ describe('server', () => {
         expect(typeof server.app.use).toBe('function');
       });
 
+      it('serves a caller-supplied JSON-RPC handler instead of a new one', async () => {
+        const { JSONRPCHandler } = await import('./jsonrpc.js');
+        const supplied = new JSONRPCHandler({ name: 'custom', version: '1.0.0' });
+        const tool: Tool = { name: 'one_tool', description: 'd', inputSchema: { type: 'object' } };
+        const handler: ToolHandler = async () => textResult('ok');
+        const server = createMCPServer({
+          name: 'test-server',
+          version: '1.0.0',
+          port: 3000,
+          rpcHandler: supplied,
+          tools: [{ tool, handler }],
+        });
+
+        expect(server.rpcHandler).toBe(supplied);
+        expect(supplied.registerTool).toHaveBeenCalledWith(tool, handler);
+      });
+
       it('exposes JSONRPCHandler instance', () => {
         const server = createMCPServer({
           name: 'test-server',

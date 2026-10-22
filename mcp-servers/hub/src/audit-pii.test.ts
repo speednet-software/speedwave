@@ -156,6 +156,36 @@ describe('aggregateDetections', () => {
   });
 });
 
+describe('tool-args layer', () => {
+  it('aggregates tool-args detections per tool, separately from tool-result rows', () => {
+    const detections: Detection[] = [{ category: 'EMAIL', action: 'tokenized', count: 2 }];
+    const events = aggregateDetections([
+      { layer: 'tool-args', tool: 'custom-figma.getFile', detections },
+      { layer: 'tool-args', tool: 'custom-figma.getFile', detections },
+      { layer: 'tool-result', tool: 'custom-figma.getFile', detections },
+    ]);
+    expect(events.map((e) => [e.layer, e.count])).toEqual([
+      ['tool-args', 4],
+      ['tool-result', 2],
+    ]);
+  });
+
+  it('writes a tool-args row as JSONL', () => {
+    dir = mkdtempSync(join(tmpdir(), 'audit-pii-'));
+    vi.stubEnv('AUDIT_DIR', dir);
+    writePiiAudit([
+      { layer: 'tool-args', category: 'EMAIL', action: 'tokenized', count: 1, tool: 'custom-x.y' },
+    ]);
+    const row = JSON.parse(readFileSync(join(dir, 'audit-hub.jsonl'), 'utf-8').trim());
+    expect(row).toMatchObject({
+      layer: 'tool-args',
+      category: 'EMAIL',
+      count: 1,
+      tool: 'custom-x.y',
+    });
+  });
+});
+
 describe('writePiiAudit', () => {
   it('writes parsable JSONL lines with zero PII data values, given AUDIT_DIR', () => {
     dir = mkdtempSync(join(tmpdir(), 'audit-pii-'));

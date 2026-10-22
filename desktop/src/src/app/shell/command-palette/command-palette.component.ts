@@ -19,6 +19,8 @@ import { Router } from '@angular/router';
 import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
 import { UiStateService } from '../../services/ui-state.service';
+import { BetaService } from '../../services/beta.service';
+import { CustomMcpService } from '../../services/custom-mcp.service';
 import type { ProjectEntry, ProjectList } from '../../models/update';
 
 /** Section heading rendered above a contiguous run of items. */
@@ -163,6 +165,8 @@ export class CommandPaletteComponent implements OnInit, OnDestroy {
   private readonly router = inject(Router);
   private readonly tauri = inject(TauriService);
   private readonly projectState = inject(ProjectStateService);
+  private readonly beta = inject(BetaService);
+  private readonly customMcp = inject(CustomMcpService);
   private readonly cdr = inject(ChangeDetectorRef);
   private readonly dialog = inject(Dialog);
   private readonly positionBuilder = inject(OverlayPositionBuilder);
@@ -206,6 +210,22 @@ export class CommandPaletteComponent implements OnInit, OnDestroy {
           this.ui.closePalette();
         },
       },
+      ...(this.beta.enabled()
+        ? [
+            {
+              id: 'action-add-mcp-server',
+              section: 'actions',
+              glyph: '+',
+              glyphColor: 'accent',
+              label: 'add MCP server...',
+              action: () => {
+                this.customMcp.requestAddServer();
+                this.router.navigateByUrl('/integrations');
+                this.ui.closePalette();
+              },
+            } satisfies PaletteItem,
+          ]
+        : []),
       {
         id: 'action-restart-containers',
         section: 'actions',

@@ -1106,6 +1106,76 @@ pub const BUILT_IN_SERVICE_IDS: &[&str] = &[
     "llm",
 ];
 
+/// Service-id prefix reserved for user-approved Custom MCP servers; plugin
+/// install rejects a slug or `service_id` that starts with it (ADR-015).
+pub const CUSTOM_MCP_SERVICE_PREFIX: &str = "custom-";
+
+/// Upper bound (ten years) on the managed `custom_mcp.min_release_age_days` policy value.
+pub const CUSTOM_MCP_MAX_MIN_RELEASE_AGE_DAYS: u32 = 3650;
+
+/// Minimum age in days of every package release a resolver may pin when MDM sets none.
+pub const CUSTOM_MCP_DEFAULT_MIN_RELEASE_AGE_DAYS: u32 = 7;
+
+/// Most Custom MCP servers a project may run; the rest are excluded in name order.
+pub const CUSTOM_MCP_MAX_PER_PROJECT: usize = 5;
+
+/// Data-dir subdirectory holding per-project Custom MCP state (`<data_dir>/custom-mcp/<project>/<name>/`).
+pub const CUSTOM_MCP_STATE_DIR: &str = "custom-mcp";
+
+/// Per-server relay directory prefix (`relay-<name>/`), mounted into the host-mode guard.
+pub const CUSTOM_RELAY_SERVER_DIR_PREFIX: &str = "relay-";
+
+/// `HostBridge` name of the per-project Desktop relay that fronts host-local HTTP MCP servers.
+pub const CUSTOM_RELAY_BRIDGE_NAME: &str = "custom-mcp";
+
+/// Lock directory of the relay under the project's Custom MCP state dir (`relay/<port>.lock`,
+/// `{project,pid,port}`); resolved only through `custom_mcp::paths::relay_lock_dir_in`.
+pub const CUSTOM_RELAY_LOCK_DIR: &str = "relay";
+
+/// Extension of a relay lock file inside [`CUSTOM_RELAY_LOCK_DIR`].
+pub const CUSTOM_RELAY_LOCK_EXT: &str = "lock";
+
+/// File in `relay-<name>/` naming the relay URL and whether the relay is up; the guard re-reads it.
+pub const CUSTOM_RELAY_ENDPOINT_FILE: &str = "endpoint.json";
+
+/// File in `relay-<name>/` holding the persistent bearer the guard presents to the relay.
+pub const CUSTOM_RELAY_TOKEN_FILE: &str = "token";
+
+/// File in the project's Custom MCP state dir remembering the relay's preferred listen port.
+pub const CUSTOM_RELAY_PORT_FILE: &str = "relay-port";
+
+/// File name of a guard's policy inside `<name>/guard/` (the guard reads exactly this name).
+pub const CUSTOM_MCP_GUARD_POLICY_FILE: &str = "policy.json";
+
+/// File name of an egress proxy's allowlist inside `<name>/egress/`.
+pub const CUSTOM_MCP_EGRESS_CONFIG_FILE: &str = "egress.json";
+
+/// Digest-pinned node image the npm resolver runs in; the same base the server image template uses.
+pub const CUSTOM_MCP_RESOLVER_IMAGE: &str =
+    "node:24-bookworm-slim@sha256:2c87ef9bd3c6a3bd4b472b4bec2ce9d16354b0c574f736c476489d09f560a203";
+
+/// The only registry the npm resolver may read package metadata from.
+pub const CUSTOM_MCP_NPM_REGISTRY: &str = "https://registry.npmjs.org/";
+
+/// Deadline of one npm resolver run, image pull included.
+pub const CUSTOM_MCP_RESOLVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Env names a Custom MCP server's user-supplied env may not set, on top of [`RESERVED_ENV_KEYS`]
+/// (Speedwave sets the proxy and Node runtime knobs itself).
+pub const CUSTOM_MCP_FORBIDDEN_ENV_KEYS: &[&str] = &[
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "NODE_USE_ENV_PROXY",
+    "NODE_TLS_REJECT_UNAUTHORIZED",
+    "NODE_EXTRA_CA_CERTS",
+    "TOKENS_DIR",
+];
+
+/// Env-name prefixes a Custom MCP server's user-supplied env may not use.
+pub const CUSTOM_MCP_FORBIDDEN_ENV_PREFIXES: &[&str] = &["NPM_CONFIG_", "PIP_", "SPW_"];
+
 /// Env names plugins can't set via `extra_env` (Speedwave-reserved or hijack
 /// vectors); compared case-insensitively. SSOT for `validate_manifest()`.
 pub const RESERVED_ENV_KEYS: &[&str] = &[
@@ -2183,6 +2253,16 @@ mod tests {
     }
 
     #[test]
+    fn test_no_built_in_id_uses_the_custom_mcp_prefix() {
+        for id in BUILT_IN_SERVICE_IDS.iter().chain(BUILT_IN_SERVICES) {
+            assert!(
+                !id.starts_with(CUSTOM_MCP_SERVICE_PREFIX),
+                "built-in '{id}' uses the reserved '{CUSTOM_MCP_SERVICE_PREFIX}' prefix"
+            );
+        }
+    }
+
+    #[test]
     fn test_built_in_service_ids_covers_all_toggleable_services() {
         for svc in TOGGLEABLE_MCP_SERVICES {
             assert!(
@@ -3130,6 +3210,7 @@ mod tests {
         let desktop = include_str!("../../../desktop/src-tauri/Cargo.toml");
         let proxy = include_str!("../../../containers/proxy/Cargo.toml");
         let pii_engine = include_str!("../../pii-engine/Cargo.toml");
+        let ip_policy = include_str!("../../ip-policy/Cargo.toml");
 
         let root_clippy = lint_table(root, "[workspace.lints.clippy]");
         assert!(
@@ -3165,6 +3246,16 @@ mod tests {
             lint_table(root, "[workspace.lints.rust]"),
             lint_table(pii_engine, "[lints.rust]"),
             "root [workspace.lints.rust] must equal pii-engine [lints.rust]"
+        );
+        assert_eq!(
+            root_clippy,
+            lint_table(ip_policy, "[lints.clippy]"),
+            "root [workspace.lints.clippy] must equal ip-policy [lints.clippy]"
+        );
+        assert_eq!(
+            lint_table(root, "[workspace.lints.rust]"),
+            lint_table(ip_policy, "[lints.rust]"),
+            "root [workspace.lints.rust] must equal ip-policy [lints.rust]"
         );
     }
 
@@ -3376,11 +3467,15 @@ mod tests {
     #[test]
     fn dirty_state_spec_service_token_path_matches_tokens_and_workers_shape() {
         let tokens_src = include_str!("../../../crates/speedwave-runtime/src/compose/tokens.rs");
-        let marker = "let secrets_dir = data_dir.join(\"";
-        let after_marker = tokens_src
+        let secrets_fn = tokens_src
+            .find("fn secrets_dir_in(")
+            .map(|i| &tokens_src[i..])
+            .expect("tokens.rs must build the secrets dir in secrets_dir_in");
+        let marker = "data_dir.join(\"";
+        let after_marker = secrets_fn
             .find(marker)
-            .map(|i| &tokens_src[i + marker.len()..])
-            .expect("tokens.rs must build the secrets dir via data_dir.join(\"...\")");
+            .map(|i| &secrets_fn[i + marker.len()..])
+            .expect("secrets_dir_in must build the secrets dir via data_dir.join(\"...\")");
         let secrets_dir_name = &after_marker[..after_marker
             .find('"')
             .expect("secrets dir name must be a quoted literal")];

@@ -93,6 +93,8 @@ Copy-Tree $containersDir "$dest\build-context\containers"
 
 Copy-Tree crates\pii-engine "$dest\build-context\containers\crates\pii-engine"
 
+Copy-Tree crates\ip-policy "$dest\build-context\containers\crates\ip-policy"
+
 New-Item -ItemType Directory -Path "$dest\build-context\containers\mcp-servers\policies" -Force | Out-Null
 Copy-Item "$mcpServersDir\policies\rules.yaml" "$dest\build-context\containers\mcp-servers\policies\rules.yaml"
 
@@ -108,7 +110,7 @@ Get-ChildItem -Path "$dest\build-context\containers" -Recurse -Include '*.sh' -F
 New-Item -ItemType Directory -Path "$dest\build-context\mcp-servers" -Force | Out-Null
 Copy-Item "$mcpServersDir\tsconfig.base.json" "$dest\build-context\mcp-servers\"
 
-$services = @('shared','policies','hub','slack','sharepoint','redmine','gitlab','github','atlassian','office','playwright','context7')
+$services = @('shared','policies','hub','slack','sharepoint','redmine','gitlab','github','atlassian','office','playwright','context7','custom-launcher','custom-guard')
 
 foreach ($svc in $services) {
     $svcSrc = "$mcpServersDir\$svc"
@@ -139,7 +141,7 @@ foreach ($svc in $services) {
     if (Test-Path "$svcSrc\requirements.txt") {
         Copy-Item "$svcSrc\requirements.txt" "$svcDest\"
     }
-    foreach ($f in @('Dockerfile','Containerfile')) {
+    foreach ($f in @('Dockerfile','Containerfile','Containerfile.npm.template')) {
         if (Test-Path "$svcSrc\$f") {
             Copy-Item "$svcSrc\$f" "$svcDest\"
         }

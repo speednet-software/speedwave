@@ -11,7 +11,7 @@ homepage.workspace = true
 
 [dependencies]
 serde = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 serde_yaml_ng = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
@@ -22,6 +22,7 @@ fs2 = "0.4"
 log = { workspace = true }
 regex = "1"
 speedwave-pii-engine = { path = "../pii-engine" }
+ip-policy = { path = "../ip-policy" }
 zip = { version = "8", default-features = false, features = ["deflate"] }
 ed25519-dalek = "3"
 sha2 = "0.11"

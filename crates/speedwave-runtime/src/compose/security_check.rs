@@ -7,6 +7,9 @@ use crate::plugin::{self, PluginManifest};
 use strum::EnumProperty;
 
 use super::{container_user, resolve_tokens_dir_in};
+use crate::custom_mcp::CustomMcpExpectations;
+
+mod custom;
 
 /// Expected engine paths for security validation.
 /// Single source of truth — used by both render_compose() and SecurityCheck.
@@ -14,6 +17,7 @@ pub struct SecurityExpectedPaths {
     project_engine_path: String,
     tokens_engine_dir: String,
     telemetry_locked: bool,
+    custom_mcp: CustomMcpExpectations,
 }
 
 impl SecurityExpectedPaths {
@@ -34,6 +38,7 @@ impl SecurityExpectedPaths {
             project_engine_path: to_engine_path(std::path::Path::new(project_dir))?,
             tokens_engine_dir: to_engine_path(&tokens_dir)?,
             telemetry_locked: false,
+            custom_mcp: CustomMcpExpectations::default(),
         })
     }
 
@@ -43,6 +48,7 @@ impl SecurityExpectedPaths {
             project_engine_path: project_engine_path.to_string(),
             tokens_engine_dir: tokens_engine_dir.to_string(),
             telemetry_locked: false,
+            custom_mcp: CustomMcpExpectations::default(),
         }
     }
 
@@ -51,6 +57,18 @@ impl SecurityExpectedPaths {
     pub fn with_telemetry_locked(mut self, locked: bool) -> Self {
         self.telemetry_locked = locked;
         self
+    }
+
+    /// The Custom MCP servers the current config runs (`custom_mcp::expectations_for`); without
+    /// it every Custom MCP container fails `CustomMcpConsent`.
+    pub fn with_custom_mcp(mut self, expectations: CustomMcpExpectations) -> Self {
+        self.custom_mcp = expectations;
+        self
+    }
+
+    /// The Custom MCP servers the gate accepts.
+    pub fn custom_mcp(&self) -> &CustomMcpExpectations {
+        &self.custom_mcp
     }
 }
 
@@ -427,13 +445,65 @@ pub enum SecurityRule {
     ))]
     ClaudeWorkspaceMount,
 
-    /// The project's egress-less networks are `external: true` under their own names (pre-created
-    /// `--internal`; compose ignores `internal:`); only their worker and the hub join one.
+    /// The project's built-in egress-less networks are `external: true` under their own names
+    /// (pre-created `--internal`; compose ignores `internal:`); only their worker and the hub join one.
     #[strum(to_string = "EGRESS_LESS_NETWORK_EXTERNAL")]
     #[strum(props(
         description = "The project's egress-less networks are external (pre-created --internal) and only their worker and the hub join them"
     ))]
     EgressLessNetworkExternal,
+
+    /// Every service is built-in, a labelled plugin, or a Custom MCP container whose labels match
+    /// its service name.
+    #[strum(to_string = "UNKNOWN_SERVICE")]
+    #[strum(props(
+        description = "Every service is built-in, a plugin, or a correctly labelled Custom MCP container"
+    ))]
+    UnknownService,
+
+    /// Every Custom MCP container belongs to a server the current config runs, with its consent.
+    #[strum(to_string = "CUSTOM_MCP_CONSENT")]
+    #[strum(props(
+        description = "Custom MCP containers belong to approved, enabled servers and carry their consent"
+    ))]
+    CustomMcpConsent,
+
+    /// Custom MCP images: the approved server image, the guard image, the proxy image running
+    /// `/spw-egress`; `pull_policy: never`, no other entrypoint or command.
+    #[strum(to_string = "CUSTOM_MCP_IMAGE")]
+    #[strum(props(
+        description = "Custom MCP containers run their pinned images and entrypoints, never pulled"
+    ))]
+    CustomMcpImage,
+
+    /// Custom MCP mounts are exactly the short-form set of their role; the hub mounts nothing of
+    /// the secrets dir but single worker bearer files.
+    #[strum(to_string = "CUSTOM_MCP_VOLUMES")]
+    #[strum(props(description = "Custom MCP mounts are exactly those of their role"))]
+    CustomMcpVolumes,
+
+    /// Custom MCP network membership is exact per role, `_custom`/`_cx_*` are external, and no
+    /// other service but the hub joins a Custom MCP network.
+    #[strum(to_string = "CUSTOM_MCP_NETWORKS")]
+    #[strum(props(
+        description = "Custom MCP networks are external where egress-less and joined exactly per role"
+    ))]
+    CustomMcpNetworks,
+
+    /// A Custom MCP container carries only its role's allowlisted keys, in their rendered shape,
+    /// and only its role's env; no top-level `secrets`/`configs` next to one.
+    #[strum(to_string = "CUSTOM_MCP_FORBIDDEN_KEYS")]
+    #[strum(props(
+        description = "Custom MCP containers carry only their role's allowlisted keys and env"
+    ))]
+    CustomMcpForbiddenKeys,
+
+    /// Custom MCP limits exist and stay within the role envelope; at most the per-project count.
+    #[strum(to_string = "CUSTOM_MCP_RESOURCES")]
+    #[strum(props(
+        description = "Custom MCP limits are set within their envelope and the server count is bounded"
+    ))]
+    CustomMcpResources,
 
     #[strum(to_string = "FILE_SECURITY_VIOLATION")]
     #[strum(props(description = "Host file permissions and ownership are correct"))]
@@ -604,6 +674,7 @@ impl SecurityCheck {
             Self::check_no_policy_or_audit_mount_on_claude(&doc, data_dir, project),
             Self::check_claude_workspace_mount(&doc, expected_paths, data_dir, project),
             Self::check_egress_less_networks(&doc, project),
+            custom::check(&doc, project, expected_paths, data_dir),
             Self::check_file_security(data_dir, project),
         ]
         .into_iter()
@@ -641,7 +712,8 @@ impl SecurityCheck {
         violations
     }
 
-    /// All containers must have security_opt: [no-new-privileges:true]
+    /// Every container's security_opt is exactly [no-new-privileges:true]: no other option
+    /// (`seccomp=unconfined`, `apparmor=unconfined`, …) may loosen the profile.
     fn check_no_new_privileges(doc: &serde_yaml_ng::Value) -> Vec<SecurityViolation> {
         let mut violations = Vec::new();
         let services = match get_services(doc) {
@@ -650,22 +722,23 @@ impl SecurityCheck {
         };
 
         for (name, service) in services {
-            let has_no_new_privs = service
+            let exact = service
                 .get("security_opt")
                 .and_then(|v| v.as_sequence())
-                .map(|seq| {
-                    seq.iter()
-                        .any(|item| item.as_str().is_some_and(|s| s == "no-new-privileges:true"))
-                })
-                .unwrap_or(false);
+                .is_some_and(|seq| {
+                    seq.len() == 1 && seq[0].as_str() == Some(super::custom_mcp::NO_NEW_PRIVILEGES)
+                });
 
-            if !has_no_new_privs {
+            if !exact {
                 violations.push(SecurityViolation {
                     container: name.clone(),
                     rule: SecurityRule::NoNewPrivs,
-                    message: "Missing security_opt: [no-new-privileges:true]".into(),
-                    remediation:
-                        "Add 'security_opt: [no-new-privileges:true]' to the service definition.",
+                    message: format!(
+                        "security_opt is not exactly [{}]",
+                        super::custom_mcp::NO_NEW_PRIVILEGES
+                    ),
+                    remediation: "Set 'security_opt: [no-new-privileges:true]' and nothing else \
+                                  on the service definition.",
                 });
             }
         }
@@ -681,21 +754,21 @@ impl SecurityCheck {
         };
 
         let read_only_required = ["claude", "mcp-hub", "proxy"];
-        for required in &read_only_required {
-            if let Some((name, service)) = services.iter().find(|(n, _)| n == required) {
-                let is_read_only = service
-                    .get("read_only")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
+        for (name, service) in services.iter().filter(|(n, svc)| {
+            read_only_required.contains(&n.as_str()) || custom::has_custom_label(svc)
+        }) {
+            let is_read_only = service
+                .get("read_only")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
 
-                if !is_read_only {
-                    violations.push(SecurityViolation {
-                        container: name.clone(),
-                        rule: SecurityRule::ReadOnlyFs,
-                        message: "Missing read_only: true".into(),
-                        remediation: "Add 'read_only: true' to the service definition.",
-                    });
-                }
+            if !is_read_only {
+                violations.push(SecurityViolation {
+                    container: name.clone(),
+                    rule: SecurityRule::ReadOnlyFs,
+                    message: "Missing read_only: true".into(),
+                    remediation: "Add 'read_only: true' to the service definition.",
+                });
             }
         }
         violations
@@ -710,31 +783,28 @@ impl SecurityCheck {
         };
 
         let tmpfs_required = ["claude", "mcp-hub", "proxy"];
-        for required in &tmpfs_required {
-            if let Some((name, service)) = services.iter().find(|(n, _)| n == required) {
-                let has_tmpfs_noexec = service
-                    .get("tmpfs")
-                    .and_then(|v| v.as_sequence())
-                    .map(|seq| {
-                        seq.iter().any(|item| {
-                            item.as_str().is_some_and(|s| {
-                                s.starts_with("/tmp")
-                                    && s.contains("noexec")
-                                    && s.contains("nosuid")
-                            })
+        for (name, service) in services.iter().filter(|(n, svc)| {
+            tmpfs_required.contains(&n.as_str()) || custom::has_custom_label(svc)
+        }) {
+            let has_tmpfs_noexec = service
+                .get("tmpfs")
+                .and_then(|v| v.as_sequence())
+                .map(|seq| {
+                    seq.iter().any(|item| {
+                        item.as_str().is_some_and(|s| {
+                            s.starts_with("/tmp") && s.contains("noexec") && s.contains("nosuid")
                         })
                     })
-                    .unwrap_or(false);
+                })
+                .unwrap_or(false);
 
-                if !has_tmpfs_noexec {
-                    violations.push(SecurityViolation {
-                        container: name.clone(),
-                        rule: SecurityRule::TmpfsNoexec,
-                        message: "Missing tmpfs /tmp with noexec,nosuid".into(),
-                        remediation:
-                            "Add 'tmpfs: [\"/tmp:noexec,nosuid\"]' to the service definition.",
-                    });
-                }
+            if !has_tmpfs_noexec {
+                violations.push(SecurityViolation {
+                    container: name.clone(),
+                    rule: SecurityRule::TmpfsNoexec,
+                    message: "Missing tmpfs /tmp with noexec,nosuid".into(),
+                    remediation: "Add 'tmpfs: [\"/tmp:noexec,nosuid\"]' to the service definition.",
+                });
             }
         }
         violations
@@ -1006,6 +1076,8 @@ impl SecurityCheck {
              `external: true` and pre-created by the runtime with `nerdctl network create --internal`.";
         let owners = super::networks::egress_less_network_owners(project);
         let is_own = |net: &str| owners.iter().any(|(name, _)| name == net);
+        let is_builtin =
+            |net: &str| is_own(net) || super::networks::is_builtin_egress_less_network(net);
         let mut violations = Vec::new();
         let declared = doc.get("networks").and_then(|n| n.as_mapping());
         let mut egress_less_keys: Vec<String> = Vec::new();
@@ -1014,12 +1086,20 @@ impl SecurityCheck {
             let Some(key) = key.as_str() else {
                 continue;
             };
-            let name = decl.get("name").and_then(|n| n.as_str());
-            let egress_less = [Some(key), name]
-                .into_iter()
-                .flatten()
-                .any(|net| is_own(net) || super::networks::is_egress_less_network(net));
-            if !egress_less {
+            let Some(effective) = super::networks::effective_network_name(project, key, decl)
+            else {
+                violations.push(SecurityViolation::new(
+                    key,
+                    SecurityRule::EgressLessNetworkExternal,
+                    format!(
+                        "network '{key}' must declare `name` as a string and `external` as a \
+                         boolean"
+                    ),
+                    REMEDIATION,
+                ));
+                continue;
+            };
+            if !is_builtin(key) && !is_builtin(&effective) {
                 continue;
             }
             egress_less_keys.push(key.to_string());
@@ -1028,8 +1108,8 @@ impl SecurityCheck {
                     key,
                     SecurityRule::EgressLessNetworkExternal,
                     format!(
-                        "network '{key}' refers to an egress-less network that is not one of \
-                         project {project}'s: expected one of {:?}",
+                        "network '{key}' refers to the egress-less network '{effective}', which \
+                         is not one of project {project}'s: expected one of {:?}",
                         owners.iter().map(|(name, _)| name).collect::<Vec<_>>()
                     ),
                     REMEDIATION,
@@ -1060,9 +1140,7 @@ impl SecurityCheck {
         let services = get_services(doc).unwrap_or_default();
         for (service_name, service) in &services {
             for net in service_network_refs(service) {
-                let egress_less = egress_less_keys.contains(&net)
-                    || is_own(&net)
-                    || super::networks::is_egress_less_network(&net);
+                let egress_less = egress_less_keys.contains(&net) || is_builtin(&net);
                 let owner = owners
                     .iter()
                     .find(|(name, _)| *name == net)

@@ -4657,6 +4657,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "ip-policy"
+version = "0.0.0"
+
+[[package]]
 name = "ipnet"
 version = "2.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7969,6 +7973,8 @@ dependencies = [
  "futures-util",
  "http",
  "http-body-util",
+ "hyper",
+ "hyper-util",
  "jsonschema",
  "log",
  "mockito",
@@ -8046,6 +8052,7 @@ dependencies = [
  "ed25519-dalek",
  "fs2",
  "hound",
+ "ip-policy",
  "log",
  "num_cpus",
  "parking_lot",

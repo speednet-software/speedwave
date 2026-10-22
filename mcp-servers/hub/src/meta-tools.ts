@@ -9,7 +9,7 @@ export const SEARCH_TOOLS_TOOL: Tool = {
   description: `Search available MCP tools by keyword or short phrase. Returns tool names, descriptions, and optionally full schemas.
 Use this to discover tools before executing code. Start with 'names_only' for efficiency.
 
-Built-in services: slack, sharepoint, redmine, gitlab, github, atlassian, office, playwright, context7, os. Plugin services (if enabled) are also searchable.
+Built-in services: slack, sharepoint, redmine, gitlab, github, atlassian, office, playwright, context7, os. Plugin services (if enabled) are also searchable. User-added servers are \`custom-<name>\` services with sandbox global \`custom<Name>\`; search by the server name (e.g. "figma").
 
 Matching is tokenized and ranked (each word matched independently against name/keywords/description), so a natural phrase like "my logged hours" also works. A zero-match result includes a 'hint' with next steps.
 
@@ -97,7 +97,7 @@ Available globals:
   config: { limit, offset, maxItems, maxPages, stopWhen }; consume with collectPages/findInPages/countInPages/filterPages/mapPages/takeFromPages
   const allIds = await collectPages(paginate((offset, limit) => redmine.listIssueIds({ status: "open", offset, limit }), { maxItems: 500 }));
 
-Plugin services use the same dot syntax. A dashed plugin slug is camelCased into its global (e.g. \`my-plugin\` → \`myPlugin.someTool()\`); search_tools returns this as the \`sandboxGlobal\` field whenever it differs from the service name.
+Plugin services use the same dot syntax. A dashed plugin slug is camelCased into its global (e.g. \`my-plugin\` → \`myPlugin.someTool()\`); search_tools returns this as the \`sandboxGlobal\` field whenever it differs from the service name. User-added servers are \`custom-<name>\` with global \`custom<Name>\` (e.g. \`customFigma.getFile()\`); search_tools finds their tools by the server name.
 
 Example - Cross-service workflow:
 \`\`\`javascript

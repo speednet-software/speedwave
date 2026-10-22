@@ -2,6 +2,7 @@
 //! `managed-config.json` is a hard error so a policy never silently vanishes.
 
 use crate::config::{ManagedPiiPolicyConfig, ManagedTelemetryConfig};
+use crate::custom_mcp::model::ManagedCustomMcpConfig;
 use std::path::{Path, PathBuf};
 
 /// Root policy object read from the system-level managed-config file. Rejects
@@ -13,6 +14,8 @@ pub struct ManagedConfig {
     pub telemetry: Option<ManagedTelemetryConfig>,
     /// MDM-forced PII policy ids (absent = user fully self-service).
     pub pii_policy: Option<ManagedPiiPolicyConfig>,
+    /// MDM-forced Custom MCP policy; validated at boot, enforced by `custom_mcp::effective`.
+    pub custom_mcp: Option<ManagedCustomMcpConfig>,
 }
 
 /// System-level managed-config path (macOS/Windows); `Ok(None)` on other platforms,
@@ -172,5 +175,90 @@ mod tests {
             load_managed_config_from(&p).is_err(),
             "an unknown pii_policy key must fail-closed, not leave the field user-editable"
         );
+    }
+
+    #[test]
+    fn absent_custom_mcp_key_is_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("managed-config.json");
+        std::fs::write(&p, r#"{"telemetry":{"enabled":false}}"#).unwrap();
+        assert!(load_managed_config_from(&p)
+            .unwrap()
+            .unwrap()
+            .custom_mcp
+            .is_none());
+    }
+
+    #[test]
+    fn valid_file_parses_full_custom_mcp_policy() {
+        use crate::custom_mcp::model::{CustomPiiMode, WorkspaceMode};
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("managed-config.json");
+        std::fs::write(
+            &p,
+            r#"{"custom_mcp":{
+                "enabled":true,
+                "host_servers_enabled":false,
+                "allowed_scopes":["@acme","@modelcontextprotocol"],
+                "allowed_domains":["api.example.com","*.acme.dev"],
+                "max_workspace_mode":"read_only",
+                "force_pii_mode":"tokens",
+                "min_release_age_days":7
+            }}"#,
+        )
+        .unwrap();
+        let c = load_managed_config_from(&p).unwrap().unwrap();
+        assert_eq!(
+            c.custom_mcp.unwrap(),
+            ManagedCustomMcpConfig {
+                enabled: Some(true),
+                host_servers_enabled: Some(false),
+                allowed_scopes: Some(vec!["@acme".into(), "@modelcontextprotocol".into()]),
+                allowed_domains: Some(vec!["api.example.com".into(), "*.acme.dev".into()]),
+                max_workspace_mode: Some(WorkspaceMode::ReadOnly),
+                force_pii_mode: Some(CustomPiiMode::Tokens),
+                min_release_age_days: Some(7),
+            }
+        );
+    }
+
+    #[test]
+    fn empty_custom_mcp_object_parses_with_every_field_unset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("managed-config.json");
+        std::fs::write(&p, r#"{"custom_mcp":{}}"#).unwrap();
+        let c = load_managed_config_from(&p).unwrap().unwrap();
+        assert_eq!(c.custom_mcp, Some(ManagedCustomMcpConfig::default()));
+    }
+
+    #[test]
+    fn unknown_custom_mcp_key_is_hard_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("managed-config.json");
+        std::fs::write(&p, r#"{"custom_mcp":{"enable":false}}"#).unwrap();
+        assert!(
+            load_managed_config_from(&p).is_err(),
+            "an unknown custom_mcp key must fail-closed, not leave the field user-editable"
+        );
+    }
+
+    #[test]
+    fn malformed_custom_mcp_values_are_hard_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("managed-config.json");
+        for body in [
+            r#"{"custom_mcp":{"max_workspace_mode":"rw"}}"#,
+            r#"{"custom_mcp":{"force_pii_mode":"redacted"}}"#,
+            r#"{"custom_mcp":{"min_release_age_days":-1}}"#,
+            r#"{"custom_mcp":{"allowed_scopes":"@acme"}}"#,
+            r#"{"custom_mcp":{"enabled":"yes"}}"#,
+            r#"{"custom_mcp":true}"#,
+        ] {
+            std::fs::write(&p, body).unwrap();
+            assert!(
+                load_managed_config_from(&p).is_err(),
+                "{body} must fail-closed"
+            );
+        }
     }
 }

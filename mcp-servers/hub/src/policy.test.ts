@@ -46,6 +46,42 @@ describe('loadPolicy', () => {
     expect((value as { note: string }).note).not.toContain('a@b.com');
   });
 
+  it('loads per-service PII modes with the policy, defaulting custom servers to tokens', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'hub-policy-test-'));
+    const file = join(dir, 'policy.json');
+    writeFileSync(file, JSON.stringify(VALID_POLICY_V3));
+    writeFileSync(join(dir, 'key'), VALID_KEY);
+    vi.stubEnv('POLICY_FILE', file);
+    const { loadPolicy } = await import('./policy.js');
+    const piiMode = await import('./pii-mode.js');
+    piiMode._setServicePiiModesForTesting(new Map([['custom-x', 'plaintext']]));
+
+    loadPolicy();
+
+    expect(piiMode.piiModeFor('custom-x')).toBe('tokens');
+    expect(piiMode.piiModeFor('slack')).toBe('plaintext');
+  });
+
+  it('loads the real engine from a policy carrying per-service PII modes', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'hub-policy-test-'));
+    const file = join(dir, 'policy.json');
+    writeFileSync(
+      file,
+      JSON.stringify({ ...VALID_POLICY_V3, services: { 'custom-x': { pii_mode: 'plaintext' } } })
+    );
+    writeFileSync(join(dir, 'key'), VALID_KEY);
+    vi.stubEnv('POLICY_FILE', file);
+    const { loadPolicy, getEngine } = await import('./policy.js');
+    const piiMode = await import('./pii-mode.js');
+
+    expect(() => loadPolicy()).not.toThrow();
+
+    expect(piiMode.piiModeFor('custom-x')).toBe('plaintext');
+    expect(piiMode.piiModeFor('custom-y')).toBe('tokens');
+    const { value } = getEngine().tokenize({ note: 'contact a@b.com' });
+    expect((value as { note: string }).note).not.toContain('a@b.com');
+  });
+
   it('loads the default policy when POLICY_FILE points at a missing file', async () => {
     dir = mkdtempSync(join(tmpdir(), 'hub-policy-test-'));
     vi.stubEnv('POLICY_FILE', join(dir, 'missing.json'));

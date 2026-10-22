@@ -55,6 +55,8 @@ copy_tree "$CONTAINERS_DIR" "$DEST/build-context/containers"
 
 copy_tree "$REPO_ROOT/crates/pii-engine" "$DEST/build-context/containers/crates/pii-engine"
 
+copy_tree "$REPO_ROOT/crates/ip-policy" "$DEST/build-context/containers/crates/ip-policy"
+
 mkdir -p "$DEST/build-context/containers/mcp-servers/policies"
 cp "$MCP_SERVERS_DIR/policies/rules.yaml" "$DEST/build-context/containers/mcp-servers/policies/"
 
@@ -65,7 +67,7 @@ find "$DEST/build-context/containers" -type f -name '*.sh.bak' -delete
 mkdir -p "$DEST/build-context/mcp-servers"
 cp "$MCP_SERVERS_DIR/tsconfig.base.json" "$DEST/build-context/mcp-servers/"
 
-MCP_SERVICES="shared policies hub slack sharepoint redmine gitlab github atlassian office playwright context7"
+MCP_SERVICES="shared policies hub slack sharepoint redmine gitlab github atlassian office playwright context7 custom-launcher custom-guard"
 
 for svc in $MCP_SERVICES; do
   svc_src="$MCP_SERVERS_DIR/$svc"
@@ -84,7 +86,7 @@ for svc in $MCP_SERVICES; do
     find "$svc_src/scripts" -maxdepth 1 -type f ! -name 'test_*.py' -exec cp {} "$svc_dest/scripts/" \;
   fi
   [ -f "$svc_src/requirements.txt" ] && cp "$svc_src/requirements.txt" "$svc_dest/"
-  for f in Dockerfile Containerfile; do
+  for f in Dockerfile Containerfile Containerfile.npm.template; do
     [ -f "$svc_src/$f" ] && cp "$svc_src/$f" "$svc_dest/"
   done
 done

@@ -39,6 +39,16 @@ pub enum SourceKind {
     /// The tauri-plugin-log directory: one `/logs` source, N `logs/<file>` ZIP
     /// entries. Each consumer applies its own directory routine.
     DesktopLogDir,
+    /// Every regular file named `<prefix>*<suffix>` in one directory resolved from
+    /// `(data_dir, project)`; each is ZIP entry `<zip_entry><file name>`.
+    DirFiles {
+        /// The directory.
+        dir: fn(&Path, &str) -> Option<PathBuf>,
+        /// File name prefix.
+        prefix: &'static str,
+        /// File name suffix.
+        suffix: &'static str,
+    },
 }
 
 /// One diagnostic source. `key` is the `/logs` token (frontend `COMPOSE_RE`
@@ -87,6 +97,10 @@ fn audit_proxy_path(data_dir: &Path, project: &str) -> Option<PathBuf> {
 
 fn audit_hub_path(data_dir: &Path, project: &str) -> Option<PathBuf> {
     Some(crate::audit::audit_dir_in(data_dir, project).join(consts::AUDIT_HUB_FILE))
+}
+
+fn audit_dir_path(data_dir: &Path, project: &str) -> Option<PathBuf> {
+    Some(crate::audit::audit_dir_in(data_dir, project))
 }
 
 fn proxy_usage_path(data_dir: &Path, project: &str) -> Option<PathBuf> {
@@ -165,11 +179,22 @@ pub const DIAGNOSTIC_SOURCES: &[DiagnosticSource] = &[
         platforms: Platforms::All,
         kind: SourceKind::File(proxy_usage_path),
     },
+    DiagnosticSource {
+        key: "tool-catalogs",
+        zip_entry: "audit/tool-catalogs/",
+        displayable: false,
+        platforms: Platforms::All,
+        kind: SourceKind::DirFiles {
+            dir: audit_dir_path,
+            prefix: crate::custom_mcp::catalog::TOOL_CATALOG_FILE_PREFIX,
+            suffix: ".json",
+        },
+    },
 ];
 
 /// Explicit allow-list of ZIP-only keys. A new non-`displayable` source must be
 /// added here too, or `nondisplayable_sources_match_zip_only_allowlist` fails.
-pub const ZIP_ONLY_KEYS: &[&str] = &["compose-yml", "proxy-usage"];
+pub const ZIP_ONLY_KEYS: &[&str] = &["compose-yml", "proxy-usage", "tool-catalogs"];
 
 /// Resolves a `SourceKind::File` source's path by key, gated to the current platform. `None` for
 /// unknown keys, unavailable platforms, or non-File kinds.
@@ -181,6 +206,37 @@ pub fn resolve_file_path(key: &str, data_dir: &Path, project: &str) -> Option<Pa
             SourceKind::File(f) => f(data_dir, project),
             _ => None,
         })
+}
+
+/// The files of a `SourceKind::DirFiles` source by key, sorted; regular files only (a symlink
+/// is skipped), empty for unknown keys, other kinds or a missing directory.
+pub fn resolve_dir_files(key: &str, data_dir: &Path, project: &str) -> Vec<PathBuf> {
+    let Some(SourceKind::DirFiles {
+        dir,
+        prefix,
+        suffix,
+    }) = DIAGNOSTIC_SOURCES
+        .iter()
+        .find(|s| s.key == key && s.platforms.available_here())
+        .map(|s| s.kind)
+    else {
+        return Vec::new();
+    };
+    let Some(Ok(entries)) = dir(data_dir, project).map(std::fs::read_dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.starts_with(prefix) && n.ends_with(suffix))
+        })
+        .map(|e| e.path())
+        .collect();
+    files.sort();
+    files
 }
 
 #[cfg(test)]
@@ -203,6 +259,41 @@ mod tests {
             "every non-displayable (ZIP-only) source must be justified in ZIP_ONLY_KEYS — \
              the only allowed /logs↔ZIP divergence is a non-renderable artifact"
         );
+    }
+
+    #[test]
+    fn tool_catalogs_are_collected_from_the_audit_dir_only() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let audit = crate::audit::audit_dir_in(tmp.path(), "proj");
+        std::fs::create_dir_all(&audit).expect("audit dir");
+        for name in [
+            "tool-catalog-custom-b.json",
+            "tool-catalog-custom-a.json",
+            "audit-hub.jsonl",
+            "tool-catalog-custom-a.json.tmp",
+        ] {
+            std::fs::write(audit.join(name), "{}").expect("write");
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            audit.join("audit-hub.jsonl"),
+            audit.join("tool-catalog-custom-link.json"),
+        )
+        .expect("symlink");
+        assert_eq!(
+            resolve_dir_files("tool-catalogs", tmp.path(), "proj"),
+            vec![
+                audit.join("tool-catalog-custom-a.json"),
+                audit.join("tool-catalog-custom-b.json")
+            ]
+        );
+        assert!(resolve_dir_files("tool-catalogs", tmp.path(), "other").is_empty());
+        assert!(resolve_dir_files("audit-hub", tmp.path(), "proj").is_empty());
+        let s = DIAGNOSTIC_SOURCES
+            .iter()
+            .find(|s| s.key == "tool-catalogs")
+            .expect("registered");
+        assert!(!s.displayable && s.zip_entry.ends_with('/'));
     }
 
     #[test]

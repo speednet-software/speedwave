@@ -682,6 +682,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             });
         let migrated = migrated_llm_for(
             &user_config,
@@ -714,6 +715,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             });
         let migrated = migrated_llm_for(
             &user_config,
@@ -737,6 +739,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             });
         let migrated = migrated_llm_for(
             &user_config,
@@ -767,6 +770,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             });
         let migrated = migrated_llm_for(
             &user_config,
@@ -801,6 +805,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             });
         let migrated = migrated_llm_for(
             &user_config,
@@ -833,6 +838,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             });
 
         let needs_anthropic_auth = setup_wizard::project_needs_anthropic_auth(&user_config, "proj");

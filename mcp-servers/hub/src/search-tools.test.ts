@@ -1331,3 +1331,91 @@ describe('searchTools sandboxGlobal', () => {
     errSpy.mockRestore();
   });
 });
+
+describe('searchTools by server name', () => {
+  const savedEnabledServices = process.env.ENABLED_SERVICES;
+  const builtIns = ['slack', 'sharepoint', 'redmine', 'gitlab', 'os'];
+
+  beforeEach(() => {
+    _resetRegistryForTesting();
+    populateRegistryWithMockTools();
+    const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
+    mutableRegistry['custom-figma'] = {
+      getFile: buildMockToolMetadata('custom-figma', 'getFile', {
+        description: 'Fetch a design document',
+        keywords: [],
+      }),
+      postComment: buildMockToolMetadata('custom-figma', 'postComment', {
+        description: 'Comment on a design',
+        keywords: [],
+      }),
+    };
+    _setServiceNamesForTesting([...builtIns, 'custom-figma']);
+    process.env.ENABLED_SERVICES = [...builtIns, 'custom-figma'].join(',');
+    resetServiceCaches();
+  });
+
+  afterEach(() => {
+    if (savedEnabledServices === undefined) {
+      delete process.env.ENABLED_SERVICES;
+    } else {
+      process.env.ENABLED_SERVICES = savedEnabledServices;
+    }
+    resetServiceCaches();
+  });
+
+  const figmaMatches = (result: Awaited<ReturnType<typeof searchTools>>) =>
+    result.matches
+      .filter((m) => m.service === 'custom-figma')
+      .map((m) => m.tool)
+      .sort();
+
+  it.each(['figma', 'FIGMA', 'custom-figma', 'customFigma', 'CUSTOMFIGMA'])(
+    'finds every tool of the server for the token %s',
+    async (query) => {
+      const result = await searchTools({ query, detailLevel: 'names_only' });
+      expect(figmaMatches(result)).toEqual(['custom-figma/getFile', 'custom-figma/postComment']);
+    }
+  );
+
+  it('combines the server name with another token', async () => {
+    const result = await searchTools({ query: 'figma file', detailLevel: 'names_only' });
+    expect(result.matches.map((m) => m.tool)).toEqual(['custom-figma/getFile']);
+  });
+
+  it('never matches the bare custom prefix or a part of the server name', async () => {
+    for (const query of ['custom', 'custom-', 'fig']) {
+      const result = await searchTools({ query, detailLevel: 'names_only' });
+      expect(figmaMatches(result)).toEqual([]);
+    }
+  });
+
+  it('matches built-in services by their id too', async () => {
+    const result = await searchTools({ query: 'gitlab', detailLevel: 'names_only' });
+    const gitlabTools = Object.keys(TOOL_REGISTRY['gitlab']).map((m) => `gitlab/${m}`);
+    expect(result.matches.map((m) => m.tool).sort()).toEqual(gitlabTools.sort());
+  });
+
+  it('ranks a server-name match below a description match', async () => {
+    const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
+    mutableRegistry['redmine']['linkDesign'] = buildMockToolMetadata('redmine', 'linkDesign', {
+      description: 'Attach a figma link to an issue',
+      keywords: [],
+    });
+
+    const result = await searchTools({ query: 'figma', detailLevel: 'names_only' });
+
+    const names = result.matches.map((m) => m.tool);
+    expect(names[0]).toBe('redmine/linkDesign');
+    expect(names.slice(1).sort()).toEqual(['custom-figma/getFile', 'custom-figma/postComment']);
+    delete mutableRegistry['redmine']['linkDesign'];
+  });
+
+  it('lists the enabled services with their sandbox globals in a zero-match hint', async () => {
+    const result = await searchTools({ query: 'xyznonexistent123', detailLevel: 'names_only' });
+
+    expect(result.hint).toContain('Enabled services, searchable by name:');
+    expect(result.hint).toContain('custom-figma (sandbox global customFigma)');
+    expect(result.hint).toContain('gitlab, os, redmine');
+  });
+});

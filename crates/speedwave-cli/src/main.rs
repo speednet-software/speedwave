@@ -555,7 +555,7 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    if let Err(e) = speedwave_runtime::config::check_telemetry_policy_at_boot() {
+    if let Err(e) = speedwave_runtime::config::check_managed_policy_at_boot() {
         err!("Organization policy error: {}", redact_err(&e));
         err!("Contact your administrator to correct the managed configuration.");
         std::process::exit(2);
@@ -882,6 +882,12 @@ fn main() -> anyhow::Result<()> {
     let (resolved, integrations) =
         config::resolve_project_config(&project_dir, &user_config, &project_name);
 
+    for notice in custom_mcp_notice_lines(&integrations.custom_mcp, || {
+        speedwave_runtime::custom_mcp::relay::is_running(&project_name)
+    }) {
+        err!("{notice}");
+    }
+
     let cleaned = speedwave_runtime::legacy_token_cleanup::run_legacy_token_cleanup_at_startup();
     if cleaned > 0 {
         log::info!("legacy token cleanup sanitised {cleaned} project(s)");
@@ -898,7 +904,14 @@ fn main() -> anyhow::Result<()> {
         &integrations,
         Some(&runtime),
         &host_bridges,
-    )?;
+    )
+    .unwrap_or_else(|e| {
+        err!(
+            "Failed to prepare the project containers: {}",
+            redact_err(&e)
+        );
+        std::process::exit(1);
+    });
 
     let manifests = plugin::list_installed_plugins().unwrap_or_else(|e| {
         log::warn!("Failed to list installed plugins: {e}");
@@ -906,7 +919,12 @@ fn main() -> anyhow::Result<()> {
     });
     let expected_paths =
         compose::SecurityExpectedPaths::compute(&project_name, &project_dir.to_string_lossy())?
-            .with_telemetry_locked(resolved.telemetry.any_locked);
+            .with_telemetry_locked(resolved.telemetry.any_locked)
+            .with_custom_mcp(speedwave_runtime::custom_mcp::expectations_for(
+                &user_config,
+                &project_name,
+                speedwave_runtime::custom_mcp::effective::current_managed_policy().as_ref(),
+            ));
 
     let prereq_violations = speedwave_runtime::os_prereqs::check_os_prereqs();
 
@@ -1065,6 +1083,15 @@ fn main() -> anyhow::Result<()> {
     }
     let code = status.code().unwrap_or(if is_oom { 137 } else { 1 });
     std::process::exit(code);
+}
+
+fn custom_mcp_notice_lines(
+    resolution: &speedwave_runtime::custom_mcp::effective::CustomMcpResolution,
+    relay_running: impl FnOnce() -> bool,
+) -> Vec<String> {
+    let relay_running =
+        speedwave_runtime::custom_mcp::notices::needs_relay(resolution) && relay_running();
+    speedwave_runtime::custom_mcp::notices::custom_mcp_notices(resolution, relay_running)
 }
 
 fn stamped_exec_argv(instance_id: &str, tail: Vec<String>) -> Vec<String> {
@@ -1836,6 +1863,7 @@ mod tests {
             plugin_settings: None,
             policy: None,
             effort_pin: None,
+            custom_mcp: None,
         });
         user_config
     }
@@ -2086,6 +2114,25 @@ mod tests {
     }
 
     #[test]
+    fn main_exits_when_the_managed_policy_boot_check_fails() {
+        let source = include_str!("main.rs");
+        let call = source
+            .find("config::check_managed_policy_at_boot()")
+            .expect("CLI must run the managed policy boot check");
+        let rest = &source[call..];
+        let exit = rest
+            .find("std::process::exit(2)")
+            .expect("managed policy failure must exit");
+        let next = rest
+            .find("check_pii_policy_at_boot")
+            .expect("PII boot check anchor");
+        assert!(
+            exit < next,
+            "a managed policy error must exit before anything else runs"
+        );
+    }
+
+    #[test]
     fn main_heals_llm_config_before_project_actions() {
         let source = include_str!("main.rs");
         let heal = source
@@ -2241,6 +2288,7 @@ mod tests {
             plugin_settings: None,
             policy: None,
             effort_pin: None,
+            custom_mcp: None,
         }
     }
 
@@ -2286,6 +2334,7 @@ mod tests {
             plugin_settings: None,
             policy: None,
             effort_pin: None,
+            custom_mcp: None,
         };
         let cfg = config_with(vec![proj("alpha"), cwd_project], Some("alpha"));
         assert_eq!(resolve_project_fallback(&cfg).unwrap(), "alpha");
@@ -2959,5 +3008,98 @@ mod tests {
                  or a concurrent config writer can lose this update"
             );
         }
+    }
+
+    const HOST_SOURCE: &str = r#"{"kind":"host","port":3845,"path":"/mcp"}"#;
+
+    fn custom_mcp_resolution(
+        servers: &[(&str, &str, bool)],
+    ) -> speedwave_runtime::custom_mcp::effective::CustomMcpResolution {
+        let entries: std::collections::BTreeMap<
+            String,
+            speedwave_runtime::custom_mcp::model::CustomMcpEntry,
+        > = servers
+            .iter()
+            .map(|(name, source, approve)| {
+                let mut entry: speedwave_runtime::custom_mcp::model::CustomMcpEntry =
+                    serde_json::from_value(serde_json::json!({
+                        "enabled": true,
+                        "source": serde_json::from_str::<serde_json::Value>(source).unwrap(),
+                    }))
+                    .unwrap();
+                if *approve {
+                    entry.consent_digest = Some(
+                        speedwave_runtime::custom_mcp::policy::consent_digest(&entry).unwrap(),
+                    );
+                }
+                (name.to_string(), entry)
+            })
+            .collect();
+        speedwave_runtime::custom_mcp::effective::resolve_effective(&entries, true, None)
+    }
+
+    #[test]
+    fn custom_mcp_notices_probe_the_relay_only_for_a_running_host_server() {
+        let resolution = custom_mcp_resolution(&[("desk", HOST_SOURCE, true)]);
+        assert_eq!(resolution.effective.len(), 1);
+        let mut probed = 0;
+        let down = custom_mcp_notice_lines(&resolution, || {
+            probed += 1;
+            false
+        });
+        assert_eq!(probed, 1);
+        assert_eq!(
+            down,
+            vec!["host MCP server 'desk' is available only while Speedwave Desktop is running"]
+        );
+        assert!(custom_mcp_notice_lines(&resolution, || true).is_empty());
+    }
+
+    #[test]
+    fn custom_mcp_notices_skip_the_relay_probe_without_a_running_host_server() {
+        let resolution = custom_mcp_resolution(&[("desk", HOST_SOURCE, false)]);
+        assert!(resolution.effective.is_empty());
+        let lines = custom_mcp_notice_lines(&resolution, || {
+            panic!("the relay probe must not run without a running host server")
+        });
+        assert_eq!(
+            lines,
+            vec!["custom MCP server 'desk' is waiting for approval in Speedwave Desktop"]
+        );
+        let empty = speedwave_runtime::custom_mcp::effective::CustomMcpResolution::default();
+        assert!(custom_mcp_notice_lines(&empty, || panic!("no probe")).is_empty());
+    }
+
+    #[test]
+    fn custom_mcp_notices_are_printed_through_err_before_render_compose() {
+        let source = include_str!("main.rs");
+        let fn_body = extract_fn_body(source, "fn main(");
+        let notices_pos = fn_body
+            .find("custom_mcp_notice_lines(&integrations.custom_mcp")
+            .expect("main() must print the custom MCP notices");
+        let resolve_pos = fn_body
+            .find("config::resolve_project_config(")
+            .expect("main() must resolve the project config");
+        let render_pos = fn_body
+            .find("compose::render_compose(")
+            .expect("main() must call render_compose");
+        assert!(resolve_pos < notices_pos && notices_pos < render_pos);
+        let print = &fn_body[notices_pos..render_pos];
+        assert!(print.contains("err!(\"{notice}\")"), "{print}");
+        assert!(print.contains("custom_mcp::relay::is_running(&project_name)"));
+    }
+
+    #[test]
+    fn render_compose_failures_are_printed_through_err_redacted() {
+        let source = include_str!("main.rs");
+        let fn_body = extract_fn_body(source, "fn main(");
+        let render_pos = fn_body
+            .find("compose::render_compose(")
+            .expect("main() must call render_compose");
+        let call = &fn_body[render_pos..];
+        let stmt = &call[..call.find("});").expect("render_compose closure end")];
+        assert!(stmt.contains(".unwrap_or_else(|e| {"), "{stmt}");
+        assert!(stmt.contains("redact_err(&e)"), "{stmt}");
+        assert!(stmt.contains("std::process::exit(1)"), "{stmt}");
     }
 }

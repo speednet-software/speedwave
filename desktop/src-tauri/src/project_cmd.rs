@@ -121,6 +121,7 @@ pub(crate) async fn switch_project(
         log::warn!("clearing the chat sessions after the project switch did not finish: {je}");
     }
 
+    crate::custom_mcp_cmd::relays::stop_relays_except(&name);
     if let Some(prev) = pending_teardown {
         reconcile::teardown_oauth_for_project(&oauth_for_teardown, &prev);
         spawn_background_teardown(prev);
@@ -244,6 +245,7 @@ mod tests {
                     plugin_settings: None,
                     policy: None,
                     effort_pin: None,
+                    custom_mcp: None,
                 },
                 ProjectUserEntry {
                     name: "beta".to_string(),
@@ -253,6 +255,7 @@ mod tests {
                     plugin_settings: None,
                     policy: None,
                     effort_pin: None,
+                    custom_mcp: None,
                 },
             ],
             active_project: Some("alpha".to_string()),
@@ -528,6 +531,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: None,
             selected_ide: None,

@@ -1038,6 +1038,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             ..Default::default()
         }

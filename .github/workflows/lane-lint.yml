@@ -52,7 +52,7 @@ jobs:
           (cd policies && npm run build:wasm)
           (cd policies && npx tsc)
           # `playwright` is a Container-built bridge worker — no TS sources, no tsconfig.
-          for ws in policies hub slack sharepoint redmine gitlab os atlassian context7 github oauth office; do
+          for ws in policies hub slack sharepoint redmine gitlab os atlassian context7 github oauth office custom-launcher custom-guard; do
             echo "tsc --noEmit $ws"
             (cd "$ws" && npx tsc --noEmit)
           done

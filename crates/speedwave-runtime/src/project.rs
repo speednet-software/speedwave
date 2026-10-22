@@ -19,6 +19,7 @@ fn cleanup_project_dirs_in(project: &str, data_dir: &Path) {
         "snapshots",
         "usage",
         crate::consts::OAUTH_SUBDIR,
+        crate::consts::CUSTOM_MCP_STATE_DIR,
         crate::legacy_token_cleanup::LEGACY_HOST_EXEC_SUBDIR,
     ] {
         let dir = data_dir.join(sub).join(project);
@@ -177,6 +178,7 @@ fn add_project_with_validated_dir(
         plugin_settings: None,
         policy: None,
         effort_pin: None,
+        custom_mcp: None,
     };
 
     user_config.projects.push(entry);
@@ -420,6 +422,7 @@ mod tests {
                     plugin_settings: None,
                     policy: None,
                     effort_pin: None,
+                    custom_mcp: None,
                 })
                 .collect(),
             active_project: Some(active.to_string()),
@@ -595,6 +598,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: Some("existing".to_string()),
             selected_ide: None,
@@ -674,6 +678,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: Some("existing".to_string()),
             selected_ide: None,
@@ -742,6 +747,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -778,6 +784,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -1143,6 +1150,72 @@ mod tests {
             !data_dir.join("usage").join("first").exists(),
             "usage/first must be removed on project removal"
         );
+    }
+
+    #[test]
+    fn remove_project_removes_custom_mcp_state_and_credentials_preserving_siblings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        for name in ["first", "second"] {
+            let dir = tmp.path().join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            let canonical = std::fs::canonicalize(&dir).unwrap();
+            add_project_with_validated_dir(
+                name,
+                canonical.clone(),
+                canonical.to_string_lossy().to_string(),
+                &data_dir,
+            )
+            .unwrap();
+        }
+        for project in ["first", "second"] {
+            let guard = crate::custom_mcp::paths::ensure_subdir_in(
+                &data_dir,
+                project,
+                "figma",
+                crate::custom_mcp::paths::ServerSubdir::Guard,
+            )
+            .unwrap();
+            std::fs::write(
+                guard.join(crate::consts::CUSTOM_MCP_GUARD_POLICY_FILE),
+                b"{}",
+            )
+            .unwrap();
+            let relay =
+                crate::custom_mcp::paths::ensure_relay_dir_in(&data_dir, project, "desk").unwrap();
+            std::fs::write(relay.join(crate::consts::CUSTOM_RELAY_TOKEN_FILE), b"t").unwrap();
+            let locks = crate::custom_mcp::paths::relay_lock_dir_in(&data_dir, project).unwrap();
+            std::fs::create_dir_all(&locks).unwrap();
+            std::fs::write(locks.join("4100.lock"), b"{}").unwrap();
+            let creds = crate::plugin::token_dir_in(
+                &data_dir,
+                project,
+                &crate::custom_mcp::model::service_id("figma"),
+            );
+            std::fs::create_dir_all(&creds).unwrap();
+            std::fs::write(creds.join("API_KEY"), b"secret").unwrap();
+        }
+
+        remove_project_with_data_dir("first", &data_dir).unwrap();
+
+        let custom_first = crate::custom_mcp::paths::project_dir_in(&data_dir, "first").unwrap();
+        assert!(!custom_first.exists(), "custom-mcp/first must be removed");
+        assert!(!crate::plugin::token_dir_in(
+            &data_dir,
+            "first",
+            &crate::custom_mcp::model::service_id("figma"),
+        )
+        .exists());
+        let custom_second = crate::custom_mcp::paths::project_dir_in(&data_dir, "second").unwrap();
+        assert!(custom_second.join("figma").join("guard").is_dir());
+        assert!(custom_second.join("relay-desk").is_dir());
+        assert!(crate::plugin::token_dir_in(
+            &data_dir,
+            "second",
+            &crate::custom_mcp::model::service_id("figma"),
+        )
+        .join("API_KEY")
+        .is_file());
     }
 
     #[test]

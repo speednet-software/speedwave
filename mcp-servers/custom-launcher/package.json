@@ -1,0 +1,31 @@
+{
+  "name": "@speedwave/mcp-custom-launcher",
+  "version": "0.0.0",
+  "description": "Speedwave custom MCP launcher - stdio MCP server behind a bearer-gated Streamable HTTP endpoint",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "start": "node dist/index.js",
+    "lint": "eslint src",
+    "lint:fix": "eslint src --fix",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "keywords": [
+    "speedwave",
+    "mcp",
+    "launcher",
+    "stdio"
+  ],
+  "author": "Speednet",
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@types/node": "^26.4.1",
+    "@vitest/coverage-v8": "^5.0.0",
+    "typescript": "^6.0.3",
+    "vitest": "^5.0.0"
+  }
+}

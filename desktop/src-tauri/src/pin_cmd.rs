@@ -214,6 +214,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             ..Default::default()
         };
@@ -380,6 +381,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                custom_mcp: None,
             }],
             active_project: Some("proj".to_string()),
             ..Default::default()

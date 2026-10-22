@@ -200,6 +200,21 @@ describe('bootWorker', () => {
     expect(warnSpy.mock.calls.flat().join(' ')).not.toContain('not configured');
   });
 
+  it('passes a caller-supplied JSON-RPC handler through to the server', async () => {
+    process.env.PORT = '3000';
+    const rpcHandler = { marker: 'custom' } as never;
+    await bootWorker({ serverName: 'mcp-test', version: '1.0.0', makeTools: () => [], rpcHandler });
+    const opts = createMCPServerMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(opts.rpcHandler).toBe(rpcHandler);
+  });
+
+  it('omits rpcHandler when none is supplied', async () => {
+    process.env.PORT = '3000';
+    await bootWorker({ serverName: 'mcp-test', version: '1.0.0', makeTools: () => [] });
+    const opts = createMCPServerMock.mock.calls[0][0] as Record<string, unknown>;
+    expect('rpcHandler' in opts).toBe(false);
+  });
+
   it('omits healthCheck when makeHealthCheck is not provided', async () => {
     await bootWorker({ serverName: 'mcp-test', version: '1.0.0', makeTools: () => [] });
     const opts = createMCPServerMock.mock.calls[0][0] as Record<string, unknown>;
