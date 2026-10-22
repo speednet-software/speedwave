@@ -15,6 +15,7 @@ import {
   runMail,
   confirmProperty,
   MAIL_FLAG_VALUES,
+  ASK_USER_FIRST,
 } from './mail-shared.js';
 
 const BATCH_BUDGET = mailTimeBudget(120_000);
@@ -126,7 +127,7 @@ export const markEmailsReadTool: Tool = {
   name: 'markEmailsRead',
   description:
     'Mark 1 to 25 emails, by the mail ids listEmails or searchEmails returned, as read (read=true) or unread (read=false). ' +
-    'Reversible, so no confirmation is needed. Reports every email: ok, or the error that left it unchanged.',
+    `${ASK_USER_FIRST} Reports every email: ok, or the error that left it unchanged.`,
   annotations: WRITE_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
@@ -155,7 +156,7 @@ export const flagEmailsTool: Tool = {
   name: 'flagEmails',
   description:
     'Flag 1 to 25 emails, by the mail ids listEmails or searchEmails returned, with a color, or take the flag off with flag "none". ' +
-    'Reversible, so no confirmation is needed. Reports every email: ok, or the error that left it unchanged.',
+    `${ASK_USER_FIRST} Reports every email: ok, or the error that left it unchanged.`,
   annotations: WRITE_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
@@ -191,7 +192,7 @@ export const moveEmailsTool: Tool = {
   name: 'moveEmails',
   description:
     'Move 1 to 25 emails, by the mail ids listEmails or searchEmails returned, to a mailbox named together with its account (as listMailboxes returns them). ' +
-    'Reversible, so no confirmation is needed; a target that does not exist fails the call and nothing moves. ' +
+    `${ASK_USER_FIRST} A target that does not exist fails the call and nothing moves. ` +
     "The account's Trash and Junk mailbox are refused: delete with deleteEmails and report spam with markEmailsSpam, which ask the user first. " +
     'Reports every email: ok, or the error that left it where it is. A moved email gets a new mail id: list the target mailbox to act on it again.',
   annotations: WRITE_ANNOTATIONS,
@@ -230,7 +231,7 @@ export const copyEmailsTool: Tool = {
   name: 'copyEmails',
   description:
     'Copy 1 to 25 emails, by the mail ids listEmails or searchEmails returned, to a mailbox named together with its account (as listMailboxes returns them); the originals stay where they are. ' +
-    'No confirmation is needed; a target that does not exist fails the call and nothing is copied. ' +
+    `${ASK_USER_FIRST} A target that does not exist fails the call and nothing is copied. ` +
     "The account's Trash and Junk mailbox are refused: delete with deleteEmails and report spam with markEmailsSpam, which ask the user first. " +
     'Reports every email: ok, or the error that kept it from being copied.',
   annotations: WRITE_ANNOTATIONS,
@@ -269,7 +270,7 @@ export const archiveEmailsTool: Tool = {
   name: 'archiveEmails',
   description:
     'Archive 1 to 25 emails, by the mail ids listEmails or searchEmails returned: each moves to the Archive mailbox of its own account (All Mail on Gmail). ' +
-    'Reversible, so no confirmation is needed. An account without an archive mailbox leaves the email where it is and reports MAIL_ARCHIVE_NOT_FOUND for it; then ask the user where to keep it and use moveEmails.',
+    `${ASK_USER_FIRST} An account without an archive mailbox leaves the email where it is and reports MAIL_ARCHIVE_NOT_FOUND for it; then ask the user where to keep it and use moveEmails.`,
   annotations: WRITE_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
@@ -298,7 +299,7 @@ export const createMailboxTool: Tool = {
   description:
     'Create a mailbox in an account (the account field from listMailboxes, "On My Mac" for a local one). ' +
     'name is its path inside the account; Clients/Acme makes Acme inside Clients. An existing mailbox is refused (MAIL_MAILBOX_EXISTS), never reused. ' +
-    'No tool deletes a mailbox.',
+    `No tool deletes a mailbox. ${ASK_USER_FIRST}`,
   annotations: WRITE_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
@@ -389,7 +390,7 @@ export const markEmailsNotSpamTool: Tool = {
   name: 'markEmailsNotSpam',
   description:
     "Mark 1 to 25 emails, by the mail ids listEmails or searchEmails returned, as not spam: Mail's junk filter learns from them, and an email in the Junk mailbox of its own account moves to the Inbox of that account. " +
-    'Reversible, so no confirmation is needed. An email outside the Junk mailbox only loses its junk mark and stays where it is, and so does every email of On My Mac, which has no Inbox. ' +
+    `${ASK_USER_FIRST} An email outside the Junk mailbox only loses its junk mark and stays where it is, and so does every email of On My Mac, which has no Inbox. ` +
     'Reports every email: ok with moved (true when it went to the Inbox), or the error that left it unchanged. A moved email gets a new mail id: list the Inbox to act on it again.',
   annotations: WRITE_ANNOTATIONS,
   _meta: {
@@ -434,7 +435,7 @@ export const renameMailboxTool: Tool = {
   name: 'renameMailbox',
   description:
     'Rename a mailbox of an account (mailbox and account exactly as listMailboxes returns them); it stays inside the same parent mailbox, so new_name is one name without /. ' +
-    'Reversible, so no confirmation is needed: renaming it back undoes it. ' +
+    `${ASK_USER_FIRST} Renaming it back undoes it. ` +
     "The account's own mailboxes keep their names: Inbox, Drafts, Sent, Junk, Trash, Outbox and the archive mailbox are refused with MAIL_SPECIAL_MAILBOX. " +
     'A name the parent already has is refused with MAIL_MAILBOX_EXISTS. Emails in the renamed mailbox get new mail ids: list it again to act on them.',
   annotations: WRITE_ANNOTATIONS,

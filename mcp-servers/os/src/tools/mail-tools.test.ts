@@ -28,6 +28,7 @@ import {
   handleRenameMailbox,
 } from './mail-organizing.js';
 import { createMailTools } from './mail-tools.js';
+import { ASK_USER_FIRST } from './mail-shared.js';
 
 vi.mock('../platform-runner.js', () => ({
   runCommand: vi.fn(),
@@ -1350,6 +1351,47 @@ describe('mail-tools', () => {
       expect(runCommand).toHaveBeenCalledWith('mail', command, budgeted(input), PROCESS_TIMEOUT);
     });
 
+    it('no mail tool description tells Claude that a change needs no confirmation', () => {
+      for (const { tool: t } of createMailTools()) {
+        const text = [
+          t.description,
+          ...Object.values(t.inputSchema.properties ?? {}).map(
+            (p) => (p as { description?: string }).description ?? ''
+          ),
+        ].join(' ');
+        expect([t.name, text]).not.toEqual([
+          t.name,
+          expect.stringMatching(
+            /no confirmation|without confirmation|needs? no confirm|so no confirm/i
+          ),
+        ]);
+      }
+    });
+
+    it('every mail tool that changes mail without a confirm flag tells Claude to ask the user first', () => {
+      const ungatedWrites = createMailTools()
+        .map((t) => t.tool)
+        .filter((t) => t.annotations?.readOnlyHint === false && t.name !== 'checkMail')
+        .filter(
+          (t) => !Object.keys(t.inputSchema.properties ?? {}).some((k) => k.startsWith('confirm_'))
+        );
+
+      expect(ungatedWrites.map((t) => t.name).sort()).toEqual([
+        'archiveEmails',
+        'copyEmails',
+        'createMailbox',
+        'flagEmails',
+        'markEmailsNotSpam',
+        'markEmailsRead',
+        'moveEmails',
+        'renameMailbox',
+        'saveDraft',
+      ]);
+      for (const t of ungatedWrites) {
+        expect([t.name, t.description]).toEqual([t.name, expect.stringContaining(ASK_USER_FIRST)]);
+      }
+    });
+
     it.each([
       'markEmailsRead',
       'flagEmails',
@@ -1357,7 +1399,7 @@ describe('mail-tools', () => {
       'copyEmails',
       'archiveEmails',
       'markEmailsNotSpam',
-    ])('%s is reversible, so it needs no confirmation and is not destructive', (name) => {
+    ])('%s has no confirm flag and is not destructive', (name) => {
       const t = tool(name).tool;
 
       expect(t.annotations?.readOnlyHint).toBe(false);

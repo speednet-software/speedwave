@@ -36,6 +36,10 @@ export const MAIL_FLAG_VALUES = [
   'none',
 ];
 
+/** The step every mail tool that changes mail without a confirm flag names: Claude asks before calling it. */
+export const ASK_USER_FIRST =
+  'It changes Mail at once, with no confirm flag, so tell the user what it will do and call it only after their yes.';
+
 export const SPLIT_BATCH_STEP = `Split the mail ids into batches of at most ${MAIL_BATCH_LIMIT} and confirm each batch with the user separately.`;
 
 export const EXAMPLE_IDS = [

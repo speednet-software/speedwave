@@ -6,7 +6,13 @@ import {
   META_KEYS,
 } from '@speedwave/mcp-shared';
 import { ToolResult, validateAll, asRecord, MAX_LENGTHS } from './validation.js';
-import { STANDARD_BUDGET, mailTimeBudget, runMail, confirmProperty } from './mail-shared.js';
+import {
+  STANDARD_BUDGET,
+  ASK_USER_FIRST,
+  mailTimeBudget,
+  runMail,
+  confirmProperty,
+} from './mail-shared.js';
 
 const READ_THEN_SEND_BUDGET = mailTimeBudget(60_000, 2);
 
@@ -326,7 +332,8 @@ export const saveDraftTool: Tool = {
   name: 'saveDraft',
   description:
     `Save a new plain-text email as a draft in Apple Mail without sending it, for the user to finish and send in Mail.app. ${PLAIN_TEXT_ONLY} ` +
-    "The draft goes from account and lands in its Drafts mailbox (from Mail's primary address when account is omitted); the answer's from names the sender. No confirmation is needed: nothing is sent and the user can delete the draft. " +
+    "The draft goes from account and lands in its Drafts mailbox (from Mail's primary address when account is omitted); the answer's from names the sender. Nothing is sent and the user can delete the draft. " +
+    `${ASK_USER_FIRST} ` +
     `Recipients and text are optional. ${SHOWN_AS_QUOTE}`,
   annotations: WRITE_ANNOTATIONS,
   _meta: {
