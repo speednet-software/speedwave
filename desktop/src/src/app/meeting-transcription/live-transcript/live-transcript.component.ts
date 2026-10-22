@@ -58,6 +58,7 @@ const DECODE_DONE_PROGRESS = 0.6;
 const DIARIZE_START_PROGRESS = 0.62;
 const DIARIZE_DONE_PROGRESS = 0.85;
 const ETA_PACE_WINDOW_MS = 120_000;
+const ETA_MIN_PACE_SPAN_MS = 30_000;
 const ETA_MIN_MOVED = 0.05;
 const ETA_MIN_ELAPSED_MS = 5000;
 
@@ -117,7 +118,6 @@ interface ProgressSample {
 
 interface ProgressTrack {
   sessionId: string;
-  anchor: ProgressSample;
   samples: ProgressSample[];
 }
 
@@ -834,15 +834,17 @@ export class LiveTranscriptComponent {
     }
     if (st.progress >= DECODE_DONE_PROGRESS) return 'almost done';
     const track = this.progressTrack();
-    if (!track || track.sessionId !== this.session()?.id) return '';
+    if (!track || track.sessionId !== this.sessionId()) return '';
+    const anchor = track.samples[0];
     const latest = track.samples[track.samples.length - 1];
     if (
-      latest.progress - track.anchor.progress < ETA_MIN_MOVED ||
-      latest.at - track.anchor.at < ETA_MIN_ELAPSED_MS
+      latest.progress - anchor.progress < ETA_MIN_MOVED ||
+      latest.at - anchor.at < ETA_MIN_ELAPSED_MS
     ) {
       return '';
     }
-    const from = track.samples.length > 1 ? track.samples[0] : track.anchor;
+    const windowed = track.samples.find((s) => latest.at - s.at <= ETA_PACE_WINDOW_MS) ?? anchor;
+    const from = latest.at - windowed.at >= ETA_MIN_PACE_SPAN_MS ? windowed : anchor;
     const moved = latest.progress - from.progress;
     if (moved <= 0) return '';
     const leftMs = ((latest.at - from.at) / moved) * (DECODE_DONE_PROGRESS - latest.progress);
@@ -892,12 +894,12 @@ export class LiveTranscriptComponent {
       }
       const sample = { at: Date.now(), progress: st.progress };
       if (!track || track.sessionId !== id) {
-        this.progressTrack.set({ sessionId: id, anchor: sample, samples: [sample] });
+        this.progressTrack.set({ sessionId: id, samples: [sample] });
       } else if (sample.progress !== track.samples[track.samples.length - 1].progress) {
-        const samples = [...track.samples, sample].filter(
-          (s) => s.at >= sample.at - ETA_PACE_WINDOW_MS
+        const kept = track.samples.filter(
+          (s, i) => i === 0 || s.at >= sample.at - ETA_PACE_WINDOW_MS
         );
-        this.progressTrack.set({ ...track, samples });
+        this.progressTrack.set({ ...track, samples: [...kept, sample] });
       }
     });
   }

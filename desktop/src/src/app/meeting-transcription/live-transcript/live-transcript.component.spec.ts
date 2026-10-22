@@ -835,9 +835,12 @@ describe('LiveTranscriptComponent', () => {
         expect(report(240_000, 0.55)).toBe('less than a minute left');
       });
 
-      it('shows no estimate before the pass has moved enough to extrapolate', () => {
+      it('shows no estimate before the decode has run for a few seconds', () => {
         report(0, 0.05);
         expect(report(2_000, 0.3)).toBe('');
+      });
+
+      it('shows no estimate before the decode has moved enough to extrapolate', () => {
         report(0, 0.05);
         expect(report(60_000, 0.09)).toBe('');
       });
@@ -869,6 +872,14 @@ describe('LiveTranscriptComponent', () => {
         report(0, 0.05);
         report(30_000, 0.1);
         expect(report(300_000, 0.3)).toBe('about 6 min left');
+      });
+
+      it('falls back to the pace since the decode start when the window spans under half a minute', () => {
+        report(0, 0.05);
+        report(130_000, 0.3);
+        report(131_000, 0.32);
+        expect(report(132_000, 0.34)).toBe('about 2 min left');
+        expect(report(132_000, 0.36)).toBe('about 2 min left');
       });
 
       it('names the phase after the decode instead of a time', () => {
