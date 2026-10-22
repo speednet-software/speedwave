@@ -2,14 +2,17 @@ import Foundation
 
 /// Executes AppleScript via osascript subprocess with timeout support.
 public enum ScriptRunner {
-    /// Run an AppleScript and return stdout. Throws on non-zero exit or timeout.
+    /// Run an AppleScript and return stdout. Throws on non-zero exit or timeout. The script goes to `osascript`
+    /// on stdin, so its size is not bound by the argument limit.
     public static func run(_ script: String, timeout: TimeInterval = 15) throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", script]
+        process.arguments = []
 
+        let stdinPipe = Pipe()
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
+        process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
@@ -19,6 +22,7 @@ public enum ScriptRunner {
         try process.run()
         let stdoutReader = PipeReader(stdoutPipe)
         let stderrReader = PipeReader(stderrPipe)
+        PipeWriter.write(Data(script.utf8), to: stdinPipe)
 
         if semaphore.wait(timeout: .now() + timeout) == .timedOut {
             process.terminate()
@@ -63,6 +67,19 @@ private final class PipeReader: @unchecked Sendable {
     func data() -> Data {
         done.wait()
         return collected
+    }
+}
+
+/// Writes data into a pipe on a background queue and closes it; a reader that exits early ends the write without
+/// a SIGPIPE.
+private enum PipeWriter {
+    static func write(_ data: Data, to pipe: Pipe) {
+        let handle = pipe.fileHandleForWriting
+        _ = fcntl(handle.fileDescriptor, F_SETNOSIGPIPE, 1)
+        DispatchQueue.global().async {
+            try? handle.write(contentsOf: data)
+            try? handle.close()
+        }
     }
 }
 

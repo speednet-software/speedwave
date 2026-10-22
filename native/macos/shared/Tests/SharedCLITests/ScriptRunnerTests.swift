@@ -353,6 +353,16 @@ final class ScriptRunnerTests: XCTestCase {
         }
     }
 
+    func testRunTakesAScriptLongerThanTheArgumentLimitWithUnicodeIntact() throws {
+        let text = String(repeating: "Zażółć gęślą jaźń ", count: 90_000)
+        let script = "set s to \"\(text)\"\nreturn (length of s as text) & \" \" & (text 1 thru 6 of s)"
+
+        let output = try ScriptRunner.run(script, timeout: 30)
+
+        XCTAssertGreaterThan(script.utf8.count, 2_000_000)
+        XCTAssertEqual(output, "\(text.count) Zażółć")
+    }
+
     func testRunStillTimesOutAScriptThatNeverEnds() {
         XCTAssertThrowsError(try ScriptRunner.run("delay 30", timeout: 1)) { error in
             guard case .timeout = error as? ScriptError else {

@@ -24,7 +24,7 @@ The native OS integrations (Mail, Calendar, Reminders, Notes) run as Swift CLIs 
 
 Extending a Mail/Notes gate or adding a new native automation gate must keep this shape — "simplifying" back to bundle-id addressing reintroduces the non-deterministic failure.
 
-- **`ScriptRunner.run` (SharedCLI) reads `osascript`'s stdout and stderr while the script runs** (`PipeReader`, which drains each pipe on a background queue from the moment it is made), never after it exits: a script printing more than a pipe buffer (64 KB) blocks on the write and was killed at the timeout, which made `list_emails` of any mailbox with a few hundred mails fail with `MAIL_TIMEOUT` (live, 2026-10-21: Exchange Inbox of 352 mails, 1.1 s after the fix). `ScriptRunnerTests` runs scripts with 256 KB of output and of error text.
+- **`ScriptRunner.run` (SharedCLI) reads `osascript`'s stdout and stderr while the script runs** (`PipeReader`, which drains each pipe on a background queue from the moment it is made), never after it exits: a script printing more than a pipe buffer (64 KB) blocks on the write and was killed at the timeout, which made `list_emails` of any mailbox with a few hundred mails fail with `MAIL_TIMEOUT` (live, 2026-10-21: Exchange Inbox of 352 mails, 1.1 s after the fix). `ScriptRunnerTests` runs scripts with 256 KB of output and of error text. The script itself goes to `osascript` on stdin (no `-e`), written on a background queue into a pipe marked `F_SETNOSIGPIPE`: an `-e` argument is bound by the argument limit (`ARG_MAX`, 1 MB on macOS, environment included), so a reply quoting a mail of about 1 MB failed with E2BIG before the script ran. `ScriptRunnerTests` runs a 2 MB script with Unicode text.
 
 ## TCC and entitlements
 
