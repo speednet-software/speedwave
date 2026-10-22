@@ -327,7 +327,6 @@ export class TranscriptionSectionComponent implements OnInit {
   /** Forwards errors to the Settings shell banner. */
   readonly errorOccurred = output<string>();
 
-  /** The recommended models + their state, read from the service; `null` while loading. */
   readonly model = computed<RecommendedModelAck | null>(() => this.transcription.recommended());
 
   /**

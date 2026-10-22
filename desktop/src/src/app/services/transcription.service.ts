@@ -156,13 +156,8 @@ export class TranscriptionService {
     return ack ? (ack.finalize ?? ack.live) : null;
   });
 
-  /** The models this host needs, with their on-disk state; null until the first read. */
   readonly recommended: Signal<RecommendedModelAck | null> = this.recommendedSignal.asReadonly();
 
-  /**
-   * Whether any Whisper model is downloaded (what recording needs); null until the first read.
-   * Service-level so the first-run gate of a view mounted mid-download sees the download finish.
-   */
   readonly modelReady: Signal<boolean | null> = this.modelReadySignal.asReadonly();
 
   /**
