@@ -624,7 +624,7 @@ test-release-gate:
 	  _tests/desktop/beta-release-notes.bats
 	@echo "✅ Release-gate tests passed"
 
-test-e2e-desktop-build: build-cli build-mcp build-os-cli
+test-e2e-desktop-build: build-cli build-mcp build-os-cli prepare-pii-ner-model
 	@if [ "$$(uname)" = "Darwin" ] && [ ! -s desktop/src-tauri/lima/bin/limactl ]; then "$(MAKE)" download-lima; fi
 	@if [ "$(OS)" = "Windows_NT" ] && [ ! -s desktop/src-tauri/wsl/nerdctl-full.tar.gz ]; then "$(MAKE)" download-wsl-resources; fi
 	@if [ ! -f desktop/src-tauri/nodejs/bin/node ] && [ ! -f desktop/src-tauri/nodejs/node.exe ]; then "$(MAKE)" download-nodejs; fi

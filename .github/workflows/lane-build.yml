@@ -86,7 +86,7 @@ jobs:
           MATRIX_ARGS: ${{ matrix.args }}
         run: |
           read -ra ARGS <<< "$MATRIX_ARGS"
-          CONFIG="{\"version\":\"$SPEEDWAVE_VERSION\",\"bundle\":{\"createUpdaterArtifacts\":false}}"
+          CONFIG="{\"version\":\"$SPEEDWAVE_VERSION\",\"bundle\":{\"createUpdaterArtifacts\":false,\"windows\":{\"nsis\":{\"compression\":\"none\"}}}}"
           npx --prefix ../src tauri build "${ARGS[@]}" --config "$CONFIG"
 
       - name: Check an NSIS /UPDATE install removes files the release no longer ships (Windows)

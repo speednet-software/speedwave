@@ -9,20 +9,53 @@ permissions:
   contents: read
 
 jobs:
-  # Stub required check, SPEED-738 replaces the steps with the real macOS rig lane; skipped on pull requests, run in the merge queue.
   e2e-macos:
     if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    concurrency:
+      group: rig-macos
+      cancel-in-progress: false
+    runs-on: [self-hosted, macOS, ARM64]
+    environment: e2e
+    timeout-minutes: 120
     steps:
-      - name: Stub until SPEED-738 brings the macOS rig lane
-        run: echo "Stub required check, SPEED-738 replaces this step with the real macOS rig lane."
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
 
-  # Stub required check, SPEED-738 replaces the steps with the real Windows rig lane; skipped on pull requests, run in the merge queue.
+      - name: Run the macOS rig lane
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_MODEL: ${{ secrets.OPENROUTER_MODEL }}
+          LOCAL_LLM_BASE_URL: ${{ secrets.LOCAL_LLM_BASE_URL }}
+          LOCAL_LLM_API_KEY: ${{ secrets.LOCAL_LLM_API_KEY }}
+          LOCAL_LLM_MODEL: ${{ secrets.LOCAL_LLM_MODEL }}
+        run: SPEEDWAVE_MACOS_HOST="$(whoami)@127.0.0.1" bash scripts/e2e-vm.sh macos
+
   e2e-windows:
     if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    concurrency:
+      group: rig-windows
+      cancel-in-progress: false
+    runs-on: [self-hosted, Windows, X64]
+    environment: e2e
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
     steps:
-      - name: Stub until SPEED-738 brings the Windows rig lane
-        run: echo "Stub required check, SPEED-738 replaces this step with the real Windows rig lane."
+      - name: Put Git Bash ahead of the WSL launcher
+        shell: powershell
+        run: Add-Content $env:GITHUB_PATH 'C:\Program Files\Git\bin'
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Run the Windows rig lane
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_MODEL: ${{ secrets.OPENROUTER_MODEL }}
+          LOCAL_LLM_BASE_URL: ${{ secrets.LOCAL_LLM_BASE_URL }}
+          LOCAL_LLM_API_KEY: ${{ secrets.LOCAL_LLM_API_KEY }}
+          LOCAL_LLM_MODEL: ${{ secrets.LOCAL_LLM_MODEL }}
+        run: SPEEDWAVE_WINDOWS_HOST="$USERNAME@127.0.0.1" bash scripts/e2e-vm.sh windows
