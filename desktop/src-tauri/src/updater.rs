@@ -3,7 +3,8 @@ use speedwave_runtime::consts;
 use speedwave_runtime::update_channel::{self, deserialize_channel, UpdateChannel};
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::AppHandle;
+use std::time::{Duration, Instant};
+use tauri::{AppHandle, Emitter};
 use tauri_plugin_updater::UpdaterExt;
 
 /// Mutex to serialize load-modify-save cycles on update-settings.json.
@@ -12,6 +13,10 @@ static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
 /// Fixed update manifest URL. Mirrors `plugins.updater.endpoints` in tauri.conf.json.
 const UPDATE_ENDPOINT: &str =
     "https://github.com/speednet-software/speedwave/releases/latest/download/latest.json";
+
+const UPDATE_DOWNLOAD_PROGRESS_EVENT: &str = "update_download_progress";
+
+const DOWNLOAD_PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UpdateInfo {
@@ -30,6 +35,20 @@ pub enum UpdateCheckOutcome {
     UpToDate,
     /// A newer release is available.
     UpdateAvailable(UpdateInfo),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum UpdateInstallPhase {
+    Downloading,
+    Installing,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct UpdateDownloadProgress {
+    downloaded: u64,
+    total: Option<u64>,
+    phase: UpdateInstallPhase,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -162,7 +181,6 @@ pub async fn check_for_update(app: &AppHandle) -> Result<UpdateCheckOutcome, Str
                 body: u.body.clone(),
                 date: u.date.map(|d| d.to_string()),
             };
-            use tauri::Emitter;
             if let Err(e) = app.emit("update_available", &info) {
                 log::warn!("failed to emit update_available event: {e}");
             }
@@ -205,35 +223,80 @@ pub async fn install_update(app: &AppHandle, expected_version: String) -> Result
     }
     log::info!("installing version {installing_version}");
 
-    let update_body = update.body.clone();
-    let mut downloaded: u64 = 0;
-    update
-        .download_and_install(
-            |chunk, _total| {
-                downloaded += chunk as u64;
-                log::debug!("downloaded {downloaded} bytes");
+    let outcome = download_and_install(app, &update).await;
+    if outcome.is_err() {
+        emit_download_progress(app, &None);
+    }
+    outcome?;
+    log::info!("installed version {installing_version}");
+    Ok(())
+}
+
+async fn download_and_install(
+    app: &AppHandle,
+    update: &tauri_plugin_updater::Update,
+) -> Result<(), String> {
+    let mut progress = DownloadProgress::default();
+    let bytes = update
+        .download(
+            |chunk, total| {
+                if let Some(event) = progress.chunk(chunk, total, Instant::now()) {
+                    emit_download_progress(app, &Some(event));
+                }
             },
-            || {
-                log::info!("download complete, installing");
-            },
+            || log::info!("download complete, installing"),
         )
         .await
         .map_err(|e| e.to_string())?;
+    emit_download_progress(app, &Some(progress.finished()));
+    update.install(bytes).map_err(|e| e.to_string())
+}
 
-    use tauri::Emitter;
-    if let Err(e) = app.emit(
-        "update_installed",
-        &UpdateInfo {
-            version: installing_version.clone(),
-            body: update_body.clone(),
-            date: None,
-            is_critical: detect_critical(&update_body),
-        },
-    ) {
-        log::warn!("failed to emit update_installed event: {e}");
+fn emit_download_progress(app: &AppHandle, event: &Option<UpdateDownloadProgress>) {
+    if let Err(e) = app.emit(UPDATE_DOWNLOAD_PROGRESS_EVENT, event) {
+        log::warn!("failed to emit {UPDATE_DOWNLOAD_PROGRESS_EVENT} event: {e}");
     }
-    log::info!("installed version {installing_version}; waiting for frontend to confirm restart");
-    Ok(())
+}
+
+#[derive(Default)]
+struct DownloadProgress {
+    downloaded: u64,
+    total: Option<u64>,
+    last_reported_at: Option<Instant>,
+}
+
+impl DownloadProgress {
+    fn chunk(
+        &mut self,
+        chunk_len: usize,
+        total: Option<u64>,
+        now: Instant,
+    ) -> Option<UpdateDownloadProgress> {
+        self.downloaded += chunk_len as u64;
+        if total.is_some() {
+            self.total = total;
+        }
+        let due = self
+            .last_reported_at
+            .is_none_or(|at| now.duration_since(at) >= DOWNLOAD_PROGRESS_INTERVAL);
+        if !due {
+            return None;
+        }
+        self.last_reported_at = Some(now);
+        Some(self.snapshot(UpdateInstallPhase::Downloading))
+    }
+
+    fn finished(&self) -> UpdateDownloadProgress {
+        self.snapshot(UpdateInstallPhase::Installing)
+    }
+
+    fn snapshot(&self, phase: UpdateInstallPhase) -> UpdateDownloadProgress {
+        UpdateDownloadProgress {
+            downloaded: self.downloaded,
+            total: self.total,
+            phase,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -593,6 +656,156 @@ mod tests {
         match back {
             UpdateCheckOutcome::UpdateAvailable(info) => assert_eq!(info.version, "9.9.9"),
             _ => panic!("expected UpdateAvailable"),
+        }
+    }
+
+    #[test]
+    fn the_first_chunk_is_reported_at_once() {
+        let mut progress = DownloadProgress::default();
+        let now = Instant::now();
+        assert_eq!(
+            progress.chunk(1024, Some(4096), now),
+            Some(UpdateDownloadProgress {
+                downloaded: 1024,
+                total: Some(4096),
+                phase: UpdateInstallPhase::Downloading,
+            })
+        );
+    }
+
+    #[test]
+    fn chunks_inside_the_interval_are_not_reported() {
+        let mut progress = DownloadProgress::default();
+        let start = Instant::now();
+        progress.chunk(10, Some(100), start);
+        assert_eq!(
+            progress.chunk(10, Some(100), start + Duration::from_millis(100)),
+            None
+        );
+        assert_eq!(
+            progress.chunk(10, Some(100), start + Duration::from_millis(249)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_chunk_after_the_interval_reports_every_byte_so_far() {
+        let mut progress = DownloadProgress::default();
+        let start = Instant::now();
+        progress.chunk(10, Some(100), start);
+        progress.chunk(10, Some(100), start + Duration::from_millis(100));
+        let event = progress.chunk(10, Some(100), start + DOWNLOAD_PROGRESS_INTERVAL);
+        assert_eq!(event.map(|e| e.downloaded), Some(30));
+        assert_eq!(
+            progress.chunk(
+                10,
+                Some(100),
+                start + DOWNLOAD_PROGRESS_INTERVAL + Duration::from_millis(1)
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn an_empty_chunk_counts_nothing() {
+        let mut progress = DownloadProgress::default();
+        let event = progress.chunk(0, None, Instant::now());
+        assert_eq!(event.map(|e| e.downloaded), Some(0));
+    }
+
+    #[test]
+    fn the_total_stays_unknown_when_the_server_never_sends_one() {
+        let mut progress = DownloadProgress::default();
+        let start = Instant::now();
+        progress.chunk(10, None, start);
+        let event = progress.chunk(10, None, start + DOWNLOAD_PROGRESS_INTERVAL);
+        assert_eq!(event.map(|e| e.total), Some(None));
+        assert_eq!(progress.finished().total, None);
+    }
+
+    #[test]
+    fn a_total_once_known_is_kept() {
+        let mut progress = DownloadProgress::default();
+        let start = Instant::now();
+        progress.chunk(10, Some(100), start);
+        let event = progress.chunk(10, None, start + DOWNLOAD_PROGRESS_INTERVAL);
+        assert_eq!(event.map(|e| e.total), Some(Some(100)));
+    }
+
+    #[test]
+    fn finishing_reports_the_installing_phase_with_the_full_count() {
+        let mut progress = DownloadProgress::default();
+        let start = Instant::now();
+        progress.chunk(60, Some(100), start);
+        progress.chunk(40, Some(100), start + Duration::from_millis(1));
+        assert_eq!(
+            progress.finished(),
+            UpdateDownloadProgress {
+                downloaded: 100,
+                total: Some(100),
+                phase: UpdateInstallPhase::Installing,
+            }
+        );
+    }
+
+    #[test]
+    fn download_progress_serializes_snake_case_phases() {
+        let json = serde_json::to_string(&UpdateDownloadProgress {
+            downloaded: 5,
+            total: None,
+            phase: UpdateInstallPhase::Downloading,
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            r#"{"downloaded":5,"total":null,"phase":"downloading"}"#
+        );
+        let json = serde_json::to_string(&UpdateDownloadProgress {
+            downloaded: 5,
+            total: Some(5),
+            phase: UpdateInstallPhase::Installing,
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"downloaded":5,"total":5,"phase":"installing"}"#);
+    }
+
+    #[test]
+    fn a_failed_install_clears_the_progress_with_a_null_payload() {
+        let json = serde_json::to_string(&Option::<UpdateDownloadProgress>::None).unwrap();
+        assert_eq!(json, "null");
+    }
+
+    #[test]
+    fn download_progress_matches_ts_mirror() {
+        use crate::ts_mirror::{rust_fields, ts_interface_fields};
+        let ts = include_str!("../../src/src/app/models/update.ts");
+        let sample = UpdateDownloadProgress {
+            downloaded: 1,
+            total: Some(2),
+            phase: UpdateInstallPhase::Downloading,
+        };
+        assert_eq!(
+            rust_fields(&sample),
+            ts_interface_fields(ts, "UpdateDownloadProgress")
+        );
+        assert!(
+            ts.contains(&format!("'{UPDATE_DOWNLOAD_PROGRESS_EVENT}'")),
+            "update.ts must name the {UPDATE_DOWNLOAD_PROGRESS_EVENT} event"
+        );
+        assert!(
+            ts.contains("UpdateDownloadProgressEvent = UpdateDownloadProgress | null"),
+            "update.ts must type the event payload as nullable, since a failed install emits null"
+        );
+        for phase in [
+            UpdateInstallPhase::Downloading,
+            UpdateInstallPhase::Installing,
+        ] {
+            let name = serde_json::to_value(phase).unwrap();
+            let name = name.as_str().unwrap();
+            assert!(
+                ts.contains(&format!("'{name}'")),
+                "update.ts must list the '{name}' install phase"
+            );
         }
     }
 }

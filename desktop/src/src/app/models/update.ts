@@ -1,4 +1,5 @@
 import { TauriService } from '../services/tauri.service';
+import { formatBytes } from '../shared/format-bytes';
 
 /** Metadata for an available application update from GitHub Releases. */
 export interface UpdateInfo {
@@ -11,6 +12,44 @@ export interface UpdateInfo {
 /** Tagged result of `check_for_update`; mirrors Rust `updater::UpdateCheckOutcome` (serde tag "kind", snake_case). */
 export type UpdateCheckOutcome =
   { kind: 'up_to_date' } | ({ kind: 'update_available' } & UpdateInfo);
+
+export const UPDATE_DOWNLOAD_PROGRESS_EVENT = 'update_download_progress';
+
+/** Mirrors Rust `updater::UpdateInstallPhase` (serde snake_case). */
+export type UpdateInstallPhase = 'downloading' | 'installing';
+
+/** Mirrors Rust `updater::UpdateDownloadProgress`. */
+export interface UpdateDownloadProgress {
+  downloaded: number;
+  total: number | null;
+  phase: UpdateInstallPhase;
+}
+
+/** Payload of `UPDATE_DOWNLOAD_PROGRESS_EVENT`: the latest progress, or null once an install failed. */
+export type UpdateDownloadProgressEvent = UpdateDownloadProgress | null;
+
+/**
+ * Whole percent of the download, or null while the server has not said how large it is.
+ * @param progress - The latest progress event.
+ */
+export function downloadProgressPercent(progress: UpdateDownloadProgress): number | null {
+  if (progress.phase === 'installing') return 100;
+  if (progress.total === null || progress.total <= 0) return null;
+  return Math.min(100, Math.floor((progress.downloaded / progress.total) * 100));
+}
+
+/**
+ * Status line for the progress bar: percent and sizes while downloading, the restart notice once installing.
+ * @param progress - The latest progress event.
+ */
+export function downloadProgressText(progress: UpdateDownloadProgress): string {
+  if (progress.phase === 'installing') return 'installing, the app will restart...';
+  const percent = downloadProgressPercent(progress);
+  if (percent === null || progress.total === null) {
+    return `downloading ${formatBytes(progress.downloaded)}`;
+  }
+  return `downloading ${percent}% (${formatBytes(progress.downloaded)} / ${formatBytes(progress.total)})`;
+}
 
 /** Mirrors Rust `speedwave_runtime::update_channel::UpdateChannel`. */
 export type UpdateChannel = 'stable' | 'beta';
