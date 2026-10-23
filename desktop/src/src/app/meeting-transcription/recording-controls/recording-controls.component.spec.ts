@@ -3,7 +3,6 @@ import { computed, signal, type Signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { RecordingControlsComponent } from './recording-controls.component';
 import { TranscriptionService } from '../../services/transcription.service';
-import { LoggerService } from '../../services/logger.service';
 import type {
   AudioSource,
   AudioSourceInfo,
@@ -11,6 +10,7 @@ import type {
   MicPermission,
   StartAck,
   TranscriptSummary,
+  RecommendedModelAck,
 } from '../../models/transcript';
 import type { RecordingChoice } from '../../services/transcription.service';
 
@@ -63,8 +63,8 @@ describe('RecordingControlsComponent', () => {
   let svc: {
     liveTranscriptPreferred: ReturnType<typeof vi.fn>;
     listAudioSources: ReturnType<typeof vi.fn>;
-    listModels: ReturnType<typeof vi.fn>;
-    recommendedModel: ReturnType<typeof vi.fn>;
+    modelReady: ReturnType<typeof signal<boolean | null>>;
+    recommended: ReturnType<typeof signal<RecommendedModelAck | null>>;
     startRecording: ReturnType<typeof vi.fn>;
     stopRecording: ReturnType<typeof vi.fn>;
     requestMicrophonePermission: ReturnType<typeof vi.fn>;
@@ -82,23 +82,6 @@ describe('RecordingControlsComponent', () => {
     recordingStartedAt: typeof recordingStartedAt;
     audioLevels: typeof audioLevels;
   };
-  let logger: {
-    warn: ReturnType<typeof vi.fn>;
-    error: ReturnType<typeof vi.fn>;
-    info: ReturnType<typeof vi.fn>;
-    debug: ReturnType<typeof vi.fn>;
-  };
-
-  /** A model list with at least one downloaded Whisper model. */
-  const modelsWithSmall = {
-    whisper: [{ key: 'small', downloaded: true, size_bytes: 488_000_000, path: '/m/small' }],
-    total_bytes_used: 488_000_000,
-  };
-  /** A model list with nothing downloaded. */
-  const modelsEmpty = {
-    whisper: [{ key: 'small', downloaded: false, size_bytes: 488_000_000, path: null }],
-    total_bytes_used: 0,
-  };
   /** Recommended pair with both passes covered — no finalize warning. */
   const recAllDownloaded = {
     live: {
@@ -115,7 +98,15 @@ describe('RecordingControlsComponent', () => {
       downloaded: true,
       downloading: false,
     },
+    diarization: {
+      key: 'nemotron-3-diarization-q8_0',
+      display_name: 'Nemotron-3 Diarization',
+      size_bytes: 1,
+      downloaded: false,
+      downloading: false,
+    },
     accel_label: 'CPU',
+    gpu_class: 'none' as const,
   };
   /** Recommended pair whose finalize model is absent and not downloading. */
   const recFinalizeMissing = {
@@ -133,8 +124,8 @@ describe('RecordingControlsComponent', () => {
     svc = {
       liveTranscriptPreferred: vi.fn(() => true),
       listAudioSources: vi.fn(async () => SOURCES),
-      listModels: vi.fn(async () => modelsWithSmall),
-      recommendedModel: vi.fn(async () => recAllDownloaded),
+      modelReady: signal<boolean | null>(true),
+      recommended: signal<RecommendedModelAck | null>(recAllDownloaded),
       startRecording: vi.fn(async (source: AudioSource, language: Language): Promise<StartAck> => {
         recordingSessionId.set('sess-1');
         recordingSource.set(source);
@@ -168,13 +159,9 @@ describe('RecordingControlsComponent', () => {
       recordingStartedAt,
       audioLevels,
     };
-    logger = { warn: vi.fn(), error: vi.fn(), info: vi.fn(), debug: vi.fn() };
     await TestBed.configureTestingModule({
       imports: [RecordingControlsComponent],
-      providers: [
-        { provide: TranscriptionService, useValue: svc },
-        { provide: LoggerService, useValue: logger },
-      ],
+      providers: [{ provide: TranscriptionService, useValue: svc }],
     }).compileComponents();
     fixture = TestBed.createComponent(RecordingControlsComponent);
     component = fixture.componentInstance;
@@ -507,7 +494,7 @@ describe('RecordingControlsComponent', () => {
     });
 
     it('does not start while Start is unavailable', async () => {
-      svc.listModels.mockResolvedValue(modelsEmpty);
+      svc.modelReady.set(false);
       await component.ngOnInit();
       press({ metaKey: true, shiftKey: true });
       expect(svc.startRecording).not.toHaveBeenCalled();
@@ -601,7 +588,7 @@ describe('RecordingControlsComponent', () => {
   });
 
   it('disables Start and shows the "download a model" note when nothing is downloaded', async () => {
-    svc.listModels.mockResolvedValue(modelsEmpty);
+    svc.modelReady.set(false);
     await component.ngOnInit();
     fixture.detectChanges();
     expect(component.hasModel()).toBe(false);
@@ -612,32 +599,28 @@ describe('RecordingControlsComponent', () => {
     expect(fixture.nativeElement.querySelector('[data-testid="start-btn"]').disabled).toBe(true);
   });
 
-  it('refreshModelAvailability re-enables Start once a model is downloaded', async () => {
-    svc.listModels.mockResolvedValue(modelsEmpty);
+  it('re-enables Start as soon as the service sees a model, with no read of its own', async () => {
+    svc.modelReady.set(false);
     await component.ngOnInit();
+    fixture.detectChanges();
     expect(component.hasModel()).toBe(false);
-    svc.listModels.mockResolvedValue(modelsWithSmall);
-    await component.refreshModelAvailability();
+    svc.modelReady.set(true);
+    fixture.detectChanges();
     expect(component.hasModel()).toBe(true);
+    expect(fixture.nativeElement.querySelector('[data-testid="start-btn"]').disabled).toBe(false);
   });
 
-  it('refreshModelAvailability fails open (modelsKnown=false) on a listModels error', async () => {
+  it('keeps Start available and shows no note while the model state is unknown', async () => {
+    svc.modelReady.set(null);
     await component.ngOnInit();
-    svc.listModels.mockRejectedValueOnce(new Error('boom'));
-    await component.refreshModelAvailability();
+    fixture.detectChanges();
     expect(component.modelsKnown()).toBe(false);
-  });
-
-  it('a recommendedModel failure clears the finalize warning and is logged, never silent', async () => {
-    await component.ngOnInit();
-    svc.recommendedModel.mockRejectedValueOnce(new Error('ipc down'));
-    await component.refreshModelAvailability();
-    expect(component.missingFinalizeModel()).toBeNull();
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('ipc down'));
+    expect(fixture.nativeElement.querySelector('[data-testid="no-model-note"]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="start-btn"]').disabled).toBe(false);
   });
 
   it('warns when the finalize model is missing: Start stays enabled, the quality cost is named', async () => {
-    svc.recommendedModel.mockResolvedValue(recFinalizeMissing);
+    svc.recommended.set(recFinalizeMissing);
     await component.ngOnInit();
     fixture.detectChanges();
     const warn = fixture.nativeElement.querySelector('[data-testid="finalize-model-warning"]');
@@ -652,22 +635,20 @@ describe('RecordingControlsComponent', () => {
     fixture.detectChanges();
     const sel = '[data-testid="finalize-model-warning"]';
     expect(fixture.nativeElement.querySelector(sel)).toBeNull();
-    svc.recommendedModel.mockResolvedValue({
+    svc.recommended.set({
       ...recAllDownloaded,
       finalize: { ...recAllDownloaded.finalize, downloaded: false, downloading: true },
     });
-    await component.refreshModelAvailability();
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector(sel)).toBeNull();
-    svc.recommendedModel.mockResolvedValue({ ...recAllDownloaded, finalize: null });
-    await component.refreshModelAvailability();
+    svc.recommended.set({ ...recAllDownloaded, finalize: null });
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector(sel)).toBeNull();
   });
 
   it('finalize warning is suppressed while no model at all is downloaded (the no-model note owns that)', async () => {
-    svc.listModels.mockResolvedValue(modelsEmpty);
-    svc.recommendedModel.mockResolvedValue(recFinalizeMissing);
+    svc.modelReady.set(false);
+    svc.recommended.set(recFinalizeMissing);
     await component.ngOnInit();
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-testid="no-model-note"]')).not.toBeNull();

@@ -79,6 +79,8 @@ const SPEAKER_LABELS_PROMPT: Record<Language, string> = {
     'and flag uncertain attributions.',
 };
 
+const sameJson = <T>(a: T, b: T): boolean => JSON.stringify(a) === JSON.stringify(b);
+
 /**
  * Meeting-transcription state + Tauri-command facade. Mirrors ADR-056 snapshot+seq delivery:
  * `subscribeToTranscript` applies a snapshot, then applies events with `seq > lastSeq`.
@@ -107,7 +109,12 @@ export class TranscriptionService {
   private readonly liveDraftSignal = signal<string>('');
   private readonly audioLevelsSignal = signal<number[] | null>(null);
   private readonly recordingWarningsSignal = signal<readonly CaptureWarning[]>([]);
-  private readonly recommendedSignal = signal<RecommendedModelAck | null>(null);
+  private readonly recommendedSignal = signal<RecommendedModelAck | null>(null, {
+    equal: sameJson,
+  });
+  private recommendedReads = 0;
+  private readonly modelReadySignal = signal<boolean | null>(null);
+  private modelReadyReads = 0;
   private readonly recordingsSignal = signal<TranscriptSummary[]>([]);
   private readonly recordingsErrorSignal = signal('');
   private recordingsUnlisten: UnlistenFn | null = null;
@@ -154,6 +161,10 @@ export class TranscriptionService {
     const ack = this.recommendedSignal();
     return ack ? (ack.finalize ?? ack.live) : null;
   });
+
+  readonly recommended: Signal<RecommendedModelAck | null> = this.recommendedSignal.asReadonly();
+
+  readonly modelReady: Signal<boolean | null> = this.modelReadySignal.asReadonly();
 
   /**
    * Source/language of the in-progress recording — service-level so a remounted
@@ -564,18 +575,43 @@ export class TranscriptionService {
     return this.tauri.invoke<RecommendedModelAck>('recommended_transcription_model');
   }
 
-  /** Reads the recommended models into {@link highQualityModel}; a failure keeps the last read. */
-  async loadRecommendedModel(): Promise<void> {
-    try {
-      this.recommendedSignal.set(await this.recommendedModel());
-    } catch (e) {
-      this.log.warn(`recommended-model read failed: ${String(e)}`);
-    }
+  /**
+   * Reads the recommended models into {@link recommended} and returns them; a failure keeps the
+   * last read and rethrows, and a read overtaken by a newer one writes nothing.
+   */
+  async loadRecommendedModel(): Promise<RecommendedModelAck> {
+    const read = ++this.recommendedReads;
+    const ack = await this.recommendedModel();
+    if (read === this.recommendedReads) this.recommendedSignal.set(ack);
+    return ack;
   }
 
   /** Status of all Whisper models on disk. */
   listModels(): Promise<ModelsAck> {
     return this.tauri.invoke<ModelsAck>('list_transcription_models');
+  }
+
+  /** Re-reads {@link modelReady}; a read error fails open so the gate never locks a working setup out. */
+  async refreshModelReady(): Promise<void> {
+    const read = ++this.modelReadyReads;
+    let ready: boolean;
+    try {
+      ready = (await this.listModels()).whisper.some((m) => m.downloaded);
+    } catch (e) {
+      this.log.warn(`model-availability check failed: ${String(e)}`);
+      ready = true;
+    }
+    if (read === this.modelReadyReads) this.modelReadySignal.set(ready);
+  }
+
+  /** Re-reads {@link recommended} and {@link modelReady} together; neither read's failure rejects. */
+  async refreshModelState(): Promise<void> {
+    await Promise.all([
+      this.loadRecommendedModel().catch((e) =>
+        this.log.warn(`recommended-model read failed: ${String(e)}`)
+      ),
+      this.refreshModelReady(),
+    ]);
   }
 
   /**
@@ -590,10 +626,10 @@ export class TranscriptionService {
     try {
       await this.beginDownloadTracking(modelId);
       await this.tauri.invoke<void>('download_transcription_model', { modelId });
+      await this.refreshModelState();
     } finally {
       this.clearDownloadTracking();
     }
-    await this.loadRecommendedModel();
   }
 
   /**
@@ -617,9 +653,11 @@ export class TranscriptionService {
       return;
     }
     try {
-      const ack = await this.recommendedModel();
-      const entry = ack.live.key === modelId ? ack.live : ack.finalize;
-      if (entry?.key === modelId && !entry.downloading) {
+      const ack = await this.loadRecommendedModel();
+      const entry = [ack.live, ack.finalize, ack.diarization].find((e) => e?.key === modelId);
+      if (entry && !entry.downloading) {
+        this.stopDownloadPoll();
+        await this.refreshModelReady();
         this.clearDownloadTracking();
       }
     } catch (e) {
@@ -661,8 +699,9 @@ export class TranscriptionService {
    * Deletes a downloaded model.
    * @param modelId - catalogue key.
    */
-  deleteModel(modelId: string): Promise<void> {
-    return this.tauri.invoke<void>('delete_transcription_model', { modelId });
+  async deleteModel(modelId: string): Promise<void> {
+    await this.tauri.invoke<void>('delete_transcription_model', { modelId });
+    await this.refreshModelState();
   }
 
   /**

@@ -11,11 +11,7 @@ import {
 
 import { TauriService } from '../../services/tauri.service';
 import { TranscriptionService } from '../../services/transcription.service';
-import type {
-  MicPermissionStatus,
-  RecommendedModelAck,
-  RecommendedModelEntry,
-} from '../../models/transcript';
+import type { MicPermissionStatus, RecommendedModelEntry } from '../../models/transcript';
 import { formatBytes } from '../../shared/format-bytes';
 import { ToggleComponent } from '../../shared/toggle.component';
 
@@ -322,11 +318,12 @@ const SPEAKER_COST_TEXT = {
   `,
 })
 export class TranscriptionSectionComponent implements OnInit {
+  private readonly transcription = inject(TranscriptionService);
+
   /** Forwards errors to the Settings shell banner. */
   readonly errorOccurred = output<string>();
 
-  /** The recommended models + their state; `null` while loading. */
-  readonly model = signal<RecommendedModelAck | null>(null);
+  readonly model = this.transcription.recommended;
 
   /**
    * Rows the card renders: the live model, plus the offline one when it is a different model, plus
@@ -415,8 +412,6 @@ export class TranscriptionSectionComponent implements OnInit {
     }
     return `Speech recognition needs one download (${this.size(best)}). After that it works offline.`;
   });
-
-  private readonly transcription = inject(TranscriptionService);
 
   /** Whether new recordings show live text (off unless the user turned it on). */
   readonly liveTranscript = signal(this.transcription.liveTranscriptPreferred());
@@ -526,8 +521,7 @@ export class TranscriptionSectionComponent implements OnInit {
   /** Re-reads the recommended-model state and re-syncs download tracking. */
   private async refresh(): Promise<void> {
     try {
-      const ack = await this.transcription.recommendedModel();
-      this.model.set(ack);
+      await this.transcription.loadRecommendedModel();
       const inFlight = this.modelRows().find((r) => r.entry.downloading);
       const tracked = this.transcription.downloadingModelKey();
       if (inFlight && tracked !== inFlight.entry.key) {
@@ -551,7 +545,7 @@ export class TranscriptionSectionComponent implements OnInit {
   async download(key: string): Promise<void> {
     try {
       await this.transcription.downloadModel(key);
-      await this.refresh();
+      this.error.set('');
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       this.error.set(msg);
@@ -568,7 +562,7 @@ export class TranscriptionSectionComponent implements OnInit {
     this.removeBusy.set(true);
     try {
       await this.transcription.deleteModel(key);
-      await this.refresh();
+      this.error.set('');
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       this.error.set(msg);
