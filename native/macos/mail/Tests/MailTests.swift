@@ -210,8 +210,8 @@ final class MailTests: XCTestCase {
         let parsed = try! JSONSerialization.jsonObject(with: result.data(using: .utf8)!) as! [String: Any]
         XCTAssertEqual(parsed["status"] as? String, "denied")
         let error = parsed["error"] as? String ?? ""
-        XCTAssertTrue(error.contains("tccutil reset AppleEvents pl.speedwave.desktop.mail"),
-                      "Mail denied must use AppleEvents service + sub-identifier, got: \(error)")
+        XCTAssertTrue(error.contains("tccutil reset AppleEvents pl.speedwave.desktop\n"),
+                      "Mail denied must reset AppleEvents for the app identity, got: \(error)")
         XCTAssertFalse(error.contains("tccutil reset Mail"),
                        "Mail must NOT use 'tccutil reset Mail' (no such TCC service), got: \(error)")
     }
@@ -239,8 +239,8 @@ final class MailTests: XCTestCase {
         let parsed = try! JSONSerialization.jsonObject(with: result.data(using: .utf8)!) as! [String: Any]
         XCTAssertEqual(parsed["status"] as? String, "silentReject")
         let error = parsed["error"] as? String ?? ""
-        XCTAssertTrue(error.contains("reinstall"),
-                      "silentReject must mention reinstall (signing/entitlement guidance)")
+        XCTAssertFalse(error.lowercased().contains("reinstall"), "got: \(error)")
+        XCTAssertTrue(error.contains("allow Speedwave to control Mail"), "got: \(error)")
     }
 
     func testCheckPermissionGrantedButDataAccessFails() {

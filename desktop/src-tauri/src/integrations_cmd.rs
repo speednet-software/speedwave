@@ -1886,13 +1886,13 @@ mod tests {
             service: "calendar".to_string(),
             previous_enabled: true,
             new_enabled: false,
-            reason: "tccutil reset Calendar pl.speedwave.desktop.calendar".to_string(),
+            reason: "tccutil reset Calendar pl.speedwave.desktop".to_string(),
         };
         let json = serde_json::to_string(&v).unwrap();
         assert!(json.contains(r#""service":"calendar""#));
         assert!(json.contains(r#""previous_enabled":true"#));
         assert!(json.contains(r#""new_enabled":false"#));
-        assert!(json.contains(r#""reason":"tccutil reset Calendar pl.speedwave.desktop.calendar""#));
+        assert!(json.contains(r#""reason":"tccutil reset Calendar pl.speedwave.desktop""#));
     }
 
     #[test]
@@ -2509,36 +2509,36 @@ mod tests {
     #[test]
     fn parse_permission_output_denied_with_status_and_error() {
         let result = parse_permission_output(
-            r#"{"granted": false, "status": "denied", "error": "tccutil reset Calendar pl.speedwave.desktop.calendar"}"#,
+            r#"{"granted": false, "status": "denied", "error": "tccutil reset Calendar pl.speedwave.desktop"}"#,
         );
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
-            err.contains("tccutil reset Calendar pl.speedwave.desktop.calendar"),
-            "error must contain calendar sub-identifier in tccutil command, got: {err}"
+            err.contains("tccutil reset Calendar pl.speedwave.desktop"),
+            "error must keep the tccutil command, got: {err}"
         );
     }
 
     #[test]
-    fn parse_permission_output_reminders_uses_sub_identifier() {
+    fn parse_permission_output_reminders_keeps_the_reset_command() {
         let result = parse_permission_output(
-            r#"{"granted": false, "status": "denied", "error": "tccutil reset Reminders pl.speedwave.desktop.reminders"}"#,
+            r#"{"granted": false, "status": "denied", "error": "tccutil reset Reminders pl.speedwave.desktop"}"#,
         );
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
-            .contains("tccutil reset Reminders pl.speedwave.desktop.reminders"));
+            .contains("tccutil reset Reminders pl.speedwave.desktop"));
     }
 
     #[test]
     fn parse_permission_output_mail_uses_apple_events_service() {
         let result = parse_permission_output(
-            r#"{"granted": false, "status": "denied", "error": "tccutil reset AppleEvents pl.speedwave.desktop.mail"}"#,
+            r#"{"granted": false, "status": "denied", "error": "tccutil reset AppleEvents pl.speedwave.desktop"}"#,
         );
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
-            err.contains("tccutil reset AppleEvents pl.speedwave.desktop.mail"),
+            err.contains("tccutil reset AppleEvents pl.speedwave.desktop"),
             "Mail must use AppleEvents service in tccutil command, got: {err}"
         );
         assert!(
@@ -2550,11 +2550,11 @@ mod tests {
     #[test]
     fn parse_permission_output_notes_uses_apple_events_service() {
         let result = parse_permission_output(
-            r#"{"granted": false, "status": "denied", "error": "tccutil reset AppleEvents pl.speedwave.desktop.notes"}"#,
+            r#"{"granted": false, "status": "denied", "error": "tccutil reset AppleEvents pl.speedwave.desktop"}"#,
         );
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.contains("tccutil reset AppleEvents pl.speedwave.desktop.notes"));
+        assert!(err.contains("tccutil reset AppleEvents pl.speedwave.desktop"));
         assert!(!err.contains("tccutil reset Notes "));
     }
 

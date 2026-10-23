@@ -479,7 +479,7 @@ describe('IntegrationsComponent', () => {
     it('displays_multi_line_error_with_preserved_newlines', async () => {
       await component.ngOnInit();
       const multiLineError =
-        'Calendar access was previously denied. Open Terminal and run:\ntccutil reset Calendar pl.speedwave.desktop\nThen click the toggle again.';
+        'Calendar access is turned off for Speedwave. To turn it on, allow Speedwave in System Settings > Privacy & Security > Calendars, or run in Terminal:\ntccutil reset Calendar pl.speedwave.desktop\nThen click the toggle again.';
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'set_os_integration_enabled') throw new Error(multiLineError);
         return undefined;
@@ -501,7 +501,7 @@ describe('IntegrationsComponent', () => {
     it('displays_silent_reject_recovery_text', async () => {
       await component.ngOnInit();
       const silentRejectError =
-        'Calendar permission was silently rejected by macOS. This usually means a signing or entitlement problem — please reinstall Speedwave from a fresh download.';
+        "macOS did not give Speedwave access to Calendar. If you clicked Don't Allow, allow Speedwave in System Settings > Privacy & Security > Calendars, or run in Terminal:\ntccutil reset Calendar pl.speedwave.desktop\nThen click the toggle again. If no macOS dialog appeared, report it as a Speedwave bug.";
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'set_os_integration_enabled') throw new Error(silentRejectError);
         return undefined;
@@ -510,7 +510,7 @@ describe('IntegrationsComponent', () => {
       const event = { stopPropagation: vi.fn() } as unknown as Event;
       await component.onOsToggleClick(os, event);
 
-      expect(component.error).toContain('reinstall Speedwave from a fresh download');
+      expect(component.error).toContain("If you clicked Don't Allow");
     });
 
     it('reverts_toggle_state_on_permission_failure', async () => {
@@ -1995,14 +1995,14 @@ describe('IntegrationsComponent', () => {
               previous_enabled: true,
               new_enabled: false,
               reason:
-                'Calendar access was previously denied. Open Terminal and run:\ntccutil reset Calendar pl.speedwave.desktop.calendar\nThen click the toggle again.',
+                'Calendar access is turned off for Speedwave. To turn it on, allow Speedwave in System Settings > Privacy & Security > Calendars, or run in Terminal:\ntccutil reset Calendar pl.speedwave.desktop\nThen click the toggle again.',
             },
             {
               service: 'mail',
               previous_enabled: true,
               new_enabled: false,
               reason:
-                'Mail access was previously denied. Open Terminal and run:\ntccutil reset AppleEvents pl.speedwave.desktop.mail\nThen click the toggle again.',
+                'Mail access is turned off for Speedwave. To turn it on, allow Speedwave to control Mail in System Settings > Privacy & Security > Automation, or run in Terminal:\ntccutil reset AppleEvents pl.speedwave.desktop\nThen click the toggle again. The reset makes macOS ask again for every app Speedwave controls.',
             },
           ];
         }
@@ -2023,11 +2023,11 @@ describe('IntegrationsComponent', () => {
       expect(component.osIntegrationsAutoDisabled.length).toBe(2);
       expect(component.osIntegrationsAutoDisabled[0].service).toBe('calendar');
       expect(component.osIntegrationsAutoDisabled[0].reason).toContain(
-        'tccutil reset Calendar pl.speedwave.desktop.calendar'
+        'tccutil reset Calendar pl.speedwave.desktop'
       );
       expect(component.osIntegrationsAutoDisabled[1].service).toBe('mail');
       expect(component.osIntegrationsAutoDisabled[1].reason).toContain(
-        'tccutil reset AppleEvents pl.speedwave.desktop.mail'
+        'tccutil reset AppleEvents pl.speedwave.desktop'
       );
     });
 
@@ -2039,7 +2039,7 @@ describe('IntegrationsComponent', () => {
               service: 'calendar',
               previous_enabled: true,
               new_enabled: false,
-              reason: 'tccutil reset Calendar pl.speedwave.desktop.calendar',
+              reason: 'tccutil reset Calendar pl.speedwave.desktop',
             },
           ];
         }
@@ -2063,9 +2063,7 @@ describe('IntegrationsComponent', () => {
       );
       expect(bannerEl).toBeTruthy();
       expect(bannerEl.textContent).toContain('calendar');
-      expect(bannerEl.textContent).toContain(
-        'tccutil reset Calendar pl.speedwave.desktop.calendar'
-      );
+      expect(bannerEl.textContent).toContain('tccutil reset Calendar pl.speedwave.desktop');
     });
 
     it('does not render banner when no integrations were auto-disabled', async () => {
@@ -2087,7 +2085,7 @@ describe('IntegrationsComponent', () => {
               service: 'reminders',
               previous_enabled: true,
               new_enabled: false,
-              reason: 'tccutil reset Reminders pl.speedwave.desktop.reminders',
+              reason: 'tccutil reset Reminders pl.speedwave.desktop',
             },
           ];
         }
@@ -2170,13 +2168,13 @@ describe('IntegrationsComponent', () => {
               service: 'calendar',
               previous_enabled: true,
               new_enabled: false,
-              reason: 'tccutil reset Calendar pl.speedwave.desktop.calendar',
+              reason: 'tccutil reset Calendar pl.speedwave.desktop',
             },
             {
               service: 'mail',
               previous_enabled: true,
               new_enabled: false,
-              reason: 'tccutil reset AppleEvents pl.speedwave.desktop.mail',
+              reason: 'tccutil reset AppleEvents pl.speedwave.desktop',
             },
           ];
         }
@@ -2196,11 +2194,11 @@ describe('IntegrationsComponent', () => {
 
       expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining('os.calendar'));
       expect(mockLogger.warn).toHaveBeenCalledWith(
-        expect.stringContaining('tccutil reset Calendar pl.speedwave.desktop.calendar')
+        expect.stringContaining('tccutil reset Calendar pl.speedwave.desktop')
       );
       expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining('os.mail'));
       expect(mockLogger.warn).toHaveBeenCalledWith(
-        expect.stringContaining('tccutil reset AppleEvents pl.speedwave.desktop.mail')
+        expect.stringContaining('tccutil reset AppleEvents pl.speedwave.desktop')
       );
       expect(mockLogger.info).toHaveBeenCalledWith(
         expect.stringContaining('auto-disabled 2 service(s)')
@@ -2260,7 +2258,7 @@ describe('IntegrationsComponent', () => {
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'set_os_integration_enabled') {
           throw new Error(
-            'Calendar access was previously denied. Open Terminal and run:\ntccutil reset Calendar pl.speedwave.desktop.calendar'
+            'Calendar access is turned off for Speedwave. To turn it on, allow Speedwave in System Settings > Privacy & Security > Calendars, or run in Terminal:\ntccutil reset Calendar pl.speedwave.desktop'
           );
         }
         return undefined;
@@ -2274,7 +2272,7 @@ describe('IntegrationsComponent', () => {
       expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining('os toggle failed'));
       expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining('reason='));
       expect(mockLogger.warn).toHaveBeenCalledWith(
-        expect.stringContaining('tccutil reset Calendar pl.speedwave.desktop.calendar')
+        expect.stringContaining('tccutil reset Calendar pl.speedwave.desktop')
       );
     });
   });

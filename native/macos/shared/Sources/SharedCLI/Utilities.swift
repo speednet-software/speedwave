@@ -35,15 +35,9 @@ public enum PermissionEntity: String {
     case notes
 }
 
-/// SSOT: parent bundle identifier literal. Must match `desktop/src-tauri/tauri.conf.json::identifier`
-/// (drift-guarded by a bats test). Per-CLI binaries embed `pl.speedwave.desktop.<entity>` via `subBundleIdentifier(for:)`.
+/// SSOT: the Desktop app's bundle identifier (`tauri.conf.json::identifier`, `testSpeedwaveBundleIdentifierMatchesTauriConf`).
+/// TCC stores every helper's grant under it, since the app is the helpers' responsible process (ADR-049 Amendment 1).
 public let speedwaveBundleIdentifier: String = "pl.speedwave.desktop"
-
-/// Per-entity sub-identifier used as `CFBundleIdentifier` of each CLI binary's embedded
-/// Info.plist. TCC binds to this identifier, so `tccutil reset` targets the correct row.
-public func subBundleIdentifier(for entity: PermissionEntity) -> String {
-    "\(speedwaveBundleIdentifier).\(entity.rawValue)"
-}
 
 /// kTCCService name used by the `tccutil reset <service> <bundleId>` command.
 /// Calendar/Reminders have dedicated TCC services; Mail and Notes both use AppleEvents.
@@ -53,16 +47,6 @@ public func tccServiceName(for entity: PermissionEntity) -> String {
     case .reminders: return "Reminders"
     case .mail, .notes: return "AppleEvents"
     }
-}
-
-/// Returns `Bundle.main.bundleIdentifier` when launched from the parent .app,
-/// otherwise falls back to `speedwaveBundleIdentifier`.
-public func resolvedBundleIdentifier() -> String {
-    resolvedBundleIdentifier(from: Bundle.main.bundleIdentifier)
-}
-
-public func resolvedBundleIdentifier(from rawBundleId: String?) -> String {
-    rawBundleId ?? speedwaveBundleIdentifier
 }
 
 /// Backward-compatible overload for callers that don't have a PermissionStatus.
@@ -122,21 +106,28 @@ public func mapRawToPermissionStatus(_ raw: RawAuthorizationStatus) -> Permissio
     }
 }
 
-public func composeErrorMessage(
-    status: PermissionStatus,
-    entity: PermissionEntity,
-    bundleId: String? = nil
-) -> String {
-    let resolvedBundleId = bundleId ?? subBundleIdentifier(for: entity)
+public func composeErrorMessage(status: PermissionStatus, entity: PermissionEntity) -> String {
     let entityName = entity.rawValue.capitalized
-    let serviceName = tccServiceName(for: entity)
-    let resetCmd = "tccutil reset \(serviceName) \(resolvedBundleId)"
-    let settingsPath = "System Settings > Privacy & Security > \(entityName)"
+    let resetCmd = "tccutil reset \(tccServiceName(for: entity)) \(speedwaveBundleIdentifier)"
+    let settingsPath: String
+    let allowStep: String
+    let resetNote: String
+    switch entity {
+    case .calendar, .reminders:
+        settingsPath = "System Settings > Privacy & Security > \(entity == .calendar ? "Calendars" : "Reminders")"
+        allowStep = "allow Speedwave in \(settingsPath)"
+        resetNote = ""
+    case .mail, .notes:
+        settingsPath = "System Settings > Privacy & Security > Automation"
+        allowStep = "allow Speedwave to control \(entityName) in \(settingsPath)"
+        resetNote = " The reset makes macOS ask again for every app Speedwave controls."
+    }
+    let reenableSteps = "\(allowStep), or run in Terminal:\n\(resetCmd)\nThen click the toggle again.\(resetNote)"
     switch status {
     case .granted:
         return ""
     case .denied:
-        return "\(entityName) access was previously denied. Open Terminal and run:\n\(resetCmd)\nThen click the toggle again."
+        return "\(entityName) access is turned off for Speedwave. To turn it on, \(reenableSteps)"
     case .restricted:
         return "\(entityName) access restricted by your administrator or parental controls."
     case .notDetermined:
@@ -144,7 +135,7 @@ public func composeErrorMessage(
     case .writeOnly:
         return "Speedwave has write-only \(entityName) access. Open \(settingsPath) and grant Full Access for read support."
     case .silentReject:
-        return "\(entityName) permission was silently rejected by macOS. This usually means a signing or entitlement problem — please reinstall Speedwave from a fresh download."
+        return "macOS did not give Speedwave access to \(entityName). If you clicked Don't Allow, \(reenableSteps) If no macOS dialog appeared, report it as a Speedwave bug."
     case .targetNotRunning:
         return "\(entityName).app is not running. Open \(entityName).app and try again — this is not a permission problem."
     }
@@ -190,7 +181,7 @@ public func performCheckPermission(gate: PermissionGate, entity: PermissionEntit
         return formatPermissionResult(
             granted: false,
             status: .silentReject,
-            error: "\(entity.rawValue.capitalized) permission dialog timed out after \(Int(timeout))s. The TCC system is unresponsive — please retry or reboot."
+            error: "\(entity.rawValue.capitalized) permission dialog timed out after \(Int(timeout))s without an answer; click the toggle again and answer the macOS dialog."
         )
     }
     logTrace("performCheckPermission requestAccess returned entity=\(entity.rawValue) granted=\(requestGranted) error=\(requestError?.localizedDescription ?? "nil")")
