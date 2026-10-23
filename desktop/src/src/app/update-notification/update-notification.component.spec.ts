@@ -3,7 +3,8 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { UpdateNotificationComponent } from './update-notification.component';
 import { TauriService } from '../services/tauri.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
-import { createDeferred } from '../testing/deferred';
+import { createDeferred, type Deferred } from '../testing/deferred';
+import { UPDATE_DOWNLOAD_PROGRESS_EVENT, UpdateDownloadProgressEvent } from '../models/update';
 
 describe('UpdateNotificationComponent', () => {
   let component: UpdateNotificationComponent;
@@ -276,6 +277,126 @@ describe('UpdateNotificationComponent', () => {
       });
 
       expect(component.dismissed).toBe(true);
+    });
+  });
+
+  describe('download progress', () => {
+    const MB = 1024 * 1024;
+
+    function banner(): HTMLElement | null {
+      fixture.detectChanges();
+      return (fixture.nativeElement as HTMLElement).querySelector('[data-testid="update-banner"]');
+    }
+
+    function progressBar(): HTMLElement | null {
+      return (
+        banner()?.querySelector<HTMLElement>(
+          '[data-testid="update-progress"] [role="progressbar"]'
+        ) ?? null
+      );
+    }
+
+    function startInstall(): { pendingInstall: Deferred<void>; done: Promise<void> } {
+      const pendingInstall = createDeferred();
+      mockTauri.invokeHandler = (cmd: string) =>
+        cmd === 'install_update_and_reconcile' ? pendingInstall.promise : Promise.resolve();
+      component.updateInfo = { version: '1.2.3', body: null, date: null, is_critical: false };
+      component.confirmUpdate = true;
+      const done = component.installAndRestart();
+      return { pendingInstall, done };
+    }
+
+    function report(progress: UpdateDownloadProgressEvent): void {
+      mockTauri.dispatchEvent(UPDATE_DOWNLOAD_PROGRESS_EVENT, progress);
+    }
+
+    function buttons(): HTMLButtonElement[] {
+      return [...(banner()?.querySelectorAll<HTMLButtonElement>('button') ?? [])];
+    }
+
+    it('says updating until the backend reports a chunk', () => {
+      startInstall();
+
+      expect(banner()?.textContent).toContain('updating...');
+      expect(progressBar()).toBeNull();
+    });
+
+    it('replaces the updating label with percent and sizes while downloading', () => {
+      startInstall();
+      report({ downloaded: 12 * MB, total: 48 * MB, phase: 'downloading' });
+
+      expect(banner()?.textContent).toContain('downloading 25% (12.0 MB / 48.0 MB)');
+      expect(banner()?.textContent).not.toContain('updating...');
+      expect(progressBar()?.getAttribute('aria-valuenow')).toBe('25');
+      expect(progressBar()?.firstElementChild?.getAttribute('style')).toContain('width: 25%');
+    });
+
+    it('shows the downloaded size alone when the total is unknown', () => {
+      startInstall();
+      report({ downloaded: 12 * MB, total: null, phase: 'downloading' });
+
+      expect(banner()?.textContent).toContain('downloading 12.0 MB');
+      expect(progressBar()?.hasAttribute('aria-valuenow')).toBe(false);
+      expect(progressBar()?.firstElementChild?.classList).toContain('animate-pulse');
+    });
+
+    it('announces the restart once the installer runs', () => {
+      startInstall();
+      report({ downloaded: 48 * MB, total: 48 * MB, phase: 'installing' });
+
+      expect(banner()?.textContent).toContain('installing, the app will restart...');
+      expect(progressBar()?.getAttribute('aria-valuenow')).toBe('100');
+    });
+
+    it('a failed install clears the bar and shows the error', async () => {
+      const { pendingInstall, done } = startInstall();
+      report({ downloaded: 12 * MB, total: 48 * MB, phase: 'downloading' });
+      expect(progressBar()).not.toBeNull();
+
+      report(null);
+      pendingInstall.reject(new Error('install failed'));
+      await done;
+
+      expect(progressBar()).toBeNull();
+      expect(banner()?.textContent).toContain('install failed');
+      expect(buttons().every((b) => !b.disabled)).toBe(true);
+    });
+
+    it('shows the progress of an install started elsewhere and blocks a second one', async () => {
+      mockTauri.dispatchEvent('update_available', {
+        version: '1.2.3',
+        body: null,
+        date: null,
+        is_critical: false,
+      });
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      report({ downloaded: 12 * MB, total: 48 * MB, phase: 'downloading' });
+
+      expect(progressBar()).not.toBeNull();
+      expect(banner()?.textContent).toContain('downloading 25% (12.0 MB / 48.0 MB)');
+      expect(banner()?.textContent).not.toContain('update and restart now');
+      expect(buttons().length).toBeGreaterThan(0);
+      expect(buttons().every((b) => b.disabled)).toBe(true);
+      await component.installAndRestart();
+      expect(invokeSpy).not.toHaveBeenCalledWith('install_update_and_reconcile', expect.anything());
+    });
+
+    it('a null event, sent when an install started elsewhere fails, hides the bar again', () => {
+      mockTauri.dispatchEvent('update_available', {
+        version: '1.2.3',
+        body: null,
+        date: null,
+        is_critical: false,
+      });
+      report({ downloaded: 48 * MB, total: 48 * MB, phase: 'installing' });
+      expect(progressBar()).not.toBeNull();
+
+      report(null);
+
+      expect(progressBar()).toBeNull();
+      expect(banner()?.textContent).toContain('update and restart now');
+      expect(buttons().every((b) => !b.disabled)).toBe(true);
     });
   });
 });

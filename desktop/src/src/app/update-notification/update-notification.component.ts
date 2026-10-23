@@ -7,6 +7,8 @@ import {
 } from '@angular/core';
 import { type UnlistenFn } from '@tauri-apps/api/event';
 import { TauriService } from '../services/tauri.service';
+import { UpdateProgressService } from '../services/update-progress.service';
+import { UpdateProgressBarComponent } from '../shared/update-progress-bar.component';
 import {
   ProjectList,
   UpdateCheckOutcome,
@@ -18,6 +20,7 @@ import {
 /** Shows a banner when a new Speedwave version is available for install. */
 @Component({
   selector: 'app-update-notification',
+  imports: [UpdateProgressBarComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (showUpdateBanner) {
@@ -25,14 +28,21 @@ import {
         class="flex items-center justify-between px-4 py-1.5 bg-sw-bg-navy border-b border-sw-accent text-[13px] font-mono"
         data-testid="update-banner"
       >
-        <span class="text-sw-text">
-          Speedwave v{{ updateInfo!.version }} is ready
-          @if (installing) {
-            — updating...
-          } @else if (containersRunning) {
-            — running containers will be restarted
-          } @else {
-            — update and restart now
+        <span class="flex items-center gap-3 text-sw-text">
+          <span>
+            Speedwave v{{ updateInfo!.version }} is ready:
+            @if (updateProgress.progress() === null) {
+              @if (installInFlight()) {
+                updating...
+              } @else if (containersRunning) {
+                running containers will be restarted
+              } @else {
+                update and restart now
+              }
+            }
+          </span>
+          @if (updateProgress.progress(); as progress) {
+            <app-update-progress-bar [progress]="progress" data-testid="update-progress" />
           }
         </span>
         <div class="flex items-center gap-2">
@@ -48,7 +58,7 @@ import {
             <button
               class="px-3 py-0.5 bg-sw-accent text-on-accent border-none rounded text-xs font-mono cursor-pointer transition-opacity duration-200 hover:not-disabled:opacity-85 disabled:opacity-40 disabled:cursor-not-allowed"
               (click)="confirmUpdate = true"
-              [disabled]="installing"
+              [disabled]="installInFlight()"
             >
               Update now
             </button>
@@ -56,14 +66,14 @@ import {
             <button
               class="px-3 py-0.5 bg-sw-accent text-on-accent border-none rounded text-xs font-mono cursor-pointer transition-opacity duration-200 hover:not-disabled:opacity-85 disabled:opacity-40 disabled:cursor-not-allowed"
               (click)="installAndRestart()"
-              [disabled]="installing"
+              [disabled]="installInFlight()"
             >
-              {{ installing ? 'Updating...' : 'Confirm Update' }}
+              {{ installInFlight() ? 'Updating...' : 'Confirm Update' }}
             </button>
             <button
               class="px-3 py-0.5 bg-transparent text-sw-text-muted border border-sw-slider rounded text-xs font-mono cursor-pointer transition-colors duration-200 hover:not-disabled:text-sw-text hover:not-disabled:border-sw-text-muted disabled:opacity-40 disabled:cursor-not-allowed"
               (click)="confirmUpdate = false"
-              [disabled]="installing"
+              [disabled]="installInFlight()"
             >
               Cancel
             </button>
@@ -76,7 +86,7 @@ import {
               <button
                 class="px-3 py-0.5 bg-transparent text-sw-text-muted border border-sw-slider rounded text-xs font-mono cursor-pointer transition-colors duration-200 hover:not-disabled:text-sw-text hover:not-disabled:border-sw-text-muted disabled:opacity-40 disabled:cursor-not-allowed"
                 (click)="dismiss()"
-                [disabled]="installing"
+                [disabled]="installInFlight()"
               >
                 Later
               </button>
@@ -99,6 +109,7 @@ export class UpdateNotificationComponent implements OnDestroy {
   private unlisten: UnlistenFn | null = null;
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
+  protected readonly updateProgress = inject(UpdateProgressService);
 
   /** Initializes the Tauri event listeners and performs an initial update check. */
   constructor() {
@@ -144,8 +155,13 @@ export class UpdateNotificationComponent implements OnDestroy {
     }
   }
 
+  protected installInFlight(): boolean {
+    return this.installing || this.updateProgress.progress() !== null;
+  }
+
   /** Downloads and installs the update, then lets the backend restart the app. */
   async installAndRestart(): Promise<void> {
+    if (this.installInFlight()) return;
     this.installing = true;
     this.error = '';
     this.newerVersionNotice = '';

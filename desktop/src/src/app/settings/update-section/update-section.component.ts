@@ -9,6 +9,8 @@ import {
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { TauriService } from '../../services/tauri.service';
+import { UpdateProgressService } from '../../services/update-progress.service';
+import { UpdateProgressBarComponent } from '../../shared/update-progress-bar.component';
 import {
   UPDATE_CHANNELS,
   UpdateChannel,
@@ -21,7 +23,7 @@ import {
 /** Displays app update controls, container update/rollback, and auto-check settings. */
 @Component({
   selector: 'app-update-section',
-  imports: [CommonModule],
+  imports: [CommonModule, UpdateProgressBarComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block' },
   template: `
@@ -39,6 +41,13 @@ import {
             <div class="mono mt-0.5 text-[11px]" [class]="updateStatusClass()">
               {{ updateStatusText() }}
             </div>
+            @if (updateProgress.progress(); as progress) {
+              <app-update-progress-bar
+                class="mt-2"
+                [progress]="progress"
+                data-testid="settings-update-progress"
+              />
+            }
           </div>
           <div class="flex flex-wrap items-center gap-2">
             <button
@@ -46,7 +55,7 @@ import {
               class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-40 disabled:cursor-not-allowed"
               data-testid="settings-check-update"
               (click)="checkForUpdate()"
-              [disabled]="updateChecking || updateInstalling"
+              [disabled]="updateChecking || installInFlight()"
             >
               {{ updateChecking ? 'checking...' : 'check now' }}
             </button>
@@ -56,9 +65,9 @@ import {
                 class="mono rounded bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
                 data-testid="settings-install-update"
                 (click)="installUpdate()"
-                [disabled]="updateInstalling"
+                [disabled]="installInFlight()"
               >
-                {{ updateInstalling ? 'installing...' : 'install & restart' }}
+                {{ installInFlight() ? 'installing...' : 'install & restart' }}
               </button>
             }
           </div>
@@ -76,7 +85,7 @@ import {
                 [attr.aria-pressed]="channel === channelLabel()"
                 class="theme-card flex items-center gap-3 rounded border border-[var(--line)] bg-[var(--bg-1)] px-3 py-2 text-left hover:border-[var(--line-strong)] disabled:cursor-not-allowed disabled:opacity-40"
                 (click)="setChannel(channel)"
-                [disabled]="updateInstalling"
+                [disabled]="installInFlight()"
               >
                 <span class="mono text-[12px] text-[var(--ink)]">{{ channel }}</span>
                 <span class="check ml-auto text-[var(--accent)]">&#9679;</span>
@@ -139,6 +148,7 @@ export class UpdateSectionComponent implements OnInit {
 
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
+  protected readonly updateProgress = inject(UpdateProgressService);
 
   /** Loads current version and update settings on init. */
   ngOnInit(): void {
@@ -161,6 +171,10 @@ export class UpdateSectionComponent implements OnInit {
     if (this.updateResult === 'up-to-date') return 'text-[var(--green)]';
     if (this.updateResult === 'available') return 'text-[var(--amber)]';
     return 'text-[var(--ink-mute)]';
+  }
+
+  protected installInFlight(): boolean {
+    return this.updateInstalling || this.updateProgress.progress() !== null;
   }
 
   /** Current channel for display; missing settings read as `stable`. */
@@ -211,7 +225,7 @@ export class UpdateSectionComponent implements OnInit {
    * @param channel - The channel to switch to.
    */
   protected async setChannel(channel: UpdateChannel): Promise<void> {
-    if (this.updateInstalling || channel === this.channelLabel()) return;
+    if (this.installInFlight() || channel === this.channelLabel()) return;
     this.updateChannel = channel;
     this.cdr.markForCheck();
     await this.saveUpdateSettings();
@@ -250,7 +264,7 @@ export class UpdateSectionComponent implements OnInit {
 
   /** Downloads and installs the available update, then lets the backend restart the app. */
   async installUpdate(): Promise<void> {
-    if (!this.updateAvailableVersion) return;
+    if (!this.updateAvailableVersion || this.installInFlight()) return;
     this.updateInstalling = true;
     this.updateInstallError = '';
     this.updateInstallNotice = '';

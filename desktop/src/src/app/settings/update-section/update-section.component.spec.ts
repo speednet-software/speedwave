@@ -3,7 +3,8 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { UpdateSectionComponent } from './update-section.component';
 import { TauriService } from '../../services/tauri.service';
 import { MockTauriService } from '../../testing/mock-tauri.service';
-import { createDeferred } from '../../testing/deferred';
+import { createDeferred, type Deferred } from '../../testing/deferred';
+import { UPDATE_DOWNLOAD_PROGRESS_EVENT, UpdateDownloadProgressEvent } from '../../models/update';
 
 type ChannelTestAccess = { channelLabel(): string; setChannel(channel: string): Promise<void> };
 
@@ -488,6 +489,125 @@ describe('UpdateSectionComponent', () => {
 
       expect(channelButton(root, 'beta').classList).toContain('active');
       expect(channelButton(root, 'stable').classList).not.toContain('active');
+    });
+  });
+
+  describe('download progress', () => {
+    const MB = 1024 * 1024;
+
+    function progressRow(): HTMLElement | null {
+      fixture.detectChanges();
+      return (fixture.nativeElement as HTMLElement).querySelector(
+        '[data-testid="settings-update-progress"]'
+      );
+    }
+
+    async function startInstall(): Promise<{
+      pendingInstall: Deferred<void>;
+      done: Promise<void>;
+    }> {
+      const pendingInstall = createDeferred();
+      mockTauri.invokeHandler = (cmd: string) =>
+        cmd === 'install_update_and_reconcile' ? pendingInstall.promise : Promise.resolve();
+      component.updateAvailableVersion = '2.0.0';
+      component.updateResult = 'available';
+      fixture.detectChanges();
+      await Promise.resolve();
+      const done = component.installUpdate();
+      return { pendingInstall, done };
+    }
+
+    function report(progress: UpdateDownloadProgressEvent): void {
+      mockTauri.dispatchEvent(UPDATE_DOWNLOAD_PROGRESS_EVENT, progress);
+    }
+
+    function installButton(): HTMLButtonElement | null {
+      fixture.detectChanges();
+      return (fixture.nativeElement as HTMLElement).querySelector<HTMLButtonElement>(
+        '[data-testid="settings-install-update"]'
+      );
+    }
+
+    it('shows no bar before the backend reports a chunk', async () => {
+      await startInstall();
+      expect(progressRow()).toBeNull();
+    });
+
+    it('shows the percent and both sizes while downloading a known total', async () => {
+      await startInstall();
+      report({ downloaded: 12 * MB, total: 48 * MB, phase: 'downloading' });
+
+      const row = progressRow();
+      expect(row?.textContent).toContain('downloading 25% (12.0 MB / 48.0 MB)');
+      const bar = row?.querySelector<HTMLElement>('[role="progressbar"]');
+      expect(bar?.getAttribute('aria-valuenow')).toBe('25');
+      expect(bar?.firstElementChild?.getAttribute('style')).toContain('width: 25%');
+    });
+
+    it('shows the downloaded size alone, with an indeterminate bar, when the total is unknown', async () => {
+      await startInstall();
+      report({ downloaded: 12 * MB, total: null, phase: 'downloading' });
+
+      const row = progressRow();
+      expect(row?.textContent).toContain('downloading 12.0 MB');
+      expect(row?.textContent).not.toContain('%');
+      const bar = row?.querySelector<HTMLElement>('[role="progressbar"]');
+      expect(bar?.hasAttribute('aria-valuenow')).toBe(false);
+      expect(bar?.firstElementChild?.classList).toContain('animate-pulse');
+    });
+
+    it('moves on to the installing state once the download is complete', async () => {
+      await startInstall();
+      report({ downloaded: 48 * MB, total: 48 * MB, phase: 'installing' });
+
+      const row = progressRow();
+      expect(row?.textContent).toContain('installing, the app will restart...');
+      expect(row?.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow')).toBe('100');
+    });
+
+    it('a failed install clears the bar and shows the error', async () => {
+      const { pendingInstall, done } = await startInstall();
+      report({ downloaded: 12 * MB, total: 48 * MB, phase: 'downloading' });
+      expect(progressRow()).not.toBeNull();
+
+      report(null);
+      pendingInstall.reject(new Error('download failed'));
+      await done;
+
+      expect(progressRow()).toBeNull();
+      expect(component.updateInstallError).toBe('download failed');
+      expect(installButton()?.disabled).toBe(false);
+    });
+
+    it('shows the progress of an install started elsewhere and blocks a second one', async () => {
+      component.updateAvailableVersion = '2.0.0';
+      component.updateResult = 'available';
+      fixture.detectChanges();
+      await Promise.resolve();
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      report({ downloaded: 12 * MB, total: 48 * MB, phase: 'downloading' });
+
+      expect(progressRow()?.textContent).toContain('downloading 25%');
+      expect(installButton()?.disabled).toBe(true);
+      expect(installButton()?.textContent).toContain('installing...');
+      await component.installUpdate();
+      expect(invokeSpy).not.toHaveBeenCalledWith('install_update_and_reconcile', expect.anything());
+    });
+
+    it('a null event, sent when an install started elsewhere fails, hides the bar again', async () => {
+      component.updateAvailableVersion = '2.0.0';
+      component.updateResult = 'available';
+      fixture.detectChanges();
+      await Promise.resolve();
+      report({ downloaded: 48 * MB, total: 48 * MB, phase: 'installing' });
+      expect(progressRow()).not.toBeNull();
+
+      report(null);
+
+      expect(progressRow()).toBeNull();
+      expect(installButton()?.disabled).toBe(false);
+      expect(installButton()?.textContent).toContain('install & restart');
     });
   });
 });
