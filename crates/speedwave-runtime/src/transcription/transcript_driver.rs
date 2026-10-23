@@ -861,9 +861,13 @@ pub struct FinalizeConfig {
 /// A short overlap (below) keeps utterances that straddle a boundary intact.
 const FINALIZE_WINDOW_SECS: f32 = 30.0;
 
-/// Overlap (seconds) between consecutive offline-pass windows. Segments starting inside the
-/// *next* window's overlap are dropped from the previous window's output to avoid duplicates.
+/// Overlap (seconds) at the end of an offline-pass window: segments starting in it go to the next
+/// window, which starts at the last kept end (a step at least), or at a kept tail cut by the edge.
 const FINALIZE_WINDOW_OVERLAP_SECS: f32 = 3.0;
+
+/// A kept tail ending this close (seconds) to the window end was cut by it: whisper.cpp closes the
+/// last segment of its input once it is within 100 ms of the end.
+const FINALIZE_WINDOW_EDGE_SECS: f32 = 0.1;
 
 const FINALIZE_DECODE_START_PROGRESS: f32 = 0.05;
 const FINALIZE_DECODE_DONE_PROGRESS: f32 = 0.60;
@@ -1173,8 +1177,8 @@ fn pass_stopped(e: &StoreError) -> Option<DriverError> {
     }
 }
 
-/// Transcribes `pcm` in `FINALIZE_WINDOW_SECS` windows with `FINALIZE_WINDOW_OVERLAP_SECS`
-/// overlap, stitched to one absolute list tagged `source`; `progress` fires 0.0→1.0/window,
+/// Transcribes `pcm` in `FINALIZE_WINDOW_SECS` windows stepped as `FINALIZE_WINDOW_OVERLAP_SECS`
+/// describes, stitched to one absolute list tagged `source`; `progress` fires 0.0→1.0/window,
 /// and an error it returns stops the decode before the next window.
 fn transcribe_chunked(
     transcriber: &mut dyn Transcriber,
@@ -1187,6 +1191,7 @@ fn transcribe_chunked(
     let win = (FINALIZE_WINDOW_SECS * SAMPLE_RATE_HZ as f32) as usize;
     let overlap = (FINALIZE_WINDOW_OVERLAP_SECS * SAMPLE_RATE_HZ as f32) as usize;
     let step = win.saturating_sub(overlap).max(1);
+    let edge = (FINALIZE_WINDOW_EDGE_SECS * SAMPLE_RATE_HZ as f32) as usize;
     let total = pcm.len();
 
     if total <= win {
@@ -1213,13 +1218,24 @@ fn transcribe_chunked(
             Duration::from_secs_f64(step as f64 / rate as f64)
         };
 
-        let segs = transcriber
+        let mut kept: Vec<Segment> = transcriber
             .transcribe(window, opts)
-            .map_err(|e| DriverError::Transcribe(e.to_string()))?;
-        for s in segs {
-            if s.start >= keep_until {
-                continue;
+            .map_err(|e| DriverError::Transcribe(e.to_string()))?
+            .into_iter()
+            .filter(|s| s.start < keep_until)
+            .collect();
+        let mut next_start = start + step;
+        if let Some(tail) = kept.last() {
+            let tail_start = frame_at(tail.start);
+            let tail_end = frame_at(tail.end).min(window.len());
+            if !is_last && tail_end + edge >= window.len() && tail_start >= overlap {
+                kept.pop();
+                next_start = start + tail_start;
+            } else {
+                next_start = next_start.max(start + tail_end);
             }
+        }
+        for s in kept {
             out.push(Segment {
                 start: window_start + s.start,
                 end: window_start + s.end,
@@ -1233,7 +1249,7 @@ fn transcribe_chunked(
         if is_last {
             break;
         }
-        start += step;
+        start = next_start;
     }
     Ok(out)
 }
@@ -3415,22 +3431,169 @@ mod tests {
         .unwrap();
         assert!(!segs.is_empty());
         for w in segs.windows(2) {
-            assert!(w[1].start >= w[0].start, "starts went backwards");
+            assert!(
+                w[1].start >= w[0].end,
+                "segment at {:?} overlaps the one ending at {:?}",
+                w[1].start,
+                w[0].end
+            );
         }
-        let last_end = segs.last().unwrap().end.as_secs_f32();
-        assert!(
-            (60.0..=71.0).contains(&last_end),
-            "last segment ends at {last_end}, expected ≈70"
-        );
-        assert!(
-            ticks.len() >= 3,
-            "expected ≥3 progress ticks, got {}",
-            ticks.len()
-        );
+        assert_eq!(segs.first().unwrap().start, Duration::ZERO);
+        assert_eq!(segs.last().unwrap().end, Duration::from_secs(70));
+        assert_eq!(ticks.len(), 3);
         assert!((ticks.last().copied().unwrap() - 1.0).abs() < 1e-6);
         for w in ticks.windows(2) {
             assert!(w[1] >= w[0]);
         }
+    }
+
+    struct SpeechTranscriber {
+        speech: Vec<(f32, f32, &'static str)>,
+        window_starts: Vec<f32>,
+    }
+    impl Transcriber for SpeechTranscriber {
+        fn transcribe(
+            &mut self,
+            pcm: &[f32],
+            _opts: &TranscribeOptions,
+        ) -> Result<Vec<Segment>, crate::transcription::transcriber::TranscribeError> {
+            let from = pcm[0] / 16_000.0;
+            let to = from + pcm.len() as f32 / 16_000.0;
+            self.window_starts.push(from);
+            Ok(self
+                .speech
+                .iter()
+                .filter(|(start, end, _)| *end > from && *start < to)
+                .map(|(start, end, text)| seg_at(start.max(from) - from, end.min(to) - from, text))
+                .collect())
+        }
+    }
+
+    fn timeline_pcm(secs: usize) -> Vec<f32> {
+        (0..secs * 16_000).map(|i| i as f32).collect()
+    }
+
+    #[test]
+    fn transcribe_chunked_keeps_speech_across_a_window_step_once() {
+        let mut tr = SpeechTranscriber {
+            speech: vec![
+                (20.0, 26.0, "before"),
+                (26.0, 29.0, "jakbym miał"),
+                (40.0, 47.0, "middle"),
+                (53.1, 56.5, "second step"),
+                (62.0, 66.0, "tail"),
+            ],
+            window_starts: Vec::new(),
+        };
+        let opts = TranscribeOptions::for_language(Language::Pl);
+        let segs = transcribe_chunked(&mut tr, &timeline_pcm(70), &opts, None, |_| Ok(())).unwrap();
+        let texts: Vec<&str> = segs.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            ["before", "jakbym miał", "middle", "second step", "tail"]
+        );
+        assert_eq!(tr.window_starts, [0.0, 29.0, 56.5]);
+        assert_eq!(segs[1].start, Duration::from_secs(26));
+        assert_eq!(segs[1].end, Duration::from_secs(29));
+    }
+
+    #[test]
+    fn transcribe_chunked_advances_by_the_step_through_silence() {
+        let mut tr = SpeechTranscriber {
+            speech: Vec::new(),
+            window_starts: Vec::new(),
+        };
+        let mut ticks = 0;
+        let opts = TranscribeOptions::for_language(Language::En);
+        let segs = transcribe_chunked(&mut tr, &timeline_pcm(70), &opts, None, |_| {
+            ticks += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert!(segs.is_empty());
+        assert_eq!(tr.window_starts, [0.0, 27.0, 54.0]);
+        assert_eq!(ticks, 3);
+    }
+
+    #[test]
+    fn transcribe_chunked_re_decodes_a_tail_cut_by_the_window_edge_in_the_next_window() {
+        let mut tr = SpeechTranscriber {
+            speech: vec![
+                (10.0, 24.0, "before the edge"),
+                (24.0, 33.0, "across the edge"),
+                (40.0, 44.0, "after"),
+            ],
+            window_starts: Vec::new(),
+        };
+        let opts = TranscribeOptions::for_language(Language::En);
+        let segs = transcribe_chunked(&mut tr, &timeline_pcm(70), &opts, None, |_| Ok(())).unwrap();
+        let texts: Vec<&str> = segs.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(texts, ["before the edge", "across the edge", "after"]);
+        assert_eq!(tr.window_starts, [0.0, 24.0, 51.0]);
+        assert_eq!(segs[1].start, Duration::from_secs(24));
+        assert_eq!(segs[1].end, Duration::from_secs(33));
+    }
+
+    #[test]
+    fn transcribe_chunked_re_decodes_an_edge_tail_of_a_recording_just_over_one_window() {
+        let mut tr = SpeechTranscriber {
+            speech: vec![(20.0, 30.05, "to the very end")],
+            window_starts: Vec::new(),
+        };
+        let pcm: Vec<f32> = (0..30 * 16_000 + 800).map(|i| i as f32).collect();
+        let opts = TranscribeOptions::for_language(Language::Pl);
+        let segs = transcribe_chunked(&mut tr, &pcm, &opts, None, |_| Ok(())).unwrap();
+        assert_eq!(tr.window_starts, [0.0, 20.0]);
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].text, "to the very end");
+        assert_eq!(segs[0].start, Duration::from_secs(20));
+    }
+
+    #[test]
+    fn transcribe_chunked_re_decodes_a_tail_whisper_closed_within_100_ms_of_the_edge() {
+        let mut tr = ScriptedTranscriber {
+            script: vec![
+                vec![seg_at(10.0, 24.0, "before"), seg_at(24.0, 29.92, "cut")],
+                vec![seg_at(0.0, 9.0, "whole")],
+                Vec::new(),
+            ],
+            call: 0,
+        };
+        let opts = TranscribeOptions::for_language(Language::Pl);
+        let segs = transcribe_chunked(&mut tr, &timeline_pcm(70), &opts, None, |_| Ok(())).unwrap();
+        let texts: Vec<&str> = segs.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(texts, ["before", "whole"]);
+        assert_eq!(segs[1].start, Duration::from_secs(24));
+    }
+
+    #[test]
+    fn transcribe_chunked_keeps_a_tail_ending_more_than_100_ms_before_the_edge() {
+        let mut tr = ScriptedTranscriber {
+            script: vec![
+                vec![seg_at(10.0, 24.0, "before"), seg_at(24.0, 29.8, "ended")],
+                vec![seg_at(0.0, 5.0, "next")],
+                Vec::new(),
+            ],
+            call: 0,
+        };
+        let opts = TranscribeOptions::for_language(Language::Pl);
+        let segs = transcribe_chunked(&mut tr, &timeline_pcm(70), &opts, None, |_| Ok(())).unwrap();
+        let texts: Vec<&str> = segs.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(texts, ["before", "ended", "next"]);
+        assert!((segs[2].start.as_secs_f64() - 29.8).abs() < 1e-3);
+    }
+
+    #[test]
+    fn transcribe_chunked_keeps_an_edge_tail_starting_inside_the_overlap_and_stops_at_the_edge() {
+        let mut tr = ScriptedTranscriber {
+            script: vec![vec![seg_at(1.0, 45.0, "overlong")], Vec::new()],
+            call: 0,
+        };
+        let opts = TranscribeOptions::for_language(Language::En);
+        let segs = transcribe_chunked(&mut tr, &timeline_pcm(70), &opts, None, |_| Ok(())).unwrap();
+        assert_eq!(tr.call, 3);
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].text, "overlong");
     }
 
     #[test]
