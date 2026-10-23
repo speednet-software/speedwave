@@ -53,11 +53,14 @@ const SECONDARY_BTN =
 const EXPORT_TOOLTIP = 'Saves the transcript as Markdown.';
 /** How long the "Copied" confirmation stays. */
 const COPIED_FEEDBACK_MS = 2000;
-/**
- * Progress at which the offline pass has decoded every part (`run_finalize` reports 0.05 → 0.60
- * while decoding, then installs the result); the time estimate extrapolates to this point.
- */
+const DECODE_START_PROGRESS = 0.05;
 const DECODE_DONE_PROGRESS = 0.6;
+const DIARIZE_START_PROGRESS = 0.62;
+const DIARIZE_DONE_PROGRESS = 0.85;
+const ETA_PACE_WINDOW_MS = 120_000;
+const ETA_MIN_PACE_SPAN_MS = 30_000;
+const ETA_MIN_MOVED = 0.05;
+const ETA_MIN_ELAPSED_MS = 5000;
 
 /**
  * Seconds → `MM:SS`. Segment timestamps are serde `Duration` `{secs,nanos}`; the caller passes
@@ -108,11 +111,14 @@ interface QualityLine {
 /** Which of the pane's menus is open. */
 type OpenMenu = 'chat' | 'more' | null;
 
-/** Where the transcription progress stood when this pane first saw it, for the time estimate. */
-interface ProgressAnchor {
-  sessionId: string;
+interface ProgressSample {
   at: number;
   progress: number;
+}
+
+interface ProgressTrack {
+  sessionId: string;
+  samples: ProgressSample[];
 }
 
 /**
@@ -818,18 +824,30 @@ export class LiveTranscriptComponent {
     return st?.state === 'finalizing' ? Math.round(st.progress * 100) : 0;
   });
 
-  /** Where the progress stood when this pane first saw the pass running. */
-  private readonly progressAnchor = signal<ProgressAnchor | null>(null);
+  private readonly progressTrack = signal<ProgressTrack | null>(null);
 
-  /** Rough time left, re-read on every progress event, once there is enough to extrapolate. */
   readonly eta = computed(() => {
     const st = this.session()?.status;
-    const anchor = this.progressAnchor();
-    if (st?.state !== 'finalizing' || !anchor || anchor.sessionId !== this.session()?.id) return '';
-    const moved = st.progress - anchor.progress;
-    const elapsedMs = Date.now() - anchor.at;
-    if (moved < 0.05 || elapsedMs < 5000 || st.progress >= DECODE_DONE_PROGRESS) return '';
-    const leftMs = (elapsedMs / moved) * (DECODE_DONE_PROGRESS - st.progress);
+    if (st?.state !== 'finalizing') return '';
+    if (st.progress >= DIARIZE_START_PROGRESS && st.progress < DIARIZE_DONE_PROGRESS) {
+      return 'telling speakers apart';
+    }
+    if (st.progress >= DECODE_DONE_PROGRESS) return 'almost done';
+    const track = this.progressTrack();
+    if (!track || track.sessionId !== this.sessionId()) return '';
+    const anchor = track.samples[0];
+    const latest = track.samples[track.samples.length - 1];
+    if (
+      latest.progress - anchor.progress < ETA_MIN_MOVED ||
+      latest.at - anchor.at < ETA_MIN_ELAPSED_MS
+    ) {
+      return '';
+    }
+    const windowed = track.samples.find((s) => latest.at - s.at <= ETA_PACE_WINDOW_MS) ?? anchor;
+    const from = latest.at - windowed.at >= ETA_MIN_PACE_SPAN_MS ? windowed : anchor;
+    const moved = latest.progress - from.progress;
+    if (moved <= 0) return '';
+    const leftMs = ((latest.at - from.at) / moved) * (DECODE_DONE_PROGRESS - latest.progress);
     return leftMs < 60_000
       ? 'less than a minute left'
       : `about ${Math.ceil(leftMs / 60_000)} min left`;
@@ -869,11 +887,19 @@ export class LiveTranscriptComponent {
     effect(() => {
       const st = this.session()?.status;
       const id = this.sessionId();
-      const anchor = untracked(() => this.progressAnchor());
-      if (st?.state !== 'finalizing') {
-        if (anchor) this.progressAnchor.set(null);
-      } else if (!anchor || anchor.sessionId !== id) {
-        this.progressAnchor.set({ sessionId: id, at: Date.now(), progress: st.progress });
+      const track = untracked(() => this.progressTrack());
+      if (st?.state !== 'finalizing' || st.progress < DECODE_START_PROGRESS) {
+        if (track) this.progressTrack.set(null);
+        return;
+      }
+      const sample = { at: Date.now(), progress: st.progress };
+      if (!track || track.sessionId !== id) {
+        this.progressTrack.set({ sessionId: id, samples: [sample] });
+      } else if (sample.progress !== track.samples[track.samples.length - 1].progress) {
+        const kept = track.samples.filter(
+          (s, i) => i === 0 || s.at >= sample.at - ETA_PACE_WINDOW_MS
+        );
+        this.progressTrack.set({ ...track, samples: [...kept, sample] });
       }
     });
   }

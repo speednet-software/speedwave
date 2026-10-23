@@ -808,48 +808,105 @@ describe('LiveTranscriptComponent', () => {
       expect(component.quality()?.text).toBe('Waiting for another transcription to finish');
     });
 
-    it('estimates the time left from the pace so far', () => {
-      const now = vi.spyOn(Date, 'now').mockReturnValue(0);
-      fixture.componentRef.setInput(
-        'session',
-        session({ status: { state: 'finalizing', progress: 0.05 } })
-      );
-      fixture.detectChanges();
-      expect(component.eta()).toBe('');
+    describe('time estimate', () => {
+      let now: ReturnType<typeof vi.spyOn>;
 
-      now.mockReturnValue(60_000);
-      fixture.componentRef.setInput(
-        'session',
-        session({ status: { state: 'finalizing', progress: 0.15 } })
-      );
-      fixture.detectChanges();
-      expect(component.eta()).toBe('about 5 min left');
+      beforeEach(() => {
+        now = vi.spyOn(Date, 'now').mockReturnValue(0);
+      });
 
-      now.mockReturnValue(240_000);
-      fixture.componentRef.setInput(
-        'session',
-        session({ status: { state: 'finalizing', progress: 0.55 } })
-      );
-      fixture.detectChanges();
-      expect(component.eta()).toBe('less than a minute left');
-      now.mockRestore();
-    });
+      afterEach(() => {
+        now.mockRestore();
+      });
 
-    it('shows no estimate before the pass has moved enough to extrapolate', () => {
-      const now = vi.spyOn(Date, 'now').mockReturnValue(0);
-      fixture.componentRef.setInput(
-        'session',
-        session({ status: { state: 'finalizing', progress: 0.05 } })
-      );
-      fixture.detectChanges();
-      now.mockReturnValue(2_000);
-      fixture.componentRef.setInput(
-        'session',
-        session({ status: { state: 'finalizing', progress: 0.3 } })
-      );
-      fixture.detectChanges();
-      expect(component.eta()).toBe('');
-      now.mockRestore();
+      const report = (atMs: number, progress: number, id = 'sess-1'): string => {
+        now.mockReturnValue(atMs);
+        fixture.componentRef.setInput(
+          'session',
+          session({ id, status: { state: 'finalizing', progress } })
+        );
+        fixture.detectChanges();
+        return component.eta();
+      };
+
+      it('estimates the decode time left from the pace so far', () => {
+        expect(report(0, 0.05)).toBe('');
+        expect(report(60_000, 0.15)).toBe('about 5 min left');
+        expect(report(240_000, 0.55)).toBe('less than a minute left');
+      });
+
+      it('shows no estimate before the decode has run for a few seconds', () => {
+        report(0, 0.05);
+        expect(report(2_000, 0.3)).toBe('');
+      });
+
+      it('shows no estimate before the decode has moved enough to extrapolate', () => {
+        report(0, 0.05);
+        expect(report(60_000, 0.09)).toBe('');
+      });
+
+      it('anchors on the decode start, not on the wait and the model load before it', () => {
+        expect(report(0, 0)).toBe('');
+        expect(report(50_000, 0.02)).toBe('');
+        expect(report(60_000, 0.05)).toBe('');
+        expect(report(120_000, 0.15)).toBe('about 5 min left');
+      });
+
+      it('shows nothing while the pass is queued or loading its model', () => {
+        expect(report(0, 0)).toBe('');
+        expect(report(600_000, 0.04)).toBe('');
+      });
+
+      it('follows the pace of the last minutes when a lane with more speech decodes slower', () => {
+        report(0, 0.05);
+        report(60_000, 0.15);
+        expect(report(120_000, 0.25)).toBe('about 4 min left');
+        report(180_000, 0.3);
+        report(240_000, 0.35);
+        expect(report(300_000, 0.4)).toBe('about 4 min left');
+        report(360_000, 0.45);
+        expect(report(420_000, 0.5)).toBe('about 2 min left');
+      });
+
+      it('falls back to the pace since the decode start when the last minutes hold one report', () => {
+        report(0, 0.05);
+        report(30_000, 0.1);
+        expect(report(300_000, 0.3)).toBe('about 6 min left');
+      });
+
+      it('falls back to the pace since the decode start when the window spans under half a minute', () => {
+        report(0, 0.05);
+        report(130_000, 0.3);
+        report(131_000, 0.32);
+        expect(report(132_000, 0.34)).toBe('about 2 min left');
+        expect(report(132_000, 0.36)).toBe('about 2 min left');
+      });
+
+      it('names the phase after the decode instead of a time', () => {
+        report(0, 0.05);
+        report(600_000, 0.55);
+        expect(report(660_000, 0.6)).toBe('almost done');
+        expect(report(661_000, 0.62)).toBe('telling speakers apart');
+        expect(report(900_000, 0.85)).toBe('almost done');
+        expect(report(901_000, 0.9)).toBe('almost done');
+      });
+
+      it('starts over for another recording', () => {
+        report(0, 0.05);
+        report(60_000, 0.15);
+        expect(report(60_000, 0.15, 'sess-2')).toBe('');
+        expect(report(120_000, 0.25, 'sess-2')).toBe('about 4 min left');
+      });
+
+      it('drops the track once the pass is over', () => {
+        report(0, 0.05);
+        report(60_000, 0.15);
+        now.mockReturnValue(61_000);
+        fixture.componentRef.setInput('session', session({ status: { state: 'done' } }));
+        fixture.detectChanges();
+        expect(component.eta()).toBe('');
+        expect(report(120_000, 0.05)).toBe('');
+      });
     });
   });
 

@@ -865,6 +865,12 @@ const FINALIZE_WINDOW_SECS: f32 = 30.0;
 /// *next* window's overlap are dropped from the previous window's output to avoid duplicates.
 const FINALIZE_WINDOW_OVERLAP_SECS: f32 = 3.0;
 
+const FINALIZE_DECODE_START_PROGRESS: f32 = 0.05;
+const FINALIZE_DECODE_DONE_PROGRESS: f32 = 0.60;
+const FINALIZE_DIARIZE_START_PROGRESS: f32 = 0.62;
+const FINALIZE_DIARIZE_DONE_PROGRESS: f32 = 0.85;
+const FINALIZE_RESULT_PROGRESS: f32 = 0.9;
+
 /// Runs the offline pass: transcribes the recorded WAV, diarizes the meeting channel when a loader
 /// is given (a failure there only warns), installs `final_segments` and marks `Done`; a cancelled
 /// `pass` writes nothing more and returns [`DriverError::Superseded`] or [`DriverError::Deleted`].
@@ -968,7 +974,7 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
         Err(e) => pass_stopped(&e).map_or(Ok(()), Err),
         Ok(_) => Ok(()),
     };
-    report(0.05)?;
+    report(FINALIZE_DECODE_START_PROGRESS)?;
     let total_samples: u64 = plans.iter().map(|p| p.samples).sum();
     let mut final_segs: Vec<Segment> = Vec::new();
     let system_frames: u64 = if diarizer.is_some() {
@@ -1017,7 +1023,13 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
                 pcm,
                 &transcribe_opts,
                 source,
-                |frac| report(0.05 + 0.55 * (done_frac + frac * lane_share)),
+                |frac| {
+                    report(
+                        FINALIZE_DECODE_START_PROGRESS
+                            + (FINALIZE_DECODE_DONE_PROGRESS - FINALIZE_DECODE_START_PROGRESS)
+                                * (done_frac + frac * lane_share),
+                    )
+                },
             ) {
                 Ok(s) => s,
                 Err(e @ (DriverError::Deleted | DriverError::Superseded)) => return Err(e),
@@ -1042,6 +1054,7 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
             first_read_error.unwrap_or_else(|| NO_AUDIO.to_string()),
         ));
     }
+    report(FINALIZE_DECODE_DONE_PROGRESS)?;
     final_segs.sort_by_key(|s| s.start);
 
     drop(transcriber);
@@ -1060,7 +1073,7 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
         )?,
         None => None,
     };
-    report(0.9)?;
+    report(FINALIZE_RESULT_PROGRESS)?;
 
     if let Err(e) = store.set_final_segments(id, &pass, final_segs, diarization) {
         return Err(pass_stopped(&e)
@@ -1082,7 +1095,7 @@ fn diarize_meeting_channel(
     final_segs: &mut [Segment],
     report: &dyn Fn(f32) -> Result<(), DriverError>,
 ) -> Result<Option<DiarizationRecord>, DriverError> {
-    report(0.62)?;
+    report(FINALIZE_DIARIZE_START_PROGRESS)?;
     let started = Instant::now();
     let result =
         load().and_then(|mut diarizer| diarizer.diarize(&system_pcm, &pass.decode_cancel()));
@@ -1122,7 +1135,7 @@ fn diarize_meeting_channel(
             None
         }
     };
-    report(0.85)?;
+    report(FINALIZE_DIARIZE_DONE_PROGRESS)?;
     Ok(record)
 }
 
@@ -1315,6 +1328,93 @@ mod tests {
             audio_path.to_path_buf(),
         );
         store.create(s).unwrap()
+    }
+
+    #[test]
+    fn finalize_progress_bands_match_ts_mirror() {
+        let pane = include_str!(
+            "../../../../desktop/src/src/app/meeting-transcription/live-transcript/live-transcript.component.ts"
+        );
+        for (name, value) in [
+            ("DECODE_START_PROGRESS", FINALIZE_DECODE_START_PROGRESS),
+            ("DECODE_DONE_PROGRESS", FINALIZE_DECODE_DONE_PROGRESS),
+            ("DIARIZE_START_PROGRESS", FINALIZE_DIARIZE_START_PROGRESS),
+            ("DIARIZE_DONE_PROGRESS", FINALIZE_DIARIZE_DONE_PROGRESS),
+        ] {
+            let prefix = format!("const {name} = ");
+            let line = pane
+                .lines()
+                .find(|l| l.starts_with(&prefix))
+                .unwrap_or_else(|| panic!("live-transcript.component.ts must declare `{prefix}`"));
+            let ts: f32 = line[prefix.len()..]
+                .trim_end_matches(';')
+                .parse()
+                .unwrap_or_else(|e| {
+                    panic!("{name} in live-transcript.component.ts is not a number: {e}")
+                });
+            assert!(
+                (ts - value).abs() < 1e-6,
+                "{name} is {ts} in live-transcript.component.ts and {value} in transcript_driver.rs"
+            );
+        }
+    }
+
+    #[test]
+    fn run_finalize_reports_the_decode_done_band_exactly_between_the_lanes_and_the_result() {
+        use crate::transcription::transcript_store::TranscriptEvent;
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session(&store, &store_dir.path().join("a.wav"));
+        let _ = store.set_status(id, TranscriptStatus::Finalizing { progress: 0.0 });
+        let wav = store_dir.path().join("stereo.wav");
+        let mut w = hound::WavWriter::create(
+            &wav,
+            hound::WavSpec {
+                channels: 2,
+                sample_rate: 16_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .unwrap();
+        for i in 0..(70 * 16_000) {
+            let v = (0.1
+                * (2.0 * std::f32::consts::PI * 220.0 * i as f32 / 16_000.0).sin()
+                * 32_767.0) as i16;
+            w.write_sample(v).unwrap();
+            w.write_sample(v).unwrap();
+        }
+        w.finalize().unwrap();
+        let mut sub = store.subscribe(id).unwrap();
+
+        run_finalize(FinalizeConfig {
+            pass: store.claim_finalizing(id),
+            id,
+            store: store.clone(),
+            audio_paths: vec![wav],
+            transcriber: Box::new(MockTranscriber {
+                seg_secs: 2.0,
+                text_template: "f{n}".to_string(),
+            }),
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+            diarizer: None,
+        })
+        .unwrap();
+
+        let mut reported = Vec::new();
+        while let Ok(event) = sub.events.try_recv() {
+            if let TranscriptEvent::FinalizeProgress { progress, .. } = event {
+                reported.push(progress);
+            }
+        }
+        assert_eq!(reported.first(), Some(&FINALIZE_DECODE_START_PROGRESS));
+        assert!(reported.windows(2).all(|w| w[0] <= w[1]), "{reported:?}");
+        let done = reported
+            .iter()
+            .rposition(|p| p.to_bits() == FINALIZE_DECODE_DONE_PROGRESS.to_bits())
+            .unwrap_or_else(|| panic!("no exact decode-done report in {reported:?}"));
+        assert!(done > 2, "{reported:?}");
+        assert_eq!(reported[done + 1..], [FINALIZE_RESULT_PROGRESS]);
     }
 
     #[test]
