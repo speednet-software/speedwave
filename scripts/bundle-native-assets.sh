@@ -37,10 +37,9 @@ adhoc_resign() {
   case "$pkg" in
     audio-capture) [[ -f "$ent/audio-capture.plist" ]] && ent_arg=(--entitlements "$ent/audio-capture.plist") ;;
     calendar)      [[ -f "$ent/calendars.plist" ]]     && ent_arg=(--entitlements "$ent/calendars.plist") ;;
-    reminders)     [[ -f "$ent/reminders.plist" ]]     && ent_arg=(--entitlements "$ent/reminders.plist") ;;
     mail|notes)    [[ -f "$ent/apple-events.plist" ]]  && ent_arg=(--entitlements "$ent/apple-events.plist") ;;
   esac
-  codesign --force --sign - "${ent_arg[@]}" "$path" >/dev/null 2>&1 \
+  codesign --force --sign - ${ent_arg[@]+"${ent_arg[@]}"} "$path" >/dev/null 2>&1 \
     || echo "  warning: ad-hoc re-sign of $path failed (dev build) — capture may be SIGKILLed by taskgated" >&2
 }
 

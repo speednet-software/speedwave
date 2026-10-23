@@ -54,7 +54,7 @@ This is described here, not in another ADR. The legacy TCC.db rows were keyed by
 - Every message that leads the user back to access (`composeErrorMessage` in `native/macos/shared/Sources/SharedCLI/Utilities.swift`) names the System Settings pane (Calendars, Reminders, or Automation for Mail and Notes) and `tccutil reset <Service> pl.speedwave.desktop`. A reset of `AppleEvents` covers every app Speedwave controls, and the message says so.
 - `silentReject` no longer advises a reinstall. Once the entitlements ship it usually means the user clicked Don't Allow: the Apple Events gate's passive read cannot tell a refusal from a missing decision, and EventKit can keep answering `notDetermined` in the process that has just asked. The message gives the same steps and asks for a bug report only when no dialog appeared.
 - `performCheckPermission` trusts a granted request whose post-status still reads `notDetermined` (seen on three of four first grants); an explicit `denied`, `restricted` or `writeOnly` post-status still wins.
-- The helpers keep their sub-identifiers as code-signing identifiers (`verify_identifier` in `scripts/sign-bundled-binaries.sh`) and their embedded `Info.plist`, which EventKit reads in the calling process[^1]. `subBundleIdentifier(for:)` and `resolvedBundleIdentifier()` are removed.
+- The helpers keep their sub-identifiers as code-signing identifiers (`verify_identifier` in `scripts/sign-bundled-binaries.sh`) and their embedded `Info.plist`, which EventKit reads in the calling process[^1]. `subBundleIdentifier(for:)` and `resolvedBundleIdentifier()` are removed, and `reminders-cli` is signed without entitlements, its `reminders.plist` key being none Apple defines.
 
 **Consequences.**
 
