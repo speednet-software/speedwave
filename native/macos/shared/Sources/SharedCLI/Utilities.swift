@@ -198,11 +198,11 @@ public func performCheckPermission(gate: PermissionGate, entity: PermissionEntit
     let postStatus = mapRawToPermissionStatus(gate.authorizationStatus())
     logTrace("performCheckPermission post-status entity=\(entity.rawValue) status=\(postStatus.rawValue)")
     let final: PermissionStatus
-    if requestGranted && postStatus == .granted {
+    if requestGranted && (postStatus == .granted || postStatus == .notDetermined) {
         final = .granted
     } else if postStatus == .notDetermined {
         final = .silentReject
-        logTrace("performCheckPermission SILENT REJECT entity=\(entity.rawValue) — post-status remained notDetermined; check Info.plist usage description and code signature")
+        logTrace("performCheckPermission SILENT REJECT entity=\(entity.rawValue) — post-status remained notDetermined; check tccd for a hardened-runtime entitlement missing on the responsible app")
     } else {
         final = postStatus
     }

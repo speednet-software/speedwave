@@ -609,6 +609,33 @@ final class SharedCLITests: XCTestCase {
             "Post-status .denied must mention tccutil reset with sub-identifier")
     }
 
+    func testPerformGrantedRequestWhilePostStatusStillReadsNotDetermined() {
+        let gate = MockGate()
+        gate.initialStatus = .notDetermined
+        gate.requestGranted = true
+        gate.postRequestStatus = .notDetermined
+        let result = performCheckPermission(gate: gate, entity: .calendar)
+        let parsed = try! JSONSerialization.jsonObject(with: result.data(using: .utf8)!) as! [String: Any]
+        XCTAssertEqual(parsed["granted"] as? Bool, true,
+            "EventKit keeps answering notDetermined in the process that was just granted")
+        XCTAssertEqual(parsed["status"] as? String, "granted")
+        XCTAssertNil(parsed["error"])
+    }
+
+    func testPerformTrustedGrantStillRunsTheDataAccessCheck() {
+        let gate = MockGate()
+        gate.initialStatus = .notDetermined
+        gate.requestGranted = true
+        gate.postRequestStatus = .notDetermined
+        gate.dataAccessError = "Notes got privilege error"
+        let result = performCheckPermission(gate: gate, entity: .notes)
+        let parsed = try! JSONSerialization.jsonObject(with: result.data(using: .utf8)!) as! [String: Any]
+        XCTAssertEqual(parsed["granted"] as? Bool, false)
+        XCTAssertEqual(parsed["status"] as? String, "silentReject")
+        let error = parsed["error"] as? String ?? ""
+        XCTAssertTrue(error.contains("data access failed: Notes got privilege error"), "got: \(error)")
+    }
+
     func testPerformTimeout() {
         let gate = MockGate()
         gate.initialStatus = .notDetermined
