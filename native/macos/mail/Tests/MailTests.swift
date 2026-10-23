@@ -5,82 +5,51 @@ import XCTest
 final class MailTests: XCTestCase {
 
 
-    func testAppleMailAlwaysAvailable() {
-        XCTAssertTrue(AppleMailClient.isAvailable())
+    func testParseMailboxesTypesTheMessageAndUnreadCountsAsNumbers() {
+        let rows = AppleMailClient.parseMailboxes(
+            "iCloud\u{1F}INBOX\u{1F}42\u{1F}7\u{1E}Work\u{1F}Archive\u{1F}0\u{1F}0")
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertEqual(rows[0]["account"] as? String, "iCloud")
+        XCTAssertEqual(rows[0]["name"] as? String, "INBOX")
+        XCTAssertEqual(rows[0]["message_count"] as? Int, 42)
+        XCTAssertEqual(rows[0]["unread_count"] as? Int, 7)
+        XCTAssertEqual(rows[1]["message_count"] as? Int, 0)
+        XCTAssertEqual(rows[1]["unread_count"] as? Int, 0)
+    }
+
+    func testParseMailboxesOmitsACountThatIsNotAnInteger() {
+        let rows = AppleMailClient.parseMailboxes("iCloud\u{1F}INBOX\u{1F}missing value\u{1F}missing value")
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertNil(rows[0]["message_count"])
+        XCTAssertNil(rows[0]["unread_count"])
     }
 
 
-    func testDetectClientsHasMailAndOutlookEntries() {
-        let result = detectClients()
-        let clients = result["clients"] as? [[String: Any]] ?? []
-        XCTAssertEqual(clients.count, 2, "must list Apple Mail + Outlook")
-        XCTAssertEqual(clients.first?["name"] as? String, AppleMailClient.name)
-        XCTAssertEqual(clients.first?["available"] as? Bool, true)
+
+    func testDetectClientsReportsAppleMailAsTheOnlySupportedClient() {
+        let clients = detectClients(outlookInstalled: { false })["clients"] as? [[String: Any]] ?? []
+        XCTAssertEqual(clients.count, 1)
+        XCTAssertEqual(clients.first?["name"] as? String, "Apple Mail")
+        XCTAssertEqual(clients.first?["supported"] as? Bool, true)
+        XCTAssertNil(clients.first?["instructions"])
+    }
+
+    func testDetectClientsReportsAnInstalledOutlookAsUnsupportedWithInstructions() {
+        let clients = detectClients(outlookInstalled: { true })["clients"] as? [[String: Any]] ?? []
+        XCTAssertEqual(clients.count, 2)
         let outlook = clients.last
-        XCTAssertEqual(outlook?["name"] as? String, OutlookClient.name)
-        XCTAssertNotNil(outlook?["available"], "Outlook entry must always carry an availability flag")
-        if let err = outlook?["error"] as? String {
-            XCTAssertEqual(outlook?["available"] as? Bool, false,
-                           "an Outlook error must pair with available=false")
-            XCTAssertFalse(err.isEmpty)
-        }
-    }
-
-    func testOutlookAvailabilityRethrowsPermissionAndTimeoutErrors() {
-        let permission = ScriptError.automationPermission("not allowed")
-        let timeout = ScriptError.timeout(5, nil)
-        let scriptFailed = ScriptError.scriptFailed("syntax error")
-
-        func classify(_ e: ScriptError) -> Bool {
-            switch e {
-            case .automationPermission, .timeout: return true
-            case .scriptFailed: return false
-            }
-        }
-        XCTAssertTrue(classify(permission), "permission denial must be surfaced, not swallowed")
-        XCTAssertTrue(classify(timeout), "timeout must be surfaced, not swallowed")
-        XCTAssertFalse(classify(scriptFailed), "a generic failure means Outlook is simply not available")
+        XCTAssertEqual(outlook?["name"] as? String, "Microsoft Outlook")
+        XCTAssertEqual(outlook?["supported"] as? Bool, false)
+        let instructions = outlook?["instructions"] as? String ?? ""
+        XCTAssertTrue(instructions.contains("not supported"), instructions)
+        XCTAssertTrue(instructions.contains("Internet Accounts"), instructions)
+        XCTAssertTrue(instructions.contains("Apple Mail"), instructions)
     }
 
 
     func testMailErrorMissingField() {
         let error = MailError.missingField("to")
         XCTAssertEqual(error.errorDescription, "Missing required field: to")
-    }
-
-    func testMailErrorClientNotAvailable() {
-        let error = MailError.clientNotAvailable("Microsoft Outlook")
-        XCTAssertTrue(error.errorDescription!.contains("not running"))
-    }
-
-    func testMailErrorUnknownClient() {
-        let error = MailError.unknownClient("thunderbird")
-        XCTAssertTrue(error.errorDescription!.contains("Unknown mail client"))
-    }
-
-    func testMailErrorConfirmRequired() {
-        let error = MailError.confirmRequired
-        XCTAssertTrue(error.errorDescription!.contains("confirm_send"))
-    }
-
-
-    func testResolveClientDefaultIsMail() throws {
-        let client = try resolveClient(preferred: nil)
-        XCTAssertEqual(client, "mail")
-    }
-
-    func testResolveClientAppleMail() throws {
-        let client = try resolveClient(preferred: "mail")
-        XCTAssertEqual(client, "mail")
-    }
-
-    func testResolveClientAppleMailAlt() throws {
-        let client = try resolveClient(preferred: "Apple Mail")
-        XCTAssertEqual(client, "mail")
-    }
-
-    func testResolveClientUnknownThrows() {
-        XCTAssertThrowsError(try resolveClient(preferred: "thunderbird"))
     }
 
 
@@ -105,7 +74,7 @@ final class MailTests: XCTestCase {
 
 
     func testAppleMailRecipientClausesSingleAddress() {
-        let result = AppleMailClient.recipientClauses("alice@example.com", kind: "to")
+        let result = MailSending.recipientClauses(["alice@example.com"], kind: "to")
         XCTAssertEqual(
             result,
             "        make new to recipient at end of to recipients with properties {address:\"alice@example.com\"}"
@@ -113,7 +82,7 @@ final class MailTests: XCTestCase {
     }
 
     func testAppleMailRecipientClausesMultipleAddressesOneLinePerRecipient() {
-        let result = AppleMailClient.recipientClauses("alice@example.com,bob@example.com", kind: "cc")
+        let result = MailSending.recipientClauses(["alice@example.com", "bob@example.com"], kind: "cc")
         let lines = result.components(separatedBy: "\n")
         XCTAssertEqual(lines.count, 2, "must emit one AppleScript line per recipient")
         XCTAssertTrue(lines[0].contains("cc recipient") && lines[0].contains("alice@example.com"))
@@ -121,200 +90,50 @@ final class MailTests: XCTestCase {
     }
 
     func testAppleMailRecipientClausesEmptyStringProducesNoLines() {
-        XCTAssertEqual(AppleMailClient.recipientClauses("", kind: "bcc"), "")
+        XCTAssertEqual(MailSending.recipientClauses([], kind: "bcc"), "")
     }
 
 
-    func testOutlookRecipientClausesSingleAddress() {
-        let result = OutlookClient.recipientClauses("alice@example.com", kind: "to")
-        XCTAssertTrue(result.contains("email address:{address:\"alice@example.com\"}"))
+    func testMailboxLookupSearchesEveryAccountWhenNoAccountIsGiven() {
+        let script = AppleMailClient.mailboxLookup(name: "Archive", account: nil)
+        XCTAssertTrue(script.contains("repeat with spwAcctRef in accounts"), script)
+        XCTAssertTrue(script.contains("set spwAcct to contents of spwAcctRef"), script)
+        XCTAssertTrue(script.contains("exists mailbox \"Archive\" of spwAcct"), script)
+        XCTAssertFalse(script.contains("exists account"), script)
+        XCTAssertTrue(script.contains("if exists mailbox \"Archive\" then"), script)
+        XCTAssertTrue(script.contains("set end of spwOwners to missing value"), script)
+        XCTAssertTrue(script.contains("set spwAcctId to id of spwAcct"), script)
     }
 
-    func testOutlookRecipientClausesMultipleAddressesOneLinePerRecipient() {
-        let result = OutlookClient.recipientClauses("alice@example.com,bob@example.com", kind: "bcc")
-        let lines = result.components(separatedBy: "\n")
-        XCTAssertEqual(lines.count, 2, "must emit one AppleScript line per recipient")
-        XCTAssertTrue(lines[0].contains("bcc recipient") && lines[0].contains("alice@example.com"))
-        XCTAssertTrue(lines[1].contains("bcc recipient") && lines[1].contains("bob@example.com"))
+    func testMailboxLookupSearchesOnlyTheNamedAccount() {
+        let script = AppleMailClient.mailboxLookup(name: "Archive", account: "Exchange")
+        XCTAssertTrue(script.contains("set spwNamed to (every account whose name is \"Exchange\")"), script)
+        XCTAssertTrue(script.contains("set mb to mailbox \"Archive\" of spwAcct"), script)
+        XCTAssertFalse(script.contains("if exists mailbox \"Archive\" then"), script)
     }
 
-
-    func testSendEmailParamsCarryBccUpToConfirmGate() {
-        let params: [String: Any] = [
-            "to": "alice@example.com",
-            "subject": "Test",
-            "body": "Hello",
-            "bcc": "carol@example.com",
-            "confirm_send": false,
-        ]
-        XCTAssertThrowsError(try sendEmail(params: params)) { error in
-            guard case MailError.confirmRequired = error else {
-                return XCTFail("expected confirmRequired (proves to/subject/body/bcc parsed), got \(error)")
-            }
-        }
+    func testMailboxLookupEscapesQuotesInNames() {
+        let script = AppleMailClient.mailboxLookup(name: "My \"Box\"", account: "Work \"A\"")
+        XCTAssertTrue(script.contains("mailbox \"My \\\"Box\\\"\" of spwAcct"), script)
+        XCTAssertTrue(script.contains("whose name is \"Work \\\"A\\\"\""), script)
     }
 
-
-    func testRunMailScriptMapsMailboxNotFoundToTeachingError() {
-        let script = "error \"Can\u{2019}t get mailbox \\\"Nope\\\". (-1728)\""
-        XCTAssertThrowsError(
-            try runMailScript(script, timeout: 5, mailbox: "Nope", mailboxMissing: { true })
-        ) { error in
-            guard case CLIError.notFound(let message) = error else {
-                return XCTFail("expected CLIError.notFound, got \(error)")
-            }
-            XCTAssertTrue(message.contains("listMailboxes"))
-        }
+    func testMailboxLookupInOnMyMacAddressesTheLocalMailbox() {
+        let script = AppleMailClient.mailboxLookup(name: "Speedwave-Test", account: "On My Mac")
+        XCTAssertTrue(script.contains("set mb to mailbox \"Speedwave-Test\"\n"), script)
+        XCTAssertTrue(script.contains("set spwAcctName to \"On My Mac\""), script)
+        XCTAssertFalse(script.contains("spwAcct\n"), script)
+        XCTAssertFalse(script.contains("exists account"), script)
     }
 
-    func testRunMailScriptPropagatesWhenMailboxExists() {
-        let script = "error \"Can\u{2019}t get subject of message 1 of mailbox \\\"Inbox\\\". (-1728)\""
-        XCTAssertThrowsError(
-            try runMailScript(script, timeout: 5, mailbox: "Inbox", mailboxMissing: { false })
-        ) { error in
-            guard case ScriptError.scriptFailed = error else {
-                return XCTFail("expected raw ScriptError.scriptFailed, got \(error)")
-            }
-        }
+    func testMessageLookupFindsTheMessageInItsOwnMailboxAndAccount() {
+        let id = MailId(accountId: "Work-ID", account: "Work", mailbox: "Archive", messageId: "<a\"b@x>")
+        let script = AppleMailClient.messageLookup(id)
+        XCTAssertTrue(script.contains("set spwAcct to account id \"Work-ID\""), script)
+        XCTAssertTrue(script.contains("mailbox \"Archive\" of spwAcct"), script)
+        XCTAssertTrue(script.contains("every message of mb whose message id is \"<a\\\"b@x>\""), script)
+        XCTAssertFalse(script.contains("of inbox"), script)
     }
-
-    func testRunMailScriptDoesNotWrapWhenMailboxIsNil() {
-        let script = "error \"Can\u{2019}t get mailbox \\\"Nope\\\". (-1728)\""
-        XCTAssertThrowsError(try runMailScript(script, timeout: 5, mailbox: nil)) { error in
-            guard case ScriptError.scriptFailed = error else {
-                return XCTFail("expected raw ScriptError.scriptFailed, got \(error)")
-            }
-        }
-    }
-
-    func testOutlookListEmailsMapsMailboxNotFoundToTeachingError() throws {
-        guard (try? OutlookClient.isAvailable()) == true else {
-            throw XCTSkip("Microsoft Outlook not installed/running in this environment")
-        }
-        XCTAssertThrowsError(
-            try OutlookClient.listEmails(limit: 1, mailbox: "SPW-Nonexistent-Folder-XYZ-123")
-        ) { error in
-            guard case CLIError.notFound(let message) = error else {
-                return XCTFail("expected CLIError.notFound, got \(error)")
-            }
-            XCTAssertTrue(message.contains("listMailboxes"))
-        }
-    }
-
-
-    func testSendEmailRejectsEmptyTo() {
-        let params: [String: Any] = [
-            "to": "", "subject": "Test", "body": "Hello", "confirm_send": true,
-        ]
-        XCTAssertThrowsError(try sendEmail(params: params)) { error in
-            guard case MailError.emptyRecipients("to") = error else {
-                return XCTFail("expected emptyRecipients(\"to\"), got \(error)")
-            }
-        }
-    }
-
-    func testSendEmailRejectsWhitespaceOnlyTo() {
-        let params: [String: Any] = [
-            "to": "   ", "subject": "Test", "body": "Hello", "confirm_send": true,
-        ]
-        XCTAssertThrowsError(try sendEmail(params: params)) { error in
-            guard case MailError.emptyRecipients("to") = error else {
-                return XCTFail("expected emptyRecipients(\"to\"), got \(error)")
-            }
-        }
-    }
-
-    func testSendEmailRejectsCommaOnlyTo() {
-        let params: [String: Any] = [
-            "to": ",", "subject": "Test", "body": "Hello", "confirm_send": true,
-        ]
-        XCTAssertThrowsError(try sendEmail(params: params)) { error in
-            guard case MailError.emptyRecipients("to") = error else {
-                return XCTFail("expected emptyRecipients(\"to\"), got \(error)")
-            }
-        }
-    }
-
-    func testSendEmailRejectsWhitespaceAndCommaOnlyTo() {
-        let params: [String: Any] = [
-            "to": " , ", "subject": "Test", "body": "Hello", "confirm_send": true,
-        ]
-        XCTAssertThrowsError(try sendEmail(params: params)) { error in
-            guard case MailError.emptyRecipients("to") = error else {
-                return XCTFail("expected emptyRecipients(\"to\"), got \(error)")
-            }
-        }
-    }
-
-    func testSendEmailRejectsCommaOnlyCc() {
-        let params: [String: Any] = [
-            "to": "alice@example.com", "subject": "Test", "body": "Hello",
-            "cc": " , ", "confirm_send": true,
-        ]
-        XCTAssertThrowsError(try sendEmail(params: params)) { error in
-            guard case MailError.emptyRecipients("cc") = error else {
-                return XCTFail("expected emptyRecipients(\"cc\"), got \(error)")
-            }
-        }
-    }
-
-    func testSendEmailRejectsWhitespaceOnlyBcc() {
-        let params: [String: Any] = [
-            "to": "alice@example.com", "subject": "Test", "body": "Hello",
-            "bcc": "   ", "confirm_send": true,
-        ]
-        XCTAssertThrowsError(try sendEmail(params: params)) { error in
-            guard case MailError.emptyRecipients("bcc") = error else {
-                return XCTFail("expected emptyRecipients(\"bcc\"), got \(error)")
-            }
-        }
-    }
-
-    func testSendEmailAllowsOmittedCcAndBcc() {
-        let params: [String: Any] = [
-            "to": "alice@example.com", "subject": "Test", "body": "Hello",
-        ]
-        XCTAssertThrowsError(try sendEmail(params: params)) { error in
-            guard case MailError.confirmRequired = error else {
-                return XCTFail("expected confirmRequired, got \(error)")
-            }
-        }
-    }
-
-    func testSendEmailEmptyRecipientsErrorMessageNamesField() {
-        XCTAssertTrue(MailError.emptyRecipients("to").errorDescription!.contains("'to' field is empty"))
-        XCTAssertTrue(MailError.emptyRecipients("bcc").errorDescription!.contains("'bcc' field is empty"))
-        XCTAssertTrue(
-            MailError.emptyRecipients("cc").errorDescription!.contains("at least one recipient"))
-    }
-
-    func testSendEmailValidToStillReachesConfirmGate() {
-        let params: [String: Any] = [
-            "to": "alice@example.com", "subject": "Test", "body": "Hello",
-        ]
-        XCTAssertThrowsError(try sendEmail(params: params)) { error in
-            guard case MailError.confirmRequired = error else {
-                return XCTFail("expected confirmRequired (proves 'to' passed validation), got \(error)")
-            }
-        }
-    }
-
-
-    func testSendEmailRequiresConfirmation() {
-        let params: [String: Any] = [
-            "to": "test@example.com",
-            "subject": "Test",
-            "body": "Hello",
-        ]
-        XCTAssertNil(params["confirm_send"])
-    }
-
-    func testSendEmailRequiredFields() {
-        let params: [String: Any] = ["subject": "Test"]
-        XCTAssertNil(params["to"])
-        XCTAssertNil(params["body"])
-    }
-
 
     func testPermissionCheckScriptAccessesData() {
         XCTAssertFalse(
@@ -326,12 +145,6 @@ final class MailTests: XCTestCase {
             "permissionCheckScript must target Mail app"
         )
     }
-
-    func testPermissionCheckScriptDeniedIncludesGuidance() {
-        let detail = "Mail access denied: some error\nGrant access in System Settings > Privacy & Security > Automation"
-        XCTAssertTrue(detail.contains("Automation"))
-    }
-
 
     func testFormatPermissionResultWithAutomationPermissionError() {
         let errorMsg = ScriptError.automationPermission("not allowed").errorDescription!

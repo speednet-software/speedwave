@@ -1,35 +1,319 @@
 import Foundation
 import SharedCLI
 
-/// One `make new <kind> recipient...` AppleScript line per comma-separated address.
-/// `addressProperty` renders the escaped address into each client's property clause.
-func makeRecipientClauses(
-    _ addresses: String,
-    kind: String,
-    addressProperty: (String) -> String
-) -> String {
-    splitAddressList(addresses)
-        .map { addr in
-            "        make new \(kind) recipient at end of \(kind) recipients "
-                + "with properties {\(addressProperty(escapeAppleScript(addr)))}"
-        }
-        .joined(separator: "\n")
+let mailboxNotFoundMarker = "SPW_MAILBOX_NOT_FOUND"
+let mailboxAmbiguousMarker = "SPW_MAILBOX_AMBIGUOUS:"
+let accountNotFoundMarker = "SPW_ACCOUNT_NOT_FOUND"
+let accountAmbiguousMarker = "SPW_ACCOUNT_AMBIGUOUS"
+let accountDisabledMarker = "SPW_ACCOUNT_DISABLED"
+let mailNotFoundMarker = "SPW_MAIL_NOT_FOUND"
+let signatureNotFoundMarker = "SPW_SIGNATURE_NOT_FOUND"
+let noSenderMarker = "SPW_NO_SENDER"
+let mailboxesChangedMarker = "SPW_MAILBOXES_CHANGED"
+
+/// The JSON argument carrying the script time budget in milliseconds, set by the mail tools of the os worker.
+let scriptTimeoutParam = "script_timeout_ms"
+
+/// Runs one AppleScript within `timeout` seconds and returns its stdout, or throws a `ScriptError`.
+typealias ScriptExecutor = (_ script: String, _ timeout: TimeInterval) throws -> String
+
+/// The production executor: a separate `osascript` process per script.
+let osascriptExecutor: ScriptExecutor = { script, timeout in
+    try ScriptRunner.run(script, timeout: timeout)
 }
 
-/// Runs a mailbox-scoped AppleScript. A -1728 "Can't get" failure maps to a mailbox teaching error
-/// only when `mailboxMissing` confirms it's absent — a per-message read failure keeps its real cause.
-func runMailScript(
-    _ script: String,
-    timeout: TimeInterval,
-    mailbox: String?,
-    mailboxMissing: () -> Bool = { false }
-) throws -> String {
-    do { return try ScriptRunner.run(script, timeout: timeout) }
-    catch ScriptError.scriptFailed(let msg)
-        where mailbox != nil && isAppleScriptNotFoundError(msg) && mailboxMissing()
-    {
-        throw CLIError.notFound(
-            "Mailbox '\(mailbox!)' not found. List valid mailboxes via listMailboxes and use their name field."
-        )
+/// A failure the mail tools turn into a teaching error; `code` is the stable prefix of its description.
+enum MailFailure: LocalizedError, Equatable {
+    case timeout(seconds: TimeInterval)
+    case automationDenied(String)
+    case mailboxNotFound(mailbox: String, account: String?)
+    case accountNotFound(String)
+    case accountAmbiguous(String)
+    case accountDisabled(String)
+    case mailboxAmbiguous(mailbox: String, accounts: [String])
+    case invalidMailId(String)
+    case mailboxChanged(mailbox: String)
+    case mailboxesChanged
+    case mailNotFound(mailbox: String, account: String)
+    case batchTooLarge(count: Int, limit: Int)
+    case trashNotFound(account: String)
+    case alreadyInTrash
+    case junkNotFound(account: String)
+    case alreadyInJunk
+    case archiveNotFound(account: String)
+    case alreadyArchived
+    case notAttempted
+    case mailboxExists(mailbox: String, account: String)
+    case targetIsTrash(mailbox: String, account: String)
+    case targetIsJunk(mailbox: String, account: String)
+    case specialMailbox(mailbox: String, account: String)
+    case sendFailed
+    case previewChanged
+    case signatureNotFound(String)
+    case noSender
+
+    var code: String {
+        switch self {
+        case .timeout: return "MAIL_TIMEOUT"
+        case .automationDenied: return "MAIL_AUTOMATION_DENIED"
+        case .mailboxNotFound: return "MAIL_MAILBOX_NOT_FOUND"
+        case .accountNotFound: return "MAIL_ACCOUNT_NOT_FOUND"
+        case .accountAmbiguous: return "MAIL_ACCOUNT_AMBIGUOUS"
+        case .accountDisabled: return "MAIL_ACCOUNT_DISABLED"
+        case .mailboxAmbiguous: return "MAIL_MAILBOX_AMBIGUOUS"
+        case .invalidMailId: return "MAIL_INVALID_ID"
+        case .mailboxChanged, .mailboxesChanged: return "MAIL_MAILBOX_CHANGED"
+        case .mailNotFound: return "MAIL_NOT_FOUND"
+        case .batchTooLarge: return "MAIL_BATCH_TOO_LARGE"
+        case .trashNotFound: return "MAIL_TRASH_NOT_FOUND"
+        case .alreadyInTrash: return "MAIL_ALREADY_IN_TRASH"
+        case .junkNotFound: return "MAIL_JUNK_NOT_FOUND"
+        case .alreadyInJunk: return "MAIL_ALREADY_IN_JUNK"
+        case .archiveNotFound: return "MAIL_ARCHIVE_NOT_FOUND"
+        case .alreadyArchived: return "MAIL_ALREADY_ARCHIVED"
+        case .notAttempted: return "MAIL_NOT_ATTEMPTED"
+        case .mailboxExists: return "MAIL_MAILBOX_EXISTS"
+        case .targetIsTrash: return "MAIL_TARGET_IS_TRASH"
+        case .targetIsJunk: return "MAIL_TARGET_IS_JUNK"
+        case .specialMailbox: return "MAIL_SPECIAL_MAILBOX"
+        case .sendFailed: return "MAIL_SEND_FAILED"
+        case .previewChanged: return "MAIL_PREVIEW_CHANGED"
+        case .signatureNotFound: return "MAIL_SIGNATURE_NOT_FOUND"
+        case .noSender: return "MAIL_NO_SENDER"
+        }
+    }
+
+    var errorDescription: String? {
+        "\(code): \(message)"
+    }
+
+    private var message: String {
+        switch self {
+        case .timeout(let seconds):
+            return "Mail.app did not answer within \(Int(seconds)) s."
+        case .automationDenied(let detail):
+            return "Speedwave is not allowed to control Mail.app (\(detail))."
+        case .mailboxNotFound(let mailbox, let account):
+            let scope = account.map { "account '\($0)'" } ?? "any account"
+            return "Mailbox '\(mailbox)' not found in \(scope)."
+        case .accountNotFound(let account):
+            return "Account '\(account)' not found."
+        case .accountAmbiguous(let account):
+            return "Several Mail accounts are named '\(account)', so the name does not say which one is meant."
+        case .accountDisabled(let account):
+            return "Account '\(account)' is turned off in Mail.app, "
+                + "so Mail would send or file the message from another account."
+        case .mailboxAmbiguous(let mailbox, let accounts):
+            return "Mailbox '\(mailbox)' exists in several accounts: \(accounts.joined(separator: ", "))."
+        case .invalidMailId(let id):
+            return "'\(id)' is not a mail id. Take the id from listEmails or searchEmails."
+        case .mailboxChanged(let mailbox):
+            return "Mailbox '\(mailbox)' changed while it was being read."
+        case .mailboxesChanged:
+            return "Mail's mailboxes changed while they were being read."
+        case .mailNotFound(let mailbox, let account):
+            return "No email with this id in mailbox '\(mailbox)' of account '\(account)'; it was moved or deleted."
+        case .batchTooLarge(let count, let limit):
+            return "\(count) mail ids given, but one call takes at most \(limit). "
+                + "Split them into batches of at most \(limit) and confirm each batch with the user separately."
+        case .trashNotFound(let account):
+            return "Account '\(account)' has no Trash mailbox, so the email was left where it is."
+        case .alreadyInTrash:
+            return "The email is already in the Trash; no tool deletes an email permanently."
+        case .junkNotFound(let account):
+            return "Account '\(account)' has no Junk mailbox, so the email was left where it is."
+        case .alreadyInJunk:
+            return "The email is already in the Junk mailbox."
+        case .archiveNotFound(let account):
+            let names = archiveMailboxNames.map { "'\($0)'" }.joined(separator: " or ")
+            return "Account '\(account)' has no mailbox named \(names), so the email was left where it is. "
+                + "Ask the user which mailbox of the account keeps archived mail (listMailboxes lists them) and move "
+                + "the email there with moveEmails, passing that mailbox and the account."
+        case .alreadyArchived:
+            return "The email is already in the Archive mailbox."
+        case .notAttempted:
+            return "The batch ran out of time before this email, so it was left unchanged. "
+                + "Call again with the ids of the emails that were not attempted."
+        case .mailboxExists(let mailbox, let account):
+            return "Mailbox '\(mailbox)' already exists in account '\(account)'."
+        case .targetIsTrash(let mailbox, let account):
+            return "Mailbox '\(mailbox)' is the Trash of account '\(account)', so no email was moved or copied. "
+                + "To delete emails use deleteEmails, which asks the user first."
+        case .targetIsJunk(let mailbox, let account):
+            return "Mailbox '\(mailbox)' is the Junk mailbox of account '\(account)', so no email was moved or copied. "
+                + "To mark emails as spam use markEmailsSpam, which asks the user first."
+        case .specialMailbox(let mailbox, let account):
+            return "Mailbox '\(mailbox)' is the Inbox, Drafts, Sent, Junk, Trash, Outbox or Archive mailbox of account "
+                + "'\(account)', which keeps its name, so nothing was renamed."
+        case .sendFailed:
+            return "Mail.app did not send the message; it may wait in the Outbox."
+        case .previewChanged:
+            return "The message Mail.app made differs from the preview in its recipients, subject or sender, "
+                + "so it was closed unsent; the original changed or Mail chose differently."
+        case .signatureNotFound(let name):
+            return "Mail.app has no signature named '\(name)'."
+        case .noSender:
+            return "Mail.app has no turned-on account with an email address to send from."
+        }
+    }
+}
+
+/// A mail's opaque id: its account's Mail id (empty for On My Mac) and name, the mailbox path inside that account
+/// and its RFC Message-ID, encoded as `mail2.` + unpadded base64url of `[accountId, account, mailbox, messageId]`.
+struct MailId: Equatable {
+    static let prefix = "mail2."
+
+    let accountId: String
+    let account: String
+    let mailbox: String
+    let messageId: String
+
+    var encoded: String {
+        let json = (try? JSONEncoder().encode([accountId, account, mailbox, messageId])) ?? Data()
+        let base64url = json.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        return Self.prefix + base64url
+    }
+
+    init(accountId: String, account: String, mailbox: String, messageId: String) {
+        self.accountId = accountId
+        self.account = account
+        self.mailbox = mailbox
+        self.messageId = messageId
+    }
+
+    init(decoding id: String) throws {
+        guard id.hasPrefix(Self.prefix) else { throw MailFailure.invalidMailId(id) }
+        var base64 = String(id.dropFirst(Self.prefix.count))
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        base64 += String(repeating: "=", count: (4 - base64.count % 4) % 4)
+        guard let data = Data(base64Encoded: base64),
+              let parts = try? JSONDecoder().decode([String].self, from: data),
+              parts.count == 4,
+              parts.dropFirst().allSatisfy({ !$0.isEmpty })
+        else {
+            throw MailFailure.invalidMailId(id)
+        }
+        self.init(accountId: parts[0], account: parts[1], mailbox: parts[2], messageId: parts[3])
+    }
+}
+
+/// The script seam of one mail command: every script runs through `execute` within the command's time budget,
+/// and a timeout, a denied Automation permission or a failed mailbox lookup comes back as a `MailFailure`.
+struct MailScripts {
+    let execute: ScriptExecutor
+    let timeout: TimeInterval
+
+    init(execute: @escaping ScriptExecutor, params: [String: Any]) throws {
+        guard let milliseconds = params[scriptTimeoutParam] as? Int, milliseconds > 0 else {
+            throw CLIError.missingField(scriptTimeoutParam)
+        }
+        self.execute = execute
+        self.timeout = TimeInterval(milliseconds) / 1000
+    }
+
+    func run(_ script: String, mailbox: String? = nil, account: String? = nil) throws -> String {
+        do {
+            return try execute(Self.withTimeout(script, seconds: max(1, Int(timeout))), timeout)
+        } catch ScriptError.timeout {
+            throw MailFailure.timeout(seconds: timeout)
+        } catch ScriptError.automationPermission(let detail) {
+            throw MailFailure.automationDenied(detail)
+        } catch ScriptError.scriptFailed(let detail) {
+            throw Self.failure(detail, mailbox: mailbox, account: account, timeout: timeout)
+                ?? ScriptError.scriptFailed(detail)
+        }
+    }
+
+    /// `script` with every `tell application "Mail"` block and one-line tell inside `with timeout of seconds`, since
+    /// an Apple event otherwise gives up after AppleScript's default of two minutes, whatever the budget.
+    private static func withTimeout(_ script: String, seconds: Int) -> String {
+        let open = "tell application \"Mail\""
+        let start = "with timeout of \(seconds) seconds"
+        var blocks: [Bool] = []
+        var lines: [String] = []
+        for line in script.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed == open {
+                lines += [line, start]
+                blocks.append(true)
+                continue
+            }
+            if trimmed.hasPrefix(open + " to ") {
+                lines += [start, line, "end timeout"]
+                continue
+            }
+            if trimmed.hasPrefix("tell ") && !trimmed.contains(" to ") {
+                blocks.append(false)
+            } else if trimmed == "end tell", blocks.popLast() == true {
+                lines.append("end timeout")
+            }
+            lines.append(line)
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    static func failure(
+        _ detail: String,
+        mailbox: String?,
+        account: String?,
+        timeout: TimeInterval
+    ) -> MailFailure? {
+        if detail.contains("(-1743)") {
+            return .automationDenied(detail)
+        }
+        if detail.contains("(-1712)") {
+            return .timeout(seconds: timeout)
+        }
+        if detail.contains(accountAmbiguousMarker) {
+            return .accountAmbiguous(account ?? "")
+        }
+        if detail.contains(accountNotFoundMarker) {
+            return .accountNotFound(account ?? "")
+        }
+        if detail.contains(accountDisabledMarker) {
+            return .accountDisabled(account ?? "")
+        }
+        if detail.contains(mailboxAmbiguousMarker) {
+            let accounts = detail.components(separatedBy: mailboxAmbiguousMarker).last?
+                .components(separatedBy: ", ")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty && !$0.hasPrefix("(") } ?? []
+            return .mailboxAmbiguous(mailbox: mailbox ?? "", accounts: accounts)
+        }
+        if detail.contains(mailboxExistsMarker) {
+            return .mailboxExists(mailbox: mailbox ?? "", account: account ?? "")
+        }
+        if detail.contains(mailboxesChangedMarker) {
+            return .mailboxesChanged
+        }
+        if detail.contains(targetIsTrashMarker) {
+            return .targetIsTrash(mailbox: mailbox ?? "", account: account ?? "")
+        }
+        if detail.contains(targetIsJunkMarker) {
+            return .targetIsJunk(mailbox: mailbox ?? "", account: account ?? "")
+        }
+        if detail.contains(specialMailboxMarker) {
+            return .specialMailbox(mailbox: mailbox ?? "", account: account ?? "")
+        }
+        if detail.contains(sendFailedMarker) {
+            return .sendFailed
+        }
+        if detail.contains(previewChangedMarker) {
+            return .previewChanged
+        }
+        if detail.contains(noSenderMarker) {
+            return .noSender
+        }
+        if detail.contains(mailNotFoundMarker) {
+            return .mailNotFound(mailbox: mailbox ?? "", account: account ?? "")
+        }
+        if detail.contains(mailboxNotFoundMarker) {
+            return .mailboxNotFound(mailbox: mailbox ?? "", account: account)
+        }
+        return nil
     }
 }

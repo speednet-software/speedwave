@@ -3,22 +3,52 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { META_KEYS, TIMEOUTS } from '@speedwave/mcp-shared';
 import {
   handleDetectMailClients,
   handleListMailboxes,
   handleListEmails,
   handleGetEmail,
   handleSearchEmails,
+} from './mail-reading.js';
+import {
   handleSendEmail,
   handleReplyToEmail,
-  createMailTools,
-} from './mail-tools.js';
+  handleForwardEmail,
+  handleRedirectEmail,
+  handleSaveDraft,
+  handleListMailSignatures,
+} from './mail-sending.js';
+import { handleListMailRules, handleCheckMail } from './mail-rules.js';
+import {
+  handleDeleteEmails,
+  handleFlagEmails,
+  handleCreateMailbox,
+  handleMoveEmails,
+  handleCopyEmails,
+  handleRenameMailbox,
+} from './mail-organizing.js';
+import { createMailTools } from './mail-tools.js';
+import { ASK_USER_FIRST } from './mail-shared.js';
 
 vi.mock('../platform-runner.js', () => ({
   runCommand: vi.fn(),
 }));
 
 import { runCommand } from '../platform-runner.js';
+
+const PROCESS_TIMEOUT = expect.any(Number);
+
+const MAIL_ID =
+  'mail2.WyI1RjNBMkMxRS0wQjdELTRDMUEtOUUyRi03QTFCM0M0RDVFNkYiLCJpQ2xvdWQiLCJJTkJPWCIsIjxhQHg-Il0';
+
+/**
+ * The arguments mail-cli receives for a call: the tool's arguments plus the script time budget.
+ * @param args - Tool arguments.
+ */
+function budgeted(args: Record<string, unknown>): Record<string, unknown> {
+  return { ...args, script_timeout_ms: expect.any(Number) };
+}
 
 describe('mail-tools', () => {
   beforeEach(() => {
@@ -27,21 +57,33 @@ describe('mail-tools', () => {
 
   describe('handleDetectMailClients', () => {
     it('returns detected clients', async () => {
-      const mockData = { clients: ['Apple Mail', 'Outlook'] };
+      const mockData = {
+        clients: [
+          { name: 'Apple Mail', supported: true },
+          { name: 'Microsoft Outlook', supported: false, instructions: 'Add the account…' },
+        ],
+      };
       vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: mockData });
 
       const result = await handleDetectMailClients({});
 
       expect(result.success).toBe(true);
       expect(result.data).toEqual(mockData);
-      expect(runCommand).toHaveBeenCalledWith('mail', 'detect_clients');
+      expect(runCommand).toHaveBeenCalledWith(
+        'mail',
+        'detect_clients',
+        budgeted({}),
+        PROCESS_TIMEOUT
+      );
     });
   });
 
   describe('handleListMailboxes', () => {
     it('returns mailboxes on success', async () => {
       const mockData = {
-        mailboxes: [{ name: 'INBOX', account: 'john@example.com', unread_count: 5 }],
+        mailboxes: [
+          { name: 'INBOX', account: 'john@example.com', message_count: 5, unread_count: 2 },
+        ],
       };
       vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: mockData });
 
@@ -50,41 +92,87 @@ describe('mail-tools', () => {
       expect(result.success).toBe(true);
       expect(result.data).toEqual(mockData);
     });
+
+    it('tells Claude every mailbox carries its unread count', () => {
+      const tool = createMailTools().find((t) => t.tool.name === 'listMailboxes')!.tool;
+      const mailbox = (tool.outputSchema as any).properties.mailboxes.items.properties;
+
+      expect(mailbox.unread_count.type).toBe('number');
+      expect(tool.description).toContain('unread_count');
+    });
   });
 
   describe('handleListEmails', () => {
-    it('returns emails with pagination', async () => {
+    it('returns the emails of a mailbox', async () => {
       const mockData = {
-        emails: [{ id: 'msg-1', subject: 'Hello', from: 'alice@example.com' }],
+        emails: [{ id: MAIL_ID, subject: 'Hello', sender: 'alice@example.com' }],
+        total: 1,
       };
       vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: mockData });
 
-      const result = await handleListEmails({ limit: 10, offset: 0 });
+      const result = await handleListEmails({ mailbox: 'INBOX', limit: 10 });
 
       expect(result.success).toBe(true);
-      expect(runCommand).toHaveBeenCalledWith('mail', 'list_emails', { limit: 10, offset: 0 });
+      expect(result.data).toEqual(mockData);
+      expect(runCommand).toHaveBeenCalledWith(
+        'mail',
+        'list_emails',
+        budgeted({ mailbox: 'INBOX', limit: 10 }),
+        PROCESS_TIMEOUT
+      );
     });
 
-    it('passes client through to the native CLI', async () => {
-      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { emails: [] } });
+    it('passes the page and the unread and flagged filters through to mail-cli', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { emails: [], total: 0 } });
+      const tool = createMailTools().find((t) => t.tool.name === 'listEmails')!;
+      const input = {
+        mailbox: 'INBOX',
+        account: 'iCloud',
+        limit: 5,
+        offset: 0,
+        unread_only: true,
+        flagged_only: true,
+      };
 
-      await handleListEmails({ client: 'outlook' });
+      const result = await tool.handler(input);
 
-      expect(runCommand).toHaveBeenCalledWith('mail', 'list_emails', { client: 'outlook' });
+      expect(result.isError).toBeFalsy();
+      expect(vi.mocked(runCommand).mock.calls[0][2]).toEqual(budgeted(input));
+    });
+
+    it('fails without a mailbox', async () => {
+      const result = await handleListEmails({} as any);
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('MISSING_FIELDS');
+      expect(result.error?.message).toContain('mailbox');
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [{ offset: -1 }, 'OUT_OF_RANGE'],
+      [{ offset: '10' }, 'INVALID_TYPE'],
+      [{ limit: 2.5 }, 'INVALID_TYPE'],
+      [{ offset: 0.5 }, 'INVALID_TYPE'],
+      [{ unread_only: 'true' }, 'INVALID_TYPE'],
+      [{ flagged_only: 'true' }, 'INVALID_TYPE'],
+    ])('rejects %o without calling mail-cli', async (extra, code) => {
+      const result = await handleListEmails({ mailbox: 'INBOX', ...(extra as object) });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(code);
+      expect(runCommand).not.toHaveBeenCalled();
     });
   });
 
   describe('handleGetEmail', () => {
     it('returns email by ID', async () => {
       const mockData = {
-        id: 'msg-1',
-        subject: 'Hello',
-        from: 'alice@example.com',
-        body: 'Hello world',
+        email: { id: MAIL_ID, subject: 'Hello', sender: 'alice@example.com', body: 'Hello world' },
       };
       vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: mockData });
 
-      const result = await handleGetEmail({ id: 'msg-1' });
+      const result = await handleGetEmail({ id: MAIL_ID });
 
       expect(result.success).toBe(true);
       expect(result.data).toEqual(mockData);
@@ -97,54 +185,256 @@ describe('mail-tools', () => {
       expect(result.error?.code).toBe('EMPTY_FIELDS');
     });
 
-    it('passes client through to the native CLI', async () => {
-      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { id: 'msg-1' } });
+    it('passes the headers and source requests to mail-cli', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { email: {} } });
 
-      await handleGetEmail({ id: 'msg-1', client: 'outlook' });
+      await handleGetEmail({ id: MAIL_ID, include_headers: true, include_source: false });
 
-      expect(runCommand).toHaveBeenCalledWith('mail', 'get_email', {
-        id: 'msg-1',
-        client: 'outlook',
-      });
+      expect(runCommand).toHaveBeenCalledWith(
+        'mail',
+        'get_email',
+        budgeted({ id: MAIL_ID, include_headers: true, include_source: false }),
+        PROCESS_TIMEOUT
+      );
+    });
+
+    it('refuses a headers request that is not a boolean without calling mail-cli', async () => {
+      const result = await handleGetEmail({ id: MAIL_ID, include_source: 'yes' as never });
+
+      expect(result.success).toBe(false);
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it('declares the truncation flags of the headers and the source', () => {
+      const tool = createMailTools().find((t) => t.tool.name === 'getEmail')!;
+      const email = (tool.tool.outputSchema as any).properties.email.properties;
+      const input = tool.tool.inputSchema.properties as Record<string, { type: string }>;
+
+      expect(email.source_truncated.description).toContain('100000');
+      expect(email.headers_truncated.type).toBe('boolean');
+      expect(input.include_headers.type).toBe('boolean');
+      expect(input.include_source.type).toBe('boolean');
     });
   });
 
   describe('handleSearchEmails', () => {
     it('searches emails by query', async () => {
       const mockData = {
-        results: [{ id: 'msg-2', subject: 'Invoice', from: 'billing@example.com' }],
+        emails: [{ id: MAIL_ID, subject: 'Invoice', sender: 'billing@example.com' }],
       };
       vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: mockData });
 
-      const result = await handleSearchEmails({ query: 'invoice' });
+      const result = await handleSearchEmails({ query: 'invoice', mailbox: 'INBOX' });
 
       expect(result.success).toBe(true);
-      expect(runCommand).toHaveBeenCalledWith('mail', 'search_emails', { query: 'invoice' });
-    });
-
-    it('passes client through to the native CLI', async () => {
-      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { emails: [] } });
-
-      await handleSearchEmails({ query: 'invoice', client: 'outlook' });
-
-      expect(runCommand).toHaveBeenCalledWith('mail', 'search_emails', {
-        query: 'invoice',
-        client: 'outlook',
-      });
+      expect(runCommand).toHaveBeenCalledWith(
+        'mail',
+        'search_emails',
+        budgeted({ query: 'invoice', mailbox: 'INBOX' }),
+        PROCESS_TIMEOUT
+      );
     });
 
     it('fails when query is empty', async () => {
-      const result = await handleSearchEmails({ query: '' });
+      const result = await handleSearchEmails({ query: '', mailbox: 'INBOX' });
 
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('EMPTY_FIELDS');
       expect(result.error?.message).toContain('query');
     });
+
+    it('passes the filters, the page and a Unicode query with quotes through to mail-cli', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { emails: [], total: 0 } });
+      const tool = createMailTools().find((t) => t.tool.name === 'searchEmails')!;
+      const input = {
+        query: 'Zażółć "東京" \\ 🚀',
+        mailbox: 'INBOX',
+        account: 'iCloud',
+        sender: "o'brien@example.com",
+        since: '2026-10-01',
+        before: '2026-10-20T09:00:00+02:00',
+        unread_only: true,
+        flagged_only: true,
+        offset: 10,
+        limit: 5,
+      };
+
+      const result = await tool.handler(input);
+
+      expect(result.isError).toBeFalsy();
+      expect(vi.mocked(runCommand).mock.calls[0][2]).toEqual(budgeted(input));
+    });
+
+    it('returns no hits with a total of zero', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { emails: [], total: 0 } });
+
+      const result = await handleSearchEmails({ query: 'nothing', mailbox: 'INBOX' });
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual({ emails: [], total: 0 });
+    });
+
+    it('gives a body search a longer time budget than a subject and sender search', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { emails: [], total: 0 } });
+
+      await handleSearchEmails({ query: 'x', mailbox: 'INBOX' });
+      await handleSearchEmails({ query: 'x', mailbox: 'INBOX', search_body: true });
+
+      const [fast, slow] = vi.mocked(runCommand).mock.calls;
+      const scriptMs = (call: typeof fast) =>
+        (call[2] as Record<string, unknown>).script_timeout_ms as number;
+      expect(scriptMs(slow)).toBeGreaterThan(scriptMs(fast));
+      expect(slow[3]).toBeGreaterThan(fast[3]!);
+      const tool = createMailTools().find((t) => t.tool.name === 'searchEmails')!;
+      expect(tool.tool._meta?.[META_KEYS.TIMEOUT_MS]).toBeGreaterThan(slow[3]!);
+      expect(tool.tool._meta?.[META_KEYS.TIMEOUT_CLASS]).toBe('long');
+    });
+
+    it("declares the long timeout class on every tool whose budget does not fit the hub's standard execute_code limit", () => {
+      const tooLong = createMailTools().filter(
+        (t) => (t.tool._meta?.[META_KEYS.TIMEOUT_MS] as number) >= TIMEOUTS.EXECUTION_MS
+      );
+
+      expect(tooLong.map((t) => t.tool.name)).toEqual(
+        expect.arrayContaining(['deleteEmails', 'moveEmails', 'copyEmails', 'markEmailsSpam'])
+      );
+      for (const t of tooLong) {
+        expect([t.tool.name, t.tool._meta?.[META_KEYS.TIMEOUT_CLASS]]).toEqual([
+          t.tool.name,
+          'long',
+        ]);
+      }
+    });
+
+    it('tells Claude that a body search is slow', () => {
+      const tool = createMailTools().find((t) => t.tool.name === 'searchEmails')!;
+      const schema = tool.tool.inputSchema as {
+        properties: Record<string, { description: string }>;
+      };
+
+      expect(tool.tool.description).toMatch(/subject.*sender/i);
+      expect(schema.properties.search_body.description).toMatch(/slow/i);
+    });
+
+    it.each([
+      [{ search_body: 'yes' }, 'INVALID_TYPE'],
+      [{ unread_only: 1 }, 'INVALID_TYPE'],
+      [{ flagged_only: 0 }, 'INVALID_TYPE'],
+      [{ offset: -1 }, 'OUT_OF_RANGE'],
+      [{ sender: 'a\x01b' }, 'INVALID_CHARACTERS'],
+      [{ recipient: 'a\nb' }, 'INVALID_CHARACTERS'],
+      [{ recipient: 7 }, 'INVALID_TYPE'],
+      [{ since: 12 }, 'INVALID_TYPE'],
+      [{ limit: 1.5 }, 'INVALID_TYPE'],
+      [{ since: 'yesterday' }, 'INVALID_DATE'],
+      [{ before: '2026-10-1' }, 'INVALID_DATE'],
+    ])('rejects %o without calling mail-cli', async (extra, code) => {
+      const result = await handleSearchEmails({
+        query: 'x',
+        mailbox: 'INBOX',
+        ...(extra as object),
+      } as any);
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(code);
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [{ since: '2026-10-13', before: '2026-10-20' }],
+      [{ recipient: 'anna@example.com' }],
+      [{ unread_only: true }],
+      [{ flagged_only: true }],
+      [{ sender: 'Zażółć "東京" \\' }],
+    ])('searches without a query when %o narrows the mailbox', async (filters) => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { emails: [], total: 0 } });
+
+      const result = await handleSearchEmails({ mailbox: 'Sent', ...filters });
+
+      expect(result.success).toBe(true);
+      expect(vi.mocked(runCommand).mock.calls[0][2]).toEqual(
+        budgeted({ mailbox: 'Sent', ...filters })
+      );
+    });
+
+    it.each([[{}], [{ unread_only: false, flagged_only: false }]])(
+      'a search without any filter (%o) runs nothing and points at listEmails',
+      async (extra) => {
+        const result = await handleSearchEmails({ mailbox: 'INBOX', ...extra } as any);
+
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('MISSING_FIELDS');
+        expect(result.error?.message).toContain('listEmails');
+        for (const filter of ['query', 'sender', 'recipient', 'since', 'before']) {
+          expect(result.error?.message).toContain(filter);
+        }
+        expect(runCommand).not.toHaveBeenCalled();
+      }
+    );
+
+    it('a body search without a query runs nothing and asks for one', async () => {
+      const result = await handleSearchEmails({
+        mailbox: 'INBOX',
+        sender: 'bob@x',
+        search_body: true,
+      } as any);
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('MISSING_FIELDS');
+      expect(result.error?.message).toContain('query');
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it('declares recipient and requires no parameter', () => {
+      const tool = createMailTools().find((t) => t.tool.name === 'searchEmails')!.tool;
+      const schema = tool.inputSchema as {
+        properties: Record<string, { type: string; description: string }>;
+        required?: string[];
+      };
+
+      expect(schema.required ?? []).toEqual([]);
+      expect(schema.properties.recipient.type).toBe('string');
+      expect(schema.properties.recipient.description).toMatch(/to.*cc/i);
+    });
+
+    it.each([[{}], [{ account: 'Work' }], [{ account: 'On My Mac' }]])(
+      'searches every mailbox without a mailbox (%o)',
+      async (scope) => {
+        vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { emails: [], total: 0 } });
+
+        const result = await handleSearchEmails({ query: 'invoice', ...scope });
+
+        expect(result.success).toBe(true);
+        expect(vi.mocked(runCommand).mock.calls[0][2]).toEqual(
+          budgeted({ query: 'invoice', ...scope })
+        );
+      }
+    );
+
+    it('a body search without a mailbox runs nothing and asks for one', async () => {
+      const result = await handleSearchEmails({ query: 'net 30', search_body: true });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('MISSING_FIELDS');
+      expect(result.error?.message).toContain('mailbox');
+      expect(result.error?.message).toContain('listMailboxes');
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it('tells Claude a search without a mailbox skips Trash and Junk', () => {
+      const tool = createMailTools().find((t) => t.tool.name === 'searchEmails')!.tool;
+      const schema = tool.inputSchema as { properties: Record<string, { description: string }> };
+
+      expect(tool.description).toMatch(/without mailbox/i);
+      expect(tool.description).toMatch(/trash/i);
+      expect(tool.description).toMatch(/junk/i);
+      expect(schema.properties.mailbox.description).toMatch(/every mailbox/i);
+    });
   });
 
   describe('handleSendEmail', () => {
     it('sends email when confirm_send is true', async () => {
-      const mockData = { status: 'sent', message_id: 'msg-new' };
+      const mockData = { status: 'sent' };
       vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: mockData });
 
       const result = await handleSendEmail({
@@ -158,16 +448,65 @@ describe('mail-tools', () => {
       expect(result.data).toEqual(mockData);
     });
 
-    it('rejects when confirm_send is false', async () => {
+    it('hands an unconfirmed send to mail-cli, which answers with the preview', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: SEND_PREVIEW });
+
       const result = await handleSendEmail({
         to: 'bob@example.com',
         subject: 'Test',
         body: 'Hello Bob',
-        confirm_send: false,
       });
 
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual(SEND_PREVIEW);
+      expect(runCommand).toHaveBeenCalledWith(
+        'mail',
+        'send_email',
+        budgeted({ to: 'bob@example.com', subject: 'Test', body: 'Hello Bob' }),
+        PROCESS_TIMEOUT
+      );
+    });
+
+    it('reports missing fields of an unconfirmed send instead of previewing it', async () => {
+      const result = await handleSendEmail({ to: '', subject: '', body: '' });
+
       expect(result.success).toBe(false);
-      expect(result.error?.code).toBe('CONFIRMATION_REQUIRED');
+      expect(result.error?.code).toBe('EMPTY_FIELDS');
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it('promises no HTML body and no attachments', () => {
+      const tool = createMailTools().find((t) => t.tool.name === 'sendEmail')!.tool;
+      const input = Object.keys(tool.inputSchema.properties ?? {});
+
+      expect(input).not.toContain('html_body');
+      expect(input).not.toContain('attachments');
+      expect(Object.keys(tool.outputSchema?.properties ?? {})).not.toContain('attachments');
+      expect(tool.description).toContain('Plain text only');
+    });
+
+    it('warns that Mail shows scripted text as a quote only where a script sets the text', () => {
+      const description = (name: string) =>
+        createMailTools().find((t) => t.tool.name === name)!.tool.description;
+
+      for (const name of ['sendEmail', 'replyToEmail', 'saveDraft']) {
+        expect(description(name), name).toMatch(/as a quote.*tell the user/);
+      }
+      for (const name of ['forwardEmail', 'redirectEmail']) {
+        expect(description(name), name).not.toMatch(/as a quote/);
+      }
+    });
+
+    it('says a reply goes to the Reply-To or sender and a reply or forward that Mail makes otherwise is not sent', () => {
+      const description = (name: string) =>
+        createMailTools().find((t) => t.tool.name === name)!.tool.description;
+
+      expect(description('replyToEmail')).toContain('Reply-To');
+      expect(description('replyToEmail')).toMatch(/reply_all.*own addresses/);
+      for (const name of ['replyToEmail', 'forwardEmail']) {
+        expect(description(name), name).toContain('MAIL_PREVIEW_CHANGED');
+      }
+      expect(description('redirectEmail')).not.toContain('MAIL_PREVIEW_CHANGED');
     });
 
     it('fails when required fields are empty', async () => {
@@ -183,7 +522,35 @@ describe('mail-tools', () => {
       expect(result.error?.message).toContain('to');
     });
 
-    it('passes bcc and client through to the native CLI', async () => {
+    it('sends from the account given and tells to show the user the sender before asking', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: SEND_PREVIEW });
+      const tool = createMailTools().find((t) => t.tool.name === 'sendEmail')!.tool;
+
+      await handleSendEmail({ to: 'a@x', subject: 's', body: 'b', account: 'Work' });
+
+      expect(runCommand).toHaveBeenCalledWith(
+        'mail',
+        'send_email',
+        budgeted({ to: 'a@x', subject: 's', body: 'b', account: 'Work' }),
+        PROCESS_TIMEOUT
+      );
+      expect(tool.inputSchema.properties).toHaveProperty('account');
+      expect(tool.description).toMatch(/from.*show/);
+    });
+
+    it('refuses an over-long account before calling mail-cli', async () => {
+      const result = await handleSendEmail({
+        to: 'a@x',
+        subject: 's',
+        body: 'b',
+        account: 'x'.repeat(10_000),
+      });
+
+      expect(result.success).toBe(false);
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it('passes bcc through to the native CLI', async () => {
       vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { status: 'sent' } });
 
       await handleSendEmail({
@@ -191,18 +558,21 @@ describe('mail-tools', () => {
         subject: 'Test',
         body: 'Hello Bob',
         bcc: 'carol@example.com',
-        client: 'outlook',
         confirm_send: true,
       });
 
-      expect(runCommand).toHaveBeenCalledWith('mail', 'send_email', {
-        to: 'bob@example.com',
-        subject: 'Test',
-        body: 'Hello Bob',
-        bcc: 'carol@example.com',
-        client: 'outlook',
-        confirm_send: true,
-      });
+      expect(runCommand).toHaveBeenCalledWith(
+        'mail',
+        'send_email',
+        budgeted({
+          to: 'bob@example.com',
+          subject: 'Test',
+          body: 'Hello Bob',
+          bcc: 'carol@example.com',
+          confirm_send: true,
+        }),
+        PROCESS_TIMEOUT
+      );
     });
   });
 
@@ -212,7 +582,7 @@ describe('mail-tools', () => {
       vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: mockData });
 
       const result = await handleReplyToEmail({
-        id: 'msg-1',
+        id: MAIL_ID,
         body: 'Thanks!',
         confirm_send: true,
       });
@@ -221,15 +591,60 @@ describe('mail-tools', () => {
       expect(result.data).toEqual(mockData);
     });
 
-    it('rejects when confirm_send is false', async () => {
-      const result = await handleReplyToEmail({
-        id: 'msg-1',
-        body: 'Thanks!',
-        confirm_send: false,
-      });
+    it('hands an unconfirmed reply to mail-cli, which answers with the preview', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: REPLY_PREVIEW });
 
-      expect(result.success).toBe(false);
-      expect(result.error?.code).toBe('CONFIRMATION_REQUIRED');
+      const result = await handleReplyToEmail({ id: MAIL_ID, body: 'Thanks!', reply_all: true });
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual(REPLY_PREVIEW);
+      expect(runCommand).toHaveBeenCalledWith(
+        'mail',
+        'reply_to_email',
+        budgeted({ id: MAIL_ID, body: 'Thanks!', reply_all: true }),
+        PROCESS_TIMEOUT
+      );
+    });
+
+    it('passes cc and bcc to mail-cli, which adds them to the recipients Mail chose', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: REPLY_PREVIEW });
+      const tool = createMailTools().find((t) => t.tool.name === 'replyToEmail')!.tool;
+
+      await handleReplyToEmail({ id: MAIL_ID, body: 'Ok', cc: 'ewa@x', bcc: 'boss@x' });
+
+      expect(runCommand).toHaveBeenCalledWith(
+        'mail',
+        'reply_to_email',
+        budgeted({ id: MAIL_ID, body: 'Ok', cc: 'ewa@x', bcc: 'boss@x' }),
+        PROCESS_TIMEOUT
+      );
+      expect(Object.keys(tool.inputSchema.properties ?? {})).toEqual(
+        expect.arrayContaining(['cc', 'bcc'])
+      );
+      expect(tool.outputSchema?.properties).toHaveProperty('bcc');
+    });
+
+    it('refuses an over-long cc or bcc before calling mail-cli', async () => {
+      for (const field of ['cc', 'bcc']) {
+        const result = await handleReplyToEmail({
+          id: MAIL_ID,
+          body: 'Ok',
+          [field]: 'x'.repeat(10_000),
+        });
+
+        expect(result.success).toBe(false);
+      }
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it('gives both scripts of a confirmed reply time to finish before mail-cli is killed', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: REPLY_PREVIEW });
+
+      await handleReplyToEmail({ id: MAIL_ID, body: 'Thanks!', confirm_send: true });
+
+      const [, , args, processTimeoutMs] = vi.mocked(runCommand).mock.calls[0];
+      const scriptTimeoutMs = (args as Record<string, unknown>).script_timeout_ms as number;
+      expect(processTimeoutMs! - 2 * scriptTimeoutMs).toBeGreaterThanOrEqual(2_000);
     });
 
     it('fails when required fields are empty', async () => {
@@ -242,31 +657,94 @@ describe('mail-tools', () => {
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('EMPTY_FIELDS');
     });
+  });
 
-    it('passes client through to the native CLI', async () => {
-      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { status: 'sent' } });
+  describe('forwarding and redirecting', () => {
+    it('hands an unconfirmed forward to mail-cli, which answers with the preview', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: FORWARD_PREVIEW });
 
-      await handleReplyToEmail({
-        id: 'msg-1',
-        body: 'Thanks!',
-        client: 'outlook',
-        confirm_send: true,
-      });
+      const result = await handleForwardEmail({ id: MAIL_ID, to: 'bob@x' });
 
-      expect(runCommand).toHaveBeenCalledWith('mail', 'reply_to_email', {
-        id: 'msg-1',
-        body: 'Thanks!',
-        client: 'outlook',
-        confirm_send: true,
-      });
+      expect(result.data).toEqual(FORWARD_PREVIEW);
+      expect(runCommand).toHaveBeenCalledWith(
+        'mail',
+        'forward_email',
+        budgeted({ id: MAIL_ID, to: 'bob@x' }),
+        PROCESS_TIMEOUT
+      );
     });
+
+    it('hands a confirmed redirect with cc to mail-cli', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: REDIRECT_SENT });
+
+      const result = await handleRedirectEmail({
+        id: MAIL_ID,
+        to: 'bob@x',
+        cc: 'carol@x',
+        confirm_send: true,
+      });
+
+      expect(result.data).toEqual(REDIRECT_SENT);
+      expect(runCommand).toHaveBeenCalledWith(
+        'mail',
+        'redirect_email',
+        budgeted({ id: MAIL_ID, to: 'bob@x', cc: 'carol@x', confirm_send: true }),
+        PROCESS_TIMEOUT
+      );
+    });
+
+    it('gives the read and the send of both tools time to finish before mail-cli is killed', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: REDIRECT_SENT });
+
+      await handleForwardEmail({ id: MAIL_ID, to: 'bob@x', confirm_send: true });
+      await handleRedirectEmail({ id: MAIL_ID, to: 'bob@x', confirm_send: true });
+
+      for (const [, , args, processTimeoutMs] of vi.mocked(runCommand).mock.calls) {
+        const scriptTimeoutMs = (args as Record<string, unknown>).script_timeout_ms as number;
+        expect(processTimeoutMs! - 2 * scriptTimeoutMs).toBeGreaterThanOrEqual(2_000);
+      }
+    });
+
+    it('refuses a forward or a redirect without recipients before mail-cli runs', async () => {
+      const forward = await handleForwardEmail({ id: MAIL_ID } as never);
+      const redirect = await handleRedirectEmail({ id: MAIL_ID, to: '' });
+
+      expect(forward.error?.code).toBe('MISSING_FIELDS');
+      expect(redirect.error?.code).toBe('EMPTY_FIELDS');
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it('rejects confirm_send given as a string', async () => {
+      const result = await handleForwardEmail({
+        id: MAIL_ID,
+        to: 'bob@x',
+        confirm_send: 'true' as never,
+      });
+
+      expect(result.error?.code).toBe('INVALID_TYPE');
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it.each(['forwardEmail', 'redirectEmail'])(
+      '%s takes no comment, since any change to a forward drops its quote and attachments',
+      async (name) => {
+        const tool = createMailTools().find((t) => t.tool.name === name)!;
+
+        expect(tool.tool.inputSchema.properties).not.toHaveProperty('comment');
+        expect(tool.tool.outputSchema?.properties).not.toHaveProperty('comment');
+        await expect(
+          tool.handler({ id: MAIL_ID, to: 'bob@x', comment: 'Hi' })
+        ).resolves.toMatchObject({ isError: true });
+        expect(runCommand).not.toHaveBeenCalled();
+      }
+    );
   });
 
   describe('createMailTools', () => {
-    it('returns 7 tool definitions', () => {
+    it('returns 23 tool definitions', () => {
       const tools = createMailTools();
 
-      expect(tools).toHaveLength(7);
+      expect(tools).toHaveLength(23);
       expect(tools.map((t) => t.tool.name)).toEqual([
         'detectMailClients',
         'listMailboxes',
@@ -275,6 +753,22 @@ describe('mail-tools', () => {
         'searchEmails',
         'sendEmail',
         'replyToEmail',
+        'forwardEmail',
+        'redirectEmail',
+        'listMailRules',
+        'checkMail',
+        'deleteEmails',
+        'markEmailsRead',
+        'flagEmails',
+        'moveEmails',
+        'copyEmails',
+        'archiveEmails',
+        'createMailbox',
+        'markEmailsSpam',
+        'markEmailsNotSpam',
+        'renameMailbox',
+        'saveDraft',
+        'listMailSignatures',
       ]);
     });
 
@@ -286,49 +780,346 @@ describe('mail-tools', () => {
     });
   });
 
-  describe('confirm_send priority', () => {
-    it('handleSendEmail returns CONFIRMATION_REQUIRED before MISSING_FIELDS when confirm_send is false and fields are missing', async () => {
-      const result = await handleSendEmail({
-        to: '',
-        subject: '',
-        body: '',
-        confirm_send: false,
-      });
+  describe('mail rules', () => {
+    it('listMailRules reads the rules through mail-cli', async () => {
+      const rules = {
+        rules: [{ name: 'A', enabled: true, match_all: true, conditions: [], actions: [] }],
+      };
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: rules });
 
-      expect(result.success).toBe(false);
-      expect(result.error?.code).toBe('CONFIRMATION_REQUIRED');
+      const result = await handleListMailRules({});
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual(rules);
+      expect(runCommand).toHaveBeenCalledWith('mail', 'list_rules', budgeted({}), PROCESS_TIMEOUT);
     });
 
-    it('handleReplyToEmail returns CONFIRMATION_REQUIRED before MISSING_FIELDS when confirm_send is false and fields are missing', async () => {
-      const result = await handleReplyToEmail({
-        id: '',
-        body: '',
-        confirm_send: false,
+    it('listMailRules is read-only', () => {
+      const tool = createMailTools().find((t) => t.tool.name === 'listMailRules')!;
+
+      expect(tool.tool.annotations?.readOnlyHint).toBe(true);
+      expect(tool.tool.annotations?.destructiveHint).toBe(false);
+    });
+
+    it('no mail tool creates, changes or deletes a rule', () => {
+      const ruleTools = createMailTools().filter((t) =>
+        /rule/i.test(`${t.tool.name} ${t.tool.keywords?.join(' ')}`)
+      );
+
+      expect(ruleTools.map((t) => t.tool.name)).toEqual(['listMailRules']);
+      expect(ruleTools.every((t) => t.tool.annotations?.readOnlyHint)).toBe(true);
+    });
+
+    it('listMailRules takes no arguments', async () => {
+      const tool = createMailTools().find((t) => t.tool.name === 'listMailRules')!;
+
+      const result = await tool.handler({ name: 'Forward all', enabled: false });
+
+      expect(result.isError).toBe(true);
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('check mail', () => {
+    it('checks every account when no account is given', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { status: 'started' } });
+
+      const result = await handleCheckMail({});
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual({ status: 'started' });
+      expect(runCommand).toHaveBeenCalledWith('mail', 'check_mail', budgeted({}), PROCESS_TIMEOUT);
+    });
+
+    it('checks only the named account', async () => {
+      vi.mocked(runCommand).mockResolvedValue({
+        stdout: '',
+        parsed: { status: 'started', account: 'Work' },
       });
 
-      expect(result.success).toBe(false);
-      expect(result.error?.code).toBe('CONFIRMATION_REQUIRED');
+      await handleCheckMail({ account: 'Work' });
+
+      expect(runCommand).toHaveBeenCalledWith(
+        'mail',
+        'check_mail',
+        budgeted({ account: 'Work' }),
+        PROCESS_TIMEOUT
+      );
     });
+
+    it('rejects an account with control characters', async () => {
+      const result = await handleCheckMail({ account: 'Wo\x01rk' });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('INVALID_CHARACTERS');
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it('is a non-destructive write', () => {
+      const tool = createMailTools().find((t) => t.tool.name === 'checkMail')!;
+
+      expect(tool.tool.annotations?.readOnlyHint).toBe(false);
+      expect(tool.tool.annotations?.destructiveHint).toBe(false);
+    });
+
+    it('an unknown account points at listMailboxes', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        new Error("mail.check_mail failed: MAIL_ACCOUNT_NOT_FOUND: Account 'Nope' not found.")
+      );
+      const tool = createMailTools().find((t) => t.tool.name === 'checkMail')!;
+
+      const result = await tool.handler({ account: 'Nope' });
+
+      expect(result.isError).toBe(true);
+      const text = (result.content[0] as { text: string }).text;
+      expect(text).toContain('MAIL_ACCOUNT_NOT_FOUND');
+      expect(text).toContain('listMailboxes');
+    });
+  });
+
+  describe('mailbox account', () => {
+    it.each(['listEmails', 'searchEmails'])(
+      '%s passes mailbox and account through to mail-cli',
+      async (name) => {
+        vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { emails: [] } });
+        const tool = createMailTools().find((t) => t.tool.name === name)!;
+        const input = { ...validInput(name), mailbox: 'Drafts', account: 'Google' };
+
+        await tool.handler(input);
+
+        expect(vi.mocked(runCommand).mock.calls[0][2]).toEqual(budgeted(input));
+      }
+    );
+
+    it.each(['listEmails', 'searchEmails'])(
+      '%s rejects an account with control characters',
+      async (name) => {
+        const tool = createMailTools().find((t) => t.tool.name === name)!;
+
+        const result = await tool.handler({
+          ...validInput(name),
+          mailbox: 'Inbox',
+          account: 'Ex\x01change',
+        });
+
+        expect(result.isError).toBe(true);
+        expect((result.content[0] as { text: string }).text).toContain('INVALID_CHARACTERS');
+        expect(runCommand).not.toHaveBeenCalled();
+      }
+    );
+  });
+
+  describe('mail client choice', () => {
+    it('no mail tool offers a client parameter', () => {
+      for (const t of createMailTools()) {
+        expect(Object.keys(t.tool.inputSchema.properties), t.tool.name).not.toContain('client');
+      }
+    });
+
+    it.each(createMailTools().map((t) => [t.tool.name, t] as const))(
+      '%s rejects a client argument without calling the native CLI',
+      async (_name, t) => {
+        const result = await t.handler({ ...validInput(t.tool.name), client: 'outlook' });
+
+        expect(result.isError).toBe(true);
+        const text = (result.content[0] as { text: string }).text;
+        expect(text).toContain('client');
+        expect(text).toContain('nothing was sent');
+        expect(runCommand).not.toHaveBeenCalled();
+      }
+    );
+
+    it('detectMailClients declares the supported flag and the instructions of an unsupported client', () => {
+      const tool = createMailTools().find((t) => t.tool.name === 'detectMailClients')!;
+      const item = (tool.tool.outputSchema as any).properties.clients.items.properties;
+
+      expect(Object.keys(item).sort()).toEqual(['instructions', 'name', 'supported']);
+      expect(tool.tool.description).toContain('Outlook');
+      expect(tool.tool.description).toContain('Apple Mail');
+    });
+  });
+
+  describe('attachment counts on the listing', () => {
+    it.each(['listEmails', 'searchEmails'])(
+      '%s rows carry attachment_count, which may include embedded images, with getEmail for the list',
+      (name) => {
+        const tool = createMailTools().find((t) => t.tool.name === name)!.tool;
+        const row = (tool.outputSchema as any).properties.emails.items.properties;
+
+        expect(row.attachment_count.type).toBe('number');
+        expect(tool.description).toContain('attachment_count');
+        expect(tool.description).toMatch(/embedded images/i);
+        expect(tool.description).toContain('getEmail');
+      }
+    );
+  });
+
+  describe('flags on the read side', () => {
+    const flagEnum = (name: string, path: (schema: any) => any) =>
+      path(createMailTools().find((t) => t.tool.name === name)!.tool.outputSchema).enum;
+    const flagEmailsColors = (
+      createMailTools().find((t) => t.tool.name === 'flagEmails')!.tool.inputSchema as any
+    ).properties.flag.enum;
+
+    it.each([
+      ['listEmails', (s: any) => s.properties.emails.items.properties.flag],
+      ['searchEmails', (s: any) => s.properties.emails.items.properties.flag],
+      ['getEmail', (s: any) => s.properties.email.properties.flag],
+    ])('%s reports a flag with the colors flagEmails sets, plus none', (name, path) => {
+      expect(flagEnum(name, path)).toEqual(flagEmailsColors);
+      expect(flagEmailsColors).toContain('none');
+    });
+
+    it.each(['listEmails', 'searchEmails'])(
+      '%s declares flagged_only and mentions it in its description',
+      (name) => {
+        const tool = createMailTools().find((t) => t.tool.name === name)!.tool;
+        const schema = tool.inputSchema as { properties: Record<string, { type: string }> };
+
+        expect(schema.properties.flagged_only.type).toBe('boolean');
+        expect(tool.description).toContain('flagged_only');
+      }
+    );
+  });
+
+  describe('outputSchema matches what mail-cli emits', () => {
+    const NATIVE_OUTPUT: Record<string, Record<string, unknown>> = {
+      detectMailClients: {
+        clients: [
+          { name: 'Apple Mail', supported: true },
+          { name: 'Microsoft Outlook', supported: false, instructions: 'Add the account…' },
+        ],
+      },
+      listMailboxes: {
+        mailboxes: [{ account: 'iCloud', name: 'INBOX', message_count: 3, unread_count: 1 }],
+      },
+      listEmails: {
+        emails: [
+          {
+            id: MAIL_ID,
+            subject: 'Hi',
+            sender: 'Anna',
+            date: '2026-10-20T09:15:00+02:00',
+            read: false,
+            flag: 'blue',
+            attachment_count: 2,
+            mailbox: 'INBOX',
+            account: 'iCloud',
+          },
+        ],
+        total: 1,
+        without_id: 1,
+      },
+      getEmail: {
+        email: {
+          id: MAIL_ID,
+          subject: 'Hi',
+          sender: 'Anna',
+          to: ['me@x'],
+          cc: ['ewa@x'],
+          date: '2026-10-20T09:15:00+02:00',
+          read: true,
+          flag: 'none',
+          body: 'Hello',
+          mailbox: 'Archive',
+          account: 'iCloud',
+          attachments: [{ index: 1, name: 'a.pdf', size: 1024, mime_type: 'application/pdf' }],
+          headers: 'Received: from mx',
+          headers_truncated: false,
+          source: 'Received: from mx',
+          source_truncated: true,
+        },
+      },
+      searchEmails: {
+        emails: [
+          {
+            id: MAIL_ID,
+            subject: 'Hi',
+            sender: 'Anna',
+            date: '2026-10-20T09:15:00+02:00',
+            read: false,
+            flag: 'blue',
+            attachment_count: 2,
+            mailbox: 'INBOX',
+            account: 'iCloud',
+          },
+        ],
+        total: 1,
+        without_id: 1,
+      },
+      sendEmail: { ...SEND_PREVIEW, bcc: ['carol@x'], account: 'Work', signature: 'Work' },
+      replyToEmail: { ...REPLY_PREVIEW, signature: 'Work' },
+      saveDraft: DRAFT_SAVED,
+      listMailSignatures: { signatures: ['Work', 'Private'] },
+      forwardEmail: { ...REDIRECT_SENT, ...FORWARD_PREVIEW },
+      redirectEmail: { ...REDIRECT_SENT, ...REDIRECT_PREVIEW },
+      listMailRules: {
+        rules: [
+          {
+            name: 'Invoices',
+            enabled: true,
+            match_all: false,
+            conditions: [
+              { field: 'from header', qualifier: 'does contain value', expression: 'billing@x' },
+              {
+                field: 'header key',
+                header: 'X-Mailer',
+                qualifier: 'begins with value',
+                expression: 'Acme',
+              },
+            ],
+            actions: [
+              { type: 'move', mailbox: 'Finance', account: 'Work' },
+              { type: 'copy', target_missing: true },
+              { type: 'forward', address: 'a@x' },
+              { type: 'reply', text: 'Away' },
+            ],
+          },
+        ],
+      },
+      checkMail: { status: 'started', account: 'Work' },
+      deleteEmails: gatedBatchOutputs(DELETE_PREVIEW, DELETE_REPORT),
+      markEmailsRead: ORGANIZE_REPORT,
+      flagEmails: ORGANIZE_REPORT,
+      moveEmails: ORGANIZE_REPORT,
+      copyEmails: ORGANIZE_REPORT,
+      archiveEmails: ORGANIZE_REPORT,
+      createMailbox: { status: 'created', mailbox: 'Clients/Acme', account: 'Work' },
+      markEmailsSpam: gatedBatchOutputs(DELETE_PREVIEW, DELETE_REPORT),
+      markEmailsNotSpam: NOT_SPAM_REPORT,
+      renameMailbox: {
+        status: 'renamed',
+        mailbox: 'Clients/Acme Corp',
+        previous_mailbox: 'Clients/Acme',
+        account: 'Work',
+      },
+    };
+
+    it('covers every mail tool', () => {
+      expect(Object.keys(NATIVE_OUTPUT).sort()).toEqual(
+        createMailTools()
+          .map((t) => t.tool.name)
+          .sort()
+      );
+    });
+
+    it.each(createMailTools().map((t) => [t.tool.name, t] as const))(
+      '%s declares exactly the keys it emits',
+      async (name, t) => {
+        vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: NATIVE_OUTPUT[name] });
+
+        const result = await t.handler(validInput(name));
+
+        const emitted = JSON.parse((result.content[0] as { text: string }).text);
+        expect(declaredShape(t.tool.outputSchema)).toEqual(shapeOf(emitted));
+      }
+    );
   });
 
   describe('input validation (SEC-012)', () => {
     describe('handleGetEmail', () => {
       it('rejects id with control characters', async () => {
         const result = await handleGetEmail({ id: 'm\x01id' });
-        expect(result.success).toBe(false);
-        expect(result.error?.code).toBe('INVALID_CHARACTERS');
-      });
-
-      it('rejects client with control characters', async () => {
-        const result = await handleGetEmail({ id: 'msg-1', client: 'out\x01look' });
-        expect(result.success).toBe(false);
-        expect(result.error?.code).toBe('INVALID_CHARACTERS');
-      });
-    });
-
-    describe('handleListMailboxes', () => {
-      it('rejects client with control characters', async () => {
-        const result = await handleListMailboxes({ client: 'mail\x07app' });
         expect(result.success).toBe(false);
         expect(result.error?.code).toBe('INVALID_CHARACTERS');
       });
@@ -342,47 +1133,23 @@ describe('mail-tools', () => {
       });
 
       it('rejects limit as string', async () => {
-        const result = await handleListEmails({ limit: '20' as any });
+        const result = await handleListEmails({ mailbox: 'INBOX', limit: '20' as any });
         expect(result.success).toBe(false);
         expect(result.error?.code).toBe('INVALID_TYPE');
-      });
-
-      it('rejects negative offset', async () => {
-        const result = await handleListEmails({ offset: -1 });
-        expect(result.success).toBe(false);
-        expect(result.error?.code).toBe('OUT_OF_RANGE');
-      });
-
-      it('rejects unread_only as string', async () => {
-        const result = await handleListEmails({ unread_only: 'true' as any });
-        expect(result.success).toBe(false);
-        expect(result.error?.code).toBe('INVALID_TYPE');
-      });
-
-      it('rejects client with control characters', async () => {
-        const result = await handleListEmails({ client: 'out\x01look' });
-        expect(result.success).toBe(false);
-        expect(result.error?.code).toBe('INVALID_CHARACTERS');
       });
     });
 
     describe('handleSearchEmails', () => {
       it('rejects query with control characters', async () => {
-        const result = await handleSearchEmails({ query: 'test\x00query' });
+        const result = await handleSearchEmails({ query: 'test\x00query', mailbox: 'INBOX' });
         expect(result.success).toBe(false);
         expect(result.error?.code).toBe('INVALID_CHARACTERS');
       });
 
       it('rejects limit = -1', async () => {
-        const result = await handleSearchEmails({ query: 'test', limit: -1 });
+        const result = await handleSearchEmails({ query: 'test', mailbox: 'INBOX', limit: -1 });
         expect(result.success).toBe(false);
         expect(result.error?.code).toBe('OUT_OF_RANGE');
-      });
-
-      it('rejects client exceeding max length', async () => {
-        const result = await handleSearchEmails({ query: 'test', client: 'a'.repeat(1001) });
-        expect(result.success).toBe(false);
-        expect(result.error?.code).toBe('FIELD_TOO_LONG');
       });
     });
 
@@ -431,24 +1198,12 @@ describe('mail-tools', () => {
         expect(result.success).toBe(false);
         expect(result.error?.code).toBe('INVALID_CHARACTERS');
       });
-
-      it('rejects client exceeding max length', async () => {
-        const result = await handleSendEmail({
-          to: 'bob@example.com',
-          subject: 'Test',
-          body: 'Hello',
-          client: 'a'.repeat(1001),
-          confirm_send: true,
-        });
-        expect(result.success).toBe(false);
-        expect(result.error?.code).toBe('FIELD_TOO_LONG');
-      });
     });
 
     describe('handleReplyToEmail', () => {
       it('rejects confirm_send as string', async () => {
         const result = await handleReplyToEmail({
-          id: 'msg-1',
+          id: MAIL_ID,
           body: 'Thanks!',
           confirm_send: 'true' as any,
         });
@@ -458,7 +1213,7 @@ describe('mail-tools', () => {
 
       it('rejects reply_all as number 1', async () => {
         const result = await handleReplyToEmail({
-          id: 'msg-1',
+          id: MAIL_ID,
           body: 'Thanks!',
           confirm_send: true,
           reply_all: 1 as any,
@@ -466,17 +1221,1202 @@ describe('mail-tools', () => {
         expect(result.success).toBe(false);
         expect(result.error?.code).toBe('INVALID_TYPE');
       });
+    });
+  });
 
-      it('rejects client with control characters', async () => {
-        const result = await handleReplyToEmail({
-          id: 'msg-1',
-          body: 'Thanks!',
-          confirm_send: true,
-          client: 'out\x01look',
-        });
-        expect(result.success).toBe(false);
-        expect(result.error?.code).toBe('INVALID_CHARACTERS');
+  describe('time budget', () => {
+    it.each(createMailTools().map((t) => [t.tool.name, t] as const))(
+      '%s ends the script before mail-cli is killed, and mail-cli before the hub gives up',
+      async (name, t) => {
+        vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: {} });
+
+        await t.handler(validInput(name));
+
+        const [, , args, processTimeoutMs] = vi.mocked(runCommand).mock.calls[0];
+        const scriptTimeoutMs = (args as Record<string, unknown>).script_timeout_ms as number;
+        const toolTimeoutMs = t.tool._meta?.[META_KEYS.TIMEOUT_MS] as number;
+        expect(scriptTimeoutMs).toBeGreaterThan(0);
+        expect(processTimeoutMs).toBeGreaterThan(scriptTimeoutMs);
+        expect(toolTimeoutMs).toBeGreaterThan(processTimeoutMs!);
+      }
+    );
+
+    it('leaves Mail at least a few seconds of headroom before the process is killed', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { emails: [] } });
+
+      await handleListEmails({ mailbox: 'INBOX' });
+
+      const [, , args, processTimeoutMs] = vi.mocked(runCommand).mock.calls[0];
+      const scriptTimeoutMs = (args as Record<string, unknown>).script_timeout_ms as number;
+      expect(processTimeoutMs! - scriptTimeoutMs).toBeGreaterThanOrEqual(2_000);
+    });
+  });
+
+  describe('deleteEmails', () => {
+    const ids = (count: number): string[] =>
+      Array.from({ length: count }, (_, i) => `${MAIL_ID.slice(0, -2)}${i}`);
+
+    it('passes the ids and the confirmation to mail-cli', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: DELETE_REPORT });
+
+      const result = await handleDeleteEmails({ ids: [MAIL_ID], confirm_delete: true });
+
+      expect(result.success).toBe(true);
+      expect(runCommand).toHaveBeenCalledWith(
+        'mail',
+        'delete_emails',
+        budgeted({ ids: [MAIL_ID], confirm_delete: true }),
+        PROCESS_TIMEOUT
+      );
+    });
+
+    it('without confirm_delete still asks mail-cli, which only previews', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: DELETE_PREVIEW });
+
+      const result = await handleDeleteEmails({ ids: [MAIL_ID] });
+
+      expect(result).toEqual({ success: true, data: DELETE_PREVIEW });
+      expect(vi.mocked(runCommand).mock.calls[0][2]).toEqual(budgeted({ ids: [MAIL_ID] }));
+    });
+
+    it('accepts 25 mail ids', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: DELETE_PREVIEW });
+
+      const result = await handleDeleteEmails({ ids: ids(25) });
+
+      expect(result.success).toBe(true);
+    });
+
+    it('refuses 26 mail ids with the instruction to split them into confirmed batches', async () => {
+      const result = await handleDeleteEmails({ ids: ids(26), confirm_delete: true });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('MAIL_BATCH_TOO_LARGE');
+      expect(result.error?.message).toContain('at most 25');
+      expect(result.error?.message).toContain('confirm each batch');
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['no ids', {}, 'MISSING_FIELDS'],
+      ['an empty list', { ids: [] }, 'EMPTY_FIELDS'],
+      ['ids as a string', { ids: MAIL_ID }, 'INVALID_TYPE'],
+      ['a number among the ids', { ids: [MAIL_ID, 7] }, 'INVALID_TYPE'],
+      ['an id with control characters', { ids: ['mail2.\x01'] }, 'INVALID_CHARACTERS'],
+      ['an over-long id', { ids: ['m'.repeat(8_193)] }, 'FIELD_TOO_LONG'],
+      ['confirm_delete as a string', { ids: [MAIL_ID], confirm_delete: 'true' }, 'INVALID_TYPE'],
+    ])('refuses %s before calling mail-cli', async (_case, input, code) => {
+      const result = await handleDeleteEmails(input as any);
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(code);
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it('is destructive and declares the confirmation and the 25-id limit', () => {
+      const tool = createMailTools().find((t) => t.tool.name === 'deleteEmails')!.tool;
+
+      expect(tool.annotations?.destructiveHint).toBe(true);
+      expect(tool.annotations?.readOnlyHint).toBe(false);
+      const props = tool.inputSchema.properties as any;
+      expect(props.ids).toMatchObject({ type: 'array', minItems: 1, maxItems: 25 });
+      expect(props.confirm_delete.type).toBe('boolean');
+      expect(tool.inputSchema.required).toEqual(['ids']);
+      expect(tool.description).toContain('Trash');
+      expect(tool.description).toContain('ask the user');
+    });
+
+    it('a batch mail-cli refuses as too large teaches the split', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        new Error(
+          'mail.delete_emails failed: MAIL_BATCH_TOO_LARGE: 30 mail ids given, but one call takes at most 25.'
+        )
+      );
+
+      const result = await handleDeleteEmails({ ids: [MAIL_ID] });
+
+      expect(result.error?.code).toBe('MAIL_BATCH_TOO_LARGE');
+      expect(result.error?.message).toContain('confirm each batch');
+    });
+  });
+
+  describe('organizing emails', () => {
+    const ids = (count: number): string[] =>
+      Array.from({ length: count }, (_, i) => `${MAIL_ID.slice(0, -2)}${i}`);
+
+    const tool = (name: string) => createMailTools().find((t) => t.tool.name === name)!;
+
+    it.each([
+      ['flagEmails without valid ids', () => handleFlagEmails({ ids: [], flag: 'red' }), 'ids'],
+      [
+        'flagEmails with a flag that is not text',
+        () => handleFlagEmails({ ids: [MAIL_ID], flag: 3 as unknown as string }),
+        'flag',
+      ],
+      [
+        'moveEmails without valid ids',
+        () => handleMoveEmails({ ids: [], mailbox: 'A', account: 'W' }),
+        'ids',
+      ],
+      [
+        'createMailbox with a name that is not text',
+        () => handleCreateMailbox({ name: 7 as unknown as string, account: 'W' }),
+        'name',
+      ],
+      [
+        'renameMailbox with a new name that is not text',
+        () => handleRenameMailbox({ mailbox: 'A', account: 'W', new_name: 7 as unknown as string }),
+        'new_name',
+      ],
+    ])('refuses %s before calling mail-cli', async (_case, call, param) => {
+      const result = await call();
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain(param);
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['markEmailsRead', 'mark_emails_read', { ids: [MAIL_ID], read: false }],
+      ['flagEmails', 'flag_emails', { ids: [MAIL_ID], flag: 'purple' }],
+      ['moveEmails', 'move_emails', { ids: [MAIL_ID], mailbox: 'Clients/Acme', account: 'Work' }],
+      ['copyEmails', 'copy_emails', { ids: [MAIL_ID], mailbox: 'Clients', account: 'On My Mac' }],
+      ['archiveEmails', 'archive_emails', { ids: [MAIL_ID] }],
+      ['createMailbox', 'create_mailbox', { name: 'Clients/Acme', account: 'Work' }],
+      ['markEmailsSpam', 'mark_emails_spam', { ids: [MAIL_ID], confirm_spam: true }],
+      ['markEmailsNotSpam', 'mark_emails_not_spam', { ids: [MAIL_ID] }],
+      [
+        'renameMailbox',
+        'rename_mailbox',
+        { mailbox: 'Clients/Acme', account: 'Work', new_name: 'Acme Corp' },
+      ],
+    ])('%s passes its arguments to mail-cli %s', async (name, command, input) => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: ORGANIZE_REPORT });
+
+      const result = await tool(name).handler(input);
+
+      expect(result.isError).toBeFalsy();
+      expect(runCommand).toHaveBeenCalledWith('mail', command, budgeted(input), PROCESS_TIMEOUT);
+    });
+
+    it('no mail tool description tells Claude that a change needs no confirmation', () => {
+      for (const { tool: t } of createMailTools()) {
+        const text = [
+          t.description,
+          ...Object.values(t.inputSchema.properties ?? {}).map(
+            (p) => (p as { description?: string }).description ?? ''
+          ),
+        ].join(' ');
+        expect([t.name, text]).not.toEqual([
+          t.name,
+          expect.stringMatching(
+            /no confirmation|without confirmation|needs? no confirm|so no confirm/i
+          ),
+        ]);
+      }
+    });
+
+    it('every mail tool that changes mail without a confirm flag tells Claude to ask the user first', () => {
+      const ungatedWrites = createMailTools()
+        .map((t) => t.tool)
+        .filter((t) => t.annotations?.readOnlyHint === false && t.name !== 'checkMail')
+        .filter(
+          (t) => !Object.keys(t.inputSchema.properties ?? {}).some((k) => k.startsWith('confirm_'))
+        );
+
+      expect(ungatedWrites.map((t) => t.name).sort()).toEqual([
+        'archiveEmails',
+        'copyEmails',
+        'createMailbox',
+        'flagEmails',
+        'markEmailsNotSpam',
+        'markEmailsRead',
+        'moveEmails',
+        'renameMailbox',
+        'saveDraft',
+      ]);
+      for (const t of ungatedWrites) {
+        expect([t.name, t.description]).toEqual([t.name, expect.stringContaining(ASK_USER_FIRST)]);
+      }
+    });
+
+    it.each([
+      'markEmailsRead',
+      'flagEmails',
+      'moveEmails',
+      'copyEmails',
+      'archiveEmails',
+      'markEmailsNotSpam',
+    ])('%s has no confirm flag and is not destructive', (name) => {
+      const t = tool(name).tool;
+
+      expect(t.annotations?.readOnlyHint).toBe(false);
+      expect(t.annotations?.destructiveHint).toBe(false);
+      expect(Object.keys(t.inputSchema.properties).some((k) => k.startsWith('confirm_'))).toBe(
+        false
+      );
+      expect((t.inputSchema.properties as any).ids).toMatchObject({
+        type: 'array',
+        minItems: 1,
+        maxItems: 25,
       });
+    });
+
+    it('renameMailbox is a reversible write that needs the mailbox, its account and the new name', () => {
+      const t = tool('renameMailbox').tool;
+
+      expect(t.annotations?.readOnlyHint).toBe(false);
+      expect(t.annotations?.destructiveHint).toBe(false);
+      expect(t.inputSchema.required).toEqual(['mailbox', 'account', 'new_name']);
+      expect(Object.keys(t.inputSchema.properties).some((k) => k.startsWith('confirm_'))).toBe(
+        false
+      );
+      expect(t.description).toContain('Inbox');
+      expect(t.description).toContain('MAIL_MAILBOX_EXISTS');
+    });
+
+    it('createMailbox is a reversible write', () => {
+      const t = tool('createMailbox').tool;
+
+      expect(t.annotations?.readOnlyHint).toBe(false);
+      expect(t.annotations?.destructiveHint).toBe(false);
+      expect(t.inputSchema.required).toEqual(['name', 'account']);
+    });
+
+    it('markEmailsSpam is destructive and gated by confirm_spam', () => {
+      const t = tool('markEmailsSpam').tool;
+
+      expect(t.annotations?.destructiveHint).toBe(true);
+      expect((t.inputSchema.properties as any).confirm_spam.type).toBe('boolean');
+      expect(t.inputSchema.required).toEqual(['ids']);
+      expect(t.description).toContain('ask the user');
+      expect(t.description).toContain('Junk');
+    });
+
+    it('markEmailsNotSpam says which emails moved back to the Inbox and why one stays', () => {
+      const t = tool('markEmailsNotSpam').tool;
+      const row = (t.outputSchema as any).properties.emails.items.properties;
+
+      expect(t.inputSchema.required).toEqual(['ids']);
+      expect(row.moved.type).toBe('boolean');
+      expect(t.description).toContain('Inbox');
+      expect(t.description).toContain('On My Mac');
+      expect(t.description).toContain('moved');
+    });
+
+    it('moveEmails and copyEmails take the target mailbox together with its account', () => {
+      for (const name of ['moveEmails', 'copyEmails']) {
+        expect(tool(name).tool.inputSchema.required).toEqual(['ids', 'mailbox', 'account']);
+      }
+    });
+
+    it('flagEmails declares the colors Mail has and none', () => {
+      const flag = (tool('flagEmails').tool.inputSchema.properties as any).flag;
+
+      expect(flag.enum).toEqual([
+        'red',
+        'orange',
+        'yellow',
+        'green',
+        'blue',
+        'purple',
+        'gray',
+        'none',
+      ]);
+    });
+
+    it.each([
+      ['markEmailsRead', { ids: [MAIL_ID] }, 'requires read'],
+      ['markEmailsRead', { ids: [MAIL_ID], read: 'yes' }, 'INVALID_TYPE'],
+      ['flagEmails', { ids: [MAIL_ID] }, 'requires flag'],
+      ['flagEmails', { ids: [MAIL_ID], flag: 'pink' }, 'INVALID_VALUE'],
+      ['moveEmails', { ids: [MAIL_ID], mailbox: 'Clients' }, 'requires account'],
+      ['copyEmails', { ids: [MAIL_ID], account: 'Work' }, 'requires mailbox'],
+      ['moveEmails', { ids: [MAIL_ID], mailbox: 'Cl\x01', account: 'Work' }, 'INVALID_CHARACTERS'],
+      ['archiveEmails', { ids: [] }, 'EMPTY_FIELDS'],
+      ['archiveEmails', { ids: ids(26) }, 'MAIL_BATCH_TOO_LARGE'],
+      ['markEmailsRead', { ids: ids(26), read: true }, 'MAIL_BATCH_TOO_LARGE'],
+      ['markEmailsSpam', { ids: ids(26), confirm_spam: true }, 'MAIL_BATCH_TOO_LARGE'],
+      ['markEmailsSpam', { ids: [MAIL_ID], confirm_spam: 'true' }, 'INVALID_TYPE'],
+      ['markEmailsNotSpam', { ids: ids(26) }, 'MAIL_BATCH_TOO_LARGE'],
+      ['markEmailsNotSpam', {}, 'requires ids'],
+      ['renameMailbox', { mailbox: 'Clients', account: 'Work' }, 'requires new_name'],
+      ['renameMailbox', { mailbox: 'Clients', new_name: 'A' }, 'requires account'],
+      ['renameMailbox', { mailbox: 'Clients', account: 'Work', new_name: '' }, 'requires new_name'],
+      ['renameMailbox', { mailbox: 'Clients', account: 'Work', new_name: 'A/B' }, 'INVALID_VALUE'],
+      ['createMailbox', { name: 'Clients' }, 'requires account'],
+      ['createMailbox', { name: '', account: 'Work' }, 'requires name'],
+    ])('%s refuses %o before calling mail-cli', async (name, input, code) => {
+      const result = await tool(name).handler(input);
+
+      expect(result.isError).toBe(true);
+      expect((result.content[0] as { text: string }).text).toContain(code);
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it('a mailbox that already exists teaches to use it', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        new Error(
+          "mail.create_mailbox failed: MAIL_MAILBOX_EXISTS: Mailbox 'Clients' already exists in account 'Work'."
+        )
+      );
+
+      const result = await handleCreateMailbox({ name: 'Clients', account: 'Work' });
+
+      expect(result.error?.code).toBe('MAIL_MAILBOX_EXISTS');
+      expect(result.error?.message).toContain('Invalid name (received: "Clients")');
+      expect(result.error?.message).toContain('moveEmails');
+    });
+
+    it('a new name the parent already has asks the user for another name', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        new Error(
+          "mail.rename_mailbox failed: MAIL_MAILBOX_EXISTS: Mailbox 'Clients/Acme Corp' already exists in account 'Work'."
+        )
+      );
+
+      const result = await handleRenameMailbox({
+        mailbox: 'Clients/Acme',
+        account: 'Work',
+        new_name: 'Acme Corp',
+      });
+
+      expect(result.error?.code).toBe('MAIL_MAILBOX_EXISTS');
+      expect(result.error?.message).toContain('Invalid new_name (received: "Acme Corp")');
+      expect(result.error?.message).toContain('another name');
+      expect(result.error?.message).not.toContain('moveEmails');
+    });
+
+    it('a special mailbox keeps its name and the error says so', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        new Error(
+          "mail.rename_mailbox failed: MAIL_SPECIAL_MAILBOX: Mailbox 'INBOX' is the Inbox, Drafts, Sent, Junk, Trash, Outbox or Archive mailbox of account 'Work', which keeps its name, so nothing was renamed."
+        )
+      );
+
+      const result = await handleRenameMailbox({
+        mailbox: 'INBOX',
+        account: 'Work',
+        new_name: 'In',
+      });
+
+      expect(result.error?.code).toBe('MAIL_SPECIAL_MAILBOX');
+      expect(result.error?.message).toContain('Invalid mailbox (received: "INBOX")');
+      expect(result.error?.message).toContain('createMailbox');
+    });
+
+    it('a target mailbox that does not exist points at listMailboxes and createMailbox', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        new Error(
+          "mail.move_emails failed: MAIL_MAILBOX_NOT_FOUND: Mailbox 'Clients' not found in account 'Work'."
+        )
+      );
+
+      const result = await handleMoveEmails({
+        ids: [MAIL_ID],
+        mailbox: 'Clients',
+        account: 'Work',
+      });
+
+      expect(result.error?.code).toBe('MAIL_MAILBOX_NOT_FOUND');
+      expect(result.error?.message).toContain('Invalid mailbox (received: "Clients")');
+      expect(result.error?.message).toContain('listMailboxes');
+    });
+
+    it.each([
+      [
+        handleMoveEmails,
+        'move_emails',
+        'MAIL_TARGET_IS_TRASH',
+        'Deleted Items',
+        'the Trash',
+        'deleteEmails',
+      ],
+      [
+        handleCopyEmails,
+        'copy_emails',
+        'MAIL_TARGET_IS_JUNK',
+        'Junk Email',
+        'the Junk mailbox',
+        'markEmailsSpam',
+      ],
+    ])(
+      'a move or copy into a Trash or Junk target is refused and points at the gated tool (%#)',
+      async (handle, command, code, mailbox, what, gatedTool) => {
+        vi.mocked(runCommand).mockRejectedValue(
+          new Error(
+            `mail.${command} failed: ${code}: Mailbox '${mailbox}' is ${what} of account 'Work', so no email was moved or copied.`
+          )
+        );
+
+        const result = await handle({ ids: [MAIL_ID], mailbox, account: 'Work' });
+
+        expect(result.error?.code).toBe(code);
+        expect(result.error?.message).toContain(`Invalid mailbox (received: "${mailbox}")`);
+        expect(result.error?.message).toContain(gatedTool);
+        expect(result.error?.message).toContain('confirm');
+      }
+    );
+  });
+
+  describe('drafts and signatures', () => {
+    it('saves a draft through mail-cli without a confirmation flag', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: DRAFT_SAVED });
+      const input = {
+        to: 'bob@example.com',
+        subject: 'Test',
+        body: 'Hello Bob',
+        account: 'Work',
+        signature: 'Work',
+      };
+
+      const result = await handleSaveDraft(input);
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual(DRAFT_SAVED);
+      expect(runCommand).toHaveBeenCalledWith(
+        'mail',
+        'save_draft',
+        budgeted(input),
+        PROCESS_TIMEOUT
+      );
+    });
+
+    it('saves a draft without recipients', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: DRAFT_SAVED });
+
+      const result = await handleSaveDraft({ subject: 'Idea', body: '' });
+
+      expect(result.success).toBe(true);
+      expect(vi.mocked(runCommand).mock.calls[0][2]).toEqual(
+        budgeted({ subject: 'Idea', body: '' })
+      );
+    });
+
+    it('saveDraft is a non-destructive write with no confirmation flag', () => {
+      const tool = createMailTools().find((t) => t.tool.name === 'saveDraft')!.tool;
+
+      expect(tool.annotations?.readOnlyHint).toBe(false);
+      expect(tool.annotations?.destructiveHint).toBe(false);
+      expect(Object.keys(tool.inputSchema.properties ?? {}).sort()).toEqual([
+        'account',
+        'bcc',
+        'body',
+        'cc',
+        'signature',
+        'subject',
+        'to',
+      ]);
+      expect(tool.inputSchema.required).toEqual(['subject']);
+    });
+
+    it('listMailSignatures is read-only and reads the names through mail-cli', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { signatures: ['Work'] } });
+      const tool = createMailTools().find((t) => t.tool.name === 'listMailSignatures')!;
+
+      const result = await handleListMailSignatures({});
+
+      expect(result.data).toEqual({ signatures: ['Work'] });
+      expect(runCommand).toHaveBeenCalledWith(
+        'mail',
+        'list_signatures',
+        budgeted({}),
+        PROCESS_TIMEOUT
+      );
+      expect(tool.tool.annotations?.readOnlyHint).toBe(true);
+    });
+
+    it.each([
+      ['sendEmail', 'send_email'],
+      ['replyToEmail', 'reply_to_email'],
+      ['saveDraft', 'save_draft'],
+    ])('%s passes the chosen signature through to mail-cli', async (name, command) => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: {} });
+      const tool = createMailTools().find((t) => t.tool.name === name)!;
+      const input = { ...validInput(name), signature: 'Work' };
+
+      const result = await tool.handler(input);
+
+      expect(result.isError).toBeFalsy();
+      expect(runCommand).toHaveBeenCalledWith('mail', command, budgeted(input), PROCESS_TIMEOUT);
+    });
+
+    it.each([
+      [{ signature: 'Wo\x01rk' }, 'INVALID_CHARACTERS'],
+      [{ signature: 3 }, 'INVALID_TYPE'],
+      [{ account: 'Ex\x01change' }, 'INVALID_CHARACTERS'],
+      [{ to: 'a\x00@x' }, 'INVALID_CHARACTERS'],
+      [{ body: 'a'.repeat(100_001) }, 'FIELD_TOO_LONG'],
+    ])('saveDraft rejects %o without calling mail-cli', async (extra, code) => {
+      const result = await handleSaveDraft({
+        subject: 's',
+        body: 'b',
+        ...(extra as object),
+      } as any);
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(code);
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it('saveDraft requires a subject', async () => {
+      const result = await handleSaveDraft({ body: 'b' } as any);
+
+      expect(result.error?.code).toBe('MISSING_FIELDS');
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it('an unknown signature points at listMailSignatures', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        new Error(
+          "mail.send_email failed: MAIL_SIGNATURE_NOT_FOUND: Mail.app has no signature named 'Nope'."
+        )
+      );
+
+      const result = await handleSendEmail({
+        to: 'a@x',
+        subject: 's',
+        body: 'b',
+        signature: 'Nope',
+      });
+
+      expect(result.error?.code).toBe('MAIL_SIGNATURE_NOT_FOUND');
+      expect(result.error?.message).toContain('Invalid signature (received: "Nope")');
+      expect(result.error?.message).toContain('listMailSignatures');
+    });
+  });
+
+  describe('mail-cli failures reach Claude as teaching errors', () => {
+    const cliFailure = (command: string, stderr: string): Error =>
+      new Error(`mail.${command} failed: ${stderr}`);
+
+    it('a mail id of a long Message-ID in a deep mailbox reaches mail-cli from every tool that takes one', async () => {
+      const longId = 'mail2.' + 'A'.repeat(2_000);
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: {} });
+
+      const results = await Promise.all([
+        handleGetEmail({ id: longId }),
+        handleReplyToEmail({ id: longId, body: 'b' }),
+        handleForwardEmail({ id: longId, to: 'a@x' }),
+        handleRedirectEmail({ id: longId, to: 'a@x' }),
+        handleDeleteEmails({ ids: [longId] }),
+      ]);
+
+      expect(results.map((r) => r.success)).toEqual([true, true, true, true, true]);
+      expect(runCommand).toHaveBeenCalledTimes(5);
+    });
+
+    it('a timed-out listing teaches to narrow it, not to retry it with a smaller limit', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        cliFailure('list_emails', 'MAIL_TIMEOUT: Mail.app did not answer within 25 s.')
+      );
+
+      const result = await handleListEmails({ mailbox: 'Archive', limit: 500 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('MAIL_TIMEOUT');
+      expect(result.error?.message).toContain('Mail.app did not answer within 25 s.');
+      expect(result.error?.message).toContain('unread_only');
+      expect(result.error?.message).toContain('Do not repeat the same call');
+      expect(result.error?.message).not.toContain('limit');
+      expect(result.error?.message).not.toMatch(/retry once/i);
+    });
+
+    it.each([
+      [
+        'a batch',
+        'copy_emails',
+        () => handleCopyEmails({ ids: [MAIL_ID], mailbox: 'A', account: 'W' }),
+        ['may already have changed', 'Never repeat copyEmails'],
+      ],
+      [
+        'a send',
+        'reply_to_email',
+        () => handleReplyToEmail({ id: MAIL_ID, body: 'b', confirm_send: true }),
+        ['Mail.app may have sent it', 'Sent mailbox'],
+      ],
+      ['a draft', 'save_draft', () => handleSaveDraft({ subject: 's' }), ['Drafts mailbox']],
+      [
+        'a rename',
+        'rename_mailbox',
+        () => handleRenameMailbox({ mailbox: 'A', account: 'W', new_name: 'B' }),
+        ['listMailboxes'],
+      ],
+    ])(
+      'a timed-out change (%s) says not to retry and what to check first',
+      async (_kind, command, call, phrases) => {
+        vi.mocked(runCommand).mockRejectedValue(
+          cliFailure(command, 'MAIL_TIMEOUT: Mail.app did not answer within 115 s.')
+        );
+
+        const result = await call();
+
+        expect(result.error?.code).toBe('MAIL_TIMEOUT');
+        expect(result.error?.message).toContain('Do not retry');
+        for (const phrase of phrases) expect(result.error?.message).toContain(phrase);
+      }
+    );
+
+    it.each([
+      [
+        'getEmail',
+        () => handleGetEmail({ id: MAIL_ID }),
+        'id',
+        "MAIL_MAILBOX_NOT_FOUND: Mailbox 'INBOX' not found in account 'iCloud'.",
+      ],
+      [
+        'deleteEmails',
+        () => handleDeleteEmails({ ids: [MAIL_ID] }),
+        'ids',
+        "MAIL_ACCOUNT_NOT_FOUND: Account 'iCloud' not found.",
+      ],
+    ])(
+      '%s failing on the mailbox or account of a mail id teaches a fresh id, not a mailbox or account parameter',
+      async (_tool, call, param, stderr) => {
+        vi.mocked(runCommand).mockRejectedValue(cliFailure('get_email', stderr));
+
+        const result = await call();
+
+        expect(result.error?.message).toContain(`Invalid ${param}`);
+        expect(result.error?.message).not.toContain('Invalid mailbox');
+        expect(result.error?.message).not.toContain('Invalid account');
+        expect(result.error?.message).toContain('use a current id');
+      }
+    );
+
+    it('a denied Automation permission tells the user where to allow it', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        cliFailure(
+          'list_mailboxes',
+          'MAIL_AUTOMATION_DENIED: Speedwave is not allowed to control Mail.app (Not authorized to send Apple events to Mail. (-1743)).'
+        )
+      );
+
+      const result = await handleListMailboxes({});
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('MAIL_AUTOMATION_DENIED');
+      expect(result.error?.message).toContain('not allowed to control Mail.app');
+      expect(result.error?.message).toContain('System Settings > Privacy & Security > Automation');
+    });
+
+    it('a missing mailbox names it and points at listMailboxes', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        cliFailure(
+          'search_emails',
+          "MAIL_MAILBOX_NOT_FOUND: Mailbox 'Archiv' not found in any account."
+        )
+      );
+
+      const result = await handleSearchEmails({ query: 'x', mailbox: 'Archiv' });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('MAIL_MAILBOX_NOT_FOUND');
+      expect(result.error?.message).toContain('Invalid mailbox (received: "Archiv")');
+      expect(result.error?.message).toContain('Get a valid value from listMailboxes');
+      expect(result.error?.message).toContain("Mailbox 'Archiv' not found in any account.");
+    });
+
+    it('a missing account names it and points at listMailboxes', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        cliFailure('list_emails', "MAIL_ACCOUNT_NOT_FOUND: Account 'Nope' not found.")
+      );
+
+      const result = await handleListEmails({ mailbox: 'Inbox', account: 'Nope' });
+
+      expect(result.error?.code).toBe('MAIL_ACCOUNT_NOT_FOUND');
+      expect(result.error?.message).toContain('Invalid account (received: "Nope")');
+      expect(result.error?.message).toContain('listMailboxes');
+    });
+
+    it('an account name several accounts share asks the user to rename one instead of picking', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        cliFailure(
+          'move_emails',
+          "MAIL_ACCOUNT_AMBIGUOUS: Several Mail accounts are named 'Work', so the name does not say which one is meant."
+        )
+      );
+
+      const result = await handleMoveEmails({ ids: [MAIL_ID], mailbox: 'Done', account: 'Work' });
+
+      expect(result.error?.code).toBe('MAIL_ACCOUNT_AMBIGUOUS');
+      expect(result.error?.message).toContain('Invalid account (received: "Work")');
+      expect(result.error?.message).toContain('Nothing was done');
+      expect(result.error?.message).toContain('Mail > Settings > Accounts');
+    });
+
+    it('a turned-off account names it and tells how to turn it on', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        cliFailure(
+          'save_draft',
+          "MAIL_ACCOUNT_DISABLED: Account 'Google' is turned off in Mail.app, so Mail would send or file the message from another account."
+        )
+      );
+
+      const result = await handleSaveDraft({ subject: 'S', account: 'Google' });
+
+      expect(result.error?.code).toBe('MAIL_ACCOUNT_DISABLED');
+      expect(result.error?.message).toContain('Invalid account (received: "Google")');
+      expect(result.error?.message).toContain('Mail > Settings > Accounts');
+      expect(runCommand).toHaveBeenCalledTimes(1);
+    });
+
+    it('a reply to a mail whose own account is turned off is not taught as a bad account parameter', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        cliFailure(
+          'reply_to_email',
+          "MAIL_ACCOUNT_DISABLED: Account 'Google' is turned off in Mail.app, so Mail would send or file the message from another account."
+        )
+      );
+
+      const result = await handleReplyToEmail({ id: MAIL_ID, body: 'b' });
+
+      expect(result.error?.code).toBe('MAIL_ACCOUNT_DISABLED');
+      expect(result.error?.message).not.toContain('Invalid account');
+      expect(result.error?.message).toContain("email's own account is turned off");
+      expect(result.error?.message).toContain('do not retry on your own');
+    });
+
+    it('a send from a turned-off account asks the user instead of retrying', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        cliFailure(
+          'send_email',
+          "MAIL_ACCOUNT_DISABLED: Account 'Google' is turned off in Mail.app, so Mail would send or file the message from another account."
+        )
+      );
+
+      const result = await handleSendEmail({
+        to: 'a@example.com',
+        subject: 'S',
+        body: 'B',
+        account: 'Google',
+      });
+
+      expect(result.error?.code).toBe('MAIL_ACCOUNT_DISABLED');
+      expect(result.error?.message).toContain('Ask the user whether to turn the account on');
+      expect(result.error?.message).toContain('do not retry on your own');
+      expect(result.error?.message).toContain('new from');
+    });
+
+    it('a mailbox in several accounts asks for the account', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        cliFailure(
+          'list_emails',
+          "MAIL_MAILBOX_AMBIGUOUS: Mailbox 'Inbox' exists in several accounts: Exchange, Google."
+        )
+      );
+
+      const result = await handleListEmails({ mailbox: 'Inbox' });
+
+      expect(result.error?.code).toBe('MAIL_MAILBOX_AMBIGUOUS');
+      expect(result.error?.message).toContain('Invalid account');
+      expect(result.error?.message).toContain('Exchange, Google');
+    });
+
+    it('an id that is not a mail id points at the tools that return one', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        cliFailure(
+          'get_email',
+          "MAIL_INVALID_ID: '<a@x>' is not a mail id. Take the id from listEmails or searchEmails."
+        )
+      );
+
+      const result = await handleGetEmail({ id: '<a@x>' });
+
+      expect(result.error?.code).toBe('MAIL_INVALID_ID');
+      expect(result.error?.message).toContain('Invalid id (received: "<a@x>")');
+      expect(result.error?.message).toContain('listEmails');
+      expect(result.error?.message).toContain('searchEmails');
+    });
+
+    it('a mailbox that changed during the read asks for one retry', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        cliFailure(
+          'list_emails',
+          "MAIL_MAILBOX_CHANGED: Mailbox 'INBOX' changed while it was being read."
+        )
+      );
+
+      const result = await handleListEmails({ mailbox: 'INBOX' });
+
+      expect(result.error?.code).toBe('MAIL_MAILBOX_CHANGED');
+      expect(result.error?.message).toContain("Mailbox 'INBOX' changed while it was being read.");
+      expect(result.error?.message).toContain('retry');
+    });
+
+    it.each([
+      ['MAIL_TIMEOUT', 'Mail.app did not answer within 25 s.'],
+      ['MAIL_AUTOMATION_DENIED', 'Speedwave is not allowed to control Mail.app.'],
+      ['MAIL_MAILBOX_CHANGED', "Mailbox 'INBOX' changed while it was being read."],
+      ['MAIL_SEND_FAILED', 'Mail.app did not send the message; it may wait in the Outbox.'],
+      ['MAIL_PREVIEW_CHANGED', 'The message Mail.app made differs from the preview.'],
+    ])('%s is not reported as an invalid argument', async (code, detail) => {
+      vi.mocked(runCommand).mockRejectedValue(cliFailure('list_emails', `${code}: ${detail}`));
+
+      const result = await handleListEmails({ mailbox: 'INBOX' });
+
+      expect(result.error?.code).toBe(code);
+      expect(result.error?.message.startsWith(detail)).toBe(true);
+      expect(result.error?.message).not.toContain('Invalid');
+    });
+
+    it('reaches Claude through the registered tool as an error result', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        cliFailure('list_emails', 'MAIL_TIMEOUT: Mail.app did not answer within 25 s.')
+      );
+      const tool = createMailTools().find((t) => t.tool.name === 'listEmails')!;
+
+      const result = await tool.handler({ mailbox: 'INBOX', limit: 5 });
+
+      expect(result.isError).toBe(true);
+      const text = (result.content[0] as { text: string }).text;
+      expect(text).toContain('MAIL_TIMEOUT');
+      expect(text).toContain('Mail.app did not answer within 25 s.');
+    });
+
+    it('a mail no longer in its mailbox points at the tools that list the current ones', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        cliFailure(
+          'get_email',
+          "MAIL_NOT_FOUND: No email with this id in mailbox 'INBOX' of account 'iCloud'; it was moved or deleted."
+        )
+      );
+
+      const result = await handleGetEmail({ id: MAIL_ID });
+
+      expect(result.error?.code).toBe('MAIL_NOT_FOUND');
+      expect(result.error?.message).toContain('Invalid id');
+      expect(result.error?.message).toContain("mailbox 'INBOX' of account 'iCloud'");
+      expect(result.error?.message).toContain('listEmails');
+    });
+
+    it('a Mail without an address to send from asks the user to set up an account', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        cliFailure(
+          'send_email',
+          'MAIL_NO_SENDER: Mail.app has no turned-on account with an email address to send from.'
+        )
+      );
+
+      const result = await handleSendEmail({ to: 'a@x', subject: 's', body: 'b' });
+
+      expect(result.error?.code).toBe('MAIL_NO_SENDER');
+      expect(result.error?.message).toContain('Mail > Settings > Accounts');
+    });
+
+    it('a send Mail did not complete asks the user instead of retrying', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        cliFailure(
+          'send_email',
+          'MAIL_SEND_FAILED: Mail.app did not send the message; it may wait in the Outbox.'
+        )
+      );
+
+      const result = await handleSendEmail({
+        to: 'a@x',
+        subject: 's',
+        body: 'b',
+        confirm_send: true,
+      });
+
+      expect(result.error?.code).toBe('MAIL_SEND_FAILED');
+      expect(result.error?.message).toContain('Outbox');
+      expect(result.error?.message).toContain('do not retry without asking');
+    });
+
+    it.each([
+      ['reply_to_email', () => handleReplyToEmail({ id: MAIL_ID, body: 'b', confirm_send: true })],
+      ['forward_email', () => handleForwardEmail({ id: MAIL_ID, to: 'a@x', confirm_send: true })],
+    ])(
+      'a %s Mail would send otherwise than previewed asks for a new preview instead of sending',
+      async (command, call) => {
+        vi.mocked(runCommand).mockRejectedValue(
+          cliFailure(
+            command,
+            'MAIL_PREVIEW_CHANGED: The message Mail.app made differs from the preview in its recipients, subject or sender, so it was closed unsent; the original changed or Mail chose differently.'
+          )
+        );
+
+        const result = await call();
+
+        expect(result.error?.code).toBe('MAIL_PREVIEW_CHANGED');
+        expect(result.error?.message).toContain('closed unsent');
+        expect(result.error?.message).toContain('without confirm_send');
+        expect(result.error?.message).toContain('new preview');
+        expect(result.error?.message).toContain('do not loop');
+        expect(result.error?.message).toContain('sendEmail');
+        expect(result.error?.message).not.toContain('Invalid');
+      }
+    );
+
+    it.each([
+      ['list_emails', () => handleListEmails({ mailbox: 'INBOX' })],
+      ['get_email', () => handleGetEmail({ id: MAIL_ID })],
+      ['reply_to_email', () => handleReplyToEmail({ id: MAIL_ID, body: 'b', confirm_send: true })],
+      ['save_draft', () => handleSaveDraft({ subject: 's' })],
+      ['copy_emails', () => handleCopyEmails({ ids: [MAIL_ID], mailbox: 'A', account: 'W' })],
+    ])(
+      'a timeout of %s says a repeated timeout means Mail is stuck and the user restarts it',
+      async (command, call) => {
+        vi.mocked(runCommand).mockRejectedValue(
+          cliFailure(command, 'MAIL_TIMEOUT: Mail.app did not answer within 25 s.')
+        );
+
+        const result = await call();
+
+        expect(result.error?.code).toBe('MAIL_TIMEOUT');
+        expect(result.error?.message).toContain('quit and reopen Mail.app');
+        expect(result.error?.message).toContain('stop calling mail tools');
+      }
+    );
+
+    it('a failure that is not an Error reaches the caller unchanged', async () => {
+      vi.mocked(runCommand).mockRejectedValue('MAIL_TIMEOUT: not an Error');
+
+      await expect(handleListEmails({ mailbox: 'INBOX' })).rejects.toBe(
+        'MAIL_TIMEOUT: not an Error'
+      );
+    });
+
+    it('any other failure keeps its own message', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        cliFailure('get_email', 'AppleScript error: Mail got an error: Can’t get message 1.')
+      );
+      const tool = createMailTools().find((t) => t.tool.name === 'getEmail')!;
+
+      const result = await tool.handler({ id: MAIL_ID });
+
+      expect(result.isError).toBe(true);
+      const text = (result.content[0] as { text: string }).text;
+      expect(text).toContain('HANDLER_ERROR');
+      expect(text).toContain('AppleScript error: Mail got an error: Can’t get message 1.');
     });
   });
 });
+
+const DELETE_PREVIEW = {
+  status: 'confirmation_required',
+  confirm_param: 'confirm_delete',
+  instruction: 'Nothing was changed. Show this preview to the user and ask the user: …',
+  emails: [
+    {
+      id: MAIL_ID,
+      ok: true,
+      subject: 'Hi',
+      sender: 'Anna',
+      date: '2026-10-20T09:15:00+02:00',
+      mailbox: 'INBOX',
+      account: 'iCloud',
+    },
+  ],
+};
+
+const SEND_PREVIEW = {
+  status: 'confirmation_required',
+  confirm_param: 'confirm_send',
+  instruction:
+    'Nothing was changed. Show this preview to the user and ask the user: Send this email? …',
+  from: 'Me <me@example.com>',
+  to: ['bob@example.com'],
+  cc: [],
+  bcc: [],
+  subject: 'Test',
+  body: 'Hello Bob',
+};
+
+const REPLY_PREVIEW = {
+  status: 'confirmation_required',
+  confirm_param: 'confirm_send',
+  instruction:
+    'Nothing was changed. Show this preview to the user and ask the user: Send this reply? …',
+  to: ['anna@x'],
+  cc: ['ewa@x'],
+  bcc: [],
+  from: 'Me <me@x>',
+  subject: 'Re: Hi',
+  body: 'Thanks!\n\nOn 20 Oct 2026 at 09:15, Anna <anna@x> wrote:\n\n> Hello\n',
+};
+
+const FORWARD_PREVIEW = {
+  status: 'confirmation_required',
+  confirm_param: 'confirm_send',
+  instruction:
+    'Nothing was changed. Show this preview to the user and ask the user: Forward this email? …',
+  to: ['bob@x'],
+  cc: [],
+  from: 'Me <me@x>',
+  subject: 'Fwd: Hi',
+  original: {
+    id: MAIL_ID,
+    subject: 'Hi',
+    sender: 'Anna <anna@x>',
+    date: '2026-10-20T09:15:00+02:00',
+    mailbox: 'INBOX',
+    account: 'iCloud',
+  },
+  attachments: ['invoice.pdf'],
+};
+
+const REDIRECT_PREVIEW = {
+  status: 'confirmation_required',
+  confirm_param: 'confirm_send',
+  instruction:
+    'Nothing was changed. Show this preview to the user and ask the user: Redirect this email? …',
+  to: ['bob@x'],
+  cc: [],
+  from: 'Me <me@x>',
+  subject: 'Hi',
+  original: FORWARD_PREVIEW.original,
+  attachments: ['invoice.pdf'],
+};
+
+const REDIRECT_SENT = {
+  status: 'sent',
+  to: ['bob@x'],
+  cc: ['carol@x'],
+  from: 'Me <me@x>',
+  subject: 'Hi',
+  original: { id: MAIL_ID, subject: 'Hi', sender: 'Anna', mailbox: 'INBOX', account: 'iCloud' },
+  attachments: [],
+};
+
+const DRAFT_SAVED = {
+  status: 'saved',
+  from: 'Work Me <me@work.example>',
+  to: ['bob@example.com'],
+  cc: [],
+  bcc: [],
+  subject: 'Test',
+  body: 'Hello Bob',
+  account: 'Work',
+  signature: 'Work',
+};
+
+const DELETE_REPORT = {
+  status: 'partial',
+  emails: [
+    { id: MAIL_ID, ok: true, subject: 'Hi', sender: 'Anna', mailbox: 'INBOX', account: 'iCloud' },
+    {
+      id: MAIL_ID,
+      ok: false,
+      mailbox: 'INBOX',
+      account: 'iCloud',
+      error: 'MAIL_NOT_FOUND: The email is no longer in mailbox …',
+    },
+  ],
+  succeeded: 1,
+  failed: 1,
+};
+
+const ORGANIZE_REPORT = {
+  status: 'partial',
+  emails: [
+    {
+      id: MAIL_ID,
+      ok: true,
+      subject: 'Hi',
+      sender: 'Anna',
+      date: '2026-10-20T09:15:00+02:00',
+      mailbox: 'INBOX',
+      account: 'iCloud',
+    },
+    {
+      id: MAIL_ID,
+      ok: false,
+      mailbox: 'INBOX',
+      account: 'iCloud',
+      error: "MAIL_ARCHIVE_NOT_FOUND: Account 'iCloud' has no Archive mailbox …",
+    },
+  ],
+  succeeded: 1,
+  failed: 1,
+};
+
+const NOT_SPAM_REPORT = {
+  ...ORGANIZE_REPORT,
+  emails: [{ ...ORGANIZE_REPORT.emails[0], moved: true }, ORGANIZE_REPORT.emails[1]],
+};
+
+/**
+ * One sample carrying every key a gated batch tool emits, from its preview and from its per-mail report.
+ * @param preview - The unconfirmed answer.
+ * @param report - The confirmed answer.
+ */
+function gatedBatchOutputs(
+  preview: { emails: object[] },
+  report: { emails: object[] }
+): Record<string, unknown> {
+  return { ...preview, ...report, emails: [...preview.emails, ...report.emails] };
+}
+
+/**
+ * A call each mail tool accepts.
+ * @param name - Tool name.
+ */
+function validInput(name: string): Record<string, unknown> {
+  const inputs: Record<string, Record<string, unknown>> = {
+    detectMailClients: {},
+    listMailboxes: {},
+    listEmails: { mailbox: 'INBOX' },
+    getEmail: { id: MAIL_ID },
+    searchEmails: { query: 'hi' },
+    sendEmail: { to: 'a@x', subject: 's', body: 'b', confirm_send: true },
+    replyToEmail: { id: MAIL_ID, body: 'b', confirm_send: true },
+    forwardEmail: { id: MAIL_ID, to: 'a@x', confirm_send: true },
+    redirectEmail: { id: MAIL_ID, to: 'a@x', confirm_send: true },
+    listMailRules: {},
+    checkMail: {},
+    deleteEmails: { ids: [MAIL_ID], confirm_delete: true },
+    markEmailsRead: { ids: [MAIL_ID], read: true },
+    flagEmails: { ids: [MAIL_ID], flag: 'red' },
+    moveEmails: { ids: [MAIL_ID], mailbox: 'Clients', account: 'Work' },
+    copyEmails: { ids: [MAIL_ID], mailbox: 'Clients', account: 'Work' },
+    archiveEmails: { ids: [MAIL_ID] },
+    createMailbox: { name: 'Clients', account: 'Work' },
+    markEmailsSpam: { ids: [MAIL_ID], confirm_spam: true },
+    markEmailsNotSpam: { ids: [MAIL_ID] },
+    renameMailbox: { mailbox: 'Clients', account: 'Work', new_name: 'Customers' },
+    saveDraft: { subject: 's', body: 'b' },
+    listMailSignatures: {},
+  };
+  return inputs[name];
+}
+
+/**
+ * The key tree of a JSON value: objects map keys to subtrees, arrays to the merged tree of their items.
+ * @param value - Parsed JSON.
+ */
+function shapeOf(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    const items = value.map(shapeOf);
+    if (items.length === 0) return [null];
+    if (items.every((item) => item !== null && typeof item === 'object')) {
+      return [shapeOf(Object.assign({}, ...items))];
+    }
+    return [items[0]];
+  }
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([k, v]) => [k, shapeOf(v)])
+    );
+  }
+  return null;
+}
+
+/**
+ * The key tree a JSON schema declares, in the form {@link shapeOf} returns.
+ * @param schema - JSON schema.
+ */
+function declaredShape(schema: any): unknown {
+  if (schema?.type === 'array') return [declaredShape(schema.items)];
+  if (schema?.type === 'object' && schema.properties) {
+    return Object.fromEntries(
+      Object.entries(schema.properties as Record<string, unknown>)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([k, v]) => [k, declaredShape(v)])
+    );
+  }
+  return null;
+}

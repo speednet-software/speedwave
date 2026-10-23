@@ -32,7 +32,7 @@ Hardened Runtime disables several capabilities by default; binaries that use res
 | `lima/bin/limactl`  | `virtualization.plist` | `com.apple.security.virtualization`                                                         | Apple Virtualization.framework (`vmType: vz`)                                            |
 | `calendar-cli`      | `calendars.plist`      | `com.apple.security.personal-information.calendars`                                         | EventKit Calendar access (see [ADR-010](ADR-010-mcp-os-as-host-process-per-platform.md)) |
 | `reminders-cli`     | `reminders.plist`      | `com.apple.security.personal-information.reminders`                                         | EventKit Reminders access                                                                |
-| `mail-cli`          | `apple-events.plist`   | `com.apple.security.automation.apple-events`                                                | Apple Events to Mail/Outlook via osascript                                               |
+| `mail-cli`          | `apple-events.plist`   | `com.apple.security.automation.apple-events`                                                | Apple Events to Mail via osascript                                                       |
 | `notes-cli`         | `apple-events.plist`   | `com.apple.security.automation.apple-events`                                                | Apple Events to Notes via osascript                                                      |
 | `audio-capture-cli` | `audio-capture.plist`  | `com.apple.security.device.audio-input`                                                     | Host-side audio capture (see [ADR-056](ADR-056-host-side-audio-transcription.md))        |
 

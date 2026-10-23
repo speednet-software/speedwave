@@ -39,8 +39,8 @@ function summarizeReceived(value: unknown): string {
 
 /** Input for {@link teachingErrorResult}. */
 export interface TeachingErrorParams {
-  /** Name of the invalid parameter. */
-  paramName: string;
+  /** Name of the invalid parameter; leave it out when no single parameter was wrong. */
+  paramName?: string;
   /** The value that was actually received; leave the key out to keep the value out of the message. */
   received?: unknown;
   /** Name of the tool that provides a correct value for this param (e.g. "listIssueIds"). */
@@ -55,11 +55,14 @@ export interface TeachingErrorParams {
  */
 export function buildTeachingMessage(params: TeachingErrorParams): string {
   const { paramName, correctValueTool, nextStep } = params;
-  const parts = [
-    Object.hasOwn(params, 'received')
-      ? `Invalid ${paramName} (received: ${summarizeReceived(params.received)}).`
-      : `Invalid ${paramName}.`,
-  ];
+  const parts: string[] = [];
+  if (paramName !== undefined) {
+    parts.push(
+      Object.hasOwn(params, 'received')
+        ? `Invalid ${paramName} (received: ${summarizeReceived(params.received)}).`
+        : `Invalid ${paramName}.`
+    );
+  }
   if (correctValueTool) {
     parts.push(`Get a valid value from ${correctValueTool}.`);
   }

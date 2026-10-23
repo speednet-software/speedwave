@@ -133,6 +133,7 @@ export const ITEM_KEYS = [
   'merge_requests',
   'pipelines',
   'messages',
+  'emails',
   'channels',
   'files',
   'results',

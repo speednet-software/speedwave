@@ -80,7 +80,7 @@ describe('Security', () => {
     it('has expected command count per domain', () => {
       expect(ALLOWED_COMMANDS.reminders.size).toBe(6);
       expect(ALLOWED_COMMANDS.calendar.size).toBe(6);
-      expect(ALLOWED_COMMANDS.mail.size).toBe(7);
+      expect(ALLOWED_COMMANDS.mail.size).toBe(23);
       expect(ALLOWED_COMMANDS.notes.size).toBe(7);
     });
 
@@ -131,20 +131,24 @@ describe('Security', () => {
         const params: Record<string, unknown> = {};
         for (const field of required) {
           const prop = tool.inputSchema.properties?.[field] as
-            { type?: string; description?: string } | undefined;
+            { type?: string; description?: string; enum?: unknown[] } | undefined;
           const isDateField =
             prop?.description?.toLowerCase().includes('iso8601') ||
             field === 'start' ||
             field === 'end';
-          if (prop?.type === 'boolean') {
+          if (prop?.enum) {
+            params[field] = prop.enum[0];
+          } else if (prop?.type === 'boolean') {
             params[field] = true;
+          } else if (prop?.type === 'array') {
+            params[field] = ['test-value'];
           } else if (isDateField) {
             params[field] = '2026-02-20T10:00:00Z';
           } else {
             params[field] = 'test-value';
           }
         }
-        await handler(params);
+        await handler({ ...params, ...tool.inputExamples?.[0]?.input });
       }
 
       expect(calledCommands.length).toBe(tools.length);

@@ -2,14 +2,17 @@ import Foundation
 
 /// Executes AppleScript via osascript subprocess with timeout support.
 public enum ScriptRunner {
-    /// Run an AppleScript and return stdout. Throws on non-zero exit or timeout.
+    /// Run an AppleScript and return stdout. Throws on non-zero exit or timeout. The script goes to `osascript`
+    /// on stdin, so its size is not bound by the argument limit.
     public static func run(_ script: String, timeout: TimeInterval = 15) throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", script]
+        process.arguments = []
 
+        let stdinPipe = Pipe()
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
+        process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
@@ -17,6 +20,9 @@ public enum ScriptRunner {
         process.terminationHandler = { _ in semaphore.signal() }
 
         try process.run()
+        let stdoutReader = PipeReader(stdoutPipe)
+        let stderrReader = PipeReader(stderrPipe)
+        PipeWriter.write(Data(script.utf8), to: stdinPipe)
 
         if semaphore.wait(timeout: .now() + timeout) == .timedOut {
             process.terminate()
@@ -24,10 +30,10 @@ public enum ScriptRunner {
             throw ScriptError.timeout(timeout, nil)
         }
 
-        let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-        let stdout = String(data: stdoutData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let stderr = String(data: stderrData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let stdout = String(data: stdoutReader.data(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let stderr = String(data: stderrReader.data(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
         guard process.terminationStatus == 0 else {
             throw classifyFailure(stderr: stderr)
@@ -42,6 +48,38 @@ public enum ScriptRunner {
             return .automationPermission(stderr)
         }
         return .scriptFailed(stderr)
+    }
+}
+
+/// Drains a pipe on a background queue from the moment it is made.
+private final class PipeReader: @unchecked Sendable {
+    private let done = DispatchGroup()
+    private var collected = Data()
+
+    init(_ pipe: Pipe) {
+        done.enter()
+        DispatchQueue.global().async {
+            self.collected = pipe.fileHandleForReading.readDataToEndOfFile()
+            self.done.leave()
+        }
+    }
+
+    func data() -> Data {
+        done.wait()
+        return collected
+    }
+}
+
+/// Writes data into a pipe on a background queue and closes it; a reader that exits early ends the write without
+/// a SIGPIPE.
+private enum PipeWriter {
+    static func write(_ data: Data, to pipe: Pipe) {
+        let handle = pipe.fileHandleForWriting
+        _ = fcntl(handle.fileDescriptor, F_SETNOSIGPIPE, 1)
+        DispatchQueue.global().async {
+            try? handle.write(contentsOf: data)
+            try? handle.close()
+        }
     }
 }
 
@@ -114,26 +152,6 @@ public func escapeAppleScript(_ s: String) -> String {
     return safe
         .replacingOccurrences(of: "\\", with: "\\\\")
         .replacingOccurrences(of: "\"", with: "\\\"")
-}
-
-/// Parse `||`-delimited email row (subject||sender||date||read||to-list||body); throws if <6 fields.
-public func parseEmailDetail(_ output: String, id: String) throws -> [String: Any] {
-    let parts = output.components(separatedBy: "||")
-    guard parts.count >= 6 else {
-        throw ScriptError.scriptFailed("Unexpected email format")
-    }
-    return [
-        "id": id,
-        "subject": parts[0].trimmingCharacters(in: .whitespaces),
-        "sender": parts[1].trimmingCharacters(in: .whitespaces),
-        "date": parts[2].trimmingCharacters(in: .whitespaces),
-        "read": parts[3].trimmingCharacters(in: .whitespaces) == "true",
-        "to": parts[4]
-            .components(separatedBy: ",")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty },
-        "body": parts[5...].joined(separator: "||").trimmingCharacters(in: .whitespaces),
-    ]
 }
 
 /// Parse `||`-delimited AppleScript output into array of dictionaries.

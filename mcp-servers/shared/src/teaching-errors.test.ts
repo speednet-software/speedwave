@@ -193,6 +193,30 @@ describe('teachingToolResult', () => {
       (teachingErrorResult(params).content[0].text as string).replace(/^Error: /, '')
     );
   });
+
+  it('without a param name gives only the next step under the given code', () => {
+    const result = teachingToolResult(
+      { nextStep: 'Mail.app did not answer. Retry once.' },
+      'MAIL_TIMEOUT'
+    );
+
+    expect(result).toEqual({
+      success: false,
+      error: { code: 'MAIL_TIMEOUT', message: 'Mail.app did not answer. Retry once.' },
+    });
+  });
+
+  it('without a param name keeps the correct-value tool and drops a received value', () => {
+    const result = teachingToolResult({
+      received: 'x',
+      correctValueTool: 'listMailboxes',
+      nextStep: 'Pass a listed mailbox.',
+    });
+
+    expect(result.error?.message).toBe(
+      'Get a valid value from listMailboxes. Pass a listed mailbox.'
+    );
+  });
 });
 
 describe('clampPageSize', () => {

@@ -13,9 +13,9 @@ vi.mock('./platform-runner.js', () => ({
 
 describe('mcp-os integration', () => {
   describe('createToolDefinitions', () => {
-    it('returns all 26 tools', () => {
+    it('returns all 42 tools', () => {
       const tools = createToolDefinitions();
-      expect(tools).toHaveLength(26);
+      expect(tools).toHaveLength(42);
     });
 
     it('all tool names are unique', () => {
@@ -68,6 +68,22 @@ describe('mcp-os integration', () => {
       expect(names).toContain('searchEmails');
       expect(names).toContain('sendEmail');
       expect(names).toContain('replyToEmail');
+      expect(names).toContain('forwardEmail');
+      expect(names).toContain('redirectEmail');
+      expect(names).toContain('listMailRules');
+      expect(names).toContain('checkMail');
+      expect(names).toContain('deleteEmails');
+      expect(names).toContain('markEmailsRead');
+      expect(names).toContain('flagEmails');
+      expect(names).toContain('moveEmails');
+      expect(names).toContain('copyEmails');
+      expect(names).toContain('archiveEmails');
+      expect(names).toContain('createMailbox');
+      expect(names).toContain('markEmailsSpam');
+      expect(names).toContain('markEmailsNotSpam');
+      expect(names).toContain('renameMailbox');
+      expect(names).toContain('saveDraft');
+      expect(names).toContain('listMailSignatures');
     });
 
     it('contains all notes tools', () => {
@@ -101,9 +117,10 @@ describe('mcp-os integration', () => {
         'updateEvent',
         'deleteEvent',
         'getEmail',
-        'searchEmails',
         'sendEmail',
         'replyToEmail',
+        'forwardEmail',
+        'redirectEmail',
         'getNote',
         'searchNotes',
         'createNote',

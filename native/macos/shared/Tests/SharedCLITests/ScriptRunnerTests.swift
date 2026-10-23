@@ -267,63 +267,6 @@ final class ScriptRunnerTests: XCTestCase {
     }
 
 
-    func testParseEmailDetailHappyPath() throws {
-        let output = "Hello||alice@example.com||2024-01-01||true||bob@x.com,carol@y.com||Body text"
-        let dict = try parseEmailDetail(output, id: "msg-1")
-        XCTAssertEqual(dict["id"] as? String, "msg-1")
-        XCTAssertEqual(dict["subject"] as? String, "Hello")
-        XCTAssertEqual(dict["sender"] as? String, "alice@example.com")
-        XCTAssertEqual(dict["date"] as? String, "2024-01-01")
-        XCTAssertEqual(dict["read"] as? Bool, true)
-        XCTAssertEqual(dict["to"] as? [String], ["bob@x.com", "carol@y.com"])
-        XCTAssertEqual(dict["body"] as? String, "Body text")
-    }
-
-    func testParseEmailDetailBodyContainingDelimiter() throws {
-        let output = "Subj||from@x||2024-01-01||false||to@x||line1 || line2 || line3"
-        let dict = try parseEmailDetail(output, id: "id")
-        XCTAssertEqual(dict["read"] as? Bool, false)
-        XCTAssertEqual(dict["body"] as? String, "line1 || line2 || line3")
-    }
-
-    func testParseEmailDetailEmptyToListFiltersToEmptyArray() throws {
-        let output = "Subj||from@x||2024-01-01||true||||Body"
-        let dict = try parseEmailDetail(output, id: "id")
-        XCTAssertEqual(dict["to"] as? [String], [])
-    }
-
-    func testParseEmailDetailTrimsFieldWhitespace() throws {
-        let output = " Subj || from@x || 2024-01-01 || true || a@x , b@y || Body "
-        let dict = try parseEmailDetail(output, id: "id")
-        XCTAssertEqual(dict["subject"] as? String, "Subj")
-        XCTAssertEqual(dict["sender"] as? String, "from@x")
-        XCTAssertEqual(dict["to"] as? [String], ["a@x", "b@y"])
-        XCTAssertEqual(dict["body"] as? String, "Body")
-    }
-
-    func testParseEmailDetailReadFalseWhenNotLiteralTrue() throws {
-        let output = "Subj||from@x||2024-01-01||no||to@x||Body"
-        let dict = try parseEmailDetail(output, id: "id")
-        XCTAssertEqual(dict["read"] as? Bool, false)
-    }
-
-    func testParseEmailDetailThrowsOnTooFewFields() {
-        let output = "Subj||from@x||2024-01-01||true||to@x"
-        XCTAssertThrowsError(try parseEmailDetail(output, id: "id")) { error in
-            guard case ScriptError.scriptFailed(let msg) = error else {
-                return XCTFail("expected .scriptFailed, got \(error)")
-            }
-            XCTAssertEqual(msg, "Unexpected email format")
-        }
-    }
-
-    func testParseEmailDetailExactlySixFieldsHasEmptyBody() throws {
-        let output = "Subj||from@x||2024-01-01||true||to@x||"
-        let dict = try parseEmailDetail(output, id: "id")
-        XCTAssertEqual(dict["body"] as? String, "")
-    }
-
-
     func testScriptErrorFailedDescription() {
         let err = ScriptError.scriptFailed("x")
         XCTAssertEqual(err.errorDescription, "AppleScript error: x")
@@ -375,5 +318,56 @@ final class ScriptRunnerTests: XCTestCase {
     func testClassifyFailureEmptyStderr() {
         let err = ScriptRunner.classifyFailure(stderr: "")
         guard case .scriptFailed = err else { return XCTFail("expected .scriptFailed") }
+    }
+
+    func testRunReturnsOutputLargerThanAPipeBufferWithoutWaitingForTheTimeout() throws {
+        let script = """
+        set s to "a"
+        repeat 18 times
+            set s to s & s
+        end repeat
+        return s
+        """
+        let started = Date()
+
+        let output = try ScriptRunner.run(script, timeout: 20)
+
+        XCTAssertEqual(output.count, 262_144)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 10)
+    }
+
+    func testRunReturnsAFailureWithStderrLargerThanAPipeBuffer() {
+        let script = """
+        set s to "e"
+        repeat 17 times
+            set s to s & s
+        end repeat
+        error s
+        """
+
+        XCTAssertThrowsError(try ScriptRunner.run(script, timeout: 20)) { error in
+            guard case .scriptFailed(let stderr) = error as? ScriptError else {
+                return XCTFail("expected .scriptFailed, got \(error)")
+            }
+            XCTAssertGreaterThan(stderr.count, 131_072)
+        }
+    }
+
+    func testRunTakesAScriptLongerThanTheArgumentLimitWithUnicodeIntact() throws {
+        let text = String(repeating: "Zażółć gęślą jaźń ", count: 90_000)
+        let script = "set s to \"\(text)\"\nreturn (length of s as text) & \" \" & (text 1 thru 6 of s)"
+
+        let output = try ScriptRunner.run(script, timeout: 30)
+
+        XCTAssertGreaterThan(script.utf8.count, 2_000_000)
+        XCTAssertEqual(output, "\(text.count) Zażółć")
+    }
+
+    func testRunStillTimesOutAScriptThatNeverEnds() {
+        XCTAssertThrowsError(try ScriptRunner.run("delay 30", timeout: 1)) { error in
+            guard case .timeout = error as? ScriptError else {
+                return XCTFail("expected .timeout, got \(error)")
+            }
+        }
     }
 }
