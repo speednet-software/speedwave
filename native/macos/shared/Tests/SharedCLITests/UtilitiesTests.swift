@@ -305,16 +305,6 @@ final class SharedCLITests: XCTestCase {
     }
 
 
-    func testResolvedBundleIdentifierFallbackWhenNil() {
-        XCTAssertEqual(resolvedBundleIdentifier(from: nil), speedwaveBundleIdentifier)
-        XCTAssertEqual(resolvedBundleIdentifier(from: nil), "pl.speedwave.desktop")
-    }
-
-    func testResolvedBundleIdentifierUsesProvidedValueWhenPresent() {
-        XCTAssertEqual(resolvedBundleIdentifier(from: "pl.speedwave.desktop"), "pl.speedwave.desktop")
-        XCTAssertEqual(resolvedBundleIdentifier(from: "com.example.other"), "com.example.other")
-    }
-
     func testSpeedwaveBundleIdentifierMatchesTauriConf() throws {
         let candidates = [
             "../../../desktop/src-tauri/tauri.conf.json",
@@ -337,48 +327,57 @@ final class SharedCLITests: XCTestCase {
     }
 
 
-    func testComposeDeniedCalendarMentionsTccutilReset() {
+    func testComposeDeniedCalendarPointsToTheCalendarsPaneAndTheAppReset() {
         let msg = composeErrorMessage(status: .denied, entity: .calendar)
-        XCTAssertTrue(msg.contains("tccutil reset Calendar pl.speedwave.desktop.calendar"),
-                      "Denied Calendar message must contain tccutil reset with sub-identifier, got: \(msg)")
+        XCTAssertTrue(msg.contains("allow Speedwave in System Settings > Privacy & Security > Calendars"), "got: \(msg)")
+        XCTAssertTrue(msg.contains("tccutil reset Calendar pl.speedwave.desktop\n"), "got: \(msg)")
     }
 
-    func testComposeDeniedRemindersMentionsTccutilReset() {
+    func testComposeDeniedRemindersPointsToTheRemindersPaneAndTheAppReset() {
         let msg = composeErrorMessage(status: .denied, entity: .reminders)
-        XCTAssertTrue(msg.contains("tccutil reset Reminders pl.speedwave.desktop.reminders"),
-                      "Denied Reminders message must contain tccutil reset with sub-identifier, got: \(msg)")
+        XCTAssertTrue(msg.contains("allow Speedwave in System Settings > Privacy & Security > Reminders"), "got: \(msg)")
+        XCTAssertTrue(msg.contains("tccutil reset Reminders pl.speedwave.desktop\n"), "got: \(msg)")
     }
 
-    func testComposeDeniedMailMentionsAppleEventsService() {
+    func testComposeDeniedMailPointsToAutomationAndWarnsTheResetCoversEveryApp() {
         let msg = composeErrorMessage(status: .denied, entity: .mail)
-        XCTAssertTrue(msg.contains("tccutil reset AppleEvents pl.speedwave.desktop.mail"),
-                      "Denied Mail must use AppleEvents service in tccutil command, got: \(msg)")
+        XCTAssertTrue(msg.contains("allow Speedwave to control Mail in System Settings > Privacy & Security > Automation"),
+                      "got: \(msg)")
+        XCTAssertTrue(msg.contains("tccutil reset AppleEvents pl.speedwave.desktop\n"), "got: \(msg)")
+        XCTAssertTrue(msg.contains("every app Speedwave controls"), "got: \(msg)")
     }
 
-    func testComposeDeniedNotesMentionsAppleEventsService() {
+    func testComposeDeniedNotesPointsToAutomation() {
         let msg = composeErrorMessage(status: .denied, entity: .notes)
-        XCTAssertTrue(msg.contains("tccutil reset AppleEvents pl.speedwave.desktop.notes"),
-                      "Denied Notes must use AppleEvents service in tccutil command, got: \(msg)")
+        XCTAssertTrue(msg.contains("allow Speedwave to control Notes in System Settings > Privacy & Security > Automation"),
+                      "got: \(msg)")
+        XCTAssertTrue(msg.contains("tccutil reset AppleEvents pl.speedwave.desktop\n"), "got: \(msg)")
     }
 
-    func testComposeUsesSubIdentifierByDefault() {
+    func testComposeResetNamesTheAppIdentityTccKeepsGrantsUnder() {
         for entity in [PermissionEntity.calendar, .reminders, .mail, .notes] {
-            let msg = composeErrorMessage(status: .denied, entity: entity)
-            let expected = "pl.speedwave.desktop.\(entity.rawValue)"
-            XCTAssertTrue(msg.contains(expected),
-                          "Default bundleId must be sub-identifier '\(expected)' for \(entity), got: \(msg)")
+            for status in [PermissionStatus.denied, .silentReject] {
+                let msg = composeErrorMessage(status: status, entity: entity)
+                XCTAssertTrue(msg.contains("tccutil reset \(tccServiceName(for: entity)) \(speedwaveBundleIdentifier)\n"),
+                              "\(status) \(entity) got: \(msg)")
+                XCTAssertFalse(msg.contains("\(speedwaveBundleIdentifier).\(entity.rawValue)"),
+                               "tccutil cannot resolve a helper identifier, \(status) \(entity) got: \(msg)")
+            }
         }
     }
 
-    func testComposeAcceptsExplicitBundleIdOverride() {
-        let msg = composeErrorMessage(status: .denied, entity: .calendar, bundleId: "com.example.test")
-        XCTAssertTrue(msg.contains("tccutil reset Calendar com.example.test"),
-                      "Explicit bundleId must override default sub-identifier, got: \(msg)")
+    func testComposeSilentRejectLeadsBackToAccessInsteadOfReinstall() {
+        for entity in [PermissionEntity.calendar, .reminders, .mail, .notes] {
+            let msg = composeErrorMessage(status: .silentReject, entity: entity)
+            XCTAssertFalse(msg.lowercased().contains("reinstall"), "\(entity) got: \(msg)")
+            XCTAssertTrue(msg.contains("If you clicked Don't Allow"), "\(entity) got: \(msg)")
+            XCTAssertTrue(msg.contains("report it as a Speedwave bug"), "\(entity) got: \(msg)")
+        }
     }
 
-    func testComposeSilentRejectMentionsReinstall() {
-        let msg = composeErrorMessage(status: .silentReject, entity: .calendar)
-        XCTAssertTrue(msg.contains("reinstall"), "silentReject must mention reinstall")
+    func testComposeWriteOnlyCalendarPointsToTheCalendarsPane() {
+        let msg = composeErrorMessage(status: .writeOnly, entity: .calendar)
+        XCTAssertTrue(msg.contains("System Settings > Privacy & Security > Calendars"), "got: \(msg)")
     }
 
     func testComposeWriteOnlyOnlyForCalendar() {
@@ -425,13 +424,6 @@ final class SharedCLITests: XCTestCase {
         XCTAssertFalse(msg.isEmpty, ".notDetermined must return non-empty for parametric invariant")
     }
 
-
-    func testSubBundleIdentifierForEachEntity() {
-        XCTAssertEqual(subBundleIdentifier(for: .calendar), "pl.speedwave.desktop.calendar")
-        XCTAssertEqual(subBundleIdentifier(for: .reminders), "pl.speedwave.desktop.reminders")
-        XCTAssertEqual(subBundleIdentifier(for: .mail), "pl.speedwave.desktop.mail")
-        XCTAssertEqual(subBundleIdentifier(for: .notes), "pl.speedwave.desktop.notes")
-    }
 
     func testTccServiceNameMailAndNotesUseAppleEvents() {
         XCTAssertEqual(tccServiceName(for: .calendar), "Calendar")
@@ -534,8 +526,8 @@ final class SharedCLITests: XCTestCase {
         XCTAssertEqual(parsed["granted"] as? Bool, false)
         XCTAssertEqual(parsed["status"] as? String, "denied")
         let error = parsed["error"] as? String ?? ""
-        XCTAssertTrue(error.contains("tccutil reset Calendar pl.speedwave.desktop.calendar"),
-                      "Denied must mention tccutil reset with sub-identifier, got: \(error)")
+        XCTAssertTrue(error.contains("tccutil reset Calendar pl.speedwave.desktop\n"),
+                      "Denied must reset the app identity, got: \(error)")
         XCTAssertEqual(gate.requestInvokedCount, 0)
     }
 
@@ -578,8 +570,8 @@ final class SharedCLITests: XCTestCase {
         XCTAssertEqual(parsed["granted"] as? Bool, false)
         XCTAssertEqual(parsed["status"] as? String, "denied")
         let error = parsed["error"] as? String ?? ""
-        XCTAssertTrue(error.contains("tccutil reset Calendar pl.speedwave.desktop.calendar"),
-                      "Denied must mention tccutil reset with sub-identifier")
+        XCTAssertTrue(error.contains("tccutil reset Calendar pl.speedwave.desktop\n"),
+                      "Denied must reset the app identity, got: \(error)")
     }
 
     func testPerformSilentRejectStatusUnchanged() {
@@ -591,7 +583,8 @@ final class SharedCLITests: XCTestCase {
         let parsed = try! JSONSerialization.jsonObject(with: result.data(using: .utf8)!) as! [String: Any]
         XCTAssertEqual(parsed["status"] as? String, "silentReject")
         let error = parsed["error"] as? String ?? ""
-        XCTAssertTrue(error.contains("reinstall"), "silentReject must mention reinstall")
+        XCTAssertFalse(error.lowercased().contains("reinstall"), "got: \(error)")
+        XCTAssertTrue(error.contains("If you clicked Don't Allow"), "got: \(error)")
     }
 
     func testPerformGrantedRequestButPostStatusDenied() {
@@ -605,8 +598,35 @@ final class SharedCLITests: XCTestCase {
             "Post-status .denied must override requestGranted=true")
         XCTAssertEqual(parsed["status"] as? String, "denied")
         let error = parsed["error"] as? String ?? ""
-        XCTAssertTrue(error.contains("tccutil reset Calendar pl.speedwave.desktop.calendar"),
-            "Post-status .denied must mention tccutil reset with sub-identifier")
+        XCTAssertTrue(error.contains("tccutil reset Calendar pl.speedwave.desktop\n"),
+            "Post-status .denied must reset the app identity, got: \(error)")
+    }
+
+    func testPerformGrantedRequestWhilePostStatusStillReadsNotDetermined() {
+        let gate = MockGate()
+        gate.initialStatus = .notDetermined
+        gate.requestGranted = true
+        gate.postRequestStatus = .notDetermined
+        let result = performCheckPermission(gate: gate, entity: .calendar)
+        let parsed = try! JSONSerialization.jsonObject(with: result.data(using: .utf8)!) as! [String: Any]
+        XCTAssertEqual(parsed["granted"] as? Bool, true,
+            "EventKit keeps answering notDetermined in the process that was just granted")
+        XCTAssertEqual(parsed["status"] as? String, "granted")
+        XCTAssertNil(parsed["error"])
+    }
+
+    func testPerformTrustedGrantStillRunsTheDataAccessCheck() {
+        let gate = MockGate()
+        gate.initialStatus = .notDetermined
+        gate.requestGranted = true
+        gate.postRequestStatus = .notDetermined
+        gate.dataAccessError = "Notes got privilege error"
+        let result = performCheckPermission(gate: gate, entity: .notes)
+        let parsed = try! JSONSerialization.jsonObject(with: result.data(using: .utf8)!) as! [String: Any]
+        XCTAssertEqual(parsed["granted"] as? Bool, false)
+        XCTAssertEqual(parsed["status"] as? String, "silentReject")
+        let error = parsed["error"] as? String ?? ""
+        XCTAssertTrue(error.contains("data access failed: Notes got privilege error"), "got: \(error)")
     }
 
     func testPerformTimeout() {
@@ -618,6 +638,8 @@ final class SharedCLITests: XCTestCase {
         XCTAssertEqual(parsed["status"] as? String, "silentReject")
         let error = parsed["error"] as? String ?? ""
         XCTAssertTrue(error.contains("timed out"), "Timeout must produce 'timed out' in error")
+        XCTAssertTrue(error.contains("click the toggle again and answer the macOS dialog"), "got: \(error)")
+        XCTAssertFalse(error.contains("reboot"), "got: \(error)")
     }
 
     func testPerformTargetNotRunningInvokesRequestForAutoLaunch() {
