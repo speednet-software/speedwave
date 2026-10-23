@@ -583,9 +583,26 @@ fn resolve_native_cli_binary_in(
         .join(binary_name))
 }
 
+const TARGET_NOT_RUNNING_STATUS: &str = "targetNotRunning";
+
+#[derive(Debug, PartialEq)]
+struct PermissionRefusal {
+    status: Option<String>,
+    reason: String,
+}
+
+impl From<String> for PermissionRefusal {
+    fn from(reason: String) -> Self {
+        Self {
+            status: None,
+            reason,
+        }
+    }
+}
+
 /// Parses `check_permission` JSON `{"granted": bool, "status": str, "error": str}`. `Ok(())` if
-/// `granted` is boolean `true`; `Err(error)` if false, missing, or non-boolean.
-fn parse_permission_output(stdout: &str) -> Result<(), String> {
+/// `granted` is boolean `true`; otherwise the refusal, with the CLI's status when it gave one.
+fn parse_permission_output(stdout: &str) -> Result<(), PermissionRefusal> {
     let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
         .map_err(|e| format!("Failed to parse permission check output: {e}"))?;
 
@@ -603,12 +620,18 @@ fn parse_permission_output(stdout: &str) -> Result<(), String> {
         .and_then(|v| v.as_str())
         .unwrap_or("Permission denied");
 
-    Err(speedwave_runtime::log_sanitizer::sanitize(raw_error))
+    Err(PermissionRefusal {
+        status: parsed
+            .get("status")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        reason: speedwave_runtime::log_sanitizer::sanitize(raw_error),
+    })
 }
 
 /// Checks macOS TCC/Automation permission for the given OS service.
 /// Spawns the native CLI with `check_permission` and parses the JSON output.
-fn check_os_permission(service: &str, launch_if_needed: bool) -> Result<(), String> {
+fn check_os_permission(service: &str, launch_if_needed: bool) -> Result<(), PermissionRefusal> {
     check_os_permission_with_timeout(
         service,
         launch_if_needed,
@@ -622,7 +645,7 @@ fn check_os_permission_with_timeout(
     service: &str,
     launch_if_needed: bool,
     timeout: std::time::Duration,
-) -> Result<(), String> {
+) -> Result<(), PermissionRefusal> {
     let resources_dir = std::env::var(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV)
         .ok()
         .map(std::path::PathBuf::from);
@@ -641,7 +664,7 @@ fn check_os_permission_with_timeout_in(
     launch_if_needed: bool,
     timeout: std::time::Duration,
     resources_dir: Option<&std::path::Path>,
-) -> Result<(), String> {
+) -> Result<(), PermissionRefusal> {
     let binary_path = resolve_native_cli_binary_in(service, resources_dir)?;
     log::info!(
         "spawning {service}-cli check_permission launch={launch_if_needed} (binary={})",
@@ -700,13 +723,13 @@ fn check_os_permission_with_timeout_in(
             "{service}-cli exited non-zero (code={}): {detail}",
             status.code().unwrap_or(-1)
         );
-        return Err(format!("Permission check failed: {detail}"));
+        return Err(format!("Permission check failed: {detail}").into());
     }
 
     let parse_result = parse_permission_output(&stdout);
     match &parse_result {
         Ok(()) => log::info!("{service} permission GRANTED"),
-        Err(reason) => log::warn!("{service} permission NOT GRANTED — {reason}"),
+        Err(refusal) => log::warn!("{service} permission NOT GRANTED — {}", refusal.reason),
     }
     parse_result
 }
@@ -726,9 +749,12 @@ pub fn set_os_integration_enabled(
     );
 
     if enabled {
-        if let Err(reason) = check_os_permission(&service, true) {
-            log::warn!("rejecting enable for {service} (project={project}) — {reason}");
-            return Err(reason);
+        if let Err(refusal) = check_os_permission(&service, true) {
+            log::warn!(
+                "rejecting enable for {service} (project={project}) — {}",
+                refusal.reason
+            );
+            return Err(refusal.reason);
         }
     }
 
@@ -828,7 +854,10 @@ pub fn validate_os_integrations_on_startup(
         }
     }
 
-    let handles: Vec<(&'static str, std::thread::JoinHandle<Result<(), String>>)> = to_check
+    let handles: Vec<(
+        &'static str,
+        std::thread::JoinHandle<Result<(), PermissionRefusal>>,
+    )> = to_check
         .into_iter()
         .map(|svc| {
             log::info!("checking {svc} (currently enabled in config)");
@@ -842,19 +871,10 @@ pub fn validate_os_integrations_on_startup(
     for (svc, handle) in handles {
         let result = handle
             .join()
-            .unwrap_or_else(|_| Err(format!("validate worker thread for {svc} panicked")));
-        match result {
-            Ok(()) => log::info!("{svc} VALID (TCC granted, keeping enabled)"),
-            Err(reason) => {
-                log::warn!("auto-disabling {svc} (was enabled, TCC reports: {reason})");
-                to_disable.push(svc);
-                validations.push(OsIntegrationValidation {
-                    service: svc.to_string(),
-                    previous_enabled: true,
-                    new_enabled: false,
-                    reason,
-                });
-            }
+            .unwrap_or_else(|_| Err(format!("validate worker thread for {svc} panicked").into()));
+        if let Some(validation) = startup_validation(svc, result) {
+            to_disable.push(svc);
+            validations.push(validation);
         }
     }
 
@@ -890,6 +910,37 @@ pub fn validate_os_integrations_on_startup(
     );
 
     Ok(validations)
+}
+
+fn startup_validation(
+    service: &str,
+    check: Result<(), PermissionRefusal>,
+) -> Option<OsIntegrationValidation> {
+    match check {
+        Ok(()) => {
+            log::info!("{service} VALID (TCC granted, keeping enabled)");
+            None
+        }
+        Err(refusal) if refusal.status.as_deref() == Some(TARGET_NOT_RUNNING_STATUS) => {
+            log::info!(
+                "keeping {service} enabled, its permission cannot be read now: {}",
+                refusal.reason
+            );
+            None
+        }
+        Err(refusal) => {
+            log::warn!(
+                "auto-disabling {service} (was enabled, TCC reports: {})",
+                refusal.reason
+            );
+            Some(OsIntegrationValidation {
+                service: service.to_string(),
+                previous_enabled: true,
+                new_enabled: false,
+                reason: refusal.reason,
+            })
+        }
+    }
 }
 
 #[tauri::command]
@@ -2459,28 +2510,28 @@ mod tests {
     fn parse_permission_output_denied() {
         let result = parse_permission_output(r#"{"granted": false, "error": "denied"}"#);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("denied"));
+        assert!(result.unwrap_err().reason.contains("denied"));
     }
 
     #[test]
     fn parse_permission_output_denied_no_error_field() {
         let result = parse_permission_output(r#"{"granted": false}"#);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Permission denied"));
+        assert!(result.unwrap_err().reason.contains("Permission denied"));
     }
 
     #[test]
     fn parse_permission_output_malformed_json() {
         let result = parse_permission_output("not json");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Failed to parse"));
+        assert!(result.unwrap_err().reason.contains("Failed to parse"));
     }
 
     #[test]
     fn parse_permission_output_empty() {
         let result = parse_permission_output("");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Failed to parse"));
+        assert!(result.unwrap_err().reason.contains("Failed to parse"));
     }
 
     #[test]
@@ -2512,7 +2563,7 @@ mod tests {
             r#"{"granted": false, "status": "denied", "error": "tccutil reset Calendar pl.speedwave.desktop"}"#,
         );
         assert!(result.is_err());
-        let err = result.unwrap_err();
+        let err = result.unwrap_err().reason;
         assert!(
             err.contains("tccutil reset Calendar pl.speedwave.desktop"),
             "error must keep the tccutil command, got: {err}"
@@ -2527,6 +2578,7 @@ mod tests {
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
+            .reason
             .contains("tccutil reset Reminders pl.speedwave.desktop"));
     }
 
@@ -2536,7 +2588,7 @@ mod tests {
             r#"{"granted": false, "status": "denied", "error": "tccutil reset AppleEvents pl.speedwave.desktop"}"#,
         );
         assert!(result.is_err());
-        let err = result.unwrap_err();
+        let err = result.unwrap_err().reason;
         assert!(
             err.contains("tccutil reset AppleEvents pl.speedwave.desktop"),
             "Mail must use AppleEvents service in tccutil command, got: {err}"
@@ -2553,7 +2605,7 @@ mod tests {
             r#"{"granted": false, "status": "denied", "error": "tccutil reset AppleEvents pl.speedwave.desktop"}"#,
         );
         assert!(result.is_err());
-        let err = result.unwrap_err();
+        let err = result.unwrap_err().reason;
         assert!(err.contains("tccutil reset AppleEvents pl.speedwave.desktop"));
         assert!(!err.contains("tccutil reset Notes "));
     }
@@ -2564,7 +2616,7 @@ mod tests {
             r#"{"granted": false, "status": "targetNotRunning", "error": "Mail.app is not running. Open Mail.app and try again — this is not a permission problem."}"#,
         );
         assert!(result.is_err());
-        let err = result.unwrap_err();
+        let err = result.unwrap_err().reason;
         assert!(err.contains("Mail.app is not running"));
         assert!(
             !err.to_lowercase().contains("tccutil"),
@@ -2578,7 +2630,7 @@ mod tests {
             r#"{"granted": false, "status": "completely_made_up", "error": "real error"}"#,
         );
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "real error");
+        assert_eq!(result.unwrap_err().reason, "real error");
     }
 
     #[test]
@@ -2587,7 +2639,7 @@ mod tests {
             r#"{"granted": false, "error": "failed with Bearer eyJhbGciOiJIUzI1NiJ9.test.sig"}"#;
         let result = parse_permission_output(input);
         assert!(result.is_err());
-        let err = result.unwrap_err();
+        let err = result.unwrap_err().reason;
         assert!(
             !err.contains("eyJhbGciOiJIUzI1NiJ9.test.sig"),
             "Bearer token must be redacted, got: {err}"
@@ -2600,7 +2652,76 @@ mod tests {
             r#"{"granted": false, "error": "Calendar access denied: foo"}"#,
         );
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Calendar access denied: foo"));
+        assert!(result
+            .unwrap_err()
+            .reason
+            .contains("Calendar access denied: foo"));
+    }
+
+    #[test]
+    fn parse_permission_output_keeps_the_cli_status() {
+        let refusal = parse_permission_output(
+            r#"{"granted": false, "status": "targetNotRunning", "error": "Mail.app is not running."}"#,
+        )
+        .unwrap_err();
+        assert_eq!(refusal.status.as_deref(), Some("targetNotRunning"));
+        assert_eq!(refusal.reason, "Mail.app is not running.");
+    }
+
+    #[test]
+    fn startup_validation_keeps_a_granted_integration() {
+        assert_eq!(startup_validation("calendar", Ok(())), None);
+    }
+
+    #[test]
+    fn startup_validation_keeps_an_integration_whose_app_is_not_running() {
+        let check = parse_permission_output(
+            r#"{"granted": false, "status": "targetNotRunning", "error": "Mail.app is not running. Open Mail.app and try again — this is not a permission problem."}"#,
+        );
+        assert_eq!(startup_validation("mail", check), None);
+    }
+
+    #[test]
+    fn startup_validation_disables_an_integration_tcc_refuses() {
+        let check = parse_permission_output(
+            r#"{"granted": false, "status": "denied", "error": "Notes access is turned off for Speedwave."}"#,
+        );
+        assert_eq!(
+            startup_validation("notes", check),
+            Some(OsIntegrationValidation {
+                service: "notes".to_string(),
+                previous_enabled: true,
+                new_enabled: false,
+                reason: "Notes access is turned off for Speedwave.".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn startup_validation_disables_when_the_check_could_not_run() {
+        let check = Err(PermissionRefusal::from(
+            "Failed to run permission check for mail: no such file".to_string(),
+        ));
+        assert!(startup_validation("mail", check).is_some_and(|v| !v.new_enabled));
+    }
+
+    #[test]
+    fn target_not_running_status_matches_the_swift_permission_status() {
+        let swift = include_str!("../../../native/macos/shared/Sources/SharedCLI/Utilities.swift");
+        let start = swift
+            .find("public enum PermissionStatus: String {")
+            .expect("SharedCLI must declare PermissionStatus");
+        let end = start
+            + swift[start..]
+                .find('}')
+                .expect("PermissionStatus must close");
+        let expected = format!("case {TARGET_NOT_RUNNING_STATUS}");
+        assert!(
+            swift[start..end]
+                .lines()
+                .any(|line| line.trim() == expected),
+            "PermissionStatus must carry `{expected}`, the status startup validation keeps enabled"
+        );
     }
 
     #[test]
@@ -2672,7 +2793,7 @@ mod tests {
             Some(dir),
         );
         assert!(result.is_err());
-        let err = result.unwrap_err();
+        let err = result.unwrap_err().reason;
         assert!(
             err.contains("Failed to run") || err.contains("No such file"),
             "expected 'Failed to run' or 'No such file', got: {err}"
@@ -2695,7 +2816,7 @@ mod tests {
             Some(tmp.path()),
         );
         assert!(result.is_err());
-        let err = result.unwrap_err();
+        let err = result.unwrap_err().reason;
         assert!(
             err.contains("Permission denied") || err.contains("Failed to run"),
             "expected permission error, got: {err}"
@@ -2718,7 +2839,7 @@ mod tests {
             Some(tmp.path()),
         );
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("crash info"));
+        assert!(result.unwrap_err().reason.contains("crash info"));
     }
 
     #[cfg(target_os = "macos")]
@@ -2737,7 +2858,7 @@ mod tests {
             Some(tmp.path()),
         );
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Failed to parse"));
+        assert!(result.unwrap_err().reason.contains("Failed to parse"));
     }
 
     #[cfg(target_os = "macos")]
@@ -2757,7 +2878,7 @@ mod tests {
         );
         assert!(result.is_err());
         assert!(
-            result.unwrap_err().contains("timed out"),
+            result.unwrap_err().reason.contains("timed out"),
             "should report timeout"
         );
     }
