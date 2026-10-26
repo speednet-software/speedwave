@@ -124,12 +124,7 @@ describe('addComment', () => {
       comment: {
         id: '5',
         body: 'Done',
-        author: {
-          account_id: 'u1',
-          display_name: 'Ann',
-          email_address: undefined,
-          active: true,
-        },
+        author: { account_id: 'u1', name: 'Ann' },
         created: 't1',
         updated: 't2',
       },

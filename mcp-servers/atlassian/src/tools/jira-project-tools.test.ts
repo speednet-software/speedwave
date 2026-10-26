@@ -113,7 +113,7 @@ describe('listProjects', () => {
           key: 'PROJ',
           name: 'Project',
           project_type_key: 'software',
-          lead: { account_id: 'u1', display_name: 'Lead', active: true },
+          lead: { account_id: 'u1', name: 'Lead' },
           url: 'https://acme.atlassian.net/browse/PROJ',
         },
       ],
