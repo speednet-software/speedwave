@@ -55,7 +55,7 @@ The single id conflated two questions that have different correct answers:
 - `speedwave-claude`: the four files its Containerfile uses (explicit list —
   `containers/` also holds `claude-resources/` (synced + mounted, never baked)
   and `compose.template.yml`; neither may rebuild claude).
-- Workers: own directory + `mcp-servers/shared` + `mcp-servers/tsconfig.base.json`
+- Workers: own directory + `mcp-servers/shared` + `mcp-servers/tsconfig.base.json` + the npm workspaces root `mcp-servers/package.json` and `mcp-servers/package-lock.json`
   (a `shared/` change rebuilds every worker — it is baked into each via
   multi-stage COPY).
 

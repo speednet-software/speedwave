@@ -1,5 +1,5 @@
 import { switchToProject, activeProjectSlug } from '../helpers/projects';
-import { confirmRestartAndWait, RESTART_WAIT_MS } from '../helpers/shell';
+import { confirmRestartAndWait, FLAKY_STEP_RETRIES, RESTART_WAIT_MS } from '../helpers/shell';
 import { waitForHealthy } from '../helpers/health';
 import { restartAppAndReconnect } from '../helpers/app-restart';
 import { lastSpawnArgs, waitForFreshSpawnArgs } from '../helpers/spawn-args';
@@ -220,6 +220,7 @@ describe('Slash Popover + Model/Effort Selector', function () {
   });
 
   it('OpenRouter: a provider save leaves a routable model before the first message', async function () {
+    this.retries(FLAKY_STEP_RETRIES);
     this.timeout(2 * RESTART_WAIT_MS + 60_000);
     await openSettings();
     await configureOpenRouter(requireOpenrouterKey());

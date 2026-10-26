@@ -106,3 +106,10 @@ jobs:
       prerelease: true
       notes: ${{ needs.compute.outputs.notes }}
     secrets: inherit
+
+  e2e:
+    needs: compute
+    if: needs.compute.outputs.skip != 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/e2e.yml

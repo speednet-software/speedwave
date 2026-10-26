@@ -2,26 +2,18 @@
 FROM node:24-alpine@sha256:fb71d01345f11b708a3553c66e7c74074f2d506400ea81973343d915cb64eef0 AS builder
 WORKDIR /build
 
-COPY tsconfig.base.json ./
-COPY shared/package*.json ./shared/
-RUN --mount=type=cache,target=/root/.npm cd shared && npm install
+COPY tsconfig.base.json package.json package-lock.json ./
+COPY shared/package.json ./shared/
+COPY office/package.json ./office/
+RUN --mount=type=cache,target=/root/.npm npm ci --workspace=office --ignore-scripts
 COPY shared/src ./shared/src
 COPY shared/tsconfig.json ./shared/
-RUN cd shared && npm run build
+RUN npm run build --workspace=shared
 
-COPY office/package*.json ./office/
-RUN --mount=type=cache,target=/root/.npm cd office && npm install
-RUN cd office \
-    && SHEETJS_VERSION=0.20.3 \
-    && SHEETJS_SHA256=8dc73fc3b00203e72d176e85b50938627c7b086e607c682e8d3c22c02bb99fe8 \
-    && wget -q -O /tmp/xlsx.tgz "https://cdn.sheetjs.com/xlsx-${SHEETJS_VERSION}/xlsx-${SHEETJS_VERSION}.tgz" \
-    && echo "${SHEETJS_SHA256}  /tmp/xlsx.tgz" | sha256sum -c - \
-    && npm install --no-save /tmp/xlsx.tgz \
-    && rm /tmp/xlsx.tgz
 COPY office/src ./office/src
 COPY office/tsconfig.json ./office/
-RUN cd office && npm run build
-RUN cd office && npm prune --omit=dev
+RUN npm run build --workspace=office
+RUN npm prune --omit=dev --workspace=office --ignore-scripts
 
 FROM node:24-bookworm-slim@sha256:2c87ef9bd3c6a3bd4b472b4bec2ce9d16354b0c574f736c476489d09f560a203
 WORKDIR /app
@@ -42,18 +34,17 @@ RUN python3 -m venv /opt/office-venv \
     && /opt/office-venv/bin/pip install --no-cache-dir -r /tmp/requirements.txt \
     && rm /tmp/requirements.txt
 
-COPY --from=builder /build/shared/dist ../shared/dist
-COPY --from=builder /build/shared/package.json ../shared/
-COPY --from=builder /build/shared/node_modules ../shared/node_modules
+COPY --from=builder /build/shared/dist ./shared/dist
+COPY --from=builder /build/shared/package.json ./shared/
+COPY --from=builder /build/node_modules ./node_modules
 
-COPY --from=builder /build/office/package*.json ./
+COPY --from=builder /build/office/package.json ./
 COPY --from=builder /build/office/dist ./dist
-COPY --from=builder /build/office/node_modules ./node_modules
 COPY office/scripts ./scripts
 
 ENV PATH="/opt/office-venv/bin:${PATH}"
 RUN mkdir -p /workspace \
-    && chown -R node:node /workspace /app /app/../shared
+    && chown -R node:node /workspace /app
 
 USER node
 

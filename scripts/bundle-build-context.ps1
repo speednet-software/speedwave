@@ -106,7 +106,7 @@ Get-ChildItem -Path "$dest\build-context\containers" -Recurse -Include '*.sh' -F
     }
 
 New-Item -ItemType Directory -Path "$dest\build-context\mcp-servers" -Force | Out-Null
-Copy-Item "$mcpServersDir\tsconfig.base.json" "$dest\build-context\mcp-servers\"
+Copy-Item "$mcpServersDir\tsconfig.base.json","$mcpServersDir\package.json","$mcpServersDir\package-lock.json" "$dest\build-context\mcp-servers\"
 
 $services = @('shared','policies','hub','slack','sharepoint','redmine','gitlab','github','atlassian','office','playwright','context7')
 
@@ -159,18 +159,22 @@ foreach ($staged in @("$dest\build-context\containers", "$dest\build-context\mcp
 
 function Stage-Host-Worker {
     param([string]$worker, [string]$bundle)
-    New-Item -ItemType Directory -Path "$dest\$bundle\$worker","$dest\$bundle\shared" -Force | Out-Null
+    $installDir = "$dest\$bundle\.npm-ci"
+    New-Item -ItemType Directory -Path "$dest\$bundle\$worker","$dest\$bundle\shared","$installDir\shared" -Force | Out-Null
     Copy-Item -Recurse "$mcpServersDir\$worker\dist" "$dest\$bundle\$worker\dist"
     Copy-Item -Recurse "$mcpServersDir\shared\dist" "$dest\$bundle\shared\dist"
     Copy-Item "$mcpServersDir\shared\package.json" "$dest\$bundle\shared\"
-    Push-Location "$dest\$bundle\shared"
-    npm pkg delete devDependencies
-    if ($LASTEXITCODE -ne 0) { throw "npm pkg delete devDependencies failed in $dest\$bundle\shared" }
-    npm install --package-lock-only --ignore-scripts
-    if ($LASTEXITCODE -ne 0) { throw "npm install --package-lock-only failed in $dest\$bundle\shared" }
-    npm ci --omit=dev --ignore-scripts
-    if ($LASTEXITCODE -ne 0) { throw "npm ci --omit=dev failed in $dest\$bundle\shared" }
+    Copy-Item "$mcpServersDir\package.json","$mcpServersDir\package-lock.json" "$installDir\"
+    Copy-Item "$mcpServersDir\shared\package.json" "$installDir\shared\"
+    Push-Location $installDir
+    npm ci --omit=dev --ignore-scripts --workspace=shared
+    $npmExit = $LASTEXITCODE
     Pop-Location
+    if ($npmExit -ne 0) { throw "npm ci --omit=dev --workspace=shared failed in $installDir" }
+    Remove-Item -Recurse -Force "$installDir\node_modules\@speedwave"
+    Move-Item "$installDir\node_modules" "$dest\$bundle\shared\node_modules"
+    Copy-Item "$installDir\package-lock.json" "$dest\$bundle\shared\package-lock.json"
+    Remove-Item -Recurse -Force $installDir
     New-Item -ItemType Directory -Path "$dest\$bundle\$worker\node_modules\@speedwave" -Force | Out-Null
     Copy-Item -Recurse "$dest\$bundle\shared" "$dest\$bundle\$worker\node_modules\@speedwave\mcp-shared"
 }

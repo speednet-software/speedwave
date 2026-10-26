@@ -258,3 +258,35 @@ _record_run() {
     [[ "$output" == *"could not reach the rig"* ]]
     [ ! -e "$BATS_TEST_TMPDIR/runs" ]
 }
+
+_load_collect_screenshots() {
+    eval "$(sed -n '/^collect_screenshots()/,/^}/p' "$SCRIPT")"
+    HOST_REPO_DIR="$BATS_TEST_TMPDIR/repo"
+    mkdir -p "$HOST_REPO_DIR" "$BATS_TEST_TMPDIR/remote-shots"
+    unset GITHUB_WORKSPACE
+}
+
+@test "collect_screenshots unpacks the remote screenshots into a per-platform, per-phase directory" {
+    _load_collect_screenshots
+    printf 'png' >"$BATS_TEST_TMPDIR/remote-shots/FAIL-1.png"
+    _remote() { tar -C "$BATS_TEST_TMPDIR/remote-shots" -cf - .; }
+    collect_screenshots _remote ignored macos pre-reset
+    [ "$(cat "$HOST_REPO_DIR/.e2e-artifacts/macos/pre-reset/FAIL-1.png")" = "png" ]
+}
+
+@test "collect_screenshots prefers GITHUB_WORKSPACE and normalises Windows separators" {
+    _load_collect_screenshots
+    printf 'png' >"$BATS_TEST_TMPDIR/remote-shots/FAIL-2.png"
+    _remote() { tar -C "$BATS_TEST_TMPDIR/remote-shots" -cf - .; }
+    GITHUB_WORKSPACE="${BATS_TEST_TMPDIR//\//\\}\\ws"
+    collect_screenshots _remote ignored windows first-launch
+    [ -f "$BATS_TEST_TMPDIR/ws/.e2e-artifacts/windows/first-launch/FAIL-2.png" ]
+}
+
+@test "collect_screenshots returns 0 and warns when the remote copy fails" {
+    _load_collect_screenshots
+    _broken() { return 255; }
+    run collect_screenshots _broken ignored macos first-launch
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"could not collect failure screenshots"* ]]
+}
