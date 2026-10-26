@@ -977,17 +977,7 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
     report(FINALIZE_DECODE_START_PROGRESS)?;
     let total_samples: u64 = plans.iter().map(|p| p.samples).sum();
     let mut final_segs: Vec<Segment> = Vec::new();
-    let system_frames: u64 = if diarizer.is_some() {
-        plans
-            .iter()
-            .map(|p| system_pcm_end(p.part_base, p.frames, p.channels))
-            .max()
-            .unwrap_or(0)
-    } else {
-        0
-    };
-    let mut system_pcm: Vec<f32> =
-        Vec::with_capacity(usize::try_from(system_frames).unwrap_or(usize::MAX));
+    let mut meeting_parts: Vec<&PartPlan> = Vec::new();
     let mut done_samples: u64 = 0;
     let mut loaded_any = false;
     for plan in &plans {
@@ -1043,8 +1033,8 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
             }));
             done_samples += pcm.len() as u64;
         }
-        if diarizer.is_some() && sources.first() == Some(&Some(TranscriptSource::System)) {
-            append_at(&mut system_pcm, plan.part_base, &channels[0]);
+        if sources.first() == Some(&Some(TranscriptSource::System)) {
+            meeting_parts.push(plan);
         }
         loaded_any = true;
     }
@@ -1061,13 +1051,39 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
     let meeting_speech = final_segs
         .iter()
         .any(|s| s.source == Some(TranscriptSource::System));
+    let read_meeting_channel = || -> Result<Vec<f32>, DiarizeError> {
+        let end = meeting_parts
+            .iter()
+            .map(|p| system_pcm_end(p.part_base, p.frames, p.channels))
+            .max()
+            .unwrap_or(0);
+        let mut system_pcm = Vec::with_capacity(usize::try_from(end).unwrap_or(usize::MAX));
+        for part in &meeting_parts {
+            if pass.cancelled() {
+                return Err(DiarizeError::Inference(
+                    "cancelled while reading the meeting channel".to_string(),
+                ));
+            }
+            system_pcm.resize(frame_at(part.part_base), 0.0);
+            let frames = super::audio::append_wav_channel_f32(part.path, 0, &mut system_pcm)
+                .map_err(|e| DiarizeError::InvalidAudio(e.to_string()))?;
+            if frames as u64 != part.frames {
+                return Err(DiarizeError::InvalidAudio(format!(
+                    "{} holds {frames} frames, not the {} the transcription read",
+                    part.path.display(),
+                    part.frames
+                )));
+            }
+        }
+        Ok(system_pcm)
+    };
     let diarization = match diarizer.filter(|_| meeting_speech) {
         Some(load) => diarize_meeting_channel(
             &store,
             id,
             &pass,
             load,
-            system_pcm,
+            read_meeting_channel,
             &mut final_segs,
             &report,
         )?,
@@ -1091,15 +1107,16 @@ fn diarize_meeting_channel(
     id: Uuid,
     pass: &OfflinePass,
     load: DiarizerLoader,
-    system_pcm: Vec<f32>,
+    read_meeting_channel: impl FnOnce() -> Result<Vec<f32>, DiarizeError>,
     final_segs: &mut [Segment],
     report: &dyn Fn(f32) -> Result<(), DriverError>,
 ) -> Result<Option<DiarizationRecord>, DriverError> {
     report(FINALIZE_DIARIZE_START_PROGRESS)?;
     let started = Instant::now();
-    let result =
-        load().and_then(|mut diarizer| diarizer.diarize(&system_pcm, &pass.decode_cancel()));
-    drop(system_pcm);
+    let result = load().and_then(|mut diarizer| {
+        let system_pcm = read_meeting_channel()?;
+        diarizer.diarize(&system_pcm, &pass.decode_cancel())
+    });
     if pass.cancelled() {
         return Err(stopped_pass_error(store, id));
     }
@@ -1144,11 +1161,6 @@ fn stopped_pass_error(store: &TranscriptStore, id: Uuid) -> DriverError {
         Err(e) => pass_stopped(&e).unwrap_or(DriverError::Superseded),
         Ok(_) => DriverError::Superseded,
     }
-}
-
-fn append_at(buf: &mut Vec<f32>, offset: Duration, pcm: &[f32]) {
-    buf.resize(frame_at(offset), 0.0);
-    buf.extend_from_slice(pcm);
 }
 
 fn system_pcm_end(part_base: Duration, frames: u64, channels: usize) -> u64 {
@@ -4101,12 +4113,24 @@ mod tests {
         })
     }
 
-    struct DroppedFlagTranscriber {
+    struct OnDropTranscriber {
         inner: MockTranscriber,
-        dropped: Arc<AtomicBool>,
+        on_drop: Option<Box<dyn FnOnce() + Send>>,
     }
 
-    impl Transcriber for DroppedFlagTranscriber {
+    impl OnDropTranscriber {
+        fn boxed(on_drop: impl FnOnce() + Send + 'static) -> Box<dyn Transcriber> {
+            Box::new(Self {
+                inner: MockTranscriber {
+                    seg_secs: 2.0,
+                    text_template: "f{n}".to_string(),
+                },
+                on_drop: Some(Box::new(on_drop)),
+            })
+        }
+    }
+
+    impl Transcriber for OnDropTranscriber {
         fn transcribe(
             &mut self,
             pcm: &[f32],
@@ -4116,10 +4140,52 @@ mod tests {
         }
     }
 
-    impl Drop for DroppedFlagTranscriber {
+    impl Drop for OnDropTranscriber {
         fn drop(&mut self) {
-            self.dropped.store(true, Ordering::SeqCst);
+            if let Some(on_drop) = self.on_drop.take() {
+                on_drop();
+            }
         }
+    }
+
+    struct CapturingDiarizer(Arc<Mutex<Option<Vec<f32>>>>);
+
+    impl Diarizer for CapturingDiarizer {
+        fn diarize(
+            &mut self,
+            pcm: &[f32],
+            _cancel: &DecodeCancel,
+        ) -> Result<
+            Vec<crate::transcription::diarizer::SpeakerTurn>,
+            crate::transcription::diarizer::DiarizeError,
+        > {
+            *self.0.lock().unwrap() = Some(pcm.to_vec());
+            Ok(vec![turn_secs(0, 2, 0)])
+        }
+    }
+
+    fn write_stereo_wav(path: &Path, frames: &[(i16, i16)]) {
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: SAMPLE_RATE_HZ,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(path, spec).unwrap();
+        for &(meeting, mic) in frames {
+            w.write_sample(meeting).unwrap();
+            w.write_sample(mic).unwrap();
+        }
+        w.finalize().unwrap();
+    }
+
+    fn tone_frames(secs: u32, meeting: i16, mic: i16) -> Vec<(i16, i16)> {
+        (0..secs * SAMPLE_RATE_HZ)
+            .map(|i| {
+                let sign = if i % 2 == 0 { 1 } else { -1 };
+                (sign * meeting, sign * mic)
+            })
+            .collect()
     }
 
     fn speakers_by_source(
@@ -4356,6 +4422,7 @@ mod tests {
         let whisper_dropped = Arc::new(AtomicBool::new(false));
         let dropped_at_load = Arc::new(AtomicBool::new(false));
         let (seen_dropped, seen) = (whisper_dropped.clone(), dropped_at_load.clone());
+        let mark_dropped = whisper_dropped.clone();
         let store_for_load = store.clone();
         let load: DiarizerLoader = Box::new(move || {
             match store_for_load.get(id).unwrap().status {
@@ -4368,13 +4435,8 @@ mod tests {
                 detail: "no metal device".to_string(),
             })
         });
-        let transcriber = Box::new(DroppedFlagTranscriber {
-            inner: MockTranscriber {
-                seg_secs: 2.0,
-                text_template: "f{n}".to_string(),
-            },
-            dropped: whisper_dropped,
-        });
+        let transcriber =
+            OnDropTranscriber::boxed(move || mark_dropped.store(true, Ordering::SeqCst));
 
         finalize_with_transcriber(&store, id, vec![wav], transcriber, Some(load)).unwrap();
 
@@ -4435,6 +4497,167 @@ mod tests {
     }
 
     #[test]
+    fn the_diarizer_receives_channel_zero_of_the_stereo_parts_on_the_transcript_timeline() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session(&store, &store_dir.path().join("a.wav"));
+        let part1 = store_dir.path().join("audio.wav");
+        let part2 = store_dir.path().join("audio-2.wav");
+        let part3 = store_dir.path().join("audio-3.wav");
+        write_stereo_wav(&part1, &tone_frames(2, 8_192, 1_000));
+        write_test_wav(&part2, 1, 2.0);
+        write_stereo_wav(&part3, &tone_frames(2, -16_384, 2_000));
+        let received = Arc::new(Mutex::new(None));
+
+        finalize_with(
+            &store,
+            id,
+            vec![part1, part2, part3],
+            loader(CapturingDiarizer(received.clone())),
+        )
+        .unwrap();
+
+        let frames = 2 * SAMPLE_RATE_HZ as usize;
+        let alternating = |amp: f32| (0..frames).map(move |i| if i % 2 == 0 { amp } else { -amp });
+        let expected: Vec<f32> = alternating(0.25)
+            .chain(std::iter::repeat_n(0.0, frames))
+            .chain(alternating(-0.5))
+            .collect();
+        assert_eq!(
+            received.lock().unwrap().as_deref(),
+            Some(expected.as_slice()),
+            "the meeting channel of both stereo parts, the mono part as silence between them"
+        );
+    }
+
+    #[test]
+    fn the_meeting_channel_is_read_only_after_whisper_is_released() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session(&store, &store_dir.path().join("a.wav"));
+        let wav = store_dir.path().join("stereo.wav");
+        write_stereo_wav(&wav, &tone_frames(4, 8_192, 1_000));
+        let rewrite = wav.clone();
+        let transcriber = OnDropTranscriber::boxed(move || {
+            write_stereo_wav(&rewrite, &tone_frames(4, 16_384, 1_000));
+        });
+        let received = Arc::new(Mutex::new(None));
+
+        finalize_with_transcriber(
+            &store,
+            id,
+            vec![wav],
+            transcriber,
+            loader(CapturingDiarizer(received.clone())),
+        )
+        .unwrap();
+
+        let pcm = received.lock().unwrap().take().unwrap();
+        assert_eq!(pcm.len(), 4 * SAMPLE_RATE_HZ as usize);
+        assert!(
+            pcm.iter().all(|s| s.abs() == 0.5),
+            "the diarizer got the meeting channel as it was on disk after Whisper was dropped"
+        );
+    }
+
+    #[test]
+    fn a_meeting_part_unreadable_after_whisper_leaves_the_transcript_done_without_labels() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session(&store, &store_dir.path().join("a.wav"));
+        let wav = store_dir.path().join("stereo.wav");
+        write_test_wav(&wav, 2, 4.0);
+        let remove = wav.clone();
+        let transcriber = OnDropTranscriber::boxed(move || std::fs::remove_file(&remove).unwrap());
+        let (diarizer, received) = ScriptedDiarizer::new(Ok(vec![turn_secs(0, 4, 0)]));
+
+        finalize_with_transcriber(&store, id, vec![wav], transcriber, loader(diarizer)).unwrap();
+
+        assert!(received.lock().unwrap().is_empty());
+        let snap = store.get(id).unwrap();
+        assert!(matches!(snap.status, TranscriptStatus::Done));
+        assert!(snap
+            .final_segments
+            .unwrap()
+            .iter()
+            .all(|s| s.speaker_id.is_none()));
+        assert_eq!(snap.models_used.diarization, None);
+        assert_eq!(
+            snap.active_warnings,
+            vec![CaptureWarning::SpeakerAttributionFailed]
+        );
+    }
+
+    #[test]
+    fn a_missing_model_is_reported_before_the_meeting_channel_is_read() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session(&store, &store_dir.path().join("a.wav"));
+        let wav = store_dir.path().join("stereo.wav");
+        write_test_wav(&wav, 2, 4.0);
+        let remove = wav.clone();
+        let transcriber = OnDropTranscriber::boxed(move || std::fs::remove_file(&remove).unwrap());
+        let load: DiarizerLoader =
+            Box::new(|| Err(DiarizeError::ModelMissing("m.gguf".to_string())));
+
+        finalize_with_transcriber(&store, id, vec![wav], transcriber, Some(load)).unwrap();
+
+        assert_eq!(
+            store.get(id).unwrap().active_warnings,
+            vec![CaptureWarning::SpeakerModelMissing],
+            "an unreadable part must not hide that the model is not downloaded"
+        );
+    }
+
+    #[test]
+    fn a_meeting_part_whose_length_changed_after_whisper_is_not_diarized() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session(&store, &store_dir.path().join("a.wav"));
+        let wav = store_dir.path().join("stereo.wav");
+        write_stereo_wav(&wav, &tone_frames(4, 8_192, 1_000));
+        let rewrite = wav.clone();
+        let transcriber = OnDropTranscriber::boxed(move || {
+            write_stereo_wav(&rewrite, &tone_frames(3, 8_192, 1_000));
+        });
+        let (diarizer, received) = ScriptedDiarizer::new(Ok(vec![turn_secs(0, 4, 0)]));
+
+        finalize_with_transcriber(&store, id, vec![wav], transcriber, loader(diarizer)).unwrap();
+
+        assert!(received.lock().unwrap().is_empty());
+        let snap = store.get(id).unwrap();
+        assert!(matches!(snap.status, TranscriptStatus::Done));
+        assert_eq!(snap.models_used.diarization, None);
+        assert_eq!(
+            snap.active_warnings,
+            vec![CaptureWarning::SpeakerAttributionFailed]
+        );
+    }
+
+    #[test]
+    fn a_pass_put_off_before_the_meeting_channel_is_read_never_diarizes() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session(&store, &store_dir.path().join("a.wav"));
+        let wav = store_dir.path().join("stereo.wav");
+        write_test_wav(&wav, 2, 4.0);
+        let (diarizer, received) = ScriptedDiarizer::new(Ok(vec![turn_secs(0, 4, 0)]));
+        let postpone_from = store.clone();
+        let load: DiarizerLoader = Box::new(move || {
+            postpone_from.postpone(id).unwrap();
+            Ok(Box::new(diarizer) as Box<dyn Diarizer>)
+        });
+
+        let err = finalize_with(&store, id, vec![wav], Some(load)).unwrap_err();
+
+        assert!(matches!(err, DriverError::Superseded), "{err:?}");
+        assert!(received.lock().unwrap().is_empty());
+        let snap = store.get(id).unwrap();
+        assert!(matches!(snap.status, TranscriptStatus::Postponed));
+        assert_eq!(snap.final_segments, None);
+    }
+
+    #[test]
     fn the_meeting_buffer_reserves_up_to_the_end_of_the_last_stereo_part_and_nothing_for_mono() {
         let rate = u64::from(SAMPLE_RATE_HZ);
         assert_eq!(system_pcm_end(Duration::ZERO, 5 * rate, 1), 0);
@@ -4455,26 +4678,6 @@ mod tests {
             .map(|&(base, frames, channels)| system_pcm_end(base, frames, channels))
             .max()
             .unwrap_or(0);
-        let mut buf = Vec::new();
-        append_at(
-            &mut buf,
-            Duration::from_secs(3),
-            &vec![0.5; 2 * rate as usize],
-        );
-        assert_eq!(reserved, buf.len() as u64);
-    }
-
-    #[test]
-    fn append_at_places_each_part_at_its_offset_and_pads_gaps_with_silence() {
-        let mut buf = Vec::new();
-        append_at(&mut buf, Duration::ZERO, &[1.0, 1.0]);
-        append_at(&mut buf, Duration::from_secs_f64(4.0 / 16_000.0), &[2.0]);
-        assert_eq!(buf, vec![1.0, 1.0, 0.0, 0.0, 2.0]);
-        append_at(
-            &mut buf,
-            Duration::from_secs_f64(4.0 / 16_000.0),
-            &[3.0, 3.0],
-        );
-        assert_eq!(buf, vec![1.0, 1.0, 0.0, 0.0, 3.0, 3.0]);
+        assert_eq!(reserved, frame_at(Duration::from_secs(3)) as u64 + 2 * rate);
     }
 }

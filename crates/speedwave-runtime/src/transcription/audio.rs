@@ -358,33 +358,105 @@ pub fn parse_wav_to_mono_f32(path: &Path) -> Result<(Vec<f32>, u32), CaptureErro
 /// Parses a WAV file into per-channel `f32` samples (no resampling, no downmix).
 /// Returns one `Vec` per channel plus the file's sample rate.
 pub fn parse_wav_to_channels_f32(path: &Path) -> Result<(Vec<Vec<f32>>, u32), CaptureError> {
-    let mut reader = hound::WavReader::open(path)
-        .map_err(|e| CaptureError::Failed(format!("open WAV {}: {e}", path.display())))?;
-    let spec = reader.spec();
-    let interleaved: Vec<f32> = match (spec.bits_per_sample, spec.sample_format) {
-        (16, hound::SampleFormat::Int) => reader
-            .samples::<i16>()
-            .map(|s| s.map(|v| v as f32 / 32_768.0))
-            .collect::<Result<_, _>>()
-            .map_err(|e| CaptureError::Failed(format!("read i16 samples: {e}")))?,
-        (32, hound::SampleFormat::Float) => reader
-            .samples::<f32>()
-            .collect::<Result<_, _>>()
-            .map_err(|e| CaptureError::Failed(format!("read f32 samples: {e}")))?,
-        (bits, fmt) => {
-            return Err(CaptureError::Failed(format!(
-                "unsupported WAV format ({bits}-bit {fmt:?}) — need 16-bit int or 32-bit float"
-            )))
+    let wav = WavSamples::open(path)?;
+    let rate = wav.rate;
+    let mut out: Vec<Vec<f32>> = (0..wav.channels)
+        .map(|_| Vec::with_capacity(wav.frames))
+        .collect();
+    wav.for_each(|channel, sample| out[channel].push(sample))?;
+    Ok((out, rate))
+}
+
+pub(super) fn append_wav_channel_f32(
+    path: &Path,
+    channel: usize,
+    out: &mut Vec<f32>,
+) -> Result<usize, CaptureError> {
+    let wav = WavSamples::open(path)?;
+    out.reserve(wav.frames);
+    let start = out.len();
+    wav.for_each(|ch, sample| {
+        if ch == channel {
+            out.push(sample);
         }
-    };
-    let channels = spec.channels.max(1) as usize;
-    let mut out = vec![Vec::with_capacity(interleaved.len() / channels); channels];
-    for frame in interleaved.chunks(channels) {
-        for (ch, &s) in frame.iter().enumerate() {
-            out[ch].push(s);
-        }
+    })?;
+    Ok(out.len() - start)
+}
+
+struct WavSamples {
+    reader: hound::WavReader<std::io::BufReader<std::fs::File>>,
+    format: WavSampleFormat,
+    channels: usize,
+    frames: usize,
+    rate: u32,
+}
+
+enum WavSampleFormat {
+    Int16,
+    Float32,
+}
+
+impl WavSamples {
+    fn open(path: &Path) -> Result<Self, CaptureError> {
+        let open_error = |e: &dyn std::fmt::Display| {
+            CaptureError::Failed(format!("open WAV {}: {e}", path.display()))
+        };
+        let file = std::fs::File::open(path).map_err(|e| open_error(&e))?;
+        let file_len = file.metadata().map_err(|e| open_error(&e))?.len();
+        let reader =
+            hound::WavReader::new(std::io::BufReader::new(file)).map_err(|e| open_error(&e))?;
+        let spec = reader.spec();
+        let format = match (spec.bits_per_sample, spec.sample_format) {
+            (16, hound::SampleFormat::Int) => WavSampleFormat::Int16,
+            (32, hound::SampleFormat::Float) => WavSampleFormat::Float32,
+            (bits, fmt) => {
+                return Err(CaptureError::Failed(format!(
+                    "unsupported WAV format ({bits}-bit {fmt:?}) — need 16-bit int or 32-bit float"
+                )))
+            }
+        };
+        let channels = usize::from(spec.channels.max(1));
+        let frame_bytes = u64::from(spec.bits_per_sample / 8) * channels as u64;
+        let frames = u64::from(reader.duration()).min(file_len / frame_bytes);
+        Ok(Self {
+            reader,
+            format,
+            channels,
+            frames: usize::try_from(frames).unwrap_or(0),
+            rate: spec.sample_rate,
+        })
     }
-    Ok((out, spec.sample_rate))
+
+    fn for_each(mut self, mut f: impl FnMut(usize, f32)) -> Result<(), CaptureError> {
+        let channels = self.channels;
+        let mut channel = 0;
+        let mut emit = |sample: f32| {
+            f(channel, sample);
+            channel = if channel + 1 == channels {
+                0
+            } else {
+                channel + 1
+            };
+        };
+        match self.format {
+            WavSampleFormat::Int16 => {
+                for sample in self.reader.samples::<i16>() {
+                    let sample = sample
+                        .map_err(|e| CaptureError::Failed(format!("read i16 samples: {e}")))?;
+                    emit(f32::from(sample) / 32_768.0);
+                }
+            }
+            WavSampleFormat::Float32 => {
+                for sample in self.reader.samples::<f32>() {
+                    emit(
+                        sample
+                            .map_err(|e| CaptureError::Failed(format!("read f32 samples: {e}")))?,
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Duration of a WAV file from its header (`None` when unreadable or the header
@@ -902,6 +974,172 @@ mod tests {
         let path = dir.path().join("garbage.wav");
         std::fs::write(&path, vec![0xAAu8; 200]).unwrap();
         assert_eq!(wav_duration(&path), None);
+    }
+
+    fn write_wav_samples<S: hound::Sample + Copy>(
+        path: &Path,
+        channels: u16,
+        bits_per_sample: u16,
+        sample_format: hound::SampleFormat,
+        interleaved: &[S],
+    ) {
+        let spec = hound::WavSpec {
+            channels,
+            sample_rate: 16_000,
+            bits_per_sample,
+            sample_format,
+        };
+        let mut w = hound::WavWriter::create(path, spec).unwrap();
+        for &s in interleaved {
+            w.write_sample(s).unwrap();
+        }
+        w.finalize().unwrap();
+    }
+
+    fn assert_reserved_exactly(channels: &[Vec<f32>]) {
+        for ch in channels {
+            assert_eq!(
+                ch.capacity(),
+                ch.len(),
+                "each channel is reserved from the header frame count and never regrows"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_wav_to_channels_splits_16_bit_frames_into_their_channels() {
+        let dir = tempfile::tempdir().unwrap();
+        let stereo = dir.path().join("stereo.wav");
+        write_wav_samples(
+            &stereo,
+            2,
+            16,
+            hound::SampleFormat::Int,
+            &[16_384i16, -32_768, 0, 8_192, -16_384, 32_767],
+        );
+
+        let (channels, rate) = parse_wav_to_channels_f32(&stereo).unwrap();
+
+        assert_eq!(rate, 16_000);
+        assert_eq!(
+            channels,
+            vec![vec![0.5, 0.0, -0.5], vec![-1.0, 0.25, 32_767.0 / 32_768.0]]
+        );
+        assert_reserved_exactly(&channels);
+
+        let mono = dir.path().join("mono.wav");
+        write_wav_samples(
+            &mono,
+            1,
+            16,
+            hound::SampleFormat::Int,
+            &[16_384i16, -8_192, 0],
+        );
+        let (channels, _) = parse_wav_to_channels_f32(&mono).unwrap();
+        assert_eq!(channels, vec![vec![0.5, -0.25, 0.0]]);
+        assert_reserved_exactly(&channels);
+    }
+
+    #[test]
+    fn parse_wav_to_channels_splits_float_frames_into_their_channels() {
+        let dir = tempfile::tempdir().unwrap();
+        let stereo = dir.path().join("stereo.wav");
+        write_wav_samples(
+            &stereo,
+            2,
+            32,
+            hound::SampleFormat::Float,
+            &[0.1f32, -0.9, 0.2, -0.8],
+        );
+
+        let (channels, _) = parse_wav_to_channels_f32(&stereo).unwrap();
+
+        assert_eq!(channels, vec![vec![0.1, 0.2], vec![-0.9, -0.8]]);
+        assert_reserved_exactly(&channels);
+
+        let mono = dir.path().join("mono.wav");
+        write_wav_samples(&mono, 1, 32, hound::SampleFormat::Float, &[0.75f32]);
+        let (channels, _) = parse_wav_to_channels_f32(&mono).unwrap();
+        assert_eq!(channels, vec![vec![0.75]]);
+    }
+
+    #[test]
+    fn parse_wav_to_channels_returns_one_empty_channel_per_channel_of_an_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.wav");
+        write_wav_samples::<i16>(&path, 2, 16, hound::SampleFormat::Int, &[]);
+
+        let (channels, _) = parse_wav_to_channels_f32(&path).unwrap();
+
+        assert_eq!(channels, vec![Vec::<f32>::new(), Vec::new()]);
+    }
+
+    #[test]
+    fn parse_wav_to_channels_rejects_a_format_other_than_16_bit_int_or_32_bit_float() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("i32.wav");
+        write_wav_samples(&path, 1, 32, hound::SampleFormat::Int, &[1i32, 2]);
+
+        let err = parse_wav_to_channels_f32(&path).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("unsupported WAV format (32-bit Int)"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn parse_wav_to_channels_fails_on_a_missing_file_or_a_header_that_overstates_the_data() {
+        let err = parse_wav_to_channels_f32(Path::new("/no/such/file.wav")).unwrap_err();
+        assert!(err.to_string().contains("open WAV"), "{err}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("overstated.wav");
+        write_wav_samples(&path, 2, 16, hound::SampleFormat::Int, &[1i16, 2, 3, 4]);
+        let mut b = std::fs::read(&path).unwrap();
+        b[40..44].copy_from_slice(&0xFFFF_FFF0u32.to_le_bytes());
+        std::fs::write(&path, b).unwrap();
+
+        let err = parse_wav_to_channels_f32(&path).unwrap_err();
+
+        assert!(err.to_string().contains("read i16 samples"), "{err}");
+    }
+
+    #[test]
+    fn append_wav_channel_adds_only_the_chosen_channel_after_what_the_buffer_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let stereo = dir.path().join("stereo.wav");
+        write_wav_samples(
+            &stereo,
+            2,
+            16,
+            hound::SampleFormat::Int,
+            &[16_384i16, -32_768, 8_192, 0, -16_384, 32_767],
+        );
+        let mut buf = vec![0.0f32; 2];
+
+        let meeting = append_wav_channel_f32(&stereo, 0, &mut buf).unwrap();
+
+        assert_eq!(meeting, 3);
+        assert_eq!(buf, vec![0.0, 0.0, 0.5, 0.25, -0.5]);
+
+        let mic = append_wav_channel_f32(&stereo, 1, &mut buf).unwrap();
+        assert_eq!(mic, 3);
+        assert_eq!(&buf[5..], &[-1.0, 0.0, 32_767.0 / 32_768.0]);
+
+        assert_eq!(append_wav_channel_f32(&stereo, 2, &mut buf).unwrap(), 0);
+        assert_eq!(buf.len(), 8);
+    }
+
+    #[test]
+    fn append_wav_channel_fails_on_a_missing_file_and_leaves_the_buffer_alone() {
+        let mut buf = vec![0.5f32];
+
+        let err = append_wav_channel_f32(Path::new("/no/such/file.wav"), 0, &mut buf).unwrap_err();
+
+        assert!(err.to_string().contains("open WAV"), "{err}");
+        assert_eq!(buf, vec![0.5]);
     }
 
     #[test]
