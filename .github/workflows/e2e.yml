@@ -12,7 +12,7 @@ jobs:
   e2e-macos:
     if: github.event_name != 'pull_request'
     concurrency:
-      group: rig-macos
+      group: probe-863-rig-macos
       cancel-in-progress: false
     runs-on: [self-hosted, macOS, ARM64]
     environment: e2e-probe
@@ -34,7 +34,7 @@ jobs:
   e2e-windows:
     if: github.event_name != 'pull_request'
     concurrency:
-      group: rig-windows
+      group: probe-863-rig-windows
       cancel-in-progress: false
     runs-on: [self-hosted, Windows, X64]
     environment: e2e-probe
