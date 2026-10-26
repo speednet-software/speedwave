@@ -63,7 +63,7 @@ find "$DEST/build-context/containers" -type f -name '*.sh' -print0 |
 find "$DEST/build-context/containers" -type f -name '*.sh.bak' -delete
 
 mkdir -p "$DEST/build-context/mcp-servers"
-cp "$MCP_SERVERS_DIR/tsconfig.base.json" "$DEST/build-context/mcp-servers/"
+cp "$MCP_SERVERS_DIR/tsconfig.base.json" "$MCP_SERVERS_DIR/package.json" "$MCP_SERVERS_DIR/package-lock.json" "$DEST/build-context/mcp-servers/"
 
 MCP_SERVICES="shared policies hub slack sharepoint redmine gitlab github atlassian office playwright context7"
 
@@ -106,11 +106,18 @@ fi
 
 stage_host_worker() {
   local worker="$1" bundle="$2"
-  mkdir -p "$DEST/$bundle/$worker" "$DEST/$bundle/shared"
+  local install_dir="$DEST/$bundle/.npm-ci"
+  mkdir -p "$DEST/$bundle/$worker" "$DEST/$bundle/shared" "$install_dir/shared"
   cp -r "$MCP_SERVERS_DIR/$worker/dist" "$DEST/$bundle/$worker/"
   cp -r "$MCP_SERVERS_DIR/shared/dist" "$DEST/$bundle/shared/"
   cp "$MCP_SERVERS_DIR/shared/package.json" "$DEST/$bundle/shared/"
-  (cd "$DEST/$bundle/shared" && npm pkg delete devDependencies && npm install --package-lock-only --ignore-scripts && npm ci --omit=dev --ignore-scripts)
+  cp "$MCP_SERVERS_DIR/package.json" "$MCP_SERVERS_DIR/package-lock.json" "$install_dir/"
+  cp "$MCP_SERVERS_DIR/shared/package.json" "$install_dir/shared/"
+  (cd "$install_dir" && npm ci --omit=dev --ignore-scripts --workspace=shared)
+  rm -rf "$install_dir/node_modules/@speedwave"
+  mv "$install_dir/node_modules" "$DEST/$bundle/shared/node_modules"
+  cp "$install_dir/package-lock.json" "$DEST/$bundle/shared/package-lock.json"
+  rm -rf "$install_dir"
   mkdir -p "$DEST/$bundle/$worker/node_modules/@speedwave"
   cp -r "$DEST/$bundle/shared" "$DEST/$bundle/$worker/node_modules/@speedwave/mcp-shared"
 }
