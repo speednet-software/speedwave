@@ -30,6 +30,7 @@ import {
   waitForDashboardUsd,
   waitForFooterToReconcile,
 } from '../helpers/llm';
+import { FLAKY_STEP_RETRIES } from '../helpers/shell';
 
 describe('Chat Cost Reconciliation', function () {
   before(async function () {
@@ -48,7 +49,7 @@ describe('Chat Cost Reconciliation', function () {
   });
 
   it('should reconcile the footer cost against the usage dashboard aggregate', async function () {
-    this.retries(3);
+    this.retries(FLAKY_STEP_RETRIES);
     this.timeout(180_000);
 
     const dashboardCost = await waitForDashboardUsd({

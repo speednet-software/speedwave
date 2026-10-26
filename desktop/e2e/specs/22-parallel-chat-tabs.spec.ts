@@ -29,6 +29,7 @@ import {
   startNewConversation,
   openHistory,
 } from '../helpers/llm';
+import { FLAKY_STEP_RETRIES } from '../helpers/shell';
 import { LONG_STREAM_PROMPT } from '../helpers/memory-fact';
 
 const E2E_PROJECT_NAME = 'e2e-test';
@@ -82,7 +83,7 @@ describe('Parallel Chat Tabs (SPEED-388)', function () {
   });
 
   it('enables beta features and starts from a single empty tab', async function () {
-    this.retries(3);
+    this.retries(FLAKY_STEP_RETRIES);
     this.timeout(240_000);
     setBetaEnabled(true);
     await restartAppAndReconnect();
