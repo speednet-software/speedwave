@@ -1,14 +1,18 @@
 /**
- * Jira projects — listing (allowlist-filtered), single-project lookup, and issue-type metadata
- * for a project.
+ * Jira projects: listing (allowlist-filtered), single-project lookup, issue-type metadata and
+ * components.
  * @module mcp-atlassian/domains/jira-projects
  */
 
 import { clampPageSize } from '@speedwave/mcp-shared';
 import type { AtlassianClient } from '../client.js';
-import { assertJiraProjectAllowed, filterByAllowlist } from '../scope.js';
+import {
+  assertJiraIssueKeyAllowed,
+  assertJiraProjectAllowed,
+  filterByAllowlist,
+} from '../scope.js';
 import { deriveBrowseUrl } from '../url.js';
-import type { JiraIssueType, JiraProject } from '../types.js';
+import type { JiraComponent, JiraIssueType, JiraProject } from '../types.js';
 import { mapUser } from './normalizers.js';
 
 /** Client for Jira project operations. */
@@ -19,6 +23,13 @@ export interface JiraProjectsClient {
   get(projectIdOrKey: string): Promise<JiraProject>;
   /** List the issue types available in a project. */
   listIssueTypes(projectIdOrKey: string): Promise<JiraIssueType[]>;
+  /**
+   * List the issue types an issue can change to: the types of its project with the same sub-task
+   * kind as its current type, the current type excluded.
+   */
+  listIssueTypesForIssue(issueIdOrKey: string): Promise<JiraIssueType[]>;
+  /** List the components of a project. */
+  listComponents(projectIdOrKey: string): Promise<JiraComponent[]>;
 }
 
 /**
@@ -56,6 +67,34 @@ export function createJiraProjectsClient(client: AtlassianClient): JiraProjectsC
       });
       return (Array.isArray(res) ? res : []).map(mapIssueType);
     },
+
+    async listIssueTypesForIssue(issueIdOrKey) {
+      assertJiraIssueKeyAllowed(issueIdOrKey, client.jiraProjectKeys);
+      const issue = await client.get<{ fields?: Record<string, unknown> }>(
+        `/rest/api/3/issue/${encodeURIComponent(issueIdOrKey)}`,
+        { fields: 'issuetype,project' }
+      );
+      const current = mapIssueType(issue.fields?.issuetype);
+      const projectKey = String(
+        (issue.fields?.project as { key?: unknown } | undefined)?.key ?? ''
+      );
+      assertJiraProjectAllowed(projectKey, client.jiraProjectKeys);
+      const res = await client.get<{ issueTypes?: unknown[] }>(
+        `/rest/api/3/issue/createmeta/${encodeURIComponent(projectKey)}/issuetypes`,
+        { maxResults: 100 }
+      );
+      return (res.issueTypes ?? [])
+        .map(mapIssueType)
+        .filter((type) => type.id !== current.id && type.subtask === current.subtask);
+    },
+
+    async listComponents(projectIdOrKey) {
+      const project = await this.get(projectIdOrKey);
+      const res = await client.get<unknown[]>(
+        `/rest/api/3/project/${encodeURIComponent(project.key)}/components`
+      );
+      return (Array.isArray(res) ? res : []).map(mapComponent);
+    },
   };
 }
 
@@ -86,5 +125,14 @@ export function mapIssueType(raw: unknown): JiraIssueType {
     name: String(o.name ?? ''),
     description: o.description ? String(o.description) : undefined,
     subtask: Boolean(o.subtask ?? false),
+  };
+}
+
+function mapComponent(raw: unknown): JiraComponent {
+  const o = (raw ?? {}) as Record<string, unknown>;
+  return {
+    id: String(o.id ?? ''),
+    name: String(o.name ?? ''),
+    description: o.description ? String(o.description) : undefined,
   };
 }
