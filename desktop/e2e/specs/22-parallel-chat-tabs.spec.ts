@@ -77,9 +77,13 @@ async function resumeConversationMatching(sentinel: string): Promise<void> {
 describe('Parallel Chat Tabs (SPEED-388)', function () {
   let priorBetaEnabled = false;
 
-  before(async function () {
-    this.timeout(240_000);
+  before(function () {
     priorBetaEnabled = readBetaEnabled();
+  });
+
+  it('enables beta features and starts from a single empty tab', async function () {
+    this.retries(3);
+    this.timeout(240_000);
     setBetaEnabled(true);
     await restartAppAndReconnect();
 

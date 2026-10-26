@@ -400,6 +400,24 @@ echo "Clean state ready"
 CLEAN
 }
 
+collect_screenshots() {
+    local ssh_fn="$1" remote_cmd="$2" platform="$3" phase="$4"
+    local base="${GITHUB_WORKSPACE:-$HOST_REPO_DIR}"
+    local dest="${base//\\//}/.e2e-artifacts/${platform}/${phase}"
+    if ! { mkdir -p "$dest" && "$ssh_fn" "$remote_cmd" | tar -xf - -C "$dest"; } 2>/dev/null; then
+        echo "[$platform] WARNING: could not collect failure screenshots for phase $phase" >&2
+    fi
+    return 0
+}
+
+windows_collect_screenshots() {
+    collect_screenshots windows_ssh 'tar -C C:\speedwave-e2e\screenshots -cf - .' windows "$1"
+}
+
+macos_collect_screenshots() {
+    collect_screenshots macos_ssh 'tar -C /tmp/speedwave-e2e/screenshots -cf - .' macos "$1"
+}
+
 run_windows() {
     windows_wait_ssh
     ensure_provisioned_windows
@@ -588,6 +606,7 @@ SCRIPT
     local exit_code=0
     echo "[windows] Running E2E (first launch — clean system)..."
     run_windows_e2e || exit_code=$?
+    windows_collect_screenshots first-launch
 
     if [ "$exit_code" -ne 0 ]; then
         echo "[windows] FAILED on first launch (exit code: $exit_code)"
@@ -621,6 +640,7 @@ npm ci
 SCRIPT
 
     run_windows_e2e "pre-reset" || exit_code=$?
+    windows_collect_screenshots pre-reset
 
     if [ "$exit_code" -eq 0 ]; then
         echo "[windows] Running engine-contract suite (staging distro -> WSL interop -> Speedwave distro)..."
@@ -651,6 +671,7 @@ SCRIPT
 
     if [ "$exit_code" -eq 0 ]; then
         run_windows_e2e "reset-only" || exit_code=$?
+        windows_collect_screenshots reset-only
     fi
 
     if [ "$exit_code" -eq 0 ]; then
@@ -849,6 +870,7 @@ SCRIPT
     local exit_code=0
     echo "[macos] Running E2E (first launch — clean system)..."
     run_macos_e2e || exit_code=$?
+    macos_collect_screenshots first-launch
 
     if [ "$exit_code" -ne 0 ]; then
         echo "[macos] FAILED on first launch (exit code: $exit_code)"
@@ -886,6 +908,7 @@ cd /tmp/speedwave-e2e && npm ci
 SCRIPT
 
     run_macos_e2e "pre-reset" || exit_code=$?
+    macos_collect_screenshots pre-reset
 
     if [ "$exit_code" -eq 0 ]; then
         echo "[macos] Running engine-contract suite (production-style install: LIMA_HOME + speedwave VM)..."
@@ -920,6 +943,7 @@ SCRIPT_TAIL
 
     if [ "$exit_code" -eq 0 ]; then
         run_macos_e2e "reset-only" || exit_code=$?
+        macos_collect_screenshots reset-only
     fi
 
     if [ "$exit_code" -eq 0 ]; then
