@@ -8,12 +8,12 @@ Project key: `PROJ`. Issue type for tickets: `Task`. Both were written by `/spee
 
 ## Conventions
 
-- **Create an issue**: `atlassian.createIssue` with `projectKey`, `summary`, `issueType`, `bodyText` (plain text, converted to Jira's rich format) and `labels`.
+- **Create an issue**: `atlassian.createIssue` with `project`, `summary`, `type`, `description` (Markdown, converted to Jira's rich format) and `labels`.
 - **Read an issue**: `atlassian.getIssue` for the description, labels, status and assignee; `atlassian.getComments` for the comments.
 - **List issues**: `atlassian.searchIssues` with JQL, for example `project = PROJ AND statusCategory != Done AND labels = "needs-triage" ORDER BY created ASC`; unlabelled issues are `labels IS EMPTY`.
-- **Comment on an issue**: `atlassian.addComment` with `bodyText`.
+- **Comment on an issue**: `atlassian.addComment` with `body` (Markdown).
 - **Apply / remove labels**: `atlassian.updateIssue` replaces the whole label set, so read the current labels with `atlassian.getIssue`, edit the list, and send it back as `labels`.
-- **Close**: post the explanation with `atlassian.addComment`, then `atlassian.getTransitions` to find the transition into the project's done status, then `atlassian.transitionIssue` with its `transitionId`.
+- **Close**: post the explanation with `atlassian.addComment`, then `atlassian.getTransitions` to find the transition into the project's done status, then `atlassian.transitionIssue` with its `transition_id`.
 
 ## Pull requests as a triage surface
 
@@ -32,8 +32,8 @@ Run `atlassian.getIssue`, then `atlassian.getComments` for its comments.
 Used by `/speedwave-wayfinder`. The **map** is a single issue with **child** issues as tickets.
 
 - **Map**: a single issue labelled `wayfinder:map`, holding the Notes / Decisions-so-far / Fog body. `atlassian.createIssue` with `labels: ["wayfinder:map"]`.
-- **Child ticket**: `atlassian.createIssue` with `Part of <MAP-KEY>` as the first line of `bodyText` and the label `wayfinder:<type>` (`research`/`prototype`/`grilling`/`task`). Jira sub-tasks need a parent field the hub tool does not expose, so children are ordinary issues. Once claimed, the ticket is assigned to the driving dev.
-- **Blocking**: a `Blocked by: <KEY-1>, <KEY-2>` line at the top of the description. Jira's native issue links are not reachable through the hub, so this line is the canonical representation. A ticket is unblocked when every blocker is done (`atlassian.getIssue` on each).
-- **Frontier query**: `atlassian.searchIssues` with `project = PROJ AND labels IN ("wayfinder:research", "wayfinder:prototype", "wayfinder:grilling", "wayfinder:task") AND statusCategory != Done AND assignee IS EMPTY AND text ~ "Part of <MAP-KEY>" ORDER BY created ASC`, then drop any with an open blocker in its `Blocked by` line; first in map order wins.
-- **Claim**: `atlassian.getMyself` for your `accountId`, then `atlassian.assignIssue` with it — the session's first write.
-- **Resolve**: `atlassian.addComment` with the answer, then transition the ticket to done (`getTransitions` + `transitionIssue`), then append a context pointer (gist + link) to the map's Decisions-so-far: read the map with `atlassian.getIssue`, append, write it back with `atlassian.updateIssue` (`bodyText`).
+- **Child ticket**: `atlassian.createIssue` with `parent: "<MAP-KEY>"` and the label `wayfinder:<type>` (`research`/`prototype`/`grilling`/`task`). Jira accepts only a parent one level above the child type (for example the map as an epic, or a Sub-task type under a Task map); if it rejects the parent, the error says so. Once claimed, the ticket is assigned to the driving dev.
+- **Blocking**: native issue links: `atlassian.linkIssues` with `issue: "<BLOCKER-KEY>"`, `relation: "blocks"`, `target: "<TICKET-KEY>"` (relation texts from `atlassian.listLinkTypes`). `atlassian.getIssue` returns a ticket's `links`. A ticket is unblocked when every issue that blocks it is done.
+- **Frontier query**: `atlassian.searchIssues` with `project = PROJ AND labels IN ("wayfinder:research", "wayfinder:prototype", "wayfinder:grilling", "wayfinder:task") AND statusCategory != Done AND assignee IS EMPTY AND parent = <MAP-KEY> ORDER BY created ASC`, then drop any with an open blocker in its `links` (check each blocker with `atlassian.getIssue`); first in map order wins.
+- **Claim**: `atlassian.assignIssue` with `assignee: "me"` — the session's first write.
+- **Resolve**: `atlassian.addComment` with the answer, then transition the ticket to done (`getTransitions` + `transitionIssue`), then append a context pointer (gist + link) to the map's Decisions-so-far: read the map with `atlassian.getIssue`, append, write it back with `atlassian.updateIssue` (`description`).
