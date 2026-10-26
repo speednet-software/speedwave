@@ -1,16 +1,31 @@
 //! SSOT catalogue of the models downloaded on demand: Whisper (ADR-056), Silero VAD and the
-//! diarization model (ADR-098). Bump 1 const; Whisper comes from `ggerganov/whisper.cpp` on HF.
+//! diarization model (ADR-098). Every URL is pinned to one Hugging Face commit per repository.
 
 use crate::transcription::accel::GpuClass;
 
-const WHISPER_HF_REPO: &str = "ggerganov/whisper.cpp";
-const VAD_HF_REPO: &str = "ggml-org/whisper-vad";
-const DIARIZATION_HF_REPO: &str = "nvidia/Nemotron-3-Diarization";
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HfRepo {
+    pub(crate) path: &'static str,
+    pub(crate) revision: &'static str,
+}
+
+const WHISPER_HF_REPO: HfRepo = HfRepo {
+    path: "ggerganov/whisper.cpp",
+    revision: "5359861c739e955e79d9a303bcbc70fb988958b1",
+};
+const VAD_HF_REPO: HfRepo = HfRepo {
+    path: "ggml-org/whisper-vad",
+    revision: "9ffd54a1e1ee413ddf265af9913beaf518d1639b",
+};
+const DIARIZATION_HF_REPO: HfRepo = HfRepo {
+    path: "nvidia/Nemotron-3-Diarization",
+    revision: "f667ed73aee57d40cc39428eb768b4fd87a0a29e",
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ModelFile {
     pub(crate) key: &'static str,
-    pub(crate) repo: &'static str,
+    pub(crate) repo: HfRepo,
     pub(crate) file: &'static str,
     pub(crate) sha256: &'static str,
     pub(crate) approx_bytes: u64,
@@ -19,8 +34,8 @@ pub(crate) struct ModelFile {
 impl ModelFile {
     pub(crate) fn url(&self) -> String {
         format!(
-            "https://huggingface.co/{}/resolve/main/{}",
-            self.repo, self.file
+            "https://huggingface.co/{}/resolve/{}/{}",
+            self.repo.path, self.repo.revision, self.file
         )
     }
 }
@@ -320,10 +335,25 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    fn is_hex64(s: &str) -> bool {
-        s.len() == 64
+    fn is_lower_hex(s: &str, len: usize) -> bool {
+        s.len() == len
             && s.bytes()
                 .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    }
+
+    fn is_hex64(s: &str) -> bool {
+        is_lower_hex(s, 64)
+    }
+
+    fn is_hex40(s: &str) -> bool {
+        is_lower_hex(s, 40)
+    }
+
+    fn resolve_prefix(repo: HfRepo) -> String {
+        format!(
+            "https://huggingface.co/{}/resolve/{}/",
+            repo.path, repo.revision
+        )
     }
 
     #[test]
@@ -362,7 +392,7 @@ mod tests {
             assert!(!m.license.is_empty(), "Whisper {} license empty", m.key);
             let url = m.download().url();
             assert!(
-                url.starts_with("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/"),
+                url.starts_with(&resolve_prefix(WHISPER_HF_REPO)),
                 "Whisper {} url not from the expected HF repo: {url}",
                 m.key
             );
@@ -409,7 +439,7 @@ mod tests {
         assert!(m.approx_bytes > 100_000 && m.approx_bytes < 10_000_000);
         assert!(!m.license.is_empty());
         let url = m.download().url();
-        assert!(url.starts_with("https://huggingface.co/ggml-org/whisper-vad/resolve/main/"));
+        assert!(url.starts_with(&resolve_prefix(VAD_HF_REPO)));
         assert!(url.ends_with(m.file));
         assert!(WHISPER_MODELS.iter().all(|w| w.file != m.file));
     }
@@ -423,9 +453,7 @@ mod tests {
         assert!(!m.license.is_empty());
         assert!(!m.display_name.is_empty());
         let url = m.download().url();
-        assert!(
-            url.starts_with("https://huggingface.co/nvidia/Nemotron-3-Diarization/resolve/main/")
-        );
+        assert!(url.starts_with(&resolve_prefix(DIARIZATION_HF_REPO)));
         assert!(url.ends_with(m.file));
         let host = reqwest::Url::parse(&url).unwrap();
         assert!(crate::consts::TRANSCRIPTION_MODEL_ALLOWED_REDIRECT_HOSTS
@@ -479,7 +507,41 @@ mod tests {
             );
             assert_eq!(
                 file.url(),
-                format!("https://huggingface.co/{}/resolve/main/{name}", file.repo)
+                format!(
+                    "https://huggingface.co/{}/resolve/{}/{name}",
+                    file.repo.path, file.repo.revision
+                )
+            );
+        }
+    }
+
+    fn all_downloads() -> Vec<ModelFile> {
+        WHISPER_MODELS
+            .iter()
+            .map(WhisperModelInfo::download)
+            .chain([VAD_MODEL.download(), DIARIZATION_MODEL.download()])
+            .collect()
+    }
+
+    #[test]
+    fn every_download_url_is_pinned_to_a_commit_not_a_branch() {
+        for file in all_downloads() {
+            assert!(
+                is_hex40(file.repo.revision),
+                "{}: revision must be a full 40-hex commit, got {:?}",
+                file.key,
+                file.repo.revision
+            );
+            let url = file.url();
+            let revision = url
+                .split("/resolve/")
+                .nth(1)
+                .and_then(|rest| rest.split('/').next())
+                .unwrap();
+            assert!(
+                is_hex40(revision),
+                "{}: url does not carry a commit: {url}",
+                file.key
             );
         }
     }

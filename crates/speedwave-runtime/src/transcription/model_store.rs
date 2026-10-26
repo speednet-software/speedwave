@@ -1007,7 +1007,10 @@ mod tests {
     fn test_diarization_file(body: &[u8], sha256: String) -> ModelFile {
         ModelFile {
             key: "test-diarization",
-            repo: "test/repo",
+            repo: crate::transcription::model_catalog::HfRepo {
+                path: "test/repo",
+                revision: "0000000000000000000000000000000000000000",
+            },
             file: "test.gguf",
             sha256: Box::leak(sha256.into_boxed_str()),
             approx_bytes: body.len() as u64,
