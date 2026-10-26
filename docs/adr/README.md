@@ -106,6 +106,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-098](ADR-098-optional-speaker-attribution.md)                     | Optional speaker attribution: Nemotron-3 diarization of the meeting channel in the offline pass                             | Accepted                                                                           |
 | [ADR-099](ADR-099-find-in-chat-with-css-custom-highlight.md)           | Find in the active chat tab: rendered-text matching, one highlighted match through the CSS Custom Highlight API             | Accepted                                                                           |
 | [ADR-104](ADR-104-apple-mail-control-through-applescript.md)           | Apple Mail control through AppleScript: gates, Trash-only delete, read-only rules, and living with Mail 16 bugs             | Accepted                                                                           |
+| [ADR-105](ADR-105-caller-shaped-jira-tools-in-the-atlassian-worker.md) | Caller-shaped Jira tools in the Atlassian worker: API designed from the caller side, decoupled from Jira REST               | Accepted                                                                           |
 
 ## Creating a New ADR
 
