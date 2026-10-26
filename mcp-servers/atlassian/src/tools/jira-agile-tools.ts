@@ -1,5 +1,5 @@
 /**
- * Jira Agile tools — boards, board configuration, sprints, moving issues into a sprint. 6 tools.
+ * Jira Agile tools (boards, board configuration, sprints, moving issues into a sprint). 6 tools.
  * @module mcp-atlassian/tools/jira-agile-tools
  */
 
@@ -10,6 +10,7 @@ import {
   errorResult,
   notConfiguredMessage,
   teachingErrorResult,
+  withDeclaredParams,
   META_KEYS,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
@@ -25,13 +26,13 @@ const listBoardsTool: Tool = {
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['jira', 'agile', 'boards', 'scrum', 'kanban', 'list'],
-  example: 'const { boards } = await atlassian.listBoards({ projectKeyOrId: "PROJ" })',
+  example: 'const { boards } = await atlassian.listBoards({ project: "PROJ" })',
   inputSchema: {
     type: 'object',
     properties: {
       name: { type: 'string', description: 'Filter by board name substring' },
-      projectKeyOrId: { type: 'string', description: 'Filter to boards of a project' },
-      maxResults: { type: 'number', description: 'Max boards (default 50, max 100)' },
+      project: { type: 'string', description: 'Filter to boards of a project (key or ID)' },
+      max_results: { type: 'number', description: 'Max boards (default 50, max 100)' },
     },
   },
   outputSchema: {
@@ -45,7 +46,7 @@ const listBoardsTool: Tool = {
   },
   inputExamples: [
     { description: 'All boards', input: {} },
-    { description: "A project's boards", input: { projectKeyOrId: 'PROJ' } },
+    { description: "A project's boards", input: { project: 'PROJ' } },
     { description: 'By name', input: { name: 'Sprint Board' } },
   ],
 };
@@ -57,11 +58,11 @@ const getBoardTool: Tool = {
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['jira', 'agile', 'board', 'get', 'detail'],
-  example: 'const board = await atlassian.getBoard({ boardId: 12 })',
+  example: 'const board = await atlassian.getBoard({ board_id: 12 })',
   inputSchema: {
     type: 'object',
-    properties: { boardId: { type: 'number', description: 'Agile board ID' } },
-    required: ['boardId'],
+    properties: { board_id: { type: 'number', description: 'Agile board ID' } },
+    required: ['board_id'],
   },
   outputSchema: {
     type: 'object',
@@ -72,7 +73,7 @@ const getBoardTool: Tool = {
     },
     required: ['success'],
   },
-  inputExamples: [{ description: 'Get a board', input: { boardId: 12 } }],
+  inputExamples: [{ description: 'Get a board', input: { board_id: 12 } }],
 };
 
 const getBoardConfigurationTool: Tool = {
@@ -81,11 +82,11 @@ const getBoardConfigurationTool: Tool = {
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['jira', 'agile', 'board', 'configuration', 'columns', 'filter'],
-  example: 'const config = await atlassian.getBoardConfiguration({ boardId: 12 })',
+  example: 'const config = await atlassian.getBoardConfiguration({ board_id: 12 })',
   inputSchema: {
     type: 'object',
-    properties: { boardId: { type: 'number', description: 'Agile board ID' } },
-    required: ['boardId'],
+    properties: { board_id: { type: 'number', description: 'Agile board ID' } },
+    required: ['board_id'],
   },
   outputSchema: {
     type: 'object',
@@ -96,7 +97,7 @@ const getBoardConfigurationTool: Tool = {
     },
     required: ['success'],
   },
-  inputExamples: [{ description: 'Board config', input: { boardId: 12 } }],
+  inputExamples: [{ description: 'Board config', input: { board_id: 12 } }],
 };
 
 const listSprintsTool: Tool = {
@@ -105,19 +106,19 @@ const listSprintsTool: Tool = {
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['jira', 'agile', 'sprints', 'list', 'board'],
-  example: 'const { sprints } = await atlassian.listSprints({ boardId: 12, state: "active" })',
+  example: 'const { sprints } = await atlassian.listSprints({ board_id: 12, state: "active" })',
   inputSchema: {
     type: 'object',
     properties: {
-      boardId: { type: 'number', description: 'Agile board ID' },
+      board_id: { type: 'number', description: 'Agile board ID' },
       state: {
         type: 'string',
         enum: ['active', 'future', 'closed'],
         description: 'Sprint state filter',
       },
-      maxResults: { type: 'number', description: 'Max sprints (default 50, max 100)' },
+      max_results: { type: 'number', description: 'Max sprints (default 50, max 100)' },
     },
-    required: ['boardId'],
+    required: ['board_id'],
   },
   outputSchema: {
     type: 'object',
@@ -129,8 +130,8 @@ const listSprintsTool: Tool = {
     required: ['success'],
   },
   inputExamples: [
-    { description: 'All sprints', input: { boardId: 12 } },
-    { description: 'Active sprints', input: { boardId: 12, state: 'active' } },
+    { description: 'All sprints', input: { board_id: 12 } },
+    { description: 'Active sprints', input: { board_id: 12, state: 'active' } },
   ],
 };
 
@@ -141,11 +142,11 @@ const getSprintTool: Tool = {
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['jira', 'agile', 'sprint', 'get', 'detail'],
-  example: 'const sprint = await atlassian.getSprint({ sprintId: 34 })',
+  example: 'const sprint = await atlassian.getSprint({ sprint_id: 34 })',
   inputSchema: {
     type: 'object',
-    properties: { sprintId: { type: 'number', description: 'Sprint ID' } },
-    required: ['sprintId'],
+    properties: { sprint_id: { type: 'number', description: 'Sprint ID' } },
+    required: ['sprint_id'],
   },
   outputSchema: {
     type: 'object',
@@ -156,38 +157,42 @@ const getSprintTool: Tool = {
     },
     required: ['success'],
   },
-  inputExamples: [{ description: 'Get a sprint', input: { sprintId: 34 } }],
+  inputExamples: [{ description: 'Get a sprint', input: { sprint_id: 34 } }],
 };
 
 const moveIssuesToSprintTool: Tool = {
   name: 'moveIssuesToSprint',
-  description: `Move issues into a sprint. Rejects with a teaching error if more than ${MOVE_ISSUES_MAX} issueKeysOrIds are given: the Agile API caps a single call at ${MOVE_ISSUES_MAX}; split larger batches into multiple calls.`,
+  description: `Move issues into a sprint. Rejects with a teaching error if more than ${MOVE_ISSUES_MAX} issues are given: the Agile API caps a single call at ${MOVE_ISSUES_MAX}; split larger batches into multiple calls.`,
   annotations: WRITE_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['jira', 'agile', 'sprint', 'move', 'issues', 'assign'],
-  example:
-    'await atlassian.moveIssuesToSprint({ sprintId: 34, issueKeysOrIds: ["PROJ-1", "PROJ-2"] })',
+  example: 'await atlassian.moveIssuesToSprint({ sprint_id: 34, issues: ["PROJ-1", "PROJ-2"] })',
   inputSchema: {
     type: 'object',
     properties: {
-      sprintId: { type: 'number', description: 'Target sprint ID' },
-      issueKeysOrIds: {
+      sprint_id: { type: 'number', description: 'Target sprint ID' },
+      issues: {
         type: 'array',
         items: { type: 'string' },
         description: `Issue keys or IDs (max ${MOVE_ISSUES_MAX} per call, rejected if exceeded)`,
       },
     },
-    required: ['sprintId', 'issueKeysOrIds'],
+    required: ['sprint_id', 'issues'],
   },
   outputSchema: {
     type: 'object',
-    properties: { success: { type: 'boolean' }, error: { type: 'string' } },
+    properties: {
+      success: { type: 'boolean' },
+      moved: { type: 'boolean' },
+      count: { type: 'number' },
+      error: { type: 'string' },
+    },
     required: ['success'],
   },
   inputExamples: [
     {
       description: 'Move two issues',
-      input: { sprintId: 34, issueKeysOrIds: ['PROJ-1', 'PROJ-2'] },
+      input: { sprint_id: 34, issues: ['PROJ-1', 'PROJ-2'] },
     },
   ],
 };
@@ -207,78 +212,83 @@ export function createJiraAgileTools(client: AtlassianClient | null): ToolDefini
   ];
   if (!client) {
     const unconfigured = async () => errorResult(notConfiguredMessage('Atlassian'));
-    return tools.map((tool) => ({ tool, handler: unconfigured }));
+    return tools.map((tool) => ({ tool, handler: withDeclaredParams(tool, unconfigured) }));
   }
   const agile = createJiraAgileClient(client);
 
-  return [
+  const definitions: ToolDefinition[] = [
     {
       tool: listBoardsTool,
       handler: withValidation(client, async (_c, params) => {
-        const { name, projectKeyOrId, maxResults } = params as {
+        const { name, project, max_results } = params as {
           name?: string;
-          projectKeyOrId?: string;
-          maxResults?: number;
+          project?: string;
+          max_results?: number;
         };
-        return jsonResult({ boards: await agile.listBoards({ name, projectKeyOrId, maxResults }) });
+        return jsonResult({
+          boards: await agile.listBoards({ name, project, maxResults: max_results }),
+        });
       }),
     },
     {
       tool: getBoardTool,
       handler: withValidation(client, async (_c, params) => {
-        const { boardId } = params as { boardId: number };
-        return jsonResult({ board: await agile.getBoard(boardId) });
+        const { board_id } = params as { board_id: number };
+        return jsonResult({ board: await agile.getBoard(board_id) });
       }),
     },
     {
       tool: getBoardConfigurationTool,
       handler: withValidation(client, async (_c, params) => {
-        const { boardId } = params as { boardId: number };
-        return jsonResult({ configuration: await agile.getBoardConfiguration(boardId) });
+        const { board_id } = params as { board_id: number };
+        return jsonResult({ configuration: await agile.getBoardConfiguration(board_id) });
       }),
     },
     {
       tool: listSprintsTool,
       handler: withValidation(client, async (_c, params) => {
-        const { boardId, state, maxResults } = params as {
-          boardId: number;
+        const { board_id, state, max_results } = params as {
+          board_id: number;
           state?: 'active' | 'future' | 'closed';
-          maxResults?: number;
+          max_results?: number;
         };
-        return jsonResult({ sprints: await agile.listSprints(boardId, { state, maxResults }) });
+        return jsonResult({
+          sprints: await agile.listSprints(board_id, { state, maxResults: max_results }),
+        });
       }),
     },
     {
       tool: getSprintTool,
       handler: withValidation(client, async (_c, params) => {
-        const { sprintId } = params as { sprintId: number };
-        return jsonResult({ sprint: await agile.getSprint(sprintId) });
+        const { sprint_id } = params as { sprint_id: number };
+        return jsonResult({ sprint: await agile.getSprint(sprint_id) });
       }),
     },
     {
       tool: moveIssuesToSprintTool,
       handler: withValidation(client, async (_c, params) => {
-        const { sprintId, issueKeysOrIds } = params as {
-          sprintId: number;
-          issueKeysOrIds: string[];
-        };
-        if (issueKeysOrIds.length === 0) {
+        const { sprint_id, issues } = params as { sprint_id: number; issues: string[] };
+        if (issues.length === 0) {
           return teachingErrorResult({
-            paramName: 'issueKeysOrIds',
+            paramName: 'issues',
             received: '0 issues',
             nextStep: 'Provide at least one issue key or ID to move into the sprint.',
           });
         }
-        if (issueKeysOrIds.length > MOVE_ISSUES_MAX) {
+        if (issues.length > MOVE_ISSUES_MAX) {
           return teachingErrorResult({
-            paramName: 'issueKeysOrIds',
-            received: `${issueKeysOrIds.length} issues`,
+            paramName: 'issues',
+            received: `${issues.length} issues`,
             nextStep: `The Agile API accepts at most ${MOVE_ISSUES_MAX} issues per call; split this batch into multiple calls of ${MOVE_ISSUES_MAX} or fewer.`,
           });
         }
-        await agile.moveIssuesToSprint(sprintId, issueKeysOrIds);
-        return jsonResult({ moved: true, count: issueKeysOrIds.length });
+        await agile.moveIssuesToSprint(sprint_id, issues);
+        return jsonResult({ moved: true, count: issues.length });
       }),
     },
   ];
+  return definitions.map(({ tool, handler }) => ({
+    tool,
+    handler: withDeclaredParams(tool, handler),
+  }));
 }

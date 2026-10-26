@@ -79,8 +79,8 @@ export interface JiraTransition {
 /** Jira issue comment, normalised. */
 export interface JiraComment {
   id: string;
-  /** Comment body may be ADF (v3). */
-  body: AdfDoc | string;
+  /** Comment body as Markdown. */
+  body: string;
   author?: JiraUser | null;
   created: string;
   updated: string;
@@ -91,7 +91,7 @@ export interface JiraWorklog {
   id: string;
   issue_id: string;
   time_spent_seconds: number;
-  comment?: AdfDoc | string | null;
+  comment?: string | null;
   author?: JiraUser | null;
   started: string;
   created: string;
@@ -113,6 +113,13 @@ export interface JiraIssueType {
   name: string;
   description?: string;
   subtask: boolean;
+}
+
+/** Jira project component, normalised. */
+export interface JiraComponent {
+  id: string;
+  name: string;
+  description?: string;
 }
 
 /** Jira issue attachment metadata, normalised. */
