@@ -14,9 +14,7 @@ export function mapUser(raw: unknown): JiraUser {
   const o = (raw ?? {}) as Record<string, unknown>;
   return {
     account_id: String(o.accountId ?? ''),
-    display_name: String(o.displayName ?? ''),
-    email_address: o.emailAddress ? String(o.emailAddress) : undefined,
-    active: Boolean(o.active ?? true),
+    name: String(o.displayName ?? ''),
   };
 }
 

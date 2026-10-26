@@ -36,29 +36,82 @@ export interface AdfDoc {
 /** Jira account (reporter/assignee/author), normalised. */
 export interface JiraUser {
   account_id: string;
-  display_name: string;
-  email_address?: string;
-  active: boolean;
+  name: string;
 }
 
-/** Jira issue, normalised to the fields Speedwave exposes. */
-export interface JiraIssue {
-  id: string;
+/** Compact reference to another issue: a parent or a link end. */
+export interface JiraIssueRef {
   key: string;
   summary: string;
-  /** `description` may be ADF (v3) — returned as-is so callers can render it. */
-  description?: AdfDoc | string | null;
   status: string;
-  issue_type: string;
-  project_key: string;
-  priority?: string;
+}
+
+/** Parent of an issue: epic for a story, story for a sub-task. */
+export interface JiraIssueParent extends JiraIssueRef {
+  type: string;
+}
+
+/** Link between two issues; `relation` reads from the side of the issue that carries it. */
+export interface JiraIssueLink {
+  id: string;
+  relation: string;
+  issue: JiraIssueRef;
+}
+
+/** Jira issue link type with its two direction descriptions. */
+export interface JiraLinkType {
+  id: string;
+  name: string;
+  inward: string;
+  outward: string;
+}
+
+/** Jira issue, normalised to the shape callers see. `description` is Markdown and absent in search results. */
+export interface JiraIssue {
+  key: string;
+  id: string;
+  web_url?: string;
+  summary: string;
+  description?: string;
+  type: string;
+  status: string;
+  project: string;
+  priority: string | null;
   labels: string[];
-  assignee?: JiraUser | null;
-  reporter?: JiraUser | null;
+  components: string[];
+  parent: JiraIssueParent | null;
+  links: JiraIssueLink[];
+  assignee: JiraUser | null;
+  reporter: JiraUser | null;
   created: string;
   updated: string;
-  /** Human `/browse/<key>` URL; absent if the API's `self` URL can't be parsed. */
-  web_url?: string;
+}
+
+/** Caller input for creating an issue. `description` (Markdown) and `description_adf` are mutually exclusive. */
+export interface CreateIssueInput {
+  project: string;
+  type: string;
+  summary: string;
+  description?: string;
+  description_adf?: AdfDoc;
+  priority?: string;
+  labels?: string[];
+  assignee?: string | null;
+  parent?: string;
+  components?: string[];
+}
+
+/** Caller input for updating an issue; omitted fields stay unchanged, `parent: null` detaches. */
+export interface UpdateIssueInput {
+  type?: string;
+  summary?: string;
+  description?: string;
+  description_adf?: AdfDoc;
+  priority?: string;
+  labels?: string[];
+  assignee?: string | null;
+  parent?: string | null;
+  components?: string[];
 }
 
 /** Result of an enhanced JQL search (`POST /rest/api/3/search/jql`). */
