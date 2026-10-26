@@ -50,7 +50,6 @@ populate_targets() {
     cp "$ent_src/node.plist" "$SRC_TAURI/entitlements/node.plist"
     cp "$ent_src/virtualization.plist" "$SRC_TAURI/entitlements/virtualization.plist"
     cp "$ent_src/calendars.plist" "$SRC_TAURI/entitlements/calendars.plist"
-    cp "$ent_src/reminders.plist" "$SRC_TAURI/entitlements/reminders.plist"
     cp "$ent_src/apple-events.plist" "$SRC_TAURI/entitlements/apple-events.plist"
     cp "$ent_src/audio-capture.plist" "$SRC_TAURI/entitlements/audio-capture.plist"
 }
