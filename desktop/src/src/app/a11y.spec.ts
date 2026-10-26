@@ -83,6 +83,11 @@ function buildMockTauri(): MockTauriService {
         return { auto_check: true, check_interval_hours: 24 };
       case 'get_platform':
         return 'darwin';
+      case 'get_notification_settings':
+        return {
+          prefs: { enabled: true, turn_finished: true, awaiting_input: true, session_error: true },
+          permission: 'granted',
+        };
       case 'get_auth_status':
         return { api_key_configured: false, oauth_authenticated: false };
       case 'get_integrations':

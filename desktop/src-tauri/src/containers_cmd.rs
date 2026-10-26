@@ -2839,6 +2839,7 @@ mod tests {
         });
         cfg.ui = Some(config::UiPrefsConfig {
             beta_enabled: Some(true),
+            ..Default::default()
         });
         let gate_on = seeded_tempdir(&cfg);
         assert!(

@@ -2,6 +2,7 @@ use crate::control_channel::{
     self, ControlChannel, ControlHandle, ControlQuery, SessionInfoEvent, SessionInfoState,
 };
 use crate::history;
+use crate::notifications::{notify_session_event, SessionEvent};
 use crate::pii_display::DisplayPolicy;
 use speedwave_runtime::stream::{
     AskUserOption, AskUserQuestionItem, MAX_ASK_USER_QUESTIONS, MAX_ASK_USER_WIRE_BYTES,
@@ -1799,6 +1800,23 @@ fn end_session_info(slot: &Mutex<SessionInfoState>, emit: Option<&SessionInfoEmi
     }
 }
 
+fn turn_end_event(chunks: &[StreamChunk]) -> Option<SessionEvent> {
+    chunks.iter().find_map(|c| match c {
+        StreamChunk::Result { .. } => Some(SessionEvent::TurnFinished),
+        StreamChunk::Error {
+            turn_ended: true, ..
+        } => Some(SessionEvent::SessionError),
+        _ => None,
+    })
+}
+
+fn unless_next_turn_started(
+    event: Option<SessionEvent>,
+    next_turn_started: bool,
+) -> Option<SessionEvent> {
+    event.filter(|e| !(next_turn_started && *e == SessionEvent::TurnFinished))
+}
+
 #[derive(Clone)]
 struct AwaitedResult(Arc<std::sync::atomic::AtomicBool>);
 
@@ -2265,6 +2283,12 @@ impl ChatSession {
                             },
                             &display_policy,
                         );
+                        notify_session_event(
+                            &app_handle,
+                            &project_for_reader,
+                            &tab_id_for_reader,
+                            SessionEvent::AwaitingInput,
+                        );
                     } else {
                         if let Some(reason) = &ctrl.safety_check {
                             log::warn!(
@@ -2393,6 +2417,7 @@ impl ChatSession {
                     StreamChunk::Result { session_id, .. } => Some(session_id.clone()),
                     _ => None,
                 });
+                let turn_event = turn_end_event(&chunks);
                 awaited_for_reader.observe(&chunks);
                 for chunk in chunks {
                     if let StreamChunk::SystemInit {
@@ -2409,6 +2434,7 @@ impl ChatSession {
                     }
                     emit_sanitized_chunk(&app_handle, &tab_id_for_reader, chunk, &display_policy);
                 }
+                let mut next_turn_started = false;
                 if let Some(session_id) = result_session_id {
                     if drain_queued_message(
                         &app_handle,
@@ -2419,7 +2445,16 @@ impl ChatSession {
                         &display_policy,
                     ) {
                         awaited_for_reader.message_written();
+                        next_turn_started = true;
                     }
+                }
+                if let Some(event) = unless_next_turn_started(turn_event, next_turn_started) {
+                    notify_session_event(
+                        &app_handle,
+                        &project_for_reader,
+                        &tab_id_for_reader,
+                        event,
+                    );
                 }
             }
 
@@ -2443,6 +2478,12 @@ impl ChatSession {
                     turn_ended: false,
                 };
                 emit_sanitized_chunk(&app_handle, &tab_id_for_reader, chunk, &display_policy);
+                notify_session_event(
+                    &app_handle,
+                    &project_for_reader,
+                    &tab_id_for_reader,
+                    SessionEvent::SessionError,
+                );
             }
         });
         self.drain_handles.push(h);
@@ -3804,6 +3845,52 @@ mod tests {
             awaited.is_awaited(),
             "the previous turn's result must not cover a message sent after it"
         );
+    }
+
+    #[test]
+    fn a_finished_turn_or_a_turn_ending_error_names_its_notification() {
+        assert_eq!(turn_end_event(&[]), None);
+        assert_eq!(
+            turn_end_event(&[
+                StreamChunk::Text {
+                    content: "hi".to_string(),
+                },
+                finished_turn(),
+            ]),
+            Some(SessionEvent::TurnFinished)
+        );
+        assert_eq!(
+            turn_end_event(&[StreamChunk::Error {
+                content: "overloaded".to_string(),
+                turn_ended: true,
+            }]),
+            Some(SessionEvent::SessionError)
+        );
+        assert_eq!(
+            turn_end_event(&[StreamChunk::Error {
+                content: "model refused".to_string(),
+                turn_ended: false,
+            }]),
+            None,
+            "an error that leaves the turn running is not the end of the session's work"
+        );
+    }
+
+    #[test]
+    fn a_queued_message_that_starts_the_next_turn_withholds_only_the_finished_notification() {
+        assert_eq!(
+            unless_next_turn_started(Some(SessionEvent::TurnFinished), false),
+            Some(SessionEvent::TurnFinished)
+        );
+        assert_eq!(
+            unless_next_turn_started(Some(SessionEvent::TurnFinished), true),
+            None
+        );
+        assert_eq!(
+            unless_next_turn_started(Some(SessionEvent::SessionError), true),
+            Some(SessionEvent::SessionError)
+        );
+        assert_eq!(unless_next_turn_started(None, false), None);
     }
 
     #[test]
