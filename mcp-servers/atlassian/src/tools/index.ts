@@ -1,5 +1,5 @@
 /**
- * Atlassian tools aggregator — 35 tools: Jira issues/comments/projects/Agile, Confluence pages.
+ * Atlassian tools aggregator — 39 tools: Jira issues/comments/projects/Agile, Confluence pages.
  * @module mcp-atlassian/tools
  */
 
