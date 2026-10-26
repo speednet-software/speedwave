@@ -11,8 +11,8 @@
   },
   "type": "module",
   "devDependencies": {
-    "@commitlint/cli": "^21.2.3",
+    "@commitlint/cli": "^21.2.4",
     "@commitlint/config-conventional": "^21",
-    "prettier": "^3.9.9"
+    "prettier": "^3.9.10"
   }
 }
