@@ -5,9 +5,7 @@
 
 import { describe, it, expect } from 'vitest';
 import {
-  textToAdf,
   isAdfDoc,
-  toAdf,
   storageBody,
   textToStorage,
   resolveBodyPayload,
@@ -16,49 +14,7 @@ import {
 } from './adf.js';
 import type { AdfNode } from './types.js';
 
-describe('textToAdf', () => {
-  it('wraps a single line in one paragraph', () => {
-    expect(textToAdf('hello')).toEqual({
-      version: 1,
-      type: 'doc',
-      content: [{ type: 'paragraph', content: [{ type: 'text', text: 'hello' }] }],
-    });
-  });
-
-  it('produces one paragraph per line', () => {
-    const doc = textToAdf('a\nb');
-    expect(doc.content).toHaveLength(2);
-    expect(doc.content[1]).toEqual({ type: 'paragraph', content: [{ type: 'text', text: 'b' }] });
-  });
-
-  it('represents a blank line as an empty paragraph', () => {
-    const doc = textToAdf('a\n\nb');
-    expect(doc.content).toEqual([
-      { type: 'paragraph', content: [{ type: 'text', text: 'a' }] },
-      { type: 'paragraph', content: [] },
-      { type: 'paragraph', content: [{ type: 'text', text: 'b' }] },
-    ]);
-  });
-
-  it('handles an empty string as a single empty paragraph', () => {
-    expect(textToAdf('').content).toEqual([{ type: 'paragraph', content: [] }]);
-  });
-
-  it('coerces nullish input to an empty document body', () => {
-    // @ts-expect-error — exercising the runtime guard
-    expect(textToAdf(undefined).content).toEqual([{ type: 'paragraph', content: [] }]);
-  });
-
-  it('keeps special characters verbatim (no escaping at this layer)', () => {
-    const doc = textToAdf('<b> & "x"');
-    expect(doc.content[0]).toEqual({
-      type: 'paragraph',
-      content: [{ type: 'text', text: '<b> & "x"' }],
-    });
-  });
-});
-
-describe('isAdfDoc / toAdf', () => {
+describe('isAdfDoc', () => {
   it('recognises a well-formed ADF doc', () => {
     expect(isAdfDoc({ version: 1, type: 'doc', content: [] })).toBe(true);
   });
@@ -73,20 +29,6 @@ describe('isAdfDoc / toAdf', () => {
     ['content not an array', { version: 1, type: 'doc', content: 'x' }],
   ])('rejects %s', (_label, value) => {
     expect(isAdfDoc(value)).toBe(false);
-  });
-
-  it('passes a pre-built ADF doc through unchanged', () => {
-    const doc = { version: 1 as const, type: 'doc' as const, content: [] };
-    expect(toAdf(doc)).toBe(doc);
-  });
-
-  it('converts plain text', () => {
-    expect(toAdf('x')).toEqual(textToAdf('x'));
-  });
-
-  it('coerces a nullish body to an empty document', () => {
-    // @ts-expect-error — exercising the runtime guard
-    expect(toAdf(undefined)).toEqual(textToAdf(''));
   });
 });
 
@@ -478,12 +420,31 @@ describe('adfToMarkdown', () => {
             t(' s', [{ type: 'strike' }]),
             t('c', [{ type: 'code' }]),
             t('l', [{ type: 'link', attrs: { href: 'https://a.b/(x y)' } }]),
-            t('u', [{ type: 'underline' }]),
             t('  ', [{ type: 'strong' }])
           )
         )
       )
-    ).toBe('**b** *i* ~~s~~`c`[l](https://a.b/%28x%20y%29)u  ');
+    ).toBe('**b** *i* ~~s~~`c`[l](https://a.b/%28x%20y%29)  ');
+  });
+
+  it('marks text formatting without a Markdown equivalent instead of dropping it', () => {
+    expect(
+      adfToMarkdown(
+        doc(
+          p(
+            t('u', [{ type: 'underline' }]),
+            t(' c ', [{ type: 'textColor', attrs: { color: '#ff0000' } }]),
+            t('b', [{ type: 'backgroundColor', attrs: { color: '#00ff00' } }]),
+            t('x', [{ type: 'subsup', attrs: { type: 'sub' } }]),
+            t('n', [{ type: 'strong' }, { type: 'annotation', attrs: { id: 'a1' } }])
+          )
+        )
+      )
+    ).toBe(
+      '[adf:underline]u[/adf:underline] [adf:textColor #ff0000]c[/adf:textColor] ' +
+        '[adf:backgroundColor #00ff00]b[/adf:backgroundColor][adf:subsup sub]x[/adf:subsup]' +
+        '[adf:annotation a1]**n**[/adf:annotation]'
+    );
   });
 
   it('renders inline code containing backticks', () => {

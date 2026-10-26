@@ -15,6 +15,14 @@ import { deriveBrowseUrl } from '../url.js';
 import type { JiraComponent, JiraIssueType, JiraProject } from '../types.js';
 import { mapUser } from './normalizers.js';
 
+interface CreateMetaIssueTypesPage {
+  issueTypes?: unknown[];
+  createMetaIssueType?: unknown[];
+  total?: number;
+}
+
+const CREATE_META_PAGE_SIZE = 100;
+
 /** Client for Jira project operations. */
 export interface JiraProjectsClient {
   /** List projects visible to the account (filtered by the configured allowlist, if any). */
@@ -79,11 +87,19 @@ export function createJiraProjectsClient(client: AtlassianClient): JiraProjectsC
         (issue.fields?.project as { key?: unknown } | undefined)?.key ?? ''
       );
       assertJiraProjectAllowed(projectKey, client.jiraProjectKeys);
-      const res = await client.get<{ issueTypes?: unknown[] }>(
-        `/rest/api/3/issue/createmeta/${encodeURIComponent(projectKey)}/issuetypes`,
-        { maxResults: 100 }
-      );
-      return (res.issueTypes ?? [])
+      const allowed: unknown[] = [];
+      let total = 0;
+      do {
+        const page = await client.get<CreateMetaIssueTypesPage>(
+          `/rest/api/3/issue/createmeta/${encodeURIComponent(projectKey)}/issuetypes`,
+          { startAt: allowed.length, maxResults: CREATE_META_PAGE_SIZE }
+        );
+        const types = page.issueTypes ?? page.createMetaIssueType ?? [];
+        if (types.length === 0) break;
+        allowed.push(...types);
+        total = page.total ?? 0;
+      } while (allowed.length < total);
+      return allowed
         .map(mapIssueType)
         .filter((type) => type.id !== current.id && type.subtask === current.subtask);
     },

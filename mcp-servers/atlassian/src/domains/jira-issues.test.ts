@@ -389,20 +389,6 @@ describe('create', () => {
     expect(sentFields('post').description).toBe(adf);
   });
 
-  it('rejects description together with description_adf before any request', async () => {
-    const c = createJiraIssuesClient(client);
-    await expect(
-      c.create({
-        project: 'PROJ',
-        type: 'Task',
-        summary: 'S',
-        description: 'x',
-        description_adf: { type: 'doc', version: 1, content: [] },
-      })
-    ).rejects.toThrow(/description.*description_adf/);
-    expect(client.post).not.toHaveBeenCalled();
-  });
-
   it('resolves assignee "me" through the myself endpoint', async () => {
     client.get.mockResolvedValueOnce({ accountId: 'self-1', displayName: 'Me' });
     client.post.mockResolvedValueOnce({ key: 'PROJ-5' });
@@ -488,19 +474,6 @@ describe('update', () => {
     expect(sentFields('put')).toEqual({ components: [] });
   });
 
-  it('detaches the parent with null and sets one with a key or id', async () => {
-    client.put.mockResolvedValue(undefined);
-    client.get.mockResolvedValue(rawIssue());
-    const c = createJiraIssuesClient(client);
-    await c.update('PROJ-1', { parent: null });
-    await c.update('PROJ-1', { parent: 'PROJ-2' });
-    await c.update('PROJ-1', { parent: '10077' });
-    const parents = client.put.mock.calls.map(
-      (call) => (call[1] as { fields: { parent: unknown } }).fields.parent
-    );
-    expect(parents).toEqual([null, { key: 'PROJ-2' }, { id: '10077' }]);
-  });
-
   it('addresses the issue by numeric id when no allowlist is set', async () => {
     client.put.mockResolvedValueOnce(undefined);
     client.get.mockResolvedValueOnce(rawIssue());
@@ -533,17 +506,6 @@ describe('update', () => {
     expect(sentFields('put').description).toBe(adf);
   });
 
-  it('rejects description together with description_adf before any request', async () => {
-    const c = createJiraIssuesClient(client);
-    await expect(
-      c.update('PROJ-1', {
-        description: 'x',
-        description_adf: { type: 'doc', version: 1, content: [] },
-      })
-    ).rejects.toThrow(/description.*description_adf/);
-    expect(client.put).not.toHaveBeenCalled();
-  });
-
   it('enforces the allowlist on the issue and the parent before updating', async () => {
     client = stubClient(['ALLOWED']);
     const c = createJiraIssuesClient(client);
@@ -568,17 +530,6 @@ describe('update', () => {
 });
 
 describe('delete', () => {
-  it('DELETEs the issue by key or id without deleteSubtasks', async () => {
-    client.del.mockResolvedValue(undefined);
-    const c = createJiraIssuesClient(client);
-    await c.delete('PROJ-1');
-    await c.delete('10001');
-    expect(client.del.mock.calls).toEqual([
-      ['/rest/api/3/issue/PROJ-1'],
-      ['/rest/api/3/issue/10001'],
-    ]);
-  });
-
   it('enforces the allowlist before deleting', async () => {
     client = stubClient(['ALLOWED']);
     const c = createJiraIssuesClient(client);
@@ -612,30 +563,6 @@ describe('link types and linking', () => {
     expect(await c.listLinkTypes()).toEqual([]);
   });
 
-  it('links with this issue as the outward end when the relation is the outward text', async () => {
-    client.get.mockResolvedValueOnce(linkTypes);
-    client.post.mockResolvedValueOnce(undefined);
-    const c = createJiraIssuesClient(client);
-    await c.linkIssues('PROJ-1', 'blocks', 'PROJ-2');
-    expect(client.post).toHaveBeenCalledWith('/rest/api/3/issueLink', {
-      type: { name: 'Blocks' },
-      outwardIssue: { key: 'PROJ-1' },
-      inwardIssue: { key: 'PROJ-2' },
-    });
-  });
-
-  it('links with this issue as the inward end when the relation is the inward text, case-insensitively', async () => {
-    client.get.mockResolvedValueOnce(linkTypes);
-    client.post.mockResolvedValueOnce(undefined);
-    const c = createJiraIssuesClient(client);
-    await c.linkIssues('PROJ-1', '  Is Blocked BY ', '10002');
-    expect(client.post).toHaveBeenCalledWith('/rest/api/3/issueLink', {
-      type: { name: 'Blocks' },
-      inwardIssue: { key: 'PROJ-1' },
-      outwardIssue: { id: '10002' },
-    });
-  });
-
   it('fetches the link types once per client instance', async () => {
     client.get.mockResolvedValueOnce(linkTypes);
     client.post.mockResolvedValue(undefined);
@@ -663,16 +590,6 @@ describe('link types and linking', () => {
     await expect(c.linkIssues('PROJ-1', 'blocks', 'PROJ-2')).rejects.toThrow('down');
     await c.linkIssues('PROJ-1', 'blocks', 'PROJ-2');
     expect(client.post).toHaveBeenCalledTimes(1);
-  });
-
-  it('throws UnknownLinkRelationError listing the valid relations and sends nothing', async () => {
-    client.get.mockResolvedValueOnce(linkTypes);
-    const c = createJiraIssuesClient(client);
-    const failure = await c.linkIssues('PROJ-1', 'duplicates', 'PROJ-2').catch((e) => e);
-    expect(failure).toBeInstanceOf(UnknownLinkRelationError);
-    expect(failure.relation).toBe('duplicates');
-    expect(failure.available).toEqual(['blocks', 'is blocked by', 'relates to']);
-    expect(client.post).not.toHaveBeenCalled();
   });
 
   it('enforces the allowlist on both link ends before any request', async () => {

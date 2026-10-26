@@ -5,21 +5,9 @@
 
 import type { AdfDoc, AdfNode } from './types.js';
 
-/**
- * Convert plain text to a minimal ADF doc: one paragraph per line, blanks collapsed to empty ones.
- * No inline marks; callers needing rich formatting pass a raw ADF object via {@link toAdf}.
- * @param text - Plain text (may contain `\n`).
- * @returns ADF document.
- */
-export function textToAdf(text: string): AdfDoc {
-  const lines = String(text ?? '').split('\n');
-  const content: AdfNode[] = lines.map((line) =>
-    line.length === 0
-      ? { type: 'paragraph', content: [] }
-      : { type: 'paragraph', content: [{ type: 'text', text: line }] }
-  );
-  return { version: 1, type: 'doc', content };
-}
+type AdfMarked = { type: string; attrs?: Record<string, unknown> };
+
+const MARKDOWN_MARKS: ReadonlySet<string> = new Set(['code', 'em', 'strong', 'strike', 'link']);
 
 /**
  * Narrow check: is `value` already a `{ version: 1, type: 'doc', ... }` ADF object?
@@ -34,15 +22,6 @@ export function isAdfDoc(value: unknown): value is AdfDoc {
     (value as { version?: unknown }).version === 1 &&
     Array.isArray((value as { content?: unknown }).content)
   );
-}
-
-/**
- * Resolve a body to ADF: pass through a pre-built doc, else convert text via {@link textToAdf}.
- * @param body - Plain text or a raw ADF object.
- * @returns ADF document.
- */
-export function toAdf(body: string | AdfDoc): AdfDoc {
-  return isAdfDoc(body) ? body : textToAdf(String(body ?? ''));
 }
 
 /**
@@ -578,6 +557,9 @@ function textToMarkdown(node: AdfNode): string {
   if (marks.some((mark) => mark.type === 'em')) result = `*${result}*`;
   if (marks.some((mark) => mark.type === 'strong')) result = `**${result}**`;
   if (marks.some((mark) => mark.type === 'strike')) result = `~~${result}~~`;
+  for (const mark of marks.filter((candidate) => !MARKDOWN_MARKS.has(candidate.type))) {
+    result = wrapUnsupported(mark, result, '');
+  }
   const link = marks.find((mark) => mark.type === 'link');
   if (link) result = `[${result}](${encodeHref(String(link.attrs?.href ?? ''))})`;
   return leading + result + trailing;
@@ -601,25 +583,26 @@ function encodeHref(href: string): string {
   );
 }
 
-function wrapUnsupported(node: AdfNode, content: string, separator: string): string {
+function wrapUnsupported(node: AdfMarked, content: string, separator: string): string {
   const open: UnsupportedAdfMarker = unsupportedMarker(node);
   if (content === '') return open;
   const close: UnsupportedAdfMarker = `[/adf:${node.type}]`;
   return [open, content, close].join(separator);
 }
 
-function unsupportedMarker(node: AdfNode): UnsupportedAdfMarker {
+function unsupportedMarker(node: AdfMarked): UnsupportedAdfMarker {
   const detail = markerDetail(node).replace(/\s+|\]/g, ' ');
   return detail === '' ? `[adf:${node.type}]` : `[adf:${node.type} ${detail}]`;
 }
 
-function markerDetail(node: AdfNode): string {
+function markerDetail(node: AdfMarked): string {
   const attrs = node.attrs ?? {};
+  if (node.type === 'subsup') return String(attrs.type ?? '');
   if (node.type === 'date') {
     const date = new Date(Number(attrs.timestamp));
     return Number.isNaN(date.getTime()) ? '' : date.toISOString().slice(0, 10);
   }
-  const key = ['panelType', 'title', 'text', 'id', 'url', 'shortName'].find(
+  const key = ['panelType', 'title', 'text', 'id', 'url', 'shortName', 'color'].find(
     (candidate) => typeof attrs[candidate] === 'string'
   );
   return key === undefined ? '' : String(attrs[key]);

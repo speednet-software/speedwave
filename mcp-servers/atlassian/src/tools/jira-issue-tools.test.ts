@@ -542,6 +542,46 @@ describe('updateIssue', () => {
     expect(result.isError).toBe(true);
     expect(client.put).not.toHaveBeenCalled();
   });
+
+  it('sends a parent given as key or numeric id in the matching shape', async () => {
+    client.put.mockResolvedValue(undefined);
+    client.get.mockResolvedValue(RAW_ISSUE);
+    await run('updateIssue', { issue: 'PROJ-7', parent: 'PROJ-2' });
+    await run('updateIssue', { issue: 'PROJ-7', parent: '10077' });
+    expect(client.put.mock.calls.map((call) => call[1].fields.parent)).toEqual([
+      { key: 'PROJ-2' },
+      { id: '10077' },
+    ]);
+  });
+
+  it('checks the project allowlist on the new parent, including an empty one', async () => {
+    client.jiraProjectKeys = ['PROJ'];
+    for (const parent of ['OTHER-1', '']) {
+      const result = await run('updateIssue', { issue: 'PROJ-7', parent });
+      expect(result.isError).toBe(true);
+    }
+    expect(client.put).not.toHaveBeenCalled();
+  });
+
+  it('does not label an error message that only mentions a parent as a parent error', async () => {
+    client.put.mockRejectedValueOnce(
+      badRequest({ errorMessages: ['The parent filter in your workflow is misconfigured'] })
+    );
+    const result = await run('updateIssue', { issue: 'PROJ-7', summary: 'x' });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).not.toContain('Invalid parent.');
+  });
+
+  it('rejects a description_adf that is not an ADF document before sending', async () => {
+    const result = await run('updateIssue', {
+      issue: 'PROJ-7',
+      description_adf: { type: 'paragraph' },
+    });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('description_adf must be an ADF document');
+    expect(textOf(result)).not.toContain('paragraph');
+    expect(client.put).not.toHaveBeenCalled();
+  });
 });
 
 describe('deleteIssue', () => {
@@ -549,6 +589,15 @@ describe('deleteIssue', () => {
     client.del.mockResolvedValueOnce(undefined);
     expect(payload(await run('deleteIssue', { issue: 'PROJ-7' }))).toEqual({ deleted: true });
     expect(client.del.mock.calls[0][0]).toBe('/rest/api/3/issue/PROJ-7');
+  });
+
+  it('deletes by numeric id and enforces the allowlist on the key', async () => {
+    client.del.mockResolvedValueOnce(undefined);
+    await run('deleteIssue', { issue: '10007' });
+    expect(client.del.mock.calls[0][0]).toBe('/rest/api/3/issue/10007');
+    client.jiraProjectKeys = ['OTHER'];
+    expect((await run('deleteIssue', { issue: 'PROJ-7' })).isError).toBe(true);
+    expect(client.del).toHaveBeenCalledTimes(1);
   });
 
   it('tells the caller to deal with sub-tasks when Jira refuses', async () => {
@@ -584,6 +633,17 @@ describe('linkIssues and unlinkIssues', () => {
       type: { name: 'Blocks' },
       outwardIssue: { key: 'PROJ-1' },
       inwardIssue: { key: 'PROJ-2' },
+    });
+  });
+
+  it('links with the relation read from the inward text, case-insensitively, with an id target', async () => {
+    client.get.mockResolvedValueOnce(LINK_TYPES);
+    client.post.mockResolvedValueOnce(undefined);
+    await run('linkIssues', { issue: 'PROJ-1', relation: '  Is Blocked BY ', target: '10002' });
+    expect(client.post).toHaveBeenCalledWith('/rest/api/3/issueLink', {
+      type: { name: 'Blocks' },
+      inwardIssue: { key: 'PROJ-1' },
+      outwardIssue: { id: '10002' },
     });
   });
 

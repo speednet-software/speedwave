@@ -17,9 +17,9 @@ import {
 } from '@speedwave/mcp-shared';
 import { AtlassianClient } from '../client.js';
 import { createJiraCommentsClient } from '../domains/jira-comments.js';
-import { isAdfDoc } from '../adf.js';
 import type { AdfDoc } from '../types.js';
 import { withValidation } from './validation.js';
+import { resolveRichText, type RichTextResult } from './rich-text.js';
 
 const addCommentTool: Tool = {
   name: 'addComment',
@@ -202,8 +202,6 @@ export function createJiraCommentTools(client: AtlassianClient | null): ToolDefi
   }));
 }
 
-type RichTextResult<T> = { value: T } | { error: ReturnType<typeof teachingErrorResult> };
-
 function requireRichText(
   markdownName: string,
   markdown: string | undefined,
@@ -221,31 +219,4 @@ function requireRichText(
     };
   }
   return { value: resolved.value };
-}
-
-function resolveRichText(
-  markdownName: string,
-  markdown: string | undefined,
-  adfName: string,
-  adf: unknown
-): RichTextResult<string | AdfDoc | undefined> {
-  if (markdown !== undefined && adf !== undefined) {
-    return {
-      error: teachingErrorResult({
-        paramName: `${markdownName} and ${adfName}`,
-        nextStep: `Give ${markdownName} (Markdown) or ${adfName} (ADF), not both. Nothing was sent.`,
-      }),
-    };
-  }
-  if (adf === undefined) return { value: markdown };
-  if (!isAdfDoc(adf)) {
-    return {
-      error: teachingErrorResult({
-        paramName: adfName,
-        received: adf,
-        nextStep: `${adfName} must be an ADF document: { version: 1, type: "doc", content: [...] }. Nothing was sent.`,
-      }),
-    };
-  }
-  return { value: adf };
 }

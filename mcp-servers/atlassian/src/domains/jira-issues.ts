@@ -28,7 +28,7 @@ import type {
 } from '../types.js';
 import { mapTransition, mapUser } from './normalizers.js';
 
-/** Fields requested for a single issue — kept tight to keep responses small. */
+/** Fields requested for a single issue: kept tight to keep responses small. */
 const ISSUE_FIELDS = [
   'summary',
   'description',
@@ -113,8 +113,8 @@ export interface JiraIssuesClient {
   getTransitions(issueIdOrKey: string): Promise<JiraTransition[]>;
   /** Perform a workflow transition by transition ID. */
   transition(issueIdOrKey: string, transitionId: string): Promise<void>;
-  /** Assign an issue to an account (or unassign with `null`). */
-  assign(issueIdOrKey: string, accountId: string | null): Promise<void>;
+  /** Assign an issue to an account ID or `"me"`, or unassign with `null`. */
+  assign(issueIdOrKey: string, assignee: string | null): Promise<void>;
   /** Get the account the API token authenticates as. */
   getMyself(): Promise<JiraUser>;
   /**
@@ -168,9 +168,6 @@ export function createJiraIssuesClient(client: AtlassianClient): JiraIssuesClien
   const writableFields = async (
     input: CreateIssueInput | UpdateIssueInput
   ): Promise<Record<string, unknown>> => {
-    if (input.description !== undefined && input.description_adf !== undefined) {
-      throw new Error("Pass either 'description' (Markdown) or 'description_adf', not both.");
-    }
     const fields: Record<string, unknown> = {};
     if (input.description !== undefined) fields.description = markdownToAdf(input.description);
     if (input.description_adf !== undefined) fields.description = input.description_adf;
@@ -248,7 +245,7 @@ export function createJiraIssuesClient(client: AtlassianClient): JiraIssuesClien
 
     async update(issue, input) {
       enforceFromIssueKey(issue);
-      if (input.parent) enforceFromIssueKey(input.parent);
+      if (input.parent !== undefined && input.parent !== null) enforceFromIssueKey(input.parent);
       const fields: Record<string, unknown> = { ...(await writableFields(input)) };
       if (input.type !== undefined) fields.issuetype = { name: input.type };
       if (input.summary !== undefined) fields.summary = input.summary;
@@ -306,10 +303,10 @@ export function createJiraIssuesClient(client: AtlassianClient): JiraIssuesClien
       });
     },
 
-    async assign(issueIdOrKey, accountId) {
+    async assign(issueIdOrKey, assignee) {
       enforceFromIssueKey(issueIdOrKey);
       await client.put<void>(`/rest/api/3/issue/${encodeURIComponent(issueIdOrKey)}/assignee`, {
-        accountId,
+        accountId: assignee === null ? null : (await resolveAssignee(assignee)).accountId,
       });
     },
 
@@ -395,7 +392,7 @@ export function mapAttachment(raw: unknown): JiraAttachment {
  * Map a raw Jira issue (with `fields`, Atlassian REST API shape) to {@link JiraIssue}.
  * @param raw - The raw object as returned by the Atlassian REST API.
  */
-export function mapIssue(raw: unknown): JiraIssue {
+function mapIssue(raw: unknown): JiraIssue {
   const o = (raw ?? {}) as Record<string, unknown>;
   const f = (o.fields ?? {}) as Record<string, unknown>;
   const key = String(o.key ?? '');

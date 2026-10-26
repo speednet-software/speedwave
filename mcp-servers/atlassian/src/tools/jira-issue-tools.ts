@@ -22,6 +22,18 @@ import { AtlassianClient } from '../client.js';
 import { createJiraIssuesClient, UnknownLinkRelationError } from '../domains/jira-issues.js';
 import type { AdfDoc } from '../types.js';
 import { withValidation } from './validation.js';
+import { resolveRichText } from './rich-text.js';
+
+interface WriteContext {
+  outcome: string;
+  issueTypeLookup: string;
+  componentLookup: string;
+}
+
+interface JiraRejection {
+  fields: Record<string, string>;
+  messages: string[];
+}
 
 const ACCOUNT_ID_RESOLUTION_GUIDANCE =
   'Pass an account ID, "me" for the account this worker authenticates as (see getMyself), or reuse an assignee/reporter account_id from a prior getIssue/searchIssues result. Do not guess an account ID.';
@@ -610,13 +622,18 @@ export function createJiraIssueTools(client: AtlassianClient | null): ToolDefini
         parent?: string;
         components?: string[];
       };
-      const conflict = descriptionConflict(p);
-      if (conflict) return conflict;
+      const description = resolveRichText(
+        'description',
+        p.description,
+        'description_adf',
+        p.description_adf
+      );
+      if ('error' in description) return description.error;
       try {
         return jsonResult({ issue: await issues.create(p) });
       } catch (error) {
         return translateWriteRejection(error, {
-          action: 'createIssue',
+          outcome: 'nothing was created',
           issueTypeLookup: `listIssueTypes with project "${p.project}"`,
           componentLookup: `listComponents with project "${p.project}"`,
         });
@@ -636,13 +653,18 @@ export function createJiraIssueTools(client: AtlassianClient | null): ToolDefini
         parent?: string | null;
         components?: string[];
       };
-      const conflict = descriptionConflict(fields);
-      if (conflict) return conflict;
+      const description = resolveRichText(
+        'description',
+        fields.description,
+        'description_adf',
+        fields.description_adf
+      );
+      if ('error' in description) return description.error;
       try {
         return jsonResult({ issue: await issues.update(issue, fields) });
       } catch (error) {
         return translateWriteRejection(error, {
-          action: 'updateIssue',
+          outcome: 'nothing was changed',
           issueTypeLookup: `listIssueTypes with issue "${issue}"`,
           componentLookup: `listComponents with the project of ${issue}`,
         });
@@ -710,9 +732,7 @@ export function createJiraIssueTools(client: AtlassianClient | null): ToolDefini
 
     assignIssue: withValidation(client, async (_c, params) => {
       const { issue, assignee } = params as { issue: string; assignee?: string | null };
-      const accountId =
-        assignee === 'me' ? (await issues.getMyself()).account_id : (assignee ?? null);
-      await issues.assign(issue, accountId);
+      await issues.assign(issue, assignee ?? null);
       return jsonResult({ assigned: true });
     }),
 
@@ -745,24 +765,44 @@ export function createJiraIssueTools(client: AtlassianClient | null): ToolDefini
   return tools.map((tool) => ({ tool, handler: withDeclaredParams(tool, handlers[tool.name]) }));
 }
 
-interface WriteContext {
-  action: string;
-  issueTypeLookup: string;
-  componentLookup: string;
+function translateWriteRejection(error: unknown, context: WriteContext) {
+  const rejection = jiraRejection(error);
+  if (!rejection) throw error;
+  const { fields, messages } = rejection;
+  const { outcome } = context;
+
+  if (fields.components !== undefined) {
+    return teachingErrorResult({
+      paramName: 'components',
+      correctValueTool: 'listComponents',
+      nextStep: `Jira does not know one of the component names, so ${outcome}. Call ${context.componentLookup} and retry with names from it.${withJiraMessage(fields.components)}`,
+    });
+  }
+  if (fields.issuetype !== undefined) {
+    return teachingErrorResult({
+      paramName: 'type',
+      correctValueTool: 'listIssueTypes',
+      nextStep: `Jira refused this issue type, so ${outcome}. Call ${context.issueTypeLookup} for the types allowed here; some type changes (for example between a standard type and a Sub-task) cannot be done through the API.${withJiraMessage(fields.issuetype)}`,
+    });
+  }
+  const parentMessage = fields.parent ?? messages.find(isParentMessage);
+  if (fields.parent !== undefined || parentMessage !== undefined) {
+    return teachingErrorResult({
+      paramName: 'parent',
+      nextStep: `Jira rejected the parent, so ${outcome}. A Sub-task type needs parent set to the key of an existing issue; other types accept only a parent one level above them (for example an epic for a story).${withJiraMessage(parentMessage)}`,
+    });
+  }
+  throw error;
 }
 
-interface JiraRejection {
-  fields: Record<string, string>;
-  messages: string[];
+function withJiraMessage(text: string | undefined): string {
+  return text ? ` Jira said: ${text}` : '';
 }
 
-function descriptionConflict(p: { description?: string; description_adf?: AdfDoc }) {
-  if (p.description === undefined || p.description_adf === undefined) return undefined;
-  return teachingErrorResult({
-    paramName: 'description and description_adf',
-    nextStep:
-      'Send either description (Markdown) or description_adf (raw ADF), not both. The call was rejected and nothing was sent.',
-  });
+function isParentMessage(message: string): boolean {
+  return (
+    /must have a parent/i.test(message) || (/parent/i.test(message) && /sub-?task/i.test(message))
+  );
 }
 
 function jiraRejection(error: unknown): JiraRejection | undefined {
@@ -772,35 +812,4 @@ function jiraRejection(error: unknown): JiraRejection | undefined {
     errorMessages?: string[];
   };
   return { fields: data.errors ?? {}, messages: data.errorMessages ?? [] };
-}
-
-function translateWriteRejection(error: unknown, context: WriteContext) {
-  const rejection = jiraRejection(error);
-  if (!rejection) throw error;
-  const { fields, messages } = rejection;
-  const said = (text: string | undefined) => (text ? ` Jira said: ${text}` : '');
-  const isCreate = context.action === 'createIssue';
-  const outcome = isCreate ? 'nothing was created' : 'nothing was changed';
-
-  if (fields.parent !== undefined || messages.some((m) => /parent/i.test(m))) {
-    return teachingErrorResult({
-      paramName: 'parent',
-      nextStep: `Jira rejected the parent, so ${outcome}. A Sub-task type needs parent set to the key of an existing issue; other types accept only a parent one level above them (for example an epic for a story).${said(fields.parent ?? messages[0])}`,
-    });
-  }
-  if (fields.components !== undefined) {
-    return teachingErrorResult({
-      paramName: 'components',
-      correctValueTool: 'listComponents',
-      nextStep: `Jira does not know one of the component names, so ${outcome}. Call ${context.componentLookup} and retry with names from it.${said(fields.components)}`,
-    });
-  }
-  if (fields.issuetype !== undefined) {
-    return teachingErrorResult({
-      paramName: 'type',
-      correctValueTool: 'listIssueTypes',
-      nextStep: `Jira refused this issue type, so ${outcome}. Call ${context.issueTypeLookup} for the types allowed here; some type changes (for example between a standard type and a Sub-task) cannot be done through the API.${said(fields.issuetype)}`,
-    });
-  }
-  throw error;
 }

@@ -31,15 +31,15 @@ Isolated Jira & Confluence (Atlassian Cloud) MCP server with per-service token i
 
 ## Tools (40 total)
 
-| Domain               | Count | Tools                                                                                                                                                                                                  |
-| -------------------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Jira — issues        | 14    | searchIssues (JQL), getIssue, createIssue, updateIssue, deleteIssue, linkIssues, unlinkIssues, listLinkTypes, getTransitions, transitionIssue, assignIssue, getMyself, addAttachment, deleteAttachment |
-| Jira — comments      | 3     | addComment, getComments, addWorklog                                                                                                                                                                    |
-| Jira — projects      | 4     | listProjects, getProject, listIssueTypes, listComponents                                                                                                                                               |
-| Jira — Agile         | 6     | listBoards, getBoard, getBoardConfiguration, listSprints, getSprint, moveIssuesToSprint                                                                                                                |
-| Confluence — spaces  | 2     | listSpaces, getSpace                                                                                                                                                                                   |
-| Confluence — pages   | 6     | searchPages (CQL), getPage, getPageByTitle, createPage, updatePage, getPageChildren                                                                                                                    |
-| Confluence — content | 5     | addPageComment, getPageComments, addPageLabels, getPageLabels, listAttachments                                                                                                                         |
+| Domain              | Count | Tools                                                                                                                                                                                                  |
+| ------------------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Jira: issues        | 14    | searchIssues (JQL), getIssue, createIssue, updateIssue, deleteIssue, linkIssues, unlinkIssues, listLinkTypes, getTransitions, transitionIssue, assignIssue, getMyself, addAttachment, deleteAttachment |
+| Jira: comments      | 3     | addComment, getComments, addWorklog                                                                                                                                                                    |
+| Jira: projects      | 4     | listProjects, getProject, listIssueTypes, listComponents                                                                                                                                               |
+| Jira: Agile         | 6     | listBoards, getBoard, getBoardConfiguration, listSprints, getSprint, moveIssuesToSprint                                                                                                                |
+| Confluence: spaces  | 2     | listSpaces, getSpace                                                                                                                                                                                   |
+| Confluence: pages   | 6     | searchPages (CQL), getPage, getPageByTitle, createPage, updatePage, getPageChildren                                                                                                                    |
+| Confluence: content | 5     | addPageComment, getPageComments, addPageLabels, getPageLabels, listAttachments                                                                                                                         |
 
 Jira tools take and return snake_case names (`max_results`, `transition_id`, `account_id`). Every Jira tool is wrapped in `withDeclaredParams`: an undeclared parameter or a missing required one is rejected with a teaching error before any request is sent. Confluence tools keep camelCase and are not under the guard yet (SPEED-870).
 

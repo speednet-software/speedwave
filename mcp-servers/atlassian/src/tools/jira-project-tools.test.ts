@@ -220,6 +220,7 @@ describe('listIssueTypes', () => {
       fields: 'issuetype,project',
     });
     expect(client.get).toHaveBeenNthCalledWith(2, '/rest/api/3/issue/createmeta/PROJ/issuetypes', {
+      startAt: 0,
       maxResults: 100,
     });
     expect(result).toEqual({ issue_types: [{ id: '2', name: 'Task', subtask: false }] });
@@ -237,6 +238,49 @@ describe('listIssueTypes', () => {
     const result = payload(await handlerFor('listIssueTypes')({ issue: '10042' }));
 
     expect(result).toEqual({ issue_types: [{ id: '4', name: 'Review', subtask: true }] });
+  });
+
+  it('reads the createMetaIssueType key and pages until total is reached', async () => {
+    client.get
+      .mockResolvedValueOnce({
+        fields: { issuetype: { id: '1', subtask: false }, project: { key: 'PROJ' } },
+      })
+      .mockResolvedValueOnce({
+        createMetaIssueType: [{ id: '2', name: 'Task', subtask: false }],
+        startAt: 0,
+        total: 2,
+      })
+      .mockResolvedValueOnce({
+        issueTypes: [{ id: '5', name: 'Spike', subtask: false }],
+        startAt: 1,
+        total: 2,
+      });
+
+    const result = payload(await handlerFor('listIssueTypes')({ issue: 'PROJ-7' }));
+
+    expect(client.get).toHaveBeenNthCalledWith(3, '/rest/api/3/issue/createmeta/PROJ/issuetypes', {
+      startAt: 1,
+      maxResults: 100,
+    });
+    expect(result).toEqual({
+      issue_types: [
+        { id: '2', name: 'Task', subtask: false },
+        { id: '5', name: 'Spike', subtask: false },
+      ],
+    });
+  });
+
+  it('stops paging when a page comes back empty', async () => {
+    client.get
+      .mockResolvedValueOnce({
+        fields: { issuetype: { id: '1', subtask: false }, project: { key: 'PROJ' } },
+      })
+      .mockResolvedValueOnce({ issueTypes: [], total: 3 });
+
+    expect(payload(await handlerFor('listIssueTypes')({ issue: 'PROJ-7' }))).toEqual({
+      issue_types: [],
+    });
+    expect(client.get).toHaveBeenCalledTimes(2);
   });
 
   it('returns an empty list when createmeta lists no issue types', async () => {
