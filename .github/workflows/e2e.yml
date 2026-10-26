@@ -15,7 +15,7 @@ jobs:
       group: rig-macos
       cancel-in-progress: false
     runs-on: [self-hosted, macOS, ARM64]
-    environment: e2e
+    environment: e2e-probe
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -37,7 +37,7 @@ jobs:
       group: rig-windows
       cancel-in-progress: false
     runs-on: [self-hosted, Windows, X64]
-    environment: e2e
+    environment: e2e-probe
     timeout-minutes: 120
     defaults:
       run:
