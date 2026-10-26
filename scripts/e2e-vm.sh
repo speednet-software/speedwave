@@ -42,36 +42,118 @@ HOST_REPO_DIR="${SPEEDWAVE_REPO_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 
 ensure_provisioned_windows() {
-    local ok=1
+    local ok=1 host_policy
+    host_policy=$(windows_ps 2>/dev/null <<'PROBE' | tr -d '\r'
+"sac=$((Get-MpComputerStatus).SmartAppControlState)"
+$d = Join-Path $env:TEMP 'speedwave-junction-probe'
+cmd /c rmdir "$d\link" 2>$null
+Remove-Item -Recurse -Force $d -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Path "$d\target" -Force | Out-Null
+Set-Content -Path "$d\target\probe" -Value ok
+New-Item -ItemType Junction -Path "$d\link" -Target "$d\target" | Out-Null
+"junction=$(Test-Path "$d\link\probe")"
+cmd /c rmdir "$d\link"
+Remove-Item -Recurse -Force $d -ErrorAction SilentlyContinue
+PROBE
+) || host_policy=""
+    if [[ "$host_policy" == *"sac=On"* ]]; then
+        echo "[windows] ERROR: Smart App Control is on and blocks every unsigned build script; an administrator sets VerifiedAndReputablePolicyState to 0 and restarts the rig (RELEASING.md)" >&2
+        return 1
+    fi
+    if [[ "$host_policy" == *"junction=False"* ]]; then
+        echo "[windows] ERROR: SSH sessions cannot follow junctions created by this account (RedirectionGuard on sshd.exe), so npm workspace links do not resolve; an administrator clears it in the sshd.exe MitigationOptions and restarts sshd (RELEASING.md)" >&2
+        return 1
+    fi
     # shellcheck disable=SC2086
     ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- echo ready" >/dev/null 2>&1 || ok=0
     if [ "$ok" -eq 1 ]; then
-        echo 'if (-not (Get-Command node -ErrorAction SilentlyContinue)) { exit 1 }; if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { exit 1 }; if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) { exit 1 }; $p = [System.Environment]::GetEnvironmentVariable("LIBCLANG_PATH","Machine"); if (-not $p -or -not (Test-Path "$p\libclang.dll")) { exit 1 }; $v = [System.Environment]::GetEnvironmentVariable("VULKAN_SDK","Machine"); if (-not $v -or -not (Test-Path "$v\runtime\x64\vulkan-1.dll")) { exit 1 }' | windows_ps >/dev/null 2>&1 || ok=0
+        echo 'if (-not (Get-Command node -ErrorAction SilentlyContinue)) { exit 1 }; if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { exit 1 }; if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) { exit 1 }; python --version *> $null; if ($LASTEXITCODE -ne 0) { exit 1 }; $p = [System.Environment]::GetEnvironmentVariable("LIBCLANG_PATH","Machine"); if (-not $p -or -not (Test-Path "$p\libclang.dll")) { exit 1 }; $v = [System.Environment]::GetEnvironmentVariable("VULKAN_SDK","Machine"); if (-not $v -or -not (Test-Path "$v\runtime\x64\vulkan-1.dll")) { exit 1 }' | windows_ps >/dev/null 2>&1 || ok=0
     fi
     if [ "$ok" -eq 1 ]; then
-        echo "[windows] Provisioning: OK (WSL2 + node + cargo + cmake + libclang + Vulkan SDK found)"
+        echo "[windows] Provisioning: OK (WSL2 + node + cargo + cmake + python + libclang + Vulkan SDK found)"
         return
     fi
+    if [ "${CI:-}" = "true" ]; then
+        echo "[windows] ERROR: rig toolchain is missing or incomplete; an administrator runs scripts/e2e-vm-setup.sh windows on the rig (RELEASING.md)" >&2
+        return 1
+    fi
     echo "[windows] Provisioning: missing tools — running setup..."
-    "${SCRIPT_DIR}/e2e-vm-setup.sh" windows
+    bash "${SCRIPT_DIR}/e2e-vm-setup.sh" windows
 }
 
 ensure_provisioned_macos() {
-    if macos_ssh "command -v npm && command -v cargo && command -v cmake" >/dev/null 2>&1; then
-        echo "[macos] Provisioning: OK (npm + cargo + cmake found)"
+    # shellcheck disable=SC2016
+    if macos_ssh 'eval "$(/opt/homebrew/bin/brew shellenv)"; export PATH="$HOME/.cargo/bin:$PATH"; command -v npm && command -v cargo && command -v cmake && cargo tauri --version' >/dev/null 2>&1; then
+        echo "[macos] Provisioning: OK (npm + cargo + cmake + tauri-cli found)"
         return
     fi
+    if [ "${CI:-}" = "true" ]; then
+        echo "[macos] ERROR: rig toolchain is missing or incomplete; an administrator runs scripts/e2e-vm-setup.sh macos on the rig (RELEASING.md)" >&2
+        return 1
+    fi
     echo "[macos] Provisioning: missing tools — running setup..."
-    "${SCRIPT_DIR}/e2e-vm-setup.sh" macos
+    bash "${SCRIPT_DIR}/e2e-vm-setup.sh" macos
 }
 
 WINDOWS_WSL_STAGING="/home/windows/speedwave-e2e"
 WINDOWS_CONTRACT_STAGING="/home/windows/speedwave-contract-suite"
 
-WINDOWS_BATS_ENGINE_PREAMBLE="command -v bats >/dev/null || (sudo apt-get update -o Acquire::Retries=3 && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y bats); ENGINE_EXEC='env WSL_UTF8=1 wsl.exe -d Speedwave -u root --'"
+BATS_VERSION="1.11.1"
+WINDOWS_BATS="/home/windows/bats-core-${BATS_VERSION}/bin/bats"
+WINDOWS_BATS_ENGINE_PREAMBLE="[ -x $WINDOWS_BATS ] || curl -fsSL https://github.com/bats-core/bats-core/archive/refs/tags/v${BATS_VERSION}.tar.gz | tar -xz -C /home/windows; ENGINE_EXEC='env WSL_UTF8=1 wsl.exe -d Speedwave -u root --'"
 
-MACOS_ENGINE_BATS_PREAMBLE='command -v bats >/dev/null 2>&1 || brew install bats-core
-env LIMA_HOME="$HOME/.speedwave/lima" /Applications/Speedwave.app/Contents/Resources/lima/bin/limactl start speedwave'
+MACOS_ENGINE_BATS_PREAMBLE='[ -x "$HOME/.local/bats-core-'"$BATS_VERSION"'/bin/bats" ] || { mkdir -p "$HOME/.local" && curl -fsSL https://github.com/bats-core/bats-core/archive/refs/tags/v'"$BATS_VERSION"'.tar.gz | tar -xz -C "$HOME/.local"; }
+export PATH="$HOME/.local/bats-core-'"$BATS_VERSION"'/bin:$PATH"
+env LIMA_HOME="$HOME/.speedwave/lima" "$HOME/Applications/Speedwave.app/Contents/Resources/lima/bin/limactl" start speedwave'
+
+RIG_LOCK_STALE_MINUTES=150
+RIG_LOCK_POLL_SECONDS=30
+RIG_LOCK_WAIT_SECONDS=1800
+
+with_rig_lock() {
+    local runner="$1" lock="$2" waited=0 rc=0
+    shift 2
+    while :; do
+        rc=0
+        rig_lock_try_script "$lock" | "$runner" || rc=$?
+        [ "$rc" -eq 0 ] && break
+        if [ "$rc" -ne 1 ]; then
+            echo "could not reach the rig to take its lock $lock (exit $rc)" >&2
+            return "$rc"
+        fi
+        if [ "$waited" -ge "$RIG_LOCK_WAIT_SECONDS" ]; then
+            echo "the rig lock $lock is still held after ${waited}s; another run is using this machine" >&2
+            return 1
+        fi
+        echo "the rig lock $lock is held by another run, waiting..."
+        sleep "$RIG_LOCK_POLL_SECONDS"
+        waited=$((waited + RIG_LOCK_POLL_SECONDS))
+    done
+    rc=0
+    ("$@") || rc=$?
+    printf 'rm -rf "%s"\n' "$lock" | "$runner" || true
+    return "$rc"
+}
+
+rig_lock_try_script() {
+    cat <<SCRIPT
+lock="$1"
+if mkdir "\$lock" 2>/dev/null; then exit 0; fi
+if [ -n "\$(find "\$lock" -maxdepth 0 -mmin +$RIG_LOCK_STALE_MINUTES)" ]; then
+    rm -rf "\$lock" && mkdir "\$lock" && exit 0
+fi
+exit 1
+SCRIPT
+}
+
+macos_bash() {
+    macos_ssh bash
+}
+
+windows_restore_interop() {
+    # shellcheck disable=SC2086
+    ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -u root -- sh -c \"[ -e /proc/sys/fs/binfmt_misc/WSLInterop ] || { echo :WSLInterop:M::MZ::/init:PF > /proc/sys/fs/binfmt_misc/register && echo WSLInterop re-registered; }\""
+}
 
 ps_squote() {
     printf '%s' "$1" | sed "s/'/''/g"
@@ -108,12 +190,20 @@ windows_wsl() {
     ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -"
 }
 
+tar_is_bsdtar() {
+    case "$(tar --version 2>/dev/null)" in
+        *bsdtar*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 windows_rsync_to() {
     local src="$1" dst="$2"
     local -a tar_excludes=()
     for e in "${E2E_RSYNC_EXCLUDES[@]}"; do tar_excludes+=("--exclude=$e"); done
     tar_excludes+=('--exclude=._*')
-    local -a tar_flags=(--no-mac-metadata)
+    local -a tar_flags=()
+    if tar_is_bsdtar; then tar_flags+=(--no-mac-metadata); fi
     echo "  Waiting for WSL distro $WINDOWS_WSL_DISTRO..."
     local wsl_ready=0
     for i in $(seq 1 10); do
@@ -137,7 +227,7 @@ windows_rsync_to() {
     local tar_local
     tar_local=$(mktemp "${TMPDIR:-/tmp}/speedwave-e2e-XXXXXX.tar")
     echo "  tar: creating archive from $(dirname "$src")/$(basename "$src")..."
-    tar "${tar_flags[@]}" -cf "$tar_local" -C "$(dirname "$src")" "${tar_excludes[@]}" "$(basename "$src")"
+    tar ${tar_flags[@]+"${tar_flags[@]}"} -cf "$tar_local" -C "$(dirname "$src")" "${tar_excludes[@]}" "$(basename "$src")"
 
     echo "  scp: uploading $(du -h "$tar_local" | cut -f1) archive to Windows..."
     scp -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
@@ -167,6 +257,7 @@ windows_scp_from() {
 }
 
 windows_wait_ssh() {
+    require_host SPEEDWAVE_WINDOWS_HOST "$WINDOWS_HOST"
     echo "[windows] Waiting for SSH on $WINDOWS_HOST (port $WINDOWS_SSH_PORT)..."
     for i in $(seq 1 30); do
         windows_ssh "echo ready" >/dev/null 2>&1 && { echo "[windows] SSH ready"; return 0; }
@@ -241,8 +332,7 @@ if ($bridges) {
 Remove-Item -Recurse -Force "C:\Speedwave" -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force "$env:USERPROFILE\.speedwave" -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force "C:\speedwave-e2e" -ErrorAction SilentlyContinue
-Remove-Item -Recurse -Force "C:\cb" -ErrorAction SilentlyContinue
-Remove-Item -Force "C:\speedwave-setup.exe" -ErrorAction SilentlyContinue
+Remove-Item -Force "$env:TEMP\speedwave-setup.exe" -ErrorAction SilentlyContinue
 
 # Remove WSL-side staging dir (in the build distro, not Speedwave distro).
 wsl.exe -d $WINDOWS_WSL_DISTRO -- rm -rf /home/windows/speedwave-e2e
@@ -263,6 +353,7 @@ macos_rsync_to() {
 }
 
 macos_wait_ssh() {
+    require_host SPEEDWAVE_MACOS_HOST "$MACOS_HOST"
     echo "[macos] Waiting for SSH on $MACOS_HOST..."
     for i in $(seq 1 30); do
         macos_ssh "echo ready" >/dev/null 2>&1 && { echo "[macos] SSH ready"; return 0; }
@@ -299,7 +390,7 @@ for vol in /Volumes/Speedwave*; do
     [ -d "$vol" ] || continue
     hdiutil detach "$vol" -force 2>/dev/null || true
 done
-rm -rf /Applications/Speedwave.app 2>/dev/null || true
+rm -rf ~/Applications/Speedwave.app 2>/dev/null || true
 # Remove Speedwave user data (config, Lima VM, setup markers, cached downloads)
 rm -rf "$SPEEDWAVE_DATA_DIR" 2>/dev/null || true
 rm -rf ~/Library/Caches/lima 2>/dev/null || true
@@ -322,7 +413,7 @@ run_windows() {
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = "Stop"
 function Assert-ExitCode { if ($LASTEXITCODE -ne 0) { Write-Error "Command failed with exit code $LASTEXITCODE"; exit $LASTEXITCODE } }
-$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+$env:Path = "C:\Program Files\Git\bin;" + [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 
 Write-Host "── Copying repo from WSL2 to Windows side..."
 Stop-Process -Name "esbuild" -Force -ErrorAction SilentlyContinue
@@ -345,6 +436,11 @@ wsl.exe -d $WINDOWS_WSL_DISTRO -- cp -rT /home/windows/speedwave-e2e /mnt/c/spee
 Assert-ExitCode
 
 Set-Location C:\speedwave-e2e
+Write-Host "── Ensuring the wasm32 target and wasm-pack for the PII engine..."
+rustup target add wasm32-unknown-unknown; Assert-ExitCode
+if (-not (Get-Command wasm-pack -ErrorAction SilentlyContinue)) {
+    cargo install wasm-pack --locked; Assert-ExitCode
+}
 Write-Host "── Installing npm dependencies..."
 npm ci; Assert-ExitCode
 Set-Location mcp-servers; npm ci; Assert-ExitCode; Set-Location ..
@@ -357,7 +453,7 @@ SCRIPT
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = "Stop"
 function Assert-ExitCode { if ($LASTEXITCODE -ne 0) { Write-Error "Command failed with exit code $LASTEXITCODE"; exit $LASTEXITCODE } }
-$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+$env:Path = "C:\Program Files\Git\bin;" + [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 Set-Location C:\speedwave-e2e
 
 Write-Host "── Building MCP servers..."
@@ -387,6 +483,10 @@ Copy-Item $dll desktop\src-tauri\vulkan-1.dll
 New-Item -ItemType Directory -Path desktop\src-tauri\THIRD-PARTY-LICENSES -Force | Out-Null
 Copy-Item desktop\src-tauri\licenses-static\* desktop\src-tauri\THIRD-PARTY-LICENSES\
 
+Write-Host "── Converting the PII NER model for bundling..."
+python crates\pii-ner\tools\fetch_and_convert.py --out desktop\src-tauri\pii-ner
+Assert-ExitCode
+
 Write-Host "── Bundling build context..."
 powershell -ExecutionPolicy Bypass -File scripts\bundle-build-context.ps1
 Assert-ExitCode
@@ -397,7 +497,7 @@ SCRIPT
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = "Stop"
 function Assert-ExitCode { if ($LASTEXITCODE -ne 0) { Write-Error "Command failed with exit code $LASTEXITCODE"; exit $LASTEXITCODE } }
-$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+$env:Path = "C:\Program Files\Git\bin;" + [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 $env:INCLUDE = [System.Environment]::GetEnvironmentVariable("INCLUDE","Machine")
 $env:LIB = [System.Environment]::GetEnvironmentVariable("LIB","Machine")
 $env:CARGO_TARGET_DIR = 'C:\cb'
@@ -419,7 +519,7 @@ SCRIPT
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = "Stop"
 function Assert-ExitCode { if ($LASTEXITCODE -ne 0) { Write-Error "Command failed with exit code $LASTEXITCODE"; exit $LASTEXITCODE } }
-$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+$env:Path = "C:\Program Files\Git\bin;" + [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 $env:INCLUDE = [System.Environment]::GetEnvironmentVariable("INCLUDE","Machine")
 $env:LIB = [System.Environment]::GetEnvironmentVariable("LIB","Machine")
 # whisper-rs-sys needs the pinned SDK (ADR-085); fresh ssh sessions carry stale machine env.
@@ -431,9 +531,12 @@ New-Item -ItemType Directory -Path $env:CARGO_TARGET_DIR -Force | Out-Null
 $env:CMAKE_GENERATOR = 'Ninja'
 Set-Location C:\speedwave-e2e
 
+Remove-Item -Recurse -Force "$env:CARGO_TARGET_DIR\release\bundle" -ErrorAction SilentlyContinue
+Set-Content -Path C:\speedwave-e2e\e2e-nsis.conf.json -Value '{"bundle":{"windows":{"nsis":{"compression":"none"}}}}'
+
 Write-Host "── Building Tauri release with NSIS bundle (e2e feature = WebDriver on :4445)..."
 Set-Location desktop\src-tauri
-cargo tauri build --features e2e --no-sign
+cargo tauri build --features e2e --no-sign --bundles nsis --config C:\speedwave-e2e\e2e-nsis.conf.json
 Assert-ExitCode
 Set-Location ..\..
 Write-Host "Step 4 DONE"
@@ -447,7 +550,7 @@ Set-Location C:\speedwave-e2e
 $installer = Get-ChildItem "C:\cb\release\bundle\nsis\*.exe" -Recurse | Select-Object -First 1
 if (-not $installer) { Write-Error "NSIS installer not found"; exit 1 }
 Write-Host "Found: $($installer.FullName)"
-Copy-Item $installer.FullName "C:\speedwave-setup.exe"
+Copy-Item $installer.FullName "$env:TEMP\speedwave-setup.exe"
 Copy-Item $installer.FullName "$env:USERPROFILE\Desktop\speedwave-setup.exe"
 Write-Host "Step 5 DONE"
 SCRIPT
@@ -455,12 +558,12 @@ SCRIPT
     windows_clean_state
 
     echo "[windows] Phase 2: Installing app and running E2E tests (clean system)..."
-    echo 'Copy-Item "$env:USERPROFILE\Desktop\speedwave-setup.exe" "C:\speedwave-setup.exe"' | windows_ps
+    echo 'Copy-Item "$env:USERPROFILE\Desktop\speedwave-setup.exe" "$env:TEMP\speedwave-setup.exe"' | windows_ps
 
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = "Stop"
 Write-Host "── Installing Speedwave..."
-Start-Process -Wait -FilePath "C:\speedwave-setup.exe" -ArgumentList "/S","/D=C:\Speedwave"
+Start-Process -Wait -FilePath "$env:TEMP\speedwave-setup.exe" -ArgumentList "/S","/D=C:\Speedwave"
 if (Test-Path "C:\Speedwave\speedwave-desktop.exe") {
     Write-Host "Install OK"
 } else {
@@ -474,7 +577,7 @@ SCRIPT
     windows_rsync_to "$HOST_REPO_DIR/desktop/e2e/" "$WINDOWS_WSL_STAGING/"
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = "Stop"
-$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+$env:Path = "C:\Program Files\Git\bin;" + [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 Remove-Item -Recurse -Force "C:\speedwave-e2e" -ErrorAction SilentlyContinue
 wsl.exe -d $WINDOWS_WSL_DISTRO -- rm -rf /mnt/c/speedwave-e2e
 wsl.exe -d $WINDOWS_WSL_DISTRO -- cp -rT /home/windows/speedwave-e2e /mnt/c/speedwave-e2e
@@ -498,18 +601,18 @@ SCRIPT
     windows_clean_state
 
     echo "[windows] Reinstalling app..."
-    echo 'Copy-Item "$env:USERPROFILE\Desktop\speedwave-setup.exe" "C:\speedwave-setup.exe"' | windows_ps
+    echo 'Copy-Item "$env:USERPROFILE\Desktop\speedwave-setup.exe" "$env:TEMP\speedwave-setup.exe"' | windows_ps
 
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = "Stop"
-Start-Process -Wait -FilePath "C:\speedwave-setup.exe" -ArgumentList "/S","/D=C:\Speedwave"
+Start-Process -Wait -FilePath "$env:TEMP\speedwave-setup.exe" -ArgumentList "/S","/D=C:\Speedwave"
 if (Test-Path "C:\Speedwave\speedwave-desktop.exe") { Write-Host "Install OK" } else { Write-Error "Install failed"; exit 1 }
 SCRIPT
 
     windows_rsync_to "$HOST_REPO_DIR/desktop/e2e/" "$WINDOWS_WSL_STAGING/"
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = "Stop"
-$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+$env:Path = "C:\Program Files\Git\bin;" + [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 Remove-Item -Recurse -Force "C:\speedwave-e2e" -ErrorAction SilentlyContinue
 wsl.exe -d $WINDOWS_WSL_DISTRO -- rm -rf /mnt/c/speedwave-e2e
 wsl.exe -d $WINDOWS_WSL_DISTRO -- cp -rT /home/windows/speedwave-e2e /mnt/c/speedwave-e2e
@@ -521,8 +624,12 @@ SCRIPT
 
     if [ "$exit_code" -eq 0 ]; then
         echo "[windows] Running engine-contract suite (staging distro -> WSL interop -> Speedwave distro)..."
+        windows_restore_interop || exit_code=$?
+    fi
+
+    if [ "$exit_code" -eq 0 ]; then
         # shellcheck disable=SC2086
-        ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -lc \"$WINDOWS_BATS_ENGINE_PREAMBLE bats --print-output-on-failure $WINDOWS_CONTRACT_STAGING/engine-contract.bats\"" || exit_code=$?
+        ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -lc \"$WINDOWS_BATS_ENGINE_PREAMBLE $WINDOWS_BATS --print-output-on-failure $WINDOWS_CONTRACT_STAGING/engine-contract.bats\"" || exit_code=$?
     fi
 
     if [ "$exit_code" -eq 0 ]; then
@@ -536,8 +643,9 @@ SCRIPT
         else
             local windows_data_dir="${windows_cli_path%/bin/*}"
             echo "[windows] Running update-dirty-state suite (staging distro -> WSL interop -> Speedwave distro)..."
+            windows_restore_interop || exit_code=$?
             # shellcheck disable=SC2086
-            ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -lc \"$WINDOWS_BATS_ENGINE_PREAMBLE SPW_E2E_PROJECT=e2e-test SPEEDWAVE_DATA_DIR=$windows_data_dir SPEEDWAVE_BIN=$windows_cli_path bats --print-output-on-failure $WINDOWS_CONTRACT_STAGING/update-dirty-state.bats\"" || exit_code=$?
+            ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -lc \"$WINDOWS_BATS_ENGINE_PREAMBLE SPW_E2E_PROJECT=e2e-test SPEEDWAVE_DATA_DIR=$windows_data_dir SPEEDWAVE_BIN=$windows_cli_path $WINDOWS_BATS --print-output-on-failure $WINDOWS_CONTRACT_STAGING/update-dirty-state.bats\"" || exit_code=$?
         fi
     fi
 
@@ -567,7 +675,7 @@ run_windows_audio() {
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = "Stop"
 function Assert-ExitCode { if ($LASTEXITCODE -ne 0) { Write-Error "exit $LASTEXITCODE"; exit $LASTEXITCODE } }
-$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+$env:Path = "C:\Program Files\Git\bin;" + [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 
 $dst = "C:\spw-audio-e2e"
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $dst
@@ -602,7 +710,7 @@ run_windows_e2e() {
     local SPW_E2E_SPEC_PHASE="${1:-}"
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = "Stop"
-$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+$env:Path = "C:\Program Files\Git\bin;" + [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 
 $appExe = "C:\Speedwave\speedwave-desktop.exe"
 if (-not (Test-Path $appExe)) {
@@ -625,7 +733,7 @@ Write-Host "── Launching $appExe in interactive session..."
 # SSH runs in session 0 (services) which has no desktop.
 # Use schtasks /IT to launch the app in the console session where the GUI lives.
 $taskName = "SpeedwaveE2E"
-schtasks /Create /TN $taskName /TR $appExe /SC ONCE /ST 00:00 /IT /F /RL HIGHEST | Out-Null
+schtasks /Create /TN $taskName /TR $appExe /SC ONCE /ST 00:00 /IT /F | Out-Null
 schtasks /Run /TN $taskName | Out-Null
 schtasks /Delete /TN $taskName /F | Out-Null
 # Wait for the process to appear (retry loop for slow VMs)
@@ -684,9 +792,16 @@ run_macos() {
 
     macos_ssh bash <<'SCRIPT'
 set -euo pipefail
+mkdir -p ~/speedwave-e2e-target/root ~/speedwave-e2e-target/desktop
+rm -rf ~/speedwave-e2e-target/desktop/release/bundle
+ln -sfn ~/speedwave-e2e-target/root /tmp/speedwave-e2e/target
+ln -sfn ~/speedwave-e2e-target/desktop /tmp/speedwave-e2e/desktop/src-tauri/target
 cd /tmp/speedwave-e2e
 export PATH="$HOME/.cargo/bin:$PATH"
 eval "$(/opt/homebrew/bin/brew shellenv)"
+
+rustup target add wasm32-unknown-unknown
+command -v wasm-pack >/dev/null 2>&1 || cargo install wasm-pack --locked
 
 npm ci
 cd mcp-servers && npm ci && cd ..
@@ -694,7 +809,7 @@ cd desktop/src && npm ci && cd ../..
 cd desktop/e2e && npm ci && cd ../..
 
 echo "── Building full release (.dmg)..."
-make test-e2e-desktop-build
+CI=true make test-e2e-desktop-build
 SCRIPT
 
     echo "[macos] Locating .dmg artifact on remote..."
@@ -714,11 +829,11 @@ SCRIPT
 
     macos_ssh bash <<'SCRIPT'
 set -euo pipefail
-# Mount the .dmg and copy .app to /Applications (same as user drag-and-drop)
+# Mount the .dmg and copy .app to ~/Applications (a drag-and-drop target that needs no admin)
 hdiutil attach /tmp/speedwave.dmg -nobrowse -noautoopen
-cp -R "/Volumes/Speedwave/Speedwave.app" /Applications/
+mkdir -p ~/Applications && cp -R "/Volumes/Speedwave/Speedwave.app" ~/Applications/
 hdiutil detach "/Volumes/Speedwave"
-echo "Install OK: $(ls -d /Applications/Speedwave.app)"
+echo "Install OK: $(ls -d ~/Applications/Speedwave.app)"
 SCRIPT
 
     # shellcheck disable=SC2086
@@ -752,7 +867,7 @@ SCRIPT
     macos_ssh bash <<'SCRIPT'
 set -euo pipefail
 hdiutil attach /tmp/speedwave.dmg -nobrowse -noautoopen
-cp -R "/Volumes/Speedwave/Speedwave.app" /Applications/
+mkdir -p ~/Applications && cp -R "/Volumes/Speedwave/Speedwave.app" ~/Applications/
 hdiutil detach "/Volumes/Speedwave"
 echo "Install OK"
 SCRIPT
@@ -781,7 +896,7 @@ eval "$(/opt/homebrew/bin/brew shellenv)"
 SCRIPT_HEAD
             printf '%s\n' "$MACOS_ENGINE_BATS_PREAMBLE"
             cat <<'SCRIPT_TAIL'
-ENGINE_EXEC="env LIMA_HOME=$HOME/.speedwave/lima /Applications/Speedwave.app/Contents/Resources/lima/bin/limactl shell speedwave -- sudo" \
+ENGINE_EXEC="env LIMA_HOME=$HOME/.speedwave/lima $HOME/Applications/Speedwave.app/Contents/Resources/lima/bin/limactl shell speedwave -- sudo" \
 bats --print-output-on-failure /tmp/speedwave-e2e/engine-contract.bats
 SCRIPT_TAIL
         } | macos_ssh bash || exit_code=$?
@@ -797,7 +912,7 @@ SCRIPT_HEAD
             printf '%s\n' "$MACOS_ENGINE_BATS_PREAMBLE"
             cat <<'SCRIPT_TAIL'
 SPEEDWAVE_BIN="$HOME/.local/bin/speedwave" \
-ENGINE_EXEC="env LIMA_HOME=$HOME/.speedwave/lima /Applications/Speedwave.app/Contents/Resources/lima/bin/limactl shell speedwave -- sudo" \
+ENGINE_EXEC="env LIMA_HOME=$HOME/.speedwave/lima $HOME/Applications/Speedwave.app/Contents/Resources/lima/bin/limactl shell speedwave -- sudo" \
 SPW_E2E_PROJECT=e2e-test bats --print-output-on-failure /tmp/speedwave-e2e/update-dirty-state.bats
 SCRIPT_TAIL
         } | macos_ssh bash || exit_code=$?
@@ -835,7 +950,7 @@ SPEEDWAVE_DATA_DIR="${SPEEDWAVE_DATA_DIR:-$HOME/.speedwave}"
 export PATH="$HOME/.cargo/bin:$PATH"
 eval "$(/opt/homebrew/bin/brew shellenv)"
 
-APP_PATH="/Applications/Speedwave.app/Contents/MacOS/speedwave-desktop"
+APP_PATH="$HOME/Applications/Speedwave.app/Contents/MacOS/speedwave-desktop"
 if [ ! -f "$APP_PATH" ]; then
     echo "ERROR: Speedwave binary not found at $APP_PATH" >&2
     exit 1
@@ -896,11 +1011,11 @@ preview_windows() {
     windows_clean_state
 
     echo "[windows] Installing app from Desktop\\speedwave-setup.exe..."
-    echo 'Copy-Item "$env:USERPROFILE\Desktop\speedwave-setup.exe" "C:\speedwave-setup.exe"' | windows_ps
+    echo 'Copy-Item "$env:USERPROFILE\Desktop\speedwave-setup.exe" "$env:TEMP\speedwave-setup.exe"' | windows_ps
 
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = "Stop"
-Start-Process -Wait -FilePath "C:\speedwave-setup.exe" -ArgumentList "/S","/D=C:\Speedwave"
+Start-Process -Wait -FilePath "$env:TEMP\speedwave-setup.exe" -ArgumentList "/S","/D=C:\Speedwave"
 if (Test-Path "C:\Speedwave\speedwave-desktop.exe") { Write-Host "Install OK" } else { Write-Error "Install failed"; exit 1 }
 Start-Process -FilePath "C:\Speedwave\speedwave-desktop.exe"
 Write-Host "Launched"
@@ -928,9 +1043,9 @@ preview_macos() {
     macos_ssh bash <<'SCRIPT'
 set -euo pipefail
 hdiutil attach /tmp/speedwave.dmg -nobrowse -noautoopen
-cp -R "/Volumes/Speedwave/Speedwave.app" /Applications/
+mkdir -p ~/Applications && cp -R "/Volumes/Speedwave/Speedwave.app" ~/Applications/
 hdiutil detach "/Volumes/Speedwave"
-open /Applications/Speedwave.app
+open ~/Applications/Speedwave.app
 echo "Launched"
 SCRIPT
 
@@ -941,15 +1056,26 @@ SCRIPT
 }
 
 
+WINDOWS_RIG_LOCK="/home/windows/.speedwave-e2e.lock"
+MACOS_RIG_LOCK='$HOME/.speedwave-e2e.lock'
+
+locked_run_windows() {
+    with_rig_lock windows_wsl "$WINDOWS_RIG_LOCK" run_windows
+}
+
+locked_run_macos() {
+    with_rig_lock macos_bash "$MACOS_RIG_LOCK" run_macos
+}
+
 TARGET="${1:-all}"
 
 case "$TARGET" in
-    windows|win)    run_windows ;;
-    windows-audio|win-audio) run_windows_audio ;;
-    macos|mac)      run_macos ;;
+    windows|win)    locked_run_windows ;;
+    windows-audio|win-audio) with_rig_lock windows_wsl "$WINDOWS_RIG_LOCK" run_windows_audio ;;
+    macos|mac)      locked_run_macos ;;
     all)
         PIDS=()
-        for fn in run_windows run_macos; do
+        for fn in locked_run_windows locked_run_macos; do
             $fn &
             PIDS+=($!)
         done

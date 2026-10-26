@@ -273,15 +273,24 @@ describe('Project Management', function () {
       await confirmYes.waitForExist({ timeout: 10_000 });
       await confirmYes.click();
 
+      await browser.waitUntil(
+        async () => {
+          const listed = await invokeCommand<{ projects: Array<{ name: string }> }>(
+            'list_projects'
+          );
+          return listed.ok && !listed.value.projects.some((p) => p.name === THIRD_PROJECT_NAME);
+        },
+        {
+          timeout: 120_000,
+          interval: 1_000,
+          timeoutMsg: 'remove_project never dropped the project',
+        }
+      );
       await $(`[data-testid="project-switcher-item-${THIRD_PROJECT_NAME}"]`).waitForExist({
         timeout: 30_000,
         reverse: true,
         timeoutMsg: 'removed project still listed in the switcher',
       });
-      const listed = await invokeCommand<{ projects: Array<{ name: string }> }>('list_projects');
-      const stillListed =
-        !listed.ok || listed.value.projects.some((p) => p.name === THIRD_PROJECT_NAME);
-      expect(stillListed).toBe(false);
       expect(await activeProjectSlug()).toBe('e2e-test');
       await (await $('[data-testid="project-pill"]')).click();
       await waitForHealthy('e2e-test');

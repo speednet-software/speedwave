@@ -49,7 +49,10 @@ export function wslDistroName(): string {
  */
 export function engineExec(argv: string[]): string {
   if (process.platform === 'darwin') {
-    const limactl = '/Applications/Speedwave.app/Contents/Resources/lima/bin/limactl';
+    const limactl = join(
+      homedir(),
+      'Applications/Speedwave.app/Contents/Resources/lima/bin/limactl'
+    );
     const env = { ...process.env, LIMA_HOME: join(dataDir(), 'lima') };
     return execFileSync(limactl, ['shell', instanceName(), '--', 'sudo', ...argv], {
       env,

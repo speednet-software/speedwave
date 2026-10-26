@@ -2082,6 +2082,179 @@ describe('LlmProviderComponent', () => {
     expect(component.expandedExtraId).toBe('openrouter');
   });
 
+  describe('OpenRouter picked before the initial loads land (SPEED-861)', () => {
+    const SELECT = '[data-testid="settings-llm-extra-select-openrouter"]';
+    const KEY = '[data-testid="settings-llm-extra-key-openrouter"]';
+    const REFRESH = '[data-testid="settings-llm-extra-refresh-openrouter"]';
+    const SAVE = '[data-testid="settings-llm-save"]';
+
+    let pendingConfig: Deferred<unknown>;
+    let pendingAuthStatus: Deferred<AuthStatusResponse>;
+
+    const anthropicConfig = {
+      provider: 'anthropic',
+      model: null,
+      base_url: null,
+      default_base_url: null,
+      providers: [{ id: 'anthropic', kind: 'anthropic_oauth', has_api_key: false }],
+      active: { provider_id: 'anthropic', model: null },
+    };
+
+    beforeEach(() => {
+      pendingConfig = createDeferred<unknown>();
+      pendingAuthStatus = createDeferred<AuthStatusResponse>();
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'get_llm_config':
+            return pendingConfig.promise;
+          case 'get_auth_status':
+            return pendingAuthStatus.promise;
+          case 'discover_llm_models':
+            return { models: [{ id: 'deepseek/deepseek-v4-flash' }] };
+          case 'get_default_base_url':
+            return 'http://host.docker.internal:11434';
+          default:
+            return undefined;
+        }
+      };
+    });
+
+    function el<T extends HTMLElement>(selector: string): T {
+      return fixture.nativeElement.querySelector(selector) as T;
+    }
+
+    function pickOpenRouterAndTypeKey(key: string): void {
+      el<HTMLButtonElement>(SELECT).click();
+      fixture.detectChanges();
+      const input = el<HTMLInputElement>(KEY);
+      input.value = key;
+      input.dispatchEvent(new Event('input'));
+      fixture.detectChanges();
+    }
+
+    async function testConnection(): Promise<void> {
+      el<HTMLButtonElement>(REFRESH).click();
+      await flushMicrotasks();
+      fixture.detectChanges();
+    }
+
+    it('keeps the pick, the typed key and an enabled Save when the config lands afterwards', async () => {
+      fixture.detectChanges();
+      pickOpenRouterAndTypeKey('sk-or-v1-early');
+
+      pendingConfig.resolve(anthropicConfig);
+      await flushMicrotasks();
+      fixture.detectChanges();
+      await testConnection();
+
+      expect(component.selectedTarget()).toBe('openrouter');
+      expect(component.expandedExtraId).toBe('openrouter');
+      expect(el<HTMLInputElement>(KEY).value).toBe('sk-or-v1-early');
+      expect(el<HTMLButtonElement>(SAVE).disabled).toBe(false);
+    });
+
+    it('enables Save after a connection test when the auth status lands after the pick', async () => {
+      fixture.componentRef.setInput('activeProject', 'proj');
+      fixture.detectChanges();
+      pendingConfig.resolve(anthropicConfig);
+      await flushMicrotasks();
+      fixture.detectChanges();
+
+      pickOpenRouterAndTypeKey('sk-or-v1-early');
+      pendingAuthStatus.resolve({
+        api_key_configured: false,
+        oauth_authenticated: false,
+        needs_anthropic_auth: true,
+        provider_configured: false,
+      });
+      await flushMicrotasks();
+      fixture.detectChanges();
+      await testConnection();
+
+      expect(component.selectedTarget()).toBe('openrouter');
+      expect(el<HTMLButtonElement>(SAVE).disabled).toBe(false);
+    });
+
+    it('merges the saved OpenRouter entry into the row the user is already editing', async () => {
+      fixture.detectChanges();
+      pickOpenRouterAndTypeKey('sk-or-v1-replacement');
+
+      pendingConfig.resolve({
+        ...anthropicConfig,
+        providers: [
+          { id: 'anthropic', kind: 'anthropic_oauth', has_api_key: false },
+          {
+            id: 'openrouter',
+            kind: 'open_router',
+            has_api_key: true,
+            model: 'deepseek/deepseek-v4-flash',
+            context_tokens: 163840,
+          },
+        ],
+        active: { provider_id: 'openrouter', model: 'deepseek/deepseek-v4-flash' },
+      });
+      await flushMicrotasks();
+      fixture.detectChanges();
+
+      const row = component.extraProviders().find((r) => r.id === 'openrouter')!;
+      expect(row.keyInput).toBe('sk-or-v1-replacement');
+      expect(row.hasKey).toBe(true);
+      expect(row.model).toBe('deepseek/deepseek-v4-flash');
+      expect(row.contextTokens).toBe(163840);
+      expect(row.lastTest).toEqual({ fp: 'v:sk-or-v1-replacement', passed: true });
+      expect(el<HTMLButtonElement>(SAVE).disabled).toBe(false);
+    });
+
+    it('keeps the local card picked before the config lands and lets it be saved', async () => {
+      fixture.detectChanges();
+      el<HTMLButtonElement>('[data-testid="settings-llm-provider-local"]').click();
+      await flushMicrotasks();
+
+      pendingConfig.resolve(anthropicConfig);
+      await flushMicrotasks();
+      fixture.detectChanges();
+
+      expect(component.selectedTarget()).toBe('local');
+      expect(component.provider()).toBe('local');
+      expect(component.baseUrl()).toBe('http://host.docker.internal:11434');
+      expect(el<HTMLButtonElement>(SAVE).disabled).toBe(false);
+    });
+
+    it('keeps the anthropic card picked before a config with an active OpenRouter lands', async () => {
+      fixture.detectChanges();
+      el<HTMLButtonElement>('[data-testid="settings-llm-provider-anthropic"]').click();
+      await flushMicrotasks();
+
+      pendingConfig.resolve({
+        ...anthropicConfig,
+        providers: [
+          { id: 'anthropic', kind: 'anthropic_oauth', has_api_key: false },
+          { id: 'openrouter', kind: 'open_router', has_api_key: true, model: 'deepseek/x' },
+        ],
+        active: { provider_id: 'openrouter', model: 'deepseek/x' },
+      });
+      await flushMicrotasks();
+      fixture.detectChanges();
+
+      expect(component.selectedTarget()).toBe('anthropic');
+      expect(component.provider()).toBe('anthropic');
+    });
+
+    it('applies only the last pick made while the config loads', async () => {
+      fixture.detectChanges();
+      el<HTMLButtonElement>(SELECT).click();
+      el<HTMLButtonElement>('[data-testid="settings-llm-provider-local"]').click();
+      await flushMicrotasks();
+
+      pendingConfig.resolve(anthropicConfig);
+      await flushMicrotasks();
+      fixture.detectChanges();
+
+      expect(component.selectedTarget()).toBe('local');
+      expect(component.provider()).toBe('local');
+    });
+  });
+
   it('preserves the inactive local entry verbatim across a save', async () => {
     let captured: Record<string, unknown> | null = null;
     mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
