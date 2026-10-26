@@ -404,7 +404,7 @@ collect_screenshots() {
     local ssh_fn="$1" remote_cmd="$2" platform="$3" phase="$4"
     local base="${GITHUB_WORKSPACE:-$HOST_REPO_DIR}"
     local dest="${base//\\//}/.e2e-artifacts/${platform}/${phase}"
-    if ! { mkdir -p "$dest" && "$ssh_fn" "$remote_cmd" | tar -xf - -C "$dest"; } 2>/dev/null; then
+    if ! (set -o pipefail && mkdir -p "$dest" && "$ssh_fn" "$remote_cmd" | tar -xf - -C "$dest") 2>/dev/null; then
         echo "[$platform] WARNING: could not collect failure screenshots for phase $phase" >&2
     fi
     return 0
