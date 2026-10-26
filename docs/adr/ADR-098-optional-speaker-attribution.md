@@ -73,7 +73,7 @@ Telling the number of speakers in advance improved the AMI score by 0.1 pp, and 
 
 [^7]: VoxConverse speaker diarisation dataset: <https://github.com/joonson/voxconverse>.
 
-[^8]: The model file in the catalogue: <https://huggingface.co/nvidia/Nemotron-3-Diarization/resolve/main/Nemotron-3-Diarization.q8_0.gguf>.
+[^8]: The model file in the catalogue: <https://huggingface.co/nvidia/Nemotron-3-Diarization/resolve/f667ed73aee57d40cc39428eb768b4fd87a0a29e/Nemotron-3-Diarization.q8_0.gguf>.
 
 [^9]: sherpa-onnx, Apache-2.0, with speaker diarization: <https://github.com/k2-fsa/sherpa-onnx>.
 
