@@ -22,13 +22,14 @@ The API is shaped by what a caller wants to say, and the worker maps it to Jira 
 4. **`parent`** omitted leaves the parent alone; `null` detaches it.
 5. **Components** are names. In `updateIssue` the list replaces the current one and an empty list clears it.
 6. **`assignee`** is an account ID, `"me"` (resolved through `getMyself`) or `null`.
-7. **Markdown in both directions** for descriptions and comments, with an ADF escape hatch for content Markdown cannot carry. The converter is our own (`mcp-servers/atlassian/src/adf.ts`). Nodes with no Markdown equivalent come back as explicit markers, so a loss is visible to the model.
-8. **`searchIssues` returns no `description`**, but includes parent, components and links. JQL filtering on the description still works because Jira evaluates it.
-9. **Jira 400s become teaching errors.** A subtask without a parent, an unknown component, an unknown link type, a non-empty parent on delete and issue type change limits (JRACLOUD-68207[^2]) are sent as requests, and the 400 is translated into a message naming the next tool to call. No pre-flight GET is made before a write.
+7. **Markdown in both directions** for descriptions and comments, with an ADF escape hatch for content Markdown cannot carry. The converter is our own (`mcp-servers/atlassian/src/adf.ts`). Nodes and text marks with no Markdown equivalent (underline, text and background color, sub and superscript) come back as explicit markers, so a loss is visible to the model.
+8. **`searchIssues` returns no `description`**, but includes parent, components and links. JQL filtering on the description is expected to keep working because Jira evaluates the query, not the worker; this is to be confirmed on live Jira.
+9. **Jira 400s become teaching errors.** A subtask without a parent, an unknown component, an unknown link type, deleting an issue that has subtasks and issue type change limits (JRACLOUD-68207[^2]) are sent as requests, and the 400 is translated into a message naming the next tool to call. No pre-flight GET is made before a write.
 10. **`withDeclaredParams` wraps every Jira tool**, so unknown parameters are rejected (SPEED-524).
-11. **`deleteIssue`** uses `DESTRUCTIVE_ANNOTATIONS` and the allowlist. It has no `deleteSubtasks`; Jira refuses to delete an issue that has subtasks and the worker turns that into a message.
-12. **The allowlist covers `parent` and both ends of a link**, not only the issue the call names.
-13. **No hub confirmation mechanism.** The epic's "hub policy" is annotations plus the allowlist; nothing new in the hub.
+11. **`deleteIssue`** uses `DESTRUCTIVE_ANNOTATIONS` and the allowlist. It has no `deleteSubtasks`; Jira refuses to delete an issue that has subtasks unless `deleteSubtasks` is set[^3], and the worker turns that 400 into a message.
+12. **Linking reads link types.** `linkIssues` reads the link types (`GET /rest/api/3/issueLinkType`, cached per client) and maps `relation` to a link type and a direction; `unlinkIssues` reads the link (`GET /rest/api/3/issueLink/{id}`) to apply the allowlist to both ends when an allowlist is active.
+13. **The allowlist covers `parent` and both ends of a link**, not only the issue the call names.
+14. **No hub confirmation mechanism.** The epic's "hub policy" is annotations plus the allowlist; nothing new in the hub.
 
 ## Consequences
 
@@ -51,3 +52,5 @@ The API is shaped by what a caller wants to say, and the worker maps it to Jira 
 [^1]: Atlassian, Atlassian Document Format structure: "An Atlassian Document Format document is a JSON object", used for text in Jira issue comments and `textarea` custom fields: https://developer.atlassian.com/cloud/jira/platform/apis/document/structure/
 
 [^2]: Atlassian, JRACLOUD-68207, "Using REST API the issue type can be changed when workflows are completely different"; closed as fixed with validation that fails when only one of the source and target types is a subtask or when the target workflow lacks the issue's current status: https://jira.atlassian.com/browse/JRACLOUD-68207
+
+[^3]: Atlassian, Jira Cloud platform REST API v3, Delete issue: "An issue cannot be deleted if it has one or more subtasks. To delete an issue with subtasks, set `deleteSubtasks`." The 400 response is "Returned if the issue has subtasks and `deleteSubtasks` is not set to true." Verified 2026-10-26 from https://dac-static.atlassian.com/cloud/jira/platform/swagger-v3.v3.json
