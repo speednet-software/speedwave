@@ -476,16 +476,15 @@ export function createJiraIssueTools(client: AtlassianClient | null): ToolDefini
           labels?: string[];
           assigneeAccountId?: string;
         };
-        const body = p.bodyAdf ?? p.bodyText;
         return jsonResult({
           issue: await issues.create({
-            projectKey: p.projectKey,
+            project: p.projectKey,
             summary: p.summary,
-            issueType: p.issueType,
-            body,
+            type: p.issueType,
+            ...(p.bodyAdf ? { description_adf: p.bodyAdf } : { description: p.bodyText }),
             priority: p.priority,
             labels: p.labels,
-            assigneeAccountId: p.assigneeAccountId,
+            assignee: p.assigneeAccountId,
           }),
         });
       }),
@@ -502,14 +501,13 @@ export function createJiraIssueTools(client: AtlassianClient | null): ToolDefini
           labels?: string[];
           assigneeAccountId?: string;
         };
-        const body = p.bodyAdf ?? p.bodyText;
         return jsonResult({
           issue: await issues.update(p.issueIdOrKey, {
             summary: p.summary,
-            body,
+            ...(p.bodyAdf ? { description_adf: p.bodyAdf } : { description: p.bodyText }),
             priority: p.priority,
             labels: p.labels,
-            assigneeAccountId: p.assigneeAccountId,
+            assignee: p.assigneeAccountId,
           }),
         });
       }),

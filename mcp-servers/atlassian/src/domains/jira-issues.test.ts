@@ -4,7 +4,8 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { createJiraIssuesClient } from './jira-issues.js';
+import { createJiraIssuesClient, UnknownLinkRelationError } from './jira-issues.js';
+import { markdownToAdf } from '../adf.js';
 import { ScopeError } from '../scope.js';
 import type { AtlassianClient } from '../client.js';
 
@@ -35,12 +36,22 @@ function rawIssue(over: Record<string, unknown> = {}, fields: Record<string, unk
     self: 'https://acme.atlassian.net/rest/api/3/issue/10001',
     fields: {
       summary: 'Hello',
-      description: { type: 'doc', version: 1, content: [] },
+      description: {
+        type: 'doc',
+        version: 1,
+        content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Body' }] }],
+      },
       status: { name: 'To Do' },
       issuetype: { name: 'Task' },
       project: { key: 'PROJ' },
       priority: { name: 'High' },
       labels: ['a', 'b'],
+      components: [{ name: 'core' }, { name: 'ui' }],
+      parent: {
+        key: 'PROJ-100',
+        fields: { summary: 'Epic', status: { name: 'In Progress' }, issuetype: { name: 'Epic' } },
+      },
+      issuelinks: [],
       assignee: { accountId: 'u1', displayName: 'Alice', active: true },
       reporter: { accountId: 'u2', displayName: 'Bob', active: true },
       created: '2026-01-01T00:00:00.000+0000',
@@ -59,7 +70,7 @@ beforeEach(() => {
 describe('search (enhanced JQL)', () => {
   it('POSTs to /rest/api/3/search/jql with capped maxResults and returns normalised issues + cursor', async () => {
     client.post.mockResolvedValueOnce({
-      issues: [rawIssue()],
+      issues: [rawIssue({}, { description: undefined })],
       nextPageToken: 'tok2',
       isLast: false,
     });
@@ -71,6 +82,10 @@ describe('search (enhanced JQL)', () => {
       { retryable: true }
     );
     expect(res.issues[0].key).toBe('PROJ-1');
+    const requested = (client.post.mock.calls[0][1] as { fields: string[] }).fields;
+    expect(requested).not.toContain('description');
+    expect(requested).toEqual(expect.arrayContaining(['parent', 'components', 'issuelinks']));
+    expect(res.issues[0]).not.toHaveProperty('description');
     expect(res.issues[0].web_url).toBe('https://acme.atlassian.net/browse/PROJ-1');
     expect(res.next_page_token).toBe('tok2');
     expect(res.is_last).toBe(false);
@@ -205,22 +220,101 @@ describe('get', () => {
       '/rest/api/3/issue/PROJ-1',
       expect.objectContaining({ fields: expect.any(String) })
     );
-    expect(issue).toMatchObject({
-      id: '10001',
+    expect(issue).toEqual({
       key: 'PROJ-1',
+      id: '10001',
+      web_url: 'https://acme.atlassian.net/browse/PROJ-1',
       summary: 'Hello',
+      description: 'Body',
+      type: 'Task',
       status: 'To Do',
-      issue_type: 'Task',
-      project_key: 'PROJ',
+      project: 'PROJ',
       priority: 'High',
       labels: ['a', 'b'],
+      components: ['core', 'ui'],
+      parent: { key: 'PROJ-100', summary: 'Epic', type: 'Epic', status: 'In Progress' },
+      links: [],
+      assignee: { account_id: 'u1', name: 'Alice' },
+      reporter: { account_id: 'u2', name: 'Bob' },
+      created: '2026-01-01T00:00:00.000+0000',
+      updated: '2026-01-02T00:00:00.000+0000',
     });
-    expect(issue.assignee).toEqual({
-      account_id: 'u1',
-      display_name: 'Alice',
-      email_address: undefined,
-      active: true,
-    });
+  });
+
+  it('requests parent, components, links, issue type and description', async () => {
+    client.get.mockResolvedValueOnce(rawIssue());
+    const c = createJiraIssuesClient(client);
+    await c.get('PROJ-1');
+    const fields = (client.get.mock.calls[0][1] as { fields: string }).fields.split(',');
+    expect(fields).toEqual(
+      expect.arrayContaining(['parent', 'components', 'issuelinks', 'issuetype', 'description'])
+    );
+  });
+
+  it('maps links with the relation read from this issue side', async () => {
+    client.get.mockResolvedValueOnce(
+      rawIssue(
+        {},
+        {
+          issuelinks: [
+            {
+              id: '501',
+              type: { name: 'Blocks', inward: 'is blocked by', outward: 'blocks' },
+              inwardIssue: {
+                key: 'PROJ-7',
+                fields: { summary: 'Blocker', status: { name: 'Open' } },
+              },
+            },
+            {
+              id: '502',
+              type: { name: 'Blocks', inward: 'is blocked by', outward: 'blocks' },
+              outwardIssue: {
+                key: 'PROJ-8',
+                fields: { summary: 'Blocked', status: { name: 'Done' } },
+              },
+            },
+          ],
+        }
+      )
+    );
+    const c = createJiraIssuesClient(client);
+    expect((await c.get('PROJ-1')).links).toEqual([
+      {
+        id: '501',
+        relation: 'is blocked by',
+        issue: { key: 'PROJ-7', summary: 'Blocker', status: 'Open' },
+      },
+      {
+        id: '502',
+        relation: 'blocks',
+        issue: { key: 'PROJ-8', summary: 'Blocked', status: 'Done' },
+      },
+    ]);
+  });
+
+  it('maps an empty link object to empty strings', async () => {
+    client.get.mockResolvedValueOnce(rawIssue({}, { issuelinks: [{}] }));
+    const c = createJiraIssuesClient(client);
+    expect((await c.get('PROJ-1')).links).toEqual([
+      { id: '', relation: '', issue: { key: '', summary: '', status: '' } },
+    ]);
+  });
+
+  it('returns a null parent and empty components when the issue has neither', async () => {
+    client.get.mockResolvedValueOnce(
+      rawIssue({}, { parent: undefined, components: undefined, issuelinks: undefined })
+    );
+    const c = createJiraIssuesClient(client);
+    const issue = await c.get('PROJ-1');
+    expect(issue.parent).toBeNull();
+    expect(issue.components).toEqual([]);
+    expect(issue.links).toEqual([]);
+  });
+
+  it('renders a null description as an empty string', async () => {
+    client.get.mockResolvedValueOnce(rawIssue({}, { description: null }));
+    const c = createJiraIssuesClient(client);
+    expect((await c.get('PROJ-1')).description).toBe('');
   });
 
   it('enforces the project allowlist on the fetched issue', async () => {
@@ -238,34 +332,51 @@ describe('get', () => {
   });
 });
 
+function sentFields(call: 'post' | 'put'): Record<string, unknown> {
+  return (client[call].mock.calls[0][1] as { fields: Record<string, unknown> }).fields;
+}
+
 describe('create', () => {
-  it('builds the fields payload (ADF description), then re-fetches the created issue', async () => {
+  it('converts the Markdown description to ADF, maps the caller shape, then re-fetches', async () => {
     client.post.mockResolvedValueOnce({ key: 'PROJ-2' });
     client.get.mockResolvedValueOnce(rawIssue({ key: 'PROJ-2' }));
     const c = createJiraIssuesClient(client);
     const issue = await c.create({
-      projectKey: 'PROJ',
+      project: 'PROJ',
+      type: 'Bug',
       summary: 'New',
-      issueType: 'Bug',
-      body: 'line1\nline2',
+      description: '# Title\n\n**bold**',
       priority: 'Low',
       labels: ['x'],
-      assigneeAccountId: 'u9',
+      assignee: 'u9',
+      parent: 'PROJ-100',
+      components: ['core', 'ui'],
     });
-    const sent = client.post.mock.calls[0][1] as { fields: Record<string, unknown> };
-    expect(sent.fields).toMatchObject({
+    expect(client.post.mock.calls[0][0]).toBe('/rest/api/3/issue');
+    expect(sentFields('post')).toEqual({
       project: { key: 'PROJ' },
       summary: 'New',
       issuetype: { name: 'Bug' },
+      description: markdownToAdf('# Title\n\n**bold**'),
       priority: { name: 'Low' },
       labels: ['x'],
       assignee: { accountId: 'u9' },
+      parent: { key: 'PROJ-100' },
+      components: [{ name: 'core' }, { name: 'ui' }],
     });
-    expect(sent.fields.description).toMatchObject({ type: 'doc', version: 1 });
+    expect(client.get).toHaveBeenCalledWith('/rest/api/3/issue/PROJ-2', expect.anything());
     expect(issue.key).toBe('PROJ-2');
   });
 
-  it('passes a raw ADF body through unchanged', async () => {
+  it('sends a numeric parent as an id', async () => {
+    client.post.mockResolvedValueOnce({ key: 'PROJ-2' });
+    client.get.mockResolvedValueOnce(rawIssue());
+    const c = createJiraIssuesClient(client);
+    await c.create({ project: 'PROJ', type: 'Sub-task', summary: 'S', parent: '10050' });
+    expect(sentFields('post').parent).toEqual({ id: '10050' });
+  });
+
+  it('passes a raw ADF description through unchanged', async () => {
     client.post.mockResolvedValueOnce({ key: 'PROJ-3' });
     client.get.mockResolvedValueOnce(rawIssue({ key: 'PROJ-3' }));
     const adf = {
@@ -274,30 +385,65 @@ describe('create', () => {
       content: [{ type: 'paragraph', content: [] }],
     };
     const c = createJiraIssuesClient(client);
-    await c.create({ projectKey: 'PROJ', summary: 'S', issueType: 'Task', body: adf });
-    const sent = client.post.mock.calls[0][1] as { fields: { description: unknown } };
-    expect(sent.fields.description).toBe(adf);
+    await c.create({ project: 'PROJ', type: 'Task', summary: 'S', description_adf: adf });
+    expect(sentFields('post').description).toBe(adf);
+  });
+
+  it('rejects description together with description_adf before any request', async () => {
+    const c = createJiraIssuesClient(client);
+    await expect(
+      c.create({
+        project: 'PROJ',
+        type: 'Task',
+        summary: 'S',
+        description: 'x',
+        description_adf: { type: 'doc', version: 1, content: [] },
+      })
+    ).rejects.toThrow(/description.*description_adf/);
+    expect(client.post).not.toHaveBeenCalled();
+  });
+
+  it('resolves assignee "me" through the myself endpoint', async () => {
+    client.get.mockResolvedValueOnce({ accountId: 'self-1', displayName: 'Me' });
+    client.post.mockResolvedValueOnce({ key: 'PROJ-5' });
+    client.get.mockResolvedValueOnce(rawIssue({ key: 'PROJ-5' }));
+    const c = createJiraIssuesClient(client);
+    await c.create({ project: 'PROJ', type: 'Task', summary: 'S', assignee: 'me' });
+    expect(client.get.mock.calls[0][0]).toBe('/rest/api/3/myself');
+    expect(sentFields('post').assignee).toEqual({ accountId: 'self-1' });
   });
 
   it('omits optional fields when not provided', async () => {
     client.post.mockResolvedValueOnce({ key: 'PROJ-4' });
     client.get.mockResolvedValueOnce(rawIssue({ key: 'PROJ-4' }));
     const c = createJiraIssuesClient(client);
-    await c.create({ projectKey: 'PROJ', summary: 'S', issueType: 'Task' });
-    const sent = client.post.mock.calls[0][1] as { fields: Record<string, unknown> };
-    expect(sent.fields).not.toHaveProperty('description');
-    expect(sent.fields).not.toHaveProperty('priority');
-    expect(sent.fields).not.toHaveProperty('labels');
-    expect(sent.fields).not.toHaveProperty('assignee');
+    await c.create({ project: 'PROJ', type: 'Task', summary: 'S' });
+    expect(Object.keys(sentFields('post')).sort()).toEqual(['issuetype', 'project', 'summary']);
   });
 
   it('rejects creation outside the project allowlist before any request', async () => {
     client = stubClient(['ALLOWED']);
     const c = createJiraIssuesClient(client);
+    await expect(c.create({ project: 'OTHER', type: 'Task', summary: 'S' })).rejects.toThrow(
+      ScopeError
+    );
+    expect(client.post).not.toHaveBeenCalled();
+  });
+
+  it('rejects a parent outside the project allowlist before any request', async () => {
+    client = stubClient(['PROJ']);
+    const c = createJiraIssuesClient(client);
     await expect(
-      c.create({ projectKey: 'OTHER', summary: 'S', issueType: 'Task' })
+      c.create({ project: 'PROJ', type: 'Sub-task', summary: 'S', parent: 'OTHER-1' })
     ).rejects.toThrow(ScopeError);
     expect(client.post).not.toHaveBeenCalled();
+  });
+
+  it('lets a client error propagate with its status intact', async () => {
+    const failure = Object.assign(new Error('bad request'), { status: 400 });
+    client.post.mockRejectedValueOnce(failure);
+    const c = createJiraIssuesClient(client);
+    await expect(c.create({ project: 'PROJ', type: 'Task', summary: 'S' })).rejects.toBe(failure);
   });
 });
 
@@ -306,14 +452,24 @@ describe('update', () => {
     client.put.mockResolvedValueOnce(undefined);
     client.get.mockResolvedValueOnce(rawIssue());
     const c = createJiraIssuesClient(client);
-    await c.update('PROJ-1', { summary: 'Renamed', body: 'b', priority: 'High', labels: [] });
-    const sent = client.put.mock.calls[0][1] as { fields: Record<string, unknown> };
-    expect(sent.fields).toMatchObject({
+    await c.update('PROJ-1', {
       summary: 'Renamed',
+      description: 'b',
+      priority: 'High',
+      labels: [],
+      type: 'Story',
+      components: ['core'],
+    });
+    expect(client.put.mock.calls[0][0]).toBe('/rest/api/3/issue/PROJ-1');
+    expect(sentFields('put')).toEqual({
+      summary: 'Renamed',
+      description: markdownToAdf('b'),
       priority: { name: 'High' },
       labels: [],
+      issuetype: { name: 'Story' },
+      components: [{ name: 'core' }],
     });
-    expect(sent.fields.description).toMatchObject({ type: 'doc' });
+    expect(client.get).toHaveBeenCalledWith('/rest/api/3/issue/PROJ-1', expect.anything());
   });
 
   it('sends an empty fields object when nothing is provided', async () => {
@@ -324,10 +480,75 @@ describe('update', () => {
     expect(client.put.mock.calls[0][1]).toEqual({ fields: {} });
   });
 
-  it('enforces the allowlist from the issue key before updating', async () => {
+  it('clears components with an empty list', async () => {
+    client.put.mockResolvedValueOnce(undefined);
+    client.get.mockResolvedValueOnce(rawIssue());
+    const c = createJiraIssuesClient(client);
+    await c.update('PROJ-1', { components: [] });
+    expect(sentFields('put')).toEqual({ components: [] });
+  });
+
+  it('detaches the parent with null and sets one with a key or id', async () => {
+    client.put.mockResolvedValue(undefined);
+    client.get.mockResolvedValue(rawIssue());
+    const c = createJiraIssuesClient(client);
+    await c.update('PROJ-1', { parent: null });
+    await c.update('PROJ-1', { parent: 'PROJ-2' });
+    await c.update('PROJ-1', { parent: '10077' });
+    const parents = client.put.mock.calls.map(
+      (call) => (call[1] as { fields: { parent: unknown } }).fields.parent
+    );
+    expect(parents).toEqual([null, { key: 'PROJ-2' }, { id: '10077' }]);
+  });
+
+  it('addresses the issue by numeric id when no allowlist is set', async () => {
+    client.put.mockResolvedValueOnce(undefined);
+    client.get.mockResolvedValueOnce(rawIssue());
+    const c = createJiraIssuesClient(client);
+    await c.update('10001', { summary: 'x' });
+    expect(client.put.mock.calls[0][0]).toBe('/rest/api/3/issue/10001');
+  });
+
+  it('sets, resolves and clears the assignee', async () => {
+    client.put.mockResolvedValue(undefined);
+    client.get.mockImplementation(async (path: string) =>
+      path === '/rest/api/3/myself' ? { accountId: 'self-1' } : rawIssue()
+    );
+    const c = createJiraIssuesClient(client);
+    await c.update('PROJ-1', { assignee: 'u9' });
+    await c.update('PROJ-1', { assignee: 'me' });
+    await c.update('PROJ-1', { assignee: null });
+    const assignees = client.put.mock.calls.map(
+      (call) => (call[1] as { fields: { assignee: unknown } }).fields.assignee
+    );
+    expect(assignees).toEqual([{ accountId: 'u9' }, { accountId: 'self-1' }, null]);
+  });
+
+  it('passes a raw ADF description through unchanged', async () => {
+    client.put.mockResolvedValueOnce(undefined);
+    client.get.mockResolvedValueOnce(rawIssue());
+    const adf = { type: 'doc' as const, version: 1 as const, content: [] };
+    const c = createJiraIssuesClient(client);
+    await c.update('PROJ-1', { description_adf: adf });
+    expect(sentFields('put').description).toBe(adf);
+  });
+
+  it('rejects description together with description_adf before any request', async () => {
+    const c = createJiraIssuesClient(client);
+    await expect(
+      c.update('PROJ-1', {
+        description: 'x',
+        description_adf: { type: 'doc', version: 1, content: [] },
+      })
+    ).rejects.toThrow(/description.*description_adf/);
+    expect(client.put).not.toHaveBeenCalled();
+  });
+
+  it('enforces the allowlist on the issue and the parent before updating', async () => {
     client = stubClient(['ALLOWED']);
     const c = createJiraIssuesClient(client);
     await expect(c.update('OTHER-1', { summary: 'x' })).rejects.toThrow(ScopeError);
+    await expect(c.update('ALLOWED-1', { parent: 'OTHER-2' })).rejects.toThrow(ScopeError);
     expect(client.put).not.toHaveBeenCalled();
   });
 
@@ -337,22 +558,174 @@ describe('update', () => {
     await expect(c.update('10001', { summary: 'x' })).rejects.toThrow(ScopeError);
   });
 
-  it('sends an assignee field when assigneeAccountId is provided', async () => {
+  it('enforces the allowlist on the re-fetched issue', async () => {
+    client = stubClient(['ALLOWED']);
     client.put.mockResolvedValueOnce(undefined);
-    client.get.mockResolvedValueOnce(rawIssue());
+    client.get.mockResolvedValueOnce(rawIssue({ key: 'ALLOWED-1' }, { project: { key: 'OTHER' } }));
     const c = createJiraIssuesClient(client);
-    await c.update('PROJ-1', { assigneeAccountId: 'u9' });
-    const sent = client.put.mock.calls[0][1] as { fields: Record<string, unknown> };
-    expect(sent.fields).toMatchObject({ assignee: { accountId: 'u9' } });
+    await expect(c.update('ALLOWED-1', { summary: 'x' })).rejects.toThrow(ScopeError);
+  });
+});
+
+describe('delete', () => {
+  it('DELETEs the issue by key or id without deleteSubtasks', async () => {
+    client.del.mockResolvedValue(undefined);
+    const c = createJiraIssuesClient(client);
+    await c.delete('PROJ-1');
+    await c.delete('10001');
+    expect(client.del.mock.calls).toEqual([
+      ['/rest/api/3/issue/PROJ-1'],
+      ['/rest/api/3/issue/10001'],
+    ]);
   });
 
-  it('omits the assignee field when assigneeAccountId is not provided', async () => {
-    client.put.mockResolvedValueOnce(undefined);
-    client.get.mockResolvedValueOnce(rawIssue());
+  it('enforces the allowlist before deleting', async () => {
+    client = stubClient(['ALLOWED']);
     const c = createJiraIssuesClient(client);
-    await c.update('PROJ-1', { summary: 'x' });
-    const sent = client.put.mock.calls[0][1] as { fields: Record<string, unknown> };
-    expect(sent.fields).not.toHaveProperty('assignee');
+    await expect(c.delete('OTHER-1')).rejects.toThrow(ScopeError);
+    expect(client.del).not.toHaveBeenCalled();
+  });
+});
+
+describe('link types and linking', () => {
+  const linkTypes = {
+    issueLinkTypes: [
+      { id: '1', name: 'Blocks', inward: 'is blocked by', outward: 'blocks' },
+      { id: '2', name: 'Relates', inward: 'relates to', outward: 'relates to' },
+    ],
+  };
+
+  it('lists link types', async () => {
+    client.get.mockResolvedValueOnce(linkTypes);
+    const c = createJiraIssuesClient(client);
+    expect(await c.listLinkTypes()).toEqual([
+      { id: '1', name: 'Blocks', inward: 'is blocked by', outward: 'blocks' },
+      { id: '2', name: 'Relates', inward: 'relates to', outward: 'relates to' },
+    ]);
+    expect(client.get).toHaveBeenCalledWith('/rest/api/3/issueLinkType');
+  });
+
+  it('lists nothing and normalises blanks when the response is empty', async () => {
+    client.get.mockResolvedValueOnce({ issueLinkTypes: [{}] }).mockResolvedValueOnce({});
+    const c = createJiraIssuesClient(client);
+    expect(await c.listLinkTypes()).toEqual([{ id: '', name: '', inward: '', outward: '' }]);
+    expect(await c.listLinkTypes()).toEqual([]);
+  });
+
+  it('links with this issue as the outward end when the relation is the outward text', async () => {
+    client.get.mockResolvedValueOnce(linkTypes);
+    client.post.mockResolvedValueOnce(undefined);
+    const c = createJiraIssuesClient(client);
+    await c.linkIssues('PROJ-1', 'blocks', 'PROJ-2');
+    expect(client.post).toHaveBeenCalledWith('/rest/api/3/issueLink', {
+      type: { name: 'Blocks' },
+      outwardIssue: { key: 'PROJ-1' },
+      inwardIssue: { key: 'PROJ-2' },
+    });
+  });
+
+  it('links with this issue as the inward end when the relation is the inward text, case-insensitively', async () => {
+    client.get.mockResolvedValueOnce(linkTypes);
+    client.post.mockResolvedValueOnce(undefined);
+    const c = createJiraIssuesClient(client);
+    await c.linkIssues('PROJ-1', '  Is Blocked BY ', '10002');
+    expect(client.post).toHaveBeenCalledWith('/rest/api/3/issueLink', {
+      type: { name: 'Blocks' },
+      inwardIssue: { key: 'PROJ-1' },
+      outwardIssue: { id: '10002' },
+    });
+  });
+
+  it('fetches the link types once per client instance', async () => {
+    client.get.mockResolvedValueOnce(linkTypes);
+    client.post.mockResolvedValue(undefined);
+    const c = createJiraIssuesClient(client);
+    await c.linkIssues('PROJ-1', 'blocks', 'PROJ-2');
+    await c.linkIssues('PROJ-3', 'relates to', 'PROJ-4');
+    expect(client.get).toHaveBeenCalledTimes(1);
+    expect(client.post).toHaveBeenCalledTimes(2);
+  });
+
+  it('refreshes the cache when listLinkTypes is called', async () => {
+    client.get.mockResolvedValueOnce({ issueLinkTypes: [] }).mockResolvedValueOnce(linkTypes);
+    client.post.mockResolvedValue(undefined);
+    const c = createJiraIssuesClient(client);
+    await c.listLinkTypes();
+    await c.listLinkTypes();
+    await c.linkIssues('PROJ-1', 'blocks', 'PROJ-2');
+    expect(client.get).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not cache a failed link type lookup', async () => {
+    client.get.mockRejectedValueOnce(new Error('down')).mockResolvedValueOnce(linkTypes);
+    client.post.mockResolvedValue(undefined);
+    const c = createJiraIssuesClient(client);
+    await expect(c.linkIssues('PROJ-1', 'blocks', 'PROJ-2')).rejects.toThrow('down');
+    await c.linkIssues('PROJ-1', 'blocks', 'PROJ-2');
+    expect(client.post).toHaveBeenCalledTimes(1);
+  });
+
+  it('throws UnknownLinkRelationError listing the valid relations and sends nothing', async () => {
+    client.get.mockResolvedValueOnce(linkTypes);
+    const c = createJiraIssuesClient(client);
+    const failure = await c.linkIssues('PROJ-1', 'duplicates', 'PROJ-2').catch((e) => e);
+    expect(failure).toBeInstanceOf(UnknownLinkRelationError);
+    expect(failure.relation).toBe('duplicates');
+    expect(failure.available).toEqual(['blocks', 'is blocked by', 'relates to']);
+    expect(client.post).not.toHaveBeenCalled();
+  });
+
+  it('enforces the allowlist on both link ends before any request', async () => {
+    client = stubClient(['PROJ']);
+    const c = createJiraIssuesClient(client);
+    await expect(c.linkIssues('OTHER-1', 'blocks', 'PROJ-2')).rejects.toThrow(ScopeError);
+    await expect(c.linkIssues('PROJ-1', 'blocks', 'OTHER-2')).rejects.toThrow(ScopeError);
+    expect(client.get).not.toHaveBeenCalled();
+    expect(client.post).not.toHaveBeenCalled();
+  });
+});
+
+describe('unlinkIssues', () => {
+  it('DELETEs the link by id and encodes it', async () => {
+    client.del.mockResolvedValueOnce(undefined);
+    const c = createJiraIssuesClient(client);
+    await c.unlinkIssues('501/x');
+    expect(client.del).toHaveBeenCalledWith('/rest/api/3/issueLink/501%2Fx');
+    expect(client.get).not.toHaveBeenCalled();
+  });
+
+  it('checks both link ends against the allowlist before deleting', async () => {
+    client = stubClient(['PROJ']);
+    client.get.mockResolvedValueOnce({
+      id: '501',
+      inwardIssue: { key: 'PROJ-1' },
+      outwardIssue: { key: 'OTHER-2' },
+    });
+    const c = createJiraIssuesClient(client);
+    await expect(c.unlinkIssues('501')).rejects.toThrow(ScopeError);
+    expect(client.get).toHaveBeenCalledWith('/rest/api/3/issueLink/501');
+    expect(client.del).not.toHaveBeenCalled();
+  });
+
+  it('deletes when both ends are allowed', async () => {
+    client = stubClient(['PROJ']);
+    client.get.mockResolvedValueOnce({
+      id: '501',
+      inwardIssue: { key: 'PROJ-1' },
+      outwardIssue: { key: 'PROJ-2' },
+    });
+    client.del.mockResolvedValueOnce(undefined);
+    const c = createJiraIssuesClient(client);
+    await c.unlinkIssues('501');
+    expect(client.del).toHaveBeenCalledWith('/rest/api/3/issueLink/501');
+  });
+
+  it('fails closed when the link ends cannot be read under an allowlist', async () => {
+    client = stubClient(['PROJ']);
+    client.get.mockResolvedValueOnce({});
+    const c = createJiraIssuesClient(client);
+    await expect(c.unlinkIssues('501')).rejects.toThrow(ScopeError);
+    expect(client.del).not.toHaveBeenCalled();
   });
 });
 
@@ -417,12 +790,7 @@ describe('getMyself', () => {
       active: true,
     });
     const c = createJiraIssuesClient(client);
-    expect(await c.getMyself()).toEqual({
-      account_id: 'me',
-      display_name: 'Me',
-      email_address: 'me@x.com',
-      active: true,
-    });
+    expect(await c.getMyself()).toEqual({ account_id: 'me', name: 'Me' });
   });
 });
 
@@ -430,7 +798,7 @@ describe('normalisation edge cases', () => {
   it('derives project_key from the issue key when fields.project is missing', async () => {
     client.get.mockResolvedValueOnce(rawIssue({ key: 'ABC-7' }, { project: undefined }));
     const c = createJiraIssuesClient(client);
-    expect((await c.get('ABC-7')).project_key).toBe('ABC');
+    expect((await c.get('ABC-7')).project).toBe('ABC');
   });
 
   it('omits web_url when the self URL is unparseable', async () => {
@@ -452,32 +820,29 @@ describe('normalisation edge cases', () => {
     const c = createJiraIssuesClient(client);
     const issue = (await c.search({ jql: 'x' })).issues[0];
     expect(issue).toEqual({
-      id: '',
       key: '',
+      id: '',
+      web_url: undefined,
       summary: '',
-      description: null,
+      type: '',
       status: '',
-      issue_type: '',
-      project_key: '',
-      priority: undefined,
+      project: '',
+      priority: null,
       labels: [],
+      components: [],
+      parent: null,
+      links: [],
       assignee: null,
       reporter: null,
       created: '',
       updated: '',
-      web_url: undefined,
     });
   });
 
   it('normalises a user with nothing set', async () => {
     client.get.mockResolvedValueOnce({});
     const c = createJiraIssuesClient(client);
-    expect(await c.getMyself()).toEqual({
-      account_id: '',
-      display_name: '',
-      email_address: undefined,
-      active: true,
-    });
+    expect(await c.getMyself()).toEqual({ account_id: '', name: '' });
   });
 
   it('normalises a transition with no `to`', async () => {
@@ -489,7 +854,7 @@ describe('normalisation edge cases', () => {
   it('mapIssue derives project_key from a key with no hyphen as the whole key', async () => {
     client.post.mockResolvedValueOnce({ issues: [{ key: 'NOHYPHEN' }] });
     const c = createJiraIssuesClient(client);
-    expect((await c.search({ jql: 'x' })).issues[0].project_key).toBe('NOHYPHEN');
+    expect((await c.search({ jql: 'x' })).issues[0].project).toBe('NOHYPHEN');
   });
 });
 
@@ -521,7 +886,7 @@ describe('addAttachment', () => {
       mime_type: 'image/png',
       created: '2026-07-02T00:00:00.000+0000',
       url: 'https://acme.atlassian.net/secure/attachment/20001/bug.png',
-      author: { account_id: 'u1', display_name: 'Alice', email_address: undefined, active: true },
+      author: { account_id: 'u1', name: 'Alice' },
     });
   });
 

@@ -22,6 +22,10 @@ const issuesStub = {
   getMyself: vi.fn(),
   addAttachment: vi.fn(),
   deleteAttachment: vi.fn(),
+  delete: vi.fn(),
+  linkIssues: vi.fn(),
+  unlinkIssues: vi.fn(),
+  listLinkTypes: vi.fn(),
 };
 vi.mock('../domains/jira-issues.js', () => ({
   createJiraIssuesClient: () => issuesStub,
@@ -164,13 +168,13 @@ describe('createIssue handler', () => {
       assigneeAccountId: 'u1',
     });
     expect(issuesStub.create).toHaveBeenCalledWith({
-      projectKey: 'PROJ',
+      project: 'PROJ',
       summary: 'S',
-      issueType: 'Task',
-      body: 'text',
+      type: 'Task',
+      description: 'text',
       priority: 'High',
       labels: ['x'],
-      assigneeAccountId: 'u1',
+      assignee: 'u1',
     });
   });
 
@@ -184,13 +188,13 @@ describe('createIssue handler', () => {
       bodyText: 't',
       bodyAdf: adf,
     });
-    expect(issuesStub.create.mock.calls[0][0].body).toBe(adf);
+    expect(issuesStub.create.mock.calls[0][0].description_adf).toBe(adf);
   });
 
   it('passes body as undefined when neither bodyText nor bodyAdf is given', async () => {
     issuesStub.create.mockResolvedValueOnce({ key: 'PROJ-4' });
     await handlerFor('createIssue')({ projectKey: 'PROJ', summary: 'S', issueType: 'Task' });
-    expect(issuesStub.create.mock.calls[0][0].body).toBeUndefined();
+    expect(issuesStub.create.mock.calls[0][0].description).toBeUndefined();
   });
 });
 
@@ -206,22 +210,23 @@ describe('updateIssue handler', () => {
     });
     expect(issuesStub.update).toHaveBeenCalledWith('PROJ-1', {
       summary: 'X',
-      body: adf,
+      description_adf: adf,
       priority: undefined,
       labels: [],
+      assignee: undefined,
     });
   });
 
   it('falls back to bodyText when no bodyAdf', async () => {
     issuesStub.update.mockResolvedValueOnce({ key: 'PROJ-1' });
     await handlerFor('updateIssue')({ issueIdOrKey: 'PROJ-1', bodyText: 't' });
-    expect(issuesStub.update.mock.calls[0][1].body).toBe('t');
+    expect(issuesStub.update.mock.calls[0][1].description).toBe('t');
   });
 
   it('forwards assigneeAccountId to reassign the issue', async () => {
     issuesStub.update.mockResolvedValueOnce({ key: 'PROJ-1' });
     await handlerFor('updateIssue')({ issueIdOrKey: 'PROJ-1', assigneeAccountId: 'u1' });
-    expect(issuesStub.update.mock.calls[0][1].assigneeAccountId).toBe('u1');
+    expect(issuesStub.update.mock.calls[0][1].assignee).toBe('u1');
   });
 });
 
