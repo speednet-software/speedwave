@@ -584,6 +584,7 @@ test-ci:
 	  _tests/ci/audit-gate.bats _tests/ci/audit-changed-files.bats \
 	  _tests/ci/audit-run.bats _tests/ci/audit-diff.bats _tests/ci/audit-issue.bats \
 	  _tests/ci/resolve-pr-title-message.bats _tests/ci/merge-queue-comment.bats \
+	  _tests/ci/promotion-gate.bats \
 	  _tests/ci/dependabot-triage.bats \
 	  _tests/ci/install-wasm-bindgen.bats _tests/ci/ci-clean-cargo-target.bats \
 	  _tests/ci/sha256.bats

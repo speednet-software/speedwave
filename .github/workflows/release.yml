@@ -3,9 +3,15 @@ name: Release
 on:
   push:
     branches: ['release/**']
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: 'Commit on dev whose published beta is promoted to stable'
+        required: true
+        type: string
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event_name == 'workflow_dispatch' && 'promote' || github.ref }}
   cancel-in-progress: false
 
 permissions:
@@ -13,13 +19,13 @@ permissions:
 
 jobs:
   route:
+    if: github.event_name == 'push' && !github.event.created
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
     outputs:
       minor: ${{ steps.line.outputs.minor }}
-      has_stable: ${{ steps.stable.outputs.has_stable }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -59,7 +65,7 @@ jobs:
           fi
           echo "minor=$MINOR" >> "$GITHUB_OUTPUT"
 
-      - name: Decide promote vs hotfix
+      - name: Require a stable release on the line (push means hotfix)
         id: stable
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -77,11 +83,41 @@ jobs:
               fi
             fi
           fi
-          echo "has_stable=$HAS_STABLE" >> "$GITHUB_OUTPUT"
+          if [ "$HAS_STABLE" != "true" ]; then
+            echo "::error::release/0.${MINOR} has no stable release yet, so a push to it is not a promotion. Promote with Run workflow on dev and the commit input; this branch only accepts hotfix pushes once the line is stable."
+            exit 1
+          fi
+
+  guard:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Refuse a promotion dispatched from a branch other than dev
+        if: github.ref != 'refs/heads/dev'
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          echo "::error::promotion runs only from dev (dispatched from $REF); choose dev in Use workflow from"
+          exit 1
+
+  approve:
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: promotion
+    permissions:
+      contents: read
+    steps:
+      - name: Promotion approved
+        env:
+          COMMIT: ${{ inputs.commit }}
+        run: echo "promotion approved for $COMMIT"
 
   promote:
-    needs: route
-    if: needs.route.outputs.has_stable != 'true'
+    needs: approve
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: release
@@ -94,62 +130,63 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - uses: ./.github/actions/release-preflight
-
-      - name: Refuse a promotion older than the previous release line
-        env:
-          MINOR: ${{ needs.route.outputs.minor }}
+      - name: Fetch release lines and tags
         run: |
           set -euo pipefail
-          HEAD_SHA=$(git rev-parse HEAD)
-          cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- \
-            validate-promotion --repo "$PWD" --candidate "$HEAD_SHA" --new-minor "$MINOR"
+          git fetch origin '+refs/heads/release/*:refs/remotes/origin/release/*' --no-tags
+          git fetch origin --tags --force
 
-      - name: Find the beta release built from this commit
-        id: beta
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          shared-key: speedwave-version
+
+      - name: Check the promotion preconditions (no writes)
+        id: gate
         env:
           GH_TOKEN: ${{ secrets.GH_AUTOMATION_PAT }}
           REPO: ${{ github.repository }}
-          MINOR: ${{ needs.route.outputs.minor }}
+          COMMIT: ${{ inputs.commit }}
+        run: bash scripts/promotion-gate.sh >> "$GITHUB_OUTPUT"
+
+      - name: Check out the release commit
+        env:
+          SHA: ${{ steps.gate.outputs.commit }}
+        run: git checkout --detach "$SHA"
+
+      - uses: ./.github/actions/release-preflight
+        if: steps.gate.outputs.flipped != 'true'
+
+      - name: Create the release line branch at the promoted commit
+        if: steps.gate.outputs.branch_exists != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_AUTOMATION_PAT }}
+          MINOR: ${{ steps.gate.outputs.minor }}
+          SHA: ${{ steps.gate.outputs.commit }}
         run: |
           set -euo pipefail
-          mapfile -t TAGS < <(git tag --points-at HEAD --list "v0.${MINOR}.0" "v0.${MINOR}.0+*")
-          if [ "${#TAGS[@]}" -eq 0 ]; then
-            echo "::error::no beta tag found on this commit for release line 0.${MINOR}. The beta build may still be running — re-run this job (Re-run jobs) once it publishes, without deleting the branch."
-            exit 1
-          fi
-          if [ "${#TAGS[@]}" -gt 1 ]; then
-            echo "::error::ambiguous beta tags on this commit: ${TAGS[*]}"
-            exit 1
-          fi
-          TAG="${TAGS[0]}"
-          VERSION="${TAG#v}"
-          RELEASE_JSON=$(gh release view "$TAG" --repo "$REPO" --json databaseId,isDraft 2>/dev/null || true)
-          if [ -z "$RELEASE_JSON" ]; then
-            echo "::error::tag $TAG exists but has no GitHub Release yet — re-run this job (Re-run jobs) once the beta build publishes."
-            exit 1
-          fi
-          RELEASE_ID=$(echo "$RELEASE_JSON" | jq -r '.databaseId')
-          IS_DRAFT=$(echo "$RELEASE_JSON" | jq -r '.isDraft')
-          if [ "$IS_DRAFT" = "true" ]; then
-            echo "::error::the beta release for $TAG is still a draft (build in progress) — re-run this job (Re-run jobs) once it publishes."
-            exit 1
-          fi
-          {
-            echo "tag=$TAG"
-            echo "version=$VERSION"
-            echo "release_id=$RELEASE_ID"
-          } >> "$GITHUB_OUTPUT"
+          AUTH_HEADER="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          git -c "http.https://github.com/.extraheader=${AUTH_HEADER}" push origin "${SHA}:refs/heads/release/0.${MINOR}"
 
       - name: Compute the stable notes range
         id: range
+        env:
+          MINOR: ${{ steps.gate.outputs.minor }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ steps.gate.outputs.tag }}
         run: |
           set -euo pipefail
-          mapfile -t LINES < <(cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- notes-range --repo "$PWD")
+          mapfile -t LINES < <(cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- notes-range --repo "$PWD" --branch "release/0.${MINOR}")
           RANGE="${LINES[0]}"
           SINCE="${RANGE%%..*}"
-          echo "range=$RANGE" >> "$GITHUB_OUTPUT"
-          echo "since=$SINCE" >> "$GITHUB_OUTPUT"
+          {
+            echo "range=$RANGE"
+            echo "since=$SINCE"
+            echo "compare_url=https://github.com/${REPO}/compare/${SINCE}...${TAG}"
+          } >> "$GITHUB_OUTPUT"
           SKIP_ARGS=()
           for sha in "${LINES[@]:1}"; do
             if ! [[ "$sha" =~ ^[0-9a-f]{7,40}$ ]]; then
@@ -170,16 +207,15 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Rewrite the release notes and flip prerelease/make_latest
+        if: steps.gate.outputs.flipped != 'true'
         env:
           GH_TOKEN: ${{ secrets.GH_AUTOMATION_PAT }}
           REPO: ${{ github.repository }}
-          RID: ${{ steps.beta.outputs.release_id }}
-          TAG: ${{ steps.beta.outputs.tag }}
-          SINCE: ${{ steps.range.outputs.since }}
+          RID: ${{ steps.gate.outputs.release_id }}
+          COMPARE_URL: ${{ steps.range.outputs.compare_url }}
           CONTENT: ${{ steps.cliff.outputs.content }}
         run: |
           set -euo pipefail
-          COMPARE_URL="https://github.com/${REPO}/compare/${SINCE}...${TAG}"
           BODY_FILE="$(mktemp)"
           {
             printf '%s\n' "$CONTENT"
@@ -190,16 +226,15 @@ jobs:
             -f prerelease=false \
             -f make_latest=true \
             -F body=@"$BODY_FILE"
-          echo "compare_url=$COMPARE_URL" >> "$GITHUB_ENV"
 
       - name: Open the changelog PR to dev
         env:
           GH_TOKEN: ${{ secrets.GH_AUTOMATION_PAT }}
           REPO: ${{ github.repository }}
-          MINOR: ${{ needs.route.outputs.minor }}
-          VERSION: ${{ steps.beta.outputs.version }}
+          MINOR: ${{ steps.gate.outputs.minor }}
+          VERSION: ${{ steps.gate.outputs.version }}
           CONTENT: ${{ steps.cliff.outputs.content }}
-          COMPARE_URL: ${{ env.compare_url }}
+          COMPARE_URL: ${{ steps.range.outputs.compare_url }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
@@ -230,7 +265,6 @@ jobs:
 
   hotfix:
     needs: route
-    if: needs.route.outputs.has_stable == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: release

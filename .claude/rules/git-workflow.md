@@ -10,7 +10,7 @@
 | `feature/*` / `fix/*` → `release/0.M` (hotfix)  | Squash merge | `release-gate` ruleset: the same two checks, no queue; only the highest `release/0.*` accepts one |
 | `merge/release-0.M-into-dev` (backport) → `dev` | Squash merge | `release.yml`'s `hotfix` job opens it with `GH_AUTOMATION_PAT`, auto-merge on                     |
 
-- **PRs to `dev` or to a `release/0.M` line never push directly** — a developer creates the `release/0.M` branch itself (the only direct push; see `RELEASING.md`), everything else is a PR through the gate.
+- **PRs to `dev` or to a `release/0.M` line never push directly**: the promotion workflow creates the `release/0.M` branch (see `RELEASING.md`), everything else is a PR through the gate.
 - No PR title restriction tied to a target branch: `dev` and `release/0.M` take the same conventional-commit types. The old `dev → main`-only `feat`/`fix` restriction is gone with `main`; `validate` checks every PR title and every merge-queue commit with `commitlint.config.js`. On a pull request it validates the title with the ` (#<number>)` suffix GitHub appends to the squash message (`scripts/resolve-pr-title-message.sh`), so a title that would overflow `header-max-length` in the queue fails on the PR first. Its `ignores` skips Dependabot's `chore(deps): bump …` and `chore(deps-dev): bump …` titles, which can exceed `header-max-length` and never reach the changelog (`cliff.toml` skips `chore`).
 - **The backport PR is automated, never a manual chore:** after every merge into a `release/0.M` line, `release.yml`'s `hotfix` job opens `merge/release-0.M-into-dev` → `dev` with `GH_AUTOMATION_PAT` (so CI runs on it) and turns on auto-merge, assigned to the hotfix's author. A conflict is resolved on that PR's branch, never on `release/0.M` directly (a push there is the next hotfix). Nothing force-pushes or rewrites `dev`'s history; every open PR to `dev` survives every release.
 - Branch names: no `+` characters — use `fix/foo`, `feature/foo`.
@@ -21,7 +21,7 @@
 
 ## Releases
 
-Full process, the promotion/hotfix state machine and the runbook steps are in `RELEASING.md`. In short: the tip of `dev` becomes a beta GitHub Release once a night (00:17 UTC, Tuesday to Saturday), or at once via "Run workflow" (`beta.yml`), only commits with a beta can be promoted; promoting one commit's beta to stable is pushing a `release/0.M` branch at it (`release.yml`'s `promote` job flips the `prerelease` flag, no rebuild); a hotfix is a PR to the highest `release/0.M` that publishes `0.M.Z` immediately on merge. `GH_AUTOMATION_PAT` is the one token for every release/PR write; `RELEASE_TOKEN` no longer exists.
+Full process, the promotion/hotfix state machine and the runbook steps are in `RELEASING.md`. In short: the tip of `dev` becomes a beta GitHub Release once a night (00:17 UTC, Tuesday to Saturday), or at once via "Run workflow" (`beta.yml`), only commits with a beta can be promoted; promoting one commit's beta to stable is "Run workflow" on `Release` from `dev` with a `commit` input, approved in the `promotion` environment (`release.yml`'s `promote` job checks the preconditions, including a green Beta run with its rig e2e, creates `release/0.M`, flips the `prerelease` flag, no rebuild); a hotfix is a PR to the highest `release/0.M` that publishes `0.M.Z` immediately on merge. `GH_AUTOMATION_PAT` is the one token for every release/PR write; `RELEASE_TOKEN` no longer exists.
 
 ## Branch protection & CI — NEVER bypass
 
@@ -36,7 +36,7 @@ The Windows jobs that save a cache of `D:\st` (`lane-test-windows.yml`, the Wind
 Five rulesets (SPEED-740), none with a bypass except `ci-owners`:
 
 - `merge-gate` on `dev`: a PR, the two checks `ci-gate`, `validate`, `strict`, squash only, and the merge queue (one PR at a time, 150 min check timeout). GitHub refuses a merge queue on a wildcard pattern, so the queue cannot cover `release/**`.
-- `release-gate` on `release/**`: the same PR rule and the same two checks with `strict`, without a queue. A hotfix gets no rig e2e: the rig runs only for a beta, and a hotfix ships without one. Creating a `release/0.M` branch by push (promotion) passes: required checks are not enforced on creation.
+- `release-gate` on `release/**`: the same PR rule and the same two checks with `strict`, without a queue. A hotfix gets no rig e2e: the rig runs only for a beta, and a hotfix ships without one. It has no bypass, and it does not enforce on branch creation: the promotion workflow creates `release/0.M` with `GH_AUTOMATION_PAT`; anyone with write access could push one, so not creating it by hand is a process rule.
 - `release-lines` on `release/0.*`: the branch cannot be deleted. Other names under `release/` stay deletable.
 - `ci-owners` on `dev` and `release/**`: code owner review for paths in `.github/CODEOWNERS` (`.github/workflows/`, `.github/actions/`, `_tests/ci/`, `CODEOWNERS` itself). Its only bypass is the CI owner, on pull requests only, so the owner's own CI changes still go through `merge-gate` and the queue.
 - `release-tags` on `v*`: a tag cannot be moved or deleted; creating one stays open.
