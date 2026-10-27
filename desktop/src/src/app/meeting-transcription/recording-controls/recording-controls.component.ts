@@ -297,16 +297,14 @@ export class RecordingControlsComponent implements OnInit {
 
   /** Whether Record can be pressed now: not while an import is picked or decoded. */
   readonly canStart = computed(
-    () =>
-      !this.busy() &&
-      !this.importing() &&
-      !this.transcription.captureOpen() &&
-      this.sources().length > 0 &&
-      !(this.modelsKnown() && !this.hasModel())
+    () => this.idleWithModel() && !this.transcription.captureOpen() && this.sources().length > 0
   );
 
   /** Whether Import audio can be pressed now. */
-  readonly canImport = computed(
+  readonly canImport = computed(() => this.idleWithModel());
+
+  /** Nothing is starting or importing, and no model is known to be missing. */
+  private readonly idleWithModel = computed(
     () => !this.importing() && !this.busy() && !(this.modelsKnown() && !this.hasModel())
   );
 

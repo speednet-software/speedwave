@@ -392,7 +392,8 @@ impl TranscriptStore {
                 && entry
                     .file_name()
                     .to_str()
-                    .is_some_and(|n| n.starts_with(IMPORT_STAGING_PREFIX));
+                    .and_then(|n| n.strip_prefix(IMPORT_STAGING_PREFIX))
+                    .is_some_and(|id| Uuid::parse_str(id).is_ok());
             if staged {
                 remove_failed_import(&entry.path());
             }
@@ -1311,6 +1312,8 @@ mod tests {
         let without_json = first.session_dir(Uuid::new_v4());
         std::fs::create_dir_all(&without_json).unwrap();
         std::fs::write(without_json.join(AUDIO_WAV), b"RIFF").unwrap();
+        let foreign = root.path().join(format!("{IMPORT_STAGING_PREFIX}notes"));
+        std::fs::create_dir_all(&foreign).unwrap();
         let restarted = TranscriptStore::with_root(root.path());
 
         restarted.reconcile_interrupted();
@@ -1324,10 +1327,10 @@ mod tests {
             .session_dir(kept)
             .join(crate::transcription::transcript::TRANSCRIPT_JSON)
             .exists());
-        assert!(restarted
-            .list()
-            .iter()
-            .all(|r| !r.id.to_string().starts_with('.')));
+        assert!(
+            foreign.exists(),
+            "only a staging directory named after a session id is removed"
+        );
     }
 
     #[tokio::test]

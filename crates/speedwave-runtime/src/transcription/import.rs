@@ -3,12 +3,13 @@
 
 use std::path::Path;
 
-use symphonia::core::codecs::audio::AudioDecoderOptions;
+use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::probe::Hint;
-use symphonia::core::formats::{FormatOptions, TrackType};
+use symphonia::core::formats::{FormatOptions, FormatReader, TrackType};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
+use symphonia::core::packet::Packet;
 
 use super::audio::SAMPLE_RATE_HZ;
 
@@ -61,42 +62,11 @@ pub fn supported_formats() -> String {
 }
 
 pub(crate) fn decode_to_wav(src: &Path, dst: &Path) -> Result<(), ImportError> {
-    let ext = src
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(str::to_ascii_lowercase)
-        .filter(|e| IMPORT_EXTENSIONS.contains(&e.as_str()))
-        .ok_or(ImportError::UnsupportedFormat)?;
-    let file = std::fs::File::open(src).map_err(ImportError::Read)?;
-    let stream = MediaSourceStream::new(Box::new(file), Default::default());
-    let mut hint = Hint::new();
-    hint.with_extension(&ext);
-    let mut format = symphonia::default::get_probe()
-        .probe(
-            &hint,
-            stream,
-            FormatOptions::default(),
-            MetadataOptions::default(),
-        )
-        .map_err(|e| match e {
-            SymphoniaError::IoError(io) if io.kind() != std::io::ErrorKind::UnexpectedEof => {
-                ImportError::Read(io)
-            }
-            _ => ImportError::NotReadable(ext.to_ascii_uppercase()),
-        })?;
-    let track = format
-        .default_track(TrackType::Audio)
-        .ok_or(ImportError::UnsupportedAudio)?;
-    let track_id = track.id;
-    let params = track
-        .codec_params
-        .as_ref()
-        .and_then(|p| p.audio())
-        .ok_or(ImportError::UnsupportedAudio)?;
-    let mut decoder = symphonia::default::get_codecs()
-        .make_audio_decoder(params, &AudioDecoderOptions::default())
-        .map_err(|_| ImportError::UnsupportedAudio)?;
-
+    let AudioInput {
+        mut format,
+        mut decoder,
+        track_id,
+    } = open_audio(src)?;
     let mut writer = MonoWavWriter::create(dst)?;
     let mut resampler: Option<AreaResampler> = None;
     let mut interleaved: Vec<f32> = Vec::new();
@@ -105,24 +75,7 @@ pub(crate) fn decode_to_wav(src: &Path, dst: &Path) -> Result<(), ImportError> {
     let mut decoded_any = false;
     let mut skipped_packets = 0usize;
     let mut first_skip: Option<&'static str> = None;
-    loop {
-        let packet = match format.next_packet() {
-            Ok(Some(packet)) => packet,
-            Ok(None) => break,
-            Err(SymphoniaError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                if decoded_any {
-                    log::warn!("the imported file ends early; keeping the audio decoded so far");
-                }
-                break;
-            }
-            Err(SymphoniaError::IoError(e)) => return Err(ImportError::Read(e)),
-            Err(SymphoniaError::ResetRequired) => {
-                return Err(ImportError::Damaged(
-                    "its audio changes format part way through".to_string(),
-                ))
-            }
-            Err(e) => return Err(ImportError::Damaged(e.to_string())),
-        };
+    while let Some(packet) = next_packet(format.as_mut(), decoded_any)? {
         if packet.track_id != track_id {
             continue;
         }
@@ -148,12 +101,8 @@ pub(crate) fn decode_to_wav(src: &Path, dst: &Path) -> Result<(), ImportError> {
                 .chunks_exact(channels)
                 .map(|frame| frame.iter().sum::<f32>() / channels as f32),
         );
-        if resampler.as_ref().map(|rs| rs.from) != Some(u64::from(rate)) {
-            if let Some(old) = resampler.take() {
-                resampled.clear();
-                old.finish(&mut resampled);
-                writer.write(&resampled)?;
-            }
+        if resampler.as_ref().map(|rs| rs.from_rate) != Some(u64::from(rate)) {
+            flush(resampler.take(), &mut resampled, &mut writer)?;
             resampler = Some(AreaResampler::new(rate, SAMPLE_RATE_HZ));
         }
         if let Some(rs) = resampler.as_mut() {
@@ -162,11 +111,7 @@ pub(crate) fn decode_to_wav(src: &Path, dst: &Path) -> Result<(), ImportError> {
             writer.write(&resampled)?;
         }
     }
-    if let Some(rs) = resampler.take() {
-        resampled.clear();
-        rs.finish(&mut resampled);
-        writer.write(&resampled)?;
-    }
+    flush(resampler.take(), &mut resampled, &mut writer)?;
     if !decoded_any {
         return Err(match first_skip {
             Some(e) => ImportError::Damaged(e.to_string()),
@@ -184,85 +129,168 @@ pub(crate) fn decode_to_wav(src: &Path, dst: &Path) -> Result<(), ImportError> {
     Ok(())
 }
 
+struct AudioInput {
+    format: Box<dyn FormatReader>,
+    decoder: Box<dyn AudioDecoder>,
+    track_id: u32,
+}
+
+fn open_audio(src: &Path) -> Result<AudioInput, ImportError> {
+    let ext = src
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .filter(|e| IMPORT_EXTENSIONS.contains(&e.as_str()))
+        .ok_or(ImportError::UnsupportedFormat)?;
+    let file = std::fs::File::open(src).map_err(ImportError::Read)?;
+    let stream = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    hint.with_extension(&ext);
+    let format = symphonia::default::get_probe()
+        .probe(
+            &hint,
+            stream,
+            FormatOptions::default(),
+            MetadataOptions::default(),
+        )
+        .map_err(|e| match e {
+            SymphoniaError::IoError(io) if io.kind() != std::io::ErrorKind::UnexpectedEof => {
+                ImportError::Read(io)
+            }
+            _ => ImportError::NotReadable(ext.to_ascii_uppercase()),
+        })?;
+    let track = format
+        .default_track(TrackType::Audio)
+        .ok_or(ImportError::UnsupportedAudio)?;
+    let track_id = track.id;
+    let params = track
+        .codec_params
+        .as_ref()
+        .and_then(|p| p.audio())
+        .ok_or(ImportError::UnsupportedAudio)?;
+    let decoder = symphonia::default::get_codecs()
+        .make_audio_decoder(params, &AudioDecoderOptions::default())
+        .map_err(|_| ImportError::UnsupportedAudio)?;
+    Ok(AudioInput {
+        format,
+        decoder,
+        track_id,
+    })
+}
+
+fn next_packet(
+    format: &mut dyn FormatReader,
+    decoded_any: bool,
+) -> Result<Option<Packet>, ImportError> {
+    match format.next_packet() {
+        Ok(packet) => Ok(packet),
+        Err(SymphoniaError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+            if decoded_any {
+                log::warn!("the imported file ends early; keeping the audio decoded so far");
+            }
+            Ok(None)
+        }
+        Err(SymphoniaError::IoError(e)) => Err(ImportError::Read(e)),
+        Err(SymphoniaError::ResetRequired) => Err(ImportError::Damaged(
+            "its audio changes format part way through".to_string(),
+        )),
+        Err(e) => Err(ImportError::Damaged(e.to_string())),
+    }
+}
+
+fn flush(
+    resampler: Option<AreaResampler>,
+    out: &mut Vec<f32>,
+    writer: &mut MonoWavWriter,
+) -> Result<(), ImportError> {
+    if let Some(rs) = resampler {
+        out.clear();
+        rs.finish(out);
+        writer.write(out)?;
+    }
+    Ok(())
+}
+
 struct MonoWavWriter {
     inner: hound::WavWriter<std::io::BufWriter<std::fs::File>>,
-    file: std::fs::File,
+    fsync_handle: std::fs::File,
 }
 
 impl MonoWavWriter {
     fn create(path: &Path) -> Result<Self, ImportError> {
-        let write_error = |e: &dyn std::fmt::Display| ImportError::Write(e.to_string());
         let spec = hound::WavSpec {
             channels: 1,
             sample_rate: SAMPLE_RATE_HZ,
             bits_per_sample: 16,
             sample_format: hound::SampleFormat::Int,
         };
-        let file = std::fs::File::create(path).map_err(|e| write_error(&e))?;
-        let sync = file.try_clone().map_err(|e| write_error(&e))?;
-        let inner = hound::WavWriter::new(std::io::BufWriter::new(file), spec)
-            .map_err(|e| write_error(&e))?;
-        Ok(Self { inner, file: sync })
+        let file = std::fs::File::create(path).map_err(write_error)?;
+        let fsync_handle = file.try_clone().map_err(write_error)?;
+        let inner =
+            hound::WavWriter::new(std::io::BufWriter::new(file), spec).map_err(write_error)?;
+        Ok(Self {
+            inner,
+            fsync_handle,
+        })
     }
 
     fn write(&mut self, samples: &[f32]) -> Result<(), ImportError> {
         for s in samples {
             let v = (s.clamp(-1.0, 1.0) * 32_767.0) as i16;
-            self.inner
-                .write_sample(v)
-                .map_err(|e| ImportError::Write(e.to_string()))?;
+            self.inner.write_sample(v).map_err(write_error)?;
         }
         Ok(())
     }
 
     fn finalize(self) -> Result<u32, ImportError> {
         let frames = self.inner.len();
-        self.inner
-            .finalize()
-            .map_err(|e| ImportError::Write(e.to_string()))?;
-        crate::fs_perms::fsync_file_durable(&self.file)
-            .map_err(|e| ImportError::Write(e.to_string()))?;
+        self.inner.finalize().map_err(write_error)?;
+        crate::fs_perms::fsync_file_durable(&self.fsync_handle).map_err(write_error)?;
         Ok(frames)
     }
 }
 
+fn write_error(e: impl std::fmt::Display) -> ImportError {
+    ImportError::Write(e.to_string())
+}
+
 struct AreaResampler {
-    from: u64,
-    to: u64,
-    acc: f64,
-    filled: u64,
+    from_rate: u64,
+    to_rate: u64,
+    sum: f64,
+    weight: u64,
 }
 
 impl AreaResampler {
-    fn new(from: u32, to: u32) -> Self {
+    fn new(from_rate: u32, to_rate: u32) -> Self {
         Self {
-            from: u64::from(from),
-            to: u64::from(to),
-            acc: 0.0,
-            filled: 0,
+            from_rate: u64::from(from_rate),
+            to_rate: u64::from(to_rate),
+            sum: 0.0,
+            weight: 0,
         }
     }
 
     fn push(&mut self, input: &[f32], out: &mut Vec<f32>) {
         for &x in input {
-            let mut left = self.to;
+            let mut left = self.to_rate;
             while left > 0 {
-                let take = (self.from - self.filled).min(left);
-                self.acc += f64::from(x) * take as f64;
-                self.filled += take;
+                let take = (self.from_rate - self.weight).min(left);
+                self.sum += f64::from(x) * take as f64;
+                self.weight += take;
                 left -= take;
-                if self.filled == self.from {
-                    out.push((self.acc / self.from as f64) as f32);
-                    self.acc = 0.0;
-                    self.filled = 0;
+                if self.weight == self.from_rate {
+                    out.push((self.sum / self.from_rate as f64) as f32);
+                    self.sum = 0.0;
+                    self.weight = 0;
                 }
             }
         }
     }
 
     fn finish(self, out: &mut Vec<f32>) {
-        if self.filled > 0 {
-            out.push((self.acc / self.filled as f64) as f32);
+        if self.weight > 0 {
+            out.push((self.sum / self.weight as f64) as f32);
         }
     }
 }

@@ -279,6 +279,21 @@ describe('MeetingTranscriptionComponent', () => {
     expect(component.error()).toBe('');
   });
 
+  it('keeps the open recording and shows the reason when an import fails', async () => {
+    activeSig.set(makeTranscriptSession({ id: 'sess-open' }));
+    const controls = fixture.debugElement.query(By.directive(RecordingControlsComponent));
+    (controls.componentInstance as RecordingControlsComponent).errorOccurred.emit(
+      'Could not import "call.wma": this file type is not supported'
+    );
+    fixture.detectChanges();
+    expect(svc.subscribeToTranscript).not.toHaveBeenCalled();
+    expect(component.active()?.id).toBe('sess-open');
+    const banner: HTMLElement | null = fixture.nativeElement.querySelector(
+      '[data-testid="meeting-transcription-error"]'
+    );
+    expect(banner?.textContent).toContain('Could not import "call.wma"');
+  });
+
   it('starts following the recordings list through the list component', () => {
     expect(svc.watchRecordings).toHaveBeenCalled();
   });
