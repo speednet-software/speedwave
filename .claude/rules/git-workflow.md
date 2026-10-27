@@ -21,7 +21,7 @@
 
 ## Releases
 
-Full process, the promotion/hotfix state machine and the runbook steps are in `RELEASING.md`. In short: the tip of `dev` becomes a beta GitHub Release three times every working day, or at once via "Run workflow" (`beta.yml`), only commits with a beta can be promoted; promoting one commit's beta to stable is pushing a `release/0.M` branch at it (`release.yml`'s `promote` job flips the `prerelease` flag, no rebuild); a hotfix is a PR to the highest `release/0.M` that publishes `0.M.Z` immediately on merge. `GH_AUTOMATION_PAT` is the one token for every release/PR write; `RELEASE_TOKEN` no longer exists.
+Full process, the promotion/hotfix state machine and the runbook steps are in `RELEASING.md`. In short: the tip of `dev` becomes a beta GitHub Release once a night (00:17 UTC, Tuesday to Saturday), or at once via "Run workflow" (`beta.yml`), only commits with a beta can be promoted; promoting one commit's beta to stable is pushing a `release/0.M` branch at it (`release.yml`'s `promote` job flips the `prerelease` flag, no rebuild); a hotfix is a PR to the highest `release/0.M` that publishes `0.M.Z` immediately on merge. `GH_AUTOMATION_PAT` is the one token for every release/PR write; `RELEASE_TOKEN` no longer exists.
 
 ## Branch protection & CI — NEVER bypass
 
