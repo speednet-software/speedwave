@@ -12,7 +12,12 @@ import {
 import { TranscriptionService } from '../../services/transcription.service';
 import { TooltipDirective } from '../../shared/tooltip.directive';
 import { IconComponent } from '../../shared/icon.component';
-import { RECORD_SHORTCUT_HINT, formatClock, recordingName } from '../recording-format';
+import {
+  LANGUAGE_NAME,
+  RECORD_SHORTCUT_HINT,
+  formatClock,
+  recordingName,
+} from '../recording-format';
 
 /** Shortcut that pauses or resumes the recording while this view is open. */
 const PAUSE_SHORTCUT_HINT = '⌘⇧P';
@@ -205,9 +210,9 @@ export class RecordingBarComponent {
   /** Second line: language and source while capturing, what a pause means while paused. */
   readonly detail = computed(() => {
     if (this.paused()) return 'Nothing is being recorded. The microphone is off.';
-    const lang = (this.transcription.recordingLanguage() ?? this.summary()?.language) === 'en';
+    const lang = this.transcription.recordingLanguage() ?? this.summary()?.language ?? 'pl';
     const source = this.summary()?.source_label ?? '';
-    return [lang ? 'English' : 'Polish', source].filter(Boolean).join(' · ');
+    return [LANGUAGE_NAME[lang], source].filter(Boolean).join(' · ');
   });
 
   /** Wall-clock tick that drives the elapsed-time display while recording. */

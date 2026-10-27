@@ -11,7 +11,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use super::audio::{
     AudioCapture, AudioChunk, AudioSource, AudioSourceInfo, AudioStream, CaptureCapabilities,
     CaptureError, CaptureHealth, CaptureWarning, ZeroStreakDetector, DEFAULT_MIXED_SOURCE_LABEL,
-    SAMPLE_RATE_HZ,
+    IMPORTED_FILE_NOT_CAPTURED, SAMPLE_RATE_HZ,
 };
 use super::mix::{
     poll_paired_chunk, MixBuffer, MixSource, SingleStreamWatchdog, CHUNK_SAMPLES, KEEPALIVE_AFTER,
@@ -183,6 +183,9 @@ impl AudioCapture for WasapiAudioCapture {
                     watchdog: SingleStreamWatchdog::new(),
                 }))
             }
+            AudioSource::ImportedFile => Err(CaptureError::Unsupported(
+                IMPORTED_FILE_NOT_CAPTURED.to_string(),
+            )),
             AudioSource::Mixed { mic } => {
                 let mic_dev = resolve_mic(&host, mic)?;
                 let buf = Arc::new(Mutex::new(MixBuffer::new()));

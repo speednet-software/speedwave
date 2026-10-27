@@ -29,6 +29,7 @@ import {
   recordingName,
   shownTranscriptQuality,
   transcriptQuality,
+  LANGUAGE_NAME,
 } from '../recording-format';
 
 /** Tooltip on "Attach to new chat". */
@@ -611,7 +612,7 @@ export class LiveTranscriptComponent {
     () => this.summary()?.finalize_model ?? this.session()?.models_used.finalize ?? null
   );
 
-  /** Start time (under a title), length and source. */
+  /** Start time (under a title), length, source and the language it is transcribed in. */
   readonly meta = computed(() => {
     const s = this.session();
     if (!s) return '';
@@ -619,6 +620,7 @@ export class LiveTranscriptComponent {
       s.title ? formatRecordingDate(s.created_at) : '',
       formatDuration(this.summary()?.duration_secs ?? 0),
       s.audio_source.label,
+      LANGUAGE_NAME[s.language],
     ];
     return parts.filter(Boolean).join(' · ');
   });
@@ -718,10 +720,11 @@ export class LiveTranscriptComponent {
     () => ['done', 'postponed'].includes(this.status()) && this.lines().length > 0
   );
 
-  /** Continue recording is offered on a finished recording while nothing else records. */
+  /** Continue recording: a finished recording, not an imported file, while nothing else records. */
   readonly canContinue = computed(
     () =>
       this.status() === 'done' &&
+      this.session()?.audio_source.source.kind !== 'imported_file' &&
       !this.transcription.recording() &&
       this.transcription.pausedRecording() === null
   );

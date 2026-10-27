@@ -1,4 +1,4 @@
-import type { TranscriptStatus } from '../models/transcript';
+import type { Language, TranscriptStatus } from '../models/transcript';
 
 /** How a status chip is drawn: its text, the tooltip that explains it, and its colour. */
 export interface StatusChip {
@@ -6,6 +6,9 @@ export interface StatusChip {
   tooltip: string;
   tone: 'live' | 'busy' | 'muted' | 'error';
 }
+
+/** The name of each forced transcription language, as the view shows it. */
+export const LANGUAGE_NAME: Record<Language, string> = { pl: 'Polish', en: 'English' };
 
 /** Shortcut that starts or stops a recording while the recordings view is open. */
 export const RECORD_SHORTCUT_HINT = '⌘⇧R';

@@ -10,6 +10,7 @@ pub mod audio_macos;
 pub mod audio_windows;
 pub mod diarizer;
 mod gpu_probe;
+pub mod import;
 pub mod mix;
 pub mod model_catalog;
 pub mod model_store;
@@ -26,9 +27,10 @@ pub use audio::{
     bytes_to_f32_samples, drain_child_stderr, kill_child_gracefully, parse_wav_to_mono_f32,
     repair_wav_header, wav_duration, AudioCapture, AudioChunk, AudioSource, AudioSourceInfo,
     AudioStream, CaptureCapabilities, CaptureError, CaptureWarning, FileAudioCapture,
-    CHUNK_DURATION, DEFAULT_MIXED_SOURCE_LABEL, SAMPLE_RATE_HZ,
+    CHUNK_DURATION, DEFAULT_MIXED_SOURCE_LABEL, IMPORTED_FILE_NOT_CAPTURED, SAMPLE_RATE_HZ,
 };
 pub use diarizer::{DiarizeError, Diarizer, DiarizerLoader, NemotronDiarizer, SpeakerTurn};
+pub use import::{supported_formats, IMPORT_EXTENSIONS};
 pub use mix::{poll_paired_chunk, MixBuffer, MixSource, CHUNK_SAMPLES};
 pub use model_catalog::{
     catalog_model, whisper_model, CatalogModel, ModelRole, Quantization, WhisperModelInfo,

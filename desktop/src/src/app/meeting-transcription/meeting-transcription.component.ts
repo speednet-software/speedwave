@@ -13,7 +13,12 @@ import { TranscriptionService } from '../services/transcription.service';
 import { LoggerService } from '../services/logger.service';
 import { IconComponent } from '../shared/icon.component';
 import { formatBytes } from '../shared/format-bytes';
-import type { CaptureWarning, TranscriptSession, TranscriptSummary } from '../models/transcript';
+import {
+  IMPORT_FORMATS_LABEL,
+  type CaptureWarning,
+  type TranscriptSession,
+  type TranscriptSummary,
+} from '../models/transcript';
 import { RecordingControlsComponent } from './recording-controls/recording-controls.component';
 import { RecordingBarComponent } from './recording-bar/recording-bar.component';
 import { LiveTranscriptComponent } from './live-transcript/live-transcript.component';
@@ -118,6 +123,11 @@ import { SessionListComponent } from './session-list/session-list.component';
                   <li>
                     You can start the next recording while the last one is still being transcribed.
                   </li>
+                  <li data-testid="import-how-it-works">
+                    Import audio adds a recording made elsewhere, such as Teams, Zoom or a voice
+                    recorder ({{ importFormats }}), and transcribes it on this machine in the
+                    language chosen next to Record.
+                  </li>
                   <li>
                     Attach to new chat opens a chat with the transcript attached; nothing is sent
                     until you press Send.
@@ -140,7 +150,11 @@ import { SessionListComponent } from './session-list/session-list.component';
             </div>
           </div>
           @if (!transcription.captureOpen()) {
-            <app-recording-controls (started)="onStarted()" (errorOccurred)="onError($event)" />
+            <app-recording-controls
+              (started)="onStarted()"
+              (imported)="onOpenById($event)"
+              (errorOccurred)="onError($event)"
+            />
           }
         </header>
 
@@ -206,6 +220,8 @@ import { SessionListComponent } from './session-list/session-list.component';
 export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
   /** Latest error string (rendered in a banner). */
   readonly error = signal('');
+
+  protected readonly importFormats = IMPORT_FORMATS_LABEL;
 
   protected readonly transcription = inject(TranscriptionService);
   private readonly log = inject(LoggerService);

@@ -1076,7 +1076,7 @@ describe('LiveTranscriptComponent', () => {
       fixture.detectChanges();
       const el: HTMLElement = fixture.nativeElement;
       expect(el.querySelector('[data-testid="transcript-meta"]')!.textContent!.trim()).toBe(
-        '13 min · System'
+        '13 min · System · Polish'
       );
       expect(el.querySelector('[data-testid="transcript-quality"]')).toBeNull();
       expect(el.querySelector('[data-testid="smaller-model-banner"]')).toBeNull();
@@ -1217,6 +1217,36 @@ describe('LiveTranscriptComponent', () => {
       svc.pausedRecording.set(row({ id: 'other', status: { state: 'paused' } }));
       fixture.detectChanges();
       expect(q('resume-item')).toBeNull();
+    });
+
+    it('offers no Continue recording on an imported file, which has nothing to capture', () => {
+      fixture.componentRef.setInput(
+        'session',
+        session({
+          status: { state: 'done' },
+          audio_source: { source: { kind: 'imported_file' }, label: 'Imported file: sync.m4a' },
+          live_segments: [seg(0, 'hi')],
+        })
+      );
+      fixture.detectChanges();
+      expect(q('resume-item')).toBeNull();
+      expect(q('retranscribe-item')).not.toBeNull();
+      expect(q('reveal-btn')).not.toBeNull();
+    });
+
+    it('names the language an imported file was transcribed in', () => {
+      fixture.componentRef.setInput(
+        'session',
+        session({
+          status: { state: 'done' },
+          language: 'en',
+          audio_source: { source: { kind: 'imported_file' }, label: 'Imported file: sync.m4a' },
+          live_segments: [seg(0, 'hi')],
+        })
+      );
+      fixture.detectChanges();
+      const meta = q('transcript-meta')!.textContent!;
+      expect(meta).toContain('Imported file: sync.m4a · English');
     });
 
     it('deletes only after the confirmation', async () => {

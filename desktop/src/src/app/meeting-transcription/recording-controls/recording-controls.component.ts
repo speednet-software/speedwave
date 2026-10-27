@@ -12,17 +12,21 @@ import {
 import { TranscriptionService } from '../../services/transcription.service';
 import { TooltipDirective } from '../../shared/tooltip.directive';
 import { IconComponent } from '../../shared/icon.component';
-import type {
-  AudioSource,
-  AudioSourceInfo,
-  AudioSourceKind,
-  Language,
+import {
+  IMPORT_FORMATS_LABEL,
+  type AudioSource,
+  type AudioSourceInfo,
+  type AudioSourceKind,
+  type Language,
 } from '../../models/transcript';
-import { RECORD_SHORTCUT_HINT, recordingName } from '../recording-format';
+import { LANGUAGE_NAME, RECORD_SHORTCUT_HINT, recordingName } from '../recording-format';
 
 /** Tooltip on "Transcribe later" next to the transcription status. */
 const POSTPONE_TOOLTIP =
   'Stops these transcriptions so they do not slow this computer down during your next meeting. Open a recording and press Transcribe when you are ready.';
+/** Tooltip on the chooser. */
+const OPTIONS_TOOLTIP =
+  'The language applies to Record and Import audio; the source applies to Record only.';
 /** Tooltip on Record. */
 const START_TOOLTIP =
   'Records system audio and your microphone on this machine. Nothing leaves your computer.';
@@ -32,6 +36,7 @@ const SOURCE_SHORT_LABEL: Record<AudioSourceKind, string> = {
   mixed: 'Whole meeting',
   system_wide: 'Other people only',
   microphone: 'Your microphone only',
+  imported_file: 'Imported file',
 };
 
 /** A named input device for the microphone dropdown. */
@@ -57,10 +62,10 @@ function micName(label: string): string {
 }
 
 /**
- * Record (view header, idle): the Record button with its shortcut, a chooser showing the language
- * and source the next recording uses (remembered from the last one) that opens their pickers, and
- * a muted status of the transcriptions still running, with Transcribe later. Emits
- * `started`; errors go to the parent banner. ⌘⇧R / Ctrl+Shift+R starts.
+ * Record (view header, idle): a chooser showing the language (for Record and Import audio) and the
+ * source the next recording uses, remembered from the last one, then Import audio, the Record button
+ * with its shortcut, and a muted status of the transcriptions still running, with Transcribe later.
+ * Emits `started` and `imported`; errors go to the parent banner. ⌘⇧R / Ctrl+Shift+R starts.
  */
 @Component({
   selector: 'app-recording-controls',
@@ -84,12 +89,28 @@ function micName(label: string): string {
           "
           aria-haspopup="dialog"
           data-testid="recording-options"
+          [appTooltip]="optionsTooltip"
+          placement="bottom"
+          [attr.aria-label]="'Options for Record and Import audio: ' + choiceLabel()"
           [attr.aria-expanded]="optionsOpen()"
           (click)="optionsOpen.set(!optionsOpen())"
         >
           {{ choiceLabel() }}
           <app-icon name="chevron-down" class="h-3 w-3" />
         </button>
+        <span [appTooltip]="importTooltip()" placement="bottom">
+          <button
+            type="button"
+            class="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border border-[var(--line)] bg-[var(--bg-1)] px-2.5 py-1.5 text-[12px] text-[var(--ink-dim)] hover:text-[var(--ink)] disabled:cursor-not-allowed disabled:opacity-40"
+            data-testid="import-btn"
+            [attr.aria-busy]="importing()"
+            [disabled]="!canImport()"
+            (click)="importFile()"
+          >
+            <app-icon name="document" class="h-3.5 w-3.5" />
+            {{ importing() ? 'Importing…' : 'Import audio' }}
+          </button>
+        </span>
         <span [appTooltip]="startTooltip" [tooltipKbd]="shortcutHint" placement="bottom">
           <button
             type="button"
@@ -116,7 +137,7 @@ function micName(label: string): string {
           >
             <label class="mb-2.5 flex flex-col gap-1">
               <span class="text-[11.5px] text-[var(--ink-mute)]"
-                >Language spoken in the meeting</span
+                >Language spoken, for Record and Import audio</span
               >
               <select
                 class="min-w-0 truncate rounded border border-[var(--line-strong)] bg-[var(--bg-1)] py-1.5 pl-2 pr-8 text-[var(--ink)]"
@@ -128,7 +149,7 @@ function micName(label: string): string {
               </select>
             </label>
             <label class="mb-2.5 flex flex-col gap-1">
-              <span class="text-[11.5px] text-[var(--ink-mute)]">Record</span>
+              <span class="text-[11.5px] text-[var(--ink-mute)]">What Record captures</span>
               <select
                 class="min-w-0 truncate rounded border border-[var(--line-strong)] bg-[var(--bg-1)] py-1.5 pl-2 pr-8 text-[var(--ink)]"
                 data-testid="source-select"
@@ -163,7 +184,7 @@ function micName(label: string): string {
               </p>
             }
             <p class="border-t border-[var(--line)] pt-2.5 text-[11.5px] text-[var(--ink-mute)]">
-              Remembered for your next recording.
+              Remembered for your next recording and import.
             </p>
           </div>
         }
@@ -212,6 +233,8 @@ function micName(label: string): string {
 export class RecordingControlsComponent implements OnInit {
   /** Emitted with the new session id once recording starts. */
   readonly started = output<string>();
+  /** Emitted with the new session id once an audio file is imported. */
+  readonly imported = output<string>();
   /** Forwards errors to the parent banner. */
   readonly errorOccurred = output<string>();
 
@@ -223,6 +246,8 @@ export class RecordingControlsComponent implements OnInit {
   readonly sourceIndex = signal(0);
   /** Disables Record while a start is in flight. */
   readonly busy = signal(false);
+  /** Disables Import audio while the picked file is decoded. */
+  readonly importing = signal(false);
   /** Whether the language/source pickers are open. */
   readonly optionsOpen = signal(false);
   private readonly transcription = inject(TranscriptionService);
@@ -254,7 +279,7 @@ export class RecordingControlsComponent implements OnInit {
 
   /** "Polish · Whole meeting": what the next recording uses, on the chooser. */
   readonly choiceLabel = computed(() => {
-    const lang = this.language() === 'pl' ? 'Polish' : 'English';
+    const lang = LANGUAGE_NAME[this.language()];
     const kind = this.sources()[this.sourceIndex()]?.source.kind;
     return kind ? `${lang} · ${SOURCE_SHORT_LABEL[kind]}` : lang;
   });
@@ -270,24 +295,41 @@ export class RecordingControlsComponent implements OnInit {
       : `Transcribing ${recordingName(rec)} · ${Math.round(rec.status.progress * 100)}%`;
   });
 
-  /** Whether Record can be pressed now. */
+  /** Whether Record can be pressed now: not while an import is picked or decoded. */
   readonly canStart = computed(
     () =>
       !this.busy() &&
+      !this.importing() &&
       !this.transcription.captureOpen() &&
       this.sources().length > 0 &&
       !(this.modelsKnown() && !this.hasModel())
   );
 
+  /** Whether Import audio can be pressed now. */
+  readonly canImport = computed(
+    () => !this.importing() && !this.busy() && !(this.modelsKnown() && !this.hasModel())
+  );
+
+  /** Tooltip on Import audio: what it takes, and the language from the chooser it transcribes in. */
+  readonly importTooltip = computed(
+    () =>
+      `Adds an audio or video file (${IMPORT_FORMATS_LABEL}) to your recordings and transcribes ` +
+      `it in ${LANGUAGE_NAME[this.language()]}, the language set on the left. ` +
+      'Nothing leaves your computer.'
+  );
+
   protected readonly startTooltip = START_TOOLTIP;
+  protected readonly optionsTooltip = OPTIONS_TOOLTIP;
   protected readonly postponeTooltip = POSTPONE_TOOLTIP;
 
   /** `true` while "Transcribe later" puts the running transcriptions off. */
   readonly postponing = signal(false);
   protected readonly shortcutHint = RECORD_SHORTCUT_HINT;
 
-  /** Loads the source list and restores the last recording's choice. */
+  /** Restores the remembered language at once, so Import audio has it, then loads the sources. */
   async ngOnInit(): Promise<void> {
+    const saved = this.transcription.recordingChoice();
+    if (saved) this.language.set(saved.language);
     try {
       const list = await this.transcription.listAudioSources();
       this.sources.set(list);
@@ -419,6 +461,21 @@ export class RecordingControlsComponent implements OnInit {
       this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
     } finally {
       this.busy.set(false);
+      this.cdr.markForCheck();
+    }
+  }
+
+  /** Asks for an audio file and transcribes it in the chosen language; a closed picker is no error. */
+  async importFile(): Promise<void> {
+    this.optionsOpen.set(false);
+    this.importing.set(true);
+    try {
+      const id = await this.transcription.importFile(this.language());
+      if (id) this.imported.emit(id);
+    } catch (e: unknown) {
+      this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
+    } finally {
+      this.importing.set(false);
       this.cdr.markForCheck();
     }
   }

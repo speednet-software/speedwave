@@ -21,3 +21,9 @@
 *.cer        binary
 *.der        binary
 *.gpg        binary
+*.mp3        binary
+*.m4a        binary
+*.mp4        binary
+*.flac       binary
+*.ogg        binary
+*.wav        binary

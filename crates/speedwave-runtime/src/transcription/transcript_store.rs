@@ -9,10 +9,24 @@ use parking_lot::RwLock;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use crate::transcription::transcriber::{DecodeCancel, Segment};
+use crate::transcription::audio::AudioSourceInfo;
+use crate::transcription::import::{decode_to_wav, ImportError};
+use crate::transcription::transcriber::{DecodeCancel, Language, Segment};
 use crate::transcription::transcript::{
     normalize_title, DiarizationRecord, TranscriptSession, TranscriptStatus, TranscriptSummary,
+    AUDIO_WAV,
 };
+
+/// Name prefix of the directory an import decodes into before it becomes a session directory;
+/// not a session id, so the list never shows it. A failed import or the startup sweep removes it.
+const IMPORT_STAGING_PREFIX: &str = ".import-";
+
+/// How often an import retries moving its staging directory into place while another process
+/// still holds a file in it (on Windows an antivirus or the indexer scanning the new audio).
+const IMPORT_RENAME_ATTEMPTS: u32 = 10;
+
+/// Pause between those attempts.
+const IMPORT_RENAME_PAUSE: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// Capacity of each session's `broadcast` channel — generous enough that a slow subscriber
 /// falls behind only after thousands of events; if it does, it re-subscribes via the snapshot.
@@ -138,6 +152,9 @@ pub enum StoreError {
     /// The offline pass writing was put off or replaced by a newer one; it must stop quietly.
     #[error("the offline pass of transcript {0} was put off or replaced")]
     PassEnded(Uuid),
+    /// An imported audio file could not be decoded; the text is for the user.
+    #[error("{0}")]
+    Import(#[from] ImportError),
 }
 
 /// One offline pass's claim on its session. The store accepts the pass's writes only while the
@@ -241,6 +258,46 @@ impl TranscriptStore {
         Ok(id)
     }
 
+    /// Creates a session from the audio file at `src` (SPEED-462), waiting for its offline pass.
+    /// The file is decoded in a staging directory first, so one that cannot be read leaves nothing.
+    pub fn import(
+        &self,
+        src: &Path,
+        language: Language,
+        audio_source: AudioSourceInfo,
+        title: &str,
+    ) -> Result<TranscriptSession, StoreError> {
+        let id = Uuid::new_v4();
+        let staging = self.root.join(format!("{IMPORT_STAGING_PREFIX}{id}"));
+        let dir = self.session_dir(id);
+        let mut session =
+            TranscriptSession::new_with_id(id, language, audio_source, dir.join(AUDIO_WAV));
+        session.title = normalize_title(title);
+        session.status = TranscriptStatus::Finalizing { progress: 0.0 };
+        std::fs::create_dir_all(&staging)?;
+        restrict_dir_perms(&staging);
+        let staged = decode_to_wav(src, &staging.join(AUDIO_WAV))
+            .map_err(StoreError::from)
+            .and_then(|()| Ok(session.save(&staging)?))
+            .and_then(|()| {
+                Ok(retry_while_denied(
+                    || std::fs::rename(&staging, &dir),
+                    IMPORT_RENAME_ATTEMPTS,
+                    IMPORT_RENAME_PAUSE,
+                )?)
+            });
+        if let Err(e) = staged {
+            remove_failed_import(&staging);
+            return Err(e);
+        }
+        crate::fs_perms::fsync_parent_dir(&self.root);
+        if let Err(e) = self.create(session.clone()) {
+            remove_failed_import(&dir);
+            return Err(e);
+        }
+        Ok(session)
+    }
+
     /// Returns a snapshot of session `id` (loads from disk if not in cache).
     pub fn get(&self, id: Uuid) -> Result<TranscriptSession, StoreError> {
         if let Some(e) = self.sessions.get(&id) {
@@ -301,6 +358,7 @@ impl TranscriptStore {
     /// [`INTERRUPTED_REASON`], after repairing the WAV headers its unfinished writer left at zero,
     /// so the offline pass can transcribe it again. Run once at startup, before any recording.
     pub fn reconcile_interrupted(&self) -> usize {
+        self.remove_unfinished_imports();
         let mut reconciled = 0;
         for session in self.sessions_on_disk() {
             if !matches!(
@@ -326,6 +384,23 @@ impl TranscriptStore {
             }
         }
         reconciled
+    }
+
+    /// Removes the staging directories of imports an earlier run left half-decoded.
+    fn remove_unfinished_imports(&self) {
+        let Ok(entries) = std::fs::read_dir(&self.root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let staged = entry.file_type().is_ok_and(|t| t.is_dir())
+                && entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|n| n.starts_with(IMPORT_STAGING_PREFIX));
+            if staged {
+                remove_failed_import(&entry.path());
+            }
+        }
     }
 
     /// Every session on disk (in-memory copy for active ones), newest first.
@@ -942,6 +1017,32 @@ struct EntryHandle {
     tx: broadcast::Sender<TranscriptEvent>,
 }
 
+fn retry_while_denied<T>(
+    mut op: impl FnMut() -> std::io::Result<T>,
+    attempts: u32,
+    pause: std::time::Duration,
+) -> std::io::Result<T> {
+    let mut tried = 1;
+    loop {
+        match op() {
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && tried < attempts => {
+                tried += 1;
+                std::thread::sleep(pause);
+            }
+            done => return done,
+        }
+    }
+}
+
+fn remove_failed_import(dir: &Path) {
+    if let Err(e) = std::fs::remove_dir_all(dir) {
+        log::warn!(
+            "failed to remove an unfinished import at {}: {e}",
+            dir.display()
+        );
+    }
+}
+
 fn restrict_dir_perms(dir: &Path) {
     if let Err(e) = crate::fs_perms::set_owner_only_dir(dir) {
         log::warn!("failed to restrict permissions on {}: {e}", dir.display());
@@ -978,6 +1079,223 @@ mod tests {
             source: None,
             speaker_id: None,
         }
+    }
+
+    fn imported_file() -> AudioSourceInfo {
+        AudioSourceInfo {
+            source: AudioSource::ImportedFile,
+            label: "Imported file: standup.wav".to_string(),
+        }
+    }
+
+    fn write_tone_wav(path: &Path, rate: u32, secs: u32) {
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: rate,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(path, spec).unwrap();
+        for i in 0..rate * secs {
+            let v = ((i as f32 * 0.05).sin() * 8_000.0) as i16;
+            w.write_sample(v).unwrap();
+            w.write_sample(v).unwrap();
+        }
+        w.finalize().unwrap();
+    }
+
+    fn names_in(root: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn an_import_creates_a_session_waiting_for_its_pass_on_the_decoded_audio() {
+        let src_dir = tempfile::tempdir().unwrap();
+        let src = src_dir.path().join("standup.wav");
+        write_tone_wav(&src, 44_100, 2);
+        let root = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(root.path());
+        let mut changes = store.watch();
+
+        let session = store
+            .import(&src, Language::En, imported_file(), "  Daily\tstandup ")
+            .unwrap();
+
+        let audio = store.session_dir(session.id).join(AUDIO_WAV);
+        assert_eq!(session.all_audio_parts(), vec![audio.clone()]);
+        assert_eq!(store.get(session.id).unwrap(), session);
+        assert_eq!(
+            session.status,
+            TranscriptStatus::Finalizing { progress: 0.0 }
+        );
+        assert_eq!(session.title.as_deref(), Some("Daily standup"));
+        assert_eq!(session.language, Language::En);
+        assert_eq!(session.audio_source, imported_file());
+        let row = &store.list()[0];
+        assert_eq!(row.id, session.id);
+        assert!(
+            (row.duration_secs - 2.0).abs() < 1e-3,
+            "{}",
+            row.duration_secs
+        );
+        assert_eq!(changes.try_recv().unwrap(), session.id);
+        let spec = hound::WavReader::open(&audio).unwrap().spec();
+        assert_eq!((spec.channels, spec.sample_rate), (1, 16_000));
+        assert_eq!(names_in(root.path()), vec![session.id.to_string()]);
+    }
+
+    #[test]
+    fn a_blank_import_title_falls_back_to_the_start_time() {
+        let src_dir = tempfile::tempdir().unwrap();
+        let src = src_dir.path().join("blank.wav");
+        write_tone_wav(&src, 16_000, 1);
+        let root = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(root.path());
+
+        let session = store
+            .import(&src, Language::Pl, imported_file(), " ")
+            .unwrap();
+
+        assert_eq!(session.title, None);
+    }
+
+    #[test]
+    fn a_failed_import_leaves_no_session_and_no_directory() {
+        let src_dir = tempfile::tempdir().unwrap();
+        let src = src_dir.path().join("broken.mp3");
+        std::fs::write(&src, b"not audio at all").unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(root.path());
+        let mut changes = store.watch();
+
+        let err = store
+            .import(&src, Language::Pl, imported_file(), "broken")
+            .unwrap_err();
+
+        assert!(matches!(err, StoreError::Import(_)), "{err:?}");
+        assert!(err.to_string().contains("not a readable MP3 file"), "{err}");
+        assert!(names_in(root.path()).is_empty());
+        assert!(store.list().is_empty());
+        assert!(
+            changes.try_recv().is_err(),
+            "a failed import notifies nothing"
+        );
+    }
+
+    #[test]
+    fn an_import_moved_into_place_but_not_yet_created_is_a_session_on_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        let dir = root.path().join(id.to_string());
+        let staging = root.path().join(format!("{IMPORT_STAGING_PREFIX}{id}"));
+        std::fs::create_dir_all(&staging).unwrap();
+        write_tone_wav(&staging.join(AUDIO_WAV), 16_000, 1);
+        let mut session =
+            TranscriptSession::new_with_id(id, Language::Pl, imported_file(), dir.join(AUDIO_WAV));
+        session.status = TranscriptStatus::Finalizing { progress: 0.0 };
+        session.save(&staging).unwrap();
+        std::fs::rename(&staging, &dir).unwrap();
+        let restarted = TranscriptStore::with_root(root.path());
+
+        assert_eq!(restarted.reconcile_interrupted(), 1);
+
+        let rows = restarted.list();
+        assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), vec![id]);
+        assert!(
+            matches!(rows[0].status, TranscriptStatus::Failed { .. }),
+            "{:?}",
+            rows[0].status
+        );
+    }
+
+    #[test]
+    fn a_denied_rename_is_retried_until_it_succeeds() {
+        let mut calls = 0;
+        let out = retry_while_denied(
+            || {
+                calls += 1;
+                if calls < 3 {
+                    Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+                } else {
+                    Ok(calls)
+                }
+            },
+            10,
+            std::time::Duration::ZERO,
+        );
+        assert_eq!(out.unwrap(), 3);
+    }
+
+    #[test]
+    fn a_rename_still_denied_after_every_attempt_fails() {
+        let mut calls = 0;
+        let out: std::io::Result<()> = retry_while_denied(
+            || {
+                calls += 1;
+                Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            },
+            4,
+            std::time::Duration::ZERO,
+        );
+        assert_eq!(
+            out.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(calls, 4);
+    }
+
+    #[test]
+    fn any_other_rename_error_is_not_retried() {
+        let mut calls = 0;
+        let out: std::io::Result<()> = retry_while_denied(
+            || {
+                calls += 1;
+                Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+            },
+            10,
+            std::time::Duration::ZERO,
+        );
+        assert_eq!(out.unwrap_err().kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn reconcile_removes_only_the_staging_of_an_unfinished_import() {
+        let root = tempfile::tempdir().unwrap();
+        let first = TranscriptStore::with_root(root.path());
+        let kept = first
+            .create(mk_session(&root.path().join("a.wav")))
+            .unwrap();
+        let staging = root
+            .path()
+            .join(format!("{IMPORT_STAGING_PREFIX}{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join(AUDIO_WAV), b"RIFF").unwrap();
+        let without_json = first.session_dir(Uuid::new_v4());
+        std::fs::create_dir_all(&without_json).unwrap();
+        std::fs::write(without_json.join(AUDIO_WAV), b"RIFF").unwrap();
+        let restarted = TranscriptStore::with_root(root.path());
+
+        restarted.reconcile_interrupted();
+
+        assert!(!staging.exists());
+        assert!(
+            without_json.join(AUDIO_WAV).exists(),
+            "audio of a session that lost its transcript.json is never deleted"
+        );
+        assert!(restarted
+            .session_dir(kept)
+            .join(crate::transcription::transcript::TRANSCRIPT_JSON)
+            .exists());
+        assert!(restarted
+            .list()
+            .iter()
+            .all(|r| !r.id.to_string().starts_with('.')));
     }
 
     #[tokio::test]
