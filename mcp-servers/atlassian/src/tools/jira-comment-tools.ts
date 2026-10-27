@@ -17,7 +17,7 @@ import { AtlassianClient } from '../client.js';
 import { createJiraCommentsClient } from '../domains/jira-comments.js';
 import type { AdfDoc } from '../types.js';
 import { commentSchema, commentsSchema, worklogSchema } from './jira-schemas.js';
-import { unconfiguredDefinitions, withValidation } from './validation.js';
+import { listResult, unconfiguredDefinitions, withValidation } from './validation.js';
 import { resolveRichText, type RichTextResult } from './rich-text.js';
 
 const addCommentTool: Tool = {
@@ -84,6 +84,7 @@ const getCommentsTool: Tool = {
     properties: {
       success: { type: 'boolean' },
       comments: commentsSchema,
+      count: { type: 'number' },
       error: { type: 'string' },
     },
     required: ['success'],
@@ -167,7 +168,7 @@ export function createJiraCommentTools(client: AtlassianClient | null): ToolDefi
       tool: getCommentsTool,
       handler: withValidation(client, async (_c, params) => {
         const { issue, max_results } = params as { issue: string; max_results?: number };
-        return jsonResult({ comments: await comments.list(issue, { maxResults: max_results }) });
+        return listResult('comments', await comments.list(issue, { maxResults: max_results }));
       }),
     },
     {

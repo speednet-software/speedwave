@@ -47,8 +47,10 @@ Jira tools take and return snake_case names (`max_results`, `transition_id`, `ac
 - Jira text is Markdown in both directions: `description`, comment `body` and worklog `comment` are converted to ADF on write, and descriptions and comments come back as Markdown. ADF nodes with no Markdown form come back as `[adf:<type>]` markers. Content Markdown cannot express goes through the escape hatch `description_adf`, `body_adf` or `comment_adf` (send one or the other, not both). `searchIssues` returns no `description`; use `getIssue`.
 - `createIssue` and `updateIssue` accept `parent` (key or ID; `null` detaches on update), `components` (names from `listComponents`; on update the list replaces the current one and `[]` clears it), `assignee` (account ID, `"me"` or `null`) and, on update, `type`. A Jira 400 on these becomes an error that names the next tool to call.
 - `linkIssues({ issue, relation, target })` reads the relation from the side of `issue` (`PROJ-1 blocks PROJ-2`); valid relation texts come from `listLinkTypes`. `unlinkIssues` takes the `links[].id` returned by `getIssue` or `searchIssues`.
-- `listIssueTypes` takes either `project` (types available there) or `issue` (types that issue can change to).
-- `deleteIssue` is irreversible and fails while the issue has sub-tasks.
+- `listIssueTypes` takes either `project` (types available there) or `issue` (types that issue can change to). For `issue` it reads the issue's `editmeta` and falls back to the project's createmeta when `editmeta` lists no issue types.
+- Every list tool returns `{ <items key>: [...], count }`. `getProject` and `listProjects` include each project's `components`.
+- `deleteIssue` is irreversible and fails while the issue has sub-tasks. A 403 or 404 from Jira becomes an error that says nothing was removed.
+- When `updateIssue` with `type` is refused, the error names the issue's current status and the requested type.
 - The project allowlist covers the issue a call names, `parent`, and both ends of a link.
 
 Confluence page bodies accept `bodyText` or raw `bodyStorage` (storage representation); `updatePage` fetches the current version automatically.

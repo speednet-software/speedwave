@@ -15,6 +15,10 @@ import { deriveBrowseUrl } from '../url.js';
 import type { JiraComponent, JiraIssueType, JiraProject } from '../types.js';
 import { mapUser } from './normalizers.js';
 
+interface EditMeta {
+  fields?: { issuetype?: { allowedValues?: unknown[] } };
+}
+
 interface CreateMetaIssueTypesPage {
   issueTypes?: unknown[];
   createMetaIssueType?: unknown[];
@@ -87,19 +91,10 @@ export function createJiraProjectsClient(client: AtlassianClient): JiraProjectsC
         (issue.fields?.project as { key?: unknown } | undefined)?.key ?? ''
       );
       assertJiraProjectAllowed(projectKey, client.jiraProjectKeys);
-      const allowed: unknown[] = [];
-      let total = 0;
-      do {
-        const page = await client.get<CreateMetaIssueTypesPage>(
-          `/rest/api/3/issue/createmeta/${encodeURIComponent(projectKey)}/issuetypes`,
-          { startAt: allowed.length, maxResults: CREATE_META_PAGE_SIZE }
-        );
-        const types = page.issueTypes ?? page.createMetaIssueType ?? [];
-        if (types.length === 0) break;
-        allowed.push(...types);
-        total = page.total ?? 0;
-      } while (allowed.length < total);
-      return allowed
+      const allowed = await editMetaIssueTypes(client, issueIdOrKey);
+      const candidates =
+        allowed.length > 0 ? allowed : await createMetaIssueTypes(client, projectKey);
+      return candidates
         .map(mapIssueType)
         .filter((type) => type.id !== current.id && type.subtask === current.subtask);
     },
@@ -112,6 +107,36 @@ export function createJiraProjectsClient(client: AtlassianClient): JiraProjectsC
       return (Array.isArray(res) ? res : []).map(mapComponent);
     },
   };
+}
+
+async function editMetaIssueTypes(
+  client: AtlassianClient,
+  issueIdOrKey: string
+): Promise<unknown[]> {
+  const meta = await client.get<EditMeta>(
+    `/rest/api/3/issue/${encodeURIComponent(issueIdOrKey)}/editmeta`
+  );
+  const values = meta.fields?.issuetype?.allowedValues;
+  return Array.isArray(values) ? values : [];
+}
+
+async function createMetaIssueTypes(
+  client: AtlassianClient,
+  projectKey: string
+): Promise<unknown[]> {
+  const collected: unknown[] = [];
+  let total = 0;
+  do {
+    const page = await client.get<CreateMetaIssueTypesPage>(
+      `/rest/api/3/issue/createmeta/${encodeURIComponent(projectKey)}/issuetypes`,
+      { startAt: collected.length, maxResults: CREATE_META_PAGE_SIZE }
+    );
+    const types = page.issueTypes ?? page.createMetaIssueType ?? [];
+    if (types.length === 0) break;
+    collected.push(...types);
+    total = page.total ?? 0;
+  } while (collected.length < total);
+  return collected;
 }
 
 /**
@@ -127,6 +152,7 @@ export function mapProject(raw: unknown): JiraProject {
     project_type_key: o.projectTypeKey ? String(o.projectTypeKey) : undefined,
     lead: o.lead ? mapUser(o.lead) : null,
     url: o.self ? deriveBrowseUrl(String(o.self), String(o.key ?? '')) : undefined,
+    components: (Array.isArray(o.components) ? o.components : []).map(mapComponent),
   };
 }
 

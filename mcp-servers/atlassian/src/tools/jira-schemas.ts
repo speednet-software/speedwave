@@ -36,6 +36,11 @@ export const worklogSchema = objectOf({
   created: { type: 'string' },
 });
 
+/** A component list. */
+export const componentsSchema = arrayOf(
+  objectOf({ id: { type: 'string' }, name: { type: 'string' }, description: { type: 'string' } })
+);
+
 /** A project. */
 export const projectSchema = objectOf({
   id: { type: 'string' },
@@ -44,6 +49,7 @@ export const projectSchema = objectOf({
   project_type_key: { type: 'string' },
   lead: userSchema,
   url: { type: 'string' },
+  components: componentsSchema,
 });
 
 /** A project list. */
@@ -57,11 +63,6 @@ export const issueTypesSchema = arrayOf(
     description: { type: 'string' },
     subtask: { type: 'boolean' },
   })
-);
-
-/** A component list. */
-export const componentsSchema = arrayOf(
-  objectOf({ id: { type: 'string' }, name: { type: 'string' }, description: { type: 'string' } })
 );
 
 /** An Agile board. */

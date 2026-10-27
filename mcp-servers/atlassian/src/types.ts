@@ -159,6 +159,7 @@ export interface JiraProject {
   project_type_key?: string;
   lead?: JiraUser | null;
   url?: string;
+  components: JiraComponent[];
 }
 
 /** Jira issue type metadata. */

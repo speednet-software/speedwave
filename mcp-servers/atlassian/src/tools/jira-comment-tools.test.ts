@@ -208,6 +208,7 @@ describe('getComments', () => {
       maxResults: 10,
     });
     expect((result.comments as Array<{ body: string }>)[0].body).toBe('hello');
+    expect(result.count).toBe(1);
   });
 
   it('renders ADF nodes without a Markdown equivalent as visible markers', async () => {
@@ -252,6 +253,7 @@ describe('getComments', () => {
 
     expect(payload(await handlerFor('getComments')({ issue: 'PROJ-1' }))).toEqual({
       comments: [],
+      count: 0,
     });
   });
 

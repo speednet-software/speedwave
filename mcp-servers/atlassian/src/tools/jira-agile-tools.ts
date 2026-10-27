@@ -22,7 +22,7 @@ import {
   sprintSchema,
   sprintsSchema,
 } from './jira-schemas.js';
-import { unconfiguredDefinitions, withValidation } from './validation.js';
+import { listResult, unconfiguredDefinitions, withValidation } from './validation.js';
 
 const listBoardsTool: Tool = {
   name: 'listBoards',
@@ -45,6 +45,7 @@ const listBoardsTool: Tool = {
     properties: {
       success: { type: 'boolean' },
       boards: boardsSchema,
+      count: { type: 'number' },
       error: { type: 'string' },
     },
     required: ['success'],
@@ -130,6 +131,7 @@ const listSprintsTool: Tool = {
     properties: {
       success: { type: 'boolean' },
       sprints: sprintsSchema,
+      count: { type: 'number' },
       error: { type: 'string' },
     },
     required: ['success'],
@@ -227,9 +229,10 @@ export function createJiraAgileTools(client: AtlassianClient | null): ToolDefini
           project?: string;
           max_results?: number;
         };
-        return jsonResult({
-          boards: await agile.listBoards({ name, project, maxResults: max_results }),
-        });
+        return listResult(
+          'boards',
+          await agile.listBoards({ name, project, maxResults: max_results })
+        );
       }),
     },
     {
@@ -254,9 +257,10 @@ export function createJiraAgileTools(client: AtlassianClient | null): ToolDefini
           state?: 'active' | 'future' | 'closed';
           max_results?: number;
         };
-        return jsonResult({
-          sprints: await agile.listSprints(board_id, { state, maxResults: max_results }),
-        });
+        return listResult(
+          'sprints',
+          await agile.listSprints(board_id, { state, maxResults: max_results })
+        );
       }),
     },
     {

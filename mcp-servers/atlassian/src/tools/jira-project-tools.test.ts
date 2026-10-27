@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { META_KEYS, type ToolsCallResult } from '@speedwave/mcp-shared';
 import { createJiraProjectTools } from './jira-project-tools.js';
-import { declaredFields } from './jira-test-helpers.js';
+import { declaredFields, schemaKeys } from './jira-test-helpers.js';
 import type { AtlassianClient } from '../client.js';
 
 const client = {
@@ -116,9 +116,23 @@ describe('listProjects', () => {
           project_type_key: 'software',
           lead: { account_id: 'u1', name: 'Lead' },
           url: 'https://acme.atlassian.net/browse/PROJ',
+          components: [],
         },
       ],
+      count: 1,
     });
+  });
+
+  it('includes the components Jira returns with each project', async () => {
+    client.get.mockResolvedValueOnce({
+      values: [rawProject({ components: [{ id: '10', name: 'core' }] })],
+    });
+
+    const result = payload(await handlerFor('listProjects')({}));
+
+    expect((result.projects as Array<{ components: unknown }>)[0].components).toEqual([
+      { id: '10', name: 'core' },
+    ]);
   });
 
   it('filters by the configured allowlist', async () => {
@@ -150,6 +164,24 @@ describe('getProject', () => {
     expect(result.project).toMatchObject({ key: 'PROJ', name: 'Project' });
   });
 
+  it('returns the components of the project', async () => {
+    client.get.mockResolvedValueOnce(
+      rawProject({
+        components: [
+          { id: '10', name: 'core', description: 'Core engine', self: 'x' },
+          { id: '11', name: 'ui' },
+        ],
+      })
+    );
+
+    const result = payload(await handlerFor('getProject')({ project: 'PROJ' }));
+
+    expect((result.project as { components: unknown }).components).toEqual([
+      { id: '10', name: 'core', description: 'Core engine' },
+      { id: '11', name: 'ui' },
+    ]);
+  });
+
   it('rejects a project outside the allowlist', async () => {
     client.jiraProjectKeys = ['ALLOWED'];
     client.get.mockResolvedValueOnce(rawProject({ key: 'OTHER' }));
@@ -169,7 +201,7 @@ describe('getProject', () => {
 
     const result = payload(await handlerFor('getProject')({ project: 'X' }));
 
-    expect(result.project).toEqual({ id: '', key: '', name: '', lead: null });
+    expect(result.project).toEqual({ id: '', key: '', name: '', lead: null, components: [] });
   });
 });
 
@@ -194,6 +226,7 @@ describe('listIssueTypes', () => {
         { id: '2', name: 'Task', subtask: false },
         { id: '3', name: 'Sub-task', subtask: true },
       ],
+      count: 3,
     });
   });
 
@@ -202,6 +235,7 @@ describe('listIssueTypes', () => {
 
     expect(payload(await handlerFor('listIssueTypes')({ project: 'PROJ' }))).toEqual({
       issue_types: [],
+      count: 0,
     });
   });
 
@@ -213,6 +247,7 @@ describe('listIssueTypes', () => {
           project: { key: 'PROJ' },
         },
       })
+      .mockResolvedValueOnce({})
       .mockResolvedValueOnce({ issueTypes: projectTypes });
 
     const result = payload(await handlerFor('listIssueTypes')({ issue: 'PROJ-7' }));
@@ -220,11 +255,62 @@ describe('listIssueTypes', () => {
     expect(client.get).toHaveBeenNthCalledWith(1, '/rest/api/3/issue/PROJ-7', {
       fields: 'issuetype,project',
     });
-    expect(client.get).toHaveBeenNthCalledWith(2, '/rest/api/3/issue/createmeta/PROJ/issuetypes', {
+    expect(client.get).toHaveBeenNthCalledWith(3, '/rest/api/3/issue/createmeta/PROJ/issuetypes', {
       startAt: 0,
       maxResults: 100,
     });
-    expect(result).toEqual({ issue_types: [{ id: '2', name: 'Task', subtask: false }] });
+    expect(result).toEqual({ issue_types: [{ id: '2', name: 'Task', subtask: false }], count: 1 });
+  });
+
+  it('reads the allowed types from the issue editmeta without touching createmeta', async () => {
+    client.get
+      .mockResolvedValueOnce({
+        fields: { issuetype: { id: '1', name: 'Bug', subtask: false }, project: { key: 'PROJ' } },
+      })
+      .mockResolvedValueOnce({
+        fields: {
+          issuetype: {
+            allowedValues: [
+              { id: '1', name: 'Bug', subtask: false },
+              { id: '2', name: 'Task', subtask: false },
+              { id: '3', name: 'Sub-task', subtask: true },
+              { id: '6', name: 'Story', subtask: false },
+            ],
+          },
+        },
+      });
+
+    const result = payload(await handlerFor('listIssueTypes')({ issue: 'PROJ-7' }));
+
+    expect(client.get).toHaveBeenNthCalledWith(2, '/rest/api/3/issue/PROJ-7/editmeta');
+    expect(client.get).toHaveBeenCalledTimes(2);
+    expect(result).toEqual({
+      issue_types: [
+        { id: '2', name: 'Task', subtask: false },
+        { id: '6', name: 'Story', subtask: false },
+      ],
+      count: 2,
+    });
+  });
+
+  it('falls back to createmeta when editmeta has no issuetype field', async () => {
+    client.get
+      .mockResolvedValueOnce({
+        fields: { issuetype: { id: '1', name: 'Bug', subtask: false }, project: { key: 'PROJ' } },
+      })
+      .mockResolvedValueOnce({ fields: { summary: {} } })
+      .mockResolvedValueOnce({ issueTypes: projectTypes });
+
+    const result = payload(await handlerFor('listIssueTypes')({ issue: 'PROJ-7' }));
+
+    expect(client.get).toHaveBeenNthCalledWith(3, '/rest/api/3/issue/createmeta/PROJ/issuetypes', {
+      startAt: 0,
+      maxResults: 100,
+    });
+    expect(result).toEqual({
+      issue_types: [{ id: '2', name: 'Task', subtask: false }],
+      count: 1,
+    });
   });
 
   it('keeps only sub-task types for a sub-task issue', async () => {
@@ -232,13 +318,14 @@ describe('listIssueTypes', () => {
       .mockResolvedValueOnce({
         fields: { issuetype: { id: '3', subtask: true }, project: { key: 'PROJ' } },
       })
+      .mockResolvedValueOnce({ fields: {} })
       .mockResolvedValueOnce({
         issueTypes: [...projectTypes, { id: '4', name: 'Review', subtask: true }],
       });
 
     const result = payload(await handlerFor('listIssueTypes')({ issue: '10042' }));
 
-    expect(result).toEqual({ issue_types: [{ id: '4', name: 'Review', subtask: true }] });
+    expect(result).toEqual({ issue_types: [{ id: '4', name: 'Review', subtask: true }], count: 1 });
   });
 
   it('reads the createMetaIssueType key and pages until total is reached', async () => {
@@ -246,6 +333,7 @@ describe('listIssueTypes', () => {
       .mockResolvedValueOnce({
         fields: { issuetype: { id: '1', subtask: false }, project: { key: 'PROJ' } },
       })
+      .mockResolvedValueOnce({ fields: { issuetype: { allowedValues: [] } } })
       .mockResolvedValueOnce({
         createMetaIssueType: [{ id: '2', name: 'Task', subtask: false }],
         startAt: 0,
@@ -259,7 +347,7 @@ describe('listIssueTypes', () => {
 
     const result = payload(await handlerFor('listIssueTypes')({ issue: 'PROJ-7' }));
 
-    expect(client.get).toHaveBeenNthCalledWith(3, '/rest/api/3/issue/createmeta/PROJ/issuetypes', {
+    expect(client.get).toHaveBeenNthCalledWith(4, '/rest/api/3/issue/createmeta/PROJ/issuetypes', {
       startAt: 1,
       maxResults: 100,
     });
@@ -268,6 +356,7 @@ describe('listIssueTypes', () => {
         { id: '2', name: 'Task', subtask: false },
         { id: '5', name: 'Spike', subtask: false },
       ],
+      count: 2,
     });
   });
 
@@ -276,12 +365,14 @@ describe('listIssueTypes', () => {
       .mockResolvedValueOnce({
         fields: { issuetype: { id: '1', subtask: false }, project: { key: 'PROJ' } },
       })
+      .mockResolvedValueOnce({ fields: { issuetype: { allowedValues: [] } } })
       .mockResolvedValueOnce({ issueTypes: [], total: 3 });
 
     expect(payload(await handlerFor('listIssueTypes')({ issue: 'PROJ-7' }))).toEqual({
       issue_types: [],
+      count: 0,
     });
-    expect(client.get).toHaveBeenCalledTimes(2);
+    expect(client.get).toHaveBeenCalledTimes(3);
   });
 
   it('returns an empty list when createmeta lists no issue types', async () => {
@@ -289,10 +380,12 @@ describe('listIssueTypes', () => {
       .mockResolvedValueOnce({
         fields: { issuetype: { id: '1', subtask: false }, project: { key: 'PROJ' } },
       })
+      .mockResolvedValueOnce({ fields: { issuetype: { allowedValues: [] } } })
       .mockResolvedValueOnce({});
 
     expect(payload(await handlerFor('listIssueTypes')({ issue: 'PROJ-7' }))).toEqual({
       issue_types: [],
+      count: 0,
     });
   });
 
@@ -351,6 +444,7 @@ describe('listComponents', () => {
         { id: '10', name: 'core', description: 'Core engine' },
         { id: '11', name: 'ui' },
       ],
+      count: 2,
     });
   });
 
@@ -367,6 +461,7 @@ describe('listComponents', () => {
 
     expect(payload(await handlerFor('listComponents')({ project: 'PROJ' }))).toEqual({
       components: [],
+      count: 0,
     });
   });
 
@@ -404,6 +499,17 @@ describe('output schemas', () => {
     const types = payload(await handlerFor('listIssueTypes')({ project: 'PROJ' }));
     const components = payload(await handlerFor('listComponents')({ project: 'PROJ' }));
 
+    for (const [name, emitted] of [
+      ['listProjects', listed],
+      ['listIssueTypes', types],
+      ['listComponents', components],
+    ] as const) {
+      const tool = tools.find((d) => d.tool.name === name)!.tool;
+      const declared = schemaKeys(tool.outputSchema).filter(
+        (k) => k !== 'success' && k !== 'error'
+      );
+      expect(Object.keys(emitted).sort(), name).toEqual(declared);
+    }
     expect(Object.keys((listed.projects as object[])[0]).sort()).toEqual(
       declaredFields(tools, 'listProjects', 'projects')
     );

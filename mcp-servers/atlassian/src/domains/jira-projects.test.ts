@@ -147,6 +147,7 @@ describe('normalisation of minimal payloads', () => {
       project_type_key: undefined,
       lead: null,
       url: undefined,
+      components: [],
     });
   });
 

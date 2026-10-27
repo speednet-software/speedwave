@@ -11,7 +11,7 @@ import {
   type Tool,
   type ToolDefinition,
   type ToolsCallResult,
-  type jsonResult,
+  jsonResult,
   type textResult,
 } from '@speedwave/mcp-shared';
 import { AtlassianClient } from '../client.js';
@@ -34,6 +34,16 @@ export function withValidation<T>(
     serviceName: 'Atlassian',
     formatError: (error) => AtlassianClient.formatError(error),
   });
+}
+
+/**
+ * Build the result of a list tool: the items under `key` plus how many were returned.
+ * @param key - The result key that holds the items.
+ * @param items - The returned items.
+ * @returns The JSON tool result `{ <key>: [...], count }`.
+ */
+export function listResult(key: string, items: unknown[]): ReturnType<typeof jsonResult> {
+  return jsonResult({ [key]: items, count: items.length });
 }
 
 /**

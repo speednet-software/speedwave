@@ -20,7 +20,7 @@ import {
   projectSchema,
   projectsSchema,
 } from './jira-schemas.js';
-import { unconfiguredDefinitions, withValidation } from './validation.js';
+import { listResult, unconfiguredDefinitions, withValidation } from './validation.js';
 
 const listProjectsTool: Tool = {
   name: 'listProjects',
@@ -42,6 +42,7 @@ const listProjectsTool: Tool = {
     properties: {
       success: { type: 'boolean' },
       projects: projectsSchema,
+      count: { type: 'number' },
       error: { type: 'string' },
     },
     required: ['success'],
@@ -100,6 +101,7 @@ const listIssueTypesTool: Tool = {
     properties: {
       success: { type: 'boolean' },
       issue_types: issueTypesSchema,
+      count: { type: 'number' },
       error: { type: 'string' },
     },
     required: ['success'],
@@ -128,6 +130,7 @@ const listComponentsTool: Tool = {
     properties: {
       success: { type: 'boolean' },
       components: componentsSchema,
+      count: { type: 'number' },
       error: { type: 'string' },
     },
     required: ['success'],
@@ -149,7 +152,7 @@ export function createJiraProjectTools(client: AtlassianClient | null): ToolDefi
       tool: listProjectsTool,
       handler: withValidation(client, async (_c, params) => {
         const { query, max_results } = params as { query?: string; max_results?: number };
-        return jsonResult({ projects: await projects.list({ query, maxResults: max_results }) });
+        return listResult('projects', await projects.list({ query, maxResults: max_results }));
       }),
     },
     {
@@ -174,14 +177,14 @@ export function createJiraProjectTools(client: AtlassianClient | null): ToolDefi
           issue !== undefined
             ? await projects.listIssueTypesForIssue(issue)
             : await projects.listIssueTypes(project as string);
-        return jsonResult({ issue_types: issueTypes });
+        return listResult('issue_types', issueTypes);
       }),
     },
     {
       tool: listComponentsTool,
       handler: withValidation(client, async (_c, params) => {
         const { project } = params as { project: string };
-        return jsonResult({ components: await projects.listComponents(project) });
+        return listResult('components', await projects.listComponents(project));
       }),
     },
   ];

@@ -132,6 +132,7 @@ describe('listBoards', () => {
     });
     expect(result).toEqual({
       boards: [{ id: 7, name: 'Board', type: 'scrum', project_key: 'PROJ' }],
+      count: 1,
     });
   });
 
@@ -225,13 +226,17 @@ describe('listSprints', () => {
           end_date: 'e',
         },
       ],
+      count: 1,
     });
   });
 
   it('returns an empty list when Jira omits values', async () => {
     client.get.mockResolvedValueOnce(rawBoard()).mockResolvedValueOnce({});
 
-    expect(payload(await handlerFor('listSprints')({ board_id: 7 }))).toEqual({ sprints: [] });
+    expect(payload(await handlerFor('listSprints')({ board_id: 7 }))).toEqual({
+      sprints: [],
+      count: 0,
+    });
   });
 });
 

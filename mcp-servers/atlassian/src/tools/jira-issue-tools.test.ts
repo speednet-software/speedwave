@@ -100,17 +100,21 @@ function badRequest(data: unknown): AxiosError {
   );
 }
 
-function serverError(): AxiosError {
+function httpError(status: number): AxiosError {
   return new AxiosError(
-    'Request failed with status code 500',
+    `Request failed with status code ${status}`,
     'ERR_BAD_RESPONSE',
     undefined,
     undefined,
     {
-      status: 500,
+      status,
       data: {},
     } as AxiosResponse
   );
+}
+
+function serverError(): AxiosError {
+  return httpError(500);
 }
 
 beforeEach(() => {
@@ -277,6 +281,7 @@ describe('emitted JSON matches outputSchema', () => {
     const issue = (emitted.issues as object[])[0];
     expect(Object.keys(issue).sort()).toEqual(schemaKeys(items));
     expect(issue).not.toHaveProperty('description');
+    expect(emitted.count).toBe(1);
   });
 
   it('createIssue and updateIssue emit the issue under `issue`', async () => {
@@ -590,6 +595,26 @@ describe('updateIssue', () => {
     expect(textOf(result)).toContain('nothing was changed');
   });
 
+  it('names the current status and the requested type when Jira refuses a type change', async () => {
+    client.put.mockRejectedValueOnce(
+      badRequest({ errors: { issuetype: 'Issue type cannot be changed to a sub-task' } })
+    );
+    client.get.mockResolvedValueOnce(RAW_ISSUE);
+    const result = await run('updateIssue', { issue: 'PROJ-7', type: 'Bug' });
+    expect(textOf(result)).toContain('PROJ-7 has status "To Do" and the requested type is "Bug"');
+    expect(textOf(result)).toContain('listIssueTypes with issue "PROJ-7"');
+  });
+
+  it('keeps the plain type message when the status cannot be read', async () => {
+    client.put.mockRejectedValueOnce(
+      badRequest({ errors: { issuetype: 'Issue type cannot be changed to a sub-task' } })
+    );
+    client.get.mockRejectedValueOnce(new Error('read failed'));
+    const result = await run('updateIssue', { issue: 'PROJ-7', type: 'Bug' });
+    expect(textOf(result)).toContain('Jira refused this issue type, so nothing was changed.');
+    expect(textOf(result)).not.toContain('has status');
+  });
+
   it('checks component names against the project of the issue before sending', async () => {
     client.get.mockImplementation(async (url: string) =>
       url.endsWith('/components')
@@ -707,7 +732,21 @@ describe('deleteIssue', () => {
   });
 
   it.each([
+    [403, 'lacks permission to delete PROJ-7', 'grant Delete Issues'],
+    [404, 'found no issue PROJ-7 visible to this account', 'getIssue or searchIssues'],
+  ])('explains a %s from Jira and says nothing was removed', async (status, reason, next) => {
+    client.del.mockRejectedValueOnce(httpError(status));
+    const result = await run('deleteIssue', { issue: 'PROJ-7' });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('Invalid issue.');
+    expect(textOf(result)).toContain(reason);
+    expect(textOf(result)).toContain('nothing was removed');
+    expect(textOf(result)).toContain(next);
+  });
+
+  it.each([
     ['another 400', badRequest({ errorMessages: ['Something else'] })],
+    ['a 500', serverError()],
     ['a 400 without messages', badRequest({})],
     ['a plain error', new Error('boom-delete')],
   ])('passes %s through', async (_label, error) => {
@@ -777,6 +816,7 @@ describe('linkIssues and unlinkIssues', () => {
     client.get.mockResolvedValueOnce(LINK_TYPES);
     expect(payload(await run('listLinkTypes', {}))).toEqual({
       link_types: [{ id: '1', name: 'Blocks', inward: 'is blocked by', outward: 'blocks' }],
+      count: 1,
     });
   });
 });
@@ -788,6 +828,7 @@ describe('transitions, assignment, account', () => {
     });
     expect(payload(await run('getTransitions', { issue: 'PROJ-1' }))).toEqual({
       transitions: [{ id: '5', name: 'Go', to_status: 'Done', to_status_category: 'done' }],
+      count: 1,
     });
   });
 

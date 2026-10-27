@@ -20,13 +20,14 @@ import { AtlassianClient } from '../client.js';
 import { createJiraIssuesClient, UnknownLinkRelationError } from '../domains/jira-issues.js';
 import { createJiraProjectsClient } from '../domains/jira-projects.js';
 import type { AdfDoc } from '../types.js';
-import { unconfiguredDefinitions, withValidation } from './validation.js';
+import { listResult, unconfiguredDefinitions, withValidation } from './validation.js';
 import { resolveRichText } from './rich-text.js';
 import { userSchema } from './jira-schemas.js';
 
 interface WriteContext {
   outcome: string;
   issueTypeLookup: string;
+  typeChangeNote?: string;
 }
 
 interface JiraRejection {
@@ -155,6 +156,7 @@ const searchIssuesTool: Tool = {
       issues: { type: 'array', items: { type: 'object', properties: searchIssueProperties } },
       next_page_token: { type: ['string', 'null'] },
       is_last: { type: 'boolean' },
+      count: { type: 'number' },
     },
     required: ['success'],
   },
@@ -390,6 +392,7 @@ const listLinkTypesTool: Tool = {
           },
         },
       },
+      count: { type: 'number' },
     },
     required: ['success'],
   },
@@ -424,6 +427,7 @@ const getTransitionsTool: Tool = {
           },
         },
       },
+      count: { type: 'number' },
     },
     required: ['success'],
   },
@@ -606,6 +610,17 @@ export function createJiraIssueTools(client: AtlassianClient | null): ToolDefini
     });
   };
 
+  const typeChangeNote = async (issue: string, type: string): Promise<string | undefined> => {
+    try {
+      const { status } = await issues.get(issue);
+      return status
+        ? ` ${issue} has status "${status}" and the requested type is "${type}".`
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
   const isSubtaskType = async (project: string, type: string) =>
     (await projects.listIssueTypes(project)).some((t) => t.subtask && t.name === type);
 
@@ -616,9 +631,12 @@ export function createJiraIssueTools(client: AtlassianClient | null): ToolDefini
         max_results?: number;
         next_page_token?: string;
       };
-      return jsonResult(
-        await issues.search({ jql, maxResults: max_results, nextPageToken: next_page_token })
-      );
+      const result = await issues.search({
+        jql,
+        maxResults: max_results,
+        nextPageToken: next_page_token,
+      });
+      return jsonResult({ ...result, count: result.issues.length });
     }),
 
     getIssue: withValidation(client, async (_c, params) => {
@@ -696,9 +714,13 @@ export function createJiraIssueTools(client: AtlassianClient | null): ToolDefini
       try {
         return jsonResult({ issue: await issues.update(issue, fields) });
       } catch (error) {
+        const refusedType = fields.type !== undefined && jiraRejection(error)?.fields.issuetype;
         return translateWriteRejection(error, {
           outcome,
           issueTypeLookup: `listIssueTypes with issue "${issue}"`,
+          typeChangeNote: refusedType
+            ? await typeChangeNote(issue, fields.type as string)
+            : undefined,
         });
       }
     }),
@@ -713,6 +735,19 @@ export function createJiraIssueTools(client: AtlassianClient | null): ToolDefini
           return teachingErrorResult({
             paramName: 'issue',
             nextStep: `${issue} still has sub-tasks, so Jira refused the delete and nothing was removed. Delete the sub-tasks first, or move them to another parent with updateIssue and parent, then retry.`,
+          });
+        }
+        const status = responseStatus(error);
+        if (status === 403) {
+          return teachingErrorResult({
+            paramName: 'issue',
+            nextStep: `This account lacks permission to delete ${issue}, so nothing was removed. A Jira admin must grant Delete Issues in that project.`,
+          });
+        }
+        if (status === 404) {
+          return teachingErrorResult({
+            paramName: 'issue',
+            nextStep: `Jira found no issue ${issue} visible to this account, so nothing was removed. Check the key with getIssue or searchIssues.`,
           });
         }
         throw error;
@@ -748,12 +783,12 @@ export function createJiraIssueTools(client: AtlassianClient | null): ToolDefini
     }),
 
     listLinkTypes: withValidation(client, async () =>
-      jsonResult({ link_types: await issues.listLinkTypes() })
+      listResult('link_types', await issues.listLinkTypes())
     ),
 
     getTransitions: withValidation(client, async (_c, params) => {
       const { issue } = params as { issue: string };
-      return jsonResult({ transitions: await issues.getTransitions(issue) });
+      return listResult('transitions', await issues.getTransitions(issue));
     }),
 
     transitionIssue: withValidation(client, async (_c, params) => {
@@ -807,7 +842,7 @@ function translateWriteRejection(error: unknown, context: WriteContext) {
     return teachingErrorResult({
       paramName: 'type',
       correctValueTool: 'listIssueTypes',
-      nextStep: `Jira refused this issue type, so ${outcome}. Call ${context.issueTypeLookup} for the types allowed here; some type changes (for example between a standard type and a Sub-task) cannot be done through the API.${withJiraMessage(fields.issuetype)}`,
+      nextStep: `Jira refused this issue type, so ${outcome}.${context.typeChangeNote ?? ''} Call ${context.issueTypeLookup} for the types allowed here; some type changes (for example between a standard type and a Sub-task) cannot be done through the API.${withJiraMessage(fields.issuetype)}`,
     });
   }
   const parentMessage = fields.parent ?? messages.find(isParentMessage);
@@ -832,6 +867,10 @@ function isParentMessage(message: string): boolean {
   return (
     /must have a parent/i.test(message) || (/parent/i.test(message) && /sub-?task/i.test(message))
   );
+}
+
+function responseStatus(error: unknown): number | undefined {
+  return axios.isAxiosError(error) ? error.response?.status : undefined;
 }
 
 function jiraRejection(error: unknown): JiraRejection | undefined {
