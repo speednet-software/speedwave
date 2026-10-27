@@ -17,15 +17,10 @@ use crate::transcription::transcript::{
     AUDIO_WAV,
 };
 
-/// Name prefix of the directory an import decodes into before it becomes a session directory;
-/// not a session id, so the list never shows it. A failed import or the startup sweep removes it.
 const IMPORT_STAGING_PREFIX: &str = ".import-";
 
-/// How often an import retries moving its staging directory into place while another process
-/// still holds a file in it (on Windows an antivirus or the indexer scanning the new audio).
 const IMPORT_RENAME_ATTEMPTS: u32 = 10;
 
-/// Pause between those attempts.
 const IMPORT_RENAME_PAUSE: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// Capacity of each session's `broadcast` channel — generous enough that a slow subscriber
@@ -246,15 +241,7 @@ impl TranscriptStore {
         std::fs::create_dir_all(&dir)?;
         restrict_dir_perms(&dir);
         session.save(&dir)?;
-        let (tx, _) = broadcast::channel(CHANNEL_CAPACITY);
-        self.sessions.insert(
-            id,
-            Entry {
-                session: Arc::new(RwLock::new(session)),
-                tx,
-            },
-        );
-        self.notify(id);
+        self.register(session);
         Ok(id)
     }
 
@@ -280,7 +267,7 @@ impl TranscriptStore {
             .map_err(StoreError::from)
             .and_then(|()| Ok(session.save(&staging)?))
             .and_then(|()| {
-                Ok(retry_while_denied(
+                Ok(retry_while_held(
                     || std::fs::rename(&staging, &dir),
                     IMPORT_RENAME_ATTEMPTS,
                     IMPORT_RENAME_PAUSE,
@@ -291,11 +278,21 @@ impl TranscriptStore {
             return Err(e);
         }
         crate::fs_perms::fsync_parent_dir(&self.root);
-        if let Err(e) = self.create(session.clone()) {
-            remove_failed_import(&dir);
-            return Err(e);
-        }
+        self.register(session.clone());
         Ok(session)
+    }
+
+    fn register(&self, session: TranscriptSession) {
+        let id = session.id;
+        let (tx, _) = broadcast::channel(CHANNEL_CAPACITY);
+        self.sessions.insert(
+            id,
+            Entry {
+                session: Arc::new(RwLock::new(session)),
+                tx,
+            },
+        );
+        self.notify(id);
     }
 
     /// Returns a snapshot of session `id` (loads from disk if not in cache).
@@ -386,7 +383,6 @@ impl TranscriptStore {
         reconciled
     }
 
-    /// Removes the staging directories of imports an earlier run left half-decoded.
     fn remove_unfinished_imports(&self) {
         let Ok(entries) = std::fs::read_dir(&self.root) else {
             return;
@@ -1017,7 +1013,7 @@ struct EntryHandle {
     tx: broadcast::Sender<TranscriptEvent>,
 }
 
-fn retry_while_denied<T>(
+fn retry_while_held<T>(
     mut op: impl FnMut() -> std::io::Result<T>,
     attempts: u32,
     pause: std::time::Duration,
@@ -1025,13 +1021,27 @@ fn retry_while_denied<T>(
     let mut tried = 1;
     loop {
         match op() {
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && tried < attempts => {
+            Err(e) if held_by_another_process(&e) && tried < attempts => {
                 tried += 1;
                 std::thread::sleep(pause);
             }
             done => return done,
         }
     }
+}
+
+fn held_by_another_process(e: &std::io::Error) -> bool {
+    if e.kind() == std::io::ErrorKind::PermissionDenied {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION};
+        if let Some(code) = e.raw_os_error() {
+            return code == ERROR_SHARING_VIOLATION as i32 || code == ERROR_LOCK_VIOLATION as i32;
+        }
+    }
+    false
 }
 
 fn remove_failed_import(dir: &Path) {
@@ -1216,7 +1226,7 @@ mod tests {
     #[test]
     fn a_denied_rename_is_retried_until_it_succeeds() {
         let mut calls = 0;
-        let out = retry_while_denied(
+        let out = retry_while_held(
             || {
                 calls += 1;
                 if calls < 3 {
@@ -1234,7 +1244,7 @@ mod tests {
     #[test]
     fn a_rename_still_denied_after_every_attempt_fails() {
         let mut calls = 0;
-        let out: std::io::Result<()> = retry_while_denied(
+        let out: std::io::Result<()> = retry_while_held(
             || {
                 calls += 1;
                 Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
@@ -1249,10 +1259,32 @@ mod tests {
         assert_eq!(calls, 4);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_sharing_or_lock_violation_is_retried() {
+        use windows_sys::Win32::Foundation::{ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION};
+        for code in [ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION] {
+            let mut calls = 0;
+            let out = retry_while_held(
+                || {
+                    calls += 1;
+                    if calls < 3 {
+                        Err(std::io::Error::from_raw_os_error(code as i32))
+                    } else {
+                        Ok(calls)
+                    }
+                },
+                10,
+                std::time::Duration::ZERO,
+            );
+            assert_eq!(out.unwrap(), 3, "code {code}");
+        }
+    }
+
     #[test]
     fn any_other_rename_error_is_not_retried() {
         let mut calls = 0;
-        let out: std::io::Result<()> = retry_while_denied(
+        let out: std::io::Result<()> = retry_while_held(
             || {
                 calls += 1;
                 Err(std::io::Error::from(std::io::ErrorKind::NotFound))

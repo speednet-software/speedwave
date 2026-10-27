@@ -341,21 +341,19 @@ export class RecordingControlsComponent implements OnInit {
   }
 
   /**
-   * Picks the remembered language, source and microphone; without one, the mixed source (else
-   * system audio) in Polish.
+   * Picks the remembered source and microphone (ngOnInit already restored the language); without
+   * one, the mixed source, else system audio.
    * @param list - the freshly-loaded source list.
    */
   private restoreChoice(list: AudioSourceInfo[]): void {
     const saved = this.transcription.recordingChoice();
     const savedIdx = saved ? list.findIndex((s) => s.source.kind === saved.source) : -1;
     if (saved && savedIdx >= 0) {
-      this.language.set(saved.language);
       this.sourceIndex.set(savedIdx);
       const known = saved.mic === null || this.mics().some((m) => m.uid === saved.mic);
       this.micDevice.set(known ? saved.mic : null);
       return;
     }
-    if (saved) this.language.set(saved.language);
     const mixedIdx = list.findIndex((s) => s.source.kind === 'mixed');
     const sysIdx = list.findIndex((s) => s.source.kind === 'system_wide');
     this.sourceIndex.set(mixedIdx >= 0 ? mixedIdx : sysIdx >= 0 ? sysIdx : 0);
@@ -480,13 +478,12 @@ export class RecordingControlsComponent implements OnInit {
     }
   }
 
-  /** Stores the current language, source and microphone for the next recording. */
+  /** Stores the language, source and microphone for the next recording and import; with no capture source loaded, it keeps the stored source. */
   private saveChoice(): void {
-    const kind = this.sources()[this.sourceIndex()]?.source.kind;
-    if (!kind) return;
+    const saved = this.transcription.recordingChoice();
     this.transcription.setRecordingChoice({
       language: this.language(),
-      source: kind,
+      source: this.sources()[this.sourceIndex()]?.source.kind ?? saved?.source ?? 'mixed',
       mic: this.micDevice(),
     });
   }

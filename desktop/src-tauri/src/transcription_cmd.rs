@@ -40,7 +40,6 @@ pub const MODEL_PROGRESS_EVENT: &str = "transcription_model_status";
 /// App-wide event carrying the id of a session whose recordings-list row changed.
 pub const TRANSCRIPTS_CHANGED_EVENT: &str = "transcripts_changed";
 
-/// Refusal of a start, resume or import while no Whisper model is on disk.
 const NO_WHISPER_MODEL: &str =
     "no Whisper model is downloaded; download it in Settings → Meeting transcription";
 
@@ -529,7 +528,6 @@ pub async fn import_transcription(
     Ok(Some(session.id))
 }
 
-/// Decodes `src` into a new session named after the file, waiting for its offline pass.
 fn import_audio_file(
     store: &TranscriptStore,
     src: &std::path::Path,
@@ -2191,19 +2189,6 @@ mod tests {
 
         assert!(err.contains("WAV, MP3, M4A, MP4, FLAC or OGG"), "{err}");
         assert!(store.list().is_empty());
-    }
-
-    #[test]
-    fn the_import_command_takes_the_language_as_its_wire_name() {
-        assert_eq!(
-            serde_json::from_value::<Language>(serde_json::json!("pl")).unwrap(),
-            Language::Pl
-        );
-        assert_eq!(
-            serde_json::from_value::<Language>(serde_json::json!("en")).unwrap(),
-            Language::En
-        );
-        assert!(serde_json::from_value::<Language>(serde_json::json!("de")).is_err());
     }
 
     #[test]

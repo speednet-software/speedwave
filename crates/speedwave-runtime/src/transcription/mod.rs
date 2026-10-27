@@ -10,7 +10,7 @@ pub mod audio_macos;
 pub mod audio_windows;
 pub mod diarizer;
 mod gpu_probe;
-pub mod import;
+mod import;
 pub mod mix;
 pub mod model_catalog;
 pub mod model_store;

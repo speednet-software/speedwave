@@ -683,6 +683,35 @@ describe('RecordingControlsComponent', () => {
       expect(component.language()).toBe('en');
     });
 
+    it('keeps a language picked before the source list arrives', async () => {
+      svc.recordingChoice.mockReturnValue({ language: 'pl', source: 'mixed', mic: null });
+      let sources: (list: AudioSourceInfo[]) => void = () => undefined;
+      svc.listAudioSources.mockImplementationOnce(
+        () => new Promise<AudioSourceInfo[]>((resolve) => (sources = resolve))
+      );
+
+      const init = component.ngOnInit();
+      component.onLanguage('en');
+      sources(SOURCES_WITH_MIXED);
+      await init;
+
+      expect(component.language()).toBe('en');
+    });
+
+    it('remembers the language for imports on a host that offers no capture source', async () => {
+      svc.recordingChoice.mockReturnValue({ language: 'pl', source: 'system_wide', mic: null });
+      svc.listAudioSources.mockResolvedValueOnce([]);
+      await component.ngOnInit();
+
+      component.onLanguage('en');
+
+      expect(svc.setRecordingChoice).toHaveBeenLastCalledWith({
+        language: 'en',
+        source: 'system_wide',
+        mic: null,
+      });
+    });
+
     it('is disabled while no Whisper model is downloaded, like Record', async () => {
       svc.modelReady.set(false);
       fixture.detectChanges();

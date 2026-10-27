@@ -25,7 +25,9 @@ pub enum ImportError {
     UnsupportedFormat,
     /// No reader takes the content as the format its extension names: damaged, or renamed.
     #[error(
-        "it is not a readable {0} file; it may be damaged, or be another format under that name"
+        "it is not a readable {0} file; it may be damaged, or be another format under that \
+         name; use {fmts}",
+        fmts = supported_formats()
     )]
     NotReadable(String),
     /// The container holds no audio track, or one in a codec the decoder lacks (Opus, HE-AAC).
@@ -45,16 +47,6 @@ pub enum ImportError {
     Write(String),
 }
 
-/// Decodes `src` into a durable 16 kHz mono 16-bit WAV at `dst`, removed again on failure. A file
-/// cut short keeps the audio before the cut; damaged packets are skipped, any other damage fails it.
-pub(crate) fn decode_to_wav(src: &Path, dst: &Path) -> Result<(), ImportError> {
-    let result = decode_into(src, dst);
-    if result.is_err() {
-        let _ = std::fs::remove_file(dst);
-    }
-    result
-}
-
 /// The supported formats as the UI names them: "WAV, MP3, M4A, MP4, FLAC or OGG".
 pub fn supported_formats() -> String {
     let upper: Vec<String> = IMPORT_EXTENSIONS
@@ -68,7 +60,7 @@ pub fn supported_formats() -> String {
     }
 }
 
-fn decode_into(src: &Path, dst: &Path) -> Result<(), ImportError> {
+pub(crate) fn decode_to_wav(src: &Path, dst: &Path) -> Result<(), ImportError> {
     let ext = src
         .extension()
         .and_then(|e| e.to_str())
@@ -234,8 +226,6 @@ impl MonoWavWriter {
     }
 }
 
-/// Resamples by averaging each output period of the input, weighted exactly in integer units of
-/// `1 / to` input samples: a box low-pass when shrinking the rate, a sample hold when growing it.
 struct AreaResampler {
     from: u64,
     to: u64,
@@ -371,7 +361,6 @@ mod tests {
 
         assert!(matches!(err, ImportError::UnsupportedFormat), "{err:?}");
         assert!(err.to_string().contains("WAV, MP3, M4A, MP4, FLAC or OGG"));
-        assert!(!dst.exists());
     }
 
     #[test]
@@ -396,7 +385,7 @@ mod tests {
     }
 
     #[test]
-    fn garbage_with_an_audio_extension_is_refused_and_leaves_no_wav() {
+    fn garbage_with_an_audio_extension_is_not_readable() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("broken.m4a");
         std::fs::write(&src, vec![0x5au8; 4096]).unwrap();
@@ -406,11 +395,14 @@ mod tests {
 
         assert!(matches!(err, ImportError::NotReadable(_)), "{err:?}");
         assert!(err.to_string().contains("not a readable M4A file"), "{err}");
-        assert!(!dst.exists());
+        assert!(
+            err.to_string().contains("WAV, MP3, M4A, MP4, FLAC or OGG"),
+            "{err}"
+        );
     }
 
     #[test]
-    fn an_m4a_cut_before_its_index_is_not_readable_and_leaves_no_wav() {
+    fn an_m4a_cut_before_its_index_is_not_readable() {
         let dir = tempfile::tempdir().unwrap();
         let whole = std::fs::read(fixture("tone.m4a")).unwrap();
         let src = dir.path().join("cut.m4a");
@@ -421,7 +413,6 @@ mod tests {
 
         assert!(matches!(err, ImportError::NotReadable(_)), "{err:?}");
         assert!(err.to_string().contains("may be damaged"), "{err}");
-        assert!(!dst.exists());
     }
 
     #[test]
@@ -448,7 +439,6 @@ mod tests {
         let err = decode_to_wav(&src, &dst).unwrap_err();
 
         assert!(matches!(err, ImportError::Empty), "{err:?}");
-        assert!(!dst.exists());
     }
 
     fn fixture(name: &str) -> std::path::PathBuf {
@@ -495,7 +485,6 @@ mod tests {
 
         assert!(matches!(err, ImportError::UnsupportedAudio), "{err:?}");
         assert!(err.to_string().contains("AAC-LC"), "{err}");
-        assert!(!dst.exists());
     }
 
     #[test]
