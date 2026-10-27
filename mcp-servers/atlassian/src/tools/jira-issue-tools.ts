@@ -24,6 +24,7 @@ import { createJiraProjectsClient } from '../domains/jira-projects.js';
 import type { AdfDoc } from '../types.js';
 import { withValidation } from './validation.js';
 import { resolveRichText } from './rich-text.js';
+import { userSchema } from './jira-schemas.js';
 
 interface WriteContext {
   outcome: string;
@@ -47,11 +48,6 @@ const MAX_ATTACHMENT_BYTES = (() => {
 const USER_SCOPED_META = {
   [META_KEYS.USER_SCOPED]: true,
   [META_KEYS.CURRENT_USER_TOOL]: 'getMyself',
-};
-
-const userSchema = {
-  type: ['object', 'null'],
-  properties: { account_id: { type: 'string' }, name: { type: 'string' } },
 };
 
 const issueRefProperties = {
@@ -402,7 +398,8 @@ const listLinkTypesTool: Tool = {
 
 const getTransitionsTool: Tool = {
   name: 'getTransitions',
-  description: 'List the workflow transitions currently available for an issue.',
+  description:
+    'List the workflow transitions currently available for an issue, with the target status and its category (new, indeterminate, done).',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['jira', 'transitions', 'workflow', 'status', 'list'],
@@ -420,6 +417,10 @@ const getTransitionsTool: Tool = {
             id: { type: 'string' },
             name: { type: 'string' },
             to_status: { type: 'string' },
+            to_status_category: {
+              type: 'string',
+              description: 'Status category key of the target status: new, indeterminate or done',
+            },
           },
         },
       },

@@ -16,6 +16,12 @@ import {
 } from '@speedwave/mcp-shared';
 import { AtlassianClient } from '../client.js';
 import { createJiraProjectsClient } from '../domains/jira-projects.js';
+import {
+  componentsSchema,
+  issueTypesSchema,
+  projectSchema,
+  projectsSchema,
+} from './jira-schemas.js';
 import { withValidation } from './validation.js';
 
 const listProjectsTool: Tool = {
@@ -37,7 +43,7 @@ const listProjectsTool: Tool = {
     type: 'object',
     properties: {
       success: { type: 'boolean' },
-      projects: { type: 'array' },
+      projects: projectsSchema,
       error: { type: 'string' },
     },
     required: ['success'],
@@ -65,7 +71,7 @@ const getProjectTool: Tool = {
     type: 'object',
     properties: {
       success: { type: 'boolean' },
-      project: { type: 'object' },
+      project: projectSchema,
       error: { type: 'string' },
     },
     required: ['success'],
@@ -95,7 +101,7 @@ const listIssueTypesTool: Tool = {
     type: 'object',
     properties: {
       success: { type: 'boolean' },
-      issue_types: { type: 'array' },
+      issue_types: issueTypesSchema,
       error: { type: 'string' },
     },
     required: ['success'],
@@ -123,7 +129,7 @@ const listComponentsTool: Tool = {
     type: 'object',
     properties: {
       success: { type: 'boolean' },
-      components: { type: 'array' },
+      components: componentsSchema,
       error: { type: 'string' },
     },
     required: ['success'],

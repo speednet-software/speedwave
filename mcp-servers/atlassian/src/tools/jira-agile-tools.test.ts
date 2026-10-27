@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { META_KEYS, type ToolsCallResult } from '@speedwave/mcp-shared';
+import { META_KEYS, type ToolDefinition, type ToolsCallResult } from '@speedwave/mcp-shared';
 import { createJiraAgileTools } from './jira-agile-tools.js';
 import type { AtlassianClient } from '../client.js';
 
@@ -45,6 +45,13 @@ const rawSprint = (over: Record<string, unknown> = {}) => ({
   endDate: 'e',
   ...over,
 });
+
+function declaredFields(tools: ToolDefinition[], toolName: string, key: string): string[] {
+  const tool = tools.find((d) => d.tool.name === toolName)!.tool;
+  const prop = (tool.outputSchema!.properties as Record<string, Record<string, unknown>>)[key];
+  const shape = (prop.items ?? prop) as { properties: Record<string, unknown> };
+  return Object.keys(shape.properties).sort();
+}
 
 beforeEach(() => {
   client.get.mockReset();
@@ -328,5 +335,48 @@ describe('moveIssuesToSprint', () => {
 
     expect(result.isError).toBe(true);
     expect(client.post).not.toHaveBeenCalled();
+  });
+});
+
+describe('output schemas', () => {
+  it('declare every field of the boards, configuration and sprints the tools return', async () => {
+    const tools = createJiraAgileTools(asClient());
+    const fullSprint = rawSprint({ completeDate: 'c' });
+    client.get
+      .mockResolvedValueOnce({ values: [rawBoard()] })
+      .mockResolvedValueOnce(rawBoard())
+      .mockResolvedValueOnce(rawBoard())
+      .mockResolvedValueOnce({
+        id: 7,
+        name: 'Board',
+        filter: { id: '900' },
+        columnConfig: { columns: [{ name: 'To Do' }] },
+      })
+      .mockResolvedValueOnce(rawBoard())
+      .mockResolvedValueOnce({ values: [fullSprint] })
+      .mockResolvedValueOnce(fullSprint)
+      .mockResolvedValueOnce(rawBoard());
+
+    const boards = payload(await handlerFor('listBoards')({}));
+    const board = payload(await handlerFor('getBoard')({ board_id: 7 }));
+    const configuration = payload(await handlerFor('getBoardConfiguration')({ board_id: 7 }));
+    const sprints = payload(await handlerFor('listSprints')({ board_id: 7 }));
+    const sprint = payload(await handlerFor('getSprint')({ sprint_id: 34 }));
+
+    expect(Object.keys((boards.boards as object[])[0]).sort()).toEqual(
+      declaredFields(tools, 'listBoards', 'boards')
+    );
+    expect(Object.keys(board.board as object).sort()).toEqual(
+      declaredFields(tools, 'getBoard', 'board')
+    );
+    expect(Object.keys(configuration.configuration as object).sort()).toEqual(
+      declaredFields(tools, 'getBoardConfiguration', 'configuration')
+    );
+    expect(Object.keys((sprints.sprints as object[])[0]).sort()).toEqual(
+      declaredFields(tools, 'listSprints', 'sprints')
+    );
+    expect(Object.keys(sprint.sprint as object).sort()).toEqual(
+      declaredFields(tools, 'getSprint', 'sprint')
+    );
   });
 });

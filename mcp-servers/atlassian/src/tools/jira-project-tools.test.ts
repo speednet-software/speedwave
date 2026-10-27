@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { META_KEYS, type ToolsCallResult } from '@speedwave/mcp-shared';
+import { META_KEYS, type ToolDefinition, type ToolsCallResult } from '@speedwave/mcp-shared';
 import { createJiraProjectTools } from './jira-project-tools.js';
 import type { AtlassianClient } from '../client.js';
 
@@ -36,6 +36,13 @@ const rawProject = (over: Record<string, unknown> = {}) => ({
   self: 'https://acme.atlassian.net/rest/api/3/project/100',
   ...over,
 });
+
+function declaredFields(tools: ToolDefinition[], toolName: string, key: string): string[] {
+  const tool = tools.find((d) => d.tool.name === toolName)!.tool;
+  const prop = (tool.outputSchema!.properties as Record<string, Record<string, unknown>>)[key];
+  const shape = (prop.items ?? prop) as { properties: Record<string, unknown> };
+  return Object.keys(shape.properties).sort();
+}
 
 beforeEach(() => {
   client.get.mockReset();
@@ -384,5 +391,36 @@ describe('listComponents', () => {
 
     expect(result.isError).toBe(true);
     expect(textOf(result)).toContain('project');
+  });
+});
+
+describe('output schemas', () => {
+  it('declare every field of the projects, issue types and components the tools return', async () => {
+    const tools = createJiraProjectTools(asClient());
+    client.get
+      .mockResolvedValueOnce({ values: [rawProject()] })
+      .mockResolvedValueOnce(rawProject())
+      .mockResolvedValueOnce(rawProject())
+      .mockResolvedValueOnce([{ id: '1', name: 'Bug', description: 'A bug', subtask: false }])
+      .mockResolvedValueOnce(rawProject())
+      .mockResolvedValueOnce([{ id: '10', name: 'core', description: 'Core engine' }]);
+
+    const listed = payload(await handlerFor('listProjects')({}));
+    const project = payload(await handlerFor('getProject')({ project: 'PROJ' }));
+    const types = payload(await handlerFor('listIssueTypes')({ project: 'PROJ' }));
+    const components = payload(await handlerFor('listComponents')({ project: 'PROJ' }));
+
+    expect(Object.keys((listed.projects as object[])[0]).sort()).toEqual(
+      declaredFields(tools, 'listProjects', 'projects')
+    );
+    expect(Object.keys(project.project as object).sort()).toEqual(
+      declaredFields(tools, 'getProject', 'project')
+    );
+    expect(Object.keys((types.issue_types as object[])[0]).sort()).toEqual(
+      declaredFields(tools, 'listIssueTypes', 'issue_types')
+    );
+    expect(Object.keys((components.components as object[])[0]).sort()).toEqual(
+      declaredFields(tools, 'listComponents', 'components')
+    );
   });
 });

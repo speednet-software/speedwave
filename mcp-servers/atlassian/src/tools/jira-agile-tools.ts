@@ -17,6 +17,13 @@ import {
 } from '@speedwave/mcp-shared';
 import { AtlassianClient } from '../client.js';
 import { createJiraAgileClient, MOVE_ISSUES_MAX } from '../domains/jira-agile.js';
+import {
+  boardConfigurationSchema,
+  boardSchema,
+  boardsSchema,
+  sprintSchema,
+  sprintsSchema,
+} from './jira-schemas.js';
 import { withValidation } from './validation.js';
 
 const listBoardsTool: Tool = {
@@ -39,7 +46,7 @@ const listBoardsTool: Tool = {
     type: 'object',
     properties: {
       success: { type: 'boolean' },
-      boards: { type: 'array' },
+      boards: boardsSchema,
       error: { type: 'string' },
     },
     required: ['success'],
@@ -68,7 +75,7 @@ const getBoardTool: Tool = {
     type: 'object',
     properties: {
       success: { type: 'boolean' },
-      board: { type: 'object' },
+      board: boardSchema,
       error: { type: 'string' },
     },
     required: ['success'],
@@ -92,7 +99,7 @@ const getBoardConfigurationTool: Tool = {
     type: 'object',
     properties: {
       success: { type: 'boolean' },
-      configuration: { type: 'object' },
+      configuration: boardConfigurationSchema,
       error: { type: 'string' },
     },
     required: ['success'],
@@ -124,7 +131,7 @@ const listSprintsTool: Tool = {
     type: 'object',
     properties: {
       success: { type: 'boolean' },
-      sprints: { type: 'array' },
+      sprints: sprintsSchema,
       error: { type: 'string' },
     },
     required: ['success'],
@@ -152,7 +159,7 @@ const getSprintTool: Tool = {
     type: 'object',
     properties: {
       success: { type: 'boolean' },
-      sprint: { type: 'object' },
+      sprint: sprintSchema,
       error: { type: 'string' },
     },
     required: ['success'],

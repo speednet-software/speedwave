@@ -127,6 +127,8 @@ export interface JiraTransition {
   id: string;
   name: string;
   to_status: string;
+  /** Status category key of the target status (`new`, `indeterminate`, `done`). */
+  to_status_category: string;
 }
 
 /** Jira issue comment, normalised. */

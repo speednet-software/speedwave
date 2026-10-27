@@ -770,10 +770,10 @@ describe('linkIssues and unlinkIssues', () => {
 describe('transitions, assignment, account', () => {
   it('getTransitions lists transitions for `issue`', async () => {
     client.get.mockResolvedValueOnce({
-      transitions: [{ id: '5', name: 'Go', to: { name: 'Done' } }],
+      transitions: [{ id: '5', name: 'Go', to: { name: 'Done', statusCategory: { key: 'done' } } }],
     });
     expect(payload(await run('getTransitions', { issue: 'PROJ-1' }))).toEqual({
-      transitions: [{ id: '5', name: 'Go', to_status: 'Done' }],
+      transitions: [{ id: '5', name: 'Go', to_status: 'Done', to_status_category: 'done' }],
     });
   });
 

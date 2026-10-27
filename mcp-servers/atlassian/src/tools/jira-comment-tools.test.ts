@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { META_KEYS, type ToolsCallResult } from '@speedwave/mcp-shared';
+import { META_KEYS, type ToolDefinition, type ToolsCallResult } from '@speedwave/mcp-shared';
 import { createJiraCommentTools } from './jira-comment-tools.js';
 import type { AtlassianClient } from '../client.js';
 import type { AdfDoc } from '../types.js';
@@ -42,6 +42,13 @@ const rawComment = (over: Record<string, unknown> = {}) => ({
   updated: 't2',
   ...over,
 });
+
+function declaredFields(tools: ToolDefinition[], toolName: string, key: string): string[] {
+  const tool = tools.find((d) => d.tool.name === toolName)!.tool;
+  const prop = (tool.outputSchema!.properties as Record<string, Record<string, unknown>>)[key];
+  const shape = (prop.items ?? prop) as { properties: Record<string, unknown> };
+  return Object.keys(shape.properties).sort();
+}
 
 beforeEach(() => {
   client.get.mockReset();
@@ -351,5 +358,37 @@ describe('addWorklog', () => {
 
     expect(result.isError).toBe(true);
     expect(client.post).not.toHaveBeenCalled();
+  });
+});
+
+describe('output schemas', () => {
+  it('declare every field of the comments and the worklog the tools return', async () => {
+    const tools = createJiraCommentTools(asClient());
+    client.post.mockResolvedValueOnce(rawComment()).mockResolvedValueOnce({
+      id: '9',
+      issueId: '100',
+      timeSpentSeconds: 60,
+      comment: adfParagraph('note'),
+      author: { accountId: 'u1', displayName: 'Ann' },
+      started: 's',
+      created: 'c',
+    });
+    client.get.mockResolvedValueOnce({ comments: [rawComment()] });
+
+    const added = payload(await handlerFor('addComment')({ issue: 'PROJ-1', body: 'x' }));
+    const listed = payload(await handlerFor('getComments')({ issue: 'PROJ-1' }));
+    const logged = payload(
+      await handlerFor('addWorklog')({ issue: 'PROJ-1', time_spent_seconds: 60 })
+    );
+
+    expect(Object.keys(added.comment as object).sort()).toEqual(
+      declaredFields(tools, 'addComment', 'comment')
+    );
+    expect(Object.keys((listed.comments as object[])[0]).sort()).toEqual(
+      declaredFields(tools, 'getComments', 'comments')
+    );
+    expect(Object.keys(logged.worklog as object).sort()).toEqual(
+      declaredFields(tools, 'addWorklog', 'worklog')
+    );
   });
 });

@@ -18,6 +18,7 @@ import {
 import { AtlassianClient } from '../client.js';
 import { createJiraCommentsClient } from '../domains/jira-comments.js';
 import type { AdfDoc } from '../types.js';
+import { commentSchema, commentsSchema, worklogSchema } from './jira-schemas.js';
 import { withValidation } from './validation.js';
 import { resolveRichText, type RichTextResult } from './rich-text.js';
 
@@ -46,7 +47,7 @@ const addCommentTool: Tool = {
     type: 'object',
     properties: {
       success: { type: 'boolean' },
-      comment: { type: 'object' },
+      comment: commentSchema,
       error: { type: 'string' },
     },
     required: ['success'],
@@ -84,7 +85,7 @@ const getCommentsTool: Tool = {
     type: 'object',
     properties: {
       success: { type: 'boolean' },
-      comments: { type: 'array' },
+      comments: commentsSchema,
       error: { type: 'string' },
     },
     required: ['success'],
@@ -122,7 +123,7 @@ const addWorklogTool: Tool = {
     type: 'object',
     properties: {
       success: { type: 'boolean' },
-      worklog: { type: 'object' },
+      worklog: worklogSchema,
       error: { type: 'string' },
     },
     required: ['success'],

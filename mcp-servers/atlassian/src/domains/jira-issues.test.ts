@@ -649,11 +649,17 @@ describe('unlinkIssues', () => {
 describe('transitions & assignment', () => {
   it('lists transitions', async () => {
     client.get.mockResolvedValueOnce({
-      transitions: [{ id: '11', name: 'Start', to: { name: 'In Progress' } }],
+      transitions: [
+        {
+          id: '11',
+          name: 'Start',
+          to: { name: 'In Progress', statusCategory: { key: 'indeterminate' } },
+        },
+      ],
     });
     const c = createJiraIssuesClient(client);
     expect(await c.getTransitions('PROJ-1')).toEqual([
-      { id: '11', name: 'Start', to_status: 'In Progress' },
+      { id: '11', name: 'Start', to_status: 'In Progress', to_status_category: 'indeterminate' },
     ]);
   });
 
@@ -765,7 +771,9 @@ describe('normalisation edge cases', () => {
   it('normalises a transition with no `to`', async () => {
     client.get.mockResolvedValueOnce({ transitions: [{}] });
     const c = createJiraIssuesClient(client);
-    expect(await c.getTransitions('PROJ-1')).toEqual([{ id: '', name: '', to_status: '' }]);
+    expect(await c.getTransitions('PROJ-1')).toEqual([
+      { id: '', name: '', to_status: '', to_status_category: '' },
+    ]);
   });
 
   it('mapIssue derives project_key from a key with no hyphen as the whole key', async () => {
