@@ -10,10 +10,11 @@ if [[ -z "$PR_NUMBER" ]]; then
     exit 1
 fi
 
-BASE="${SERVER_URL:?SERVER_URL is required}/${REPO:?REPO is required}/actions/workflows/test.yml"
-BRANCH="${HEAD_REF//\//%2F}"
-RUNS_URL="$BASE?query=branch%3A$BRANCH"
-BADGE_URL="$BASE/badge.svg?branch=$BRANCH&event=merge_group"
+WORKFLOW_URL="${SERVER_URL:?SERVER_URL is required}/${REPO:?REPO is required}/actions/workflows/test.yml"
+BRANCH="${HEAD_REF#refs/heads/}"
+BRANCH="${BRANCH//\//%2F}"
+RUNS_URL="$WORKFLOW_URL?query=branch%3A$BRANCH"
+BADGE_URL="$WORKFLOW_URL/badge.svg?branch=$BRANCH&event=merge_group"
 
 printf '🚦 Merge queue run: [![test](%s)](%s) [logs](%s)\n' "$BADGE_URL" "$RUNS_URL" "$RUNS_URL" |
     gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file -

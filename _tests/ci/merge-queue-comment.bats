@@ -2,7 +2,7 @@
 
 REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
 SCRIPT="$REPO_ROOT/scripts/merge-queue-comment.sh"
-HEAD="gh-readonly-queue/dev/pr-1420-0123456789abcdef"
+QUEUE_REF="refs/heads/gh-readonly-queue/dev/pr-1420-0123456789abcdef"
 ENCODED="gh-readonly-queue%2Fdev%2Fpr-1420-0123456789abcdef"
 
 setup() {
@@ -25,15 +25,11 @@ run_script() {
 }
 
 posted_body() {
-    if [ -f "$BATS_TEST_TMPDIR/gh.stdin" ]; then
-        cat "$BATS_TEST_TMPDIR/gh.stdin"
-    else
-        grep -A1 -x -- '--body' "$BATS_TEST_TMPDIR/gh.argv" | tail -n1
-    fi
+    cat "$BATS_TEST_TMPDIR/gh.stdin"
 }
 
 @test "the PR number is parsed from the group branch and passed to gh pr comment" {
-    HEAD_REF="$HEAD" run_script
+    HEAD_REF="$QUEUE_REF" run_script
     [ "$status" -eq 0 ]
     run cat "$BATS_TEST_TMPDIR/gh.argv"
     [[ "${lines[0]}" == "pr" ]]
@@ -43,12 +39,19 @@ posted_body() {
 }
 
 @test "the comment carries the test.yml badge and the runs link for the encoded branch" {
-    HEAD_REF="$HEAD" run_script
+    HEAD_REF="$QUEUE_REF" run_script
     [ "$status" -eq 0 ]
     body="$(posted_body)"
     runs="https://github.com/speednet/speedwave/actions/workflows/test.yml?query=branch%3A$ENCODED"
     badge="https://github.com/speednet/speedwave/actions/workflows/test.yml/badge.svg?branch=$ENCODED&event=merge_group"
     [[ "$body" == "🚦 Merge queue run: [![test]($badge)]($runs) [logs]($runs)" ]]
+}
+
+@test "a bare branch name without refs/heads gives the same links" {
+    HEAD_REF="${QUEUE_REF#refs/heads/}" run_script
+    [ "$status" -eq 0 ]
+    body="$(posted_body)"
+    [[ "$body" == *"query=branch%3A$ENCODED)"* ]]
 }
 
 @test "an empty head_ref fails with an error annotation and posts nothing" {
@@ -66,6 +69,6 @@ posted_body() {
 }
 
 @test "a gh failure propagates as a non-zero exit" {
-    HEAD_REF="$HEAD" GH_STUB_EXIT=1 run_script
+    HEAD_REF="$QUEUE_REF" GH_STUB_EXIT=1 run_script
     [ "$status" -ne 0 ]
 }
