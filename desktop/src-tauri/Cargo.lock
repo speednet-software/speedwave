@@ -6077,6 +6077,8 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9df9128cbbfef73cda168416ccf7f837b62737d748333bfe9ab71c245d76613e"
 dependencies = [
+ "bitflags 2.13.2",
+ "block2",
  "objc2",
  "objc2-foundation",
 ]
@@ -7975,6 +7977,8 @@ dependencies = [
  "notify",
  "objc2",
  "objc2-av-foundation",
+ "objc2-foundation",
+ "objc2-user-notifications",
  "open",
  "reqwest 0.12.28",
  "serde",
@@ -8000,6 +8004,7 @@ dependencies = [
  "tower",
  "url",
  "uuid",
+ "windows",
  "windows-sys 0.61.2",
  "zip 8.6.0",
 ]

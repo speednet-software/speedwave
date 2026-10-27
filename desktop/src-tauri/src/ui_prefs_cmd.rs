@@ -66,6 +66,7 @@ mod tests {
         let cfg = SpeedwaveUserConfig {
             ui: Some(UiPrefsConfig {
                 beta_enabled: Some(true),
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -77,6 +78,7 @@ mod tests {
         let cfg = SpeedwaveUserConfig {
             ui: Some(UiPrefsConfig {
                 beta_enabled: Some(false),
+                ..Default::default()
             }),
             ..Default::default()
         };

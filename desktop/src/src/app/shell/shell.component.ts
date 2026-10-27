@@ -9,12 +9,14 @@ import {
   signal,
 } from '@angular/core';
 import { NavigationEnd, Router, RouterOutlet } from '@angular/router';
+import type { UnlistenFn } from '@tauri-apps/api/event';
 import type { Subscription } from 'rxjs';
 import { filter } from 'rxjs/operators';
 import { ProjectSwitcherComponent } from '../project-switcher/project-switcher.component';
 import { UpdateNotificationComponent } from '../update-notification/update-notification.component';
 import { BetaService } from '../services/beta.service';
 import { ChatStateService } from '../services/chat-state.service';
+import { NotificationsService } from '../services/notifications.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { TranscriptionService } from '../services/transcription.service';
 import { UiStateService } from '../services/ui-state.service';
@@ -195,8 +197,11 @@ export class ShellComponent implements OnInit, OnDestroy {
   private readonly transcription = inject(TranscriptionService);
   private cdr = inject(ChangeDetectorRef);
   private router = inject(Router);
+  private readonly notifications = inject(NotificationsService);
   private unsubscribe: (() => void) | null = null;
   private routerSub: Subscription | null = null;
+  private stopNotificationRouting: UnlistenFn | null = null;
+  private destroyed = false;
 
   /** Catalog of every nav entry — order matches the rail top-down. */
   private readonly entryCatalog: readonly NavRailEntry[] = [
@@ -279,7 +284,7 @@ export class ShellComponent implements OnInit, OnDestroy {
     }
   }
 
-  /** Bootstraps project state and tracks the current URL. */
+  /** Bootstraps project state, tracks the current URL and routes notification clicks. */
   ngOnInit(): void {
     this.projectState.init();
     this.unsubscribe = this.projectState.onChange(() => {
@@ -288,6 +293,7 @@ export class ShellComponent implements OnInit, OnDestroy {
     this.routerSub = this.router.events
       .pipe(filter((e): e is NavigationEnd => e instanceof NavigationEnd))
       .subscribe((e) => this.currentUrlSignal.set(e.urlAfterRedirects));
+    void this.routeNotificationClicks();
   }
 
   /**
@@ -426,8 +432,11 @@ export class ShellComponent implements OnInit, OnDestroy {
     this.cdr.markForCheck();
   }
 
-  /** Tears down the projectState and router subscriptions. */
+  /** Tears down the projectState, router and notification-click subscriptions. */
   ngOnDestroy(): void {
+    this.destroyed = true;
+    this.stopNotificationRouting?.();
+    this.stopNotificationRouting = null;
     if (this.unsubscribe) {
       this.unsubscribe();
       this.unsubscribe = null;
@@ -436,5 +445,13 @@ export class ShellComponent implements OnInit, OnDestroy {
       this.routerSub.unsubscribe();
       this.routerSub = null;
     }
+  }
+
+  private async routeNotificationClicks(): Promise<void> {
+    try {
+      const stop = await this.notifications.listenForActivation();
+      if (this.destroyed) stop();
+      else this.stopNotificationRouting = stop;
+    } catch {}
   }
 }

@@ -105,6 +105,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-097](ADR-097-mermaid-diagrams-and-full-markdown-in-desktop.md)    | Mermaid diagrams and full Markdown in the Desktop UI: slot hydration, own DOMPurify pass, dagre layout without elkjs        | Accepted                                                                           |
 | [ADR-098](ADR-098-optional-speaker-attribution.md)                     | Optional speaker attribution: Nemotron-3 diarization of the meeting channel in the offline pass                             | Accepted                                                                           |
 | [ADR-099](ADR-099-find-in-chat-with-css-custom-highlight.md)           | Find in the active chat tab: rendered-text matching, one highlighted match through the CSS Custom Highlight API             | Accepted                                                                           |
+| [ADR-100](ADR-100-native-os-notifications-for-chat-session-events.md)  | Native OS notifications for chat-session events: backend-decided, native permission read, click opens the tab               | Accepted                                                                           |
 | [ADR-104](ADR-104-apple-mail-control-through-applescript.md)           | Apple Mail control through AppleScript: gates, Trash-only delete, read-only rules, and living with Mail 16 bugs             | Accepted                                                                           |
 
 ## Creating a New ADR
