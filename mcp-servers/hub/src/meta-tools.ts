@@ -11,7 +11,7 @@ Use this to discover tools before executing code. Start with 'names_only' for ef
 
 Built-in services: slack, sharepoint, redmine, gitlab, github, atlassian, office, playwright, context7, os. Plugin services (if enabled) are also searchable.
 
-Matching is tokenized and ranked (each word matched independently against name/keywords/description), so a natural phrase like "my logged hours" also works. A zero-match result includes a 'hint' with next steps.
+Matching is tokenized and ranked: a tool matches only when every word of the query hits its name, keywords or description (a query of 4 or more words may miss one). A natural phrase like "my logged hours" works; a list of several tool names matches nothing, so look tools up one name per call. A zero-match result includes a 'hint' with next steps.
 
 Examples:
 - search_tools({ query: "slack", detail_level: "names_only" })

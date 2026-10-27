@@ -5,7 +5,7 @@
 
 import { clampPageSize } from '@speedwave/mcp-shared';
 import type { AtlassianClient } from '../client.js';
-import { toAdf } from '../adf.js';
+import { adfToMarkdown, markdownToAdf } from '../adf.js';
 import {
   assertJiraIssueKeyAllowed,
   assertJiraProjectAllowed,
@@ -15,15 +15,19 @@ import {
 import { deriveBrowseUrl } from '../url.js';
 import type {
   AdfDoc,
+  CreateIssueInput,
   JiraAttachment,
   JiraIssue,
+  JiraIssueLink,
+  JiraIssueParent,
+  JiraLinkType,
   JiraSearchResult,
   JiraTransition,
   JiraUser,
+  UpdateIssueInput,
 } from '../types.js';
 import { mapTransition, mapUser } from './normalizers.js';
 
-/** Fields requested for issues — kept tight to keep responses small. */
 const ISSUE_FIELDS = [
   'summary',
   'description',
@@ -32,17 +36,38 @@ const ISSUE_FIELDS = [
   'project',
   'priority',
   'labels',
+  'components',
+  'parent',
+  'issuelinks',
   'assignee',
   'reporter',
   'created',
   'updated',
 ] as const;
 
+const SEARCH_FIELDS = ISSUE_FIELDS.filter((field) => field !== 'description');
+
 /**
  * With a project allowlist, upstream pages that filter to zero visible issues are skipped
  * (bounded by this cap) so a caller can't infer out-of-allowlist matches from an empty page.
  */
 const MAX_SEARCH_CONTINUATION_PAGES = 5;
+
+/** Thrown by `linkIssues` when no link type has the requested relation text. */
+export class UnknownLinkRelationError extends Error {
+  /**
+   * Create the error.
+   * @param relation - The relation text the caller asked for.
+   * @param available - All relation texts the Jira site knows, sorted by link type.
+   */
+  constructor(
+    readonly relation: string,
+    readonly available: string[]
+  ) {
+    super(`Unknown link relation '${relation}'. Available: ${available.join(', ')}`);
+    this.name = 'UnknownLinkRelationError';
+  }
+}
 
 /** Client for Jira issue operations. */
 export interface JiraIssuesClient {
@@ -58,38 +83,36 @@ export interface JiraIssuesClient {
   /** Get a single issue by key (e.g. `PROJ-123`) or numeric ID. */
   get(issueIdOrKey: string): Promise<JiraIssue>;
   /**
-   * Create an issue. `body` is plain text (converted to ADF) or a raw ADF document.
+   * Create an issue from the caller shape (Markdown `description` or raw `description_adf`,
+   * `assignee` accountId or `"me"`, `parent` key or id, `components` names).
    * Returns the created issue, re-fetched and normalised.
+   * @throws {ScopeError} When the project or the parent is outside the allowlist.
    */
-  create(params: {
-    projectKey: string;
-    summary: string;
-    issueType: string;
-    body?: string | AdfDoc;
-    priority?: string;
-    labels?: string[];
-    assigneeAccountId?: string;
-  }): Promise<JiraIssue>;
+  create(params: CreateIssueInput): Promise<JiraIssue>;
   /**
-   * Update mutable fields of an issue (only provided fields change; an allowlist requires
-   * a key, not a numeric ID). Returns the updated issue, re-fetched and normalised.
+   * Update the provided fields of an issue (`issue` is a key or numeric ID; an allowlist
+   * requires a key). `parent: null` detaches, `components` replaces, `type` changes the issue type.
+   * Returns the updated issue, re-fetched and normalised.
    */
-  update(
-    issueIdOrKey: string,
-    params: {
-      summary?: string;
-      body?: string | AdfDoc;
-      priority?: string;
-      labels?: string[];
-      assigneeAccountId?: string;
-    }
-  ): Promise<JiraIssue>;
+  update(issue: string, params: UpdateIssueInput): Promise<JiraIssue>;
+  /** Delete an issue by key or numeric ID (Jira refuses issues that still have sub-tasks). */
+  delete(issue: string): Promise<void>;
+  /**
+   * Link `issue` to `target` with a relation read from the side of `issue`, for example
+   * `blocks` or `is blocked by`.
+   * @throws {UnknownLinkRelationError} When no link type has that inward or outward text.
+   */
+  linkIssues(issue: string, relation: string, target: string): Promise<void>;
+  /** Remove an issue link by its link ID. */
+  unlinkIssues(linkId: string): Promise<void>;
+  /** List the link types with their inward and outward texts. */
+  listLinkTypes(): Promise<JiraLinkType[]>;
   /** List the workflow transitions currently available for an issue. */
   getTransitions(issueIdOrKey: string): Promise<JiraTransition[]>;
   /** Perform a workflow transition by transition ID. */
   transition(issueIdOrKey: string, transitionId: string): Promise<void>;
-  /** Assign an issue to an account (or unassign with `null`). */
-  assign(issueIdOrKey: string, accountId: string | null): Promise<void>;
+  /** Assign an issue to an account ID or `"me"`, or unassign with `null`. */
+  assign(issueIdOrKey: string, assignee: string | null): Promise<void>;
   /** Get the account the API token authenticates as. */
   getMyself(): Promise<JiraUser>;
   /**
@@ -113,8 +136,51 @@ export interface JiraIssuesClient {
  * @returns A Jira issues client.
  */
 export function createJiraIssuesClient(client: AtlassianClient): JiraIssuesClient {
+  let linkTypes: JiraLinkType[] | undefined;
+
   const enforceFromIssueKey = (issueIdOrKey: string): void =>
     assertJiraIssueKeyAllowed(issueIdOrKey, client.jiraProjectKeys);
+
+  const fetchIssue = async (issueIdOrKey: string): Promise<JiraIssue> =>
+    mapIssue(
+      await client.get<unknown>(`/rest/api/3/issue/${encodeURIComponent(issueIdOrKey)}`, {
+        fields: ISSUE_FIELDS.join(','),
+      })
+    );
+
+  const cachedLinkTypes = async (): Promise<JiraLinkType[]> => {
+    if (!linkTypes) {
+      const res = await client.get<{ issueLinkTypes?: unknown[] }>('/rest/api/3/issueLinkType');
+      linkTypes = (res.issueLinkTypes ?? []).map(mapLinkType);
+    }
+    return linkTypes;
+  };
+
+  const resolveAssignee = async (assignee: string): Promise<{ accountId: string }> => ({
+    accountId:
+      assignee === 'me'
+        ? mapUser(await client.get<unknown>('/rest/api/3/myself')).account_id
+        : assignee,
+  });
+
+  const writableFields = async (
+    input: CreateIssueInput | UpdateIssueInput
+  ): Promise<Record<string, unknown>> => {
+    const fields: Record<string, unknown> = {};
+    if (input.description !== undefined) fields.description = markdownToAdf(input.description);
+    if (input.description_adf !== undefined) fields.description = input.description_adf;
+    if (input.priority !== undefined) fields.priority = { name: input.priority };
+    if (input.labels !== undefined) fields.labels = input.labels;
+    if (input.components !== undefined)
+      fields.components = input.components.map((name) => ({ name }));
+    if (input.parent !== undefined) {
+      fields.parent = input.parent === null ? null : issueRef(input.parent);
+    }
+    if (input.assignee !== undefined) {
+      fields.assignee = input.assignee === null ? null : await resolveAssignee(input.assignee);
+    }
+    return fields;
+  };
 
   return {
     async search({ jql, maxResults = 50, nextPageToken }) {
@@ -128,7 +194,7 @@ export function createJiraIssuesClient(client: AtlassianClient): JiraIssuesClien
         const body: Record<string, unknown> = {
           jql,
           maxResults: capped,
-          fields: [...ISSUE_FIELDS],
+          fields: [...SEARCH_FIELDS],
         };
         if (cursor) body.nextPageToken = cursor;
         const res = await client.post<{
@@ -138,7 +204,7 @@ export function createJiraIssuesClient(client: AtlassianClient): JiraIssuesClien
         }>('/rest/api/3/search/jql', body, { retryable: true });
         issues = filterByAllowlist(
           (res.issues ?? []).map(mapIssue),
-          (i) => i.project_key,
+          (i) => i.project,
           client.jiraProjectKeys
         );
         cursor = res.nextPageToken ?? undefined;
@@ -158,56 +224,67 @@ export function createJiraIssuesClient(client: AtlassianClient): JiraIssuesClien
     },
 
     async get(issueIdOrKey) {
-      const raw = await client.get<unknown>(
-        `/rest/api/3/issue/${encodeURIComponent(issueIdOrKey)}`,
-        {
-          fields: ISSUE_FIELDS.join(','),
-        }
-      );
-      const issue = mapIssue(raw);
-      assertJiraProjectAllowed(issue.project_key, client.jiraProjectKeys);
+      const issue = await fetchIssue(issueIdOrKey);
+      assertJiraProjectAllowed(issue.project, client.jiraProjectKeys);
       return issue;
     },
 
-    async create({ projectKey, summary, issueType, body, priority, labels, assigneeAccountId }) {
-      assertJiraProjectAllowed(projectKey, client.jiraProjectKeys);
+    async create(input) {
+      assertJiraProjectAllowed(input.project, client.jiraProjectKeys);
+      if (input.parent !== undefined) enforceFromIssueKey(input.parent);
       const fields: Record<string, unknown> = {
-        project: { key: projectKey },
-        summary,
-        issuetype: { name: issueType },
+        project: { key: input.project },
+        summary: input.summary,
+        issuetype: { name: input.type },
+        ...(await writableFields(input)),
       };
-      if (body !== undefined) fields.description = toAdf(body);
-      if (priority) fields.priority = { name: priority };
-      if (labels) fields.labels = labels;
-      if (assigneeAccountId) fields.assignee = { accountId: assigneeAccountId };
       const created = await client.post<{ key: string }>('/rest/api/3/issue', { fields });
-      const raw = await client.get<unknown>(
-        `/rest/api/3/issue/${encodeURIComponent(created.key)}`,
-        {
-          fields: ISSUE_FIELDS.join(','),
-        }
-      );
-      return mapIssue(raw);
+      return fetchIssue(created.key);
     },
 
-    async update(issueIdOrKey, { summary, body, priority, labels, assigneeAccountId }) {
-      enforceFromIssueKey(issueIdOrKey);
-      const fields: Record<string, unknown> = {};
-      if (summary !== undefined) fields.summary = summary;
-      if (body !== undefined) fields.description = toAdf(body);
-      if (priority !== undefined) fields.priority = { name: priority };
-      if (labels !== undefined) fields.labels = labels;
-      if (assigneeAccountId) fields.assignee = { accountId: assigneeAccountId };
-      await client.put<void>(`/rest/api/3/issue/${encodeURIComponent(issueIdOrKey)}`, { fields });
-      const raw = await client.get<unknown>(
-        `/rest/api/3/issue/${encodeURIComponent(issueIdOrKey)}`,
-        {
-          fields: ISSUE_FIELDS.join(','),
-        }
-      );
-      const issue = mapIssue(raw);
-      assertJiraProjectAllowed(issue.project_key, client.jiraProjectKeys);
-      return issue;
+    async update(issue, input) {
+      enforceFromIssueKey(issue);
+      if (input.parent !== undefined && input.parent !== null) enforceFromIssueKey(input.parent);
+      const fields: Record<string, unknown> = { ...(await writableFields(input)) };
+      if (input.type !== undefined) fields.issuetype = { name: input.type };
+      if (input.summary !== undefined) fields.summary = input.summary;
+      await client.put<void>(`/rest/api/3/issue/${encodeURIComponent(issue)}`, { fields });
+      const updated = await fetchIssue(issue);
+      assertJiraProjectAllowed(updated.project, client.jiraProjectKeys);
+      return updated;
+    },
+
+    async delete(issue) {
+      enforceFromIssueKey(issue);
+      await client.del<void>(`/rest/api/3/issue/${encodeURIComponent(issue)}`);
+    },
+
+    async linkIssues(issue, relation, target) {
+      enforceFromIssueKey(issue);
+      enforceFromIssueKey(target);
+      const { type, issueIsOutward } = resolveRelation(await cachedLinkTypes(), relation);
+      const own = issueRef(issue);
+      const other = issueRef(target);
+      await client.post<void>('/rest/api/3/issueLink', {
+        type: { name: type.name },
+        inwardIssue: issueIsOutward ? own : other,
+        outwardIssue: issueIsOutward ? other : own,
+      });
+    },
+
+    async unlinkIssues(linkId) {
+      const path = `/rest/api/3/issueLink/${encodeURIComponent(linkId)}`;
+      if (client.jiraProjectKeys.length > 0) {
+        const link = (await client.get<Record<string, unknown>>(path)) ?? {};
+        enforceFromIssueKey(linkEndKey(link.inwardIssue));
+        enforceFromIssueKey(linkEndKey(link.outwardIssue));
+      }
+      await client.del<void>(path);
+    },
+
+    async listLinkTypes() {
+      linkTypes = undefined;
+      return cachedLinkTypes();
     },
 
     async getTransitions(issueIdOrKey) {
@@ -225,10 +302,10 @@ export function createJiraIssuesClient(client: AtlassianClient): JiraIssuesClien
       });
     },
 
-    async assign(issueIdOrKey, accountId) {
+    async assign(issueIdOrKey, assignee) {
       enforceFromIssueKey(issueIdOrKey);
       await client.put<void>(`/rest/api/3/issue/${encodeURIComponent(issueIdOrKey)}/assignee`, {
-        accountId,
+        accountId: assignee === null ? null : (await resolveAssignee(assignee)).accountId,
       });
     },
 
@@ -255,6 +332,40 @@ export function createJiraIssuesClient(client: AtlassianClient): JiraIssuesClien
   };
 }
 
+function issueRef(issueIdOrKey: string): { id: string } | { key: string } {
+  const trimmed = issueIdOrKey.trim();
+  return /^\d+$/.test(trimmed) ? { id: trimmed } : { key: trimmed };
+}
+
+function linkEndKey(end: unknown): string {
+  return String(((end ?? {}) as Record<string, unknown>).key ?? '');
+}
+
+function resolveRelation(
+  types: JiraLinkType[],
+  relation: string
+): { type: JiraLinkType; issueIsOutward: boolean } {
+  const wanted = relation.trim().toLowerCase();
+  const byOutward = types.find((t) => t.outward.toLowerCase() === wanted);
+  if (byOutward) return { type: byOutward, issueIsOutward: true };
+  const byInward = types.find((t) => t.inward.toLowerCase() === wanted);
+  if (byInward) return { type: byInward, issueIsOutward: false };
+  throw new UnknownLinkRelationError(
+    relation,
+    types.flatMap((t) => [t.outward, t.inward]).filter((text, i, all) => all.indexOf(text) === i)
+  );
+}
+
+function mapLinkType(raw: unknown): JiraLinkType {
+  const o = (raw ?? {}) as Record<string, unknown>;
+  return {
+    id: String(o.id ?? ''),
+    name: String(o.name ?? ''),
+    inward: String(o.inward ?? ''),
+    outward: String(o.outward ?? ''),
+  };
+}
+
 /**
  * Map a raw Jira attachment object (Atlassian REST API shape) to {@link JiraAttachment}.
  * @param raw - The raw object as returned by the Atlassian REST API.
@@ -276,28 +387,66 @@ export function mapAttachment(raw: unknown): JiraAttachment {
  * Map a raw Jira issue (with `fields`, Atlassian REST API shape) to {@link JiraIssue}.
  * @param raw - The raw object as returned by the Atlassian REST API.
  */
-export function mapIssue(raw: unknown): JiraIssue {
+function mapIssue(raw: unknown): JiraIssue {
   const o = (raw ?? {}) as Record<string, unknown>;
   const f = (o.fields ?? {}) as Record<string, unknown>;
-  const project = (f.project ?? {}) as Record<string, unknown>;
-  const status = (f.status ?? {}) as Record<string, unknown>;
-  const issuetype = (f.issuetype ?? {}) as Record<string, unknown>;
-  const priority = (f.priority ?? {}) as Record<string, unknown>;
   const key = String(o.key ?? '');
-  return {
-    id: String(o.id ?? ''),
+  const issue: JiraIssue = {
     key,
+    id: String(o.id ?? ''),
+    web_url: o.self ? deriveBrowseUrl(String(o.self), key) : undefined,
     summary: String(f.summary ?? ''),
-    description: (f.description ?? null) as AdfDoc | string | null,
-    status: String(status.name ?? ''),
-    issue_type: String(issuetype.name ?? ''),
-    project_key: String(project.key ?? key.split('-')[0]),
-    priority: priority.name ? String(priority.name) : undefined,
+    type: nameOf(f.issuetype),
+    status: nameOf(f.status),
+    project: String(asRecord(f.project).key ?? key.split('-')[0]),
+    priority: asRecord(f.priority).name ? nameOf(f.priority) : null,
     labels: Array.isArray(f.labels) ? (f.labels as unknown[]).map(String) : [],
+    components: Array.isArray(f.components)
+      ? (f.components as unknown[]).map((c) => nameOf(c))
+      : [],
+    parent: f.parent ? mapParent(f.parent) : null,
+    links: Array.isArray(f.issuelinks) ? (f.issuelinks as unknown[]).map(mapLink) : [],
     assignee: f.assignee ? mapUser(f.assignee) : null,
     reporter: f.reporter ? mapUser(f.reporter) : null,
     created: String(f.created ?? ''),
     updated: String(f.updated ?? ''),
-    web_url: o.self ? deriveBrowseUrl(String(o.self), key) : undefined,
+  };
+  if (f.description !== undefined) {
+    issue.description = adfToMarkdown(f.description as AdfDoc | null);
+  }
+  return issue;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return (value ?? {}) as Record<string, unknown>;
+}
+
+function nameOf(value: unknown): string {
+  return String(asRecord(value).name ?? '');
+}
+
+function mapParent(raw: unknown): JiraIssueParent {
+  const f = asRecord(asRecord(raw).fields);
+  return {
+    key: String(asRecord(raw).key ?? ''),
+    summary: String(f.summary ?? ''),
+    type: nameOf(f.issuetype),
+    status: nameOf(f.status),
+  };
+}
+
+function mapLink(raw: unknown): JiraIssueLink {
+  const o = asRecord(raw);
+  const type = asRecord(o.type);
+  const other = asRecord(o.inwardIssue ?? o.outwardIssue);
+  const fields = asRecord(other.fields);
+  return {
+    id: String(o.id ?? ''),
+    relation: String((o.inwardIssue ? type.inward : type.outward) ?? ''),
+    issue: {
+      key: String(other.key ?? ''),
+      summary: String(fields.summary ?? ''),
+      status: nameOf(fields.status),
+    },
   };
 }

@@ -1,24 +1,24 @@
 /**
- * Jira issue comments and worklog entries; comment bodies use Atlassian Document Format
- * (Jira Cloud REST v3).
+ * Jira issue comments and worklog entries; the API speaks Atlassian Document Format (Jira
+ * Cloud REST v3), callers speak Markdown.
  * @module mcp-atlassian/domains/jira-comments
  */
 
 import { clampPageSize } from '@speedwave/mcp-shared';
 import type { AtlassianClient } from '../client.js';
-import { toAdf } from '../adf.js';
+import { adfToMarkdown, isAdfDoc, markdownToAdf } from '../adf.js';
 import { assertJiraIssueKeyAllowed } from '../scope.js';
 import type { AdfDoc, JiraComment, JiraWorklog } from '../types.js';
 import { mapUser } from './normalizers.js';
 
 /** Client for Jira comments and worklog. */
 export interface JiraCommentsClient {
-  /** Add a comment to an issue. `body` is plain text (→ ADF) or a raw ADF object. */
+  /** Add a comment to an issue. `body` is Markdown (→ ADF) or a raw ADF object. */
   add(issueIdOrKey: string, body: string | AdfDoc): Promise<JiraComment>;
   /** List comments on an issue (most recent last, Jira default ordering). */
   list(issueIdOrKey: string, options?: { maxResults?: number }): Promise<JiraComment[]>;
   /**
-   * Log work against an issue. `comment` is plain text (→ ADF) or a raw ADF document; `started`
+   * Log work against an issue. `comment` is Markdown (→ ADF) or a raw ADF document; `started`
    * is an ISO 8601 timestamp, defaulting to now server-side. Returns the normalised entry.
    */
   addWorklog(
@@ -41,7 +41,7 @@ export function createJiraCommentsClient(client: AtlassianClient): JiraCommentsC
       enforce(issueIdOrKey);
       const raw = await client.post<unknown>(
         `/rest/api/3/issue/${encodeURIComponent(issueIdOrKey)}/comment`,
-        { body: toAdf(body) }
+        { body: bodyToAdf(body) }
       );
       return mapComment(raw);
     },
@@ -58,7 +58,7 @@ export function createJiraCommentsClient(client: AtlassianClient): JiraCommentsC
     async addWorklog(issueIdOrKey, { timeSpentSeconds, comment, started }) {
       enforce(issueIdOrKey);
       const data: Record<string, unknown> = { timeSpentSeconds };
-      if (comment !== undefined) data.comment = toAdf(comment);
+      if (comment !== undefined) data.comment = bodyToAdf(comment);
       if (started) data.started = started;
       const raw = await client.post<unknown>(
         `/rest/api/3/issue/${encodeURIComponent(issueIdOrKey)}/worklog`,
@@ -77,7 +77,7 @@ export function mapComment(raw: unknown): JiraComment {
   const o = (raw ?? {}) as Record<string, unknown>;
   return {
     id: String(o.id ?? ''),
-    body: (o.body ?? '') as AdfDoc | string,
+    body: bodyToMarkdown(o.body),
     author: o.author ? mapUser(o.author) : null,
     created: String(o.created ?? ''),
     updated: String(o.updated ?? o.created ?? ''),
@@ -95,9 +95,18 @@ export function mapWorklog(raw: unknown, issueIdOrKey: string): JiraWorklog {
     id: String(o.id ?? ''),
     issue_id: String(o.issueId ?? issueIdOrKey),
     time_spent_seconds: Number(o.timeSpentSeconds ?? 0),
-    comment: (o.comment ?? null) as AdfDoc | string | null,
+    comment: o.comment === undefined || o.comment === null ? null : bodyToMarkdown(o.comment),
     author: o.author ? mapUser(o.author) : null,
     started: String(o.started ?? ''),
     created: String(o.created ?? ''),
   };
+}
+
+function bodyToAdf(body: string | AdfDoc): AdfDoc {
+  return isAdfDoc(body) ? body : markdownToAdf(body);
+}
+
+function bodyToMarkdown(body: unknown): string {
+  if (isAdfDoc(body)) return adfToMarkdown(body);
+  return typeof body === 'string' ? body : '';
 }

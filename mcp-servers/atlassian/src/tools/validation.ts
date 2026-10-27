@@ -5,8 +5,13 @@
 
 import {
   withClientValidation,
+  withDeclaredParams,
+  errorResult,
+  notConfiguredMessage,
+  type Tool,
+  type ToolDefinition,
   type ToolsCallResult,
-  type jsonResult,
+  jsonResult,
   type textResult,
 } from '@speedwave/mcp-shared';
 import { AtlassianClient } from '../client.js';
@@ -29,6 +34,26 @@ export function withValidation<T>(
     serviceName: 'Atlassian',
     formatError: (error) => AtlassianClient.formatError(error),
   });
+}
+
+/**
+ * Build the result of a list tool: the items under `key` plus how many were returned.
+ * @param key - The result key that holds the items.
+ * @param items - The returned items.
+ * @returns The JSON tool result `{ <key>: [...], count }`.
+ */
+export function listResult(key: string, items: unknown[]): ReturnType<typeof jsonResult> {
+  return jsonResult({ [key]: items, count: items.length });
+}
+
+/**
+ * Build the definitions for an unconfigured service: every tool rejects bad arguments, then reports the missing configuration.
+ * @param tools - The tools to expose.
+ * @returns Definitions whose handlers return the not-configured error.
+ */
+export function unconfiguredDefinitions(tools: Tool[]): ToolDefinition[] {
+  const unconfigured = async () => errorResult(notConfiguredMessage('Atlassian'));
+  return tools.map((tool) => ({ tool, handler: withDeclaredParams(tool, unconfigured) }));
 }
 
 /**

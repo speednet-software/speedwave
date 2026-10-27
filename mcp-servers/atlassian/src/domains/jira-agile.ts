@@ -21,7 +21,7 @@ export interface JiraAgileClient {
   /** List Agile boards (filtered by the configured project allowlist, if any). */
   listBoards(options?: {
     name?: string;
-    projectKeyOrId?: string;
+    project?: string;
     maxResults?: number;
   }): Promise<JiraBoard[]>;
   /** Get a single board by ID. */
@@ -80,7 +80,7 @@ export function createJiraAgileClient(client: AtlassianClient): JiraAgileClient 
         maxResults: clampPageSize(options.maxResults, 50, 100),
       };
       if (options.name) params.name = options.name;
-      if (options.projectKeyOrId) params.projectKeyOrId = options.projectKeyOrId;
+      if (options.project) params.projectKeyOrId = options.project;
       const res = await client.get<{ values?: unknown[] }>('/rest/agile/1.0/board', params);
       const boards = (res.values ?? []).map(mapBoard);
       return filterByAllowlist(boards, (b) => b.project_key, client.jiraProjectKeys);

@@ -14,9 +14,7 @@ export function mapUser(raw: unknown): JiraUser {
   const o = (raw ?? {}) as Record<string, unknown>;
   return {
     account_id: String(o.accountId ?? ''),
-    display_name: String(o.displayName ?? ''),
-    email_address: o.emailAddress ? String(o.emailAddress) : undefined,
-    active: Boolean(o.active ?? true),
+    name: String(o.displayName ?? ''),
   };
 }
 
@@ -28,5 +26,11 @@ export function mapUser(raw: unknown): JiraUser {
 export function mapTransition(raw: unknown): JiraTransition {
   const o = (raw ?? {}) as Record<string, unknown>;
   const to = (o.to ?? {}) as Record<string, unknown>;
-  return { id: String(o.id ?? ''), name: String(o.name ?? ''), to_status: String(to.name ?? '') };
+  const category = (to.statusCategory ?? {}) as Record<string, unknown>;
+  return {
+    id: String(o.id ?? ''),
+    name: String(o.name ?? ''),
+    to_status: String(to.name ?? ''),
+    to_status_category: String(category.key ?? ''),
+  };
 }
