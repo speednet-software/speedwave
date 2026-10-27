@@ -268,8 +268,8 @@ export function createJiraIssuesClient(client: AtlassianClient): JiraIssuesClien
       const other = issueRef(target);
       await client.post<void>('/rest/api/3/issueLink', {
         type: { name: type.name },
-        outwardIssue: issueIsOutward ? own : other,
-        inwardIssue: issueIsOutward ? other : own,
+        inwardIssue: issueIsOutward ? own : other,
+        outwardIssue: issueIsOutward ? other : own,
       });
     },
 
@@ -447,7 +447,7 @@ function mapLink(raw: unknown): JiraIssueLink {
   const fields = asRecord(other.fields);
   return {
     id: String(o.id ?? ''),
-    relation: String((o.inwardIssue ? type.outward : type.inward) ?? ''),
+    relation: String((o.inwardIssue ? type.inward : type.outward) ?? ''),
     issue: {
       key: String(other.key ?? ''),
       summary: String(fields.summary ?? ''),

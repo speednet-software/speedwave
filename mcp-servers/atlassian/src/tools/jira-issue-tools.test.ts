@@ -243,7 +243,7 @@ describe('emitted JSON matches outputSchema', () => {
       project: 'PROJ',
       components: ['core'],
       parent: { key: 'PROJ-1', summary: 'Epic', type: 'Epic', status: 'Open' },
-      links: [{ id: '900', relation: 'blocks', issue: { key: 'PROJ-2' } }],
+      links: [{ id: '900', relation: 'is blocked by', issue: { key: 'PROJ-2' } }],
       assignee: { account_id: 'u1', name: 'Ann' },
     });
   });
@@ -705,14 +705,14 @@ describe('deleteIssue', () => {
 });
 
 describe('linkIssues and unlinkIssues', () => {
-  it('links with the relation read from the side of `issue`', async () => {
+  it('sends the issue that blocks as inwardIssue, the way Jira stores "PROJ-1 blocks PROJ-2"', async () => {
     client.get.mockResolvedValueOnce(LINK_TYPES);
     client.post.mockResolvedValueOnce(undefined);
     await run('linkIssues', { issue: 'PROJ-1', relation: 'blocks', target: 'PROJ-2' });
     expect(client.post).toHaveBeenCalledWith('/rest/api/3/issueLink', {
       type: { name: 'Blocks' },
-      outwardIssue: { key: 'PROJ-1' },
-      inwardIssue: { key: 'PROJ-2' },
+      inwardIssue: { key: 'PROJ-1' },
+      outwardIssue: { key: 'PROJ-2' },
     });
   });
 
@@ -722,8 +722,8 @@ describe('linkIssues and unlinkIssues', () => {
     await run('linkIssues', { issue: 'PROJ-1', relation: '  Is Blocked BY ', target: '10002' });
     expect(client.post).toHaveBeenCalledWith('/rest/api/3/issueLink', {
       type: { name: 'Blocks' },
-      inwardIssue: { key: 'PROJ-1' },
-      outwardIssue: { id: '10002' },
+      outwardIssue: { key: 'PROJ-1' },
+      inwardIssue: { id: '10002' },
     });
   });
 

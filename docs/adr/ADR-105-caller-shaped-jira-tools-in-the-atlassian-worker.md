@@ -35,7 +35,7 @@ The API is shaped by what a caller wants to say, and the worker maps it to Jira 
 
 - Callers on the old names break. The `create-jira-issue` skill (`plugin/stallion/claude-resources/skills/create-jira-issue/`) must migrate; SPEED-416 is informed.
 - The mapping from caller shape to REST lives in one place, the worker, so a Jira API change does not reach the tool contract.
-- Which side of a link `relation` maps to was verified against live Jira on 2026-10-27, not assumed from documentation: `linkIssues(A, "blocks", B)` sends `outwardIssue: A, inwardIssue: B`, and in A's `issuelinks` that link carries `inwardIssue: B`, so an entry naming `inwardIssue` is read with the type's outward text.
+- Which side of a link `relation` maps to was verified against live Jira on 2026-10-27, in the Jira UI, not assumed from documentation. The create and read shapes name the ends in opposite ways: `POST /rest/api/3/issueLink` with `inwardIssue: A, outwardIssue: B` stores "A blocks B", while in an issue's `issuelinks` an entry naming `inwardIssue` is read with the type's inward text (A's entry for "B blocks A" carries `inwardIssue: B` and reads "is blocked by").
 - The model-facing text of a description is lossy for nodes without a Markdown form; the markers and the ADF escape hatch bound the loss.
 - Confluence and sharepoint keep camelCase until SPEED-870.
 
