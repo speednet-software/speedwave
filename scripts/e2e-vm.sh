@@ -456,8 +456,10 @@ Assert-ExitCode
 Set-Location C:\speedwave-e2e
 Write-Host "── Ensuring the wasm32 target and wasm-pack for the PII engine..."
 rustup target add wasm32-unknown-unknown; Assert-ExitCode
-if (-not (Get-Command wasm-pack -ErrorAction SilentlyContinue)) {
-    cargo install wasm-pack --locked; Assert-ExitCode
+$wasmPackVersion = ((Get-Content scripts\build-tool-versions.env | Where-Object { $_ -like 'WASM_PACK_VERSION=*' }) -split '=', 2)[1].Trim()
+$wasmPackInstalled = if (Get-Command wasm-pack -ErrorAction SilentlyContinue) { (wasm-pack --version) -replace '^wasm-pack ', '' } else { '' }
+if ($wasmPackInstalled -ne $wasmPackVersion) {
+    cargo install wasm-pack --version $wasmPackVersion --locked --force; Assert-ExitCode
 }
 Write-Host "── Installing npm dependencies..."
 npm ci; Assert-ExitCode
@@ -822,7 +824,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 eval "$(/opt/homebrew/bin/brew shellenv)"
 
 rustup target add wasm32-unknown-unknown
-command -v wasm-pack >/dev/null 2>&1 || cargo install wasm-pack --locked
+scripts/install-wasm-pack.sh
 
 npm ci
 cd mcp-servers && npm ci && cd ..
