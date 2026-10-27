@@ -5,7 +5,7 @@ Speedwave ships a beta from the tip of `dev` once a night (or on demand) and pro
 ## Channels and versions
 
 - **`dev`** is the default and only long-lived integration branch. A beta `GitHub Release` is built from its tip at 00:17 UTC (01:17 CET, 02:17 CEST) on Tuesday to Saturday when commits landed since the previous beta, or at once from the "Run workflow" button of the `Beta` workflow: `v0.<M+1>.0+N`, flagged `prerelease`, with macOS (Apple Silicon) and Windows installers, CLI archives and `latest.json`. `N` is the number of commits reachable from the tip of `dev` (`git rev-list --count HEAD`); it never resets. The CLI archives contain the binary bundled into the app: on macOS it carries the app's Developer ID signature, on Windows an Azure Artifact Signing signature.
-- **`release/0.M`** is the line for stable minor `M`. It is created once, by the promotion workflow and never by hand: a person from the promoter list runs "Run workflow" on `Release` with `dev` selected and a `commit` input, the SHA of a `dev` commit that already has a published beta. The workflow checks every precondition, creates `release/0.M` at that commit (`M` is one more than the highest existing line), then flips that exact beta's `prerelease` flag to `false` and sets `make_latest`: same build, same tag, same bytes, no rebuild.
+- **`release/0.M`** is the line for stable minor `M`. It is created by the promotion workflow; creating it by hand is not supported. A person from the promoter list runs "Run workflow" on `Release` with `dev` selected and a `commit` input, the SHA of a `dev` commit that already has a published beta. The workflow checks every precondition, creates `release/0.M` at that commit (`M` is one more than the highest existing line), then flips that exact beta's `prerelease` flag to `false` and sets `make_latest`: same build, same tag, same bytes, no rebuild.
 - A **hotfix** is a PR to the highest `release/0.M` line. Its merge publishes `0.M.Z` immediately, with no beta stage, and opens a PR that backports it into `dev`.
 - The version always comes from git (`crates/speedwave-version`, the `speedwave-version` binary's `version`/`notes-range`/`validate-promotion` subcommands). Every tracked version field in the repo stays at the literal `0.0.0`; nothing about a release is ever written back to a tracked file.
 
@@ -53,7 +53,7 @@ Steps:
 4. The workflow creates `release/0.M` at the commit, then the beta's `GitHub Release` loses `prerelease`, gains `make_latest`, and its notes are rewritten to the list of changes since the previous line (hotfixes of that line excluded). A `changelog/0.M` PR to `dev` is opened with the `CHANGELOG.md` section; merge it like any other PR.
 5. File a Jira task for the landing "What's new" entry (EN and PL); update `install.mdx` on the landing to drop the macOS Intel row once this is the first stable of the cutover.
 
-There is no bypass. If the rig is down or e2e is red, the stable waits. Never create or push `release/0.M` by hand: the ruleset rejects it, and the workflow computes `M` itself.
+There is no bypass. If the rig is down or e2e is red, the stable waits. Do not create or push `release/0.M` by hand: the ruleset rejects it for everyone without the Repository admin role, and the workflow computes `M` itself.
 
 **Red or missing e2e, or a Beta run that is not green**: open the Beta run that built the beta and use "Re-run failed jobs" until it is green, then run the promotion again. A Beta run in progress fails the promotion; run it again when that run finishes.
 
@@ -75,8 +75,8 @@ A rerun with the same `commit` continues from the first step whose effect is not
 | Flip `prerelease`/`make_latest`, rewrite notes | the release flags and body                     | the beta is still a prerelease, or already stable               | continues if the flag was not flipped; once flipped, skips every precondition including the audit | impossible: the flip is the point of no return                                     |
 | Changelog PR                                   | the `changelog/0.M` branch and the PR to `dev` | stable is out, the PR may be missing                            | force-pushes `changelog/0.M` and reuses the open PR, or opens one                                 | not applicable                                                                     |
 
-- Starting over is possible only before the flip. An admin deletes `release/0.M` (the `release-lines` ruleset forbids deleting it, so it is an admin action), then the promotion is dispatched with another commit.
-- The flip is the point of no return: undoing it is a downgrade for every installation that already updated. Go forward only (rerun to finish the changelog PR), and never set the flag back by hand.
+- Starting over is possible only before the flip. An admin temporarily disables the `release-lines` ruleset (it forbids deleting `release/0.*` and has no bypass), deletes `release/0.M`, and enables the ruleset again; then the promotion is dispatched with another commit. A promotion that finds `release/0.M` at a different commit without a stable release refuses until this is done.
+- The flip is the point of no return: undoing it is a downgrade for every installation that already updated. Go forward only (rerun to finish the changelog PR), and do not set the flag back: that is not part of the process, and it would offer stable users a downgrade.
 - After the flip a rerun skips all preconditions, the audit included, because the stable is already out.
 
 ## Hotfixing a stable release

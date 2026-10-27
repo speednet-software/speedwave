@@ -37,6 +37,7 @@ EOF2
     git -C "$WORK" commit -q --allow-empty -m "init"
     git -C "$WORK" commit -q --allow-empty -m "release 0.20 tip"
     git -C "$WORK" update-ref refs/remotes/origin/release/0.20 HEAD
+    git -C "$WORK" tag "v0.20.0"
     git -C "$WORK" commit -q --allow-empty -m "candidate"
     CANDIDATE="$(git -C "$WORK" rev-parse HEAD)"
     git -C "$WORK" tag "v0.21.0+203"
@@ -47,6 +48,7 @@ EOF2
     export SPEEDWAVE_VERSION_BIN="$STUB_DIR/speedwave-version"
     export GH_TOKEN=x
 
+    printf '{"databaseId":1,"isDraft":false,"isPrerelease":false}\n' >"$GH_DIR/release-v0.20.0.json"
     beta_release prerelease
     successful_beta_run 501
 }
@@ -211,4 +213,58 @@ gate() {
     cd "$WORK"
     PATH="$STUB_DIR:$PATH" COMMIT="" run bash "$SCRIPT"
     [ "$status" -ne 0 ]
+}
+
+@test "a highest line at another commit without a stable release is refused" {
+    git -C "$WORK" update-ref refs/remotes/origin/release/0.21 refs/remotes/origin/dev
+    gate
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"::error::release/0.21 exists at"* ]]
+    [[ "$output" == *"without a stable release"* ]]
+    [[ "$output" == *"admin deletes it"* ]]
+}
+
+@test "a highest line at another commit with a stable release makes the next minor the fresh case" {
+    git -C "$WORK" update-ref refs/remotes/origin/release/0.21 refs/remotes/origin/dev
+    git -C "$WORK" tag "v0.21.0" refs/remotes/origin/dev
+    printf '{"databaseId":2,"isDraft":false,"isPrerelease":false}\n' >"$GH_DIR/release-v0.21.0.json"
+    git -C "$WORK" tag "v0.22.0+203" "$CANDIDATE"
+    printf '{"databaseId":888,"isDraft":false,"isPrerelease":true}\n' >"$GH_DIR/release-v0.22.0+203.json"
+    gate
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"minor=22"* ]]
+    [[ "$output" == *"branch_exists=false"* ]]
+}
+
+@test "the dev ancestry is checked before the beta tag" {
+    git -C "$WORK" checkout -q -b side
+    git -C "$WORK" commit -q --allow-empty -m "side"
+    COMMIT="$(git -C "$WORK" rev-parse HEAD)"
+    gate
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"::error::"*"history of dev"* ]]
+}
+
+@test "a commit input that is not 7 to 40 lowercase hex characters is refused" {
+    for bad in "HEAD" "dev" "ABCDEF1234" "abc12" "$CANDIDATE;id" "--help"; do
+        COMMIT="$bad" gate
+        [ "$status" -eq 1 ]
+        [[ "$output" == *"::error::commit input must be 7 to 40 lowercase hex characters"* ]]
+    done
+}
+
+@test "a short commit prefix is accepted" {
+    COMMIT="${CANDIDATE:0:10}" gate
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"commit=$CANDIDATE"* ]]
+}
+
+@test "a flipped release without its branch asks for the branch to be created" {
+    beta_release published
+    rm "$GH_DIR/runs.json"
+    VERSION_STUB_EXIT=1 gate
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"flipped=true"* ]]
+    [[ "$output" == *"branch_exists=false"* ]]
+    [[ "$output" == *"minor=21"* ]]
 }
