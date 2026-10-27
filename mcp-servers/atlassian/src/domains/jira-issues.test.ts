@@ -251,7 +251,7 @@ describe('get', () => {
     );
   });
 
-  it('maps links with the relation read from this issue side', async () => {
+  it('maps links with the relation read from this issue side (inwardIssue is the other, inward end)', async () => {
     client.get.mockResolvedValueOnce(
       rawIssue(
         {},
@@ -262,7 +262,7 @@ describe('get', () => {
               type: { name: 'Blocks', inward: 'is blocked by', outward: 'blocks' },
               inwardIssue: {
                 key: 'PROJ-7',
-                fields: { summary: 'Blocker', status: { name: 'Open' } },
+                fields: { summary: 'Blocked', status: { name: 'Open' } },
               },
             },
             {
@@ -270,7 +270,7 @@ describe('get', () => {
               type: { name: 'Blocks', inward: 'is blocked by', outward: 'blocks' },
               outwardIssue: {
                 key: 'PROJ-8',
-                fields: { summary: 'Blocked', status: { name: 'Done' } },
+                fields: { summary: 'Blocker', status: { name: 'Done' } },
               },
             },
           ],
@@ -281,13 +281,13 @@ describe('get', () => {
     expect((await c.get('PROJ-1')).links).toEqual([
       {
         id: '501',
-        relation: 'is blocked by',
-        issue: { key: 'PROJ-7', summary: 'Blocker', status: 'Open' },
+        relation: 'blocks',
+        issue: { key: 'PROJ-7', summary: 'Blocked', status: 'Open' },
       },
       {
         id: '502',
-        relation: 'blocks',
-        issue: { key: 'PROJ-8', summary: 'Blocked', status: 'Done' },
+        relation: 'is blocked by',
+        issue: { key: 'PROJ-8', summary: 'Blocker', status: 'Done' },
       },
     ]);
   });

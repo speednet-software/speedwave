@@ -24,7 +24,7 @@ The API is shaped by what a caller wants to say, and the worker maps it to Jira 
 6. **`assignee`** is an account ID, `"me"` (resolved through `getMyself`) or `null`.
 7. **Markdown in both directions** for descriptions and comments, with an ADF escape hatch for content Markdown cannot carry. The converter is our own (`mcp-servers/atlassian/src/adf.ts`). Nodes and text marks with no Markdown equivalent (underline, text and background color, sub and superscript) come back as explicit markers, so a loss is visible to the model.
 8. **`searchIssues` returns no `description`**, but includes parent, components and links. JQL filtering on the description is expected to keep working because Jira evaluates the query, not the worker; this is to be confirmed on live Jira.
-9. **Jira 400s become teaching errors.** A subtask without a parent, an unknown component, an unknown link type, deleting an issue that has subtasks and issue type change limits (JRACLOUD-68207[^2]) are sent as requests, and the 400 is translated into a message naming the next tool to call. No pre-flight GET is made before a write.
+9. **Jira 400s become teaching errors.** A subtask without a parent, an unknown link type, deleting an issue that has subtasks and issue type change limits (JRACLOUD-68207[^2]) are sent as requests, and the 400 is translated into a message naming the next tool to call. Component names are the one pre-flight check: they are compared with the project's components before the write, because on the SPEED project Jira created an unknown component instead of answering 400 (live test, 2026-10-27). Jira reports a subtask created without a parent on `issuetype`, in the site's language, so a create without `parent` refused on `issuetype` reads the project's issue types and, for a subtask type, is reported as a missing `parent`.
 10. **`withDeclaredParams` wraps every Jira tool**, so unknown parameters are rejected (SPEED-524).
 11. **`deleteIssue`** uses `DESTRUCTIVE_ANNOTATIONS` and the allowlist. It has no `deleteSubtasks`; Jira refuses to delete an issue that has subtasks unless `deleteSubtasks` is set[^3], and the worker turns that 400 into a message.
 12. **Linking reads link types.** `linkIssues` reads the link types (`GET /rest/api/3/issueLinkType`, cached per client) and maps `relation` to a link type and a direction; `unlinkIssues` reads the link (`GET /rest/api/3/issueLink/{id}`) to apply the allowlist to both ends when an allowlist is active.
@@ -35,7 +35,7 @@ The API is shaped by what a caller wants to say, and the worker maps it to Jira 
 
 - Callers on the old names break. The `create-jira-issue` skill (`plugin/stallion/claude-resources/skills/create-jira-issue/`) must migrate; SPEED-416 is informed.
 - The mapping from caller shape to REST lives in one place, the worker, so a Jira API change does not reach the tool contract.
-- Which side of a link `relation` maps to (`inwardIssue` or `outwardIssue`) is verified against a live Jira instance, not assumed from documentation.
+- Which side of a link `relation` maps to was verified against live Jira on 2026-10-27, not assumed from documentation: `linkIssues(A, "blocks", B)` sends `outwardIssue: A, inwardIssue: B`, and in A's `issuelinks` that link carries `inwardIssue: B`, so an entry naming `inwardIssue` is read with the type's outward text.
 - The model-facing text of a description is lossy for nodes without a Markdown form; the markers and the ADF escape hatch bound the loss.
 - Confluence and sharepoint keep camelCase until SPEED-870.
 

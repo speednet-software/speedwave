@@ -243,7 +243,7 @@ describe('emitted JSON matches outputSchema', () => {
       project: 'PROJ',
       components: ['core'],
       parent: { key: 'PROJ-1', summary: 'Epic', type: 'Epic', status: 'Open' },
-      links: [{ id: '900', relation: 'is blocked by', issue: { key: 'PROJ-2' } }],
+      links: [{ id: '900', relation: 'blocks', issue: { key: 'PROJ-2' } }],
       assignee: { account_id: 'u1', name: 'Ann' },
     });
   });
@@ -365,7 +365,13 @@ describe('searchIssues', () => {
 describe('createIssue', () => {
   it('sends caller-shaped fields as Jira REST and returns the re-fetched issue', async () => {
     client.post.mockResolvedValueOnce({ key: 'PROJ-7' });
-    client.get.mockResolvedValueOnce(RAW_ISSUE);
+    client.get.mockImplementation(async (url: string) =>
+      url.endsWith('/components')
+        ? [{ id: '1', name: 'core' }]
+        : url.includes('/project/')
+          ? { id: '10', key: 'PROJ' }
+          : RAW_ISSUE
+    );
     await run('createIssue', {
       project: 'PROJ',
       type: 'Sub-task',
@@ -434,19 +440,71 @@ describe('createIssue', () => {
     expect(textOf(result)).toContain('Sub-task must have a parent issue');
   });
 
-  it('points an unknown component to listComponents with the project', async () => {
-    client.post.mockRejectedValueOnce(
-      badRequest({ errors: { components: "Component name 'nope' is not valid" } })
+  it('rejects a component name the project does not have before sending', async () => {
+    client.get.mockImplementation(async (url: string) =>
+      url.endsWith('/components')
+        ? [
+            { id: '1', name: 'core' },
+            { id: '2', name: 'docs' },
+          ]
+        : { id: '10', key: 'PROJ' }
     );
     const result = await run('createIssue', {
       project: 'PROJ',
       type: 'Task',
       summary: 'S',
-      components: ['nope'],
+      components: ['core', 'nope'],
     });
+    expect(result.isError).toBe(true);
     expect(textOf(result)).toContain('Invalid components.');
     expect(textOf(result)).toContain('Get a valid value from listComponents.');
-    expect(textOf(result)).toContain('listComponents with project "PROJ"');
+    expect(textOf(result)).toContain('nothing was created');
+    expect(textOf(result)).toContain('Available components: core, docs.');
+    expect(textOf(result)).not.toContain('nope');
+    expect(client.post).not.toHaveBeenCalled();
+  });
+
+  it('says the project has no components when the list is empty', async () => {
+    client.get.mockImplementation(async (url: string) =>
+      url.endsWith('/components') ? [] : { id: '10', key: 'PROJ' }
+    );
+    const result = await run('createIssue', {
+      project: 'PROJ',
+      type: 'Task',
+      summary: 'S',
+      components: ['core'],
+    });
+    expect(textOf(result)).toContain('Available components: none.');
+  });
+
+  it('teaches parent when Jira refuses a sub-task type sent without one', async () => {
+    client.post.mockRejectedValueOnce(
+      badRequest({ errors: { issuetype: 'Typ zgłoszenia jest podzadaniem' } })
+    );
+    client.get.mockImplementation(async (url: string) =>
+      url.endsWith('/issuetype/project')
+        ? [
+            { id: '1', name: 'Zadanie', subtask: false },
+            { id: '2', name: 'Podzadanie', subtask: true },
+          ]
+        : { id: '10', key: 'PROJ' }
+    );
+    const result = await run('createIssue', { project: 'PROJ', type: 'Podzadanie', summary: 'S' });
+    expect(textOf(result)).toContain('Invalid parent.');
+    expect(textOf(result)).toContain('nothing was created');
+    expect(textOf(result)).toContain('Jira said: Typ zgłoszenia jest podzadaniem');
+    expect(textOf(result)).not.toContain('listIssueTypes');
+  });
+
+  it('keeps pointing a refused standard type to listIssueTypes when no parent was sent', async () => {
+    client.post.mockRejectedValueOnce(badRequest({ errors: { issuetype: 'invalid' } }));
+    client.get.mockImplementation(async (url: string) =>
+      url.endsWith('/issuetype/project')
+        ? [{ id: '2', name: 'Podzadanie', subtask: true }]
+        : { id: '10', key: 'PROJ' }
+    );
+    const result = await run('createIssue', { project: 'PROJ', type: 'Zadanie', summary: 'S' });
+    expect(textOf(result)).toContain('Get a valid value from listIssueTypes.');
   });
 
   it('points an invalid issue type to listIssueTypes with the project', async () => {
@@ -518,10 +576,32 @@ describe('updateIssue', () => {
     expect(textOf(result)).toContain('nothing was changed');
   });
 
-  it('points an unknown component to listComponents', async () => {
-    client.put.mockRejectedValueOnce(badRequest({ errors: { components: 'not valid' } }));
+  it('checks component names against the project of the issue before sending', async () => {
+    client.get.mockImplementation(async (url: string) =>
+      url.endsWith('/components')
+        ? [{ id: '1', name: 'core' }]
+        : url.includes('/project/')
+          ? { id: '10', key: 'PROJ' }
+          : RAW_ISSUE
+    );
     const result = await run('updateIssue', { issue: 'PROJ-7', components: ['nope'] });
-    expect(textOf(result)).toContain('listComponents with the project of PROJ-7');
+    expect(textOf(result)).toContain('Invalid components.');
+    expect(textOf(result)).toContain('Project PROJ has no component');
+    expect(textOf(result)).toContain('nothing was changed');
+    expect(client.put).not.toHaveBeenCalled();
+  });
+
+  it('sends known component names', async () => {
+    client.get.mockImplementation(async (url: string) =>
+      url.endsWith('/components')
+        ? [{ id: '1', name: 'core' }]
+        : url.includes('/project/')
+          ? { id: '10', key: 'PROJ' }
+          : RAW_ISSUE
+    );
+    client.put.mockResolvedValueOnce(undefined);
+    await run('updateIssue', { issue: 'PROJ-7', components: ['core'] });
+    expect(client.put.mock.calls[0][1].fields.components).toEqual([{ name: 'core' }]);
   });
 
   it('teaches parent on a parent rejection', async () => {

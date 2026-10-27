@@ -447,7 +447,7 @@ function mapLink(raw: unknown): JiraIssueLink {
   const fields = asRecord(other.fields);
   return {
     id: String(o.id ?? ''),
-    relation: String((o.inwardIssue ? type.inward : type.outward) ?? ''),
+    relation: String((o.inwardIssue ? type.outward : type.inward) ?? ''),
     issue: {
       key: String(other.key ?? ''),
       summary: String(fields.summary ?? ''),

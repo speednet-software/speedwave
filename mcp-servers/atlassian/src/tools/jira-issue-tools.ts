@@ -20,6 +20,7 @@ import {
 } from '@speedwave/mcp-shared';
 import { AtlassianClient } from '../client.js';
 import { createJiraIssuesClient, UnknownLinkRelationError } from '../domains/jira-issues.js';
+import { createJiraProjectsClient } from '../domains/jira-projects.js';
 import type { AdfDoc } from '../types.js';
 import { withValidation } from './validation.js';
 import { resolveRichText } from './rich-text.js';
@@ -27,7 +28,6 @@ import { resolveRichText } from './rich-text.js';
 interface WriteContext {
   outcome: string;
   issueTypeLookup: string;
-  componentLookup: string;
 }
 
 interface JiraRejection {
@@ -591,6 +591,25 @@ export function createJiraIssueTools(client: AtlassianClient | null): ToolDefini
     return tools.map((tool) => ({ tool, handler: withDeclaredParams(tool, unconfigured) }));
   }
   const issues = createJiraIssuesClient(client);
+  const projects = createJiraProjectsClient(client);
+
+  const componentRejection = async (
+    project: string,
+    components: string[] | undefined,
+    outcome: string
+  ) => {
+    if (!components?.length) return undefined;
+    const known = (await projects.listComponents(project)).map((c) => c.name);
+    if (components.every((name) => known.includes(name))) return undefined;
+    return teachingErrorResult({
+      paramName: 'components',
+      correctValueTool: 'listComponents',
+      nextStep: `Project ${project} has no component with one of these names, so ${outcome}; Jira would otherwise create it in the project. Available components: ${known.join(', ') || 'none'}. Retry with names from that list.`,
+    });
+  };
+
+  const isSubtaskType = async (project: string, type: string) =>
+    (await projects.listIssueTypes(project)).some((t) => t.subtask && t.name === type);
 
   const handlers: Record<string, ToolDefinition['handler']> = {
     searchIssues: withValidation(client, async (_c, params) => {
@@ -629,13 +648,23 @@ export function createJiraIssueTools(client: AtlassianClient | null): ToolDefini
         p.description_adf
       );
       if ('error' in description) return description.error;
+      const outcome = 'nothing was created';
+      const unknownComponent = await componentRejection(p.project, p.components, outcome);
+      if (unknownComponent) return unknownComponent;
       try {
         return jsonResult({ issue: await issues.create(p) });
       } catch (error) {
+        const typeRefusal = jiraRejection(error)?.fields.issuetype;
+        if (
+          typeRefusal !== undefined &&
+          p.parent === undefined &&
+          (await isSubtaskType(p.project, p.type))
+        ) {
+          return parentRejection(outcome, typeRefusal);
+        }
         return translateWriteRejection(error, {
-          outcome: 'nothing was created',
+          outcome,
           issueTypeLookup: `listIssueTypes with project "${p.project}"`,
-          componentLookup: `listComponents with project "${p.project}"`,
         });
       }
     }),
@@ -660,13 +689,18 @@ export function createJiraIssueTools(client: AtlassianClient | null): ToolDefini
         fields.description_adf
       );
       if ('error' in description) return description.error;
+      const outcome = 'nothing was changed';
+      if (fields.components?.length) {
+        const { project } = await issues.get(issue);
+        const unknownComponent = await componentRejection(project, fields.components, outcome);
+        if (unknownComponent) return unknownComponent;
+      }
       try {
         return jsonResult({ issue: await issues.update(issue, fields) });
       } catch (error) {
         return translateWriteRejection(error, {
-          outcome: 'nothing was changed',
+          outcome,
           issueTypeLookup: `listIssueTypes with issue "${issue}"`,
-          componentLookup: `listComponents with the project of ${issue}`,
         });
       }
     }),
@@ -771,13 +805,6 @@ function translateWriteRejection(error: unknown, context: WriteContext) {
   const { fields, messages } = rejection;
   const { outcome } = context;
 
-  if (fields.components !== undefined) {
-    return teachingErrorResult({
-      paramName: 'components',
-      correctValueTool: 'listComponents',
-      nextStep: `Jira does not know one of the component names, so ${outcome}. Call ${context.componentLookup} and retry with names from it.${withJiraMessage(fields.components)}`,
-    });
-  }
   if (fields.issuetype !== undefined) {
     return teachingErrorResult({
       paramName: 'type',
@@ -787,12 +814,16 @@ function translateWriteRejection(error: unknown, context: WriteContext) {
   }
   const parentMessage = fields.parent ?? messages.find(isParentMessage);
   if (fields.parent !== undefined || parentMessage !== undefined) {
-    return teachingErrorResult({
-      paramName: 'parent',
-      nextStep: `Jira rejected the parent, so ${outcome}. A Sub-task type needs parent set to the key of an existing issue; other types accept only a parent one level above them (for example an epic for a story).${withJiraMessage(parentMessage)}`,
-    });
+    return parentRejection(outcome, parentMessage);
   }
   throw error;
+}
+
+function parentRejection(outcome: string, jiraMessage: string | undefined) {
+  return teachingErrorResult({
+    paramName: 'parent',
+    nextStep: `Jira rejected the parent, so ${outcome}. A Sub-task type needs parent set to the key of an existing issue; other types accept only a parent one level above them (for example an epic for a story).${withJiraMessage(jiraMessage)}`,
+  });
 }
 
 function withJiraMessage(text: string | undefined): string {
