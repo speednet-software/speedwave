@@ -36,7 +36,7 @@ Speedwave ships a beta from the tip of `dev` once a night (or on demand) and pro
 ## Creating a stable release
 
 1. Pick a commit on `dev` that already has a beta release (check the Releases page or `gh release list`) — it does not have to be the latest beta; testers may have validated an earlier one.
-2. Check by hand what the e2e suite cannot cover, because it runs on an API key: sign in to Anthropic with a subscription (OAuth) and confirm the plan windows listed in the usage popover (spec 21, `lists the plan windows ... for a subscription`).
+2. Check by hand what the e2e suite cannot cover, because it runs on an API key: sign in to Anthropic with a subscription (OAuth) and open the usage popover and confirm the plan windows are listed in order with values between 0 and 100.
 3. Push a branch at that commit: `git push origin <sha>:refs/heads/release/0.<M>`, where `M` is one more than the current highest `release/0.*` line.
 4. The `promote` job runs `make audit` on that commit first. A red advisory without a valid exception fails the job; the beta stays a beta and the branch stays in place — fix with a bump PR to `dev`, let a new beta build, then either move the branch (delete and recreate on the new commit) or push the bump through as a new beta and re-target.
 5. On success, the beta's `GitHub Release` loses `prerelease`, gains `make_latest`, and its notes are rewritten to the list of changes since the previous line (hotfixes of that line excluded). A `changelog/0.M` PR to `dev` is opened with the `CHANGELOG.md` section — merge it like any other PR.
