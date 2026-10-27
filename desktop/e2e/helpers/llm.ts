@@ -74,33 +74,6 @@ export async function configureOpenRouter(apiKey: string): Promise<void> {
   await saveProvider();
 }
 
-async function openAnthropicApiKeyPanel(): Promise<void> {
-  await openSettings();
-  await $('[data-testid="settings-llm-provider-anthropic"]').waitForExist({ timeout: 15_000 });
-  await clickUntil(
-    '[data-testid="settings-llm-provider-anthropic"]',
-    '[data-testid="settings-auth-method-api-key"]',
-    { timeout: 20_000, timeoutMsg: 'the Anthropic auth method switch never appeared' }
-  );
-  await clickUntil(
-    '[data-testid="settings-auth-method-api-key"]',
-    '[data-testid="settings-api-key"]',
-    { timeout: 20_000, timeoutMsg: 'the Anthropic api key input never appeared' }
-  );
-}
-
-async function authPillText(): Promise<string> {
-  const pill = await $('[data-testid="auth-status-value"]');
-  if (!(await pill.isExisting())) return '';
-  return (await pill.getText()).trim();
-}
-
-async function apiKeyConnected(): Promise<boolean> {
-  if (!(await authPillText()).includes('connected')) return false;
-  const method = await $('[data-testid="auth-status-method"]');
-  return (await method.isExisting()) && (await method.getText()).trim() === 'api key';
-}
-
 export async function configureAnthropicApiKey(apiKey: string): Promise<void> {
   await openAnthropicApiKeyPanel();
 
@@ -129,17 +102,47 @@ export async function configureAnthropicApiKey(apiKey: string): Promise<void> {
 }
 
 export async function removeAnthropicApiKey(): Promise<void> {
-  await openAnthropicApiKeyPanel();
-  const remove = '[data-testid="settings-api-key-remove"]';
-  if (await $(remove).isEnabled()) {
-    await (await $(remove)).click();
-    await browser.waitUntil(async () => !(await $(remove).isEnabled()), {
-      timeout: 15_000,
-      interval: 500,
-      timeoutMsg: 'the saved api key is still present after remove',
-    });
+  try {
+    await openAnthropicApiKeyPanel();
+    const remove = '[data-testid="settings-api-key-remove"]';
+    if (await $(remove).isEnabled()) {
+      await (await $(remove)).click();
+      await browser.waitUntil(async () => !(await $(remove).isEnabled()), {
+        timeout: 15_000,
+        interval: 500,
+        timeoutMsg: 'the saved api key is still present after remove',
+      });
+    }
+  } finally {
+    await requestBackendRestart();
   }
-  await requestBackendRestart();
+}
+
+async function openAnthropicApiKeyPanel(): Promise<void> {
+  await openSettings();
+  await $('[data-testid="settings-llm-provider-anthropic"]').waitForExist({ timeout: 15_000 });
+  await clickUntil(
+    '[data-testid="settings-llm-provider-anthropic"]',
+    '[data-testid="settings-auth-method-api-key"]',
+    { timeout: 20_000, timeoutMsg: 'the Anthropic auth method switch never appeared' }
+  );
+  await clickUntil(
+    '[data-testid="settings-auth-method-api-key"]',
+    '[data-testid="settings-api-key"]',
+    { timeout: 20_000, timeoutMsg: 'the Anthropic api key input never appeared' }
+  );
+}
+
+async function authPillText(): Promise<string> {
+  const pill = await $('[data-testid="auth-status-value"]');
+  if (!(await pill.isExisting())) return '';
+  return (await pill.getText()).trim();
+}
+
+async function apiKeyConnected(): Promise<boolean> {
+  if (!(await authPillText()).includes('connected')) return false;
+  const method = await $('[data-testid="auth-status-method"]');
+  return (await method.isExisting()) && (await method.getText()).trim() === 'api key';
 }
 
 async function clickUntil(
