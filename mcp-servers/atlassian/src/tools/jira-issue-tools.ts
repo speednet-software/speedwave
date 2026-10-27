@@ -8,8 +8,6 @@ import {
   type Tool,
   type ToolDefinition,
   jsonResult,
-  errorResult,
-  notConfiguredMessage,
   teachingErrorResult,
   readWorkspaceFile,
   withDeclaredParams,
@@ -22,7 +20,7 @@ import { AtlassianClient } from '../client.js';
 import { createJiraIssuesClient, UnknownLinkRelationError } from '../domains/jira-issues.js';
 import { createJiraProjectsClient } from '../domains/jira-projects.js';
 import type { AdfDoc } from '../types.js';
-import { withValidation } from './validation.js';
+import { unconfiguredDefinitions, withValidation } from './validation.js';
 import { resolveRichText } from './rich-text.js';
 import { userSchema } from './jira-schemas.js';
 
@@ -130,7 +128,7 @@ const descriptionProperties = {
 
 const assigneeDescription = `Account ID, "me" or null to unassign. ${ACCOUNT_ID_RESOLUTION_GUIDANCE}`;
 
-const newAssigneeDescription = `Account ID or "me". ${ACCOUNT_ID_RESOLUTION_GUIDANCE}`;
+const createAssigneeDescription = `Account ID or "me". ${ACCOUNT_ID_RESOLUTION_GUIDANCE}`;
 
 const searchIssuesTool: Tool = {
   name: 'searchIssues',
@@ -211,7 +209,7 @@ const createIssueTool: Tool = {
       ...descriptionProperties,
       priority: { type: 'string', description: 'Priority name (e.g. High)' },
       labels: { type: 'array', items: { type: 'string' }, description: 'Labels to apply' },
-      assignee: { type: 'string', description: newAssigneeDescription },
+      assignee: { type: 'string', description: createAssigneeDescription },
       parent: {
         type: 'string',
         description: 'Parent issue key or ID (required for Sub-task, optional under an epic)',
@@ -589,10 +587,7 @@ export function createJiraIssueTools(client: AtlassianClient | null): ToolDefini
     addAttachmentTool,
     deleteAttachmentTool,
   ];
-  if (!client) {
-    const unconfigured = async () => errorResult(notConfiguredMessage('Atlassian'));
-    return tools.map((tool) => ({ tool, handler: withDeclaredParams(tool, unconfigured) }));
-  }
+  if (!client) return unconfiguredDefinitions(tools);
   const issues = createJiraIssuesClient(client);
   const projects = createJiraProjectsClient(client);
 

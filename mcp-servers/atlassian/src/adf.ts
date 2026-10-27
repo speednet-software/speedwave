@@ -7,7 +7,39 @@ import type { AdfDoc, AdfNode } from './types.js';
 
 type AdfMarked = { type: string; attrs?: Record<string, unknown> };
 
+type AdfMark = NonNullable<AdfNode['marks']>[number];
+
+/** A Confluence page/comment body supplied to create/update: raw storage XHTML, or plain text. */
+export type StorageBodyInput = { storage?: string; text?: string };
+
+type UnsupportedAdfMarker = `[adf:${string}]` | `[/adf:${string}]`;
+
+type Parsed = { node: AdfNode; next: number };
+
 const MARKDOWN_MARKS: ReadonlySet<string> = new Set(['code', 'em', 'strong', 'strike', 'link']);
+
+const FENCE_LINE = /^ {0,3}(`{3,}|~{3,})\s*([^\s`]*)\s*$/;
+const HEADING_LINE = /^ {0,3}(#{1,6})\s+(.*?)(?:\s+#+)?\s*$/;
+const RULE_LINE = /^ {0,3}([-*_])(?:\s*\1){2,}\s*$/;
+const QUOTE_LINE = /^ {0,3}> ?/;
+const ITEM_LINE = /^( *)([-*+]|\d{1,9}[.)])\s+(.*)$/;
+const TABLE_SEPARATOR = /^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$/;
+
+const LINK_PATTERN =
+  /^\[((?:\\.|[^\]\\])*)\]\(([^()\s]*(?:\([^()\s]*\)[^()\s]*)*)(?:\s+"[^"]*")?\)/;
+const AUTOLINK_PATTERN = /^<(https?:\/\/[^\s>]+)>/;
+const BREAK_PATTERN = /^<br\s*\/?>/i;
+const EMOJI_PATTERN = /^:([a-z0-9_+-]+):(?!\w)/i;
+const ESCAPABLE = /[!-/:-@[-`{-~]/;
+
+const EMPHASIS_DELIMITERS: Array<{ token: string; marks: AdfMark[] }> = [
+  { token: '***', marks: [{ type: 'strong' }, { type: 'em' }] },
+  { token: '**', marks: [{ type: 'strong' }] },
+  { token: '__', marks: [{ type: 'strong' }] },
+  { token: '~~', marks: [{ type: 'strike' }] },
+  { token: '*', marks: [{ type: 'em' }] },
+  { token: '_', marks: [{ type: 'em' }] },
+];
 
 /**
  * Narrow check: is `value` already a `{ version: 1, type: 'doc', ... }` ADF object?
@@ -48,9 +80,6 @@ export function textToStorage(text: string): string {
   return `<p>${escaped}</p>`;
 }
 
-/** A Confluence page/comment body supplied to create/update: raw storage XHTML, or plain text. */
-export type StorageBodyInput = { storage?: string; text?: string };
-
 /**
  * Resolve a {@link StorageBodyInput}: `storage` (raw XHTML) wins, else `text` is HTML-escaped and
  * wrapped in `<p>`. SSOT for body resolution shared by the Confluence page and content domains.
@@ -64,16 +93,6 @@ export function resolveBodyPayload(body: StorageBodyInput): {
   if (body.storage !== undefined) return storageBody(body.storage);
   return storageBody(textToStorage(body.text ?? ''));
 }
-
-/**
- * Visible stand-in written by {@link adfToMarkdown} for ADF nodes with no Markdown equivalent.
- * Leaf nodes give `[adf:<type> <detail>]`; nodes with content wrap it in `[adf:<type> <detail>]`
- * and `[/adf:<type>]`. `<detail>` is the first of panelType, title, text, id, url, shortName, or
- * the date for `date` nodes, and is omitted when none exists.
- */
-export type UnsupportedAdfMarker = `[adf:${string}]` | `[/adf:${string}]`;
-
-type AdfMark = NonNullable<AdfNode['marks']>[number];
 
 /**
  * Convert Markdown (CommonMark subset plus GFM pipe tables) to an ADF document.
@@ -95,21 +114,14 @@ export function markdownToAdf(markdown: string): AdfDoc {
 }
 
 /**
- * Convert an ADF document to Markdown. Nodes without a Markdown equivalent are written as an
- * {@link UnsupportedAdfMarker} so no content disappears silently.
+ * Convert an ADF document to Markdown. Nodes without a Markdown equivalent are written as a
+ * visible `[adf:<type> ...]` marker so no content disappears silently.
  * @param doc - ADF document (or nullish).
  * @returns Markdown text; empty string for a missing or empty document.
  */
 export function adfToMarkdown(doc: AdfDoc | null | undefined): string {
   return blocksToMarkdown(doc?.content ?? []);
 }
-
-const FENCE_LINE = /^ {0,3}(`{3,}|~{3,})\s*([^\s`]*)\s*$/;
-const HEADING_LINE = /^ {0,3}(#{1,6})\s+(.*?)(?:\s+#+)?\s*$/;
-const RULE_LINE = /^ {0,3}([-*_])(?:\s*\1){2,}\s*$/;
-const QUOTE_LINE = /^ {0,3}> ?/;
-const ITEM_LINE = /^( *)([-*+]|\d{1,9}[.)])\s+(.*)$/;
-const TABLE_SEPARATOR = /^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$/;
 
 function parseBlocks(lines: string[]): AdfNode[] {
   const blocks: AdfNode[] = [];
@@ -133,8 +145,6 @@ function parseBlocks(lines: string[]): AdfNode[] {
   }
   return blocks;
 }
-
-type Parsed = { node: AdfNode; next: number };
 
 function parseFence(lines: string[], start: number): Parsed | null {
   const open = FENCE_LINE.exec(lines[start]);
@@ -279,13 +289,6 @@ function parseParagraph(lines: string[], start: number): Parsed {
   return { node: { type: 'paragraph', content: parseInline(text, []) }, next: i };
 }
 
-const LINK_PATTERN =
-  /^\[((?:\\.|[^\]\\])*)\]\(([^()\s]*(?:\([^()\s]*\)[^()\s]*)*)(?:\s+"[^"]*")?\)/;
-const AUTOLINK_PATTERN = /^<(https?:\/\/[^\s>]+)>/;
-const BREAK_PATTERN = /^<br\s*\/?>/i;
-const EMOJI_PATTERN = /^:([a-z0-9_+-]+):(?!\w)/i;
-const ESCAPABLE = /[!-/:-@[-`{-~]/;
-
 function parseInline(text: string, marks: AdfMark[]): AdfNode[] {
   const nodes: AdfNode[] = [];
   let buffer = '';
@@ -376,15 +379,6 @@ function readCodeSpan(text: string, at: number): { code: string; end: number } |
   }
   return null;
 }
-
-const EMPHASIS_DELIMITERS: Array<{ token: string; marks: AdfMark[] }> = [
-  { token: '***', marks: [{ type: 'strong' }, { type: 'em' }] },
-  { token: '**', marks: [{ type: 'strong' }] },
-  { token: '__', marks: [{ type: 'strong' }] },
-  { token: '~~', marks: [{ type: 'strike' }] },
-  { token: '*', marks: [{ type: 'em' }] },
-  { token: '_', marks: [{ type: 'em' }] },
-];
 
 function readEmphasis(
   text: string,

@@ -7,8 +7,6 @@ import {
   type Tool,
   type ToolDefinition,
   jsonResult,
-  errorResult,
-  notConfiguredMessage,
   teachingErrorResult,
   withDeclaredParams,
   META_KEYS,
@@ -24,7 +22,7 @@ import {
   sprintSchema,
   sprintsSchema,
 } from './jira-schemas.js';
-import { withValidation } from './validation.js';
+import { unconfiguredDefinitions, withValidation } from './validation.js';
 
 const listBoardsTool: Tool = {
   name: 'listBoards',
@@ -217,10 +215,7 @@ export function createJiraAgileTools(client: AtlassianClient | null): ToolDefini
     getSprintTool,
     moveIssuesToSprintTool,
   ];
-  if (!client) {
-    const unconfigured = async () => errorResult(notConfiguredMessage('Atlassian'));
-    return tools.map((tool) => ({ tool, handler: withDeclaredParams(tool, unconfigured) }));
-  }
+  if (!client) return unconfiguredDefinitions(tools);
   const agile = createJiraAgileClient(client);
 
   const definitions: ToolDefinition[] = [

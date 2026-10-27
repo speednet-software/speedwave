@@ -40,7 +40,7 @@ export interface JiraUser {
 }
 
 /** Compact reference to another issue: a parent or a link end. */
-export interface JiraIssueRef {
+interface JiraIssueRef {
   key: string;
   summary: string;
   status: string;
@@ -127,7 +127,6 @@ export interface JiraTransition {
   id: string;
   name: string;
   to_status: string;
-  /** Status category key of the target status (`new`, `indeterminate`, `done`). */
   to_status_category: string;
 }
 

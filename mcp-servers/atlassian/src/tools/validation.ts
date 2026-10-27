@@ -5,6 +5,11 @@
 
 import {
   withClientValidation,
+  withDeclaredParams,
+  errorResult,
+  notConfiguredMessage,
+  type Tool,
+  type ToolDefinition,
   type ToolsCallResult,
   type jsonResult,
   type textResult,
@@ -29,6 +34,16 @@ export function withValidation<T>(
     serviceName: 'Atlassian',
     formatError: (error) => AtlassianClient.formatError(error),
   });
+}
+
+/**
+ * Build the definitions for an unconfigured service: every tool rejects bad arguments, then reports the missing configuration.
+ * @param tools - The tools to expose.
+ * @returns Definitions whose handlers return the not-configured error.
+ */
+export function unconfiguredDefinitions(tools: Tool[]): ToolDefinition[] {
+  const unconfigured = async () => errorResult(notConfiguredMessage('Atlassian'));
+  return tools.map((tool) => ({ tool, handler: withDeclaredParams(tool, unconfigured) }));
 }
 
 /**

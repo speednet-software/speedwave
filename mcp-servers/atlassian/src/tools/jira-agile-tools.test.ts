@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { META_KEYS, type ToolDefinition, type ToolsCallResult } from '@speedwave/mcp-shared';
+import { META_KEYS, type ToolsCallResult } from '@speedwave/mcp-shared';
 import { createJiraAgileTools } from './jira-agile-tools.js';
+import { declaredFields } from './jira-test-helpers.js';
 import type { AtlassianClient } from '../client.js';
 
 const client = {
@@ -45,13 +46,6 @@ const rawSprint = (over: Record<string, unknown> = {}) => ({
   endDate: 'e',
   ...over,
 });
-
-function declaredFields(tools: ToolDefinition[], toolName: string, key: string): string[] {
-  const tool = tools.find((d) => d.tool.name === toolName)!.tool;
-  const prop = (tool.outputSchema!.properties as Record<string, Record<string, unknown>>)[key];
-  const shape = (prop.items ?? prop) as { properties: Record<string, unknown> };
-  return Object.keys(shape.properties).sort();
-}
 
 beforeEach(() => {
   client.get.mockReset();

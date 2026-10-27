@@ -7,10 +7,8 @@ import {
   type Tool,
   type ToolDefinition,
   jsonResult,
-  errorResult,
   teachingErrorResult,
   withDeclaredParams,
-  notConfiguredMessage,
   META_KEYS,
   READ_ONLY_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
@@ -22,7 +20,7 @@ import {
   projectSchema,
   projectsSchema,
 } from './jira-schemas.js';
-import { withValidation } from './validation.js';
+import { unconfiguredDefinitions, withValidation } from './validation.js';
 
 const listProjectsTool: Tool = {
   name: 'listProjects',
@@ -143,10 +141,7 @@ const listComponentsTool: Tool = {
  */
 export function createJiraProjectTools(client: AtlassianClient | null): ToolDefinition[] {
   const tools = [listProjectsTool, getProjectTool, listIssueTypesTool, listComponentsTool];
-  if (!client) {
-    const unconfigured = async () => errorResult(notConfiguredMessage('Atlassian'));
-    return tools.map((tool) => ({ tool, handler: withDeclaredParams(tool, unconfigured) }));
-  }
+  if (!client) return unconfiguredDefinitions(tools);
   const projects = createJiraProjectsClient(client);
 
   const definitions: ToolDefinition[] = [

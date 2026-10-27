@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { META_KEYS, type ToolDefinition, type ToolsCallResult } from '@speedwave/mcp-shared';
+import { META_KEYS, type ToolsCallResult } from '@speedwave/mcp-shared';
 import { createJiraCommentTools } from './jira-comment-tools.js';
+import { declaredFields } from './jira-test-helpers.js';
 import type { AtlassianClient } from '../client.js';
 import type { AdfDoc } from '../types.js';
 
@@ -42,13 +43,6 @@ const rawComment = (over: Record<string, unknown> = {}) => ({
   updated: 't2',
   ...over,
 });
-
-function declaredFields(tools: ToolDefinition[], toolName: string, key: string): string[] {
-  const tool = tools.find((d) => d.tool.name === toolName)!.tool;
-  const prop = (tool.outputSchema!.properties as Record<string, Record<string, unknown>>)[key];
-  const shape = (prop.items ?? prop) as { properties: Record<string, unknown> };
-  return Object.keys(shape.properties).sort();
-}
 
 beforeEach(() => {
   client.get.mockReset();

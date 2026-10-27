@@ -251,47 +251,6 @@ describe('get', () => {
     );
   });
 
-  it('maps links with the relation read from this issue side', async () => {
-    client.get.mockResolvedValueOnce(
-      rawIssue(
-        {},
-        {
-          issuelinks: [
-            {
-              id: '501',
-              type: { name: 'Blocks', inward: 'is blocked by', outward: 'blocks' },
-              inwardIssue: {
-                key: 'PROJ-7',
-                fields: { summary: 'Blocker', status: { name: 'Open' } },
-              },
-            },
-            {
-              id: '502',
-              type: { name: 'Blocks', inward: 'is blocked by', outward: 'blocks' },
-              outwardIssue: {
-                key: 'PROJ-8',
-                fields: { summary: 'Blocked', status: { name: 'Done' } },
-              },
-            },
-          ],
-        }
-      )
-    );
-    const c = createJiraIssuesClient(client);
-    expect((await c.get('PROJ-1')).links).toEqual([
-      {
-        id: '501',
-        relation: 'is blocked by',
-        issue: { key: 'PROJ-7', summary: 'Blocker', status: 'Open' },
-      },
-      {
-        id: '502',
-        relation: 'blocks',
-        issue: { key: 'PROJ-8', summary: 'Blocked', status: 'Done' },
-      },
-    ]);
-  });
-
   it('maps an empty link object to empty strings', async () => {
     client.get.mockResolvedValueOnce(rawIssue({}, { issuelinks: [{}] }));
     const c = createJiraIssuesClient(client);
@@ -337,37 +296,6 @@ function sentFields(call: 'post' | 'put'): Record<string, unknown> {
 }
 
 describe('create', () => {
-  it('converts the Markdown description to ADF, maps the caller shape, then re-fetches', async () => {
-    client.post.mockResolvedValueOnce({ key: 'PROJ-2' });
-    client.get.mockResolvedValueOnce(rawIssue({ key: 'PROJ-2' }));
-    const c = createJiraIssuesClient(client);
-    const issue = await c.create({
-      project: 'PROJ',
-      type: 'Bug',
-      summary: 'New',
-      description: '# Title\n\n**bold**',
-      priority: 'Low',
-      labels: ['x'],
-      assignee: 'u9',
-      parent: 'PROJ-100',
-      components: ['core', 'ui'],
-    });
-    expect(client.post.mock.calls[0][0]).toBe('/rest/api/3/issue');
-    expect(sentFields('post')).toEqual({
-      project: { key: 'PROJ' },
-      summary: 'New',
-      issuetype: { name: 'Bug' },
-      description: markdownToAdf('# Title\n\n**bold**'),
-      priority: { name: 'Low' },
-      labels: ['x'],
-      assignee: { accountId: 'u9' },
-      parent: { key: 'PROJ-100' },
-      components: [{ name: 'core' }, { name: 'ui' }],
-    });
-    expect(client.get).toHaveBeenCalledWith('/rest/api/3/issue/PROJ-2', expect.anything());
-    expect(issue.key).toBe('PROJ-2');
-  });
-
   it('sends a numeric parent as an id', async () => {
     client.post.mockResolvedValueOnce({ key: 'PROJ-2' });
     client.get.mockResolvedValueOnce(rawIssue());

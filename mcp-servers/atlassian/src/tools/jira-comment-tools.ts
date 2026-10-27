@@ -7,10 +7,8 @@ import {
   type Tool,
   type ToolDefinition,
   jsonResult,
-  errorResult,
   teachingErrorResult,
   withDeclaredParams,
-  notConfiguredMessage,
   META_KEYS,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
@@ -19,7 +17,7 @@ import { AtlassianClient } from '../client.js';
 import { createJiraCommentsClient } from '../domains/jira-comments.js';
 import type { AdfDoc } from '../types.js';
 import { commentSchema, commentsSchema, worklogSchema } from './jira-schemas.js';
-import { withValidation } from './validation.js';
+import { unconfiguredDefinitions, withValidation } from './validation.js';
 import { resolveRichText, type RichTextResult } from './rich-text.js';
 
 const addCommentTool: Tool = {
@@ -152,10 +150,7 @@ const addWorklogTool: Tool = {
  */
 export function createJiraCommentTools(client: AtlassianClient | null): ToolDefinition[] {
   const tools = [addCommentTool, getCommentsTool, addWorklogTool];
-  if (!client) {
-    const unconfigured = async () => errorResult(notConfiguredMessage('Atlassian'));
-    return tools.map((tool) => ({ tool, handler: withDeclaredParams(tool, unconfigured) }));
-  }
+  if (!client) return unconfiguredDefinitions(tools);
   const comments = createJiraCommentsClient(client);
 
   const definitions: ToolDefinition[] = [

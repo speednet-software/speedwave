@@ -1,8 +1,3 @@
-/**
- * Tests for the Jira issue tools: metadata, the declared-parameter guard, the emitted JSON against
- * each outputSchema, request shaping and Jira 400 translation. Only `AtlassianClient` is mocked.
- */
-
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -10,6 +5,7 @@ import { join } from 'node:path';
 import { AxiosError, type AxiosResponse } from 'axios';
 import { META_KEYS, type ToolsCallResult } from '@speedwave/mcp-shared';
 import { createJiraIssueTools } from './jira-issue-tools.js';
+import { schemaKeys } from './jira-test-helpers.js';
 import type { AtlassianClient } from '../client.js';
 
 const client = {
@@ -49,6 +45,11 @@ const RAW_ISSUE = {
         type: { inward: 'is blocked by', outward: 'blocks' },
         inwardIssue: { key: 'PROJ-2', fields: { summary: 'Other', status: { name: 'Open' } } },
       },
+      {
+        id: '901',
+        type: { inward: 'is blocked by', outward: 'blocks' },
+        outwardIssue: { key: 'PROJ-3', fields: { summary: 'Next', status: { name: 'Done' } } },
+      },
     ],
     assignee: { accountId: 'u1', displayName: 'Ann' },
     reporter: { accountId: 'u2', displayName: 'Bob' },
@@ -78,10 +79,6 @@ function textOf(result: ToolsCallResult): string {
 function payload(result: ToolsCallResult): Record<string, unknown> {
   expect(result.isError).toBeUndefined();
   return JSON.parse(textOf(result)) as Record<string, unknown>;
-}
-
-function schemaKeys(schema: unknown): string[] {
-  return Object.keys((schema as { properties: Record<string, unknown> }).properties).sort();
 }
 
 function expectEmittedMatchesSchema(name: string, emitted: Record<string, unknown>): void {
@@ -257,7 +254,10 @@ describe('emitted JSON matches outputSchema', () => {
       project: 'PROJ',
       components: ['core'],
       parent: { key: 'PROJ-1', summary: 'Epic', type: 'Epic', status: 'Open' },
-      links: [{ id: '900', relation: 'is blocked by', issue: { key: 'PROJ-2' } }],
+      links: [
+        { id: '900', relation: 'is blocked by', issue: { key: 'PROJ-2' } },
+        { id: '901', relation: 'blocks', issue: { key: 'PROJ-3', status: 'Done' } },
+      ],
       assignee: { account_id: 'u1', name: 'Ann' },
     });
   });

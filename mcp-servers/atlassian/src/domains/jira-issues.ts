@@ -28,7 +28,6 @@ import type {
 } from '../types.js';
 import { mapTransition, mapUser } from './normalizers.js';
 
-/** Fields requested for a single issue: kept tight to keep responses small. */
 const ISSUE_FIELDS = [
   'summary',
   'description',
@@ -46,7 +45,6 @@ const ISSUE_FIELDS = [
   'updated',
 ] as const;
 
-/** Fields requested for search results: the issue fields without the (large) description. */
 const SEARCH_FIELDS = ISSUE_FIELDS.filter((field) => field !== 'description');
 
 /**
@@ -173,7 +171,8 @@ export function createJiraIssuesClient(client: AtlassianClient): JiraIssuesClien
     if (input.description_adf !== undefined) fields.description = input.description_adf;
     if (input.priority !== undefined) fields.priority = { name: input.priority };
     if (input.labels !== undefined) fields.labels = input.labels;
-    if (input.components !== undefined) fields.components = input.components.map(toNamed);
+    if (input.components !== undefined)
+      fields.components = input.components.map((name) => ({ name }));
     if (input.parent !== undefined) {
       fields.parent = input.parent === null ? null : issueRef(input.parent);
     }
@@ -336,10 +335,6 @@ export function createJiraIssuesClient(client: AtlassianClient): JiraIssuesClien
 function issueRef(issueIdOrKey: string): { id: string } | { key: string } {
   const trimmed = issueIdOrKey.trim();
   return /^\d+$/.test(trimmed) ? { id: trimmed } : { key: trimmed };
-}
-
-function toNamed(name: string): { name: string } {
-  return { name };
 }
 
 function linkEndKey(end: unknown): string {
