@@ -180,17 +180,10 @@ setup-dev:
 		echo "  📦 wasm32-unknown-unknown target not found, installing..."; \
 		rustup target add wasm32-unknown-unknown && echo "  ✅ wasm32-unknown-unknown installed" || { echo "  ❌ target install failed"; FAIL=1; }; \
 	fi; \
-	if command -v wasm-pack >/dev/null 2>&1; then \
+	if scripts/install-wasm-pack.sh; then \
 		echo "  ✅ wasm-pack $$(wasm-pack --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo 'installed')"; \
 	else \
-		echo "  📦 wasm-pack not found, installing..."; \
-		if npm install -g wasm-pack >/dev/null 2>&1 && command -v wasm-pack >/dev/null 2>&1; then \
-			echo "  ✅ wasm-pack installed (npm)"; \
-		elif cargo install wasm-pack; then \
-			echo "  ✅ wasm-pack installed (cargo)"; \
-		else \
-			echo "  ❌ wasm-pack install failed"; FAIL=1; \
-		fi; \
+		echo "  ❌ wasm-pack install failed"; FAIL=1; \
 	fi; \
 	\
 	echo ""; \
@@ -584,7 +577,8 @@ test-ci:
 	  _tests/ci/audit-gate.bats _tests/ci/audit-changed-files.bats \
 	  _tests/ci/audit-run.bats _tests/ci/audit-diff.bats _tests/ci/audit-issue.bats \
 	  _tests/ci/resolve-pr-title-message.bats _tests/ci/dependabot-triage.bats \
-	  _tests/ci/install-wasm-bindgen.bats _tests/ci/ci-clean-cargo-target.bats \
+	  _tests/ci/install-wasm-bindgen.bats _tests/ci/install-wasm-pack.bats \
+	  _tests/ci/ci-clean-cargo-target.bats \
 	  _tests/ci/sha256.bats
 	@echo "✅ CI workflow tests passed"
 
