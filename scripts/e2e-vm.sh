@@ -168,6 +168,7 @@ windows_ps() {
     local ps_prefix
     ps_prefix="\$WINDOWS_WSL_DISTRO = '$(ps_squote "$WINDOWS_WSL_DISTRO")'
 \$env:OPENROUTER_API_KEY = '$(ps_squote "${OPENROUTER_API_KEY:-}")'
+\$env:ANTHROPIC_API_KEY = '$(ps_squote "${ANTHROPIC_API_KEY:-}")'
 \$env:OPENROUTER_MODEL = '$(ps_squote "${OPENROUTER_MODEL:-}")'
 \$env:LOCAL_LLM_BASE_URL = '$(ps_squote "${LOCAL_LLM_BASE_URL:-}")'
 \$env:LOCAL_LLM_API_KEY = '$(ps_squote "${LOCAL_LLM_API_KEY:-}")'
@@ -963,6 +964,7 @@ run_macos_e2e() {
     local spec_phase="${1:-}"
     {
         printf 'export OPENROUTER_API_KEY=%q\n' "${OPENROUTER_API_KEY:-}"
+        printf 'export ANTHROPIC_API_KEY=%q\n' "${ANTHROPIC_API_KEY:-}"
         printf 'export OPENROUTER_MODEL=%q\n' "${OPENROUTER_MODEL:-}"
         printf 'export LOCAL_LLM_BASE_URL=%q\n' "${LOCAL_LLM_BASE_URL:-}"
         printf 'export LOCAL_LLM_API_KEY=%q\n' "${LOCAL_LLM_API_KEY:-}"
