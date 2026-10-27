@@ -102,7 +102,6 @@ Update-ProcessPath
 
 $cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
 $rustup = Join-Path $cargoBin 'rustup.exe'
-$cargo = Join-Path $cargoBin 'cargo.exe'
 if (Test-Path $rustup) {
     Write-Host "== Materializing pinned Rust toolchain =="
     Push-Location $repoRoot
@@ -113,16 +112,8 @@ if (Test-Path $rustup) {
         $failedItems += @{ Name = 'rust toolchain'; Hint = "rustup show failed (exit $rustupExit) -- re-run after a reboot/PATH refresh." }
         Write-Warning "rustup show failed (exit $rustupExit) -- continuing; reported at the end."
     }
-    if ((Test-Path $cargo) -and -not (Test-Path (Join-Path $cargoBin 'cargo-tauri.exe'))) {
-        Write-Host "== cargo install tauri-cli =="
-        & $cargo install tauri-cli --locked
-        if ($LASTEXITCODE -ne 0) {
-            $failedItems += @{ Name = 'cargo-tauri'; Hint = "cargo install tauri-cli failed (exit $LASTEXITCODE) -- 'make dev' needs it." }
-            Write-Warning "cargo install tauri-cli failed -- continuing; reported at the end."
-        }
-    }
 } else {
-    $failedItems += @{ Name = 'rustup'; Hint = "not at $rustup -- skipped the pinned toolchain and tauri-cli." }
+    $failedItems += @{ Name = 'rustup'; Hint = "not at $rustup -- skipped the pinned toolchain." }
     Write-Warning "rustup not found at $rustup -- continuing; reported at the end."
 }
 
