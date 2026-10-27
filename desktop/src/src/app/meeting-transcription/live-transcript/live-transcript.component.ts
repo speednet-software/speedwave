@@ -45,7 +45,7 @@ const LATER_RUNNING_TOOLTIP =
 const LATER_QUEUED_TOOLTIP =
   'Takes this recording out of the queue. The audio is kept; Transcribe it when you are ready.';
 /** Classes of the accent (primary) half of the attach button. */
-const PRIMARY_BTN = 'bg-[var(--accent)] text-[var(--bg)] hover:opacity-90';
+const PRIMARY_BTN = 'bg-[var(--accent)] text-[var(--on-accent)] hover:opacity-90';
 /** Classes of the attach button when Transcribe is the primary action. */
 const SECONDARY_BTN =
   'bg-[var(--bg-2)] text-[var(--ink)] ring-1 ring-inset ring-[var(--line-strong)] hover:bg-[var(--bg-3)]';
@@ -224,7 +224,7 @@ interface ProgressTrack {
                 aria-valuemax="100"
                 [attr.aria-valuenow]="finalizePct()"
               >
-                <div class="h-full bg-amber-400" [style.width.%]="finalizePct()"></div>
+                <div class="h-full bg-[var(--amber)]" [style.width.%]="finalizePct()"></div>
               </div>
               <span [appTooltip]="laterTooltip()" placement="bottom">
                 <button
@@ -243,7 +243,7 @@ interface ProgressTrack {
 
           @if (smallerModel(); as kind) {
             <div
-              class="mt-3 flex max-w-3xl items-center justify-between gap-3 rounded-md border border-amber-500/35 bg-amber-500/[0.07] px-3 py-2 text-[12.5px] leading-relaxed text-amber-200"
+              class="mt-3 flex max-w-3xl items-center justify-between gap-3 rounded-md border border-[var(--amber)]/40 bg-[var(--amber-soft)] px-3 py-2 text-[12.5px] leading-relaxed text-[var(--ink)]"
               data-testid="smaller-model-banner"
             >
               <span>
@@ -280,7 +280,7 @@ interface ProgressTrack {
           }
 
           @if (failureReason(); as reason) {
-            <p class="mt-2 text-[12px] text-red-300" data-testid="failure-reason">
+            <p class="mt-2 text-[12px] text-[var(--red)]" data-testid="failure-reason">
               Transcription failed: {{ reason }}
             </p>
           }
@@ -291,7 +291,7 @@ interface ProgressTrack {
                 <span [appTooltip]="transcribeTooltip" placement="bottom">
                   <button
                     type="button"
-                    class="mono rounded bg-[var(--accent)] px-3 py-1.5 font-semibold text-[var(--bg)] hover:opacity-90 disabled:opacity-40"
+                    class="mono rounded bg-[var(--accent)] px-3 py-1.5 font-semibold text-[var(--on-accent)] hover:opacity-90 disabled:opacity-40"
                     data-testid="transcribe-btn"
                     [disabled]="working()"
                     (click)="transcribe()"
@@ -433,7 +433,7 @@ interface ProgressTrack {
                       <button
                         type="button"
                         role="menuitem"
-                        class="flex w-full items-center justify-between gap-4 rounded px-2.5 py-1.5 text-left text-red-300 hover:bg-red-500/10"
+                        class="flex w-full items-center justify-between gap-4 rounded px-2.5 py-1.5 text-left text-[var(--red)] hover:bg-[var(--bg-3)]"
                         data-testid="delete-item"
                         (click)="askDelete()"
                       >
@@ -452,7 +452,7 @@ interface ProgressTrack {
 
           @if (confirmingDelete()) {
             <div
-              class="mt-3 max-w-xl rounded-md border border-red-500/40 bg-red-500/[0.06] p-3 text-[12.5px]"
+              class="mt-3 max-w-xl rounded-md border border-[var(--red)]/40 bg-[var(--red-soft)] p-3 text-[12.5px]"
               role="alertdialog"
               aria-label="Confirm deleting the recording"
               data-testid="delete-confirm"
@@ -466,7 +466,7 @@ interface ProgressTrack {
               <div class="mt-2 flex gap-2">
                 <button
                   type="button"
-                  class="mono rounded border border-red-500/40 px-2.5 py-1 text-[11.5px] text-red-300 hover:bg-red-500/10 disabled:opacity-40"
+                  class="mono rounded border border-[var(--red)]/40 px-2.5 py-1 text-[11.5px] text-[var(--red)] hover:bg-[var(--red-soft)] disabled:opacity-40"
                   data-testid="delete-yes"
                   [disabled]="working()"
                   (click)="remove()"
@@ -508,10 +508,18 @@ interface ProgressTrack {
                 <span class="text-[var(--ink-mute)]">{{ line.startLabel }}</span>
                 @if (line.speaker) {
                   <span
-                    class="rounded bg-[var(--bg-2)] px-1 font-medium text-[var(--ink-dim)]"
+                    class="inline-flex items-center gap-1 rounded bg-[var(--bg-2)] px-1 font-medium text-[var(--ink-dim)]"
                     data-testid="line-speaker"
-                    [style.color]="line.speakerColor"
-                    >{{ line.speaker }}</span
+                  >
+                    @if (line.speakerColor) {
+                      <span
+                        class="h-1.5 w-1.5 rounded-full"
+                        aria-hidden="true"
+                        data-testid="line-speaker-dot"
+                        [style.background-color]="line.speakerColor"
+                      ></span>
+                    }
+                    {{ line.speaker }}</span
                   >
                 }
               </div>
@@ -638,10 +646,10 @@ export class LiveTranscriptComponent {
    * model). A good finished transcript gets none and never names its model.
    */
   readonly quality = computed<QualityLine | null>(() => {
-    const amber = 'text-amber-300';
+    const amber = 'text-[var(--amber)]';
     switch (this.status()) {
       case 'recording':
-        return { text: STATE_LABEL.recording, cls: 'text-red-300' };
+        return { text: STATE_LABEL.recording, cls: 'text-[var(--red)]' };
       case 'paused':
         return { text: STATE_LABEL.paused, cls: amber };
       case 'finalizing':
@@ -661,7 +669,7 @@ export class LiveTranscriptComponent {
           ? { text: STATE_LABEL.postponed, cls: 'text-[var(--ink-dim)]' }
           : null;
       case 'failed':
-        return { text: STATE_LABEL.failed, cls: 'text-red-300' };
+        return { text: STATE_LABEL.failed, cls: 'text-[var(--red)]' };
       default:
         return null;
     }

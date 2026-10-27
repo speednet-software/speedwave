@@ -124,6 +124,8 @@
   --green: #34d399;
   --violet: #a78bfa;
   --red: #ef4444;
+  --amber-soft: color-mix(in srgb, var(--amber) 6%, transparent);
+  --red-soft: color-mix(in srgb, var(--red) 6%, transparent);
 
   /* Font stacks */
   --font-mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', 'Cascadia Code', ui-monospace, monospace;

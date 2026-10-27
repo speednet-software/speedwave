@@ -627,6 +627,10 @@ describe('RecordingControlsComponent', () => {
     expect(warn).not.toBeNull();
     expect(warn.textContent).toContain('Large v3');
     expect(warn.textContent).toContain('made with the smaller model');
+    expect(warn.className).toContain('text-[var(--amber)]');
+    expect(fixture.nativeElement.querySelector('[data-testid="start-btn"]').className).toContain(
+      'text-[var(--on-accent)]'
+    );
     expect(fixture.nativeElement.querySelector('[data-testid="start-btn"]').disabled).toBe(false);
   });
 
