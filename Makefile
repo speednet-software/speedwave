@@ -109,7 +109,7 @@ dev-config: guard-dev-instance
         check-clippy check-desktop-clippy check-proxy-clippy check-angular check-mcp check-fmt \
         check-mcp-lint check-angular-lint check-all \
         coverage coverage-rust coverage-mcp coverage-html \
-        audit audit-rust audit-npm audit-root audit-mcp audit-playwright audit-desktop audit-e2e \
+        audit audit-rust audit-npm audit-root audit-mcp audit-playwright audit-desktop audit-e2e audit-office lock-office \
         fmt lint status \
         download-lima clean-lima \
         download-nodejs clean-nodejs \
@@ -488,7 +488,8 @@ test-mcp-office-py:
 	echo "  building office Python test venv ($$PY) at $$VENV..."; \
 	"$$PY" -m venv --clear "$$VENV"; \
 	"$$VENV/bin/pip" install -q --upgrade pip; \
-	"$$VENV/bin/pip" install -q -r mcp-servers/office/requirements.txt pytest; \
+	"$$VENV/bin/pip" install -q --require-hashes --no-deps -r mcp-servers/office/requirements.txt; \
+	"$$VENV/bin/pip" install -q pytest; \
 	"$$VENV/bin/python" -m pytest mcp-servers/office/scripts -q; status=$$?; \
 	rm -rf "$$VENV"; exit $$status
 	@echo "✅ Office Python script tests passed"
@@ -585,7 +586,7 @@ test-ci:
 	  _tests/ci/audit-run.bats _tests/ci/audit-diff.bats _tests/ci/audit-issue.bats \
 	  _tests/ci/resolve-pr-title-message.bats _tests/ci/dependabot-triage.bats \
 	  _tests/ci/install-wasm-bindgen.bats _tests/ci/ci-clean-cargo-target.bats \
-	  _tests/ci/sha256.bats
+	  _tests/ci/sha256.bats _tests/ci/lock-office.bats
 	@echo "✅ CI workflow tests passed"
 
 test-desktop-build: build-angular build-mcp
@@ -761,7 +762,7 @@ check-angular-lint: $(ANGULAR_NPM_INSTALL)
 	cd desktop/src && $(NPX) eslint 'src/**/*.ts'
 	@echo "✅ Angular ESLint passed"
 
-audit: audit-rust audit-npm
+audit: audit-rust audit-npm audit-office
 	@echo "\n✅ No known vulnerabilities without a valid exception"
 
 AUDIT_EXCEPTIONS := scripts/audit-exceptions.json
@@ -818,6 +819,17 @@ audit-e2e:
 	python3 scripts/audit-gate.py absolute --exceptions $(AUDIT_EXCEPTIONS) \
 	  --report npm:$(AUDIT_TMP)/npm-e2e.json
 	@echo "✅ Desktop e2e dependencies: no vulnerabilities without a valid exception"
+
+audit-office:
+	@command -v pip-audit >/dev/null 2>&1 || { echo "❌ pip-audit not found. Install: pipx install pip-audit"; exit 1; }
+	@mkdir -p $(AUDIT_TMP)
+	scripts/audit-run.sh pip-office $(AUDIT_TMP)/pip-office.json
+	python3 scripts/audit-gate.py absolute --exceptions $(AUDIT_EXCEPTIONS) \
+	  --report pip:$(AUDIT_TMP)/pip-office.json
+	@echo "✅ Office Python dependencies: no vulnerabilities without a valid exception"
+
+lock-office:
+	scripts/lock-office.sh
 
 check-all: check test coverage audit
 	@echo "\n✅ Full quality gate passed — safe to push"

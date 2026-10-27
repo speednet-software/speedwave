@@ -4,7 +4,7 @@ set -euo pipefail
 # Single source of the audited lockfile paths and the npm severity threshold:
 # the `make audit-*` targets, scripts/audit-diff.sh (PR lane) and
 # scripts/audit-issue.sh (daily schedule) all shell out to this script
-# instead of repeating the cargo-audit/npm-audit invocations.
+# instead of repeating the cargo-audit/npm-audit/pip-audit invocations.
 
 list_targets() {
     cat <<'LIST'
@@ -15,6 +15,7 @@ npm-mcp npm mcp-servers/package-lock.json
 npm-playwright npm mcp-servers/playwright/package-lock.json
 npm-desktop npm desktop/src/package-lock.json
 npm-e2e npm desktop/e2e/package-lock.json
+pip-office pip mcp-servers/office/requirements.txt
 LIST
 }
 
@@ -61,6 +62,18 @@ run_npm() {
     rm -f "$err"
 }
 
+run_pip() {
+    local requirements="$1" out="$2" err="$2.stderr"
+    pip-audit -r "$requirements" --disable-pip --no-deps --format json >"$out" 2>"$err" || true
+    if [ ! -s "$out" ]; then
+        echo "audit-run: pip-audit produced no output for $requirements, it likely failed to run:" >&2
+        cat "$err" >&2
+        rm -f "$err"
+        exit 1
+    fi
+    rm -f "$err"
+}
+
 ENTRY="$(list_targets | awk -v t="$TARGET" '$1 == t')"
 if [ -z "$ENTRY" ]; then
     echo "audit-run: unknown target '$TARGET' (expected one of: $(list_targets | cut -d' ' -f1 | paste -sd' ' -))" >&2
@@ -71,5 +84,6 @@ LOCKFILE="$(echo "$ENTRY" | cut -d' ' -f3)"
 
 case "$KIND" in
     cargo) run_cargo "$ROOT/$LOCKFILE" "$OUT_JSON" ;;
+    pip) run_pip "$ROOT/$LOCKFILE" "$OUT_JSON" ;;
     npm) run_npm "$(cd "$ROOT/$(dirname "$LOCKFILE")" && pwd)" "$OUT_JSON" ;;
 esac

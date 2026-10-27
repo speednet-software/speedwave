@@ -4,7 +4,7 @@ REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
 
 _init_audit_root() {
   FIXTURE="$BATS_TEST_TMPDIR/repo"
-  mkdir -p "$FIXTURE/scripts" "$FIXTURE/mcp-servers" "$FIXTURE/desktop/src" "$FIXTURE/desktop/src-tauri" "$FIXTURE/desktop/e2e" "$FIXTURE/mcp-servers/playwright"
+  mkdir -p "$FIXTURE/scripts" "$FIXTURE/mcp-servers" "$FIXTURE/desktop/src" "$FIXTURE/desktop/src-tauri" "$FIXTURE/desktop/e2e" "$FIXTURE/mcp-servers/playwright" "$FIXTURE/mcp-servers/office"
   cp "$REPO_ROOT/scripts/audit-issue.sh" "$REPO_ROOT/scripts/audit-run.sh" "$REPO_ROOT/scripts/audit-gate.py" \
     "$FIXTURE/scripts/"
   chmod +x "$FIXTURE"/scripts/*.sh
@@ -15,6 +15,7 @@ _init_audit_root() {
   echo '{}' >"$FIXTURE/package-lock.json"
   echo '{}' >"$FIXTURE/desktop/e2e/package-lock.json"
   echo '{}' >"$FIXTURE/mcp-servers/playwright/package-lock.json"
+  echo 'numpy==2.2.2' >"$FIXTURE/mcp-servers/office/requirements.txt"
   echo '[]' >"$FIXTURE/scripts/audit-exceptions.json"
 
   FAKE_BIN="$BATS_TEST_TMPDIR/fakebin"
@@ -32,7 +33,11 @@ EOF
 #!/usr/bin/env bash
 echo '{"vulnerabilities": {"found": false, "count": 0, "list": []}}'
 EOF
-  chmod +x "$FAKE_BIN/npm" "$FAKE_BIN/cargo"
+  cat >"$FAKE_BIN/pip-audit" <<'EOF'
+#!/usr/bin/env bash
+echo '{"dependencies": [{"name": "numpy", "version": "2.2.2", "vulns": []}], "fixes": []}'
+EOF
+  chmod +x "$FAKE_BIN/npm" "$FAKE_BIN/cargo" "$FAKE_BIN/pip-audit"
 }
 
 _stub_red_tools() {
@@ -44,7 +49,11 @@ EOF
 #!/usr/bin/env bash
 echo '{"vulnerabilities": {"found": true, "count": 1, "list": [{"advisory": {"id": "RUSTSEC-2099-0001", "title": "test advisory", "url": "https://example.test"}}]}}'
 EOF
-  chmod +x "$FAKE_BIN/npm" "$FAKE_BIN/cargo"
+  cat >"$FAKE_BIN/pip-audit" <<'EOF'
+#!/usr/bin/env bash
+echo '{"dependencies": [{"name": "numpy", "version": "2.2.2", "vulns": []}], "fixes": []}'
+EOF
+  chmod +x "$FAKE_BIN/npm" "$FAKE_BIN/cargo" "$FAKE_BIN/pip-audit"
 }
 
 _stub_gh() {
@@ -143,6 +152,22 @@ case "\$PWD" in
 esac
 EOF
   chmod +x "$FAKE_BIN/npm"
+
+  run bash -c "cd '$FIXTURE' && PATH='$FAKE_BIN:$PATH' GH_REPO='test/test' ./scripts/audit-issue.sh"
+  [ "$status" -eq 0 ]
+  grep -q "issue create" "$GH_LOG"
+}
+
+@test "the scheduled audit reports an advisory found only in the office Python lock" {
+  _init_audit_root
+  _stub_clean_tools
+  _stub_gh '[]'
+  cat >"$FAKE_BIN/pip-audit" <<'EOF'
+#!/usr/bin/env bash
+echo '{"dependencies": [{"name": "pypdf", "version": "6.0.0", "vulns": [{"id": "PYSEC-2099-1", "aliases": [], "description": "test advisory"}]}], "fixes": []}'
+exit 1
+EOF
+  chmod +x "$FAKE_BIN/pip-audit"
 
   run bash -c "cd '$FIXTURE' && PATH='$FAKE_BIN:$PATH' GH_REPO='test/test' ./scripts/audit-issue.sh"
   [ "$status" -eq 0 ]

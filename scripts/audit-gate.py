@@ -56,7 +56,23 @@ def extract_cargo(data, npm_min_severity=None):
     return advisories
 
 
-EXTRACTORS = {"npm": extract_npm, "cargo": extract_cargo}
+def extract_pip(data, npm_min_severity=None):
+    advisories = {}
+    for dependency in data.get("dependencies", []):
+        for vuln in dependency.get("vulns", []):
+            adv_id = vuln.get("id")
+            if not adv_id:
+                continue
+            advisories[adv_id] = {
+                "title": f"{dependency.get('name', '')} {dependency.get('version', '')}: {vuln.get('description', '')}".strip(),
+                "severity": None,
+                "url": f"https://osv.dev/vulnerability/{adv_id}",
+                "aliases": list(vuln.get("aliases", [])),
+            }
+    return advisories
+
+
+EXTRACTORS = {"npm": extract_npm, "cargo": extract_cargo, "pip": extract_pip}
 
 
 @dataclass(frozen=True)
@@ -172,7 +188,7 @@ def load_report(spec, npm_min_severity=DEFAULT_NPM_MIN_SEVERITY):
         raise SystemExit(f"audit-gate: report spec must be ecosystem:path, got: {spec}")
     ecosystem, path = spec.split(":", 1)
     if ecosystem not in EXTRACTORS:
-        raise SystemExit(f"audit-gate: unknown ecosystem '{ecosystem}' (expected npm or cargo)")
+        raise SystemExit(f"audit-gate: unknown ecosystem '{ecosystem}' (expected npm, cargo or pip)")
     data = read_audit_json(ecosystem, path)
     return EXTRACTORS[ecosystem](data, npm_min_severity)
 
@@ -199,6 +215,10 @@ def read_audit_json(ecosystem, path):
     if ecosystem == "cargo" and (not isinstance(data, dict) or "vulnerabilities" not in data):
         raise SystemExit(
             f"audit-gate: cargo audit report at {path} is missing 'vulnerabilities' (the audit likely failed)"
+        )
+    if ecosystem == "pip" and (not isinstance(data, dict) or "dependencies" not in data):
+        raise SystemExit(
+            f"audit-gate: pip-audit report at {path} is missing 'dependencies' (the audit likely failed)"
         )
     return data
 
@@ -233,8 +253,16 @@ def load_exceptions(path, today):
 
 def evaluate_advisories(advisories, exceptions_path, today):
     active_exceptions, expired = load_exceptions(exceptions_path, today)
-    unexempted = {aid: info for aid, info in advisories.items() if aid not in active_exceptions}
-    exempted = {aid: (info, active_exceptions[aid]) for aid, info in advisories.items() if aid in active_exceptions}
+    unexempted = {}
+    exempted = {}
+    for aid, info in advisories.items():
+        covering = next(
+            (active_exceptions[key] for key in [aid, *info.get("aliases", [])] if key in active_exceptions), None
+        )
+        if covering is None:
+            unexempted[aid] = info
+        else:
+            exempted[aid] = (info, covering)
     return unexempted, exempted, expired
 
 

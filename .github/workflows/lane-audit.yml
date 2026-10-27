@@ -29,6 +29,9 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
 
+      - name: Install pip-audit
+        run: pipx install pip-audit==2.10.1
+
       - name: Diff known advisories between the target branch and the PR head
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         env:

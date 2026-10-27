@@ -30,8 +30,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 
 COPY office/requirements.txt /tmp/requirements.txt
 RUN python3 -m venv /opt/office-venv \
-    && /opt/office-venv/bin/pip install --no-cache-dir --upgrade pip \
-    && /opt/office-venv/bin/pip install --no-cache-dir -r /tmp/requirements.txt \
+    && /opt/office-venv/bin/pip install --no-cache-dir --require-hashes --no-deps -r /tmp/requirements.txt \
     && rm /tmp/requirements.txt
 
 COPY --from=builder /build/shared/dist ./shared/dist

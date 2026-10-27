@@ -35,6 +35,9 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
 
+      - name: Install pip-audit
+        run: pipx install pip-audit==2.10.1
+
       - name: Full absolute audit, file or update one issue on red
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

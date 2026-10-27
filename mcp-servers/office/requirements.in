@@ -1,0 +1,11 @@
+# Direct Python dependencies of the office worker, pinned to exact versions.
+# Edit here, then run `make lock-office` to regenerate requirements.txt (hashed lock installed into /opt/office-venv).
+# pdftotext, pandoc and soffice come from apt, not from this file.
+markitdown[docx,pptx,xlsx,pdf]==0.1.5
+python-docx==1.2.0
+openpyxl==3.1.5
+python-pptx==1.0.2
+pypdf==6.21.2
+matplotlib==3.10.0
+weasyprint==70.0
+numpy==2.2.2

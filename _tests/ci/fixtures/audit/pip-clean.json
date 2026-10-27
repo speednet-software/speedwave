@@ -1,0 +1,6 @@
+{
+  "dependencies": [
+    { "name": "numpy", "version": "2.2.2", "vulns": [] }
+  ],
+  "fixes": []
+}
