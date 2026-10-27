@@ -5,16 +5,18 @@ RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tzdata \
     && rm -rf /var/lib/apt/lists/*
 
-ARG PLAYWRIGHT_MCP_VERSION=0.0.70
+WORKDIR /opt/playwright-mcp
 
-RUN npm install -g "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" \
+COPY playwright/package.json playwright/package-lock.json ./
+
+RUN npm ci --omit=dev \
     && npm cache clean --force
 
 RUN sed -i 's/mcpServer\.connect(serverBackendFactory, transport, true)/mcpServer.connect(serverBackendFactory, transport, false)/' \
-       /usr/lib/node_modules/@playwright/mcp/node_modules/playwright-core/lib/tools/utils/mcp/http.js \
+       node_modules/playwright-core/lib/tools/utils/mcp/http.js \
     && grep -q 'mcpServer.connect(serverBackendFactory, transport, false)' \
-       /usr/lib/node_modules/@playwright/mcp/node_modules/playwright-core/lib/tools/utils/mcp/http.js \
-    || (echo "FATAL: heartbeat patch did not apply — verify path for @playwright/mcp ${PLAYWRIGHT_MCP_VERSION}" && exit 1)
+       node_modules/playwright-core/lib/tools/utils/mcp/http.js \
+    || (echo "FATAL: heartbeat patch did not apply, verify the playwright-core path for the @playwright/mcp version pinned in package-lock.json" && exit 1)
 
 USER pwuser
 
@@ -26,7 +28,7 @@ ENV PORT=3000 \
 EXPOSE 3000
 
 
-CMD ["sh", "-c", "trap 'exit 0' TERM INT; /usr/bin/playwright-mcp \
+CMD ["sh", "-c", "trap 'exit 0' TERM INT; /opt/playwright-mcp/node_modules/.bin/playwright-mcp \
      --host 0.0.0.0 \
      --port 3000 \
      --browser chromium \
