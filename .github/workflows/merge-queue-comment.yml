@@ -1,0 +1,26 @@
+name: Merge queue comment
+
+on:
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  comment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Link the merge queue run in the pull request
+        env:
+          HEAD_REF: ${{ github.event.merge_group.head_ref }}
+          REPO: ${{ github.repository }}
+          SERVER_URL: ${{ github.server_url }}
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/merge-queue-comment.sh

@@ -1,5 +1,5 @@
 /**
- * Jira project tools — listProjects, getProject, listIssueTypes. 3 tools.
+ * Jira project tools: listProjects, getProject, listIssueTypes, listComponents. 4 tools.
  * @module mcp-atlassian/tools/jira-project-tools
  */
 
@@ -7,14 +7,20 @@ import {
   type Tool,
   type ToolDefinition,
   jsonResult,
-  errorResult,
-  notConfiguredMessage,
+  teachingErrorResult,
+  withDeclaredParams,
   META_KEYS,
   READ_ONLY_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
 import { AtlassianClient } from '../client.js';
 import { createJiraProjectsClient } from '../domains/jira-projects.js';
-import { withValidation } from './validation.js';
+import {
+  componentsSchema,
+  issueTypesSchema,
+  projectSchema,
+  projectsSchema,
+} from './jira-schemas.js';
+import { listResult, unconfiguredDefinitions, withValidation } from './validation.js';
 
 const listProjectsTool: Tool = {
   name: 'listProjects',
@@ -28,14 +34,15 @@ const listProjectsTool: Tool = {
     type: 'object',
     properties: {
       query: { type: 'string', description: 'Filter by name/key substring' },
-      maxResults: { type: 'number', description: 'Max projects (default 50, max 100)' },
+      max_results: { type: 'number', description: 'Max projects (default 50, max 100)' },
     },
   },
   outputSchema: {
     type: 'object',
     properties: {
       success: { type: 'boolean' },
-      projects: { type: 'array' },
+      projects: projectsSchema,
+      count: { type: 'number' },
       error: { type: 'string' },
     },
     required: ['success'],
@@ -43,7 +50,7 @@ const listProjectsTool: Tool = {
   inputExamples: [
     { description: 'All projects', input: {} },
     { description: 'Search', input: { query: 'mobile' } },
-    { description: 'Limit', input: { maxResults: 10 } },
+    { description: 'Limit', input: { max_results: 10 } },
   ],
 };
 
@@ -53,50 +60,82 @@ const getProjectTool: Tool = {
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['jira', 'project', 'get', 'show', 'detail'],
-  example: 'const project = await atlassian.getProject({ projectIdOrKey: "PROJ" })',
+  example: 'const project = await atlassian.getProject({ project: "PROJ" })',
   inputSchema: {
     type: 'object',
-    properties: { projectIdOrKey: { type: 'string', description: 'Project key or numeric ID' } },
-    required: ['projectIdOrKey'],
+    properties: { project: { type: 'string', description: 'Project key or numeric ID' } },
+    required: ['project'],
   },
   outputSchema: {
     type: 'object',
     properties: {
       success: { type: 'boolean' },
-      project: { type: 'object' },
+      project: projectSchema,
       error: { type: 'string' },
     },
     required: ['success'],
   },
   inputExamples: [
-    { description: 'By key', input: { projectIdOrKey: 'PROJ' } },
-    { description: 'By ID', input: { projectIdOrKey: '10000' } },
+    { description: 'By key', input: { project: 'PROJ' } },
+    { description: 'By ID', input: { project: '10000' } },
   ],
 };
 
 const listIssueTypesTool: Tool = {
   name: 'listIssueTypes',
   description:
-    'List the issue types available in a Jira project. Restricted to the configured project allowlist, if any (errors if the project is out of scope).',
+    'List issue types. Give `project` for the types available in a project, or `issue` for the types that issue can change to (same kind as its current type, sub-task or standard; the current type is excluded). Give exactly one. Restricted to the configured project allowlist, if any (errors if the project is out of scope).',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true },
-  keywords: ['jira', 'issue types', 'list', 'project', 'metadata'],
-  example: 'const { issue_types } = await atlassian.listIssueTypes({ projectIdOrKey: "PROJ" })',
+  keywords: ['jira', 'issue types', 'list', 'project', 'metadata', 'change type'],
+  example: 'const { issue_types } = await atlassian.listIssueTypes({ project: "PROJ" })',
   inputSchema: {
     type: 'object',
-    properties: { projectIdOrKey: { type: 'string', description: 'Project key or numeric ID' } },
-    required: ['projectIdOrKey'],
+    properties: {
+      project: { type: 'string', description: 'Project key or numeric ID' },
+      issue: { type: 'string', description: 'Issue key or ID, to list the types it can change to' },
+    },
   },
   outputSchema: {
     type: 'object',
     properties: {
       success: { type: 'boolean' },
-      issue_types: { type: 'array' },
+      issue_types: issueTypesSchema,
+      count: { type: 'number' },
       error: { type: 'string' },
     },
     required: ['success'],
   },
-  inputExamples: [{ description: 'List issue types', input: { projectIdOrKey: 'PROJ' } }],
+  inputExamples: [
+    { description: 'Types of a project', input: { project: 'PROJ' } },
+    { description: 'Types an issue can change to', input: { issue: 'PROJ-123' } },
+  ],
+};
+
+const listComponentsTool: Tool = {
+  name: 'listComponents',
+  description:
+    'List the components of a Jira project (id, name, description). Component names are what createIssue and updateIssue take. Restricted to the configured project allowlist, if any.',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
+  keywords: ['jira', 'components', 'list', 'project', 'metadata'],
+  example: 'const { components } = await atlassian.listComponents({ project: "PROJ" })',
+  inputSchema: {
+    type: 'object',
+    properties: { project: { type: 'string', description: 'Project key or numeric ID' } },
+    required: ['project'],
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      components: componentsSchema,
+      count: { type: 'number' },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [{ description: 'List components', input: { project: 'PROJ' } }],
 };
 
 /**
@@ -104,34 +143,53 @@ const listIssueTypesTool: Tool = {
  * @param client - The Atlassian client (`null` when not configured).
  */
 export function createJiraProjectTools(client: AtlassianClient | null): ToolDefinition[] {
-  const tools = [listProjectsTool, getProjectTool, listIssueTypesTool];
-  if (!client) {
-    const unconfigured = async () => errorResult(notConfiguredMessage('Atlassian'));
-    return tools.map((tool) => ({ tool, handler: unconfigured }));
-  }
+  const tools = [listProjectsTool, getProjectTool, listIssueTypesTool, listComponentsTool];
+  if (!client) return unconfiguredDefinitions(tools);
   const projects = createJiraProjectsClient(client);
 
-  return [
+  const definitions: ToolDefinition[] = [
     {
       tool: listProjectsTool,
       handler: withValidation(client, async (_c, params) => {
-        const { query, maxResults } = params as { query?: string; maxResults?: number };
-        return jsonResult({ projects: await projects.list({ query, maxResults }) });
+        const { query, max_results } = params as { query?: string; max_results?: number };
+        return listResult('projects', await projects.list({ query, maxResults: max_results }));
       }),
     },
     {
       tool: getProjectTool,
       handler: withValidation(client, async (_c, params) => {
-        const { projectIdOrKey } = params as { projectIdOrKey: string };
-        return jsonResult({ project: await projects.get(projectIdOrKey) });
+        const { project } = params as { project: string };
+        return jsonResult({ project: await projects.get(project) });
       }),
     },
     {
       tool: listIssueTypesTool,
       handler: withValidation(client, async (_c, params) => {
-        const { projectIdOrKey } = params as { projectIdOrKey: string };
-        return jsonResult({ issue_types: await projects.listIssueTypes(projectIdOrKey) });
+        const { project, issue } = params as { project?: string; issue?: string };
+        if ((project === undefined) === (issue === undefined)) {
+          return teachingErrorResult({
+            paramName: 'project or issue',
+            nextStep:
+              'Give exactly one: project (types available in a project) or issue (types that issue can change to). Nothing was requested.',
+          });
+        }
+        const issueTypes =
+          issue !== undefined
+            ? await projects.listIssueTypesForIssue(issue)
+            : await projects.listIssueTypes(project as string);
+        return listResult('issue_types', issueTypes);
+      }),
+    },
+    {
+      tool: listComponentsTool,
+      handler: withValidation(client, async (_c, params) => {
+        const { project } = params as { project: string };
+        return listResult('components', await projects.listComponents(project));
       }),
     },
   ];
+  return definitions.map(({ tool, handler }) => ({
+    tool,
+    handler: withDeclaredParams(tool, handler),
+  }));
 }

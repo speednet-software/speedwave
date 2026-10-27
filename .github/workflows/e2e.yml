@@ -23,6 +23,7 @@ jobs:
       - name: Run the macOS rig lane
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENROUTER_MODEL: ${{ secrets.OPENROUTER_MODEL }}
           LOCAL_LLM_BASE_URL: ${{ secrets.LOCAL_LLM_BASE_URL }}
           LOCAL_LLM_API_KEY: ${{ secrets.LOCAL_LLM_API_KEY }}
@@ -60,6 +61,7 @@ jobs:
       - name: Run the Windows rig lane
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENROUTER_MODEL: ${{ secrets.OPENROUTER_MODEL }}
           LOCAL_LLM_BASE_URL: ${{ secrets.LOCAL_LLM_BASE_URL }}
           LOCAL_LLM_API_KEY: ${{ secrets.LOCAL_LLM_API_KEY }}
