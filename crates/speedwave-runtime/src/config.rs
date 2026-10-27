@@ -1980,6 +1980,7 @@ const REPO_ENV_DENY_ANTHROPIC: &[&str] = &[
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_CUSTOM_HEADERS",
+    "CLAUDE_CODE_ATTRIBUTION_HEADER",
 ];
 
 fn sanitize_repo_env(env: Option<HashMap<String, String>>) -> Option<HashMap<String, String>> {
