@@ -121,19 +121,24 @@ export async function configureAnthropicApiKey(apiKey: string): Promise<void> {
     timeoutMsg: 'auth-status-value never showed connected via api key after saving the key',
   });
   await requestBackendRestart();
+  await browser.waitUntil(apiKeyConnected, {
+    timeout: 60_000,
+    interval: 500,
+    timeoutMsg: 'auth-status-value never showed connected via api key after the backend restart',
+  });
 }
 
 export async function removeAnthropicApiKey(): Promise<void> {
   await openAnthropicApiKeyPanel();
   const remove = '[data-testid="settings-api-key-remove"]';
-  if (!(await $(remove).isEnabled())) return;
-
-  await (await $(remove)).click();
-  await browser.waitUntil(async () => !(await $(remove).isEnabled()), {
-    timeout: 15_000,
-    interval: 500,
-    timeoutMsg: 'the saved api key is still present after remove',
-  });
+  if (await $(remove).isEnabled()) {
+    await (await $(remove)).click();
+    await browser.waitUntil(async () => !(await $(remove).isEnabled()), {
+      timeout: 15_000,
+      interval: 500,
+      timeoutMsg: 'the saved api key is still present after remove',
+    });
+  }
   await requestBackendRestart();
 }
 
