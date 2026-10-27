@@ -171,3 +171,64 @@ esac'
     [[ "$pinned" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
     [ "$(cat "$CALLS")" = "npm install -g wasm-pack@$pinned" ]
 }
+
+stub_windows_git_bash() {
+    WIN_PREFIX='C:\Users\ci\AppData\Roaming\npm'
+    WIN_PREFIX_UNIX="$BATS_TEST_TMPDIR/win-npm"
+    mkdir -p "$WIN_PREFIX_UNIX"
+    export WIN_PREFIX WIN_PREFIX_UNIX
+    write_stub uname 'echo MINGW64_NT-10.0'
+    write_stub cygpath '
+case "$1" in
+    -u) echo "$WIN_PREFIX_UNIX" ;;
+    -w) echo "$WIN_PREFIX" ;;
+esac'
+    write_stub npm '
+case "$1" in
+    prefix) printf "%s\r\n" "$WIN_PREFIX" ;;
+    install)
+        echo "npm $*" >>"$CALLS"
+        printf "#!/bin/sh\necho \"wasm-pack %s\"\n" "${3#wasm-pack@}" >"$WIN_PREFIX_UNIX/wasm-pack"
+        chmod +x "$WIN_PREFIX_UNIX/wasm-pack"
+        ;;
+esac'
+}
+
+@test "on Windows Git Bash the npm global bin is the prefix itself, not prefix/bin" {
+    stub_windows_git_bash
+
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"wasm-pack 0.15.0 installed (npm)"* ]]
+    [ "$("$WIN_PREFIX_UNIX/wasm-pack" --version)" = "wasm-pack 0.15.0" ]
+}
+
+@test "on Windows Git Bash GITHUB_PATH gets the Windows form of the npm prefix" {
+    stub_windows_git_bash
+    export GITHUB_PATH="$BATS_TEST_TMPDIR/github-path"
+    : >"$GITHUB_PATH"
+
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ "$(cat "$GITHUB_PATH")" = "$WIN_PREFIX" ]
+}
+
+@test "on Windows detected through OS=Windows_NT the already installed pinned version is found" {
+    stub_windows_git_bash
+    write_stub uname 'echo Linux'
+    printf '#!/bin/sh\necho "wasm-pack 0.15.0"\n' >"$WIN_PREFIX_UNIX/wasm-pack"
+    chmod +x "$WIN_PREFIX_UNIX/wasm-pack"
+
+    OS=Windows_NT run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"already installed"* ]]
+    [ ! -s "$CALLS" ]
+}
+
+@test "prints the installed version after a fresh install" {
+    stub_npm_installing
+
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ "$output" = "wasm-pack 0.15.0 installed (npm)" ]
+}

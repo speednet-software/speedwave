@@ -6,7 +6,7 @@ _init_audit_repo() {
   FIXTURE="$BATS_TEST_TMPDIR/repo"
   mkdir -p "$FIXTURE/scripts" "$FIXTURE/mcp-servers" "$FIXTURE/desktop/src" "$FIXTURE/desktop/src-tauri" "$FIXTURE/desktop/e2e" "$FIXTURE/mcp-servers/playwright" "$FIXTURE/mcp-servers/office"
   cp "$REPO_ROOT/scripts/audit-diff.sh" "$REPO_ROOT/scripts/audit-changed-files.sh" \
-    "$REPO_ROOT/scripts/audit-run.sh" "$REPO_ROOT/scripts/audit-gate.py" "$FIXTURE/scripts/"
+    "$REPO_ROOT/scripts/audit-run.sh" "$REPO_ROOT/scripts/audit-gate.py" "$REPO_ROOT/scripts/python-tool.sh" "$REPO_ROOT/scripts/build-tool-versions.env" "$FIXTURE/scripts/"
   chmod +x "$FIXTURE"/scripts/*.sh
   echo '{}' >"$FIXTURE/Cargo.lock"
   echo '{}' >"$FIXTURE/desktop/src-tauri/Cargo.lock"
@@ -32,6 +32,10 @@ _init_audit_repo() {
 
   FAKE_BIN="$BATS_TEST_TMPDIR/fakebin"
   mkdir -p "$FAKE_BIN"
+  TOOL_CACHE="$BATS_TEST_TMPDIR/toolcache"
+  export SPEEDWAVE_TOOL_CACHE="$TOOL_CACHE"
+  PIP_AUDIT_STUB="$TOOL_CACHE/pip-audit-$(awk -F= '$1 == "PIP_AUDIT_VERSION" { print $2 }' "$REPO_ROOT/scripts/build-tool-versions.env")/bin/pip-audit"
+  mkdir -p "$(dirname "$PIP_AUDIT_STUB")"
   cat >"$FAKE_BIN/npm" <<'EOF'
 #!/usr/bin/env bash
 echo '{"vulnerabilities": {}, "metadata": {"vulnerabilities": {"total": 0}}}'
@@ -51,7 +55,7 @@ else
   echo '{"vulnerabilities": {"found": false, "count": 0, "list": []}}'
 fi
 EOF
-  cat >"$FAKE_BIN/pip-audit" <<'EOF'
+  cat >"$PIP_AUDIT_STUB" <<'EOF'
 #!/usr/bin/env bash
 file=""
 while [ "$#" -gt 0 ]; do
@@ -66,7 +70,7 @@ if [ -n "$file" ] && grep -q VULN-MARKER "$file" 2>/dev/null; then
 fi
 echo '{"dependencies": [{"name": "numpy", "version": "2.2.2", "vulns": []}], "fixes": []}'
 EOF
-  chmod +x "$FAKE_BIN/npm" "$FAKE_BIN/cargo" "$FAKE_BIN/pip-audit"
+  chmod +x "$FAKE_BIN/npm" "$FAKE_BIN/cargo" "$PIP_AUDIT_STUB"
 }
 
 @test "a diff that never touches a lockfile is green without running an audit tool" {

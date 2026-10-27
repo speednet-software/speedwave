@@ -6,6 +6,10 @@ SCRIPT="$REPO_ROOT/scripts/audit-run.sh"
 setup() {
   FAKE_BIN="$BATS_TEST_TMPDIR/fakebin"
   mkdir -p "$FAKE_BIN"
+  TOOL_CACHE="$BATS_TEST_TMPDIR/toolcache"
+  export SPEEDWAVE_TOOL_CACHE="$TOOL_CACHE"
+  PIP_AUDIT_STUB="$TOOL_CACHE/pip-audit-$(awk -F= '$1 == "PIP_AUDIT_VERSION" { print $2 }' "$REPO_ROOT/scripts/build-tool-versions.env")/bin/pip-audit"
+  mkdir -p "$(dirname "$PIP_AUDIT_STUB")"
   ROOT="$BATS_TEST_TMPDIR/root"
   mkdir -p "$ROOT/desktop/src-tauri" "$ROOT/mcp-servers" "$ROOT/desktop/src" "$ROOT/desktop/e2e" "$ROOT/mcp-servers/playwright" "$ROOT/mcp-servers/office"
   : >"$ROOT/Cargo.lock"
@@ -21,22 +25,22 @@ setup() {
 _stub_pip_audit_recording() {
   PIP_LOG="$BATS_TEST_TMPDIR/pip.log"
   : >"$PIP_LOG"
-  cat >"$FAKE_BIN/pip-audit" <<EOF
+  cat >"$PIP_AUDIT_STUB" <<EOF
 #!/usr/bin/env bash
 echo "\$PWD \$*" >>"$PIP_LOG"
 echo '{"dependencies": [], "fixes": []}'
 exit 1
 EOF
-  chmod +x "$FAKE_BIN/pip-audit"
+  chmod +x "$PIP_AUDIT_STUB"
 }
 
 _stub_pip_audit_broken() {
-  cat >"$FAKE_BIN/pip-audit" <<'EOF'
+  cat >"$PIP_AUDIT_STUB" <<'EOF'
 #!/usr/bin/env bash
 echo "pip-audit: could not reach the vulnerability service" >&2
 exit 1
 EOF
-  chmod +x "$FAKE_BIN/pip-audit"
+  chmod +x "$PIP_AUDIT_STUB"
 }
 
 _stub_cargo_ok() {

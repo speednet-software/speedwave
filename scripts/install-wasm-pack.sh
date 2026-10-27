@@ -14,12 +14,29 @@ fail() {
 version="$(awk -F= '$1 == "WASM_PACK_VERSION" { print $2; exit }' "$VERSIONS_FILE")"
 [ -n "$version" ] || fail "WASM_PACK_VERSION is not set in $VERSIONS_FILE"
 
-npm_bin=""
+is_windows() {
+  case "$(uname -s 2>/dev/null)" in
+    MINGW* | MSYS* | CYGWIN*) return 0 ;;
+  esac
+  [ "${OS:-}" = "Windows_NT" ]
+}
+
+path_bin=""
+github_path_bin=""
 if command -v npm >/dev/null 2>&1; then
-  npm_bin="$(npm prefix -g 2>/dev/null)/bin" || npm_bin=""
+  prefix="$(npm prefix -g 2>/dev/null | tr -d '\r')" || prefix=""
+  if [ -n "$prefix" ]; then
+    if is_windows; then
+      path_bin="$(cygpath -u "$prefix")"
+      github_path_bin="$(cygpath -w "$prefix")"
+    else
+      path_bin="$prefix/bin"
+      github_path_bin="$path_bin"
+    fi
+  fi
 fi
-if [ -n "$npm_bin" ]; then
-  export PATH="$npm_bin:$PATH"
+if [ -n "$path_bin" ]; then
+  export PATH="$path_bin:$PATH"
 fi
 
 installed_version() {
@@ -42,7 +59,7 @@ else
   fail "could not install wasm-pack $version with npm or cargo"
 fi
 
-if [ -n "${GITHUB_PATH:-}" ] && [ -n "$npm_bin" ]; then
-  echo "$npm_bin" >>"$GITHUB_PATH"
+if [ -n "${GITHUB_PATH:-}" ] && [ -n "$github_path_bin" ]; then
+  echo "$github_path_bin" >>"$GITHUB_PATH"
 fi
-echo "wasm-pack $version installed ($method)"
+echo "wasm-pack $(installed_version) installed ($method)"

@@ -64,7 +64,7 @@ run_npm() {
 
 run_pip() {
     local requirements="$1" out="$2" err="$2.stderr"
-    pip-audit -r "$requirements" --disable-pip --no-deps --format json >"$out" 2>"$err" || true
+    "$DEFAULT_ROOT/scripts/python-tool.sh" pip-audit -r "$requirements" --disable-pip --no-deps --format json >"$out" 2>"$err" || true
     if [ ! -s "$out" ]; then
         echo "audit-run: pip-audit produced no output for $requirements, it likely failed to run:" >&2
         cat "$err" >&2

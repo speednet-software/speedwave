@@ -181,11 +181,7 @@ setup-dev:
 		echo "  📦 wasm32-unknown-unknown target not found, installing..."; \
 		rustup target add wasm32-unknown-unknown && echo "  ✅ wasm32-unknown-unknown installed" || { echo "  ❌ target install failed"; FAIL=1; }; \
 	fi; \
-	if scripts/install-wasm-pack.sh; then \
-		echo "  ✅ wasm-pack $$(wasm-pack --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo 'installed')"; \
-	else \
-		echo "  ❌ wasm-pack install failed"; FAIL=1; \
-	fi; \
+	scripts/install-wasm-pack.sh || { echo "  ❌ wasm-pack install failed"; FAIL=1; }; \
 	\
 	echo ""; \
 	echo "── macOS system deps (Tauri) ──"; \
@@ -763,12 +759,6 @@ audit: audit-rust audit-npm audit-office
 AUDIT_EXCEPTIONS := scripts/audit-exceptions.json
 AUDIT_TMP := .audit-tmp
 
-# scripts/audit-run.sh is the single source of the audited lockfile paths and
-# the cargo-audit/npm-audit invocations; scripts/audit-diff.sh (PR lane) and
-# scripts/audit-issue.sh (audit-schedule.yml) call the same script. The npm
-# severity threshold has one source too: audit-gate.py's own default, read by
-# audit-run.sh when NPM_AUDIT_LEVEL is not set and left unset here so
-# audit-gate.py's matching default applies on both sides.
 audit-rust:
 	@command -v cargo-audit >/dev/null 2>&1 || { echo "❌ cargo-audit not found. Install: cargo install cargo-audit"; exit 1; }
 	@mkdir -p $(AUDIT_TMP)
@@ -816,7 +806,6 @@ audit-e2e:
 	@echo "✅ Desktop e2e dependencies: no vulnerabilities without a valid exception"
 
 audit-office:
-	@command -v pip-audit >/dev/null 2>&1 || { echo "❌ pip-audit not found. Install: pipx install pip-audit"; exit 1; }
 	@mkdir -p $(AUDIT_TMP)
 	scripts/audit-run.sh pip-office $(AUDIT_TMP)/pip-office.json
 	python3 scripts/audit-gate.py absolute --exceptions $(AUDIT_EXCEPTIONS) \

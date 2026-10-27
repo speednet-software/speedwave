@@ -34,7 +34,7 @@ The Speedwave claude container is hardened (read-only root filesystem, `cap_drop
 
 ### TypeScript language server pre-baked into the image
 
-The `typescript-lsp` plugin ships only an `lspServers` metadata entry pointing at the bare `typescript-language-server` command; it does not fetch the server itself. We therefore pre-bake `typescript-language-server` and `typescript` into the claude image at build time (`npm install -g`, as root, into `/usr/local`), pinned by version via `ARG` (the same pattern the playwright worker uses) so a rebuild is deterministic. Both are Apache-2.0, so redistributing them inside our image is permitted.[^6][^7]
+The `typescript-lsp` plugin ships only an `lspServers` metadata entry pointing at the bare `typescript-language-server` command; it does not fetch the server itself. We therefore pre-bake `typescript-language-server` and `typescript` into the claude image at build time (`npm install -g`, as root, into `/usr/local`), pinned by version via `ARG` so a rebuild is deterministic. Both are Apache-2.0, so redistributing them inside our image is permitted.[^6][^7]
 
 ### `php-lsp` excluded
 
