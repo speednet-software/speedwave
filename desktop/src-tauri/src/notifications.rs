@@ -21,6 +21,12 @@ pub(crate) const ACTIVATED_EVENT: &str = "notification_activated";
 
 const MAX_TRACKED_NOTIFICATIONS: usize = 64;
 
+#[cfg(any(windows, test))]
+const TOAST_SETTING_ENABLED: i32 = 0;
+
+#[cfg(any(windows, test))]
+const HRESULT_ERROR_NOT_FOUND: i32 = 0x8007_0490_u32.cast_signed();
+
 static ACTIVATION_APP: OnceLock<AppHandle> = OnceLock::new();
 
 /// A chat-session event that can raise a notification.
@@ -311,7 +317,7 @@ fn classify_toast_setting(setting: i32, user_state: Option<i32>) -> Notification
     const QUNS_RUNNING_D3D_FULL_SCREEN: i32 = 3;
     const QUNS_PRESENTATION_MODE: i32 = 4;
     const QUNS_QUIET_TIME: i32 = 6;
-    if setting != 0 {
+    if setting != TOAST_SETTING_ENABLED {
         return NotificationPermission::Denied;
     }
     match user_state {
@@ -319,6 +325,15 @@ fn classify_toast_setting(setting: i32, user_state: Option<i32>) -> Notification
             QUNS_BUSY | QUNS_RUNNING_D3D_FULL_SCREEN | QUNS_PRESENTATION_MODE | QUNS_QUIET_TIME,
         ) => NotificationPermission::Suppressed,
         _ => NotificationPermission::Granted,
+    }
+}
+
+#[cfg(any(windows, test))]
+fn classify_toast_setting_error(hresult: i32, user_state: Option<i32>) -> NotificationPermission {
+    if hresult == HRESULT_ERROR_NOT_FOUND {
+        classify_toast_setting(TOAST_SETTING_ENABLED, user_state)
+    } else {
+        NotificationPermission::Unavailable
     }
 }
 
@@ -652,6 +667,64 @@ mod tests {
                 NotificationPermission::Granted
             );
         }
+    }
+
+    #[test]
+    fn an_app_windows_has_no_toast_setting_for_yet_is_treated_as_enabled() {
+        assert_eq!(
+            classify_toast_setting_error(HRESULT_ERROR_NOT_FOUND, None),
+            NotificationPermission::Granted
+        );
+        for quiet in [2, 3, 4, 6] {
+            assert_eq!(
+                classify_toast_setting_error(HRESULT_ERROR_NOT_FOUND, Some(quiet)),
+                NotificationPermission::Suppressed
+            );
+        }
+    }
+
+    #[test]
+    fn the_first_toast_of_a_fresh_install_is_not_withheld() {
+        for event in EVENTS {
+            assert_eq!(
+                decide_with(
+                    true,
+                    prefs(true, true, true, true),
+                    event,
+                    true,
+                    classify_toast_setting_error(HRESULT_ERROR_NOT_FOUND, None)
+                ),
+                (Ok(()), 1)
+            );
+        }
+    }
+
+    #[test]
+    fn any_other_toast_setting_error_is_unavailable() {
+        for hresult in [
+            0,
+            0x8000_4005_u32.cast_signed(),
+            0x8007_0005_u32.cast_signed(),
+            0x8007_0491_u32.cast_signed(),
+            0x0000_0490,
+            i32::MIN,
+            i32::MAX,
+        ] {
+            assert_eq!(
+                classify_toast_setting_error(hresult, None),
+                NotificationPermission::Unavailable,
+                "hresult {hresult:#x}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn error_not_found_hresult_matches_the_windows_sdk() {
+        assert_eq!(
+            HRESULT_ERROR_NOT_FOUND,
+            windows::core::HRESULT::from_win32(windows_sys::Win32::Foundation::ERROR_NOT_FOUND).0
+        );
     }
 
     #[test]

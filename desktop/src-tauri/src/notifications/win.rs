@@ -14,7 +14,8 @@ use windows_sys::Win32::Foundation::S_OK;
 use windows_sys::Win32::UI::Shell::SHQueryUserNotificationState;
 
 use super::{
-    classify_toast_setting, on_activated, push_bounded, toast_xml, NotificationPermission,
+    classify_toast_setting, classify_toast_setting_error, on_activated, push_bounded, toast_xml,
+    NotificationPermission,
 };
 
 const NOTIFICATIONS_SETTINGS_URI: &str = "ms-settings:notifications";
@@ -28,8 +29,15 @@ pub(super) fn permission(app_id: &str) -> NotificationPermission {
     match setting {
         Ok(setting) => classify_toast_setting(setting.0, user_notification_state()),
         Err(e) => {
-            log::warn!("toast notification setting unreadable: {e}");
-            NotificationPermission::Unavailable
+            let permission = classify_toast_setting_error(e.code().0, user_notification_state());
+            if permission == NotificationPermission::Unavailable {
+                log::warn!("toast notification setting unreadable: {e}");
+            } else {
+                log::info!(
+                    "toast notification setting not registered yet; the first toast registers it"
+                );
+            }
+            permission
         }
     }
 }
