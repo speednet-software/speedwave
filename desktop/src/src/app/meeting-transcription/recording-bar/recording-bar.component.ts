@@ -50,16 +50,18 @@ function rmsToPct(rms: number): number {
     <div
       class="flex items-center gap-5 border-b px-6 py-2.5"
       [class]="
-        paused() ? 'border-amber-500/35 bg-amber-500/[0.06]' : 'border-red-500/35 bg-red-500/[0.06]'
+        paused()
+          ? 'border-[var(--amber)]/35 bg-[var(--amber-soft)]'
+          : 'border-[var(--red)]/35 bg-[var(--red-soft)]'
       "
       data-testid="recording-view"
       [attr.data-state]="paused() ? 'paused' : 'recording'"
     >
       @if (paused()) {
-        <app-icon name="pause" class="h-4 w-4 text-amber-300" [strokeWidth]="2.5" />
+        <app-icon name="pause" class="h-4 w-4 text-[var(--amber)]" [strokeWidth]="2.5" />
       } @else {
         <span
-          class="h-2.5 w-2.5 shrink-0 animate-pulse rounded-full bg-red-500 shadow-[0_0_0_4px_rgba(239,68,68,0.2)]"
+          class="h-2.5 w-2.5 shrink-0 animate-pulse rounded-full bg-[var(--red)] shadow-[0_0_0_4px_color-mix(in_srgb,var(--red)_20%,transparent)]"
           aria-hidden="true"
         ></span>
       }
@@ -109,7 +111,7 @@ function rmsToPct(rms: number): number {
         >
           <button
             type="button"
-            class="mono inline-flex items-center gap-1.5 rounded-md bg-[var(--accent)] px-3 py-1.5 text-[12px] font-semibold text-[var(--bg)] hover:opacity-90 disabled:opacity-40"
+            class="mono inline-flex items-center gap-1.5 rounded-md bg-[var(--accent)] px-3 py-1.5 text-[12px] font-semibold text-[var(--on-accent)] hover:opacity-90 disabled:opacity-40"
             data-testid="resume-btn"
             [disabled]="busy()"
             (click)="resume()"
@@ -121,7 +123,7 @@ function rmsToPct(rms: number): number {
         <span [appTooltip]="stopTooltip" placement="bottom">
           <button
             type="button"
-            class="mono inline-flex items-center gap-1.5 rounded-md border border-red-500/45 bg-red-500/10 px-3 py-1.5 text-[12px] text-red-300 hover:bg-red-500/20 disabled:opacity-40"
+            class="mono inline-flex items-center gap-1.5 rounded-md border border-[var(--red)]/45 bg-[var(--bg)] px-3 py-1.5 text-[12px] text-[var(--red)] hover:bg-[var(--red-soft)] disabled:opacity-40"
             data-testid="stop-btn"
             [disabled]="busy()"
             (click)="stop()"
@@ -146,7 +148,7 @@ function rmsToPct(rms: number): number {
         <span [appTooltip]="stopTooltip" [tooltipKbd]="stopHint" placement="bottom">
           <button
             type="button"
-            class="mono inline-flex items-center gap-1.5 rounded-md border border-red-500/45 bg-red-500/10 px-3 py-1.5 text-[12px] text-red-300 hover:bg-red-500/20 disabled:opacity-40"
+            class="mono inline-flex items-center gap-1.5 rounded-md border border-[var(--red)]/45 bg-[var(--bg)] px-3 py-1.5 text-[12px] text-[var(--red)] hover:bg-[var(--red-soft)] disabled:opacity-40"
             data-testid="stop-btn"
             [disabled]="busy()"
             (click)="stop()"

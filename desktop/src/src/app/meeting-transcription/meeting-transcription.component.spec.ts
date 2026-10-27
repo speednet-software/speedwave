@@ -358,6 +358,12 @@ describe('MeetingTranscriptionComponent', () => {
       expect(
         fixture.nativeElement.querySelector('[data-testid="gate-error"]').textContent
       ).toContain('network down');
+      expect(fixture.nativeElement.querySelector('[data-testid="gate-error"]').className).toContain(
+        'text-[var(--red)]'
+      );
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="gate-download"]').className
+      ).toContain('text-[var(--on-accent)]');
     });
   });
 
@@ -371,6 +377,9 @@ describe('MeetingTranscriptionComponent', () => {
     fixture.detectChanges();
     const link = fixture.nativeElement.querySelector('[data-testid="open-mic-settings"]');
     expect(link).not.toBeNull();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="meeting-transcription-error"]').className
+    ).toContain('text-[var(--red)]');
     await component.openMicrophoneSettings();
     expect(svc.openMicrophonePrivacyPane).toHaveBeenCalled();
     expect(svc.openAudioCapturePrivacyPane).toHaveBeenCalled();
@@ -430,6 +439,8 @@ describe('MeetingTranscriptionComponent', () => {
     const banner = fixture.nativeElement.querySelector('[data-testid="capture-warning"]');
     expect(banner).not.toBeNull();
     expect(banner.textContent).toContain('No system audio captured');
+    expect(banner.className).toContain('text-[var(--ink)]');
+    expect(banner.className).toContain('ring-[var(--amber)]/40');
     expect(banner.querySelector('[data-testid="open-audio-settings"]')).not.toBeNull();
   });
 

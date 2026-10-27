@@ -93,7 +93,7 @@ function micName(label: string): string {
         <span [appTooltip]="startTooltip" [tooltipKbd]="shortcutHint" placement="bottom">
           <button
             type="button"
-            class="mono inline-flex items-center gap-1.5 rounded-md bg-[var(--accent)] px-3.5 py-1.5 text-[13px] font-semibold text-[var(--bg)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+            class="mono inline-flex items-center gap-1.5 rounded-md bg-[var(--accent)] px-3.5 py-1.5 text-[13px] font-semibold text-[var(--on-accent)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
             data-testid="start-btn"
             [disabled]="!canStart()"
             (click)="start()"
@@ -199,7 +199,7 @@ function micName(label: string): string {
       }
       @if (hasModel() && missingFinalizeModel(); as missing) {
         <p
-          class="max-w-md text-right text-[11.5px] text-amber-300"
+          class="max-w-md text-right text-[11.5px] text-[var(--amber)]"
           data-testid="finalize-model-warning"
         >
           Transcripts are made with the smaller model until the high-quality one ({{ missing }}) is

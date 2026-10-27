@@ -66,7 +66,7 @@ import { SessionListComponent } from './session-list/session-list.component';
               <div class="mt-4 flex items-center gap-3">
                 <button
                   type="button"
-                  class="mono rounded-md bg-[var(--accent)] px-3.5 py-1.5 text-[12.5px] font-semibold text-[var(--bg)] hover:opacity-90 disabled:opacity-40"
+                  class="mono rounded-md bg-[var(--accent)] px-3.5 py-1.5 text-[12.5px] font-semibold text-[var(--on-accent)] hover:opacity-90 disabled:opacity-40"
                   data-testid="gate-download"
                   [disabled]="!transcription.highQualityModel()"
                   (click)="downloadFromGate()"
@@ -83,7 +83,7 @@ import { SessionListComponent } from './session-list/session-list.component';
               </div>
             }
             @if (error()) {
-              <p class="mt-3 text-[12px] text-red-300" role="alert" data-testid="gate-error">
+              <p class="mt-3 text-[12px] text-[var(--red)]" role="alert" data-testid="gate-error">
                 {{ error() }}
               </p>
             }
@@ -154,7 +154,7 @@ import { SessionListComponent } from './session-list/session-list.component';
 
         @if (error()) {
           <div
-            class="mx-6 mt-3 rounded ring-1 ring-red-500/40 bg-red-500/[0.06] px-3 py-2 text-[12px] text-red-300"
+            class="mx-6 mt-3 rounded ring-1 ring-[var(--red)]/40 bg-[var(--red-soft)] px-3 py-2 text-[12px] text-[var(--red)]"
             role="alert"
             data-testid="meeting-transcription-error"
           >
@@ -173,7 +173,7 @@ import { SessionListComponent } from './session-list/session-list.component';
         }
         @for (warning of captureWarnings(); track warning) {
           <div
-            class="mx-6 mt-3 rounded ring-1 ring-amber-500/40 bg-amber-500/[0.06] px-3 py-2 text-[12px] text-amber-300"
+            class="mx-6 mt-3 rounded ring-1 ring-[var(--amber)]/40 bg-[var(--amber-soft)] px-3 py-2 text-[12px] text-[var(--ink)]"
             role="alert"
             data-testid="capture-warning"
           >

@@ -146,6 +146,21 @@ describe('SessionListComponent', () => {
     expect(q('status-live')!.textContent).toBe('Smaller model');
   });
 
+  it('fills the attention chips with a theme colour, so they read on any row background', () => {
+    svc.recordings.set([
+      summary('rec', { status: { state: 'recording' } }),
+      summary('busy', { status: { state: 'finalizing', progress: 0.42 } }),
+      summary('failed', { status: { state: 'failed', reason: 'interrupted' } }),
+      summary('queued', { status: { state: 'finalizing', progress: 0 }, queued: true }),
+    ]);
+    svc.active.set({ id: 'busy' });
+    fixture.detectChanges();
+    expect(q('status-rec')!.className).toContain('bg-[var(--red)] text-[var(--bg)]');
+    expect(q('status-busy')!.className).toContain('bg-[var(--amber)] text-[var(--bg)]');
+    expect(q('status-failed')!.className).toContain('bg-[var(--red)] text-[var(--bg)]');
+    expect(q('status-queued')!.className).toContain('bg-[var(--bg-3)] text-[var(--ink-dim)]');
+  });
+
   it('shows no smaller-model chip while the best model is not known', () => {
     svc.highQualityModel.set(null);
     svc.recordings.set([summary('small', { finalize_model: 'small' })]);
@@ -280,6 +295,7 @@ describe('SessionListComponent', () => {
       click('open-b');
       click('delete-selected');
       expect(q('bulk-delete-confirm')!.textContent).toContain('Delete 2 recordings');
+      expect(q('bulk-delete-yes')!.className).toContain('text-[var(--red)]');
       await component.removeSelected();
       fixture.detectChanges();
       expect(svc.delete).toHaveBeenCalledTimes(2);

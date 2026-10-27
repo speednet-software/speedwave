@@ -117,6 +117,18 @@ describe('RecordingBarComponent', () => {
     expect(q('resume-btn')).toBeNull();
   });
 
+  it('paints the bar in the theme red while recording and the theme amber while paused', async () => {
+    fixture.detectChanges();
+    expect(q('recording-view')!.className).toContain('bg-[var(--red-soft)]');
+    expect(q('stop-btn')!.className).toContain('bg-[var(--bg)]');
+    expect(q('stop-btn')!.className).toContain('text-[var(--red)]');
+    await component.pause();
+    fixture.detectChanges();
+    expect(q('recording-view')!.className).toContain('bg-[var(--amber-soft)]');
+    expect(q('resume-btn')!.className).toContain('text-[var(--on-accent)]');
+    expect(q('stop-btn')!.className).toContain('bg-[var(--bg)]');
+  });
+
   it('labels a mono capture by its source and shows a flat bar before the first level', () => {
     svc.recordingSource.set({ kind: 'microphone', device: null });
     expect(component.meterBars()).toEqual([{ label: 'You', pct: 0 }]);

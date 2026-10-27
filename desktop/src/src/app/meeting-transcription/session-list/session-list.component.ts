@@ -72,7 +72,7 @@ interface DayGroup {
             >
             <button
               type="button"
-              class="mono rounded border border-red-500/40 px-2 py-0.5 text-[11px] text-red-300 hover:bg-red-500/10 disabled:opacity-40"
+              class="mono rounded border border-[var(--red)]/40 px-2 py-0.5 text-[11px] text-[var(--red)] hover:bg-[var(--red-soft)] disabled:opacity-40"
               data-testid="delete-selected"
               [disabled]="selected().size === 0 || busy()"
               (click)="pendingBulkDelete.set(true)"
@@ -112,7 +112,7 @@ interface DayGroup {
           </div>
           @if (pendingBulkDelete()) {
             <div
-              class="mt-2 rounded-md border border-red-500/40 bg-red-500/[0.06] p-2 text-[12px]"
+              class="mt-2 rounded-md border border-[var(--red)]/40 bg-[var(--red-soft)] p-2 text-[12px]"
               role="alertdialog"
               aria-label="Confirm deleting the selected recordings"
               data-testid="bulk-delete-confirm"
@@ -124,7 +124,7 @@ interface DayGroup {
               <div class="mt-2 flex gap-2">
                 <button
                   type="button"
-                  class="mono rounded border border-red-500/40 px-2 py-0.5 text-red-300 hover:bg-red-500/10"
+                  class="mono rounded border border-[var(--red)]/40 px-2 py-0.5 text-[var(--red)] hover:bg-[var(--red-soft)]"
                   data-testid="bulk-delete-yes"
                   (click)="removeSelected()"
                 >
@@ -396,9 +396,9 @@ export class SessionListComponent implements OnInit {
     switch (chip.tone) {
       case 'live':
       case 'error':
-        return 'bg-red-500/15 text-red-300';
+        return 'bg-[var(--red)] text-[var(--bg)]';
       case 'busy':
-        return 'bg-amber-500/15 text-amber-300';
+        return 'bg-[var(--amber)] text-[var(--bg)]';
       case 'muted':
         return 'bg-[var(--bg-3)] text-[var(--ink-dim)]';
     }

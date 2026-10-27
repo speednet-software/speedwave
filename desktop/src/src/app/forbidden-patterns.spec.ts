@@ -9,6 +9,7 @@ interface ForbiddenPattern {
   readonly extensions: readonly string[];
   readonly ignoreFiles?: readonly string[];
   readonly lineExemptions?: readonly string[];
+  readonly onlyUnder?: string;
 }
 
 const SRC_ROOT = findSrcRoot();
@@ -89,10 +90,18 @@ const FORBIDDEN: readonly ForbiddenPattern[] = [
     extensions: ['.ts'],
     ignoreFiles: ['forbidden-patterns.spec.ts'],
   },
+  {
+    label:
+      'fixed Tailwind palette colour in meeting transcription (SPEED-810: it ignores the light theme, use a theme token)',
+    regex:
+      /\b(?:bg|text|border(?:-[trblxy])?|ring|outline|shadow|fill|stroke|from|via|to|divide|decoration|accent|caret|placeholder)-(?:red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose|slate|gray|zinc|neutral|stone)-\d{2,3}\b/,
+    extensions: ['.ts', '.html'],
+    onlyUnder: 'app/meeting-transcription',
+  },
 ];
 
 function gatherViolations(pattern: ForbiddenPattern): string[] {
-  const files = walk(SRC_ROOT, pattern.extensions);
+  const files = walk(join(SRC_ROOT, pattern.onlyUnder ?? ''), pattern.extensions);
   const violations: string[] = [];
   for (const file of files) {
     const name = file.split('/').pop() ?? file;
