@@ -124,6 +124,20 @@ beforeEach(() => {
 });
 
 describe('definitions', () => {
+  it('offers null only on parameters whose type accepts it', () => {
+    for (const { tool } of defs()) {
+      const props = tool.inputSchema.properties as Record<
+        string,
+        { type?: string | string[]; description?: string }
+      >;
+      for (const [name, prop] of Object.entries(props)) {
+        const nullable = Array.isArray(prop.type) && prop.type.includes('null');
+        if (!nullable)
+          expect(prop.description ?? '', `${tool.name}.${name}`).not.toMatch(/\bnull\b/);
+      }
+    }
+  });
+
   it('exposes the 14 issue tools with snake_case parameters', () => {
     expect(defs().map((d) => d.tool.name)).toEqual([
       'searchIssues',

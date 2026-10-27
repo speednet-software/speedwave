@@ -130,6 +130,8 @@ const descriptionProperties = {
 
 const assigneeDescription = `Account ID, "me" or null to unassign. ${ACCOUNT_ID_RESOLUTION_GUIDANCE}`;
 
+const newAssigneeDescription = `Account ID or "me". ${ACCOUNT_ID_RESOLUTION_GUIDANCE}`;
+
 const searchIssuesTool: Tool = {
   name: 'searchIssues',
   description:
@@ -209,7 +211,7 @@ const createIssueTool: Tool = {
       ...descriptionProperties,
       priority: { type: 'string', description: 'Priority name (e.g. High)' },
       labels: { type: 'array', items: { type: 'string' }, description: 'Labels to apply' },
-      assignee: { type: 'string', description: assigneeDescription },
+      assignee: { type: 'string', description: newAssigneeDescription },
       parent: {
         type: 'string',
         description: 'Parent issue key or ID (required for Sub-task, optional under an epic)',
