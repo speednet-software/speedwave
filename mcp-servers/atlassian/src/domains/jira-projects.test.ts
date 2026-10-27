@@ -84,9 +84,7 @@ describe('get', () => {
     expect(p.key).toBe('PROJ');
     expect(p.lead).toEqual({
       account_id: 'u1',
-      display_name: 'Lead',
-      email_address: undefined,
-      active: true,
+      name: 'Lead',
     });
   });
 
@@ -149,6 +147,7 @@ describe('normalisation of minimal payloads', () => {
       project_type_key: undefined,
       lead: null,
       url: undefined,
+      components: [],
     });
   });
 

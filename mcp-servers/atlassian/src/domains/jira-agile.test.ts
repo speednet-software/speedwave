@@ -48,7 +48,7 @@ describe('listBoards', () => {
   it('lists boards with capped maxResults and optional filters, normalised', async () => {
     client.get.mockResolvedValueOnce({ values: [rawBoard()] });
     const c = createJiraAgileClient(client);
-    const res = await c.listBoards({ name: 'B', projectKeyOrId: 'PROJ', maxResults: 999 });
+    const res = await c.listBoards({ name: 'B', project: 'PROJ', maxResults: 999 });
     expect(client.get).toHaveBeenCalledWith('/rest/agile/1.0/board', {
       maxResults: 100,
       name: 'B',
