@@ -26,10 +26,13 @@ interface ModelRow {
 
 const SPEAKER_COST_TEXT = {
   macos: { text: 'Adds under a minute per hour of recording.', warn: false },
-  windowsGpu: { text: 'Adds some time after each recording.', warn: false },
-  windowsCpu: {
-    text: 'No graphics acceleration here: runs on the processor and takes longer after each recording.',
-    warn: true,
+  windows: {
+    discrete: { text: 'Adds some time after each recording.', warn: false },
+    integrated: { text: 'Adds about 3 minutes per hour of recording.', warn: false },
+    none: {
+      text: 'No graphics acceleration here: runs on the processor and takes longer after each recording.',
+      warn: true,
+    },
   },
 };
 
@@ -374,8 +377,7 @@ export class TranscriptionSectionComponent implements OnInit {
   readonly speakerCost = computed(() => {
     const m = this.model();
     if (!m) return null;
-    if (this.isMacos()) return SPEAKER_COST_TEXT.macos;
-    return m.gpu_class === 'none' ? SPEAKER_COST_TEXT.windowsCpu : SPEAKER_COST_TEXT.windowsGpu;
+    return this.isMacos() ? SPEAKER_COST_TEXT.macos : SPEAKER_COST_TEXT.windows[m.gpu_class];
   });
   /** Local error string. */
   readonly error = signal('');
