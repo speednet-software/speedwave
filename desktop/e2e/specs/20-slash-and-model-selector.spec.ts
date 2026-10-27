@@ -98,6 +98,10 @@ async function listedModelIds(): Promise<string[]> {
   return ids;
 }
 
+function modelPinIs(id: string): boolean {
+  return (readModelPin(ANTHROPIC_PROJECT) ?? '').replace(ONE_MILLION_MARKER, '') === id;
+}
+
 function requireCatalogEntry(catalog: AnthropicCatalogEntry[], id: string): AnthropicCatalogEntry {
   const entry = catalog.find((m) => m.id === id);
   if (!entry) {
@@ -278,9 +282,15 @@ describe('Slash Popover + Model/Effort Selector', function () {
 
     after(async function () {
       this.timeout(600_000);
-      clearModelPinFile(ANTHROPIC_PROJECT);
-      clearEffortPinFile(ANTHROPIC_PROJECT);
-      await removeAnthropicApiKey();
+      try {
+        clearModelPinFile(ANTHROPIC_PROJECT);
+      } finally {
+        try {
+          clearEffortPinFile(ANTHROPIC_PROJECT);
+        } finally {
+          await removeAnthropicApiKey();
+        }
+      }
     });
 
     it('(a) a fresh, unpinned session spawns with --model default, no --effort, and reports the account default in SystemInit', async function () {
@@ -340,11 +350,10 @@ describe('Slash Popover + Model/Effort Selector', function () {
       const haiku = requireCatalogEntry(catalog, HAIKU_MODEL);
 
       await selectModel(SONNET_MODEL);
-      await browser.waitUntil(
-        async () =>
-          (readModelPin(ANTHROPIC_PROJECT) ?? '').replace(ONE_MILLION_MARKER, '') === SONNET_MODEL,
-        { timeout: 10_000, timeoutMsg: 'the Sonnet pick never wrote the settings.json model pin' }
-      );
+      await browser.waitUntil(async () => modelPinIs(SONNET_MODEL), {
+        timeout: 10_000,
+        timeoutMsg: 'the Sonnet pick never wrote the settings.json model pin',
+      });
 
       await selectModel(HAIKU_MODEL);
       await $('[data-testid="control-chip"][data-command="model"]').waitForExist({
@@ -354,11 +363,10 @@ describe('Slash Popover + Model/Effort Selector', function () {
       expect(
         await (await $('[data-testid="control-chip"][data-command="model"]')).getText()
       ).not.toMatch(ONE_MILLION_MARKER);
-      await browser.waitUntil(
-        async () =>
-          (readModelPin(ANTHROPIC_PROJECT) ?? '').replace(ONE_MILLION_MARKER, '') === HAIKU_MODEL,
-        { timeout: 10_000, timeoutMsg: 'the Haiku pick never replaced the settings.json model pin' }
-      );
+      await browser.waitUntil(async () => modelPinIs(HAIKU_MODEL), {
+        timeout: 10_000,
+        timeoutMsg: 'the Haiku pick never replaced the settings.json model pin',
+      });
       await waitForBadgeFamily(haiku);
 
       await sendMessageAndWait('Say hi in one word.');
@@ -380,15 +388,13 @@ describe('Slash Popover + Model/Effort Selector', function () {
       expect(newConversationArgs.filter((a) => a === '--model').length).toBe(1);
       const launchedModel = newConversationArgs[newConversationArgs.indexOf('--model') + 1];
       expect(launchedModel.replace(ONE_MILLION_MARKER, '')).toContain(HAIKU_MODEL);
-      expect((readModelPin(ANTHROPIC_PROJECT) as string).replace(ONE_MILLION_MARKER, '')).toBe(
-        HAIKU_MODEL
-      );
+      expect(modelPinIs(HAIKU_MODEL)).toBe(true);
     });
 
     it('(c) a restart spawns with the tab model (carried by the settings.json pin); the effort pin survives too', async function () {
       this.timeout(360_000);
       const pinBeforeRestart = readModelPin(ANTHROPIC_PROJECT);
-      expect((pinBeforeRestart ?? '').replace(ONE_MILLION_MARKER, '')).toBe(HAIKU_MODEL);
+      expect(modelPinIs(HAIKU_MODEL)).toBe(true);
       const priorArgs = await lastSpawnArgs();
       await restartAppAndReconnect();
 
