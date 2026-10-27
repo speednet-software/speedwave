@@ -12,7 +12,7 @@ import {
   markdownToAdf,
   adfToMarkdown,
 } from './adf.js';
-import type { AdfNode } from './types.js';
+import type { AdfDoc, AdfNode } from './types.js';
 
 describe('isAdfDoc', () => {
   it('recognises a well-formed ADF doc', () => {
@@ -619,5 +619,50 @@ describe('round trip', () => {
     'line\\\nbreak',
   ])('keeps %j stable', (markdown) => {
     expect(adfToMarkdown(markdownToAdf(markdown))).toBe(markdown);
+  });
+});
+
+describe('table cells with pipes and backslashes', () => {
+  const cell = (type: string, text: string, marks?: Array<{ type: string }>) => ({
+    type,
+    content: [
+      {
+        type: 'paragraph',
+        content: [marks ? { type: 'text', text, marks } : { type: 'text', text }],
+      },
+    ],
+  });
+  const tableWith = (text: string, marks?: Array<{ type: string }>): AdfDoc => ({
+    version: 1,
+    type: 'doc',
+    content: [
+      {
+        type: 'table',
+        content: [
+          {
+            type: 'tableRow',
+            content: [cell('tableHeader', 'h1'), cell('tableHeader', 'h2')],
+          },
+          {
+            type: 'tableRow',
+            content: [cell('tableCell', text, marks), cell('tableCell', 'x')],
+          },
+        ],
+      },
+    ],
+  });
+  const secondRowFirstText = (doc: AdfDoc): unknown =>
+    doc.content[0].content![1].content![0].content![0].content![0].text;
+
+  it.each([
+    ['plain text', undefined],
+    ['code', [{ type: 'code' }]],
+  ])('round-trips %s cells', (_label, marks) => {
+    for (const text of ['a|b', 'a\\|b', 'a\\', '\\\\|', 'x\\\\', 'end\\']) {
+      const markdown = adfToMarkdown(tableWith(text, marks));
+      const parsed = markdownToAdf(markdown);
+      expect(secondRowFirstText(parsed), text).toBe(text);
+      expect(adfToMarkdown(parsed), text).toBe(markdown);
+    }
   });
 });
