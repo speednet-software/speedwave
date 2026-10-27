@@ -2,6 +2,7 @@
 
 ```bash
 make setup-dev         # first-time: prerequisites + all dependencies
+                       # - Runs npm ci in desktop/src; Tauri CLI is its locked @tauri-apps/cli (npx --prefix ../src tauri), same as CI. No cargo install tauri-cli.
 make setup-dev-windows # Windows only dev setup (requires admin, self-elevates):
                        # - Installs Chocolatey toolchain and pinned Vulkan SDK (machine-wide VULKAN_SDK).
                        # - Reports missing items at the end without aborting configuration early.

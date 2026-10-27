@@ -83,8 +83,8 @@ PROBE
 
 ensure_provisioned_macos() {
     # shellcheck disable=SC2016
-    if macos_ssh 'eval "$(/opt/homebrew/bin/brew shellenv)"; export PATH="$HOME/.cargo/bin:$PATH"; command -v npm && command -v cargo && command -v cmake && cargo tauri --version' >/dev/null 2>&1; then
-        echo "[macos] Provisioning: OK (npm + cargo + cmake + tauri-cli found)"
+    if macos_ssh 'eval "$(/opt/homebrew/bin/brew shellenv)"; export PATH="$HOME/.cargo/bin:$PATH"; command -v npm && command -v cargo && command -v cmake' >/dev/null 2>&1; then
+        echo "[macos] Provisioning: OK (npm + cargo + cmake found)"
         return
     fi
     if [ "${CI:-}" = "true" ]; then
@@ -554,7 +554,7 @@ Set-Content -Path C:\speedwave-e2e\e2e-nsis.conf.json -Value '{"bundle":{"window
 
 Write-Host "── Building Tauri release with NSIS bundle (e2e feature = WebDriver on :4445)..."
 Set-Location desktop\src-tauri
-cargo tauri build --features e2e --no-sign --bundles nsis --config C:\speedwave-e2e\e2e-nsis.conf.json
+npx --prefix ..\src tauri build --features e2e --no-sign --bundles nsis --config C:\speedwave-e2e\e2e-nsis.conf.json
 Assert-ExitCode
 Set-Location ..\..
 Write-Host "Step 4 DONE"

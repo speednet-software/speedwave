@@ -9,6 +9,7 @@ NPX := npx
 endif
 
 ANGULAR_NPM_INSTALL := desktop/src/node_modules/.package-lock.json
+TAURI := $(NPX) --prefix ../src tauri
 MCP_NPM_INSTALL := mcp-servers/node_modules/.package-lock.json
 
 DEV_INSTANCE ?= dev
@@ -156,11 +157,11 @@ setup-dev:
 	\
 	echo ""; \
 	echo "── Tauri CLI ──"; \
-	if command -v cargo-tauri >/dev/null 2>&1; then \
-		echo "  ✅ cargo-tauri $$(cargo tauri --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo 'installed')"; \
+	if "$(MAKE)" --no-print-directory $(ANGULAR_NPM_INSTALL) >/dev/null && TAURI_VER=$$(cd desktop/src-tauri && $(TAURI) --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+'); then \
+		echo "  ✅ @tauri-apps/cli $$TAURI_VER (desktop/src/package-lock.json)"; \
 	else \
-		echo "  📦 cargo-tauri not found — installing..."; \
-		cargo install tauri-cli && echo "  ✅ cargo-tauri installed" || { echo "  ❌ cargo-tauri install failed"; FAIL=1; }; \
+		echo "  ❌ @tauri-apps/cli not usable (npm ci in desktop/src failed)"; \
+		FAIL=1; \
 	fi; \
 	\
 	echo ""; \
@@ -298,7 +299,7 @@ else
 endif
 	@"$(MAKE)" verify-bundled-assets
 	@app_version="$${SPEEDWAVE_VERSION:-$$(cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- version --repo $(CURDIR) 2>/dev/null || echo 0.0.0)}"; \
-	cd desktop/src-tauri && SPEEDWAVE_VERSION="$$app_version" cargo tauri build \
+	cd desktop/src-tauri && SPEEDWAVE_VERSION="$$app_version" $(TAURI) build \
 	  --config "{\"version\":\"$$app_version\"}"
 	@echo "\n✅ Tauri production bundle built"
 
@@ -624,7 +625,7 @@ test-release-gate:
 	  _tests/desktop/beta-release-notes.bats
 	@echo "✅ Release-gate tests passed"
 
-test-e2e-desktop-build: build-cli build-mcp build-os-cli prepare-pii-ner-model
+test-e2e-desktop-build: build-cli build-mcp build-os-cli prepare-pii-ner-model $(ANGULAR_NPM_INSTALL)
 	@if [ "$$(uname)" = "Darwin" ] && [ ! -s desktop/src-tauri/lima/bin/limactl ]; then "$(MAKE)" download-lima; fi
 	@if [ "$(OS)" = "Windows_NT" ] && [ ! -s desktop/src-tauri/wsl/nerdctl-full.tar.gz ]; then "$(MAKE)" download-wsl-resources; fi
 	@if [ ! -f desktop/src-tauri/nodejs/bin/node ] && [ ! -f desktop/src-tauri/nodejs/node.exe ]; then "$(MAKE)" download-nodejs; fi
@@ -642,7 +643,7 @@ endif
 	@"$(MAKE)" bundle-static-licenses
 	@"$(MAKE)" verify-bundled-assets
 	@echo "── Building release binary with bundle (e2e feature = WebDriver on :4445)..."
-	cd desktop/src-tauri && cargo tauri build --features e2e $(if $(TAURI_SIGNING_PRIVATE_KEY),,--no-sign)
+	cd desktop/src-tauri && $(TAURI) build --features e2e $(if $(TAURI_SIGNING_PRIVATE_KEY),,--no-sign)
 	@echo "── Installing E2E deps..."
 	cd desktop/e2e && $(NPM) install --prefer-offline
 
@@ -954,7 +955,6 @@ clean-wsl-resources:
 
 ifeq ($(OS),Windows_NT)
 dev: guard-not-prod-data-dir guard-dev-port download-nodejs download-wsl-resources generate-installer-nsh prepare-pii-ner-model $(ANGULAR_NPM_INSTALL)
-	@command -v cargo-tauri >/dev/null 2>&1 || { echo "❌ cargo-tauri not found. Install: cargo install tauri-cli"; exit 1; }
 	@"$(MAKE)" build-cli && "$(MAKE)" build-os-cli && "$(MAKE)" build-mcp
 	@echo "Preparing build context..."
 	@bash scripts/bundle-build-context.sh
@@ -966,7 +966,6 @@ dev: guard-not-prod-data-dir guard-dev-port download-nodejs download-wsl-resourc
 	@bash scripts/dev-tauri-windows.sh
 else
 dev: guard-not-prod-data-dir guard-dev-port build-cli build-os-cli build-mcp download-nodejs generate-installer-nsh prepare-pii-ner-model $(ANGULAR_NPM_INSTALL)
-	@command -v cargo-tauri >/dev/null 2>&1 || { echo "❌ cargo-tauri not found. Install: cargo install tauri-cli"; exit 1; }
 	@if [ "$$(uname)" = "Darwin" ]; then "$(MAKE)" download-lima; fi
 	@echo "Preparing build context..."
 	@bash scripts/bundle-build-context.sh
@@ -978,7 +977,7 @@ dev: guard-not-prod-data-dir guard-dev-port build-cli build-os-cli build-mcp dow
 	@"$(MAKE)" verify-bundled-assets
 	app_version="$${SPEEDWAVE_VERSION:-$$(cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- version --repo $(CURDIR) 2>/dev/null || echo 0.0.0)}"; \
 	DEV_TAURI_CONFIG="$$(printf '%s' "$$DEV_TAURI_CONFIG" | sed "s/^{/{\"version\":\"$$app_version\",/")"; \
-	cd desktop/src-tauri && env -u PORT SPEEDWAVE_RESOURCES_DIR="$$(pwd)" SPEEDWAVE_ALLOW_UNSIGNED=1 SPEEDWAVE_VERSION="$$app_version" TAURI_CONFIG="$$DEV_TAURI_CONFIG" cargo tauri dev --config "$$DEV_TAURI_CONFIG"
+	cd desktop/src-tauri && env -u PORT SPEEDWAVE_RESOURCES_DIR="$$(pwd)" SPEEDWAVE_ALLOW_UNSIGNED=1 SPEEDWAVE_VERSION="$$app_version" TAURI_CONFIG="$$DEV_TAURI_CONFIG" $(TAURI) dev --config "$$DEV_TAURI_CONFIG"
 endif
 
 status: guard-not-prod-data-dir $(MCP_NPM_INSTALL) $(ANGULAR_NPM_INSTALL)

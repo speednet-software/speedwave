@@ -10,4 +10,4 @@ app_version="${SPEEDWAVE_VERSION:-$(cd ../.. && cargo run --quiet -p speedwave-v
 export SPEEDWAVE_VERSION="$app_version"
 export TAURI_CONFIG="$(printf '%s' "$base_tauri_config" | sed "s/^{/{\"version\":\"$app_version\",/")"
 
-exec env -u PORT cargo tauri dev --config "$TAURI_CONFIG"
+exec env -u PORT npx --prefix ../src tauri dev --config "$TAURI_CONFIG"
