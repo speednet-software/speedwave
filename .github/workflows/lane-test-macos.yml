@@ -34,7 +34,7 @@ jobs:
       - name: Install wasm toolchain (PII engine)
         run: |
           rustup target add wasm32-unknown-unknown
-          npm install -g wasm-pack
+          scripts/install-wasm-pack.sh
 
       - name: Install prebuilt wasm-bindgen (wasm-pack has none for Apple silicon)
         run: scripts/install-wasm-bindgen.sh

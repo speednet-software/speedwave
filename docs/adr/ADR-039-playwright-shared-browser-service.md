@@ -23,7 +23,7 @@ The original § Decision 2 claimed the server runs with `--allowed-hosts mcp-hub
 
 ## Heartbeat patch as deliberate tech debt
 
-`@playwright/mcp` 0.0.70[^5] enables a Streamable-HTTP heartbeat by default (ping every 3 s (unverified), kill the session after 5 s with no ack)[^6]. The hub uses a plain request-response cycle, so the ping has nowhere to land and the server closes the connection mid-response, truncating output to zero bytes. The build patches the compiled `playwright-core` JavaScript to flip that flag to `false`, with a `grep -q` guard on a later layer that fails the build with a clear FATAL message if a version bump renames the patched call. This is acknowledged tech debt; the long-term fix is an upstream `--no-heartbeat` flag, after which the patch is replaced by the CLI flag and the pin is bumped.
+`@playwright/mcp` 0.0.70[^5] enables a Streamable-HTTP heartbeat by default (ping every 3 s (unverified), kill the session after 5 s with no ack)[^6]. The hub uses a plain request-response cycle, so the ping has nowhere to land and the server closes the connection mid-response, truncating output to zero bytes. The 0.0.70 pin lives in `mcp-servers/playwright/package.json` and `package-lock.json`, and the image installs it with `npm ci --omit=dev` into `/opt/playwright-mcp`. The build patches the compiled `playwright-core` JavaScript in that tree to flip that flag to `false`, with a `grep -q` guard in the same layer that fails the build with a clear FATAL message if a version bump renames the patched call. This is acknowledged tech debt; the long-term fix is an upstream `--no-heartbeat` flag, after which the patch is replaced by the CLI flag and the pin is bumped.
 
 ## Where it lives in code
 
