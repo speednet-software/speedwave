@@ -4,7 +4,7 @@ on:
   pull_request:
   merge_group:
   schedule:
-    - cron: '41 23 * * 1-5'
+    - cron: '41 22 * * 1-5'
   workflow_dispatch:
 
 permissions:
