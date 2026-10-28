@@ -9,7 +9,7 @@
 Speedwave's external integrations are containerized MCP workers behind the hub (token-free Claude → hub:4000 → worker → service API). There are two ways such a worker has been built so far, and the choice has never been written down:
 
 1. **Own thin worker** — a small TypeScript service in `mcp-servers/<svc>/` that imports the service's official client SDK, exposes a curated set of tools via `@speedwave/mcp-shared`'s `createMCPServer`, reads its credential from `/tokens:ro`, and is tested with vitest. This is how `slack`, `sharepoint`, `redmine`, and `gitlab` are built. The SDK does the heavy lifting (auth, pagination, rate-limit handling); the worker is glue: ~40 tool definitions mapping onto `client.<resource>.<method>(...)`.
-2. **Wrap an official upstream MCP server** — ship a thin `package.json` that pins the official package plus a Containerfile that runs it. This is how `playwright` is built: `mcp-servers/playwright/package.json` is 14 lines pinning `@playwright/mcp`, and the Containerfile is ~125 lines (base image, one `npm install -g`, one `sed` patch for an upstream heartbeat incompatibility, and a `CMD` invoking the installed binary). Zero custom MCP logic, zero custom tool definitions.[^1][^2]
+2. **Wrap an official upstream MCP server** — ship a thin `package.json` that pins the official package plus a Containerfile that runs it. This is how `playwright` is built: `mcp-servers/playwright/package.json` is 14 lines pinning `@playwright/mcp` (its `package-lock.json` is committed), and the Containerfile (base image, one `npm ci`, one `sed` patch for an upstream heartbeat incompatibility, and a `CMD` invoking the installed binary) is short. Zero custom MCP logic, zero custom tool definitions.[^1][^2]
 
 The trigger for writing this down is the GitHub integration (issue `SPW-7`). Unlike GitLab/Slack/Redmine — for which no official MCP server exists (only community/archived servers in the `modelcontextprotocol/servers` repository) — GitHub publishes an **official** MCP server: `github/github-mcp-server`. It is MIT-licensed, ships a Docker image (`ghcr.io/github/github-mcp-server`) and a Go binary, runs in local mode over stdio with a Personal Access Token in the `GITHUB_PERSONAL_ACCESS_TOKEN` env var, exposes ~110 tools across ~21 toolsets (issues, PRs, repos, Actions, code/secret scanning, discussions, gists, projects, …), and supports `--read-only` and `--toolsets a,b,c` to narrow the exposed surface. Its Go library API is explicitly marked unstable.[^3][^4]
 
@@ -89,7 +89,7 @@ Same outcome again (ADR-055). Four upstream Office/PDF MCP servers were evaluate
 
 [^1]: `mcp-servers/playwright/package.json` in this repository - 14-line thin wrapper pinning `@playwright/mcp`.
 
-[^2]: `mcp-servers/playwright/Containerfile` in this repository - base image, single `npm install -g`, single `sed` patch, `CMD` invoking the binary. Documented in ADR-039.
+[^2]: `mcp-servers/playwright/Containerfile` in this repository - base image, single `npm ci` from `mcp-servers/playwright/package-lock.json`, single `sed` patch, `CMD` invoking the binary. Documented in ADR-039.
 
 [^3]: GitHub official MCP server - repository, toolsets, `--read-only`/`--toolsets` flags, local (stdio + PAT) vs remote modes, MIT license, "Go library API is unstable" note: <https://github.com/github/github-mcp-server>
 

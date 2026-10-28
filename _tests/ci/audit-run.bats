@@ -6,8 +6,12 @@ SCRIPT="$REPO_ROOT/scripts/audit-run.sh"
 setup() {
   FAKE_BIN="$BATS_TEST_TMPDIR/fakebin"
   mkdir -p "$FAKE_BIN"
+  TOOL_CACHE="$BATS_TEST_TMPDIR/toolcache"
+  export SPEEDWAVE_TOOL_CACHE="$TOOL_CACHE"
+  PIP_AUDIT_STUB="$TOOL_CACHE/pip-audit-$(awk -F= '$1 == "PIP_AUDIT_VERSION" { print $2 }' "$REPO_ROOT/scripts/build-tool-versions.env")/bin/pip-audit"
+  mkdir -p "$(dirname "$PIP_AUDIT_STUB")"
   ROOT="$BATS_TEST_TMPDIR/root"
-  mkdir -p "$ROOT/desktop/src-tauri" "$ROOT/mcp-servers" "$ROOT/desktop/src" "$ROOT/desktop/e2e" "$ROOT/mcp-servers/playwright"
+  mkdir -p "$ROOT/desktop/src-tauri" "$ROOT/mcp-servers" "$ROOT/desktop/src" "$ROOT/desktop/e2e" "$ROOT/mcp-servers/playwright" "$ROOT/mcp-servers/office"
   : >"$ROOT/Cargo.lock"
   : >"$ROOT/desktop/src-tauri/Cargo.lock"
   : >"$ROOT/mcp-servers/package-lock.json"
@@ -15,6 +19,28 @@ setup() {
   : >"$ROOT/package-lock.json"
   : >"$ROOT/desktop/e2e/package-lock.json"
   : >"$ROOT/mcp-servers/playwright/package-lock.json"
+  : >"$ROOT/mcp-servers/office/requirements.txt"
+}
+
+_stub_pip_audit_recording() {
+  PIP_LOG="$BATS_TEST_TMPDIR/pip.log"
+  : >"$PIP_LOG"
+  cat >"$PIP_AUDIT_STUB" <<EOF
+#!/usr/bin/env bash
+echo "\$PWD \$*" >>"$PIP_LOG"
+echo '{"dependencies": [], "fixes": []}'
+exit 1
+EOF
+  chmod +x "$PIP_AUDIT_STUB"
+}
+
+_stub_pip_audit_broken() {
+  cat >"$PIP_AUDIT_STUB" <<'EOF'
+#!/usr/bin/env bash
+echo "pip-audit: could not reach the vulnerability service" >&2
+exit 1
+EOF
+  chmod +x "$PIP_AUDIT_STUB"
 }
 
 _stub_cargo_ok() {
@@ -155,15 +181,37 @@ EOF
   [ "$status" -eq 0 ]
   [ "${lines[0]}" = "cargo-root cargo Cargo.lock" ]
   [[ "$output" =~ "npm-e2e npm desktop/e2e/package-lock.json" ]]
-  [ "${#lines[@]}" -eq 7 ]
+  [[ "$output" =~ "pip-office pip mcp-servers/office/requirements.txt" ]]
+  [ "${#lines[@]}" -eq 8 ]
 }
 
 @test "every listed target runs against its listed lockfile directory" {
   _stub_npm_recording
   _stub_cargo_ok
+  _stub_pip_audit_recording
   while read -r target kind lockfile; do
     PATH="$FAKE_BIN:$PATH" run "$SCRIPT" "$target" "$BATS_TEST_TMPDIR/$target.json" "$ROOT"
     [ "$status" -eq 0 ]
   done < <("$SCRIPT" --list)
   [ "$(cut -d' ' -f1 "$NPM_LOG" | sort)" = "$(printf '%s\n' "$ROOT" "$ROOT/desktop/e2e" "$ROOT/desktop/src" "$ROOT/mcp-servers" "$ROOT/mcp-servers/playwright" | sort)" ]
+}
+
+@test "pip-office: audits the hashed requirements file without installing anything" {
+  _stub_pip_audit_recording
+  out="$BATS_TEST_TMPDIR/out.json"
+  PATH="$FAKE_BIN:$PATH" run "$SCRIPT" pip-office "$out" "$ROOT"
+  [ "$status" -eq 0 ]
+  grep -q '"dependencies"' "$out"
+  [[ "$(cat "$PIP_LOG")" =~ "-r $ROOT/mcp-servers/office/requirements.txt" ]]
+  [[ "$(cat "$PIP_LOG")" =~ "--disable-pip" ]]
+  [[ "$(cat "$PIP_LOG")" =~ "--no-deps" ]]
+  [[ "$(cat "$PIP_LOG")" =~ "--format json" ]]
+}
+
+@test "pip-office: a pip-audit that fails with no stdout fails loudly, named error" {
+  _stub_pip_audit_broken
+  PATH="$FAKE_BIN:$PATH" run "$SCRIPT" pip-office "$BATS_TEST_TMPDIR/out.json" "$ROOT"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "audit-run: pip-audit produced no output" ]]
+  [[ "$output" =~ "could not reach the vulnerability service" ]]
 }

@@ -5,6 +5,7 @@ paths:
 
 # MCP Servers Rules
 
+- After editing `mcp-servers/office/requirements.in`, run `make lock-office` and commit it together with `requirements.txt`; the image installs only the hashed lock. Dependabot (the `uv` ecosystem) regenerates the lock on its own.
 - `mcp-servers/shared/` is the SSOT for MCP protocol utilities: every built-in worker uses it, with one exception, `playwright` wraps Microsoft's `@playwright/mcp` and does not consume mcp-shared.
 - MCP Hub is the ONLY MCP server Claude sees (internal port 4000); workers listen on port 3000 (`consts::PORT_WORKER`). Each worker mounts only its own credentials at `/tokens:ro`; the hub holds no external credentials.
 - **New integration = own thin TypeScript worker by default:** built on `@speedwave/mcp-shared` + the service's official SDK (else thin axios), camelCase unprefixed tool names, `_meta` policy keys where applicable. Wrapping an upstream MCP server is allowed only when ALL four hold: official and owner-maintained, an npm/TS package, generic infrastructure (not a domain API), wrappable in ≤~100 lines. Only `playwright` qualifies today.

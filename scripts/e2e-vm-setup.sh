@@ -242,19 +242,6 @@ $ErrorActionPreference = 'Stop'
 Add-MpPreference -ExclusionPath 'C:\cb','C:\speedwave-e2e',"$env:USERPROFILE\.cargo","$env:USERPROFILE\.rustup"
 SCRIPT
 
-    echo "[windows] Installing tauri-cli..."
-    windows_ps <<'SCRIPT'
-$ErrorActionPreference = 'Stop'
-$env:Path = [System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path','User')
-$env:INCLUDE = [System.Environment]::GetEnvironmentVariable('INCLUDE','Machine')
-$env:LIB = [System.Environment]::GetEnvironmentVariable('LIB','Machine')
-# Use a non-temp directory for cargo builds to avoid AppLocker blocking
-# executables in %TEMP% (Windows Application Control error 4551).
-$env:CARGO_TARGET_DIR = 'C:\cb'
-New-Item -ItemType Directory -Path $env:CARGO_TARGET_DIR -Force | Out-Null
-cargo install tauri-cli --locked
-SCRIPT
-
     echo "[windows] Installing pinned Vulkan SDK (whisper-rs-sys needs VULKAN_SDK — ADR-085)..."
     local vsdk_ps1
     vsdk_ps1="$(dirname "$0")/install-vulkan-sdk.ps1"
@@ -291,7 +278,6 @@ Write-Host "Node: $(node --version)"
 Write-Host "npm:  $(npm --version)"
 Write-Host "Rust: $(rustc --version)"
 Write-Host "Cargo: $(cargo --version)"
-Write-Host "tauri-cli: $(cargo tauri --version 2>&1)"
 Write-Host "cmake: $(cmake --version 2>&1 | Select-Object -First 1)"
 Write-Host "python: $(python --version 2>&1)"
 Write-Host "LIBCLANG_PATH: $([System.Environment]::GetEnvironmentVariable('LIBCLANG_PATH','Machine'))"
@@ -333,15 +319,13 @@ brew link node@${node_major} --overwrite --force 2>/dev/null || true
 command -v cmake >/dev/null 2>&1 || brew install cmake
 SCRIPT
 
-    echo "[macos] Installing Rust and tauri-cli..."
+    echo "[macos] Installing Rust..."
     macos_ssh bash <<'SCRIPT'
 if command -v rustc >/dev/null 2>&1; then
     echo "Rust already installed: $(rustc --version)"
 else
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 fi
-export PATH="$HOME/.cargo/bin:$PATH"
-cargo install tauri-cli --locked
 SCRIPT
 
     echo "[macos] Installing rsync (if missing)..."
@@ -358,7 +342,6 @@ echo "Node: $(node --version)"
 echo "npm:  $(npm --version)"
 echo "Rust: $(rustc --version)"
 echo "Cargo: $(cargo --version)"
-echo "tauri-cli: $(cargo tauri --version 2>/dev/null || echo 'not found')"
 echo "cmake: $(cmake --version 2>/dev/null | head -1 || echo 'not found')"
 echo "Arch: $(uname -m)"
 echo "macOS: $(sw_vers -productVersion)"

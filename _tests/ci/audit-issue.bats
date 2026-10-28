@@ -4,9 +4,9 @@ REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
 
 _init_audit_root() {
   FIXTURE="$BATS_TEST_TMPDIR/repo"
-  mkdir -p "$FIXTURE/scripts" "$FIXTURE/mcp-servers" "$FIXTURE/desktop/src" "$FIXTURE/desktop/src-tauri" "$FIXTURE/desktop/e2e" "$FIXTURE/mcp-servers/playwright"
+  mkdir -p "$FIXTURE/scripts" "$FIXTURE/mcp-servers" "$FIXTURE/desktop/src" "$FIXTURE/desktop/src-tauri" "$FIXTURE/desktop/e2e" "$FIXTURE/mcp-servers/playwright" "$FIXTURE/mcp-servers/office"
   cp "$REPO_ROOT/scripts/audit-issue.sh" "$REPO_ROOT/scripts/audit-run.sh" "$REPO_ROOT/scripts/audit-gate.py" \
-    "$FIXTURE/scripts/"
+    "$REPO_ROOT/scripts/python-tool.sh" "$REPO_ROOT/scripts/build-tool-versions.env" "$FIXTURE/scripts/"
   chmod +x "$FIXTURE"/scripts/*.sh
   echo '{}' >"$FIXTURE/Cargo.lock"
   echo '{}' >"$FIXTURE/desktop/src-tauri/Cargo.lock"
@@ -15,10 +15,15 @@ _init_audit_root() {
   echo '{}' >"$FIXTURE/package-lock.json"
   echo '{}' >"$FIXTURE/desktop/e2e/package-lock.json"
   echo '{}' >"$FIXTURE/mcp-servers/playwright/package-lock.json"
+  echo 'numpy==2.2.2' >"$FIXTURE/mcp-servers/office/requirements.txt"
   echo '[]' >"$FIXTURE/scripts/audit-exceptions.json"
 
   FAKE_BIN="$BATS_TEST_TMPDIR/fakebin"
   mkdir -p "$FAKE_BIN"
+  TOOL_CACHE="$BATS_TEST_TMPDIR/toolcache"
+  export SPEEDWAVE_TOOL_CACHE="$TOOL_CACHE"
+  PIP_AUDIT_STUB="$TOOL_CACHE/pip-audit-$(awk -F= '$1 == "PIP_AUDIT_VERSION" { print $2 }' "$REPO_ROOT/scripts/build-tool-versions.env")/bin/pip-audit"
+  mkdir -p "$(dirname "$PIP_AUDIT_STUB")"
   GH_LOG="$BATS_TEST_TMPDIR/gh.log"
   : >"$GH_LOG"
 }
@@ -32,7 +37,11 @@ EOF
 #!/usr/bin/env bash
 echo '{"vulnerabilities": {"found": false, "count": 0, "list": []}}'
 EOF
-  chmod +x "$FAKE_BIN/npm" "$FAKE_BIN/cargo"
+  cat >"$PIP_AUDIT_STUB" <<'EOF'
+#!/usr/bin/env bash
+echo '{"dependencies": [{"name": "numpy", "version": "2.2.2", "vulns": []}], "fixes": []}'
+EOF
+  chmod +x "$FAKE_BIN/npm" "$FAKE_BIN/cargo" "$PIP_AUDIT_STUB"
 }
 
 _stub_red_tools() {
@@ -44,7 +53,11 @@ EOF
 #!/usr/bin/env bash
 echo '{"vulnerabilities": {"found": true, "count": 1, "list": [{"advisory": {"id": "RUSTSEC-2099-0001", "title": "test advisory", "url": "https://example.test"}}]}}'
 EOF
-  chmod +x "$FAKE_BIN/npm" "$FAKE_BIN/cargo"
+  cat >"$PIP_AUDIT_STUB" <<'EOF'
+#!/usr/bin/env bash
+echo '{"dependencies": [{"name": "numpy", "version": "2.2.2", "vulns": []}], "fixes": []}'
+EOF
+  chmod +x "$FAKE_BIN/npm" "$FAKE_BIN/cargo" "$PIP_AUDIT_STUB"
 }
 
 _stub_gh() {
@@ -143,6 +156,22 @@ case "\$PWD" in
 esac
 EOF
   chmod +x "$FAKE_BIN/npm"
+
+  run bash -c "cd '$FIXTURE' && PATH='$FAKE_BIN:$PATH' GH_REPO='test/test' ./scripts/audit-issue.sh"
+  [ "$status" -eq 0 ]
+  grep -q "issue create" "$GH_LOG"
+}
+
+@test "the scheduled audit reports an advisory found only in the office Python lock" {
+  _init_audit_root
+  _stub_clean_tools
+  _stub_gh '[]'
+  cat >"$PIP_AUDIT_STUB" <<'EOF'
+#!/usr/bin/env bash
+echo '{"dependencies": [{"name": "pypdf", "version": "6.0.0", "vulns": [{"id": "PYSEC-2099-1", "aliases": [], "description": "test advisory"}]}], "fixes": []}'
+exit 1
+EOF
+  chmod +x "$PIP_AUDIT_STUB"
 
   run bash -c "cd '$FIXTURE' && PATH='$FAKE_BIN:$PATH' GH_REPO='test/test' ./scripts/audit-issue.sh"
   [ "$status" -eq 0 ]
