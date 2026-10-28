@@ -1004,6 +1004,62 @@ describe('tool-registry', () => {
       _setEmptyRecheckBaseMsForTesting(10_000);
     });
 
+    it('empty periodic refresh schedules a recheck before the next refresh', async () => {
+      _resetRegistryForTesting();
+
+      const { discoverAndMergeService } = await import('./tool-discovery.js');
+      const mockDiscover = vi.mocked(discoverAndMergeService);
+      const tool: ToolMetadata = { ...mockTool, name: 'listItems', service: 'redmine' };
+      const updatedTool: ToolMetadata = { ...mockTool, name: 'correctItem', service: 'redmine' };
+      mockDiscover
+        .mockReset()
+        .mockResolvedValueOnce({ listItems: tool })
+        .mockResolvedValueOnce({})
+        .mockResolvedValue({ listItems: tool, correctItem: updatedTool });
+
+      process.env.ENABLED_SERVICES = 'redmine';
+      vi.useFakeTimers();
+      try {
+        await initializeRegistry();
+        expect(Object.keys(TOOL_REGISTRY['redmine'])).toEqual(['listItems']);
+
+        await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+        expect(Object.keys(TOOL_REGISTRY['redmine'])).toEqual([]);
+
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(Object.keys(TOOL_REGISTRY['redmine']).sort()).toEqual(['correctItem', 'listItems']);
+        expect(mockDiscover).toHaveBeenCalledTimes(3);
+      } finally {
+        stopBackgroundRefresh();
+        vi.useRealTimers();
+        mockDiscover.mockReset().mockResolvedValue({});
+      }
+    });
+
+    it('non-empty periodic refresh schedules no recheck', async () => {
+      _resetRegistryForTesting();
+
+      const { discoverAndMergeService } = await import('./tool-discovery.js');
+      const mockDiscover = vi.mocked(discoverAndMergeService);
+      const tool: ToolMetadata = { ...mockTool, name: 'listItems', service: 'redmine' };
+      mockDiscover.mockReset().mockResolvedValue({ listItems: tool });
+
+      process.env.ENABLED_SERVICES = 'redmine';
+      vi.useFakeTimers();
+      try {
+        await initializeRegistry();
+        await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+        expect(mockDiscover).toHaveBeenCalledTimes(2);
+
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(mockDiscover).toHaveBeenCalledTimes(2);
+      } finally {
+        stopBackgroundRefresh();
+        vi.useRealTimers();
+        mockDiscover.mockReset().mockResolvedValue({});
+      }
+    });
+
     it('all services non-empty at init → no rechecks are scheduled', async () => {
       _resetRegistryForTesting();
 

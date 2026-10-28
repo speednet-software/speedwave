@@ -3,7 +3,7 @@
 
 use super::{
     add_claude_env_var, add_claude_volume, add_service_env_var, ensure_host_gateway_extra_host,
-    ensure_resources_dir_safe, inject_worker_env, HostBridgesInfo,
+    ensure_resources_dir_safe, inject_env_into, inject_worker_env, HostBridgesInfo,
 };
 use crate::config::ResolvedIntegrationsConfig;
 use crate::consts;
@@ -142,7 +142,9 @@ pub(crate) fn apply_plugins_from_verified(
             .map(|s| s.split(':').next().unwrap_or(s))
             .collect();
         add_claude_env_var(&mut doc, "SPEEDWAVE_PLUGINS", &slugs.join(","));
-        add_claude_env_var(&mut doc, "SPW_PLUGIN_DIGESTS", &plugin_slugs.join(","));
+        let digests = plugin_slugs.join(",");
+        add_claude_env_var(&mut doc, "SPW_PLUGIN_DIGESTS", &digests);
+        inject_env_into(&mut doc, "mcp-hub", "SPW_PLUGIN_DIGESTS", &digests);
     }
 
     Ok(serde_yaml_ng::to_string(&doc)?)
