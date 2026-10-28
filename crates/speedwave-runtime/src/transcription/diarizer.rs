@@ -164,8 +164,8 @@ struct SegmentList(NonNull<ffi::Segments>);
 unsafe impl Send for NemotronDiarizer {}
 
 impl NemotronDiarizer {
-    /// Loads the GGUF model at `model_path`, on the GPU unless `class` is `GpuClass::None`,
-    /// with `decode_threads()` CPU threads.
+    /// Loads the GGUF model at `model_path` with `decode_threads()` CPU threads, on the GPU only
+    /// when `class` is `GpuClass::Discrete`.
     pub fn load(model_path: &Path, class: GpuClass) -> Result<Self, DiarizeError> {
         Self::load_with_threads(model_path, class, decode_threads())
     }
@@ -201,11 +201,7 @@ impl NemotronDiarizer {
                 detail: "model path is not valid UTF-8 or contains NUL".to_string(),
             })?;
         install_log_forwarding();
-
-        // SAFETY: takes no arguments and returns a plain struct by value.
-        let mut params = unsafe { ffi::whisper_diar_default_context_params() };
-        params.n_threads = n_threads;
-        params.use_gpu = class != GpuClass::None;
+        let params = context_params(class, n_threads);
 
         // SAFETY: `path` is a NUL-terminated string alive for the call, which copies it; the
         // function returns null on every failure and catches every C++ exception.
@@ -410,6 +406,18 @@ fn log_level(level: c_int) -> log::Level {
         GGML_LOG_LEVEL_INFO => log::Level::Info,
         _ => log::Level::Debug,
     }
+}
+
+#[expect(
+    unsafe_code,
+    reason = "whisper diarization FFI boundary; every block has a SAFETY comment"
+)]
+fn context_params(class: GpuClass, n_threads: c_int) -> ffi::ContextParams {
+    // SAFETY: takes no arguments and returns a plain struct by value.
+    let mut params = unsafe { ffi::whisper_diar_default_context_params() };
+    params.n_threads = n_threads;
+    params.use_gpu = class == GpuClass::Discrete;
+    params
 }
 
 fn validate_pcm(pcm: &[f32]) -> Result<(), DiarizeError> {
@@ -647,6 +655,14 @@ mod tests {
         assert_eq!(log_level(1), log::Level::Debug);
         assert_eq!(log_level(0), log::Level::Debug);
         assert_eq!(log_level(5), log::Level::Debug);
+    }
+
+    #[test]
+    fn only_a_discrete_gpu_diarizes_on_the_gpu() {
+        assert!(!context_params(GpuClass::None, 4).use_gpu);
+        assert!(!context_params(GpuClass::Integrated, 4).use_gpu);
+        assert!(context_params(GpuClass::Discrete, 4).use_gpu);
+        assert_eq!(context_params(GpuClass::Integrated, 6).n_threads, 6);
     }
 
     #[test]

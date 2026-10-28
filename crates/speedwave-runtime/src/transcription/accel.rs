@@ -33,7 +33,8 @@ fn compiled_gpu_backend() -> Option<&'static str> {
 pub enum GpuClass {
     /// No usable GPU (or only a software rasterizer) — CPU tiers, whisper `use_gpu` off.
     None,
-    /// An integrated/virtual GPU: worth using for compute, not fast enough for GPU-tier models.
+    /// An integrated/virtual GPU: Whisper uses it, diarization does not; not fast enough for
+    /// GPU-tier models.
     Integrated,
     /// A discrete GPU (or Apple Metal): GPU-tier models for both passes.
     Discrete,

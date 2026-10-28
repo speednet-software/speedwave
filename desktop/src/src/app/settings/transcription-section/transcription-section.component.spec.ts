@@ -666,11 +666,20 @@ describe('TranscriptionSectionComponent', () => {
       }
     });
 
-    it('gives no number on Windows and warns only without graphics acceleration', async () => {
+    it('gives the measured cost on Windows with only an integrated GPU', async () => {
+      platform = 'windows';
+      svc.recommendedModel.mockResolvedValue(withDiarization({}, 'integrated'));
+      await component.ngOnInit();
+      fixture.detectChanges();
+      const hw = q('speaker-hardware');
+      expect(hw?.textContent?.trim()).toBe('Adds about 3 minutes per hour of recording.');
+      expect(hw?.className.includes('text-amber-300')).toBe(false);
+    });
+
+    it('gives no number on unmeasured Windows hardware and warns only without acceleration', async () => {
       platform = 'windows';
       const cases: [RecommendedModelAck['gpu_class'], string, boolean][] = [
         ['discrete', 'Adds some time after each recording.', false],
-        ['integrated', 'Adds some time after each recording.', false],
         ['none', 'No graphics acceleration here', true],
       ];
       for (const [gpu, text, warn] of cases) {

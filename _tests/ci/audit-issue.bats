@@ -103,7 +103,7 @@ EOF
 @test "a red audit with one existing open issue updates it instead of creating a second one" {
   _init_audit_root
   _stub_red_tools
-  _stub_gh '[{"number": 42, "title": "audit-schedule: known vulnerabilities on dev", "state": "open"}]'
+  _stub_gh '[{"number": 42, "title": "audit-schedule: known vulnerabilities on dev", "state": "OPEN"}]'
 
   run bash -c "cd '$FIXTURE' && PATH='$FAKE_BIN:$PATH' GH_REPO='test/test' ./scripts/audit-issue.sh"
   [ "$status" -eq 0 ]
@@ -115,7 +115,7 @@ EOF
 @test "a red audit with duplicate open issues updates the oldest and closes the rest" {
   _init_audit_root
   _stub_red_tools
-  _stub_gh '[{"number": 55, "title": "audit-schedule: known vulnerabilities on dev", "state": "open"}, {"number": 10, "title": "audit-schedule: known vulnerabilities on dev", "state": "open"}]'
+  _stub_gh '[{"number": 55, "title": "audit-schedule: known vulnerabilities on dev", "state": "OPEN"}, {"number": 10, "title": "audit-schedule: known vulnerabilities on dev", "state": "OPEN"}]'
 
   run bash -c "cd '$FIXTURE' && PATH='$FAKE_BIN:$PATH' GH_REPO='test/test' ./scripts/audit-issue.sh"
   [ "$status" -eq 0 ]
