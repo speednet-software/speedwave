@@ -3,6 +3,8 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { signal } from '@angular/core';
 import { ChatHeaderComponent } from './chat-header.component';
 import { BetaService } from '../../services/beta.service';
+import { TauriService } from '../../services/tauri.service';
+import { MockTauriService } from '../../testing/mock-tauri.service';
 
 describe('ChatHeaderComponent', () => {
   let fixture: ComponentFixture<ChatHeaderComponent>;
@@ -12,7 +14,10 @@ describe('ChatHeaderComponent', () => {
     betaEnabled = signal(false);
     await TestBed.configureTestingModule({
       imports: [ChatHeaderComponent],
-      providers: [{ provide: BetaService, useValue: { enabled: betaEnabled.asReadonly() } }],
+      providers: [
+        { provide: BetaService, useValue: { enabled: betaEnabled.asReadonly() } },
+        { provide: TauriService, useValue: new MockTauriService() },
+      ],
     }).compileComponents();
 
     fixture = TestBed.createComponent(ChatHeaderComponent);
@@ -190,6 +195,33 @@ describe('ChatHeaderComponent', () => {
       betaEnabled.set(true);
       fixture.detectChanges();
       expect(fixture.nativeElement.querySelector('[data-testid="chat-header-title"]')).toBeNull();
+    });
+  });
+
+  describe('terminal button', () => {
+    const TERMINAL = '[data-testid="chat-header-terminal"]';
+
+    it('is hidden when beta is disabled', () => {
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector(TERMINAL)).toBeNull();
+    });
+
+    it('is hidden in compact mode even when beta is enabled', () => {
+      betaEnabled.set(true);
+      fixture.componentRef.setInput('compact', true);
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector(TERMINAL)).toBeNull();
+    });
+
+    it('is shown right after the memory button and before the tab strip when beta is enabled', () => {
+      betaEnabled.set(true);
+      fixture.detectChanges();
+      const host = fixture.nativeElement.querySelector('app-chat-header-terminal') as HTMLElement;
+      expect(host.querySelector(TERMINAL)).not.toBeNull();
+      expect(host.previousElementSibling).toBe(
+        fixture.nativeElement.querySelector('[data-testid="chat-header-memory"]')
+      );
+      expect(host.nextElementSibling).toBe(fixture.nativeElement.querySelector('app-chat-tabs'));
     });
   });
 });

@@ -9,6 +9,7 @@ const ICON_NAMES: readonly IconName[] = [
   'plus',
   'x',
   'brain',
+  'terminal',
   'book',
   'chevron-right',
   'chevron-down',

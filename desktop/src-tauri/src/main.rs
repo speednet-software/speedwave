@@ -50,6 +50,7 @@ mod pin_cmd;
 mod plugin_cmd;
 mod plugin_oauth_cmd;
 mod project_cmd;
+mod project_terminal_cmd;
 mod queue_cmd;
 mod reconcile;
 mod redmine_api_cmd;
@@ -1202,6 +1203,8 @@ fn main() {
             auth_commands::get_auth_status,
             auth_commands::anthropic_logout,
             oauth_login_cmd::start_oauth_login,
+            project_terminal_cmd::open_project_terminal,
+            project_terminal_cmd::copy_project_terminal_command,
             url_validation::open_url,
             url_validation::get_platform,
             auth_commands::get_auth_command,

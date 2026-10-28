@@ -10,6 +10,7 @@ export type IconName =
   | 'plus'
   | 'x'
   | 'brain'
+  | 'terminal'
   | 'book'
   | 'chevron-right'
   | 'chevron-down'
@@ -63,6 +64,10 @@ export type IconName =
         }
         @case ('x') {
           <path d="M6 18L18 6M6 6l12 12" />
+        }
+        @case ('terminal') {
+          <rect x="3" y="4" width="18" height="16" rx="3" />
+          <path d="M7.5 9.5l2.5 2.5-2.5 2.5M12.5 14.5h4" />
         }
         @case ('book') {
           <path

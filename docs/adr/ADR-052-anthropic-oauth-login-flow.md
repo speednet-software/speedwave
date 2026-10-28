@@ -187,6 +187,18 @@ Implementation: `containers/osc52-copy.sh`, `containers/Containerfile.claude`
 - `desktop/src-tauri/src/auth_commands.rs` (`get_auth_status`, `build_auth_command_for_platform`, `resolve_project_dirs`) — Desktop integration
 - `desktop/src/src/app/settings/auth-terminal.component.ts` — primary "Open terminal" button + secondary copy fallback
 
+## Amendment (2026-10-28, macOS terminal launch through `.command` files)
+
+On macOS, the login terminal and the chat-header project terminal (which runs `speedwave --project <project>`) no longer open through `osascript` Apple Events to iTerm2 or Terminal.app. `oauth_login_cmd.rs` writes the command to `<data_dir>/terminal/<login|run>-<project>.command`, in an owner-only directory, with file mode 0o700, and opens it with `open`. `open` without an application name uses the default application that LaunchServices assigns to the file[^11], so the user's `.command` handler runs the command. No Automation (TCC Apple Events) consent is involved.
+
+The reason is attribution. Under `make dev`, TCC charges Apple Events to the process that launched `make dev`, not to `pl.speedwave.desktop` (`.claude/rules/native-macos.md`, TCC and entitlements). The `osascript` launch then exited with status 1 and its stderr was discarded, so the user saw no terminal and no reason. The `open` call now runs with a bounded timeout, and its stderr is returned in the error.
+
+After the CLI exits, the script runs `exec ${SHELL:-/bin/zsh} -l`, so the window stays open in the project directory.
+
+Windows is unchanged: the terminal runs `wt.exe new-tab <pwsh|powershell> -NoExit -EncodedCommand <base64>`, and when `wt.exe` cannot start, PowerShell starts directly with the same arguments.
+
+This amendment corrects two statements above. The Windows sentence in Surface (`cmd.exe /c start powershell.exe -NoExit -Command`) does not describe the current launch. The macOS sentence in Surface and the iTerm2 preference paragraph of the clipboard addendum describe the `osascript` path this amendment removes. The OSC 52 reasoning still holds: the clipboard write reaches the host only when the terminal behind the user's `.command` handler honors OSC 52. Speedwave no longer picks that terminal.
+
 ## References
 
 [^1]: Anthropic Claude Code authentication docs - token validity period and `setup-token` behavior. <https://code.claude.com/docs/en/authentication>
@@ -208,3 +220,5 @@ Implementation: `containers/osc52-copy.sh`, `containers/Containerfile.claude`
 [^9]: Claude Code docs, "Environment variables" - `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` disables auto-updates, telemetry, error reporting, feedback, release notes, badge and availability checks and feature-flag fetching; the OAuth refresh is not in that list. <https://code.claude.com/docs/en/env-vars>
 
 [^10]: Claude Code docs, "CLI reference" - `claude auth status` prints the authentication status as JSON and exits with code 0 if logged in, 1 if not. <https://code.claude.com/docs/en/cli-reference>
+
+[^11]: ss64.com, "OPEN Command" (mirrors the macOS `open` man page) - "If no application name is specified, the default application as determined via LaunchServices is used to open the specified files." <https://ss64.com/mac/open.html>

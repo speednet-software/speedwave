@@ -4,6 +4,7 @@ import { IconComponent } from '../../shared/icon.component';
 import { TooltipDirective } from '../../shared/tooltip.directive';
 import { BetaService } from '../../services/beta.service';
 import { ChatTabsComponent } from '../chat-tabs/chat-tabs.component';
+import { ChatHeaderTerminalComponent } from './chat-header-terminal.component';
 
 /**
  * Chat header strip: conversation controls, the title or the beta-gated tab strip, and the project pill.
@@ -11,7 +12,13 @@ import { ChatTabsComponent } from '../chat-tabs/chat-tabs.component';
  */
 @Component({
   selector: 'app-chat-header',
-  imports: [ProjectPillComponent, IconComponent, TooltipDirective, ChatTabsComponent],
+  imports: [
+    ProjectPillComponent,
+    IconComponent,
+    TooltipDirective,
+    ChatTabsComponent,
+    ChatHeaderTerminalComponent,
+  ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block flex-shrink-0' },
   template: `
@@ -44,6 +51,10 @@ import { ChatTabsComponent } from '../chat-tabs/chat-tabs.component';
         >
           <app-icon name="brain" class="h-4 w-4" />
         </button>
+
+        @if (beta.enabled()) {
+          <app-chat-header-terminal />
+        }
 
         @if (!beta.enabled()) {
           <button
