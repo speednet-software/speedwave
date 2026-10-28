@@ -104,7 +104,17 @@ The integrated GPU was 37% slower at 30 minutes and 31% slower at 2 hours, and i
 
 **Consequences.**
 
-- Every measurement above ran on uncompressed audio: the meeting channel of Speedwave recordings and AMI Mix-Headset. An import can be compressed: the formats it accepts include M4A, MP4 and MP3 (`transcription/import.rs::IMPORT_EXTENSIONS`). The accuracy on compressed audio, against the bar of decision 7, is recorded here once measured.
+- Every measurement above ran on uncompressed audio: the meeting channel of Speedwave recordings and AMI Mix-Headset. An import can be compressed: the formats it accepts include M4A, MP4 and MP3 (`transcription/import.rs::IMPORT_EXTENSIONS`). Eight AMI meetings[^4][^5], 15 minutes each, went through the import and diarization path of the app in four versions, scored automatically against the AMI reference per Whisper segment, the unit the user sees:
+
+  | version                       | segment agreement | difference to WAV (95% CI) | speaker count within ±1 | worst meeting |
+  | ----------------------------- | ----------------- | -------------------------- | ----------------------- | ------------- |
+  | WAV                           | 90.2%             |                            | 8/8                     | 83.6%         |
+  | AAC-LC, 16 kHz, 48 kb/s       | 90.3%             | +0.0 pp (−1.2 to +1.1)     | 8/8                     | 83.8%         |
+  | AAC-LC, 32 kHz, 52 kb/s       | 89.5%             | −0.8 pp (−1.5 to −0.1)     | 8/8                     | 82.1%         |
+  | AAC-LC, 24 kb/s (stress test) | 90.5%             | +0.3 pp (−1.5 to +2.4)     | 8/8                     | 84.3%         |
+
+  Every meeting in every version is above the 80% of decision 7. The speaker count was exact in 30 of the 32 runs and one too high in the other two. The 16 kHz version stands for a Teams recording and the 32 kHz one for a Zoom recording; the encoder used allows at most 48 kb/s at 16 kHz. The 32 kHz version is the only one whose interval excludes zero, and its −0.8 pp is smaller than the spread between meetings. These figures do not compare with the 82.83% of round 3, which scored the reference utterances rather than Whisper segments. The encoding reproduces the codec only, not any other processing a meeting app applies before it saves a recording. Two real meetings recorded by the author and diarized as mono, one of them with echo of the remote speakers, gave one sentence assigned to the wrong speaker and none.
+
 - An import, like a recording, has no length limit, and the limits under Known limitations apply to it: memory grows with its length, and labels on a meeting longer than 45 minutes were not measured (2026-10-27 amendment). Nothing caps or warns about the length of an import.
 - An app version older than this amendment shows the lines of a diarized mono part without labels, while its Markdown export still lists the speakers in the header and attaching it to a chat still adds the note on `Speaker N` labels (`transcription.service.ts::SPEAKER_LABELS_PROMPT`), since both follow `models_used.diarization`.
 - A recording transcribed before this change gets labels on its mono parts on "Transcribe again" with the switch on.
