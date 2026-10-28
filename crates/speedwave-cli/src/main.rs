@@ -402,6 +402,41 @@ fn build_login_exec_cmd(base_url: &str, unset_keys: &[&str]) -> Vec<String> {
     vec!["sh".to_string(), "-lc".to_string(), script]
 }
 
+#[cfg(windows)]
+const LOGIN_PASTE_STEP: &[&str] = &[
+    "2. Paste it at the \"Paste code here\" prompt with Ctrl+Shift+V",
+    "   or a right-click, then press Enter. Plain Ctrl+V may not paste there.",
+];
+
+#[cfg(not(windows))]
+const LOGIN_PASTE_STEP: &[&str] =
+    &["2. Paste it at the \"Paste code here\" prompt with Cmd+V, then press Enter."];
+
+fn login_instructions() -> String {
+    let mut lines = vec![
+        "Anthropic sign-in".to_string(),
+        String::new(),
+        "1. Open the link printed below, sign in and copy the code it shows.".to_string(),
+    ];
+    lines.extend(LOGIN_PASTE_STEP.iter().map(|line| line.to_string()));
+    lines.push("3. Close this terminal when sign-in is done.".to_string());
+    framed(&lines)
+}
+
+fn framed(lines: &[String]) -> String {
+    let width = lines
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0);
+    let rule = "─".repeat(width + 2);
+    let body: String = lines
+        .iter()
+        .map(|line| format!("│ {line:<width$} │\n"))
+        .collect();
+    format!("┌{rule}┐\n{body}└{rule}┘")
+}
+
 fn select_anthropic_in(
     user_config: &mut config::SpeedwaveUserConfig,
     project: &str,
@@ -1028,7 +1063,7 @@ fn main() -> anyhow::Result<()> {
     let _paste_watcher = paste_watcher::PasteWatcher::spawn(project_dir.clone());
 
     if let CliAction::Login(_) = action {
-        err!("Starting Anthropic sign-in. Follow the prompt, then close the terminal when done.");
+        err!("{}", login_instructions());
         let instance_id = speedwave_runtime::session::new_instance_id();
         let cmd = stamped_exec_argv(
             &instance_id,
@@ -1743,6 +1778,35 @@ mod tests {
         );
         assert_eq!(argv[2], "/usr/local/bin/claude");
         assert_eq!(argv[3], "--flag");
+    }
+
+    #[test]
+    fn framed_pads_every_line_to_the_widest_one() {
+        let boxed = framed(&["ab".to_string(), "abcd".to_string(), String::new()]);
+        let rows: Vec<&str> = boxed.lines().collect();
+        assert_eq!(
+            rows,
+            ["┌──────┐", "│ ab   │", "│ abcd │", "│      │", "└──────┘"]
+        );
+    }
+
+    #[test]
+    fn framed_counts_characters_not_bytes() {
+        let boxed = framed(&["zażółć".to_string(), "abcdef".to_string()]);
+        let widths: Vec<usize> = boxed.lines().map(|row| row.chars().count()).collect();
+        assert!(widths.iter().all(|w| *w == widths[0]), "{boxed}");
+    }
+
+    #[test]
+    fn framed_without_lines_is_an_empty_box() {
+        assert_eq!(framed(&[]), "┌──┐\n└──┘");
+    }
+
+    #[test]
+    fn login_instructions_fit_an_80_column_terminal() {
+        let boxed = login_instructions();
+        let widest = boxed.lines().map(|row| row.chars().count()).max();
+        assert!(widest.is_some_and(|w| w <= 80), "{boxed}");
     }
 
     #[test]
