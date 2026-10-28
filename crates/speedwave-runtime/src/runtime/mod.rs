@@ -849,10 +849,10 @@ pub fn ensure_exec_healthy(
     project: &str,
     container: &str,
 ) -> anyhow::Result<()> {
-    log::info!("probing container '{container}'");
+    log::debug!("probing container '{container}'");
     match probe_container_exec(runtime, container) {
         Ok(()) => {
-            log::info!("container '{container}' is healthy");
+            log::debug!("container '{container}' is healthy");
             return Ok(());
         }
         Err(e) => {
