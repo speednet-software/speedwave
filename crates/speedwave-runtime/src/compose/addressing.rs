@@ -311,10 +311,10 @@ mod host_addressing_impls {
     ))]
     fn addressing_from(gateway: &str, can_bind: impl Fn(&str) -> bool) -> HostAddressing {
         if can_bind(gateway) {
-            log::info!("WSL2 addressing: NAT — gateway {gateway} is host-bindable");
+            log::debug!("WSL2 addressing: NAT — gateway {gateway} is host-bindable");
             HostAddressing::direct(gateway, gateway)
         } else {
-            log::info!(
+            log::debug!(
                 "WSL2 addressing: mirrored — gateway {gateway} not host-bindable; relaying via {}",
                 crate::consts::MIRROR_RELAY_GATEWAY_IP
             );
