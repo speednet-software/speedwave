@@ -183,7 +183,7 @@ pub async fn start_oauth_login(project: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         log::info!("starting OAuth login terminal for project {project}");
 
-        let (project_dir, home, data_dir, default_data_dir) = resolve_project_dirs(&project)?;
+        let (project_dir, home, data_dir) = resolve_project_dirs(&project)?;
         ensure_cli_installed()?;
 
         let cmd = build_auth_command_for_platform(
@@ -191,7 +191,6 @@ pub async fn start_oauth_login(project: String) -> Result<(), String> {
             &project_dir,
             &home,
             &data_dir,
-            default_data_dir.as_deref(),
             cfg!(target_os = "windows"),
         );
         open_terminal_with_command(CliInvocation::Login, &project, &data_dir, &cmd).map_err(|e| {
@@ -299,7 +298,6 @@ mod tests {
             project_dir,
             Path::new("/home/u"),
             Path::new("/home/u/.speedwave"),
-            Some(Path::new("/home/u/.speedwave")),
             false,
         )
     }

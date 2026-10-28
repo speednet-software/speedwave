@@ -51,7 +51,7 @@ pub async fn copy_project_terminal_command(
 }
 
 fn resolve_run_command(project: &str) -> Result<String, String> {
-    let (project_dir, home, data_dir, default_data_dir) = resolve_project_dirs(project)?;
+    let (project_dir, home, data_dir) = resolve_project_dirs(project)?;
     ensure_cli_installed()?;
     Ok(build_project_cli_command_for_platform(
         CliInvocation::Run,
@@ -59,7 +59,6 @@ fn resolve_run_command(project: &str) -> Result<String, String> {
         &project_dir,
         &home,
         &data_dir,
-        default_data_dir.as_deref(),
         cfg!(target_os = "windows"),
     ))
 }
