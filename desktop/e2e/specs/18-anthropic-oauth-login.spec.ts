@@ -60,6 +60,7 @@ describe('Anthropic OAuth Login (no-provider first start)', function () {
 
     const child = spawn(cliPath(), ['login', '--project', NO_LLM_PROJECT], {
       stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, RUST_LOG: 'debug' },
     });
     let output = '';
     child.stdout.on('data', (c: Buffer) => (output += c.toString()));
