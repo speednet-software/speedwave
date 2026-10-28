@@ -117,7 +117,7 @@ fn spawn_apple_terminal(cmd: &str) -> anyhow::Result<()> {
 /// Spawns the OS-native terminal running `cmd` (macOS: iTerm2 if installed, else Apple
 /// Terminal, both via `osascript`). Returns once **launched**; does not wait for `cmd`.
 #[cfg(target_os = "macos")]
-fn open_terminal_with_command(cmd: &str) -> anyhow::Result<()> {
+pub(crate) fn open_terminal_with_command(cmd: &str) -> anyhow::Result<()> {
     if iterm2_installed() {
         match spawn_iterm2(cmd) {
             Ok(()) => return Ok(()),
@@ -195,7 +195,7 @@ fn build_powershell_argv(cmd: &str) -> [String; 3] {
 /// Spawns a new terminal window running `cmd` (PowerShell syntax). Prefers `pwsh.exe` then
 /// `powershell.exe`, Windows Terminal then direct spawn. `-NoExit` keeps the window open.
 #[cfg(target_os = "windows")]
-fn open_terminal_with_command(cmd: &str) -> anyhow::Result<()> {
+pub(crate) fn open_terminal_with_command(cmd: &str) -> anyhow::Result<()> {
     let ps = if crate::path_util::which_in_path("pwsh.exe").is_some() {
         "pwsh.exe"
     } else {
