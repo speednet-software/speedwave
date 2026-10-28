@@ -84,7 +84,7 @@ function bySegmentStart(a: Segment, b: Segment): number {
 /** A timestamped transcript line, for rendering. */
 interface TranscriptLine {
   startLabel: string;
-  /** Channel label ('You' / 'Meeting', 'Meeting · Speaker N' when diarized), else null. */
+  /** 'You' / 'Meeting', 'Meeting · Speaker N' or, untagged, 'Speaker N' when diarized; else null. */
   speaker: string | null;
   speakerColor: string | null;
   text: string;
@@ -92,15 +92,20 @@ interface TranscriptLine {
 
 const SPEAKER_COLORS = ['var(--teal)', 'var(--violet)', 'var(--amber)', 'var(--green)'];
 
+const MICROPHONE_ONLY_NO_LABELS =
+  'Speaker labels are not available for a microphone-only recording.';
+
 function speakerOf(seg: Segment): Pick<TranscriptLine, 'speaker' | 'speakerColor'> {
   if (seg.source === 'mic') return { speaker: 'You', speakerColor: null };
-  if (seg.source !== 'system') return { speaker: null, speakerColor: null };
   const n = seg.speaker_id;
-  if (n == null || n < 1) return { speaker: 'Meeting', speakerColor: null };
-  return {
-    speaker: `Meeting · Speaker ${n}`,
-    speakerColor: SPEAKER_COLORS[n - 1] ?? null,
-  };
+  const labelled = n != null && n >= 1;
+  const speakerColor = labelled ? (SPEAKER_COLORS[n - 1] ?? null) : null;
+  if (seg.source === 'system') {
+    if (!labelled) return { speaker: 'Meeting', speakerColor: null };
+    return { speaker: `Meeting · Speaker ${n}`, speakerColor };
+  }
+  if (!labelled) return { speaker: null, speakerColor: null };
+  return { speaker: `Speaker ${n}`, speakerColor };
 }
 
 /** The quality line under the title: its words and colour. */
@@ -572,6 +577,9 @@ export class LiveTranscriptComponent {
   private readonly injector = inject(Injector);
   private readonly clipboard = inject(Clipboard);
 
+  /** The Settings switch "Tell speakers apart in the meeting audio", read when the pane opens. */
+  private readonly speakerAttribution = this.transcription.speakerAttribution();
+
   /** Effective segments: `final_segments` if the offline pass ran, else live. */
   private readonly segments = computed<Segment[]>(() => {
     const s = this.session();
@@ -667,14 +675,22 @@ export class LiveTranscriptComponent {
       case 'done':
       case 'postponed':
         if (this.smallerModel()) return { text: 'Made with a smaller model', cls: amber };
-        return this.status() === 'postponed'
-          ? { text: STATE_LABEL.postponed, cls: 'text-[var(--ink-dim)]' }
+        if (this.status() === 'postponed') {
+          return { text: STATE_LABEL.postponed, cls: 'text-[var(--ink-dim)]' };
+        }
+        return this.microphoneOnlyWithoutLabels()
+          ? { text: MICROPHONE_ONLY_NO_LABELS, cls: 'text-[var(--ink-dim)]' }
           : null;
       case 'failed':
         return { text: STATE_LABEL.failed, cls: 'text-[var(--red)]' };
       default:
         return null;
     }
+  });
+
+  /** Speaker labels were asked for, but a recording of the microphone alone is never diarized. */
+  private readonly microphoneOnlyWithoutLabels = computed(() => {
+    return this.speakerAttribution && this.session()?.audio_source.source.kind === 'microphone';
   });
 
   /**

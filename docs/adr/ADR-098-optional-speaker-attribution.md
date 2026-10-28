@@ -83,6 +83,33 @@ The integrated GPU was 37% slower at 30 minutes and 31% slower at 2 hours, and i
 - The 2-hour file measures time and memory, not labels on a long meeting. From about the 60th minute the model dropped most of the speech in some 15-minute blocks, on every device, in different blocks per device, while the first 45 minutes gave nearly the same turns on every device. The likely cause, not verified, is that eight separate meetings hold more distinct voices than the eight speakers the model tracks. Labels on a real 2-hour meeting of at most eight people were not measured.
 - A laptop with both an integrated and a discrete GPU reports `Discrete`, and the vendored code takes the first device of type GPU or integrated GPU in ggml's order (`gpu_device` 0, `native/whisper-diarization/whisper-diarization.cpp`). Whether that is the discrete one on such a laptop was not checked.
 
+## Amendment (2026-10-28): mono recordings of the meeting audio are diarized
+
+**Context.** Decision 3 diarized only the `System` channel of a paired capture: a mono recording was never diarized. Two kinds of mono recording hold nothing but meeting audio. An imported file (ADR-056 Amendment 22) is averaged into one channel by `transcription/import.rs`, so a meeting recorded in another app has every participant on that channel. A recording of "Other people only" (`AudioSource::SystemWide`) is mono because it has no microphone channel. With the Settings switch on, neither got labels and nothing told the user why (SPEED-898).
+
+**Decision.**
+
+- The meeting lane of the offline pass follows the session's audio source, which `spawn_offline_pass` reads from the session and hands over as `FinalizeConfig.source` (`transcription/transcript_driver.rs::meeting_lane`):
+
+  | session source | parts                        | meeting lane                       | label after diarization |
+  | -------------- | ---------------------------- | ---------------------------------- | ----------------------- |
+  | `Mixed`        | stereo (0 `System`, 1 `Mic`) | channel 0 of the two-channel parts | `Meeting · Speaker N`   |
+  | `SystemWide`   | mono                         | the one channel of the mono parts  | `Speaker N`             |
+  | `ImportedFile` | mono                         | the one channel of the mono parts  | `Speaker N`             |
+  | `Microphone`   | mono                         | none: the model is not loaded      | none                    |
+
+- `label_speakers` stamps the segments whose tag equals the lane's tag: `System` on a paired capture, no tag on a mono one. The segments of a mono recording keep `source: null` in `transcript.json`; `TranscriptSource`, its TypeScript mirror, `lane_sources` and the live pass do not change. A diarized segment without a tag is labelled `Speaker N`, without the `Meeting ·` prefix, in the Markdown export (`transcription/transcript.rs::to_markdown`) and in the pane (`live-transcript.component.ts::speakerOf`); the note in the Markdown header says that a 'Meeting' line without a number, or a line without any label, has no recognised speaker.
+- `import_transcription` takes the Settings switch as `speaker_mode`, like `stop_transcription` and `transcribe_transcript`.
+- A recording of the microphone alone is still never diarized. When the switch is on, the pane of such a finished recording says that it gets no speaker labels, and the Settings text under the switch says which recordings get them.
+- The paired path is unchanged. A mono part of a paired session, which only test fixtures produce, stays silence on the meeting lane, as before.
+
+**Consequences.**
+
+- Every measurement above ran on uncompressed audio: the meeting channel of Speedwave recordings and AMI Mix-Headset. An import is usually compressed (AAC in an M4A or MP4). The accuracy on compressed recordings from Teams and Zoom is being measured on at least two files of 15 minutes or more with at least three speakers, against the bar of decision 7 (segment accuracy of at least 80%) and a speaker count within one of the truth; the pull request carrying this amendment stays a draft until that result is recorded here.
+- An import, like a recording, has no length limit, and the limits under Known limitations apply to it: memory grows with its length, and labels on a meeting longer than 45 minutes were not measured (2026-10-27 amendment). Nothing caps or warns about the length of an import.
+- An app version older than this amendment shows the transcript of a diarized mono recording without labels: it labels only `system` segments.
+- A mono recording transcribed before this change gets labels on "Transcribe again" with the switch on.
+
 [^1]: Nemotron-3 Diarization model card: governed by the OpenMDW License Agreement 1.1, "handles up to eight speakers", 16 kHz single-channel input, all evaluations include overlapping speech, AMI (train and development) and VoxConverse v0.3 (development and test) in the training data table: <https://huggingface.co/nvidia/Nemotron-3-Diarization>.
 
 [^2]: OpenMDW License Agreement, version 1.1: <https://openmdw.ai/license/1-1/>.

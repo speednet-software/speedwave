@@ -321,16 +321,21 @@ impl Drop for SegmentList {
     }
 }
 
-pub(crate) fn label_speakers(segments: &mut [Segment], turns: &[SpeakerTurn]) {
-    assign_speakers(segments, turns);
+pub(crate) fn label_speakers(
+    segments: &mut [Segment],
+    turns: &[SpeakerTurn],
+    meeting: Option<TranscriptSource>,
+) {
+    assign_speakers(segments, turns, meeting);
     number_speakers(segments);
 }
 
-fn assign_speakers(segments: &mut [Segment], turns: &[SpeakerTurn]) {
-    for seg in segments
-        .iter_mut()
-        .filter(|s| s.source == Some(TranscriptSource::System))
-    {
+fn assign_speakers(
+    segments: &mut [Segment],
+    turns: &[SpeakerTurn],
+    meeting: Option<TranscriptSource>,
+) {
+    for seg in segments.iter_mut().filter(|s| s.source == meeting) {
         let best = turns
             .iter()
             .filter_map(|turn| {
@@ -490,6 +495,8 @@ impl Diarizer for MockDiarizer {
 mod tests {
     use super::*;
 
+    const SYSTEM: Option<TranscriptSource> = Some(TranscriptSource::System);
+
     fn seg(start_ms: u64, end_ms: u64, source: Option<TranscriptSource>) -> Segment {
         Segment {
             start: Duration::from_millis(start_ms),
@@ -520,23 +527,27 @@ mod tests {
     #[test]
     fn assign_speakers_picks_the_turn_with_the_most_overlap() {
         let mut segs = vec![sys(2000, 6000)];
-        assign_speakers(&mut segs, &[turn(0, 3000, 0), turn(3000, 10_000, 1)]);
+        assign_speakers(
+            &mut segs,
+            &[turn(0, 3000, 0), turn(3000, 10_000, 1)],
+            SYSTEM,
+        );
         assert_eq!(ids(&segs), vec![Some(1)]);
     }
 
     #[test]
     fn assign_speakers_leaves_a_segment_without_overlap_unlabelled() {
         let mut segs = vec![sys(20_000, 25_000), sys(5000, 6000)];
-        assign_speakers(&mut segs, &[turn(0, 5000, 0)]);
+        assign_speakers(&mut segs, &[turn(0, 5000, 0)], SYSTEM);
         assert_eq!(ids(&segs), vec![None, None]);
     }
 
     #[test]
     fn assign_speakers_breaks_a_tie_by_the_smaller_speaker_in_any_turn_order() {
         let mut a = vec![sys(0, 2000)];
-        assign_speakers(&mut a, &[turn(0, 1000, 3), turn(1000, 2000, 1)]);
+        assign_speakers(&mut a, &[turn(0, 1000, 3), turn(1000, 2000, 1)], SYSTEM);
         let mut b = vec![sys(0, 2000)];
-        assign_speakers(&mut b, &[turn(1000, 2000, 1), turn(0, 1000, 3)]);
+        assign_speakers(&mut b, &[turn(1000, 2000, 1), turn(0, 1000, 3)], SYSTEM);
         assert_eq!(ids(&a), vec![Some(1)]);
         assert_eq!(ids(&b), vec![Some(1)]);
     }
@@ -547,6 +558,7 @@ mod tests {
         assign_speakers(
             &mut segs,
             &[turn(0, 2000, 0), turn(2000, 4000, 0), turn(4000, 7000, 1)],
+            SYSTEM,
         );
         assert_eq!(ids(&segs), vec![Some(1)]);
     }
@@ -558,16 +570,27 @@ mod tests {
             seg(0, 2000, None),
             sys(0, 2000),
         ];
-        assign_speakers(&mut segs, &[turn(0, 2000, 4)]);
+        assign_speakers(&mut segs, &[turn(0, 2000, 4)], SYSTEM);
         assert_eq!(ids(&segs), vec![None, None, Some(4)]);
+    }
+
+    #[test]
+    fn assign_speakers_with_an_untagged_meeting_lane_labels_only_untagged_segments() {
+        let mut segs = vec![
+            seg(0, 2000, Some(TranscriptSource::Mic)),
+            seg(0, 2000, None),
+            sys(0, 2000),
+        ];
+        assign_speakers(&mut segs, &[turn(0, 2000, 4)], None);
+        assert_eq!(ids(&segs), vec![None, Some(4), None]);
     }
 
     #[test]
     fn assign_speakers_handles_empty_inputs() {
         let mut none: Vec<Segment> = vec![];
-        assign_speakers(&mut none, &[turn(0, 1000, 0)]);
+        assign_speakers(&mut none, &[turn(0, 1000, 0)], SYSTEM);
         let mut segs = vec![sys(0, 1000)];
-        assign_speakers(&mut segs, &[]);
+        assign_speakers(&mut segs, &[], SYSTEM);
         assert_eq!(ids(&segs), vec![None]);
     }
 
@@ -582,8 +605,24 @@ mod tests {
         label_speakers(
             &mut segs,
             &[turn(0, 1000, 5), turn(1000, 2000, 2), turn(2000, 3000, 5)],
+            SYSTEM,
         );
         assert_eq!(ids(&segs), vec![Some(1), Some(2), Some(1), None]);
+    }
+
+    #[test]
+    fn label_speakers_numbers_untagged_meeting_segments_by_first_appearance() {
+        let mut segs = vec![
+            seg(2000, 3000, None),
+            seg(0, 1000, None),
+            seg(1000, 2000, None),
+        ];
+        label_speakers(
+            &mut segs,
+            &[turn(0, 1000, 6), turn(1000, 2000, 0), turn(2000, 3000, 6)],
+            None,
+        );
+        assert_eq!(ids(&segs), vec![Some(1), Some(1), Some(2)]);
     }
 
     #[test]

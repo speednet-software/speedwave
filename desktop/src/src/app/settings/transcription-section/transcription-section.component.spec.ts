@@ -579,6 +579,10 @@ describe('TranscriptionSectionComponent', () => {
       expect(card?.textContent).toContain('After you stop');
       expect(card?.textContent).toContain('Tell speakers apart in the meeting audio');
       expect(card?.textContent).toContain('Your microphone stays "You"');
+      expect(card?.textContent).toContain(
+        'Also for an imported file and a recording of other people only.'
+      );
+      expect(card?.textContent).toContain('a recording of your microphone alone gets no labels.');
       expect(component.speakerAttribution()).toBe(false);
       const input = toggle();
       input.checked = true;

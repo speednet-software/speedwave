@@ -148,8 +148,9 @@ const SPEAKER_COST_TEXT = {
               Tell speakers apart in the meeting audio
             </div>
             <div class="text-[11px] leading-relaxed text-[var(--ink-mute)]">
-              Labels the people in the meeting audio as Speaker 1, Speaker 2, … Your microphone
-              stays "You". Runs on this computer.
+              Labels the people in the meeting audio as Speaker 1, Speaker 2, … Also for an imported
+              file and a recording of other people only. Your microphone stays "You"; a recording of
+              your microphone alone gets no labels. Runs on this computer.
             </div>
           </div>
           <app-toggle

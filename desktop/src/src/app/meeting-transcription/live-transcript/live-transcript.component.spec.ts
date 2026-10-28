@@ -88,6 +88,7 @@ describe('LiveTranscriptComponent', () => {
     delete: ReturnType<typeof vi.fn>;
     resumeRecording: ReturnType<typeof vi.fn>;
     liveTranscriptPreferred: ReturnType<typeof vi.fn>;
+    speakerAttribution: ReturnType<typeof vi.fn>;
   };
   let chat: {
     hasConversation: WritableSignal<boolean>;
@@ -115,6 +116,7 @@ describe('LiveTranscriptComponent', () => {
       delete: vi.fn(async () => undefined),
       resumeRecording: vi.fn(async () => undefined),
       liveTranscriptPreferred: vi.fn(() => false),
+      speakerAttribution: vi.fn(() => false),
     };
     chat = {
       hasConversation: signal(false),
@@ -216,6 +218,73 @@ describe('LiveTranscriptComponent', () => {
     expect(chips[1].querySelector('[data-testid="line-speaker-dot"]')).toBeNull();
     expect(chips[4].querySelector('[data-testid="line-speaker-dot"]')).toBeNull();
     expect(chips[5].querySelector('[data-testid="line-speaker-dot"]')).toBeNull();
+  });
+
+  it('labels diarized segments without a channel as Speaker N in their colour', () => {
+    const untagged = (start: number, text: string, speaker_id?: number) => ({
+      ...seg(start, text),
+      speaker_id,
+    });
+    fixture.componentRef.setInput(
+      'session',
+      session({
+        audio_source: { source: { kind: 'imported_file' }, label: 'Imported file: sync.m4a' },
+        final_segments: [
+          untagged(0, 'zaczynamy', 1),
+          untagged(1, 'pytanie', 2),
+          untagged(2, 'mhm'),
+        ],
+        models_used: { live: null, finalize: 'large-v3', diarization: 'nemotron' },
+      })
+    );
+    fixture.detectChanges();
+    const lines = component.lines();
+    expect(lines.map((l) => l.speaker)).toEqual(['Speaker 1', 'Speaker 2', null]);
+    expect(lines.map((l) => l.speakerColor)).toEqual(['var(--teal)', 'var(--violet)', null]);
+    const chips: HTMLElement[] = Array.from(
+      fixture.nativeElement.querySelectorAll('[data-testid="line-speaker"]')
+    );
+    expect(chips.map((c) => c.textContent?.trim())).toEqual(['Speaker 1', 'Speaker 2']);
+  });
+
+  describe('speaker labels on a microphone-only recording', () => {
+    const q = (id: string): HTMLElement | null =>
+      fixture.nativeElement.querySelector(`[data-testid="${id}"]`);
+
+    function openDone(kind: 'microphone' | 'system_wide' | 'imported_file', asked: boolean): void {
+      svc.speakerAttribution.mockReturnValue(asked);
+      fixture = TestBed.createComponent(LiveTranscriptComponent);
+      component = fixture.componentInstance;
+      svc.recordings.set([row()]);
+      const source =
+        kind === 'microphone' ? { kind, device: null } : ({ kind } as { kind: typeof kind });
+      fixture.componentRef.setInput(
+        'session',
+        session({
+          status: { state: 'done' },
+          audio_source: { source, label: 'Source' },
+          final_segments: [seg(0, 'hi')],
+          models_used: { live: null, finalize: 'large' },
+        })
+      );
+      fixture.detectChanges();
+    }
+
+    it('says why there are no labels when the Settings switch asked for them', () => {
+      openDone('microphone', true);
+      expect(q('transcript-quality')!.textContent).toContain(
+        'Speaker labels are not available for a microphone-only recording.'
+      );
+    });
+
+    it('says nothing with the switch off or for a recording of the meeting audio', () => {
+      openDone('microphone', false);
+      expect(q('transcript-quality')).toBeNull();
+      openDone('system_wide', true);
+      expect(q('transcript-quality')).toBeNull();
+      openDone('imported_file', true);
+      expect(q('transcript-quality')).toBeNull();
+    });
   });
 
   it('sorts a copy, never mutating the session segment array', () => {

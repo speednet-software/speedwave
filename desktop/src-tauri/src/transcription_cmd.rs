@@ -478,9 +478,11 @@ pub async fn postpone_transcription(
 
 /// Asks for an audio file on this machine and transcribes it like a stopped recording (SPEED-462);
 /// `None` when the picker is closed. A file that cannot be decoded leaves no session.
+/// `speaker_mode` is as in `stop_transcription`.
 #[tauri::command]
 pub async fn import_transcription(
     language: Language,
+    speaker_mode: bool,
     store: tauri::State<'_, TranscriptStoreHandle>,
     models: tauri::State<'_, ModelStoreHandle>,
     app: AppHandle,
@@ -523,7 +525,7 @@ pub async fn import_transcription(
         models_arc,
         session.id,
         session.all_audio_parts(),
-        false,
+        speaker_mode,
     );
     Ok(Some(session.id))
 }
@@ -653,13 +655,15 @@ fn spawn_offline_pass(
                 }
             };
         let diarizer = offline_diarizer(&models_arc, speaker_mode, transcription::gpu_class());
+        let (language, source) = session_pass_inputs(&store_arc, id);
         let cfg = FinalizeConfig {
             id,
             store: store_arc.clone(),
             audio_paths,
             transcriber,
-            transcribe_opts: TranscribeOptions::for_language(session_language(&store_arc, id)),
+            transcribe_opts: TranscribeOptions::for_language(language),
             pass,
+            source,
             diarizer,
         };
         match speedwave_runtime::transcription::run_finalize(cfg) {
@@ -777,9 +781,13 @@ fn source_label(
     generic(src)
 }
 
-/// Reads a session's forced language (defaults to PL if it can't be read).
-fn session_language(store: &TranscriptStore, id: Uuid) -> Language {
-    store.get(id).map(|s| s.language).unwrap_or(Language::Pl)
+/// Reads a session's forced language and audio source; PL and the default microphone, which has
+/// no meeting lane to diarize, when it can't be read.
+fn session_pass_inputs(store: &TranscriptStore, id: Uuid) -> (Language, AudioSource) {
+    store
+        .get(id)
+        .map(|s| (s.language, s.audio_source.source))
+        .unwrap_or((Language::Pl, AudioSource::Microphone { device: None }))
 }
 
 /// Picks the model for the offline pass: this build's finalize model if downloaded, else the
@@ -1832,13 +1840,19 @@ mod tests {
     }
 
     #[test]
-    fn session_language_reads_the_session_or_defaults_to_pl() {
+    fn session_pass_inputs_read_the_session_or_default_to_pl_without_a_meeting_lane() {
         let dir = tempfile::tempdir().unwrap();
         let store = TranscriptStore::with_root(dir.path());
         let id = mk_session_in(&store);
-        assert_eq!(session_language(&store, id), Language::Pl);
+        assert_eq!(
+            session_pass_inputs(&store, id),
+            (Language::Pl, AudioSource::SystemWide)
+        );
         let missing = Uuid::new_v4();
-        assert_eq!(session_language(&store, missing), Language::Pl);
+        assert_eq!(
+            session_pass_inputs(&store, missing),
+            (Language::Pl, AudioSource::Microphone { device: None })
+        );
     }
 
     fn write_sparse_diarization_model(models: &ModelStore) {
@@ -1975,9 +1989,13 @@ mod tests {
     }
 
     #[test]
-    fn stop_and_transcribe_hand_the_speaker_mode_to_the_offline_pass() {
+    fn stop_transcribe_and_import_hand_the_speaker_mode_to_the_offline_pass() {
         let src = include_str!("transcription_cmd.rs");
-        for name in ["stop_transcription", "transcribe_transcript"] {
+        for name in [
+            "stop_transcription",
+            "transcribe_transcript",
+            "import_transcription",
+        ] {
             assert!(
                 fn_body(src, name).contains("speaker_mode,\n"),
                 "{name} must pass the Settings speaker mode to spawn_offline_pass"
