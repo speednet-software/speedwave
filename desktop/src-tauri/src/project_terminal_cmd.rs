@@ -16,7 +16,13 @@ pub async fn open_project_terminal(project: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         log::info!("opening project terminal for project {project}");
         let cmd = resolve_run_command(&project)?;
-        open_terminal_with_command(&cmd).map_err(|e| {
+        open_terminal_with_command(
+            CliInvocation::Run,
+            &project,
+            speedwave_runtime::consts::data_dir(),
+            &cmd,
+        )
+        .map_err(|e| {
             log::error!("failed to spawn project terminal: {e}");
             e.to_string()
         })

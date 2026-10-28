@@ -1,137 +1,88 @@
 //! Tauri command: open the host's terminal running `speedwave login` for the chosen
 //! project. OAuth happens in the container; Speedwave never sees or stores the token.
+//! macOS opens a `.command` script through LaunchServices; Windows runs PowerShell directly.
 
 use crate::auth_commands::{
-    build_auth_command_for_platform, ensure_cli_installed, resolve_project_dirs,
+    build_auth_command_for_platform, ensure_cli_installed, resolve_project_dirs, CliInvocation,
 };
 use crate::types::check_project;
+use std::path::Path;
+#[cfg(any(target_os = "macos", test))]
+use std::path::PathBuf;
 
-/// Returns true when `s` contains any control character (`< 0x20` or DEL) — AppleScript
-/// `do script` interprets these, so we reject them to avoid command-injection surprises.
+#[cfg(any(target_os = "macos", test))]
+const TERMINAL_SCRIPT_DIR: &str = "terminal";
+#[cfg(any(target_os = "macos", test))]
+const TERMINAL_SCRIPT_EXTENSION: &str = "command";
 #[cfg(target_os = "macos")]
-fn contains_control_chars(s: &str) -> bool {
-    s.bytes().any(|b| b < 0x20 || b == 0x7f)
+const OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Body of the `.command` script: runs `cmd`, then leaves the user in a login shell.
+#[cfg(any(target_os = "macos", test))]
+fn build_terminal_script(cmd: &str) -> String {
+    format!("#!/bin/sh\n{cmd}\nexec \"${{SHELL:-/bin/zsh}}\" -l\n")
 }
 
-/// Escapes a string for an AppleScript double-quoted literal. Order matters: backslashes
-/// must be doubled before quotes are escaped, or a pre-existing `\` consumes the `\"` lead.
-#[cfg(target_os = "macos")]
-pub(crate) fn escape_for_applescript(s: &str) -> anyhow::Result<String> {
-    if contains_control_chars(s) {
-        anyhow::bail!("control characters in AppleScript argument");
+#[cfg(any(target_os = "macos", test))]
+fn terminal_script_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join(TERMINAL_SCRIPT_DIR)
+}
+
+/// `<data_dir>/terminal/<login|run>-<project>.command`.
+#[cfg(any(target_os = "macos", test))]
+fn terminal_script_path(data_dir: &Path, invocation: CliInvocation, project: &str) -> PathBuf {
+    let purpose = match invocation {
+        CliInvocation::Login => "login",
+        CliInvocation::Run => "run",
+    };
+    terminal_script_dir(data_dir).join(format!("{purpose}-{project}.{TERMINAL_SCRIPT_EXTENSION}"))
+}
+
+/// Maps the outcome of `open <script>` to a user-readable error carrying its stderr.
+#[cfg(any(target_os = "macos", test))]
+fn check_open_result(success: bool, stderr: &[u8]) -> anyhow::Result<()> {
+    if success {
+        return Ok(());
     }
-    Ok(s.replace('\\', "\\\\").replace('"', "\\\""))
-}
-
-#[cfg(target_os = "macos")]
-const DEFAULT_LOGIN_SHELL: &str = "/bin/zsh";
-
-/// Whether `s` is a plain absolute path safe to use as argv[0] in iTerm2's
-/// word-split `command "<str>"` — i.e. no whitespace, no shell metacharacters.
-#[cfg(target_os = "macos")]
-fn is_safe_shell_path(s: &str) -> bool {
-    s.starts_with('/')
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'_' | b'.' | b'-'))
-}
-
-/// Validates a candidate shell path (typically `$SHELL`), falling back to `DEFAULT_LOGIN_SHELL`
-/// when missing or not a plain absolute path. Pure — testable without mutating the env.
-#[cfg(target_os = "macos")]
-fn sanitize_login_shell(candidate: Option<&str>) -> String {
-    match candidate {
-        Some(s) if is_safe_shell_path(s) => s.to_string(),
-        Some(s) => {
-            log::warn!(
-                "SHELL='{s}' is not a plain absolute path; using {DEFAULT_LOGIN_SHELL} for iTerm2 spawn"
-            );
-            DEFAULT_LOGIN_SHELL.to_string()
-        }
-        None => DEFAULT_LOGIN_SHELL.to_string(),
+    let stderr = String::from_utf8_lossy(stderr);
+    let stderr = stderr.trim();
+    if stderr.is_empty() {
+        anyhow::bail!("could not open the terminal: open exited with a failure status");
     }
-}
-
-/// Returns a login shell to wrap the command in for iTerm2 — `$SHELL` if it is
-/// a plain absolute path, otherwise `/bin/zsh` (macOS default).
-#[cfg(target_os = "macos")]
-fn safe_login_shell() -> String {
-    sanitize_login_shell(std::env::var("SHELL").ok().as_deref())
-}
-
-/// True iff `iTerm.app` exists in any of `roots`. Pure path check — testable
-/// against a tempdir without consulting the real `/Applications/`.
-#[cfg(target_os = "macos")]
-fn iterm2_installed_in(roots: &[&std::path::Path]) -> bool {
-    roots.iter().any(|r| r.join("iTerm.app").exists())
-}
-
-/// True iff iTerm2 is installed in `/Applications/` or `~/Applications/`.
-#[cfg(target_os = "macos")]
-fn iterm2_installed() -> bool {
-    let system = std::path::PathBuf::from("/Applications");
-    let user = dirs::home_dir().map(|h| h.join("Applications"));
-    let mut roots: Vec<&std::path::Path> = vec![&system];
-    if let Some(ref u) = user {
-        roots.push(u);
-    }
-    iterm2_installed_in(&roots)
+    anyhow::bail!("could not open the terminal: {stderr}");
 }
 
 #[cfg(target_os = "macos")]
-fn spawn_iterm2(cmd: &str) -> anyhow::Result<()> {
-    let shell = safe_login_shell();
-    let inner_escaped = cmd.replace('\'', "'\\''");
-    let wrapped = format!("{shell} -ilc '{inner_escaped}'");
-    let escaped = escape_for_applescript(&wrapped)?;
-    let script = format!(
-        "tell application \"iTerm\"\n\
-         \tactivate\n\
-         \tcreate window with default profile command \"{escaped}\"\n\
-         end tell"
-    );
-    let status = speedwave_runtime::binary::system_command("osascript")
-        .args(["-e", &script])
-        .status()?;
-    if !status.success() {
-        anyhow::bail!("osascript (iTerm2) exited with status {status}");
-    }
-    Ok(())
+fn write_terminal_script(
+    data_dir: &Path,
+    invocation: CliInvocation,
+    project: &str,
+    cmd: &str,
+) -> anyhow::Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+
+    speedwave_runtime::fs_perms::ensure_owner_only_dir(&terminal_script_dir(data_dir))?;
+    let path = terminal_script_path(data_dir, invocation, project);
+    speedwave_runtime::fs_perms::write_restricted_file_atomic(&path, &build_terminal_script(cmd))?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+    Ok(path)
 }
 
+/// Opens Terminal (the default `.command` handler) on a script that runs `cmd`, via `open`.
+/// Returns once **launched**; does not wait for `cmd`.
 #[cfg(target_os = "macos")]
-fn spawn_apple_terminal(cmd: &str) -> anyhow::Result<()> {
-    let escaped = escape_for_applescript(cmd)?;
-    let script = format!(
-        "tell application \"Terminal\" to do script \"{escaped}\"\n\
-         tell application \"Terminal\" to activate"
-    );
-    let status = speedwave_runtime::binary::system_command("osascript")
-        .args(["-e", &script])
-        .status()?;
-    if !status.success() {
-        anyhow::bail!("osascript exited with status {status}");
-    }
-    Ok(())
-}
-
-/// Spawns the OS-native terminal running `cmd` (macOS: iTerm2 if installed, else Apple
-/// Terminal, both via `osascript`). Returns once **launched**; does not wait for `cmd`.
-#[cfg(target_os = "macos")]
-pub(crate) fn open_terminal_with_command(cmd: &str) -> anyhow::Result<()> {
-    if iterm2_installed() {
-        match spawn_iterm2(cmd) {
-            Ok(()) => return Ok(()),
-            Err(iterm_err) => {
-                log::warn!("iTerm2 spawn failed ({iterm_err}); falling back to Apple Terminal");
-                return spawn_apple_terminal(cmd).map_err(|apple_err| {
-                    anyhow::anyhow!(
-                        "iTerm2 failed ({iterm_err}); Apple Terminal also failed: {apple_err}"
-                    )
-                });
-            }
-        }
-    }
-    spawn_apple_terminal(cmd)
+pub(crate) fn open_terminal_with_command(
+    invocation: CliInvocation,
+    project: &str,
+    data_dir: &Path,
+    cmd: &str,
+) -> anyhow::Result<()> {
+    let path = write_terminal_script(data_dir, invocation, project, cmd)?;
+    let output = speedwave_runtime::binary::run_with_timeout_capture(
+        speedwave_runtime::binary::system_command("open").arg(&path),
+        OPEN_TIMEOUT,
+    )?;
+    check_open_result(output.status.success(), &output.stderr)
 }
 
 /// Encodes a PowerShell command for `-EncodedCommand`: UTF-16LE then base64.
@@ -195,7 +146,12 @@ fn build_powershell_argv(cmd: &str) -> [String; 3] {
 /// Spawns a new terminal window running `cmd` (PowerShell syntax). Prefers `pwsh.exe` then
 /// `powershell.exe`, Windows Terminal then direct spawn. `-NoExit` keeps the window open.
 #[cfg(target_os = "windows")]
-pub(crate) fn open_terminal_with_command(cmd: &str) -> anyhow::Result<()> {
+pub(crate) fn open_terminal_with_command(
+    _invocation: CliInvocation,
+    _project: &str,
+    _data_dir: &Path,
+    cmd: &str,
+) -> anyhow::Result<()> {
     let ps = if crate::path_util::which_in_path("pwsh.exe").is_some() {
         "pwsh.exe"
     } else {
@@ -238,7 +194,7 @@ pub async fn start_oauth_login(project: String) -> Result<(), String> {
             default_data_dir.as_deref(),
             cfg!(target_os = "windows"),
         );
-        open_terminal_with_command(&cmd).map_err(|e| {
+        open_terminal_with_command(CliInvocation::Login, &project, &data_dir, &cmd).map_err(|e| {
             log::error!("failed to spawn OAuth login terminal: {e}");
             e.to_string()
         })
@@ -252,7 +208,7 @@ pub async fn start_oauth_login(project: String) -> Result<(), String> {
     target_os = "macos",
     expect(
         clippy::unwrap_used,
-        reason = "the macOS-only AppleScript tests unwrap results"
+        reason = "the macOS-only script write test unwraps results"
     )
 )]
 #[expect(
@@ -260,8 +216,8 @@ pub async fn start_oauth_login(project: String) -> Result<(), String> {
     reason = "unwrap/expect are fine in test assertions"
 )]
 mod tests {
-    #[cfg(target_os = "macos")]
     use super::*;
+    use crate::auth_commands::build_project_cli_command_for_platform;
 
     fn base64_decode(s: &str) -> Vec<u8> {
         fn val(c: u8) -> u32 {
@@ -336,140 +292,102 @@ mod tests {
         );
     }
 
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn escape_applescript_no_special_chars() {
-        assert_eq!(escape_for_applescript("hello").unwrap(), "hello");
+    fn unix_command(invocation: CliInvocation, project_dir: &str) -> String {
+        build_project_cli_command_for_platform(
+            invocation,
+            "myproj",
+            project_dir,
+            Path::new("/home/u"),
+            Path::new("/home/u/.speedwave"),
+            Some(Path::new("/home/u/.speedwave")),
+            false,
+        )
     }
 
     #[test]
-    #[cfg(target_os = "macos")]
-    fn escape_applescript_double_quote() {
-        assert_eq!(escape_for_applescript(r#"a"b"#).unwrap(), r#"a\"b"#);
+    fn terminal_script_runs_the_command_then_a_login_shell() {
+        for (invocation, project_dir) in [
+            (CliInvocation::Run, "/work/proj"),
+            (CliInvocation::Login, "/work/proj"),
+            (CliInvocation::Run, "/work/o'brien"),
+        ] {
+            let cmd = unix_command(invocation, project_dir);
+            let body = build_terminal_script(&cmd);
+            let lines: Vec<&str> = body.lines().collect();
+            assert_eq!(lines.len(), 3);
+            assert_eq!(lines[0], "#!/bin/sh");
+            assert_eq!(lines[1], cmd);
+            assert_eq!(lines[2], "exec \"${SHELL:-/bin/zsh}\" -l");
+            assert!(body.ends_with('\n'));
+        }
     }
 
     #[test]
-    #[cfg(target_os = "macos")]
-    fn escape_applescript_backslash() {
-        assert_eq!(escape_for_applescript(r"a\b").unwrap(), r"a\\b");
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn escape_applescript_backslash_then_quote() {
-        assert_eq!(escape_for_applescript(r#"\""#).unwrap(), r#"\\\""#);
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn escape_applescript_empty() {
-        assert_eq!(escape_for_applescript("").unwrap(), "");
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn escape_applescript_rejects_newline() {
-        assert!(escape_for_applescript("foo\nbar").is_err());
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn escape_applescript_rejects_tab() {
-        assert!(escape_for_applescript("foo\tbar").is_err());
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn escape_applescript_rejects_null() {
-        assert!(escape_for_applescript("foo\0bar").is_err());
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn escape_applescript_rejects_del() {
-        assert!(escape_for_applescript("foo\x7fbar").is_err());
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn sanitize_shell_accepts_plain_absolute_path() {
-        assert_eq!(sanitize_login_shell(Some("/bin/bash")), "/bin/bash");
+    fn terminal_script_path_is_per_purpose_and_project() {
+        let data_dir = Path::new("/data");
         assert_eq!(
-            sanitize_login_shell(Some("/usr/local/bin/fish")),
-            "/usr/local/bin/fish"
+            terminal_script_path(data_dir, CliInvocation::Run, "myproj"),
+            data_dir.join("terminal").join("run-myproj.command")
+        );
+        assert_eq!(
+            terminal_script_path(data_dir, CliInvocation::Login, "myproj"),
+            data_dir.join("terminal").join("login-myproj.command")
         );
     }
 
     #[test]
-    #[cfg(target_os = "macos")]
-    fn sanitize_shell_rejects_value_with_spaces() {
+    fn open_result_is_ok_on_success() {
+        assert!(check_open_result(true, b"").is_ok());
+    }
+
+    #[test]
+    fn open_result_carries_trimmed_stderr_on_failure() {
+        let err = check_open_result(false, b"LSOpenURLsWithRole() failed with error -10810\n")
+            .expect_err("a failed open must be an error");
         assert_eq!(
-            sanitize_login_shell(Some("/bin/zsh -c 'echo pwned'")),
-            DEFAULT_LOGIN_SHELL
+            err.to_string(),
+            "could not open the terminal: LSOpenURLsWithRole() failed with error -10810"
         );
     }
 
     #[test]
-    #[cfg(target_os = "macos")]
-    fn sanitize_shell_rejects_semicolon_and_metachars() {
-        assert_eq!(
-            sanitize_login_shell(Some("/bin/zsh;touch /tmp/x")),
-            DEFAULT_LOGIN_SHELL
-        );
-        assert_eq!(
-            sanitize_login_shell(Some("/bin/zsh\"")),
-            DEFAULT_LOGIN_SHELL
-        );
-        assert_eq!(
-            sanitize_login_shell(Some("/bin/zsh$(id)")),
-            DEFAULT_LOGIN_SHELL
-        );
+    fn open_result_names_the_failure_when_stderr_is_empty() {
+        let err = check_open_result(false, b"  \n").expect_err("a failed open must be an error");
+        assert!(err.to_string().starts_with("could not open the terminal: "));
+        assert!(err.to_string().contains("failure status"));
     }
 
     #[test]
     #[cfg(target_os = "macos")]
-    fn sanitize_shell_rejects_relative_path() {
-        assert_eq!(sanitize_login_shell(Some("zsh")), DEFAULT_LOGIN_SHELL);
-        assert_eq!(sanitize_login_shell(Some("bin/zsh")), DEFAULT_LOGIN_SHELL);
-    }
+    fn write_terminal_script_is_owner_only_executable_and_replaced_on_rewrite() {
+        use std::os::unix::fs::PermissionsExt;
 
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn sanitize_shell_falls_back_when_unset() {
-        assert_eq!(sanitize_login_shell(None), DEFAULT_LOGIN_SHELL);
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn sanitize_shell_rejects_empty_string() {
-        assert_eq!(sanitize_login_shell(Some("")), DEFAULT_LOGIN_SHELL);
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn iterm2_installed_in_returns_true_when_system_root_has_app() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir(tmp.path().join("iTerm.app")).unwrap();
-        assert!(super::iterm2_installed_in(&[tmp.path()]));
-    }
+        let path = write_terminal_script(tmp.path(), CliInvocation::Run, "myproj", "echo one")
+            .unwrap();
+        assert_eq!(path, tmp.path().join("terminal").join("run-myproj.command"));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            build_terminal_script("echo one")
+        );
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        let dir_mode = std::fs::metadata(tmp.path().join("terminal"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(dir_mode & 0o777, 0o700);
 
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn iterm2_installed_in_returns_true_when_user_root_has_app() {
-        let system_root = tempfile::tempdir().unwrap();
-        let user_root = tempfile::tempdir().unwrap();
-        std::fs::create_dir(user_root.path().join("iTerm.app")).unwrap();
-        assert!(super::iterm2_installed_in(&[
-            system_root.path(),
-            user_root.path()
-        ]));
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn iterm2_installed_in_returns_false_when_no_root_has_app() {
-        let r1 = tempfile::tempdir().unwrap();
-        let r2 = tempfile::tempdir().unwrap();
-        assert!(!super::iterm2_installed_in(&[r1.path(), r2.path()]));
+        let again = write_terminal_script(tmp.path(), CliInvocation::Run, "myproj", "echo two")
+            .unwrap();
+        assert_eq!(again, path);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            build_terminal_script("echo two")
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
     }
 }

@@ -66,7 +66,8 @@ export type IconName =
           <path d="M6 18L18 6M6 6l12 12" />
         }
         @case ('terminal') {
-          <path d="M4 17l6-6-6-6M12 19h8" />
+          <rect x="3" y="4" width="18" height="16" rx="3" />
+          <path d="M7.5 9.5l2.5 2.5-2.5 2.5M12.5 14.5h4" />
         }
         @case ('book') {
           <path
