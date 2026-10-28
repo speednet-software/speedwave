@@ -43,6 +43,38 @@ staged_fixture_repo() {
     git -C "$root" -c user.name=t -c user.email=t@t commit -qm fixture
 }
 
+package_fixture_root() {
+    local root pkg
+    root="$(cd "$BATS_TEST_TMPDIR" && pwd -P)/native/macos"
+    for pkg in shared $SPW_PACKAGES; do
+        mkdir -p "$root/$pkg"
+        cp "$SPW_ROOT/native/macos/$pkg/Package.swift" "$root/$pkg/"
+    done
+    for pkg in $SPW_PACKAGES; do
+        cp -R "$SPW_ROOT/native/macos/$pkg/Resources" "$root/$pkg/"
+    done
+    printf '%s\n' "$root"
+}
+
+linked_info_plist() {
+    swift package --package-path "$1" --manifest-cache none dump-package | python3 -c '
+import json, sys
+def walk(node):
+    if isinstance(node, list):
+        if "__info_plist" in node:
+            yield node[-1]
+        for item in node:
+            yield from walk(item)
+    elif isinstance(node, dict):
+        for item in node.values():
+            yield from walk(item)
+found = list(walk(json.load(sys.stdin)))
+if len(found) != 1:
+    sys.exit("expected one -sectcreate __info_plist flag set, found %d" % len(found))
+print(found[0])
+'
+}
+
 @test "staging writes both version keys into the copy" {
     local src="$BATS_TEST_TMPDIR/Info.plist" dest="$BATS_TEST_TMPDIR/.build/Info.plist"
     plist_fixture "$src"
@@ -128,3 +160,30 @@ PY
     done
 }
 
+@test "Package.swift embeds the staged plist by absolute path once it exists" {
+    assert_package_list
+    local root pkg linked
+    root="$(package_fixture_root)"
+    for pkg in $SPW_PACKAGES; do
+        stage_info_plist "$root/$pkg/Resources/Info.plist" "$root/$pkg/.build/Info.plist"
+        linked="$(linked_info_plist "$root/$pkg")" || return 1
+        [ "$linked" = "$root/$pkg/.build/Info.plist" ] || {
+            echo "$pkg links $linked, expected the staged copy" >&2
+            return 1
+        }
+    done
+}
+
+@test "Package.swift falls back to the source plist by absolute path without staging" {
+    assert_package_list
+    local root pkg linked
+    root="$(package_fixture_root)"
+    for pkg in $SPW_PACKAGES; do
+        linked="$(linked_info_plist "$root/$pkg")" || return 1
+        [ "$linked" = "$root/$pkg/Resources/Info.plist" ] || {
+            echo "$pkg links $linked, expected Resources/Info.plist" >&2
+            return 1
+        }
+        [ -f "$linked" ]
+    done
+}

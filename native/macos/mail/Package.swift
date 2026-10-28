@@ -1,5 +1,11 @@
 // swift-tools-version: 5.9
+import Foundation
 import PackageDescription
+
+let stagedInfoPlist = Context.packageDirectory + "/.build/Info.plist"
+let infoPlist = FileManager.default.fileExists(atPath: stagedInfoPlist)
+    ? stagedInfoPlist
+    : Context.packageDirectory + "/Resources/Info.plist"
 
 let package = Package(
     name: "mail-cli",
@@ -17,7 +23,7 @@ let package = Package(
                     "-Xlinker", "-sectcreate",
                     "-Xlinker", "__TEXT",
                     "-Xlinker", "__info_plist",
-                    "-Xlinker", ".build/Info.plist",
+                    "-Xlinker", infoPlist,
                 ]),
             ]
         ),
