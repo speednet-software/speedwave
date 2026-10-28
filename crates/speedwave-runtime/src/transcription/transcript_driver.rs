@@ -1071,15 +1071,15 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
             .map(|p| frame_at(p.part_base) as u64 + p.frames)
             .max()
             .unwrap_or(0);
-        let mut system_pcm = Vec::with_capacity(usize::try_from(end).unwrap_or(usize::MAX));
+        let mut meeting_pcm = Vec::with_capacity(usize::try_from(end).unwrap_or(usize::MAX));
         for part in &meeting_parts {
             if pass.cancelled() {
                 return Err(DiarizeError::Inference(
                     "cancelled while reading the meeting channel".to_string(),
                 ));
             }
-            system_pcm.resize(frame_at(part.part_base), 0.0);
-            let frames = super::audio::append_wav_channel_f32(part.path, 0, &mut system_pcm)
+            meeting_pcm.resize(frame_at(part.part_base), 0.0);
+            let frames = super::audio::append_wav_channel_f32(part.path, 0, &mut meeting_pcm)
                 .map_err(|e| DiarizeError::InvalidAudio(e.to_string()))?;
             if frames as u64 != part.frames {
                 return Err(DiarizeError::InvalidAudio(format!(
@@ -1089,7 +1089,7 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
                 )));
             }
         }
-        Ok(system_pcm)
+        Ok(meeting_pcm)
     };
     let diarization = match (diarizer, lane) {
         (Some(load), Some(lane)) if meeting_speech => diarize_meeting_channel(
@@ -1098,14 +1098,7 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
             &pass,
             load,
             read_meeting_channel,
-            |turns| {
-                label_speakers(&mut final_segs, turns, lane.tag);
-                final_segs
-                    .iter()
-                    .filter_map(|seg| seg.speaker_id)
-                    .max()
-                    .unwrap_or(0)
-            },
+            |turns| label_speakers(&mut final_segs, turns, lane.tag),
             &report,
         )?,
         _ => None,
@@ -1147,8 +1140,8 @@ fn diarize_meeting_channel(
     report(FINALIZE_DIARIZE_START_PROGRESS)?;
     let started = Instant::now();
     let result = load().and_then(|mut diarizer| {
-        let system_pcm = read_meeting_channel()?;
-        diarizer.diarize(&system_pcm, &pass.decode_cancel())
+        let meeting_pcm = read_meeting_channel()?;
+        diarizer.diarize(&meeting_pcm, &pass.decode_cancel())
     });
     if pass.cancelled() {
         return Err(stopped_pass_error(store, id));
@@ -4368,11 +4361,11 @@ mod tests {
             crate::transcription::diarizer::DiarizeError,
         > {
             *self.0.lock().unwrap() = Some(pcm.to_vec());
-            Ok(vec![crate::transcription::diarizer::SpeakerTurn {
-                start: Duration::ZERO,
-                end: Duration::from_secs_f64(pcm.len() as f64 / f64::from(SAMPLE_RATE_HZ)),
-                speaker: 0,
-            }])
+            Ok(vec![turn_secs(
+                0,
+                (pcm.len() / SAMPLE_RATE_HZ as usize) as u64,
+                0,
+            )])
         }
     }
 

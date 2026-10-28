@@ -782,12 +782,18 @@ fn source_label(
 }
 
 /// Reads a session's forced language and audio source; PL and the default microphone, which has
-/// no meeting lane to diarize, when it can't be read.
+/// no meeting lane to diarize, when it can't be read (logged).
 fn session_pass_inputs(store: &TranscriptStore, id: Uuid) -> (Language, AudioSource) {
-    store
-        .get(id)
-        .map(|s| (s.language, s.audio_source.source))
-        .unwrap_or((Language::Pl, AudioSource::Microphone { device: None }))
+    match store.get(id) {
+        Ok(s) => (s.language, s.audio_source.source),
+        Err(e) => {
+            log::warn!(
+                "offline pass for {} could not read its session ({e}); it runs in Polish without speaker labels",
+                short_id(id)
+            );
+            (Language::Pl, AudioSource::Microphone { device: None })
+        }
+    }
 }
 
 /// Picks the model for the offline pass: this build's finalize model if downloaded, else the

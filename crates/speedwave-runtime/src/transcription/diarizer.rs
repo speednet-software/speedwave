@@ -325,9 +325,9 @@ pub(crate) fn label_speakers(
     segments: &mut [Segment],
     turns: &[SpeakerTurn],
     meeting: Option<TranscriptSource>,
-) {
+) -> u32 {
     assign_speakers(segments, turns, meeting);
-    number_speakers(segments);
+    number_speakers(segments)
 }
 
 fn assign_speakers(
@@ -350,7 +350,7 @@ fn assign_speakers(
     }
 }
 
-fn number_speakers(segments: &mut [Segment]) {
+fn number_speakers(segments: &mut [Segment]) -> u32 {
     let mut order: Vec<usize> = (0..segments.len()).collect();
     order.sort_by_key(|&i| (segments[i].start, i));
     let mut numbers: Vec<(u32, u32)> = Vec::new();
@@ -368,6 +368,7 @@ fn number_speakers(segments: &mut [Segment]) {
         };
         segments[i].speaker_id = Some(number);
     }
+    numbers.len() as u32
 }
 
 fn install_log_forwarding() {
@@ -602,12 +603,13 @@ mod tests {
             sys(2000, 3000),
             sys(3000, 4000),
         ];
-        label_speakers(
+        let speakers = label_speakers(
             &mut segs,
             &[turn(0, 1000, 5), turn(1000, 2000, 2), turn(2000, 3000, 5)],
             SYSTEM,
         );
         assert_eq!(ids(&segs), vec![Some(1), Some(2), Some(1), None]);
+        assert_eq!(speakers, 2);
     }
 
     #[test]
@@ -617,12 +619,13 @@ mod tests {
             seg(0, 1000, None),
             seg(1000, 2000, None),
         ];
-        label_speakers(
+        let speakers = label_speakers(
             &mut segs,
             &[turn(0, 1000, 6), turn(1000, 2000, 0), turn(2000, 3000, 6)],
             None,
         );
         assert_eq!(ids(&segs), vec![Some(1), Some(1), Some(2)]);
+        assert_eq!(speakers, 2);
     }
 
     #[test]
@@ -646,10 +649,10 @@ mod tests {
         let mut segs = vec![sys(0, 1000), sys(0, 1000), sys(1000, 2000)];
         segs[0].speaker_id = Some(7);
         segs[1].speaker_id = Some(3);
-        number_speakers(&mut segs);
+        assert_eq!(number_speakers(&mut segs), 2);
         assert_eq!(ids(&segs), vec![Some(1), Some(2), None]);
         let mut empty: Vec<Segment> = vec![];
-        number_speakers(&mut empty);
+        assert_eq!(number_speakers(&mut empty), 0);
     }
 
     #[test]
