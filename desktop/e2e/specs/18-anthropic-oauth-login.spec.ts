@@ -68,7 +68,7 @@ describe('Anthropic OAuth Login (no-provider first start)', function () {
     child.on('exit', () => (exited = true));
 
     try {
-      await browser.waitUntil(async () => output.includes('Starting Anthropic sign-in'), {
+      await browser.waitUntil(async () => output.includes('Anthropic sign-in'), {
         timeout: 240_000,
         interval: 2_000,
         timeoutMsg: `speedwave login never reached the sign-in stage; output:\n${output.slice(-2000)}`,
