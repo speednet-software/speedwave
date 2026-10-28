@@ -113,3 +113,4 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/e2e.yml
+    secrets: inherit
