@@ -121,7 +121,7 @@ fn discover_slash_commands_with_timeout(
     }
 
     let generation = cache_generation(&project.name);
-    let container = claude_container_name(&project.name);
+    let container = consts::claude_container_name(&project.name);
     let outcome = lead_discovery(&project.name, || {
         run_discovery_with_timeout(runtime, &container, timeout).map_err(|e| e.to_string())
     });
@@ -872,15 +872,6 @@ fn parse_frontmatter(contents: &str) -> Option<SlashFrontmatter> {
         yaml.push('\n');
     }
     None
-}
-
-fn claude_container_name(project: &str) -> String {
-    format!(
-        "{}_{}_{}",
-        consts::compose_prefix(),
-        project,
-        consts::CLAUDE_COMPOSE_SERVICE
-    )
 }
 
 #[cfg(test)]

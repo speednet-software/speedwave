@@ -395,12 +395,14 @@ fn validate_project_name(name: &str) -> Result<(), String> {
 
 fn build_login_exec_cmd(base_url: &str, unset_keys: &[&str]) -> Vec<String> {
     let script = format!(
-        "unset {}; export ANTHROPIC_BASE_URL={base_url}; exec {} auth login --claudeai",
+        "unset {}; export ANTHROPIC_BASE_URL={base_url}; {LOGIN_REACHABILITY_CHECK}; exec {} auth login --claudeai",
         unset_keys.join(" "),
         consts::CLAUDE_BINARY,
     );
     vec!["sh".to_string(), "-lc".to_string(), script]
 }
+
+const LOGIN_REACHABILITY_CHECK: &str = r#"curl -sS -m 10 -o /dev/null https://platform.claude.com || { printf '%s\n' 'The Speedwave container cannot reach platform.claude.com, so sign-in cannot finish.' 'On Windows, Docker running in another WSL distribution can block container traffic.' 'Check the network and try again.' >&2; exit 1; }"#;
 
 #[cfg(windows)]
 const LOGIN_PASTE_STEP: &[&str] = &[
@@ -1057,7 +1059,7 @@ fn main() -> anyhow::Result<()> {
         Ok(())
     })?;
 
-    let container_name = format!("{}_{}_claude", consts::compose_prefix(), project_name);
+    let container_name = consts::claude_container_name(&project_name);
     ensure_exec_healthy(&runtime, &project_name, &container_name)?;
 
     let _paste_watcher = paste_watcher::PasteWatcher::spawn(project_dir.clone());
@@ -1809,30 +1811,90 @@ mod tests {
         assert!(widest.is_some_and(|w| w <= 80), "{boxed}");
     }
 
+    #[cfg(unix)]
+    struct LoginRun {
+        status: std::process::ExitStatus,
+        stderr: String,
+        claude_args: Option<String>,
+        env_seen_by_claude: Option<String>,
+    }
+
+    #[cfg(unix)]
+    fn run_login_script(curl_stub: &str) -> LoginRun {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let write_executable = |path: &std::path::Path, body: &str| {
+            std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        write_executable(&dir.path().join("curl"), curl_stub);
+        let claude = dir.path().join("claude");
+        let args_file = dir.path().join("claude-args");
+        let env_file = dir.path().join("claude-env");
+        write_executable(
+            &claude,
+            &format!(
+                "echo \"$@\" > {}\necho \"$ANTHROPIC_BASE_URL:${{ANTHROPIC_MODEL-unset}}\" > {}",
+                args_file.display(),
+                env_file.display()
+            ),
+        );
+        let cmd = build_login_exec_cmd("http://proxy:4000", &["ANTHROPIC_MODEL"]);
+        let script = cmd[2].replace(consts::CLAUDE_BINARY, &claude.display().to_string());
+        // SSOT-allow: test fixture spawn
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&script)
+            .env_clear()
+            .env("PATH", dir.path())
+            .env("ANTHROPIC_MODEL", "pinned")
+            .output()
+            .unwrap();
+        LoginRun {
+            status: output.status,
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            claude_args: std::fs::read_to_string(args_file).ok(),
+            env_seen_by_claude: std::fs::read_to_string(env_file).ok(),
+        }
+    }
+
     #[test]
-    fn build_login_exec_cmd_unsets_and_execs_auth_login() {
-        let cmd = build_login_exec_cmd(
-            "http://proxy:4000",
-            &["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL"],
+    #[cfg(unix)]
+    fn login_script_starts_auth_login_when_the_container_reaches_the_sign_in_host() {
+        let run = run_login_script("exit 0");
+        assert!(run.status.success(), "{}", run.stderr);
+        assert_eq!(run.claude_args.as_deref(), Some("auth login --claudeai\n"));
+        assert_eq!(
+            run.env_seen_by_claude.as_deref(),
+            Some("http://proxy:4000:unset\n")
         );
-        assert_eq!(cmd[0], "sh");
-        assert_eq!(cmd[1], "-lc");
-        let script = &cmd[2];
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn login_script_stops_before_auth_login_when_the_sign_in_host_is_unreachable() {
+        let run = run_login_script(
+            "echo 'curl: (6) Could not resolve host: platform.claude.com' >&2; exit 6",
+        );
+        assert_eq!(run.status.code(), Some(1));
         assert!(
-            script.contains("unset ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL"),
-            "{script}"
+            run.stderr.contains("Could not resolve host"),
+            "{}",
+            run.stderr
         );
         assert!(
-            script.contains("export ANTHROPIC_BASE_URL=http://proxy:4000"),
-            "{script}"
+            run.stderr
+                .contains("cannot reach platform.claude.com, so sign-in cannot finish"),
+            "{}",
+            run.stderr
         );
-        let exec_pos = script.find("exec ").expect("exec present");
-        let unset_pos = script.find("unset ").unwrap();
-        assert!(unset_pos < exec_pos, "unset must precede exec: {script}");
         assert!(
-            script.contains(&format!("{} auth login --claudeai", consts::CLAUDE_BINARY)),
-            "auth login subcommand: {script}"
+            run.stderr.contains("another WSL distribution"),
+            "{}",
+            run.stderr
         );
+        assert_eq!(run.claude_args, None);
     }
 
     #[test]

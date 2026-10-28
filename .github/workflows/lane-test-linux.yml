@@ -56,6 +56,9 @@ jobs:
       - name: Entrypoint tests
         run: make test-entrypoint
 
+      - name: WSL egress guard tests
+        run: make test-wsl-egress-guard
+
       - name: Release-gate tests (gh shim)
         run: make test-release-gate
 
