@@ -168,7 +168,7 @@ def cmd_lockfiles_touched(args):
 def cmd_issue_plan(args):
     with open(args.existing) as f:
         issues = json.load(f)
-    matches = [i for i in issues if i.get("title") == args.title and i.get("state") == "open"]
+    matches = [i for i in issues if i.get("title") == args.title and i.get("state", "").upper() == "OPEN"]
     if matches:
         chosen = min(matches, key=lambda i: i["number"])
         duplicates = sorted(i["number"] for i in matches if i["number"] != chosen["number"])
