@@ -924,7 +924,6 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
         frames: u64,
         /// Frames × channels — this part's share of the progress band.
         samples: u64,
-        channels: usize,
     }
     let mut plans: Vec<PartPlan> = Vec::new();
     let mut part_base = Duration::ZERO;
@@ -941,7 +940,6 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
                         part_base,
                         frames,
                         samples: frames * u64::from(spec.channels.max(1)),
-                        channels: usize::from(spec.channels),
                     });
                     part_base +=
                         Duration::from_secs_f64(frames as f64 / f64::from(spec.sample_rate));
