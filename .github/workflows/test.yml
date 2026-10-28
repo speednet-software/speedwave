@@ -18,13 +18,33 @@ jobs:
   lint:
     uses: ./.github/workflows/lane-lint.yml
 
-  test-rust:
+  test-rust-1:
+    uses: ./.github/workflows/lane-test-rust.yml
+
+  test-rust-2:
+    needs: test-rust-1
+    if: ${{ !cancelled() && contains(fromJSON('["cancelled", "abandoned"]'), needs.test-rust-1.result) }}
+    uses: ./.github/workflows/lane-test-rust.yml
+
+  test-rust-3:
+    needs: test-rust-2
+    if: ${{ !cancelled() && contains(fromJSON('["cancelled", "abandoned"]'), needs.test-rust-2.result) }}
     uses: ./.github/workflows/lane-test-rust.yml
 
   test-linux:
     uses: ./.github/workflows/lane-test-linux.yml
 
-  test-macos:
+  test-macos-1:
+    uses: ./.github/workflows/lane-test-macos.yml
+
+  test-macos-2:
+    needs: test-macos-1
+    if: ${{ !cancelled() && contains(fromJSON('["cancelled", "abandoned"]'), needs.test-macos-1.result) }}
+    uses: ./.github/workflows/lane-test-macos.yml
+
+  test-macos-3:
+    needs: test-macos-2
+    if: ${{ !cancelled() && contains(fromJSON('["cancelled", "abandoned"]'), needs.test-macos-2.result) }}
     uses: ./.github/workflows/lane-test-macos.yml
 
   test-windows:
@@ -36,8 +56,29 @@ jobs:
   audit:
     uses: ./.github/workflows/lane-audit.yml
 
-  build:
+  build-windows:
     uses: ./.github/workflows/lane-build.yml
+    with:
+      platform: windows-latest
+
+  build-macos-1:
+    uses: ./.github/workflows/lane-build.yml
+    with:
+      platform: macos-latest
+
+  build-macos-2:
+    needs: build-macos-1
+    if: ${{ !cancelled() && contains(fromJSON('["cancelled", "abandoned"]'), needs.build-macos-1.result) }}
+    uses: ./.github/workflows/lane-build.yml
+    with:
+      platform: macos-latest
+
+  build-macos-3:
+    needs: build-macos-2
+    if: ${{ !cancelled() && contains(fromJSON('["cancelled", "abandoned"]'), needs.build-macos-2.result) }}
+    uses: ./.github/workflows/lane-build.yml
+    with:
+      platform: macos-latest
 
   architecture:
     uses: ./.github/workflows/lane-architecture.yml
@@ -49,13 +90,20 @@ jobs:
     if: always()
     needs:
       - lint
-      - test-rust
+      - test-rust-1
+      - test-rust-2
+      - test-rust-3
       - test-linux
-      - test-macos
+      - test-macos-1
+      - test-macos-2
+      - test-macos-3
       - test-windows
       - ci-config
       - audit
-      - build
+      - build-windows
+      - build-macos-1
+      - build-macos-2
+      - build-macos-3
       - architecture
       - security
     runs-on: ubuntu-latest
