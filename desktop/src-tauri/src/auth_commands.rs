@@ -933,12 +933,7 @@ mod tests {
         assert_eq!(shell_escape_single_quoted(""), "");
     }
 
-    fn run_command(
-        project: &str,
-        dir: &str,
-        dd: &std::path::Path,
-        is_windows: bool,
-    ) -> String {
+    fn run_command(project: &str, dir: &str, dd: &std::path::Path, is_windows: bool) -> String {
         build_project_cli_command_for_platform(
             CliInvocation::Run,
             project,
@@ -1146,13 +1141,8 @@ mod tests {
     fn build_auth_command_default_data_dir() {
         let home = std::path::Path::new("/Users/test");
         let dd = std::path::Path::new("/Users/test/.speedwave");
-        let cmd = build_auth_command_for_platform(
-            "myproj",
-            "/Users/test/Projects",
-            home,
-            dd,
-            false,
-        );
+        let cmd =
+            build_auth_command_for_platform("myproj", "/Users/test/Projects", home, dd, false);
         assert_eq!(
             cmd,
             "cd '/Users/test/Projects' && '/Users/test/.local/bin/speedwave' login --project 'myproj'"
