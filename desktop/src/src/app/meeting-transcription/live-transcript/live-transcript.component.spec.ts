@@ -14,6 +14,7 @@ import {
 } from '../../services/chat-state.service';
 import { Clipboard } from '@angular/cdk/clipboard';
 import type {
+  AudioSource,
   DownloadProgress,
   RecommendedModelEntry,
   Segment,
@@ -251,20 +252,29 @@ describe('LiveTranscriptComponent', () => {
     const q = (id: string): HTMLElement | null =>
       fixture.nativeElement.querySelector(`[data-testid="${id}"]`);
 
-    function openDone(kind: 'microphone' | 'system_wide' | 'imported_file', asked: boolean): void {
+    function openDone(
+      kind: AudioSource['kind'],
+      asked: boolean,
+      finalize = 'large',
+      state: 'done' | 'postponed' = 'done'
+    ): void {
       svc.speakerAttribution.mockReturnValue(asked);
       fixture = TestBed.createComponent(LiveTranscriptComponent);
       component = fixture.componentInstance;
-      svc.recordings.set([row()]);
-      const source =
-        kind === 'microphone' ? { kind, device: null } : ({ kind } as { kind: typeof kind });
+      svc.recordings.set([row({ finalize_model: finalize, status: { state } })]);
+      const sources: Record<AudioSource['kind'], AudioSource> = {
+        microphone: { kind: 'microphone', device: null },
+        mixed: { kind: 'mixed', mic: null },
+        system_wide: { kind: 'system_wide' },
+        imported_file: { kind: 'imported_file' },
+      };
       fixture.componentRef.setInput(
         'session',
         session({
-          status: { state: 'done' },
-          audio_source: { source, label: 'Source' },
+          status: { state },
+          audio_source: { source: sources[kind], label: 'Source' },
           final_segments: [seg(0, 'hi')],
-          models_used: { live: null, finalize: 'large' },
+          models_used: { live: null, finalize },
         })
       );
       fixture.detectChanges();
@@ -284,6 +294,15 @@ describe('LiveTranscriptComponent', () => {
       expect(q('transcript-quality')).toBeNull();
       openDone('imported_file', true);
       expect(q('transcript-quality')).toBeNull();
+      openDone('mixed', true);
+      expect(q('transcript-quality')).toBeNull();
+    });
+
+    it('keeps the smaller-model and put-off lines ahead of it', () => {
+      openDone('microphone', true, 'small');
+      expect(q('transcript-quality')!.textContent).toContain('Made with a smaller model');
+      openDone('microphone', true, 'large', 'postponed');
+      expect(q('transcript-quality')!.textContent).not.toContain('Speaker labels');
     });
   });
 

@@ -577,7 +577,6 @@ export class LiveTranscriptComponent {
   private readonly injector = inject(Injector);
   private readonly clipboard = inject(Clipboard);
 
-  /** The Settings switch "Tell speakers apart in the meeting audio", read when the pane opens. */
   private readonly speakerAttribution = this.transcription.speakerAttribution();
 
   /** Effective segments: `final_segments` if the offline pass ran, else live. */
@@ -688,7 +687,6 @@ export class LiveTranscriptComponent {
     }
   });
 
-  /** Speaker labels were asked for, but a recording of the microphone alone is never diarized. */
   private readonly microphoneOnlyWithoutLabels = computed(() => {
     return this.speakerAttribution && this.session()?.audio_source.source.kind === 'microphone';
   });

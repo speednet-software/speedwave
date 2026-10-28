@@ -655,15 +655,13 @@ fn spawn_offline_pass(
                 }
             };
         let diarizer = offline_diarizer(&models_arc, speaker_mode, transcription::gpu_class());
-        let (language, source) = session_pass_inputs(&store_arc, id);
         let cfg = FinalizeConfig {
             id,
             store: store_arc.clone(),
             audio_paths,
             transcriber,
-            transcribe_opts: TranscribeOptions::for_language(language),
+            transcribe_opts: TranscribeOptions::for_language(session_language(&store_arc, id)),
             pass,
-            source,
             diarizer,
         };
         match speedwave_runtime::transcription::run_finalize(cfg) {
@@ -781,19 +779,9 @@ fn source_label(
     generic(src)
 }
 
-/// Reads a session's forced language and audio source; PL and the default microphone, which has
-/// no meeting lane to diarize, when it can't be read (logged).
-fn session_pass_inputs(store: &TranscriptStore, id: Uuid) -> (Language, AudioSource) {
-    match store.get(id) {
-        Ok(s) => (s.language, s.audio_source.source),
-        Err(e) => {
-            log::warn!(
-                "offline pass for {} could not read its session ({e}); it runs in Polish without speaker labels",
-                short_id(id)
-            );
-            (Language::Pl, AudioSource::Microphone { device: None })
-        }
-    }
+/// Reads a session's forced language (defaults to PL if it can't be read).
+fn session_language(store: &TranscriptStore, id: Uuid) -> Language {
+    store.get(id).map(|s| s.language).unwrap_or(Language::Pl)
 }
 
 /// Picks the model for the offline pass: this build's finalize model if downloaded, else the
@@ -1846,19 +1834,13 @@ mod tests {
     }
 
     #[test]
-    fn session_pass_inputs_read_the_session_or_default_to_pl_without_a_meeting_lane() {
+    fn session_language_reads_the_session_or_defaults_to_pl() {
         let dir = tempfile::tempdir().unwrap();
         let store = TranscriptStore::with_root(dir.path());
         let id = mk_session_in(&store);
-        assert_eq!(
-            session_pass_inputs(&store, id),
-            (Language::Pl, AudioSource::SystemWide)
-        );
+        assert_eq!(session_language(&store, id), Language::Pl);
         let missing = Uuid::new_v4();
-        assert_eq!(
-            session_pass_inputs(&store, missing),
-            (Language::Pl, AudioSource::Microphone { device: None })
-        );
+        assert_eq!(session_language(&store, missing), Language::Pl);
     }
 
     fn write_sparse_diarization_model(models: &ModelStore) {
