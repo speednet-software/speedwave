@@ -6,6 +6,8 @@ const CLAUDE_CODE_MAX_TOKENS = 16_384;
 
 const FETCH_TIMEOUT_MS = 20_000;
 
+const ANTHROPIC_API_VERSION = '2023-06-01';
+
 const LOCAL_MODEL_PROBE_MAX_TOKENS = 16;
 const LOCAL_MODEL_PROBE_TIMEOUT_MS = 120_000;
 const LOCAL_MODEL_PROBE_ATTEMPTS = 6;
@@ -71,6 +73,41 @@ async function checkOpenrouter(): Promise<PreflightFailure | null> {
   return { service: 'OpenRouter', reason: `probe returned HTTP ${res.status}. ${detail}` };
 }
 
+async function checkAnthropic(): Promise<PreflightFailure | null> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    return {
+      service: 'Anthropic',
+      reason: 'ANTHROPIC_API_KEY is not set (`set -a && source .env`)',
+    };
+  }
+  let res: Response;
+  try {
+    res = await fetch('https://api.anthropic.com/v1/models', {
+      headers: { 'x-api-key': apiKey, 'anthropic-version': ANTHROPIC_API_VERSION },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+  } catch (e) {
+    return { service: 'Anthropic', reason: `probe request failed: ${(e as Error).message}` };
+  }
+  if (res.ok) return null;
+
+  const detail = (await res.text().catch(() => '')).slice(0, 300).trim();
+  if (res.status === 401 || res.status === 403) {
+    return {
+      service: 'Anthropic',
+      reason: `HTTP ${res.status}: ANTHROPIC_API_KEY is invalid, revoked or lacks access. ${detail}`,
+    };
+  }
+  if (res.status === 429) {
+    return {
+      service: 'Anthropic',
+      reason: `HTTP 429: the account is rate limited or out of quota. ${detail}`,
+    };
+  }
+  return { service: 'Anthropic', reason: `probe returned HTTP ${res.status}. ${detail}` };
+}
+
 /** True when the server answers FROM THIS HOST on the catalog path production
  *  uses (`discovery.rs` → `{base}/v1/models`); bare `/models` 404s on LM Studio. */
 async function localLlmReachable(): Promise<boolean> {
@@ -133,7 +170,11 @@ function hasStopReason(body: string): boolean {
 /** Fatal preconditions, empty when the suite may run. An unreachable local LLM is not
  *  fatal — it marks spec 11 and the live-server tests of spec 12 skippable so the rest keep reporting. */
 export async function runPreflight(): Promise<PreflightFailure[]> {
-  const [openrouter, localOk] = await Promise.all([checkOpenrouter(), localLlmReachable()]);
+  const [openrouter, anthropic, localOk] = await Promise.all([
+    checkOpenrouter(),
+    checkAnthropic(),
+    localLlmReachable(),
+  ]);
   const modelProblem = localOk ? await localModelProblem() : null;
   const target = process.env.LOCAL_LLM_BASE_URL || '(LOCAL_LLM_BASE_URL unset)';
 
@@ -154,7 +195,7 @@ export async function runPreflight(): Promise<PreflightFailure[]> {
     );
   }
 
-  return openrouter ? [openrouter] : [];
+  return [openrouter, anthropic].filter((f): f is PreflightFailure => f !== null);
 }
 
 /** True when preflight found no route to the local LLM from this host. */

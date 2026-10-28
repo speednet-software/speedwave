@@ -107,6 +107,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-099](ADR-099-find-in-chat-with-css-custom-highlight.md)           | Find in the active chat tab: rendered-text matching, one highlighted match through the CSS Custom Highlight API             | Accepted                                                                           |
 | [ADR-100](ADR-100-native-os-notifications-for-chat-session-events.md)  | Native OS notifications for chat-session events: backend-decided, native permission read, click opens the tab               | Accepted                                                                           |
 | [ADR-104](ADR-104-apple-mail-control-through-applescript.md)           | Apple Mail control through AppleScript: gates, Trash-only delete, read-only rules, and living with Mail 16 bugs             | Accepted                                                                           |
+| [ADR-105](ADR-105-caller-shaped-jira-tools-in-the-atlassian-worker.md) | Caller-shaped Jira tools in the Atlassian worker: API designed from the caller side, decoupled from Jira REST               | Accepted                                                                           |
 
 ## Creating a New ADR
 

@@ -117,11 +117,24 @@ fn apply_llm_config_proxy(
             };
         }
     }
-    extra_env.insert(
-        "CLAUDE_CODE_ATTRIBUTION_HEADER".to_string(),
-        "0".to_string(),
-    );
+    if !keeps_attribution_block(entry.kind, &model) {
+        extra_env.insert(
+            "CLAUDE_CODE_ATTRIBUTION_HEADER".to_string(),
+            "0".to_string(),
+        );
+    }
     inject_claude_env(yaml, &extra_env)
+}
+
+fn keeps_attribution_block(kind: LlmProviderKind, model: &str) -> bool {
+    match kind {
+        LlmProviderKind::AnthropicApiKey => true,
+        LlmProviderKind::Local => model
+            .rsplit('/')
+            .next()
+            .is_some_and(|name| name.to_ascii_lowercase().starts_with("claude-")),
+        LlmProviderKind::AnthropicOauth | LlmProviderKind::OpenRouter => false,
+    }
 }
 
 fn apply_llm_config_legacy_in(
@@ -188,11 +201,13 @@ fn apply_llm_config_legacy_in(
                     consts::CLAUDE_DISABLE_NONESSENTIAL_TRAFFIC_ENV.to_string(),
                     "1".to_string(),
                 ),
-                (
+            ]);
+            if !keeps_attribution_block(LlmProviderKind::Local, model) {
+                extra_env.insert(
                     "CLAUDE_CODE_ATTRIBUTION_HEADER".to_string(),
                     "0".to_string(),
-                ),
-            ]);
+                );
+            }
 
             if llm.has_custom_headers {
                 if let Some(headers) =
@@ -287,7 +302,7 @@ pub(crate) fn provider_display_label(provider: &str) -> &'static str {
 }
 
 /// Env keys `speedwave login` clears so Anthropic OAuth runs unshadowed by a
-/// non-Anthropic provider. Excludes re-exported BASE_URL + cache-only ATTRIBUTION_HEADER.
+/// non-Anthropic provider. Excludes re-exported BASE_URL + ATTRIBUTION_HEADER, which the OAuth proxy path keeps at `0`.
 pub fn anthropic_login_unset_keys() -> &'static [&'static str] {
     &[
         "ANTHROPIC_AUTH_TOKEN",
@@ -837,5 +852,58 @@ mod tests {
             rendered.contains("ANTHROPIC_CUSTOM_MODEL_OPTION_NAME=llama3.3 (Ollama)"),
             "ollama display name must use 'Ollama' label, got: {rendered}"
         );
+    }
+
+    #[test]
+    fn attribution_block_stays_on_only_for_claude_billed_by_api_key() {
+        use crate::config::LlmProviderKind::{AnthropicApiKey, AnthropicOauth, Local, OpenRouter};
+        let litellm = Some("http://host.docker.internal:4000");
+        let cases = [
+            (Local, litellm, "claude-opus-5-5", false),
+            (Local, litellm, "claude-haiku-5-5", false),
+            (Local, litellm, "anthropic/claude-opus-5-5", false),
+            (Local, litellm, "prov/claude-opus-5-5", false),
+            (Local, litellm, "Claude-Sonnet-5", false),
+            (Local, litellm, "qwen3.6-35b-a3b", true),
+            (Local, litellm, "my-claude-finetune", true),
+            (Local, litellm, "claude-finetunes/qwen3", true),
+            (OpenRouter, None, "anthropic/claude-opus-5-5", true),
+            (OpenRouter, None, "qwen/qwen3-coder", true),
+            (AnthropicApiKey, None, "claude-opus-5-5", false),
+            (AnthropicOauth, None, "claude-opus-5-5", true),
+        ];
+        for (kind, base_url, model, disabled) in cases {
+            let rendered = apply_llm_config_proxy(
+                CLAUDE_ENV_YAML,
+                &proxy_cfg("prov", kind, base_url, model),
+                "test-caller-token",
+            )
+            .unwrap();
+            assert_eq!(
+                rendered.contains("CLAUDE_CODE_ATTRIBUTION_HEADER=0"),
+                disabled,
+                "{kind:?} with {model}: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn direct_local_path_keeps_the_attribution_block_only_for_claude_models() {
+        let tmp = tempfile::tempdir().unwrap();
+        for (model, disabled) in [("claude-opus-5-5", false), ("qwen3.6-35b-a3b", true)] {
+            let llm = crate::config::LlmConfig {
+                provider: Some("local".to_string()),
+                base_url: Some("http://host.docker.internal:4000".to_string()),
+                model: Some(model.to_string()),
+                ..Default::default()
+            };
+            let rendered =
+                apply_llm_config_legacy_in(tmp.path(), CLAUDE_ENV_YAML, &llm, "proj").unwrap();
+            assert_eq!(
+                rendered.contains("CLAUDE_CODE_ATTRIBUTION_HEADER=0"),
+                disabled,
+                "{model}: {rendered}"
+            );
+        }
     }
 }

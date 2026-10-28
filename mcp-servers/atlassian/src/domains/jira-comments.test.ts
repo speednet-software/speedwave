@@ -43,9 +43,7 @@ describe('add', () => {
     expect(comment).toMatchObject({ id: '5', created: 't1', updated: 't2' });
     expect(comment.author).toEqual({
       account_id: 'u1',
-      display_name: 'A',
-      email_address: undefined,
-      active: true,
+      name: 'A',
     });
   });
 

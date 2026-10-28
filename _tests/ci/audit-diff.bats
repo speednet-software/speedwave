@@ -4,9 +4,9 @@ REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
 
 _init_audit_repo() {
   FIXTURE="$BATS_TEST_TMPDIR/repo"
-  mkdir -p "$FIXTURE/scripts" "$FIXTURE/mcp-servers" "$FIXTURE/desktop/src" "$FIXTURE/desktop/src-tauri" "$FIXTURE/desktop/e2e" "$FIXTURE/mcp-servers/playwright"
+  mkdir -p "$FIXTURE/scripts" "$FIXTURE/mcp-servers" "$FIXTURE/desktop/src" "$FIXTURE/desktop/src-tauri" "$FIXTURE/desktop/e2e" "$FIXTURE/mcp-servers/playwright" "$FIXTURE/mcp-servers/office"
   cp "$REPO_ROOT/scripts/audit-diff.sh" "$REPO_ROOT/scripts/audit-changed-files.sh" \
-    "$REPO_ROOT/scripts/audit-run.sh" "$REPO_ROOT/scripts/audit-gate.py" "$FIXTURE/scripts/"
+    "$REPO_ROOT/scripts/audit-run.sh" "$REPO_ROOT/scripts/audit-gate.py" "$REPO_ROOT/scripts/python-tool.sh" "$REPO_ROOT/scripts/build-tool-versions.env" "$FIXTURE/scripts/"
   chmod +x "$FIXTURE"/scripts/*.sh
   echo '{}' >"$FIXTURE/Cargo.lock"
   echo '{}' >"$FIXTURE/desktop/src-tauri/Cargo.lock"
@@ -20,6 +20,7 @@ _init_audit_repo() {
   echo '{}' >"$FIXTURE/desktop/e2e/package-lock.json"
   echo '{}' >"$FIXTURE/mcp-servers/playwright/package.json"
   echo '{}' >"$FIXTURE/mcp-servers/playwright/package-lock.json"
+  echo 'numpy==2.2.2' >"$FIXTURE/mcp-servers/office/requirements.txt"
   echo '[]' >"$FIXTURE/scripts/audit-exceptions.json"
   echo "readme" >"$FIXTURE/README.md"
   git -C "$FIXTURE" init -q
@@ -31,6 +32,10 @@ _init_audit_repo() {
 
   FAKE_BIN="$BATS_TEST_TMPDIR/fakebin"
   mkdir -p "$FAKE_BIN"
+  TOOL_CACHE="$BATS_TEST_TMPDIR/toolcache"
+  export SPEEDWAVE_TOOL_CACHE="$TOOL_CACHE"
+  PIP_AUDIT_STUB="$TOOL_CACHE/pip-audit-$(awk -F= '$1 == "PIP_AUDIT_VERSION" { print $2 }' "$REPO_ROOT/scripts/build-tool-versions.env")/bin/pip-audit"
+  mkdir -p "$(dirname "$PIP_AUDIT_STUB")"
   cat >"$FAKE_BIN/npm" <<'EOF'
 #!/usr/bin/env bash
 echo '{"vulnerabilities": {}, "metadata": {"vulnerabilities": {"total": 0}}}'
@@ -50,7 +55,22 @@ else
   echo '{"vulnerabilities": {"found": false, "count": 0, "list": []}}'
 fi
 EOF
-  chmod +x "$FAKE_BIN/npm" "$FAKE_BIN/cargo"
+  cat >"$PIP_AUDIT_STUB" <<'EOF'
+#!/usr/bin/env bash
+file=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -r) file="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ -n "$file" ] && grep -q VULN-MARKER "$file" 2>/dev/null; then
+  echo '{"dependencies": [{"name": "numpy", "version": "2.2.2", "vulns": [{"id": "PYSEC-2099-1", "aliases": [], "description": "test advisory"}]}], "fixes": []}'
+  exit 1
+fi
+echo '{"dependencies": [{"name": "numpy", "version": "2.2.2", "vulns": []}], "fixes": []}'
+EOF
+  chmod +x "$FAKE_BIN/npm" "$FAKE_BIN/cargo" "$PIP_AUDIT_STUB"
 }
 
 @test "a diff that never touches a lockfile is green without running an audit tool" {
@@ -154,6 +174,32 @@ EOF
   echo '{"changed": true}' >"$FIXTURE/Cargo.lock"
   git -C "$FIXTURE" add -A
   git -C "$FIXTURE" commit -q -m head
+  run bash -c "cd '$FIXTURE' && PATH='$FAKE_BIN:$PATH' AUDIT_BASE_SHA='$BASE' ./scripts/audit-diff.sh"
+  [ "$status" -eq 0 ]
+}
+
+@test "a PR adding a vulnerable pinned Python dependency is red with the named failure" {
+  _init_audit_repo
+  echo "numpy==2.2.2 VULN-MARKER" >"$FIXTURE/mcp-servers/office/requirements.txt"
+  git -C "$FIXTURE" add -A
+  git -C "$FIXTURE" commit -q -m head
+
+  run bash -c "cd '$FIXTURE' && PATH='$FAKE_BIN:$PATH' AUDIT_BASE_SHA='$BASE' ./scripts/audit-diff.sh"
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "PYSEC-2099-1" ]]
+  [[ "$output" =~ "PR introduces a dependency with a known vulnerability" ]]
+}
+
+@test "a Python advisory already on the target branch does not red the PR" {
+  _init_audit_repo
+  echo "numpy==2.2.2 VULN-MARKER" >"$FIXTURE/mcp-servers/office/requirements.txt"
+  git -C "$FIXTURE" add -A
+  git -C "$FIXTURE" commit -q -m base-vuln
+  BASE="$(git -C "$FIXTURE" rev-parse HEAD)"
+  echo "numpy==2.2.2 VULN-MARKER bump" >"$FIXTURE/mcp-servers/office/requirements.txt"
+  git -C "$FIXTURE" add -A
+  git -C "$FIXTURE" commit -q -m head
+
   run bash -c "cd '$FIXTURE' && PATH='$FAKE_BIN:$PATH' AUDIT_BASE_SHA='$BASE' ./scripts/audit-diff.sh"
   [ "$status" -eq 0 ]
 }

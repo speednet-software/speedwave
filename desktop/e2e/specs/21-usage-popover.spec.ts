@@ -1,5 +1,12 @@
 import { switchToProject, activeProjectSlug } from '../helpers/projects';
-import { openChat, openSettings, sendMessageAndWait, startNewConversation } from '../helpers/llm';
+import {
+  openChat,
+  sendMessageAndWait,
+  startNewConversation,
+  configureAnthropicApiKey,
+  removeAnthropicApiKey,
+  requireAnthropicKey,
+} from '../helpers/llm';
 import { invokeOr } from '../helpers/tauri-invoke';
 
 const ROUTED_PROJECT = 'e2e-test';
@@ -215,26 +222,19 @@ describe('Usage Ring + Popover', function () {
     let method = '';
 
     before(async function () {
-      this.timeout(180_000);
+      this.timeout(600_000);
       if ((await activeProjectSlug()) !== ANTHROPIC_PROJECT) {
         await switchToProject(ANTHROPIC_PROJECT);
       }
-      await openSettings();
-      const anthropicCard = await $('[data-testid="settings-llm-provider-anthropic"]');
-      await anthropicCard.waitForExist({ timeout: 15_000 });
-      await anthropicCard.click();
-      const authPill = await $('[data-testid="auth-status-value"]');
-      await authPill.waitForExist({ timeout: 15_000 });
-      try {
-        await browser.waitUntil(async () => (await authPill.getText()).includes('connected'), {
-          timeout: 20_000,
-        });
-      } catch {
-        this.skip();
-      }
+      await configureAnthropicApiKey(requireAnthropicKey());
       method = (await (await $('[data-testid="auth-status-method"]')).getText()).trim();
       await openChat();
       await startNewConversation();
+    });
+
+    after(async function () {
+      this.timeout(600_000);
+      await removeAnthropicApiKey();
     });
 
     it('shows the context window of a fresh session before the first turn', async function () {

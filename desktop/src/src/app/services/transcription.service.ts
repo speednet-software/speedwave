@@ -314,6 +314,15 @@ export class TranscriptionService {
   }
 
   /**
+   * Asks the host for an audio file and transcribes it like a stopped recording.
+   * @param language - forced PL/EN the file is transcribed in.
+   * @returns the new recording's id, or null when the file picker was closed.
+   */
+  importFile(language: Language): Promise<string | null> {
+    return this.tauri.invoke<string | null>('import_transcription', { language });
+  }
+
+  /**
    * Resumes a finished or paused recording: a new part appends to the same transcript, and the
    * clock goes on from the length already recorded.
    * @param sessionId - the Done or Paused session to reopen.

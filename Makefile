@@ -9,6 +9,7 @@ NPX := npx
 endif
 
 ANGULAR_NPM_INSTALL := desktop/src/node_modules/.package-lock.json
+TAURI := $(NPX) --prefix ../src tauri
 MCP_NPM_INSTALL := mcp-servers/node_modules/.package-lock.json
 
 DEV_INSTANCE ?= dev
@@ -109,7 +110,7 @@ dev-config: guard-dev-instance
         check-clippy check-desktop-clippy check-proxy-clippy check-angular check-mcp check-fmt \
         check-mcp-lint check-angular-lint check-all \
         coverage coverage-rust coverage-mcp coverage-html \
-        audit audit-rust audit-npm audit-root audit-mcp audit-playwright audit-desktop audit-e2e \
+        audit audit-rust audit-npm audit-root audit-mcp audit-playwright audit-desktop audit-e2e audit-office lock-office \
         fmt lint status \
         download-lima clean-lima \
         download-nodejs clean-nodejs \
@@ -156,11 +157,11 @@ setup-dev:
 	\
 	echo ""; \
 	echo "── Tauri CLI ──"; \
-	if command -v cargo-tauri >/dev/null 2>&1; then \
-		echo "  ✅ cargo-tauri $$(cargo tauri --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo 'installed')"; \
+	if "$(MAKE)" --no-print-directory $(ANGULAR_NPM_INSTALL) >/dev/null && TAURI_VER=$$(cd desktop/src-tauri && $(TAURI) --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+'); then \
+		echo "  ✅ @tauri-apps/cli $$TAURI_VER (desktop/src/package-lock.json)"; \
 	else \
-		echo "  📦 cargo-tauri not found — installing..."; \
-		cargo install tauri-cli && echo "  ✅ cargo-tauri installed" || { echo "  ❌ cargo-tauri install failed"; FAIL=1; }; \
+		echo "  ❌ @tauri-apps/cli not usable (npm ci in desktop/src failed)"; \
+		FAIL=1; \
 	fi; \
 	\
 	echo ""; \
@@ -180,18 +181,7 @@ setup-dev:
 		echo "  📦 wasm32-unknown-unknown target not found, installing..."; \
 		rustup target add wasm32-unknown-unknown && echo "  ✅ wasm32-unknown-unknown installed" || { echo "  ❌ target install failed"; FAIL=1; }; \
 	fi; \
-	if command -v wasm-pack >/dev/null 2>&1; then \
-		echo "  ✅ wasm-pack $$(wasm-pack --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo 'installed')"; \
-	else \
-		echo "  📦 wasm-pack not found, installing..."; \
-		if npm install -g wasm-pack >/dev/null 2>&1 && command -v wasm-pack >/dev/null 2>&1; then \
-			echo "  ✅ wasm-pack installed (npm)"; \
-		elif cargo install wasm-pack; then \
-			echo "  ✅ wasm-pack installed (cargo)"; \
-		else \
-			echo "  ❌ wasm-pack install failed"; FAIL=1; \
-		fi; \
-	fi; \
+	scripts/install-wasm-pack.sh || { echo "  ❌ wasm-pack install failed"; FAIL=1; }; \
 	\
 	echo ""; \
 	echo "── macOS system deps (Tauri) ──"; \
@@ -298,7 +288,7 @@ else
 endif
 	@"$(MAKE)" verify-bundled-assets
 	@app_version="$${SPEEDWAVE_VERSION:-$$(cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- version --repo $(CURDIR) 2>/dev/null || echo 0.0.0)}"; \
-	cd desktop/src-tauri && SPEEDWAVE_VERSION="$$app_version" cargo tauri build \
+	cd desktop/src-tauri && SPEEDWAVE_VERSION="$$app_version" $(TAURI) build \
 	  --config "{\"version\":\"$$app_version\"}"
 	@echo "\n✅ Tauri production bundle built"
 
@@ -488,7 +478,8 @@ test-mcp-office-py:
 	echo "  building office Python test venv ($$PY) at $$VENV..."; \
 	"$$PY" -m venv --clear "$$VENV"; \
 	"$$VENV/bin/pip" install -q --upgrade pip; \
-	"$$VENV/bin/pip" install -q -r mcp-servers/office/requirements.txt pytest; \
+	"$$VENV/bin/pip" install -q --require-hashes --no-deps -r mcp-servers/office/requirements.txt; \
+	"$$VENV/bin/pip" install -q pytest; \
 	"$$VENV/bin/python" -m pytest mcp-servers/office/scripts -q; status=$$?; \
 	rm -rf "$$VENV"; exit $$status
 	@echo "✅ Office Python script tests passed"
@@ -583,9 +574,12 @@ test-ci:
 	  _tests/ci/bats-suite-wiring.bats \
 	  _tests/ci/audit-gate.bats _tests/ci/audit-changed-files.bats \
 	  _tests/ci/audit-run.bats _tests/ci/audit-diff.bats _tests/ci/audit-issue.bats \
-	  _tests/ci/resolve-pr-title-message.bats _tests/ci/dependabot-triage.bats \
-	  _tests/ci/install-wasm-bindgen.bats _tests/ci/ci-clean-cargo-target.bats \
-	  _tests/ci/sha256.bats
+	  _tests/ci/resolve-pr-title-message.bats _tests/ci/merge-queue-comment.bats \
+	  _tests/ci/promotion-gate.bats \
+	  _tests/ci/dependabot-triage.bats \
+	  _tests/ci/install-wasm-bindgen.bats _tests/ci/install-wasm-pack.bats \
+	  _tests/ci/ci-clean-cargo-target.bats \
+	  _tests/ci/sha256.bats _tests/ci/lock-office.bats
 	@echo "✅ CI workflow tests passed"
 
 test-desktop-build: build-angular build-mcp
@@ -624,7 +618,7 @@ test-release-gate:
 	  _tests/desktop/beta-release-notes.bats
 	@echo "✅ Release-gate tests passed"
 
-test-e2e-desktop-build: build-cli build-mcp build-os-cli prepare-pii-ner-model
+test-e2e-desktop-build: build-cli build-mcp build-os-cli prepare-pii-ner-model $(ANGULAR_NPM_INSTALL)
 	@if [ "$$(uname)" = "Darwin" ] && [ ! -s desktop/src-tauri/lima/bin/limactl ]; then "$(MAKE)" download-lima; fi
 	@if [ "$(OS)" = "Windows_NT" ] && [ ! -s desktop/src-tauri/wsl/nerdctl-full.tar.gz ]; then "$(MAKE)" download-wsl-resources; fi
 	@if [ ! -f desktop/src-tauri/nodejs/bin/node ] && [ ! -f desktop/src-tauri/nodejs/node.exe ]; then "$(MAKE)" download-nodejs; fi
@@ -642,7 +636,7 @@ endif
 	@"$(MAKE)" bundle-static-licenses
 	@"$(MAKE)" verify-bundled-assets
 	@echo "── Building release binary with bundle (e2e feature = WebDriver on :4445)..."
-	cd desktop/src-tauri && cargo tauri build --features e2e $(if $(TAURI_SIGNING_PRIVATE_KEY),,--no-sign)
+	cd desktop/src-tauri && $(TAURI) build --features e2e $(if $(TAURI_SIGNING_PRIVATE_KEY),,--no-sign)
 	@echo "── Installing E2E deps..."
 	cd desktop/e2e && $(NPM) install --prefer-offline
 
@@ -761,18 +755,12 @@ check-angular-lint: $(ANGULAR_NPM_INSTALL)
 	cd desktop/src && $(NPX) eslint 'src/**/*.ts'
 	@echo "✅ Angular ESLint passed"
 
-audit: audit-rust audit-npm
+audit: audit-rust audit-npm audit-office
 	@echo "\n✅ No known vulnerabilities without a valid exception"
 
 AUDIT_EXCEPTIONS := scripts/audit-exceptions.json
 AUDIT_TMP := .audit-tmp
 
-# scripts/audit-run.sh is the single source of the audited lockfile paths and
-# the cargo-audit/npm-audit invocations; scripts/audit-diff.sh (PR lane) and
-# scripts/audit-issue.sh (audit-schedule.yml) call the same script. The npm
-# severity threshold has one source too: audit-gate.py's own default, read by
-# audit-run.sh when NPM_AUDIT_LEVEL is not set and left unset here so
-# audit-gate.py's matching default applies on both sides.
 audit-rust:
 	@command -v cargo-audit >/dev/null 2>&1 || { echo "❌ cargo-audit not found. Install: cargo install cargo-audit"; exit 1; }
 	@mkdir -p $(AUDIT_TMP)
@@ -818,6 +806,16 @@ audit-e2e:
 	python3 scripts/audit-gate.py absolute --exceptions $(AUDIT_EXCEPTIONS) \
 	  --report npm:$(AUDIT_TMP)/npm-e2e.json
 	@echo "✅ Desktop e2e dependencies: no vulnerabilities without a valid exception"
+
+audit-office:
+	@mkdir -p $(AUDIT_TMP)
+	scripts/audit-run.sh pip-office $(AUDIT_TMP)/pip-office.json
+	python3 scripts/audit-gate.py absolute --exceptions $(AUDIT_EXCEPTIONS) \
+	  --report pip:$(AUDIT_TMP)/pip-office.json
+	@echo "✅ Office Python dependencies: no vulnerabilities without a valid exception"
+
+lock-office:
+	scripts/lock-office.sh
 
 check-all: check test coverage audit
 	@echo "\n✅ Full quality gate passed — safe to push"
@@ -954,7 +952,6 @@ clean-wsl-resources:
 
 ifeq ($(OS),Windows_NT)
 dev: guard-not-prod-data-dir guard-dev-port download-nodejs download-wsl-resources generate-installer-nsh prepare-pii-ner-model $(ANGULAR_NPM_INSTALL)
-	@command -v cargo-tauri >/dev/null 2>&1 || { echo "❌ cargo-tauri not found. Install: cargo install tauri-cli"; exit 1; }
 	@"$(MAKE)" build-cli && "$(MAKE)" build-os-cli && "$(MAKE)" build-mcp
 	@echo "Preparing build context..."
 	@bash scripts/bundle-build-context.sh
@@ -966,7 +963,6 @@ dev: guard-not-prod-data-dir guard-dev-port download-nodejs download-wsl-resourc
 	@bash scripts/dev-tauri-windows.sh
 else
 dev: guard-not-prod-data-dir guard-dev-port build-cli build-os-cli build-mcp download-nodejs generate-installer-nsh prepare-pii-ner-model $(ANGULAR_NPM_INSTALL)
-	@command -v cargo-tauri >/dev/null 2>&1 || { echo "❌ cargo-tauri not found. Install: cargo install tauri-cli"; exit 1; }
 	@if [ "$$(uname)" = "Darwin" ]; then "$(MAKE)" download-lima; fi
 	@echo "Preparing build context..."
 	@bash scripts/bundle-build-context.sh
@@ -978,7 +974,7 @@ dev: guard-not-prod-data-dir guard-dev-port build-cli build-os-cli build-mcp dow
 	@"$(MAKE)" verify-bundled-assets
 	app_version="$${SPEEDWAVE_VERSION:-$$(cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- version --repo $(CURDIR) 2>/dev/null || echo 0.0.0)}"; \
 	DEV_TAURI_CONFIG="$$(printf '%s' "$$DEV_TAURI_CONFIG" | sed "s/^{/{\"version\":\"$$app_version\",/")"; \
-	cd desktop/src-tauri && env -u PORT SPEEDWAVE_RESOURCES_DIR="$$(pwd)" SPEEDWAVE_ALLOW_UNSIGNED=1 SPEEDWAVE_VERSION="$$app_version" TAURI_CONFIG="$$DEV_TAURI_CONFIG" cargo tauri dev --config "$$DEV_TAURI_CONFIG"
+	cd desktop/src-tauri && env -u PORT SPEEDWAVE_RESOURCES_DIR="$$(pwd)" SPEEDWAVE_ALLOW_UNSIGNED=1 SPEEDWAVE_VERSION="$$app_version" TAURI_CONFIG="$$DEV_TAURI_CONFIG" $(TAURI) dev --config "$$DEV_TAURI_CONFIG"
 endif
 
 status: guard-not-prod-data-dir $(MCP_NPM_INSTALL) $(ANGULAR_NPM_INSTALL)

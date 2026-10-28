@@ -83,8 +83,8 @@ PROBE
 
 ensure_provisioned_macos() {
     # shellcheck disable=SC2016
-    if macos_ssh 'eval "$(/opt/homebrew/bin/brew shellenv)"; export PATH="$HOME/.cargo/bin:$PATH"; command -v npm && command -v cargo && command -v cmake && cargo tauri --version' >/dev/null 2>&1; then
-        echo "[macos] Provisioning: OK (npm + cargo + cmake + tauri-cli found)"
+    if macos_ssh 'eval "$(/opt/homebrew/bin/brew shellenv)"; export PATH="$HOME/.cargo/bin:$PATH"; command -v npm && command -v cargo && command -v cmake' >/dev/null 2>&1; then
+        echo "[macos] Provisioning: OK (npm + cargo + cmake found)"
         return
     fi
     if [ "${CI:-}" = "true" ]; then
@@ -168,6 +168,7 @@ windows_ps() {
     local ps_prefix
     ps_prefix="\$WINDOWS_WSL_DISTRO = '$(ps_squote "$WINDOWS_WSL_DISTRO")'
 \$env:OPENROUTER_API_KEY = '$(ps_squote "${OPENROUTER_API_KEY:-}")'
+\$env:ANTHROPIC_API_KEY = '$(ps_squote "${ANTHROPIC_API_KEY:-}")'
 \$env:OPENROUTER_MODEL = '$(ps_squote "${OPENROUTER_MODEL:-}")'
 \$env:LOCAL_LLM_BASE_URL = '$(ps_squote "${LOCAL_LLM_BASE_URL:-}")'
 \$env:LOCAL_LLM_API_KEY = '$(ps_squote "${LOCAL_LLM_API_KEY:-}")'
@@ -456,8 +457,10 @@ Assert-ExitCode
 Set-Location C:\speedwave-e2e
 Write-Host "── Ensuring the wasm32 target and wasm-pack for the PII engine..."
 rustup target add wasm32-unknown-unknown; Assert-ExitCode
-if (-not (Get-Command wasm-pack -ErrorAction SilentlyContinue)) {
-    cargo install wasm-pack --locked; Assert-ExitCode
+$wasmPackVersion = ((Get-Content scripts\build-tool-versions.env | Where-Object { $_ -like 'WASM_PACK_VERSION=*' }) -split '=', 2)[1].Trim()
+$wasmPackInstalled = if (Get-Command wasm-pack -ErrorAction SilentlyContinue) { (wasm-pack --version) -replace '^wasm-pack ', '' } else { '' }
+if ($wasmPackInstalled -ne $wasmPackVersion) {
+    cargo install wasm-pack --version $wasmPackVersion --locked --force; Assert-ExitCode
 }
 Write-Host "── Installing npm dependencies..."
 npm ci; Assert-ExitCode
@@ -554,7 +557,7 @@ Set-Content -Path C:\speedwave-e2e\e2e-nsis.conf.json -Value '{"bundle":{"window
 
 Write-Host "── Building Tauri release with NSIS bundle (e2e feature = WebDriver on :4445)..."
 Set-Location desktop\src-tauri
-cargo tauri build --features e2e --no-sign --bundles nsis --config C:\speedwave-e2e\e2e-nsis.conf.json
+npx --prefix ..\src tauri build --features e2e --no-sign --bundles nsis --config C:\speedwave-e2e\e2e-nsis.conf.json
 Assert-ExitCode
 Set-Location ..\..
 Write-Host "Step 4 DONE"
@@ -822,7 +825,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 eval "$(/opt/homebrew/bin/brew shellenv)"
 
 rustup target add wasm32-unknown-unknown
-command -v wasm-pack >/dev/null 2>&1 || cargo install wasm-pack --locked
+scripts/install-wasm-pack.sh
 
 npm ci
 cd mcp-servers && npm ci && cd ..
@@ -963,6 +966,7 @@ run_macos_e2e() {
     local spec_phase="${1:-}"
     {
         printf 'export OPENROUTER_API_KEY=%q\n' "${OPENROUTER_API_KEY:-}"
+        printf 'export ANTHROPIC_API_KEY=%q\n' "${ANTHROPIC_API_KEY:-}"
         printf 'export OPENROUTER_MODEL=%q\n' "${OPENROUTER_MODEL:-}"
         printf 'export LOCAL_LLM_BASE_URL=%q\n' "${LOCAL_LLM_BASE_URL:-}"
         printf 'export LOCAL_LLM_API_KEY=%q\n' "${LOCAL_LLM_API_KEY:-}"

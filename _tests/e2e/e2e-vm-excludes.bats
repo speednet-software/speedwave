@@ -290,3 +290,41 @@ _load_collect_screenshots() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"could not collect failure screenshots"* ]]
 }
+
+_load_windows_ps_capture() {
+    eval "$(sed -n '/^ps_squote()/,/^}/p;/^windows_ps()/,/^}/p' "$SCRIPT")"
+    WINDOWS_SSH_OPTS=""
+    WINDOWS_SSH_PORT=22
+    WINDOWS_HOST="runner@127.0.0.1"
+    WINDOWS_WSL_DISTRO="Ubuntu-22.04"
+    _stub ssh 'exit 0'
+    _stub scp 'src=""; for a in "$@"; do case "$a" in /*) src="$a" ;; esac; done; cp "$src" "$BATS_TEST_TMPDIR/uploaded.ps1"'
+    PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+}
+
+@test "windows_ps hands ANTHROPIC_API_KEY to the script as a quoted PowerShell literal" {
+    _load_windows_ps_capture
+    ANTHROPIC_API_KEY="sk-ant-o'brien" run windows_ps <<<'Write-Output ok'
+    [ "$status" -eq 0 ]
+    grep -qxF "\$env:ANTHROPIC_API_KEY = 'sk-ant-o''brien'" "$BATS_TEST_TMPDIR/uploaded.ps1"
+}
+
+@test "windows_ps sets ANTHROPIC_API_KEY to an empty literal when the key is unset" {
+    _load_windows_ps_capture
+    run env -u ANTHROPIC_API_KEY bash -c '
+        eval "$(sed -n "/^ps_squote()/,/^}/p;/^windows_ps()/,/^}/p" "$1")"
+        WINDOWS_SSH_OPTS=""; WINDOWS_SSH_PORT=22; WINDOWS_HOST=r@h; WINDOWS_WSL_DISTRO=d
+        PATH="$2/bin:$PATH"
+        windows_ps <<<"Write-Output ok"' _ "$SCRIPT" "$BATS_TEST_TMPDIR"
+    [ "$status" -eq 0 ]
+    grep -qxF "\$env:ANTHROPIC_API_KEY = ''" "$BATS_TEST_TMPDIR/uploaded.ps1"
+}
+
+@test "run_macos_e2e exports ANTHROPIC_API_KEY to the rig shell with the exact value" {
+    eval "$(sed -n '/^run_macos_e2e()/,/^    } | macos_ssh bash$/p' "$SCRIPT")"$'\n}'
+    macos_ssh() { cat >"$BATS_TEST_TMPDIR/macos-stdin"; }
+    ANTHROPIC_API_KEY='sk-ant-a b$c"d' run_macos_e2e pre-reset
+    run bash -c "$(grep '^export ' "$BATS_TEST_TMPDIR/macos-stdin"); printf %s \"\$ANTHROPIC_API_KEY\""
+    [ "$status" -eq 0 ]
+    [ "$output" = 'sk-ant-a b$c"d' ]
+}
