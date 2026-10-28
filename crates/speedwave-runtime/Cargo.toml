@@ -22,7 +22,7 @@ fs2 = "0.4"
 log = { workspace = true }
 regex = "1"
 speedwave-pii-engine = { path = "../pii-engine" }
-zip = { version = "8", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 ed25519-dalek = "3"
 sha2 = "0.11"
 base64 = "0.23"

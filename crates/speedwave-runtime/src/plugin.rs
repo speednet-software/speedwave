@@ -2707,7 +2707,7 @@ fn extract_zip_with_limits(
     let mut total_uncompressed: u64 = 0;
     for i in 0..archive.len() {
         let entry = archive.by_index(i)?;
-        let name = entry.name().to_owned();
+        let name = entry.name()?.into_owned();
         if name.starts_with('/') || name.starts_with('\\') {
             anyhow::bail!("Rejected ZIP entry with absolute path: '{}'", name);
         }
