@@ -363,8 +363,8 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = tempfile::tempdir().unwrap();
-        let path = write_terminal_script(tmp.path(), CliInvocation::Run, "myproj", "echo one")
-            .unwrap();
+        let path =
+            write_terminal_script(tmp.path(), CliInvocation::Run, "myproj", "echo one").unwrap();
         assert_eq!(path, tmp.path().join("terminal").join("run-myproj.command"));
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -378,8 +378,8 @@ mod tests {
             .mode();
         assert_eq!(dir_mode & 0o777, 0o700);
 
-        let again = write_terminal_script(tmp.path(), CliInvocation::Run, "myproj", "echo two")
-            .unwrap();
+        let again =
+            write_terminal_script(tmp.path(), CliInvocation::Run, "myproj", "echo two").unwrap();
         assert_eq!(again, path);
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),

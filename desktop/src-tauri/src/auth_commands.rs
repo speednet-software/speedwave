@@ -1062,8 +1062,18 @@ mod tests {
         let custom_dd = home.join(".speedwave-dev");
         let win_home = std::path::Path::new(r"C:\Users\test");
         let win_dd = std::path::Path::new(r"C:\Users\test\.speedwave");
-        let cases: [(bool, &std::path::Path, &std::path::Path, Option<&std::path::Path>); 4] = [
-            (false, home, default_dd.as_path(), Some(default_dd.as_path())),
+        let cases: [(
+            bool,
+            &std::path::Path,
+            &std::path::Path,
+            Option<&std::path::Path>,
+        ); 4] = [
+            (
+                false,
+                home,
+                default_dd.as_path(),
+                Some(default_dd.as_path()),
+            ),
             (false, home, custom_dd.as_path(), Some(default_dd.as_path())),
             (true, win_home, win_dd, Some(win_dd)),
             (true, win_home, win_dd, None),
@@ -1432,7 +1442,10 @@ mod tests {
             ps_escape_single_quoted("a\u{2018}b\u{2019}c\u{201A}d\u{201B}e"),
             "a\u{2018}\u{2018}b\u{2019}\u{2019}c\u{201A}\u{201A}d\u{201B}\u{201B}e"
         );
-        assert_eq!(ps_escape_single_quoted("John\u{2019}s"), "John\u{2019}\u{2019}s");
+        assert_eq!(
+            ps_escape_single_quoted("John\u{2019}s"),
+            "John\u{2019}\u{2019}s"
+        );
     }
 
     #[test]
