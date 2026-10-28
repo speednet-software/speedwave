@@ -10,7 +10,7 @@ use speedwave_runtime::transcription::{
     DriverConfig, DriverError, FinalizeConfig, GpuClass, Language, ModelStatusEntry, ModelStore,
     NemotronDiarizer, StopSignal, StoreError, TranscribeOptions, TranscriptDriver, TranscriptEvent,
     TranscriptSession, TranscriptStatus, TranscriptStore, TranscriptSummary, WhisperCppTranscriber,
-    DIARIZATION_MODEL,
+    DIARIZATION_MODEL, IMPORTED_FILE_NOT_CAPTURED, IMPORT_EXTENSIONS,
 };
 use tauri::{AppHandle, Emitter};
 use tokio::sync::broadcast;
@@ -39,6 +39,9 @@ pub const MODEL_PROGRESS_EVENT: &str = "transcription_model_status";
 
 /// App-wide event carrying the id of a session whose recordings-list row changed.
 pub const TRANSCRIPTS_CHANGED_EVENT: &str = "transcripts_changed";
+
+const NO_WHISPER_MODEL: &str =
+    "no Whisper model is downloaded; download it in Settings → Meeting transcription";
 
 /// Validates a transcript id (UUID v4 string). Same shape as
 /// `history::validate_session_id` but parses to `Uuid`.
@@ -473,6 +476,86 @@ pub async fn postpone_transcription(
     store.postpone(id).map(|_| ()).map_err(|e| e.to_string())
 }
 
+/// Asks for an audio file on this machine and transcribes it like a stopped recording (SPEED-462);
+/// `None` when the picker is closed. A file that cannot be decoded leaves no session.
+#[tauri::command]
+pub async fn import_transcription(
+    language: Language,
+    store: tauri::State<'_, TranscriptStoreHandle>,
+    models: tauri::State<'_, ModelStoreHandle>,
+    app: AppHandle,
+) -> Result<Option<Uuid>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let store_arc = store.inner().clone();
+    let models_arc = models.inner().clone();
+    let picked = {
+        let store = store_arc.clone();
+        let models = models_arc.clone();
+        tokio::task::spawn_blocking(move || -> Result<Option<TranscriptSession>, String> {
+            if pick_offline_model(&models).is_none() {
+                return Err(NO_WHISPER_MODEL.to_string());
+            }
+            let Some(file) = app
+                .dialog()
+                .file()
+                .set_title("Import an audio file")
+                .add_filter(
+                    format!("Audio ({})", transcription::supported_formats()),
+                    IMPORT_EXTENSIONS,
+                )
+                .blocking_pick_file()
+            else {
+                return Ok(None);
+            };
+            let src = file
+                .into_path()
+                .map_err(|e| format!("unsupported file location: {e}"))?;
+            import_audio_file(&store, &src, language).map(Some)
+        })
+        .await
+        .map_err(|e| format!("import task panicked: {e}"))??
+    };
+    let Some(session) = picked else {
+        return Ok(None);
+    };
+    spawn_offline_pass(
+        store_arc,
+        models_arc,
+        session.id,
+        session.all_audio_parts(),
+        false,
+    );
+    Ok(Some(session.id))
+}
+
+fn import_audio_file(
+    store: &TranscriptStore,
+    src: &std::path::Path,
+    language: Language,
+) -> Result<TranscriptSession, String> {
+    let file_name = src
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let title = src
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let source = AudioSourceInfo {
+        source: AudioSource::ImportedFile,
+        label: format!("Imported file: {file_name}"),
+    };
+    let session = store.import(src, language, source, &title).map_err(|e| {
+        log::info!("audio file import refused: {e}");
+        format!("Could not import \"{file_name}\": {e}")
+    })?;
+    log::info!(
+        "imported an audio file as transcript {}",
+        short_id(session.id)
+    );
+    Ok(session)
+}
+
 /// One offline pass at a time: two passes loading two large models side by side can exhaust the
 /// memory of a 16 GiB host, so a second Stop waits its turn (the list row says "queued").
 static OFFLINE_PASS_TURN: Mutex<()> = Mutex::new(());
@@ -656,6 +739,7 @@ fn validate_source_against_caps(
         return Err("this host does not support system audio capture".to_string());
     }
     let needs_microphone: bool = match src {
+        AudioSource::ImportedFile => return Err(IMPORTED_FILE_NOT_CAPTURED.to_string()),
         AudioSource::SystemWide => false,
         AudioSource::Microphone { .. } => true,
         AudioSource::Mixed { .. } => true,
@@ -687,6 +771,7 @@ fn source_label(
             AudioSource::SystemWide => "System (everything)".to_string(),
             AudioSource::Microphone { .. } => "Microphone".to_string(),
             AudioSource::Mixed { .. } => "System (everything) + microphone".to_string(),
+            AudioSource::ImportedFile => "Imported file".to_string(),
         }
     }
     generic(src)
@@ -723,10 +808,7 @@ async fn prepare_live_transcriber(
     let m = models.clone();
     tokio::task::spawn_blocking(move || {
         if pick_offline_model(&m).is_none() {
-            return Err(
-                "no Whisper model is downloaded — download it in Settings → Meeting transcription"
-                    .to_string(),
-            );
+            return Err(NO_WHISPER_MODEL.to_string());
         }
         Ok(None)
     })
@@ -2045,6 +2127,81 @@ mod tests {
         assert_eq!(
             source_label(&cap, &AudioSource::Mixed { mic: None }),
             "System (everything) + microphone"
+        );
+    }
+
+    #[test]
+    fn an_imported_file_becomes_a_session_named_after_it_waiting_for_its_pass() {
+        let src_dir = tempfile::tempdir().unwrap();
+        let src = src_dir.path().join("Spotkanie zespołu Q4.wav");
+        write_test_wav(&src, 1);
+        let root = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(root.path());
+
+        let session = import_audio_file(&store, &src, Language::En).unwrap();
+
+        assert_eq!(store.get(session.id).unwrap(), session);
+        assert_eq!(session.title.as_deref(), Some("Spotkanie zespołu Q4"));
+        assert_eq!(session.language, Language::En);
+        assert_eq!(session.audio_source.source, AudioSource::ImportedFile);
+        assert_eq!(
+            session.audio_source.label,
+            "Imported file: Spotkanie zespołu Q4.wav"
+        );
+        assert_eq!(
+            session.status,
+            TranscriptStatus::Finalizing { progress: 0.0 }
+        );
+        assert_eq!(
+            offline_pass_parts(&store, session.id).unwrap(),
+            session.all_audio_parts()
+        );
+    }
+
+    #[test]
+    fn an_unreadable_import_names_the_file_and_leaves_no_session() {
+        let src_dir = tempfile::tempdir().unwrap();
+        let src = src_dir.path().join("voice memo.m4a");
+        std::fs::write(&src, b"definitely not an mp4 container").unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(root.path());
+
+        let err = import_audio_file(&store, &src, Language::Pl).unwrap_err();
+
+        assert!(
+            err.starts_with("Could not import \"voice memo.m4a\": "),
+            "{err}"
+        );
+        assert!(err.contains("not a readable M4A file"), "{err}");
+        assert!(store.list().is_empty());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn an_unsupported_import_lists_the_formats_it_takes() {
+        let src_dir = tempfile::tempdir().unwrap();
+        let src = src_dir.path().join("call.wma");
+        std::fs::write(&src, b"whatever").unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(root.path());
+
+        let err = import_audio_file(&store, &src, Language::Pl).unwrap_err();
+
+        assert!(err.contains("WAV, MP3, M4A, MP4, FLAC or OGG"), "{err}");
+        assert!(store.list().is_empty());
+    }
+
+    #[test]
+    fn an_imported_file_is_never_captured_or_continued() {
+        use speedwave_runtime::transcription::CaptureCapabilities;
+        let full = CaptureCapabilities {
+            supports_system_audio: true,
+            supports_microphone: true,
+            note: None,
+        };
+        assert_eq!(
+            validate_source_against_caps(&AudioSource::ImportedFile, &full).unwrap_err(),
+            IMPORTED_FILE_NOT_CAPTURED
         );
     }
 

@@ -66,6 +66,7 @@ describe('RecordingControlsComponent', () => {
     modelReady: ReturnType<typeof signal<boolean | null>>;
     recommended: ReturnType<typeof signal<RecommendedModelAck | null>>;
     startRecording: ReturnType<typeof vi.fn>;
+    importFile: ReturnType<typeof vi.fn>;
     stopRecording: ReturnType<typeof vi.fn>;
     requestMicrophonePermission: ReturnType<typeof vi.fn>;
     openMicrophonePrivacyPane: ReturnType<typeof vi.fn>;
@@ -136,6 +137,7 @@ describe('RecordingControlsComponent', () => {
           snapshot: {} as never,
         };
       }),
+      importFile: vi.fn(async (): Promise<string | null> => 'imported-1'),
       stopRecording: vi.fn(async (id: string) => {
         if (recordingSessionId() === id) {
           recordingSessionId.set(null);
@@ -569,6 +571,196 @@ describe('RecordingControlsComponent', () => {
       expect(svc.startRecording).not.toHaveBeenCalled();
       expect(errSpy).toHaveBeenCalledWith('ipc down');
       expect(component.busy()).toBe(false);
+    });
+  });
+
+  describe('import file', () => {
+    const importBtn = (): HTMLButtonElement =>
+      fixture.nativeElement.querySelector('[data-testid="import-btn"]');
+
+    it('imports in the chosen language and emits the new recording', async () => {
+      await component.ngOnInit();
+      component.onLanguage('en');
+      const imported = vi.fn();
+      component.imported.subscribe(imported);
+      fixture.detectChanges();
+
+      importBtn().click();
+      await fixture.whenStable();
+
+      expect(svc.importFile).toHaveBeenCalledWith('en');
+      expect(imported).toHaveBeenCalledWith('imported-1');
+      expect(component.importing()).toBe(false);
+    });
+
+    it('emits nothing when the file picker is closed', async () => {
+      svc.importFile.mockResolvedValueOnce(null);
+      const imported = vi.fn();
+      const errors = vi.fn();
+      component.imported.subscribe(imported);
+      component.errorOccurred.subscribe(errors);
+
+      await component.importFile();
+
+      expect(imported).not.toHaveBeenCalled();
+      expect(errors).not.toHaveBeenCalled();
+    });
+
+    it('surfaces an import error in the banner and frees the button', async () => {
+      svc.importFile.mockRejectedValueOnce(
+        new Error('Could not import "call.wma": this file type is not supported')
+      );
+      const errors = vi.fn();
+      component.errorOccurred.subscribe(errors);
+
+      await component.importFile();
+
+      expect(errors).toHaveBeenCalledWith(
+        'Could not import "call.wma": this file type is not supported'
+      );
+      expect(component.importing()).toBe(false);
+      expect(component.canImport()).toBe(true);
+    });
+
+    it('says it is importing and blocks a second import while the file is decoded', async () => {
+      let finish: (id: string | null) => void = () => undefined;
+      svc.importFile.mockImplementationOnce(
+        () => new Promise<string | null>((resolve) => (finish = resolve))
+      );
+      fixture.detectChanges();
+
+      const pending = component.importFile();
+      fixture.detectChanges();
+
+      expect(importBtn().disabled).toBe(true);
+      expect(importBtn().textContent).toContain('Importing…');
+      expect(importBtn().getAttribute('aria-busy')).toBe('true');
+      finish(null);
+      await pending;
+      fixture.detectChanges();
+      expect(importBtn().disabled).toBe(false);
+      expect(importBtn().textContent).toContain('Import audio');
+    });
+
+    it('blocks Record and its shortcut while an import is picked or decoded', async () => {
+      await component.ngOnInit();
+      let finish: (id: string | null) => void = () => undefined;
+      svc.importFile.mockImplementationOnce(
+        () => new Promise<string | null>((resolve) => (finish = resolve))
+      );
+      fixture.detectChanges();
+
+      const pending = component.importFile();
+      fixture.detectChanges();
+      const startBtn: HTMLButtonElement = fixture.nativeElement.querySelector(
+        '[data-testid="start-btn"]'
+      );
+      expect(startBtn.disabled).toBe(true);
+      component.onKeydown(
+        new KeyboardEvent('keydown', { key: 'R', metaKey: true, shiftKey: true })
+      );
+      expect(svc.startRecording).not.toHaveBeenCalled();
+
+      finish('imported-1');
+      await pending;
+      fixture.detectChanges();
+      expect(startBtn.disabled).toBe(false);
+    });
+
+    it('imports in the remembered language even before the source list arrives', async () => {
+      svc.recordingChoice.mockReturnValue({ language: 'en', source: 'mixed', mic: null });
+      let sources: (list: AudioSourceInfo[]) => void = () => undefined;
+      svc.listAudioSources.mockImplementationOnce(
+        () => new Promise<AudioSourceInfo[]>((resolve) => (sources = resolve))
+      );
+
+      const init = component.ngOnInit();
+      await component.importFile();
+
+      expect(svc.importFile).toHaveBeenCalledWith('en');
+      sources(SOURCES_WITH_MIXED);
+      await init;
+      expect(component.language()).toBe('en');
+    });
+
+    it('keeps a language picked before the source list arrives', async () => {
+      svc.recordingChoice.mockReturnValue({ language: 'pl', source: 'mixed', mic: null });
+      let sources: (list: AudioSourceInfo[]) => void = () => undefined;
+      svc.listAudioSources.mockImplementationOnce(
+        () => new Promise<AudioSourceInfo[]>((resolve) => (sources = resolve))
+      );
+
+      const init = component.ngOnInit();
+      component.onLanguage('en');
+      sources(SOURCES_WITH_MIXED);
+      await init;
+
+      expect(component.language()).toBe('en');
+    });
+
+    it('remembers the language for imports on a host that offers no capture source', async () => {
+      svc.recordingChoice.mockReturnValue({ language: 'pl', source: 'system_wide', mic: null });
+      svc.listAudioSources.mockResolvedValueOnce([]);
+      await component.ngOnInit();
+
+      component.onLanguage('en');
+
+      expect(svc.setRecordingChoice).toHaveBeenLastCalledWith({
+        language: 'en',
+        source: 'system_wide',
+        mic: null,
+      });
+    });
+
+    it('is disabled while no Whisper model is downloaded, like Record', async () => {
+      svc.modelReady.set(false);
+      fixture.detectChanges();
+
+      expect(importBtn().disabled).toBe(true);
+    });
+
+    it('needs no capture source, so it works on a host that offers none', async () => {
+      svc.listAudioSources.mockResolvedValueOnce([]);
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      expect(component.canStart()).toBe(false);
+      expect(importBtn().disabled).toBe(false);
+    });
+
+    it('names the formats and the chooser language in its tooltip', async () => {
+      await component.ngOnInit();
+      expect(component.importTooltip()).toContain('WAV, MP3, M4A, MP4, FLAC or OGG');
+      expect(component.importTooltip()).toContain('in Polish, the language set on the left');
+      component.onLanguage('en');
+      expect(component.importTooltip()).toContain('in English, the language set on the left');
+    });
+
+    it('sits after the chooser, so the language on the chooser reads as set for both actions', async () => {
+      await component.ngOnInit();
+      fixture.detectChanges();
+      const order = Array.from(
+        fixture.nativeElement.querySelectorAll(
+          '[data-testid="recording-options"], [data-testid="import-btn"], [data-testid="start-btn"]'
+        ) as NodeListOf<HTMLElement>
+      ).map((e) => e.dataset['testid']);
+      expect(order).toEqual(['recording-options', 'import-btn', 'start-btn']);
+    });
+
+    it('says on the chooser and in its panel that the language also applies to Import audio', async () => {
+      await component.ngOnInit();
+      fixture.detectChanges();
+      const chooser: HTMLButtonElement = fixture.nativeElement.querySelector(
+        '[data-testid="recording-options"]'
+      );
+      expect(chooser.getAttribute('aria-label')).toContain('Record and Import audio');
+      chooser.click();
+      fixture.detectChanges();
+      const panel: HTMLElement = fixture.nativeElement.querySelector(
+        '[data-testid="recording-options-panel"]'
+      );
+      expect(panel.textContent).toContain('Language spoken, for Record and Import audio');
+      expect(panel.textContent).toContain('Remembered for your next recording and import.');
     });
   });
 

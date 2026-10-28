@@ -33,7 +33,14 @@ pub enum AudioSource {
         /// The microphone device for "your side" (`None` = default input).
         mic: Option<String>,
     },
+    /// An audio file imported from disk (SPEED-462): never captured, so no backend starts it.
+    ImportedFile,
 }
+
+/// Why a backend refuses [`AudioSource::ImportedFile`]: a recording made from a file has no
+/// device to capture, so it cannot be started or continued.
+pub const IMPORTED_FILE_NOT_CAPTURED: &str =
+    "an imported audio file is not a capture source; import the file again instead";
 
 /// A capturable source the UI can offer the user, as returned by
 /// `AudioCapture::enumerate_sources()`.
@@ -628,6 +635,33 @@ mod tests {
         assert_eq!(rms(&[]), 0.0);
         assert!((rms(&vec![0.5f32; 100]) - 0.5).abs() < 1e-6);
         assert!((rms(&vec![-0.5f32; 100]) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn audio_source_kinds_match_ts_union() {
+        let src = include_str!("../../../../desktop/src/src/app/models/transcript.ts");
+        for (source, kind) in [
+            (AudioSource::SystemWide, "system_wide"),
+            (AudioSource::Microphone { device: None }, "microphone"),
+            (AudioSource::Mixed { mic: None }, "mixed"),
+            (AudioSource::ImportedFile, "imported_file"),
+        ] {
+            let json = serde_json::to_value(&source).unwrap();
+            assert_eq!(json["kind"], kind);
+            assert!(
+                src.contains(&format!("{{ kind: '{kind}'")),
+                "models/transcript.ts AudioSource must carry the '{kind}' kind"
+            );
+        }
+    }
+
+    #[test]
+    fn file_capture_refuses_an_imported_file() {
+        let err = FileAudioCapture::new()
+            .start(AudioSource::ImportedFile)
+            .err()
+            .unwrap();
+        assert!(matches!(err, CaptureError::Unsupported(_)), "{err:?}");
     }
 
     #[test]

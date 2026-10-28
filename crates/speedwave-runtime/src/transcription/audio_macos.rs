@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 use super::audio::{
     AudioCapture, AudioChunk, AudioSource, AudioSourceInfo, AudioStream, CaptureCapabilities,
-    CaptureError,
+    CaptureError, IMPORTED_FILE_NOT_CAPTURED,
 };
 use super::mix::{
     MixBuffer, MixSource, PairedPcm, SingleStreamWatchdog, CHUNK_SAMPLES, KEEPALIVE_AFTER,
@@ -514,6 +514,9 @@ fn source_to_cli_args(source: &AudioSource) -> Result<(String, String), CaptureE
             };
             Ok(("all".to_string(), mic_arg))
         }
+        AudioSource::ImportedFile => Err(CaptureError::Unsupported(
+            IMPORTED_FILE_NOT_CAPTURED.to_string(),
+        )),
     }
 }
 
@@ -571,6 +574,12 @@ mod tests {
     fn list_mics_rejects_malformed_json() {
         let mics: Result<Vec<MicListEntry>, _> = serde_json::from_slice(b"{not json}");
         assert!(mics.is_err());
+    }
+
+    #[test]
+    fn an_imported_file_maps_to_no_cli_source() {
+        let err = source_to_cli_args(&AudioSource::ImportedFile).unwrap_err();
+        assert!(matches!(err, CaptureError::Unsupported(_)), "{err:?}");
     }
 
     #[test]

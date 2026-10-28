@@ -1,8 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { By } from '@angular/platform-browser';
 import { provideRouter } from '@angular/router';
 import { computed, signal, type Signal } from '@angular/core';
 import { MeetingTranscriptionComponent } from './meeting-transcription.component';
+import { RecordingControlsComponent } from './recording-controls/recording-controls.component';
 import { TranscriptionService } from '../services/transcription.service';
 import { makeTranscriptSession } from '../testing/transcript-session';
 import type {
@@ -257,6 +259,39 @@ describe('MeetingTranscriptionComponent', () => {
     expect(text).toContain('Pause turns the microphone off');
     expect(text).toContain('still being transcribed');
     expect(details.querySelector('[data-testid="quality-disclaimer"]')).not.toBeNull();
+  });
+
+  it('explains Import audio, its formats and its language under "How it works"', () => {
+    const item: HTMLElement = fixture.nativeElement.querySelector(
+      '[data-testid="import-how-it-works"]'
+    );
+    expect(item.textContent).toContain('Import audio');
+    expect(item.textContent).toContain('WAV, MP3, M4A, MP4, FLAC or OGG');
+    expect(item.textContent).toContain('language chosen next to Record');
+  });
+
+  it('opens an imported recording as soon as the controls report it', async () => {
+    component.onError('old error');
+    const controls = fixture.debugElement.query(By.directive(RecordingControlsComponent));
+    (controls.componentInstance as RecordingControlsComponent).imported.emit('imp-1');
+    await fixture.whenStable();
+    expect(svc.subscribeToTranscript).toHaveBeenCalledWith('imp-1');
+    expect(component.error()).toBe('');
+  });
+
+  it('keeps the open recording and shows the reason when an import fails', async () => {
+    activeSig.set(makeTranscriptSession({ id: 'sess-open' }));
+    const controls = fixture.debugElement.query(By.directive(RecordingControlsComponent));
+    (controls.componentInstance as RecordingControlsComponent).errorOccurred.emit(
+      'Could not import "call.wma": this file type is not supported'
+    );
+    fixture.detectChanges();
+    expect(svc.subscribeToTranscript).not.toHaveBeenCalled();
+    expect(component.active()?.id).toBe('sess-open');
+    const banner: HTMLElement | null = fixture.nativeElement.querySelector(
+      '[data-testid="meeting-transcription-error"]'
+    );
+    expect(banner?.textContent).toContain('Could not import "call.wma"');
   });
 
   it('starts following the recordings list through the list component', () => {

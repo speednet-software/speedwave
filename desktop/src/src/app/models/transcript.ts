@@ -1,11 +1,15 @@
 /** PL/EN (forced; never auto-detected). */
 export type Language = 'pl' | 'en';
 
-/** What to capture. */
+/** What to capture, or `imported_file` for a recording imported from an audio file. */
 export type AudioSource =
   | { kind: 'system_wide' }
   | { kind: 'microphone'; device: string | null }
-  | { kind: 'mixed'; mic: string | null };
+  | { kind: 'mixed'; mic: string | null }
+  | { kind: 'imported_file' };
+
+/** The audio files an import takes, as `import.rs::supported_formats` names them. */
+export const IMPORT_FORMATS_LABEL = 'WAV, MP3, M4A, MP4, FLAC or OGG';
 
 /** The kind of an {@link AudioSource}. */
 export type AudioSourceKind = AudioSource['kind'];

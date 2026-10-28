@@ -1238,6 +1238,7 @@ fn main() {
             transcription_cmd::rename_transcript,
             transcription_cmd::transcribe_transcript,
             transcription_cmd::postpone_transcription,
+            transcription_cmd::import_transcription,
             transcription_cmd::export_transcript,
             transcription_cmd::reveal_transcript_audio,
             transcription_cmd::recommended_transcription_model,
