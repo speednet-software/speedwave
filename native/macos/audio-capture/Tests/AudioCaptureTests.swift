@@ -201,6 +201,24 @@ final class AudioCaptureTests: XCTestCase {
         XCTAssertTrue(problem.contains("44100 Hz") && problem.contains("16000 Hz"), problem)
     }
 
+    func testARestartLogNamesItsTriggerAndTheEngineLifetime() {
+        let startedAt = Date(timeIntervalSince1970: 1_000)
+        XCTAssertEqual(
+            describeMicRestart(
+                trigger: .engineConfigurationChange, engineStartedAt: startedAt,
+                now: startedAt.addingTimeInterval(0.83)),
+            "restarting the microphone capture on an engine configuration change; the engine ran 0.8 s")
+        XCTAssertEqual(
+            describeMicRestart(trigger: .retryAfterFailedStart, engineStartedAt: nil),
+            "restarting the microphone capture on a retry of a failed start; no engine was running")
+    }
+
+    func testDescribeFormatReadsAsRateAndChannels() throws {
+        let format = try XCTUnwrap(
+            AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false))
+        XCTAssertEqual(describeFormat(format), "16000 Hz 1 ch")
+    }
+
     func testMicRetryDelayDoublesUpToThirtySeconds() {
         XCTAssertEqual(
             [0, 1, 2, 3, 4, 5, 6, 50].map { micRetryDelay(afterFailures: $0) },
@@ -211,10 +229,10 @@ final class AudioCaptureTests: XCTestCase {
     func testAConfigurationChangeRestartsOnlyForTheSessionsEngine() {
         let session = RecordSession()
         session.micEngine = AVAudioEngine()
-        var restarts = 0
-        onMicEngineConfigurationChange(session.micEngine, session: session) { restarts += 1 }
-        onMicEngineConfigurationChange(AVAudioEngine(), session: session) { restarts += 1 }
-        XCTAssertEqual(restarts, 1)
+        var triggers: [MicRestartTrigger] = []
+        onMicEngineConfigurationChange(session.micEngine, session: session) { triggers.append($0) }
+        onMicEngineConfigurationChange(AVAudioEngine(), session: session) { triggers.append($0) }
+        XCTAssertEqual(triggers.map(\.description), ["an engine configuration change"])
     }
 
     @available(macOS 14.4, *)
@@ -222,7 +240,7 @@ final class AudioCaptureTests: XCTestCase {
         let session = RecordSession()
         let retried = expectation(description: "the pending retry still runs")
         session.scheduleMicRestart(after: 0.3) { retried.fulfill() }
-        onMicEngineConfigurationChange(AVAudioEngine(), session: session) {
+        onMicEngineConfigurationChange(AVAudioEngine(), session: session) { _ in
             session.scheduleMicRestart { XCTFail("a stale engine replaced the retry") }
         }
         waitForExpectations(timeout: 2)
@@ -234,7 +252,7 @@ final class AudioCaptureTests: XCTestCase {
         var longRetryRan = false
         let restarted = expectation(description: "the device change restarts after the debounce")
         session.scheduleMicRestart(after: micRetryMaxDelay) { longRetryRan = true }
-        onInputDeviceChange(session: session) {
+        onInputDeviceChange(.defaultInputDeviceChange, session: session) { _ in
             session.scheduleMicRestart { restarted.fulfill() }
         }
         waitForExpectations(timeout: 2)
@@ -245,9 +263,9 @@ final class AudioCaptureTests: XCTestCase {
     func testAnInputDeviceChangeWithAStoppedEngineRestarts() {
         let session = RecordSession()
         session.micEngine = AVAudioEngine()
-        var restarts = 0
-        onInputDeviceChange(session: session) { restarts += 1 }
-        XCTAssertEqual(restarts, 1)
+        var triggers: [MicRestartTrigger] = []
+        onInputDeviceChange(.inputDeviceListChange, session: session) { triggers.append($0) }
+        XCTAssertEqual(triggers.map(\.description), ["an input device list change"])
     }
 
     @available(macOS 14.4, *)
@@ -294,7 +312,9 @@ final class AudioCaptureTests: XCTestCase {
         let session = RecordSession()
         activeSession = RecordSession()
         var started = false
-        restartMicEngine(session: session, selector: .defaultDevice, streamIndex: 1) { _, _, _ in
+        restartMicEngine(
+            session: session, selector: .defaultDevice, streamIndex: 1, trigger: .defaultInputDeviceChange
+        ) { _, _, _ in
             started = true
         }
         XCTAssertFalse(started)

@@ -20,6 +20,23 @@ let micRetryMaxDelay: TimeInterval = 30
 /// Runs a body after a delay; `RecordSession.scheduleMicRestart` in production, a recorder in tests.
 typealias MicRestartScheduler = (TimeInterval, @escaping () -> Void) -> Void
 
+/// What asked for a mic restart; logged with every restart so a storm shows its driver.
+enum MicRestartTrigger: CustomStringConvertible {
+    case engineConfigurationChange
+    case defaultInputDeviceChange
+    case inputDeviceListChange
+    case retryAfterFailedStart
+
+    var description: String {
+        switch self {
+        case .engineConfigurationChange: return "an engine configuration change"
+        case .defaultInputDeviceChange: return "a default input device change"
+        case .inputDeviceListChange: return "an input device list change"
+        case .retryAfterFailedStart: return "a retry of a failed start"
+        }
+    }
+}
+
 /// Owns all stdout writes (header + binary chunks). CoreAudio IOProc threads and the mic-engine tap
 /// only hand it already-copied raw frames; resample + write happen here, never on the real-time audio thread.
 final class WriterQueue {
@@ -392,6 +409,8 @@ final class RecordSession {
     var micRestartWork: DispatchWorkItem?
     /// Mic starts that failed since the mic last started; sets the next retry's delay.
     var micRestartFailures = 0
+    /// When the running mic engine started; logged as its lifetime when the next restart stops it.
+    var micEngineStartedAt: Date?
     /// Monotonic nanoseconds reference for `offset_ns`.
     let startMachAbs: UInt64 = mach_absolute_time()
 
@@ -694,15 +713,14 @@ func startMicEngine(session: RecordSession, selector: MicSelector, streamIndex: 
             logErr("mic device UID '\(uid)' not found; using default")
         }
     }
-    let deviceUID = deviceStringProperty(inputNode.auAudioUnit.deviceID, kAudioDevicePropertyDeviceUID)
-        ?? "an unknown device"
+    let device = describeDevice(inputNode.auAudioUnit.deviceID)
     let format = inputNode.outputFormat(forBus: 0)
     let hardwareFormat = inputNode.inputFormat(forBus: 0)
     if let problem = micFormatProblem(
         sampleRate: format.sampleRate, channels: format.channelCount,
         hardwareSampleRate: hardwareFormat.sampleRate)
     {
-        throw MicStartError("\(deviceUID): \(problem)")
+        throw MicStartError("\(device): \(problem)")
     }
 
     let tap: AVAudioNodeTapBlock = { buf, _ in
@@ -725,7 +743,7 @@ func startMicEngine(session: RecordSession, selector: MicSelector, streamIndex: 
     do {
         try SPWSafeTap.install(on: inputNode, bus: 0, bufferSize: 4096, format: format, block: tap)
     } catch {
-        throw MicStartError("\(deviceUID): \(error.localizedDescription)")
+        throw MicStartError("\(device): \(error.localizedDescription)")
     }
 
     engine.prepare()
@@ -733,10 +751,35 @@ func startMicEngine(session: RecordSession, selector: MicSelector, streamIndex: 
         try engine.start()
     } catch {
         stopCapture(on: engine)
-        throw MicStartError("\(deviceUID): \(error.localizedDescription)")
+        throw MicStartError("\(device): \(error.localizedDescription)")
     }
-    logErr("microphone capture started on \(deviceUID): \(Int(format.sampleRate)) Hz, \(format.channelCount) ch")
+    logErr(
+        "microphone capture started on \(device): tap \(describeFormat(format)), hardware \(describeFormat(hardwareFormat))"
+    )
     session.micEngine = engine
+    session.micEngineStartedAt = Date()
+}
+
+/// `Name (UID)` of an audio device for the log, or what is known of it.
+@available(macOS 14.4, *)
+func describeDevice(_ device: AudioObjectID) -> String {
+    let uid = deviceStringProperty(device, kAudioDevicePropertyDeviceUID) ?? "unknown UID"
+    let name = deviceStringProperty(device, kAudioObjectPropertyName) ?? "unknown device"
+    return "\(name) (\(uid))"
+}
+
+/// `48000 Hz 2 ch` for the log.
+func describeFormat(_ format: AVAudioFormat) -> String {
+    "\(Int(format.sampleRate)) Hz \(format.channelCount) ch"
+}
+
+/// The log line of a restart: its trigger and how long the engine it stops has run.
+func describeMicRestart(trigger: MicRestartTrigger, engineStartedAt: Date?, now: Date = Date()) -> String {
+    guard let startedAt = engineStartedAt else {
+        return "restarting the microphone capture on \(trigger); no engine was running"
+    }
+    let lifetime = String(format: "%.1f", now.timeIntervalSince(startedAt))
+    return "restarting the microphone capture on \(trigger); the engine ran \(lifetime) s"
 }
 
 /// Why the input node's format cannot carry a tap, or `nil` when it can. AVFoundation raises an
@@ -771,15 +814,19 @@ func micRestartNeeded(_ engine: AVAudioEngine?) -> Bool {
 /// that failed to start or was replaced must not cut a pending retry short.
 @available(macOS 14.4, *)
 func onMicEngineConfigurationChange(
-    _ notificationObject: Any?, session: RecordSession, restart: () -> Void
+    _ notificationObject: Any?, session: RecordSession, restart: (MicRestartTrigger) -> Void
 ) {
-    if (notificationObject as? AVAudioEngine) === session.micEngine { restart() }
+    if (notificationObject as? AVAudioEngine) === session.micEngine {
+        restart(.engineConfigurationChange)
+    }
 }
 
 /// Restarts on a change of the default input device or the device list while the mic is down.
 @available(macOS 14.4, *)
-func onInputDeviceChange(session: RecordSession, restart: () -> Void) {
-    if micRestartNeeded(session.micEngine) { restart() }
+func onInputDeviceChange(
+    _ trigger: MicRestartTrigger, session: RecordSession, restart: (MicRestartTrigger) -> Void
+) {
+    if micRestartNeeded(session.micEngine) { restart(trigger) }
 }
 
 /// Delay before the next try after `failures` failed mic starts in a row: `micRetryBaseDelay`,
@@ -792,18 +839,20 @@ func micRetryDelay(afterFailures failures: Int) -> TimeInterval {
 @available(macOS 14.4, *)
 func restartMicEngine(
     session: RecordSession, selector: MicSelector, streamIndex: UInt32,
+    trigger: MicRestartTrigger,
     start: @escaping (RecordSession, MicSelector, UInt32) throws -> Void = startMicEngine,
     schedule: MicRestartScheduler? = nil
 ) {
     guard activeSession === session else { return }
     guard micRestartNeeded(session.micEngine) else {
-        logErr("audio configuration change ignored - the microphone engine is still running")
+        logErr("\(trigger) ignored - the microphone engine is still running")
         return
     }
-    logErr("restarting the microphone capture")
+    logErr(describeMicRestart(trigger: trigger, engineStartedAt: session.micEngineStartedAt))
     if let engine = session.micEngine {
         stopCapture(on: engine)
         session.micEngine = nil
+        session.micEngineStartedAt = nil
     }
     startMicOrRetry(
         session: session, selector: selector, streamIndex: streamIndex, start: start, schedule: schedule)
@@ -827,8 +876,8 @@ func startMicOrRetry(
             "mic start failed: \(error.localizedDescription) - retrying in \(Int(delay)) s or on the next input device change")
         let retry = {
             restartMicEngine(
-                session: session, selector: selector, streamIndex: streamIndex, start: start,
-                schedule: schedule)
+                session: session, selector: selector, streamIndex: streamIndex,
+                trigger: .retryAfterFailedStart, start: start, schedule: schedule)
         }
         if let schedule {
             schedule(delay, retry)
@@ -846,9 +895,10 @@ func startMicOrRetry(
 func installMicRestartTriggers(
     session: RecordSession, selector: MicSelector, streamIndex: UInt32
 ) {
-    let scheduleRestart = {
+    let scheduleRestart = { (trigger: MicRestartTrigger) in
         session.scheduleMicRestart {
-            restartMicEngine(session: session, selector: selector, streamIndex: streamIndex)
+            restartMicEngine(
+                session: session, selector: selector, streamIndex: streamIndex, trigger: trigger)
         }
     }
     _ = NotificationCenter.default.addObserver(
@@ -856,7 +906,11 @@ func installMicRestartTriggers(
     ) { note in
         onMicEngineConfigurationChange(note.object, session: session, restart: scheduleRestart)
     }
-    for property in [kAudioHardwarePropertyDefaultInputDevice, kAudioHardwarePropertyDevices] {
+    let listeners: [(AudioObjectPropertySelector, MicRestartTrigger)] = [
+        (kAudioHardwarePropertyDefaultInputDevice, .defaultInputDeviceChange),
+        (kAudioHardwarePropertyDevices, .inputDeviceListChange),
+    ]
+    for (property, trigger) in listeners {
         var addr = AudioObjectPropertyAddress(
             mSelector: property,
             mScope: kAudioObjectPropertyScopeGlobal,
@@ -865,7 +919,10 @@ func installMicRestartTriggers(
         let status = AudioObjectAddPropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject), &addr, DispatchQueue.main
         ) { _, _ in
-            onInputDeviceChange(session: session, restart: scheduleRestart)
+            if case .defaultInputDeviceChange = trigger {
+                logErr("default input device is now \(describeDevice(defaultInputDevice()))")
+            }
+            onInputDeviceChange(trigger, session: session, restart: scheduleRestart)
         }
         if status != noErr {
             logErr("input device listener could not be installed (OSStatus \(status))")
