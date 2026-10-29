@@ -118,13 +118,12 @@ fn apply_llm_config_proxy(
         }
     }
     if !keeps_attribution_block(entry.kind, &model) {
-        extra_env.insert(
-            "CLAUDE_CODE_ATTRIBUTION_HEADER".to_string(),
-            "0".to_string(),
-        );
+        extra_env.insert(ATTRIBUTION_HEADER_ENV.to_string(), "0".to_string());
     }
     inject_claude_env(yaml, &extra_env)
 }
+
+pub(crate) const ATTRIBUTION_HEADER_ENV: &str = "CLAUDE_CODE_ATTRIBUTION_HEADER";
 
 fn keeps_attribution_block(kind: LlmProviderKind, model: &str) -> bool {
     match kind {
@@ -203,10 +202,7 @@ fn apply_llm_config_legacy_in(
                 ),
             ]);
             if !keeps_attribution_block(LlmProviderKind::Local, model) {
-                extra_env.insert(
-                    "CLAUDE_CODE_ATTRIBUTION_HEADER".to_string(),
-                    "0".to_string(),
-                );
+                extra_env.insert(ATTRIBUTION_HEADER_ENV.to_string(), "0".to_string());
             }
 
             if llm.has_custom_headers {

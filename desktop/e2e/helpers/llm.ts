@@ -44,6 +44,15 @@ export async function storedProviderModel(providerId: string): Promise<string | 
   return config?.providers?.find((p) => p.id === providerId)?.model ?? null;
 }
 
+async function activeProviderKind(): Promise<string | null> {
+  const config = await invokeOr<{
+    providers?: { id: string; kind?: string }[];
+    active?: { provider_id: string } | null;
+  } | null>(null, 'get_llm_config');
+  const activeId = config?.active?.provider_id;
+  return config?.providers?.find((p) => p.id === activeId)?.kind ?? null;
+}
+
 export async function configureOpenRouter(apiKey: string): Promise<void> {
   const refresh = '[data-testid="settings-llm-extra-refresh-openrouter"]';
   await browser.waitUntil(
@@ -92,6 +101,11 @@ export async function configureAnthropicApiKey(apiKey: string): Promise<void> {
     timeout: 30_000,
     interval: 500,
     timeoutMsg: 'auth-status-value never showed connected via api key after saving the key',
+  });
+  await browser.waitUntil(async () => (await activeProviderKind()) === 'anthropic_api_key', {
+    timeout: 30_000,
+    interval: 500,
+    timeoutMsg: 'the active provider kind never turned anthropic_api_key after saving the key',
   });
   await requestBackendRestart();
   await browser.waitUntil(apiKeyConnected, {
