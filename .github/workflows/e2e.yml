@@ -30,12 +30,13 @@ jobs:
           LOCAL_LLM_MODEL: ${{ secrets.LOCAL_LLM_MODEL }}
         run: SPEEDWAVE_MACOS_HOST="$(whoami)@127.0.0.1" bash scripts/e2e-vm.sh macos
 
-      - name: Upload failure screenshots
+      - name: Upload failure screenshots and the app log
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: e2e-screenshots-macos-${{ github.run_id }}-${{ github.run_attempt }}
+          name: e2e-artifacts-macos-${{ github.run_id }}-${{ github.run_attempt }}
           path: .e2e-artifacts/**
+          include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
 
@@ -68,11 +69,12 @@ jobs:
           LOCAL_LLM_MODEL: ${{ secrets.LOCAL_LLM_MODEL }}
         run: SPEEDWAVE_WINDOWS_HOST="$USERNAME@127.0.0.1" bash scripts/e2e-vm.sh windows
 
-      - name: Upload failure screenshots
+      - name: Upload failure screenshots and the app log
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: e2e-screenshots-windows-${{ github.run_id }}-${{ github.run_attempt }}
+          name: e2e-artifacts-windows-${{ github.run_id }}-${{ github.run_attempt }}
           path: .e2e-artifacts/**
+          include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
