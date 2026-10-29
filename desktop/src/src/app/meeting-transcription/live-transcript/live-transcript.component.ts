@@ -687,9 +687,9 @@ export class LiveTranscriptComponent {
     }
   });
 
-  private readonly microphoneOnlyWithoutLabels = computed(() => {
-    return this.speakerAttribution && this.session()?.audio_source.source.kind === 'microphone';
-  });
+  private readonly microphoneOnlyWithoutLabels = computed(
+    () => this.speakerAttribution && this.session()?.audio_source.source.kind === 'microphone'
+  );
 
   /**
    * How the transcript on screen came from a smaller model: a fallback offline pass, or only the

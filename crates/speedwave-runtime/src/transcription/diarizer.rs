@@ -327,10 +327,7 @@ pub(crate) fn label_speakers(segments: &mut [Segment], turns: &[SpeakerTurn]) ->
 }
 
 fn assign_speakers(segments: &mut [Segment], turns: &[SpeakerTurn]) {
-    for seg in segments
-        .iter_mut()
-        .filter(|s| s.source != Some(TranscriptSource::Mic))
-    {
+    for seg in segments.iter_mut().filter(|s| is_meeting_segment(s)) {
         let best = turns
             .iter()
             .filter_map(|turn| {
@@ -342,6 +339,13 @@ fn assign_speakers(segments: &mut [Segment], turns: &[SpeakerTurn]) {
             })
             .max();
         seg.speaker_id = best.map(|(_, Reverse(speaker))| speaker);
+    }
+}
+
+pub(crate) fn is_meeting_segment(segment: &Segment) -> bool {
+    match segment.source {
+        None | Some(TranscriptSource::System) => true,
+        Some(TranscriptSource::Mic) => false,
     }
 }
 
@@ -561,6 +565,17 @@ mod tests {
         ];
         assign_speakers(&mut segs, &[turn(0, 2000, 4)]);
         assert_eq!(ids(&segs), vec![None, Some(4), Some(4)]);
+    }
+
+    #[test]
+    fn only_a_microphone_segment_is_not_meeting_audio() {
+        assert!(is_meeting_segment(&sys(0, 1000)));
+        assert!(is_meeting_segment(&seg(0, 1000, None)));
+        assert!(!is_meeting_segment(&seg(
+            0,
+            1000,
+            Some(TranscriptSource::Mic)
+        )));
     }
 
     #[test]

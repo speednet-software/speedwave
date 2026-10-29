@@ -11,7 +11,9 @@ use uuid::Uuid;
 use crate::transcription::audio::{
     AudioSource, AudioStream, CaptureHealth, CaptureWarning, SAMPLE_RATE_HZ,
 };
-use crate::transcription::diarizer::{label_speakers, DiarizeError, DiarizerLoader};
+use crate::transcription::diarizer::{
+    is_meeting_segment, label_speakers, DiarizeError, DiarizerLoader,
+};
 use crate::transcription::model_catalog::DIARIZATION_MODEL;
 use crate::transcription::transcriber::{
     Segment, TranscribeOptions, Transcriber, TranscriptSource,
@@ -1057,10 +1059,7 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
     final_segs.sort_by_key(|s| s.start);
 
     drop(transcriber);
-    let meeting_speech = meeting_audio
-        && final_segs
-            .iter()
-            .any(|s| s.source != Some(TranscriptSource::Mic));
+    let meeting_speech = meeting_audio && final_segs.iter().any(is_meeting_segment);
     let read_meeting_channel = || -> Result<Vec<f32>, DiarizeError> {
         let end = meeting_parts
             .iter()
@@ -4367,7 +4366,7 @@ mod tests {
         w.finalize().unwrap();
     }
 
-    fn write_mono_wav(path: &Path, frames: &[(i16, i16)]) {
+    fn write_mono_wav(path: &Path, samples: &[i16]) {
         let spec = hound::WavSpec {
             channels: 1,
             sample_rate: SAMPLE_RATE_HZ,
@@ -4375,8 +4374,8 @@ mod tests {
             sample_format: hound::SampleFormat::Int,
         };
         let mut w = hound::WavWriter::create(path, spec).unwrap();
-        for &(meeting, _) in frames {
-            w.write_sample(meeting).unwrap();
+        for &sample in samples {
+            w.write_sample(sample).unwrap();
         }
         w.finalize().unwrap();
     }
@@ -4848,7 +4847,11 @@ mod tests {
         let part2 = store_dir.path().join("audio-2.wav");
         let part3 = store_dir.path().join("audio-3.wav");
         write_stereo_wav(&part1, &tone_frames(2, 8_192, 1_000));
-        write_mono_wav(&part2, &tone_frames(2, 4_096, 0));
+        let mono: Vec<i16> = tone_frames(2, 4_096, 0)
+            .into_iter()
+            .map(|(meeting, _)| meeting)
+            .collect();
+        write_mono_wav(&part2, &mono);
         write_stereo_wav(&part3, &tone_frames(2, -16_384, 2_000));
         let received = Arc::new(Mutex::new(None));
 
