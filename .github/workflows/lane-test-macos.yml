@@ -80,24 +80,13 @@ jobs:
       - name: CLI e2e trio (no VM)
         run: make test-e2e
 
-      - name: Compute app version
-        id: version
-        env:
-          BRANCH: ${{ github.head_ref || github.ref_name }}
-        run: |
-          echo "version=$(cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- version --branch "$BRANCH")" >> "$GITHUB_OUTPUT"
-
       - name: Build native macOS CLI binaries (universal)
-        env:
-          SPEEDWAVE_VERSION: ${{ steps.version.outputs.version }}
         run: scripts/build-native-macos.sh
 
       - name: Run Swift tests
         run: make test-swift
 
       - name: Native CLI embedded-plist guards
-        env:
-          SPEEDWAVE_VERSION: ${{ steps.version.outputs.version }}
         run: make test-native-cli-plist
 
       - name: Check the build did not modify a tracked file
