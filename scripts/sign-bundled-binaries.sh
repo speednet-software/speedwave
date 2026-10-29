@@ -122,8 +122,7 @@ verify_identifier() {
   if [[ "$actual" != "$expected" ]]; then
     echo "ERROR: $path codesign Identifier='$actual', expected '$expected'" >&2
     echo "  The embedded CFBundleIdentifier is wrong (or missing). Check that" >&2
-    echo "  native/macos/<svc>/Resources/Info.plist has CFBundleIdentifier=$expected" >&2
-    echo "  and that scripts/build-native-macos.sh staged it to .build/Info.plist," >&2
+    echo "  native/macos/<svc>/Resources/Info.plist has CFBundleIdentifier=$expected," >&2
     echo "  which the linker embeds with -sectcreate __TEXT __info_plist." >&2
     exit 1
   fi
