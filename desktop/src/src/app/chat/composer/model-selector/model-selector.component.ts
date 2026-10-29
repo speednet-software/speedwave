@@ -452,6 +452,7 @@ export class ModelSelectorComponent {
   async openCombobox(): Promise<void> {
     if (this.streaming()) return;
     this.effortOpen.set(false);
+    this.query.set('');
     this.open.set(true);
     const id = this.projectId();
     if (this.summaryProjectId !== id) await this.loadSummary(id);
