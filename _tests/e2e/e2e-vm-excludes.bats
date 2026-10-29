@@ -259,36 +259,69 @@ _record_run() {
     [ ! -e "$BATS_TEST_TMPDIR/runs" ]
 }
 
-_load_collect_screenshots() {
-    eval "$(sed -n '/^collect_screenshots()/,/^}/p' "$SCRIPT")"
+_load_collect_remote_tree() {
+    eval "$(sed -n '/^collect_remote_tree()/,/^}/p;/^windows_collect_failure_artifacts()/,/^}/p;/^macos_collect_failure_artifacts()/,/^}/p' "$SCRIPT")"
     HOST_REPO_DIR="$BATS_TEST_TMPDIR/repo"
-    mkdir -p "$HOST_REPO_DIR" "$BATS_TEST_TMPDIR/remote-shots"
+    mkdir -p "$HOST_REPO_DIR" "$BATS_TEST_TMPDIR/remote-shots" "$BATS_TEST_TMPDIR/remote-logs"
+    printf 'png' >"$BATS_TEST_TMPDIR/remote-shots/FAIL-1.png"
+    printf 'log' >"$BATS_TEST_TMPDIR/remote-logs/speedwave-desktop.log"
     unset GITHUB_WORKSPACE
 }
 
-@test "collect_screenshots unpacks the remote screenshots into a per-platform, per-phase directory" {
-    _load_collect_screenshots
-    printf 'png' >"$BATS_TEST_TMPDIR/remote-shots/FAIL-1.png"
-    _remote() { tar -C "$BATS_TEST_TMPDIR/remote-shots" -cf - .; }
-    collect_screenshots _remote ignored macos pre-reset
-    [ "$(cat "$HOST_REPO_DIR/.e2e-artifacts/macos/pre-reset/FAIL-1.png")" = "png" ]
+_remote_shots() { tar -C "$BATS_TEST_TMPDIR/remote-shots" -cf - .; }
+
+_remote_by_path() {
+    case "$1" in
+    *screenshots*) tar -C "$BATS_TEST_TMPDIR/remote-shots" -cf - . ;;
+    *pl.speedwave.desktop*) tar -C "$BATS_TEST_TMPDIR/remote-logs" -cf - . ;;
+    *) return 255 ;;
+    esac
 }
 
-@test "collect_screenshots prefers GITHUB_WORKSPACE and normalises Windows separators" {
-    _load_collect_screenshots
-    printf 'png' >"$BATS_TEST_TMPDIR/remote-shots/FAIL-2.png"
-    _remote() { tar -C "$BATS_TEST_TMPDIR/remote-shots" -cf - .; }
+@test "collect_remote_tree unpacks the remote tree into a per-platform, per-phase, per-kind directory" {
+    _load_collect_remote_tree
+    collect_remote_tree _remote_shots ignored macos pre-reset screenshots
+    [ "$(cat "$HOST_REPO_DIR/.e2e-artifacts/macos/pre-reset/screenshots/FAIL-1.png")" = "png" ]
+}
+
+@test "collect_remote_tree prefers GITHUB_WORKSPACE and normalises Windows separators" {
+    _load_collect_remote_tree
     GITHUB_WORKSPACE="${BATS_TEST_TMPDIR//\//\\}\\ws"
-    collect_screenshots _remote ignored windows first-launch
-    [ -f "$BATS_TEST_TMPDIR/ws/.e2e-artifacts/windows/first-launch/FAIL-2.png" ]
+    collect_remote_tree _remote_shots ignored windows first-launch screenshots
+    [ -f "$BATS_TEST_TMPDIR/ws/.e2e-artifacts/windows/first-launch/screenshots/FAIL-1.png" ]
 }
 
-@test "collect_screenshots returns 0 and warns when the remote copy fails" {
-    _load_collect_screenshots
+@test "collect_remote_tree returns 0 and warns when the remote copy fails" {
+    _load_collect_remote_tree
     _broken() { return 255; }
-    run collect_screenshots _broken ignored macos first-launch
+    run collect_remote_tree _broken ignored macos first-launch app-log
     [ "$status" -eq 0 ]
-    [[ "$output" == *"could not collect failure screenshots"* ]]
+    [[ "$output" == *"could not collect the app-log of phase first-launch"* ]]
+}
+
+@test "macos_collect_failure_artifacts collects the screenshots and the app log of the phase" {
+    _load_collect_remote_tree
+    macos_ssh() { _remote_by_path "$1"; }
+    macos_collect_failure_artifacts reset-only
+    [ "$(cat "$HOST_REPO_DIR/.e2e-artifacts/macos/reset-only/screenshots/FAIL-1.png")" = "png" ]
+    [ "$(cat "$HOST_REPO_DIR/.e2e-artifacts/macos/reset-only/app-log/speedwave-desktop.log")" = "log" ]
+}
+
+@test "windows_collect_failure_artifacts collects the screenshots and the app log of the phase" {
+    _load_collect_remote_tree
+    windows_ssh() { _remote_by_path "$1"; }
+    windows_collect_failure_artifacts first-launch
+    [ "$(cat "$HOST_REPO_DIR/.e2e-artifacts/windows/first-launch/screenshots/FAIL-1.png")" = "png" ]
+    [ "$(cat "$HOST_REPO_DIR/.e2e-artifacts/windows/first-launch/app-log/speedwave-desktop.log")" = "log" ]
+}
+
+@test "a lane keeps collecting the app log when the screenshots are missing" {
+    _load_collect_remote_tree
+    macos_ssh() { case "$1" in *screenshots*) return 1 ;; *) _remote_by_path "$1" ;; esac; }
+    run macos_collect_failure_artifacts pre-reset
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"could not collect the screenshots of phase pre-reset"* ]]
+    [ -f "$HOST_REPO_DIR/.e2e-artifacts/macos/pre-reset/app-log/speedwave-desktop.log" ]
 }
 
 _load_windows_ps_capture() {
