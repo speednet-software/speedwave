@@ -2031,6 +2031,8 @@ impl ChatSession {
             model_override,
             model_pin.as_deref(),
         )?;
+        #[cfg(feature = "e2e")]
+        let args = crate::e2e_support::with_claude_debug(args);
 
         #[cfg(feature = "e2e")]
         crate::e2e_support::record_spawn_args(&self.tab_id, &args);

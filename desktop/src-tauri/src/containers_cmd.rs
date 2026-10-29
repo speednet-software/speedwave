@@ -713,6 +713,12 @@ pub async fn check_containers_running(project: String) -> Result<bool, String> {
                 RECONCILE_WAIT_TIMEOUT.as_secs()
             );
         }
+        if !crate::reconcile::wait_for_compose_port_reconcile(RECONCILE_WAIT_TIMEOUT) {
+            log::warn!(
+                "compose host URL reconcile still running after {}s, reading the engine as it is",
+                RECONCILE_WAIT_TIMEOUT.as_secs()
+            );
+        }
         let rt = speedwave_runtime::runtime::detect_runtime();
         if !rt.is_available() {
             log::warn!("runtime not available");
@@ -5609,6 +5615,38 @@ mod tests {
                 !ran_out.contains(exit),
                 "a first VM start may provision for as long as the wait lasts, so running out of \
                  it must not end the container check (`{exit}`)"
+            );
+        }
+    }
+
+    #[test]
+    fn check_containers_running_waits_for_the_compose_port_reconcile_before_asking_the_engine() {
+        let source = include_str!("containers_cmd.rs");
+        let fn_body = extract_fn_body_braced(source, "pub async fn check_containers_running(");
+
+        let wait_pos = fn_body
+            .find("wait_for_compose_port_reconcile(")
+            .expect("check_containers_running must wait for the boot-time compose port reconcile");
+        let ps_pos = fn_body
+            .find("compose_ps(")
+            .expect("check_containers_running must list the project's containers");
+        assert!(
+            wait_pos < ps_pos,
+            "a project reported ready while the reconcile still recreates its containers starts a \
+             chat session that the recreate kills"
+        );
+        let wait = fn_body
+            .split(
+                "if !crate::reconcile::wait_for_compose_port_reconcile(RECONCILE_WAIT_TIMEOUT) {",
+            )
+            .nth(1)
+            .expect("check_containers_running must branch on the wait running out");
+        let ran_out = &wait[..wait.find("\n        }\n").expect("the branch must end")];
+        assert!(ran_out.contains("log::warn!("));
+        for exit in ["return", "Err(", "?;"] {
+            assert!(
+                !ran_out.contains(exit),
+                "running out of the wait must not end the container check (`{exit}`)"
             );
         }
     }
