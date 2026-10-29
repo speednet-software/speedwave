@@ -812,6 +812,7 @@ pub(crate) fn apply_auth_config_in(
 
     let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
     add_claude_env_var(&mut doc, "ANTHROPIC_API_KEY", &api_key);
+    workers::remove_env_from(&mut doc, "claude", llm::ATTRIBUTION_HEADER_ENV);
     Ok(serde_yaml_ng::to_string(&doc)?)
 }
 
@@ -11825,6 +11826,43 @@ services:
         let result = apply_auth_config_in(auth_test_yaml(), "test", tmp.path()).unwrap();
         let has_api_key = result.contains("ANTHROPIC_API_KEY=sk-ant-api-1234");
         assert!(has_api_key, "API key must be injected when stored");
+    }
+
+    #[test]
+    fn apply_auth_config_in_drops_the_attribution_switch_once_a_key_is_injected() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_api_key_in(tmp.path(), "test", "sk-ant-api-1234");
+        let yaml = r#"
+services:
+  claude:
+    image: speedwave-claude:latest
+    environment:
+      - CLAUDE_VERSION=1.0.3
+      - CLAUDE_CODE_ATTRIBUTION_HEADER=0
+"#;
+
+        let result = apply_auth_config_in(yaml, "test", tmp.path()).unwrap();
+        assert!(result.contains("ANTHROPIC_API_KEY=sk-ant-api-1234"));
+        assert!(
+            !result.contains("CLAUDE_CODE_ATTRIBUTION_HEADER"),
+            "a container billed by an API key must send the attribution block: {result}"
+        );
+        assert!(result.contains("CLAUDE_VERSION=1.0.3"));
+    }
+
+    #[test]
+    fn apply_auth_config_in_keeps_the_attribution_switch_without_a_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let yaml = r#"
+services:
+  claude:
+    image: speedwave-claude:latest
+    environment:
+      - CLAUDE_CODE_ATTRIBUTION_HEADER=0
+"#;
+
+        let result = apply_auth_config_in(yaml, "test", tmp.path()).unwrap();
+        assert!(result.contains("CLAUDE_CODE_ATTRIBUTION_HEADER=0"));
     }
 
     #[test]

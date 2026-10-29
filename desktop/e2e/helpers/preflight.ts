@@ -8,6 +8,10 @@ const FETCH_TIMEOUT_MS = 20_000;
 
 const ANTHROPIC_API_VERSION = '2023-06-01';
 
+/** The model spec 20 sends its turns to. */
+const ANTHROPIC_PROBE_MODEL = 'claude-haiku-5-5';
+const ANTHROPIC_PROBE_MAX_TOKENS = 1;
+
 const LOCAL_MODEL_PROBE_MAX_TOKENS = 16;
 const LOCAL_MODEL_PROBE_TIMEOUT_MS = 120_000;
 const LOCAL_MODEL_PROBE_ATTEMPTS = 6;
@@ -73,6 +77,8 @@ async function checkOpenrouter(): Promise<PreflightFailure | null> {
   return { service: 'OpenRouter', reason: `probe returned HTTP ${res.status}. ${detail}` };
 }
 
+/** One real request to the model spec 20 talks to: `GET /v1/models` answers 200 for a key
+ *  whose organization has no credit, and Claude Code then gets a 400 on every model switch. */
 async function checkAnthropic(): Promise<PreflightFailure | null> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
@@ -83,20 +89,40 @@ async function checkAnthropic(): Promise<PreflightFailure | null> {
   }
   let res: Response;
   try {
-    res = await fetch('https://api.anthropic.com/v1/models', {
-      headers: { 'x-api-key': apiKey, 'anthropic-version': ANTHROPIC_API_VERSION },
+    res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': apiKey,
+        'anthropic-version': ANTHROPIC_API_VERSION,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: ANTHROPIC_PROBE_MODEL,
+        max_tokens: ANTHROPIC_PROBE_MAX_TOKENS,
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
   } catch (e) {
     return { service: 'Anthropic', reason: `probe request failed: ${(e as Error).message}` };
   }
-  if (res.ok) return null;
+  const body = await res.text().catch(() => '');
+  if (res.ok && hasStopReason(body)) return null;
 
-  const detail = (await res.text().catch(() => '')).slice(0, 300).trim();
+  const detail = body.slice(0, 300).trim();
   if (res.status === 401 || res.status === 403) {
     return {
       service: 'Anthropic',
       reason: `HTTP ${res.status}: ANTHROPIC_API_KEY is invalid, revoked or lacks access. ${detail}`,
+    };
+  }
+  if (res.status === 400 && /credit balance/i.test(body)) {
+    return {
+      service: 'Anthropic',
+      reason:
+        `HTTP 400 on a ${ANTHROPIC_PROBE_MAX_TOKENS}-token request to ${ANTHROPIC_PROBE_MODEL}: the ` +
+        'organization of ANTHROPIC_API_KEY has no credit, so Claude Code is refused every model ' +
+        `switch in spec 20. Buy credits in the Console (Settings, Billing) or use a key of a funded organization. ${detail}`,
     };
   }
   if (res.status === 429) {
@@ -105,7 +131,10 @@ async function checkAnthropic(): Promise<PreflightFailure | null> {
       reason: `HTTP 429: the account is rate limited or out of quota. ${detail}`,
     };
   }
-  return { service: 'Anthropic', reason: `probe returned HTTP ${res.status}. ${detail}` };
+  return {
+    service: 'Anthropic',
+    reason: `probe to ${ANTHROPIC_PROBE_MODEL} returned HTTP ${res.status}. ${detail}`,
+  };
 }
 
 /** True when the server answers FROM THIS HOST on the catalog path production
