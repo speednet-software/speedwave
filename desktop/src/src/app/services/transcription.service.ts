@@ -314,12 +314,16 @@ export class TranscriptionService {
   }
 
   /**
-   * Asks the host for an audio file and transcribes it like a stopped recording.
+   * Asks the host for an audio file and transcribes it like a stopped recording, with speaker
+   * labels when the Settings switch is on.
    * @param language - forced PL/EN the file is transcribed in.
    * @returns the new recording's id, or null when the file picker was closed.
    */
   importFile(language: Language): Promise<string | null> {
-    return this.tauri.invoke<string | null>('import_transcription', { language });
+    return this.tauri.invoke<string | null>('import_transcription', {
+      language,
+      speakerMode: this.speakerAttribution(),
+    });
   }
 
   /**

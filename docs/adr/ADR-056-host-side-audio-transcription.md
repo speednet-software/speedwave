@@ -160,7 +160,9 @@
 >
 > **Not changed:** dropping a file onto the view (the bytes would have to come from the webview in chunks, ADR-094), Opus, and diarization of an import.
 >
-> **Amendment 23 (a microphone restart that survives a device change, SPEED-899, 2026-10-29):**
+> **Amendment 23 (speaker labels on an import, SPEED-898):** Amendment 22's "Speaker diarization never runs on it, since the file is mono" and "diarization of an import" under **Not changed** no longer hold. `import_transcription(language, speaker_mode)` passes the Settings switch as `stop_transcription` does, and the offline pass diarizes the single channel of an imported file, and of a recording of other people only (ADR-098, Amendment of 2026-10-28).
+>
+> **Amendment 24 (a microphone restart that survives a device change, SPEED-899, 2026-10-29):**
 >
 > **Problem:**
 > Two field sessions on 0.21.0+209 lost the microphone after a headset was plugged in or out. In the first, the fourteenth restart of the Amendment 4 handler ended `audio-capture-cli` with SIGABRT: `installTap` raised the Objective-C exception `com.apple.coreaudio.avfaudio` "Failed to create tap due to format mismatch", because the input changed format between `outputFormat(forBus: 0)` and the tap. AVFoundation requires the tap's sample rate to equal the hardware's[^40], and Swift cannot recover from an Objective-C exception: it has to be caught in Objective-C before it reaches Swift code[^41]. The process died with the system audio stream, and `audio_macos.rs::reap_at_eof` failed the session as truncated. In the second, `engine.start()` threw `kAudioHardwareBadObjectError` (`'!obj'`, 560947818)[^42] for a device that had just gone; the catch kept the process alive, but with no engine left no `AVAudioEngineConfigurationChange` could arrive, so the microphone stayed off for the rest of the meeting.

@@ -478,9 +478,11 @@ pub async fn postpone_transcription(
 
 /// Asks for an audio file on this machine and transcribes it like a stopped recording (SPEED-462);
 /// `None` when the picker is closed. A file that cannot be decoded leaves no session.
+/// `speaker_mode` is as in `stop_transcription`.
 #[tauri::command]
 pub async fn import_transcription(
     language: Language,
+    speaker_mode: bool,
     store: tauri::State<'_, TranscriptStoreHandle>,
     models: tauri::State<'_, ModelStoreHandle>,
     app: AppHandle,
@@ -523,7 +525,7 @@ pub async fn import_transcription(
         models_arc,
         session.id,
         session.all_audio_parts(),
-        false,
+        speaker_mode,
     );
     Ok(Some(session.id))
 }
@@ -1975,9 +1977,13 @@ mod tests {
     }
 
     #[test]
-    fn stop_and_transcribe_hand_the_speaker_mode_to_the_offline_pass() {
+    fn stop_transcribe_and_import_hand_the_speaker_mode_to_the_offline_pass() {
         let src = include_str!("transcription_cmd.rs");
-        for name in ["stop_transcription", "transcribe_transcript"] {
+        for name in [
+            "stop_transcription",
+            "transcribe_transcript",
+            "import_transcription",
+        ] {
             assert!(
                 fn_body(src, name).contains("speaker_mode,\n"),
                 "{name} must pass the Settings speaker mode to spawn_offline_pass"

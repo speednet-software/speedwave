@@ -31,6 +31,7 @@ describe('MeetingTranscriptionComponent', () => {
     recommendedModel: ReturnType<typeof vi.fn>;
     listAudioSources: ReturnType<typeof vi.fn>;
     liveTranscriptPreferred: ReturnType<typeof vi.fn>;
+    speakerAttribution: ReturnType<typeof vi.fn>;
     modelReady: typeof modelReadySig;
     recommended: Signal<RecommendedModelAck | null>;
     refreshModelReady: ReturnType<typeof vi.fn>;
@@ -108,6 +109,7 @@ describe('MeetingTranscriptionComponent', () => {
       recommendedModel: vi.fn(async () => recommended(true)),
       listAudioSources: vi.fn(async () => []),
       liveTranscriptPreferred: vi.fn(() => false),
+      speakerAttribution: vi.fn(() => false),
       modelReady: modelReadySig,
       recommended: signal<RecommendedModelAck | null>(null),
       refreshModelReady: vi.fn(async () => undefined),
