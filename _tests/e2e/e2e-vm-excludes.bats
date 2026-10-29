@@ -262,9 +262,10 @@ _record_run() {
 _load_collect_remote_tree() {
     eval "$(sed -n '/^collect_remote_tree()/,/^}/p;/^windows_collect_failure_artifacts()/,/^}/p;/^macos_collect_failure_artifacts()/,/^}/p' "$SCRIPT")"
     HOST_REPO_DIR="$BATS_TEST_TMPDIR/repo"
-    mkdir -p "$HOST_REPO_DIR" "$BATS_TEST_TMPDIR/remote-shots" "$BATS_TEST_TMPDIR/remote-logs"
+    mkdir -p "$HOST_REPO_DIR" "$BATS_TEST_TMPDIR/remote-shots" "$BATS_TEST_TMPDIR/remote-logs" "$BATS_TEST_TMPDIR/remote-sessions/e2e-second"
     printf 'png' >"$BATS_TEST_TMPDIR/remote-shots/FAIL-1.png"
     printf 'log' >"$BATS_TEST_TMPDIR/remote-logs/speedwave-desktop.log"
+    printf 'session' >"$BATS_TEST_TMPDIR/remote-sessions/e2e-second/claude-session.log"
     unset GITHUB_WORKSPACE
 }
 
@@ -274,6 +275,7 @@ _remote_by_path() {
     case "$1" in
     *screenshots*) tar -C "$BATS_TEST_TMPDIR/remote-shots" -cf - . ;;
     *pl.speedwave.desktop*) tar -C "$BATS_TEST_TMPDIR/remote-logs" -cf - . ;;
+    *.speedwave*logs*) tar -C "$BATS_TEST_TMPDIR/remote-sessions" -cf - . ;;
     *) return 255 ;;
     esac
 }
@@ -305,6 +307,7 @@ _remote_by_path() {
     macos_collect_failure_artifacts reset-only
     [ "$(cat "$HOST_REPO_DIR/.e2e-artifacts/macos/reset-only/screenshots/FAIL-1.png")" = "png" ]
     [ "$(cat "$HOST_REPO_DIR/.e2e-artifacts/macos/reset-only/app-log/speedwave-desktop.log")" = "log" ]
+    [ "$(cat "$HOST_REPO_DIR/.e2e-artifacts/macos/reset-only/session-logs/e2e-second/claude-session.log")" = "session" ]
 }
 
 @test "windows_collect_failure_artifacts collects the screenshots and the app log of the phase" {
@@ -313,6 +316,7 @@ _remote_by_path() {
     windows_collect_failure_artifacts first-launch
     [ "$(cat "$HOST_REPO_DIR/.e2e-artifacts/windows/first-launch/screenshots/FAIL-1.png")" = "png" ]
     [ "$(cat "$HOST_REPO_DIR/.e2e-artifacts/windows/first-launch/app-log/speedwave-desktop.log")" = "log" ]
+    [ "$(cat "$HOST_REPO_DIR/.e2e-artifacts/windows/first-launch/session-logs/e2e-second/claude-session.log")" = "session" ]
 }
 
 @test "a lane keeps collecting the app log when the screenshots are missing" {
