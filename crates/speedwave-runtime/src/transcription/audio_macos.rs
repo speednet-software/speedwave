@@ -107,6 +107,10 @@ impl AudioCapture for MacOsAudioCapture {
 
     fn start(&self, source: AudioSource) -> Result<Box<dyn AudioStream>, CaptureError> {
         let (source_arg, mic_arg) = source_to_cli_args(&source)?;
+        log::info!(
+            target: "transcription::capture",
+            "starting {CLI_NAME} --record --source {source_arg} --mic {mic_arg}"
+        );
         let mut child = super::super::binary::command(CLI_NAME)
             .arg("--record")
             .arg("--source")

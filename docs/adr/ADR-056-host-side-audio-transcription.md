@@ -161,6 +161,22 @@
 > **Not changed:** dropping a file onto the view (the bytes would have to come from the webview in chunks, ADR-094), Opus, and diarization of an import.
 >
 > **Amendment 23 (speaker labels on an import, SPEED-898):** Amendment 22's "Speaker diarization never runs on it, since the file is mono" and "diarization of an import" under **Not changed** no longer hold. `import_transcription(language, speaker_mode)` passes the Settings switch as `stop_transcription` does, and the offline pass diarizes the single channel of an imported file, and of a recording of other people only (ADR-098, Amendment of 2026-10-28).
+>
+> **Amendment 24 (a microphone restart that survives a device change, SPEED-899, 2026-10-29):**
+>
+> **Problem:**
+> Two field sessions on 0.21.0+209 lost the microphone after a headset was plugged in or out. In the first, the fourteenth restart of the Amendment 4 handler ended `audio-capture-cli` with SIGABRT: `installTap` raised the Objective-C exception `com.apple.coreaudio.avfaudio` "Failed to create tap due to format mismatch", because the input changed format between `outputFormat(forBus: 0)` and the tap. AVFoundation requires the tap's sample rate to equal the hardware's[^40], and Swift cannot recover from an Objective-C exception: it has to be caught in Objective-C before it reaches Swift code[^41]. The process died with the system audio stream, and `audio_macos.rs::reap_at_eof` failed the session as truncated. In the second, `engine.start()` threw `kAudioHardwareBadObjectError` (`'!obj'`, 560947818)[^42] for a device that had just gone; the catch kept the process alive, but with no engine left no `AVAudioEngineConfigurationChange` could arrive, so the microphone stayed off for the rest of the meeting.
+>
+> **Decision:**
+>
+> - **The tap is installed from Objective-C:** the `SafeAudioTap` target of the audio-capture package (`SPWSafeTap.install(on:bus:bufferSize:format:block:)`) calls `installTapOnBus:` inside `@try`/`@catch` and returns the exception's name and reason as an `NSError`, so the exception never passes through a Swift frame. Before the tap, `startMicEngine` refuses a format with no channels or no sample rate, and one whose sample rate differs from `inputFormat(forBus: 0)` (`micFormatProblem`), as a failed start.
+> - **A failed start is tried again:** `startMicOrRetry` retries after 1, 2, 4, 8, 16 and then every 30 s (`micRetryDelay`), and resets the count once the mic starts. `installMicRestartTriggers` also listens on the system object for `kAudioHardwarePropertyDefaultInputDevice` and `kAudioHardwarePropertyDevices`[^43], which fire without any engine, and while the mic is down replaces a pending retry with a restart after the usual 0.2 s debounce.
+> - **A mic that fails at the start of a recording no longer ends it:** with system audio, a failed first start goes through `startMicOrRetry` like a failed restart, so the system audio records, the "microphone stopped" banner shows, and the mic joins once it starts. Only a failed system tap still ends the process; a microphone-only recording still fails at once, since it has nothing else to record. The timer covers a change these two properties do not show, such as a Bluetooth headset switching its own sample rate.
+> - **Only the running engine's notifications count:** the `AVAudioEngineConfigurationChange` observer still listens with `object: nil`, but schedules a restart only for the session's current engine (`onMicEngineConfigurationChange`), so an engine that failed to start cannot cut a pending retry short.
+> - **The log names the device and the driver of each restart:** every start logs the input device name and UID with the tap and hardware formats, every failure names the device, every restart names its trigger (engine configuration change, default input device change, device list change, retry) and how long the engine it stops has run, a default input device change logs the new device, and the Rust side logs the `--source` and `--mic` arguments of each spawn. A diagnostics bundle of a restart storm then shows what drives it and between which devices and formats the input moves, which the bundles of SPEED-899 did not.
+> - **The banner clears itself:** when the mic delivers again, `mix.rs::refresh_health` emits `CaptureHealth::Cleared(MicrophoneStalled)` as before (Amendment 4), so the "microphone stopped" banner goes away.
+>
+> **Not changed:** the 0.2 s debounce, the tap API (`installTapOnBus:`, now called from `SPWSafeTap`, deprecated from macOS 27.0 in favour of `installAudioTap(onBus:bufferSize:format:tapProvider:)`[^40]), and the Rust side of the capture.
 
 ## Decision
 
@@ -297,3 +313,11 @@ The supporting sub-decisions:
 [^38]: Windows system error codes 5 `ERROR_ACCESS_DENIED`, 32 `ERROR_SHARING_VIOLATION` ("The process cannot access the file because it is being used by another process.") and 33 `ERROR_LOCK_VIOLATION`: <https://learn.microsoft.com/en-us/windows/win32/debug/system-error-codes--0-499->.
 
 [^39]: In Rust 1.94.0, `decode_error_kind` maps `ERROR_ACCESS_DENIED` to `PermissionDenied` and neither sharing nor lock violation: <https://github.com/rust-lang/rust/blob/1.94.0/library/std/src/sys/io/error/windows.rs>.
+
+[^40]: AVFoundation's assertion `format.sampleRate == inputHWFormat.sampleRate` in `InstallTapOnNode`, quoted in an Apple Developer Forums thread answered by Apple DTS: <https://developer.apple.com/forums/thread/680785>. The `installTap(onBus:bufferSize:format:block:)` reference, which marks it deprecated from macOS 27.0 and says "The tap and connection formats (if non-nil) on the bus need to be identical": <https://developer.apple.com/documentation/avfaudio/avaudionode/installtap(onbus:buffersize:format:block:)>.
+
+[^41]: "there's no safe way to recover from Objective-C exceptions in Swift. To handle Objective-C exceptions, write Objective-C code that catches exceptions before they reach any Swift code.": <https://developer.apple.com/documentation/swift/handling-cocoa-errors-in-swift>.
+
+[^42]: `kAudioHardwareBadObjectError`: <https://developer.apple.com/documentation/coreaudio/kaudiohardwarebadobjecterror>.
+
+[^43]: `AudioObjectAddPropertyListenerBlock(_:_:_:_:)`: <https://developer.apple.com/documentation/coreaudio/audioobjectaddpropertylistenerblock(_:_:_:_:)>.

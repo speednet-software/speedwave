@@ -1,11 +1,41 @@
 import AVFoundation
 import CoreAudio
 import Foundation
+import SafeAudioTap
 import SharedCLI
 
 
 /// 16 kHz mono float32 — the only output format. Whisper expects this rate.
 let kSampleRate: Double = 16_000.0
+
+/// Delay that coalesces a burst of configuration-change notifications into one mic restart.
+let micRestartDebounce: TimeInterval = 0.2
+
+/// Wait before the first retry of a mic that failed to start; doubles with every further failure.
+let micRetryBaseDelay: TimeInterval = 1
+
+/// Longest wait between two retries of a mic that failed to start.
+let micRetryMaxDelay: TimeInterval = 30
+
+/// Runs a body after a delay; `RecordSession.scheduleMicRestart` in production, a recorder in tests.
+typealias MicRestartScheduler = (TimeInterval, @escaping () -> Void) -> Void
+
+/// What asked for a mic restart; logged with every restart so a storm shows its driver.
+enum MicRestartTrigger: CustomStringConvertible {
+    case engineConfigurationChange
+    case defaultInputDeviceChange
+    case inputDeviceListChange
+    case retryAfterFailedStart
+
+    var description: String {
+        switch self {
+        case .engineConfigurationChange: return "an engine configuration change"
+        case .defaultInputDeviceChange: return "a default input device change"
+        case .inputDeviceListChange: return "an input device list change"
+        case .retryAfterFailedStart: return "a retry of a failed start"
+        }
+    }
+}
 
 /// Owns all stdout writes (header + binary chunks). CoreAudio IOProc threads and the mic-engine tap
 /// only hand it already-copied raw frames; resample + write happen here, never on the real-time audio thread.
@@ -165,6 +195,15 @@ enum MicSelector {
 struct RecordOptions {
     let source: AudioSource
     let mic: MicSelector
+}
+
+/// A mic engine that could not start; the message names the device and the reason.
+struct MicStartError: LocalizedError {
+    let errorDescription: String?
+
+    init(_ message: String) {
+        errorDescription = message
+    }
 }
 
 /// The mic selector for a `mic-only[:uid]` source: the named device, or default.
@@ -366,17 +405,21 @@ final class RecordSession {
     var ioProcId: AudioDeviceIOProcID?
     /// Optional mic engine; nil when --mic none.
     var micEngine: AVAudioEngine?
-    /// Debounce for mic restarts — config changes arrive in bursts.
+    /// Pending mic restart: the debounce of a burst of config changes, or the retry after a failed start.
     var micRestartWork: DispatchWorkItem?
+    /// Mic starts that failed since the mic last started; sets the next retry's delay.
+    var micRestartFailures = 0
+    /// When the running mic engine started; logged as its lifetime when the next restart stops it.
+    var micEngineStartedAt: Date?
     /// Monotonic nanoseconds reference for `offset_ns`.
     let startMachAbs: UInt64 = mach_absolute_time()
 
-    /// Coalesces burst config-change notifications into one restart.
-    func scheduleMicRestart(_ body: @escaping () -> Void) {
+    /// Coalesces burst config-change notifications and pending retries into one restart.
+    func scheduleMicRestart(after delay: TimeInterval = micRestartDebounce, _ body: @escaping () -> Void) {
         micRestartWork?.cancel()
         let work = DispatchWorkItem(block: body)
         micRestartWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     /// Converts a mach absolute time delta to nanoseconds. Cached timebase.
@@ -448,7 +491,7 @@ func runRecord(_ opts: RecordOptions) {
             session.teardown()
             exit(1)
         }
-        installMicConfigChangeObserver(session: session, selector: selector, streamIndex: 0)
+        installMicRestartTriggers(session: session, selector: selector, streamIndex: 0)
         RunLoop.main.run()
         return
     }
@@ -470,14 +513,14 @@ func runRecord(_ opts: RecordOptions) {
 
     do {
         try startSystemTap(session: session, source: opts.source)
-        if micGranted {
-            try startMicEngine(session: session, selector: opts.mic, streamIndex: 1)
-            installMicConfigChangeObserver(session: session, selector: opts.mic, streamIndex: 1)
-        }
     } catch {
         logErr("record start failed: \(error.localizedDescription)")
         session.teardown()
         exit(1)
+    }
+    if micGranted {
+        startMicOrRetry(session: session, selector: opts.mic, streamIndex: 1)
+        installMicRestartTriggers(session: session, selector: opts.mic, streamIndex: 1)
     }
 
     RunLoop.main.run()
@@ -652,8 +695,8 @@ func requestMicrophoneAccess() -> Bool {
     }
 }
 
-/// Spins up an AVAudioEngine on the default microphone and tees its frames into the framed protocol
-/// on `streamIndex` (0 for mic-only, 1 when mixed with a system tap) — via the writer queue.
+/// Spins up an AVAudioEngine on the default microphone and tees its frames into stream `streamIndex`.
+/// The tap goes through `SPWSafeTap`, so AVFoundation's format-mismatch exception is a thrown error.
 @available(macOS 14.4, *)
 func startMicEngine(session: RecordSession, selector: MicSelector, streamIndex: UInt32) throws {
     let engine = AVAudioEngine()
@@ -670,9 +713,17 @@ func startMicEngine(session: RecordSession, selector: MicSelector, streamIndex: 
             logErr("mic device UID '\(uid)' not found; using default")
         }
     }
+    let device = describeDevice(inputNode.auAudioUnit.deviceID)
     let format = inputNode.outputFormat(forBus: 0)
+    let hardwareFormat = inputNode.inputFormat(forBus: 0)
+    if let problem = micFormatProblem(
+        sampleRate: format.sampleRate, channels: format.channelCount,
+        hardwareSampleRate: hardwareFormat.sampleRate)
+    {
+        throw MicStartError("\(device): \(problem)")
+    }
 
-    inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { buf, _ in
+    let tap: AVAudioNodeTapBlock = { buf, _ in
         let frames = Int(buf.frameLength)
         let channels = Int(buf.format.channelCount)
         guard frames > 0, let chan = buf.floatChannelData else { return }
@@ -689,10 +740,67 @@ func startMicEngine(session: RecordSession, selector: MicSelector, streamIndex: 
             streamIndex: streamIndex, interleaved: interleaved, format: interleavedFmt,
             offsetNs: offset)
     }
+    do {
+        try SPWSafeTap.install(on: inputNode, bus: 0, bufferSize: 4096, format: format, block: tap)
+    } catch {
+        throw MicStartError("\(device): \(error.localizedDescription)")
+    }
 
     engine.prepare()
-    try engine.start()
+    do {
+        try engine.start()
+    } catch {
+        stopCapture(on: engine)
+        throw MicStartError("\(device): \(error.localizedDescription)")
+    }
+    logErr(
+        "microphone capture started on \(device): tap \(describeFormat(format)), hardware \(describeFormat(hardwareFormat))"
+    )
     session.micEngine = engine
+    session.micEngineStartedAt = Date()
+}
+
+/// `Name (UID)` of an audio device for the log, or what is known of it.
+@available(macOS 14.4, *)
+func describeDevice(_ device: AudioObjectID) -> String {
+    let uid = deviceStringProperty(device, kAudioDevicePropertyDeviceUID) ?? "unknown UID"
+    let name = deviceStringProperty(device, kAudioObjectPropertyName) ?? "unknown device"
+    return "\(name) (\(uid))"
+}
+
+/// `48000 Hz 2 ch` for the log.
+func describeFormat(_ format: AVAudioFormat) -> String {
+    "\(Int(format.sampleRate)) Hz \(format.channelCount) ch"
+}
+
+/// The log line of a restart: its trigger and how long the engine it stops has run.
+func describeMicRestart(trigger: MicRestartTrigger, engineStartedAt: Date?, now: Date = Date()) -> String {
+    guard let startedAt = engineStartedAt else {
+        return "restarting the microphone capture on \(trigger); no engine was running"
+    }
+    let lifetime = String(format: "%.1f", now.timeIntervalSince(startedAt))
+    return "restarting the microphone capture on \(trigger); the engine ran \(lifetime) s"
+}
+
+/// Why the input node's format cannot carry a tap, or `nil` when it can. AVFoundation raises an
+/// exception when the tap's sample rate differs from the hardware's or the format is empty.
+func micFormatProblem(
+    sampleRate: Double, channels: AVAudioChannelCount, hardwareSampleRate: Double
+) -> String? {
+    if channels == 0 || sampleRate <= 0 {
+        return "the input reports no usable format (\(channels) ch, \(Int(sampleRate)) Hz)"
+    }
+    if sampleRate != hardwareSampleRate {
+        return "the input format changed while starting (tap \(Int(sampleRate)) Hz, hardware \(Int(hardwareSampleRate)) Hz)"
+    }
+    return nil
+}
+
+/// Removes the tap and stops the engine.
+@available(macOS 14.4, *)
+func stopCapture(on engine: AVAudioEngine) {
+    engine.inputNode.removeTap(onBus: 0)
+    engine.stop()
 }
 
 /// A real configuration change stops the engine (AVAudioEngine contract); binding
@@ -702,39 +810,122 @@ func micRestartNeeded(_ engine: AVAudioEngine?) -> Bool {
     !(engine?.isRunning ?? false)
 }
 
-/// Restarts the mic engine after the audio configuration changed (AVAudioEngine
-/// invalidates its graph when the default input device switches mid-session).
+/// Restarts on a configuration change of the engine the session runs. A notification from an engine
+/// that failed to start or was replaced must not cut a pending retry short.
 @available(macOS 14.4, *)
-func restartMicEngine(session: RecordSession, selector: MicSelector, streamIndex: UInt32) {
-    guard activeSession === session else { return }
-    guard micRestartNeeded(session.micEngine) else {
-        logErr("audio configuration change ignored — the microphone engine is still running")
-        return
-    }
-    logErr("audio configuration changed — restarting the microphone capture")
-    if let engine = session.micEngine {
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
-        session.micEngine = nil
-    }
-    do {
-        try startMicEngine(session: session, selector: selector, streamIndex: streamIndex)
-    } catch {
-        logErr("mic restart failed: \(error.localizedDescription) — continuing without the microphone")
+func onMicEngineConfigurationChange(
+    _ notificationObject: Any?, session: RecordSession, restart: (MicRestartTrigger) -> Void
+) {
+    if (notificationObject as? AVAudioEngine) === session.micEngine {
+        restart(.engineConfigurationChange)
     }
 }
 
-/// Debounced mic restart on engine-configuration changes (device switch).
-/// Process-lifetime observer — the CLI records one session and exits.
+/// Restarts on a change of the default input device or the device list while the mic is down.
 @available(macOS 14.4, *)
-func installMicConfigChangeObserver(
+func onInputDeviceChange(
+    _ trigger: MicRestartTrigger, session: RecordSession, restart: (MicRestartTrigger) -> Void
+) {
+    if micRestartNeeded(session.micEngine) { restart(trigger) }
+}
+
+/// Delay before the next try after `failures` failed mic starts in a row: `micRetryBaseDelay`,
+/// doubled per further failure, at most `micRetryMaxDelay`.
+func micRetryDelay(afterFailures failures: Int) -> TimeInterval {
+    min(micRetryMaxDelay, micRetryBaseDelay * pow(2, Double(max(0, failures - 1))))
+}
+
+/// Restarts the mic engine after the audio configuration or the input devices changed.
+@available(macOS 14.4, *)
+func restartMicEngine(
+    session: RecordSession, selector: MicSelector, streamIndex: UInt32,
+    trigger: MicRestartTrigger,
+    start: @escaping (RecordSession, MicSelector, UInt32) throws -> Void = startMicEngine,
+    schedule: MicRestartScheduler? = nil
+) {
+    guard activeSession === session else { return }
+    guard micRestartNeeded(session.micEngine) else {
+        logErr("\(trigger) ignored - the microphone engine is still running")
+        return
+    }
+    logErr(describeMicRestart(trigger: trigger, engineStartedAt: session.micEngineStartedAt))
+    if let engine = session.micEngine {
+        stopCapture(on: engine)
+        session.micEngine = nil
+        session.micEngineStartedAt = nil
+    }
+    startMicOrRetry(
+        session: session, selector: selector, streamIndex: streamIndex, start: start, schedule: schedule)
+}
+
+/// Starts the mic; a failure leaves the other stream recording and schedules `restartMicEngine` after
+/// `micRetryDelay`, which an input device change cuts short.
+@available(macOS 14.4, *)
+func startMicOrRetry(
+    session: RecordSession, selector: MicSelector, streamIndex: UInt32,
+    start: @escaping (RecordSession, MicSelector, UInt32) throws -> Void = startMicEngine,
+    schedule: MicRestartScheduler? = nil
+) {
+    do {
+        try start(session, selector, streamIndex)
+        session.micRestartFailures = 0
+    } catch {
+        session.micRestartFailures += 1
+        let delay = micRetryDelay(afterFailures: session.micRestartFailures)
+        logErr(
+            "mic start failed: \(error.localizedDescription) - retrying in \(Int(delay)) s or on the next input device change")
+        let retry = {
+            restartMicEngine(
+                session: session, selector: selector, streamIndex: streamIndex,
+                trigger: .retryAfterFailedStart, start: start, schedule: schedule)
+        }
+        if let schedule {
+            schedule(delay, retry)
+        } else {
+            session.scheduleMicRestart(after: delay, retry)
+        }
+    }
+}
+
+/// Debounced mic restart on configuration changes of the session's engine and on changes of the
+/// default input device or the device list. The CoreAudio listeners fire with no engine at all, so a mic
+/// that failed to restart comes back on the next device change. Process-lifetime: the CLI records one
+/// session and exits.
+@available(macOS 14.4, *)
+func installMicRestartTriggers(
     session: RecordSession, selector: MicSelector, streamIndex: UInt32
 ) {
+    let scheduleRestart = { (trigger: MicRestartTrigger) in
+        session.scheduleMicRestart {
+            restartMicEngine(
+                session: session, selector: selector, streamIndex: streamIndex, trigger: trigger)
+        }
+    }
     _ = NotificationCenter.default.addObserver(
         forName: .AVAudioEngineConfigurationChange, object: nil, queue: .main
-    ) { _ in
-        session.scheduleMicRestart {
-            restartMicEngine(session: session, selector: selector, streamIndex: streamIndex)
+    ) { note in
+        onMicEngineConfigurationChange(note.object, session: session, restart: scheduleRestart)
+    }
+    let listeners: [(AudioObjectPropertySelector, MicRestartTrigger)] = [
+        (kAudioHardwarePropertyDefaultInputDevice, .defaultInputDeviceChange),
+        (kAudioHardwarePropertyDevices, .inputDeviceListChange),
+    ]
+    for (property, trigger) in listeners {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: property,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let status = AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &addr, DispatchQueue.main
+        ) { _, _ in
+            if case .defaultInputDeviceChange = trigger {
+                logErr("default input device is now \(describeDevice(defaultInputDevice()))")
+            }
+            onInputDeviceChange(trigger, session: session, restart: scheduleRestart)
+        }
+        if status != noErr {
+            logErr("input device listener could not be installed (OSStatus \(status))")
         }
     }
 }
