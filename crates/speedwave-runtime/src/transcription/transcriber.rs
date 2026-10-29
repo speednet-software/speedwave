@@ -94,7 +94,7 @@ pub struct Word {
 }
 
 /// Which captured channel a segment was decoded from. Deterministic channel
-/// attribution; telling speakers apart on the `System` channel is `diarizer.rs` (ADR-098).
+/// attribution; telling speakers apart in the meeting audio is `diarizer.rs` (ADR-098).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TranscriptSource {
@@ -130,8 +130,8 @@ pub struct Segment {
     /// pre-Amendment-9 transcripts).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<TranscriptSource>,
-    /// Speaker number 1..N in order of first appearance, set only on `System` segments
-    /// by speaker diarization. The pre-ADR-075 `speaker` field is never read into it.
+    /// Speaker number 1..N in order of first appearance, set by speaker diarization on every
+    /// segment but a `Mic` one. The pre-ADR-075 `speaker` field is never read into it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speaker_id: Option<u32>,
 }

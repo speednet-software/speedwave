@@ -159,6 +159,8 @@
 > - **Downgrade:** an app version older than this amendment cannot read the `imported_file` source, so it skips such a recording in its list until the user updates again; the audio stays on disk.
 >
 > **Not changed:** dropping a file onto the view (the bytes would have to come from the webview in chunks, ADR-094), Opus, and diarization of an import.
+>
+> **Amendment 23 (speaker labels on an import, SPEED-898):** Amendment 22's "Speaker diarization never runs on it, since the file is mono" and "diarization of an import" under **Not changed** no longer hold. `import_transcription(language, speaker_mode)` passes the Settings switch as `stop_transcription` does, and the offline pass diarizes the single channel of an imported file, and of a recording of other people only (ADR-098, Amendment of 2026-10-28).
 
 ## Decision
 
