@@ -117,6 +117,42 @@ async function selectModel(id: string): Promise<void> {
   await pickModelOption(id);
 }
 
+async function waitForModelPickerRows(project: string): Promise<string[]> {
+  let ids: string[] = [];
+  await browser.waitUntil(
+    async () => {
+      ids = (await modelPickerRowIds(project)) ?? [];
+      return ids.length > 0;
+    },
+    {
+      timeout: 90_000,
+      timeoutMsg: `the session of ${project} never reported its model list (list_model_picker stayed empty)`,
+    }
+  );
+  return ids;
+}
+
+async function waitForCatalogBadge(
+  catalog: AnthropicCatalogEntry[]
+): Promise<AnthropicCatalogEntry> {
+  let label = '';
+  let entry: AnthropicCatalogEntry | null = null;
+  await browser.waitUntil(
+    async () => {
+      label = (await (await $('[data-testid="composer-model-badge"]')).getText()).trim();
+      entry = catalogEntryForBadgeLabel(catalog, label);
+      return entry !== null;
+    },
+    {
+      timeout: 30_000,
+      timeoutMsg: () => `composer-model-badge never showed a catalog family, last label "${label}"`,
+    }
+  );
+  expect(label).not.toMatch(ONE_MILLION_MARKER);
+  if (!entry) throw new Error(`composer-model-badge showed an unrecognized label "${label}"`);
+  return entry;
+}
+
 async function waitForBadgeFamily(entry: AnthropicCatalogEntry): Promise<void> {
   await browser.waitUntil(
     async () =>
@@ -305,17 +341,12 @@ describe('Slash Popover + Model/Effort Selector', function () {
 
       const catalog = await anthropicCatalog();
       const latestIds = await latestAnthropicModelIds();
-      const badgeLabel = (await (await $('[data-testid="composer-model-badge"]')).getText()).trim();
-      expect(badgeLabel).not.toMatch(ONE_MILLION_MARKER);
-      const entry = catalogEntryForBadgeLabel(catalog, badgeLabel);
-      if (!entry) {
-        throw new Error(`composer-model-badge showed an unrecognized label "${badgeLabel}"`);
-      }
+      const pickerIds = await waitForModelPickerRows(ANTHROPIC_PROJECT);
+      const entry = await waitForCatalogBadge(catalog);
       expect(latestIds).toContain(entry.id);
 
       const haiku = requireCatalogEntry(catalog, HAIKU_MODEL);
       requireCatalogEntry(catalog, SONNET_MODEL);
-      const pickerIds = await modelPickerRowIds(ANTHROPIC_PROJECT);
       expect(pickerIds).toContain(HAIKU_MODEL);
       expect(pickerIds).toContain(SONNET_MODEL);
 
