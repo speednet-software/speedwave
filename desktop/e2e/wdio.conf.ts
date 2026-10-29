@@ -83,7 +83,7 @@ export const config = {
     _context: unknown,
     { passed, error }: { passed: boolean; error?: Error }
   ) {
-    if (!passed) await captureFailure('Hook', error);
+    if (!passed && !/skip/i.test(error?.message ?? '')) await captureFailure('Hook', error);
   },
 };
 

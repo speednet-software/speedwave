@@ -285,7 +285,14 @@ export async function queueMessageViaEnter(text: string): Promise<void> {
   const input = await $('[data-testid="chat-input"]');
   await input.waitForExist({ timeout: 15_000 });
   await input.setValue(text);
-  await browser.keys('Enter');
+  await browser.execute(() => {
+    const ta = document.querySelector('[data-testid="chat-input"]') as HTMLTextAreaElement | null;
+    if (!ta) return;
+    ta.focus();
+    ta.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })
+    );
+  });
 }
 
 export async function waitForTurnComplete(responseTimeoutMs = 180_000): Promise<void> {
