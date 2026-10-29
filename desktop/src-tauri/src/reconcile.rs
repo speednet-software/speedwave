@@ -805,9 +805,43 @@ pub(crate) fn reconcile_bundle_update(app_handle: &tauri::AppHandle) -> bool {
     true
 }
 
+static COMPOSE_PORT_RECONCILES: std::sync::LazyLock<(Mutex<u32>, Condvar)> =
+    std::sync::LazyLock::new(|| (Mutex::new(0), Condvar::new()));
+
+/// Whether every compose host URL reconcile begun so far has finished within `timeout`.
+pub(crate) fn wait_for_compose_port_reconcile(timeout: Duration) -> bool {
+    let (lock, cvar) = &*COMPOSE_PORT_RECONCILES;
+    let pending = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let (pending, _) = cvar
+        .wait_timeout_while(pending, timeout, |n| *n > 0)
+        .unwrap_or_else(|e| e.into_inner());
+    *pending == 0
+}
+
+struct ComposePortReconcileGuard;
+
+impl ComposePortReconcileGuard {
+    fn begin() -> Self {
+        let (lock, _) = &*COMPOSE_PORT_RECONCILES;
+        *lock.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        Self
+    }
+}
+
+impl Drop for ComposePortReconcileGuard {
+    fn drop(&mut self) {
+        let (lock, cvar) = &*COMPOSE_PORT_RECONCILES;
+        let mut pending = lock.lock().unwrap_or_else(|e| e.into_inner());
+        *pending = pending.saturating_sub(1);
+        cvar.notify_all();
+    }
+}
+
 pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
     let handle = app_handle.clone();
+    let settles = ComposePortReconcileGuard::begin();
     std::thread::spawn(move || {
+        let _settles = settles;
         let project = match config::load_user_config()
             .ok()
             .and_then(|c| c.active_project)
@@ -1287,6 +1321,38 @@ mod tests {
             "restore_one_project must follow order: transaction(...) {{ compose_down -> render_and_save_compose -> compose_validate_with_retry -> compose_up_recreate }} \
              (tx={tx_pos}, down={down_pos}, render={render_pos}, validate={validate_pos}, up={up_pos})"
         );
+    }
+
+    #[test]
+    fn the_container_check_waits_until_every_compose_port_reconcile_settles() {
+        assert!(wait_for_compose_port_reconcile(Duration::from_millis(10)));
+        let first = ComposePortReconcileGuard::begin();
+        let second = ComposePortReconcileGuard::begin();
+        assert!(!wait_for_compose_port_reconcile(Duration::from_millis(50)));
+        drop(first);
+        assert!(!wait_for_compose_port_reconcile(Duration::from_millis(20)));
+        let waiter = std::thread::spawn(|| wait_for_compose_port_reconcile(Duration::from_secs(5)));
+        std::thread::sleep(Duration::from_millis(50));
+        drop(second);
+        assert!(waiter.join().unwrap());
+        assert!(wait_for_compose_port_reconcile(Duration::from_millis(10)));
+    }
+
+    #[test]
+    fn reconcile_compose_port_is_pending_before_its_thread_runs_and_settles_on_every_exit() {
+        let source = include_str!("reconcile.rs");
+        let fn_body = extract_fn_body_braced(source, "pub(crate) fn reconcile_compose_port(");
+        let begin = fn_body
+            .find("ComposePortReconcileGuard::begin()")
+            .expect("the reconcile is pending from the call, not from the thread's first step");
+        let spawn = fn_body
+            .find("std::thread::spawn(")
+            .expect("the reconcile runs on its own thread");
+        assert!(begin < spawn);
+        let moved = fn_body
+            .find("let _settles = settles;")
+            .expect("the guard moves into the thread so every return path settles the wait");
+        assert!(spawn < moved);
     }
 
     #[test]
