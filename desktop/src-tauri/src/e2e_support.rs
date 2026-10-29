@@ -45,15 +45,9 @@ pub fn spawn_args_for(tab_id: &str) -> Option<Vec<String>> {
         .and_then(|guard| guard.as_ref().and_then(|(_, map)| map.get(tab_id).cloned()))
 }
 
-#[cfg(feature = "e2e")]
 pub fn with_claude_debug(mut args: Vec<String>) -> Vec<String> {
     args.push("--debug-file".to_string());
     args.push("/dev/stderr".to_string());
-    args
-}
-
-#[cfg(not(feature = "e2e"))]
-pub fn with_claude_debug(args: Vec<String>) -> Vec<String> {
     args
 }
 
@@ -137,14 +131,6 @@ mod tests {
     static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
-    #[cfg(not(feature = "e2e"))]
-    fn a_release_build_spawns_claude_without_a_debug_file() {
-        let args = vec!["claude".to_string(), "-p".to_string()];
-        assert_eq!(with_claude_debug(args.clone()), args);
-    }
-
-    #[test]
-    #[cfg(feature = "e2e")]
     fn an_e2e_build_spawns_claude_with_its_debug_log_on_stderr() {
         let args = with_claude_debug(vec!["claude".to_string(), "-p".to_string()]);
         assert_eq!(
