@@ -14,9 +14,14 @@ let package = Package(
         .package(path: "../shared"),
     ],
     targets: [
+        .target(
+            name: "SafeAudioTap",
+            path: "SafeAudioTap",
+            linkerSettings: [.linkedFramework("AVFoundation")]
+        ),
         .executableTarget(
             name: "audio-capture-cli",
-            dependencies: [.product(name: "SharedCLI", package: "shared")],
+            dependencies: ["SafeAudioTap", .product(name: "SharedCLI", package: "shared")],
             path: "Sources",
             linkerSettings: [
                 .unsafeFlags([
@@ -29,7 +34,10 @@ let package = Package(
         ),
         .testTarget(
             name: "AudioCaptureTests",
-            dependencies: ["audio-capture-cli", .product(name: "SharedCLI", package: "shared")],
+            dependencies: [
+                "audio-capture-cli", "SafeAudioTap",
+                .product(name: "SharedCLI", package: "shared"),
+            ],
             path: "Tests"
         ),
     ]
