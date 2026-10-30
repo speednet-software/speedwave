@@ -977,6 +977,21 @@ describe('TranscriptionService', () => {
         ['stop_transcription', { sessionId: 'sess-2', speakerMode: true }],
       ]);
     });
+
+    it('an import hands the current choice to the backend', async () => {
+      const calls: [string, unknown][] = [];
+      mockTauri.invokeHandler = async (cmd, args) => {
+        calls.push([cmd, args]);
+        return 'imported-1';
+      };
+      await svc.importFile('pl');
+      svc.setSpeakerAttribution(true);
+      await svc.importFile('en');
+      expect(calls).toEqual([
+        ['import_transcription', { language: 'pl', speakerMode: false }],
+        ['import_transcription', { language: 'en', speakerMode: true }],
+      ]);
+    });
   });
 
   describe('recordings list', () => {

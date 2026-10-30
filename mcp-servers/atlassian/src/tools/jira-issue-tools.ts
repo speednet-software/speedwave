@@ -1,70 +1,162 @@
 /**
- * Jira issue tools — search/CRUD, transitions, assignment, current account, attachments (10).
+ * Jira issue tools: search/CRUD, parent, components, links, transitions, assignment, current account, attachments (14).
  * @module mcp-atlassian/tools/jira-issue-tools
  */
 
+import axios from 'axios';
 import {
   type Tool,
   type ToolDefinition,
   jsonResult,
-  errorResult,
-  notConfiguredMessage,
   teachingErrorResult,
   readWorkspaceFile,
+  withDeclaredParams,
   META_KEYS,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
   DESTRUCTIVE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
 import { AtlassianClient } from '../client.js';
-import { createJiraIssuesClient } from '../domains/jira-issues.js';
+import { createJiraIssuesClient, UnknownLinkRelationError } from '../domains/jira-issues.js';
+import { createJiraProjectsClient } from '../domains/jira-projects.js';
 import type { AdfDoc } from '../types.js';
-import { withValidation } from './validation.js';
+import { listResult, unconfiguredDefinitions, withValidation } from './validation.js';
+import { resolveRichText } from './rich-text.js';
+import { userSchema } from './jira-schemas.js';
 
-/** Shared account-ID resolution guidance (no user-search tool exists here). */
+interface WriteContext {
+  outcome: string;
+  issueTypeLookup: string;
+  typeChangeNote?: string;
+}
+
+interface JiraRejection {
+  fields: Record<string, string>;
+  messages: string[];
+}
+
 const ACCOUNT_ID_RESOLUTION_GUIDANCE =
-  'Resolve your own account ID via getMyself; for someone else, reuse an assignee/reporter account_id already present in a prior getIssue/searchIssues result, or ask the user rather than guessing.';
+  'Pass an account ID, "me" for the account this worker authenticates as (see getMyself), or reuse an assignee/reporter account_id from a prior getIssue/searchIssues result. Do not guess an account ID.';
 
-/**
- * Max attachment size this worker will buffer and upload, well under its 128 MiB memory budget.
- * Override: `ATLASSIAN_MAX_ATTACHMENT_BYTES`.
- */
 const MAX_ATTACHMENT_BYTES = (() => {
   const raw = process.env.ATLASSIAN_MAX_ATTACHMENT_BYTES;
   const n = raw === undefined ? NaN : Number.parseInt(raw, 10);
   return Number.isInteger(n) && n > 0 ? n : 25 * 1024 * 1024;
 })();
 
+const USER_SCOPED_META = {
+  [META_KEYS.USER_SCOPED]: true,
+  [META_KEYS.CURRENT_USER_TOOL]: 'getMyself',
+};
+
+const issueRefProperties = {
+  key: { type: 'string' },
+  summary: { type: 'string' },
+  status: { type: 'string' },
+};
+
+const searchIssueProperties = {
+  key: { type: 'string' },
+  id: { type: 'string' },
+  web_url: { type: 'string' },
+  summary: { type: 'string' },
+  type: { type: 'string' },
+  status: { type: 'string' },
+  project: { type: 'string' },
+  priority: { type: ['string', 'null'] },
+  labels: { type: 'array', items: { type: 'string' } },
+  components: { type: 'array', items: { type: 'string' } },
+  parent: {
+    type: ['object', 'null'],
+    properties: { ...issueRefProperties, type: { type: 'string' } },
+  },
+  links: {
+    type: 'array',
+    items: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' },
+        relation: { type: 'string' },
+        issue: { type: 'object', properties: issueRefProperties },
+      },
+    },
+  },
+  assignee: userSchema,
+  reporter: userSchema,
+  created: { type: 'string' },
+  updated: { type: 'string' },
+};
+
+const issueProperties = {
+  ...searchIssueProperties,
+  description: { type: 'string', description: 'Markdown' },
+};
+
+const errorProperties = { success: { type: 'boolean' }, error: { type: 'string' } };
+
+const issueOutputSchema = {
+  type: 'object',
+  properties: {
+    ...errorProperties,
+    issue: { type: 'object', properties: issueProperties },
+  },
+  required: ['success'],
+};
+
+const flagOutputSchema = (flag: string) => ({
+  type: 'object',
+  properties: { ...errorProperties, [flag]: { type: 'boolean' } },
+  required: ['success'],
+});
+
+const issueParam = (extra = '') => ({
+  type: 'string',
+  description: `Issue key (e.g. PROJ-123) or numeric ID.${extra}`,
+});
+
+const descriptionProperties = {
+  description: {
+    type: 'string',
+    description:
+      'Markdown description (headings, lists, code, links, tables). Send either description or description_adf, not both.',
+  },
+  description_adf: {
+    type: 'object',
+    description:
+      'Raw Atlassian Document Format document for content Markdown cannot express (mentions, panels). Send either description or description_adf, not both.',
+  },
+};
+
+const assigneeDescription = `Account ID, "me" or null to unassign. ${ACCOUNT_ID_RESOLUTION_GUIDANCE}`;
+
+const createAssigneeDescription = `Account ID or "me". ${ACCOUNT_ID_RESOLUTION_GUIDANCE}`;
+
 const searchIssuesTool: Tool = {
   name: 'searchIssues',
   description:
-    'Search Jira issues with JQL (enhanced search; paginated by nextPageToken). For "my"/"assigned to me" queries use `assignee = currentUser()` directly in the JQL — no need to resolve an account ID first. If a project allowlist is configured, matches outside it are silently removed from the returned issues, and next_page_token/is_last still reflect the unfiltered upstream page (so a page that looks "last" may still be hiding excluded items).',
+    'Search Jira issues with JQL (enhanced search, paginated by next_page_token). Results carry parent, components and links but no description; use getIssue for the description. For "my"/"assigned to me" queries use `assignee = currentUser()` directly in the JQL. If a project allowlist is configured, matches outside it are silently removed from the returned issues, and next_page_token/is_last still reflect the unfiltered upstream page (so a page that looks "last" may still be hiding excluded items).',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: {
-    [META_KEYS.DEFER_LOADING]: false,
-    [META_KEYS.USER_SCOPED]: true,
-    [META_KEYS.CURRENT_USER_TOOL]: 'getMyself',
-  },
+  _meta: { [META_KEYS.DEFER_LOADING]: false, ...USER_SCOPED_META },
   keywords: ['jira', 'issues', 'search', 'jql', 'query', 'tickets', 'find'],
   example:
-    'const { issues, next_page_token } = await atlassian.searchIssues({ jql: "project = PROJ AND status = \\"To Do\\" ORDER BY created DESC", maxResults: 20 })',
+    'const { issues, next_page_token } = await atlassian.searchIssues({ jql: "project = PROJ AND status = \\"To Do\\" ORDER BY created DESC", max_results: 20 })',
   inputSchema: {
     type: 'object',
     properties: {
       jql: { type: 'string', description: 'JQL query string' },
-      maxResults: { type: 'number', description: 'Max issues per page (default 50, max 100)' },
-      nextPageToken: { type: 'string', description: 'Opaque cursor from a previous page' },
+      max_results: { type: 'number', description: 'Max issues per page (default 50, max 100)' },
+      next_page_token: { type: 'string', description: 'Opaque cursor from a previous page' },
     },
     required: ['jql'],
   },
   outputSchema: {
     type: 'object',
     properties: {
-      success: { type: 'boolean' },
-      issues: { type: 'array' },
+      ...errorProperties,
+      issues: { type: 'array', items: { type: 'object', properties: searchIssueProperties } },
       next_page_token: { type: ['string', 'null'] },
       is_last: { type: 'boolean' },
-      error: { type: 'string' },
+      count: { type: 'number' },
     },
     required: ['success'],
   },
@@ -76,107 +168,84 @@ const searchIssuesTool: Tool = {
     },
     {
       description: 'Full: paginated search',
-      input: { jql: 'assignee = currentUser()', maxResults: 25, nextPageToken: 'CAEaAggD' },
+      input: { jql: 'assignee = currentUser()', max_results: 25, next_page_token: 'CAEaAggD' },
     },
   ],
 };
 
 const getIssueTool: Tool = {
   name: 'getIssue',
-  description: 'Get a single Jira issue by key or ID.',
+  description:
+    'Get a single Jira issue by key or ID, with its Markdown description, parent, components and links (each link has an id for unlinkIssues).',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['jira', 'issue', 'get', 'show', 'ticket', 'detail'],
-  example: 'const issue = await atlassian.getIssue({ issueIdOrKey: "PROJ-123" })',
+  example: 'const { issue } = await atlassian.getIssue({ issue: "PROJ-123" })',
   inputSchema: {
     type: 'object',
-    properties: {
-      issueIdOrKey: { type: 'string', description: 'Issue key (e.g. PROJ-123) or numeric ID' },
-    },
-    required: ['issueIdOrKey'],
+    properties: { issue: issueParam() },
+    required: ['issue'],
   },
-  outputSchema: {
-    type: 'object',
-    properties: {
-      success: { type: 'boolean' },
-      issue: { type: 'object' },
-      error: { type: 'string' },
-    },
-    required: ['success'],
-  },
+  outputSchema: issueOutputSchema,
   inputExamples: [
-    { description: 'By key', input: { issueIdOrKey: 'PROJ-123' } },
-    { description: 'By numeric ID', input: { issueIdOrKey: '10042' } },
+    { description: 'By key', input: { issue: 'PROJ-123' } },
+    { description: 'By numeric ID', input: { issue: '10042' } },
   ],
 };
 
 const createIssueTool: Tool = {
   name: 'createIssue',
   description:
-    'Create a Jira issue. `bodyText` (plain text) becomes the description as ADF; pass `bodyAdf` for a pre-built ADF document.',
+    'Create a Jira issue. Sub-task types require `parent`. `components` are names; list them with listComponents. Returns the created issue.',
   annotations: WRITE_ANNOTATIONS,
-  _meta: {
-    [META_KEYS.DEFER_LOADING]: true,
-    [META_KEYS.USER_SCOPED]: true,
-    [META_KEYS.CURRENT_USER_TOOL]: 'getMyself',
-  },
-  keywords: ['jira', 'issue', 'create', 'new', 'ticket', 'open'],
+  _meta: { [META_KEYS.DEFER_LOADING]: true, ...USER_SCOPED_META },
+  keywords: ['jira', 'issue', 'create', 'new', 'ticket', 'open', 'subtask', 'parent'],
   example:
-    'const issue = await atlassian.createIssue({ projectKey: "PROJ", summary: "Fix login", issueType: "Bug", bodyText: "Steps to reproduce..." })',
+    'const { issue } = await atlassian.createIssue({ project: "PROJ", type: "Bug", summary: "Fix login", description: "Steps to reproduce..." })',
   inputSchema: {
     type: 'object',
     properties: {
-      projectKey: { type: 'string', description: 'Target project key' },
+      project: { type: 'string', description: 'Target project key' },
+      type: { type: 'string', description: 'Issue type name (e.g. Task, Bug, Story, Sub-task)' },
       summary: { type: 'string', description: 'Issue summary' },
-      issueType: { type: 'string', description: 'Issue type name (e.g. Task, Bug, Story)' },
-      bodyText: { type: 'string', description: 'Plain-text description (converted to ADF)' },
-      bodyAdf: {
-        type: 'object',
-        description: 'Pre-built Atlassian Document Format document (overrides bodyText)',
-      },
+      ...descriptionProperties,
       priority: { type: 'string', description: 'Priority name (e.g. High)' },
       labels: { type: 'array', items: { type: 'string' }, description: 'Labels to apply' },
-      assigneeAccountId: {
+      assignee: { type: 'string', description: createAssigneeDescription },
+      parent: {
         type: 'string',
-        description: `Cloud account ID to assign to (e.g. 5b10ac8d82e05b22cc7d4ef5), not a username or email. ${ACCOUNT_ID_RESOLUTION_GUIDANCE}`,
+        description: 'Parent issue key or ID (required for Sub-task, optional under an epic)',
+      },
+      components: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Component names (see listComponents)',
       },
     },
-    required: ['projectKey', 'summary', 'issueType'],
+    required: ['project', 'type', 'summary'],
   },
-  outputSchema: {
-    type: 'object',
-    properties: {
-      success: { type: 'boolean' },
-      issue: { type: 'object' },
-      error: { type: 'string' },
-    },
-    required: ['success'],
-  },
+  outputSchema: issueOutputSchema,
   inputExamples: [
+    { description: 'Minimal', input: { project: 'PROJ', type: 'Task', summary: 'Task title' } },
     {
-      description: 'Minimal',
-      input: { projectKey: 'PROJ', summary: 'Task title', issueType: 'Task' },
-    },
-    {
-      description: 'Partial: with description and labels',
+      description: 'Partial: Markdown description and labels',
       input: {
-        projectKey: 'PROJ',
+        project: 'PROJ',
+        type: 'Bug',
         summary: 'Bug',
-        issueType: 'Bug',
-        bodyText: 'Repro:\n1. ...',
+        description: 'Repro:\n1. ...',
         labels: ['triage'],
       },
     },
     {
-      description: 'Full',
+      description: 'Sub-task with parent and components',
       input: {
-        projectKey: 'PROJ',
-        summary: 'Story',
-        issueType: 'Story',
-        bodyText: 'As a user...',
-        priority: 'High',
-        labels: ['frontend'],
-        assigneeAccountId: '5b10a...',
+        project: 'PROJ',
+        type: 'Sub-task',
+        summary: 'Write tests',
+        parent: 'PROJ-10',
+        components: ['core'],
+        assignee: 'me',
       },
     },
   ],
@@ -185,86 +254,184 @@ const createIssueTool: Tool = {
 const updateIssueTool: Tool = {
   name: 'updateIssue',
   description:
-    'Update fields of a Jira issue (only provided fields change). `bodyText`/`bodyAdf` set the description.',
+    'Update fields of a Jira issue; omitted fields stay unchanged. `parent: null` detaches the parent, `components` replaces the whole list (empty clears), `type` changes the issue type (Jira may refuse some changes, see listIssueTypes with `issue`). Returns the updated issue.',
   annotations: WRITE_ANNOTATIONS,
-  _meta: {
-    [META_KEYS.DEFER_LOADING]: true,
-    [META_KEYS.USER_SCOPED]: true,
-    [META_KEYS.CURRENT_USER_TOOL]: 'getMyself',
-  },
-  keywords: ['jira', 'issue', 'update', 'edit', 'change', 'modify', 'ticket'],
-  example:
-    'await atlassian.updateIssue({ issueIdOrKey: "PROJ-123", summary: "New title", priority: "Low" })',
+  _meta: { [META_KEYS.DEFER_LOADING]: true, ...USER_SCOPED_META },
+  keywords: ['jira', 'issue', 'update', 'edit', 'change', 'modify', 'ticket', 'parent', 'type'],
+  example: 'await atlassian.updateIssue({ issue: "PROJ-123", summary: "New title", parent: null })',
   inputSchema: {
     type: 'object',
     properties: {
-      issueIdOrKey: {
-        type: 'string',
-        description: 'Issue key or ID (an allowlist requires a key, not a numeric ID)',
-      },
+      issue: issueParam(' An allowlist requires a key, not a numeric ID.'),
+      type: { type: 'string', description: 'New issue type name' },
       summary: { type: 'string', description: 'New summary' },
-      bodyText: { type: 'string', description: 'New plain-text description (converted to ADF)' },
-      bodyAdf: { type: 'object', description: 'New ADF description (overrides bodyText)' },
+      ...descriptionProperties,
       priority: { type: 'string', description: 'New priority name' },
       labels: { type: 'array', items: { type: 'string' }, description: 'Replacement label set' },
-      assigneeAccountId: {
-        type: 'string',
-        description: `Cloud account ID to reassign to (e.g. 5b10ac8d82e05b22cc7d4ef5), not a username or email. ${ACCOUNT_ID_RESOLUTION_GUIDANCE}`,
+      assignee: { type: ['string', 'null'], description: assigneeDescription },
+      parent: {
+        type: ['string', 'null'],
+        description: 'New parent issue key or ID, or null to detach',
+      },
+      components: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Replacement component names (empty array clears; see listComponents)',
       },
     },
-    required: ['issueIdOrKey'],
+    required: ['issue'],
   },
-  outputSchema: {
-    type: 'object',
-    properties: {
-      success: { type: 'boolean' },
-      issue: { type: 'object' },
-      error: { type: 'string' },
-    },
-    required: ['success'],
-  },
+  outputSchema: issueOutputSchema,
   inputExamples: [
-    { description: 'Rename', input: { issueIdOrKey: 'PROJ-123', summary: 'Renamed' } },
-    {
-      description: 'Replace description',
-      input: { issueIdOrKey: 'PROJ-123', bodyText: 'Updated details.' },
-    },
+    { description: 'Rename', input: { issue: 'PROJ-123', summary: 'Renamed' } },
+    { description: 'Detach from the parent', input: { issue: 'PROJ-123', parent: null } },
     {
       description: 'Full',
       input: {
-        issueIdOrKey: 'PROJ-123',
+        issue: 'PROJ-123',
+        type: 'Story',
         summary: 'X',
-        bodyText: 'Y',
+        description: 'Y',
         priority: 'High',
         labels: ['a', 'b'],
-        assigneeAccountId: '5b10a...',
+        components: ['core'],
+        parent: 'PROJ-10',
+        assignee: 'me',
       },
     },
   ],
 };
 
-const getTransitionsTool: Tool = {
-  name: 'getTransitions',
-  description: 'List the workflow transitions currently available for an issue.',
-  annotations: READ_ONLY_ANNOTATIONS,
+const deleteIssueTool: Tool = {
+  name: 'deleteIssue',
+  description:
+    'Delete a Jira issue (irreversible). Jira refuses an issue that still has sub-tasks: delete or move the sub-tasks first.',
+  annotations: DESTRUCTIVE_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true },
-  keywords: ['jira', 'transitions', 'workflow', 'status', 'list'],
-  example: 'const { transitions } = await atlassian.getTransitions({ issueIdOrKey: "PROJ-123" })',
+  keywords: ['jira', 'issue', 'delete', 'remove', 'ticket'],
+  example: 'await atlassian.deleteIssue({ issue: "PROJ-123" })',
   inputSchema: {
     type: 'object',
-    properties: { issueIdOrKey: { type: 'string', description: 'Issue key or ID' } },
-    required: ['issueIdOrKey'],
+    properties: { issue: issueParam(' An allowlist requires a key, not a numeric ID.') },
+    required: ['issue'],
   },
+  outputSchema: flagOutputSchema('deleted'),
+  inputExamples: [{ description: 'Delete an issue', input: { issue: 'PROJ-123' } }],
+};
+
+const linkIssuesTool: Tool = {
+  name: 'linkIssues',
+  description:
+    'Link two issues. `relation` reads from the side of `issue`: ("PROJ-1", "blocks", "PROJ-2") means PROJ-1 blocks PROJ-2; "is blocked by" reverses it. Valid relations come from listLinkTypes.',
+  annotations: WRITE_ANNOTATIONS,
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
+  keywords: ['jira', 'link', 'relation', 'blocks', 'relates', 'duplicate', 'depends'],
+  example: 'await atlassian.linkIssues({ issue: "PROJ-1", relation: "blocks", target: "PROJ-2" })',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      issue: issueParam(' The side the relation reads from.'),
+      relation: {
+        type: 'string',
+        description: 'Relation text such as "blocks" or "is blocked by" (see listLinkTypes)',
+      },
+      target: issueParam(' The other end of the link.'),
+    },
+    required: ['issue', 'relation', 'target'],
+  },
+  outputSchema: flagOutputSchema('linked'),
+  inputExamples: [
+    {
+      description: 'PROJ-1 blocks PROJ-2',
+      input: { issue: 'PROJ-1', relation: 'blocks', target: 'PROJ-2' },
+    },
+  ],
+};
+
+const unlinkIssuesTool: Tool = {
+  name: 'unlinkIssues',
+  description:
+    'Remove an issue link by its link ID (the `links[].id` of getIssue or searchIssues).',
+  annotations: DESTRUCTIVE_ANNOTATIONS,
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
+  keywords: ['jira', 'unlink', 'link', 'relation', 'remove'],
+  example: 'await atlassian.unlinkIssues({ link_id: "10001" })',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      link_id: { type: 'string', description: 'Link ID from `links[].id` of an issue' },
+    },
+    required: ['link_id'],
+  },
+  outputSchema: flagOutputSchema('unlinked'),
+  inputExamples: [{ description: 'Remove a link', input: { link_id: '10001' } }],
+};
+
+const listLinkTypesTool: Tool = {
+  name: 'listLinkTypes',
+  description:
+    'List the issue link types with their inward and outward relation texts; either text is a valid `relation` for linkIssues.',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
+  keywords: ['jira', 'link', 'types', 'relations', 'blocks'],
+  example: 'const { link_types } = await atlassian.listLinkTypes({})',
+  inputSchema: { type: 'object', properties: {} },
   outputSchema: {
     type: 'object',
     properties: {
-      success: { type: 'boolean' },
-      transitions: { type: 'array' },
-      error: { type: 'string' },
+      ...errorProperties,
+      link_types: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            name: { type: 'string' },
+            inward: { type: 'string' },
+            outward: { type: 'string' },
+          },
+        },
+      },
+      count: { type: 'number' },
     },
     required: ['success'],
   },
-  inputExamples: [{ description: 'List transitions', input: { issueIdOrKey: 'PROJ-123' } }],
+  inputExamples: [{ description: 'List link types', input: {} }],
+};
+
+const getTransitionsTool: Tool = {
+  name: 'getTransitions',
+  description:
+    'List the workflow transitions currently available for an issue, with the target status and its category (new, indeterminate, done).',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
+  keywords: ['jira', 'transitions', 'workflow', 'status', 'list'],
+  example: 'const { transitions } = await atlassian.getTransitions({ issue: "PROJ-123" })',
+  inputSchema: { type: 'object', properties: { issue: issueParam() }, required: ['issue'] },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      ...errorProperties,
+      transitions: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            name: { type: 'string' },
+            to_status: { type: 'string' },
+            to_status_category: {
+              type: 'string',
+              description: 'Status category key of the target status: new, indeterminate or done',
+            },
+          },
+        },
+      },
+      count: { type: 'number' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [{ description: 'List transitions', input: { issue: 'PROJ-123' } }],
 };
 
 const transitionIssueTool: Tool = {
@@ -273,59 +440,40 @@ const transitionIssueTool: Tool = {
   annotations: WRITE_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['jira', 'transition', 'workflow', 'status', 'move', 'close', 'resolve'],
-  example: 'await atlassian.transitionIssue({ issueIdOrKey: "PROJ-123", transitionId: "31" })',
+  example: 'await atlassian.transitionIssue({ issue: "PROJ-123", transition_id: "31" })',
   inputSchema: {
     type: 'object',
     properties: {
-      issueIdOrKey: { type: 'string', description: 'Issue key or ID' },
-      transitionId: { type: 'string', description: 'Transition ID from getTransitions' },
+      issue: issueParam(),
+      transition_id: { type: 'string', description: 'Transition ID from getTransitions' },
     },
-    required: ['issueIdOrKey', 'transitionId'],
+    required: ['issue', 'transition_id'],
   },
-  outputSchema: {
-    type: 'object',
-    properties: { success: { type: 'boolean' }, error: { type: 'string' } },
-    required: ['success'],
-  },
+  outputSchema: flagOutputSchema('transitioned'),
   inputExamples: [
-    { description: 'Apply a transition', input: { issueIdOrKey: 'PROJ-123', transitionId: '31' } },
+    { description: 'Apply a transition', input: { issue: 'PROJ-123', transition_id: '31' } },
   ],
 };
 
 const assignIssueTool: Tool = {
   name: 'assignIssue',
-  description: `Assign an issue to an account, or unassign it (omit accountId or pass null). ${ACCOUNT_ID_RESOLUTION_GUIDANCE}`,
+  description: `Assign an issue to an account, or unassign it (omit assignee or pass null). ${ACCOUNT_ID_RESOLUTION_GUIDANCE}`,
   annotations: WRITE_ANNOTATIONS,
-  _meta: {
-    [META_KEYS.DEFER_LOADING]: true,
-    [META_KEYS.USER_SCOPED]: true,
-    [META_KEYS.CURRENT_USER_TOOL]: 'getMyself',
-  },
+  _meta: { [META_KEYS.DEFER_LOADING]: true, ...USER_SCOPED_META },
   keywords: ['jira', 'assign', 'assignee', 'unassign', 'owner'],
-  example: 'await atlassian.assignIssue({ issueIdOrKey: "PROJ-123", accountId: "5b10a..." })',
+  example: 'await atlassian.assignIssue({ issue: "PROJ-123", assignee: "me" })',
   inputSchema: {
     type: 'object',
     properties: {
-      issueIdOrKey: { type: 'string', description: 'Issue key or ID' },
-      accountId: {
-        type: ['string', 'null'],
-        description:
-          'Cloud account ID to assign to (e.g. 5b10ac8d82e05b22cc7d4ef5), or null/omit to unassign — not a username or email.',
-      },
+      issue: issueParam(),
+      assignee: { type: ['string', 'null'], description: assigneeDescription },
     },
-    required: ['issueIdOrKey'],
+    required: ['issue'],
   },
-  outputSchema: {
-    type: 'object',
-    properties: { success: { type: 'boolean' }, error: { type: 'string' } },
-    required: ['success'],
-  },
+  outputSchema: flagOutputSchema('assigned'),
   inputExamples: [
-    {
-      description: 'Assign',
-      input: { issueIdOrKey: 'PROJ-123', accountId: '5b10ac8d82e05b22cc7d4ef5' },
-    },
-    { description: 'Unassign', input: { issueIdOrKey: 'PROJ-123' } },
+    { description: 'Assign to me', input: { issue: 'PROJ-123', assignee: 'me' } },
+    { description: 'Unassign', input: { issue: 'PROJ-123' } },
   ],
 };
 
@@ -335,15 +483,11 @@ const getMyselfTool: Tool = {
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['jira', 'me', 'myself', 'current user', 'account', 'whoami'],
-  example: 'const me = await atlassian.getMyself()',
+  example: 'const { user } = await atlassian.getMyself({})',
   inputSchema: { type: 'object', properties: {} },
   outputSchema: {
     type: 'object',
-    properties: {
-      success: { type: 'boolean' },
-      user: { type: 'object' },
-      error: { type: 'string' },
-    },
+    properties: { ...errorProperties, user: userSchema },
     required: ['success'],
   },
   inputExamples: [{ description: 'Who am I', input: {} }],
@@ -351,49 +495,58 @@ const getMyselfTool: Tool = {
 
 const addAttachmentTool: Tool = {
   name: 'addAttachment',
-  description: `Attach a file to a Jira issue. The worker reads \`filePath\` (a path under /workspace) fully into memory before uploading, so it is capped at ${MAX_ATTACHMENT_BYTES} bytes regardless of Jira's own attachment-size limit.`,
+  description: `Attach a file to a Jira issue. The worker reads \`file_path\` (a path under /workspace) fully into memory before uploading, so it is capped at ${MAX_ATTACHMENT_BYTES} bytes regardless of Jira's own attachment-size limit.`,
   annotations: WRITE_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['jira', 'attachment', 'attach', 'upload', 'file', 'screenshot', 'image', 'załącznik'],
-  example:
-    'await atlassian.addAttachment({ issueIdOrKey: "PROJ-123", filePath: "/workspace/bug.png" })',
+  example: 'await atlassian.addAttachment({ issue: "PROJ-123", file_path: "/workspace/bug.png" })',
   inputSchema: {
     type: 'object',
     properties: {
-      issueIdOrKey: { type: 'string', description: 'Issue key (e.g. PROJ-123) or numeric ID' },
-      filePath: {
+      issue: issueParam(),
+      file_path: {
         type: 'string',
         description: `Path under /workspace to read (e.g. /workspace/bug.png), max ${MAX_ATTACHMENT_BYTES} bytes`,
       },
       filename: {
         type: 'string',
-        description: 'Attachment file name; defaults to the basename of filePath',
+        description: 'Attachment file name; defaults to the basename of file_path',
       },
-      contentType: { type: 'string', description: 'MIME type (default application/octet-stream)' },
+      content_type: { type: 'string', description: 'MIME type (default application/octet-stream)' },
     },
-    required: ['issueIdOrKey', 'filePath'],
+    required: ['issue', 'file_path'],
   },
   outputSchema: {
     type: 'object',
     properties: {
-      success: { type: 'boolean' },
-      attachment: { type: 'object' },
-      error: { type: 'string' },
+      ...errorProperties,
+      attachment: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          filename: { type: 'string' },
+          size: { type: 'number' },
+          mime_type: { type: 'string' },
+          created: { type: 'string' },
+          url: { type: 'string' },
+          author: userSchema,
+        },
+      },
     },
     required: ['success'],
   },
   inputExamples: [
     {
       description: 'From a workspace file',
-      input: { issueIdOrKey: 'PROJ-123', filePath: '/workspace/bug.png' },
+      input: { issue: 'PROJ-123', file_path: '/workspace/bug.png' },
     },
     {
       description: 'With an explicit filename and MIME type',
       input: {
-        issueIdOrKey: 'PROJ-123',
-        filePath: '/workspace/.speedwave/shot.png',
+        issue: 'PROJ-123',
+        file_path: '/workspace/.speedwave/shot.png',
         filename: 'bug.png',
-        contentType: 'image/png',
+        content_type: 'image/png',
       },
     },
   ],
@@ -405,24 +558,20 @@ const deleteAttachmentTool: Tool = {
   annotations: DESTRUCTIVE_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['jira', 'attachment', 'delete', 'remove', 'załącznik', 'usuń'],
-  example: 'await atlassian.deleteAttachment({ attachmentId: "10475" })',
+  example: 'await atlassian.deleteAttachment({ attachment_id: "10475" })',
   inputSchema: {
     type: 'object',
     properties: {
-      attachmentId: { type: 'string', description: 'Attachment ID (e.g. 10475)' },
+      attachment_id: { type: 'string', description: 'Attachment ID (e.g. 10475)' },
     },
-    required: ['attachmentId'],
+    required: ['attachment_id'],
   },
-  outputSchema: {
-    type: 'object',
-    properties: { success: { type: 'boolean' }, error: { type: 'string' } },
-    required: ['success'],
-  },
-  inputExamples: [{ description: 'Delete an attachment', input: { attachmentId: '10475' } }],
+  outputSchema: flagOutputSchema('deleted'),
+  inputExamples: [{ description: 'Delete an attachment', input: { attachment_id: '10475' } }],
 };
 
 /**
- * Build the Jira issue tool definitions.
+ * Build the Jira issue tool definitions; every handler rejects undeclared and missing required arguments.
  * @param client - The Atlassian client (`null` when the service is not configured).
  */
 export function createJiraIssueTools(client: AtlassianClient | null): ToolDefinition[] {
@@ -431,6 +580,10 @@ export function createJiraIssueTools(client: AtlassianClient | null): ToolDefini
     getIssueTool,
     createIssueTool,
     updateIssueTool,
+    deleteIssueTool,
+    linkIssuesTool,
+    unlinkIssuesTool,
+    listLinkTypesTool,
     getTransitionsTool,
     transitionIssueTool,
     assignIssueTool,
@@ -438,166 +591,293 @@ export function createJiraIssueTools(client: AtlassianClient | null): ToolDefini
     addAttachmentTool,
     deleteAttachmentTool,
   ];
-  if (!client) {
-    const unconfigured = async () => errorResult(notConfiguredMessage('Atlassian'));
-    return tools.map((tool) => ({ tool, handler: unconfigured }));
-  }
+  if (!client) return unconfiguredDefinitions(tools);
   const issues = createJiraIssuesClient(client);
+  const projects = createJiraProjectsClient(client);
 
-  return [
-    {
-      tool: searchIssuesTool,
-      handler: withValidation(client, async (_c, params) => {
-        const { jql, maxResults, nextPageToken } = params as {
-          jql: string;
-          maxResults?: number;
-          nextPageToken?: string;
-        };
-        return jsonResult(await issues.search({ jql, maxResults, nextPageToken }));
-      }),
-    },
-    {
-      tool: getIssueTool,
-      handler: withValidation(client, async (_c, params) => {
-        const { issueIdOrKey } = params as { issueIdOrKey: string };
-        return jsonResult({ issue: await issues.get(issueIdOrKey) });
-      }),
-    },
-    {
-      tool: createIssueTool,
-      handler: withValidation(client, async (_c, params) => {
-        const p = params as {
-          projectKey: string;
-          summary: string;
-          issueType: string;
-          bodyText?: string;
-          bodyAdf?: AdfDoc;
-          priority?: string;
-          labels?: string[];
-          assigneeAccountId?: string;
-        };
-        const body = p.bodyAdf ?? p.bodyText;
-        return jsonResult({
-          issue: await issues.create({
-            projectKey: p.projectKey,
-            summary: p.summary,
-            issueType: p.issueType,
-            body,
-            priority: p.priority,
-            labels: p.labels,
-            assigneeAccountId: p.assigneeAccountId,
-          }),
-        });
-      }),
-    },
-    {
-      tool: updateIssueTool,
-      handler: withValidation(client, async (_c, params) => {
-        const p = params as {
-          issueIdOrKey: string;
-          summary?: string;
-          bodyText?: string;
-          bodyAdf?: AdfDoc;
-          priority?: string;
-          labels?: string[];
-          assigneeAccountId?: string;
-        };
-        const body = p.bodyAdf ?? p.bodyText;
-        return jsonResult({
-          issue: await issues.update(p.issueIdOrKey, {
-            summary: p.summary,
-            body,
-            priority: p.priority,
-            labels: p.labels,
-            assigneeAccountId: p.assigneeAccountId,
-          }),
-        });
-      }),
-    },
-    {
-      tool: getTransitionsTool,
-      handler: withValidation(client, async (_c, params) => {
-        const { issueIdOrKey } = params as { issueIdOrKey: string };
-        return jsonResult({ transitions: await issues.getTransitions(issueIdOrKey) });
-      }),
-    },
-    {
-      tool: transitionIssueTool,
-      handler: withValidation(client, async (_c, params) => {
-        const { issueIdOrKey, transitionId } = params as {
-          issueIdOrKey: string;
-          transitionId: string;
-        };
-        await issues.transition(issueIdOrKey, transitionId);
-        return jsonResult({ transitioned: true });
-      }),
-    },
-    {
-      tool: assignIssueTool,
-      handler: withValidation(client, async (_c, params) => {
-        const { issueIdOrKey, accountId } = params as {
-          issueIdOrKey: string;
-          accountId?: string | null;
-        };
-        await issues.assign(issueIdOrKey, accountId ?? null);
-        return jsonResult({ assigned: true });
-      }),
-    },
-    {
-      tool: getMyselfTool,
-      handler: withValidation(client, async () => jsonResult({ user: await issues.getMyself() })),
-    },
-    {
-      tool: addAttachmentTool,
-      handler: withValidation(client, async (_c, params) => {
-        const { issueIdOrKey, filename, filePath, contentType } = params as {
-          issueIdOrKey: string;
-          filename?: string;
-          filePath?: string;
-          contentType?: string;
-        };
-        if (!issueIdOrKey) {
-          return teachingErrorResult({
-            paramName: 'issueIdOrKey',
-            received: issueIdOrKey,
-            nextStep:
-              'Provide the Jira issue key (e.g. PROJ-123) or numeric ID to attach the file to.',
-          });
-        }
-        if (!filePath) {
-          return teachingErrorResult({
-            paramName: 'filePath',
-            received: filePath,
-            nextStep:
-              'Provide a path under /workspace to the file to attach (e.g. /workspace/bug.png).',
-          });
-        }
+  const componentRejection = async (
+    project: string,
+    components: string[] | undefined,
+    outcome: string
+  ) => {
+    if (!components?.length) return undefined;
+    const known = (await projects.listComponents(project)).map((c) => c.name);
+    if (components.every((name) => known.includes(name))) return undefined;
+    return teachingErrorResult({
+      paramName: 'components',
+      correctValueTool: 'listComponents',
+      nextStep: `Project ${project} has no component with one of these names, so ${outcome}; Jira would otherwise create it in the project. Available components: ${known.join(', ') || 'none'}. Retry with names from that list.`,
+    });
+  };
 
-        const file = await readWorkspaceFile(filePath, MAX_ATTACHMENT_BYTES);
-        return jsonResult({
-          attachment: await issues.addAttachment(issueIdOrKey, {
-            filename: filename || file.name,
-            data: file.buffer,
-            contentType: contentType || 'application/octet-stream',
-          }),
+  const typeChangeNote = async (issue: string, type: string): Promise<string | undefined> => {
+    try {
+      const { status } = await issues.get(issue);
+      return status
+        ? ` ${issue} has status "${status}" and the requested type is "${type}".`
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
+  const isSubtaskType = async (project: string, type: string) =>
+    (await projects.listIssueTypes(project)).some((t) => t.subtask && t.name === type);
+
+  const handlers: Record<string, ToolDefinition['handler']> = {
+    searchIssues: withValidation(client, async (_c, params) => {
+      const { jql, max_results, next_page_token } = params as {
+        jql: string;
+        max_results?: number;
+        next_page_token?: string;
+      };
+      const result = await issues.search({
+        jql,
+        maxResults: max_results,
+        nextPageToken: next_page_token,
+      });
+      return jsonResult({ ...result, count: result.issues.length });
+    }),
+
+    getIssue: withValidation(client, async (_c, params) => {
+      const { issue } = params as { issue: string };
+      return jsonResult({ issue: await issues.get(issue) });
+    }),
+
+    createIssue: withValidation(client, async (_c, params) => {
+      const p = params as {
+        project: string;
+        type: string;
+        summary: string;
+        description?: string;
+        description_adf?: AdfDoc;
+        priority?: string;
+        labels?: string[];
+        assignee?: string;
+        parent?: string;
+        components?: string[];
+      };
+      const description = resolveRichText(
+        'description',
+        p.description,
+        'description_adf',
+        p.description_adf
+      );
+      if ('error' in description) return description.error;
+      const outcome = 'nothing was created';
+      const unknownComponent = await componentRejection(p.project, p.components, outcome);
+      if (unknownComponent) return unknownComponent;
+      try {
+        return jsonResult({ issue: await issues.create(p) });
+      } catch (error) {
+        const typeRefusal = jiraRejection(error)?.fields.issuetype;
+        if (
+          typeRefusal !== undefined &&
+          p.parent === undefined &&
+          (await isSubtaskType(p.project, p.type))
+        ) {
+          return parentRejection(outcome, typeRefusal);
+        }
+        return translateWriteRejection(error, {
+          outcome,
+          issueTypeLookup: `listIssueTypes with project "${p.project}"`,
         });
-      }),
-    },
-    {
-      tool: deleteAttachmentTool,
-      handler: withValidation(client, async (_c, params) => {
-        const { attachmentId } = params as { attachmentId: string };
-        if (!attachmentId) {
+      }
+    }),
+
+    updateIssue: withValidation(client, async (_c, params) => {
+      const { issue, ...fields } = params as {
+        issue: string;
+        type?: string;
+        summary?: string;
+        description?: string;
+        description_adf?: AdfDoc;
+        priority?: string;
+        labels?: string[];
+        assignee?: string | null;
+        parent?: string | null;
+        components?: string[];
+      };
+      const description = resolveRichText(
+        'description',
+        fields.description,
+        'description_adf',
+        fields.description_adf
+      );
+      if ('error' in description) return description.error;
+      const outcome = 'nothing was changed';
+      if (fields.components?.length) {
+        const { project } = await issues.get(issue);
+        const unknownComponent = await componentRejection(project, fields.components, outcome);
+        if (unknownComponent) return unknownComponent;
+      }
+      try {
+        return jsonResult({ issue: await issues.update(issue, fields) });
+      } catch (error) {
+        const refusedType = fields.type !== undefined && jiraRejection(error)?.fields.issuetype;
+        return translateWriteRejection(error, {
+          outcome,
+          issueTypeLookup: `listIssueTypes with issue "${issue}"`,
+          typeChangeNote: refusedType
+            ? await typeChangeNote(issue, fields.type as string)
+            : undefined,
+        });
+      }
+    }),
+
+    deleteIssue: withValidation(client, async (_c, params) => {
+      const { issue } = params as { issue: string };
+      try {
+        await issues.delete(issue);
+      } catch (error) {
+        const rejection = jiraRejection(error);
+        if (rejection?.messages.some((m) => /sub-?task/i.test(m))) {
           return teachingErrorResult({
-            paramName: 'attachmentId',
-            received: attachmentId,
-            nextStep:
-              'Provide the Jira attachment ID to delete (e.g. from a prior getIssue/addAttachment result).',
+            paramName: 'issue',
+            nextStep: `${issue} still has sub-tasks, so Jira refused the delete and nothing was removed. Delete the sub-tasks first, or move them to another parent with updateIssue and parent, then retry.`,
           });
         }
-        await issues.deleteAttachment(attachmentId);
-        return jsonResult({ deleted: true });
-      }),
-    },
-  ];
+        const status = responseStatus(error);
+        if (status === 403) {
+          return teachingErrorResult({
+            paramName: 'issue',
+            nextStep: `This account lacks permission to delete ${issue}, so nothing was removed. A Jira admin must grant Delete Issues in that project.`,
+          });
+        }
+        if (status === 404) {
+          return teachingErrorResult({
+            paramName: 'issue',
+            nextStep: `Jira found no issue ${issue} visible to this account, so nothing was removed. Check the key with getIssue or searchIssues.`,
+          });
+        }
+        throw error;
+      }
+      return jsonResult({ deleted: true });
+    }),
+
+    linkIssues: withValidation(client, async (_c, params) => {
+      const { issue, relation, target } = params as {
+        issue: string;
+        relation: string;
+        target: string;
+      };
+      try {
+        await issues.linkIssues(issue, relation, target);
+      } catch (error) {
+        if (error instanceof UnknownLinkRelationError) {
+          return teachingErrorResult({
+            paramName: 'relation',
+            correctValueTool: 'listLinkTypes',
+            nextStep: `This site has no link relation with that text, so no link was created. Available relations: ${error.available.join(', ')}. Retry with one of them.`,
+          });
+        }
+        throw error;
+      }
+      return jsonResult({ linked: true });
+    }),
+
+    unlinkIssues: withValidation(client, async (_c, params) => {
+      const { link_id } = params as { link_id: string };
+      await issues.unlinkIssues(link_id);
+      return jsonResult({ unlinked: true });
+    }),
+
+    listLinkTypes: withValidation(client, async () =>
+      listResult('link_types', await issues.listLinkTypes())
+    ),
+
+    getTransitions: withValidation(client, async (_c, params) => {
+      const { issue } = params as { issue: string };
+      return listResult('transitions', await issues.getTransitions(issue));
+    }),
+
+    transitionIssue: withValidation(client, async (_c, params) => {
+      const { issue, transition_id } = params as { issue: string; transition_id: string };
+      await issues.transition(issue, transition_id);
+      return jsonResult({ transitioned: true });
+    }),
+
+    assignIssue: withValidation(client, async (_c, params) => {
+      const { issue, assignee } = params as { issue: string; assignee?: string | null };
+      await issues.assign(issue, assignee ?? null);
+      return jsonResult({ assigned: true });
+    }),
+
+    getMyself: withValidation(client, async () => jsonResult({ user: await issues.getMyself() })),
+
+    addAttachment: withValidation(client, async (_c, params) => {
+      const { issue, filename, file_path, content_type } = params as {
+        issue: string;
+        filename?: string;
+        file_path: string;
+        content_type?: string;
+      };
+      const file = await readWorkspaceFile(file_path, MAX_ATTACHMENT_BYTES);
+      return jsonResult({
+        attachment: await issues.addAttachment(issue, {
+          filename: filename || file.name,
+          data: file.buffer,
+          contentType: content_type || 'application/octet-stream',
+        }),
+      });
+    }),
+
+    deleteAttachment: withValidation(client, async (_c, params) => {
+      const { attachment_id } = params as { attachment_id: string };
+      await issues.deleteAttachment(attachment_id);
+      return jsonResult({ deleted: true });
+    }),
+  };
+
+  return tools.map((tool) => ({ tool, handler: withDeclaredParams(tool, handlers[tool.name]) }));
+}
+
+function translateWriteRejection(error: unknown, context: WriteContext) {
+  const rejection = jiraRejection(error);
+  if (!rejection) throw error;
+  const { fields, messages } = rejection;
+  const { outcome } = context;
+
+  if (fields.issuetype !== undefined) {
+    return teachingErrorResult({
+      paramName: 'type',
+      correctValueTool: 'listIssueTypes',
+      nextStep: `Jira refused this issue type, so ${outcome}.${context.typeChangeNote ?? ''} Call ${context.issueTypeLookup} for the types allowed here; some type changes (for example between a standard type and a Sub-task) cannot be done through the API.${withJiraMessage(fields.issuetype)}`,
+    });
+  }
+  const parentMessage = fields.parent ?? messages.find(isParentMessage);
+  if (fields.parent !== undefined || parentMessage !== undefined) {
+    return parentRejection(outcome, parentMessage);
+  }
+  throw error;
+}
+
+function parentRejection(outcome: string, jiraMessage: string | undefined) {
+  return teachingErrorResult({
+    paramName: 'parent',
+    nextStep: `Jira rejected the parent, so ${outcome}. A Sub-task type needs parent set to the key of an existing issue; other types accept only a parent one level above them (for example an epic for a story).${withJiraMessage(jiraMessage)}`,
+  });
+}
+
+function withJiraMessage(text: string | undefined): string {
+  return text ? ` Jira said: ${text}` : '';
+}
+
+function isParentMessage(message: string): boolean {
+  return (
+    /must have a parent/i.test(message) || (/parent/i.test(message) && /sub-?task/i.test(message))
+  );
+}
+
+function responseStatus(error: unknown): number | undefined {
+  return axios.isAxiosError(error) ? error.response?.status : undefined;
+}
+
+function jiraRejection(error: unknown): JiraRejection | undefined {
+  if (!axios.isAxiosError(error) || error.response?.status !== 400) return undefined;
+  const data = (error.response.data ?? {}) as {
+    errors?: Record<string, string>;
+    errorMessages?: string[];
+  };
+  return { fields: data.errors ?? {}, messages: data.errorMessages ?? [] };
 }

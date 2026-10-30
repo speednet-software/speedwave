@@ -1,1 +1,6 @@
-[]
+[
+  { "id": "RUSTSEC-2026-0367", "expires": "2027-01-28", "jira": "SPEED-906" },
+  { "id": "RUSTSEC-2026-0368", "expires": "2027-01-28", "jira": "SPEED-906" },
+  { "id": "RUSTSEC-2026-0369", "expires": "2027-01-28", "jira": "SPEED-906" },
+  { "id": "RUSTSEC-2026-0403", "expires": "2027-01-28", "jira": "SPEED-906" }
+]

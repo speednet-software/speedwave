@@ -3,9 +3,10 @@
  * self-heal specs — bundled limactl shell on macOS, `wsl.exe` on Windows.
  */
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { writeFileSync } from 'node:fs';
 
 /** Same sentinel content `engine-contract.bats` plants. */
 export const DEAD_ID = 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef';
@@ -67,6 +68,67 @@ export function engineExec(argv: string[]): string {
     }).trim();
   }
   throw new Error(`engineExec: unsupported platform '${process.platform}'`);
+}
+
+const CONTAINER_LOG_TAIL = '500';
+
+function engineArgv(argv: string[]): { file: string; args: string[]; env: NodeJS.ProcessEnv } {
+  if (process.platform === 'darwin') {
+    const limactl = join(
+      homedir(),
+      'Applications/Speedwave.app/Contents/Resources/lima/bin/limactl'
+    );
+    return {
+      file: limactl,
+      args: ['shell', instanceName(), '--', 'sudo', ...argv],
+      env: { ...process.env, LIMA_HOME: join(dataDir(), 'lima') },
+    };
+  }
+  if (process.platform === 'win32') {
+    return {
+      file: 'wsl.exe',
+      args: ['-d', wslDistroName(), '-u', 'root', '--', ...argv],
+      env: { ...process.env, WSL_UTF8: '1' },
+    };
+  }
+  throw new Error(`engineArgv: unsupported platform '${process.platform}'`);
+}
+
+/**
+ * Writes the recent log of every e2e project container (stdout and stderr, timestamped) and the
+ * container list into `dir`, one `FAIL-<stamp>-<container>.log` per container, and returns the
+ * files written. Containers are found by the `_e2e-` project infix of their compose name. The
+ * argv stays free of shell metacharacters and whitespace: the Windows transport re-parses it.
+ */
+export function dumpContainerLogs(dir: string, stamp: string): string[] {
+  const ps = engineExec(['nerdctl', 'ps', '-a', '--format', '{{.Names}}:{{.Status}}']);
+  const written: string[] = [];
+  const psFile = join(dir, `FAIL-${stamp}-containers.txt`);
+  writeFileSync(psFile, ps + '\n');
+  written.push(psFile);
+  const names = ps
+    .split('\n')
+    .map((line) => line.split(':')[0].trim())
+    .filter((name) => name.includes('_e2e-'));
+  for (const name of names) {
+    const { file, args, env } = engineArgv([
+      'nerdctl',
+      'logs',
+      '--timestamps',
+      '--tail',
+      CONTAINER_LOG_TAIL,
+      name,
+    ]);
+    const run = spawnSync(file, args, { env, encoding: 'utf8' });
+    const body = `${run.stdout ?? ''}${run.stderr ?? ''}`;
+    const logFile = join(dir, `FAIL-${stamp}-${name}.log`);
+    writeFileSync(
+      logFile,
+      run.status === 0 ? body : `${body}\n[nerdctl logs exited ${run.status}]\n`
+    );
+    written.push(logFile);
+  }
+  return written;
 }
 
 /** Reads the name-store via the engine into filename → 64-hex content. Plain metachar-free

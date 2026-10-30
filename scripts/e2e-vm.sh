@@ -83,8 +83,8 @@ PROBE
 
 ensure_provisioned_macos() {
     # shellcheck disable=SC2016
-    if macos_ssh 'eval "$(/opt/homebrew/bin/brew shellenv)"; export PATH="$HOME/.cargo/bin:$PATH"; command -v npm && command -v cargo && command -v cmake && cargo tauri --version' >/dev/null 2>&1; then
-        echo "[macos] Provisioning: OK (npm + cargo + cmake + tauri-cli found)"
+    if macos_ssh 'eval "$(/opt/homebrew/bin/brew shellenv)"; export PATH="$HOME/.cargo/bin:$PATH"; command -v npm && command -v cargo && command -v cmake' >/dev/null 2>&1; then
+        echo "[macos] Provisioning: OK (npm + cargo + cmake found)"
         return
     fi
     if [ "${CI:-}" = "true" ]; then
@@ -168,6 +168,7 @@ windows_ps() {
     local ps_prefix
     ps_prefix="\$WINDOWS_WSL_DISTRO = '$(ps_squote "$WINDOWS_WSL_DISTRO")'
 \$env:OPENROUTER_API_KEY = '$(ps_squote "${OPENROUTER_API_KEY:-}")'
+\$env:ANTHROPIC_API_KEY = '$(ps_squote "${ANTHROPIC_API_KEY:-}")'
 \$env:OPENROUTER_MODEL = '$(ps_squote "${OPENROUTER_MODEL:-}")'
 \$env:LOCAL_LLM_BASE_URL = '$(ps_squote "${LOCAL_LLM_BASE_URL:-}")'
 \$env:LOCAL_LLM_API_KEY = '$(ps_squote "${LOCAL_LLM_API_KEY:-}")'
@@ -333,6 +334,7 @@ Remove-Item -Recurse -Force "C:\Speedwave" -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force "$env:USERPROFILE\.speedwave" -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force "C:\speedwave-e2e" -ErrorAction SilentlyContinue
 Remove-Item -Force "$env:TEMP\speedwave-setup.exe" -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force "$env:LOCALAPPDATA\pl.speedwave.desktop" -ErrorAction SilentlyContinue
 
 # Remove WSL-side staging dir (in the build distro, not Speedwave distro).
 wsl.exe -d $WINDOWS_WSL_DISTRO -- rm -rf /home/windows/speedwave-e2e
@@ -394,10 +396,33 @@ rm -rf ~/Applications/Speedwave.app 2>/dev/null || true
 # Remove Speedwave user data (config, Lima VM, setup markers, cached downloads)
 rm -rf "$SPEEDWAVE_DATA_DIR" 2>/dev/null || true
 rm -rf ~/Library/Caches/lima 2>/dev/null || true
+rm -rf ~/Library/Logs/pl.speedwave.desktop 2>/dev/null || true
 # Remove previous build/test dirs and artifacts
 rm -rf /tmp/speedwave-e2e /tmp/speedwave.dmg /tmp/speedwave.log 2>/dev/null || true
 echo "Clean state ready"
 CLEAN
+}
+
+collect_remote_tree() {
+    local ssh_fn="$1" remote_cmd="$2" platform="$3" phase="$4" kind="$5"
+    local base="${GITHUB_WORKSPACE:-$HOST_REPO_DIR}"
+    local dest="${base//\\//}/.e2e-artifacts/${platform}/${phase}/${kind}"
+    if ! (set -o pipefail && mkdir -p "$dest" && "$ssh_fn" "$remote_cmd" | tar -xf - -C "$dest") 2>/dev/null; then
+        echo "[$platform] WARNING: could not collect the $kind of phase $phase" >&2
+    fi
+    return 0
+}
+
+windows_collect_failure_artifacts() {
+    collect_remote_tree windows_ssh 'tar -C C:\speedwave-e2e\screenshots -cf - .' windows "$1" screenshots
+    collect_remote_tree windows_ssh 'tar -C %LOCALAPPDATA%\pl.speedwave.desktop\logs -cf - .' windows "$1" app-log
+    collect_remote_tree windows_ssh 'tar -C %USERPROFILE%\.speedwave\logs -cf - .' windows "$1" session-logs
+}
+
+macos_collect_failure_artifacts() {
+    collect_remote_tree macos_ssh 'tar -C /tmp/speedwave-e2e/screenshots -cf - .' macos "$1" screenshots
+    collect_remote_tree macos_ssh 'tar -C ~/Library/Logs/pl.speedwave.desktop -cf - .' macos "$1" app-log
+    collect_remote_tree macos_ssh 'tar -C ~/.speedwave/logs -cf - .' macos "$1" session-logs
 }
 
 run_windows() {
@@ -438,8 +463,10 @@ Assert-ExitCode
 Set-Location C:\speedwave-e2e
 Write-Host "── Ensuring the wasm32 target and wasm-pack for the PII engine..."
 rustup target add wasm32-unknown-unknown; Assert-ExitCode
-if (-not (Get-Command wasm-pack -ErrorAction SilentlyContinue)) {
-    cargo install wasm-pack --locked; Assert-ExitCode
+$wasmPackVersion = ((Get-Content scripts\build-tool-versions.env | Where-Object { $_ -like 'WASM_PACK_VERSION=*' }) -split '=', 2)[1].Trim()
+$wasmPackInstalled = if (Get-Command wasm-pack -ErrorAction SilentlyContinue) { (wasm-pack --version) -replace '^wasm-pack ', '' } else { '' }
+if ($wasmPackInstalled -ne $wasmPackVersion) {
+    cargo install wasm-pack --version $wasmPackVersion --locked --force; Assert-ExitCode
 }
 Write-Host "── Installing npm dependencies..."
 npm ci; Assert-ExitCode
@@ -536,7 +563,7 @@ Set-Content -Path C:\speedwave-e2e\e2e-nsis.conf.json -Value '{"bundle":{"window
 
 Write-Host "── Building Tauri release with NSIS bundle (e2e feature = WebDriver on :4445)..."
 Set-Location desktop\src-tauri
-cargo tauri build --features e2e --no-sign --bundles nsis --config C:\speedwave-e2e\e2e-nsis.conf.json
+npx --prefix ..\src tauri build --features e2e --no-sign --bundles nsis --config C:\speedwave-e2e\e2e-nsis.conf.json
 Assert-ExitCode
 Set-Location ..\..
 Write-Host "Step 4 DONE"
@@ -588,6 +615,7 @@ SCRIPT
     local exit_code=0
     echo "[windows] Running E2E (first launch — clean system)..."
     run_windows_e2e || exit_code=$?
+    windows_collect_failure_artifacts first-launch
 
     if [ "$exit_code" -ne 0 ]; then
         echo "[windows] FAILED on first launch (exit code: $exit_code)"
@@ -621,6 +649,7 @@ npm ci
 SCRIPT
 
     run_windows_e2e "pre-reset" || exit_code=$?
+    windows_collect_failure_artifacts pre-reset
 
     if [ "$exit_code" -eq 0 ]; then
         echo "[windows] Running engine-contract suite (staging distro -> WSL interop -> Speedwave distro)..."
@@ -651,6 +680,7 @@ SCRIPT
 
     if [ "$exit_code" -eq 0 ]; then
         run_windows_e2e "reset-only" || exit_code=$?
+        windows_collect_failure_artifacts reset-only
     fi
 
     if [ "$exit_code" -eq 0 ]; then
@@ -801,7 +831,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 eval "$(/opt/homebrew/bin/brew shellenv)"
 
 rustup target add wasm32-unknown-unknown
-command -v wasm-pack >/dev/null 2>&1 || cargo install wasm-pack --locked
+scripts/install-wasm-pack.sh
 
 npm ci
 cd mcp-servers && npm ci && cd ..
@@ -849,6 +879,7 @@ SCRIPT
     local exit_code=0
     echo "[macos] Running E2E (first launch — clean system)..."
     run_macos_e2e || exit_code=$?
+    macos_collect_failure_artifacts first-launch
 
     if [ "$exit_code" -ne 0 ]; then
         echo "[macos] FAILED on first launch (exit code: $exit_code)"
@@ -886,6 +917,7 @@ cd /tmp/speedwave-e2e && npm ci
 SCRIPT
 
     run_macos_e2e "pre-reset" || exit_code=$?
+    macos_collect_failure_artifacts pre-reset
 
     if [ "$exit_code" -eq 0 ]; then
         echo "[macos] Running engine-contract suite (production-style install: LIMA_HOME + speedwave VM)..."
@@ -920,6 +952,7 @@ SCRIPT_TAIL
 
     if [ "$exit_code" -eq 0 ]; then
         run_macos_e2e "reset-only" || exit_code=$?
+        macos_collect_failure_artifacts reset-only
     fi
 
     if [ "$exit_code" -eq 0 ]; then
@@ -939,6 +972,7 @@ run_macos_e2e() {
     local spec_phase="${1:-}"
     {
         printf 'export OPENROUTER_API_KEY=%q\n' "${OPENROUTER_API_KEY:-}"
+        printf 'export ANTHROPIC_API_KEY=%q\n' "${ANTHROPIC_API_KEY:-}"
         printf 'export OPENROUTER_MODEL=%q\n' "${OPENROUTER_MODEL:-}"
         printf 'export LOCAL_LLM_BASE_URL=%q\n' "${LOCAL_LLM_BASE_URL:-}"
         printf 'export LOCAL_LLM_API_KEY=%q\n' "${LOCAL_LLM_API_KEY:-}"
@@ -1051,7 +1085,7 @@ SCRIPT
 
     echo ""
     echo "[macos] Speedwave is running on $MACOS_HOST."
-    echo "[macos] View logs:  ssh $MACOS_SSH_OPTS $MACOS_HOST tail -f ~/Library/Logs/pl.speedwave.desktop/speedwave.log"
+    echo "[macos] View logs:  ssh $MACOS_SSH_OPTS $MACOS_HOST tail -f ~/Library/Logs/pl.speedwave.desktop/speedwave-desktop.log"
     echo "[macos] Stop:       ssh $MACOS_SSH_OPTS $MACOS_HOST pkill Speedwave"
 }
 

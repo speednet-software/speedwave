@@ -14,6 +14,7 @@ import {
 } from '../../services/chat-state.service';
 import { Clipboard } from '@angular/cdk/clipboard';
 import type {
+  AudioSource,
   DownloadProgress,
   RecommendedModelEntry,
   Segment,
@@ -88,6 +89,7 @@ describe('LiveTranscriptComponent', () => {
     delete: ReturnType<typeof vi.fn>;
     resumeRecording: ReturnType<typeof vi.fn>;
     liveTranscriptPreferred: ReturnType<typeof vi.fn>;
+    speakerAttribution: ReturnType<typeof vi.fn>;
   };
   let chat: {
     hasConversation: WritableSignal<boolean>;
@@ -115,6 +117,7 @@ describe('LiveTranscriptComponent', () => {
       delete: vi.fn(async () => undefined),
       resumeRecording: vi.fn(async () => undefined),
       liveTranscriptPreferred: vi.fn(() => false),
+      speakerAttribution: vi.fn(() => false),
     };
     chat = {
       hasConversation: signal(false),
@@ -203,8 +206,104 @@ describe('LiveTranscriptComponent', () => {
       fixture.nativeElement.querySelectorAll('[data-testid="line-speaker"]')
     );
     expect(chips[0].textContent?.trim()).toBe('Meeting · Speaker 1');
-    expect(chips[0].style.color).toBe('var(--teal)');
-    expect(chips[1].style.color).toBe('');
+    expect(chips[0].style.color).toBe('');
+    expect(chips[0].className).toContain('text-[var(--ink-dim)]');
+    const dots: HTMLElement[] = Array.from(
+      fixture.nativeElement.querySelectorAll('[data-testid="line-speaker-dot"]')
+    );
+    expect(dots.map((d) => d.style.backgroundColor)).toEqual([
+      'var(--teal)',
+      'var(--violet)',
+      'var(--teal)',
+    ]);
+    expect(chips[1].querySelector('[data-testid="line-speaker-dot"]')).toBeNull();
+    expect(chips[4].querySelector('[data-testid="line-speaker-dot"]')).toBeNull();
+    expect(chips[5].querySelector('[data-testid="line-speaker-dot"]')).toBeNull();
+  });
+
+  it('labels diarized segments without a channel as Speaker N in their colour', () => {
+    const untagged = (start: number, text: string, speaker_id?: number) => ({
+      ...seg(start, text),
+      speaker_id,
+    });
+    fixture.componentRef.setInput(
+      'session',
+      session({
+        audio_source: { source: { kind: 'imported_file' }, label: 'Imported file: sync.m4a' },
+        final_segments: [
+          untagged(0, 'zaczynamy', 1),
+          untagged(1, 'pytanie', 2),
+          untagged(2, 'mhm'),
+        ],
+        models_used: { live: null, finalize: 'large-v3', diarization: 'nemotron' },
+      })
+    );
+    fixture.detectChanges();
+    const lines = component.lines();
+    expect(lines.map((l) => l.speaker)).toEqual(['Speaker 1', 'Speaker 2', null]);
+    expect(lines.map((l) => l.speakerColor)).toEqual(['var(--teal)', 'var(--violet)', null]);
+    const chips: HTMLElement[] = Array.from(
+      fixture.nativeElement.querySelectorAll('[data-testid="line-speaker"]')
+    );
+    expect(chips.map((c) => c.textContent?.trim())).toEqual(['Speaker 1', 'Speaker 2']);
+  });
+
+  describe('speaker labels on a microphone-only recording', () => {
+    const q = (id: string): HTMLElement | null =>
+      fixture.nativeElement.querySelector(`[data-testid="${id}"]`);
+
+    function openDone(
+      kind: AudioSource['kind'],
+      asked: boolean,
+      finalize = 'large',
+      state: 'done' | 'postponed' = 'done'
+    ): void {
+      svc.speakerAttribution.mockReturnValue(asked);
+      fixture = TestBed.createComponent(LiveTranscriptComponent);
+      component = fixture.componentInstance;
+      svc.recordings.set([row({ finalize_model: finalize, status: { state } })]);
+      const sources: Record<AudioSource['kind'], AudioSource> = {
+        microphone: { kind: 'microphone', device: null },
+        mixed: { kind: 'mixed', mic: null },
+        system_wide: { kind: 'system_wide' },
+        imported_file: { kind: 'imported_file' },
+      };
+      fixture.componentRef.setInput(
+        'session',
+        session({
+          status: { state },
+          audio_source: { source: sources[kind], label: 'Source' },
+          final_segments: [seg(0, 'hi')],
+          models_used: { live: null, finalize },
+        })
+      );
+      fixture.detectChanges();
+    }
+
+    it('says why there are no labels when the Settings switch asked for them', () => {
+      openDone('microphone', true);
+      expect(q('transcript-quality')!.textContent).toContain(
+        'Speaker labels are not available for a microphone-only recording.'
+      );
+    });
+
+    it('says nothing with the switch off or for a recording of the meeting audio', () => {
+      openDone('microphone', false);
+      expect(q('transcript-quality')).toBeNull();
+      openDone('system_wide', true);
+      expect(q('transcript-quality')).toBeNull();
+      openDone('imported_file', true);
+      expect(q('transcript-quality')).toBeNull();
+      openDone('mixed', true);
+      expect(q('transcript-quality')).toBeNull();
+    });
+
+    it('keeps the smaller-model and put-off lines ahead of it', () => {
+      openDone('microphone', true, 'small');
+      expect(q('transcript-quality')!.textContent).toContain('Made with a smaller model');
+      openDone('microphone', true, 'large', 'postponed');
+      expect(q('transcript-quality')!.textContent).not.toContain('Speaker labels');
+    });
   });
 
   it('sorts a copy, never mutating the session segment array', () => {
@@ -267,6 +366,7 @@ describe('LiveTranscriptComponent', () => {
     const bar = fixture.nativeElement.querySelector('[data-testid="finalize-bar"]');
     expect(bar).not.toBeNull();
     expect(bar.getAttribute('aria-valuenow')).toBe('40');
+    expect(bar.firstElementChild.className).toContain('bg-[var(--amber)]');
   });
 
   it('stages the transcript without a confirm dialog, then navigates to the chat tab', async () => {
@@ -721,6 +821,12 @@ describe('LiveTranscriptComponent', () => {
       expect(el.querySelector('[data-testid="transcript-quality"]')!.textContent).toContain(
         'Not transcribed'
       );
+      expect(el.querySelector('[data-testid="failure-reason"]')!.className).toContain(
+        'text-[var(--red)]'
+      );
+      expect(el.querySelector('[data-testid="transcribe-btn"]')!.className).toContain(
+        'text-[var(--on-accent)]'
+      );
       (el.querySelector('[data-testid="transcribe-btn"]') as HTMLButtonElement).click();
       await fixture.whenStable();
       expect(svc.transcribe).toHaveBeenCalledWith('sess-1');
@@ -797,6 +903,22 @@ describe('LiveTranscriptComponent', () => {
         row({ status: { state: 'finalizing', progress: 0.1 }, finalize_model: 'small' }),
       ]);
       expect(component.quality()?.text).toBe('Transcribing with the smaller model');
+    });
+
+    it('colours the state line with the theme amber and red, never a fixed palette', () => {
+      const cls = (state: TranscriptSummary['status'], queued = false): string | undefined => {
+        svc.recordings.set([row({ status: state, queued })]);
+        fixture.componentRef.setInput('session', session({ status: state }));
+        fixture.detectChanges();
+        return component.quality()?.cls;
+      };
+      expect(cls({ state: 'recording' })).toBe('text-[var(--red)]');
+      expect(cls({ state: 'paused' })).toBe('text-[var(--amber)]');
+      expect(cls({ state: 'finalizing', progress: 0.1 })).toBe('text-[var(--amber)]');
+      expect(cls({ state: 'finalizing', progress: 0 }, true)).toBe('text-[var(--amber)]');
+      expect(cls({ state: 'failed', reason: 'x' })).toBe('text-[var(--red)]');
+      expect(cls({ state: 'postponed' })).toBe('text-[var(--ink-dim)]');
+      expect(cls({ state: 'done' })).toBeUndefined();
     });
 
     it('says the recording waits its turn while another pass runs', () => {
@@ -1021,6 +1143,7 @@ describe('LiveTranscriptComponent', () => {
       expect(q('smaller-model-banner')!.textContent).toContain('live text from the recording');
       expect(q('transcribe-btn')).toBeNull();
       expect(q('send-to-chat-btn')!.className).not.toContain('bg-[var(--bg-2)]');
+      expect(q('send-to-chat-btn')!.className).toContain('text-[var(--on-accent)]');
       expect((q('copy-btn') as HTMLButtonElement).disabled).toBe(false);
       expect((q('export-btn') as HTMLButtonElement).disabled).toBe(false);
       const banner = q('banner-transcribe') as HTMLButtonElement;
@@ -1076,7 +1199,7 @@ describe('LiveTranscriptComponent', () => {
       fixture.detectChanges();
       const el: HTMLElement = fixture.nativeElement;
       expect(el.querySelector('[data-testid="transcript-meta"]')!.textContent!.trim()).toBe(
-        '13 min · System'
+        '13 min · System · Polish'
       );
       expect(el.querySelector('[data-testid="transcript-quality"]')).toBeNull();
       expect(el.querySelector('[data-testid="smaller-model-banner"]')).toBeNull();
@@ -1115,6 +1238,12 @@ describe('LiveTranscriptComponent', () => {
       );
       expect(el.querySelector('[data-testid="smaller-model-banner"]')!.textContent).toContain(
         'high-quality one was not downloaded'
+      );
+      expect(el.querySelector('[data-testid="smaller-model-banner"]')!.className).toContain(
+        'text-[var(--ink)]'
+      );
+      expect(el.querySelector('[data-testid="transcript-quality"]')!.className).toContain(
+        'text-[var(--amber)]'
       );
       const btn = el.querySelector('[data-testid="download-best-model"]') as HTMLButtonElement;
       expect(btn.textContent).toContain('Download high-quality model');
@@ -1219,12 +1348,43 @@ describe('LiveTranscriptComponent', () => {
       expect(q('resume-item')).toBeNull();
     });
 
+    it('offers no Continue recording on an imported file, which has nothing to capture', () => {
+      fixture.componentRef.setInput(
+        'session',
+        session({
+          status: { state: 'done' },
+          audio_source: { source: { kind: 'imported_file' }, label: 'Imported file: sync.m4a' },
+          live_segments: [seg(0, 'hi')],
+        })
+      );
+      fixture.detectChanges();
+      expect(q('resume-item')).toBeNull();
+      expect(q('retranscribe-item')).not.toBeNull();
+      expect(q('reveal-btn')).not.toBeNull();
+    });
+
+    it('names the language an imported file was transcribed in', () => {
+      fixture.componentRef.setInput(
+        'session',
+        session({
+          status: { state: 'done' },
+          language: 'en',
+          audio_source: { source: { kind: 'imported_file' }, label: 'Imported file: sync.m4a' },
+          live_segments: [seg(0, 'hi')],
+        })
+      );
+      fixture.detectChanges();
+      const meta = q('transcript-meta')!.textContent!;
+      expect(meta).toContain('Imported file: sync.m4a · English');
+    });
+
     it('deletes only after the confirmation', async () => {
       q('delete-item')!.click();
       fixture.detectChanges();
       expect(svc.delete).not.toHaveBeenCalled();
       const confirm = fixture.nativeElement.querySelector('[data-testid="delete-confirm"]');
       expect(confirm.textContent).toContain('This cannot be undone.');
+      expect(q('delete-yes')!.className).toContain('text-[var(--red)]');
       q('delete-no')!.click();
       fixture.detectChanges();
       expect(fixture.nativeElement.querySelector('[data-testid="delete-confirm"]')).toBeNull();

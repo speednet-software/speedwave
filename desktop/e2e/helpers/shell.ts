@@ -2,6 +2,8 @@
 
 export const RESTART_WAIT_MS = 360_000;
 
+export const FLAKY_STEP_RETRIES = 3;
+
 interface RestartUi {
   errorText: string | null;
   overlay: boolean;

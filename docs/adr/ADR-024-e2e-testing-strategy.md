@@ -19,7 +19,7 @@ Drive the real, installed desktop binary on a real machine via SSH orchestration
 
 - WebDriver plugin registration (feature-gated, both platforms) — `desktop/src-tauri/src/main.rs` (`#[cfg(feature = "e2e")]` block registering `tauri_plugin_webdriver::init()`)
 - `e2e` Cargo feature (optional `tauri-plugin-webdriver` dependency, no platform conditioning) — `desktop/src-tauri/Cargo.toml` (`[features] e2e = ["dep:tauri-plugin-webdriver"]`)
-- SSH orchestration per platform (clean state, copy repo, build release artifact, install, launch, run WebdriverIO) — `scripts/e2e-vm.sh` (`windows_clean_state` / `macos_clean_state` reset machine state; both platforms build the release artifact with the `e2e` feature enabled — Windows runs `cargo tauri build --features e2e` directly, macOS goes through `make test-e2e-desktop-build`)
+- SSH orchestration per platform (clean state, copy repo, build release artifact, install, launch, run WebdriverIO) — `scripts/e2e-vm.sh` (`windows_clean_state` / `macos_clean_state` reset machine state; both platforms build the release artifact with the `e2e` feature enabled — Windows runs `npx --prefix ../src tauri build --features e2e` directly, macOS goes through `make test-e2e-desktop-build`)
 - Shared SSH/host helpers — `scripts/e2e-common.sh`
 - Test runner specs and config — `desktop/e2e/`
 - `make test-e2e-all` (both platforms in parallel via SSH) and `make test-e2e-desktop` (build + local run; the `_e2e-run` recipe is **macOS-only** — Windows local E2E must go through `scripts/e2e-vm.sh windows`) — `Makefile`

@@ -55,9 +55,69 @@ Telling the number of speakers in advance improved the AMI score by 0.1 pp, and 
 - Memory grows with the recording: the vendored code keeps the whole meeting channel as 32-bit samples, about 0.23 GB per hour. On the CPU of an Apple M4 Pro the `diarize` example took 151 s for a 2-hour recording (a real-time factor of 0.021) with a peak of 1.1 GB, and 1.56 GB for 3 hours; the diarization itself held about 0.6 GB of that at 2 hours, the rest is the WAV reader keeping two copies of the audio for a moment (SPEED-818 removed that second copy and reads the meeting channel only after Whisper is released; the figures above predate it). The 45-minute recording above peaked at 529 MB.
 - "Transcribe again" can number the speakers differently.
 - "Later" during diarization takes effect at the next chunk boundary, within 21 seconds of audio: about a tenth of a second on Metal and under a second on the CPU of an Apple M4 Pro at the measured real-time factors.
-- Windows was measured on one x86_64 laptop whose Vulkan device is its integrated GPU. On the CPU with 8 threads: 6.3 s for 142.6 s of meeting audio (a real-time factor of 0.044, model load included), 2 speakers found and no segment left unlabelled; that run fell back to the CPU because the vendored code did not take an integrated GPU as a GPU device, which local change 9 fixed. A run after the fix picked Vulkan0 and labelled 4 speakers from 39 turns in 24.4 s on a longer recording; whether the integrated GPU beats the CPU for this model was not measured, nor was a long recording, so the Settings text gives no time on Windows.
+- Windows was measured on one x86_64 laptop whose Vulkan device is its integrated GPU. On the CPU with 8 threads: 6.3 s for 142.6 s of meeting audio (a real-time factor of 0.044, model load included), 2 speakers found and no segment left unlabelled; that run fell back to the CPU because the vendored code did not take an integrated GPU as a GPU device, which local change 9 fixed. A run after the fix picked Vulkan0 and labelled 4 speakers from 39 turns in 24.4 s on a longer recording; whether the integrated GPU beats the CPU for this model was not measured, nor was a long recording, so the Settings text gives no time on Windows. The Amendment of 2026-10-27 measured both.
 - The microphone can pick up the meeting audio through the speakers; such a fragment is transcribed on the `Mic` channel as "You" (2.6 s at the start of that 142.6 s recording). Diarization never touches the `Mic` channel, so it cannot correct it.
 - The vendored code is a copy of a draft. A whisper-rs-sys bump fails the build until the ggml headers and `UPSTREAM` are updated. When whisper-rs-sys ships whisper.cpp with diarization, the duplicate `whisper_diar_*` symbols fail the link, which is the signal to delete the copy; the Rust side stays as it is.
+
+## Amendment (2026-10-27): an integrated GPU diarizes on the CPU
+
+**Context.** SPEED-823 measured what the Windows limitation above left open. The host was one Dell Latitude 5421 (Intel Core i7-11850H, 8 cores, 16 GB, Intel UHD Graphics as its only GPU, driver 32.0.101.7088, on AC power in Best performance mode), running the `diarize` example at `dev` `239ff5bc` with the default thread count, two runs per case. The inputs were 16 kHz mono files cut from AMI[^4][^5]: 30 minutes of the meetings EN2002a and EN2002c, 15 minutes each, and 2 hours of eight meetings at 15 minutes each, padded with the start of EN2002a. During the GPU runs the 3D engine of the integrated GPU ran at about 92% through Vulkan.
+
+| input  | device         | time, median of 2 | real-time factor | difference between runs | peak working set |
+| ------ | -------------- | ----------------- | ---------------- | ----------------------- | ---------------- |
+| 30 min | CPU            | 87.8 s            | 0.049            | 2.2%                    | 267 MB           |
+| 30 min | integrated GPU | 119.9 s           | 0.067            | 0.04%                   | 314 MB           |
+| 2 h    | CPU            | 367.8 s           | 0.051            | 0.4%                    | 620 MB           |
+| 2 h    | integrated GPU | 482.5 s           | 0.067            | 0.5%                    | 667 MB           |
+
+The integrated GPU was 37% slower at 30 minutes and 31% slower at 2 hours, and its peak working set was 47 MB higher. The two runs of each case gave identical turns. On the same files an Apple M4 Pro took 31.9 s and 134.1 s on the CPU and 6.0 s and 23.4 s on Metal, one run at `e533d769`, which has the same `crates/` as `239ff5bc`.
+
+**Decision.**
+
+- Diarization uses the GPU only when the host's class is `GpuClass::Discrete` (`transcription/diarizer.rs::context_params`): Metal on macOS, which always reports `Discrete` (`transcription/accel.rs::gpu_class`), and a discrete Vulkan device on Windows. `GpuClass::Integrated`, which also covers a virtual GPU (`transcription/gpu_probe.rs::classify_device_types`), diarizes on the CPU. Whisper keeps the GPU on every class but `None` (`transcription/transcriber.rs`).
+- On Windows with an integrated GPU, the Settings cost line reads "Adds about 3 minutes per hour of recording." (`desktop/src/src/app/settings/transcription-section/transcription-section.component.ts::SPEAKER_COST_TEXT`), from the CPU's 2.93 to 3.07 minutes per hour above. The rule agreed before the measurement rounded up to whole minutes, which gives 4; 3 is closer to what was measured. A discrete GPU and a host without one keep a line with no time: neither was measured, and a Windows host without a GPU is usually an older machine or a VM that this laptop does not represent.
+
+**Consequences.**
+
+- The CPU time stands for an H-series laptop processor; a lower-power processor can take longer per hour.
+- The 2-hour file measures time and memory, not labels on a long meeting. From about the 60th minute the model dropped most of the speech in some 15-minute blocks, on every device, in different blocks per device, while the first 45 minutes gave nearly the same turns on every device. The likely cause, not verified, is that eight separate meetings hold more distinct voices than the eight speakers the model tracks. Labels on a real 2-hour meeting of at most eight people were not measured.
+- A laptop with both an integrated and a discrete GPU reports `Discrete`, and the vendored code takes the first device of type GPU or integrated GPU in ggml's order (`gpu_device` 0, `native/whisper-diarization/whisper-diarization.cpp`). Whether that is the discrete one on such a laptop was not checked.
+
+## Amendment (2026-10-28): mono recordings of the meeting audio are diarized
+
+**Context.** Decision 3 diarized only the `System` channel of a paired capture: a mono recording was never diarized. Three kinds of mono audio hold nothing but meeting audio. An imported file (ADR-056 Amendment 22) is averaged into one channel by `transcription/import.rs`, so a meeting recorded in another app has every participant on that channel. A recording of "Other people only" (`AudioSource::SystemWide`) is mono because it has no microphone channel. A part of a "Whole meeting" recording (`AudioSource::Mixed`) made on macOS without microphone access is mono too: the capture CLI then records the system audio alone (`native/macos/audio-capture/Sources/AudioCaptureCLI.swift`, "recording system audio only"); on Windows a "Whole meeting" recording opens the microphone or fails to start (`transcription/audio_windows.rs`), so it is always stereo. With the Settings switch on, none of them got labels and nothing told the user why (SPEED-898).
+
+**Decision.**
+
+- Every recording but one of the microphone alone holds meeting audio (`transcription/transcript_driver.rs::has_meeting_audio`, from the session's audio source, which `run_finalize` reads from the store). Its meeting lane is channel 0 of every part:
+
+  | part                                                   | meeting lane                  | label after diarization                      |
+  | ------------------------------------------------------ | ----------------------------- | -------------------------------------------- |
+  | stereo part of `Mixed`                                 | channel 0 (`System`)          | `Meeting · Speaker N`; channel 1 stays "You" |
+  | mono part of `Mixed` (macOS without microphone access) | the one channel               | `Speaker N`                                  |
+  | mono part of `SystemWide` or `ImportedFile`            | the one channel               | `Speaker N`                                  |
+  | any part of `Microphone`                               | none: the model is not loaded | none                                         |
+
+- `label_speakers` stamps every segment but a `Mic` one, numbered across all parts. The segments of a mono part keep `source: null` in `transcript.json`; `TranscriptSource`, its TypeScript mirror, `lane_sources` and the live pass do not change. A diarized segment without a tag is labelled `Speaker N`, without the `Meeting ·` prefix, in the Markdown export (`transcription/transcript.rs::to_markdown`) and in the pane (`live-transcript.component.ts::speakerOf`); the note in the Markdown header says that a 'Meeting' line without a number, or a line without any label, has no recognised speaker.
+- `import_transcription` takes the Settings switch as `speaker_mode`, like `stop_transcription` and `transcribe_transcript`.
+- A recording of the microphone alone is still never diarized. When the switch is on, the pane of such a finished recording says that it gets no speaker labels, and the Settings text under the switch says which recordings get them. A pass handed a diarizer that it does not run logs why.
+
+**Consequences.**
+
+- Every measurement above ran on uncompressed audio: the meeting channel of Speedwave recordings and AMI Mix-Headset. An import can be compressed: the formats it accepts include M4A, MP4 and MP3 (`transcription/import.rs::IMPORT_EXTENSIONS`). Eight AMI meetings[^4][^5], 15 minutes each, went through the import and diarization path of the app in four versions, scored automatically against the AMI reference per Whisper segment, the unit the user sees:
+
+  | version                       | segment agreement | difference to WAV (95% CI) | speaker count within ±1 | worst meeting |
+  | ----------------------------- | ----------------- | -------------------------- | ----------------------- | ------------- |
+  | WAV                           | 90.2%             |                            | 8/8                     | 83.6%         |
+  | AAC-LC, 16 kHz, 48 kb/s       | 90.3%             | +0.0 pp (−1.2 to +1.1)     | 8/8                     | 83.8%         |
+  | AAC-LC, 32 kHz, 52 kb/s       | 89.5%             | −0.8 pp (−1.5 to −0.1)     | 8/8                     | 82.1%         |
+  | AAC-LC, 24 kb/s (stress test) | 90.5%             | +0.3 pp (−1.5 to +2.4)     | 8/8                     | 84.3%         |
+
+  Every meeting in every version is above the 80% of decision 7. The speaker count was exact in 30 of the 32 runs and one too high in the other two. The 16 kHz version stands for a Teams recording and the 32 kHz one for a Zoom recording; the encoder used allows at most 48 kb/s at 16 kHz. The 32 kHz version is the only one whose interval excludes zero, and its −0.8 pp is smaller than the spread between meetings. These figures do not compare with the 82.83% of round 3, which scored the reference utterances rather than Whisper segments. The encoding reproduces the codec only, not any other processing a meeting app applies before it saves a recording. Two real meetings recorded by the author and diarized as mono, one of them with echo of the remote speakers, gave one sentence assigned to the wrong speaker and none.
+
+- An import, like a recording, has no length limit, and the limits under Known limitations apply to it: memory grows with its length, and labels on a meeting longer than 45 minutes were not measured (2026-10-27 amendment). Nothing caps or warns about the length of an import.
+- An app version older than this amendment shows the lines of a diarized mono part without labels, while its Markdown export still lists the speakers in the header and attaching it to a chat still adds the note on `Speaker N` labels (`transcription.service.ts::SPEAKER_LABELS_PROMPT`), since both follow `models_used.diarization`.
+- A recording transcribed before this change gets labels on its mono parts on "Transcribe again" with the switch on.
 
 [^1]: Nemotron-3 Diarization model card: governed by the OpenMDW License Agreement 1.1, "handles up to eight speakers", 16 kHz single-channel input, all evaluations include overlapping speech, AMI (train and development) and VoxConverse v0.3 (development and test) in the training data table: <https://huggingface.co/nvidia/Nemotron-3-Diarization>.
 
@@ -73,7 +133,7 @@ Telling the number of speakers in advance improved the AMI score by 0.1 pp, and 
 
 [^7]: VoxConverse speaker diarisation dataset: <https://github.com/joonson/voxconverse>.
 
-[^8]: The model file in the catalogue: <https://huggingface.co/nvidia/Nemotron-3-Diarization/resolve/main/Nemotron-3-Diarization.q8_0.gguf>.
+[^8]: The model file in the catalogue: <https://huggingface.co/nvidia/Nemotron-3-Diarization/resolve/f667ed73aee57d40cc39428eb768b4fd87a0a29e/Nemotron-3-Diarization.q8_0.gguf>.
 
 [^9]: sherpa-onnx, Apache-2.0, with speaker diarization: <https://github.com/k2-fsa/sherpa-onnx>.
 

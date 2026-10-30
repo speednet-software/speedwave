@@ -694,6 +694,57 @@ pub struct SelectedIde {
 pub struct UiPrefsConfig {
     /// Reveal hidden / work-in-progress UI surfaces. Default = off.
     pub beta_enabled: Option<bool>,
+    /// Native OS notifications for chat-session events (SPEED-522).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notifications: Option<NotificationPrefsConfig>,
+}
+
+/// Stored notification switches; an unset switch resolves to on.
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
+pub struct NotificationPrefsConfig {
+    /// Master switch for every notification.
+    pub enabled: Option<bool>,
+    /// A session finished its turn.
+    pub turn_finished: Option<bool>,
+    /// A session waits for the user's answer.
+    pub awaiting_input: Option<bool>,
+    /// A session stopped with an error.
+    pub session_error: Option<bool>,
+}
+
+/// Resolved notification switches.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotificationPrefs {
+    /// Master switch for every notification.
+    pub enabled: bool,
+    /// A session finished its turn.
+    pub turn_finished: bool,
+    /// A session waits for the user's answer.
+    pub awaiting_input: bool,
+    /// A session stopped with an error.
+    pub session_error: bool,
+}
+
+impl From<&NotificationPrefsConfig> for NotificationPrefs {
+    fn from(c: &NotificationPrefsConfig) -> Self {
+        Self {
+            enabled: c.enabled.unwrap_or(true),
+            turn_finished: c.turn_finished.unwrap_or(true),
+            awaiting_input: c.awaiting_input.unwrap_or(true),
+            session_error: c.session_error.unwrap_or(true),
+        }
+    }
+}
+
+impl From<NotificationPrefs> for NotificationPrefsConfig {
+    fn from(p: NotificationPrefs) -> Self {
+        Self {
+            enabled: Some(p.enabled),
+            turn_finished: Some(p.turn_finished),
+            awaiting_input: Some(p.awaiting_input),
+            session_error: Some(p.session_error),
+        }
+    }
 }
 
 /// OTLP transport protocol for the telemetry exporter.
@@ -1457,6 +1508,20 @@ impl SpeedwaveUserConfig {
             .and_then(|u| u.beta_enabled)
             .unwrap_or(false)
     }
+
+    /// Notification switches, every unset one resolved to on (top-level only).
+    pub fn notification_prefs(&self) -> NotificationPrefs {
+        self.ui
+            .as_ref()
+            .and_then(|u| u.notifications.as_ref())
+            .map(NotificationPrefs::from)
+            .unwrap_or_else(|| NotificationPrefs::from(&NotificationPrefsConfig::default()))
+    }
+
+    /// Stores every notification switch explicitly.
+    pub fn set_notification_prefs(&mut self, prefs: NotificationPrefs) {
+        self.ui.get_or_insert_with(Default::default).notifications = Some(prefs.into());
+    }
 }
 
 /// Fully resolved Claude container config after the layered merge.
@@ -1915,6 +1980,7 @@ const REPO_ENV_DENY_ANTHROPIC: &[&str] = &[
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_CUSTOM_HEADERS",
+    "CLAUDE_CODE_ATTRIBUTION_HEADER",
 ];
 
 fn sanitize_repo_env(env: Option<HashMap<String, String>>) -> Option<HashMap<String, String>> {
@@ -2515,6 +2581,7 @@ mod tests {
         let cfg_on = SpeedwaveUserConfig {
             ui: Some(UiPrefsConfig {
                 beta_enabled: Some(true),
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -2523,6 +2590,7 @@ mod tests {
         let cfg_off = SpeedwaveUserConfig {
             ui: Some(UiPrefsConfig {
                 beta_enabled: Some(false),
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -2540,12 +2608,86 @@ mod tests {
         let cfg = SpeedwaveUserConfig {
             ui: Some(UiPrefsConfig {
                 beta_enabled: Some(true),
+                ..Default::default()
             }),
             ..Default::default()
         };
         let json = serde_json::to_string(&cfg).expect("serialize");
         let back: SpeedwaveUserConfig = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.ui, cfg.ui);
+    }
+
+    #[test]
+    fn notification_prefs_default_to_on() {
+        let all_on = NotificationPrefs {
+            enabled: true,
+            turn_finished: true,
+            awaiting_input: true,
+            session_error: true,
+        };
+        assert_eq!(SpeedwaveUserConfig::default().notification_prefs(), all_on);
+        let empty_ui = SpeedwaveUserConfig {
+            ui: Some(UiPrefsConfig::default()),
+            ..Default::default()
+        };
+        assert_eq!(empty_ui.notification_prefs(), all_on);
+    }
+
+    #[test]
+    fn notification_prefs_resolve_each_unset_switch_to_on() {
+        let cfg = SpeedwaveUserConfig {
+            ui: Some(UiPrefsConfig {
+                notifications: Some(NotificationPrefsConfig {
+                    turn_finished: Some(false),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let prefs = cfg.notification_prefs();
+        assert!(prefs.enabled);
+        assert!(!prefs.turn_finished);
+        assert!(prefs.awaiting_input);
+        assert!(prefs.session_error);
+    }
+
+    #[test]
+    fn set_notification_prefs_keeps_beta_and_round_trips() {
+        let mut cfg = SpeedwaveUserConfig {
+            ui: Some(UiPrefsConfig {
+                beta_enabled: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let prefs = NotificationPrefs {
+            enabled: false,
+            turn_finished: true,
+            awaiting_input: false,
+            session_error: true,
+        };
+        cfg.set_notification_prefs(prefs);
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        let back: SpeedwaveUserConfig = serde_json::from_str(&json).expect("deserialize");
+        assert!(back.beta_enabled());
+        assert_eq!(back.notification_prefs(), prefs);
+    }
+
+    #[test]
+    fn ui_prefs_without_notifications_serialize_without_the_key() {
+        let cfg = SpeedwaveUserConfig {
+            ui: Some(UiPrefsConfig {
+                beta_enabled: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        assert!(!json.contains("notifications"), "{json}");
+        let parsed: SpeedwaveUserConfig =
+            serde_json::from_str(r#"{"projects":[],"ui":{"beta_enabled":true}}"#).expect("parse");
+        assert!(parsed.ui.and_then(|u| u.notifications).is_none());
     }
 
     #[test]
@@ -6079,6 +6221,7 @@ mod tests {
             selected_ide: None,
             ui: Some(UiPrefsConfig {
                 beta_enabled: Some(true),
+                ..Default::default()
             }),
             telemetry: None,
         };
@@ -6267,6 +6410,7 @@ mod tests {
         let user_config = SpeedwaveUserConfig {
             ui: Some(UiPrefsConfig {
                 beta_enabled: Some(true),
+                ..Default::default()
             }),
             ..Default::default()
         };

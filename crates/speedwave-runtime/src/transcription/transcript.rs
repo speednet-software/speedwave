@@ -73,8 +73,8 @@ pub struct DiarizationRecord {
 
 const SPEAKER_LABEL: &str = "Speaker";
 const SPEAKERS_NOTE: &str = "told apart from the meeting audio; approximate: one person can get \
-several labels and one label several people; a 'Meeting' line without a number has no \
-recognised speaker";
+several labels and one label several people; a 'Meeting' line without a number, or a line \
+without any label, has no recognised speaker";
 
 /// One transcript session — the persisted artifact.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -324,7 +324,8 @@ impl TranscriptSession {
                     format!(" {} · {SPEAKER_LABEL} {n}:", src.label())
                 }
                 (Some(src), _) => format!(" {}:", src.label()),
-                (None, _) => String::new(),
+                (None, Some(n)) => format!(" {SPEAKER_LABEL} {n}:"),
+                (None, None) => String::new(),
             };
             s.push_str(&format!("**({}){label}** {text}\n\n", fmt_ts(seg.start)));
         }
@@ -554,6 +555,10 @@ mod tests {
             "live-transcript.component.ts must label a diarized meeting line `Meeting · {SPEAKER_LABEL} N`"
         );
         assert!(
+            pane.contains(&format!("`{SPEAKER_LABEL} ${{n}}`")),
+            "live-transcript.component.ts must label a diarized untagged line `{SPEAKER_LABEL} N`"
+        );
+        assert!(
             service.contains(&format!("'{SPEAKER_LABEL} N'")),
             "transcription.service.ts SPEAKER_LABELS_PROMPT must name the labels as '{SPEAKER_LABEL} N'"
         );
@@ -623,6 +628,23 @@ mod tests {
     }
 
     #[test]
+    fn to_markdown_labels_diarized_untagged_segments_with_the_speaker_only() {
+        let mut s = TranscriptSession::new(Language::Pl, mk_source(), PathBuf::from("/a.wav"));
+        let mut first = seg(0.0, 3.0, "Witam wszystkich.");
+        first.speaker_id = Some(1);
+        let mut second = seg(3.0, 4.0, "Dzień dobry.");
+        second.speaker_id = Some(2);
+        s.final_segments = Some(vec![first, second, seg(4.0, 5.0, "Mhm.")]);
+        s.models_used.diarization = Some("nemotron-3-diarization-q8_0".to_string());
+        let md = s.to_markdown();
+        assert!(md.contains("- Speakers: Speaker 1, Speaker 2 ("), "{md}");
+        assert!(md.contains("**(00:00.00) Speaker 1:** Witam wszystkich."));
+        assert!(md.contains("**(00:03.00) Speaker 2:** Dzień dobry."));
+        assert!(md.contains("**(00:04.00)** Mhm."));
+        assert!(!md.contains("Meeting ·"));
+    }
+
+    #[test]
     fn to_markdown_lists_the_speakers_in_numeric_order_in_the_header() {
         let md = diarized_session().to_markdown();
         assert!(
@@ -631,7 +653,7 @@ mod tests {
             )),
             "{md}"
         );
-        assert!(md.contains("approximate: one person can get several labels and one label several people; a 'Meeting' line without a number has no recognised speaker)\n"));
+        assert!(md.contains("approximate: one person can get several labels and one label several people; a 'Meeting' line without a number, or a line without any label, has no recognised speaker)\n"));
     }
 
     #[test]

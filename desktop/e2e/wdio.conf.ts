@@ -1,6 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { dumpContainerLogs } from './helpers/engine';
 import { runPreflight } from './helpers/preflight';
 
 const SCREENSHOT_DIR = join(process.cwd(), 'screenshots');
@@ -60,17 +61,33 @@ export const config = {
     _context: unknown,
     { passed, error }: { passed: boolean; error?: Error }
   ) {
-    if (!passed) {
-      if (error) console.error(`Test failed: ${error.message}`);
-      try {
-        mkdirSync(SCREENSHOT_DIR, { recursive: true });
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const filepath = join(SCREENSHOT_DIR, `FAIL-${timestamp}.png`);
-        await browser.saveScreenshot(filepath);
-        console.log(`Screenshot saved: ${filepath}`);
-      } catch (e) {
-        console.error(`Failed to save screenshot: ${e}`);
-      }
-    }
+    if (!passed) await captureFailure('Test', error);
+  },
+
+  afterHook: async function (
+    _test: unknown,
+    _context: unknown,
+    { passed, error }: { passed: boolean; error?: Error }
+  ) {
+    if (!passed && !/skip/i.test(error?.message ?? '')) await captureFailure('Hook', error);
   },
 };
+
+async function captureFailure(what: string, error?: Error): Promise<void> {
+  if (error) console.error(`${what} failed: ${error.message}`);
+  mkdirSync(SCREENSHOT_DIR, { recursive: true });
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  try {
+    const filepath = join(SCREENSHOT_DIR, `FAIL-${timestamp}.png`);
+    await browser.saveScreenshot(filepath);
+    console.log(`Screenshot saved: ${filepath}`);
+  } catch (e) {
+    console.error(`Failed to save screenshot: ${e}`);
+  }
+  try {
+    const files = dumpContainerLogs(SCREENSHOT_DIR, timestamp);
+    console.log(`Container logs saved: ${files.length} files`);
+  } catch (e) {
+    console.error(`Failed to save container logs: ${e}`);
+  }
+}

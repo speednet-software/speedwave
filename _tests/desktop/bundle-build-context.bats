@@ -68,6 +68,37 @@ tree_fingerprint() {
     done
 }
 
+assert_installed_versions_match_lock() {
+    local node_modules="$1" lock="$2"
+    node -e '
+const fs = require("fs");
+const path = require("path");
+const [nodeModules, lockPath] = process.argv.slice(1);
+const locked = JSON.parse(fs.readFileSync(lockPath, "utf8")).packages;
+const mismatches = [];
+let checked = 0;
+for (const entry of fs.readdirSync(nodeModules)) {
+  if (entry.startsWith(".")) continue;
+  const names = entry.startsWith("@")
+    ? fs.readdirSync(path.join(nodeModules, entry)).map((n) => entry + "/" + n)
+    : [entry];
+  for (const name of names) {
+    const manifest = path.join(nodeModules, name, "package.json");
+    const want = locked["node_modules/" + name];
+    if (!fs.existsSync(manifest) || !want || want.link) continue;
+    checked += 1;
+    const got = JSON.parse(fs.readFileSync(manifest, "utf8")).version;
+    if (got !== want.version) mismatches.push(name + " " + got + " != lock " + want.version);
+  }
+}
+if (checked === 0) mismatches.push("no installed package was compared");
+if (mismatches.length) {
+  console.error(mismatches.join("\n"));
+  process.exit(1);
+}
+' "$node_modules" "$lock"
+}
+
 setup_file() {
     SHARED_DEST="$(mktemp -d "${TMPDIR:-/tmp}/bundle-bats-shared.XXXXXX")"
     SHARED_WASM_LOCK="$SHARED_DEST/wasm/.wasm-build.lock"
@@ -381,12 +412,13 @@ EOF
     [ -d "$DEST/mcp-os/shared/node_modules/express" ]
 }
 
-@test "bundle script strips devDependencies from the staged shared package.json" {
-    local DEST="$SHARED_DEST"
-    run grep -q '"devDependencies"' "$DEST/mcp-os/shared/package.json"
-    [ "$status" -ne 0 ]
-    run grep -q '"devDependencies"' "$DEST/oauth/shared/package.json"
-    [ "$status" -ne 0 ]
+@test "host bundles install exactly the versions in the committed mcp-servers lockfile" {
+    local DEST="$SHARED_DEST" bundle
+    for bundle in mcp-os oauth; do
+        cmp "$BATS_TEST_DIRNAME/../../mcp-servers/package-lock.json" "$DEST/$bundle/shared/package-lock.json"
+        assert_installed_versions_match_lock "$DEST/$bundle/shared/node_modules" "$BATS_TEST_DIRNAME/../../mcp-servers/package-lock.json"
+        [ ! -e "$DEST/$bundle/.npm-ci" ]
+    done
 }
 
 @test "bundle script creates @speedwave/mcp-shared directory in mcp-os/os" {
@@ -449,16 +481,31 @@ EOF
     [ ! -f "$DEST/build-context/STALE_FILE" ]
 }
 
-@test "mcp-os/shared standalone lockfile resolves without workspace context" {
+@test "build-context installs every worker from the committed lockfile, the way its Containerfile does" {
     local DEST="$SHARED_DEST"
-    [ -f "$DEST/mcp-os/shared/package-lock.json" ]
-    local tmpdir
-    tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' RETURN
-    cp "$DEST/mcp-os/shared/package.json" "$tmpdir/"
-    cp "$DEST/mcp-os/shared/package-lock.json" "$tmpdir/"
-    (cd "$tmpdir" && npm ci --omit=dev --ignore-scripts)
-    [ "$(ls "$tmpdir/node_modules" | wc -l)" -gt 0 ]
+    local ctx="$DEST/build-context/mcp-servers" lock="$BATS_TEST_DIRNAME/../../mcp-servers/package-lock.json"
+    cmp "$lock" "$ctx/package-lock.json"
+    cmp "$BATS_TEST_DIRNAME/../../mcp-servers/package.json" "$ctx/package.json"
+    local worker deps dep install
+    for worker in hub office slack; do
+        install="$(mktemp -d "${TMPDIR:-/tmp}/bundle-bats-install.XXXXXX")"
+        cp "$ctx/package.json" "$ctx/package-lock.json" "$install/"
+        deps=(shared "$worker")
+        [ "$worker" != hub ] || deps+=(policies)
+        for dep in "${deps[@]}"; do
+            mkdir -p "$install/$dep"
+            cp "$ctx/$dep/package.json" "$install/$dep/"
+        done
+        run bash -c 'cd "$1" && npm ci --workspace="$2" --ignore-scripts' _ "$install" "$worker"
+        if [ "$status" -ne 0 ]; then
+            echo "$output"
+            rm -rf "$install"
+            return 1
+        fi
+        assert_installed_versions_match_lock "$install/node_modules" "$lock"
+        (cd "$install/$worker" && node -e 'require.resolve("@speedwave/mcp-shared/package.json")')
+        rm -rf "$install"
+    done
 }
 
 @test "bundle script normalises shell scripts to LF in build-context" {

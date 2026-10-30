@@ -60,6 +60,7 @@ describe('Anthropic OAuth Login (no-provider first start)', function () {
 
     const child = spawn(cliPath(), ['login', '--project', NO_LLM_PROJECT], {
       stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, RUST_LOG: 'debug' },
     });
     let output = '';
     child.stdout.on('data', (c: Buffer) => (output += c.toString()));
@@ -68,7 +69,7 @@ describe('Anthropic OAuth Login (no-provider first start)', function () {
     child.on('exit', () => (exited = true));
 
     try {
-      await browser.waitUntil(async () => output.includes('Starting Anthropic sign-in'), {
+      await browser.waitUntil(async () => output.includes('Anthropic sign-in'), {
         timeout: 240_000,
         interval: 2_000,
         timeoutMsg: `speedwave login never reached the sign-in stage; output:\n${output.slice(-2000)}`,

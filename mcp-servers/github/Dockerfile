@@ -3,22 +3,20 @@ FROM node:24-alpine@sha256:fb71d01345f11b708a3553c66e7c74074f2d506400ea81973343d
 
 WORKDIR /build
 
-COPY tsconfig.base.json ./
-COPY shared/package*.json ./shared/
-RUN --mount=type=cache,target=/root/.npm cd shared && npm install
+COPY tsconfig.base.json package.json package-lock.json ./
+COPY shared/package.json ./shared/
+COPY github/package.json ./github/
+RUN --mount=type=cache,target=/root/.npm npm ci --workspace=github --ignore-scripts
 
 COPY shared/src ./shared/src
 COPY shared/tsconfig.json ./shared/
-RUN cd shared && npm run build
-
-COPY github/package*.json ./github/
-RUN --mount=type=cache,target=/root/.npm cd github && npm install
+RUN npm run build --workspace=shared
 
 COPY github/src ./github/src
 COPY github/tsconfig.json ./github/
-RUN cd github && npm run build
+RUN npm run build --workspace=github
 
-RUN cd github && npm prune --omit=dev
+RUN npm prune --omit=dev --workspace=github --ignore-scripts
 
 FROM node:24-alpine@sha256:fb71d01345f11b708a3553c66e7c74074f2d506400ea81973343d915cb64eef0
 
@@ -26,15 +24,14 @@ RUN apk add --no-cache curl tzdata
 
 WORKDIR /app
 
-COPY --from=builder /build/shared/dist ../shared/dist
-COPY --from=builder /build/shared/package.json ../shared/
-COPY --from=builder /build/shared/node_modules ../shared/node_modules
+COPY --from=builder /build/shared/dist ./shared/dist
+COPY --from=builder /build/shared/package.json ./shared/
+COPY --from=builder /build/node_modules ./node_modules
 
-COPY --from=builder /build/github/package*.json ./
+COPY --from=builder /build/github/package.json ./
 COPY --from=builder /build/github/dist ./dist
-COPY --from=builder /build/github/node_modules ./node_modules
 
-RUN mkdir -p /tokens /project && chown -R node:node /tokens /project /app /app/../shared
+RUN mkdir -p /tokens /project && chown -R node:node /tokens /project /app
 
 USER node
 

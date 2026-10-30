@@ -285,6 +285,28 @@ describe('ModelSelectorComponent', () => {
     expect(optionIds()).toEqual(['claude-sonnet-5', 'claude-opus-4-1']);
   });
 
+  it('opens with an empty search so a query typed before a pick does not filter the next list', async () => {
+    await fixture.componentInstance.openCombobox();
+    await fixture.componentInstance.whenOptionsSettled();
+    fixture.detectChanges();
+    fixture.componentInstance.onQueryChange('opus');
+    fixture.detectChanges();
+    expect(optionIds()).toEqual(['claude-opus-4-1']);
+    fixture.debugElement
+      .query(By.css('[data-testid="model-selector-option-claude-opus-4-1"]'))
+      .nativeElement.click();
+    fixture.detectChanges();
+
+    await fixture.componentInstance.openCombobox();
+    await fixture.componentInstance.whenOptionsSettled();
+    fixture.detectChanges();
+    expect(optionIds()).toEqual(['claude-sonnet-5', 'claude-opus-4-1']);
+    expect(
+      fixture.debugElement.query(By.css('[data-testid="model-selector-search"]')).nativeElement
+        .value
+    ).toBe('');
+  });
+
   it('never renders a 1M marker in a row, whatever wire id the row carries', async () => {
     await fixture.componentInstance.openCombobox();
     await fixture.componentInstance.whenOptionsSettled();

@@ -27,6 +27,10 @@ runs:
       shell: bash
       run: make audit-npm
 
+    - name: pip audit (office worker lock)
+      shell: bash
+      run: make audit-office
+
     - name: Install cargo-audit
       shell: bash
       run: cargo install cargo-audit --locked

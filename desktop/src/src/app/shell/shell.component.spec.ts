@@ -39,6 +39,7 @@ class FakeChatState {
 
   readonly openTab = vi.fn().mockResolvedValue('new-tab-id');
   readonly closeTab = vi.fn().mockResolvedValue(undefined);
+  readonly activateTab = vi.fn();
 
   setTabCount(n: number): void {
     const map = new Map<string, FakeTabStore>();
@@ -117,6 +118,20 @@ describe('ShellComponent', () => {
 
   it('should create', () => {
     expect(component).toBeTruthy();
+  });
+
+  it('routes a clicked notification to its chat tab until destroyed', async () => {
+    await vi.waitFor(() =>
+      expect(mockTauri.listenHandlers['notification_activated']).toBeDefined()
+    );
+    projectState.activeProject.set('test');
+
+    mockTauri.dispatchEvent('notification_activated', { project: 'test', tab_id: 't1' });
+
+    await vi.waitFor(() => expect(chatState.activateTab).toHaveBeenCalledWith('t1'));
+    expect(TestBed.inject(Router).url).toBe('/chat');
+    fixture.destroy();
+    expect(mockTauri.listenHandlers['notification_activated']).toBeUndefined();
   });
 
   it('should render update-notification', () => {

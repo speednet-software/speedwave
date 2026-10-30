@@ -1,8 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { By } from '@angular/platform-browser';
 import { provideRouter } from '@angular/router';
 import { computed, signal, type Signal } from '@angular/core';
 import { MeetingTranscriptionComponent } from './meeting-transcription.component';
+import { RecordingControlsComponent } from './recording-controls/recording-controls.component';
 import { TranscriptionService } from '../services/transcription.service';
 import { makeTranscriptSession } from '../testing/transcript-session';
 import type {
@@ -29,6 +31,7 @@ describe('MeetingTranscriptionComponent', () => {
     recommendedModel: ReturnType<typeof vi.fn>;
     listAudioSources: ReturnType<typeof vi.fn>;
     liveTranscriptPreferred: ReturnType<typeof vi.fn>;
+    speakerAttribution: ReturnType<typeof vi.fn>;
     modelReady: typeof modelReadySig;
     recommended: Signal<RecommendedModelAck | null>;
     refreshModelReady: ReturnType<typeof vi.fn>;
@@ -106,6 +109,7 @@ describe('MeetingTranscriptionComponent', () => {
       recommendedModel: vi.fn(async () => recommended(true)),
       listAudioSources: vi.fn(async () => []),
       liveTranscriptPreferred: vi.fn(() => false),
+      speakerAttribution: vi.fn(() => false),
       modelReady: modelReadySig,
       recommended: signal<RecommendedModelAck | null>(null),
       refreshModelReady: vi.fn(async () => undefined),
@@ -259,6 +263,39 @@ describe('MeetingTranscriptionComponent', () => {
     expect(details.querySelector('[data-testid="quality-disclaimer"]')).not.toBeNull();
   });
 
+  it('explains Import audio, its formats and its language under "How it works"', () => {
+    const item: HTMLElement = fixture.nativeElement.querySelector(
+      '[data-testid="import-how-it-works"]'
+    );
+    expect(item.textContent).toContain('Import audio');
+    expect(item.textContent).toContain('WAV, MP3, M4A, MP4, FLAC or OGG');
+    expect(item.textContent).toContain('language chosen next to Record');
+  });
+
+  it('opens an imported recording as soon as the controls report it', async () => {
+    component.onError('old error');
+    const controls = fixture.debugElement.query(By.directive(RecordingControlsComponent));
+    (controls.componentInstance as RecordingControlsComponent).imported.emit('imp-1');
+    await fixture.whenStable();
+    expect(svc.subscribeToTranscript).toHaveBeenCalledWith('imp-1');
+    expect(component.error()).toBe('');
+  });
+
+  it('keeps the open recording and shows the reason when an import fails', async () => {
+    activeSig.set(makeTranscriptSession({ id: 'sess-open' }));
+    const controls = fixture.debugElement.query(By.directive(RecordingControlsComponent));
+    (controls.componentInstance as RecordingControlsComponent).errorOccurred.emit(
+      'Could not import "call.wma": this file type is not supported'
+    );
+    fixture.detectChanges();
+    expect(svc.subscribeToTranscript).not.toHaveBeenCalled();
+    expect(component.active()?.id).toBe('sess-open');
+    const banner: HTMLElement | null = fixture.nativeElement.querySelector(
+      '[data-testid="meeting-transcription-error"]'
+    );
+    expect(banner?.textContent).toContain('Could not import "call.wma"');
+  });
+
   it('starts following the recordings list through the list component', () => {
     expect(svc.watchRecordings).toHaveBeenCalled();
   });
@@ -358,6 +395,12 @@ describe('MeetingTranscriptionComponent', () => {
       expect(
         fixture.nativeElement.querySelector('[data-testid="gate-error"]').textContent
       ).toContain('network down');
+      expect(fixture.nativeElement.querySelector('[data-testid="gate-error"]').className).toContain(
+        'text-[var(--red)]'
+      );
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="gate-download"]').className
+      ).toContain('text-[var(--on-accent)]');
     });
   });
 
@@ -371,6 +414,9 @@ describe('MeetingTranscriptionComponent', () => {
     fixture.detectChanges();
     const link = fixture.nativeElement.querySelector('[data-testid="open-mic-settings"]');
     expect(link).not.toBeNull();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="meeting-transcription-error"]').className
+    ).toContain('text-[var(--red)]');
     await component.openMicrophoneSettings();
     expect(svc.openMicrophonePrivacyPane).toHaveBeenCalled();
     expect(svc.openAudioCapturePrivacyPane).toHaveBeenCalled();
@@ -430,6 +476,8 @@ describe('MeetingTranscriptionComponent', () => {
     const banner = fixture.nativeElement.querySelector('[data-testid="capture-warning"]');
     expect(banner).not.toBeNull();
     expect(banner.textContent).toContain('No system audio captured');
+    expect(banner.className).toContain('text-[var(--ink)]');
+    expect(banner.className).toContain('ring-[var(--amber)]/40');
     expect(banner.querySelector('[data-testid="open-audio-settings"]')).not.toBeNull();
   });
 

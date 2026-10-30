@@ -26,10 +26,13 @@ interface ModelRow {
 
 const SPEAKER_COST_TEXT = {
   macos: { text: 'Adds under a minute per hour of recording.', warn: false },
-  windowsGpu: { text: 'Adds some time after each recording.', warn: false },
-  windowsCpu: {
-    text: 'No graphics acceleration here: runs on the processor and takes longer after each recording.',
-    warn: true,
+  windows: {
+    discrete: { text: 'Adds some time after each recording.', warn: false },
+    integrated: { text: 'Adds about 3 minutes per hour of recording.', warn: false },
+    none: {
+      text: 'No graphics acceleration here: runs on the processor and takes longer after each recording.',
+      warn: true,
+    },
   },
 };
 
@@ -145,8 +148,9 @@ const SPEAKER_COST_TEXT = {
               Tell speakers apart in the meeting audio
             </div>
             <div class="text-[11px] leading-relaxed text-[var(--ink-mute)]">
-              Labels the people in the meeting audio as Speaker 1, Speaker 2, … Your microphone
-              stays "You". Runs on this computer.
+              Labels the people in the meeting audio as Speaker 1, Speaker 2, … Also for an imported
+              file and a recording of other people only. Your microphone stays "You"; a recording of
+              your microphone alone gets no labels. Runs on this computer.
             </div>
           </div>
           <app-toggle
@@ -374,8 +378,7 @@ export class TranscriptionSectionComponent implements OnInit {
   readonly speakerCost = computed(() => {
     const m = this.model();
     if (!m) return null;
-    if (this.isMacos()) return SPEAKER_COST_TEXT.macos;
-    return m.gpu_class === 'none' ? SPEAKER_COST_TEXT.windowsCpu : SPEAKER_COST_TEXT.windowsGpu;
+    return this.isMacos() ? SPEAKER_COST_TEXT.macos : SPEAKER_COST_TEXT.windows[m.gpu_class];
   });
   /** Local error string. */
   readonly error = signal('');

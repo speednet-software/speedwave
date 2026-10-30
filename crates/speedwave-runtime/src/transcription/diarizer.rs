@@ -164,8 +164,8 @@ struct SegmentList(NonNull<ffi::Segments>);
 unsafe impl Send for NemotronDiarizer {}
 
 impl NemotronDiarizer {
-    /// Loads the GGUF model at `model_path`, on the GPU unless `class` is `GpuClass::None`,
-    /// with `decode_threads()` CPU threads.
+    /// Loads the GGUF model at `model_path` with `decode_threads()` CPU threads, on the GPU only
+    /// when `class` is `GpuClass::Discrete`.
     pub fn load(model_path: &Path, class: GpuClass) -> Result<Self, DiarizeError> {
         Self::load_with_threads(model_path, class, decode_threads())
     }
@@ -201,11 +201,7 @@ impl NemotronDiarizer {
                 detail: "model path is not valid UTF-8 or contains NUL".to_string(),
             })?;
         install_log_forwarding();
-
-        // SAFETY: takes no arguments and returns a plain struct by value.
-        let mut params = unsafe { ffi::whisper_diar_default_context_params() };
-        params.n_threads = n_threads;
-        params.use_gpu = class != GpuClass::None;
+        let params = context_params(class, n_threads);
 
         // SAFETY: `path` is a NUL-terminated string alive for the call, which copies it; the
         // function returns null on every failure and catches every C++ exception.
@@ -325,16 +321,13 @@ impl Drop for SegmentList {
     }
 }
 
-pub(crate) fn label_speakers(segments: &mut [Segment], turns: &[SpeakerTurn]) {
+pub(crate) fn label_speakers(segments: &mut [Segment], turns: &[SpeakerTurn]) -> u32 {
     assign_speakers(segments, turns);
-    number_speakers(segments);
+    number_speakers(segments)
 }
 
 fn assign_speakers(segments: &mut [Segment], turns: &[SpeakerTurn]) {
-    for seg in segments
-        .iter_mut()
-        .filter(|s| s.source == Some(TranscriptSource::System))
-    {
+    for seg in segments.iter_mut().filter(|s| is_meeting_segment(s)) {
         let best = turns
             .iter()
             .filter_map(|turn| {
@@ -349,7 +342,14 @@ fn assign_speakers(segments: &mut [Segment], turns: &[SpeakerTurn]) {
     }
 }
 
-fn number_speakers(segments: &mut [Segment]) {
+pub(crate) fn is_meeting_segment(segment: &Segment) -> bool {
+    match segment.source {
+        None | Some(TranscriptSource::System) => true,
+        Some(TranscriptSource::Mic) => false,
+    }
+}
+
+fn number_speakers(segments: &mut [Segment]) -> u32 {
     let mut order: Vec<usize> = (0..segments.len()).collect();
     order.sort_by_key(|&i| (segments[i].start, i));
     let mut numbers: Vec<(u32, u32)> = Vec::new();
@@ -367,6 +367,7 @@ fn number_speakers(segments: &mut [Segment]) {
         };
         segments[i].speaker_id = Some(number);
     }
+    numbers.len() as u32
 }
 
 fn install_log_forwarding() {
@@ -410,6 +411,18 @@ fn log_level(level: c_int) -> log::Level {
         GGML_LOG_LEVEL_INFO => log::Level::Info,
         _ => log::Level::Debug,
     }
+}
+
+#[expect(
+    unsafe_code,
+    reason = "whisper diarization FFI boundary; every block has a SAFETY comment"
+)]
+fn context_params(class: GpuClass, n_threads: c_int) -> ffi::ContextParams {
+    // SAFETY: takes no arguments and returns a plain struct by value.
+    let mut params = unsafe { ffi::whisper_diar_default_context_params() };
+    params.n_threads = n_threads;
+    params.use_gpu = class == GpuClass::Discrete;
+    params
 }
 
 fn validate_pcm(pcm: &[f32]) -> Result<(), DiarizeError> {
@@ -544,14 +557,25 @@ mod tests {
     }
 
     #[test]
-    fn assign_speakers_skips_microphone_and_untagged_segments() {
+    fn assign_speakers_labels_every_segment_but_the_microphones() {
         let mut segs = vec![
             seg(0, 2000, Some(TranscriptSource::Mic)),
             seg(0, 2000, None),
             sys(0, 2000),
         ];
         assign_speakers(&mut segs, &[turn(0, 2000, 4)]);
-        assert_eq!(ids(&segs), vec![None, None, Some(4)]);
+        assert_eq!(ids(&segs), vec![None, Some(4), Some(4)]);
+    }
+
+    #[test]
+    fn only_a_microphone_segment_is_not_meeting_audio() {
+        assert!(is_meeting_segment(&sys(0, 1000)));
+        assert!(is_meeting_segment(&seg(0, 1000, None)));
+        assert!(!is_meeting_segment(&seg(
+            0,
+            1000,
+            Some(TranscriptSource::Mic)
+        )));
     }
 
     #[test]
@@ -571,11 +595,27 @@ mod tests {
             sys(2000, 3000),
             sys(3000, 4000),
         ];
-        label_speakers(
+        let speakers = label_speakers(
             &mut segs,
             &[turn(0, 1000, 5), turn(1000, 2000, 2), turn(2000, 3000, 5)],
         );
         assert_eq!(ids(&segs), vec![Some(1), Some(2), Some(1), None]);
+        assert_eq!(speakers, 2);
+    }
+
+    #[test]
+    fn label_speakers_numbers_untagged_meeting_segments_by_first_appearance() {
+        let mut segs = vec![
+            seg(2000, 3000, None),
+            seg(0, 1000, None),
+            seg(1000, 2000, None),
+        ];
+        let speakers = label_speakers(
+            &mut segs,
+            &[turn(0, 1000, 6), turn(1000, 2000, 0), turn(2000, 3000, 6)],
+        );
+        assert_eq!(ids(&segs), vec![Some(1), Some(1), Some(2)]);
+        assert_eq!(speakers, 2);
     }
 
     #[test]
@@ -599,10 +639,10 @@ mod tests {
         let mut segs = vec![sys(0, 1000), sys(0, 1000), sys(1000, 2000)];
         segs[0].speaker_id = Some(7);
         segs[1].speaker_id = Some(3);
-        number_speakers(&mut segs);
+        assert_eq!(number_speakers(&mut segs), 2);
         assert_eq!(ids(&segs), vec![Some(1), Some(2), None]);
         let mut empty: Vec<Segment> = vec![];
-        number_speakers(&mut empty);
+        assert_eq!(number_speakers(&mut empty), 0);
     }
 
     #[test]
@@ -647,6 +687,14 @@ mod tests {
         assert_eq!(log_level(1), log::Level::Debug);
         assert_eq!(log_level(0), log::Level::Debug);
         assert_eq!(log_level(5), log::Level::Debug);
+    }
+
+    #[test]
+    fn only_a_discrete_gpu_diarizes_on_the_gpu() {
+        assert!(!context_params(GpuClass::None, 4).use_gpu);
+        assert!(!context_params(GpuClass::Integrated, 4).use_gpu);
+        assert!(context_params(GpuClass::Discrete, 4).use_gpu);
+        assert_eq!(context_params(GpuClass::Integrated, 6).n_threads, 6);
     }
 
     #[test]

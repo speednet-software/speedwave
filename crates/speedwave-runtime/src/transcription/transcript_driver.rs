@@ -8,8 +8,12 @@ use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
-use crate::transcription::audio::{AudioStream, CaptureHealth, CaptureWarning, SAMPLE_RATE_HZ};
-use crate::transcription::diarizer::{label_speakers, DiarizeError, DiarizerLoader};
+use crate::transcription::audio::{
+    AudioSource, AudioStream, CaptureHealth, CaptureWarning, SAMPLE_RATE_HZ,
+};
+use crate::transcription::diarizer::{
+    is_meeting_segment, label_speakers, DiarizeError, DiarizerLoader,
+};
 use crate::transcription::model_catalog::DIARIZATION_MODEL;
 use crate::transcription::transcriber::{
     Segment, TranscribeOptions, Transcriber, TranscriptSource,
@@ -897,9 +901,16 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
             .and_then(|e| pass_stopped(&e))
             .unwrap_or(DriverError::Transcribe(reason))
     };
-    if let Err(StoreError::NotFound(_)) = store.get(id) {
-        return Err(DriverError::Deleted);
-    }
+    let meeting_audio = match store.get(id) {
+        Ok(session) => has_meeting_audio(&session.audio_source.source),
+        Err(StoreError::NotFound(_)) => return Err(DriverError::Deleted),
+        Err(e) => {
+            log::warn!(
+                "transcript {id} could not be read before its offline pass ({e}); it gets no speaker labels"
+            );
+            false
+        }
+    };
     if pass.cancelled() {
         return Err(DriverError::Superseded);
     }
@@ -915,7 +926,6 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
         frames: u64,
         /// Frames × channels — this part's share of the progress band.
         samples: u64,
-        channels: usize,
     }
     let mut plans: Vec<PartPlan> = Vec::new();
     let mut part_base = Duration::ZERO;
@@ -932,7 +942,6 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
                         part_base,
                         frames,
                         samples: frames * u64::from(spec.channels.max(1)),
-                        channels: usize::from(spec.channels),
                     });
                     part_base +=
                         Duration::from_secs_f64(frames as f64 / f64::from(spec.sample_rate));
@@ -1037,9 +1046,7 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
             }));
             done_samples += pcm.len() as u64;
         }
-        if sources.first() == Some(&Some(TranscriptSource::System)) {
-            meeting_parts.push(plan);
-        }
+        meeting_parts.push(plan);
         loaded_any = true;
     }
     if !loaded_any {
@@ -1052,24 +1059,22 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
     final_segs.sort_by_key(|s| s.start);
 
     drop(transcriber);
-    let meeting_speech = final_segs
-        .iter()
-        .any(|s| s.source == Some(TranscriptSource::System));
+    let meeting_speech = meeting_audio && final_segs.iter().any(is_meeting_segment);
     let read_meeting_channel = || -> Result<Vec<f32>, DiarizeError> {
         let end = meeting_parts
             .iter()
-            .map(|p| system_pcm_end(p.part_base, p.frames, p.channels))
+            .map(|p| frame_at(p.part_base) as u64 + p.frames)
             .max()
             .unwrap_or(0);
-        let mut system_pcm = Vec::with_capacity(usize::try_from(end).unwrap_or(usize::MAX));
+        let mut meeting_pcm = Vec::with_capacity(usize::try_from(end).unwrap_or(usize::MAX));
         for part in &meeting_parts {
             if pass.cancelled() {
                 return Err(DiarizeError::Inference(
                     "cancelled while reading the meeting channel".to_string(),
                 ));
             }
-            system_pcm.resize(frame_at(part.part_base), 0.0);
-            let frames = super::audio::append_wav_channel_f32(part.path, 0, &mut system_pcm)
+            meeting_pcm.resize(frame_at(part.part_base), 0.0);
+            let frames = super::audio::append_wav_channel_f32(part.path, 0, &mut meeting_pcm)
                 .map_err(|e| DiarizeError::InvalidAudio(e.to_string()))?;
             if frames as u64 != part.frames {
                 return Err(DiarizeError::InvalidAudio(format!(
@@ -1079,10 +1084,10 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
                 )));
             }
         }
-        Ok(system_pcm)
+        Ok(meeting_pcm)
     };
-    let diarization = match diarizer.filter(|_| meeting_speech) {
-        Some(load) => diarize_meeting_channel(
+    let diarization = match diarizer {
+        Some(load) if meeting_speech => diarize_meeting_channel(
             &store,
             id,
             &pass,
@@ -1091,6 +1096,17 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
             &mut final_segs,
             &report,
         )?,
+        Some(_) => {
+            log::info!(
+                "speaker diarization of transcript {id} skipped: {}",
+                if meeting_audio {
+                    "Whisper found no speech in the meeting audio"
+                } else {
+                    "the recording holds no meeting audio"
+                }
+            );
+            None
+        }
         None => None,
     };
     report(FINALIZE_RESULT_PROGRESS)?;
@@ -1106,6 +1122,13 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
     Ok(())
 }
 
+fn has_meeting_audio(source: &AudioSource) -> bool {
+    match source {
+        AudioSource::Mixed { .. } | AudioSource::SystemWide | AudioSource::ImportedFile => true,
+        AudioSource::Microphone { .. } => false,
+    }
+}
+
 fn diarize_meeting_channel(
     store: &TranscriptStore,
     id: Uuid,
@@ -1118,21 +1141,16 @@ fn diarize_meeting_channel(
     report(FINALIZE_DIARIZE_START_PROGRESS)?;
     let started = Instant::now();
     let result = load().and_then(|mut diarizer| {
-        let system_pcm = read_meeting_channel()?;
-        diarizer.diarize(&system_pcm, &pass.decode_cancel())
+        let meeting_pcm = read_meeting_channel()?;
+        diarizer.diarize(&meeting_pcm, &pass.decode_cancel())
     });
     if pass.cancelled() {
         return Err(stopped_pass_error(store, id));
     }
     let record = match result {
         Ok(turns) => {
-            label_speakers(final_segs, &turns);
+            let speakers = label_speakers(final_segs, &turns);
             let secs = started.elapsed().as_secs_f64();
-            let speakers = final_segs
-                .iter()
-                .filter_map(|seg| seg.speaker_id)
-                .max()
-                .unwrap_or(0);
             log::info!(
                 "speaker diarization of transcript {id} labelled {speakers} speakers from {} turns in {secs:.1} s",
                 turns.len()
@@ -1164,14 +1182,6 @@ fn stopped_pass_error(store: &TranscriptStore, id: Uuid) -> DriverError {
     match store.get(id) {
         Err(e) => pass_stopped(&e).unwrap_or(DriverError::Superseded),
         Ok(_) => DriverError::Superseded,
-    }
-}
-
-fn system_pcm_end(part_base: Duration, frames: u64, channels: usize) -> u64 {
-    if lane_sources(channels).first() == Some(&Some(TranscriptSource::System)) {
-        frame_at(part_base) as u64 + frames
-    } else {
-        0
     }
 }
 
@@ -1346,11 +1356,21 @@ mod tests {
     use crate::transcription::transcript::TranscriptSession;
     use std::path::PathBuf;
 
+    const MIXED: AudioSource = AudioSource::Mixed { mic: None };
+
     fn mk_session(store: &TranscriptStore, audio_path: &Path) -> Uuid {
+        mk_session_with_source(store, audio_path, AudioSource::SystemWide)
+    }
+
+    fn mk_session_with_source(
+        store: &TranscriptStore,
+        audio_path: &Path,
+        source: AudioSource,
+    ) -> Uuid {
         let s = crate::transcription::transcript::TranscriptSession::new(
             Language::Pl,
             AudioSourceInfo {
-                source: AudioSource::SystemWide,
+                source,
                 label: "System".to_string(),
             },
             audio_path.to_path_buf(),
@@ -4323,7 +4343,11 @@ mod tests {
             crate::transcription::diarizer::DiarizeError,
         > {
             *self.0.lock().unwrap() = Some(pcm.to_vec());
-            Ok(vec![turn_secs(0, 2, 0)])
+            Ok(vec![turn_secs(
+                0,
+                (pcm.len() / SAMPLE_RATE_HZ as usize) as u64,
+                0,
+            )])
         }
     }
 
@@ -4338,6 +4362,20 @@ mod tests {
         for &(meeting, mic) in frames {
             w.write_sample(meeting).unwrap();
             w.write_sample(mic).unwrap();
+        }
+        w.finalize().unwrap();
+    }
+
+    fn write_mono_wav(path: &Path, samples: &[i16]) {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: SAMPLE_RATE_HZ,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(path, spec).unwrap();
+        for &sample in samples {
+            w.write_sample(sample).unwrap();
         }
         w.finalize().unwrap();
     }
@@ -4363,7 +4401,7 @@ mod tests {
     fn run_finalize_labels_meeting_segments_with_speakers_and_records_the_diarization() {
         let store_dir = tempfile::tempdir().unwrap();
         let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
-        let id = mk_session(&store, &store_dir.path().join("a.wav"));
+        let id = mk_session_with_source(&store, &store_dir.path().join("a.wav"), MIXED);
         let wav = store_dir.path().join("stereo.wav");
         write_test_wav(&wav, 2, 4.0);
 
@@ -4399,10 +4437,14 @@ mod tests {
     }
 
     #[test]
-    fn run_finalize_never_calls_the_diarizer_on_a_mono_recording() {
+    fn run_finalize_never_calls_the_diarizer_on_a_microphone_only_recording() {
         let store_dir = tempfile::tempdir().unwrap();
         let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
-        let id = mk_session(&store, &store_dir.path().join("a.wav"));
+        let id = mk_session_with_source(
+            &store,
+            &store_dir.path().join("a.wav"),
+            AudioSource::Microphone { device: None },
+        );
         let (_g, wav) = make_fixture_wav(4.0);
         let (diarizer, received) = ScriptedDiarizer::new(Ok(vec![turn_secs(0, 4, 0)]));
 
@@ -4420,11 +4462,84 @@ mod tests {
         assert!(snap.active_warnings.is_empty());
     }
 
+    fn diarizes_the_single_channel_of_a_mono_recording(source: AudioSource) {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session_with_source(&store, &store_dir.path().join("a.wav"), source);
+        let wav = store_dir.path().join("mono.wav");
+        write_test_wav(&wav, 1, 4.0);
+        let (diarizer, received) =
+            ScriptedDiarizer::new(Ok(vec![turn_secs(0, 2, 7), turn_secs(2, 4, 3)]));
+
+        finalize_with(&store, id, vec![wav], loader(diarizer)).unwrap();
+
+        assert_eq!(*received.lock().unwrap(), vec![4 * 16_000]);
+        let snap = store.get(id).unwrap();
+        assert!(matches!(snap.status, TranscriptStatus::Done));
+        assert_eq!(
+            speakers_by_source(&snap.final_segments.unwrap()),
+            vec![
+                (Duration::ZERO, None, Some(1)),
+                (Duration::from_secs(2), None, Some(2)),
+            ]
+        );
+        assert_eq!(
+            snap.models_used.diarization.as_deref(),
+            Some(DIARIZATION_MODEL.key)
+        );
+        assert!(snap.diarization_secs.is_some());
+        assert!(snap.active_warnings.is_empty());
+    }
+
+    #[test]
+    fn run_finalize_diarizes_the_single_channel_of_a_system_wide_recording() {
+        diarizes_the_single_channel_of_a_mono_recording(AudioSource::SystemWide);
+    }
+
+    #[test]
+    fn run_finalize_diarizes_the_single_channel_of_an_imported_file() {
+        diarizes_the_single_channel_of_a_mono_recording(AudioSource::ImportedFile);
+    }
+
+    #[test]
+    fn run_finalize_never_calls_the_diarizer_when_whisper_heard_nothing_on_a_mono_meeting_recording(
+    ) {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session_with_source(
+            &store,
+            &store_dir.path().join("a.wav"),
+            AudioSource::ImportedFile,
+        );
+        let wav = store_dir.path().join("mono.wav");
+        write_test_wav(&wav, 1, 4.0);
+        let loaded = Arc::new(AtomicBool::new(false));
+        let loaded_flag = loaded.clone();
+        let load: DiarizerLoader = Box::new(move || {
+            loaded_flag.store(true, Ordering::SeqCst);
+            Err(DiarizeError::ModelMissing("m.gguf".to_string()))
+        });
+        let transcriber = ScriptedTranscriber {
+            script: vec![Vec::new()],
+            call: 0,
+        };
+
+        finalize_with_transcriber(&store, id, vec![wav], Box::new(transcriber), Some(load))
+            .unwrap();
+
+        assert!(!loaded.load(Ordering::SeqCst), "the model is never loaded");
+        let snap = store.get(id).unwrap();
+        assert!(matches!(snap.status, TranscriptStatus::Done));
+        assert_eq!(snap.final_segments, Some(Vec::new()));
+        assert_eq!(snap.models_used.diarization, None);
+        assert!(snap.active_warnings.is_empty());
+    }
+
     #[test]
     fn run_finalize_never_calls_the_diarizer_when_whisper_heard_nothing_on_the_meeting_channel() {
         let store_dir = tempfile::tempdir().unwrap();
         let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
-        let id = mk_session(&store, &store_dir.path().join("a.wav"));
+        let id = mk_session_with_source(&store, &store_dir.path().join("a.wav"), MIXED);
         let wav = store_dir.path().join("stereo.wav");
         write_test_wav(&wav, 2, 4.0);
         let (diarizer, received) = ScriptedDiarizer::new(Ok(vec![turn_secs(0, 4, 0)]));
@@ -4459,7 +4574,7 @@ mod tests {
     fn a_failed_diarization_finishes_the_transcript_without_labels_and_warns() {
         let store_dir = tempfile::tempdir().unwrap();
         let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
-        let id = mk_session(&store, &store_dir.path().join("a.wav"));
+        let id = mk_session_with_source(&store, &store_dir.path().join("a.wav"), MIXED);
         let wav = store_dir.path().join("stereo.wav");
         write_test_wav(&wav, 2, 4.0);
         let (diarizer, received) = ScriptedDiarizer::new(Err("gpu lost".to_string()));
@@ -4481,25 +4596,52 @@ mod tests {
     }
 
     #[test]
-    fn diarization_sees_every_part_on_the_transcript_timeline() {
+    fn a_failed_diarization_of_a_system_wide_recording_finishes_without_labels_and_warns() {
         let store_dir = tempfile::tempdir().unwrap();
         let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
         let id = mk_session(&store, &store_dir.path().join("a.wav"));
+        let wav = store_dir.path().join("mono.wav");
+        write_test_wav(&wav, 1, 4.0);
+        let (diarizer, received) = ScriptedDiarizer::new(Err("gpu lost".to_string()));
+
+        finalize_with(&store, id, vec![wav], loader(diarizer)).unwrap();
+
+        assert_eq!(*received.lock().unwrap(), vec![4 * 16_000]);
+        let snap = store.get(id).unwrap();
+        assert!(matches!(snap.status, TranscriptStatus::Done));
+        let finals = snap.final_segments.unwrap();
+        assert_eq!(finals.len(), 2);
+        assert!(finals.iter().all(|s| s.speaker_id.is_none()));
+        assert_eq!(snap.models_used.diarization, None);
+        assert_eq!(
+            snap.active_warnings,
+            vec![CaptureWarning::SpeakerAttributionFailed]
+        );
+    }
+
+    #[test]
+    fn diarization_sees_every_part_on_the_transcript_timeline() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session_with_source(&store, &store_dir.path().join("a.wav"), MIXED);
         let part1 = store_dir.path().join("audio.wav");
         let part2 = store_dir.path().join("audio-2.wav");
         let part3 = store_dir.path().join("audio-3.wav");
         write_test_wav(&part1, 2, 2.0);
         write_test_wav(&part2, 1, 2.0);
         write_test_wav(&part3, 2, 2.0);
-        let (diarizer, received) =
-            ScriptedDiarizer::new(Ok(vec![turn_secs(0, 2, 9), turn_secs(4, 6, 4)]));
+        let (diarizer, received) = ScriptedDiarizer::new(Ok(vec![
+            turn_secs(0, 2, 9),
+            turn_secs(2, 4, 9),
+            turn_secs(4, 6, 4),
+        ]));
 
         finalize_with(&store, id, vec![part1, part2, part3], loader(diarizer)).unwrap();
 
         assert_eq!(
             *received.lock().unwrap(),
             vec![6 * 16_000],
-            "the meeting channel spans all three parts, the mono one as silence"
+            "the meeting channel spans all three parts"
         );
         let finals = store.get(id).unwrap().final_segments.unwrap();
         assert_eq!(
@@ -4507,7 +4649,7 @@ mod tests {
             vec![
                 (Duration::ZERO, Some(TranscriptSource::System), Some(1)),
                 (Duration::ZERO, Some(TranscriptSource::Mic), None),
-                (Duration::from_secs(2), None, None),
+                (Duration::from_secs(2), None, Some(1)),
                 (
                     Duration::from_secs(4),
                     Some(TranscriptSource::System),
@@ -4519,10 +4661,47 @@ mod tests {
     }
 
     #[test]
-    fn a_pass_put_off_during_diarization_writes_nothing() {
+    fn diarization_reads_every_mono_part_of_a_system_wide_session() {
         let store_dir = tempfile::tempdir().unwrap();
         let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
         let id = mk_session(&store, &store_dir.path().join("a.wav"));
+        let parts: Vec<PathBuf> = ["audio.wav", "audio-2.wav", "audio-3.wav"]
+            .iter()
+            .map(|name| store_dir.path().join(name))
+            .collect();
+        for part in &parts {
+            write_test_wav(part, 1, 2.0);
+        }
+        let received = Arc::new(Mutex::new(None));
+
+        finalize_with(
+            &store,
+            id,
+            parts,
+            loader(CapturingDiarizer(received.clone())),
+        )
+        .unwrap();
+
+        let pcm = received.lock().unwrap().take().unwrap();
+        assert_eq!(pcm.len(), 6 * 16_000);
+        for part in pcm.chunks(2 * 16_000) {
+            assert!(
+                part.iter().any(|s| *s != 0.0),
+                "every part carries its own audio, none is padded silence"
+            );
+        }
+        let finals = store.get(id).unwrap().final_segments.unwrap();
+        assert_eq!(finals.len(), 3);
+        assert!(finals
+            .iter()
+            .all(|s| s.source.is_none() && s.speaker_id.is_some()));
+    }
+
+    #[test]
+    fn a_pass_put_off_during_diarization_writes_nothing() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session_with_source(&store, &store_dir.path().join("a.wav"), MIXED);
         let wav = store_dir.path().join("stereo.wav");
         write_test_wav(&wav, 2, 4.0);
         let (mut diarizer, received) = ScriptedDiarizer::new(Ok(vec![turn_secs(0, 4, 0)]));
@@ -4550,7 +4729,7 @@ mod tests {
     fn transcribing_again_without_diarization_drops_the_speaker_labels() {
         let store_dir = tempfile::tempdir().unwrap();
         let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
-        let id = mk_session(&store, &store_dir.path().join("a.wav"));
+        let id = mk_session_with_source(&store, &store_dir.path().join("a.wav"), MIXED);
         let wav = store_dir.path().join("stereo.wav");
         write_test_wav(&wav, 2, 4.0);
         finalize_with(
@@ -4579,7 +4758,7 @@ mod tests {
     fn the_diarizer_loads_only_after_whisper_finished_and_a_failed_load_only_warns() {
         let store_dir = tempfile::tempdir().unwrap();
         let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
-        let id = mk_session(&store, &store_dir.path().join("a.wav"));
+        let id = mk_session_with_source(&store, &store_dir.path().join("a.wav"), MIXED);
         let wav = store_dir.path().join("stereo.wav");
         write_test_wav(&wav, 2, 4.0);
         let whisper_dropped = Arc::new(AtomicBool::new(false));
@@ -4625,7 +4804,7 @@ mod tests {
     fn a_missing_model_at_load_raises_the_model_missing_warning_and_the_pass_still_ends_done() {
         let store_dir = tempfile::tempdir().unwrap();
         let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
-        let id = mk_session(&store, &store_dir.path().join("a.wav"));
+        let id = mk_session_with_source(&store, &store_dir.path().join("a.wav"), MIXED);
         let wav = store_dir.path().join("stereo.wav");
         write_test_wav(&wav, 2, 4.0);
         let load: DiarizerLoader =
@@ -4646,7 +4825,7 @@ mod tests {
     fn a_session_deleted_during_diarization_ends_the_pass_as_deleted_and_writes_nothing() {
         let store_dir = tempfile::tempdir().unwrap();
         let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
-        let id = mk_session(&store, &store_dir.path().join("a.wav"));
+        let id = mk_session_with_source(&store, &store_dir.path().join("a.wav"), MIXED);
         let wav = store_dir.path().join("stereo.wav");
         write_test_wav(&wav, 2, 4.0);
         let (mut diarizer, _received) = ScriptedDiarizer::new(Ok(vec![turn_secs(0, 4, 0)]));
@@ -4660,15 +4839,19 @@ mod tests {
     }
 
     #[test]
-    fn the_diarizer_receives_channel_zero_of_the_stereo_parts_on_the_transcript_timeline() {
+    fn the_diarizer_receives_channel_zero_of_every_part_on_the_transcript_timeline() {
         let store_dir = tempfile::tempdir().unwrap();
         let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
-        let id = mk_session(&store, &store_dir.path().join("a.wav"));
+        let id = mk_session_with_source(&store, &store_dir.path().join("a.wav"), MIXED);
         let part1 = store_dir.path().join("audio.wav");
         let part2 = store_dir.path().join("audio-2.wav");
         let part3 = store_dir.path().join("audio-3.wav");
         write_stereo_wav(&part1, &tone_frames(2, 8_192, 1_000));
-        write_test_wav(&part2, 1, 2.0);
+        let mono: Vec<i16> = tone_frames(2, 4_096, 0)
+            .into_iter()
+            .map(|(meeting, _)| meeting)
+            .collect();
+        write_mono_wav(&part2, &mono);
         write_stereo_wav(&part3, &tone_frames(2, -16_384, 2_000));
         let received = Arc::new(Mutex::new(None));
 
@@ -4683,13 +4866,13 @@ mod tests {
         let frames = 2 * SAMPLE_RATE_HZ as usize;
         let alternating = |amp: f32| (0..frames).map(move |i| if i % 2 == 0 { amp } else { -amp });
         let expected: Vec<f32> = alternating(0.25)
-            .chain(std::iter::repeat_n(0.0, frames))
+            .chain(alternating(0.125))
             .chain(alternating(-0.5))
             .collect();
         assert_eq!(
             received.lock().unwrap().as_deref(),
             Some(expected.as_slice()),
-            "the meeting channel of both stereo parts, the mono part as silence between them"
+            "channel 0 of both stereo parts with the mono part, which holds the system audio alone, between them"
         );
     }
 
@@ -4697,7 +4880,7 @@ mod tests {
     fn the_meeting_channel_is_read_only_after_whisper_is_released() {
         let store_dir = tempfile::tempdir().unwrap();
         let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
-        let id = mk_session(&store, &store_dir.path().join("a.wav"));
+        let id = mk_session_with_source(&store, &store_dir.path().join("a.wav"), MIXED);
         let wav = store_dir.path().join("stereo.wav");
         write_stereo_wav(&wav, &tone_frames(4, 8_192, 1_000));
         let rewrite = wav.clone();
@@ -4727,7 +4910,7 @@ mod tests {
     fn a_meeting_part_unreadable_after_whisper_leaves_the_transcript_done_without_labels() {
         let store_dir = tempfile::tempdir().unwrap();
         let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
-        let id = mk_session(&store, &store_dir.path().join("a.wav"));
+        let id = mk_session_with_source(&store, &store_dir.path().join("a.wav"), MIXED);
         let wav = store_dir.path().join("stereo.wav");
         write_test_wav(&wav, 2, 4.0);
         let remove = wav.clone();
@@ -4755,7 +4938,7 @@ mod tests {
     fn a_missing_model_is_reported_before_the_meeting_channel_is_read() {
         let store_dir = tempfile::tempdir().unwrap();
         let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
-        let id = mk_session(&store, &store_dir.path().join("a.wav"));
+        let id = mk_session_with_source(&store, &store_dir.path().join("a.wav"), MIXED);
         let wav = store_dir.path().join("stereo.wav");
         write_test_wav(&wav, 2, 4.0);
         let remove = wav.clone();
@@ -4776,7 +4959,7 @@ mod tests {
     fn a_meeting_part_whose_length_changed_after_whisper_is_not_diarized() {
         let store_dir = tempfile::tempdir().unwrap();
         let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
-        let id = mk_session(&store, &store_dir.path().join("a.wav"));
+        let id = mk_session_with_source(&store, &store_dir.path().join("a.wav"), MIXED);
         let wav = store_dir.path().join("stereo.wav");
         write_stereo_wav(&wav, &tone_frames(4, 8_192, 1_000));
         let rewrite = wav.clone();
@@ -4801,7 +4984,7 @@ mod tests {
     fn a_pass_put_off_before_the_meeting_channel_is_read_never_diarizes() {
         let store_dir = tempfile::tempdir().unwrap();
         let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
-        let id = mk_session(&store, &store_dir.path().join("a.wav"));
+        let id = mk_session_with_source(&store, &store_dir.path().join("a.wav"), MIXED);
         let wav = store_dir.path().join("stereo.wav");
         write_test_wav(&wav, 2, 4.0);
         let (diarizer, received) = ScriptedDiarizer::new(Ok(vec![turn_secs(0, 4, 0)]));
@@ -4821,26 +5004,35 @@ mod tests {
     }
 
     #[test]
-    fn the_meeting_buffer_reserves_up_to_the_end_of_the_last_stereo_part_and_nothing_for_mono() {
-        let rate = u64::from(SAMPLE_RATE_HZ);
-        assert_eq!(system_pcm_end(Duration::ZERO, 5 * rate, 1), 0);
-        assert_eq!(system_pcm_end(Duration::from_secs(3), 5 * rate, 1), 0);
-        assert_eq!(system_pcm_end(Duration::ZERO, 0, 2), 0);
-        assert_eq!(
-            system_pcm_end(Duration::from_millis(2500), 4 * rate, 2),
-            (2.5 * rate as f64) as u64 + 4 * rate
-        );
+    fn only_a_recording_of_the_microphone_alone_holds_no_meeting_audio() {
+        assert!(has_meeting_audio(&MIXED));
+        assert!(has_meeting_audio(&AudioSource::SystemWide));
+        assert!(has_meeting_audio(&AudioSource::ImportedFile));
+        assert!(!has_meeting_audio(&AudioSource::Microphone {
+            device: Some("usb".to_string())
+        }));
+    }
 
-        let parts = [
-            (Duration::ZERO, 3 * rate, 1),
-            (Duration::from_secs(3), 2 * rate, 2),
-            (Duration::from_secs(5), 7 * rate, 1),
-        ];
-        let reserved = parts
-            .iter()
-            .map(|&(base, frames, channels)| system_pcm_end(base, frames, channels))
-            .max()
-            .unwrap_or(0);
-        assert_eq!(reserved, frame_at(Duration::from_secs(3)) as u64 + 2 * rate);
+    #[test]
+    fn the_pane_names_exactly_the_sources_without_meeting_audio() {
+        let pane = include_str!(
+            "../../../../desktop/src/src/app/meeting-transcription/live-transcript/live-transcript.component.ts"
+        );
+        for source in [
+            AudioSource::SystemWide,
+            AudioSource::Microphone { device: None },
+            MIXED,
+            AudioSource::ImportedFile,
+        ] {
+            let kind = serde_json::to_value(&source).unwrap()["kind"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert_eq!(
+                pane.contains(&format!("source.kind === '{kind}'")),
+                !has_meeting_audio(&source),
+                "live-transcript.component.ts must say no speaker labels exactly for the sources without meeting audio ({kind})"
+            );
+        }
     }
 }

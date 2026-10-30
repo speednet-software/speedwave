@@ -45,6 +45,12 @@ pub fn spawn_args_for(tab_id: &str) -> Option<Vec<String>> {
         .and_then(|guard| guard.as_ref().and_then(|(_, map)| map.get(tab_id).cloned()))
 }
 
+pub fn with_claude_debug(mut args: Vec<String>) -> Vec<String> {
+    args.push("--debug-file".to_string());
+    args.push("/dev/stderr".to_string());
+    args
+}
+
 #[cfg(feature = "e2e")]
 #[tauri::command]
 pub fn e2e_last_spawn_args() -> Vec<String> {
@@ -123,6 +129,18 @@ mod tests {
     use super::*;
 
     static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn an_e2e_build_spawns_claude_with_its_debug_log_on_stderr() {
+        let args = with_claude_debug(vec!["claude".to_string(), "-p".to_string()]);
+        assert_eq!(
+            args,
+            vec!["claude", "-p", "--debug-file", "/dev/stderr"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     fn spawn_args_are_recorded_per_tab_and_last_wins_globally() {

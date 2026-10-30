@@ -35,6 +35,7 @@ mod logging_cmd;
 mod mic_permission_cmd;
 mod mirror_relay;
 mod model_picker;
+mod notifications;
 mod oauth_cmd;
 mod oauth_flow;
 mod oauth_login_cmd;
@@ -863,6 +864,8 @@ fn main() {
                 log::warn!("LLM config heal failed: {e:#}");
             }
 
+            notifications::install(app.handle());
+
             if let Ok(mut slot) = clipboard_bridge_slot.lock() {
                 *slot = clipboard_bridge::spawn(app.handle().clone());
             }
@@ -1235,6 +1238,7 @@ fn main() {
             transcription_cmd::rename_transcript,
             transcription_cmd::transcribe_transcript,
             transcription_cmd::postpone_transcription,
+            transcription_cmd::import_transcription,
             transcription_cmd::export_transcript,
             transcription_cmd::reveal_transcript_audio,
             transcription_cmd::recommended_transcription_model,
@@ -1305,6 +1309,10 @@ fn main() {
             mic_permission_cmd::microphone_permission_status,
             system_settings_cmd::open_microphone_pane,
             system_settings_cmd::open_audio_capture_pane,
+            notifications::get_notification_settings,
+            notifications::set_notification_prefs,
+            notifications::request_notification_permission,
+            notifications::open_notification_settings,
             #[cfg(feature = "e2e")]
             e2e_support::e2e_last_spawn_args,
             #[cfg(feature = "e2e")]

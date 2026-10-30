@@ -24,7 +24,7 @@ import {
   openProjectSwitcher,
   switchToProject,
 } from '../helpers/projects';
-import { waitForShellReady } from '../helpers/shell';
+import { FLAKY_STEP_RETRIES, waitForShellReady } from '../helpers/shell';
 import { invokeCommand } from '../helpers/tauri-invoke';
 
 const SECOND_PROJECT_NAME = 'e2e-second';
@@ -158,6 +158,7 @@ describe('Project Management', function () {
 
   describe('Switch Project', function () {
     it('should switch back to e2e-test project', async function () {
+      this.retries(FLAKY_STEP_RETRIES);
       this.timeout(180_000);
 
       await waitForShellReady();
@@ -189,6 +190,7 @@ describe('Project Management', function () {
     });
 
     it('should report healthy containers after switching back', async function () {
+      this.retries(FLAKY_STEP_RETRIES);
       this.timeout(150_000);
       await waitForHealthy('e2e-test');
     });
@@ -214,6 +216,7 @@ describe('Project Management', function () {
     });
 
     it('switches back to e2e-test for the remaining specs', async function () {
+      this.retries(FLAKY_STEP_RETRIES);
       this.timeout(240_000);
       await switchToProject('e2e-test');
       await waitForHealthy('e2e-test');

@@ -98,6 +98,34 @@ _needs_ids() {
 }
 
 
+@test "gate passes an attempt group when a later attempt succeeded" {
+    run_gate "$(needs_json lint=success build-macos-1=abandoned build-macos-2=success build-macos-3=skipped)"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"build-macos"*"success"* ]]
+}
+
+
+@test "gate fails an attempt group no attempt of which got a runner, and says so" {
+    run_gate "$(needs_json build-macos-1=abandoned build-macos-2=cancelled build-macos-3=abandoned)"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"::error::ci-gate: build-macos"*"got a runner"*"abandoned, cancelled, abandoned"* ]]
+}
+
+
+@test "gate fails an attempt group whose first attempt failed, without blaming the runner" {
+    run_gate "$(needs_json build-macos-1=failure build-macos-2=skipped build-macos-3=skipped)"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"::error::ci-gate: build-macos: no attempt succeeded (attempts: failure, skipped, skipped)"* ]]
+    [[ "$output" != *"got a runner"* ]]
+}
+
+@test "gate still fails a skipped job that is not an attempt" {
+    run_gate "$(needs_json build-windows=skipped build-macos-1=success build-macos-2=skipped build-macos-3=skipped)"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"::error::ci-gate: build-windows finished with result 'skipped'"* ]]
+}
+
+
 @test "needs ids are read from both the flow and the block form" {
     run _needs_ids <<<'    needs: [a, b-c]'
     [ "$output" = $'a\nb-c' ]

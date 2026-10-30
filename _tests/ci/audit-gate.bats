@@ -280,3 +280,58 @@ _audited_lockfiles() {
   [ "$status" -ne 0 ]
   [[ "$output" =~ "audit-gate: npm audit reported an error instead of a report" ]]
 }
+
+@test "pip extraction reads the PYSEC id and skips clean dependencies" {
+  run "$PYTHON" "$SCRIPT" extract --ecosystem pip --in "$FIXTURES/pip-vulnerable.json"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "PYSEC-2099-1" ]]
+  [[ "$output" =~ "pypdf" ]]
+  advisory_count="$(echo "$output" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
+  [ "$advisory_count" -eq 1 ]
+}
+
+@test "pip extraction on a clean report yields no advisories" {
+  run "$PYTHON" "$SCRIPT" extract --ecosystem pip --in "$FIXTURES/pip-clean.json"
+  [ "$status" -eq 0 ]
+  [ "$output" = "{}" ]
+}
+
+@test "pip extraction rejects a report with no dependencies list" {
+  run "$PYTHON" "$SCRIPT" extract --ecosystem pip --in "$FIXTURES/pip-no-dependencies.json"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "pip-audit report" ]]
+  [[ ! "$output" =~ "Traceback" ]]
+}
+
+@test "pip extraction on an empty report fails with a named error" {
+  run "$PYTHON" "$SCRIPT" extract --ecosystem pip --in "$FIXTURES/npm-empty.json"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "empty pip audit report" ]]
+}
+
+@test "absolute: a pip advisory with no exception is red" {
+  run "$PYTHON" "$SCRIPT" absolute --exceptions "$FIXTURES/exceptions-empty.json" \
+    --report "pip:$FIXTURES/pip-vulnerable.json"
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "PYSEC-2099-1" ]]
+}
+
+@test "absolute: a pip advisory covered by an exception on its PYSEC id is green" {
+  run "$PYTHON" "$SCRIPT" absolute --exceptions "$FIXTURES/exceptions-pip-pysec.json" \
+    --report "pip:$FIXTURES/pip-vulnerable.json"
+  [ "$status" -eq 0 ]
+}
+
+@test "absolute: a pip advisory covered by an exception on its GHSA alias is green" {
+  run "$PYTHON" "$SCRIPT" absolute --exceptions "$FIXTURES/exceptions-pip-ghsa-alias.json" \
+    --report "pip:$FIXTURES/pip-vulnerable.json"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "covered by a valid exception" ]]
+}
+
+@test "diff: a pip advisory only in head is red" {
+  run "$PYTHON" "$SCRIPT" diff --exceptions "$FIXTURES/exceptions-empty.json" \
+    --base "pip:$FIXTURES/pip-clean.json" --head "pip:$FIXTURES/pip-vulnerable.json"
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "PYSEC-2099-1" ]]
+}

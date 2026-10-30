@@ -1,0 +1,23 @@
+{
+  "dependencies": [
+    {
+      "name": "pypdf",
+      "version": "6.0.0",
+      "vulns": [
+        {
+          "id": "PYSEC-2099-1",
+          "fix_versions": ["6.1.0"],
+          "aliases": ["CVE-2099-0001", "GHSA-pypd-f000-test"],
+          "description": "pypdf unbounded recursion"
+        }
+      ]
+    },
+    { "name": "numpy", "version": "2.2.2", "vulns": [] },
+    {
+      "name": "weasyprint",
+      "version": "70.0",
+      "skip_reason": "Dependency not found on PyPI and could not be audited: weasyprint (70.0)"
+    }
+  ],
+  "fixes": []
+}

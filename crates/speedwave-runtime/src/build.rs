@@ -88,6 +88,8 @@ pub const IMAGES: &[ImageDef] = &[
             "mcp-servers/shared",
             "mcp-servers/policies",
             "mcp-servers/tsconfig.base.json",
+            "mcp-servers/package.json",
+            "mcp-servers/package-lock.json",
         ],
     },
     ImageDef {
@@ -99,6 +101,8 @@ pub const IMAGES: &[ImageDef] = &[
             "mcp-servers/slack",
             "mcp-servers/shared",
             "mcp-servers/tsconfig.base.json",
+            "mcp-servers/package.json",
+            "mcp-servers/package-lock.json",
         ],
     },
     ImageDef {
@@ -110,6 +114,8 @@ pub const IMAGES: &[ImageDef] = &[
             "mcp-servers/sharepoint",
             "mcp-servers/shared",
             "mcp-servers/tsconfig.base.json",
+            "mcp-servers/package.json",
+            "mcp-servers/package-lock.json",
         ],
     },
     ImageDef {
@@ -121,6 +127,8 @@ pub const IMAGES: &[ImageDef] = &[
             "mcp-servers/redmine",
             "mcp-servers/shared",
             "mcp-servers/tsconfig.base.json",
+            "mcp-servers/package.json",
+            "mcp-servers/package-lock.json",
         ],
     },
     ImageDef {
@@ -132,6 +140,8 @@ pub const IMAGES: &[ImageDef] = &[
             "mcp-servers/gitlab",
             "mcp-servers/shared",
             "mcp-servers/tsconfig.base.json",
+            "mcp-servers/package.json",
+            "mcp-servers/package-lock.json",
         ],
     },
     ImageDef {
@@ -143,6 +153,8 @@ pub const IMAGES: &[ImageDef] = &[
             "mcp-servers/github",
             "mcp-servers/shared",
             "mcp-servers/tsconfig.base.json",
+            "mcp-servers/package.json",
+            "mcp-servers/package-lock.json",
         ],
     },
     ImageDef {
@@ -154,6 +166,8 @@ pub const IMAGES: &[ImageDef] = &[
             "mcp-servers/atlassian",
             "mcp-servers/shared",
             "mcp-servers/tsconfig.base.json",
+            "mcp-servers/package.json",
+            "mcp-servers/package-lock.json",
         ],
     },
     ImageDef {
@@ -165,6 +179,8 @@ pub const IMAGES: &[ImageDef] = &[
             "mcp-servers/office",
             "mcp-servers/shared",
             "mcp-servers/tsconfig.base.json",
+            "mcp-servers/package.json",
+            "mcp-servers/package-lock.json",
         ],
     },
     ImageDef {
@@ -183,6 +199,8 @@ pub const IMAGES: &[ImageDef] = &[
             "mcp-servers/context7",
             "mcp-servers/shared",
             "mcp-servers/tsconfig.base.json",
+            "mcp-servers/package.json",
+            "mcp-servers/package-lock.json",
         ],
     },
 ];

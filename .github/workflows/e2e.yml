@@ -1,8 +1,7 @@
 name: E2E
 
 on:
-  pull_request:
-  merge_group:
+  workflow_call:
   workflow_dispatch: {}
 
 permissions:
@@ -10,7 +9,6 @@ permissions:
 
 jobs:
   e2e-macos:
-    if: github.event_name != 'pull_request'
     concurrency:
       group: probe-863-rig-macos
       cancel-in-progress: false
@@ -25,14 +23,24 @@ jobs:
       - name: Run the macOS rig lane
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENROUTER_MODEL: ${{ secrets.OPENROUTER_MODEL }}
           LOCAL_LLM_BASE_URL: ${{ secrets.LOCAL_LLM_BASE_URL }}
           LOCAL_LLM_API_KEY: ${{ secrets.LOCAL_LLM_API_KEY }}
           LOCAL_LLM_MODEL: ${{ secrets.LOCAL_LLM_MODEL }}
         run: SPEEDWAVE_MACOS_HOST="$(whoami)@127.0.0.1" bash scripts/e2e-vm.sh macos
 
+      - name: Upload failure screenshots and the app log
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: e2e-artifacts-macos-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .e2e-artifacts/**
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
+
   e2e-windows:
-    if: github.event_name != 'pull_request'
     concurrency:
       group: probe-863-rig-windows
       cancel-in-progress: false
@@ -54,8 +62,19 @@ jobs:
       - name: Run the Windows rig lane
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENROUTER_MODEL: ${{ secrets.OPENROUTER_MODEL }}
           LOCAL_LLM_BASE_URL: ${{ secrets.LOCAL_LLM_BASE_URL }}
           LOCAL_LLM_API_KEY: ${{ secrets.LOCAL_LLM_API_KEY }}
           LOCAL_LLM_MODEL: ${{ secrets.LOCAL_LLM_MODEL }}
         run: SPEEDWAVE_WINDOWS_HOST="$USERNAME@127.0.0.1" bash scripts/e2e-vm.sh windows
+
+      - name: Upload failure screenshots and the app log
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: e2e-artifacts-windows-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .e2e-artifacts/**
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7

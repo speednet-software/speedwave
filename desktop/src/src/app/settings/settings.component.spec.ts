@@ -22,6 +22,11 @@ function setupMockTauri(mockTauri: MockTauriService): void {
         return { auto_check: true, check_interval_hours: 24 };
       case 'get_platform':
         return 'darwin';
+      case 'get_notification_settings':
+        return {
+          prefs: { enabled: true, turn_finished: true, awaiting_input: true, session_error: true },
+          permission: 'granted',
+        };
       case 'get_auth_status':
         return { api_key_configured: false, oauth_authenticated: false };
       case 'list_transcripts':
@@ -118,6 +123,17 @@ describe('SettingsComponent', () => {
     betaEnabled.set(false);
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('app-transcription-section')).toBeNull();
+  });
+
+  it('renders NotificationsSectionComponent when beta is enabled', () => {
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('app-notifications-section')).not.toBeNull();
+  });
+
+  it('hides NotificationsSectionComponent when beta is disabled', () => {
+    betaEnabled.set(false);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('app-notifications-section')).toBeNull();
   });
 
   it('renders TelemetrySectionComponent when beta is enabled', () => {

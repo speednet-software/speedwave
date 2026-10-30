@@ -20,6 +20,7 @@ import { TranscriptionSectionComponent } from './transcription-section/transcrip
 import { TelemetrySectionComponent } from './telemetry-section/telemetry-section.component';
 import { SecuritySectionComponent } from './security-section/security-section.component';
 import { UpdateSectionComponent } from './update-section/update-section.component';
+import { NotificationsSectionComponent } from './notifications-section/notifications-section.component';
 import { ProjectPillComponent } from '../project-switcher/project-pill.component';
 import { RecreateOnDirective } from '../shared/recreate-on.directive';
 
@@ -73,6 +74,7 @@ const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
     TelemetrySectionComponent,
     SecuritySectionComponent,
     UpdateSectionComponent,
+    NotificationsSectionComponent,
     ProjectPillComponent,
     RecreateOnDirective,
   ],
@@ -191,6 +193,10 @@ const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
         </section>
 
         @if (beta.enabled()) {
+          <app-notifications-section (errorOccurred)="error = $event" />
+        }
+
+        @if (beta.enabled()) {
           <app-telemetry-section (errorOccurred)="error = $event" />
         }
 
@@ -225,7 +231,7 @@ export class SettingsComponent implements OnInit, OnDestroy {
   readonly theme = inject(ThemeService);
   /** UI state service exposed for the project switcher trigger in the header. */
   readonly ui = inject(UiStateService);
-  /** Beta-features gate — the transcription and telemetry sections are beta-only. */
+  /** Beta-features gate — the transcription, notifications and telemetry sections are beta-only. */
   readonly beta = inject(BetaService);
 
   private router = inject(Router);
