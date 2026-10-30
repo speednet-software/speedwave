@@ -144,9 +144,13 @@ const ENGINE_STATE_PROBES: { argv: string[]; keep?: { head?: number; tail?: numb
   { argv: ['dmesg', '-T'], keep: { tail: 100 } },
 ];
 
-function keepLines(text: string, keep?: { head?: number; tail?: number }): string {
+function keepLines(text: string, keep?: { head?: number; tail?: number; grep?: RegExp }): string {
   if (!keep) return text;
   const lines = text.split('\n');
+  if (keep.grep !== undefined) {
+    const pattern = keep.grep;
+    return lines.filter((line) => pattern.test(line)).join('\n');
+  }
   if (keep.head !== undefined) return lines.slice(0, keep.head).join('\n');
   if (keep.tail !== undefined) return lines.slice(-keep.tail).join('\n');
   return text;
@@ -156,27 +160,83 @@ function keepLines(text: string, keep?: { head?: number; tail?: number }): strin
  * Writes the load, pressure, memory, disk and kernel log of the engine VM (Lima) or distro (WSL)
  * into `dir` as `FAIL-<stamp>-engine-state.txt` and returns the file. Each probe records how
  * long its round trip through the engine transport took, so a slow transport shows apart from
- * a loaded guest. The argv stays free of shell metacharacters and whitespace: the Windows
+ * a loaded guest. On macOS it also times the Lima SSH transport from the host: through the
+ * control master and on a fresh connection, plus the master's state and the live ssh and
+ * limactl processes. The argv stays free of shell metacharacters and whitespace: the Windows
  * transport re-parses it.
  */
 export function dumpEngineState(dir: string, stamp: string): string {
   const sections: string[] = [];
   for (const probe of ENGINE_STATE_PROBES) {
-    const { file, args, env } = engineArgv(probe.argv);
-    const started = Date.now();
-    const run = spawnSync(file, args, {
-      env,
-      encoding: 'utf8',
-      timeout: ENGINE_PROBE_TIMEOUT_MS,
-    });
-    const elapsed = Date.now() - started;
-    const outcome = run.error ? `error ${run.error.message}` : `exit ${run.status}`;
-    const body = keepLines(`${run.stdout ?? ''}${run.stderr ?? ''}`.trimEnd(), probe.keep);
-    sections.push(`== ${probe.argv.join(' ')} (${elapsed} ms, ${outcome})\n${body}`);
+    sections.push(runProbe(probe.argv.join(' '), engineArgv(probe.argv), probe.keep));
+  }
+  if (process.platform === 'darwin') {
+    for (const probe of limaTransportProbes()) {
+      sections.push(runProbe(probe.label, probe, probe.keep));
+    }
   }
   const stateFile = join(dir, `FAIL-${stamp}-engine-state.txt`);
   writeFileSync(stateFile, sections.join('\n\n') + '\n');
   return stateFile;
+}
+
+function runProbe(
+  label: string,
+  command: { file: string; args: string[]; env: NodeJS.ProcessEnv },
+  keep?: { head?: number; tail?: number; grep?: RegExp }
+): string {
+  const started = Date.now();
+  const run = spawnSync(command.file, command.args, {
+    env: command.env,
+    encoding: 'utf8',
+    timeout: ENGINE_PROBE_TIMEOUT_MS,
+  });
+  const elapsed = Date.now() - started;
+  const outcome = run.error ? `error ${run.error.message}` : `exit ${run.status}`;
+  const body = keepLines(`${run.stdout ?? ''}${run.stderr ?? ''}`.trimEnd(), keep);
+  return `== ${label} (${elapsed} ms, ${outcome})\n${body}`;
+}
+
+function limaTransportProbes(): {
+  label: string;
+  file: string;
+  args: string[];
+  env: NodeJS.ProcessEnv;
+  keep?: { grep?: RegExp };
+}[] {
+  const limaHome = join(dataDir(), 'lima');
+  const env = { ...process.env, LIMA_HOME: limaHome };
+  const sshConfig = join(limaHome, instanceName(), 'ssh.config');
+  const host = `lima-${instanceName()}`;
+  const limactl = join(homedir(), 'Applications/Speedwave.app/Contents/Resources/lima/bin/limactl');
+  return [
+    { label: 'host: limactl list', file: limactl, args: ['list'], env },
+    {
+      label: 'host: ssh -O check (control master)',
+      file: 'ssh',
+      args: ['-F', sshConfig, '-O', 'check', host],
+      env,
+    },
+    {
+      label: 'host: ssh true through the control master',
+      file: 'ssh',
+      args: ['-F', sshConfig, host, 'true'],
+      env,
+    },
+    {
+      label: 'host: ssh true on a fresh connection',
+      file: 'ssh',
+      args: ['-F', sshConfig, '-o', 'ControlMaster=no', '-o', 'ControlPath=none', host, 'true'],
+      env,
+    },
+    {
+      label: 'host: ssh and limactl processes',
+      file: 'ps',
+      args: ['-axo', 'pid,ppid,etime,stat,command'],
+      env,
+      keep: { grep: /\b(ssh|limactl)\b/ },
+    },
+  ];
 }
 
 /** Reads the name-store via the engine into filename → 64-hex content. Plain metachar-free
