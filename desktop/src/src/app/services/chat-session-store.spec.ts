@@ -2652,6 +2652,129 @@ describe('ChatSessionStore', () => {
       }
     });
 
+    it('picks up an OpenRouter cost that /generation prices only after ~2.5 min', async () => {
+      vi.useFakeTimers();
+      try {
+        TestBed.inject(ProjectStateService).activeProject.set('proj');
+        let elapsed = 0;
+        vi.spyOn(mockTauri, 'invoke').mockImplementation(async (cmd: string) => {
+          if (cmd === 'get_usage_for_response') {
+            return elapsed >= 150_000
+              ? { cost_usd: 0.0032, cost_source: 'actual' }
+              : { cost_usd: null, cost_source: 'deferred' };
+          }
+          if (cmd === 'get_conversation_cost') return elapsed >= 150_000 ? 0.0032 : null;
+          return undefined;
+        });
+
+        store.handleStreamChunk({ chunk_type: 'Text', data: { content: 'a' } });
+        store.handleStreamChunk({
+          chunk_type: 'Result',
+          data: {
+            session_id: 'abc',
+            assistant_uuid: 'msg_1',
+            total_cost: 0.1062,
+            turn_cost: 0.1062,
+            model: 'openrouter/openai/gpt-4o-mini',
+          },
+        });
+        await vi.advanceTimersByTimeAsync(0);
+
+        for (let t = 0; t < 185_000; t += 5000) {
+          elapsed += 5000;
+          await vi.advanceTimersByTimeAsync(5000);
+        }
+
+        expect(store.messages.find((m) => m.uuid === 'msg_1')?.meta?.cost).toBeCloseTo(0.0032, 6);
+        expect(store.sessionStats?.total_cost).toBeCloseTo(0.0032, 6);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    describe('when the chat view opens again', () => {
+      function pricedLater(state: { priced: boolean; usageCalls: number }) {
+        return async (cmd: string) => {
+          if (cmd === 'get_usage_for_response') {
+            state.usageCalls += 1;
+            return state.priced
+              ? { cost_usd: 0.0032, cost_source: 'actual' }
+              : { cost_usd: null, cost_source: 'deferred' };
+          }
+          if (cmd === 'get_conversation_cost') return state.priced ? 0.0032 : null;
+          return undefined;
+        };
+      }
+
+      it('reconciles the footer a deferred cost left unpriced after its retries ran out', async () => {
+        vi.useFakeTimers();
+        try {
+          TestBed.inject(ProjectStateService).activeProject.set('proj');
+          const state = { priced: false, usageCalls: 0 };
+          vi.spyOn(mockTauri, 'invoke').mockImplementation(pricedLater(state));
+          await store.init();
+
+          store.handleStreamChunk({ chunk_type: 'Text', data: { content: 'a' } });
+          store.handleStreamChunk({
+            chunk_type: 'Result',
+            data: {
+              session_id: 'abc',
+              assistant_uuid: 'msg_1',
+              total_cost: 0.1062,
+              turn_cost: 0.1062,
+              model: 'openrouter/openai/gpt-4o-mini',
+            },
+          });
+          await vi.advanceTimersByTimeAsync(400_000);
+          expect(store.sessionStats?.total_cost).toBe(0.1062);
+
+          state.priced = true;
+          await store.init();
+          await vi.advanceTimersByTimeAsync(0);
+
+          expect(store.messages.find((m) => m.uuid === 'msg_1')?.meta?.cost).toBeCloseTo(0.0032, 6);
+          expect(store.sessionStats?.total_cost).toBeCloseTo(0.0032, 6);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('asks for no cost while a turn still streams', async () => {
+        TestBed.inject(ProjectStateService).activeProject.set('proj');
+        const state = { priced: true, usageCalls: 0 };
+        vi.spyOn(mockTauri, 'invoke').mockImplementation(pricedLater(state));
+        await store.init();
+        store.loadMessages([
+          {
+            role: 'assistant',
+            uuid: 'msg_1',
+            blocks: [{ type: 'text', content: 'a' }],
+            timestamp: 1,
+          },
+        ]);
+        await new Promise((r) => setTimeout(r, 0));
+        const callsAfterLoad = state.usageCalls;
+
+        store.handleStreamChunk({ chunk_type: 'Text', data: { content: 'b' } });
+        await store.init();
+        await new Promise((r) => setTimeout(r, 0));
+
+        expect(store.isStreaming).toBe(true);
+        expect(state.usageCalls).toBe(callsAfterLoad);
+      });
+
+      it('asks for nothing in a conversation without an assistant reply', async () => {
+        TestBed.inject(ProjectStateService).activeProject.set('proj');
+        const state = { priced: true, usageCalls: 0 };
+        vi.spyOn(mockTauri, 'invoke').mockImplementation(pricedLater(state));
+        await store.init();
+        await store.init();
+        await new Promise((r) => setTimeout(r, 0));
+
+        expect(state.usageCalls).toBe(0);
+      });
+    });
+
     it('stops re-reconciling a deferred turn once a newer turn supersedes it', async () => {
       vi.useFakeTimers();
       try {

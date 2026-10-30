@@ -1162,6 +1162,8 @@ export class ChatSessionStore {
             void this.startChatSession();
           });
         }
+      } else if (!this.isStreaming) {
+        void this.reconcileFooterCost(this.latestAssistantUuid());
       }
     } finally {
       this.firstStartDueSignal.set(false);
@@ -1885,10 +1887,11 @@ export class ChatSessionStore {
     this._messages = msgs;
     this.requestAutoScroll();
     this.notifyChange();
-    const lastAssistant = [...msgs].reverse().find((m) => m.role === 'assistant' && m.uuid);
-    if (lastAssistant?.uuid) {
-      void this.reconcileFooterCost(lastAssistant.uuid);
-    }
+    void this.reconcileFooterCost(this.latestAssistantUuid());
+  }
+
+  private latestAssistantUuid(): string | undefined {
+    return [...this._messages].reverse().find((m) => m.role === 'assistant' && m.uuid)?.uuid;
   }
 
   /**
@@ -2223,7 +2226,9 @@ export class ChatSessionStore {
     else if (!sessionKept) this.dropPendingPicks();
   }
 
-  private static readonly DEFERRED_RECONCILE_BACKOFF_MS = [1000, 2000, 4000, 8000, 15000, 30000];
+  private static readonly DEFERRED_RECONCILE_BACKOFF_MS = [
+    1000, 2000, 4000, 8000, 15000, 30000, 30000, 30000, 60000,
+  ];
 
   private async reconcileFooterCost(assistantUuid: string | undefined, attempt = 0): Promise<void> {
     if (!assistantUuid) return;

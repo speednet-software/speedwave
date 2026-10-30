@@ -154,8 +154,13 @@ async fn fetch_openrouter_gen_cost(
         .query(&[("id", gen_id)])
         .send()
         .await
+        .inspect_err(|e| log::debug!("OpenRouter generation {gen_id} lookup failed: {e}"))
         .ok()?;
     if !resp.status().is_success() {
+        log::debug!(
+            "OpenRouter has not priced generation {gen_id} yet: HTTP {}",
+            resp.status()
+        );
         return None;
     }
     let body = read_body_limited(resp, "openrouter generation")
