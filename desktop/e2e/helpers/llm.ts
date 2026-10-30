@@ -285,6 +285,10 @@ export async function queueMessageViaEnter(text: string): Promise<void> {
   const input = await $('[data-testid="chat-input"]');
   await input.waitForExist({ timeout: 15_000 });
   await input.setValue(text);
+  await browser.waitUntil(async () => await $('[data-testid="chat-send"]').isEnabled(), {
+    timeout: 60_000,
+    timeoutMsg: 'chat-send never became enabled, the session start never finished',
+  });
   await browser.execute(() => {
     const ta = document.querySelector('[data-testid="chat-input"]') as HTMLTextAreaElement | null;
     if (!ta) return;

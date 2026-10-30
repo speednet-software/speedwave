@@ -72,6 +72,10 @@ async function clearComposer(): Promise<void> {
 }
 
 async function openModelSelector(): Promise<void> {
+  await browser.waitUntil(async () => await $('[data-testid="composer-model-badge"]').isEnabled(), {
+    timeout: 90_000,
+    timeoutMsg: 'composer-model-badge stayed disabled, the session never reported its models',
+  });
   await (await $('[data-testid="composer-model-badge"]')).click();
   await $('[data-testid="model-selector-search"]').waitForExist({ timeout: 10_000 });
 }
@@ -130,6 +134,22 @@ async function waitForModelPickerRows(project: string): Promise<string[]> {
     }
   );
   return ids;
+}
+
+async function waitForDefaultPickerRow(project: string): Promise<string> {
+  let id: string | null = null;
+  await browser.waitUntil(
+    async () => {
+      id = await defaultModelPickerRowId(project);
+      return id !== null;
+    },
+    {
+      timeout: 90_000,
+      timeoutMsg: `the session of ${project} never reported a default row (list_model_picker)`,
+    }
+  );
+  if (id === null) throw new Error(`no default row for ${project}`);
+  return id;
 }
 
 async function waitForCatalogBadge(
@@ -483,8 +503,7 @@ describe('Slash Popover + Model/Effort Selector', function () {
         expect(newTabArgs.filter((a) => a === '--model').length).toBe(1);
         expect(newTabArgs[newTabArgs.indexOf('--model') + 1]).toBe(SONNET_MODEL);
 
-        const defaultRowId = await defaultModelPickerRowId(ANTHROPIC_PROJECT);
-        if (!defaultRowId) throw new Error('the model picker reports no default row');
+        const defaultRowId = await waitForDefaultPickerRow(ANTHROPIC_PROJECT);
         await openModelSelector();
         await pickModelOption(defaultRowId);
         const priorArgsAfterDefault = await waitForFreshSpawnArgs(newTabArgs);
