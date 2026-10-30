@@ -161,7 +161,8 @@ function keepLines(text: string, keep?: { head?: number; tail?: number; grep?: R
  * into `dir` as `FAIL-<stamp>-engine-state.txt` and returns the file. Each probe records how
  * long its round trip through the engine transport took, so a slow transport shows apart from
  * a loaded guest. On macOS it also times the Lima SSH transport from the host: through the
- * control master and on a fresh connection, plus the master's state and the live ssh and
+ * control master and on a fresh connection, `limactl shell` without `sudo`, `sudo` without
+ * `limactl`, the guest's name resolution, plus the master's state and the live ssh and
  * limactl processes. The argv stays free of shell metacharacters and whitespace: the Windows
  * transport re-parses it.
  */
@@ -227,6 +228,29 @@ function limaTransportProbes(): {
       label: 'host: ssh true on a fresh connection',
       file: 'ssh',
       args: ['-F', sshConfig, '-o', 'ControlMaster=no', '-o', 'ControlPath=none', host, 'true'],
+      env,
+    },
+    {
+      label: 'host: limactl shell true without sudo',
+      file: limactl,
+      args: ['shell', instanceName(), '--', 'true'],
+      env,
+    },
+    {
+      label: 'host: ssh sudo -n true',
+      file: 'ssh',
+      args: ['-F', sshConfig, host, 'sudo', '-n', 'true'],
+      env,
+    },
+    {
+      label: 'host: ssh guest name resolution',
+      file: 'ssh',
+      args: [
+        '-F',
+        sshConfig,
+        host,
+        'hostname; cat /etc/hosts /etc/resolv.conf; time getent hosts "$(hostname)"; time timeout 20 getent hosts github.com; resolvectl status 2>&1 | head -30',
+      ],
       env,
     },
     {
