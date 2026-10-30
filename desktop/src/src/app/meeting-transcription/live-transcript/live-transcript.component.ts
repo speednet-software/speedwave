@@ -37,6 +37,7 @@ import { SpeakerNameDialogComponent } from '../speaker-name-dialog/speaker-name-
 import {
   nameChangeNote,
   normalizeSpeakerName,
+  samePerson,
   numberLabel,
   sameSpeakerName,
   speakerActionLabel,
@@ -131,12 +132,13 @@ const YOUR_NAME_NOTE =
 
 function speakerOf(
   seg: Segment,
-  names: Record<string, string>
+  names: Record<string, string>,
+  sharingName: Set<number>
 ): Pick<TranscriptLine, 'speaker' | 'diarized'> {
   if (seg.source === 'mic') return { speaker: 'You', diarized: null };
   const n = seg.speaker_id;
   if (n != null && n >= 1) {
-    const diarized = speakerOfId(n, names);
+    const diarized = { ...speakerOfId(n, names), sharesName: sharingName.has(n) };
     return { speaker: diarized.label, diarized };
   }
   if (seg.source === 'system') return { speaker: 'Meeting', diarized: null };
@@ -516,7 +518,7 @@ interface ProgressTrack {
           @if (speakers().length > 0) {
             <app-speaker-legend
               [speakers]="speakers()"
-              [highlighted]="highlightedSpeaker()"
+              [highlighted]="highlightedIds()"
               [canReapply]="canReapplyNames()"
               [editable]="canName()"
               (name)="openNaming($event, 'legend')"
@@ -585,7 +587,7 @@ interface ProgressTrack {
               class="-mx-2 mb-2.5 rounded px-2 py-0.5"
               data-testid="transcript-line"
               [class.bg-[var(--bg-1)]]="
-                line.diarized !== null && line.diarized.id === highlightedSpeaker()
+                line.diarized !== null && highlightedIds().includes(line.diarized.id)
               "
             >
               <div class="mb-0.5 flex items-center gap-1.5 text-[11px] tabular-nums">
@@ -609,6 +611,11 @@ interface ProgressTrack {
                     >
                       <app-speaker-mark [speaker]="sp" />
                       <span class="truncate">{{ line.speaker }}</span>
+                      @if (sp.sharesName) {
+                        <span class="mono shrink-0 text-[10px] text-[var(--ink-mute)]"
+                          >#{{ sp.id }}</span
+                        >
+                      }
                       <app-icon
                         name="pencil"
                         class="h-2.5 w-2.5 shrink-0 text-[var(--ink-mute)] group-hover:opacity-100 group-focus-visible:opacity-100"
@@ -623,6 +630,11 @@ interface ProgressTrack {
                     >
                       <app-speaker-mark [speaker]="sp" />
                       <span class="truncate">{{ line.speaker }}</span>
+                      @if (sp.sharesName) {
+                        <span class="mono shrink-0 text-[10px] text-[var(--ink-mute)]"
+                          >#{{ sp.id }}</span
+                        >
+                      }
                     </span>
                   }
                 } @else if (line.speaker) {
@@ -729,10 +741,15 @@ export class LiveTranscriptComponent {
    */
   readonly lines = computed<TranscriptLine[]>(() => {
     const names = this.namedSpeakers();
+    const sharingName = new Set(
+      this.speakers()
+        .filter((s) => s.sharesName)
+        .map((s) => s.id)
+    );
     const ordered = [...this.segments()].sort(bySegmentStart);
     return ordered.map((seg) => ({
       startLabel: fmtTs(seg.start.secs),
-      ...speakerOf(seg, names),
+      ...speakerOf(seg, names, sharingName),
       text: seg.text.trim(),
     }));
   });
@@ -740,7 +757,7 @@ export class LiveTranscriptComponent {
   /** The names the user gave the speakers, by speaker number. */
   private readonly namedSpeakers = computed(() => this.session()?.named_speakers ?? {});
 
-  /** The diarized speakers of the transcript, those with the most lines first. */
+  /** The diarized speakers of the transcript, person by person, the most lines first. */
   readonly speakers = computed<Speaker[]>(() =>
     this.session()?.models_used.diarization ? speakersOf(this.segments(), this.namedSpeakers()) : []
   );
@@ -748,8 +765,10 @@ export class LiveTranscriptComponent {
   /** Whether the speakers can be named: once the transcription is over, as the backend requires. */
   readonly canName = computed(() => ['done', 'postponed', 'failed'].includes(this.status()));
 
-  /** The speaker whose lines are highlighted: the one being named, else the one hovered. */
-  readonly highlightedSpeaker = computed(() => this.naming()?.speaker ?? this.hoveredSpeaker());
+  /** The labels whose lines are highlighted: the person being named, else the one hovered. */
+  readonly highlightedIds = computed(() =>
+    samePerson(this.speakers(), this.naming()?.speaker ?? this.hoveredSpeaker())
+  );
 
   /** The speaker the name dialog is open for. */
   readonly namingSpeaker = computed(() => {

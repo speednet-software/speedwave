@@ -476,6 +476,24 @@ describe('LiveTranscriptComponent', () => {
       expect(all('speaker-chip')[2].className).toContain('border-[var(--accent)]');
     });
 
+    it('treats two labels with one name as one person: together in the legend, numbered, lit up together', () => {
+      open({ '1': 'Marta', '3': 'marta' });
+      expect(all('speaker-chip').map((c) => c.getAttribute('aria-label'))).toEqual([
+        'Rename Marta (Speaker 1), 3 lines',
+        'Rename marta (Speaker 3), 1 line',
+        'Name Speaker 2, 2 lines',
+      ]);
+      expect(q('transcript-meta')!.textContent).toContain('2 speakers · 3 labels · 1 unnamed');
+      expect(all('line-speaker')[0].textContent).toContain('#1');
+      expect(all('line-speaker')[2].textContent).not.toContain('#');
+      all('speaker-chip')[1].dispatchEvent(new Event('mouseenter'));
+      fixture.detectChanges();
+      const lit = all('transcript-line').filter((l) => l.className.includes('bg-[var(--bg-1)]'));
+      expect(
+        lit.map((l) => l.textContent?.match(/zaczynamy|dalej|jeszcze|odpowiadam/)?.[0])
+      ).toEqual(['zaczynamy', 'dalej', 'odpowiadam', 'jeszcze']);
+    });
+
     it('offers the names from before the last transcription that no speaker has', () => {
       open({ '1': 'Marta' }, ['marta', 'Paweł', 'Ola']);
       expect(q('speaker-reapply')).not.toBeNull();

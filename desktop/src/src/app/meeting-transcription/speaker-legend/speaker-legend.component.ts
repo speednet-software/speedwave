@@ -36,9 +36,9 @@ export interface NameRequest {
           class="inline-flex min-w-0 max-w-[min(16rem,100%)] items-center gap-1.5 rounded-md border bg-[var(--bg-1)] py-1 pl-2 pr-2.5 text-[12px] hover:bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--accent)] disabled:cursor-default disabled:hover:bg-[var(--bg-1)]"
           data-testid="speaker-chip"
           [class.border-dashed]="!s.name"
-          [class.border-[var(--line-strong)]]="!s.name && highlighted() !== s.id"
-          [class.border-[var(--line)]]="!!s.name && highlighted() !== s.id"
-          [class.border-[var(--accent)]]="highlighted() === s.id"
+          [class.border-[var(--line-strong)]]="!s.name && !highlighted().includes(s.id)"
+          [class.border-[var(--line)]]="!!s.name && !highlighted().includes(s.id)"
+          [class.border-[var(--accent)]]="highlighted().includes(s.id)"
           [disabled]="!editable()"
           [attr.aria-label]="editable() ? actionLabel(s) : s.label + ', ' + lines(s.lines)"
           (click)="name.emit({ id: s.id, trigger: $any($event.currentTarget) })"
@@ -55,6 +55,13 @@ export interface NameRequest {
             [class.text-[var(--ink-dim)]]="!s.name"
             >{{ s.label }}</span
           >
+          @if (s.sharesName) {
+            <span
+              class="mono shrink-0 text-[10.5px] text-[var(--ink-dim)]"
+              data-testid="speaker-number"
+              >#{{ s.id }}</span
+            >
+          }
           <span class="mono shrink-0 text-[10.5px] text-[var(--ink-mute)]">{{
             lines(s.lines)
           }}</span>
@@ -115,8 +122,8 @@ export interface NameRequest {
 export class SpeakerLegendComponent {
   /** The transcript's speakers, those with the most lines first. */
   readonly speakers = input.required<Speaker[]>();
-  /** The speaker whose lines are highlighted, if any. */
-  readonly highlighted = input<number | null>(null);
+  /** The speakers whose lines are highlighted: one person's labels, or none. */
+  readonly highlighted = input<number[]>([]);
   /** Whether the speakers can be named now; while a transcription runs the chips only show. */
   readonly editable = input(true);
   /** Whether names from before the last transcription can be given again. */

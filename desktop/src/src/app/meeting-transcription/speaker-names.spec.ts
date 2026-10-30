@@ -3,6 +3,7 @@ import { describe, it, expect } from 'vitest';
 import type { Segment } from '../models/transcript';
 import {
   isTranscriptLabel,
+  samePerson,
   linesLabel,
   nameChangeNote,
   normalizeSpeakerName,
@@ -36,7 +37,7 @@ describe('speaker names', () => {
       color: 'var(--violet)',
       mark: null,
     });
-    expect(speakerOfId(4, {})).toMatchObject({ label: 'Speaker 4', color: 'var(--green)' });
+    expect(speakerOfId(4, {})).toMatchObject({ label: 'Speaker 4', color: 'var(--rose)' });
   });
 
   it('marks speakers past the fourth with the initial of the name, else the number', () => {
@@ -70,6 +71,47 @@ describe('speaker names', () => {
     expect(sameSpeakerName(' marta ', 'Marta')).toBe(true);
     expect(sameSpeakerName('ŁUKASZ', 'łukasz')).toBe(true);
     expect(sameSpeakerName('Anna Maria', 'AnnaMaria')).toBe(false);
+  });
+
+  it('keeps the labels of one person together, the person with the most lines first', () => {
+    const speakers = speakersOf(
+      [
+        ...Array.from({ length: 5 }, (_, i) => seg(i, 2)),
+        ...Array.from({ length: 4 }, (_, i) => seg(10 + i, 3)),
+        ...Array.from({ length: 3 }, (_, i) => seg(20 + i, 1)),
+        seg(30, 4),
+      ],
+      { '2': 'Sławek', '1': ' sławek ', '3': 'Alan' }
+    );
+    expect(speakers.map((s) => [s.id, s.lines, s.sharesName])).toEqual([
+      [2, 5, true],
+      [1, 3, true],
+      [3, 4, false],
+      [4, 1, false],
+    ]);
+  });
+
+  it('lights up every label of the person a speaker belongs to', () => {
+    const speakers = speakersOf([seg(0, 1), seg(1, 2), seg(2, 3), seg(3, 4)], {
+      '1': 'Sławek',
+      '4': 'SŁAWEK',
+      '2': 'Alan',
+    });
+    expect(samePerson(speakers, 4).sort()).toEqual([1, 4]);
+    expect(samePerson(speakers, 2)).toEqual([2]);
+    expect(samePerson(speakers, 3)).toEqual([3]);
+    expect(samePerson(speakers, null)).toEqual([]);
+    expect(samePerson(speakers, 9)).toEqual([]);
+  });
+
+  it('counts people and labels apart once labels share a name', () => {
+    const speakers = speakersOf([seg(0, 1), seg(1, 2), seg(2, 3), seg(3, 4), seg(4, 5)], {
+      '1': 'Sławek',
+      '2': 'Sławek',
+      '3': 'Alan',
+      '4': 'Mikołaj',
+    });
+    expect(speakerCountLine(speakers)).toBe('4 speakers · 5 labels · 1 unnamed');
   });
 
   it('says how many speakers there are and how many are unnamed', () => {

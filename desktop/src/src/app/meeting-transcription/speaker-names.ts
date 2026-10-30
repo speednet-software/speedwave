@@ -1,6 +1,6 @@
 import { SPEAKER_NAME_MAX_CHARS, type Segment } from '../models/transcript';
 
-const SPEAKER_COLORS = ['var(--teal)', 'var(--violet)', 'var(--amber)', 'var(--green)'];
+const SPEAKER_COLORS = ['var(--teal)', 'var(--violet)', 'var(--amber)', 'var(--rose)'];
 
 /** One diarized speaker of a transcript, as the legend, the line labels and the name dialog show it. */
 export interface Speaker {
@@ -15,6 +15,8 @@ export interface Speaker {
   color: string | null;
   /** From speaker 5 on, the initial of the name, else the number, drawn in a circle. */
   mark: string | null;
+  /** Whether another label has the same name, so the label number is shown beside it. */
+  sharesName: boolean;
 }
 
 /**
@@ -30,7 +32,10 @@ export function numberLabel(id: number): string {
  * @param id - the speaker number, 1 or more.
  * @param names - the names the user gave, by speaker number.
  */
-export function speakerOfId(id: number, names: Record<string, string>): Omit<Speaker, 'lines'> {
+export function speakerOfId(
+  id: number,
+  names: Record<string, string>
+): Omit<Speaker, 'lines' | 'sharesName'> {
   const name = names[String(id)] ?? null;
   const color = SPEAKER_COLORS[id - 1] ?? null;
   const mark = color ? null : name ? name.charAt(0).toUpperCase() : String(id);
@@ -38,7 +43,8 @@ export function speakerOfId(id: number, names: Record<string, string>): Omit<Spe
 }
 
 /**
- * The diarized speakers of a transcript, those with the most lines first.
+ * The diarized speakers of a transcript, one person after another: labels that share a name stand
+ * together, the person with the most lines first, and within a person the label with the most.
  * @param segments - the transcript's segments.
  * @param names - the names the user gave, by speaker number.
  */
@@ -48,9 +54,42 @@ export function speakersOf(segments: Segment[], names: Record<string, string>): 
     const id = seg.speaker_id;
     if (id != null && id >= 1) lines.set(id, (lines.get(id) ?? 0) + 1);
   }
-  return [...lines]
-    .map(([id, count]) => ({ ...speakerOfId(id, names), lines: count }))
-    .sort((a, b) => b.lines - a.lines || a.id - b.id);
+  const people = new Map<string, Omit<Speaker, 'sharesName'>[]>();
+  for (const [id, count] of lines) {
+    const speaker = { ...speakerOfId(id, names), lines: count };
+    const key = speaker.name ? `name:${nameKey(speaker.name)}` : `id:${id}`;
+    people.set(key, [...(people.get(key) ?? []), speaker]);
+  }
+  const byLines = (a: { lines: number; id: number }, b: { lines: number; id: number }) =>
+    b.lines - a.lines || a.id - b.id;
+  return [...people.values()]
+    .map((labels) => labels.sort(byLines))
+    .sort((a, b) => byLines(personOf(a), personOf(b)))
+    .flatMap((labels) => labels.map((s) => ({ ...s, sharesName: labels.length > 1 })));
+}
+
+/**
+ * The speakers whose lines light up with `id`'s: every label with its name, or `id` alone.
+ * @param speakers - every speaker of the transcript.
+ * @param id - the speaker hovered or being named, or null.
+ */
+export function samePerson(speakers: Speaker[], id: number | null): number[] {
+  const speaker = speakers.find((s) => s.id === id);
+  if (!speaker) return [];
+  const name = speaker.name;
+  if (name === null) return [speaker.id];
+  return speakers.filter((s) => s.name !== null && sameSpeakerName(s.name, name)).map((s) => s.id);
+}
+
+function nameKey(name: string): string {
+  return name.trim().toLowerCase();
+}
+
+function personOf(labels: { lines: number; id: number }[]): { lines: number; id: number } {
+  return {
+    lines: labels.reduce((sum, s) => sum + s.lines, 0),
+    id: Math.min(...labels.map((s) => s.id)),
+  };
 }
 
 /**
@@ -74,7 +113,7 @@ export function normalizeSpeakerName(raw: string): string {
  * @param b - the other name.
  */
 export function sameSpeakerName(a: string, b: string): boolean {
-  return a.trim().toLowerCase() === b.trim().toLowerCase();
+  return nameKey(a) === nameKey(b);
 }
 
 /**
@@ -104,7 +143,10 @@ export function isTranscriptLabel(name: string): boolean {
  * @param speaker - the speaker the control names.
  */
 export function speakerActionLabel(speaker: Speaker): string {
-  return `${speaker.name ? 'Rename' : 'Name'} ${speaker.label}, ${linesLabel(speaker.lines)}`;
+  const label = speaker.sharesName
+    ? `${speaker.label} (${numberLabel(speaker.id)})`
+    : speaker.label;
+  return `${speaker.name ? 'Rename' : 'Name'} ${label}, ${linesLabel(speaker.lines)}`;
 }
 
 /**
@@ -134,16 +176,20 @@ export function nameChangeNote(target: Speaker, speakers: Speaker[], typed: stri
 }
 
 /**
- * "3 speakers · 1 unnamed", "3 speakers · none named" or "3 speakers"; '' without speakers.
+ * "3 speakers · 1 unnamed", "3 speakers · none named" or "3 speakers", with "· 4 labels" when
+ * labels share a name, so people and labels differ; '' without speakers.
  * @param speakers - the transcript's speakers.
  */
 export function speakerCountLine(speakers: Speaker[]): string {
   if (speakers.length === 0) return '';
-  const count = `${speakers.length} ${speakers.length === 1 ? 'speaker' : 'speakers'}`;
+  const named = speakers.flatMap((s) => (s.name ? [s.name] : []));
+  const people = uniqueSpeakerNames(named).length + speakers.length - named.length;
+  const parts = [`${people} ${people === 1 ? 'speaker' : 'speakers'}`];
+  if (people < speakers.length) parts.push(`${speakers.length} labels`);
   const unnamed = speakers.filter((s) => !s.name).length;
-  if (unnamed === 0) return count;
-  if (unnamed === speakers.length) return `${count} · none named`;
-  return `${count} · ${unnamed} unnamed`;
+  if (unnamed === speakers.length) parts.push('none named');
+  else if (unnamed > 0) parts.push(`${unnamed} unnamed`);
+  return parts.join(' · ');
 }
 
 /**

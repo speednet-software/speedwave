@@ -5,7 +5,7 @@ import { SpeakerLegendComponent, type NameRequest } from './speaker-legend.compo
 import { speakerOfId, type Speaker } from '../speaker-names';
 
 function speaker(id: number, lines: number, name?: string): Speaker {
-  return { ...speakerOfId(id, name ? { [String(id)]: name } : {}), lines };
+  return { ...speakerOfId(id, name ? { [String(id)]: name } : {}), lines, sharesName: false };
 }
 
 describe('SpeakerLegendComponent', () => {
@@ -30,7 +30,7 @@ describe('SpeakerLegendComponent', () => {
     fixture.componentInstance.reapply.subscribe(() => reapplied++);
   });
 
-  function render(speakers: Speaker[], canReapply = false, highlighted: number | null = null) {
+  function render(speakers: Speaker[], canReapply = false, highlighted: number[] = []) {
     fixture.componentRef.setInput('speakers', speakers);
     fixture.componentRef.setInput('canReapply', canReapply);
     fixture.componentRef.setInput('highlighted', highlighted);
@@ -66,7 +66,7 @@ describe('SpeakerLegendComponent', () => {
   });
 
   it('marks the highlighted speaker', () => {
-    render([speaker(1, 2), speaker(2, 1, 'Paweł')], false, 2);
+    render([speaker(1, 2), speaker(2, 1, 'Paweł')], false, [2]);
     expect(all('speaker-chip')[1].className).toContain('border-[var(--accent)]');
     expect(all('speaker-chip')[0].className).not.toContain('border-[var(--accent)]');
   });
@@ -100,6 +100,25 @@ describe('SpeakerLegendComponent', () => {
     expect(q('speaker-fewer')).toBeNull();
   });
 
+  it('shows the label number beside a name another label shares, and lights up every label of the person', () => {
+    const shared = [
+      { ...speaker(2, 221, 'Sławek'), sharesName: true },
+      { ...speaker(4, 199, 'Sławek'), sharesName: true },
+      speaker(3, 20, 'Alan'),
+    ];
+    render(shared, false, [2, 4]);
+    const chips = all('speaker-chip');
+    expect(
+      chips.map((c) => c.querySelector('[data-testid="speaker-number"]')?.textContent)
+    ).toEqual(['#2', '#4', undefined]);
+    expect(chips.map((c) => c.className.includes('border-[var(--accent)]'))).toEqual([
+      true,
+      true,
+      false,
+    ]);
+    expect(chips[1].getAttribute('aria-label')).toBe('Rename Sławek (Speaker 4), 199 lines');
+  });
+
   it('only shows the speakers while they cannot be named', () => {
     fixture.componentRef.setInput('editable', false);
     render([speaker(1, 2), speaker(2, 1, 'Paweł')], true);
@@ -111,7 +130,7 @@ describe('SpeakerLegendComponent', () => {
   });
 
   it('keeps the accent on a highlighted unnamed chip, not the dashed line colour', () => {
-    render([speaker(1, 2)], false, 1);
+    render([speaker(1, 2)], false, [1]);
     expect(all('speaker-chip')[0].className).toContain('border-[var(--accent)]');
     expect(all('speaker-chip')[0].className).not.toContain('border-[var(--line-strong)]');
   });
