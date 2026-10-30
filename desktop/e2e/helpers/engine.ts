@@ -162,7 +162,8 @@ function keepLines(text: string, keep?: { head?: number; tail?: number; grep?: R
  * long its round trip through the engine transport took, so a slow transport shows apart from
  * a loaded guest. On macOS it also times the Lima SSH transport from the host: through the
  * control master and on a fresh connection, `limactl shell` without `sudo`, `sudo` without
- * `limactl`, the guest's name resolution, plus the master's state and the live ssh and
+ * `limactl`, the guest's name resolution, a syscall trace of a slow `sudo` with the guest's
+ * systemd, journal and D-Bus state, plus the master's state and the live ssh and
  * limactl processes. The argv stays free of shell metacharacters and whitespace: the Windows
  * transport re-parses it.
  */
@@ -250,6 +251,26 @@ function limaTransportProbes(): {
         sshConfig,
         host,
         'hostname; cat /etc/hosts /etc/resolv.conf; time getent hosts "$(hostname)"; time timeout 20 getent hosts github.com; resolvectl status 2>&1 | head -30',
+      ],
+      env,
+    },
+    {
+      label: 'host: ssh what sudo waits on',
+      file: 'ssh',
+      args: [
+        '-F',
+        sshConfig,
+        host,
+        [
+          'systemctl is-system-running',
+          'systemctl --failed --no-legend --no-pager',
+          'time logger -t spw-probe sudo-probe',
+          'time busctl --system --timeout=20 call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus GetId',
+          'command -v strace >/dev/null || echo strace-missing',
+          'timeout 45 sudo -n strace -f -tt -T -o /tmp/spw-sudo.strace sudo -n true',
+          "grep -E '<([1-9][0-9]*|0\\.[1-9])[0-9.]*>' /tmp/spw-sudo.strace | head -40",
+          'journalctl -b --since -20min -p warning --no-pager 2>&1 | tail -40',
+        ].join('; '),
       ],
       env,
     },
