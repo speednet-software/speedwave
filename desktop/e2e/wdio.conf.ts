@@ -1,7 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { dumpContainerLogs } from './helpers/engine';
+import { dumpContainerLogs, dumpEngineState } from './helpers/engine';
 import { runPreflight } from './helpers/preflight';
 
 const SCREENSHOT_DIR = join(process.cwd(), 'screenshots');
@@ -97,6 +97,11 @@ async function captureFailure(what: string, error?: Error): Promise<void> {
     console.log(`Screenshot saved: ${filepath}`);
   } catch (e) {
     console.error(`Failed to save screenshot: ${e}`);
+  }
+  try {
+    console.log(`Engine state saved: ${dumpEngineState(SCREENSHOT_DIR, timestamp)}`);
+  } catch (e) {
+    console.error(`Failed to save engine state: ${e}`);
   }
   try {
     const files = dumpContainerLogs(SCREENSHOT_DIR, timestamp);

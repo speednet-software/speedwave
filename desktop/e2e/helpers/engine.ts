@@ -131,6 +131,54 @@ export function dumpContainerLogs(dir: string, stamp: string): string[] {
   return written;
 }
 
+const ENGINE_PROBE_TIMEOUT_MS = 60_000;
+
+const ENGINE_STATE_PROBES: { argv: string[]; keep?: { head?: number; tail?: number } }[] = [
+  { argv: ['true'] },
+  { argv: ['uptime'] },
+  { argv: ['cat', '/proc/pressure/cpu', '/proc/pressure/memory', '/proc/pressure/io'] },
+  { argv: ['free', '-m'] },
+  { argv: ['vmstat', '1', '3'] },
+  { argv: ['df', '-h'] },
+  { argv: ['top', '-b', '-n', '1', '-o', '%CPU'], keep: { head: 40 } },
+  { argv: ['dmesg', '-T'], keep: { tail: 100 } },
+];
+
+function keepLines(text: string, keep?: { head?: number; tail?: number }): string {
+  if (!keep) return text;
+  const lines = text.split('\n');
+  if (keep.head !== undefined) return lines.slice(0, keep.head).join('\n');
+  if (keep.tail !== undefined) return lines.slice(-keep.tail).join('\n');
+  return text;
+}
+
+/**
+ * Writes the load, pressure, memory, disk and kernel log of the engine VM (Lima) or distro (WSL)
+ * into `dir` as `FAIL-<stamp>-engine-state.txt` and returns the file. Each probe records how
+ * long its round trip through the engine transport took, so a slow transport shows apart from
+ * a loaded guest. The argv stays free of shell metacharacters and whitespace: the Windows
+ * transport re-parses it.
+ */
+export function dumpEngineState(dir: string, stamp: string): string {
+  const sections: string[] = [];
+  for (const probe of ENGINE_STATE_PROBES) {
+    const { file, args, env } = engineArgv(probe.argv);
+    const started = Date.now();
+    const run = spawnSync(file, args, {
+      env,
+      encoding: 'utf8',
+      timeout: ENGINE_PROBE_TIMEOUT_MS,
+    });
+    const elapsed = Date.now() - started;
+    const outcome = run.error ? `error ${run.error.message}` : `exit ${run.status}`;
+    const body = keepLines(`${run.stdout ?? ''}${run.stderr ?? ''}`.trimEnd(), probe.keep);
+    sections.push(`== ${probe.argv.join(' ')} (${elapsed} ms, ${outcome})\n${body}`);
+  }
+  const stateFile = join(dir, `FAIL-${stamp}-engine-state.txt`);
+  writeFileSync(stateFile, sections.join('\n\n') + '\n');
+  return stateFile;
+}
+
 /** Reads the name-store via the engine into filename → 64-hex content. Plain metachar-free
  *  argv is what survives both transports' default-shell re-parse (wsl.rs::run_in_distro). */
 export function storeSnapshot(): Map<string, string> {
