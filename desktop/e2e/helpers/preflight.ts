@@ -28,13 +28,6 @@ export interface PreflightFailure {
   readonly reason: string;
 }
 
-async function fetchJson(url: string, apiKey: string): Promise<unknown> {
-  const signal = AbortSignal.timeout(FETCH_TIMEOUT_MS);
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${apiKey}` }, signal });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
-}
-
 /** Probes with the real token budget: the balance endpoint is no substitute,
  *  since a funded-looking account still 402s on the up-front reservation. */
 async function checkOpenrouter(): Promise<PreflightFailure | null> {
@@ -137,18 +130,37 @@ async function checkAnthropic(): Promise<PreflightFailure | null> {
   };
 }
 
-/** True when the server answers FROM THIS HOST on the catalog path production
- *  uses (`discovery.rs` → `{base}/v1/models`); bare `/models` 404s on LM Studio. */
-async function localLlmReachable(): Promise<boolean> {
+/** Why the server does not answer FROM THIS HOST on the catalog path production
+ *  uses (`discovery.rs` → `{base}/v1/models`; bare `/models` 404s on LM Studio), null when it does. */
+async function localLlmUnreachableReason(): Promise<string | null> {
   const baseUrl = process.env.LOCAL_LLM_BASE_URL;
   const apiKey = process.env.LOCAL_LLM_API_KEY;
-  if (!baseUrl || !apiKey) return false;
+  if (!baseUrl || !apiKey) return 'LOCAL_LLM_BASE_URL / LOCAL_LLM_API_KEY are not set';
+  const started = Date.now();
+  let res: Response;
   try {
-    await fetchJson(`${baseUrl.replace(/\/$/, '')}/v1/models`, apiKey);
-    return true;
-  } catch {
-    return false;
+    res = await fetch(`${baseUrl.replace(/\/$/, '')}/v1/models`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+  } catch (e) {
+    return `GET /v1/models failed after ${Date.now() - started} ms: ${describeFetchError(e)}`;
   }
+  const body = await res.text().catch(() => '');
+  const elapsed = Date.now() - started;
+  if (!res.ok) return `GET /v1/models answered HTTP ${res.status} after ${elapsed} ms: ${body.slice(0, 300).trim()}`;
+  try {
+    JSON.parse(body);
+    return null;
+  } catch {
+    return `GET /v1/models answered HTTP ${res.status} after ${elapsed} ms with a body that is not JSON: ${body.slice(0, 300).trim()}`;
+  }
+}
+
+function describeFetchError(e: unknown): string {
+  const err = e as Error & { cause?: { code?: string; message?: string } };
+  const cause = err.cause ? ` (cause: ${[err.cause.code, err.cause.message].filter(Boolean).join(' ')})` : '';
+  return `${err.name}: ${err.message}${cause}`;
 }
 
 async function localModelProblem(): Promise<string | null> {
@@ -172,7 +184,7 @@ async function localModelProblem(): Promise<string | null> {
         signal: AbortSignal.timeout(LOCAL_MODEL_PROBE_TIMEOUT_MS),
       });
     } catch (e) {
-      return `probe request failed: ${(e as Error).message}`;
+      return `probe request failed: ${describeFetchError(e)}`;
     }
     const body = await res.text().catch(() => '');
     if (res.ok && hasStopReason(body)) return null;
@@ -199,18 +211,18 @@ function hasStopReason(body: string): boolean {
 /** Fatal preconditions, empty when the suite may run. An unreachable local LLM is not
  *  fatal — it marks spec 11 and the live-server tests of spec 12 skippable so the rest keep reporting. */
 export async function runPreflight(): Promise<PreflightFailure[]> {
-  const [openrouter, anthropic, localOk] = await Promise.all([
+  const [openrouter, anthropic, unreachableReason] = await Promise.all([
     checkOpenrouter(),
     checkAnthropic(),
-    localLlmReachable(),
+    localLlmUnreachableReason(),
   ]);
-  const modelProblem = localOk ? await localModelProblem() : null;
+  const modelProblem = unreachableReason === null ? await localModelProblem() : null;
   const target = process.env.LOCAL_LLM_BASE_URL || '(LOCAL_LLM_BASE_URL unset)';
 
-  if (!localOk) {
+  if (unreachableReason !== null) {
     process.env[LOCAL_LLM_UNREACHABLE_ENV] = '1';
     console.warn(
-      `\n⚠  E2E preflight: local LLM at ${target} is unreachable from this machine.\n` +
+      `\n⚠  E2E preflight: local LLM at ${target} is unreachable from this machine (${unreachableReason}).\n` +
         '   Spec 11 (local-provider-resume) and the live-server tests of spec 12\n' +
         '   (provider-errors) will SKIP — spec 12 still runs its offline-server test.\n' +
         '   Give this host a route to the server to restore that coverage.\n'
