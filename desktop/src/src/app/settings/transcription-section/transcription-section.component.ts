@@ -236,8 +236,8 @@ const SPEAKER_COST_TEXT = {
           id="transcription-your-name-hint"
           class="mt-1.5 text-[11px] leading-relaxed text-[var(--ink-mute)]"
         >
-          Used instead of "You" in exports and in what Claude gets. The transcript in the app keeps
-          showing "You". Stored on this computer only.
+          Used instead of "You" in exports and in transcripts you attach to a chat. The transcript
+          in the app keeps showing "You". Stored on this computer only.
         </p>
       </div>
 
@@ -458,7 +458,7 @@ export class TranscriptionSectionComponent implements OnInit {
   /** Whether new recordings show live text (off unless the user turned it on). */
   readonly liveTranscript = signal(this.transcription.liveTranscriptPreferred());
   readonly speakerAttribution = signal(this.transcription.speakerAttribution());
-  /** The user's own name for exports and Claude ('' when not set). */
+  /** The user's own name for exports and chats ('' when not set). */
   readonly yourName = signal(this.transcription.yourName());
   protected readonly nameMaxChars = SPEAKER_NAME_MAX_CHARS;
 

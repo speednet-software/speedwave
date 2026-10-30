@@ -47,7 +47,7 @@ const LEGACY_LIVE_TRANSCRIPT_STORAGE_KEY = 'speedwave-live-transcript';
 
 const SPEAKER_ATTRIBUTION_STORAGE_KEY = 'speedwave-speaker-attribution';
 
-/** localStorage key of the user's own name, used instead of "You" in exports and for Claude. */
+/** localStorage key of the user's own name, used instead of "You" in exports and in chats. */
 const YOUR_NAME_STORAGE_KEY = 'speedwave-your-name';
 
 /** localStorage key set once the user was asked for their name before a first export. */
@@ -144,7 +144,7 @@ function speakerLabelsPrompt(session: TranscriptSession, yourName: string): stri
 }
 
 /**
- * The sentence that tells Claude not to guess names for the unnamed labels; '' without any.
+ * The sentence that tells the model not to guess names for the unnamed labels; '' without any.
  * @param text - the prompt texts of the session's language.
  * @param unnamed - the labels of the unnamed speakers.
  */
@@ -354,7 +354,7 @@ export class TranscriptionService {
     writeStored(SPEAKER_ATTRIBUTION_STORAGE_KEY, on ? 'on' : 'off');
   }
 
-  /** The user's own name for exports and Claude; '' when not set. */
+  /** The user's own name for exports and chats; '' when not set. */
   yourName(): string {
     return readStored(YOUR_NAME_STORAGE_KEY) ?? '';
   }

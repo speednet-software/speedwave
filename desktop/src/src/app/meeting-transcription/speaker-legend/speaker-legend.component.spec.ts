@@ -129,6 +129,6 @@ describe('SpeakerLegendComponent', () => {
     const note = q('speaker-approximate')!;
     expect(note.tagName).toBe('BUTTON');
     expect(note.getAttribute('aria-label')).toContain('one person can get two labels');
-    expect(note.getAttribute('aria-label')).toContain('Claude');
+    expect(note.getAttribute('aria-label')).toContain('transcripts you attach to a chat');
   });
 });

@@ -11,7 +11,7 @@ const VISIBLE_CHIPS = 4;
 /** What the approximate-labels note says in its tooltip. */
 const APPROXIMATE_NOTE =
   'Labels are approximate: one person can get two labels and one label can cover two people. ' +
-  'Names you give go to the export and to what Claude gets.';
+  'Names you give go to the export and to transcripts you attach to a chat.';
 
 /** A request to name a speaker, with the element focus returns to afterwards. */
 export interface NameRequest {

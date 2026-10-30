@@ -126,8 +126,8 @@ const MICROPHONE_ONLY_NO_LABELS =
   'Speaker labels are not available for a microphone-only recording.';
 
 const YOUR_NAME_NOTE =
-  'Used instead of "You" in exports and in what Claude gets. The transcript here keeps showing ' +
-  '"You". You can change it in Settings.';
+  'Used instead of "You" in exports and in transcripts you attach to a chat. The transcript here ' +
+  'keeps showing "You". You can change it in Settings.';
 
 function speakerOf(
   seg: Segment,

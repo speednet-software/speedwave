@@ -574,7 +574,7 @@ describe('TranscriptionSectionComponent', () => {
       expect(input().getAttribute('maxlength')).toBe('40');
       const card = fixture.nativeElement.querySelector('[data-testid="your-name"]');
       expect(card.textContent).toContain(
-        'Used instead of "You" in exports and in what Claude gets.'
+        'Used instead of "You" in exports and in transcripts you attach to a chat.'
       );
       expect(card.textContent).toContain('Stored on this computer only.');
       expect(input().labels?.[0]?.textContent?.trim()).toBe('Your name');
