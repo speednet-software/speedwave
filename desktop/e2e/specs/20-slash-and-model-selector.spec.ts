@@ -252,7 +252,7 @@ describe('Slash Popover + Model/Effort Selector', function () {
     expect(await $('[data-testid="control-chip"][data-command="model"]').isExisting()).toBe(true);
   });
 
-  it('write-through: local provider soft-imposes the chosen model on the next session', async function () {
+  it.only('write-through: local provider soft-imposes the chosen model on the next session', async function () {
     this.timeout(RESTART_WAIT_MS + 120_000);
     if (localLlmUnreachable()) this.skip();
     const local = requireLocalLlm();

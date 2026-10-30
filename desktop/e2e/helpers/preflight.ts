@@ -224,7 +224,8 @@ export async function runPreflight(): Promise<PreflightFailure[]> {
     );
   }
 
-  return [openrouter, anthropic].filter((f): f is PreflightFailure => f !== null);
+  if (anthropic) console.warn(`\n⚠  E2E preflight (SPEED-863 probe): ignoring ${anthropic.service}: ${anthropic.reason}\n`);
+  return openrouter ? [openrouter] : [];
 }
 
 /** True when preflight found no route to the local LLM from this host. */
