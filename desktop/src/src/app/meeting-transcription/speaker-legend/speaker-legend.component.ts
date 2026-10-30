@@ -29,15 +29,11 @@ export interface NameRequest {
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block' },
   template: `
-    <div
-      class="mt-2.5 flex items-center gap-1.5"
-      [class.flex-wrap]="expanded()"
-      data-testid="speaker-legend"
-    >
+    <div class="mt-2.5 flex flex-wrap items-center gap-1.5" data-testid="speaker-legend">
       @for (s of shown(); track s.id) {
         <button
           type="button"
-          class="inline-flex min-w-0 max-w-[16rem] shrink-0 items-center gap-1.5 rounded-md border bg-[var(--bg-1)] py-1 pl-2 pr-2.5 text-[12px] hover:bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--accent)] disabled:cursor-default disabled:hover:bg-[var(--bg-1)]"
+          class="inline-flex min-w-0 max-w-[min(16rem,100%)] items-center gap-1.5 rounded-md border bg-[var(--bg-1)] py-1 pl-2 pr-2.5 text-[12px] hover:bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--accent)] disabled:cursor-default disabled:hover:bg-[var(--bg-1)]"
           data-testid="speaker-chip"
           [class.border-dashed]="!s.name"
           [class.border-[var(--line-strong)]]="!s.name && highlighted() !== s.id"

@@ -85,6 +85,15 @@ describe('SpeakerLegendComponent', () => {
     expect(all('speaker-chip').length).toBe(4);
   });
 
+  it('wraps onto a second row instead of running past a narrow pane, and caps a chip at its width', () => {
+    render([1, 2, 3, 4, 5].map((id) => speaker(id, 200 + id)));
+    expect(q('speaker-legend')!.className).toContain('flex-wrap');
+    for (const chip of all('speaker-chip')) {
+      expect(chip.className).toContain('max-w-[min(16rem,100%)]');
+      expect(chip.className).not.toContain('shrink-0');
+    }
+  });
+
   it('shows no +N for four speakers or fewer', () => {
     render([1, 2, 3, 4].map((id) => speaker(id, 1)));
     expect(q('speaker-more')).toBeNull();
