@@ -376,7 +376,7 @@ describe('LiveTranscriptComponent', () => {
       fixture.detectChanges();
       type(' marta ');
       expect(q('speaker-name-note')!.textContent?.trim()).toBe(
-        'Renames Speaker 2 on all 2 lines. Speaker 1 is already Marta, so both will show as Marta, 5 lines together. Rename either one to split them again.'
+        'Renames Speaker 2 on all 2 lines. Same name as Speaker 1, so they count as one person, also in exports and chats. Different people? Add a surname or a number.'
       );
       type('Marek');
       expect(q('speaker-name-note')!.textContent?.trim()).toBe('Renames Speaker 2 on all 2 lines.');
@@ -539,7 +539,7 @@ describe('LiveTranscriptComponent', () => {
       all('line-speaker')[2].click();
       fixture.detectChanges();
       type('marta   nowak');
-      expect(q('speaker-name-note')!.textContent).toContain('Speaker 1 is already Marta Nowak');
+      expect(q('speaker-name-note')!.textContent).toContain('Same name as Speaker 1');
     });
 
     it('does not call the backend when the typed name normalises to the stored one', async () => {

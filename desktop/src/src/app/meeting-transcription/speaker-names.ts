@@ -108,8 +108,8 @@ export function speakerActionLabel(speaker: Speaker): string {
 }
 
 /**
- * What saving a typed name for `target` changes: the lines it renames, and the speakers it puts
- * together with, or that the name is a label the transcript uses.
+ * What saving a typed name for `target` changes: the lines it renames, and the speakers it makes
+ * one person with and how to keep two people of one name apart, or that the name is a label.
  * @param target - the speaker being named.
  * @param speakers - every speaker of the transcript.
  * @param typed - the text in the field.
@@ -129,12 +129,8 @@ export function nameChangeNote(target: Speaker, speakers: Speaker[], typed: stri
       s.id !== target.id && s.name !== null && sameSpeakerName(s.name, name)
   );
   if (others.length === 0) return scope;
-  const together = linesLabel(others.reduce((sum, s) => sum + s.lines, target.lines));
   const ids = others.map((s) => numberLabel(s.id)).join(' and ');
-  const shown = others[0].name;
-  return others.length === 1
-    ? `${scope} ${ids} is already ${shown}, so both will show as ${shown}, ${together} together. Rename either one to split them again.`
-    : `${scope} ${ids} are already ${shown}, so all will show as ${shown}, ${together} together. Rename any of them to split them again.`;
+  return `${scope} Same name as ${ids}, so they count as one person, also in exports and chats. Different people? Add a surname or a number.`;
 }
 
 /**

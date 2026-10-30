@@ -129,12 +129,12 @@ describe('speaker names', () => {
       expect(nameChangeNote(byId(2), speakers, '')).toBe('Renames Speaker 2 on its one line.');
     });
 
-    it('says which speakers a shared name puts together and how many lines that makes', () => {
+    it('says a shared name makes one person everywhere, and how to keep two people of one name apart', () => {
       expect(nameChangeNote(byId(3), speakers, ' MARTA ')).toBe(
-        'Renames Speaker 3 on all 3 lines. Speaker 1 and Speaker 4 are already Marta, so all will show as Marta, 6 lines together. Rename any of them to split them again.'
+        'Renames Speaker 3 on all 3 lines. Same name as Speaker 1 and Speaker 4, so they count as one person, also in exports and chats. Different people? Add a surname or a number.'
       );
       expect(nameChangeNote(byId(1), speakers, 'Marta')).toBe(
-        'Renames Marta on all 2 lines. Speaker 4 is already marta, so both will show as marta, 3 lines together. Rename either one to split them again.'
+        'Renames Marta on all 2 lines. Same name as Speaker 4, so they count as one person, also in exports and chats. Different people? Add a surname or a number.'
       );
     });
 
