@@ -72,6 +72,10 @@ export function engineExec(argv: string[]): string {
 
 const CONTAINER_LOG_TAIL = '500';
 
+export function engineArgvForProbe(argv: string[]): { file: string; args: string[]; env: NodeJS.ProcessEnv } {
+  return engineArgv(argv);
+}
+
 function engineArgv(argv: string[]): { file: string; args: string[]; env: NodeJS.ProcessEnv } {
   if (process.platform === 'darwin') {
     const limactl = join(

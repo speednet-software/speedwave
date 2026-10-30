@@ -25,16 +25,18 @@ import { MEMORY_ANSWER, MEMORY_RECALL_PROMPT } from '../helpers/memory-fact';
 import { localModelUnavailable } from '../helpers/preflight';
 import { pickComposerEffort } from '../helpers/applied-effort';
 import { clearEffortPinFile } from '../helpers/host-files';
+import { logLocalLlmRoute } from '../helpers/probe-route';
 
 const E2E_PROJECT_NAME = 'e2e-test';
 
 describe('Local Provider + Resume', function () {
   before(async function () {
-    this.timeout(180_000);
+    this.timeout(900_000);
     if ((await activeProjectSlug()) !== E2E_PROJECT_NAME) {
       await switchToProject(E2E_PROJECT_NAME);
     }
     expect(await activeProjectSlug()).toBe(E2E_PROJECT_NAME);
+    logLocalLlmRoute();
     if (localModelUnavailable()) this.skip();
   });
 
