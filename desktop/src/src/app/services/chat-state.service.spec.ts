@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { DEFAULT_ALIAS } from './model-picker.service';
 import { TestBed } from '@angular/core/testing';
 import { signal } from '@angular/core';
@@ -21,6 +21,7 @@ import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-ta
 import { createDeferred, type Deferred } from '../testing/deferred';
 import { makeMockLogger } from '../testing/mock-logger';
 import { CLAUDE_MODEL_SWITCH_FAILED_EVENT } from '../models/claude-control';
+import { CHAT_SESSION_EVENT, type ChatSessionEventKind } from '../models/notifications';
 import { DEFAULT_CONTEXT_TOKENS } from '../models/llm';
 
 describe('ChatStateService', () => {
@@ -1760,6 +1761,189 @@ describe('ChatStateService', () => {
       for (const store of service.tabs().values()) {
         expect(store.modelSelectionError()).toBe('');
       }
+    });
+  });
+
+  describe('unseen session events (SPEED-914)', () => {
+    const DWELL_MS = 500;
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    async function twoTabs(): Promise<{ background: string; active: string }> {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      projectState.activeProject.set('test');
+      await service.init();
+      const background = service.activeTabId();
+      const active = await service.openTab();
+      talk(background);
+      talk(active);
+      service.setChatViewOpen(true);
+      vi.useFakeTimers();
+      return { background, active };
+    }
+
+    function talk(tabId: string): void {
+      const store = service.tabs().get(tabId)!;
+      store.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Hello' } });
+      store.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: `s-${tabId}` },
+      } as never);
+    }
+
+    function sessionEvent(tab_id: string, kind: ChatSessionEventKind, project = 'test'): void {
+      mockTauri.dispatchEvent(CHAT_SESSION_EVENT, { project, tab_id, kind });
+    }
+
+    function keepInView(ms = DWELL_MS): void {
+      TestBed.tick();
+      vi.advanceTimersByTime(ms);
+      TestBed.tick();
+    }
+
+    it('marks a background tab with the event it raised, the latest one winning', async () => {
+      const { background } = await twoTabs();
+      window.dispatchEvent(new Event('focus'));
+
+      sessionEvent(background, 'turn_finished');
+      TestBed.tick();
+      expect(service.tabs().get(background)?.unseenEvent()).toBe('turn_finished');
+
+      sessionEvent(background, 'session_error');
+      TestBed.tick();
+      expect(service.tabs().get(background)?.unseenEvent()).toBe('session_error');
+    });
+
+    it('leaves the active tab unmarked while the chat view shows it in a focused window', async () => {
+      const { active } = await twoTabs();
+      window.dispatchEvent(new Event('focus'));
+
+      sessionEvent(active, 'awaiting_input');
+      TestBed.tick();
+
+      expect(service.activeStore().unseenEvent()).toBeNull();
+    });
+
+    it('marks the active tab while the chat view is closed, and keeps the mark there', async () => {
+      const { active } = await twoTabs();
+      window.dispatchEvent(new Event('focus'));
+      service.setChatViewOpen(false);
+
+      sessionEvent(active, 'turn_finished');
+      keepInView();
+
+      expect(service.activeStore().unseenEvent()).toBe('turn_finished');
+    });
+
+    it('clears the mark of the active tab once the regained window keeps it in view', async () => {
+      const { active } = await twoTabs();
+      window.dispatchEvent(new Event('blur'));
+      sessionEvent(active, 'turn_finished');
+      TestBed.tick();
+      expect(service.activeStore().unseenEvent()).toBe('turn_finished');
+
+      window.dispatchEvent(new Event('focus'));
+      keepInView(DWELL_MS - 1);
+      expect(service.activeStore().unseenEvent()).toBe('turn_finished');
+
+      keepInView(1);
+      expect(service.activeStore().unseenEvent()).toBeNull();
+    });
+
+    it('clears a mark once its tab is activated in a focused window, and only then', async () => {
+      const { background } = await twoTabs();
+      window.dispatchEvent(new Event('blur'));
+      sessionEvent(background, 'awaiting_input');
+
+      service.activateTab(background);
+      keepInView();
+      expect(service.tabs().get(background)?.unseenEvent()).toBe('awaiting_input');
+
+      window.dispatchEvent(new Event('focus'));
+      keepInView();
+      expect(service.tabs().get(background)?.unseenEvent()).toBeNull();
+    });
+
+    it('keeps the mark of a tab the user leaves before the mark clears', async () => {
+      const { background, active } = await twoTabs();
+      window.dispatchEvent(new Event('blur'));
+      sessionEvent(active, 'turn_finished');
+      TestBed.tick();
+
+      window.dispatchEvent(new Event('focus'));
+      keepInView(DWELL_MS / 2);
+      service.activateTab(background);
+      keepInView();
+
+      expect(service.tabs().get(active)?.unseenEvent()).toBe('turn_finished');
+    });
+
+    it('gives no mark to a tab that never held a conversation', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      projectState.activeProject.set('test');
+      await service.init();
+      const empty = service.activeTabId();
+      await service.openTab();
+
+      sessionEvent(empty, 'session_error');
+      TestBed.tick();
+
+      expect(service.tabs().get(empty)?.unseenEvent()).toBeNull();
+    });
+
+    it('ignores an event of another project and one for a closed tab', async () => {
+      const { background } = await twoTabs();
+
+      sessionEvent(background, 'turn_finished', 'other');
+      sessionEvent('closed-tab', 'turn_finished');
+      TestBed.tick();
+
+      for (const store of service.tabs().values()) {
+        expect(store.unseenEvent()).toBeNull();
+      }
+    });
+  });
+
+  describe('tabsByRecentUse (SPEED-914)', () => {
+    it('lists the most recently active tab first and drops closed tabs', async () => {
+      await service.init();
+      const first = service.activeTabId();
+      const second = await service.openTab();
+      const third = await service.openTab();
+      expect(service.tabsByRecentUse()).toEqual([third, second, first]);
+
+      service.activateTab(first);
+      expect(service.tabsByRecentUse()).toEqual([first, third, second]);
+
+      await service.closeTab(third);
+      expect(service.tabsByRecentUse()).toEqual([first, second]);
+    });
+
+    it('lists a tab that was never active after the others', async () => {
+      await service.init();
+      const first = service.activeTabId();
+
+      const opening = service.openTab();
+      const [, added] = Array.from(service.tabs().keys());
+      expect(service.tabsByRecentUse()).toEqual([first, added]);
+
+      await opening;
+      expect(service.tabsByRecentUse()).toEqual([added, first]);
+    });
+
+    it('starts over with the one fresh tab after a project switch', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      await service.init();
+      await service.openTab();
+
+      mockTauri.dispatchEvent('project_switch_started', { project: 'test' });
+
+      expect(service.tabsByRecentUse()).toEqual([service.activeTabId()]);
     });
   });
 

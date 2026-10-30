@@ -1342,7 +1342,7 @@ fn main() {
                 tauri::WindowEvent::Focused(focused) => {
                     if should_emit_focus_event(window.label(), *focused) {
                         use tauri::Emitter;
-                        let _ = window.emit("window_focused", ());
+                        let _ = window.emit(window::FOCUSED_EVENT, ());
                     }
                 }
                 _ => {}

@@ -192,6 +192,58 @@ describe('ChatSessionStore', () => {
     });
   });
 
+  describe('unseen marks (SPEED-914)', () => {
+    function converse(): void {
+      store.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Hello' } });
+      store.handleStreamChunk({ chunk_type: 'Result', data: { session_id: 'abc' } } as never);
+    }
+
+    async function interruptATurn(): Promise<void> {
+      converse();
+      store.handleStreamChunk({ chunk_type: 'Text', data: { content: 'working' } });
+      await store.stopConversation();
+    }
+
+    it('records a mark only for a tab that holds a conversation', () => {
+      store.markUnseen('session_error');
+      expect(store.unseenEvent()).toBeNull();
+
+      converse();
+      store.markUnseen('session_error');
+      expect(store.unseenEvent()).toBe('session_error');
+
+      store.markSeen();
+      expect(store.unseenEvent()).toBeNull();
+    });
+
+    it('drops the end of an interrupted turn, and marks the next event', async () => {
+      await interruptATurn();
+
+      store.markUnseen('turn_finished');
+      expect(store.unseenEvent()).toBeNull();
+
+      store.markUnseen('session_error');
+      expect(store.unseenEvent()).toBe('session_error');
+    });
+
+    it('still marks a question after an interrupted turn', async () => {
+      await interruptATurn();
+
+      store.markUnseen('awaiting_input');
+
+      expect(store.unseenEvent()).toBe('awaiting_input');
+    });
+
+    it('marks the end of a turn that started after an interrupted one', async () => {
+      await interruptATurn();
+      store.handleStreamChunk({ chunk_type: 'QueueDrained', data: { text: 'next' } } as never);
+
+      store.markUnseen('turn_finished');
+
+      expect(store.unseenEvent()).toBe('turn_finished');
+    });
+  });
+
   describe('sessionEnded (SPEED-388 phase 2)', () => {
     it('defaults to false', () => {
       expect(store.sessionEnded()).toBe(false);

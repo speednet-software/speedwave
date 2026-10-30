@@ -9,6 +9,7 @@ import { PlanUsageService } from './plan-usage.service';
 import { LoggerService } from './logger.service';
 import { DEFAULT_ALIAS } from './model-picker.service';
 import type { ClaudeContextUsage, ModelSwitchOutcome } from '../models/claude-control';
+import type { ChatSessionEventKind } from '../models/notifications';
 import { isBlankOrSlashOnly, isControlShaped } from '../chat/slash/slash.service';
 import { ComposerAttachments } from '../chat/composer/composer-attachments';
 import { DEFAULT_FIND_STATE, escapeRegExp, type ChatFindState } from '../chat/find/chat-find';
@@ -933,6 +934,30 @@ export class ChatSessionStore {
     if (this.isStreaming) this.finalizeInterruptedTurn();
   }
 
+  private readonly _unseenEvent = signal<ChatSessionEventKind | null>(null);
+  /** The latest session event this tab raised while the user was not looking at it; null once seen. */
+  readonly unseenEvent: Signal<ChatSessionEventKind | null> = this._unseenEvent.asReadonly();
+  private _interruptedTurn: number | null = null;
+
+  /**
+   * Records a session event the user has not seen yet; a later one replaces it. A tab without a
+   * conversation gets no mark, and neither does the end of an interrupted turn.
+   * @param kind - What happened in the session.
+   */
+  markUnseen(kind: ChatSessionEventKind): void {
+    if (!this.hasConversation()) return;
+    if (kind !== 'awaiting_input' && this._interruptedTurn === this._turnId) {
+      this._interruptedTurn = null;
+      return;
+    }
+    this._unseenEvent.set(kind);
+  }
+
+  /** Clears the unseen mark once the user looks at this tab. */
+  markSeen(): void {
+    this._unseenEvent.set(null);
+  }
+
   private readonly _state = signal<ConversationStateTree>({ ...DEFAULT_STATE_TREE });
   readonly state: Signal<ConversationStateTree> = this._state.asReadonly();
 
@@ -1492,6 +1517,7 @@ export class ChatSessionStore {
 
   private finalizeInterruptedTurn(): void {
     this._turnId += 1;
+    this._interruptedTurn = this._turnId;
     this.isStreaming = false;
     const keptBlocks = interruptRunningTools(
       this._currentBlocks.filter((b) => b.type !== 'ask_user')

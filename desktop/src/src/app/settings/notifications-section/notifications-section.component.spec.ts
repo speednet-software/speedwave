@@ -93,6 +93,15 @@ describe('NotificationsSectionComponent', () => {
     expect(el.querySelector('[data-testid="open-notification-settings"]')).toBeNull();
   });
 
+  it('describes every event without naming Claude', async () => {
+    const el = await render();
+
+    expect(el.textContent).toContain('The chat is done and waits for your next message.');
+    expect(el.textContent).toContain('The chat asked a question and cannot continue without you.');
+    expect(el.textContent).toContain('The turn or the session ended with an error.');
+    expect(el.textContent).not.toContain('Claude');
+  });
+
   it('stores every switch when one changes', async () => {
     const el = await render();
 

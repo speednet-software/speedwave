@@ -25,6 +25,7 @@ import { BetaService } from '../services/beta.service';
 import type { ConversationSummary, ChatAttachment, StagedTranscript } from '../models/chat';
 import { formatContextLabel } from '../models/llm';
 import { ChatHeaderComponent } from './header/chat-header.component';
+import { ChatTabSwitcherComponent } from './chat-tabs/chat-tab-switcher.component';
 import { ChatMessageListComponent } from './message-list/chat-message-list.component';
 import { ComposerComponent } from './composer/composer.component';
 import { SessionStatsComponent } from './session-stats/session-stats.component';
@@ -41,6 +42,7 @@ import { onRequestCounter } from '../shared/request-counter';
     CommonModule,
     RouterLink,
     ChatHeaderComponent,
+    ChatTabSwitcherComponent,
     ChatMessageListComponent,
     ComposerComponent,
     SessionStatsComponent,
@@ -127,6 +129,7 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   /** Wires effects driven by the state-tree signal and the drawer toggles. */
   constructor() {
+    this.chat.setChatViewOpen(true);
     let wasStreaming = false;
     effect(() => {
       const streaming = this.chat.isStreamingFromState();
@@ -537,6 +540,7 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   /** Tears down project-lifecycle subscriptions and saves the active tab's composer state. */
   ngOnDestroy(): void {
+    this.chat.setChatViewOpen(false);
     this.saveOutgoingTabState(this.chat.activeTabId());
     if (this.unsubProjectReady) {
       this.unsubProjectReady();

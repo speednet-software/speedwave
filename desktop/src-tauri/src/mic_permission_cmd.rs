@@ -209,33 +209,10 @@ mod tests {
                 | MicPermission::PreviouslyDenied => {}
             }
         }
-        let mut rust: Vec<String> = all
-            .iter()
-            .map(|p| {
-                serde_json::to_value(p)
-                    .unwrap()
-                    .as_str()
-                    .unwrap()
-                    .to_string()
-            })
-            .collect();
-        rust.sort();
-
         let src = include_str!("../../src/src/app/models/transcript.ts");
-        let marker = "export type MicPermission =";
-        let idx = src
-            .find(marker)
-            .expect("transcript.ts must declare `export type MicPermission`");
-        let union = src[idx + marker.len()..].split(';').next().unwrap_or("");
-        let mut ts: Vec<String> = union
-            .split('|')
-            .map(|s| s.trim().trim_matches('\'').to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        ts.sort();
-
         assert_eq!(
-            rust, ts,
+            crate::ts_mirror::serde_names(&all),
+            crate::ts_mirror::ts_union_members(src, "MicPermission"),
             "TS MicPermission union must match Rust MicPermission serde strings"
         );
     }
@@ -254,33 +231,10 @@ mod tests {
                 | MicPermissionStatus::Undetermined => {}
             }
         }
-        let mut rust: Vec<String> = all
-            .iter()
-            .map(|s| {
-                serde_json::to_value(s)
-                    .unwrap()
-                    .as_str()
-                    .unwrap()
-                    .to_string()
-            })
-            .collect();
-        rust.sort();
-
         let src = include_str!("../../src/src/app/models/transcript.ts");
-        let marker = "export type MicPermissionStatus =";
-        let idx = src
-            .find(marker)
-            .expect("transcript.ts must declare `export type MicPermissionStatus`");
-        let union = src[idx + marker.len()..].split(';').next().unwrap_or("");
-        let mut ts: Vec<String> = union
-            .split('|')
-            .map(|s| s.trim().trim_matches('\'').to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        ts.sort();
-
         assert_eq!(
-            rust, ts,
+            crate::ts_mirror::serde_names(&all),
+            crate::ts_mirror::ts_union_members(src, "MicPermissionStatus"),
             "TS MicPermissionStatus union must match Rust serde strings"
         );
     }

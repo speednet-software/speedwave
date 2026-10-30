@@ -11,6 +11,7 @@ import {
 
 import { TauriService } from '../../services/tauri.service';
 import { NotificationsService } from '../../services/notifications.service';
+import { WINDOW_FOCUSED_EVENT } from '../../services/window-focus.service';
 import type { NotificationPermission, NotificationPrefs } from '../../models/notifications';
 import { ToggleComponent } from '../../shared/toggle.component';
 
@@ -25,12 +26,12 @@ const EVENT_ROWS: readonly EventRow[] = [
   {
     key: 'turn_finished',
     label: 'Chat finished',
-    hint: 'Claude is done and waits for your next message.',
+    hint: 'The chat is done and waits for your next message.',
   },
   {
     key: 'awaiting_input',
     label: 'Chat waits for your answer',
-    hint: 'Claude asked a question and cannot continue without you.',
+    hint: 'The chat asked a question and cannot continue without you.',
   },
   {
     key: 'session_error',
@@ -173,7 +174,7 @@ export class NotificationsSectionComponent implements OnInit {
     } catch {}
     await this.refresh();
     try {
-      const stop = await this.tauri.listen('window_focused', () => void this.refresh());
+      const stop = await this.tauri.listen(WINDOW_FOCUSED_EVENT, () => void this.refresh());
       this.destroyRef.onDestroy(stop);
     } catch {}
   }

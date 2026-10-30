@@ -73,7 +73,7 @@ import { IconComponent } from '../../shared/icon.component';
       <button
         type="button"
         data-testid="chat-find-prev"
-        class="rounded p-0.5 hover:bg-[var(--bg-1)] disabled:opacity-40"
+        class="flex items-center rounded p-0.5 hover:bg-[var(--bg-1)] disabled:opacity-40"
         aria-label="Previous match"
         title="Previous match (Shift+Enter)"
         [disabled]="total() === 0"
@@ -84,7 +84,7 @@ import { IconComponent } from '../../shared/icon.component';
       <button
         type="button"
         data-testid="chat-find-next"
-        class="rounded p-0.5 hover:bg-[var(--bg-1)] disabled:opacity-40"
+        class="flex items-center rounded p-0.5 hover:bg-[var(--bg-1)] disabled:opacity-40"
         aria-label="Next match"
         title="Next match (Enter)"
         [disabled]="total() === 0"
@@ -95,7 +95,7 @@ import { IconComponent } from '../../shared/icon.component';
       <button
         type="button"
         data-testid="chat-find-close"
-        class="rounded p-0.5 hover:bg-[var(--bg-1)]"
+        class="flex items-center rounded p-0.5 hover:bg-[var(--bg-1)]"
         aria-label="Close find"
         title="Close (Escape)"
         (click)="closed.emit()"

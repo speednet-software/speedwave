@@ -737,33 +737,10 @@ mod tests {
                 OauthSignIn::Verified | OauthSignIn::SavedUnverified | OauthSignIn::None => {}
             }
         }
-        let mut rust: Vec<String> = all
-            .iter()
-            .map(|v| {
-                serde_json::to_value(v)
-                    .unwrap()
-                    .as_str()
-                    .unwrap()
-                    .to_string()
-            })
-            .collect();
-        rust.sort();
-
         let src = include_str!("../../src/src/app/services/project-state.service.ts");
-        let marker = "export type OauthSignIn =";
-        let idx = src
-            .find(marker)
-            .expect("project-state.service.ts must declare `export type OauthSignIn`");
-        let union = src[idx + marker.len()..].split(';').next().unwrap_or("");
-        let mut ts: Vec<String> = union
-            .split('|')
-            .map(|s| s.trim().trim_matches('\'').to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        ts.sort();
-
         assert_eq!(
-            rust, ts,
+            crate::ts_mirror::serde_names(&all),
+            crate::ts_mirror::ts_union_members(src, "OauthSignIn"),
             "TS OauthSignIn union must match Rust OauthSignIn serde strings"
         );
     }

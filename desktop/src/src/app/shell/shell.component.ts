@@ -8,6 +8,8 @@ import {
   OnInit,
   signal,
 } from '@angular/core';
+import { DOCUMENT } from '@angular/common';
+import { Dialog } from '@angular/cdk/dialog';
 import { NavigationEnd, Router, RouterOutlet } from '@angular/router';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import type { Subscription } from 'rxjs';
@@ -18,6 +20,7 @@ import { BetaService } from '../services/beta.service';
 import { ChatStateService } from '../services/chat-state.service';
 import { NotificationsService } from '../services/notifications.service';
 import { ProjectStateService } from '../services/project-state.service';
+import { TabSwitcherService } from '../services/tab-switcher.service';
 import { TranscriptionService } from '../services/transcription.service';
 import { UiStateService } from '../services/ui-state.service';
 import { CommandPaletteComponent } from './command-palette/command-palette.component';
@@ -195,12 +198,16 @@ export class ShellComponent implements OnInit, OnDestroy {
   readonly beta = inject(BetaService);
   private readonly chat = inject(ChatStateService);
   private readonly transcription = inject(TranscriptionService);
+  private readonly tabSwitcher = inject(TabSwitcherService);
+  private readonly document = inject(DOCUMENT);
+  private readonly dialogs = inject(Dialog);
   private cdr = inject(ChangeDetectorRef);
   private router = inject(Router);
   private readonly notifications = inject(NotificationsService);
   private unsubscribe: (() => void) | null = null;
   private routerSub: Subscription | null = null;
   private stopNotificationRouting: UnlistenFn | null = null;
+  private stopTabSwitchKeys: (() => void) | null = null;
   private destroyed = false;
 
   /** Catalog of every nav entry — order matches the rail top-down. */
@@ -294,6 +301,7 @@ export class ShellComponent implements OnInit, OnDestroy {
       .pipe(filter((e): e is NavigationEnd => e instanceof NavigationEnd))
       .subscribe((e) => this.currentUrlSignal.set(e.urlAfterRedirects));
     void this.routeNotificationClicks();
+    this.routeTabSwitchKeys();
   }
 
   /**
@@ -362,17 +370,13 @@ export class ShellComponent implements OnInit, OnDestroy {
         void this.router.navigateByUrl('/logs');
         return;
       case 'f':
-        if (this.activeViewId() === 'chat' && this.projectState.status() === 'ready') {
+        if (this.chatViewReady()) {
           event.preventDefault();
           this.ui.requestFind();
         }
         return;
       case 'r':
-        if (
-          this.beta.enabled() &&
-          this.activeViewId() === 'chat' &&
-          this.projectState.status() === 'ready'
-        ) {
+        if (this.beta.enabled() && this.chatViewReady()) {
           event.preventDefault();
           this.ui.requestRestart();
         }
@@ -386,11 +390,7 @@ export class ShellComponent implements OnInit, OnDestroy {
           }
           return;
         }
-        if (
-          key.toLowerCase() === 'n' &&
-          this.activeViewId() === 'chat' &&
-          this.projectState.status() === 'ready'
-        ) {
+        if (key.toLowerCase() === 'n' && this.chatViewReady()) {
           event.preventDefault();
           this.ui.requestRestart();
         }
@@ -432,11 +432,13 @@ export class ShellComponent implements OnInit, OnDestroy {
     this.cdr.markForCheck();
   }
 
-  /** Tears down the projectState, router and notification-click subscriptions. */
+  /** Tears down the projectState, router, notification-click and Ctrl+Tab key subscriptions. */
   ngOnDestroy(): void {
     this.destroyed = true;
     this.stopNotificationRouting?.();
     this.stopNotificationRouting = null;
+    this.stopTabSwitchKeys?.();
+    this.stopTabSwitchKeys = null;
     if (this.unsubscribe) {
       this.unsubscribe();
       this.unsubscribe = null;
@@ -453,5 +455,52 @@ export class ShellComponent implements OnInit, OnDestroy {
       if (this.destroyed) stop();
       else this.stopNotificationRouting = stop;
     } catch {}
+  }
+
+  private routeTabSwitchKeys(): void {
+    const keydown = (event: KeyboardEvent): void => this.routeTabSwitchKeydown(event);
+    const keyup = (event: KeyboardEvent): void => {
+      if (event.key === 'Control' && this.tabSwitcher.active()) this.tabSwitcher.commit();
+    };
+    this.document.addEventListener('keydown', keydown, true);
+    this.document.addEventListener('keyup', keyup, true);
+    this.stopTabSwitchKeys = () => {
+      this.document.removeEventListener('keydown', keydown, true);
+      this.document.removeEventListener('keyup', keyup, true);
+    };
+  }
+
+  private routeTabSwitchKeydown(event: KeyboardEvent): void {
+    if (this.tabSwitcher.active()) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.key === 'Escape') this.tabSwitcher.cancel();
+      else if (!event.ctrlKey) this.tabSwitcher.commit();
+      else if (event.key === 'Tab') this.tabSwitcher.step(event.shiftKey ? -1 : 1);
+      return;
+    }
+    if (event.key !== 'Tab' || !this.tabSwitchAllowed(event)) return;
+    if (this.tabSwitcher.step(event.shiftKey ? -1 : 1)) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  }
+
+  private tabSwitchAllowed(event: KeyboardEvent): boolean {
+    return (
+      event.ctrlKey &&
+      !event.metaKey &&
+      !event.altKey &&
+      this.beta.enabled() &&
+      this.chatViewReady() &&
+      !this.ui.paletteOpen() &&
+      !this.ui.projectSwitcherOpen() &&
+      this.dialogs.openDialogs.length === 0 &&
+      this.document.querySelector('[aria-modal="true"], .cdk-overlay-backdrop-showing') === null
+    );
+  }
+
+  private chatViewReady(): boolean {
+    return this.activeViewId() === 'chat' && this.projectState.status() === 'ready';
   }
 }

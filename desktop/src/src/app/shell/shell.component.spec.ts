@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { Component, signal, computed } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { Router, RouterModule } from '@angular/router';
@@ -9,8 +9,10 @@ import { ChatStateService } from '../services/chat-state.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { ThemeService } from '../services/theme.service';
 import { UiStateService } from '../services/ui-state.service';
+import { TabSwitcherService } from '../services/tab-switcher.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
 import { TranscriptionService } from '../services/transcription.service';
+import { ModalOverlayComponent } from './modal-overlay/modal-overlay.component';
 
 /**
  * Stand-in for every routed view in the test router config below — routing to `ShellComponent`
@@ -19,6 +21,18 @@ import { TranscriptionService } from '../services/transcription.service';
  */
 @Component({ selector: 'app-route-stub', standalone: true, template: '' })
 class RouteStubComponent {}
+
+@Component({
+  selector: 'app-open-modal-overlay-stub',
+  imports: [ModalOverlayComponent],
+  template: `<app-modal-overlay
+    [open]="true"
+    kicker="restart"
+    modalTitle="Restart conversation?"
+    primaryLabel="Restart"
+  />`,
+})
+class OpenModalOverlayStubComponent {}
 
 class FakeTabStore {
   readonly messagesFromState = (): readonly unknown[] => [];
@@ -54,12 +68,24 @@ class FakeChatState {
   }
 }
 
+class FakeTabSwitcher {
+  private readonly running = signal(false);
+  readonly active = this.running.asReadonly();
+  readonly step = vi.fn((_direction: 1 | -1): boolean => {
+    this.running.set(true);
+    return true;
+  });
+  readonly commit = vi.fn(() => this.running.set(false));
+  readonly cancel = vi.fn(() => this.running.set(false));
+}
+
 describe('ShellComponent', () => {
   let component: ShellComponent;
   let fixture: ComponentFixture<ShellComponent>;
   let mockTauri: MockTauriService;
   let projectState: ProjectStateService;
   let chatState: FakeChatState;
+  let tabSwitcher: FakeTabSwitcher;
   const betaEnabled = signal(true);
   const recordingSessionId = signal<string | null>(null);
 
@@ -68,6 +94,7 @@ describe('ShellComponent', () => {
     recordingSessionId.set(null);
     mockTauri = new MockTauriService();
     chatState = new FakeChatState();
+    tabSwitcher = new FakeTabSwitcher();
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'list_projects')
         return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
@@ -84,6 +111,7 @@ describe('ShellComponent', () => {
       imports: [
         ShellComponent,
         RouteStubComponent,
+        OpenModalOverlayStubComponent,
         RouterModule.forRoot([
           { path: 'chat', component: RouteStubComponent },
           { path: 'integrations', component: RouteStubComponent },
@@ -96,6 +124,7 @@ describe('ShellComponent', () => {
         { provide: TauriService, useValue: mockTauri },
         { provide: BetaService, useValue: { enabled: betaEnabled.asReadonly() } },
         { provide: ChatStateService, useValue: chatState },
+        { provide: TabSwitcherService, useValue: tabSwitcher },
         {
           provide: TranscriptionService,
           useValue: {
@@ -992,5 +1021,200 @@ describe('ShellComponent', () => {
       expect(chatState.closeTab).not.toHaveBeenCalled();
       expect(event.defaultPrevented).toBe(false);
     });
+  });
+
+  describe('Ctrl+Tab tab switcher (SPEED-914)', () => {
+    afterEach(() => {
+      document.querySelectorAll('[data-testid="spec-modal"]').forEach((el) => el.remove());
+    });
+
+    function press(init: KeyboardEventInit, type: 'keydown' | 'keyup' = 'keydown'): KeyboardEvent {
+      const event = new KeyboardEvent(type, { cancelable: true, ...init });
+      document.dispatchEvent(event);
+      return event;
+    }
+
+    function pressOn(target: HTMLElement, init: KeyboardEventInit): KeyboardEvent {
+      const event = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init });
+      target.dispatchEvent(event);
+      return event;
+    }
+
+    async function onChat(): Promise<void> {
+      await TestBed.inject(Router).navigate(['/chat']);
+      projectState.status.set('ready');
+      chatState.setTabCount(3);
+      fixture.detectChanges();
+    }
+
+    it('starts a switch on Ctrl+Tab and on Ctrl+Shift+Tab in the chat view, and eats the key', async () => {
+      await onChat();
+
+      const event = press({ key: 'Tab', ctrlKey: true });
+      expect(tabSwitcher.step).toHaveBeenCalledWith(1);
+      expect(event.defaultPrevented).toBe(true);
+
+      press({ key: 'Control' }, 'keyup');
+      press({ key: 'Tab', ctrlKey: true, shiftKey: true });
+      expect(tabSwitcher.step).toHaveBeenLastCalledWith(-1);
+    });
+
+    it('moves the highlight on every Tab while Ctrl is held and switches once Ctrl is released', async () => {
+      await onChat();
+
+      press({ key: 'Tab', ctrlKey: true });
+      press({ key: 'Control', ctrlKey: true });
+      press({ key: 'Tab', ctrlKey: true });
+      press({ key: 'Shift', ctrlKey: true, shiftKey: true });
+      press({ key: 'Tab', ctrlKey: true, shiftKey: true });
+      expect(tabSwitcher.step.mock.calls).toEqual([[1], [1], [-1]]);
+      expect(tabSwitcher.commit).not.toHaveBeenCalled();
+
+      press({ key: 'Control' }, 'keyup');
+      expect(tabSwitcher.commit).toHaveBeenCalledTimes(1);
+    });
+
+    it('takes every other key while Ctrl is held, so Ctrl+W closes no tab mid-switch', async () => {
+      await onChat();
+      press({ key: 'Tab', ctrlKey: true });
+
+      const event = press({ key: 'w', ctrlKey: true });
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(chatState.closeTab).not.toHaveBeenCalled();
+    });
+
+    it('cancels on Escape before the focused field or the chat sees it', async () => {
+      await onChat();
+      press({ key: 'Tab', ctrlKey: true });
+      const field = focusedField();
+      const fieldKey = vi.fn((event: KeyboardEvent) => event.stopPropagation());
+      field.addEventListener('keydown', fieldKey);
+      const chatEscape = vi.fn();
+      document.addEventListener('keydown', chatEscape);
+
+      const event = pressOn(field, { key: 'Escape', ctrlKey: true });
+      document.removeEventListener('keydown', chatEscape);
+
+      expect(tabSwitcher.cancel).toHaveBeenCalledTimes(1);
+      expect(tabSwitcher.commit).not.toHaveBeenCalled();
+      expect(event.defaultPrevented).toBe(true);
+      expect(fieldKey).not.toHaveBeenCalled();
+      expect(chatEscape).not.toHaveBeenCalled();
+    });
+
+    it('starts a switch before the focused field handles Ctrl+Tab itself', async () => {
+      await onChat();
+      const field = focusedField();
+      const fieldKey = vi.fn();
+      field.addEventListener('keydown', fieldKey);
+
+      const event = pressOn(field, { key: 'Tab', ctrlKey: true });
+
+      expect(tabSwitcher.step).toHaveBeenCalledWith(1);
+      expect(event.defaultPrevented).toBe(true);
+      expect(fieldKey).not.toHaveBeenCalled();
+    });
+
+    it('switches when a key arrives without Ctrl, and keeps that key from the composer', async () => {
+      await onChat();
+      press({ key: 'Tab', ctrlKey: true });
+
+      const event = press({ key: 'a' });
+
+      expect(tabSwitcher.commit).toHaveBeenCalledTimes(1);
+      expect(event.defaultPrevented).toBe(true);
+    });
+
+    it('ignores a Ctrl release while no switch runs', () => {
+      press({ key: 'Control' }, 'keyup');
+
+      expect(tabSwitcher.commit).not.toHaveBeenCalled();
+    });
+
+    it('stops routing Ctrl+Tab once destroyed', async () => {
+      await onChat();
+      fixture.destroy();
+
+      const event = press({ key: 'Tab', ctrlKey: true });
+
+      expect(tabSwitcher.step).not.toHaveBeenCalled();
+      expect(event.defaultPrevented).toBe(false);
+    });
+
+    it('leaves the key to the webview when there is nothing to switch to', async () => {
+      await onChat();
+      tabSwitcher.step.mockReturnValueOnce(false);
+
+      const event = press({ key: 'Tab', ctrlKey: true });
+
+      expect(event.defaultPrevented).toBe(false);
+    });
+
+    it.each([
+      ['beta is off', () => betaEnabled.set(false)],
+      ['a dialog is open', () => document.body.appendChild(modalDialog())],
+      [
+        'a modal overlay is open',
+        () => TestBed.createComponent(OpenModalOverlayStubComponent).detectChanges(),
+      ],
+      ['an overlay backdrop shows', () => document.body.appendChild(overlayBackdrop())],
+      ['the command palette is open', () => TestBed.inject(UiStateService).togglePalette()],
+      [
+        'the project switcher is open',
+        () => TestBed.inject(UiStateService).toggleProjectSwitcher(),
+      ],
+      ['the project is not ready', () => projectState.status.set('auth_required')],
+    ])('is inert while %s', async (_case, arrange) => {
+      await onChat();
+      arrange();
+      fixture.detectChanges();
+
+      const event = press({ key: 'Tab', ctrlKey: true });
+
+      expect(tabSwitcher.step).not.toHaveBeenCalled();
+      expect(event.defaultPrevented).toBe(false);
+    });
+
+    it('is inert off the chat view', async () => {
+      await TestBed.inject(Router).navigate(['/settings']);
+      projectState.status.set('ready');
+      fixture.detectChanges();
+
+      press({ key: 'Tab', ctrlKey: true });
+
+      expect(tabSwitcher.step).not.toHaveBeenCalled();
+    });
+
+    it('takes neither Cmd+Ctrl+Tab nor Ctrl+Alt+Tab', async () => {
+      await onChat();
+
+      press({ key: 'Tab', ctrlKey: true, metaKey: true });
+      press({ key: 'Tab', ctrlKey: true, altKey: true });
+
+      expect(tabSwitcher.step).not.toHaveBeenCalled();
+    });
+
+    function modalDialog(): HTMLElement {
+      const dialog = document.createElement('div');
+      dialog.setAttribute('aria-modal', 'true');
+      dialog.setAttribute('data-testid', 'spec-modal');
+      return dialog;
+    }
+
+    function overlayBackdrop(): HTMLElement {
+      const backdrop = document.createElement('div');
+      backdrop.className = 'cdk-overlay-backdrop cdk-overlay-backdrop-showing';
+      backdrop.setAttribute('data-testid', 'spec-modal');
+      return backdrop;
+    }
+
+    function focusedField(): HTMLInputElement {
+      const field = document.createElement('input');
+      field.setAttribute('data-testid', 'spec-modal');
+      document.body.appendChild(field);
+      field.focus();
+      return field;
+    }
   });
 });
