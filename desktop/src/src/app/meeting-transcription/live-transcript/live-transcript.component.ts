@@ -133,12 +133,12 @@ const YOUR_NAME_NOTE =
 function speakerOf(
   seg: Segment,
   names: Record<string, string>,
-  sharingName: Set<number>
+  speakers: Map<number, Speaker>
 ): Pick<TranscriptLine, 'speaker' | 'diarized'> {
   if (seg.source === 'mic') return { speaker: 'You', diarized: null };
   const n = seg.speaker_id;
   if (n != null && n >= 1) {
-    const diarized = { ...speakerOfId(n, names), sharesName: sharingName.has(n) };
+    const diarized = speakers.get(n) ?? { ...speakerOfId(n, names), sharesName: false };
     return { speaker: diarized.label, diarized };
   }
   if (seg.source === 'system') return { speaker: 'Meeting', diarized: null };
@@ -741,15 +741,11 @@ export class LiveTranscriptComponent {
    */
   readonly lines = computed<TranscriptLine[]>(() => {
     const names = this.namedSpeakers();
-    const sharingName = new Set(
-      this.speakers()
-        .filter((s) => s.sharesName)
-        .map((s) => s.id)
-    );
+    const speakers = new Map(this.speakers().map((s) => [s.id, s]));
     const ordered = [...this.segments()].sort(bySegmentStart);
     return ordered.map((seg) => ({
       startLabel: fmtTs(seg.start.secs),
-      ...speakerOf(seg, names, sharingName),
+      ...speakerOf(seg, names, speakers),
       text: seg.text.trim(),
     }));
   });
@@ -765,10 +761,14 @@ export class LiveTranscriptComponent {
   /** Whether the speakers can be named: once the transcription is over, as the backend requires. */
   readonly canName = computed(() => ['done', 'postponed', 'failed'].includes(this.status()));
 
-  /** The labels whose lines are highlighted: the person being named, else the one hovered. */
-  readonly highlightedIds = computed(() =>
-    samePerson(this.speakers(), this.naming()?.speaker ?? this.hoveredSpeaker())
-  );
+  /**
+   * The labels whose lines are highlighted: the one label being named, since a name changes only
+   * its lines, else every label of the person hovered.
+   */
+  readonly highlightedIds = computed(() => {
+    const named = this.naming()?.speaker;
+    return named != null ? [named] : samePerson(this.speakers(), this.hoveredSpeaker());
+  });
 
   /** The speaker the name dialog is open for. */
   readonly namingSpeaker = computed(() => {

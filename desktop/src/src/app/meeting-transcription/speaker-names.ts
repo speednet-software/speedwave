@@ -11,7 +11,7 @@ export interface Speaker {
   label: string;
   /** The transcript lines this speaker has. */
   lines: number;
-  /** The dot colour of speakers 1 to 4, else null. */
+  /** The dot colour of speakers 1 to 4, else null; labels of one person share their main label's. */
   color: string | null;
   /** From speaker 5 on, the initial of the name, else the number, drawn in a circle. */
   mark: string | null;
@@ -44,7 +44,7 @@ export function speakerOfId(
 
 /**
  * The diarized speakers of a transcript, one person after another: labels that share a name stand
- * together, the person with the most lines first, and within a person the label with the most.
+ * together in the colour of the one with the most lines, the person with the most lines first.
  * @param segments - the transcript's segments.
  * @param names - the names the user gave, by speaker number.
  */
@@ -65,7 +65,14 @@ export function speakersOf(segments: Segment[], names: Record<string, string>): 
   return [...people.values()]
     .map((labels) => labels.sort(byLines))
     .sort((a, b) => byLines(personOf(a), personOf(b)))
-    .flatMap((labels) => labels.map((s) => ({ ...s, sharesName: labels.length > 1 })));
+    .flatMap((labels) =>
+      labels.map((s) => ({
+        ...s,
+        color: labels[0].color,
+        mark: labels[0].mark,
+        sharesName: labels.length > 1,
+      }))
+    );
 }
 
 /**

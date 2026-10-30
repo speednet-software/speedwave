@@ -486,12 +486,30 @@ describe('LiveTranscriptComponent', () => {
       expect(q('transcript-meta')!.textContent).toContain('2 speakers · 3 labels · 1 unnamed');
       expect(all('line-speaker')[0].textContent).toContain('#1');
       expect(all('line-speaker')[2].textContent).not.toContain('#');
+      const dots = all('line-speaker').map(
+        (l) =>
+          (l.querySelector('[data-testid="speaker-dot"]') as HTMLElement | null)?.style
+            .backgroundColor
+      );
+      expect(dots[0]).toBe('var(--teal)');
+      expect(dots[4]).toBe('var(--teal)');
+      expect(dots[2]).toBe('var(--violet)');
       all('speaker-chip')[1].dispatchEvent(new Event('mouseenter'));
       fixture.detectChanges();
       const lit = all('transcript-line').filter((l) => l.className.includes('bg-[var(--bg-1)]'));
       expect(
         lit.map((l) => l.textContent?.match(/zaczynamy|dalej|jeszcze|odpowiadam/)?.[0])
       ).toEqual(['zaczynamy', 'dalej', 'odpowiadam', 'jeszcze']);
+    });
+
+    it('lights up only the label being named, since its name changes only that label', () => {
+      open({ '1': 'Marta', '3': 'Marta' });
+      all('line-speaker')[4].click();
+      fixture.detectChanges();
+      const lit = all('transcript-line').filter((l) => l.className.includes('bg-[var(--bg-1)]'));
+      expect(lit.length).toBe(1);
+      expect(lit[0].textContent).toContain('odpowiadam');
+      expect(q('speaker-name-note')!.textContent).toContain('Renames Marta on its one line.');
     });
 
     it('offers the names from before the last transcription that no speaker has', () => {

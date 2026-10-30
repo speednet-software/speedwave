@@ -89,6 +89,20 @@ describe('speaker names', () => {
       [3, 4, false],
       [4, 1, false],
     ]);
+    expect(speakers.map((s) => s.color)).toEqual([
+      'var(--violet)',
+      'var(--violet)',
+      'var(--amber)',
+      'var(--rose)',
+    ]);
+  });
+
+  it('gives a person the mark of its main label when that label has no colour', () => {
+    const speakers = speakersOf([seg(0, 6), seg(1, 6), seg(2, 1)], { '6': 'Ewa', '1': 'ewa' });
+    expect(speakers.map((s) => [s.id, s.color, s.mark])).toEqual([
+      [6, null, 'E'],
+      [1, null, 'E'],
+    ]);
   });
 
   it('lights up every label of the person a speaker belongs to', () => {
