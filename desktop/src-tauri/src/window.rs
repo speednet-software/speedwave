@@ -1,6 +1,9 @@
 use super::MAIN_WINDOW_LABEL;
 use tauri::Manager;
 
+/// Event the frontend receives when the main window gains focus; mirrored by `services/window-focus.service.ts`.
+pub(crate) const FOCUSED_EVENT: &str = "window_focused";
+
 /// Returns `true` if a click should be suppressed (debounced): elapsed since
 /// the previous click (`now_ms.saturating_sub(prev_ms)`) is `< threshold_ms`.
 pub(crate) fn should_debounce(prev_ms: u64, now_ms: u64, threshold_ms: u64) -> bool {
@@ -176,5 +179,14 @@ mod tests {
     #[test]
     fn focus_event_skipped_for_empty_label() {
         assert!(!should_emit_focus_event("", true));
+    }
+
+    #[test]
+    fn focused_event_matches_ts() {
+        let src = include_str!("../../src/src/app/services/window-focus.service.ts");
+        assert!(
+            src.contains(&format!("WINDOW_FOCUSED_EVENT = '{FOCUSED_EVENT}'")),
+            "window-focus.service.ts must export WINDOW_FOCUSED_EVENT = '{FOCUSED_EVENT}'"
+        );
     }
 }

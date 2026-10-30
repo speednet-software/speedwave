@@ -752,6 +752,20 @@ describe('ChatComponent', () => {
     });
   });
 
+  describe('chat view presence (SPEED-914)', () => {
+    it('tells the chat state the view is open from construction until it is destroyed', () => {
+      const setOpen = vi.spyOn(chatState, 'setChatViewOpen');
+      fixture.destroy();
+      expect(setOpen).toHaveBeenLastCalledWith(false);
+
+      const next = TestBed.createComponent(ChatComponent);
+      expect(setOpen).toHaveBeenLastCalledWith(true);
+
+      next.destroy();
+      expect(setOpen).toHaveBeenLastCalledWith(false);
+    });
+  });
+
   describe('resumeConversation', () => {
     it('calls resume_conversation and closes the sidebar', async () => {
       projectState.activeProject.set('test');

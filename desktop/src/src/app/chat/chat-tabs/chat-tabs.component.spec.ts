@@ -6,14 +6,17 @@ import { CdkDrag, CdkDropList, type CdkDragDrop } from '@angular/cdk/drag-drop';
 import { ChatTabsComponent } from './chat-tabs.component';
 import { ChatStateService, MAX_CHAT_TABS } from '../../services/chat-state.service';
 import type { ChatMessage } from '../../models/chat';
+import type { ChatSessionEventKind } from '../../models/notifications';
 
 class FakeStore {
   private readonly _messages = signal<readonly ChatMessage[]>([]);
   private readonly _streaming = signal(false);
   private readonly _ended = signal(false);
+  private readonly _unseen = signal<ChatSessionEventKind | null>(null);
   readonly messagesFromState = this._messages.asReadonly();
   readonly isStreamingFromState = this._streaming.asReadonly();
   readonly sessionEnded = this._ended.asReadonly();
+  readonly unseenEvent = this._unseen.asReadonly();
 
   setMessages(msgs: readonly ChatMessage[]): void {
     this._messages.set(msgs);
@@ -23,6 +26,9 @@ class FakeStore {
   }
   setEnded(v: boolean): void {
     this._ended.set(v);
+  }
+  setUnseen(kind: ChatSessionEventKind | null): void {
+    this._unseen.set(kind);
   }
 }
 
@@ -378,6 +384,111 @@ describe('ChatTabsComponent', () => {
       '[data-testid="chat-tab-activate"]'
     ) as HTMLElement;
     expect(activateBtn.getAttribute('aria-label')).toBe('Switch to tab: New chat, session ended');
+  });
+
+  describe('a tab with an unseen session event', () => {
+    let background: FakeStore;
+
+    function activateBtn(): HTMLElement {
+      return tabEls()[1].querySelector('[data-testid="chat-tab-activate"]') as HTMLElement;
+    }
+
+    function titleEl(): HTMLElement {
+      return tabEls()[1].querySelector('[data-testid="chat-tab-title"]') as HTMLElement;
+    }
+
+    function unseenDot(): HTMLElement | null {
+      return tabEls()[1].querySelector('[data-testid="chat-tab-unseen"]');
+    }
+
+    beforeEach(() => {
+      background = new FakeStore();
+      chat.setTabs([
+        ['t1', new FakeStore()],
+        ['t2', background],
+      ]);
+      chat.setActive('t1');
+      fixture.detectChanges();
+    });
+
+    it('shows a bold full-contrast title and a solid dot, named in its tooltip and label', () => {
+      expect(unseenDot()).toBeNull();
+      expect(titleEl().classList.contains('font-bold')).toBe(false);
+      expect(activateBtn().getAttribute('title')).toBeNull();
+
+      background.setUnseen('turn_finished');
+      fixture.detectChanges();
+
+      expect(unseenDot()?.getAttribute('data-kind')).toBe('turn_finished');
+      expect(unseenDot()?.classList.contains('animate-pulse')).toBe(false);
+      expect(unseenDot()?.classList.contains('bg-[var(--accent)]')).toBe(true);
+      expect(titleEl().classList.contains('font-bold')).toBe(true);
+      expect(titleEl().classList.contains('text-[var(--ink)]')).toBe(true);
+      expect(activateBtn().getAttribute('title')).toBe('Finished');
+      expect(activateBtn().getAttribute('aria-label')).toBe('Switch to tab: New chat, finished');
+    });
+
+    it('names a pending question in the tooltip and the label', () => {
+      background.setUnseen('awaiting_input');
+      fixture.detectChanges();
+
+      expect(activateBtn().getAttribute('title')).toBe('Waiting for your answer');
+      expect(activateBtn().getAttribute('aria-label')).toBe(
+        'Switch to tab: New chat, waiting for your answer'
+      );
+    });
+
+    it('keeps a pending question solid while its turn still waits on the answer', () => {
+      background.setStreaming(true);
+      background.setUnseen('awaiting_input');
+      fixture.detectChanges();
+
+      expect(tabEls()[1].querySelector('[data-testid="chat-tab-streaming"]')).toBeNull();
+      expect(unseenDot()?.getAttribute('data-kind')).toBe('awaiting_input');
+      expect(unseenDot()?.classList.contains('animate-pulse')).toBe(false);
+      expect(activateBtn().getAttribute('aria-label')).toBe(
+        'Switch to tab: New chat, waiting for your answer'
+      );
+    });
+
+    it('shows an error with a red dot', () => {
+      background.setUnseen('session_error');
+      background.setEnded(true);
+      fixture.detectChanges();
+
+      expect(unseenDot()?.classList.contains('bg-[var(--red)]')).toBe(true);
+      expect(unseenDot()?.classList.contains('bg-[var(--accent)]')).toBe(false);
+      expect(activateBtn().getAttribute('title')).toBe('Error');
+      expect(activateBtn().getAttribute('aria-label')).toBe(
+        'Switch to tab: New chat, error, session ended'
+      );
+    });
+
+    it('keeps the title bold and pulses the dot again while the marked tab streams', () => {
+      background.setUnseen('turn_finished');
+      background.setStreaming(true);
+      fixture.detectChanges();
+
+      expect(unseenDot()).toBeNull();
+      expect(tabEls()[1].querySelector('[data-testid="chat-tab-streaming"]')).not.toBeNull();
+      expect(titleEl().classList.contains('font-bold')).toBe(true);
+      expect(activateBtn().getAttribute('aria-label')).toBe(
+        'Switch to tab: New chat, finished, streaming'
+      );
+    });
+
+    it('drops the mark once the store clears it', () => {
+      background.setUnseen('turn_finished');
+      fixture.detectChanges();
+
+      background.setUnseen(null);
+      fixture.detectChanges();
+
+      expect(unseenDot()).toBeNull();
+      expect(titleEl().classList.contains('font-bold')).toBe(false);
+      expect(titleEl().classList.contains('text-[var(--ink-mute)]')).toBe(true);
+      expect(activateBtn().getAttribute('title')).toBeNull();
+    });
   });
 
   it('gives the active tab a visibly darker background than an inactive tab', () => {

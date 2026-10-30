@@ -1155,15 +1155,26 @@ describe('LlmProviderComponent', () => {
     expect(calls).toContain('update_llm_config');
   });
 
-  it('ngOnDestroy clears the focus listener', async () => {
+  it('stops probing the sign-in on window focus once destroyed', async () => {
+    const calls: string[] = [];
+    const prev = mockTauri.invokeHandler;
+    mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+      calls.push(cmd);
+      return prev(cmd, args);
+    };
     fixture.componentRef.setInput('activeProject', 'proj');
     component.ngOnInit();
     await flushMicrotasks();
-    expect(mockTauri.listenHandlers['window_focused']).toBeDefined();
+    mockTauri.dispatchEvent('window_focused', undefined);
+    await flushMicrotasks();
+    expect(calls).toContain('get_auth_status');
 
     component.ngOnDestroy();
+    calls.length = 0;
+    mockTauri.dispatchEvent('window_focused', undefined);
+    await flushMicrotasks();
 
-    expect(mockTauri.listenHandlers['window_focused']).toBeUndefined();
+    expect(calls).not.toContain('get_auth_status');
   });
 
   it('saves the configuration once when a detected login arrives while probes are slow', async () => {

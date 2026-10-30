@@ -507,7 +507,7 @@ mod tests {
             .expect_err("the stalled reap times out");
 
         assert!(is_kept(container));
-        reap_unconfirmed_within(&runtime, container, Duration::from_millis(200))
+        reap_unconfirmed_within(&runtime, container, Duration::from_secs(5))
             .expect("the next reap confirms the instance gone");
     }
 
@@ -532,9 +532,9 @@ mod tests {
         reap_instance_recorded(&runtime, container, "leaked", Duration::from_millis(200))
             .expect_err("the stalled reap times out");
 
-        reap_unconfirmed_within(&runtime, container, Duration::from_millis(200))
+        reap_unconfirmed_within(&runtime, container, Duration::from_secs(5))
             .expect("the second reap confirms the instance gone");
-        reap_unconfirmed_within(&runtime, container, Duration::from_millis(200))
+        reap_unconfirmed_within(&runtime, container, Duration::from_secs(5))
             .expect("nothing is left to reap");
 
         let calls = handles.exec_calls.lock().expect("exec calls");

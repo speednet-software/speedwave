@@ -16,6 +16,7 @@ import { ClaudeControlService } from './claude-control.service';
 import { PlanUsageService } from './plan-usage.service';
 import { LoggerService } from './logger.service';
 import { BetaService } from './beta.service';
+import { WindowFocusService } from './window-focus.service';
 import {
   ChatSessionStore,
   MAX_CHAT_TABS,
@@ -28,6 +29,7 @@ import {
   CLAUDE_MODEL_SWITCH_FAILED_EVENT,
   type ClaudeModelSwitchFailedEvent,
 } from '../models/claude-control';
+import { CHAT_SESSION_EVENT, type ChatSessionEvent } from '../models/notifications';
 import type { ConversationStateTree } from '../models/state-tree';
 import {
   type ChatInput,
@@ -69,7 +71,6 @@ export {
   NEW_CONVERSATION_PROJECT_CHANGED,
   NEW_CONVERSATION_STREAMING,
   SESSION_KEPT_MARKER,
-  blocksToPlainText,
   buildStateTreeFromLegacy,
   historyFitsTarget,
   isNotAuthenticatedError,
@@ -87,6 +88,8 @@ export const NEW_CHAT_TAB_LIMIT = 'Close a chat tab to open a new one.';
 
 export const CHAT_TAB_CLOSED = 'That chat tab was closed. Try again.';
 
+const UNSEEN_MARK_DWELL_MS = 500;
+
 /** Singleton service that holds chat session state across navigation. */
 @Injectable({ providedIn: 'root' })
 export class ChatStateService {
@@ -98,6 +101,7 @@ export class ChatStateService {
   private clipboard = inject(Clipboard);
   private log = inject(LoggerService);
   private beta = inject(BetaService);
+  private windowFocus = inject(WindowFocusService);
 
   private readonly deps: ChatStoreDeps;
 
@@ -107,10 +111,15 @@ export class ChatStateService {
   private _sawSwitching = false;
   private _resumeDecider: (() => Promise<'resume' | 'fresh'>) | null = null;
   private _backendTabsReset = false;
+  private _recentTabIds: readonly string[] = [];
 
   private readonly _tabs = signal<ReadonlyMap<string, ChatSessionStore>>(new Map());
   private readonly _activeTabId = signal<string>('');
   private readonly _closingTabs = new Set<Promise<void>>();
+  private readonly _chatViewOpen = signal(false);
+  private readonly activeTabSeen = computed(
+    () => this._chatViewOpen() && this.windowFocus.focused()
+  );
 
   /** Every open chat tab keyed by its tab id. */
   readonly tabs: Signal<ReadonlyMap<string, ChatSessionStore>> = this._tabs.asReadonly();
@@ -125,7 +134,7 @@ export class ChatStateService {
   /** Whether another tab can be opened under `MAX_CHAT_TABS` (beta gating is the UI's job). */
   readonly canOpenTab: Signal<boolean> = computed(() => this._tabs().size < MAX_CHAT_TABS);
 
-  /** Reads Claude Code's control data as soon as a session answers `initialize`. */
+  /** Reads Claude Code's control data as soon as a session answers `initialize`, and clears the mark of a tab the user keeps in view. */
   constructor() {
     this.deps = {
       tauri: this.tauri,
@@ -139,12 +148,19 @@ export class ChatStateService {
     };
     const initial = this.makeStore();
     this._tabs.set(new Map([[initial.tabId, initial]]));
-    this._activeTabId.set(initial.tabId);
+    this.setActiveTab(initial.tabId);
 
     effect(() => {
       const project = this.projectState.activeProject();
       if (!project || this.control.sessionInfoState(project).state !== 'ready') return;
       untracked(() => void this.activeStore().refreshControlData());
+    });
+
+    effect((onCleanup) => {
+      const store = this._tabs().get(this._activeTabId());
+      if (!store?.unseenEvent() || !this.activeTabSeen()) return;
+      const timer = setTimeout(() => store.markSeen(), UNSEEN_MARK_DWELL_MS);
+      onCleanup(() => clearTimeout(timer));
     });
   }
 
@@ -156,6 +172,15 @@ export class ChatStateService {
     const map = new Map(this._tabs());
     map.set(store.tabId, store);
     this._tabs.set(map);
+  }
+
+  private setActiveTab(tabId: string): void {
+    this._activeTabId.set(tabId);
+    const open = this._tabs();
+    this._recentTabIds = [
+      tabId,
+      ...this._recentTabIds.filter((id) => id !== tabId && open.has(id)),
+    ];
   }
 
   private findTabOwning(sessionId: string): ChatSessionStore | undefined {
@@ -191,7 +216,7 @@ export class ChatStateService {
     store.setResumeDecider(this._resumeDecider);
     this.addStore(store);
     await store.init();
-    this._activeTabId.set(store.tabId);
+    this.setActiveTab(store.tabId);
     return store.tabId;
   }
 
@@ -201,7 +226,7 @@ export class ChatStateService {
     this.addStore(store);
     await this.ensureListeners();
     await store.resumeConversation(sessionId);
-    this._activeTabId.set(store.tabId);
+    this.setActiveTab(store.tabId);
   }
 
   /**
@@ -224,7 +249,7 @@ export class ChatStateService {
       const transitional = new Map(this._tabs());
       transitional.set(fresh.tabId, fresh);
       this._tabs.set(transitional);
-      this._activeTabId.set(fresh.tabId);
+      this.setActiveTab(fresh.tabId);
       remaining.set(fresh.tabId, fresh);
       this._tabs.set(remaining);
       await teardown;
@@ -234,7 +259,7 @@ export class ChatStateService {
 
     if (this._activeTabId() === tabId) {
       const index = ids.indexOf(tabId);
-      this._activeTabId.set(ids[index + 1] ?? ids[index - 1]);
+      this.setActiveTab(ids[index + 1] ?? ids[index - 1]);
     }
     this._tabs.set(remaining);
     await teardown;
@@ -300,7 +325,25 @@ export class ChatStateService {
    */
   activateTab(tabId: string): void {
     if (!this._tabs().has(tabId)) return;
-    this._activeTabId.set(tabId);
+    this.setActiveTab(tabId);
+  }
+
+  /**
+   * Lists the open tabs for the tab switcher.
+   * @returns Tab ids, the most recently active first; a tab never active comes last, in strip order.
+   */
+  tabsByRecentUse(): string[] {
+    const open = this._tabs();
+    const recent = this._recentTabIds.filter((id) => open.has(id));
+    return [...recent, ...Array.from(open.keys()).filter((id) => !recent.includes(id))];
+  }
+
+  /**
+   * Records whether the chat view is on screen; `ChatComponent` sets it for its lifetime.
+   * @param open - Whether the chat view is shown.
+   */
+  setChatViewOpen(open: boolean): void {
+    this._chatViewOpen.set(open);
   }
 
   /**
@@ -521,6 +564,7 @@ export class ChatStateService {
     this.listenerSetup ??= (async () => {
       await this.setupStreamListener();
       await this.setupModelSwitchListener();
+      await this.setupSessionEventListener();
       this.setupProjectStateListeners();
       this.setupRestartResumeListeners();
       void this.activeStore().refreshLlmConfigCache();
@@ -707,7 +751,7 @@ export class ChatStateService {
     const fresh = this.makeStore();
     fresh.setResumeDecider(this._resumeDecider);
     this._tabs.set(new Map([[fresh.tabId, fresh]]));
-    this._activeTabId.set(fresh.tabId);
+    this.setActiveTab(fresh.tabId);
   }
 
   private setupRestartResumeListeners(): void {
@@ -741,6 +785,19 @@ export class ChatStateService {
       );
     } catch (err) {
       this.log.warn(`[chat-state] Failed to listen for model switch failures: ${String(err)}`);
+    }
+  }
+
+  private async setupSessionEventListener(): Promise<void> {
+    try {
+      await this.tauri.listen<ChatSessionEvent>(CHAT_SESSION_EVENT, (event) => {
+        const { project, tab_id, kind } = event.payload;
+        if (project !== this.projectState.activeProject()) return;
+        if (tab_id === this._activeTabId() && this.activeTabSeen()) return;
+        this._tabs().get(tab_id)?.markUnseen(kind);
+      });
+    } catch (err) {
+      this.log.warn(`[chat-state] Failed to listen for chat session events: ${String(err)}`);
     }
   }
 

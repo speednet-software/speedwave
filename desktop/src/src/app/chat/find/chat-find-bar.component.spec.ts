@@ -190,4 +190,13 @@ describe('ChatFindBarComponent', () => {
       }
     });
   });
+
+  describe('icon buttons', () => {
+    it('center their icon as flex items, so it never sits on the text baseline', () => {
+      for (const id of ['chat-find-prev', 'chat-find-next', 'chat-find-close']) {
+        const classes = el(id).classList;
+        expect(classes.contains('flex') && classes.contains('items-center'), id).toBe(true);
+      }
+    });
+  });
 });

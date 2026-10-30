@@ -9,43 +9,10 @@ import {
   viewChild,
   type Signal,
 } from '@angular/core';
-import {
-  ChatStateService,
-  MAX_CHAT_TABS,
-  blocksToPlainText,
-} from '../../services/chat-state.service';
-import type { ChatSessionStore } from '../../services/chat-session-store';
+import { ChatStateService, MAX_CHAT_TABS } from '../../services/chat-state.service';
 import { IconComponent } from '../../shared/icon.component';
-
-const TITLE_MAX_CHARS = 24;
-
-interface ChatTabRow {
-  readonly id: string;
-  readonly title: string;
-  readonly streaming: boolean;
-  readonly ended: boolean;
-  readonly active: boolean;
-  readonly ariaLabel: string;
-}
-
-function tabAriaLabel(title: string, streaming: boolean, ended: boolean): string {
-  const suffix = ended ? ', session ended' : streaming ? ', streaming' : '';
-  return `Switch to tab: ${title}${suffix}`;
-}
-
-function truncateTitle(text: string): string {
-  const trimmed = text.trim();
-  const points = Array.from(trimmed);
-  if (points.length <= TITLE_MAX_CHARS) return trimmed;
-  return `${points.slice(0, TITLE_MAX_CHARS).join('').trimEnd()}…`;
-}
-
-function tabTitle(store: ChatSessionStore): string {
-  const firstUser = store.messagesFromState().find((m) => m.role === 'user');
-  if (!firstUser) return 'New chat';
-  const text = blocksToPlainText(firstUser.blocks);
-  return text ? truncateTitle(text) : 'New chat';
-}
+import { ChatTabLabelComponent } from './chat-tab-label.component';
+import { chatTabRow, type ChatTabRow } from './chat-tab-row';
 
 /**
  * Browser-style tab bar for parallel chat sessions, inline in the chat header; overflowing tabs
@@ -53,7 +20,7 @@ function tabTitle(store: ChatSessionStore): string {
  */
 @Component({
   selector: 'app-chat-tabs',
-  imports: [CdkDrag, CdkDropList, IconComponent],
+  imports: [CdkDrag, CdkDropList, IconComponent, ChatTabLabelComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'flex h-full min-w-0 flex-1 items-stretch', 'data-testid': 'chat-tabs' },
   styles: `
@@ -99,29 +66,14 @@ function tabTitle(store: ChatSessionStore): string {
         >
           <button
             type="button"
-            class="flex min-w-0 flex-1 items-center gap-1.5 px-3 text-left"
+            class="flex min-w-0 flex-1 items-center px-3 text-left"
             role="tab"
             data-testid="chat-tab-activate"
             [attr.aria-selected]="row.active ? 'true' : 'false'"
             [attr.aria-label]="row.ariaLabel"
+            [attr.title]="row.tooltip"
           >
-            @if (row.streaming) {
-              <span
-                class="h-1.5 w-1.5 flex-shrink-0 animate-pulse rounded-full bg-[var(--accent)]"
-                data-testid="chat-tab-streaming"
-                aria-hidden="true"
-              ></span>
-            }
-            <span
-              class="truncate text-[12px]"
-              data-testid="chat-tab-title"
-              [class]="row.active ? 'text-[var(--ink)]' : 'text-[var(--ink-mute)]'"
-            >
-              {{ row.title }}
-            </span>
-            @if (row.ended) {
-              <span class="pill flex-shrink-0" data-testid="chat-tab-ended">ended</span>
-            }
+            <app-chat-tab-label [row]="row" [emphasized]="row.active" />
           </button>
           <button
             type="button"
@@ -167,21 +119,10 @@ export class ChatTabsComponent {
   }
 
   protected readonly tabRows: Signal<readonly ChatTabRow[]> = computed(() => {
-    const tabs = this.chat.tabs();
     const activeId = this.chat.activeTabId();
-    return Array.from(tabs.entries()).map(([id, store]) => {
-      const title = tabTitle(store);
-      const streaming = store.isStreamingFromState();
-      const ended = store.sessionEnded();
-      return {
-        id,
-        title,
-        streaming,
-        ended,
-        active: id === activeId,
-        ariaLabel: tabAriaLabel(title, streaming, ended),
-      };
-    });
+    return Array.from(this.chat.tabs().entries(), ([id, store]) =>
+      chatTabRow(id, store, id === activeId)
+    );
   });
 
   /**

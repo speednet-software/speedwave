@@ -1,5 +1,6 @@
 import { Injectable, OnDestroy, inject } from '@angular/core';
 import { TauriService } from '../../services/tauri.service';
+import { WINDOW_FOCUSED_EVENT } from '../../services/window-focus.service';
 import type { AuthStatusResponse, OauthSignIn } from '../../services/project-state.service';
 
 /** Anthropic sign-in verdict as shown by the UI, including the not-yet-loaded state. */
@@ -83,7 +84,7 @@ export class OauthCompletionWatcher implements OnDestroy {
     if (this.focusWatchRequested) return;
     this.focusWatchRequested = true;
     this.tauri
-      .listen('window_focused', () => void this.checkNow())
+      .listen(WINDOW_FOCUSED_EVENT, () => void this.checkNow())
       .then((unlisten) => {
         if (this.destroyed) {
           unlisten();

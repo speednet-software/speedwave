@@ -19,6 +19,8 @@ use win as platform;
 /// Event the frontend receives when the user clicks a notification.
 pub(crate) const ACTIVATED_EVENT: &str = "notification_activated";
 
+const SESSION_EVENT: &str = "chat_session_event";
+
 const MAX_TRACKED_NOTIFICATIONS: usize = 64;
 
 #[cfg(any(windows, test))]
@@ -29,8 +31,9 @@ const HRESULT_ERROR_NOT_FOUND: i32 = 0x8007_0490_u32.cast_signed();
 
 static ACTIVATION_APP: OnceLock<AppHandle> = OnceLock::new();
 
-/// A chat-session event that can raise a notification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A chat-session event that can raise a notification; mirrored by `models/notifications.ts`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum SessionEvent {
     /// The session finished its turn and nothing queued follows it.
     TurnFinished,
@@ -74,6 +77,13 @@ pub(crate) struct NotificationTarget {
     pub(crate) tab_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct SessionEventNotice {
+    #[serde(flatten)]
+    target: NotificationTarget,
+    kind: SessionEvent,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum Withheld {
     Off,
@@ -107,19 +117,29 @@ pub(crate) fn install(app: &AppHandle) {
     }
 }
 
-/// Shows a notification for `event` when beta, its switch and the background window allow it.
+/// Tells the frontend about `event`, then shows a notification when beta, its switch and the
+/// background window allow it.
 pub(crate) fn notify_session_event(
     app: &AppHandle,
     project: &str,
     tab_id: &str,
     event: SessionEvent,
 ) {
-    let app = app.clone();
     let target = NotificationTarget {
         project: project.to_string(),
         tab_id: tab_id.to_string(),
     };
-    tauri::async_runtime::spawn_blocking(move || deliver(&app, target, event));
+    dispatch_session_event(
+        SessionEventNotice {
+            target,
+            kind: event,
+        },
+        |notice| app.emit(SESSION_EVENT, notice),
+        |target, event| {
+            let app = app.clone();
+            tauri::async_runtime::spawn_blocking(move || deliver(&app, target, event));
+        },
+    );
 }
 
 /// Reads the switches and the permission state for Settings; never prompts.
@@ -192,6 +212,17 @@ fn activate(app: &AppHandle, id: &str) {
     if let Err(e) = app.emit(ACTIVATED_EVENT, target) {
         log::warn!("failed to emit {ACTIVATED_EVENT}: {e}");
     }
+}
+
+fn dispatch_session_event<E: std::fmt::Display>(
+    notice: SessionEventNotice,
+    tell_frontend: impl FnOnce(&SessionEventNotice) -> Result<(), E>,
+    offer_notification: impl FnOnce(NotificationTarget, SessionEvent),
+) {
+    if let Err(e) = tell_frontend(&notice) {
+        log::warn!("failed to emit {SESSION_EVENT}: {e}");
+    }
+    offer_notification(notice.target, notice.kind);
 }
 
 fn deliver(app: &AppHandle, target: NotificationTarget, event: SessionEvent) {
@@ -283,9 +314,9 @@ fn may_show(permission: NotificationPermission) -> bool {
 
 fn content(event: SessionEvent, project: &str) -> (String, String) {
     let body = match event {
-        SessionEvent::TurnFinished => "Claude finished and is ready for your next message.",
-        SessionEvent::AwaitingInput => "Claude is waiting for your answer.",
-        SessionEvent::SessionError => "The session stopped with an error.",
+        SessionEvent::TurnFinished => "Done. Ready for your next message.",
+        SessionEvent::AwaitingInput => "Waiting for your answer.",
+        SessionEvent::SessionError => "Something went wrong. Open the chat to see what happened.",
     };
     (project.to_string(), body.to_string())
 }
@@ -363,11 +394,7 @@ fn toast_xml(title: &str, body: &str) -> String {
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "test assertions may unwrap/expect freely"
-)]
+#[expect(clippy::unwrap_used, reason = "test assertions may unwrap freely")]
 mod tests {
     use super::*;
 
@@ -507,6 +534,51 @@ mod tests {
         );
     }
 
+    fn notice_for(kind: SessionEvent) -> SessionEventNotice {
+        SessionEventNotice {
+            target: NotificationTarget {
+                project: "p".into(),
+                tab_id: "t1".into(),
+            },
+            kind,
+        }
+    }
+
+    #[test]
+    fn every_event_reaches_the_frontend_and_is_offered_as_a_notification() {
+        for event in EVENTS {
+            let mut notices = Vec::new();
+            let mut offers = Vec::new();
+            dispatch_session_event(
+                notice_for(event),
+                |sent| {
+                    notices.push(sent.clone());
+                    Ok::<_, String>(())
+                },
+                |target, kind| offers.push((target, kind)),
+            );
+            assert_eq!(notices, [notice_for(event)]);
+            assert_eq!(offers, [(notice_for(event).target, event)]);
+        }
+    }
+
+    #[test]
+    fn a_failed_emit_still_offers_the_notification() {
+        let mut offers = Vec::new();
+        dispatch_session_event(
+            notice_for(SessionEvent::SessionError),
+            |_| Err("the webview is gone"),
+            |target, kind| offers.push((target, kind)),
+        );
+        assert_eq!(
+            offers,
+            [(
+                notice_for(SessionEvent::SessionError).target,
+                SessionEvent::SessionError
+            )]
+        );
+    }
+
     #[test]
     fn the_master_switch_silences_every_event() {
         for event in EVENTS {
@@ -559,9 +631,9 @@ mod tests {
         assert_eq!(
             bodies,
             [
-                "Claude finished and is ready for your next message.",
-                "Claude is waiting for your answer.",
-                "The session stopped with an error.",
+                "Done. Ready for your next message.",
+                "Waiting for your answer.",
+                "Something went wrong. Open the chat to see what happened.",
             ]
         );
     }
@@ -753,31 +825,11 @@ mod tests {
                 | NotificationPermission::Unavailable => {}
             }
         }
-        let mut rust: Vec<String> = all
-            .iter()
-            .map(|p| {
-                serde_json::to_value(p)
-                    .unwrap()
-                    .as_str()
-                    .unwrap()
-                    .to_string()
-            })
-            .collect();
-        rust.sort();
-
         let src = include_str!("../../src/src/app/models/notifications.ts");
-        let marker = "export type NotificationPermission =";
-        let idx = src
-            .find(marker)
-            .expect("notifications.ts must declare `export type NotificationPermission`");
-        let union = src[idx + marker.len()..].split(';').next().unwrap_or("");
-        let mut ts: Vec<String> = union
-            .split('|')
-            .map(|s| s.trim().trim_matches('\'').to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        ts.sort();
-        assert_eq!(rust, ts);
+        assert_eq!(
+            crate::ts_mirror::serde_names(&all),
+            crate::ts_mirror::ts_union_members(src, "NotificationPermission")
+        );
     }
 
     #[test]
@@ -805,6 +857,31 @@ mod tests {
         assert!(
             src.contains(&format!("'{ACTIVATED_EVENT}'")),
             "notifications.ts must name the {ACTIVATED_EVENT} event"
+        );
+    }
+
+    #[test]
+    fn session_event_notice_matches_its_ts_mirror() {
+        let src = include_str!("../../src/src/app/models/notifications.ts");
+        assert!(
+            src.contains(&format!("'{SESSION_EVENT}'")),
+            "notifications.ts must name the {SESSION_EVENT} event"
+        );
+        assert_eq!(
+            crate::ts_mirror::rust_fields(&notice_for(SessionEvent::AwaitingInput)),
+            crate::ts_mirror::ts_interface_fields(src, "ChatSessionEvent")
+        );
+
+        for event in EVENTS {
+            match event {
+                SessionEvent::TurnFinished
+                | SessionEvent::AwaitingInput
+                | SessionEvent::SessionError => {}
+            }
+        }
+        assert_eq!(
+            crate::ts_mirror::serde_names(&EVENTS),
+            crate::ts_mirror::ts_union_members(src, "ChatSessionEventKind")
         );
     }
 }

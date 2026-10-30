@@ -33,7 +33,7 @@ export type IconName =
 
 /**
  * Inline SVG icon, glyphs from the terminal-minimal mockup: nav/action icons use `stroke-width="1.75"`
- * (the `strokeWidth` default), toggles/spinners use `"2"`. Host is `inline-flex`; inner `<svg>` fills it via `h-full w-full`.
+ * (the `strokeWidth` default), toggles/spinners use `"2"`. Host is `inline-block`; inner `<svg>` fills it via `h-full w-full`.
  */
 @Component({
   selector: 'app-icon',
