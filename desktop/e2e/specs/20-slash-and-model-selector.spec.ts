@@ -72,6 +72,10 @@ async function clearComposer(): Promise<void> {
 }
 
 async function openModelSelector(): Promise<void> {
+  await browser.waitUntil(async () => await $('[data-testid="composer-model-badge"]').isEnabled(), {
+    timeout: 90_000,
+    timeoutMsg: 'composer-model-badge stayed disabled, the session never reported its models',
+  });
   await (await $('[data-testid="composer-model-badge"]')).click();
   await $('[data-testid="model-selector-search"]').waitForExist({ timeout: 10_000 });
 }
