@@ -448,7 +448,7 @@ describe('Slash Popover + Model/Effort Selector', function () {
       ).toBe(0);
     });
 
-    it('(c2) with beta tabs, a pick in one tab sets the project default for the next new tab, and the Default row clears it', async function () {
+    it('(c2) with beta tabs, a pick on an idle tab respawns it and sets the project default for the next new tab, and the Default row clears it', async function () {
       this.timeout(420_000);
       const priorBeta = readBetaEnabled();
       setBetaEnabled(true);
@@ -464,13 +464,15 @@ describe('Slash Popover + Model/Effort Selector', function () {
           timeoutMsg: 'chat tab bar never appeared after enabling beta features',
         });
 
+        const beforePick = await lastSpawnArgs();
         await selectModel(SONNET_MODEL);
-        await $('[data-testid="control-chip"][data-command="model"]').waitForExist({
-          timeout: 30_000,
-          timeoutMsg: `model control-chip never rendered after picking ${SONNET_MODEL}`,
+        const priorArgs = await waitForFreshSpawnArgs(beforePick);
+        expect(priorArgs[priorArgs.indexOf('--model') + 1]).toBe(SONNET_MODEL);
+        await browser.waitUntil(async () => modelPinIs(SONNET_MODEL), {
+          timeout: 10_000,
+          timeoutMsg: 'the Sonnet pick never wrote the settings.json model pin',
         });
 
-        const priorArgs = await lastSpawnArgs();
         const newTabBtn = await $('[data-testid="chat-tabs-new"]');
         await browser.waitUntil(async () => await newTabBtn.isEnabled(), {
           timeout: 10_000,
@@ -485,17 +487,14 @@ describe('Slash Popover + Model/Effort Selector', function () {
         if (!defaultRowId) throw new Error('the model picker reports no default row');
         await openModelSelector();
         await pickModelOption(defaultRowId);
-        await $('[data-testid="control-chip"][data-command="model"]').waitForExist({
-          timeout: 30_000,
-          timeoutMsg: 'model control-chip never rendered after picking the Default row',
-        });
+        const priorArgsAfterDefault = await waitForFreshSpawnArgs(newTabArgs);
+        expect(priorArgsAfterDefault[priorArgsAfterDefault.indexOf('--model') + 1]).toBe('default');
 
         await browser.waitUntil(async () => readModelPin(ANTHROPIC_PROJECT) === null, {
           timeout: 10_000,
           timeoutMsg: 'picking the Default row never cleared the settings.json model key',
         });
 
-        const priorArgsAfterDefault = await lastSpawnArgs();
         const secondNewTabBtn = await $('[data-testid="chat-tabs-new"]');
         await browser.waitUntil(async () => await secondNewTabBtn.isEnabled(), {
           timeout: 10_000,
