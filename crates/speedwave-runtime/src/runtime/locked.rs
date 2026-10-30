@@ -100,15 +100,18 @@ impl LockedRuntime {
 
     /// Starts the project's compose stack (under the per-project lock) once its egress-less
     /// networks exist isolated, recreating every container while a compose-created one remains;
-    /// refused once [`super::begin_engine_teardown`] ran.
+    /// refused once [`super::begin_engine_teardown`] ran. A started stack gets a background
+    /// egress probe outside the lock.
     pub fn compose_up(&self, project: &str) -> anyhow::Result<()> {
-        with_acquired(project, || {
+        let started = with_acquired(project, || {
             self.start_isolated(project, || {
                 let result = self.inner.compose_up(project);
                 crate::slash::invalidate_cache(project);
                 result
             })
-        })
+        });
+        self.probe_egress_after(&started, project);
+        started
     }
 
     /// Stops the project's compose stack (under the per-project lock).
@@ -119,13 +122,15 @@ impl LockedRuntime {
     /// Recreates the project's compose stack (under the per-project lock) once its egress-less
     /// networks exist isolated; refused once [`super::begin_engine_teardown`] ran.
     pub fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()> {
-        with_acquired(project, || {
+        let started = with_acquired(project, || {
             self.start_isolated(project, || {
                 let result = self.inner.compose_up_recreate(project);
                 crate::slash::invalidate_cache(project);
                 result
             })
-        })
+        });
+        self.probe_egress_after(&started, project);
+        started
     }
 
     /// Recreates one built-in service alone (ADR-073 proxy hot-reload; project lock, no teardown);
@@ -290,6 +295,12 @@ impl LockedRuntime {
         F: FnOnce(&LockedRuntime) -> anyhow::Result<T>,
     {
         with_acquired(project, || f(self))
+    }
+
+    fn probe_egress_after(&self, started: &anyhow::Result<()>, project: &str) {
+        if started.is_ok() {
+            super::egress_probe::spawn_after_start(self, self.data_dir(), project);
+        }
     }
 
     fn start_isolated(
@@ -1113,5 +1124,82 @@ mod tests {
     fn builder_construction_yields_locked_wrapper() {
         let (rt, _) = MockRuntimeBuilder::new().build();
         assert!(rt.is_available());
+    }
+
+    fn write_anthropic_config(data_dir: &std::path::Path, project: &str) {
+        let config = serde_json::json!({
+            "projects": [{
+                "name": project,
+                "dir": "/x",
+                "claude": {"llm": {
+                    "schema_version": crate::config::LLM_SCHEMA_VERSION,
+                    "providers": [{"id": "anthropic", "kind": "anthropic_oauth"}],
+                    "active": {"provider_id": "anthropic"}
+                }}
+            }]
+        });
+        std::fs::write(data_dir.join("config.json"), config.to_string()).unwrap();
+    }
+
+    #[test]
+    fn every_full_start_probes_the_egress_of_the_claude_container() {
+        let project = "locked-egress-probe";
+        let data_dir = tempfile::tempdir().unwrap();
+        write_anthropic_config(data_dir.path(), project);
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_data_dir(data_dir.path())
+            .build();
+        rt.compose_up(project).unwrap();
+        rt.compose_up_recreate(project).unwrap();
+        rt.compose_up_service(project, crate::consts::CLAUDE_COMPOSE_SERVICE)
+            .unwrap();
+        let calls = handles.exec_calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 2);
+        for call in calls {
+            assert_eq!(
+                call.container,
+                crate::consts::claude_container_name(project)
+            );
+            assert_eq!(call.argv.first().map(String::as_str), Some("curl"));
+            assert_eq!(
+                call.argv.last().map(String::as_str),
+                Some("https://api.anthropic.com")
+            );
+        }
+    }
+
+    #[test]
+    fn a_project_without_an_active_provider_is_not_probed() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_data_dir(data_dir.path())
+            .build();
+        rt.compose_up("locked-egress-none").unwrap();
+        assert!(handles.exec_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_failed_start_is_not_probed() {
+        let project = "locked-egress-failed-start";
+        let data_dir = tempfile::tempdir().unwrap();
+        write_anthropic_config(data_dir.path(), project);
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_data_dir(data_dir.path())
+            .with_fail_on_up(&[project])
+            .build();
+        assert!(rt.compose_up(project).is_err());
+        assert!(handles.exec_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_probe_that_cannot_be_built_does_not_fail_the_start() {
+        let project = "locked-egress-unbuildable";
+        let data_dir = tempfile::tempdir().unwrap();
+        write_anthropic_config(data_dir.path(), project);
+        let (rt, _) = MockRuntimeBuilder::new()
+            .with_data_dir(data_dir.path())
+            .with_exec_piped_error("engine gone")
+            .build();
+        rt.compose_up(project).unwrap();
     }
 }

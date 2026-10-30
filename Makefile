@@ -103,7 +103,7 @@ dev-config: guard-dev-instance
 .PHONY: all build test check clean dev dev-config install-deps setup-dev setup-dev-windows guard-not-prod-data-dir guard-dev-instance guard-dev-port guard-python \
         build-runtime build-cli build-desktop build-tauri build-mcp build-angular \
         build-native-macos build-os-cli bundle-native-assets bundle-static-licenses verify-bundled-assets stage-vulkan-windows \
-        test-rust test-transcription test-cli test-desktop test-angular test-mcp test-os test-swift test-e2e test-entrypoint test-ci test-desktop-build test-desktop-build-portable test-desktop-build-macos \
+        test-rust test-transcription test-cli test-desktop test-angular test-mcp test-os test-swift test-e2e test-entrypoint test-wsl-egress-guard test-ci test-desktop-build test-desktop-build-portable test-desktop-build-macos \
         test-build-phase test-rust-run test-angular-run test-mcp-run test-desktop-build-run test-desktop-run test-run-lanes test-proxy \
         test-e2e-desktop _e2e-macos _e2e-windows test-e2e-all test-e2e-audio setup-e2e-vms \
         test-e2e-plugin-tamper-release test-engine-contract test-e2e-update-dirty \
@@ -409,7 +409,7 @@ test-desktop-run: guard-not-prod-data-dir
 	$(call RUN_CARGO_ISOLATED,sh -c 'cd desktop/src-tauri && cargo test')
 	@echo "✅ Desktop tests passed"
 
-test-run-lanes: test-rust-run test-angular-run test-entrypoint test-desktop-config test-ci \
+test-run-lanes: test-rust-run test-angular-run test-entrypoint test-wsl-egress-guard test-desktop-config test-ci \
                 test-mcp-run test-desktop-build-run test-desktop-run test-proxy test-pii-ner-tools
 
 test-proxy: guard-not-prod-data-dir
@@ -566,6 +566,11 @@ test-entrypoint:
 	bats _tests/entrypoint/entrypoint.bats _tests/entrypoint/install-claude.bats \
 	  _tests/entrypoint/statusline.bats _tests/entrypoint/osc52-copy.bats
 	@echo "✅ Entrypoint tests passed"
+
+test-wsl-egress-guard:
+	@$(REQUIRE_BATS)
+	bats --print-output-on-failure _tests/runtime/wsl-egress-guard.bats
+	@echo "✅ WSL egress guard tests passed"
 
 test-ci:
 	@$(REQUIRE_BATS)

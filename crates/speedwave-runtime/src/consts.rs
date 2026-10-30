@@ -1437,6 +1437,16 @@ pub fn compose_prefix() -> &'static str {
     PREFIX.get_or_init(|| derive_instance_name_from(data_dir()))
 }
 
+/// Container name of `project`'s claude service: `<compose_prefix>_<project>_claude`.
+pub fn claude_container_name(project: &str) -> String {
+    format!(
+        "{}_{}_{}",
+        compose_prefix(),
+        project,
+        CLAUDE_COMPOSE_SERVICE
+    )
+}
+
 /// Strips the `<compose_prefix>_<project>_` prefix to the bare service name;
 /// returns the input unchanged when the prefix does not match.
 pub fn strip_compose_container_prefix<'a>(name: &'a str, project: &str) -> &'a str {

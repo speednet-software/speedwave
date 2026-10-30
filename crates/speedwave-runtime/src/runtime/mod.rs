@@ -7,6 +7,7 @@ use std::process::Command;
 use std::sync::Mutex;
 
 pub(crate) mod compose_locks;
+mod egress_probe;
 #[cfg(target_os = "macos")]
 pub(crate) mod lima;
 pub mod locked;

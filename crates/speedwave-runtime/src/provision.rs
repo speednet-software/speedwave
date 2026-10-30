@@ -535,6 +535,92 @@ fn ensure_relay_packages() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+const EGRESS_GUARD_SCRIPT: &str = include_str!("runtime/wsl_egress_guard.sh");
+
+#[cfg(target_os = "windows")]
+const EGRESS_GUARD_SCRIPT_PATH: &str = "/usr/local/lib/speedwave/egress-guard.sh";
+
+#[cfg(target_os = "windows")]
+const EGRESS_GUARD_UNIT: &str = "speedwave-egress-guard";
+
+/// Provision script for `ensure_egress_guard`: installs the guard script and its systemd
+/// unit, restarts only on content change, falls back to a detached process without systemd.
+#[cfg(target_os = "windows")]
+fn egress_guard_install_script(instance: &str) -> String {
+    let path = EGRESS_GUARD_SCRIPT_PATH;
+    let unit = EGRESS_GUARD_UNIT;
+    format!(
+        r#"set -u
+UNIT_FILE=/etc/systemd/system/{unit}.service
+mkdir -p "$(dirname {path})" /etc/systemd/system
+changed=0
+cat > {path}.new <<'SPW_EGRESS_GUARD_EOF'
+{script}SPW_EGRESS_GUARD_EOF
+chmod 755 {path}.new
+if cmp -s {path}.new {path}; then rm -f {path}.new; else mv {path}.new {path}; changed=1; fi
+cat > "$UNIT_FILE.new" <<'SPW_EGRESS_UNIT_EOF'
+[Unit]
+Description=Speedwave WSL egress guard ({instance})
+After=network.target
+[Service]
+ExecStart=/bin/sh {path} {instance}
+Restart=always
+[Install]
+WantedBy=multi-user.target
+SPW_EGRESS_UNIT_EOF
+if cmp -s "$UNIT_FILE.new" "$UNIT_FILE"; then rm -f "$UNIT_FILE.new"; else mv "$UNIT_FILE.new" "$UNIT_FILE"; changed=1; fi
+if command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload >/dev/null 2>&1 \
+  && systemctl enable {unit} >/dev/null 2>&1; then
+  if [ "$changed" = 1 ]; then
+    systemctl restart {unit} >/dev/null 2>&1
+  else
+    systemctl start {unit} >/dev/null 2>&1
+  fi
+else
+  if [ "$changed" = 1 ]; then pkill -f "{path} {instance}" 2>/dev/null || true; fi
+  if ! pgrep -f "{path} {instance}" >/dev/null 2>&1; then
+    setsid /bin/sh {path} {instance} </dev/null >>/var/log/{unit}.log 2>&1 &
+  fi
+fi
+exit 0
+"#,
+        script = EGRESS_GUARD_SCRIPT,
+    )
+}
+
+/// Installs the legacy-FORWARD egress guard (Docker in another WSL distro sets
+/// `-P FORWARD DROP`) in the distro. Idempotent; root `bash -s` on stdin; bounded.
+#[cfg(target_os = "windows")]
+fn ensure_egress_guard() -> anyhow::Result<()> {
+    let output = crate::binary::run_wsl_bounded(
+        &[
+            "-d",
+            consts::wsl_distro_name(),
+            "-u",
+            "root",
+            "--",
+            "bash",
+            "-s",
+        ],
+        Some(&egress_guard_install_script(consts::compose_prefix())),
+        std::time::Duration::from_secs(60),
+    )
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "installing egress guard in distro '{}': {e}",
+            consts::wsl_distro_name()
+        )
+    })?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "egress guard install failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 /// Writes/updates `%USERPROFILE%\.wslconfig` so `[wsl2]` declares `networkingMode=mirrored`,
 /// `dnsTunneling=true`, `autoProxy=true` (Win11 22H2+); preserves other keys; missing → skeleton.
 #[cfg(target_os = "windows")]
@@ -1523,6 +1609,9 @@ pub fn ensure_windows_invariants() {
         }
         if let Err(e) = ensure_relay_packages() {
             log::warn!("could not ensure relay packages (iptables/socat): {e}");
+        }
+        if let Err(e) = ensure_egress_guard() {
+            log::warn!("could not install egress guard: {e}");
         }
     });
 }
