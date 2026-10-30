@@ -138,7 +138,7 @@ function speakerOf(
   if (seg.source === 'mic') return { speaker: 'You', diarized: null };
   const n = seg.speaker_id;
   if (n != null && n >= 1) {
-    const diarized = speakers.get(n) ?? { ...speakerOfId(n, names), sharesName: false };
+    const diarized = speakers.get(n) ?? speakerOfId(n, names);
     return { speaker: diarized.label, diarized };
   }
   if (seg.source === 'system') return { speaker: 'Meeting', diarized: null };
@@ -750,7 +750,6 @@ export class LiveTranscriptComponent {
     }));
   });
 
-  /** The names the user gave the speakers, by speaker number. */
   private readonly namedSpeakers = computed(() => this.session()?.named_speakers ?? {});
 
   /** The diarized speakers of the transcript, person by person, the most lines first. */

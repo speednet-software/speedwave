@@ -32,14 +32,11 @@ export function numberLabel(id: number): string {
  * @param id - the speaker number, 1 or more.
  * @param names - the names the user gave, by speaker number.
  */
-export function speakerOfId(
-  id: number,
-  names: Record<string, string>
-): Omit<Speaker, 'lines' | 'sharesName'> {
+export function speakerOfId(id: number, names: Record<string, string>): Omit<Speaker, 'lines'> {
   const name = names[String(id)] ?? null;
   const color = SPEAKER_COLORS[id - 1] ?? null;
   const mark = color ? null : name ? name.charAt(0).toUpperCase() : String(id);
-  return { id, name, label: name ?? numberLabel(id), color, mark };
+  return { id, name, label: name ?? numberLabel(id), color, mark, sharesName: false };
 }
 
 /**
@@ -54,7 +51,7 @@ export function speakersOf(segments: Segment[], names: Record<string, string>): 
     const id = seg.speaker_id;
     if (id != null && id >= 1) lines.set(id, (lines.get(id) ?? 0) + 1);
   }
-  const people = new Map<string, Omit<Speaker, 'sharesName'>[]>();
+  const people = new Map<string, Speaker[]>();
   for (const [id, count] of lines) {
     const speaker = { ...speakerOfId(id, names), lines: count };
     const key = speaker.name ? `name:${nameKey(speaker.name)}` : `id:${id}`;

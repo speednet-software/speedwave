@@ -17,6 +17,33 @@ import {
   type Speaker,
 } from './speaker-names';
 
+const SPEAKER_NAME_CASES: ReadonlyArray<readonly [string, string, string]> = [
+  ['Marta', 'Marta', 'name'],
+  ['  Anna   Maria ', 'Anna Maria', 'name'],
+  ['   ', '', 'name'],
+  ['Łukasz Żółć', 'Łukasz Żółć', 'name'],
+  ['Speaker', 'Speaker', 'name'],
+  ['Speaker A', 'Speaker A', 'name'],
+  ['Speakerowa 2', 'Speakerowa 2', 'name'],
+  ['Youssef', 'Youssef', 'name'],
+  ['Sławek 2', 'Sławek 2', 'name'],
+  ['You', 'You', 'label'],
+  [' meeting ', 'meeting', 'label'],
+  ['Speaker 3', 'Speaker 3', 'label'],
+  ['speaker   12', 'speaker 12', 'label'],
+  ['SPEAKER12', 'SPEAKER12', 'label'],
+  ['ŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁ', 'ŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁŁ', 'name'],
+];
+
+const SAME_NAME_CASES: ReadonlyArray<readonly [string, string, string]> = [
+  ['Marta', ' marta ', 'same'],
+  ['ŁUKASZ', 'łukasz', 'same'],
+  ['Sławek', 'SŁAWEK', 'same'],
+  ['Anna Maria', 'AnnaMaria', 'different'],
+  ['Marta', 'Marek', 'different'],
+  ['Sławek', 'Sławek 2', 'different'],
+];
+
 function seg(start: number, speaker_id?: number | null, source?: 'system' | 'mic'): Segment {
   return {
     start: { secs: start, nanos: 0 },
@@ -36,6 +63,7 @@ describe('speaker names', () => {
       label: 'Marta',
       color: 'var(--violet)',
       mark: null,
+      sharesName: false,
     });
     expect(speakerOfId(4, {})).toMatchObject({ label: 'Speaker 4', color: 'var(--rose)' });
   });
@@ -137,6 +165,21 @@ describe('speaker names', () => {
     expect(speakerCountLine(speakersOf([seg(0, 1)], {}))).toBe('1 speaker · none named');
     expect(speakerCountLine([])).toBe('');
   });
+
+  it.each(SPEAKER_NAME_CASES)(
+    'stores %j as %j, a %s, as the backend does',
+    (typed, stored, kind) => {
+      expect(normalizeSpeakerName(typed)).toBe(stored);
+      expect(isTranscriptLabel(stored)).toBe(kind === 'label');
+    }
+  );
+
+  it.each(SAME_NAME_CASES)(
+    'compares %j and %j as the %s person, as the backend does',
+    (a, b, verdict) => {
+      expect(sameSpeakerName(a, b)).toBe(verdict === 'same');
+    }
+  );
 
   it('labels an unnamed speaker by number', () => {
     expect(numberLabel(3)).toBe('Speaker 3');

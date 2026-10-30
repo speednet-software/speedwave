@@ -5,7 +5,7 @@ import { SpeakerLegendComponent, type NameRequest } from './speaker-legend.compo
 import { speakerOfId, type Speaker } from '../speaker-names';
 
 function speaker(id: number, lines: number, name?: string): Speaker {
-  return { ...speakerOfId(id, name ? { [String(id)]: name } : {}), lines, sharesName: false };
+  return { ...speakerOfId(id, name ? { [String(id)]: name } : {}), lines };
 }
 
 describe('SpeakerLegendComponent', () => {

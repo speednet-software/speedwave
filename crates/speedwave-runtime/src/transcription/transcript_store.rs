@@ -468,9 +468,8 @@ impl TranscriptStore {
         Ok(title)
     }
 
-    /// Names speaker `speaker` of a finished transcript; a blank name takes the name away and a
-    /// name another speaker has takes that spelling. Returns the stored name; refuses with the
-    /// reason while the transcript is being made, for a speaker it lacks, or for one of its labels.
+    /// Names speaker `speaker` of a finished transcript as [`TranscriptSession::name_speaker`] does,
+    /// refusing with the reason [`TranscriptSession::check_speaker_name`] gives. Returns the name.
     pub fn rename_speaker(
         &self,
         id: Uuid,

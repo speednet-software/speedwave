@@ -1047,6 +1047,58 @@ mod tests {
         );
     }
 
+    fn ts_cases<'a>(spec: &'a str, table: &str) -> Vec<Vec<&'a str>> {
+        let start = spec
+            .find(&format!("const {table}"))
+            .unwrap_or_else(|| panic!("speaker-names.spec.ts must keep the {table} table"));
+        let body = &spec[start..];
+        let body = &body[..body.find("\n];").unwrap()];
+        body.lines()
+            .filter(|l| l.trim_start().starts_with("['"))
+            .map(|l| l.split('\'').skip(1).step_by(2).collect())
+            .collect()
+    }
+
+    #[test]
+    fn speaker_name_rules_match_ts() {
+        let spec = include_str!(
+            "../../../../desktop/src/src/app/meeting-transcription/speaker-names.spec.ts"
+        );
+        let names = ts_cases(spec, "SPEAKER_NAME_CASES");
+        assert!(names.len() >= 10, "parsed only {} name cases", names.len());
+        for case in &names {
+            let [typed, stored, kind] = case[..] else {
+                panic!("unparsable name case {case:?}")
+            };
+            assert_eq!(
+                normalize_speaker_name(typed).unwrap_or_default(),
+                stored,
+                "Rust and TS store {typed:?} differently"
+            );
+            assert_eq!(
+                is_transcript_label(stored),
+                kind == "label",
+                "Rust and TS disagree whether {stored:?} is a label"
+            );
+        }
+        let pairs = ts_cases(spec, "SAME_NAME_CASES");
+        assert!(
+            pairs.len() >= 4,
+            "parsed only {} same-name cases",
+            pairs.len()
+        );
+        for case in &pairs {
+            let [a, b, verdict] = case[..] else {
+                panic!("unparsable same-name case {case:?}")
+            };
+            assert_eq!(
+                same_speaker_name(a, b),
+                verdict == "same",
+                "Rust and TS compare {a:?} and {b:?} differently"
+            );
+        }
+    }
+
     #[test]
     fn same_speaker_name_ignores_case_and_outer_whitespace_only() {
         assert!(same_speaker_name("Marta", " marta "));

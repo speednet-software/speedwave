@@ -119,12 +119,6 @@ const NAMED_SPEAKERS_PROMPT: Record<
   },
 };
 
-/**
- * What the chat prompt says about the speaker labels of a diarized transcript: the user's names
- * as certain and no guessing for the rest, or, with no speaker named, names only on evidence.
- * @param session - the diarized session.
- * @param yourName - the user's own name, '' when not set.
- */
 function speakerLabelsPrompt(session: TranscriptSession, yourName: string): string {
   const segments = effectiveSegments(session);
   const speakers = speakersOf(segments, session.named_speakers ?? {});
@@ -143,11 +137,6 @@ function speakerLabelsPrompt(session: TranscriptSession, yourName: string): stri
   );
 }
 
-/**
- * The sentence that tells the model not to guess names for the unnamed labels; '' without any.
- * @param text - the prompt texts of the session's language.
- * @param unnamed - the labels of the unnamed speakers.
- */
 function unnamedSentence(
   text: (typeof NAMED_SPEAKERS_PROMPT)[Language],
   unnamed: string[]
@@ -157,11 +146,6 @@ function unnamedSentence(
   return text.many(unnamed.join(', '));
 }
 
-/**
- * Reads one localStorage key, tolerating a storage that throws.
- * @param key - the key.
- * @param onFailure - what to read when storage throws.
- */
 function readStored(key: string, onFailure: string | null = null): string | null {
   try {
     return localStorage.getItem(key);
@@ -170,11 +154,6 @@ function readStored(key: string, onFailure: string | null = null): string | null
   }
 }
 
-/**
- * Writes one localStorage key, or removes it for null, ignoring a storage that throws.
- * @param key - the key.
- * @param value - the value, or null to remove the key.
- */
 function writeStored(key: string, value: string | null): void {
   try {
     if (value === null) localStorage.removeItem(key);
