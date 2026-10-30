@@ -1,0 +1,153 @@
+import { describe, it, expect } from 'vitest';
+
+import type { Segment } from '../models/transcript';
+import {
+  isTranscriptLabel,
+  linesLabel,
+  nameChangeNote,
+  normalizeSpeakerName,
+  numberLabel,
+  sameSpeakerName,
+  speakerActionLabel,
+  speakerCountLine,
+  speakerOfId,
+  speakersOf,
+  uniqueSpeakerNames,
+  type Speaker,
+} from './speaker-names';
+
+function seg(start: number, speaker_id?: number | null, source?: 'system' | 'mic'): Segment {
+  return {
+    start: { secs: start, nanos: 0 },
+    end: { secs: start + 1, nanos: 0 },
+    text: 'x',
+    words: [],
+    source,
+    speaker_id,
+  };
+}
+
+describe('speaker names', () => {
+  it('shows a named speaker by name and an unnamed one by number, coloured up to four', () => {
+    expect(speakerOfId(2, { '2': 'Marta' })).toEqual({
+      id: 2,
+      name: 'Marta',
+      label: 'Marta',
+      color: 'var(--violet)',
+      mark: null,
+    });
+    expect(speakerOfId(4, {})).toMatchObject({ label: 'Speaker 4', color: 'var(--green)' });
+  });
+
+  it('marks speakers past the fourth with the initial of the name, else the number', () => {
+    expect(speakerOfId(5, { '5': 'ewa' })).toMatchObject({ color: null, mark: 'E' });
+    expect(speakerOfId(7, {})).toMatchObject({ color: null, mark: '7', label: 'Speaker 7' });
+    expect(speakerOfId(6, { '6': 'Łucja' }).mark).toBe('Ł');
+  });
+
+  it('counts lines per speaker, most first, leaving out unlabelled and microphone lines', () => {
+    const speakers = speakersOf(
+      [
+        seg(0, 2),
+        seg(1, 1),
+        seg(2, 2),
+        seg(3, null),
+        seg(4, undefined, 'mic'),
+        seg(5, 3),
+        seg(6, 0),
+      ],
+      { '3': 'Ola' }
+    );
+    expect(speakers.map((s) => [s.id, s.lines, s.label])).toEqual([
+      [2, 2, 'Speaker 2'],
+      [1, 1, 'Speaker 1'],
+      [3, 1, 'Ola'],
+    ]);
+    expect(speakersOf([], {})).toEqual([]);
+  });
+
+  it('compares names ignoring case and outer whitespace only', () => {
+    expect(sameSpeakerName(' marta ', 'Marta')).toBe(true);
+    expect(sameSpeakerName('ŁUKASZ', 'łukasz')).toBe(true);
+    expect(sameSpeakerName('Anna Maria', 'AnnaMaria')).toBe(false);
+  });
+
+  it('says how many speakers there are and how many are unnamed', () => {
+    const named = speakersOf([seg(0, 1), seg(1, 2)], { '1': 'Marta', '2': 'Paweł' });
+    expect(speakerCountLine(named)).toBe('2 speakers');
+    expect(speakerCountLine(speakersOf([seg(0, 1), seg(1, 2)], { '1': 'Marta' }))).toBe(
+      '2 speakers · 1 unnamed'
+    );
+    expect(speakerCountLine(speakersOf([seg(0, 1)], {}))).toBe('1 speaker · none named');
+    expect(speakerCountLine([])).toBe('');
+  });
+
+  it('labels an unnamed speaker by number', () => {
+    expect(numberLabel(3)).toBe('Speaker 3');
+  });
+
+  it('normalises a typed name like the backend: control characters, spacing, 40 characters', () => {
+    expect(normalizeSpeakerName('  Anna\n  Maria\u0007 ')).toBe('Anna Maria');
+    expect(normalizeSpeakerName(' \t ')).toBe('');
+    expect(Array.from(normalizeSpeakerName('Ł'.repeat(50))).length).toBe(40);
+  });
+
+  it('keeps each person once, in order', () => {
+    expect(uniqueSpeakerNames(['Marta', 'Ola', ' marta', 'OLA', 'Paweł'])).toEqual([
+      'Marta',
+      'Ola',
+      'Paweł',
+    ]);
+  });
+
+  it('knows the labels the transcript uses, as the backend refuses them', () => {
+    for (const label of ['You', ' meeting ', 'Speaker 3', 'speaker   12', 'SPEAKER12']) {
+      expect(isTranscriptLabel(label)).toBe(true);
+    }
+    for (const name of ['Speaker', 'Speaker A', 'Youssef', 'Meetingowa', 'Marta']) {
+      expect(isTranscriptLabel(name)).toBe(false);
+    }
+  });
+
+  it('names the action of a speaker control for screen readers', () => {
+    const [unnamed, named] = speakersOf([seg(0, 1), seg(1, 2), seg(2, 2)], { '2': 'Marta' }).sort(
+      (a, b) => a.id - b.id
+    );
+    expect(speakerActionLabel(unnamed)).toBe('Name Speaker 1, 1 line');
+    expect(speakerActionLabel(named)).toBe('Rename Marta, 2 lines');
+  });
+
+  describe('what saving a name changes', () => {
+    const speakers: Speaker[] = speakersOf(
+      [seg(0, 1), seg(1, 1), seg(2, 2), seg(3, 3), seg(4, 3), seg(5, 3), seg(6, 4)],
+      { '1': 'Marta', '4': 'marta' }
+    );
+    const byId = (id: number) => speakers.find((s) => s.id === id)!;
+
+    it('states how many lines the name changes', () => {
+      expect(nameChangeNote(byId(3), speakers, 'Ola')).toBe('Renames Speaker 3 on all 3 lines.');
+      expect(nameChangeNote(byId(2), speakers, '')).toBe('Renames Speaker 2 on its one line.');
+    });
+
+    it('says which speakers a shared name puts together and how many lines that makes', () => {
+      expect(nameChangeNote(byId(3), speakers, ' MARTA ')).toBe(
+        'Renames Speaker 3 on all 3 lines. Speaker 1 and Speaker 4 are already Marta, so all will show as Marta, 6 lines together. Rename any of them to split them again.'
+      );
+      expect(nameChangeNote(byId(1), speakers, 'Marta')).toBe(
+        'Renames Marta on all 2 lines. Speaker 4 is already marta, so both will show as marta, 3 lines together. Rename either one to split them again.'
+      );
+    });
+
+    it('says a label the transcript uses is not a name', () => {
+      expect(nameChangeNote(byId(2), speakers, 'speaker 3')).toBe(
+        '"speaker 3" is a label the transcript already uses; type the person\'s name.'
+      );
+    });
+  });
+
+  it('counts one line in the singular', () => {
+    expect(linesLabel(1)).toBe('1 line');
+    expect(linesLabel(0)).toBe('0 lines');
+    expect(linesLabel(14)).toBe('14 lines');
+  });
+});

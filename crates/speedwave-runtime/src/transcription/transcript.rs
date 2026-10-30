@@ -1,5 +1,6 @@
 //! Per-recording session: status, segments, on-disk persistence.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -17,6 +18,8 @@ pub const AUDIO_WAV: &str = "audio.wav";
 
 /// Longest title a user can give a recording, in characters.
 pub const TITLE_MAX_CHARS: usize = 120;
+
+const SPEAKER_NAME_MAX_CHARS: usize = 40;
 
 /// Longest transcript preview the recordings list carries, in characters.
 const PREVIEW_MAX_CHARS: usize = 140;
@@ -73,8 +76,9 @@ pub struct DiarizationRecord {
 
 const SPEAKER_LABEL: &str = "Speaker";
 const SPEAKERS_NOTE: &str = "told apart from the meeting audio; approximate: one person can get \
-several labels and one label several people; a 'Meeting' line without a number, or a line \
-without any label, has no recognised speaker";
+several labels and one label several people; a 'Meeting' line, or a line without any label, has \
+no recognised speaker";
+const NAMES_NOTE: &str = "the names were set by the user";
 
 /// One transcript session — the persisted artifact.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -112,6 +116,12 @@ pub struct TranscriptSession {
     /// `None` when that pass did not tell speakers apart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diarization_secs: Option<f64>,
+    /// Names the user gave the speakers of the transcript on screen, by speaker number.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub named_speakers: BTreeMap<u32, String>,
+    /// Names the speakers had before an offline pass numbered them again, offered when naming.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub previous_speaker_names: Vec<String>,
     /// Last event seq emitted for this session — for snapshot+stream resume.
     pub last_seq: u64,
     /// Uncommitted tail of the latest live decode — replace-only display state,
@@ -193,6 +203,8 @@ impl TranscriptSession {
             active_warnings: Vec::new(),
             models_used: ModelsUsed::default(),
             diarization_secs: None,
+            named_speakers: BTreeMap::new(),
+            previous_speaker_names: Vec::new(),
             last_seq: 0,
             live_draft: String::new(),
             prior_live_model: None,
@@ -221,13 +233,15 @@ impl TranscriptSession {
     }
 
     /// Installs `final_segments` from the higher-quality offline pass with the diarization
-    /// record of that pass, replacing the record of the transcript they replace.
+    /// record of that pass, replacing the record of the transcript they replace. The new pass
+    /// numbers the speakers again, so their names move to `previous_speaker_names`.
     pub fn set_final_segments(
         &mut self,
         final_segs: Vec<Segment>,
         diarization: Option<DiarizationRecord>,
     ) {
         self.final_segments = Some(final_segs);
+        self.detach_speaker_names();
         let (model, secs) = diarization
             .map(|d| (Some(d.model), Some(d.secs)))
             .unwrap_or_default();
@@ -278,9 +292,13 @@ impl TranscriptSession {
     }
 
     /// Renders the transcript as markdown: a header plus one timestamped line per segment,
-    /// channel-labelled on paired captures, with the speaker number on diarized meeting-channel
-    /// segments (ADR-098).
-    pub fn to_markdown(&self) -> String {
+    /// channel-labelled on paired captures, with the speaker's name or number on diarized
+    /// segments (ADR-098). `your_name` replaces "You" on microphone lines.
+    pub fn to_markdown(&self, your_name: Option<&str>) -> String {
+        let your_name = your_name.and_then(normalize_speaker_name);
+        let you = your_name
+            .as_deref()
+            .unwrap_or(TranscriptSource::Mic.label());
         let mut s = String::new();
         match &self.title {
             Some(title) => {
@@ -301,14 +319,13 @@ impl TranscriptSession {
             speakers.sort_unstable();
             speakers.dedup();
             if !speakers.is_empty() {
-                let names: Vec<String> = speakers
-                    .iter()
-                    .map(|n| format!("{SPEAKER_LABEL} {n}"))
-                    .collect();
-                s.push_str(&format!(
-                    "- Speakers: {} ({SPEAKERS_NOTE})\n",
-                    names.join(", ")
-                ));
+                let names = unique_speaker_names(speakers.iter().map(|n| self.speaker_label(*n)));
+                let note = if speakers.iter().any(|n| self.named_speakers.contains_key(n)) {
+                    format!("{SPEAKERS_NOTE}; {NAMES_NOTE}")
+                } else {
+                    SPEAKERS_NOTE.to_string()
+                };
+                s.push_str(&format!("- Speakers: {} ({note})\n", names.join(", ")));
             }
         }
         s.push('\n');
@@ -320,11 +337,9 @@ impl TranscriptSession {
                 continue;
             }
             let label = match (seg.source, seg.speaker_id) {
-                (Some(src @ TranscriptSource::System), Some(n)) => {
-                    format!(" {} · {SPEAKER_LABEL} {n}:", src.label())
-                }
-                (Some(src), _) => format!(" {}:", src.label()),
-                (None, Some(n)) => format!(" {SPEAKER_LABEL} {n}:"),
+                (Some(TranscriptSource::Mic), _) => format!(" {you}:"),
+                (_, Some(n)) => format!(" {}:", self.speaker_label(n)),
+                (Some(src), None) => format!(" {}:", src.label()),
                 (None, None) => String::new(),
             };
             s.push_str(&format!("**({}){label}** {text}\n\n", fmt_ts(seg.start)));
@@ -332,6 +347,59 @@ impl TranscriptSession {
         s.push_str("---\n");
         s.push_str("_Transcript generated locally by Speedwave._\n");
         s
+    }
+
+    fn speaker_label(&self, n: u32) -> String {
+        self.named_speakers
+            .get(&n)
+            .cloned()
+            .unwrap_or_else(|| format!("{SPEAKER_LABEL} {n}"))
+    }
+
+    /// Why speaker `speaker` cannot be given the typed name now, if it cannot: the transcript is
+    /// still being made, lacks that speaker, or the name is one of the transcript's labels.
+    pub(super) fn check_speaker_name(&self, speaker: u32, raw: &str) -> Result<(), String> {
+        if !matches!(
+            self.status,
+            TranscriptStatus::Done | TranscriptStatus::Postponed | TranscriptStatus::Failed { .. }
+        ) {
+            return Err("speakers can be named once the transcription is over".to_string());
+        }
+        if !self
+            .effective_segments()
+            .iter()
+            .any(|seg| seg.speaker_id == Some(speaker))
+        {
+            return Err(format!("this transcript has no {SPEAKER_LABEL} {speaker}"));
+        }
+        match normalize_speaker_name(raw) {
+            Some(name) if is_transcript_label(&name) => Err(format!(
+                "\"{name}\" is a label the transcript already uses; type the person's name"
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    /// Names speaker `speaker` after [`Self::check_speaker_name`] allowed it; a blank name takes
+    /// the name away, and a name another speaker has takes that speaker's spelling.
+    pub(super) fn name_speaker(&mut self, speaker: u32, raw: &str) -> Option<String> {
+        let name = normalize_speaker_name(raw).map(|typed| {
+            self.named_speakers
+                .iter()
+                .find(|(n, other)| **n != speaker && same_speaker_name(other, &typed))
+                .map_or(typed, |(_, other)| other.clone())
+        });
+        match &name {
+            Some(name) => self.named_speakers.insert(speaker, name.clone()),
+            None => self.named_speakers.remove(&speaker),
+        };
+        name
+    }
+
+    fn detach_speaker_names(&mut self) {
+        let named = std::mem::take(&mut self.named_speakers).into_values();
+        let previous = std::mem::take(&mut self.previous_speaker_names);
+        self.previous_speaker_names = unique_speaker_names(named.chain(previous));
     }
 
     /// Loads a session from `<dir>/transcript.json`.
@@ -355,6 +423,39 @@ impl TranscriptSession {
 /// Normalises a user-typed title: control characters dropped, whitespace runs collapsed, cut to
 /// [`TITLE_MAX_CHARS`]; `None` when nothing is left (the session goes back to its default name).
 pub fn normalize_title(raw: &str) -> Option<String> {
+    normalize_text(raw, TITLE_MAX_CHARS)
+}
+
+fn normalize_speaker_name(raw: &str) -> Option<String> {
+    normalize_text(raw, SPEAKER_NAME_MAX_CHARS)
+}
+
+fn same_speaker_name(a: &str, b: &str) -> bool {
+    a.trim().to_lowercase() == b.trim().to_lowercase()
+}
+
+fn unique_speaker_names(names: impl Iterator<Item = String>) -> Vec<String> {
+    let mut unique: Vec<String> = Vec::new();
+    for name in names {
+        if !unique.iter().any(|seen| same_speaker_name(seen, &name)) {
+            unique.push(name);
+        }
+    }
+    unique
+}
+
+fn is_transcript_label(name: &str) -> bool {
+    let lower = name.trim().to_lowercase();
+    let number = lower
+        .strip_prefix(&SPEAKER_LABEL.to_lowercase())
+        .map(str::trim_start);
+    [TranscriptSource::Mic, TranscriptSource::System]
+        .iter()
+        .any(|src| same_speaker_name(src.label(), name))
+        || number.is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn normalize_text(raw: &str, max_chars: usize) -> Option<String> {
     let cleaned: String = raw
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
@@ -363,7 +464,7 @@ pub fn normalize_title(raw: &str) -> Option<String> {
     if collapsed.is_empty() {
         return None;
     }
-    Some(collapsed.chars().take(TITLE_MAX_CHARS).collect())
+    Some(collapsed.chars().take(max_chars).collect())
 }
 
 fn truncate_chars(text: &str, max: usize) -> String {
@@ -544,19 +645,80 @@ mod tests {
     }
 
     #[test]
+    fn new_final_segments_move_the_speaker_names_to_the_previous_names_each_once() {
+        let mut s = diarized_session();
+        s.named_speakers.insert(2, "Paweł".to_string());
+        s.named_speakers.insert(1, "Marta".to_string());
+        s.named_speakers.insert(10, "marta ".to_string());
+        s.previous_speaker_names = vec!["Ola".to_string(), "PAWEŁ".to_string()];
+        s.set_final_segments(vec![seg(0.0, 1.0, "nowe")], None);
+        assert!(s.named_speakers.is_empty());
+        assert_eq!(
+            s.previous_speaker_names,
+            vec!["Marta".to_string(), "Paweł".to_string(), "Ola".to_string()]
+        );
+
+        s.set_final_segments(vec![seg(0.0, 1.0, "znowu")], None);
+        assert_eq!(
+            s.previous_speaker_names,
+            vec!["Marta".to_string(), "Paweł".to_string(), "Ola".to_string()],
+            "a pass after one that left nobody named keeps the earlier names"
+        );
+    }
+
+    #[test]
+    fn speaker_names_are_omitted_until_set_and_round_trip_with_numeric_keys() {
+        let mut s = TranscriptSession::new(Language::Pl, mk_source(), PathBuf::from("a.wav"));
+        let json = serde_json::to_value(&s).unwrap();
+        assert!(json.get("named_speakers").is_none());
+        assert!(json.get("previous_speaker_names").is_none());
+
+        s.named_speakers.insert(3, "Ola".to_string());
+        s.previous_speaker_names = vec!["Marta".to_string()];
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(json["named_speakers"].to_string(), r#"{"3":"Ola"}"#);
+        assert_eq!(json["previous_speaker_names"].to_string(), r#"["Marta"]"#);
+        let back: TranscriptSession = serde_json::from_value(json).unwrap();
+        assert_eq!(back.named_speakers, s.named_speakers);
+        assert_eq!(back.previous_speaker_names, s.previous_speaker_names);
+    }
+
+    #[test]
+    fn speaker_name_fields_and_limit_match_ts_mirror() {
+        let src = include_str!("../../../../desktop/src/src/app/models/transcript.ts");
+        let session = ts_interface_body(src, "TranscriptSession");
+        assert!(
+            session.contains("  named_speakers?: Record<string, string>;"),
+            "models/transcript.ts TranscriptSession must carry the optional named_speakers map"
+        );
+        assert!(
+            session.contains("  previous_speaker_names?: string[];"),
+            "models/transcript.ts TranscriptSession must carry the optional previous_speaker_names"
+        );
+        assert!(
+            src.contains(&format!(
+                "export const SPEAKER_NAME_MAX_CHARS = {SPEAKER_NAME_MAX_CHARS};"
+            )),
+            "models/transcript.ts SPEAKER_NAME_MAX_CHARS must equal the Rust limit"
+        );
+    }
+
+    #[test]
     fn speaker_label_matches_ts_mirrors() {
+        let names =
+            include_str!("../../../../desktop/src/src/app/meeting-transcription/speaker-names.ts");
         let pane = include_str!(
             "../../../../desktop/src/src/app/meeting-transcription/live-transcript/live-transcript.component.ts"
         );
         let service =
             include_str!("../../../../desktop/src/src/app/services/transcription.service.ts");
         assert!(
-            pane.contains(&format!("`Meeting · {SPEAKER_LABEL} ${{n}}`")),
-            "live-transcript.component.ts must label a diarized meeting line `Meeting · {SPEAKER_LABEL} N`"
+            names.contains(&format!("`{SPEAKER_LABEL} ${{id}}`")),
+            "speaker-names.ts must label an unnamed diarized speaker `{SPEAKER_LABEL} N`"
         );
         assert!(
-            pane.contains(&format!("`{SPEAKER_LABEL} ${{n}}`")),
-            "live-transcript.component.ts must label a diarized untagged line `{SPEAKER_LABEL} N`"
+            !pane.contains(&format!("Meeting · {SPEAKER_LABEL}")),
+            "live-transcript.component.ts must not prefix a speaker label with `Meeting · `"
         );
         assert!(
             service.contains(&format!("'{SPEAKER_LABEL} N'")),
@@ -572,7 +734,7 @@ mod tests {
             seg(2.5, 5.0, "Witaj."),
             seg(5.0, 7.0, "   "),
         ];
-        let md = s.to_markdown();
+        let md = s.to_markdown(None);
         assert!(md.starts_with("# Meeting transcript ("));
         assert!(md.contains("Language: `pl`"));
         assert!(md.contains("**(00:00.00)** Cześć!"));
@@ -593,7 +755,7 @@ mod tests {
         let mut mic = seg(2.0, 3.0, "Cześć.");
         mic.source = Some(TranscriptSource::Mic);
         s.live_segments = vec![sys, mic, seg(3.0, 4.0, "bez kanału")];
-        let md = s.to_markdown();
+        let md = s.to_markdown(None);
         assert!(md.contains("**(00:00.00) Meeting:** Dzień dobry państwu."));
         assert!(md.contains("**(00:02.00) You:** Cześć."));
         assert!(md.contains("**(00:03.00)** bez kanału"));
@@ -620,11 +782,59 @@ mod tests {
 
     #[test]
     fn to_markdown_labels_diarized_meeting_segments_with_their_speaker() {
-        let md = diarized_session().to_markdown();
-        assert!(md.contains("**(00:00.00) Meeting · Speaker 1:** Zaczynamy."));
+        let md = diarized_session().to_markdown(None);
+        assert!(md.contains("**(00:00.00) Speaker 1:** Zaczynamy."));
         assert!(md.contains("**(00:01.00) You:** Cześć."));
-        assert!(md.contains("**(00:03.00) Meeting · Speaker 2:** Odpowiadam."));
+        assert!(md.contains("**(00:03.00) Speaker 2:** Odpowiadam."));
         assert!(md.contains("**(00:04.00) Meeting:** Mhm."));
+        assert!(!md.contains("Meeting ·"));
+    }
+
+    #[test]
+    fn to_markdown_uses_the_names_the_user_gave_and_your_name_on_microphone_lines() {
+        let mut s = diarized_session();
+        s.named_speakers.insert(1, "Marta".to_string());
+        s.named_speakers.insert(10, "Paweł".to_string());
+        let md = s.to_markdown(Some("  Kamil "));
+        assert!(md.contains("**(00:00.00) Marta:** Zaczynamy."), "{md}");
+        assert!(md.contains("**(00:01.00) Kamil:** Cześć."), "{md}");
+        assert!(md.contains("**(00:02.00) Paweł:** Mam pytanie."), "{md}");
+        assert!(md.contains("**(00:03.00) Speaker 2:** Odpowiadam."), "{md}");
+        assert!(md.contains("**(00:04.00) Meeting:** Mhm."), "{md}");
+        assert!(md.contains(&format!(
+            "- Speakers: Marta, Speaker 2, Paweł ({SPEAKERS_NOTE}; {NAMES_NOTE})\n"
+        )));
+    }
+
+    #[test]
+    fn to_markdown_keeps_you_without_a_name_and_for_a_blank_one() {
+        let s = diarized_session();
+        for your_name in [None, Some(""), Some(" \t ")] {
+            let md = s.to_markdown(your_name);
+            assert!(md.contains("**(00:01.00) You:** Cześć."), "{md}");
+        }
+    }
+
+    #[test]
+    fn to_markdown_lists_a_name_two_labels_share_once() {
+        let mut s = diarized_session();
+        s.named_speakers.insert(1, "Marta".to_string());
+        s.named_speakers.insert(2, "Marta".to_string());
+        let md = s.to_markdown(None);
+        assert!(md.contains("- Speakers: Marta, Speaker 10 ("), "{md}");
+        assert!(md.contains("**(00:03.00) Marta:** Odpowiadam."));
+    }
+
+    #[test]
+    fn to_markdown_says_nothing_about_names_while_no_speaker_is_named() {
+        let mut s = diarized_session();
+        s.named_speakers.insert(7, "Ola".to_string());
+        let md = s.to_markdown(None);
+        assert!(!md.contains(NAMES_NOTE), "{md}");
+        assert!(
+            !md.contains("Ola"),
+            "a name of a speaker the transcript lacks is not shown"
+        );
     }
 
     #[test]
@@ -636,7 +846,7 @@ mod tests {
         second.speaker_id = Some(2);
         s.final_segments = Some(vec![first, second, seg(4.0, 5.0, "Mhm.")]);
         s.models_used.diarization = Some("nemotron-3-diarization-q8_0".to_string());
-        let md = s.to_markdown();
+        let md = s.to_markdown(None);
         assert!(md.contains("- Speakers: Speaker 1, Speaker 2 ("), "{md}");
         assert!(md.contains("**(00:00.00) Speaker 1:** Witam wszystkich."));
         assert!(md.contains("**(00:03.00) Speaker 2:** Dzień dobry."));
@@ -646,27 +856,27 @@ mod tests {
 
     #[test]
     fn to_markdown_lists_the_speakers_in_numeric_order_in_the_header() {
-        let md = diarized_session().to_markdown();
+        let md = diarized_session().to_markdown(None);
         assert!(
             md.contains(&format!(
                 "- Status: recording\n- Speakers: Speaker 1, Speaker 2, Speaker 10 ({SPEAKERS_NOTE})\n\n"
             )),
             "{md}"
         );
-        assert!(md.contains("approximate: one person can get several labels and one label several people; a 'Meeting' line without a number, or a line without any label, has no recognised speaker)\n"));
+        assert!(md.contains("approximate: one person can get several labels and one label several people; a 'Meeting' line, or a line without any label, has no recognised speaker)\n"));
     }
 
     #[test]
     fn to_markdown_lists_no_speakers_without_diarization_or_without_any_label() {
         let mut no_model = diarized_session();
         no_model.models_used.diarization = None;
-        assert!(!no_model.to_markdown().contains("- Speakers:"));
+        assert!(!no_model.to_markdown(None).contains("- Speakers:"));
 
         let mut no_labels = diarized_session();
         for seg in no_labels.final_segments.as_mut().unwrap() {
             seg.speaker_id = None;
         }
-        let md = no_labels.to_markdown();
+        let md = no_labels.to_markdown(None);
         assert!(!md.contains("Speaker"));
         assert!(md.contains("- Status: recording\n\n"));
     }
@@ -699,7 +909,7 @@ mod tests {
         let mut early = seg(1.0, 2.0, "wcześniej");
         early.source = Some(TranscriptSource::Mic);
         s.live_segments = vec![late, early];
-        let md = s.to_markdown();
+        let md = s.to_markdown(None);
         let early_at = md.find("wcześniej").unwrap();
         let late_at = md.find("później").unwrap();
         assert!(
@@ -712,7 +922,7 @@ mod tests {
     fn to_markdown_uses_the_title_as_heading_and_keeps_the_start_time() {
         let mut s = TranscriptSession::new(Language::En, mk_source(), PathBuf::from("/a.wav"));
         s.title = Some("Sprint review".to_string());
-        let md = s.to_markdown();
+        let md = s.to_markdown(None);
         assert!(md.starts_with("# Sprint review\n\n"));
         assert!(md.contains(&format!("- Recorded: {}\n", s.created_at)));
         assert!(!md.contains("# Meeting transcript ("));
@@ -736,6 +946,113 @@ mod tests {
             normalize_title(&long).unwrap().chars().count(),
             TITLE_MAX_CHARS
         );
+    }
+
+    fn finished_diarized_session() -> TranscriptSession {
+        let mut s = diarized_session();
+        s.status = TranscriptStatus::Done;
+        s
+    }
+
+    #[test]
+    fn a_speaker_is_named_only_once_the_transcription_is_over() {
+        let mut s = diarized_session();
+        for status in [
+            TranscriptStatus::Recording,
+            TranscriptStatus::Paused,
+            TranscriptStatus::Finalizing { progress: 0.4 },
+        ] {
+            s.status = status;
+            assert_eq!(
+                s.check_speaker_name(1, "Marta"),
+                Err("speakers can be named once the transcription is over".to_string())
+            );
+        }
+        for status in [
+            TranscriptStatus::Done,
+            TranscriptStatus::Postponed,
+            TranscriptStatus::Failed {
+                reason: "x".to_string(),
+            },
+        ] {
+            s.status = status;
+            assert_eq!(s.check_speaker_name(1, "Marta"), Ok(()));
+        }
+    }
+
+    #[test]
+    fn a_speaker_the_transcript_lacks_cannot_be_named() {
+        let s = finished_diarized_session();
+        assert_eq!(
+            s.check_speaker_name(3, "Ola"),
+            Err("this transcript has no Speaker 3".to_string())
+        );
+        assert_eq!(s.check_speaker_name(10, "Ola"), Ok(()));
+    }
+
+    #[test]
+    fn a_label_the_transcript_uses_is_not_a_name() {
+        let s = finished_diarized_session();
+        for label in [
+            "Speaker 3",
+            " speaker   12 ",
+            "SPEAKER 2",
+            "you",
+            " Meeting ",
+        ] {
+            let err = s.check_speaker_name(1, label).unwrap_err();
+            assert!(
+                err.contains("is a label the transcript already uses"),
+                "{label}: {err}"
+            );
+        }
+        for name in [
+            "Speaker",
+            "Speaker A",
+            "Speakerowa 2",
+            "Youssef",
+            "Meetingowa",
+            "",
+        ] {
+            assert_eq!(s.check_speaker_name(1, name), Ok(()), "{name}");
+        }
+    }
+
+    #[test]
+    fn name_speaker_stores_a_normalised_name_takes_a_shared_spelling_and_removes_a_blank_one() {
+        let mut s = finished_diarized_session();
+        assert_eq!(s.name_speaker(1, "  Marta\n"), Some("Marta".to_string()));
+        assert_eq!(s.name_speaker(2, " MARTA "), Some("Marta".to_string()));
+        assert_eq!(
+            s.name_speaker(1, "Marta Nowak"),
+            Some("Marta Nowak".to_string())
+        );
+        assert_eq!(s.named_speakers.get(&2).map(String::as_str), Some("Marta"));
+        assert_eq!(s.name_speaker(2, "  "), None);
+        assert!(!s.named_speakers.contains_key(&2));
+    }
+
+    #[test]
+    fn normalize_speaker_name_trims_collapses_and_caps_at_its_own_limit() {
+        assert_eq!(
+            normalize_speaker_name("  Anna\n Maria "),
+            Some("Anna Maria".to_string())
+        );
+        assert_eq!(normalize_speaker_name("\u{7}"), None);
+        assert_eq!(normalize_speaker_name(""), None);
+        let long = "Ł".repeat(SPEAKER_NAME_MAX_CHARS + 5);
+        assert_eq!(
+            normalize_speaker_name(&long).unwrap().chars().count(),
+            SPEAKER_NAME_MAX_CHARS
+        );
+    }
+
+    #[test]
+    fn same_speaker_name_ignores_case_and_outer_whitespace_only() {
+        assert!(same_speaker_name("Marta", " marta "));
+        assert!(same_speaker_name("ŁUKASZ", "łukasz"));
+        assert!(!same_speaker_name("Anna Maria", "AnnaMaria"));
+        assert!(!same_speaker_name("Marta", "Marek"));
     }
 
     #[test]
@@ -1006,6 +1323,7 @@ mod tests {
         assert_eq!(s.live_segments.len(), 1);
         assert_eq!(s.live_segments[0].text, "hej");
         assert_eq!(s.live_segments[0].speaker_id, None);
+        assert!(s.named_speakers.is_empty());
         assert_eq!(s.models_used.live.as_deref(), Some("small"));
         assert_eq!(s.last_seq, 7);
         s.save(dir.path()).unwrap();

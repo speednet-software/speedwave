@@ -1236,6 +1236,7 @@ fn main() {
             transcription_cmd::delete_transcript,
             transcription_cmd::get_transcript_markdown,
             transcription_cmd::rename_transcript,
+            transcription_cmd::rename_speaker,
             transcription_cmd::transcribe_transcript,
             transcription_cmd::postpone_transcription,
             transcription_cmd::import_transcription,

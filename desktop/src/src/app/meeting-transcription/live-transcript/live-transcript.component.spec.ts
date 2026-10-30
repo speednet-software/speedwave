@@ -90,6 +90,11 @@ describe('LiveTranscriptComponent', () => {
     resumeRecording: ReturnType<typeof vi.fn>;
     liveTranscriptPreferred: ReturnType<typeof vi.fn>;
     speakerAttribution: ReturnType<typeof vi.fn>;
+    renameSpeaker: ReturnType<typeof vi.fn>;
+    yourName: ReturnType<typeof vi.fn>;
+    setYourName: ReturnType<typeof vi.fn>;
+    yourNameAsked: ReturnType<typeof vi.fn>;
+    markYourNameAsked: ReturnType<typeof vi.fn>;
   };
   let chat: {
     hasConversation: WritableSignal<boolean>;
@@ -118,6 +123,11 @@ describe('LiveTranscriptComponent', () => {
       resumeRecording: vi.fn(async () => undefined),
       liveTranscriptPreferred: vi.fn(() => false),
       speakerAttribution: vi.fn(() => false),
+      renameSpeaker: vi.fn(async (_id: string, _n: number, name: string) => name.trim() || null),
+      yourName: vi.fn(() => ''),
+      setYourName: vi.fn((name: string) => name.trim()),
+      yourNameAsked: vi.fn(() => false),
+      markYourNameAsked: vi.fn(),
     };
     chat = {
       hasConversation: signal(false),
@@ -176,6 +186,7 @@ describe('LiveTranscriptComponent', () => {
     fixture.componentRef.setInput(
       'session',
       session({
+        status: { state: 'done' },
         final_segments: [
           sys(0, 'zaczynamy', 1),
           { ...seg(1, 'cześć'), source: 'mic' as const },
@@ -190,35 +201,37 @@ describe('LiveTranscriptComponent', () => {
     fixture.detectChanges();
     const lines = component.lines();
     expect(lines.map((l) => l.speaker)).toEqual([
-      'Meeting · Speaker 1',
+      'Speaker 1',
       'You',
-      'Meeting · Speaker 2',
-      'Meeting · Speaker 1',
+      'Speaker 2',
+      'Speaker 1',
       'Meeting',
-      'Meeting · Speaker 6',
+      'Speaker 6',
     ]);
-    expect(lines[0].speakerColor).toBe(lines[3].speakerColor);
-    expect(lines[0].speakerColor).not.toBe(lines[2].speakerColor);
-    expect(lines[5].speakerColor).toBeNull();
-    expect(lines[1].speakerColor).toBeNull();
-    expect(lines[4].speakerColor).toBeNull();
+    expect(lines.map((l) => l.diarized?.id ?? null)).toEqual([1, null, 2, 1, null, 6]);
+    expect(lines[0].diarized).toEqual(lines[3].diarized);
+    expect(lines[0].diarized?.color).not.toBe(lines[2].diarized?.color);
+    expect(lines[5].diarized).toMatchObject({ color: null, mark: '6' });
+    expect(lines[1].diarized).toBeNull();
     const chips: HTMLElement[] = Array.from(
       fixture.nativeElement.querySelectorAll('[data-testid="line-speaker"]')
     );
-    expect(chips[0].textContent?.trim()).toBe('Meeting · Speaker 1');
-    expect(chips[0].style.color).toBe('');
+    expect(chips[0].textContent?.trim()).toBe('Speaker 1');
+    expect(chips[0].tagName).toBe('BUTTON');
+    expect(chips[1].tagName).toBe('SPAN');
+    expect(chips[4].tagName).toBe('SPAN');
     expect(chips[0].className).toContain('text-[var(--ink-dim)]');
     const dots: HTMLElement[] = Array.from(
-      fixture.nativeElement.querySelectorAll('[data-testid="line-speaker-dot"]')
+      fixture.nativeElement.querySelectorAll(
+        '[data-testid="transcript-body"] [data-testid="speaker-dot"]'
+      )
     );
     expect(dots.map((d) => d.style.backgroundColor)).toEqual([
       'var(--teal)',
       'var(--violet)',
       'var(--teal)',
     ]);
-    expect(chips[1].querySelector('[data-testid="line-speaker-dot"]')).toBeNull();
-    expect(chips[4].querySelector('[data-testid="line-speaker-dot"]')).toBeNull();
-    expect(chips[5].querySelector('[data-testid="line-speaker-dot"]')).toBeNull();
+    expect(chips[5].querySelector('[data-testid="speaker-circle"]')!.textContent).toBe('6');
   });
 
   it('labels diarized segments without a channel as Speaker N in their colour', () => {
@@ -241,11 +254,455 @@ describe('LiveTranscriptComponent', () => {
     fixture.detectChanges();
     const lines = component.lines();
     expect(lines.map((l) => l.speaker)).toEqual(['Speaker 1', 'Speaker 2', null]);
-    expect(lines.map((l) => l.speakerColor)).toEqual(['var(--teal)', 'var(--violet)', null]);
+    expect(lines.map((l) => l.diarized?.color ?? null)).toEqual([
+      'var(--teal)',
+      'var(--violet)',
+      null,
+    ]);
     const chips: HTMLElement[] = Array.from(
       fixture.nativeElement.querySelectorAll('[data-testid="line-speaker"]')
     );
     expect(chips.map((c) => c.textContent?.trim())).toEqual(['Speaker 1', 'Speaker 2']);
+  });
+
+  describe('speaker names', () => {
+    const sys = (start: number, text: string, speaker_id?: number) => ({
+      ...seg(start, text),
+      source: 'system' as const,
+      speaker_id,
+    });
+    const q = (id: string): HTMLElement | null =>
+      fixture.nativeElement.querySelector(`[data-testid="${id}"]`);
+    const all = (id: string): HTMLElement[] =>
+      Array.from(fixture.nativeElement.querySelectorAll(`[data-testid="${id}"]`));
+    const field = (): HTMLInputElement => q('speaker-name-input') as HTMLInputElement;
+    const type = (value: string): void => {
+      field().value = value;
+      field().dispatchEvent(new Event('input'));
+      fixture.detectChanges();
+    };
+
+    function open(named: Record<string, string> = {}, previous: string[] = []): void {
+      fixture.componentRef.setInput(
+        'session',
+        session({
+          status: { state: 'done' },
+          final_segments: [
+            sys(0, 'zaczynamy', 1),
+            { ...seg(1, 'cześć'), source: 'mic' as const },
+            sys(2, 'pytanie', 2),
+            sys(3, 'dalej', 1),
+            sys(4, 'odpowiadam', 3),
+            sys(5, 'jeszcze', 1),
+            sys(6, 'też', 2),
+          ],
+          models_used: { live: null, finalize: 'large-v3', diarization: 'nemotron' },
+          named_speakers: named,
+          previous_speaker_names: previous,
+        })
+      );
+      fixture.detectChanges();
+    }
+
+    it('shows a legend of the speakers, most lines first, and counts the unnamed', () => {
+      open({ '2': 'Paweł' });
+      expect(all('speaker-chip').map((c) => c.getAttribute('aria-label'))).toEqual([
+        'Name Speaker 1, 3 lines',
+        'Rename Paweł, 2 lines',
+        'Name Speaker 3, 1 line',
+      ]);
+      expect(all('speaker-chip')[0].className).toContain('border-dashed');
+      expect(all('speaker-chip')[1].className).not.toContain('border-dashed');
+      expect(all('speaker-chip')[1].getAttribute('aria-label')).toBe('Rename Paweł, 2 lines');
+      expect(q('transcript-meta')!.textContent).toContain('3 speakers · 2 unnamed');
+      expect(q('speaker-approximate')).not.toBeNull();
+    });
+
+    it('shows no legend for a transcript without speakers', () => {
+      fixture.componentRef.setInput(
+        'session',
+        session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })
+      );
+      fixture.detectChanges();
+      expect(q('speaker-legend')).toBeNull();
+      expect(q('transcript-meta')!.textContent).not.toContain('speaker');
+    });
+
+    it('labels a named speaker with its name and keeps the pencil out of sight until hover', () => {
+      open({ '1': 'Marta' });
+      const labels = all('line-speaker');
+      expect(labels[0].textContent?.trim()).toBe('Marta');
+      expect(labels[0].getAttribute('aria-label')).toBe('Rename Marta, 3 lines');
+      expect(labels[0].querySelector('app-icon')!.className).toContain('opacity-0');
+      expect(labels[2].getAttribute('aria-label')).toBe('Name Speaker 2, 2 lines');
+      expect(labels[2].querySelector('app-icon')!.className).toContain('opacity-60');
+      expect(q('transcript-meta')!.textContent).toContain('3 speakers · 2 unnamed');
+    });
+
+    it('opens the dialog under the clicked line with the scope of the change', () => {
+      open();
+      all('line-speaker')[2].click();
+      fixture.detectChanges();
+      const lineWithDialog = q('speaker-name-dialog')!.closest('[data-testid="transcript-line"]');
+      expect(lineWithDialog!.textContent).toContain('pytanie');
+      expect(q('speaker-name-dialog')!.getAttribute('aria-label')).toBe('Name for Speaker 2');
+      expect(q('speaker-name-note')!.textContent?.trim()).toBe('Renames Speaker 2 on all 2 lines.');
+      const highlighted = all('transcript-line').filter((l) =>
+        l.className.includes('bg-[var(--bg-1)]')
+      );
+      expect(highlighted.map((l) => l.textContent)).toEqual([
+        expect.stringContaining('pytanie'),
+        expect.stringContaining('też'),
+      ]);
+    });
+
+    it('saves on Enter, closes the dialog and gives the focus back to the label', async () => {
+      open();
+      const label = all('line-speaker')[2];
+      label.click();
+      fixture.detectChanges();
+      type('Paweł');
+      field().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+      await fixture.whenStable();
+      fixture.detectChanges();
+      expect(svc.renameSpeaker).toHaveBeenCalledWith('sess-1', 2, 'Paweł');
+      expect(q('speaker-name-dialog')).toBeNull();
+      expect(document.activeElement).toBe(label);
+    });
+
+    it('says that a name another speaker has puts both together', () => {
+      open({ '1': 'Marta' });
+      all('line-speaker')[2].click();
+      fixture.detectChanges();
+      type(' marta ');
+      expect(q('speaker-name-note')!.textContent?.trim()).toBe(
+        'Renames Speaker 2 on all 2 lines. Speaker 1 is already Marta, so both will show as Marta, 5 lines together. Rename either one to split them again.'
+      );
+      type('Marek');
+      expect(q('speaker-name-note')!.textContent?.trim()).toBe('Renames Speaker 2 on all 2 lines.');
+    });
+
+    it('says a speaker with one line is renamed on that line', () => {
+      open();
+      all('line-speaker')[4].click();
+      fixture.detectChanges();
+      expect(q('speaker-name-note')!.textContent?.trim()).toBe(
+        'Renames Speaker 3 on its one line.'
+      );
+    });
+
+    it('saves nothing on blur, on Cancel, on Esc or on a click outside', async () => {
+      open();
+      all('line-speaker')[0].click();
+      fixture.detectChanges();
+      type('Mar');
+      field().dispatchEvent(new Event('blur'));
+      fixture.detectChanges();
+      expect(q('speaker-name-dialog')).not.toBeNull();
+      q('speaker-name-cancel')!.click();
+      fixture.detectChanges();
+      expect(q('speaker-name-dialog')).toBeNull();
+
+      all('line-speaker')[0].click();
+      fixture.detectChanges();
+      q('speaker-name-dialog')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+      fixture.detectChanges();
+      expect(q('speaker-name-dialog')).toBeNull();
+
+      all('line-speaker')[0].click();
+      fixture.detectChanges();
+      document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      fixture.detectChanges();
+      expect(q('speaker-name-dialog')).toBeNull();
+      await fixture.whenStable();
+      expect(svc.renameSpeaker).not.toHaveBeenCalled();
+    });
+
+    it('does not call the backend when the name did not change', async () => {
+      open({ '1': 'Marta' });
+      all('line-speaker')[0].click();
+      fixture.detectChanges();
+      expect(field().value).toBe('Marta');
+      q('speaker-name-save')!.click();
+      await fixture.whenStable();
+      expect(svc.renameSpeaker).not.toHaveBeenCalled();
+    });
+
+    it('takes a name away when saved empty and shows the number again', async () => {
+      open({ '1': 'Marta' });
+      all('line-speaker')[0].click();
+      fixture.detectChanges();
+      expect(q('speaker-name-dialog')!.textContent).toContain('empty goes back to Speaker 1');
+      type('');
+      q('speaker-name-save')!.click();
+      await fixture.whenStable();
+      expect(svc.renameSpeaker).toHaveBeenCalledWith('sess-1', 1, '');
+    });
+
+    it('reports a backend refusal', async () => {
+      svc.renameSpeaker.mockRejectedValueOnce(new Error('this transcript has no Speaker 2'));
+      const errSpy = vi.fn();
+      component.errorOccurred.subscribe(errSpy);
+      open();
+      all('line-speaker')[2].click();
+      fixture.detectChanges();
+      type('Paweł');
+      q('speaker-name-save')!.click();
+      await fixture.whenStable();
+      expect(errSpy).toHaveBeenCalledWith('this transcript has no Speaker 2');
+    });
+
+    it('opens the same dialog from a legend chip, under the legend', () => {
+      open();
+      all('speaker-chip')[1].click();
+      fixture.detectChanges();
+      const dialog = q('speaker-name-dialog')!;
+      expect(dialog.closest('[data-testid="transcript-line"]')).toBeNull();
+      expect(dialog.closest('[data-testid="transcript-header"]')).not.toBeNull();
+      expect(dialog.getAttribute('aria-label')).toBe('Name for Speaker 2');
+    });
+
+    it('highlights the lines of a speaker while its chip is hovered, and its chip from a line', () => {
+      open();
+      all('speaker-chip')[0].dispatchEvent(new Event('mouseenter'));
+      fixture.detectChanges();
+      const highlighted = all('transcript-line').filter((l) =>
+        l.className.includes('bg-[var(--bg-1)]')
+      );
+      expect(highlighted.length).toBe(3);
+      all('speaker-chip')[0].dispatchEvent(new Event('mouseleave'));
+      all('line-speaker')[4].dispatchEvent(new Event('mouseenter'));
+      fixture.detectChanges();
+      expect(all('speaker-chip')[2].className).toContain('border-[var(--accent)]');
+    });
+
+    it('offers the names from before the last transcription that no speaker has', () => {
+      open({ '1': 'Marta' }, ['marta', 'Paweł', 'Ola']);
+      expect(q('speaker-reapply')).not.toBeNull();
+      q('speaker-reapply')!.click();
+      fixture.detectChanges();
+      expect(q('speaker-name-dialog')!.getAttribute('aria-label')).toBe('Name for Speaker 2');
+      expect(all('speaker-name-suggestion').map((b) => b.textContent?.trim())).toEqual([
+        'Paweł',
+        'Ola',
+      ]);
+      all('speaker-name-suggestion')[0].click();
+      fixture.detectChanges();
+      expect(field().value).toBe('Paweł');
+    });
+
+    it('offers no reapply once every speaker is named', () => {
+      open({ '1': 'Marta', '2': 'Paweł', '3': 'Ola' }, ['Kasia']);
+      expect(q('speaker-reapply')).toBeNull();
+      expect(q('transcript-meta')!.textContent).toContain('3 speakers');
+      expect(q('transcript-meta')!.textContent).not.toContain('unnamed');
+    });
+
+    it('offers no naming while a transcription runs, and the backend would refuse it anyway', () => {
+      open();
+      fixture.componentRef.setInput(
+        'session',
+        session({ ...component.session()!, status: { state: 'finalizing', progress: 0.3 } })
+      );
+      fixture.detectChanges();
+      expect(all('line-speaker').map((l) => l.tagName)).toEqual([
+        'SPAN',
+        'SPAN',
+        'SPAN',
+        'SPAN',
+        'SPAN',
+        'SPAN',
+        'SPAN',
+      ]);
+      expect(all('speaker-chip').every((c) => (c as HTMLButtonElement).disabled)).toBe(true);
+      component.openNaming({ id: 1, trigger: null }, 'legend');
+      fixture.detectChanges();
+      expect(q('speaker-name-dialog')).toBeNull();
+    });
+
+    it('highlights the lines of a speaker while its line label has keyboard focus', () => {
+      open();
+      all('line-speaker')[2].dispatchEvent(new Event('focus'));
+      fixture.detectChanges();
+      expect(
+        all('transcript-line').filter((l) => l.className.includes('bg-[var(--bg-1)]')).length
+      ).toBe(2);
+      all('line-speaker')[2].dispatchEvent(new Event('blur'));
+      fixture.detectChanges();
+      expect(
+        all('transcript-line').filter((l) => l.className.includes('bg-[var(--bg-1)]')).length
+      ).toBe(0);
+    });
+
+    it('warns about a merge for a name that differs only in inner spacing', () => {
+      open({ '1': 'Marta Nowak' });
+      all('line-speaker')[2].click();
+      fixture.detectChanges();
+      type('marta   nowak');
+      expect(q('speaker-name-note')!.textContent).toContain('Speaker 1 is already Marta Nowak');
+    });
+
+    it('does not call the backend when the typed name normalises to the stored one', async () => {
+      open({ '1': 'Marta Nowak' });
+      all('line-speaker')[0].click();
+      fixture.detectChanges();
+      type('  Marta   Nowak ');
+      q('speaker-name-save')!.click();
+      await fixture.whenStable();
+      expect(svc.renameSpeaker).not.toHaveBeenCalled();
+    });
+
+    it('closes the dialog when the transcription starts again', () => {
+      open();
+      all('line-speaker')[0].click();
+      fixture.detectChanges();
+      fixture.componentRef.setInput(
+        'session',
+        session({ ...component.session()!, status: { state: 'finalizing', progress: 0 } })
+      );
+      fixture.detectChanges();
+      expect(q('speaker-name-dialog')).toBeNull();
+    });
+
+    it('folds speakers past the fourth into +N and opens them on request', () => {
+      fixture.componentRef.setInput(
+        'session',
+        session({
+          status: { state: 'done' },
+          final_segments: [1, 2, 3, 4, 5, 6].map((n) => sys(n, `mówca ${n}`, n)),
+          models_used: { live: null, finalize: 'large-v3', diarization: 'nemotron' },
+          named_speakers: { '5': 'Basia' },
+        })
+      );
+      fixture.detectChanges();
+      expect(all('speaker-chip').length).toBe(4);
+      expect(q('speaker-more')!.textContent?.replace(/\s+/g, ' ').trim()).toBe('+2 · 1 unnamed');
+      q('speaker-more')!.click();
+      fixture.detectChanges();
+      expect(all('speaker-chip').length).toBe(6);
+      const circles = all('speaker-circle').filter((c) =>
+        c.closest('[data-testid="speaker-chip"]')
+      );
+      expect(circles.map((c) => c.textContent)).toEqual(['B', '6']);
+      q('speaker-fewer')!.click();
+      fixture.detectChanges();
+      expect(all('speaker-chip').length).toBe(4);
+    });
+
+    it('says Transcribe again detaches the names once a speaker is named', () => {
+      open({ '1': 'Marta' });
+      component.toggleMenu('more');
+      fixture.detectChanges();
+      expect(q('retranscribe-item')!.textContent).toContain(
+        'Speaker names will be detached and offered again.'
+      );
+    });
+  });
+
+  describe('your name before the first export', () => {
+    const q = (id: string): HTMLElement | null =>
+      fixture.nativeElement.querySelector(`[data-testid="${id}"]`);
+
+    function withOwnLines(): void {
+      fixture.componentRef.setInput(
+        'session',
+        session({
+          status: { state: 'done' },
+          final_segments: [{ ...seg(0, 'cześć'), source: 'mic' as const }],
+        })
+      );
+      fixture.detectChanges();
+    }
+
+    it('asks once before an export of a transcript with lines of the user', async () => {
+      withOwnLines();
+      await component.exportMarkdown();
+      fixture.detectChanges();
+      expect(svc.exportMarkdown).not.toHaveBeenCalled();
+      expect(q('speaker-name-dialog')!.getAttribute('aria-label')).toBe('Your name');
+      const input = q('speaker-name-input') as HTMLInputElement;
+      input.value = 'Kamil';
+      q('speaker-name-save')!.click();
+      await fixture.whenStable();
+      expect(svc.setYourName).toHaveBeenCalledWith('Kamil');
+      expect(svc.markYourNameAsked).toHaveBeenCalled();
+      expect(svc.exportMarkdown).toHaveBeenCalledWith('sess-1');
+      expect(svc.setYourName.mock.invocationCallOrder[0]).toBeLessThan(
+        svc.exportMarkdown.mock.invocationCallOrder[0]
+      );
+      expect(q('speaker-name-dialog')).toBeNull();
+    });
+
+    it('keeps You and goes on when the user declines', async () => {
+      withOwnLines();
+      await component.stageForChat();
+      fixture.detectChanges();
+      q('speaker-name-cancel')!.click();
+      await fixture.whenStable();
+      expect(svc.setYourName).not.toHaveBeenCalled();
+      expect(svc.markYourNameAsked).toHaveBeenCalled();
+      expect(svc.stageForChat).toHaveBeenCalledWith('sess-1', 'new-chat');
+    });
+
+    it('says why an attach that became blocked while the question showed did not happen', async () => {
+      const errSpy = vi.fn();
+      component.errorOccurred.subscribe(errSpy);
+      withOwnLines();
+      await component.stageForChat();
+      fixture.detectChanges();
+      chat.newChatBlockedReason.set('Close a chat tab first');
+      q('speaker-name-cancel')!.click();
+      await fixture.whenStable();
+      expect(svc.stageForChat).not.toHaveBeenCalled();
+      expect(errSpy).toHaveBeenCalledWith('Close a chat tab first');
+    });
+
+    it('drops the question and its action when another recording opens', async () => {
+      withOwnLines();
+      await component.exportMarkdown();
+      fixture.detectChanges();
+      fixture.componentRef.setInput(
+        'session',
+        session({
+          id: 'sess-2',
+          status: { state: 'done' },
+          final_segments: [{ ...seg(0, 'inne'), source: 'mic' as const }],
+        })
+      );
+      fixture.detectChanges();
+      expect(q('speaker-name-dialog')).toBeNull();
+      expect(svc.exportMarkdown).not.toHaveBeenCalled();
+    });
+
+    it('does nothing and asks again later when the question is dismissed', async () => {
+      withOwnLines();
+      await component.copyMarkdown();
+      fixture.detectChanges();
+      q('speaker-name-dialog')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+      fixture.detectChanges();
+      expect(q('speaker-name-dialog')).toBeNull();
+      expect(svc.markYourNameAsked).not.toHaveBeenCalled();
+      expect(svc.getMarkdown).not.toHaveBeenCalled();
+    });
+
+    it('does not ask when the name is set, was asked, or the transcript has no lines of the user', async () => {
+      withOwnLines();
+      svc.yourName.mockReturnValue('Kamil');
+      await component.exportMarkdown();
+      svc.yourName.mockReturnValue('');
+      svc.yourNameAsked.mockReturnValue(true);
+      await component.exportMarkdown();
+      svc.yourNameAsked.mockReturnValue(false);
+      fixture.componentRef.setInput(
+        'session',
+        session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })
+      );
+      fixture.detectChanges();
+      await component.exportMarkdown();
+      expect(svc.exportMarkdown).toHaveBeenCalledTimes(3);
+      fixture.detectChanges();
+      expect(q('speaker-name-dialog')).toBeNull();
+    });
   });
 
   describe('speaker labels on a microphone-only recording', () => {

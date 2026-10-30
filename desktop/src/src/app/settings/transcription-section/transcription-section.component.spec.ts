@@ -37,6 +37,8 @@ describe('TranscriptionSectionComponent', () => {
     refreshRecordings: ReturnType<typeof vi.fn>;
     speakerAttribution: ReturnType<typeof vi.fn>;
     setSpeakerAttribution: ReturnType<typeof vi.fn>;
+    yourName: ReturnType<typeof vi.fn>;
+    setYourName: ReturnType<typeof vi.fn>;
   };
   let platform: string;
 
@@ -99,6 +101,8 @@ describe('TranscriptionSectionComponent', () => {
       refreshRecordings: vi.fn(async () => undefined),
       speakerAttribution: vi.fn(() => false),
       setSpeakerAttribution: vi.fn(),
+      yourName: vi.fn(() => ''),
+      setYourName: vi.fn((name: string) => name.trim().replace(/\s+/g, ' ')),
     };
     await TestBed.configureTestingModule({
       imports: [TranscriptionSectionComponent],
@@ -559,6 +563,61 @@ describe('TranscriptionSectionComponent', () => {
     });
   });
 
+  describe('your name', () => {
+    const input = (): HTMLInputElement =>
+      fixture.nativeElement.querySelector('[data-testid="your-name-input"]');
+
+    it('shows an empty field that says where the name is used', async () => {
+      await component.ngOnInit();
+      fixture.detectChanges();
+      expect(input().value).toBe('');
+      expect(input().getAttribute('maxlength')).toBe('40');
+      const card = fixture.nativeElement.querySelector('[data-testid="your-name"]');
+      expect(card.textContent).toContain(
+        'Used instead of "You" in exports and in what Claude gets.'
+      );
+      expect(card.textContent).toContain('Stored on this computer only.');
+      expect(input().labels?.[0]?.textContent?.trim()).toBe('Your name');
+    });
+
+    it('stores the typed name on change and shows it as stored', async () => {
+      await component.ngOnInit();
+      fixture.detectChanges();
+      input().value = '  Kamil   Nowak ';
+      input().dispatchEvent(new Event('change'));
+      fixture.detectChanges();
+      expect(svc.setYourName).toHaveBeenCalledWith('  Kamil   Nowak ');
+      expect(input().value).toBe('Kamil Nowak');
+      expect(component.yourName()).toBe('Kamil Nowak');
+    });
+
+    it('shows the stored spelling even when the stored name did not change', async () => {
+      svc.yourName.mockReturnValue('Kamil');
+      fixture = TestBed.createComponent(TranscriptionSectionComponent);
+      component = fixture.componentInstance;
+      await component.ngOnInit();
+      fixture.detectChanges();
+      input().value = '  Kamil  ';
+      input().dispatchEvent(new Event('change'));
+      fixture.detectChanges();
+      expect(input().value).toBe('Kamil');
+    });
+
+    it('stores on Enter too, and a cleared field removes the name', async () => {
+      svc.yourName.mockReturnValue('Kamil');
+      fixture = TestBed.createComponent(TranscriptionSectionComponent);
+      component = fixture.componentInstance;
+      await component.ngOnInit();
+      fixture.detectChanges();
+      expect(input().value).toBe('Kamil');
+      input().value = '';
+      input().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+      fixture.detectChanges();
+      expect(svc.setYourName).toHaveBeenCalledWith('');
+      expect(component.yourName()).toBe('');
+    });
+  });
+
   describe('speaker attribution', () => {
     const q = (id: string): HTMLElement | null =>
       fixture.nativeElement.querySelector(`[data-testid="${id}"]`);
@@ -711,7 +770,7 @@ describe('TranscriptionSectionComponent', () => {
       );
       expect(items).toEqual([
         'One person can get two labels and one label can cover two people, most often when people talk over each other.',
-        'Up to 8 people. Transcribing again can number them differently.',
+        'Up to 8 people. Transcribing again can number them differently, so the names you gave are offered again instead of kept.',
         'People in the room with you are picked up by your microphone and labelled You.',
       ]);
     });
