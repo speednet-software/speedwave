@@ -12,6 +12,7 @@ const ALL_SPECS = [
   './specs/02-setup-wizard.spec.ts',
   './specs/03-container-health.spec.ts',
   './specs/06-project-management.spec.ts',
+  './specs/09-chat-conversation.spec.ts',
   './specs/11-local-provider-resume.spec.ts',
   './specs/12-provider-errors.spec.ts',
   './specs/20-slash-and-model-selector.spec.ts',
