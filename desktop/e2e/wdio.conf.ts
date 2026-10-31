@@ -71,19 +71,19 @@ export const config = {
   },
 
   afterTest: async function (
-    test: { pending?: boolean },
+    _test: unknown,
     _context: unknown,
-    { passed, error }: { passed: boolean; error?: Error }
+    { passed, skipped, error }: { passed: boolean; skipped?: boolean; error?: Error }
   ) {
-    if (!passed && !test.pending) await captureFailure('Test', error);
+    if (!passed && !skipped) await captureFailure('Test', error);
   },
 
   afterHook: async function (
-    hook: { pending?: boolean },
+    _test: unknown,
     _context: unknown,
-    { passed, error }: { passed: boolean; error?: Error }
+    { passed, skipped, error }: { passed: boolean; skipped?: boolean; error?: Error }
   ) {
-    if (!passed && !hook.pending && !/skip/i.test(error?.message ?? '')) {
+    if (!passed && !skipped && !/skip/i.test(error?.message ?? '')) {
       await captureFailure('Hook', error);
     }
   },

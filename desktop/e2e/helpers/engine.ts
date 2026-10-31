@@ -147,9 +147,9 @@ const ENGINE_PROBE_TIMEOUT_MS = 60_000;
 
 const SUDO_TIMELINE_SCRIPT = [
   'if [ -e /etc/sudo.conf ]; then cp -p /etc/sudo.conf /tmp/spw-sudo.conf.bak || exit 1; fi',
+  "trap 'if [ -e /tmp/spw-sudo.conf.bak ]; then mv /tmp/spw-sudo.conf.bak /etc/sudo.conf; else rm -f /etc/sudo.conf; fi' EXIT HUP TERM",
   "printf 'Debug sudo /tmp/spw-sudo-debug.log all@debug\\n' >/etc/sudo.conf",
   'timeout 45 sudo -n true',
-  'if [ -e /tmp/spw-sudo.conf.bak ]; then mv /tmp/spw-sudo.conf.bak /etc/sudo.conf; else rm -f /etc/sudo.conf; fi',
   'wc -l /tmp/spw-sudo-debug.log',
   'head -3 /tmp/spw-sudo-debug.log',
   'awk \'{ split($3, t, ":"); s = t[1] * 3600 + t[2] * 60 + t[3]; if (NR > 1 && s - prev >= 1) { print "---- gap " s - prev " s"; print last; print $0 } prev = s; last = $0 }\' /tmp/spw-sudo-debug.log',

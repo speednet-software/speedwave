@@ -123,7 +123,11 @@ describe('Factory Reset', function () {
     this.timeout(180_000);
 
     expect(await invokeOr<boolean>(false, 'is_setup_complete')).toBe(true);
-    console.log(`Session logs preserved: ${preserveSessionLogs()}`);
+    try {
+      console.log(`Session logs preserved: ${preserveSessionLogs()}`);
+    } catch (e) {
+      console.error(`Session logs not preserved: ${e}`);
+    }
 
     const resetBtn = await $('[data-testid="settings-reset-btn"]');
     await resetBtn.click();

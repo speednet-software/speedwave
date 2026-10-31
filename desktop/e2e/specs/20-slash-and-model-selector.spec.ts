@@ -75,6 +75,7 @@ async function openModelSelector(): Promise<void> {
   await browser.waitUntil(
     async () => {
       try {
+        if (await $('[data-testid="model-selector-search"]').isExisting()) return true;
         const badge = await $('[data-testid="composer-model-badge"]');
         if (!(await badge.isEnabled())) return false;
         await badge.click();
