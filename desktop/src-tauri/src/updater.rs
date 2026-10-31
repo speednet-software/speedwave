@@ -821,6 +821,10 @@ enum AutoCheckState {
 
 pub fn spawn_auto_check(app_handle: AppHandle) -> tauri::async_runtime::JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
+        if cfg!(feature = "e2e") {
+            log::info!("update auto-check disabled in the e2e build");
+            return;
+        }
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         let mut last_state: Option<AutoCheckState> = None;
 
