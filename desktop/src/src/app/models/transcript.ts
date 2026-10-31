@@ -11,6 +11,9 @@ export type AudioSource =
 /** The audio files an import takes, as `import.rs::supported_formats` names them. */
 export const IMPORT_FORMATS_LABEL = 'WAV, MP3, M4A, MP4, FLAC or OGG';
 
+/** Longest name a user can give a speaker, or themselves (Rust `SPEAKER_NAME_MAX_CHARS`). */
+export const SPEAKER_NAME_MAX_CHARS = 40;
+
 /** The kind of an {@link AudioSource}. */
 export type AudioSourceKind = AudioSource['kind'];
 
@@ -59,6 +62,15 @@ export type TranscriptStatus =
   | { state: 'failed'; reason: string };
 
 /**
+ * The transcript on screen: the offline pass's segments once it ran, else the live ones (Rust
+ * `effective_segments`).
+ * @param session - the session.
+ */
+export function effectiveSegments(session: TranscriptSession): Segment[] {
+  return session.final_segments ?? session.live_segments;
+}
+
+/**
  * Whether a session in this status can still change; `done`, `postponed` and `failed` wait for the
  * user, a paused one waits for Resume or Stop.
  * @param status - the session's lifecycle status.
@@ -95,6 +107,10 @@ export interface TranscriptSession {
   active_warnings?: CaptureWarning[];
   models_used: ModelsUsed;
   diarization_secs?: number | null;
+  /** Names the user gave the speakers, by speaker number (absent until one is named). */
+  named_speakers?: Record<string, string>;
+  /** Names the speakers had before a pass numbered them again (absent when there are none). */
+  previous_speaker_names?: string[];
   last_seq: number;
 }
 
@@ -148,6 +164,7 @@ export type TranscriptEvent =
       kind: 'final_segments_ready';
       seq: number;
       segments: Segment[];
+      previous_speaker_names: string[];
     }
   | { kind: 'audio_level'; seq: number; levels: number[] }
   | { kind: 'finished'; seq: number };

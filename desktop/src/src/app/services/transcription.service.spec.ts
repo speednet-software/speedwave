@@ -657,10 +657,25 @@ describe('TranscriptionService', () => {
         kind: 'final_segments_ready',
         seq: 2,
         segments: [seg(0, 5, 'higher-quality')],
+        previous_speaker_names: [],
       });
       const s = svc.active()!;
       expect(s.final_segments).toEqual([seg(0, 5, 'higher-quality')]);
       expect(s.live_segments[0].text).toBe('live-text');
+    });
+
+    it('drops the speaker names and keeps the previous ones a new pass reports', async () => {
+      await subscribeWith(
+        snapshot({ named_speakers: { '1': 'Marta' }, previous_speaker_names: ['Ola'] })
+      );
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'final_segments_ready',
+        seq: 1,
+        segments: [seg(0, 5, 'nowe')],
+        previous_speaker_names: ['Marta', 'Ola'],
+      });
+      expect(svc.active()?.named_speakers).toEqual({});
+      expect(svc.active()?.previous_speaker_names).toEqual(['Marta', 'Ola']);
     });
 
     it('leaves loudness to the running recording, so an opened session sets none', () => {
@@ -1175,9 +1190,114 @@ describe('TranscriptionService', () => {
       expect(await svc.exportMarkdown('s')).toBe(false);
       await svc.revealAudio('s');
       expect(calls).toEqual([
-        ['export_transcript', { sessionId: 's' }],
+        ['export_transcript', { sessionId: 's', yourName: null }],
         ['reveal_transcript_audio', { sessionId: 's' }],
       ]);
+    });
+
+    it('export and the markdown read carry the name of the user once it is set', async () => {
+      localStorage.clear();
+      const calls: [string, unknown][] = [];
+      mockTauri.invokeHandler = async (cmd, args) => {
+        calls.push([cmd, args]);
+        return cmd === 'export_transcript' ? true : '# md';
+      };
+      svc.setYourName('Kamil');
+      await svc.exportMarkdown('s');
+      await svc.getMarkdown('s');
+      expect(calls).toEqual([
+        ['export_transcript', { sessionId: 's', yourName: 'Kamil' }],
+        ['get_transcript_markdown', { sessionId: 's', yourName: 'Kamil' }],
+      ]);
+      localStorage.clear();
+    });
+  });
+
+  describe('speaker names', () => {
+    it('renameSpeaker stores the backend name on the open session', async () => {
+      await subscribeWith(snapshot({ status: { state: 'done' }, named_speakers: { '1': 'Ola' } }));
+      mockTauri.invokeHandler = async (cmd, args) => {
+        expect(cmd).toBe('rename_speaker');
+        expect(args).toEqual({ sessionId: 'sess-1', speaker: 2, name: ' marta ' });
+        return 'Marta';
+      };
+      expect(await svc.renameSpeaker('sess-1', 2, ' marta ')).toBe('Marta');
+      expect(svc.active()?.named_speakers).toEqual({ '1': 'Ola', '2': 'Marta' });
+    });
+
+    it('renameSpeaker drops a reply that arrives after a new transcript replaced the named one', async () => {
+      await subscribeWith(
+        snapshot({ status: { state: 'done' }, final_segments: [seg(0, 1, 'a')] })
+      );
+      const reply = createDeferred<string>();
+      mockTauri.invokeHandler = async () => reply.promise;
+      const pending = svc.renameSpeaker('sess-1', 1, 'Marta');
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'final_segments_ready',
+        seq: 1,
+        segments: [seg(0, 1, 'nowe')],
+        previous_speaker_names: [],
+      });
+      reply.resolve('Marta');
+      expect(await pending).toBe('Marta');
+      expect(svc.active()?.named_speakers).toEqual({});
+    });
+
+    it('renameSpeaker takes the name off the open session when the backend stored none', async () => {
+      await subscribeWith(snapshot({ named_speakers: { '1': 'Ola', '2': 'Marta' } }));
+      mockTauri.invokeHandler = async () => null;
+      expect(await svc.renameSpeaker('sess-1', 2, '')).toBeNull();
+      expect(svc.active()?.named_speakers).toEqual({ '1': 'Ola' });
+    });
+
+    it('renameSpeaker of another recording leaves the open one alone, and a refusal changes nothing', async () => {
+      await subscribeWith(snapshot({ named_speakers: { '1': 'Ola' } }));
+      mockTauri.invokeHandler = async () => 'Marta';
+      await svc.renameSpeaker('other', 1, 'Marta');
+      expect(svc.active()?.named_speakers).toEqual({ '1': 'Ola' });
+      mockTauri.invokeHandler = async () => {
+        throw new Error('this transcript has no Speaker 3');
+      };
+      await expect(svc.renameSpeaker('sess-1', 3, 'x')).rejects.toThrow('no Speaker 3');
+      expect(svc.active()?.named_speakers).toEqual({ '1': 'Ola' });
+    });
+  });
+
+  describe('your name', () => {
+    beforeEach(() => localStorage.clear());
+    afterEach(() => localStorage.clear());
+
+    it('stores a normalised name and a blank one removes it', () => {
+      expect(svc.yourName()).toBe('');
+      expect(svc.setYourName('  Kamil \n Nowak ')).toBe('Kamil Nowak');
+      expect(svc.yourName()).toBe('Kamil Nowak');
+      expect(svc.setYourName('   ')).toBe('');
+      expect(svc.yourName()).toBe('');
+    });
+
+    it('cuts a long name to the shared limit, counting characters', () => {
+      expect(Array.from(svc.setYourName('Ł'.repeat(60))).length).toBe(40);
+    });
+
+    it('remembers that the user was asked', () => {
+      expect(svc.yourNameAsked()).toBe(false);
+      svc.markYourNameAsked();
+      expect(svc.yourNameAsked()).toBe(true);
+    });
+
+    it('reads no name and an asked question when storage throws, and saving throws nothing', () => {
+      const get = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+        throw new Error('denied');
+      });
+      const set = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+        throw new Error('quota');
+      });
+      expect(svc.yourName()).toBe('');
+      expect(svc.yourNameAsked()).toBe(true);
+      expect(() => svc.setYourName('Kamil')).not.toThrow();
+      expect(() => svc.markYourNameAsked()).not.toThrow();
+      get.mockRestore();
+      set.mockRestore();
     });
   });
 
@@ -1246,6 +1366,84 @@ describe('TranscriptionService', () => {
         expect(draft.startsWith(plain)).toBe(true);
         expect(draft.length - plain.length).toBeLessThan(130);
       }
+    });
+
+    describe('with named speakers', () => {
+      const sys = (start: number, speaker_id: number): Segment => ({
+        ...seg(start, start + 1, 'x'),
+        source: 'system',
+        speaker_id,
+      });
+      const mic: Segment = { ...seg(9, 10, 'ja'), source: 'mic' };
+
+      function diarized(language: 'pl' | 'en', named: Record<string, string>, segments: Segment[]) {
+        mockTauri.invokeHandler = async (cmd: string) => {
+          if (cmd === 'get_transcript') {
+            return snapshot({
+              language,
+              final_segments: segments,
+              named_speakers: named,
+              models_used: { live: null, finalize: 'large-v3', diarization: 'nemotron' },
+            });
+          }
+          if (cmd === 'get_transcript_markdown') return '# Meeting transcript';
+          return undefined;
+        };
+      }
+
+      afterEach(() => localStorage.clear());
+
+      it('treats the names as certain and forbids guessing for the one unnamed speaker', async () => {
+        localStorage.clear();
+        svc.setYourName('Kamil');
+        diarized('en', { '1': 'Marta', '3': 'Paweł' }, [
+          sys(0, 1),
+          sys(1, 2),
+          sys(2, 3),
+          sys(3, 1),
+          mic,
+        ]);
+        await svc.stageForChat('sess-1');
+        const draft = mockChat.tab('tab-1').composerPromptDraft();
+        expect(draft).toContain(
+          ' Speaker names (Kamil, Marta, Paweł) were set by the user: treat them as certain.' +
+            ' Speaker 2 is unnamed; refer to that speaker by the label and do not guess a name.' +
+            ' Labels are approximate: one person can get two labels and one label can cover two people.'
+        );
+        expect(draft).not.toContain("'Speaker N'");
+      });
+
+      it('lists several unnamed speakers and leaves the user out without lines of theirs', async () => {
+        localStorage.clear();
+        svc.setYourName('Kamil');
+        diarized('pl', { '2': 'Marta' }, [sys(0, 1), sys(1, 2), sys(2, 3)]);
+        await svc.stageForChat('sess-1');
+        const draft = mockChat.tab('tab-1').composerPromptDraft();
+        expect(draft).toContain(' Imiona mówców (Marta) podał użytkownik: traktuj je jako pewne.');
+        expect(draft).toContain(
+          ' Speaker 1, Speaker 3 nie mają imion; nazywaj te osoby ich etykietami i nie zgaduj imion.'
+        );
+        expect(draft).toContain(' Etykiety są przybliżone:');
+        expect(draft).not.toContain('Kamil');
+      });
+
+      it('names each person once when two labels share a name, and says nothing about the unnamed when there are none', async () => {
+        diarized('en', { '1': 'Marta', '2': 'marta' }, [sys(0, 1), sys(1, 2)]);
+        await svc.stageForChat('sess-1');
+        const draft = mockChat.tab('tab-1').composerPromptDraft();
+        expect(draft).toContain('Speaker names (Marta) were set by the user');
+        expect(draft).not.toContain('unnamed');
+      });
+
+      it('keeps the guessing prompt while no speaker is named, even with the name of the user set', async () => {
+        localStorage.clear();
+        svc.setYourName('Kamil');
+        diarized('en', {}, [sys(0, 1), mic]);
+        await svc.stageForChat('sess-1');
+        const draft = mockChat.tab('tab-1').composerPromptDraft();
+        expect(draft).toContain("'Speaker N' labels are approximate");
+        expect(draft).not.toContain('were set by the user');
+      });
     });
 
     it('says the transcript is attached, not "below", in both languages', async () => {

@@ -11,7 +11,11 @@ import {
 
 import { TauriService } from '../../services/tauri.service';
 import { TranscriptionService } from '../../services/transcription.service';
-import type { MicPermissionStatus, RecommendedModelEntry } from '../../models/transcript';
+import {
+  SPEAKER_NAME_MAX_CHARS,
+  type MicPermissionStatus,
+  type RecommendedModelEntry,
+} from '../../models/transcript';
 import { formatBytes } from '../../shared/format-bytes';
 import { ToggleComponent } from '../../shared/toggle.component';
 
@@ -148,9 +152,10 @@ const SPEAKER_COST_TEXT = {
               Tell speakers apart in the meeting audio
             </div>
             <div class="text-[11px] leading-relaxed text-[var(--ink-mute)]">
-              Labels the people in the meeting audio as Speaker 1, Speaker 2, … Also for an imported
-              file and a recording of other people only. Your microphone stays "You"; a recording of
-              your microphone alone gets no labels. Runs on this computer.
+              Labels the people in the meeting audio as Speaker 1, Speaker 2, …, which you can name
+              in the transcript. Also for an imported file and a recording of other people only.
+              Your microphone stays "You"; a recording of your microphone alone gets no labels. Runs
+              on this computer.
             </div>
           </div>
           <app-toggle
@@ -196,10 +201,44 @@ const SPEAKER_COST_TEXT = {
               One person can get two labels and one label can cover two people, most often when
               people talk over each other.
             </li>
-            <li>Up to 8 people. Transcribing again can number them differently.</li>
+            <li>
+              Up to 8 people. Transcribing again can number them differently, so the names you gave
+              are offered again instead of kept.
+            </li>
             <li>People in the room with you are picked up by your microphone and labelled You.</li>
           </ul>
         </details>
+      </div>
+
+      <div
+        class="mt-4 rounded border border-[var(--line)] bg-[var(--bg-1)] px-3 py-3"
+        data-testid="your-name"
+      >
+        <label
+          for="transcription-your-name"
+          class="mono mb-2 block text-[11px] uppercase tracking-wider text-[var(--ink-mute)]"
+        >
+          Your name
+        </label>
+        <input
+          id="transcription-your-name"
+          type="text"
+          class="h-8 w-full max-w-xs rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-2 text-[12.5px] text-[var(--ink)] outline-none placeholder:text-[var(--ink-mute)] focus:border-[var(--accent)]"
+          placeholder="Not set"
+          aria-describedby="transcription-your-name-hint"
+          data-testid="your-name-input"
+          [attr.maxlength]="nameMaxChars"
+          [value]="yourName()"
+          (change)="onYourNameChange($event)"
+          (keydown.enter)="onYourNameChange($event)"
+        />
+        <p
+          id="transcription-your-name-hint"
+          class="mt-1.5 text-[11px] leading-relaxed text-[var(--ink-mute)]"
+        >
+          Used instead of "You" in exports and in transcripts you attach to a chat. The transcript
+          in the app keeps showing "You". Stored on this computer only.
+        </p>
       </div>
 
       @if (isMacos()) {
@@ -419,6 +458,9 @@ export class TranscriptionSectionComponent implements OnInit {
   /** Whether new recordings show live text (off unless the user turned it on). */
   readonly liveTranscript = signal(this.transcription.liveTranscriptPreferred());
   readonly speakerAttribution = signal(this.transcription.speakerAttribution());
+  /** The user's own name for exports and chats ('' when not set). */
+  readonly yourName = signal(this.transcription.yourName());
+  protected readonly nameMaxChars = SPEAKER_NAME_MAX_CHARS;
 
   private readonly tauri = inject(TauriService);
   private readonly cdr = inject(ChangeDetectorRef);
@@ -509,6 +551,17 @@ export class TranscriptionSectionComponent implements OnInit {
     const on = (event.target as HTMLInputElement).checked;
     this.speakerAttribution.set(on);
     this.transcription.setSpeakerAttribution(on);
+  }
+
+  /**
+   * Stores the typed name, normalised (a blank one removes it), and shows what was stored.
+   * @param event - the field's change or Enter event.
+   */
+  onYourNameChange(event: Event): void {
+    const field = event.target as HTMLInputElement;
+    const stored = this.transcription.setYourName(field.value);
+    field.value = stored;
+    this.yourName.set(stored);
   }
 
   /** Opens System Settings → Privacy → Microphone. */

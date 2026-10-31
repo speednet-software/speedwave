@@ -120,7 +120,7 @@ fn full_pipeline_capture_transcribe_finalize_markdown() {
     .expect("finalize run");
 
     let session = store.get(id).expect("get finalized session");
-    let md = session.to_markdown();
+    let md = session.to_markdown(None);
     assert!(
         md.starts_with("# Meeting transcript ("),
         "markdown must have the header, got:\n{md}"

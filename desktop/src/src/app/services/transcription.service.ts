@@ -19,8 +19,13 @@ import type {
   TranscriptSession,
   TranscriptSummary,
 } from '../models/transcript';
-import { isSessionOngoing } from '../models/transcript';
+import { effectiveSegments, isSessionOngoing } from '../models/transcript';
 import { recordingName } from '../meeting-transcription/recording-format';
+import {
+  normalizeSpeakerName,
+  speakersOf,
+  uniqueSpeakerNames,
+} from '../meeting-transcription/speaker-names';
 import { ChatStateService } from './chat-state.service';
 import { TauriService } from './tauri.service';
 import { LoggerService } from './logger.service';
@@ -41,6 +46,12 @@ export const LIVE_TRANSCRIPT_STORAGE_KEY = 'speedwave-live-transcript-v2';
 const LEGACY_LIVE_TRANSCRIPT_STORAGE_KEY = 'speedwave-live-transcript';
 
 const SPEAKER_ATTRIBUTION_STORAGE_KEY = 'speedwave-speaker-attribution';
+
+/** localStorage key of the user's own name, used instead of "You" in exports and in chats. */
+const YOUR_NAME_STORAGE_KEY = 'speedwave-your-name';
+
+/** localStorage key set once the user was asked for their name before a first export. */
+const YOUR_NAME_ASKED_STORAGE_KEY = 'speedwave-your-name-asked';
 
 /** localStorage key of the language, source and microphone the last recording used. */
 export const RECORDING_CHOICE_STORAGE_KEY = 'speedwave-recording-choice';
@@ -78,6 +89,77 @@ const SPEAKER_LABELS_PROMPT: Record<Language, string> = {
     " 'Speaker N' labels are approximate; assign names only on evidence in the text " +
     'and flag uncertain attributions.',
 };
+
+const NAMED_SPEAKERS_PROMPT: Record<
+  Language,
+  {
+    named: (names: string) => string;
+    one: (label: string) => string;
+    many: (labels: string) => string;
+    approximate: string;
+  }
+> = {
+  pl: {
+    named: (names) => ` Imiona mówców (${names}) podał użytkownik: traktuj je jako pewne.`,
+    one: (label) => ` ${label} nie ma imienia; nazywaj tę osobę tą etykietą i nie zgaduj imienia.`,
+    many: (labels) =>
+      ` ${labels} nie mają imion; nazywaj te osoby ich etykietami i nie zgaduj imion.`,
+    approximate:
+      ' Etykiety są przybliżone: jedna osoba może dostać dwie etykiety, a jedna etykieta może ' +
+      'objąć dwie osoby.',
+  },
+  en: {
+    named: (names) => ` Speaker names (${names}) were set by the user: treat them as certain.`,
+    one: (label) =>
+      ` ${label} is unnamed; refer to that speaker by the label and do not guess a name.`,
+    many: (labels) =>
+      ` ${labels} are unnamed; refer to them by their labels and do not guess names.`,
+    approximate:
+      ' Labels are approximate: one person can get two labels and one label can cover two people.',
+  },
+};
+
+function speakerLabelsPrompt(session: TranscriptSession, yourName: string): string {
+  const segments = effectiveSegments(session);
+  const speakers = speakersOf(segments, session.named_speakers ?? {});
+  const named = speakers.flatMap((s) => (s.name ? [s.name] : []));
+  if (named.length === 0) return SPEAKER_LABELS_PROMPT[session.language];
+  const own = yourName && segments.some((seg) => seg.source === 'mic') ? [yourName] : [];
+  const unnamed = speakers
+    .filter((s) => !s.name)
+    .sort((a, b) => a.id - b.id)
+    .map((s) => s.label);
+  const text = NAMED_SPEAKERS_PROMPT[session.language];
+  return (
+    text.named(uniqueSpeakerNames([...own, ...named]).join(', ')) +
+    unnamedSentence(text, unnamed) +
+    text.approximate
+  );
+}
+
+function unnamedSentence(
+  text: (typeof NAMED_SPEAKERS_PROMPT)[Language],
+  unnamed: string[]
+): string {
+  if (unnamed.length === 0) return '';
+  if (unnamed.length === 1) return text.one(unnamed[0]);
+  return text.many(unnamed.join(', '));
+}
+
+function readStored(key: string, onFailure: string | null = null): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return onFailure;
+  }
+}
+
+function writeStored(key: string, value: string | null): void {
+  try {
+    if (value === null) localStorage.removeItem(key);
+    else localStorage.setItem(key, value);
+  } catch {}
+}
 
 const sameJson = <T>(a: T, b: T): boolean => JSON.stringify(a) === JSON.stringify(b);
 
@@ -222,18 +304,12 @@ export class TranscriptionService {
 
   /** Drops the pre-`-v2` live-transcript key so its stored choice never applies again. */
   constructor() {
-    try {
-      localStorage.removeItem(LEGACY_LIVE_TRANSCRIPT_STORAGE_KEY);
-    } catch {}
+    writeStored(LEGACY_LIVE_TRANSCRIPT_STORAGE_KEY, null);
   }
 
   /** Whether the next recording should show live text while it records; off unless the user opted in. */
   liveTranscriptPreferred(): boolean {
-    try {
-      return localStorage.getItem(LIVE_TRANSCRIPT_STORAGE_KEY) === 'on';
-    } catch {
-      return false;
-    }
+    return readStored(LIVE_TRANSCRIPT_STORAGE_KEY) === 'on';
   }
 
   /**
@@ -241,18 +317,12 @@ export class TranscriptionService {
    * @param live - the user's pick.
    */
   setLiveTranscriptPreferred(live: boolean): void {
-    try {
-      localStorage.setItem(LIVE_TRANSCRIPT_STORAGE_KEY, live ? 'on' : 'off');
-    } catch {}
+    writeStored(LIVE_TRANSCRIPT_STORAGE_KEY, live ? 'on' : 'off');
   }
 
   /** Whether the offline pass tells meeting speakers apart; off unless the user turned it on. */
   speakerAttribution(): boolean {
-    try {
-      return localStorage.getItem(SPEAKER_ATTRIBUTION_STORAGE_KEY) === 'on';
-    } catch {
-      return false;
-    }
+    return readStored(SPEAKER_ATTRIBUTION_STORAGE_KEY) === 'on';
   }
 
   /**
@@ -260,16 +330,40 @@ export class TranscriptionService {
    * @param on - the user's pick.
    */
   setSpeakerAttribution(on: boolean): void {
-    try {
-      localStorage.setItem(SPEAKER_ATTRIBUTION_STORAGE_KEY, on ? 'on' : 'off');
-    } catch {}
+    writeStored(SPEAKER_ATTRIBUTION_STORAGE_KEY, on ? 'on' : 'off');
+  }
+
+  /** The user's own name for exports and chats; '' when not set. */
+  yourName(): string {
+    return readStored(YOUR_NAME_STORAGE_KEY) ?? '';
+  }
+
+  /**
+   * Stores the user's own name (tolerates storage failures); a blank one removes it.
+   * @param name - the name as typed.
+   * @returns the stored name, '' when removed.
+   */
+  setYourName(name: string): string {
+    const stored = normalizeSpeakerName(name);
+    writeStored(YOUR_NAME_STORAGE_KEY, stored || null);
+    return stored;
+  }
+
+  /** Whether the user was already asked for their name before an export. */
+  yourNameAsked(): boolean {
+    return readStored(YOUR_NAME_ASKED_STORAGE_KEY, 'yes') === 'yes';
+  }
+
+  /** Records that the user was asked for their name, so the question comes once. */
+  markYourNameAsked(): void {
+    writeStored(YOUR_NAME_ASKED_STORAGE_KEY, 'yes');
   }
 
   /** The language, source and microphone the last recording used; null when none is stored. */
   recordingChoice(): RecordingChoice | null {
+    const raw = readStored(RECORDING_CHOICE_STORAGE_KEY);
+    if (!raw) return null;
     try {
-      const raw = localStorage.getItem(RECORDING_CHOICE_STORAGE_KEY);
-      if (!raw) return null;
       const v = JSON.parse(raw) as Partial<RecordingChoice>;
       if (v.language !== 'pl' && v.language !== 'en') return null;
       if (v.source !== 'system_wide' && v.source !== 'microphone' && v.source !== 'mixed') {
@@ -290,9 +384,7 @@ export class TranscriptionService {
    * @param choice - language, source kind and microphone as picked.
    */
   setRecordingChoice(choice: RecordingChoice): void {
-    try {
-      localStorage.setItem(RECORDING_CHOICE_STORAGE_KEY, JSON.stringify(choice));
-    } catch {}
+    writeStored(RECORDING_CHOICE_STORAGE_KEY, JSON.stringify(choice));
   }
 
   /** Audio sources the user can pick from (depends on host + capabilities). */
@@ -498,6 +590,31 @@ export class TranscriptionService {
   }
 
   /**
+   * Names a speaker of a recording's transcript; a blank name takes the name away. The open
+   * session takes the stored name only while it still shows the transcript the name was given for.
+   * @param sessionId - the recording.
+   * @param speaker - the speaker number.
+   * @param name - the name as typed.
+   * @returns the name the backend stored, or null when taken away.
+   */
+  async renameSpeaker(sessionId: string, speaker: number, name: string): Promise<string | null> {
+    const transcript = this.activeSignal()?.final_segments;
+    const stored = await this.tauri.invoke<string | null>('rename_speaker', {
+      sessionId,
+      speaker,
+      name,
+    });
+    const cur = this.activeSignal();
+    if (cur?.id === sessionId && cur.final_segments === transcript) {
+      const named = { ...cur.named_speakers };
+      if (stored === null) delete named[String(speaker)];
+      else named[String(speaker)] = stored;
+      this.activeSignal.set({ ...cur, named_speakers: named });
+    }
+    return stored;
+  }
+
+  /**
    * Puts off a running or queued transcription so it stops using the processor; the recording
    * waits as `postponed` until {@link transcribe}. A running pass loses its progress.
    * @param sessionId - the recording whose transcription to put off.
@@ -520,12 +637,15 @@ export class TranscriptionService {
   }
 
   /**
-   * Saves the transcript as Markdown where the user picks.
+   * Saves the transcript as Markdown where the user picks, with the user's name on their lines.
    * @param sessionId - the recording to export.
    * @returns false when the user cancelled the save dialog.
    */
   exportMarkdown(sessionId: string): Promise<boolean> {
-    return this.tauri.invoke<boolean>('export_transcript', { sessionId });
+    return this.tauri.invoke<boolean>('export_transcript', {
+      sessionId,
+      yourName: this.yourName() || null,
+    });
   }
 
   /**
@@ -557,11 +677,14 @@ export class TranscriptionService {
   }
 
   /**
-   * Renders the session as a timestamped markdown transcript.
+   * Renders the session as a timestamped markdown transcript, with the user's name on their lines.
    * @param sessionId - the session to render.
    */
   getMarkdown(sessionId: string): Promise<string> {
-    return this.tauri.invoke<string>('get_transcript_markdown', { sessionId });
+    return this.tauri.invoke<string>('get_transcript_markdown', {
+      sessionId,
+      yourName: this.yourName() || null,
+    });
   }
 
   /**
@@ -579,7 +702,7 @@ export class TranscriptionService {
     store.stageTranscript({ markdown: md, name: recordingName(session) });
     store.composerPromptDraft.set(
       TRANSCRIPT_PROMPT_DEFAULTS[session.language] +
-        (session.models_used.diarization ? SPEAKER_LABELS_PROMPT[session.language] : '')
+        (session.models_used.diarization ? speakerLabelsPrompt(session, this.yourName()) : '')
     );
   }
 
@@ -867,6 +990,8 @@ export class TranscriptionService {
         break;
       case 'final_segments_ready':
         next.final_segments = ev.segments;
+        next.named_speakers = {};
+        next.previous_speaker_names = ev.previous_speaker_names;
         break;
       case 'finished':
         next.status = { state: 'done' };
