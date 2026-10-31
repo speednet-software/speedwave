@@ -22,9 +22,15 @@ const REAP_EXIT_WAIT_TENTHS: u32 = 30;
 
 const REAP_KILL_WAIT_TENTHS: u32 = 10;
 
-/// How long [`reap_instance`] lets one reap exec run: the script's two waits plus 5 s.
+/// Transport time one reap exec may spend outside the script's own waits: one 15 s stall of
+/// the Lima guest's `sudo` (e2e run 41113239094) plus the exec's usual round trips.
+const REAP_TRANSPORT_MARGIN: Duration = Duration::from_secs(20);
+
+/// How long [`reap_instance`] lets one reap exec run: the script's two waits plus
+/// [`REAP_TRANSPORT_MARGIN`].
 pub const REAP_DEADLINE: Duration =
-    Duration::from_millis((REAP_EXIT_WAIT_TENTHS + REAP_KILL_WAIT_TENTHS) as u64 * 100 + 5_000);
+    Duration::from_millis((REAP_EXIT_WAIT_TENTHS + REAP_KILL_WAIT_TENTHS) as u64 * 100)
+        .saturating_add(REAP_TRANSPORT_MARGIN);
 
 fn reap_script(id: &str) -> String {
     let marker = format!("{SESSION_INSTANCE_ENV}={id}");
@@ -274,7 +280,14 @@ mod tests {
         let waits =
             Duration::from_millis(u64::from(REAP_EXIT_WAIT_TENTHS + REAP_KILL_WAIT_TENTHS) * 100);
 
-        assert_eq!(REAP_DEADLINE, waits + Duration::from_secs(5));
+        assert_eq!(REAP_DEADLINE, waits + REAP_TRANSPORT_MARGIN);
+    }
+
+    #[test]
+    fn the_transport_margin_outlasts_one_stalled_sudo_of_the_lima_guest() {
+        let stalled_sudo = Duration::from_secs(15);
+
+        assert!(REAP_TRANSPORT_MARGIN > stalled_sudo);
     }
 
     #[cfg(unix)]
