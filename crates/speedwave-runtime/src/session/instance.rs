@@ -22,8 +22,8 @@ const REAP_EXIT_WAIT_TENTHS: u32 = 30;
 
 const REAP_KILL_WAIT_TENTHS: u32 = 10;
 
-/// Transport time one reap exec may spend outside the script's own waits: one 15 s stall of
-/// the Lima guest's `sudo` (e2e run 41113239094) plus the exec's usual round trips.
+/// Transport time one reap exec may spend outside the script's own waits: one stalled `sudo`
+/// of the Lima guest plus the exec's usual round trips.
 const REAP_TRANSPORT_MARGIN: Duration = Duration::from_secs(20);
 
 /// How long [`reap_instance`] lets one reap exec run: the script's two waits plus
