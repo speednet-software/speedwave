@@ -416,13 +416,13 @@ collect_remote_tree() {
 windows_collect_failure_artifacts() {
     collect_remote_tree windows_ssh 'tar -C C:\speedwave-e2e\screenshots -cf - .' windows "$1" screenshots
     collect_remote_tree windows_ssh 'tar -C %LOCALAPPDATA%\pl.speedwave.desktop\logs -cf - .' windows "$1" app-log
-    collect_remote_tree windows_ssh 'tar -C %USERPROFILE%\.speedwave\logs -cf - .' windows "$1" session-logs
+    collect_remote_tree windows_ssh 'tar -C %USERPROFILE%\.speedwave\logs -cf - . 2>NUL || tar -C C:\speedwave-e2e\session-logs -cf - .' windows "$1" session-logs
 }
 
 macos_collect_failure_artifacts() {
     collect_remote_tree macos_ssh 'tar -C /tmp/speedwave-e2e/screenshots -cf - .' macos "$1" screenshots
     collect_remote_tree macos_ssh 'tar -C ~/Library/Logs/pl.speedwave.desktop -cf - .' macos "$1" app-log
-    collect_remote_tree macos_ssh 'tar -C ~/.speedwave/logs -cf - .' macos "$1" session-logs
+    collect_remote_tree macos_ssh 'tar -C ~/.speedwave/logs -cf - . 2>/dev/null || tar -C /tmp/speedwave-e2e/session-logs -cf - .' macos "$1" session-logs
 }
 
 run_windows() {

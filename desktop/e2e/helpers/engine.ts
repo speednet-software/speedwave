@@ -6,7 +6,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { writeFileSync } from 'node:fs';
+import { cpSync, existsSync, rmSync, writeFileSync } from 'node:fs';
 
 /** Same sentinel content `engine-contract.bats` plants. */
 export const DEAD_ID = 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef';
@@ -131,7 +131,30 @@ export function dumpContainerLogs(dir: string, stamp: string): string[] {
   return written;
 }
 
+/**
+ * Copies the Claude Code session logs of the data dir into `session-logs` next to the spec
+ * tree before a factory reset wipes them, and returns that directory.
+ */
+export function preserveSessionLogs(): string {
+  const source = join(dataDir(), 'logs');
+  const dest = join(process.cwd(), 'session-logs');
+  rmSync(dest, { recursive: true, force: true });
+  if (existsSync(source)) cpSync(source, dest, { recursive: true });
+  return dest;
+}
+
 const ENGINE_PROBE_TIMEOUT_MS = 60_000;
+
+const SUDO_TIMELINE_SCRIPT = [
+  'if [ -e /etc/sudo.conf ]; then cp -p /etc/sudo.conf /tmp/spw-sudo.conf.bak || exit 1; fi',
+  "trap 'if [ -e /tmp/spw-sudo.conf.bak ]; then mv /tmp/spw-sudo.conf.bak /etc/sudo.conf; else rm -f /etc/sudo.conf; fi' EXIT HUP TERM",
+  "printf 'Debug sudo /tmp/spw-sudo-debug.log all@debug\\n' >/etc/sudo.conf",
+  'timeout 45 sudo -n true',
+  'wc -l /tmp/spw-sudo-debug.log',
+  'head -3 /tmp/spw-sudo-debug.log',
+  'awk \'{ split($3, t, ":"); s = t[1] * 3600 + t[2] * 60 + t[3]; if (NR > 1 && s - prev >= 1) { print "---- gap " s - prev " s"; print last; print $0 } prev = s; last = $0 }\' /tmp/spw-sudo-debug.log',
+  'rm -f /tmp/spw-sudo-debug.log',
+].join('\n');
 
 const ENGINE_STATE_PROBES: { argv: string[]; keep?: { head?: number; tail?: number } }[] = [
   { argv: ['true'] },
@@ -163,9 +186,9 @@ function keepLines(text: string, keep?: { head?: number; tail?: number; grep?: R
  * a loaded guest. On macOS it also times the Lima SSH transport from the host: through the
  * control master and on a fresh connection, `limactl shell` without `sudo`, `sudo` without
  * `limactl`, the guest's name resolution, a syscall trace of a slow `sudo` with the guest's
- * systemd, journal and D-Bus state, plus the master's state and the live ssh and
- * limactl processes. The argv stays free of shell metacharacters and whitespace: the Windows
- * transport re-parses it.
+ * systemd, journal and D-Bus state, sudo's own debug timeline, plus the master's state and
+ * the live ssh and limactl processes. The argv stays free of shell metacharacters and
+ * whitespace: the Windows transport re-parses it.
  */
 export function dumpEngineState(dir: string, stamp: string): string {
   const sections: string[] = [];
@@ -250,7 +273,7 @@ function limaTransportProbes(): {
         '-F',
         sshConfig,
         host,
-        'hostname; cat /etc/hosts /etc/resolv.conf; time getent hosts "$(hostname)"; time timeout 20 getent hosts github.com; resolvectl status 2>&1 | head -30',
+        'hostname; cat /etc/hosts /etc/resolv.conf; time getent hosts "$(hostname)"; time timeout 20 getent hosts github.com; time timeout 20 getent hosts spw-probe-nonexistent; resolvectl status 2>&1 | head -30',
       ],
       env,
     },
@@ -268,9 +291,20 @@ function limaTransportProbes(): {
           'time busctl --system --timeout=20 call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus GetId',
           'command -v strace >/dev/null || echo strace-missing',
           'timeout 45 sudo -n strace -f -tt -T -o /tmp/spw-sudo.strace sudo -n true',
-          "grep -E '<([1-9][0-9]*|0\\.[1-9])[0-9.]*>' /tmp/spw-sudo.strace | head -40",
+          "grep -E 'socket\\(|connect\\(|<([1-9][0-9]*|0\\.[1-9])[0-9.]*>' /tmp/spw-sudo.strace | head -60",
           'journalctl -b --since -20min -p warning --no-pager 2>&1 | tail -40',
         ].join('; '),
+      ],
+      env,
+    },
+    {
+      label: 'host: ssh sudo function timeline',
+      file: 'ssh',
+      args: [
+        '-F',
+        sshConfig,
+        host,
+        `echo ${Buffer.from(SUDO_TIMELINE_SCRIPT).toString('base64')} | base64 -d | sudo -n sh`,
       ],
       env,
     },

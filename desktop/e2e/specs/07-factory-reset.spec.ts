@@ -12,6 +12,7 @@
 
 import * as http from 'node:http';
 
+import { preserveSessionLogs } from '../helpers/engine';
 import { switchToProject, activeProjectSlug } from '../helpers/projects';
 import { invokeOr } from '../helpers/tauri-invoke';
 
@@ -122,6 +123,11 @@ describe('Factory Reset', function () {
     this.timeout(180_000);
 
     expect(await invokeOr<boolean>(false, 'is_setup_complete')).toBe(true);
+    try {
+      console.log(`Session logs preserved: ${preserveSessionLogs()}`);
+    } catch (e) {
+      console.error(`Session logs not preserved: ${e}`);
+    }
 
     const resetBtn = await $('[data-testid="settings-reset-btn"]');
     await resetBtn.click();
