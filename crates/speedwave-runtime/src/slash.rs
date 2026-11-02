@@ -245,6 +245,10 @@ pub fn is_bare_slash(text: &str) -> bool {
 /// control-chip shape, called by both live emission and history reconstruction.
 pub fn parse_control_command(text: &str) -> Option<(&str, &str)> {
     let trimmed = text.trim();
+    if let Some(name) = trimmed.strip_prefix("/rename ") {
+        let name = name.trim();
+        return (!name.is_empty()).then_some(("rename", name));
+    }
     let (command, argument) = trimmed
         .strip_prefix("/model ")
         .map(|arg| ("model", arg))
@@ -1022,14 +1026,43 @@ mod tests {
             "slash.service.ts::CONTROL_COMMAND_RE must stay `/^\\/(model|effort) +(\\S+)$/` \
              (literal space) to match Rust parse_control_command's `^/(model|effort) +\\S+$` shape"
         );
+        let rename_re =
+            regex::Regex::new(r"const RENAME_COMMAND_RE = /\^\\/rename \\s\*\\S/;").unwrap();
+        assert!(
+            rename_re.is_match(src),
+            "slash.service.ts::RENAME_COMMAND_RE must stay `/^\\/rename \\s*\\S/` to match Rust \
+             parse_control_command's `strip_prefix(\"/rename \")` plus a trimmed non-empty name"
+        );
         let body_re = regex::Regex::new(
-            r"export function isControlShaped\(text: string\): boolean \{\s*return CONTROL_COMMAND_RE\.test\(text\.trim\(\)\);\s*\}",
+            r"export function isControlShaped\(text: string\): boolean \{\s*const trimmed = text\.trim\(\);\s*return CONTROL_COMMAND_RE\.test\(trimmed\) \|\| RENAME_COMMAND_RE\.test\(trimmed\);\s*\}",
         )
         .unwrap();
         assert!(
             body_re.is_match(src),
-            "slash.service.ts::isControlShaped must test CONTROL_COMMAND_RE against text.trim()"
+            "slash.service.ts::isControlShaped must test both patterns against text.trim()"
         );
+    }
+
+    #[test]
+    fn parse_control_command_accepts_a_multi_word_rename() {
+        assert_eq!(
+            parse_control_command("/rename Auth fix"),
+            Some(("rename", "Auth fix"))
+        );
+        assert_eq!(
+            parse_control_command("  /rename   Poprawka logowania w auth.rs  "),
+            Some(("rename", "Poprawka logowania w auth.rs"))
+        );
+        assert_eq!(parse_control_command("/rename \tx"), Some(("rename", "x")));
+    }
+
+    #[test]
+    fn parse_control_command_rejects_a_bare_rename_and_the_name_alias() {
+        assert_eq!(parse_control_command("/rename"), None);
+        assert_eq!(parse_control_command("/rename   "), None);
+        assert_eq!(parse_control_command("/rename\tAuth fix"), None);
+        assert_eq!(parse_control_command("/name Auth fix"), None);
+        assert_eq!(parse_control_command("/renamed Auth fix"), None);
     }
 
     #[derive(Deserialize)]

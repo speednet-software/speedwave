@@ -13,6 +13,7 @@ const UNSEEN_LABELS: Readonly<Record<ChatSessionEventKind, string>> = {
 export interface ChatTabRow {
   readonly id: string;
   readonly title: string;
+  readonly fullTitle: string;
   readonly streaming: boolean;
   readonly ended: boolean;
   readonly unseen: ChatSessionEventKind | null;
@@ -29,34 +30,48 @@ export interface ChatTabRow {
  * @returns The tab's row.
  */
 export function chatTabRow(id: string, store: ChatSessionStore, active: boolean): ChatTabRow {
-  const title = tabTitle(store);
+  const fullTitle = tabTitle(store).trim();
+  const title = truncateTitle(fullTitle);
   const unseen = store.unseenEvent();
   const streaming = store.isStreamingFromState() && unseen !== 'awaiting_input';
   const ended = store.sessionEnded();
   return {
     id,
     title,
+    fullTitle,
     streaming,
     ended,
     unseen,
     active,
-    tooltip: unseen ? UNSEEN_LABELS[unseen] : null,
+    tooltip: tabTooltip(fullTitle, title, unseen),
     ariaLabel: tabAriaLabel(title, streaming, ended, unseen),
   };
 }
 
 function tabTitle(store: ChatSessionStore): string {
+  const title = store.title();
+  if (title) return title;
   const firstUser = store.messagesFromState().find((m) => m.role === 'user');
   if (!firstUser) return 'New chat';
   const text = blocksToPlainText(firstUser.blocks);
-  return text ? truncateTitle(text) : 'New chat';
+  return text ? text : 'New chat';
 }
 
 function truncateTitle(text: string): string {
-  const trimmed = text.trim();
-  const points = Array.from(trimmed);
-  if (points.length <= TITLE_MAX_CHARS) return trimmed;
+  const points = Array.from(text);
+  if (points.length <= TITLE_MAX_CHARS) return text;
   return `${points.slice(0, TITLE_MAX_CHARS).join('').trimEnd()}…`;
+}
+
+function tabTooltip(
+  fullTitle: string,
+  title: string,
+  unseen: ChatSessionEventKind | null
+): string | null {
+  const truncated = fullTitle !== title ? fullTitle : null;
+  if (unseen && truncated) return `${UNSEEN_LABELS[unseen]}: ${truncated}`;
+  if (unseen) return UNSEEN_LABELS[unseen];
+  return truncated;
 }
 
 function tabAriaLabel(

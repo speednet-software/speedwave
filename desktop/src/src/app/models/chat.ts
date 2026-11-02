@@ -287,6 +287,17 @@ export interface ConversationTranscript {
   messages: ConversationMessage[];
 }
 
+/** Tauri event raised when the backend reads a session's title from its transcript. */
+export const CHAT_TITLE_CHANGED_EVENT = 'chat_title_changed';
+
+/** Payload of {@link CHAT_TITLE_CHANGED_EVENT}; `title` is null while the transcript holds none. */
+export interface ChatTitleChangedEvent {
+  project: string;
+  tab_id: string;
+  session_id: string;
+  title: string | null;
+}
+
 /** A single message within a conversation transcript. */
 export interface ConversationMessage {
   role: string;

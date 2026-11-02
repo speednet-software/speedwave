@@ -1817,6 +1817,30 @@ fn unless_next_turn_started(
     event.filter(|e| !(next_turn_started && *e == SessionEvent::TurnFinished))
 }
 
+fn turn_ended_in_error(chunks: &[StreamChunk]) -> bool {
+    chunks.iter().any(|c| {
+        matches!(
+            c,
+            StreamChunk::Error {
+                turn_ended: true,
+                ..
+            }
+        )
+    })
+}
+
+fn session_to_refresh_title_for(
+    result_session_id: Option<&str>,
+    ended_in_error: bool,
+    known_session_id: Option<&str>,
+) -> Option<String> {
+    match (result_session_id, ended_in_error) {
+        (Some(id), _) => Some(id.to_string()),
+        (None, true) => known_session_id.map(str::to_string),
+        (None, false) => None,
+    }
+}
+
 #[derive(Clone)]
 struct AwaitedResult(Arc<std::sync::atomic::AtomicBool>);
 
@@ -1868,10 +1892,13 @@ pub struct ChatSession {
     awaited_result: AwaitedResult,
     model_settled: ModelSettled,
     first_turn_gate: FirstTurnGate,
+    title_state: Arc<crate::session_title::TitleState>,
 }
 
 impl ChatSession {
     pub fn new(project_name: &str, tab_id: &str, transcript: Arc<Mutex<Option<String>>>) -> Self {
+        let title_state =
+            crate::session_title::TitleState::new(project_name, tab_id, Arc::clone(&transcript));
         Self {
             child: None,
             project_name: project_name.to_string(),
@@ -1889,6 +1916,7 @@ impl ChatSession {
             awaited_result: AwaitedResult::new(),
             model_settled: ModelSettled::default(),
             first_turn_gate: FirstTurnGate::open(),
+            title_state,
         }
     }
 
@@ -2182,6 +2210,11 @@ impl ChatSession {
         let awaited_for_reader = self.awaited_result.clone();
         self.model_settled = ModelSettled::default();
         let settled_for_reader = self.model_settled.clone();
+        self.title_state.restart(app_handle.clone());
+        let title_for_reader = self.title_state.clone();
+        if let Some(id) = resume_session_id {
+            self.title_state.refresh(id);
+        }
         let project_for_reader = self.project_name.clone();
         let impose_app_handle = app_handle.clone();
 
@@ -2419,6 +2452,7 @@ impl ChatSession {
                     StreamChunk::Result { session_id, .. } => Some(session_id.clone()),
                     _ => None,
                 });
+                let ended_in_error = turn_ended_in_error(&chunks);
                 let turn_event = turn_end_event(&chunks);
                 awaited_for_reader.observe(&chunks);
                 for chunk in chunks {
@@ -2436,15 +2470,34 @@ impl ChatSession {
                     }
                     emit_sanitized_chunk(&app_handle, &tab_id_for_reader, chunk, &display_policy);
                 }
+                let known_session_id = transcript_for_reader
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                if let Some(session_id) = session_to_refresh_title_for(
+                    result_session_id.as_deref(),
+                    ended_in_error,
+                    known_session_id.as_deref(),
+                ) {
+                    title_for_reader.refresh(&session_id);
+                }
                 let mut next_turn_started = false;
                 if let Some(session_id) = result_session_id {
                     if drain_queued_message(
                         &app_handle,
-                        &tab_id_for_reader,
                         &session_id,
                         &stdin_for_reader,
                         &settled_for_reader,
-                        &display_policy,
+                        &control_for_reader,
+                        &title_for_reader,
+                        |chunk| {
+                            emit_sanitized_chunk(
+                                &app_handle,
+                                &tab_id_for_reader,
+                                chunk,
+                                &display_policy,
+                            )
+                        },
                     ) {
                         awaited_for_reader.message_written();
                         next_turn_started = true;
@@ -2619,6 +2672,14 @@ impl ChatSession {
                 });
             }
         }
+        let joined: String = blocks
+            .iter()
+            .map(|WireContentBlock::Text { text }| text.as_str())
+            .collect();
+        let handle = ControlHandle::new(self.control.clone(), shared.clone());
+        self.title_state.maybe_request(&joined, |description| {
+            handle.begin_generate_title(description)
+        });
         Ok(())
     }
 
@@ -2878,20 +2939,26 @@ impl Drop for ChatSession {
 
 fn drain_queued_message(
     app_handle: &AppHandle,
-    tab_id: &str,
     session_id: &str,
     stdin: &Arc<Mutex<std::process::ChildStdin>>,
     settled: &ModelSettled,
-    policy: &DisplayPolicy,
+    control: &ControlChannel,
+    title: &Arc<crate::session_title::TitleState>,
+    emit: impl FnMut(StreamChunk),
 ) -> bool {
     let queue = app_handle.state::<speedwave_runtime::session::QueuedMessageService>();
     let drained = match queue.take(session_id) {
         Some(m) => m,
         None => return false,
     };
-    write_and_emit_drained_message(session_id, &drained.text, stdin, settled, |chunk| {
-        emit_sanitized_chunk(app_handle, tab_id, chunk, policy)
-    })
+    let written = write_and_emit_drained_message(session_id, &drained.text, stdin, settled, emit);
+    if written {
+        let handle = ControlHandle::new(control.clone(), stdin.clone());
+        title.maybe_request(&drained.text, |description| {
+            handle.begin_generate_title(description)
+        });
+    }
+    written
 }
 
 fn write_and_emit_drained_message(
@@ -10398,5 +10465,165 @@ mod tests {
             body.contains("allow_log_truncate"),
             "truncation must be gated by the caller-computed sibling check"
         );
+    }
+
+    fn captured_lines(bytes: &[u8]) -> Vec<serde_json::Value> {
+        String::from_utf8_lossy(bytes)
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    fn title_session() -> ChatSession {
+        ChatSession::new(
+            "proj",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        )
+    }
+
+    #[test]
+    fn send_message_asks_for_a_session_title_right_after_the_first_message() {
+        let mut session = title_session();
+        let capture = session.set_test_stdin_capture();
+        session
+            .send_message_with_emit(&text_only("  napraw logowanie w auth.rs  "), |_| {})
+            .unwrap();
+        session.control_channel_for_test().close();
+        drop(session);
+        let lines = captured_lines(&capture.join().unwrap());
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines[0]["type"], "user");
+        assert_eq!(lines[1]["type"], "control_request");
+        assert_eq!(
+            lines[1]["request"],
+            serde_json::json!({
+                "subtype": "generate_session_title",
+                "description": "napraw logowanie w auth.rs",
+                "persist": true,
+            })
+        );
+    }
+
+    #[test]
+    fn send_message_asks_for_one_title_at_a_time_and_none_for_a_command() {
+        let mut session = title_session();
+        let capture = session.set_test_stdin_capture();
+        session
+            .send_message_with_emit(&text_only("/model claude-sonnet-5"), |_| {})
+            .unwrap();
+        session
+            .send_message_with_emit(&text_only("pierwsza"), |_| {})
+            .unwrap();
+        session
+            .send_message_with_emit(&text_only("druga, gdy pierwsze żądanie trwa"), |_| {})
+            .unwrap();
+        session.control_channel_for_test().close();
+        drop(session);
+        let lines = captured_lines(&capture.join().unwrap());
+        let requests: Vec<&serde_json::Value> = lines
+            .iter()
+            .filter(|line| line["type"] == "control_request")
+            .collect();
+        assert_eq!(requests.len(), 1, "{lines:?}");
+        assert_eq!(requests[0]["request"]["description"], "pierwsza");
+    }
+
+    #[test]
+    fn send_message_rename_with_a_multi_word_name_emits_a_chip_and_asks_for_no_title() {
+        let mut session = title_session();
+        let capture = session.set_test_stdin_capture();
+        let mut emitted: Vec<StreamChunk> = Vec::new();
+        session
+            .send_message_with_emit(&text_only("/rename Auth fix"), |chunk| emitted.push(chunk))
+            .unwrap();
+        assert!(matches!(
+            emitted.as_slice(),
+            [StreamChunk::ControlChip { command, argument, uuid: None }]
+                if command == "rename" && argument == "Auth fix"
+        ));
+        drop(session);
+        let lines = captured_lines(&capture.join().unwrap());
+        assert_eq!(lines.len(), 1);
+        assert_eq!(
+            lines[0]["message"]["content"][0]["text"],
+            "/rename Auth fix"
+        );
+    }
+
+    #[test]
+    fn the_stdout_reader_refreshes_the_title_after_a_result_before_draining_the_queue() {
+        let src = include_str!("chat.rs");
+        let prod = src.split("\nmod tests {").next().unwrap_or(src);
+        let result_pos = prod
+            .find("let result_session_id = chunks.iter().find_map")
+            .expect("the reader finds the result's session id");
+        let after = &prod[result_pos..];
+        let refresh_pos = after
+            .find("title_for_reader.refresh(")
+            .expect("the reader re-reads the title after a result");
+        let drain_pos = after
+            .find("if drain_queued_message(")
+            .expect("the reader drains the queue after a result");
+        assert!(
+            refresh_pos < drain_pos,
+            "a queued message is written after the title state is fresh, so it asks for a title only when the transcript has none"
+        );
+    }
+
+    #[test]
+    fn a_resumed_session_reads_its_title_at_start() {
+        let src = include_str!("chat.rs");
+        let prod = src.split("\nmod tests {").next().unwrap_or(src);
+        let start = prod.find("    pub fn start_with_retry(").unwrap();
+        let body = &prod[start..];
+        let reset = body
+            .find("self.title_state.restart(")
+            .expect("a start resets the title state");
+        let refresh = body
+            .find("self.title_state.refresh(")
+            .expect("a resume announces the transcript's title");
+        assert!(reset < refresh);
+        assert!(body[reset..refresh].contains("if let Some(id) = resume_session_id {"));
+    }
+
+    #[test]
+    fn an_error_that_ends_the_turn_marks_the_batch() {
+        let ended = StreamChunk::Error {
+            content: "credit balance is too low".into(),
+            turn_ended: true,
+        };
+        let mid_turn = StreamChunk::Error {
+            content: "transient".into(),
+            turn_ended: false,
+        };
+        let text = StreamChunk::Text {
+            content: "hi".into(),
+        };
+        assert!(turn_ended_in_error(&[text, ended]));
+        assert!(!turn_ended_in_error(&[
+            StreamChunk::Text {
+                content: "hi".into()
+            },
+            mid_turn
+        ]));
+        assert!(!turn_ended_in_error(&[]));
+    }
+
+    #[test]
+    fn the_title_is_re_read_after_a_result_and_after_a_turn_that_ended_in_error() {
+        let known = Some("95c7b744-b1e4-40d0-a855-fb3b29a81631");
+        assert_eq!(
+            session_to_refresh_title_for(Some("result-session"), false, known).as_deref(),
+            Some("result-session")
+        );
+        assert_eq!(
+            session_to_refresh_title_for(None, true, known).as_deref(),
+            known,
+            "an is_error result reaches the reader as an Error chunk without a session id"
+        );
+        assert_eq!(session_to_refresh_title_for(None, true, None), None);
+        assert_eq!(session_to_refresh_title_for(None, false, known), None);
     }
 }

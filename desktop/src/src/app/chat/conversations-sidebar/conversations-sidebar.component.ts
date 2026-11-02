@@ -169,6 +169,7 @@ const BUCKET_ORDER: readonly { key: string; label: string }[] = [
                       <div
                         class="truncate text-[13px]"
                         [class]="active ? 'text-[var(--ink)]' : 'text-[var(--ink-dim)]'"
+                        data-testid="conversation-row-label"
                       >
                         {{ row.label }}
                       </div>

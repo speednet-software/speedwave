@@ -21,5 +21,14 @@
   { "input": "hello there", "is_control": false },
   { "input": "/clear", "is_control": false },
   { "input": "/help", "is_control": false },
-  { "input": "/model/effort claude-sonnet-5", "is_control": false }
+  { "input": "/model/effort claude-sonnet-5", "is_control": false },
+  { "input": "/rename Auth fix", "is_control": true },
+  { "input": "  /rename   Poprawka logowania w auth.rs  ", "is_control": true },
+  { "input": "/rename \tAuth fix", "is_control": true },
+  { "input": "/rename x", "is_control": true },
+  { "input": "/rename", "is_control": false },
+  { "input": "/rename   ", "is_control": false },
+  { "input": "/rename\tAuth fix", "is_control": false },
+  { "input": "/name Auth fix", "is_control": false },
+  { "input": "/renamed Auth fix", "is_control": false }
 ]

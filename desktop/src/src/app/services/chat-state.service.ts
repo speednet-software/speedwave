@@ -24,7 +24,11 @@ import {
   type ChatStoreDeps,
   type ModelSelectionInput,
 } from './chat-session-store';
-import type { TabStreamChunk } from '../models/chat';
+import {
+  CHAT_TITLE_CHANGED_EVENT,
+  type ChatTitleChangedEvent,
+  type TabStreamChunk,
+} from '../models/chat';
 import {
   CLAUDE_MODEL_SWITCH_FAILED_EVENT,
   type ClaudeModelSwitchFailedEvent,
@@ -565,6 +569,7 @@ export class ChatStateService {
       await this.setupStreamListener();
       await this.setupModelSwitchListener();
       await this.setupSessionEventListener();
+      await this.setupTitleChangedListener();
       this.setupProjectStateListeners();
       this.setupRestartResumeListeners();
       void this.activeStore().refreshLlmConfigCache();
@@ -798,6 +803,24 @@ export class ChatStateService {
       });
     } catch (err) {
       this.log.warn(`[chat-state] Failed to listen for chat session events: ${String(err)}`);
+    }
+  }
+
+  private readonly _lastTitleChange = signal<ChatTitleChangedEvent | null>(null);
+  /** The latest session title the backend announced for the active project; the history list patches its row from it. */
+  readonly lastTitleChange: Signal<ChatTitleChangedEvent | null> =
+    this._lastTitleChange.asReadonly();
+
+  private async setupTitleChangedListener(): Promise<void> {
+    try {
+      await this.tauri.listen<ChatTitleChangedEvent>(CHAT_TITLE_CHANGED_EVENT, (event) => {
+        const change = event.payload;
+        if (change.project !== this.projectState.activeProject()) return;
+        this._tabs().get(change.tab_id)?.applyTitle(change.session_id, change.title);
+        this._lastTitleChange.set(change);
+      });
+    } catch (err) {
+      this.log.warn(`[chat-state] Failed to listen for session title changes: ${String(err)}`);
     }
   }
 

@@ -119,6 +119,12 @@ describe('ControlChipComponent', () => {
     expect(chipText('effort', 'high')).toBe('effort -> high');
   });
 
+  it('renders a multi-word rename as "rename -> <name>" (SPEED-916)', () => {
+    expect(chipText('rename', 'Poprawka logowania w auth.rs')).toBe(
+      'rename -> Poprawka logowania w auth.rs'
+    );
+  });
+
   it('exposes the command as a data attribute for styling/testing hooks', () => {
     chipText('model', 'claude-opus-4-8');
 

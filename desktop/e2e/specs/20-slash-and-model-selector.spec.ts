@@ -42,6 +42,8 @@ import {
   queueMessageViaEnter,
   waitForTurnStart,
   waitForTurnComplete,
+  sendMessageNoWait,
+  openHistory,
 } from '../helpers/llm';
 import { localLlmUnreachable } from '../helpers/preflight';
 
@@ -50,6 +52,54 @@ const ANTHROPIC_PROJECT = 'e2e-second';
 const HAIKU_MODEL = 'claude-haiku-5-5';
 const SONNET_MODEL = 'claude-sonnet-5-5';
 const ALL_EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
+const RENAMED_TITLE = 'E2E renamed tab';
+
+async function activeTabTitle(): Promise<string> {
+  const tab = await $('[data-testid="chat-tab"][data-active="true"]');
+  if (!(await tab.isExisting())) return '';
+  return (await (await tab.$('[data-testid="chat-tab-title"]')).getText()).trim();
+}
+
+async function activeTabFullTitle(): Promise<string> {
+  const tab = await $('[data-testid="chat-tab"][data-active="true"]');
+  if (!(await tab.isExisting())) return '';
+  return ((await tab.getAttribute('data-title')) ?? '').trim();
+}
+
+async function waitForActiveTabTitle(
+  accept: (title: string) => boolean,
+  what: string
+): Promise<string> {
+  let seen = '';
+  await browser.waitUntil(
+    async () => {
+      seen = await activeTabTitle();
+      return accept(seen);
+    },
+    {
+      timeout: 60_000,
+      interval: 1_000,
+      timeoutMsg: `the active tab title stayed "${seen}" instead of ${what}`,
+    }
+  );
+  return seen;
+}
+
+async function activeHistoryRowLabel(): Promise<string> {
+  await openHistory();
+  const row = await $('[data-testid="conversations-sidebar-row"][data-active="true"]');
+  await row.waitForExist({
+    timeout: 15_000,
+    timeoutMsg: 'the history listed no row for the active session',
+  });
+  const label = (await (await row.$('[data-testid="conversation-row-label"]')).getText()).trim();
+  await (await $('[data-testid="conversations-sidebar-close"]')).click();
+  return label;
+}
+
+function shownPrefix(tabTitle: string): string {
+  return tabTitle.replace(/…$/, '');
+}
 
 async function openSlashPopover(): Promise<void> {
   const input = await $('[data-testid="chat-input"]');
@@ -170,17 +220,20 @@ async function waitForCatalogBadge(
 ): Promise<AnthropicCatalogEntry> {
   let label = '';
   let entry: AnthropicCatalogEntry | null = null;
-  await browser.waitUntil(
-    async () => {
-      label = (await (await $('[data-testid="composer-model-badge"]')).getText()).trim();
-      entry = catalogEntryForBadgeLabel(catalog, label);
-      return entry !== null;
-    },
-    {
-      timeout: 30_000,
-      timeoutMsg: () => `composer-model-badge never showed a catalog family, last label "${label}"`,
-    }
-  );
+  try {
+    await browser.waitUntil(
+      async () => {
+        label = (await (await $('[data-testid="composer-model-badge"]')).getText()).trim();
+        entry = catalogEntryForBadgeLabel(catalog, label);
+        return entry !== null;
+      },
+      { timeout: 30_000 }
+    );
+  } catch (e) {
+    throw new Error(
+      `composer-model-badge never showed a catalog family, last label "${label}": ${String(e)}`
+    );
+  }
   expect(label).not.toMatch(ONE_MILLION_MARKER);
   if (!entry) throw new Error(`composer-model-badge showed an unrecognized label "${label}"`);
   return entry;
@@ -536,6 +589,22 @@ describe('Slash Popover + Model/Effort Selector', function () {
         const thirdTabArgs = await waitForFreshSpawnArgs(priorArgsAfterDefault);
         expect(thirdTabArgs.filter((a) => a === '--model').length).toBe(1);
         expect(thirdTabArgs[thirdTabArgs.indexOf('--model') + 1]).toBe('default');
+
+        const haiku = requireCatalogEntry(await anthropicCatalog(), HAIKU_MODEL);
+        await selectModel(HAIKU_MODEL);
+        await waitForFreshSpawnArgs(thirdTabArgs);
+        await waitForBadgeFamily(haiku);
+        const prompt = 'Say hi in one word, so this tab gets a title.';
+        await sendMessageAndWait(prompt);
+        await waitForActiveTabTitle(
+          (title) => title !== '' && title !== 'New chat' && !prompt.startsWith(shownPrefix(title)),
+          'the title Claude Code generated'
+        );
+        expect(await activeHistoryRowLabel()).toBe(await activeTabFullTitle());
+
+        await sendMessageNoWait(`/rename ${RENAMED_TITLE}`);
+        await waitForActiveTabTitle((title) => title === RENAMED_TITLE, `"${RENAMED_TITLE}"`);
+        expect(await activeHistoryRowLabel()).toBe(RENAMED_TITLE);
       } finally {
         setBetaEnabled(priorBeta);
         await restartAppAndReconnect();

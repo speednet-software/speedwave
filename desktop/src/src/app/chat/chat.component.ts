@@ -144,6 +144,14 @@ export class ChatComponent implements OnInit, OnDestroy {
       if (this.ui.sidebarOpen()) void this.loadConversations();
     });
     effect(() => {
+      const change = this.chat.lastTitleChange();
+      if (!change) return;
+      this.conversations = this.conversations.map((c) =>
+        c.session_id === change.session_id ? { ...c, title: change.title } : c
+      );
+      this.cdr.markForCheck();
+    });
+    effect(() => {
       if (this.ui.memoryOpen()) void this.loadProjectMemory();
     });
 
