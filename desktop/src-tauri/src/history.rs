@@ -4828,7 +4828,7 @@ mod tests {
             &[FIRST_QUESTION, agent.as_str(), REPLY],
         );
         assert_eq!(
-            read_session_title_impl(tmp.path(), "proj", TITLED_SESSION_ID),
+            read_session_title_impl(tmp.path(), "proj", TITLED_SESSION_ID).unwrap(),
             None
         );
     }

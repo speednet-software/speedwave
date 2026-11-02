@@ -241,8 +241,10 @@ pub fn is_bare_slash(text: &str) -> bool {
     text.trim() == "/"
 }
 
-/// not `\s+` — a tab does not match), returning `(command, argument)`. SSOT for
-/// control-chip shape, called by both live emission and history reconstruction.
+/// Parses `text` as a `/rename <name>`, `/model <id>` or `/effort <level>` control command
+/// and returns `(command, argument)`; the separator after the command name is a literal
+/// space (not `\s+` — a tab does not match). SSOT for control-chip shape, called by both
+/// live emission and history reconstruction.
 pub fn parse_control_command(text: &str) -> Option<(&str, &str)> {
     let trimmed = text.trim();
     if let Some(name) = trimmed.strip_prefix("/rename ") {

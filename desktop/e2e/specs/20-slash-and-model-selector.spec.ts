@@ -71,17 +71,17 @@ async function waitForActiveTabTitle(
   what: string
 ): Promise<string> {
   let seen = '';
-  await browser.waitUntil(
-    async () => {
-      seen = await activeTabTitle();
-      return accept(seen);
-    },
-    {
-      timeout: 60_000,
-      interval: 1_000,
-      timeoutMsg: `the active tab title stayed "${seen}" instead of ${what}`,
-    }
-  );
+  try {
+    await browser.waitUntil(
+      async () => {
+        seen = await activeTabTitle();
+        return accept(seen);
+      },
+      { timeout: 60_000, interval: 1_000 }
+    );
+  } catch (e) {
+    throw new Error(`the active tab title stayed "${seen}" instead of ${what}: ${String(e)}`);
+  }
   return seen;
 }
 

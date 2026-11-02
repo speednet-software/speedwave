@@ -1817,18 +1817,6 @@ fn unless_next_turn_started(
     event.filter(|e| !(next_turn_started && *e == SessionEvent::TurnFinished))
 }
 
-fn turn_ended_in_error(chunks: &[StreamChunk]) -> bool {
-    chunks.iter().any(|c| {
-        matches!(
-            c,
-            StreamChunk::Error {
-                turn_ended: true,
-                ..
-            }
-        )
-    })
-}
-
 fn session_to_refresh_title_for(
     result_session_id: Option<&str>,
     ended_in_error: bool,
@@ -2452,8 +2440,8 @@ impl ChatSession {
                     StreamChunk::Result { session_id, .. } => Some(session_id.clone()),
                     _ => None,
                 });
-                let ended_in_error = turn_ended_in_error(&chunks);
                 let turn_event = turn_end_event(&chunks);
+                let ended_in_error = matches!(turn_event, Some(SessionEvent::SessionError));
                 awaited_for_reader.observe(&chunks);
                 for chunk in chunks {
                     if let StreamChunk::SystemInit {
@@ -10601,14 +10589,20 @@ mod tests {
         let text = StreamChunk::Text {
             content: "hi".into(),
         };
-        assert!(turn_ended_in_error(&[text, ended]));
-        assert!(!turn_ended_in_error(&[
-            StreamChunk::Text {
-                content: "hi".into()
-            },
-            mid_turn
-        ]));
-        assert!(!turn_ended_in_error(&[]));
+        assert_eq!(
+            turn_end_event(&[text, ended]),
+            Some(SessionEvent::SessionError)
+        );
+        assert_eq!(
+            turn_end_event(&[
+                StreamChunk::Text {
+                    content: "hi".into()
+                },
+                mid_turn
+            ]),
+            None
+        );
+        assert_eq!(turn_end_event(&[]), None);
     }
 
     #[test]

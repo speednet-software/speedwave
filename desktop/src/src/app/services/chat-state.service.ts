@@ -137,6 +137,10 @@ export class ChatStateService {
   });
   /** Whether another tab can be opened under `MAX_CHAT_TABS` (beta gating is the UI's job). */
   readonly canOpenTab: Signal<boolean> = computed(() => this._tabs().size < MAX_CHAT_TABS);
+  private readonly _lastTitleChange = signal<ChatTitleChangedEvent | null>(null);
+  /** The latest session title the backend announced for the active project; the history list patches its row from it. */
+  readonly lastTitleChange: Signal<ChatTitleChangedEvent | null> =
+    this._lastTitleChange.asReadonly();
 
   /** Reads Claude Code's control data as soon as a session answers `initialize`, and clears the mark of a tab the user keeps in view. */
   constructor() {
@@ -805,11 +809,6 @@ export class ChatStateService {
       this.log.warn(`[chat-state] Failed to listen for chat session events: ${String(err)}`);
     }
   }
-
-  private readonly _lastTitleChange = signal<ChatTitleChangedEvent | null>(null);
-  /** The latest session title the backend announced for the active project; the history list patches its row from it. */
-  readonly lastTitleChange: Signal<ChatTitleChangedEvent | null> =
-    this._lastTitleChange.asReadonly();
 
   private async setupTitleChangedListener(): Promise<void> {
     try {
