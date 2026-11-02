@@ -227,7 +227,11 @@ pub fn wait_until_port_free(
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "test code asserts via unwrap")]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test code asserts via unwrap and expect"
+)]
 mod tests {
     use super::*;
 
