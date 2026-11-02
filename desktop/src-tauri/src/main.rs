@@ -1314,8 +1314,6 @@ fn main() {
             notifications::request_notification_permission,
             notifications::open_notification_settings,
             #[cfg(feature = "e2e")]
-            e2e_support::e2e_last_spawn_args,
-            #[cfg(feature = "e2e")]
             e2e_support::e2e_chat_spawn,
             #[cfg(feature = "e2e")]
             e2e_support::e2e_last_applied_effort,

@@ -33,7 +33,11 @@
   />
 }
 @if (projectState.status() === 'ready') {
-  <section class="relative flex h-full overflow-hidden bg-[var(--bg)]" data-testid="chat-view">
+  <section
+    class="relative flex h-full overflow-hidden bg-[var(--bg)]"
+    data-testid="chat-view"
+    [attr.data-tab-id]="chat.activeTabId()"
+  >
     <app-conversations-sidebar
       [open]="ui.sidebarOpen()"
       [conversations]="conversations"
