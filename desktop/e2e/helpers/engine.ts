@@ -156,6 +156,22 @@ const SUDO_TIMELINE_SCRIPT = [
   'rm -f /tmp/spw-sudo-debug.log',
 ].join('\n');
 
+const GUEST_NSS_SCRIPT = [
+  "grep -E '^(hosts|networks):' /etc/nsswitch.conf",
+  'time timeout 20 hostname -f',
+  'time timeout 20 getent ahosts "$(hostname)"',
+].join('; ');
+
+const SUDO_DNS_QUERY_SCRIPT = [
+  'orig=$(resolvectl log-level 2>/dev/null || echo info)',
+  'trap \'resolvectl log-level "$orig" >/dev/null 2>&1\' EXIT HUP TERM',
+  'since=$(date "+%Y-%m-%d %H:%M:%S")',
+  'resolvectl log-level debug',
+  'timeout 25 sudo -n true',
+  'resolvectl log-level "$orig"',
+  'journalctl -u systemd-resolved --since "$since" --no-pager -o short-precise 2>&1 | grep -E \'Looking up RR|Cache miss|Positive cache|Negative cache|Sending query|timed out|Got message|question\' | head -60',
+].join('\n');
+
 const ENGINE_STATE_PROBES: { argv: string[]; keep?: { head?: number; tail?: number } }[] = [
   { argv: ['true'] },
   { argv: ['uptime'] },
@@ -186,7 +202,8 @@ function keepLines(text: string, keep?: { head?: number; tail?: number; grep?: R
  * a loaded guest. On macOS it also times the Lima SSH transport from the host: through the
  * control master and on a fresh connection, `limactl shell` without `sudo`, `sudo` without
  * `limactl`, the guest's name resolution, a syscall trace of a slow `sudo` with the guest's
- * systemd, journal and D-Bus state, sudo's own debug timeline, plus the master's state and
+ * systemd, journal and D-Bus state, sudo's own debug timeline, the guest's NSS order and the
+ * names sudo asks the DNS stub for, plus the master's state and
  * the live ssh and limactl processes. The argv stays free of shell metacharacters and
  * whitespace: the Windows transport re-parses it.
  */
@@ -305,6 +322,23 @@ function limaTransportProbes(): {
         sshConfig,
         host,
         `echo ${Buffer.from(SUDO_TIMELINE_SCRIPT).toString('base64')} | base64 -d | sudo -n sh`,
+      ],
+      env,
+    },
+    {
+      label: 'host: ssh guest NSS order and own-name lookups',
+      file: 'ssh',
+      args: ['-F', sshConfig, host, GUEST_NSS_SCRIPT],
+      env,
+    },
+    {
+      label: 'host: ssh names sudo asks the DNS stub for',
+      file: 'ssh',
+      args: [
+        '-F',
+        sshConfig,
+        host,
+        `echo ${Buffer.from(SUDO_DNS_QUERY_SCRIPT).toString('base64')} | base64 -d | sudo -n sh`,
       ],
       env,
     },
