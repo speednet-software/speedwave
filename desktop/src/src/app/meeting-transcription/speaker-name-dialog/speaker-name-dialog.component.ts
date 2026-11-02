@@ -16,8 +16,8 @@ import { SPEAKER_NAME_MAX_CHARS } from '../../models/transcript';
 let nextDialogId = 0;
 
 /**
- * Inline dialog that names a speaker or the user: Enter or Save saves, Cancel cancels, Esc or a
- * click outside dismisses.
+ * Inline dialog that names a speaker: Enter or Save saves; Cancel, Esc or a click outside
+ * cancels.
  */
 @Component({
   selector: 'app-speaker-name-dialog',
@@ -29,7 +29,7 @@ let nextDialogId = 0;
       class="w-full max-w-[360px] rounded-md border border-[var(--line-strong)] bg-[var(--bg-2)] p-3 text-[12.5px] shadow-lg"
       data-testid="speaker-name-dialog"
       [attr.aria-label]="heading()"
-      (keydown.escape)="dismissed.emit()"
+      (keydown.escape)="cancelled.emit()"
     >
       <label [for]="inputId" class="mb-1.5 block text-[11px] text-[var(--ink-mute)]">
         {{ heading() }}
@@ -82,7 +82,7 @@ let nextDialogId = 0;
           data-testid="speaker-name-save"
           (click)="saved.emit(field.value)"
         >
-          {{ saveLabel() }}
+          Save
         </button>
         <button
           type="button"
@@ -90,7 +90,7 @@ let nextDialogId = 0;
           data-testid="speaker-name-cancel"
           (click)="cancelled.emit()"
         >
-          {{ cancelLabel() }}
+          Cancel
         </button>
         <span class="ml-auto text-[10.5px] text-[var(--ink-mute)]">{{ hint() }}</span>
       </div>
@@ -110,16 +110,10 @@ export class SpeakerNameDialogComponent {
   readonly suggestions = input<string[]>([]);
   /** The keyboard hint beside the buttons. */
   readonly hint = input('');
-  /** The save button's text. */
-  readonly saveLabel = input('Save');
-  /** The cancel button's text. */
-  readonly cancelLabel = input('Cancel');
   /** The text in the field when the user saved. */
   readonly saved = output<string>();
-  /** The user pressed Cancel. */
+  /** The user cancelled: Cancel, Esc, or a press outside the dialog. */
   readonly cancelled = output<void>();
-  /** The user pressed Esc or clicked outside the dialog. */
-  readonly dismissed = output<void>();
 
   protected readonly maxChars = SPEAKER_NAME_MAX_CHARS;
   protected readonly inputId = `speaker-name-${++nextDialogId}`;
@@ -142,12 +136,12 @@ export class SpeakerNameDialogComponent {
   }
 
   /**
-   * Dismisses the dialog on a press outside it.
+   * Cancels on a press outside the dialog.
    * @param event - any mouse press in the document.
    */
   onDocumentMousedown(event: MouseEvent): void {
     const target = event.target as Node | null;
-    if (target && !this.host.nativeElement.contains(target)) this.dismissed.emit();
+    if (target && !this.host.nativeElement.contains(target)) this.cancelled.emit();
   }
 
   /**

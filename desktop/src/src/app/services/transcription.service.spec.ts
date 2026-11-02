@@ -1190,26 +1190,9 @@ describe('TranscriptionService', () => {
       expect(await svc.exportMarkdown('s')).toBe(false);
       await svc.revealAudio('s');
       expect(calls).toEqual([
-        ['export_transcript', { sessionId: 's', yourName: null }],
+        ['export_transcript', { sessionId: 's' }],
         ['reveal_transcript_audio', { sessionId: 's' }],
       ]);
-    });
-
-    it('export and the markdown read carry the name of the user once it is set', async () => {
-      localStorage.clear();
-      const calls: [string, unknown][] = [];
-      mockTauri.invokeHandler = async (cmd, args) => {
-        calls.push([cmd, args]);
-        return cmd === 'export_transcript' ? true : '# md';
-      };
-      svc.setYourName('Kamil');
-      await svc.exportMarkdown('s');
-      await svc.getMarkdown('s');
-      expect(calls).toEqual([
-        ['export_transcript', { sessionId: 's', yourName: 'Kamil' }],
-        ['get_transcript_markdown', { sessionId: 's', yourName: 'Kamil' }],
-      ]);
-      localStorage.clear();
     });
   });
 
@@ -1260,44 +1243,6 @@ describe('TranscriptionService', () => {
       };
       await expect(svc.renameSpeaker('sess-1', 3, 'x')).rejects.toThrow('no Speaker 3');
       expect(svc.active()?.named_speakers).toEqual({ '1': 'Ola' });
-    });
-  });
-
-  describe('your name', () => {
-    beforeEach(() => localStorage.clear());
-    afterEach(() => localStorage.clear());
-
-    it('stores a normalised name and a blank one removes it', () => {
-      expect(svc.yourName()).toBe('');
-      expect(svc.setYourName('  Kamil \n Nowak ')).toBe('Kamil Nowak');
-      expect(svc.yourName()).toBe('Kamil Nowak');
-      expect(svc.setYourName('   ')).toBe('');
-      expect(svc.yourName()).toBe('');
-    });
-
-    it('cuts a long name to the shared limit, counting characters', () => {
-      expect(Array.from(svc.setYourName('Ł'.repeat(60))).length).toBe(40);
-    });
-
-    it('remembers that the user was asked', () => {
-      expect(svc.yourNameAsked()).toBe(false);
-      svc.markYourNameAsked();
-      expect(svc.yourNameAsked()).toBe(true);
-    });
-
-    it('reads no name and an asked question when storage throws, and saving throws nothing', () => {
-      const get = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
-        throw new Error('denied');
-      });
-      const set = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
-        throw new Error('quota');
-      });
-      expect(svc.yourName()).toBe('');
-      expect(svc.yourNameAsked()).toBe(true);
-      expect(() => svc.setYourName('Kamil')).not.toThrow();
-      expect(() => svc.markYourNameAsked()).not.toThrow();
-      get.mockRestore();
-      set.mockRestore();
     });
   });
 
@@ -1391,11 +1336,7 @@ describe('TranscriptionService', () => {
         };
       }
 
-      afterEach(() => localStorage.clear());
-
       it('treats the names as certain and forbids guessing for the one unnamed speaker', async () => {
-        localStorage.clear();
-        svc.setYourName('Kamil');
         diarized('en', { '1': 'Marta', '3': 'Paweł' }, [
           sys(0, 1),
           sys(1, 2),
@@ -1406,16 +1347,14 @@ describe('TranscriptionService', () => {
         await svc.stageForChat('sess-1');
         const draft = mockChat.tab('tab-1').composerPromptDraft();
         expect(draft).toContain(
-          ' Speaker names (Kamil, Marta, Paweł) were set by the user: treat them as certain.' +
+          ' Speaker names (Marta, Paweł) were set by the user: treat them as certain.' +
             ' Speaker 2 is unnamed; refer to that speaker by the label and do not guess a name.' +
             ' Labels are approximate: one person can get two labels and one label can cover two people.'
         );
         expect(draft).not.toContain("'Speaker N'");
       });
 
-      it('lists several unnamed speakers and leaves the user out without lines of theirs', async () => {
-        localStorage.clear();
-        svc.setYourName('Kamil');
+      it('lists several unnamed speakers', async () => {
         diarized('pl', { '2': 'Marta' }, [sys(0, 1), sys(1, 2), sys(2, 3)]);
         await svc.stageForChat('sess-1');
         const draft = mockChat.tab('tab-1').composerPromptDraft();
@@ -1424,7 +1363,6 @@ describe('TranscriptionService', () => {
           ' Speaker 1, Speaker 3 nie mają imion; nazywaj te osoby ich etykietami i nie zgaduj imion.'
         );
         expect(draft).toContain(' Etykiety są przybliżone:');
-        expect(draft).not.toContain('Kamil');
       });
 
       it('names each person once when two labels share a name, and says nothing about the unnamed when there are none', async () => {
@@ -1435,9 +1373,7 @@ describe('TranscriptionService', () => {
         expect(draft).not.toContain('unnamed');
       });
 
-      it('keeps the guessing prompt while no speaker is named, even with the name of the user set', async () => {
-        localStorage.clear();
-        svc.setYourName('Kamil');
+      it('keeps the guessing prompt while no speaker is named', async () => {
         diarized('en', {}, [sys(0, 1), mic]);
         await svc.stageForChat('sess-1');
         const draft = mockChat.tab('tab-1').composerPromptDraft();

@@ -22,7 +22,6 @@ describe('SpeakerNameDialogComponent', () => {
     events = [];
     fixture.componentInstance.saved.subscribe((v) => events.push(`saved:${v}`));
     fixture.componentInstance.cancelled.subscribe(() => events.push('cancelled'));
-    fixture.componentInstance.dismissed.subscribe(() => events.push('dismissed'));
     document.body.appendChild(fixture.nativeElement);
     fixture.detectChanges();
     await fixture.whenStable();
@@ -58,12 +57,12 @@ describe('SpeakerNameDialogComponent', () => {
     expect(events).toEqual([]);
   });
 
-  it('tells Cancel apart from Esc and a press outside, and ignores a press inside', () => {
+  it('cancels on Cancel, Esc and a press outside, and ignores a press inside', () => {
     q('speaker-name-cancel')!.click();
     q('speaker-name-dialog')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
     field().dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
     document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-    expect(events).toEqual(['cancelled', 'dismissed', 'dismissed']);
+    expect(events).toEqual(['cancelled', 'cancelled', 'cancelled']);
   });
 
   it('puts an offered name in the field and keeps the focus there', () => {

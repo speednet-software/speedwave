@@ -91,10 +91,6 @@ describe('LiveTranscriptComponent', () => {
     liveTranscriptPreferred: ReturnType<typeof vi.fn>;
     speakerAttribution: ReturnType<typeof vi.fn>;
     renameSpeaker: ReturnType<typeof vi.fn>;
-    yourName: ReturnType<typeof vi.fn>;
-    setYourName: ReturnType<typeof vi.fn>;
-    yourNameAsked: ReturnType<typeof vi.fn>;
-    markYourNameAsked: ReturnType<typeof vi.fn>;
   };
   let chat: {
     hasConversation: WritableSignal<boolean>;
@@ -124,10 +120,6 @@ describe('LiveTranscriptComponent', () => {
       liveTranscriptPreferred: vi.fn(() => false),
       speakerAttribution: vi.fn(() => false),
       renameSpeaker: vi.fn(async (_id: string, _n: number, name: string) => name.trim() || null),
-      yourName: vi.fn(() => ''),
-      setYourName: vi.fn((name: string) => name.trim()),
-      yourNameAsked: vi.fn(() => false),
-      markYourNameAsked: vi.fn(),
     };
     chat = {
       hasConversation: signal(false),
@@ -632,112 +624,6 @@ describe('LiveTranscriptComponent', () => {
       expect(q('retranscribe-item')!.textContent).toContain(
         'Speaker names will be detached and offered again.'
       );
-    });
-  });
-
-  describe('your name before the first export', () => {
-    const q = (id: string): HTMLElement | null =>
-      fixture.nativeElement.querySelector(`[data-testid="${id}"]`);
-
-    function withOwnLines(): void {
-      fixture.componentRef.setInput(
-        'session',
-        session({
-          status: { state: 'done' },
-          final_segments: [{ ...seg(0, 'cześć'), source: 'mic' as const }],
-        })
-      );
-      fixture.detectChanges();
-    }
-
-    it('asks once before an export of a transcript with lines of the user', async () => {
-      withOwnLines();
-      await component.exportMarkdown();
-      fixture.detectChanges();
-      expect(svc.exportMarkdown).not.toHaveBeenCalled();
-      expect(q('speaker-name-dialog')!.getAttribute('aria-label')).toBe('Your name');
-      const input = q('speaker-name-input') as HTMLInputElement;
-      input.value = 'Kamil';
-      q('speaker-name-save')!.click();
-      await fixture.whenStable();
-      expect(svc.setYourName).toHaveBeenCalledWith('Kamil');
-      expect(svc.markYourNameAsked).toHaveBeenCalled();
-      expect(svc.exportMarkdown).toHaveBeenCalledWith('sess-1');
-      expect(svc.setYourName.mock.invocationCallOrder[0]).toBeLessThan(
-        svc.exportMarkdown.mock.invocationCallOrder[0]
-      );
-      expect(q('speaker-name-dialog')).toBeNull();
-    });
-
-    it('keeps You and goes on when the user declines', async () => {
-      withOwnLines();
-      await component.stageForChat();
-      fixture.detectChanges();
-      q('speaker-name-cancel')!.click();
-      await fixture.whenStable();
-      expect(svc.setYourName).not.toHaveBeenCalled();
-      expect(svc.markYourNameAsked).toHaveBeenCalled();
-      expect(svc.stageForChat).toHaveBeenCalledWith('sess-1', 'new-chat');
-    });
-
-    it('says why an attach that became blocked while the question showed did not happen', async () => {
-      const errSpy = vi.fn();
-      component.errorOccurred.subscribe(errSpy);
-      withOwnLines();
-      await component.stageForChat();
-      fixture.detectChanges();
-      chat.newChatBlockedReason.set('Close a chat tab first');
-      q('speaker-name-cancel')!.click();
-      await fixture.whenStable();
-      expect(svc.stageForChat).not.toHaveBeenCalled();
-      expect(errSpy).toHaveBeenCalledWith('Close a chat tab first');
-    });
-
-    it('drops the question and its action when another recording opens', async () => {
-      withOwnLines();
-      await component.exportMarkdown();
-      fixture.detectChanges();
-      fixture.componentRef.setInput(
-        'session',
-        session({
-          id: 'sess-2',
-          status: { state: 'done' },
-          final_segments: [{ ...seg(0, 'inne'), source: 'mic' as const }],
-        })
-      );
-      fixture.detectChanges();
-      expect(q('speaker-name-dialog')).toBeNull();
-      expect(svc.exportMarkdown).not.toHaveBeenCalled();
-    });
-
-    it('does nothing and asks again later when the question is dismissed', async () => {
-      withOwnLines();
-      await component.copyMarkdown();
-      fixture.detectChanges();
-      q('speaker-name-dialog')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
-      fixture.detectChanges();
-      expect(q('speaker-name-dialog')).toBeNull();
-      expect(svc.markYourNameAsked).not.toHaveBeenCalled();
-      expect(svc.getMarkdown).not.toHaveBeenCalled();
-    });
-
-    it('does not ask when the name is set, was asked, or the transcript has no lines of the user', async () => {
-      withOwnLines();
-      svc.yourName.mockReturnValue('Kamil');
-      await component.exportMarkdown();
-      svc.yourName.mockReturnValue('');
-      svc.yourNameAsked.mockReturnValue(true);
-      await component.exportMarkdown();
-      svc.yourNameAsked.mockReturnValue(false);
-      fixture.componentRef.setInput(
-        'session',
-        session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })
-      );
-      fixture.detectChanges();
-      await component.exportMarkdown();
-      expect(svc.exportMarkdown).toHaveBeenCalledTimes(3);
-      fixture.detectChanges();
-      expect(q('speaker-name-dialog')).toBeNull();
     });
   });
 

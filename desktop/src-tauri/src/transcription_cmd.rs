@@ -1018,19 +1018,18 @@ pub async fn rename_speaker(
         .map_err(|e| e.to_string())
 }
 
-/// Saves the session's markdown transcript where the user picks in a native save dialog, with
-/// `your_name` on the microphone lines when given. Returns `false` when the user cancels.
+/// Saves the session's markdown transcript where the user picks in a native save dialog.
+/// Returns `false` when the user cancels.
 #[tauri::command]
 pub async fn export_transcript(
     session_id: String,
-    your_name: Option<String>,
     store: tauri::State<'_, TranscriptStoreHandle>,
     app: AppHandle,
 ) -> Result<bool, String> {
     use tauri_plugin_dialog::DialogExt;
     let id = parse_transcript_id(&session_id)?;
     let session = store.get(id).map_err(|e| e.to_string())?;
-    let markdown = session.to_markdown(your_name.as_deref());
+    let markdown = session.to_markdown();
     let file_name = export_file_name(&session);
     tokio::task::spawn_blocking(move || {
         let Some(picked) = app
@@ -1137,16 +1136,14 @@ pub async fn delete_transcript(
     result
 }
 
-/// The session's markdown transcript, with `your_name` on the microphone lines when given.
 #[tauri::command]
 pub async fn get_transcript_markdown(
     session_id: String,
-    your_name: Option<String>,
     store: tauri::State<'_, TranscriptStoreHandle>,
 ) -> Result<String, String> {
     let id = parse_transcript_id(&session_id)?;
     let s = store.get(id).map_err(|e| e.to_string())?;
-    Ok(s.to_markdown(your_name.as_deref()))
+    Ok(s.to_markdown())
 }
 
 /// RAII slot in the in-flight download registry: removed on drop, so the
@@ -1844,7 +1841,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let md = store.get(id).unwrap().to_markdown(None);
+        let md = store.get(id).unwrap().to_markdown();
         assert!(md.contains("hi"), "expected text in markdown, got:\n{md}");
         assert!(md.ends_with("_Transcript generated locally by Speedwave._\n"));
         store.delete(id).unwrap();

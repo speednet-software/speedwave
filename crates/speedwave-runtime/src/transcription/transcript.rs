@@ -293,12 +293,8 @@ impl TranscriptSession {
 
     /// Renders the transcript as markdown: a header plus one timestamped line per segment,
     /// channel-labelled on paired captures, with the speaker's name or number on diarized
-    /// segments (ADR-098). `your_name` replaces "You" on microphone lines.
-    pub fn to_markdown(&self, your_name: Option<&str>) -> String {
-        let your_name = your_name.and_then(normalize_speaker_name);
-        let you = your_name
-            .as_deref()
-            .unwrap_or(TranscriptSource::Mic.label());
+    /// segments (ADR-098).
+    pub fn to_markdown(&self) -> String {
         let mut s = String::new();
         match &self.title {
             Some(title) => {
@@ -337,7 +333,7 @@ impl TranscriptSession {
                 continue;
             }
             let label = match (seg.source, seg.speaker_id) {
-                (Some(TranscriptSource::Mic), _) => format!(" {you}:"),
+                (Some(src @ TranscriptSource::Mic), _) => format!(" {}:", src.label()),
                 (_, Some(n)) => format!(" {}:", self.speaker_label(n)),
                 (Some(src), None) => format!(" {}:", src.label()),
                 (None, None) => String::new(),
@@ -734,7 +730,7 @@ mod tests {
             seg(2.5, 5.0, "Witaj."),
             seg(5.0, 7.0, "   "),
         ];
-        let md = s.to_markdown(None);
+        let md = s.to_markdown();
         assert!(md.starts_with("# Meeting transcript ("));
         assert!(md.contains("Language: `pl`"));
         assert!(md.contains("**(00:00.00)** Cześć!"));
@@ -755,7 +751,7 @@ mod tests {
         let mut mic = seg(2.0, 3.0, "Cześć.");
         mic.source = Some(TranscriptSource::Mic);
         s.live_segments = vec![sys, mic, seg(3.0, 4.0, "bez kanału")];
-        let md = s.to_markdown(None);
+        let md = s.to_markdown();
         assert!(md.contains("**(00:00.00) Meeting:** Dzień dobry państwu."));
         assert!(md.contains("**(00:02.00) You:** Cześć."));
         assert!(md.contains("**(00:03.00)** bez kanału"));
@@ -782,7 +778,7 @@ mod tests {
 
     #[test]
     fn to_markdown_labels_diarized_meeting_segments_with_their_speaker() {
-        let md = diarized_session().to_markdown(None);
+        let md = diarized_session().to_markdown();
         assert!(md.contains("**(00:00.00) Speaker 1:** Zaczynamy."));
         assert!(md.contains("**(00:01.00) You:** Cześć."));
         assert!(md.contains("**(00:03.00) Speaker 2:** Odpowiadam."));
@@ -791,13 +787,13 @@ mod tests {
     }
 
     #[test]
-    fn to_markdown_uses_the_names_the_user_gave_and_your_name_on_microphone_lines() {
+    fn to_markdown_uses_the_names_the_user_gave_and_keeps_you_on_microphone_lines() {
         let mut s = diarized_session();
         s.named_speakers.insert(1, "Marta".to_string());
         s.named_speakers.insert(10, "Paweł".to_string());
-        let md = s.to_markdown(Some("  Kamil "));
+        let md = s.to_markdown();
         assert!(md.contains("**(00:00.00) Marta:** Zaczynamy."), "{md}");
-        assert!(md.contains("**(00:01.00) Kamil:** Cześć."), "{md}");
+        assert!(md.contains("**(00:01.00) You:** Cześć."), "{md}");
         assert!(md.contains("**(00:02.00) Paweł:** Mam pytanie."), "{md}");
         assert!(md.contains("**(00:03.00) Speaker 2:** Odpowiadam."), "{md}");
         assert!(md.contains("**(00:04.00) Meeting:** Mhm."), "{md}");
@@ -807,20 +803,11 @@ mod tests {
     }
 
     #[test]
-    fn to_markdown_keeps_you_without_a_name_and_for_a_blank_one() {
-        let s = diarized_session();
-        for your_name in [None, Some(""), Some(" \t ")] {
-            let md = s.to_markdown(your_name);
-            assert!(md.contains("**(00:01.00) You:** Cześć."), "{md}");
-        }
-    }
-
-    #[test]
     fn to_markdown_lists_a_name_two_labels_share_once() {
         let mut s = diarized_session();
         s.named_speakers.insert(1, "Marta".to_string());
         s.named_speakers.insert(2, "Marta".to_string());
-        let md = s.to_markdown(None);
+        let md = s.to_markdown();
         assert!(md.contains("- Speakers: Marta, Speaker 10 ("), "{md}");
         assert!(md.contains("**(00:03.00) Marta:** Odpowiadam."));
     }
@@ -829,7 +816,7 @@ mod tests {
     fn to_markdown_says_nothing_about_names_while_no_speaker_is_named() {
         let mut s = diarized_session();
         s.named_speakers.insert(7, "Ola".to_string());
-        let md = s.to_markdown(None);
+        let md = s.to_markdown();
         assert!(!md.contains(NAMES_NOTE), "{md}");
         assert!(
             !md.contains("Ola"),
@@ -846,7 +833,7 @@ mod tests {
         second.speaker_id = Some(2);
         s.final_segments = Some(vec![first, second, seg(4.0, 5.0, "Mhm.")]);
         s.models_used.diarization = Some("nemotron-3-diarization-q8_0".to_string());
-        let md = s.to_markdown(None);
+        let md = s.to_markdown();
         assert!(md.contains("- Speakers: Speaker 1, Speaker 2 ("), "{md}");
         assert!(md.contains("**(00:00.00) Speaker 1:** Witam wszystkich."));
         assert!(md.contains("**(00:03.00) Speaker 2:** Dzień dobry."));
@@ -856,7 +843,7 @@ mod tests {
 
     #[test]
     fn to_markdown_lists_the_speakers_in_numeric_order_in_the_header() {
-        let md = diarized_session().to_markdown(None);
+        let md = diarized_session().to_markdown();
         assert!(
             md.contains(&format!(
                 "- Status: recording\n- Speakers: Speaker 1, Speaker 2, Speaker 10 ({SPEAKERS_NOTE})\n\n"
@@ -870,13 +857,13 @@ mod tests {
     fn to_markdown_lists_no_speakers_without_diarization_or_without_any_label() {
         let mut no_model = diarized_session();
         no_model.models_used.diarization = None;
-        assert!(!no_model.to_markdown(None).contains("- Speakers:"));
+        assert!(!no_model.to_markdown().contains("- Speakers:"));
 
         let mut no_labels = diarized_session();
         for seg in no_labels.final_segments.as_mut().unwrap() {
             seg.speaker_id = None;
         }
-        let md = no_labels.to_markdown(None);
+        let md = no_labels.to_markdown();
         assert!(!md.contains("Speaker"));
         assert!(md.contains("- Status: recording\n\n"));
     }
@@ -909,7 +896,7 @@ mod tests {
         let mut early = seg(1.0, 2.0, "wcześniej");
         early.source = Some(TranscriptSource::Mic);
         s.live_segments = vec![late, early];
-        let md = s.to_markdown(None);
+        let md = s.to_markdown();
         let early_at = md.find("wcześniej").unwrap();
         let late_at = md.find("później").unwrap();
         assert!(
@@ -922,7 +909,7 @@ mod tests {
     fn to_markdown_uses_the_title_as_heading_and_keeps_the_start_time() {
         let mut s = TranscriptSession::new(Language::En, mk_source(), PathBuf::from("/a.wav"));
         s.title = Some("Sprint review".to_string());
-        let md = s.to_markdown(None);
+        let md = s.to_markdown();
         assert!(md.starts_with("# Sprint review\n\n"));
         assert!(md.contains(&format!("- Recorded: {}\n", s.created_at)));
         assert!(!md.contains("# Meeting transcript ("));

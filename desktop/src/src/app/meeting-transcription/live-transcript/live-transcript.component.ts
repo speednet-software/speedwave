@@ -126,10 +126,6 @@ interface NamingTarget {
 const MICROPHONE_ONLY_NO_LABELS =
   'Speaker labels are not available for a microphone-only recording.';
 
-const YOUR_NAME_NOTE =
-  'Used instead of "You" in exports and in transcripts you attach to a chat. The transcript here ' +
-  'keeps showing "You". You can change it in Settings.';
-
 function speakerOf(
   seg: Segment,
   names: Record<string, string>,
@@ -500,21 +496,6 @@ interface ProgressTrack {
             </div>
           }
 
-          @if (askingYourName()) {
-            <app-speaker-name-dialog
-              class="mt-3"
-              heading="Your name"
-              placeholder="Type your name"
-              hint="Enter saves · Esc goes back"
-              saveLabel="Save and continue"
-              cancelLabel="Keep You"
-              [describe]="yourNameNote"
-              (saved)="saveYourName($event)"
-              (cancelled)="skipYourName()"
-              (dismissed)="askingYourName.set(null)"
-            />
-          }
-
           @if (speakers().length > 0) {
             <app-speaker-legend
               [speakers]="speakers()"
@@ -681,7 +662,6 @@ interface ProgressTrack {
           [describe]="describeName()"
           (saved)="saveSpeakerName($event)"
           (cancelled)="closeNaming()"
-          (dismissed)="closeNaming()"
         />
       }
     </ng-template>
@@ -709,8 +689,6 @@ export class LiveTranscriptComponent {
   readonly naming = signal<NamingTarget | null>(null);
   /** The speaker under the pointer or focus in the legend or on a line label. */
   readonly hoveredSpeaker = signal<number | null>(null);
-  /** The export, copy or attach waiting while the user is asked their name, if any. */
-  readonly askingYourName = signal<(() => Promise<void>) | null>(null);
 
   protected readonly newChatTooltip = NEW_CHAT_TOOLTIP;
   protected readonly currentChatHint = CURRENT_CHAT_HINT;
@@ -718,7 +696,6 @@ export class LiveTranscriptComponent {
   protected readonly exportTooltip = EXPORT_TOOLTIP;
   protected readonly primaryBtn = PRIMARY_BTN;
   protected readonly secondaryBtn = SECONDARY_BTN;
-  protected readonly yourNameNote = (): string => YOUR_NAME_NOTE;
   protected readonly numberLabel = numberLabel;
 
   private readonly transcription = inject(TranscriptionService);
@@ -1097,7 +1074,6 @@ export class LiveTranscriptComponent {
       this.renaming.set(false);
       this.confirmingDelete.set(false);
       this.openMenu.set(null);
-      this.askingYourName.set(null);
       if (untracked(() => this.status()) === 'recording') {
         this.scrollToBottom();
       } else {
@@ -1267,12 +1243,26 @@ export class LiveTranscriptComponent {
 
   /** Saves the transcript as Markdown where the user picks. */
   async exportMarkdown(): Promise<void> {
-    await this.withYourName(() => this.runWorking((id) => this.transcription.exportMarkdown(id)));
+    await this.runWorking((id) => this.transcription.exportMarkdown(id));
   }
 
   /** Copies the Markdown transcript to the clipboard. */
   async copyMarkdown(): Promise<void> {
-    await this.withYourName(() => this.copyNow());
+    const s = this.session();
+    if (!s) return;
+    try {
+      const md = await this.transcription.getMarkdown(s.id);
+      if (!this.clipboard.copy(md)) {
+        this.errorOccurred.emit('could not copy the transcript to the clipboard');
+        return;
+      }
+    } catch (e: unknown) {
+      this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
+      return;
+    }
+    this.copied.set(true);
+    clearTimeout(this.copiedTimer);
+    this.copiedTimer = setTimeout(() => this.copied.set(false), COPIED_FEEDBACK_MS);
   }
 
   /** Shows the recording's audio file in Finder or Explorer. */
@@ -1292,9 +1282,18 @@ export class LiveTranscriptComponent {
    * @param target - `'new-chat'` (default) or `'current-chat'` to keep the active thread.
    */
   async stageForChat(target: SendTarget = 'new-chat'): Promise<void> {
+    const s = this.session();
+    const blocked = target === 'new-chat' ? this.sendBlockedReason() : this.appendBlockedReason();
     this.closeMenus();
-    if (!this.session() || this.blockedReason(target)) return;
-    await this.withYourName(() => this.stageNow(target));
+    if (!s || blocked) return;
+    this.sending.set(true);
+    try {
+      await this.transcription.stageForChat(s.id, target);
+      await this.router.navigate(['/chat']);
+    } catch (e: unknown) {
+      this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
+    }
+    this.sending.set(false);
   }
 
   /**
@@ -1354,80 +1353,6 @@ export class LiveTranscriptComponent {
     } catch (e: unknown) {
       this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
     }
-  }
-
-  /**
-   * Stores the user's name, then runs the export, copy or attach that was waiting.
-   * @param value - the field's text.
-   */
-  saveYourName(value: string): void {
-    this.transcription.setYourName(value);
-    this.continueTransfer();
-  }
-
-  /** Keeps "You" for this and later exports, then runs the action that was waiting. */
-  skipYourName(): void {
-    this.continueTransfer();
-  }
-
-  private async withYourName(action: () => Promise<void>): Promise<void> {
-    const hasOwnLines = this.segments().some((seg) => seg.source === 'mic');
-    if (
-      !hasOwnLines ||
-      this.transcription.yourName() !== '' ||
-      this.transcription.yourNameAsked()
-    ) {
-      await action();
-      return;
-    }
-    this.askingYourName.set(action);
-  }
-
-  private continueTransfer(): void {
-    const action = this.askingYourName();
-    this.askingYourName.set(null);
-    this.transcription.markYourNameAsked();
-    if (action) void action();
-  }
-
-  private blockedReason(target: SendTarget): string {
-    return target === 'new-chat' ? this.sendBlockedReason() : this.appendBlockedReason();
-  }
-
-  private async stageNow(target: SendTarget): Promise<void> {
-    const s = this.session();
-    const blocked = this.blockedReason(target);
-    if (!s) return;
-    if (blocked) {
-      this.errorOccurred.emit(blocked);
-      return;
-    }
-    this.sending.set(true);
-    try {
-      await this.transcription.stageForChat(s.id, target);
-      await this.router.navigate(['/chat']);
-    } catch (e: unknown) {
-      this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
-    }
-    this.sending.set(false);
-  }
-
-  private async copyNow(): Promise<void> {
-    const s = this.session();
-    if (!s) return;
-    try {
-      const md = await this.transcription.getMarkdown(s.id);
-      if (!this.clipboard.copy(md)) {
-        this.errorOccurred.emit('could not copy the transcript to the clipboard');
-        return;
-      }
-    } catch (e: unknown) {
-      this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
-      return;
-    }
-    this.copied.set(true);
-    clearTimeout(this.copiedTimer);
-    this.copiedTimer = setTimeout(() => this.copied.set(false), COPIED_FEEDBACK_MS);
   }
 
   /**

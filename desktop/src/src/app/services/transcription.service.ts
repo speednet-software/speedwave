@@ -21,11 +21,7 @@ import type {
 } from '../models/transcript';
 import { effectiveSegments, isSessionOngoing } from '../models/transcript';
 import { recordingName } from '../meeting-transcription/recording-format';
-import {
-  normalizeSpeakerName,
-  speakersOf,
-  uniqueSpeakerNames,
-} from '../meeting-transcription/speaker-names';
+import { speakersOf, uniqueSpeakerNames } from '../meeting-transcription/speaker-names';
 import { ChatStateService } from './chat-state.service';
 import { TauriService } from './tauri.service';
 import { LoggerService } from './logger.service';
@@ -46,12 +42,6 @@ export const LIVE_TRANSCRIPT_STORAGE_KEY = 'speedwave-live-transcript-v2';
 const LEGACY_LIVE_TRANSCRIPT_STORAGE_KEY = 'speedwave-live-transcript';
 
 const SPEAKER_ATTRIBUTION_STORAGE_KEY = 'speedwave-speaker-attribution';
-
-/** localStorage key of the user's own name, used instead of "You" in exports and in chats. */
-const YOUR_NAME_STORAGE_KEY = 'speedwave-your-name';
-
-/** localStorage key set once the user was asked for their name before a first export. */
-const YOUR_NAME_ASKED_STORAGE_KEY = 'speedwave-your-name-asked';
 
 /** localStorage key of the language, source and microphone the last recording used. */
 export const RECORDING_CHOICE_STORAGE_KEY = 'speedwave-recording-choice';
@@ -119,19 +109,18 @@ const NAMED_SPEAKERS_PROMPT: Record<
   },
 };
 
-function speakerLabelsPrompt(session: TranscriptSession, yourName: string): string {
+function speakerLabelsPrompt(session: TranscriptSession): string {
   const segments = effectiveSegments(session);
   const speakers = speakersOf(segments, session.named_speakers ?? {});
   const named = speakers.flatMap((s) => (s.name ? [s.name] : []));
   if (named.length === 0) return SPEAKER_LABELS_PROMPT[session.language];
-  const own = yourName && segments.some((seg) => seg.source === 'mic') ? [yourName] : [];
   const unnamed = speakers
     .filter((s) => !s.name)
     .sort((a, b) => a.id - b.id)
     .map((s) => s.label);
   const text = NAMED_SPEAKERS_PROMPT[session.language];
   return (
-    text.named(uniqueSpeakerNames([...own, ...named]).join(', ')) +
+    text.named(uniqueSpeakerNames(named).join(', ')) +
     unnamedSentence(text, unnamed) +
     text.approximate
   );
@@ -146,11 +135,11 @@ function unnamedSentence(
   return text.many(unnamed.join(', '));
 }
 
-function readStored(key: string, onFailure: string | null = null): string | null {
+function readStored(key: string): string | null {
   try {
     return localStorage.getItem(key);
   } catch {
-    return onFailure;
+    return null;
   }
 }
 
@@ -331,32 +320,6 @@ export class TranscriptionService {
    */
   setSpeakerAttribution(on: boolean): void {
     writeStored(SPEAKER_ATTRIBUTION_STORAGE_KEY, on ? 'on' : 'off');
-  }
-
-  /** The user's own name for exports and chats; '' when not set. */
-  yourName(): string {
-    return readStored(YOUR_NAME_STORAGE_KEY) ?? '';
-  }
-
-  /**
-   * Stores the user's own name (tolerates storage failures); a blank one removes it.
-   * @param name - the name as typed.
-   * @returns the stored name, '' when removed.
-   */
-  setYourName(name: string): string {
-    const stored = normalizeSpeakerName(name);
-    writeStored(YOUR_NAME_STORAGE_KEY, stored || null);
-    return stored;
-  }
-
-  /** Whether the user was already asked for their name before an export. */
-  yourNameAsked(): boolean {
-    return readStored(YOUR_NAME_ASKED_STORAGE_KEY, 'yes') === 'yes';
-  }
-
-  /** Records that the user was asked for their name, so the question comes once. */
-  markYourNameAsked(): void {
-    writeStored(YOUR_NAME_ASKED_STORAGE_KEY, 'yes');
   }
 
   /** The language, source and microphone the last recording used; null when none is stored. */
@@ -637,15 +600,12 @@ export class TranscriptionService {
   }
 
   /**
-   * Saves the transcript as Markdown where the user picks, with the user's name on their lines.
+   * Saves the transcript as Markdown where the user picks.
    * @param sessionId - the recording to export.
    * @returns false when the user cancelled the save dialog.
    */
   exportMarkdown(sessionId: string): Promise<boolean> {
-    return this.tauri.invoke<boolean>('export_transcript', {
-      sessionId,
-      yourName: this.yourName() || null,
-    });
+    return this.tauri.invoke<boolean>('export_transcript', { sessionId });
   }
 
   /**
@@ -677,14 +637,11 @@ export class TranscriptionService {
   }
 
   /**
-   * Renders the session as a timestamped markdown transcript, with the user's name on their lines.
+   * Renders the session as a timestamped markdown transcript.
    * @param sessionId - the session to render.
    */
   getMarkdown(sessionId: string): Promise<string> {
-    return this.tauri.invoke<string>('get_transcript_markdown', {
-      sessionId,
-      yourName: this.yourName() || null,
-    });
+    return this.tauri.invoke<string>('get_transcript_markdown', { sessionId });
   }
 
   /**
@@ -702,7 +659,7 @@ export class TranscriptionService {
     store.stageTranscript({ markdown: md, name: recordingName(session) });
     store.composerPromptDraft.set(
       TRANSCRIPT_PROMPT_DEFAULTS[session.language] +
-        (session.models_used.diarization ? speakerLabelsPrompt(session, this.yourName()) : '')
+        (session.models_used.diarization ? speakerLabelsPrompt(session) : '')
     );
   }
 
