@@ -1,15 +1,12 @@
 #!/usr/bin/env bats
 
 SPW_ROOT="$BATS_TEST_DIRNAME/../.."
-SCRIPT="$SPW_ROOT/scripts/build-native-macos.sh"
 SPW_PACKAGES="reminders calendar mail notes audio-capture"
 
 setup() {
     if [ "$(uname)" != "Darwin" ]; then
-        skip "macOS-only: the script exits early off Darwin and needs PlistBuddy"
+        skip "macOS-only: evaluates the Swift package manifests"
     fi
-    . "$SCRIPT"
-    APP_VERSION="9.9.9"
 }
 
 assert_package_list() {
@@ -19,28 +16,6 @@ assert_package_list() {
         echo "SPW_PACKAGES expands to $n services, expected 5" >&2
         return 1
     }
-}
-
-without_version_values() {
-    awk 'skip { skip = 0; next } /<key>(CFBundleShortVersionString|CFBundleVersion)<\/key>/ { skip = 1 } { print }' "$1"
-}
-
-plist_fixture() {
-    cp "$SPW_ROOT/native/macos/calendar/Resources/Info.plist" "$1"
-}
-
-staged_fixture_repo() {
-    local root="$1" pkg
-    mkdir -p "$root/scripts" "$root/desktop/src-tauri"
-    cp -p "$SCRIPT" "$root/scripts/"
-    cp "$SPW_ROOT/.gitignore" "$root/"
-    for pkg in $SPW_PACKAGES; do
-        mkdir -p "$root/native/macos/$pkg/Resources"
-        cp "$SPW_ROOT/native/macos/$pkg/Resources/Info.plist" "$root/native/macos/$pkg/Resources/"
-    done
-    git -C "$root" init -q
-    git -C "$root" add -A
-    git -C "$root" -c user.name=t -c user.email=t@t commit -qm fixture
 }
 
 package_fixture_root() {
@@ -75,109 +50,8 @@ print(found[0])
 '
 }
 
-@test "staging writes both version keys into the copy" {
-    local src="$BATS_TEST_TMPDIR/Info.plist" dest="$BATS_TEST_TMPDIR/.build/Info.plist"
-    plist_fixture "$src"
-    stage_info_plist "$src" "$dest"
-    [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$dest")" = "9.9.9" ]
-    [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$dest")" = "9.9.9" ]
-}
-
-@test "staging leaves the source plist byte-identical" {
-    local src="$BATS_TEST_TMPDIR/Info.plist" before
-    plist_fixture "$src"
-    before="$(cat "$src")"
-    stage_info_plist "$src" "$BATS_TEST_TMPDIR/.build/Info.plist"
-    [ "$before" = "$(cat "$src")" ]
-}
-
-@test "staging leaves every other line untouched" {
-    local src="$BATS_TEST_TMPDIR/Info.plist" dest="$BATS_TEST_TMPDIR/.build/Info.plist"
-    plist_fixture "$src"
-    stage_info_plist "$src" "$dest"
-    diff <(without_version_values "$src") <(without_version_values "$dest")
-    [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$dest")" = "pl.speedwave.desktop.calendar" ]
-}
-
-@test "staging is idempotent" {
-    local src="$BATS_TEST_TMPDIR/Info.plist" dest="$BATS_TEST_TMPDIR/.build/Info.plist" once
-    plist_fixture "$src"
-    stage_info_plist "$src" "$dest"
-    once="$(cat "$dest")"
-    stage_info_plist "$src" "$dest"
-    [ "$once" = "$(cat "$dest")" ]
-}
-
-@test "staging fails loudly when a version key is absent" {
-    local src="$BATS_TEST_TMPDIR/Info.plist"
-    python3 - "$src" <<'PY'
-import plistlib, sys
-with open(sys.argv[1], "wb") as f:
-    plistlib.dump({"CFBundleIdentifier": "pl.speedwave.desktop.calendar"}, f)
-PY
-    run stage_info_plist "$src" "$BATS_TEST_TMPDIR/.build/Info.plist"
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"Failed to stamp CFBundleShortVersionString"* ]]
-}
-
-@test "staging fails loudly when the source plist is missing" {
-    run stage_info_plist "$BATS_TEST_TMPDIR/absent.plist" "$BATS_TEST_TMPDIR/.build/Info.plist"
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"Missing Info.plist"* ]]
-}
-
-@test "--stage-only stamps every package copy and leaves git status clean" {
-    assert_package_list
-    local root="$BATS_TEST_TMPDIR/repo" pkg dirty
-    staged_fixture_repo "$root"
-    run env SPEEDWAVE_VERSION=9.9.9 "$root/scripts/build-native-macos.sh" --stage-only
-    [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
-    dirty="$(git -C "$root" status --porcelain)"
-    if [ -n "$dirty" ]; then
-        echo "a build step wrote to tracked files:" >&2
-        echo "$dirty" >&2
-        return 1
-    fi
-    for pkg in $SPW_PACKAGES; do
-        [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$root/native/macos/$pkg/.build/Info.plist")" = "9.9.9" ] || {
-            echo "$pkg/.build/Info.plist was not stamped with 9.9.9" >&2
-            return 1
-        }
-    done
-}
-
-@test "--stage-only falls back to 0.0.0 without SPEEDWAVE_VERSION or a usable cargo workspace" {
-    assert_package_list
-    local root="$BATS_TEST_TMPDIR/repo" pkg
-    staged_fixture_repo "$root"
-    run env -u SPEEDWAVE_VERSION "$root/scripts/build-native-macos.sh" --stage-only
-    [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
-    for pkg in $SPW_PACKAGES; do
-        [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$root/native/macos/$pkg/.build/Info.plist")" = "0.0.0" ] || {
-            echo "$pkg/.build/Info.plist was not stamped with 0.0.0" >&2
-            return 1
-        }
-    done
-}
-
-@test "Package.swift embeds the staged plist by absolute path once it exists" {
-    assert_package_list
-    local root pkg linked
-    root="$(package_fixture_root)"
-    for pkg in $SPW_PACKAGES; do
-        stage_info_plist "$root/$pkg/Resources/Info.plist" "$root/$pkg/.build/Info.plist"
-        linked="$(linked_info_plist "$root/$pkg")" || return 1
-        [ "$linked" = "$root/$pkg/.build/Info.plist" ] || {
-            echo "$pkg links $linked, expected the staged copy" >&2
-            return 1
-        }
-    done
-}
-
-@test "Package.swift falls back to the source plist by absolute path without staging" {
-    assert_package_list
-    local root pkg linked
-    root="$(package_fixture_root)"
+assert_links_source_plist() {
+    local root="$1" pkg linked
     for pkg in $SPW_PACKAGES; do
         linked="$(linked_info_plist "$root/$pkg")" || return 1
         [ "$linked" = "$root/$pkg/Resources/Info.plist" ] || {
@@ -186,4 +60,20 @@ PY
         }
         [ -f "$linked" ]
     done
+}
+
+@test "Package.swift embeds Resources/Info.plist by absolute path" {
+    assert_package_list
+    assert_links_source_plist "$(package_fixture_root)"
+}
+
+@test "Package.swift ignores a .build/Info.plist an older build left behind" {
+    assert_package_list
+    local root pkg
+    root="$(package_fixture_root)"
+    for pkg in $SPW_PACKAGES; do
+        mkdir -p "$root/$pkg/.build"
+        cp "$root/$pkg/Resources/Info.plist" "$root/$pkg/.build/Info.plist"
+    done
+    assert_links_source_plist "$root"
 }

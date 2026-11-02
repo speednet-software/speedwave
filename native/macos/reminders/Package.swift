@@ -1,11 +1,7 @@
 // swift-tools-version: 5.9
-import Foundation
 import PackageDescription
 
-let stagedInfoPlist = Context.packageDirectory + "/.build/Info.plist"
-let infoPlist = FileManager.default.fileExists(atPath: stagedInfoPlist)
-    ? stagedInfoPlist
-    : Context.packageDirectory + "/Resources/Info.plist"
+let infoPlist = Context.packageDirectory + "/Resources/Info.plist"
 
 let package = Package(
     name: "reminders-cli",

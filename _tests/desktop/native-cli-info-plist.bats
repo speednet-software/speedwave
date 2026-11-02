@@ -60,18 +60,6 @@ extract_embedded_plist() {
     segedit "$bin" -extract __TEXT __info_plist "$out" 2>/dev/null
 }
 
-expected_app_version() {
-    local version="${SPEEDWAVE_VERSION:-}"
-    if [ -z "$version" ]; then
-        version="$(cd "$REPO_ROOT" && cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- version 2>/dev/null)"
-    fi
-    if [ -n "$version" ]; then
-        printf '%s\n' "$version"
-    else
-        printf '0.0.0\n'
-    fi
-}
-
 assert_plist_key() {
     local svc="$1" plist="$2" key="$3" expected="$4" actual
     actual="$(plutil -extract "$key" raw "$plist" 2>/dev/null)" || {
@@ -98,10 +86,9 @@ assert_plist_key() {
     done
 }
 
-@test "embedded plist carries the right identifier, executable and version" {
+@test "embedded plist carries the right identifier and executable" {
     require_built_binaries
-    local expected_version svc bin tmp expected
-    expected_version="$(expected_app_version)"
+    local svc bin tmp expected
     tmp="$BATS_TEST_TMPDIR/sw-plist"
     for svc in $SERVICES; do
         bin="$(resolve_binary "$svc")"
@@ -115,9 +102,5 @@ assert_plist_key() {
             return 1
         }
         assert_plist_key "$svc" "$tmp" CFBundleExecutable "$svc-cli" || return 1
-        assert_plist_key "$svc" "$tmp" CFBundleShortVersionString "$expected_version" || {
-            echo "  Only scripts/build-native-macos.sh re-stamps this, from \$SPEEDWAVE_VERSION or the speedwave-version git resolver, never from tauri.conf.json." >&2
-            return 1
-        }
     done
 }

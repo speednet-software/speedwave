@@ -297,7 +297,6 @@ build-native-macos:
 		echo "⬚  Skipping macOS native build (not macOS)"; \
 	else \
 		echo "🔨 Building macOS native CLI binaries..." && \
-		bash $(CURDIR)/scripts/build-native-macos.sh --stage-only && \
 		cd $(CURDIR)/native/macos/reminders && swift build -c release && \
 		cd $(CURDIR)/native/macos/calendar && swift build -c release && \
 		cd $(CURDIR)/native/macos/mail && swift build -c release && \
@@ -312,7 +311,6 @@ test-swift:
 	@if [ "$$(uname)" != "Darwin" ]; then \
 		echo "⬚  Skipping Swift tests (not macOS)"; \
 	else \
-		bash $(CURDIR)/scripts/build-native-macos.sh --stage-only && \
 		for pkg in shared reminders calendar mail notes audio-capture; do \
 			echo "Testing $$pkg..." && \
 			(cd $(CURDIR)/native/macos/$$pkg && swift test) || exit 1; \
