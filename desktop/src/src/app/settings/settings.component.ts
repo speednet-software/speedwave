@@ -21,6 +21,7 @@ import { TelemetrySectionComponent } from './telemetry-section/telemetry-section
 import { SecuritySectionComponent } from './security-section/security-section.component';
 import { UpdateSectionComponent } from './update-section/update-section.component';
 import { NotificationsSectionComponent } from './notifications-section/notifications-section.component';
+import { SleepSectionComponent } from './sleep-section/sleep-section.component';
 import { ProjectPillComponent } from '../project-switcher/project-pill.component';
 import { RecreateOnDirective } from '../shared/recreate-on.directive';
 
@@ -75,6 +76,7 @@ const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
     SecuritySectionComponent,
     UpdateSectionComponent,
     NotificationsSectionComponent,
+    SleepSectionComponent,
     ProjectPillComponent,
     RecreateOnDirective,
   ],
@@ -191,6 +193,8 @@ const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
             }
           </div>
         </section>
+
+        <app-sleep-section (errorOccurred)="error = $event" />
 
         @if (beta.enabled()) {
           <app-notifications-section (errorOccurred)="error = $event" />
