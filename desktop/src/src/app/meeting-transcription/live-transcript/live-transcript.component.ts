@@ -13,6 +13,7 @@ import {
   untracked,
   viewChild,
 } from '@angular/core';
+import { NgTemplateOutlet } from '@angular/common';
 import { Router } from '@angular/router';
 import { Clipboard } from '@angular/cdk/clipboard';
 
@@ -20,8 +21,31 @@ import { TooltipDirective } from '../../shared/tooltip.directive';
 import { IconComponent } from '../../shared/icon.component';
 import { ChatStateService, NEW_CONVERSATION_STREAMING } from '../../services/chat-state.service';
 import { TranscriptionService, type SendTarget } from '../../services/transcription.service';
-import type { Segment, TranscriptSession, TranscriptStatus } from '../../models/transcript';
+import {
+  effectiveSegments,
+  type Segment,
+  type TranscriptSession,
+  type TranscriptStatus,
+} from '../../models/transcript';
 import { formatBytes } from '../../shared/format-bytes';
+import {
+  SpeakerLegendComponent,
+  type NameRequest,
+} from '../speaker-legend/speaker-legend.component';
+import { SpeakerMarkComponent } from '../speaker-mark/speaker-mark.component';
+import { SpeakerNameDialogComponent } from '../speaker-name-dialog/speaker-name-dialog.component';
+import {
+  nameChangeNote,
+  normalizeSpeakerName,
+  samePerson,
+  numberLabel,
+  sameSpeakerName,
+  speakerActionLabel,
+  speakerCountLine,
+  speakerOfId,
+  speakersOf,
+  type Speaker,
+} from '../speaker-names';
 import {
   formatDuration,
   formatRecordingDate,
@@ -84,28 +108,37 @@ function bySegmentStart(a: Segment, b: Segment): number {
 /** A timestamped transcript line, for rendering. */
 interface TranscriptLine {
   startLabel: string;
-  /** 'You' / 'Meeting', 'Meeting · Speaker N' or, untagged, 'Speaker N' when diarized; else null. */
+  /** 'You', 'Meeting', the speaker's name or 'Speaker N' when diarized; else null. */
   speaker: string | null;
-  speakerColor: string | null;
+  /** The diarized speaker of the line, null for any other line. */
+  diarized: Omit<Speaker, 'lines'> | null;
   text: string;
 }
 
-const SPEAKER_COLORS = ['var(--teal)', 'var(--violet)', 'var(--amber)', 'var(--green)'];
+/** Where the name dialog is open: under a transcript line, or under the speaker legend. */
+interface NamingTarget {
+  speaker: number;
+  at: number | 'legend';
+  /** The element focus returns to when the dialog closes. */
+  trigger: HTMLElement | null;
+}
 
 const MICROPHONE_ONLY_NO_LABELS =
   'Speaker labels are not available for a microphone-only recording.';
 
-function speakerOf(seg: Segment): Pick<TranscriptLine, 'speaker' | 'speakerColor'> {
-  if (seg.source === 'mic') return { speaker: 'You', speakerColor: null };
+function speakerOf(
+  seg: Segment,
+  names: Record<string, string>,
+  speakers: Map<number, Speaker>
+): Pick<TranscriptLine, 'speaker' | 'diarized'> {
+  if (seg.source === 'mic') return { speaker: 'You', diarized: null };
   const n = seg.speaker_id;
-  const labelled = n != null && n >= 1;
-  const speakerColor = labelled ? (SPEAKER_COLORS[n - 1] ?? null) : null;
-  if (seg.source === 'system') {
-    if (!labelled) return { speaker: 'Meeting', speakerColor: null };
-    return { speaker: `Meeting · Speaker ${n}`, speakerColor };
+  if (n != null && n >= 1) {
+    const diarized = speakers.get(n) ?? speakerOfId(n, names);
+    return { speaker: diarized.label, diarized };
   }
-  if (!labelled) return { speaker: null, speakerColor: null };
-  return { speaker: `Speaker ${n}`, speakerColor };
+  if (seg.source === 'system') return { speaker: 'Meeting', diarized: null };
+  return { speaker: null, diarized: null };
 }
 
 /** The quality line under the title: its words and colour. */
@@ -136,7 +169,14 @@ interface ProgressTrack {
 @Component({
   selector: 'app-live-transcript',
   standalone: true,
-  imports: [TooltipDirective, IconComponent],
+  imports: [
+    NgTemplateOutlet,
+    TooltipDirective,
+    IconComponent,
+    SpeakerLegendComponent,
+    SpeakerMarkComponent,
+    SpeakerNameDialogComponent,
+  ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: {
     class: 'flex min-h-0 flex-1 flex-col',
@@ -456,6 +496,21 @@ interface ProgressTrack {
             </div>
           }
 
+          @if (speakers().length > 0) {
+            <app-speaker-legend
+              [speakers]="speakers()"
+              [highlighted]="highlightedIds()"
+              [canReapply]="canReapplyNames()"
+              [editable]="canName()"
+              (name)="openNaming($event, 'legend')"
+              (hover)="hoveredSpeaker.set($event)"
+              (reapply)="reapplyNames($event)"
+            />
+            @if (naming()?.at === 'legend') {
+              <ng-container *ngTemplateOutlet="nameDialog" />
+            }
+          }
+
           @if (confirmingDelete()) {
             <div
               class="mt-3 max-w-xl rounded-md border border-[var(--red)]/40 bg-[var(--red-soft)] p-3 text-[12.5px]"
@@ -509,27 +564,74 @@ interface ProgressTrack {
             </p>
           }
           @for (line of lines(); track $index) {
-            <div class="mb-3.5">
+            <div
+              class="-mx-2 mb-2.5 rounded px-2 py-0.5"
+              data-testid="transcript-line"
+              [class.bg-[var(--bg-1)]]="
+                line.diarized !== null && highlightedIds().includes(line.diarized.id)
+              "
+            >
               <div class="mb-0.5 flex items-center gap-1.5 text-[11px] tabular-nums">
                 <span class="text-[var(--ink-mute)]">{{ line.startLabel }}</span>
-                @if (line.speaker) {
+                @if (line.diarized; as sp) {
+                  @if (canName()) {
+                    <button
+                      type="button"
+                      class="group inline-flex min-w-0 max-w-[16rem] items-center gap-1 rounded bg-[var(--bg-2)] px-1 font-medium hover:bg-[var(--bg-3)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--accent)]"
+                      data-testid="line-speaker"
+                      [class.text-[var(--ink)]]="sp.name !== null"
+                      [class.text-[var(--ink-dim)]]="sp.name === null"
+                      [attr.aria-label]="nameLabel(sp.id)"
+                      (click)="
+                        openNaming({ id: sp.id, trigger: $any($event.currentTarget) }, $index)
+                      "
+                      (mouseenter)="hoveredSpeaker.set(sp.id)"
+                      (mouseleave)="hoveredSpeaker.set(null)"
+                      (focus)="hoveredSpeaker.set(sp.id)"
+                      (blur)="hoveredSpeaker.set(null)"
+                    >
+                      <app-speaker-mark [speaker]="sp" />
+                      <span class="truncate">{{ line.speaker }}</span>
+                      @if (sp.sharesName) {
+                        <span class="mono shrink-0 text-[10px] text-[var(--ink-mute)]"
+                          >#{{ sp.id }}</span
+                        >
+                      }
+                      <app-icon
+                        name="pencil"
+                        class="h-2.5 w-2.5 shrink-0 text-[var(--ink-mute)] group-hover:opacity-100 group-focus-visible:opacity-100"
+                        [class.opacity-60]="sp.name === null"
+                        [class.opacity-0]="sp.name !== null"
+                      />
+                    </button>
+                  } @else {
+                    <span
+                      class="inline-flex min-w-0 max-w-[16rem] items-center gap-1 rounded bg-[var(--bg-2)] px-1 font-medium text-[var(--ink-dim)]"
+                      data-testid="line-speaker"
+                    >
+                      <app-speaker-mark [speaker]="sp" />
+                      <span class="truncate">{{ line.speaker }}</span>
+                      @if (sp.sharesName) {
+                        <span class="mono shrink-0 text-[10px] text-[var(--ink-mute)]"
+                          >#{{ sp.id }}</span
+                        >
+                      }
+                    </span>
+                  }
+                } @else if (line.speaker) {
                   <span
                     class="inline-flex items-center gap-1 rounded bg-[var(--bg-2)] px-1 font-medium text-[var(--ink-dim)]"
                     data-testid="line-speaker"
-                  >
-                    @if (line.speakerColor) {
-                      <span
-                        class="h-1.5 w-1.5 rounded-full"
-                        aria-hidden="true"
-                        data-testid="line-speaker-dot"
-                        [style.background-color]="line.speakerColor"
-                      ></span>
-                    }
-                    {{ line.speaker }}</span
+                    >{{ line.speaker }}</span
                   >
                 }
               </div>
               <p class="text-[14px] leading-relaxed text-[var(--ink)]">{{ line.text }}</p>
+              @if (naming()?.at === $index) {
+                <div class="mb-1 mt-2">
+                  <ng-container *ngTemplateOutlet="nameDialog" />
+                </div>
+              }
             </div>
           }
           @if (draft()) {
@@ -543,6 +645,26 @@ interface ProgressTrack {
         </div>
       </div>
     </section>
+
+    <ng-template #nameDialog>
+      @if (namingSpeaker(); as target) {
+        <app-speaker-name-dialog
+          [heading]="'Name for ' + numberLabel(target.id)"
+          [initial]="target.name ?? ''"
+          placeholder="Type a name"
+          [suggestions]="nameSuggestions()"
+          [hint]="
+            'Enter saves · Esc cancels · empty ' +
+            (target.name ? 'goes back to' : 'keeps') +
+            ' ' +
+            numberLabel(target.id)
+          "
+          [describe]="describeName()"
+          (saved)="saveSpeakerName($event)"
+          (cancelled)="closeNaming()"
+        />
+      }
+    </ng-template>
   `,
 })
 export class LiveTranscriptComponent {
@@ -563,6 +685,10 @@ export class LiveTranscriptComponent {
   readonly openMenu = signal<OpenMenu>(null);
   /** Whether the delete confirmation is showing. */
   readonly confirmingDelete = signal(false);
+  /** Where the speaker name dialog is open, if it is. */
+  readonly naming = signal<NamingTarget | null>(null);
+  /** The speaker under the pointer or focus in the legend or on a line label. */
+  readonly hoveredSpeaker = signal<number | null>(null);
 
   protected readonly newChatTooltip = NEW_CHAT_TOOLTIP;
   protected readonly currentChatHint = CURRENT_CHAT_HINT;
@@ -570,6 +696,7 @@ export class LiveTranscriptComponent {
   protected readonly exportTooltip = EXPORT_TOOLTIP;
   protected readonly primaryBtn = PRIMARY_BTN;
   protected readonly secondaryBtn = SECONDARY_BTN;
+  protected readonly numberLabel = numberLabel;
 
   private readonly transcription = inject(TranscriptionService);
   private readonly chat = inject(ChatStateService);
@@ -582,8 +709,7 @@ export class LiveTranscriptComponent {
   /** Effective segments: `final_segments` if the offline pass ran, else live. */
   private readonly segments = computed<Segment[]>(() => {
     const s = this.session();
-    if (!s) return [];
-    return s.final_segments ?? s.live_segments;
+    return s ? effectiveSegments(s) : [];
   });
 
   /**
@@ -591,12 +717,59 @@ export class LiveTranscriptComponent {
    * can append a mic segment after a later system one (or vice versa).
    */
   readonly lines = computed<TranscriptLine[]>(() => {
+    const names = this.namedSpeakers();
+    const speakers = new Map(this.speakers().map((s) => [s.id, s]));
     const ordered = [...this.segments()].sort(bySegmentStart);
     return ordered.map((seg) => ({
       startLabel: fmtTs(seg.start.secs),
-      ...speakerOf(seg),
+      ...speakerOf(seg, names, speakers),
       text: seg.text.trim(),
     }));
+  });
+
+  private readonly namedSpeakers = computed(() => this.session()?.named_speakers ?? {});
+
+  /** The diarized speakers of the transcript, person by person, the most lines first. */
+  readonly speakers = computed<Speaker[]>(() =>
+    this.session()?.models_used.diarization ? speakersOf(this.segments(), this.namedSpeakers()) : []
+  );
+
+  /** Whether the speakers can be named: once the transcription is over, as the backend requires. */
+  readonly canName = computed(() => ['done', 'postponed', 'failed'].includes(this.status()));
+
+  /**
+   * The labels whose lines are highlighted: the one label being named, since a name changes only
+   * its lines, else every label of the person hovered.
+   */
+  readonly highlightedIds = computed(() => {
+    const named = this.naming()?.speaker;
+    return named != null ? [named] : samePerson(this.speakers(), this.hoveredSpeaker());
+  });
+
+  /** The speaker the name dialog is open for. */
+  readonly namingSpeaker = computed(() => {
+    const id = this.naming()?.speaker;
+    return this.speakers().find((s) => s.id === id) ?? null;
+  });
+
+  /** Names from before the last transcription that no speaker has now. */
+  readonly nameSuggestions = computed(() => {
+    const taken = this.speakers().flatMap((s) => (s.name ? [s.name] : []));
+    return (this.session()?.previous_speaker_names ?? []).filter(
+      (name) => !taken.some((t) => sameSpeakerName(t, name))
+    );
+  });
+
+  /** Whether "Reapply names…" has names to offer and a speaker to give one to. */
+  readonly canReapplyNames = computed(
+    () => this.nameSuggestions().length > 0 && this.speakers().some((s) => !s.name)
+  );
+
+  /** What saving a typed name changes, for the speaker the dialog is open for. */
+  readonly describeName = computed(() => {
+    const target = this.namingSpeaker();
+    const speakers = this.speakers();
+    return (typed: string): string => (target ? nameChangeNote(target, speakers, typed) : '');
   });
 
   /** Lifecycle state of the active session ('' if none). */
@@ -636,6 +809,7 @@ export class LiveTranscriptComponent {
       formatDuration(this.summary()?.duration_secs ?? 0),
       s.audio_source.label,
       LANGUAGE_NAME[s.language],
+      speakerCountLine(this.speakers()),
     ];
     return parts.filter(Boolean).join(' · ');
   });
@@ -765,9 +939,11 @@ export class LiveTranscriptComponent {
     const model = this.bestModelReady()
       ? 'with the high-quality model'
       : 'with the model on this machine';
-    return this.session()?.models_used.diarization
-      ? `${model}. Speaker numbers can change.`
-      : model;
+    const s = this.session();
+    if (!s?.models_used.diarization) return model;
+    return Object.keys(s.named_speakers ?? {}).length > 0
+      ? `${model}. Speaker names will be detached and offered again.`
+      : `${model}. Speaker numbers can change.`;
   });
 
   /** Why the last transcription failed, while the session is failed. */
@@ -903,6 +1079,15 @@ export class LiveTranscriptComponent {
       } else {
         this.scrollToTop();
       }
+    });
+    effect(() => {
+      this.sessionId();
+      this.status();
+      this.segments();
+      untracked(() => {
+        this.naming.set(null);
+        this.hoveredSpeaker.set(null);
+      });
     });
     effect(() => {
       this.lines();
@@ -1109,6 +1294,65 @@ export class LiveTranscriptComponent {
       this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
     }
     this.sending.set(false);
+  }
+
+  /**
+   * Accessible name of a line's speaker label: "Name Speaker 2, 11 lines" or "Rename Marta, …".
+   * @param id - the speaker number.
+   */
+  nameLabel(id: number): string {
+    const speaker = this.speakers().find((s) => s.id === id);
+    return speaker ? speakerActionLabel(speaker) : `Name ${numberLabel(id)}`;
+  }
+
+  /**
+   * Opens the name dialog for a speaker, under its line or under the legend.
+   * @param request - the speaker and the element focus returns to.
+   * @param at - the index of the line it opens under, or 'legend'.
+   */
+  openNaming(request: NameRequest, at: number | 'legend'): void {
+    if (!this.canName()) return;
+    this.naming.set({ speaker: request.id, at, trigger: request.trigger });
+  }
+
+  /**
+   * Opens the name dialog under the legend for the unnamed speaker with the most lines, where the
+   * previous names are offered.
+   * @param trigger - the button that asked, for focus afterwards.
+   */
+  reapplyNames(trigger: HTMLElement | null): void {
+    const first = this.speakers().find((s) => !s.name);
+    if (first) this.openNaming({ id: first.id, trigger }, 'legend');
+  }
+
+  /** Closes the name dialog and puts focus back where it was opened from. */
+  closeNaming(): void {
+    const trigger = this.naming()?.trigger;
+    this.naming.set(null);
+    if (trigger) {
+      afterNextRender(
+        { write: () => (trigger.isConnected ? trigger.focus() : undefined) },
+        { injector: this.injector }
+      );
+    }
+  }
+
+  /**
+   * Stores the typed name of the speaker the dialog is open for (blank takes the name away).
+   * @param value - the field's text.
+   */
+  async saveSpeakerName(value: string): Promise<void> {
+    const s = this.session();
+    const target = this.naming();
+    if (!s || !target) return;
+    this.closeNaming();
+    const current = this.namedSpeakers()[String(target.speaker)] ?? '';
+    if (normalizeSpeakerName(value) === current) return;
+    try {
+      await this.transcription.renameSpeaker(s.id, target.speaker, value);
+    } catch (e: unknown) {
+      this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
+    }
   }
 
   /**

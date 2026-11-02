@@ -711,7 +711,7 @@ describe('TranscriptionSectionComponent', () => {
       );
       expect(items).toEqual([
         'One person can get two labels and one label can cover two people, most often when people talk over each other.',
-        'Up to 8 people. Transcribing again can number them differently.',
+        'Up to 8 people. Transcribing again can number them differently, so the names you gave are offered again instead of kept.',
         'People in the room with you are picked up by your microphone and labelled You.',
       ]);
     });

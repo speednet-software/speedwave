@@ -1003,6 +1003,21 @@ pub async fn rename_transcript(
     store.rename(id, &title).map_err(|e| e.to_string())
 }
 
+/// Names a speaker of the session's transcript; a blank name takes the name away. Returns the
+/// stored name.
+#[tauri::command]
+pub async fn rename_speaker(
+    session_id: String,
+    speaker: u32,
+    name: String,
+    store: tauri::State<'_, TranscriptStoreHandle>,
+) -> Result<Option<String>, String> {
+    let id = parse_transcript_id(&session_id)?;
+    store
+        .rename_speaker(id, speaker, &name)
+        .map_err(|e| e.to_string())
+}
+
 /// Saves the session's markdown transcript where the user picks in a native save dialog.
 /// Returns `false` when the user cancels.
 #[tauri::command]

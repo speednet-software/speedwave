@@ -75,6 +75,8 @@ pub enum TranscriptEvent {
         seq: u64,
         /// The higher-quality offline segments.
         segments: Vec<Segment>,
+        /// The names the speakers had before this pass numbered them again.
+        previous_speaker_names: Vec<String>,
     },
     /// The session reached `Done`; the snapshot reflects the final state.
     Finished {
@@ -464,6 +466,34 @@ impl TranscriptStore {
         })?;
         self.notify(id);
         Ok(title)
+    }
+
+    /// Names speaker `speaker` of a finished transcript as [`TranscriptSession::name_speaker`] does,
+    /// refusing with the reason [`TranscriptSession::check_speaker_name`] gives. Returns the name.
+    pub fn rename_speaker(
+        &self,
+        id: Uuid,
+        speaker: u32,
+        name: &str,
+    ) -> Result<Option<String>, StoreError> {
+        let reason = std::cell::RefCell::new(String::new());
+        let mut stored = None;
+        self.guarded_batch(
+            id,
+            |s| match s.check_speaker_name(speaker, name) {
+                Ok(()) => true,
+                Err(why) => {
+                    *reason.borrow_mut() = why;
+                    false
+                }
+            },
+            || StoreError::InvalidState(reason.take()),
+            |s, _| {
+                stored = s.name_speaker(speaker, name);
+                Vec::new()
+            },
+        )?;
+        Ok(stored)
     }
 
     /// Moves a `Failed`, `Done` or `Postponed` session to `Finalizing` for another offline pass over
@@ -922,8 +952,11 @@ impl TranscriptStore {
     ) -> Result<u64, StoreError> {
         self.pass_write(id, pass, |s, seq| {
             s.set_final_segments(final_segs, diarization);
-            let segments = s.final_segments.clone().unwrap_or_default();
-            vec![TranscriptEvent::FinalSegmentsReady { seq, segments }]
+            vec![TranscriptEvent::FinalSegmentsReady {
+                seq,
+                segments: s.final_segments.clone().unwrap_or_default(),
+                previous_speaker_names: s.previous_speaker_names.clone(),
+            }]
         })
     }
 
@@ -1789,6 +1822,178 @@ mod tests {
 
         assert_eq!(store.rename(id, "   ").unwrap(), None);
         assert_eq!(store.get(id).unwrap().title, None);
+    }
+
+    fn diarized(store: &TranscriptStore, dir: &Path) -> Uuid {
+        let mut session = mk_session(&dir.join("a.wav"));
+        let labelled = |start: f32, text: &str, n: u32| Segment {
+            speaker_id: Some(n),
+            ..seg(start, start + 1.0, text)
+        };
+        session.set_final_segments(
+            vec![
+                labelled(0.0, "Zaczynamy.", 1),
+                labelled(1.0, "Pytanie.", 2),
+                labelled(2.0, "Odpowiedź.", 1),
+            ],
+            None,
+        );
+        session.status = TranscriptStatus::Done;
+        store.create(session).unwrap()
+    }
+
+    #[tokio::test]
+    async fn rename_speaker_persists_a_normalised_name_and_a_blank_one_takes_it_away() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = diarized(&store, dir.path());
+        let seq_before = store.get(id).unwrap().last_seq;
+
+        assert_eq!(
+            store
+                .rename_speaker(id, 2, "  Paweł\n ")
+                .unwrap()
+                .as_deref(),
+            Some("Paweł")
+        );
+        let on_disk = TranscriptSession::load(&store.session_dir(id)).unwrap();
+        assert_eq!(
+            on_disk.named_speakers.get(&2).map(String::as_str),
+            Some("Paweł")
+        );
+        assert_eq!(
+            store.get(id).unwrap().last_seq,
+            seq_before,
+            "naming a speaker emits no stream event"
+        );
+
+        assert_eq!(store.rename_speaker(id, 2, " \t ").unwrap(), None);
+        assert!(store.get(id).unwrap().named_speakers.is_empty());
+        assert!(TranscriptSession::load(&store.session_dir(id))
+            .unwrap()
+            .named_speakers
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn rename_speaker_to_a_name_another_speaker_has_takes_that_spelling() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = diarized(&store, dir.path());
+        store.rename_speaker(id, 1, "Marta").unwrap();
+
+        assert_eq!(
+            store.rename_speaker(id, 2, " marta ").unwrap().as_deref(),
+            Some("Marta")
+        );
+        assert_eq!(
+            store.rename_speaker(id, 1, "MARTA").unwrap().as_deref(),
+            Some("Marta"),
+            "a speaker renamed to the name it shares keeps the shared spelling"
+        );
+        assert_eq!(
+            store
+                .rename_speaker(id, 2, "Marta Nowak")
+                .unwrap()
+                .as_deref(),
+            Some("Marta Nowak"),
+            "another name splits the two again"
+        );
+        let names = store.get(id).unwrap().named_speakers;
+        assert_eq!(names.get(&1).map(String::as_str), Some("Marta"));
+        assert_eq!(names.get(&2).map(String::as_str), Some("Marta Nowak"));
+    }
+
+    #[tokio::test]
+    async fn rename_speaker_refuses_a_speaker_the_transcript_lacks_and_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = diarized(&store, dir.path());
+
+        let err = store.rename_speaker(id, 3, "Ola").unwrap_err();
+        assert!(
+            matches!(&err, StoreError::InvalidState(msg) if msg.contains("Speaker 3")),
+            "{err:?}"
+        );
+        assert!(store.get(id).unwrap().named_speakers.is_empty());
+
+        let plain = store.create(mk_session(&dir.path().join("b.wav"))).unwrap();
+        assert!(matches!(
+            store.rename_speaker(plain, 1, "Ola").unwrap_err(),
+            StoreError::InvalidState(_)
+        ));
+        assert!(matches!(
+            store.rename_speaker(Uuid::new_v4(), 1, "Ola").unwrap_err(),
+            StoreError::NotFound(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn rename_speaker_is_refused_with_its_reason_while_the_transcript_is_made_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = diarized(&store, dir.path());
+        store.begin_retranscribe(id).unwrap();
+
+        let err = store.rename_speaker(id, 1, "Marta").unwrap_err();
+        assert!(
+            matches!(&err, StoreError::InvalidState(msg) if msg.contains("once the transcription is over")),
+            "{err:?}"
+        );
+        assert!(store.get(id).unwrap().named_speakers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rename_speaker_refuses_a_label_as_a_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = diarized(&store, dir.path());
+        assert!(matches!(
+            store.rename_speaker(id, 1, "Speaker 2").unwrap_err(),
+            StoreError::InvalidState(msg) if msg.contains("is a label")
+        ));
+        assert!(store.get(id).unwrap().named_speakers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_new_offline_pass_detaches_the_names_and_sends_them_with_its_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = diarized(&store, dir.path());
+        store.rename_speaker(id, 1, "Marta").unwrap();
+        store.rename_speaker(id, 2, "Paweł").unwrap();
+        store.begin_retranscribe(id).unwrap();
+        let pass = store.begin_offline_pass(id).unwrap();
+        let mut sub = store.subscribe(id).unwrap();
+
+        store
+            .set_final_segments(id, &pass, vec![seg(0.0, 1.0, "nowe")], None)
+            .unwrap();
+
+        match sub.events.try_recv().unwrap() {
+            TranscriptEvent::FinalSegmentsReady {
+                previous_speaker_names,
+                ..
+            } => assert_eq!(previous_speaker_names, vec!["Marta", "Paweł"]),
+            other => panic!("expected FinalSegmentsReady, got {other:?}"),
+        }
+        let on_disk = TranscriptSession::load(&store.session_dir(id)).unwrap();
+        assert!(on_disk.named_speakers.is_empty());
+        assert_eq!(on_disk.previous_speaker_names, vec!["Marta", "Paweł"]);
+    }
+
+    #[tokio::test]
+    async fn a_put_off_pass_keeps_the_names_of_the_transcript_on_screen() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = diarized(&store, dir.path());
+        store.rename_speaker(id, 1, "Marta").unwrap();
+        store.begin_retranscribe(id).unwrap();
+        store.postpone(id).unwrap();
+
+        let s = store.get(id).unwrap();
+        assert_eq!(s.named_speakers.get(&1).map(String::as_str), Some("Marta"));
+        assert!(s.previous_speaker_names.is_empty());
     }
 
     #[tokio::test]
@@ -2692,6 +2897,7 @@ mod tests {
             TranscriptEvent::FinalSegmentsReady {
                 seq: 7,
                 segments: vec![seg(0.0, 1.0, "f")],
+                previous_speaker_names: Vec::new(),
             },
             TranscriptEvent::Finished { seq: 9 },
             TranscriptEvent::CaptureWarning {
@@ -3027,14 +3233,21 @@ mod tests {
     }
 
     #[test]
-    fn final_segments_ready_serde_round_trip() {
+    fn final_segments_ready_serde_round_trip_and_ts_mirror() {
         let ev = TranscriptEvent::FinalSegmentsReady {
             seq: 7,
             segments: vec![seg(0.0, 1.0, "f")],
+            previous_speaker_names: vec!["Marta".to_string()],
         };
-        assert_eq!(
-            serde_json::from_str::<TranscriptEvent>(&serde_json::to_string(&ev).unwrap()).unwrap(),
-            ev
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(json.contains(r#""previous_speaker_names":["Marta"]"#));
+        assert_eq!(serde_json::from_str::<TranscriptEvent>(&json).unwrap(), ev);
+        let src = include_str!("../../../../desktop/src/src/app/models/transcript.ts");
+        let member = &src[src.find("kind: 'final_segments_ready';").unwrap()..];
+        let member = &member[..member.find('}').unwrap()];
+        assert!(
+            member.contains("previous_speaker_names: string[];"),
+            "TS final_segments_ready must carry previous_speaker_names"
         );
     }
 

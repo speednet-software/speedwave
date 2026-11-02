@@ -123,6 +123,7 @@
   --amber: #f5b942;
   --green: #34d399;
   --violet: #a78bfa;
+  --rose: #f472b6;
   --red: #ef4444;
   --amber-soft: color-mix(in srgb, var(--amber) 6%, transparent);
   --red-soft: color-mix(in srgb, var(--red) 6%, transparent);
@@ -200,6 +201,7 @@
   --amber: #9a6b00;
   --green: #047857;
   --violet: #6d28d9;
+  --rose: #be185d;
   --red: #b91c1c;
 
   /* Ember default — same #d73c04 in light + dark; white ink clears AA at
