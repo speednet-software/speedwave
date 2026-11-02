@@ -169,7 +169,7 @@ const SUDO_DNS_QUERY_SCRIPT = [
   'resolvectl log-level debug',
   'timeout 25 sudo -n true',
   'resolvectl log-level "$orig"',
-  'journalctl -u systemd-resolved --since "$since" --no-pager -o short-precise 2>&1 | grep -E \'Looking up RR|Cache miss|Positive cache|Negative cache|Transaction|Timeout reached|question\' | head -60',
+  'journalctl -u systemd-resolved --since "$since" --no-pager -o short-precise 2>&1 | grep -E \'Got DNS stub|Looking up RR|Cache miss|Positive cache|Negative cache|Transaction|Timeout reached\' | head -80',
 ].join('\n');
 
 const ENGINE_STATE_PROBES: { argv: string[]; keep?: { head?: number; tail?: number } }[] = [
