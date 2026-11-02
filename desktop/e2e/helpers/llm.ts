@@ -1,4 +1,5 @@
 import { RESTART_WAIT_MS, requestBackendRestart } from './shell';
+import { waitForReadySession } from './spawn-args';
 import { invokeOr } from './tauri-invoke';
 
 function requireEnv(name: string): string {
@@ -282,6 +283,7 @@ export async function sendMessageNoWait(text: string): Promise<void> {
 }
 
 export async function queueMessageViaEnter(text: string): Promise<void> {
+  await waitForReadySession();
   const input = await $('[data-testid="chat-input"]');
   await input.waitForExist({ timeout: 15_000 });
   await input.setValue(text);

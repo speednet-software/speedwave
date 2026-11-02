@@ -1316,6 +1316,8 @@ fn main() {
             #[cfg(feature = "e2e")]
             e2e_support::e2e_last_spawn_args,
             #[cfg(feature = "e2e")]
+            e2e_support::e2e_chat_spawn,
+            #[cfg(feature = "e2e")]
             e2e_support::e2e_last_applied_effort,
             #[cfg(feature = "e2e")]
             e2e_support::e2e_restart_app,

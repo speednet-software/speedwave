@@ -2,7 +2,7 @@ import { switchToProject, activeProjectSlug } from '../helpers/projects';
 import { confirmRestartAndWait, FLAKY_STEP_RETRIES, RESTART_WAIT_MS } from '../helpers/shell';
 import { waitForHealthy } from '../helpers/health';
 import { restartAppAndReconnect } from '../helpers/app-restart';
-import { lastSpawnArgs, waitForFreshSpawnArgs } from '../helpers/spawn-args';
+import { chatSpawn, waitForReadySession } from '../helpers/spawn-args';
 import { pickComposerEffort } from '../helpers/applied-effort';
 import {
   clearModelPinFile,
@@ -72,6 +72,7 @@ async function clearComposer(): Promise<void> {
 }
 
 async function openModelSelector(): Promise<void> {
+  await waitForReadySession();
   await browser.waitUntil(
     async () => {
       try {
@@ -364,9 +365,9 @@ describe('Slash Popover + Model/Effort Selector', function () {
 
     it('(a) a fresh, unpinned session spawns with --model default, no --effort, and reports the account default in SystemInit', async function () {
       this.timeout(180_000);
-      const priorArgs = await lastSpawnArgs();
+      const mark = await chatSpawn();
       await openChat();
-      const freshArgs = await waitForFreshSpawnArgs(priorArgs);
+      const freshArgs = (await waitForReadySession(mark)).args;
 
       expect(freshArgs.filter((a) => a === '--model').length).toBe(1);
       expect(freshArgs[freshArgs.indexOf('--model') + 1]).toBe('default');
@@ -436,17 +437,19 @@ describe('Slash Popover + Model/Effort Selector', function () {
       await sendMessageAndWait('Say hi in one word.');
       await waitForBadgeFamily(haiku);
 
-      const argsBeforeEffortPick = await lastSpawnArgs();
+      const mark = await waitForReadySession();
       await pickComposerEffort('max');
       expect(await $('[data-testid="effort-deferred-notice"]').isExisting()).toBe(false);
       expect(await $('[data-testid="control-chip"][data-command="effort"]').isExisting()).toBe(
         false
       );
       await sendMessageAndWait('Say hi in one word, at the new effort.');
-      expect(JSON.stringify(await lastSpawnArgs())).toBe(JSON.stringify(argsBeforeEffortPick));
+      const afterEffortPick = await chatSpawn();
+      expect(afterEffortPick?.boot).toBe(mark.boot);
+      expect(afterEffortPick?.seq).toBe(mark.seq);
 
       await startNewConversation();
-      const newConversationArgs = await waitForFreshSpawnArgs(argsBeforeEffortPick);
+      const newConversationArgs = (await waitForReadySession(mark)).args;
       expect(newConversationArgs.filter((a) => a === '--effort').length).toBe(1);
       expect(newConversationArgs[newConversationArgs.indexOf('--effort') + 1]).toBe('max');
       expect(newConversationArgs.filter((a) => a === '--model').length).toBe(1);
@@ -459,7 +462,7 @@ describe('Slash Popover + Model/Effort Selector', function () {
       this.timeout(360_000);
       const pinBeforeRestart = readModelPin(ANTHROPIC_PROJECT);
       expect(modelPinIs(HAIKU_MODEL)).toBe(true);
-      const priorArgs = await lastSpawnArgs();
+      const mark = await chatSpawn();
       await restartAppAndReconnect();
 
       if ((await activeProjectSlug()) !== ANTHROPIC_PROJECT) {
@@ -469,7 +472,7 @@ describe('Slash Popover + Model/Effort Selector', function () {
 
       expect((await (await $('[data-testid="effort-segment"]')).getText()).trim()).toBe('Max');
 
-      const freshArgs = await waitForFreshSpawnArgs(priorArgs);
+      const freshArgs = (await waitForReadySession(mark)).args;
       expect(freshArgs.filter((a) => a === '--model').length).toBe(1);
       expect(freshArgs[freshArgs.indexOf('--model') + 1]).toBe(pinBeforeRestart);
       expect(freshArgs.filter((a) => a === '--effort').length).toBe(1);
@@ -497,9 +500,10 @@ describe('Slash Popover + Model/Effort Selector', function () {
           timeoutMsg: 'chat tab bar never appeared after enabling beta features',
         });
 
-        const beforePick = await lastSpawnArgs();
+        const beforePick = await waitForReadySession();
         await selectModel(SONNET_MODEL);
-        const priorArgs = await waitForFreshSpawnArgs(beforePick);
+        const afterPick = await waitForReadySession(beforePick);
+        const priorArgs = afterPick.args;
         expect(priorArgs[priorArgs.indexOf('--model') + 1]).toBe(SONNET_MODEL);
         await browser.waitUntil(async () => modelPinIs(SONNET_MODEL), {
           timeout: 10_000,
@@ -512,14 +516,16 @@ describe('Slash Popover + Model/Effort Selector', function () {
           timeoutMsg: 'chat-tabs-new never became enabled',
         });
         await newTabBtn.click();
-        const newTabArgs = await waitForFreshSpawnArgs(priorArgs);
+        const newTab = await waitForReadySession(afterPick);
+        const newTabArgs = newTab.args;
         expect(newTabArgs.filter((a) => a === '--model').length).toBe(1);
         expect(newTabArgs[newTabArgs.indexOf('--model') + 1]).toBe(SONNET_MODEL);
 
         const defaultRowId = await waitForDefaultPickerRow(ANTHROPIC_PROJECT);
         await openModelSelector();
         await pickModelOption(defaultRowId);
-        const priorArgsAfterDefault = await waitForFreshSpawnArgs(newTabArgs);
+        const afterDefault = await waitForReadySession(newTab);
+        const priorArgsAfterDefault = afterDefault.args;
         expect(priorArgsAfterDefault[priorArgsAfterDefault.indexOf('--model') + 1]).toBe('default');
 
         await browser.waitUntil(async () => readModelPin(ANTHROPIC_PROJECT) === null, {
@@ -533,7 +539,7 @@ describe('Slash Popover + Model/Effort Selector', function () {
           timeoutMsg: 'chat-tabs-new never became enabled',
         });
         await secondNewTabBtn.click();
-        const thirdTabArgs = await waitForFreshSpawnArgs(priorArgsAfterDefault);
+        const thirdTabArgs = (await waitForReadySession(afterDefault)).args;
         expect(thirdTabArgs.filter((a) => a === '--model').length).toBe(1);
         expect(thirdTabArgs[thirdTabArgs.indexOf('--model') + 1]).toBe('default');
       } finally {

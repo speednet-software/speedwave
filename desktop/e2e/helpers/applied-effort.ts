@@ -1,3 +1,4 @@
+import { waitForReadySession } from './spawn-args';
 import { invokeOr } from './tauri-invoke';
 
 interface AppliedEffort {
@@ -10,6 +11,7 @@ async function lastAppliedEffort(): Promise<AppliedEffort | null> {
 }
 
 export async function pickComposerEffort(level: string, timeoutMs = 30_000): Promise<void> {
+  await waitForReadySession();
   const prior = await lastAppliedEffort();
   await (await $('[data-testid="effort-segment"]')).click();
   await $('[data-testid="effort-popover"]').waitForExist({ timeout: 10_000 });

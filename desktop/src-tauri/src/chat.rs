@@ -2107,6 +2107,8 @@ impl ChatSession {
         } else {
             SessionInfoState::Unavailable
         }));
+        #[cfg(feature = "e2e")]
+        crate::e2e_support::record_spawn_started(&self.tab_id, asks_claude_code_for_session_info);
         self.session_info_emitter = asks_claude_code_for_session_info.then(|| {
             let app = app_handle.clone();
             let project = self.project_name.clone();
