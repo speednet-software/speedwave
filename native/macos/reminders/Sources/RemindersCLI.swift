@@ -100,6 +100,35 @@ func listLists(store: EKEventStore) throws -> [String: Any] {
     return ["lists": lists]
 }
 
+enum ReminderSort: String {
+    case dueDate = "due_date"
+    case created
+    case name
+}
+
+/// The parsed `list_reminders` filters; `dueTo` is an exclusive upper bound.
+struct ListQuery {
+    var dueFrom: Date?
+    var dueTo: Date?
+    var overdue = false
+    var search: String?
+    var sort = ReminderSort.dueDate
+    var limit = 50
+    var now = Date()
+    var timeZone = TimeZone.current
+
+    var hasDueRange: Bool { dueFrom != nil || dueTo != nil }
+
+    /// EventKit's handling of all-day due dates and bound inclusivity is undocumented, so both bounds
+    /// are widened by a day; `applyListQuery` makes the exact cut.
+    var predicateStart: Date? { dueFrom.map { addingDays(-1, to: $0, in: timeZone) } }
+
+    var predicateEnd: Date? {
+        let end = overdue ? (dueTo.map { min($0, now) } ?? now) : dueTo
+        return end.map { addingDays(1, to: $0, in: timeZone) }
+    }
+}
+
 func listReminders(store: EKEventStore, params: [String: Any]) throws -> [String: Any] {
     let query = try parseListQuery(params)
     var calendars: [EKCalendar]?
@@ -117,7 +146,7 @@ func listReminders(store: EKEventStore, params: [String: Any]) throws -> [String
         var completedResults: [EKReminder]?
 
         let incompletePred = store.predicateForIncompleteReminders(
-            withDueDateStarting: query.dueFrom, ending: query.predicateEnd, calendars: calendars
+            withDueDateStarting: query.predicateStart, ending: query.predicateEnd, calendars: calendars
         )
         group.enter()
         store.fetchReminders(matching: incompletePred) { reminders in
@@ -142,7 +171,7 @@ func listReminders(store: EKEventStore, params: [String: Any]) throws -> [String
     } else {
         let semaphore = DispatchSemaphore(value: 0)
         let predicate = store.predicateForIncompleteReminders(
-            withDueDateStarting: query.dueFrom, ending: query.predicateEnd, calendars: calendars
+            withDueDateStarting: query.predicateStart, ending: query.predicateEnd, calendars: calendars
         )
         store.fetchReminders(matching: predicate) { reminders in
             fetchedReminders = reminders
@@ -157,41 +186,6 @@ func listReminders(store: EKEventStore, params: [String: Any]) throws -> [String
     return listResponse(applyListQuery(query, to: fetchedReminders ?? []), limit: query.limit)
 }
 
-/// The first `limit` reminders plus `total` (the count before truncating) and whether anything was cut.
-func listResponse(_ matched: [EKReminder], limit: Int) -> [String: Any] {
-    [
-        "reminders": matched.prefix(limit).map { reminderToDict($0) },
-        "total": matched.count,
-        "truncated": matched.count > limit,
-    ]
-}
-
-enum ReminderSort: String {
-    case dueDate = "due_date"
-    case created
-    case name
-}
-
-/// The parsed `list_reminders` filters; `dueTo` is an exclusive upper bound.
-struct ListQuery {
-    var dueFrom: Date?
-    var dueTo: Date?
-    var overdue = false
-    var search: String?
-    var sort = ReminderSort.dueDate
-    var limit = 50
-    var now = Date()
-    var timeZone = TimeZone.current
-
-    var hasDueRange: Bool { dueFrom != nil || dueTo != nil }
-
-    /// Upper bound handed to EventKit: the earlier of `dueTo` and, for overdue, now.
-    var predicateEnd: Date? {
-        guard overdue else { return dueTo }
-        return dueTo.map { min($0, now) } ?? now
-    }
-}
-
 func parseListQuery(_ params: [String: Any], now: Date = Date(), timeZone: TimeZone = .current) throws -> ListQuery {
     var query = ListQuery(now: now, timeZone: timeZone)
     query.limit = params["limit"] as? Int ?? query.limit
@@ -204,28 +198,34 @@ func parseListQuery(_ params: [String: Any], now: Date = Date(), timeZone: TimeZ
         query.sort = sort
     }
     if let raw = params["due_from"] as? String {
-        guard let input = parseISODateInput(raw), let date = input.date(in: timeZone) else {
-            throw CLIError.invalidDate(raw)
-        }
-        query.dueFrom = date
+        query.dueFrom = try parseDueBound(raw, in: timeZone).date
     }
     if let raw = params["due_to"] as? String {
-        guard let input = parseISODateInput(raw), let date = input.date(in: timeZone) else {
-            throw CLIError.invalidDate(raw)
-        }
-        query.dueTo = upperBound(of: input, at: date, in: timeZone)
+        let bound = try parseDueBound(raw, in: timeZone)
+        query.dueTo = upperBound(of: bound.input, at: bound.date, in: timeZone)
     }
     return query
+}
+
+private func parseDueBound(_ raw: String, in timeZone: TimeZone) throws -> (input: ISODateInput, date: Date) {
+    guard let input = parseISODateInput(raw), let date = input.date(in: timeZone) else {
+        throw CLIError.invalidDate(raw)
+    }
+    return (input, date)
 }
 
 /// A bare day ends after that whole day; a time is included itself.
 private func upperBound(of input: ISODateInput, at date: Date, in timeZone: TimeZone) -> Date {
     if case .day = input {
-        var calendar = gregorian
-        calendar.timeZone = timeZone
-        return calendar.date(byAdding: .day, value: 1, to: date) ?? date
+        return addingDays(1, to: date, in: timeZone)
     }
     return Date(timeIntervalSinceReferenceDate: date.timeIntervalSinceReferenceDate.nextUp)
+}
+
+private func addingDays(_ days: Int, to date: Date, in timeZone: TimeZone) -> Date {
+    var calendar = gregorian
+    calendar.timeZone = timeZone
+    return calendar.date(byAdding: .day, value: days, to: date) ?? date
 }
 
 /// Due filter, overdue, search and sort, in that order; the caller truncates.
@@ -296,6 +296,15 @@ private func compareLastWhenNil(_ a: Date?, _ b: Date?) -> ComparisonResult {
     case (nil, _): return .orderedDescending
     case (_, nil): return .orderedAscending
     }
+}
+
+/// The first `limit` reminders plus `total` (the count before truncating) and whether anything was cut.
+func listResponse(_ matched: [EKReminder], limit: Int) -> [String: Any] {
+    [
+        "reminders": matched.prefix(limit).map { reminderToDict($0) },
+        "total": matched.count,
+        "truncated": matched.count > limit,
+    ]
 }
 
 func getReminder(store: EKEventStore, params: [String: Any]) throws -> [String: Any] {

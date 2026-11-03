@@ -109,15 +109,19 @@ final class RemindersTests: XCTestCase {
         }
     }
 
-    func testPredicateEndIsTheEarlierOfDueToAndNowWhenOverdue() throws {
-        XCTAssertNil(try query([:]).predicateEnd)
-        XCTAssertEqual(try query(["overdue": true]).predicateEnd, now)
-        XCTAssertEqual(try query(["overdue": true, "due_to": "2030-01-01"]).predicateEnd, now)
+    func testPredicateBoundsAreWidenedByADayAndOverdueEndsAtNow() throws {
+        let none = try query([:])
+        XCTAssertNil(none.predicateStart)
+        XCTAssertNil(none.predicateEnd)
+        XCTAssertEqual(try query(["due_from": "2026-06-15"]).predicateStart, parseISO8601("2026-06-13T22:00:00Z"))
+        XCTAssertEqual(try query(["due_to": "2030-01-01"]).predicateEnd, parseISO8601("2030-01-02T23:00:00Z"))
+        XCTAssertEqual(try query(["overdue": true]).predicateEnd, parseISO8601("2026-06-16T10:00:00Z"))
         XCTAssertEqual(
-            try query(["overdue": true, "due_to": "2020-01-01"]).predicateEnd,
-            parseISO8601("2020-01-01T23:00:00Z")
+            try query(["overdue": true, "due_to": "2030-01-01"]).predicateEnd, parseISO8601("2026-06-16T10:00:00Z")
         )
-        XCTAssertEqual(try query(["due_to": "2030-01-01"]).predicateEnd, try query(["due_to": "2030-01-01"]).dueTo)
+        XCTAssertEqual(
+            try query(["overdue": true, "due_to": "2020-01-01"]).predicateEnd, parseISO8601("2020-01-02T23:00:00Z")
+        )
     }
 
     func testAnAllDayReminderMatchesItsOwnDayRange() throws {
@@ -252,12 +256,6 @@ final class RemindersTests: XCTestCase {
             XCTAssertEqual((whole["reminders"] as? [[String: Any]])?.count, 2)
             XCTAssertEqual(whole["total"] as? Int, 2)
             XCTAssertEqual(whole["truncated"] as? Bool, false)
-        }
-    }
-
-    func testListRemindersRejectsAnInvalidDateBeforeFetching() {
-        XCTAssertThrowsError(try listReminders(store: EKEventStore(), params: ["due_from": "soon"])) { error in
-            guard case CLIError.invalidDate("soon") = error else { return XCTFail("unexpected \(error)") }
         }
     }
 

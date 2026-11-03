@@ -26,7 +26,7 @@ const TAG_MARKER_CHARS = { pattern: /[[\]#]/, describe: '[, ], or # characters' 
 /** Input parameters for the listReminderLists tool (no params required). */
 type ListReminderListsParams = Record<string, never>;
 
-const REMINDER_SORT_VALUES = ['due_date', 'created', 'name'];
+const REMINDER_SORT_VALUES = ['due_date', 'created', 'name'] as const;
 
 /** Input parameters for the listReminders tool. */
 interface ListRemindersParams {
@@ -45,7 +45,7 @@ interface ListRemindersParams {
   /** Case- and diacritic-insensitive substring of the name or notes. */
   search?: string;
   /** Result order (default due_date). */
-  sort?: 'due_date' | 'created' | 'name';
+  sort?: (typeof REMINDER_SORT_VALUES)[number];
 }
 
 /** Input parameters for the getReminder tool. */
@@ -550,7 +550,7 @@ export async function handleListReminders(params: ListRemindersParams): Promise<
     const search = requireFields(p, ['search']);
     if (!search.valid) return search.error;
   }
-  if (p.sort !== undefined && !REMINDER_SORT_VALUES.includes(p.sort as string)) {
+  if (p.sort !== undefined && !(REMINDER_SORT_VALUES as readonly unknown[]).includes(p.sort)) {
     return teachingToolResult(
       {
         paramName: 'sort',
