@@ -1899,6 +1899,24 @@ describe('ProjectStateService', () => {
       expect(service.restartError).toBe('');
     });
 
+    it('keeps a restart requested while the restart runs for after it succeeds', async () => {
+      service.requestRestart();
+      const invoked = createDeferred<void>();
+      const base = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (cmd, args) =>
+        cmd === 'restart_integration_containers' ? invoked.promise : base(cmd, args);
+
+      const restart = service.restartContainers('test');
+      await vi.waitFor(() => {
+        expect(service.restarting).toBe(true);
+      });
+      service.requestRestart();
+      invoked.resolve();
+
+      await expect(restart).resolves.toBe('restarted');
+      expect(service.needsRestart).toBe(true);
+    });
+
     it('restartContainers fires onRestartBegin before the Tauri invoke, and ready before restart-complete', async () => {
       const order: string[] = [];
       service.onRestartBegin(async () => {

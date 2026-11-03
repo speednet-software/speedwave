@@ -67,34 +67,91 @@ pub(crate) fn invalidate_sign_in_verdict(project: &str) {
 }
 
 #[tauri::command]
-pub async fn save_api_key(project: String, api_key: String) -> Result<(), String> {
+pub async fn save_api_key(project: String, api_key: String) -> Result<bool, String> {
     check_project(&project)?;
     if api_key.len() > crate::types::MAX_CREDENTIAL_BYTES {
         return Err("API key too long".to_string());
     }
     tokio::task::spawn_blocking(move || {
         log::info!("saving API key for project {project}");
-        auth::save_api_key(&project, &api_key).map_err(|e| {
-            log::error!("failed to save API key: {e}");
-            e.to_string()
-        })
+        auth::save_api_key(&project, &api_key)
+            .and_then(|()| {
+                record_anthropic_key_in(speedwave_runtime::consts::data_dir(), &project, true)
+            })
+            .map_err(|e| {
+                log::error!("failed to save API key: {e}");
+                e.to_string()
+            })
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub async fn delete_api_key(project: String) -> Result<(), String> {
+pub async fn delete_api_key(project: String) -> Result<bool, String> {
     check_project(&project)?;
     tokio::task::spawn_blocking(move || {
         log::info!("deleting API key for project {project}");
-        auth::delete_api_key(&project).map_err(|e| {
-            log::error!("failed to delete API key: {e}");
-            e.to_string()
-        })
+        auth::delete_api_key(&project)
+            .and_then(|()| {
+                record_anthropic_key_in(speedwave_runtime::consts::data_dir(), &project, false)
+            })
+            .map_err(|e| {
+                log::error!("failed to delete API key: {e}");
+                e.to_string()
+            })
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+fn record_anthropic_key_in(
+    data_dir: &std::path::Path,
+    project: &str,
+    key_present: bool,
+) -> anyhow::Result<bool> {
+    use speedwave_runtime::config::{self, AnthropicEvidence, LlmProviderKind};
+    invalidate_sign_in_verdict(project);
+    let config_path = data_dir.join("config.json");
+    config::with_config_lock_in(data_dir, || {
+        let mut user_config = config::load_user_config_from(&config_path)?;
+        let entry = user_config
+            .find_project_mut(project)
+            .ok_or_else(|| anyhow::anyhow!("project '{project}' not found in config"))?;
+        let llm = entry
+            .claude
+            .get_or_insert_with(Default::default)
+            .llm
+            .get_or_insert_with(Default::default);
+        let evidence = if key_present {
+            AnthropicEvidence::ApiKey
+        } else {
+            AnthropicEvidence::detect_in(data_dir, project)
+        };
+        config::migrate_llm(llm, evidence);
+        if key_present && llm.is_unconfigured() {
+            llm.set_active_to_anthropic();
+        }
+        let kind = if key_present {
+            LlmProviderKind::AnthropicApiKey
+        } else {
+            LlmProviderKind::AnthropicOauth
+        };
+        for provider in llm
+            .providers
+            .iter_mut()
+            .filter(|p| p.id == config::ANTHROPIC_PROVIDER_ID)
+        {
+            provider.kind = kind;
+            provider.has_api_key = key_present;
+        }
+        config::sync_llm_legacy_fields(llm);
+        let needs_restart = llm
+            .active_provider()
+            .is_some_and(|p| p.id == config::ANTHROPIC_PROVIDER_ID);
+        config::save_user_config_to(&user_config, &config_path)?;
+        Ok(needs_restart)
+    })
 }
 
 #[tauri::command]
@@ -1497,5 +1554,124 @@ mod tests {
         );
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["status"], "auth_required");
+    }
+
+    fn data_dir_with_llm(llm: serde_json::Value) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut project = serde_json::json!({ "name": "proj", "dir": "/tmp/proj" });
+        if !llm.is_null() {
+            project["claude"] = serde_json::json!({ "llm": llm });
+        }
+        let config = serde_json::json!({ "projects": [project], "active_project": "proj" });
+        std::fs::write(tmp.path().join("config.json"), config.to_string()).unwrap();
+        tmp
+    }
+
+    fn stored_llm(data_dir: &std::path::Path) -> speedwave_runtime::config::LlmConfig {
+        speedwave_runtime::config::load_user_config_from(&data_dir.join("config.json"))
+            .unwrap()
+            .find_project("proj")
+            .and_then(|p| p.claude.clone())
+            .and_then(|c| c.llm)
+            .unwrap()
+    }
+
+    fn anthropic_entry(
+        llm: &speedwave_runtime::config::LlmConfig,
+    ) -> &speedwave_runtime::config::LlmProviderEntry {
+        llm.providers.iter().find(|p| p.id == "anthropic").unwrap()
+    }
+
+    #[test]
+    fn saving_a_key_turns_the_active_oauth_entry_into_an_api_key_entry() {
+        let tmp = data_dir_with_llm(serde_json::json!({
+            "provider": "anthropic",
+            "model": null,
+            "base_url": null,
+            "schema_version": 3,
+            "providers": [{ "id": "anthropic", "kind": "anthropic_oauth" }],
+            "active": { "provider_id": "anthropic" }
+        }));
+
+        let needs_restart = record_anthropic_key_in(tmp.path(), "proj", true).unwrap();
+
+        let llm = stored_llm(tmp.path());
+        assert!(needs_restart);
+        assert_eq!(
+            anthropic_entry(&llm).kind,
+            speedwave_runtime::config::LlmProviderKind::AnthropicApiKey
+        );
+        assert!(anthropic_entry(&llm).has_api_key);
+        assert_eq!(llm.active_provider().unwrap().id, "anthropic");
+    }
+
+    #[test]
+    fn saving_a_key_in_a_project_without_a_provider_activates_an_api_key_entry() {
+        let tmp = data_dir_with_llm(serde_json::Value::Null);
+
+        let needs_restart = record_anthropic_key_in(tmp.path(), "proj", true).unwrap();
+
+        let llm = stored_llm(tmp.path());
+        assert!(needs_restart);
+        assert_eq!(
+            llm.active_provider().unwrap().kind,
+            speedwave_runtime::config::LlmProviderKind::AnthropicApiKey
+        );
+    }
+
+    #[test]
+    fn saving_a_key_keeps_another_active_provider_and_needs_no_restart() {
+        let tmp = data_dir_with_llm(serde_json::json!({
+            "provider": "anthropic",
+            "model": null,
+            "base_url": null,
+            "schema_version": 3,
+            "providers": [
+                { "id": "anthropic", "kind": "anthropic_oauth" },
+                { "id": "openrouter", "kind": "open_router", "model": "openai/gpt-5", "has_api_key": true }
+            ],
+            "active": { "provider_id": "openrouter", "model": "openai/gpt-5" }
+        }));
+
+        let needs_restart = record_anthropic_key_in(tmp.path(), "proj", true).unwrap();
+
+        let llm = stored_llm(tmp.path());
+        assert!(!needs_restart);
+        assert_eq!(llm.active_provider().unwrap().id, "openrouter");
+        assert_eq!(
+            anthropic_entry(&llm).kind,
+            speedwave_runtime::config::LlmProviderKind::AnthropicApiKey
+        );
+    }
+
+    #[test]
+    fn deleting_the_key_restores_the_oauth_entry_and_needs_a_restart_while_active() {
+        let tmp = data_dir_with_llm(serde_json::json!({
+            "provider": "anthropic",
+            "model": null,
+            "base_url": null,
+            "schema_version": 3,
+            "providers": [{ "id": "anthropic", "kind": "anthropic_api_key", "has_api_key": true }],
+            "active": { "provider_id": "anthropic" }
+        }));
+
+        let needs_restart = record_anthropic_key_in(tmp.path(), "proj", false).unwrap();
+
+        let llm = stored_llm(tmp.path());
+        assert!(needs_restart);
+        assert_eq!(
+            anthropic_entry(&llm).kind,
+            speedwave_runtime::config::LlmProviderKind::AnthropicOauth
+        );
+        assert!(!anthropic_entry(&llm).has_api_key);
+    }
+
+    #[test]
+    fn recording_a_key_for_an_unknown_project_fails() {
+        let tmp = data_dir_with_llm(serde_json::Value::Null);
+
+        let err = record_anthropic_key_in(tmp.path(), "other", true).unwrap_err();
+
+        assert!(err.to_string().contains("not found"));
     }
 }

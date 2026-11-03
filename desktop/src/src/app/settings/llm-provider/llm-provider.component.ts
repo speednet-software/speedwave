@@ -1007,7 +1007,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     if (this.projectState.isSettledOn(project)) this.projectState.applyAuthStatus(status);
   }
 
-  /** Saves the Anthropic API key to the project's secrets directory. */
+  /** Saves the Anthropic API key, which also records the `anthropic_api_key` kind, and asks for the restart the backend reports. */
   async saveAnthropicApiKey(): Promise<void> {
     const project = this.activeProject();
     const apiKey = this.anthropicApiKeyInput();
@@ -1016,13 +1016,13 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     this.anthropicApiKeySaved.set(false);
     this.errorOccurred.emit('');
     try {
-      await this.tauri.invoke('save_api_key', {
+      const needsRestart = await this.tauri.invoke<boolean>('save_api_key', {
         project,
         apiKey,
       });
       this.anthropicApiKeySaved.set(true);
       this.anthropicApiKeyInput.set('');
-      await this.loadAuthStatus();
+      await this.applyAnthropicKeyChange(project, needsRestart);
       setTimeout(() => {
         this.anthropicApiKeySaved.set(false);
         this.cdr.markForCheck();
@@ -1034,18 +1034,25 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     this.cdr.markForCheck();
   }
 
-  /** Removes the stored Anthropic API key for the active project. */
+  /** Removes the stored Anthropic API key, which restores the `anthropic_oauth` kind, and asks for the restart the backend reports. */
   async deleteAnthropicApiKey(): Promise<void> {
     const project = this.activeProject();
     if (!project) return;
     this.errorOccurred.emit('');
     try {
-      await this.tauri.invoke('delete_api_key', { project });
-      await this.loadAuthStatus();
+      const needsRestart = await this.tauri.invoke<boolean>('delete_api_key', { project });
+      await this.applyAnthropicKeyChange(project, needsRestart);
     } catch (e: unknown) {
       this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
     }
     this.cdr.markForCheck();
+  }
+
+  private async applyAnthropicKeyChange(project: string, needsRestart: boolean): Promise<void> {
+    await this.loadAuthStatus();
+    if (!needsRestart) return;
+    this.projectState.requestRestartFor(project);
+    await this.loadConfig();
   }
 
   private oauthDoneInFlight = false;
