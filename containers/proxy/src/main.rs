@@ -1,4 +1,4 @@
-//! Per-project LLM forwarder: routes provider-prefixed models, tokenizes and
+//! Per-project LLM forwarder and git transport: routes provider-prefixed models, tokenizes and
 //! detokenizes `/v1/messages` both ways, and is the sole appender of the usage JSONL.
 
 use std::sync::Arc;
@@ -16,6 +16,7 @@ mod audit;
 mod config;
 mod count_tokens;
 mod forward;
+mod git;
 mod keys;
 mod ner;
 mod pii;
@@ -26,7 +27,7 @@ pub(crate) mod usage;
 use config::Config;
 
 /// Header the `claude` container sends with the per-project caller secret.
-const CALLER_AUTH_HEADER: &str = "x-speedwave-proxy-auth";
+pub(crate) const CALLER_AUTH_HEADER: &str = "x-speedwave-proxy-auth";
 
 const MAX_REQUEST_BODY_BYTES: usize = 32 * 1024 * 1024;
 
@@ -62,6 +63,7 @@ fn build_router(cfg: Arc<Config>) -> Router {
             require_caller_auth,
         ));
     Router::new()
+        .route("/git/{host}/{*path}", axum::routing::any(git::handler))
         .route(
             "/health",
             get(|| async { ([("content-type", "application/json")], r#"{"status":"ok"}"#) }),

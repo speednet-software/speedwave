@@ -48,9 +48,20 @@ pub struct Route {
     pub provider_id: String,
 }
 
+/// One git host the `/git/{host}/...` transport may reach; the token stays in `token_file`.
+#[derive(Debug, Deserialize)]
+pub struct GitForge {
+    pub host: String,
+    pub base_url: String,
+    pub login: String,
+    pub token_file: PathBuf,
+}
+
 #[derive(Deserialize)]
 pub struct Config {
     pub routes: Vec<Route>,
+    #[serde(default)]
+    pub git_forges: Vec<GitForge>,
     #[serde(default)]
     pub caller_token: Option<String>,
     #[serde(skip)]
@@ -74,6 +85,7 @@ impl std::fmt::Debug for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Config")
             .field("routes", &self.routes)
+            .field("git_forges", &self.git_forges)
             .field(
                 "caller_token",
                 &self.caller_token.as_ref().map(|_| "[redacted]"),
@@ -103,6 +115,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             routes: Vec::new(),
+            git_forges: Vec::new(),
             caller_token: None,
             usage_path: PathBuf::from(
                 std::env::var("SPW_USAGE_PATH")
@@ -119,6 +132,8 @@ impl Default for Config {
 #[derive(Deserialize)]
 struct RoutesFile {
     routes: Vec<Route>,
+    #[serde(default)]
+    git_forges: Vec<GitForge>,
     #[serde(default)]
     caller_token: Option<String>,
     #[serde(default)]
@@ -140,6 +155,7 @@ impl Config {
         };
         Ok(Self {
             routes: parsed.routes,
+            git_forges: parsed.git_forges,
             caller_token: parsed.caller_token,
             ner,
             ..Self::default()

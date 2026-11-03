@@ -870,6 +870,7 @@ name = "proxy"
 version = "0.0.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "env_logger",

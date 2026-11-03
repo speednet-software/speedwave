@@ -64,6 +64,54 @@ pub fn write_ner_unavailable(audit_dir: Option<&Path>) {
     write_pii_audit_with_source(audit_dir, &[row], Some(NER_SOURCE));
 }
 
+#[derive(Serialize)]
+struct GitAuditLine<'a> {
+    ts: String,
+    layer: &'static str,
+    method: &'a str,
+    host: &'a str,
+    repo: Option<&'a str>,
+    service: Option<&'a str>,
+    status: u16,
+}
+
+/// Appends one `git` layer row (no token, no body) to `<audit_dir>/audit-proxy.jsonl`;
+/// no-op when `None`, a write failure warns and is swallowed.
+pub fn write_git_audit(
+    audit_dir: Option<&Path>,
+    method: &str,
+    host: &str,
+    repo: Option<&str>,
+    service: Option<&str>,
+    status: u16,
+) {
+    let Some(dir) = audit_dir else {
+        return;
+    };
+    let line = GitAuditLine {
+        ts: chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, false),
+        layer: "git",
+        method,
+        host,
+        repo,
+        service,
+        status,
+    };
+    let write = || -> std::io::Result<()> {
+        std::fs::create_dir_all(dir)?;
+        let mut buf = serde_json::to_vec(&line).map_err(std::io::Error::other)?;
+        buf.push(b'\n');
+        std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(dir.join(AUDIT_FILE_NAME))?
+            .write_all(&buf)
+    };
+    if let Err(e) = write() {
+        log::warn!("git audit append failed ({}): {e}", dir.display());
+    }
+}
+
 fn write_pii_audit_to(
     dir: &Path,
     detections: &[Detection],
