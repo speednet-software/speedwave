@@ -44,7 +44,7 @@ Always run steps 1–2 before guessing a tool name or parameter. The live schema
 
 ## Confirmation rule
 
-Per `CLAUDE.md`: `createReminder`, `updateReminder` and `completeReminder` are write operations and require explicit user confirmation before execution. `listReminderLists`, `listReminders`, and `getReminder` are read-only and need no confirmation.
+Per `CLAUDE.md`: `createReminder`, `updateReminder`, `completeReminder` and `deleteReminder` are write operations and require explicit user confirmation before execution. `listReminderLists`, `listReminders`, and `getReminder` are read-only and need no confirmation.
 
 `deleteReminder` is destructive and irreversible. Before calling it, fetch the reminder with `getReminder`, show the user its name, list and due date, say that the deletion is permanent, and call `deleteReminder` only after the user explicitly confirms that reminder. Confirm each reminder separately; never delete several reminders on one general approval.
 
