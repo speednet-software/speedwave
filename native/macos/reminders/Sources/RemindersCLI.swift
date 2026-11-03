@@ -327,15 +327,6 @@ func reminderToDict(_ r: EKReminder, timeZone: TimeZone = .current) -> [String: 
 }
 
 
-private func saveReminder(_ reminder: EKReminder, store: EKEventStore) throws {
-    do {
-        try store.save(reminder, commit: true)
-    } catch {
-        throw alarmSaveError(error)
-    }
-}
-
-/// Replaces the reminder's alarms from `alarms` (an array, or null to remove all); absent leaves them alone.
 private func applyAlarms(_ params: [String: Any], to reminder: EKReminder, timeZone: TimeZone) throws {
     if params["alarms"] is NSNull {
         reminder.alarms = nil
@@ -391,8 +382,18 @@ private func locationAlarm(from fields: [String: Any], label: String) throws -> 
     return alarm
 }
 
-/// The alarm in input format; nil for a location alarm without a coordinate or an arrive/leave trigger.
+private func saveReminder(_ reminder: EKReminder, store: EKEventStore) throws {
+    do {
+        try store.save(reminder, commit: true)
+    } catch {
+        throw alarmSaveError(error)
+    }
+}
+
 private func alarmDict(_ alarm: EKAlarm, timeZone: TimeZone) -> [String: Any]? {
+    if alarm.type == .email || alarm.type == .procedure {
+        return nil
+    }
     if let place = alarm.structuredLocation {
         guard let coordinate = place.geoLocation?.coordinate, let on = proximityName(alarm.proximity) else {
             return nil
@@ -422,7 +423,6 @@ private func proximityName(_ proximity: EKAlarmProximity) -> String? {
     }
 }
 
-/// Replaces the EventKit codes of accounts without location alarms with a message that says what to do.
 func alarmSaveError(_ error: Error) -> Error {
     let nsError = error as NSError
     guard nsError.domain == EKErrorDomain else { return error }

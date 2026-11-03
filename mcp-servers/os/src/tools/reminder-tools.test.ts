@@ -442,6 +442,16 @@ describe('reminder-tools', () => {
   });
 
   describe('createReminderTools', () => {
+    it('rejects an undeclared argument without running the command', async () => {
+      const tool = createReminderTools().find((t) => t.tool.name === 'createReminder')!;
+
+      const result = await tool.handler({ name: 'x', alarm: { offset_minutes: -5 } });
+
+      expect(result.isError).toBe(true);
+      expect((result.content[0] as { text: string }).text).toContain('alarm');
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
     it('returns 6 tool definitions', () => {
       const tools = createReminderTools();
 

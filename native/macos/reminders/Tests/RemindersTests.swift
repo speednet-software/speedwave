@@ -585,6 +585,15 @@ final class RemindersTests: XCTestCase {
         XCTAssertEqual(emitted, [["location": location]] as NSArray)
     }
 
+    func testReminderToDictSkipsEmailAlarmsFromOtherClients() throws {
+        let reminder = try updatedAlarms([["offset_minutes": -5]])
+        let email = EKAlarm(relativeOffset: 0)
+        email.emailAddress = "x@example.com"
+        reminder.addAlarm(email)
+        let emitted = try XCTUnwrap(reminderToDict(reminder)["alarms"] as? NSArray)
+        XCTAssertEqual(emitted, [["offset_minutes": -5]] as NSArray)
+    }
+
     func testReminderToDictOmitsAlarmsWhenThereAreNone() throws {
         XCTAssertNil(reminderToDict(try typoReminder(EKEventStore()))["alarms"])
     }

@@ -10,7 +10,7 @@ import {
   META_KEYS,
 } from '@speedwave/mcp-shared';
 import {
-  withValidation,
+  guardedTool,
   ToolResult,
   validateAll,
   requireFields,
@@ -686,11 +686,11 @@ export async function handleCompleteReminder(params: CompleteReminderParams): Pr
 /** Creates tool definitions for all reminder operations. */
 export function createReminderTools(): ToolDefinition[] {
   return [
-    { tool: listReminderListsTool, handler: withValidation(handleListReminderLists) },
-    { tool: listRemindersTool, handler: withValidation(handleListReminders) },
-    { tool: getReminderTool, handler: withValidation(handleGetReminder) },
-    { tool: createReminderTool, handler: withValidation(handleCreateReminder) },
-    { tool: updateReminderTool, handler: withValidation(handleUpdateReminder) },
-    { tool: completeReminderTool, handler: withValidation(handleCompleteReminder) },
+    guardedTool(listReminderListsTool, handleListReminderLists),
+    guardedTool(listRemindersTool, handleListReminders),
+    guardedTool(getReminderTool, handleGetReminder),
+    guardedTool(createReminderTool, handleCreateReminder),
+    guardedTool(updateReminderTool, handleUpdateReminder),
+    guardedTool(completeReminderTool, handleCompleteReminder),
   ];
 }
