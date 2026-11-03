@@ -36,7 +36,6 @@ func listColor(_ params: [String: Any]) throws -> CGColor? {
     return color
 }
 
-/// The account of the default list for new reminders, else the first account that already holds reminder lists.
 func newListSource(store: EKEventStore) throws -> EKSource {
     if let source = store.defaultCalendarForNewReminders()?.source {
         return source
@@ -123,7 +122,6 @@ func reminderCount(in list: EKCalendar, store: EKEventStore) throws -> Int {
     return try countFetched(fetched, listName: list.title)
 }
 
-/// A fetch that completed with nil is an error: reading it as 0 would let a non-empty list be deleted without force.
 func countFetched(_ fetched: [EKReminder]?, listName: String) throws -> Int {
     guard let fetched = fetched else {
         throw CLIError.invalidValue("Could not count the reminders of list '\(listName)': the fetch returned no result")

@@ -368,6 +368,9 @@ final class RemindersTests: XCTestCase {
 
     func testCountFetchedCountsTheReminders() throws {
         XCTAssertEqual(try countFetched([], listName: "Work"), 0)
+        let store = EKEventStore()
+        let reminders = [EKReminder(eventStore: store), EKReminder(eventStore: store)]
+        XCTAssertEqual(try countFetched(reminders, listName: "Work"), 2)
     }
 
     func testCountFetchedRejectsAMissingResultNamingTheList() {
