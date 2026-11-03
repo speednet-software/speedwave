@@ -1496,7 +1496,7 @@ describe('GitHubClient', () => {
         client.createOrUpdateFile('o', 'r', {
           path: 'a.txt',
           message: 'm',
-        } as unknown as Parameters<typeof client.createOrUpdateFile>[2])
+        })
       ).rejects.toThrow("needs 'content' as a string");
       expect(octokit.rest.repos.getContent).not.toHaveBeenCalled();
       expect(octokit.rest.repos.createOrUpdateFileContents).not.toHaveBeenCalled();

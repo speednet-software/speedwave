@@ -252,7 +252,7 @@ export function createRepositoryTools(client: GitHubClient | null): ToolDefiniti
           owner: string;
           repo: string;
           path: string;
-          content: string;
+          content?: string;
           message: string;
           branch?: string;
           sha?: string;

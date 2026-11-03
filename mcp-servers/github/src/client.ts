@@ -1396,7 +1396,7 @@ export class GitHubClient {
   async createOrUpdateFile(
     owner: string,
     repo: string,
-    params: { path: string; content: string; message: string; branch?: string; sha?: string }
+    params: { path: string; content?: string; message: string; branch?: string; sha?: string }
   ): Promise<{ commit_sha: string; path: string; html_url: string }> {
     this.validateRequired({ owner, repo, path: params.path, message: params.message });
     if (typeof params.content !== 'string') {
