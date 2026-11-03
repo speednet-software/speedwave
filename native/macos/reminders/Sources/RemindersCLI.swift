@@ -370,8 +370,8 @@ private func alarm(from item: Any, label: String, timeZone: TimeZone) throws -> 
 
 private func locationAlarm(from fields: [String: Any], label: String) throws -> EKAlarm {
     guard let name = fields["name"] as? String,
-          let latitude = fields["latitude"] as? Double,
-          let longitude = fields["longitude"] as? Double,
+          let latitude = (fields["latitude"] as? NSNumber)?.doubleValue,
+          let longitude = (fields["longitude"] as? NSNumber)?.doubleValue,
           let on = fields["on"] as? String
     else {
         throw CLIError.invalid("\(label).location needs name, latitude, longitude and on")
@@ -384,7 +384,7 @@ private func locationAlarm(from fields: [String: Any], label: String) throws -> 
     }
     let place = EKStructuredLocation(title: name)
     place.geoLocation = CLLocation(latitude: latitude, longitude: longitude)
-    place.radius = fields["radius_m"] as? Double ?? 0
+    place.radius = (fields["radius_m"] as? NSNumber)?.doubleValue ?? 0
     let alarm = EKAlarm()
     alarm.structuredLocation = place
     alarm.proximity = proximity
