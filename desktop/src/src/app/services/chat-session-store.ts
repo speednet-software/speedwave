@@ -958,6 +958,29 @@ export class ChatSessionStore {
     this._unseenEvent.set(null);
   }
 
+  private readonly _titledSession = signal<{ sessionId: string; title: string | null } | null>(
+    null
+  );
+  /**
+   * The session title the backend read from the transcript (a custom title, else the AI title),
+   * or null while the transcript holds none or the title belongs to another session.
+   */
+  readonly title: Signal<string | null> = computed(() => {
+    const titled = this._titledSession();
+    const sessionId = this._sessionStats()?.session_id;
+    return titled && sessionId && titled.sessionId === sessionId ? titled.title : null;
+  });
+
+  /**
+   * Records the title the backend announced for a session; it shows only while this tab holds
+   * that session.
+   * @param sessionId - The session the title belongs to.
+   * @param title - The title, or null when the transcript holds none.
+   */
+  applyTitle(sessionId: string, title: string | null): void {
+    this._titledSession.set({ sessionId, title });
+  }
+
   private readonly _state = signal<ConversationStateTree>({ ...DEFAULT_STATE_TREE });
   readonly state: Signal<ConversationStateTree> = this._state.asReadonly();
 

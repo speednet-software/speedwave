@@ -55,6 +55,7 @@ mod reconcile;
 mod redmine_api_cmd;
 mod retry_cmd;
 mod session_model;
+mod session_title;
 mod setup_wizard;
 mod slack_features;
 mod slack_oauth_cmd;

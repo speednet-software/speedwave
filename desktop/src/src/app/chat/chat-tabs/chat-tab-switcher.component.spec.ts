@@ -16,6 +16,7 @@ class FakeStore {
   readonly isStreamingFromState = signal(false);
   readonly sessionEnded = signal(false);
   readonly unseenEvent = signal<ChatSessionEventKind | null>(null);
+  readonly title = signal<string | null>(null);
 
   constructor(title: string) {
     this.messagesFromState.set([

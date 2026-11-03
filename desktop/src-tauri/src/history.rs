@@ -559,86 +559,55 @@ fn list_conversations_impl(
             continue;
         }
 
-        let file = match fs::File::open(&path) {
-            Ok(f) => f,
-            Err(e) => {
-                log::debug!("cannot read session file {}: {e}", path.display());
-                continue;
-            }
-        };
-
-        let reader = BufReader::new(file);
         let mut last_timestamp: Option<String> = None;
         let mut preview = String::new();
         let mut message_count: usize = 0;
         let mut user_message_count: usize = 0;
         let mut last_assistant_content: Option<String> = None;
-        let mut titles = SessionTitles::default();
-        let mut scanned_lines: usize = 0;
-        let mut head_read_failed = false;
 
-        for line in reader.lines().take(MAX_SCAN_LINES) {
-            let line = match line {
-                Ok(l) => l,
-                Err(e) => {
-                    log::debug!(
-                        "stopped reading session file {} at line {}: {e}",
-                        path.display(),
-                        scanned_lines + 1
-                    );
-                    head_read_failed = true;
-                    break;
-                }
+        let scan = match scan_head_and_tail(&path, |line| {
+            let Some(msg) = parse_jsonl_message(line) else {
+                return;
             };
-            scanned_lines += 1;
-            titles.record(&line);
-            if let Some(msg) = parse_jsonl_message(&line) {
-                let is_control_chip_user = msg.role == "user"
-                    && speedwave_runtime::slash::parse_control_command(&msg.content).is_some();
-                let is_synthetic_chip_reply = msg.role == "assistant"
-                    && msg.model.as_deref() == Some(crate::session_model::SYNTHETIC_MODEL);
-                if is_control_chip_user || is_synthetic_chip_reply {
-                    continue;
-                }
-                if msg.role == "assistant" {
-                    if let Some(ref prev) = last_assistant_content {
-                        if prev.contains(&msg.content) {
-                            continue;
-                        }
-                    }
-                    last_assistant_content = Some(msg.content.clone());
-                } else {
-                    last_assistant_content = None;
-                }
-                message_count += 1;
-                if msg.role == "user" {
-                    user_message_count += 1;
-                }
-                if msg.timestamp.is_some() {
-                    last_timestamp = msg.timestamp.clone();
-                }
-                if preview.is_empty() && msg.role == "user" {
-                    preview = truncate_preview(&msg.content, LABEL_MAX_CHARS);
-                }
+            let is_control_chip_user = msg.role == "user"
+                && speedwave_runtime::slash::parse_control_command(&msg.content).is_some();
+            let is_synthetic_chip_reply = msg.role == "assistant"
+                && msg.model.as_deref() == Some(crate::session_model::SYNTHETIC_MODEL);
+            if is_control_chip_user || is_synthetic_chip_reply {
+                return;
             }
-        }
-
-        let head_saw_whole_file = !head_read_failed && scanned_lines < MAX_SCAN_LINES;
-
-        if !head_saw_whole_file {
-            match scan_tail(&path) {
-                Ok(tail) => {
-                    if tail.timestamp.is_some() {
-                        last_timestamp = tail.timestamp;
+            if msg.role == "assistant" {
+                if let Some(ref prev) = last_assistant_content {
+                    if prev.contains(&msg.content) {
+                        return;
                     }
-                    titles = tail.titles.latest_over(titles);
                 }
-                Err(e) => log::debug!(
-                    "cannot read the end of session file {}: {e}",
-                    path.display()
-                ),
+                last_assistant_content = Some(msg.content.clone());
+            } else {
+                last_assistant_content = None;
             }
+            message_count += 1;
+            if msg.role == "user" {
+                user_message_count += 1;
+            }
+            if msg.timestamp.is_some() {
+                last_timestamp = msg.timestamp.clone();
+            }
+            if preview.is_empty() && msg.role == "user" {
+                preview = truncate_preview(&msg.content, LABEL_MAX_CHARS);
+            }
+        }) {
+            Ok(scan) => scan,
+            Err(e) => {
+                log::debug!("cannot read session file {}: {e}", path.display());
+                continue;
+            }
+        };
+        if scan.tail_timestamp.is_some() {
+            last_timestamp = scan.tail_timestamp;
         }
+        let titles = scan.titles;
+        let head_saw_whole_file = scan.head_saw_whole_file;
 
         if message_count == 0 {
             continue;
@@ -680,6 +649,84 @@ fn list_conversations_impl(
     }
 
     Ok(summaries)
+}
+
+pub(crate) fn read_session_title(
+    project: &str,
+    session_id: &str,
+) -> std::io::Result<Option<String>> {
+    read_session_title_impl(consts::data_dir(), project, session_id)
+}
+
+fn read_session_title_impl(
+    data_dir: &Path,
+    project: &str,
+    session_id: &str,
+) -> std::io::Result<Option<String>> {
+    if validate_session_id_impl(session_id).is_err() {
+        return Ok(None);
+    }
+    let path = sessions_dir_impl(data_dir, project).join(format!("{session_id}.jsonl"));
+    match scan_head_and_tail(&path, |_| {}) {
+        Ok(scan) => Ok(scan.titles.label()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => {
+            log::debug!("cannot read the title of {}: {e}", path.display());
+            Err(e)
+        }
+    }
+}
+
+struct SessionScan {
+    titles: SessionTitles,
+    head_saw_whole_file: bool,
+    tail_timestamp: Option<String>,
+}
+
+fn scan_head_and_tail(
+    path: &Path,
+    mut on_head_line: impl FnMut(&str),
+) -> std::io::Result<SessionScan> {
+    let file = fs::File::open(path)?;
+    let mut titles = SessionTitles::default();
+    let mut scanned_lines: usize = 0;
+    let mut head_read_failed = false;
+    for line in BufReader::new(file).lines().take(MAX_SCAN_LINES) {
+        let line = match line {
+            Ok(l) => l,
+            Err(e) => {
+                log::debug!(
+                    "stopped reading session file {} at line {}: {e}",
+                    path.display(),
+                    scanned_lines + 1
+                );
+                head_read_failed = true;
+                break;
+            }
+        };
+        scanned_lines += 1;
+        titles.record(&line);
+        on_head_line(&line);
+    }
+    let head_saw_whole_file = !head_read_failed && scanned_lines < MAX_SCAN_LINES;
+    let mut tail_timestamp = None;
+    if !head_saw_whole_file {
+        match scan_tail(path) {
+            Ok(tail) => {
+                tail_timestamp = tail.timestamp;
+                titles = tail.titles.latest_over(titles);
+            }
+            Err(e) => log::debug!(
+                "cannot read the end of session file {}: {e}",
+                path.display()
+            ),
+        }
+    }
+    Ok(SessionScan {
+        titles,
+        head_saw_whole_file,
+        tail_timestamp,
+    })
 }
 
 pub fn get_conversation(project: &str, session_id: &str) -> anyhow::Result<ConversationTranscript> {
@@ -4610,6 +4657,179 @@ mod tests {
         assert_eq!(
             last_session_model_impl(tmp.path(), "proj", |_| true),
             Some("claude-fable-5".to_string())
+        );
+    }
+
+    fn session_title_capture() -> serde_json::Value {
+        serde_json::from_str(crate::control_channel::SESSION_TITLE_FIXTURE).unwrap()
+    }
+
+    fn capture_lines(value: &serde_json::Value) -> Vec<String> {
+        value
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(serde_json::Value::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn read_session_title_prefers_the_custom_title_over_the_ai_title() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let ai = ai_title_line("Auth login fix");
+        let custom = custom_title_line("Auth fix");
+        write_session(
+            &dir,
+            TITLED_SESSION_ID,
+            &[FIRST_QUESTION, ai.as_str(), REPLY, custom.as_str()],
+        );
+        assert_eq!(
+            read_session_title_impl(tmp.path(), "proj", TITLED_SESSION_ID)
+                .unwrap()
+                .as_deref(),
+            Some("Auth fix")
+        );
+    }
+
+    #[test]
+    fn read_session_title_is_none_without_a_title_line_a_file_or_a_valid_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        write_session(&dir, TITLED_SESSION_ID, &[FIRST_QUESTION, REPLY]);
+        assert_eq!(
+            read_session_title_impl(tmp.path(), "proj", TITLED_SESSION_ID).unwrap(),
+            None
+        );
+        assert_eq!(
+            read_session_title_impl(tmp.path(), "proj", "abcdef01-2345-6789-abcd-ef0123456780")
+                .unwrap(),
+            None,
+            "a session file that does not exist yet is a session without a title, not a read failure"
+        );
+        assert_eq!(
+            read_session_title_impl(tmp.path(), "proj", "../etc/passwd").unwrap(),
+            None
+        );
+        assert_eq!(
+            read_session_title_impl(tmp.path(), "other", TITLED_SESSION_ID).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn read_session_title_reads_the_latest_title_from_the_tail_of_a_long_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let mut lines = vec![FIRST_QUESTION.to_string(), ai_title_line("Early")];
+        lines.extend(std::iter::repeat_n(REPLY.to_string(), MAX_SCAN_LINES * 2));
+        lines.push(custom_title_line("Late"));
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        write_session(&dir, TITLED_SESSION_ID, &refs);
+        assert_eq!(
+            read_session_title_impl(tmp.path(), "proj", TITLED_SESSION_ID)
+                .unwrap()
+                .as_deref(),
+            Some("Late")
+        );
+    }
+
+    #[test]
+    fn a_persisted_title_is_written_twice_and_read_once() {
+        let capture = session_title_capture();
+        let lines = capture["generate_session_title"]["transcript_lines_after_first_turn"]
+            .as_array()
+            .unwrap();
+        assert_eq!(lines.len(), 2);
+        let session_id = lines[0]["sessionId"].as_str().unwrap();
+        let (first, second) = (lines[0].to_string(), lines[1].to_string());
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        write_session(
+            &dir,
+            session_id,
+            &[FIRST_QUESTION, first.as_str(), REPLY, second.as_str()],
+        );
+        assert_eq!(
+            read_session_title_impl(tmp.path(), "proj", session_id)
+                .unwrap()
+                .as_deref(),
+            Some("Auth login fix 2")
+        );
+    }
+
+    #[test]
+    fn the_rename_capture_titles_the_session_and_rebuilds_a_multi_word_chip() {
+        let capture = session_title_capture();
+        let session_id = capture["rename"]["transcript_lines"][0]["sessionId"]
+            .as_str()
+            .unwrap();
+        let mut lines = vec![FIRST_QUESTION.to_string(), REPLY.to_string()];
+        lines.extend(capture_lines(
+            &capture["generate_session_title"]["transcript_lines_after_first_turn"],
+        ));
+        lines.extend(capture_lines(&capture["rename"]["transcript_lines"]));
+        lines.extend(capture_lines(
+            &capture["rename"]["bare"]["transcript_lines"],
+        ));
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        write_session(&dir, session_id, &refs);
+
+        assert_eq!(
+            read_session_title_impl(tmp.path(), "proj", session_id)
+                .unwrap()
+                .as_deref(),
+            Some("Auth fix"),
+            "the custom title written by /rename wins over the AI title"
+        );
+        let transcript = get_conversation_impl(tmp.path(), "proj", session_id).unwrap();
+        let chips: Vec<(String, String)> = transcript
+            .messages
+            .iter()
+            .filter_map(|m| match m.blocks.as_deref() {
+                Some([MessageBlock::ControlChip { command, argument }]) => {
+                    Some((command.clone(), argument.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            chips,
+            vec![("rename".to_string(), "Auth fix".to_string())],
+            "the typed /rename Auth fix is rebuilt as a chip; the bare /rename entry is dropped"
+        );
+        assert!(
+            transcript
+                .messages
+                .iter()
+                .all(|m| !m.content.contains("Session renamed")),
+            "Claude Code's confirmation is not a message"
+        );
+    }
+
+    #[test]
+    fn agent_name_lines_are_not_read_as_a_title() {
+        let capture = session_title_capture();
+        let agent = capture["rename"]["transcript_lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|line| line["type"] == "agent-name")
+            .expect("/rename also writes an agent-name line")
+            .to_string();
+        assert!(agent.contains("\"agentName\":\"Auth fix\""));
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        write_session(
+            &dir,
+            TITLED_SESSION_ID,
+            &[FIRST_QUESTION, agent.as_str(), REPLY],
+        );
+        assert_eq!(
+            read_session_title_impl(tmp.path(), "proj", TITLED_SESSION_ID).unwrap(),
+            None
         );
     }
 }

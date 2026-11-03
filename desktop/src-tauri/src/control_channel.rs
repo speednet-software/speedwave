@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Write;
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 pub(crate) const MSG_TYPE_CONTROL_REQUEST: &str = "control_request";
@@ -17,12 +17,14 @@ const SUBTYPE_GET_USAGE: &str = "get_usage";
 const SUBTYPE_GET_CONTEXT_USAGE: &str = "get_context_usage";
 const SUBTYPE_SET_MODEL: &str = "set_model";
 const SUBTYPE_APPLY_FLAG_SETTINGS: &str = "apply_flag_settings";
+const SUBTYPE_GENERATE_SESSION_TITLE: &str = "generate_session_title";
 
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(15);
 const GET_USAGE_TIMEOUT: Duration = Duration::from_secs(10);
 const GET_CONTEXT_USAGE_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) const SET_MODEL_TIMEOUT: Duration = Duration::from_secs(15);
 pub(crate) const APPLY_EFFORT_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const GENERATE_TITLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ControlQuery {
@@ -86,6 +88,21 @@ pub(crate) fn build_apply_effort_request(request_id: &str, level: &str) -> serde
         "request": {
             "subtype": SUBTYPE_APPLY_FLAG_SETTINGS,
             "settings": { "effortLevel": level },
+        },
+    })
+}
+
+pub(crate) fn build_generate_title_request(
+    request_id: &str,
+    description: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "type": MSG_TYPE_CONTROL_REQUEST,
+        "request_id": request_id,
+        "request": {
+            "subtype": SUBTYPE_GENERATE_SESSION_TITLE,
+            "description": description,
+            "persist": true,
         },
     })
 }
@@ -250,6 +267,16 @@ impl ControlChannel {
         })
     }
 
+    pub(crate) fn send_generate_title<W: Write>(
+        &self,
+        locked_stdin: &mut W,
+        description: &str,
+    ) -> Result<PendingControl, ControlError> {
+        self.send_session_change(locked_stdin, SUBTYPE_GENERATE_SESSION_TITLE, |id| {
+            build_generate_title_request(id, description)
+        })
+    }
+
     fn send_session_change<W: Write>(
         &self,
         locked_stdin: &mut W,
@@ -322,14 +349,33 @@ impl ControlHandle {
         timeout: Duration,
     ) -> Result<(), ControlError> {
         let pending = {
-            let mut stdin = self
-                .stdin
-                .lock()
-                .map_err(|e| ControlError::Write(format!("stdin lock poisoned: {e}")))?;
+            let mut stdin = self.lock_stdin()?;
             self.channel.send_apply_effort(&mut *stdin, level)?
         };
         pending.wait(timeout).map(|_| ())
     }
+
+    pub(crate) fn begin_generate_title(
+        &self,
+        description: &str,
+    ) -> Result<PendingControl, ControlError> {
+        let mut stdin = self.lock_stdin()?;
+        self.channel.send_generate_title(&mut *stdin, description)
+    }
+
+    fn lock_stdin(&self) -> Result<MutexGuard<'_, std::process::ChildStdin>, ControlError> {
+        self.stdin
+            .lock()
+            .map_err(|e| ControlError::Write(format!("stdin lock poisoned: {e}")))
+    }
+}
+
+pub(crate) fn generated_title(answer: &serde_json::Value) -> Option<String> {
+    answer["title"]
+        .as_str()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(str::to_string)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -568,6 +614,10 @@ pub(crate) const FIXTURE: &str =
 #[cfg(test)]
 const APPLY_EFFORT_FIXTURE: &str =
     include_str!("../tests/fixtures/cc-2.1.295-apply-effort.sanitized.json");
+
+#[cfg(test)]
+pub(crate) const SESSION_TITLE_FIXTURE: &str =
+    include_str!("../tests/fixtures/cc-2.1.295-session-title.sanitized.json");
 
 #[cfg(test)]
 #[expect(
@@ -1896,5 +1946,188 @@ mod tests {
             ts.contains(&format!("'{SESSION_INFO_EVENT}'")),
             "claude-control.ts must name the {SESSION_INFO_EVENT} event"
         );
+    }
+
+    fn session_title_capture() -> serde_json::Value {
+        serde_json::from_str(SESSION_TITLE_FIXTURE).expect("session title capture")
+    }
+
+    fn answer_of(response: &serde_json::Value) -> &serde_json::Value {
+        &response["response"]["response"]
+    }
+
+    #[test]
+    fn the_session_title_capture_is_of_the_pinned_claude_code() {
+        assert_eq!(
+            session_title_capture()["claude_code_version"],
+            speedwave_runtime::defaults::CLAUDE_VERSION,
+            "re-capture generate_session_title and /rename with the new Claude Code pin"
+        );
+    }
+
+    #[test]
+    fn generate_title_request_matches_the_captured_envelope() {
+        let capture = session_title_capture();
+        let recorded = &capture["generate_session_title"]["request"];
+        let built = build_generate_title_request(
+            recorded["request_id"].as_str().unwrap(),
+            recorded["request"]["description"].as_str().unwrap(),
+        );
+        assert_eq!(built, *recorded);
+    }
+
+    #[test]
+    fn a_generated_title_is_read_from_the_captured_response() {
+        let capture = session_title_capture();
+        let answer = answer_of(&capture["generate_session_title"]["response"]);
+        assert_eq!(generated_title(answer).as_deref(), Some("Auth login fix 2"));
+        assert_eq!(generated_title(&serde_json::json!({ "title": null })), None);
+        assert_eq!(generated_title(&serde_json::json!({ "title": "  " })), None);
+        assert_eq!(generated_title(&serde_json::json!({})), None);
+        assert_eq!(generated_title(&serde_json::Value::Null), None);
+    }
+
+    #[test]
+    fn the_title_model_request_goes_to_the_small_model_with_the_description() {
+        let capture = session_title_capture();
+        let gst = &capture["generate_session_title"];
+        let request = &gst["model_request"];
+        let model = request["model"].as_str().unwrap();
+        assert!(model.starts_with("claude-haiku-"), "{model}");
+        assert_eq!(request["output_config"]["format"]["type"], "json_schema");
+        let description = gst["request"]["request"]["description"].as_str().unwrap();
+        let prompt = request["messages"][0]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(prompt.contains(description));
+        assert!(request["system"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|block| block["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("naming a coding session"))));
+    }
+
+    #[test]
+    fn persist_decides_whether_the_title_line_is_written() {
+        let capture = session_title_capture();
+        let gst = &capture["generate_session_title"];
+        assert_eq!(gst["title_lines_written_without_persist"], 0);
+        assert_eq!(
+            generated_title(answer_of(&gst["response_without_persist"])).as_deref(),
+            Some("Auth login fix")
+        );
+        let after_first_turn = gst["transcript_lines_after_first_turn"].as_array().unwrap();
+        assert_eq!(
+            after_first_turn.len(),
+            2,
+            "written at generation and at the turn end"
+        );
+        assert!(after_first_turn
+            .iter()
+            .all(|line| line["type"] == "ai-title" && line["aiTitle"] == "Auth login fix 2"));
+        assert_eq!(
+            gst["title_lines_after_repeat"].as_array().unwrap().len(),
+            2,
+            "a repeated persist adds no line"
+        );
+        assert_eq!(
+            generated_title(answer_of(&gst["repeat_response"])).as_deref(),
+            Some("Auth login fix 2"),
+            "a repeat answers the title the session already has"
+        );
+        assert_eq!(
+            gst["repeat_model_request"]["answered_text"],
+            "{\"title\":\"Auth login fix 3\"}",
+            "the repeat still asked the model, which is why Speedwave asks only while no title exists"
+        );
+    }
+
+    #[test]
+    fn a_title_request_before_the_first_message_is_answered_at_once_and_persisted_at_the_first_turn(
+    ) {
+        let capture = session_title_capture();
+        let before = &capture["generate_session_title"]["before_first_message"];
+        assert_eq!(
+            generated_title(answer_of(&before["response"])).as_deref(),
+            Some("Auth login fix 4")
+        );
+        let stdout = before["stdout_before_the_first_message"]
+            .as_array()
+            .unwrap();
+        assert!(!stdout.is_empty());
+        assert!(stdout.iter().all(|line| line["type"] == "control_response"));
+        let lines = before["title_lines_after_first_turn"].as_array().unwrap();
+        assert_eq!(lines.len(), 2);
+        assert!(lines
+            .iter()
+            .all(|line| line["aiTitle"] == "Auth login fix 4"));
+    }
+
+    #[test]
+    fn a_title_request_after_a_custom_title_answers_that_title_without_a_model_request() {
+        let capture = session_title_capture();
+        let after = &capture["rename"]["generate_session_title_after_custom_title"];
+        assert_eq!(
+            generated_title(answer_of(&after["response"])).as_deref(),
+            Some("Auth fix")
+        );
+        assert_eq!(after["title_requests_sent_in_this_session"], 4);
+        assert_eq!(after["title_model_requests_in_this_session"], 3);
+        assert_eq!(after["title_lines_added"], 0);
+    }
+
+    #[test]
+    fn a_generate_title_written_under_the_callers_lock_resolves_on_its_answer() {
+        let channel = ControlChannel::default();
+        let mut sink = Vec::new();
+        let pending = channel
+            .send_generate_title(&mut sink, "napraw logowanie w auth.rs")
+            .expect("written");
+        let sent: serde_json::Value =
+            serde_json::from_str(String::from_utf8(sink).unwrap().trim_end()).unwrap();
+        let id = sent["request_id"].as_str().unwrap().to_string();
+        assert!(id.starts_with("req_generate_session_title_"), "{id}");
+        assert_eq!(
+            sent["request"],
+            serde_json::json!({
+                "subtype": "generate_session_title",
+                "description": "napraw logowanie w auth.rs",
+                "persist": true,
+            })
+        );
+        let answer = serde_json::json!({
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": id,
+                "response": { "title": "Logowanie w auth.rs" },
+            },
+        });
+        assert_eq!(channel.route_response(&answer), Routed::Delivered);
+        let value = pending.wait(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            generated_title(&value).as_deref(),
+            Some("Logowanie w auth.rs")
+        );
+        assert!(channel.pending_ids().is_empty());
+    }
+
+    #[test]
+    fn an_unanswered_generate_title_times_out_and_forgets_its_waiter() {
+        let channel = ControlChannel::default();
+        let pending = channel
+            .send_generate_title(&mut Vec::new(), "x")
+            .expect("written");
+        assert_eq!(
+            pending.wait(Duration::from_millis(10)),
+            Err(ControlError::Timeout {
+                subtype: "generate_session_title",
+                timeout: Duration::from_millis(10),
+            })
+        );
+        assert!(channel.pending_ids().is_empty());
+        assert!(GENERATE_TITLE_TIMEOUT > SET_MODEL_TIMEOUT);
     }
 }

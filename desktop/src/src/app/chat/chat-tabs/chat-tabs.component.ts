@@ -58,6 +58,7 @@ import { chatTabRow, type ChatTabRow } from './chat-tab-row';
           role="presentation"
           data-testid="chat-tab"
           [attr.data-active]="row.active ? 'true' : null"
+          [attr.data-title]="row.fullTitle"
           cdkDrag
           [cdkDragData]="row.id"
           cdkDragPreviewContainer="parent"

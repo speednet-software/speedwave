@@ -22,6 +22,7 @@ import { createDeferred, type Deferred } from '../testing/deferred';
 import { makeMockLogger } from '../testing/mock-logger';
 import { CLAUDE_MODEL_SWITCH_FAILED_EVENT } from '../models/claude-control';
 import { CHAT_SESSION_EVENT, type ChatSessionEventKind } from '../models/notifications';
+import { CHAT_TITLE_CHANGED_EVENT } from '../models/chat';
 import { DEFAULT_CONTEXT_TOKENS } from '../models/llm';
 
 describe('ChatStateService', () => {
@@ -1905,6 +1906,65 @@ describe('ChatStateService', () => {
       for (const store of service.tabs().values()) {
         expect(store.unseenEvent()).toBeNull();
       }
+    });
+  });
+
+  describe('session title events (SPEED-916)', () => {
+    async function twoTabs(): Promise<{ first: string; second: string }> {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      projectState.activeProject.set('test');
+      await service.init();
+      const first = service.activeTabId();
+      const second = await service.openTab();
+      for (const tabId of [first, second]) {
+        service
+          .tabs()
+          .get(tabId)!
+          .handleStreamChunk({
+            chunk_type: 'SystemInit',
+            data: { model: 'claude-opus-5-5', session_id: `s-${tabId}` },
+          } as never);
+      }
+      return { first, second };
+    }
+
+    function titleEvent(
+      tab_id: string,
+      session_id: string,
+      title: string | null,
+      project = 'test'
+    ): void {
+      mockTauri.dispatchEvent(CHAT_TITLE_CHANGED_EVENT, { project, tab_id, session_id, title });
+    }
+
+    it('gives the title to the tab it names and exposes it for the history list', async () => {
+      const { first, second } = await twoTabs();
+
+      titleEvent(first, `s-${first}`, 'Auth login fix');
+      TestBed.tick();
+
+      expect(service.tabs().get(first)?.title()).toBe('Auth login fix');
+      expect(service.tabs().get(second)?.title()).toBeNull();
+      expect(service.lastTitleChange()).toEqual({
+        project: 'test',
+        tab_id: first,
+        session_id: `s-${first}`,
+        title: 'Auth login fix',
+      });
+    });
+
+    it('ignores a title of another project and keeps the one for a closed tab out of every store', async () => {
+      const { first } = await twoTabs();
+
+      titleEvent(first, `s-${first}`, 'Inna rozmowa', 'other');
+      titleEvent('closed-tab', 's-closed', 'Zamknięta');
+      TestBed.tick();
+
+      for (const store of service.tabs().values()) {
+        expect(store.title()).toBeNull();
+      }
+      expect(service.lastTitleChange()?.title).toBe('Zamknięta');
     });
   });
 

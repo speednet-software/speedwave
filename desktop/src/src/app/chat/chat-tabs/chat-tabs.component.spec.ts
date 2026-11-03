@@ -13,10 +13,12 @@ class FakeStore {
   private readonly _streaming = signal(false);
   private readonly _ended = signal(false);
   private readonly _unseen = signal<ChatSessionEventKind | null>(null);
+  private readonly _title = signal<string | null>(null);
   readonly messagesFromState = this._messages.asReadonly();
   readonly isStreamingFromState = this._streaming.asReadonly();
   readonly sessionEnded = this._ended.asReadonly();
   readonly unseenEvent = this._unseen.asReadonly();
+  readonly title = this._title.asReadonly();
 
   setMessages(msgs: readonly ChatMessage[]): void {
     this._messages.set(msgs);
@@ -29,6 +31,9 @@ class FakeStore {
   }
   setUnseen(kind: ChatSessionEventKind | null): void {
     this._unseen.set(kind);
+  }
+  setTitle(title: string | null): void {
+    this._title.set(title);
   }
 }
 
@@ -150,6 +155,65 @@ describe('ChatTabsComponent', () => {
     fixture.detectChanges();
 
     expect(titleFor(tabEls()[0])).toBe('New chat');
+  });
+
+  function tooltipFor(tabEl: HTMLElement): string | null {
+    return (tabEl.querySelector('[data-testid="chat-tab-activate"]') as HTMLElement).getAttribute(
+      'title'
+    );
+  }
+
+  describe('session title (SPEED-916)', () => {
+    it('shows the session title the backend read over the first user message', () => {
+      const store = new FakeStore();
+      store.setMessages([userMessage('napraw logowanie w auth.rs')]);
+      store.setTitle('Auth login fix');
+      chat.setTabs([['t1', store]]);
+      fixture.detectChanges();
+
+      expect(titleFor(tabEls()[0])).toBe('Auth login fix');
+      expect(tabEls()[0].getAttribute('data-title')).toBe('Auth login fix');
+      expect(tooltipFor(tabEls()[0])).toBeNull();
+    });
+
+    it('goes back to the first user message once the title is gone', () => {
+      const store = new FakeStore();
+      store.setMessages([userMessage('napraw logowanie')]);
+      store.setTitle('Auth login fix');
+      chat.setTabs([['t1', store]]);
+      fixture.detectChanges();
+      store.setTitle(null);
+      fixture.detectChanges();
+
+      expect(titleFor(tabEls()[0])).toBe('napraw logowanie');
+    });
+
+    it('cuts a long title like a first message and keeps the whole title in the tooltip', () => {
+      const store = new FakeStore();
+      store.setTitle('Poprawka logowania i odświeżania tokenu w auth.rs');
+      chat.setTabs([['t1', store]]);
+      fixture.detectChanges();
+
+      const title = titleFor(tabEls()[0]);
+      expect(title.endsWith('…')).toBe(true);
+      expect(Array.from(title)).toHaveLength(25);
+      expect(tooltipFor(tabEls()[0])).toBe('Poprawka logowania i odświeżania tokenu w auth.rs');
+      expect(tabEls()[0].getAttribute('data-title')).toBe(
+        'Poprawka logowania i odświeżania tokenu w auth.rs'
+      );
+    });
+
+    it('keeps the unseen label in the tooltip next to a cut title', () => {
+      const store = new FakeStore();
+      store.setTitle('Poprawka logowania i odświeżania tokenu w auth.rs');
+      store.setUnseen('turn_finished');
+      chat.setTabs([['t1', store]]);
+      fixture.detectChanges();
+
+      expect(tooltipFor(tabEls()[0])).toBe(
+        'Finished: Poprawka logowania i odświeżania tokenu w auth.rs'
+      );
+    });
   });
 
   it('marks the active tab and updates it via activateTab', () => {

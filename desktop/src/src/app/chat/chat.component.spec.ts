@@ -16,6 +16,7 @@ import { LoggerService } from '../services/logger.service';
 import { BetaService } from '../services/beta.service';
 import { TranscriptionService } from '../services/transcription.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
+import { CHAT_TITLE_CHANGED_EVENT } from '../models/chat';
 import { createDeferred } from '../testing/deferred';
 import { makeMockLogger } from '../testing/mock-logger';
 import { makeStagedImage } from '../testing/attachments';
@@ -672,6 +673,31 @@ describe('ChatComponent', () => {
   });
 
   describe('loadConversations', () => {
+    it('patches a loaded row with the title the backend announces (SPEED-916)', async () => {
+      projectState.activeProject.set('test');
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'list_conversations') {
+          return [
+            { session_id: 's1', timestamp: null, title: null, preview: 'napraw', message_count: 2 },
+            { session_id: 's2', timestamp: null, title: 'Inna', preview: 'x', message_count: 2 },
+          ];
+        }
+        return undefined;
+      };
+      await chatState.init();
+      await component.loadConversations();
+
+      mockTauri.dispatchEvent(CHAT_TITLE_CHANGED_EVENT, {
+        project: 'test',
+        tab_id: chatState.activeTabId(),
+        session_id: 's1',
+        title: 'Auth login fix',
+      });
+      TestBed.tick();
+
+      expect(component.conversations.map((c) => c.title)).toEqual(['Auth login fix', 'Inna']);
+    });
+
     it('calls backend with active project and sets conversations', async () => {
       const mockConversations = [
         {

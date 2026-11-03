@@ -244,6 +244,48 @@ describe('ChatSessionStore', () => {
     });
   });
 
+  describe('session title (SPEED-916)', () => {
+    function startSession(sessionId: string): void {
+      store.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-5-5', session_id: sessionId },
+      } as never);
+    }
+
+    it('shows no title before the backend announces one', () => {
+      startSession('abc');
+      expect(store.title()).toBeNull();
+    });
+
+    it('shows the announced title only while the tab holds that session', () => {
+      store.applyTitle('abc', 'Auth login fix');
+      expect(store.title()).toBeNull();
+
+      startSession('abc');
+      expect(store.title()).toBe('Auth login fix');
+
+      startSession('def');
+      expect(store.title()).toBeNull();
+    });
+
+    it('replaces the title with the latest announcement, a cleared one included', () => {
+      startSession('abc');
+      store.applyTitle('abc', 'Auth login fix');
+      store.applyTitle('abc', 'Auth fix');
+      expect(store.title()).toBe('Auth fix');
+
+      store.applyTitle('abc', null);
+      expect(store.title()).toBeNull();
+    });
+
+    it('ignores a title announced for another session', () => {
+      startSession('abc');
+      store.applyTitle('abc', 'Auth fix');
+      store.applyTitle('other', 'Inna rozmowa');
+      expect(store.title()).toBeNull();
+    });
+  });
+
   describe('sessionEnded (SPEED-388 phase 2)', () => {
     it('defaults to false', () => {
       expect(store.sessionEnded()).toBe(false);

@@ -21,16 +21,16 @@ export function isBlankOrSlashOnly(text: string): boolean {
 }
 
 const CONTROL_COMMAND_RE = /^\/(model|effort) +(\S+)$/;
+const RENAME_COMMAND_RE = /^\/rename \s*\S/;
 
 /**
- * True when `text` is a `/model <id>` or `/effort <level>` control command.
- * Mirrors Rust SSOT `speedwave_runtime::slash::parse_control_command`, which
- * requires a literal space separator (`strip_prefix("/model ")`), not `\s+` —
- * a tab or other whitespace right after the command name does not match.
+ * True for `/model <id>`, `/effort <level>` or `/rename <name>` (any non-empty name, spaces included).
+ * Mirrors the Rust SSOT `speedwave_runtime::slash::parse_control_command`: a literal space after the command, never `\s+`.
  * @param text - Raw composer text to test.
  */
 export function isControlShaped(text: string): boolean {
-  return CONTROL_COMMAND_RE.test(text.trim());
+  const trimmed = text.trim();
+  return CONTROL_COMMAND_RE.test(trimmed) || RENAME_COMMAND_RE.test(trimmed);
 }
 
 /** Classification of a slash-menu entry, used by the UI to render the badge. */
