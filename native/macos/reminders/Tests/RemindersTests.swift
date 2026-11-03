@@ -487,4 +487,137 @@ final class RemindersTests: XCTestCase {
         XCTAssertEqual(reminderToDict(reminder, timeZone: newYork)["completed_date"] as? String, "2026-06-15T03:00:00-04:00")
         XCTAssertNil(inWarsaw["completion_date"], "reminderToDict must not emit old completion_date key")
     }
+
+
+    private func updatedAlarms(_ alarms: Any, on reminder: EKReminder? = nil) throws -> EKReminder {
+        let store = EKEventStore()
+        let target = try reminder ?? typoReminder(store)
+        try applyReminderUpdate(["id": "r-1", "alarms": alarms], to: target, store: store, timeZone: warsaw)
+        return target
+    }
+
+    func testOffsetMinutesBecomeRelativeSeconds() throws {
+        let reminder = try updatedAlarms([["offset_minutes": -30]])
+        let alarms = try XCTUnwrap(reminder.alarms)
+        XCTAssertEqual(alarms.count, 1)
+        XCTAssertEqual(alarms[0].relativeOffset, -1800)
+        XCTAssertNil(alarms[0].absoluteDate)
+    }
+
+    func testAlarmAtIsParsedAsLocalTimeLikeDueDate() throws {
+        let reminder = try updatedAlarms([["at": "2026-06-15T08:30:00"]])
+        let alarm = try XCTUnwrap(reminder.alarms?.first)
+        XCTAssertEqual(alarm.absoluteDate, try XCTUnwrap(parseISO8601("2026-06-15T06:30:00Z")))
+    }
+
+    func testLocationAlarmCarriesNameCoordinatesRadiusAndProximity() throws {
+        let location: [String: Any] = [
+            "name": "Biuro", "latitude": 52.23, "longitude": 21.01, "radius_m": 100, "on": "arrive",
+        ]
+        let reminder = try updatedAlarms([["location": location]])
+        let alarm = try XCTUnwrap(reminder.alarms?.first)
+        let place = try XCTUnwrap(alarm.structuredLocation)
+        XCTAssertEqual(place.title, "Biuro")
+        XCTAssertEqual(place.geoLocation?.coordinate.latitude, 52.23)
+        XCTAssertEqual(place.geoLocation?.coordinate.longitude, 21.01)
+        XCTAssertEqual(place.radius, 100)
+        XCTAssertEqual(alarm.proximity, .enter)
+    }
+
+    func testLocationAlarmWithoutRadiusUsesTheSystemDefaultAndLeaveMeansLeave() throws {
+        let location: [String: Any] = ["name": "Dom", "latitude": 50.06, "longitude": 19.94, "on": "leave"]
+        let alarm = try XCTUnwrap(try updatedAlarms([["location": location]]).alarms?.first)
+        XCTAssertEqual(alarm.structuredLocation?.radius, 0)
+        XCTAssertEqual(alarm.proximity, .leave)
+    }
+
+    func testAlarmsArrayReplacesEveryExistingAlarm() throws {
+        let reminder = try updatedAlarms([["offset_minutes": -5], ["offset_minutes": -10]])
+        XCTAssertEqual(reminder.alarms?.count, 2)
+        _ = try updatedAlarms([["offset_minutes": -60]], on: reminder)
+        XCTAssertEqual(reminder.alarms?.map(\.relativeOffset), [-3600])
+    }
+
+    func testNullAndEmptyAlarmsRemoveEveryAlarm() throws {
+        let reminder = try updatedAlarms([["offset_minutes": -5]])
+        _ = try updatedAlarms(NSNull(), on: reminder)
+        XCTAssertTrue(reminder.alarms?.isEmpty ?? true)
+        _ = try updatedAlarms([["offset_minutes": -5]], on: reminder)
+        _ = try updatedAlarms([Any](), on: reminder)
+        XCTAssertTrue(reminder.alarms?.isEmpty ?? true)
+    }
+
+    func testUpdateWithoutAlarmsKeepsTheExistingOnes() throws {
+        let store = EKEventStore()
+        let reminder = try updatedAlarms([["offset_minutes": -5]])
+        try applyReminderUpdate(["id": "r-1", "name": "Renamed"], to: reminder, store: store)
+        XCTAssertEqual(reminder.alarms?.count, 1)
+    }
+
+    func testMalformedAlarmsAreRejected() throws {
+        let badLocation: [String: Any] = ["name": "X", "latitude": 1.0, "longitude": 2.0, "on": "nearby"]
+        XCTAssertThrowsError(try updatedAlarms([["location": badLocation]]))
+        XCTAssertThrowsError(try updatedAlarms([[String: Any]()]))
+        XCTAssertThrowsError(try updatedAlarms("soon"))
+        XCTAssertThrowsError(try updatedAlarms([["at": "2026-02-30T10:00:00"]])) { error in
+            guard case CLIError.invalidDate("2026-02-30T10:00:00") = error else { return XCTFail("unexpected \(error)") }
+        }
+    }
+
+    func testReminderToDictEmitsAlarmsInTheInputFormat() throws {
+        let location: [String: Any] = [
+            "name": "Biuro", "latitude": 52.23, "longitude": 21.01, "radius_m": 100, "on": "leave",
+        ]
+        let input: [[String: Any]] = [
+            ["at": "2026-06-15T08:30:00+02:00"],
+            ["offset_minutes": -30],
+            ["location": location],
+        ]
+        let reminder = try updatedAlarms(input)
+        let emitted = try XCTUnwrap(reminderToDict(reminder, timeZone: warsaw)["alarms"] as? NSArray)
+        XCTAssertEqual(emitted.count, input.count)
+        for alarm in input {
+            XCTAssertTrue(emitted.contains(alarm as NSDictionary), "missing \(alarm)")
+        }
+    }
+
+    func testReminderToDictOmitsRadiusWhenTheSystemDefaultApplies() throws {
+        let location: [String: Any] = ["name": "Dom", "latitude": 50.06, "longitude": 19.94, "on": "arrive"]
+        let reminder = try updatedAlarms([["location": location]])
+        let emitted = try XCTUnwrap(reminderToDict(reminder)["alarms"] as? NSArray)
+        XCTAssertEqual(emitted, [["location": location]] as NSArray)
+    }
+
+    func testReminderToDictSkipsEmailAlarmsFromOtherClients() throws {
+        let reminder = try updatedAlarms([["offset_minutes": -5]])
+        let email = EKAlarm(relativeOffset: 0)
+        email.emailAddress = "x@example.com"
+        reminder.addAlarm(email)
+        let emitted = try XCTUnwrap(reminderToDict(reminder)["alarms"] as? NSArray)
+        XCTAssertEqual(emitted, [["offset_minutes": -5]] as NSArray)
+    }
+
+    func testReminderToDictOmitsAlarmsWhenThereAreNone() throws {
+        XCTAssertNil(reminderToDict(try typoReminder(EKEventStore()))["alarms"])
+    }
+
+    func testAlarmSaveErrorForLocationsNotSupportedNamesTheAccountLimit() {
+        let raw = NSError(domain: EKErrorDomain, code: EKError.Code.reminderLocationsNotSupported.rawValue)
+        guard case CLIError.invalid(let message) = alarmSaveError(raw) else { return XCTFail("not mapped") }
+        XCTAssertTrue(message.contains("location alarms"), message)
+        XCTAssertFalse(message.contains("EKErrorDomain"), message)
+    }
+
+    func testAlarmSaveErrorForProximityNotSupportedNamesTheAccountLimit() {
+        let raw = NSError(domain: EKErrorDomain, code: EKError.Code.alarmProximityNotSupported.rawValue)
+        guard case CLIError.invalid(let message) = alarmSaveError(raw) else { return XCTFail("not mapped") }
+        XCTAssertTrue(message.contains("arrive"), message)
+    }
+
+    func testAlarmSaveErrorKeepsOtherErrorsUntouched() {
+        let other = NSError(domain: EKErrorDomain, code: EKError.Code.noCalendar.rawValue)
+        XCTAssertEqual(alarmSaveError(other) as NSError, other)
+        let foreign = NSError(domain: "elsewhere", code: EKError.Code.reminderLocationsNotSupported.rawValue)
+        XCTAssertEqual(alarmSaveError(foreign) as NSError, foreign)
+    }
 }

@@ -1,3 +1,4 @@
+import CoreLocation
 import EventKit
 import Foundation
 import SharedCLI
@@ -194,6 +195,8 @@ func createReminder(store: EKEventStore, params: [String: Any]) throws -> [Strin
         reminder.dueDateComponents = components
     }
 
+    try applyAlarms(params, to: reminder, timeZone: .current)
+
     if let priority = params["priority"] as? Int {
         reminder.priority = priority
     }
@@ -202,7 +205,7 @@ func createReminder(store: EKEventStore, params: [String: Any]) throws -> [Strin
     let tags = params["tags"] as? [String] ?? []
     reminder.notes = combineTags(tags, with: userNotes)
 
-    try store.save(reminder, commit: true)
+    try saveReminder(reminder, store: store)
 
     return [
         "id": reminder.calendarItemIdentifier,
@@ -220,12 +223,14 @@ func updateReminder(store: EKEventStore, params: [String: Any]) throws -> [Strin
     }
 
     try applyReminderUpdate(params, to: reminder, store: store)
-    try store.save(reminder, commit: true)
+    try saveReminder(reminder, store: store)
 
     return ["status": "updated"]
 }
 
-func applyReminderUpdate(_ params: [String: Any], to reminder: EKReminder, store: EKEventStore) throws {
+func applyReminderUpdate(
+    _ params: [String: Any], to reminder: EKReminder, store: EKEventStore, timeZone: TimeZone = .current
+) throws {
     if let name = params["name"] as? String {
         reminder.title = name
     }
@@ -243,6 +248,8 @@ func applyReminderUpdate(_ params: [String: Any], to reminder: EKReminder, store
         }
         reminder.dueDateComponents = components
     }
+
+    try applyAlarms(params, to: reminder, timeZone: timeZone)
 
     if let priority = params["priority"] as? Int {
         reminder.priority = priority
@@ -311,7 +318,129 @@ func reminderToDict(_ r: EKReminder, timeZone: TimeZone = .current) -> [String: 
         dict["notes"] = cleanNotes
     }
 
+    let alarms = (r.alarms ?? []).compactMap { alarmDict($0, timeZone: timeZone) }
+    if !alarms.isEmpty {
+        dict["alarms"] = alarms
+    }
+
     return dict
+}
+
+
+private func applyAlarms(_ params: [String: Any], to reminder: EKReminder, timeZone: TimeZone) throws {
+    if params["alarms"] is NSNull {
+        reminder.alarms = nil
+    } else if let raw = params["alarms"] {
+        guard let items = raw as? [Any] else {
+            throw CLIError.invalid("alarms must be an array of alarms, or null to remove them")
+        }
+        reminder.alarms = try items.enumerated().map {
+            try alarm(from: $0.element, label: "alarms[\($0.offset)]", timeZone: timeZone)
+        }
+    }
+}
+
+private func alarm(from item: Any, label: String, timeZone: TimeZone) throws -> EKAlarm {
+    guard let fields = item as? [String: Any] else {
+        throw CLIError.invalid("\(label) must be an object")
+    }
+    if let at = fields["at"] as? String {
+        guard let date = parseISODateInput(at)?.date(in: timeZone) else {
+            throw CLIError.invalidDate(at)
+        }
+        return EKAlarm(absoluteDate: date)
+    }
+    if let minutes = fields["offset_minutes"] as? Int {
+        return EKAlarm(relativeOffset: TimeInterval(minutes) * 60)
+    }
+    if let location = fields["location"] as? [String: Any] {
+        return try locationAlarm(from: location, label: label)
+    }
+    throw CLIError.invalid("\(label) needs one of: at, offset_minutes (integer), location")
+}
+
+private func locationAlarm(from fields: [String: Any], label: String) throws -> EKAlarm {
+    guard let name = fields["name"] as? String,
+          let latitude = (fields["latitude"] as? NSNumber)?.doubleValue,
+          let longitude = (fields["longitude"] as? NSNumber)?.doubleValue,
+          let on = fields["on"] as? String
+    else {
+        throw CLIError.invalid("\(label).location needs name, latitude, longitude and on")
+    }
+    let proximity: EKAlarmProximity
+    switch on {
+    case "arrive": proximity = .enter
+    case "leave": proximity = .leave
+    default: throw CLIError.invalid("\(label).location.on must be \"arrive\" or \"leave\", got \"\(on)\"")
+    }
+    let place = EKStructuredLocation(title: name)
+    place.geoLocation = CLLocation(latitude: latitude, longitude: longitude)
+    place.radius = (fields["radius_m"] as? NSNumber)?.doubleValue ?? 0
+    let alarm = EKAlarm()
+    alarm.structuredLocation = place
+    alarm.proximity = proximity
+    return alarm
+}
+
+private func saveReminder(_ reminder: EKReminder, store: EKEventStore) throws {
+    do {
+        try store.save(reminder, commit: true)
+    } catch {
+        throw alarmSaveError(error)
+    }
+}
+
+func alarmSaveError(_ error: Error) -> Error {
+    let nsError = error as NSError
+    guard nsError.domain == EKErrorDomain else { return error }
+    switch EKError.Code(rawValue: nsError.code) {
+    case .reminderLocationsNotSupported?:
+        return CLIError.invalid(
+            "This reminder list's account does not support location alarms. Use a list in iCloud or on this Mac, or an at/offset_minutes alarm"
+        )
+    case .alarmProximityNotSupported?:
+        return CLIError.invalid(
+            "This reminder list's account does not support arrive/leave triggers on location alarms. Use a list in iCloud or on this Mac, or an at/offset_minutes alarm"
+        )
+    default:
+        return error
+    }
+}
+
+private func alarmDict(_ alarm: EKAlarm, timeZone: TimeZone) -> [String: Any]? {
+    if alarm.type == .email || alarm.type == .procedure {
+        return nil
+    }
+    if let place = alarm.structuredLocation {
+        guard let name = place.title, !name.isEmpty,
+              let coordinate = place.geoLocation?.coordinate,
+              let on = proximityName(alarm.proximity)
+        else {
+            return nil
+        }
+        var location: [String: Any] = [
+            "name": name,
+            "latitude": coordinate.latitude,
+            "longitude": coordinate.longitude,
+            "on": on,
+        ]
+        if place.radius > 0 {
+            location["radius_m"] = place.radius
+        }
+        return ["location": location]
+    }
+    if let date = alarm.absoluteDate {
+        return ["at": iso8601String(from: date, timeZone: timeZone)]
+    }
+    return ["offset_minutes": Int((alarm.relativeOffset / 60).rounded())]
+}
+
+private func proximityName(_ proximity: EKAlarmProximity) -> String? {
+    switch proximity {
+    case .enter: return "arrive"
+    case .leave: return "leave"
+    default: return nil
+    }
 }
 
 

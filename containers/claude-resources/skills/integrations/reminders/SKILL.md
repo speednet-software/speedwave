@@ -22,8 +22,8 @@ Always run steps 1–2 before guessing a tool name or parameter. The live schema
 - `os.listReminderLists()`: list all reminder lists (no params).
 - `os.listReminders({ list_id?, limit?, show_completed? })`: list reminders, incomplete by default.
 - `os.getReminder({ id })`: fetch a single reminder by ID.
-- `os.createReminder({ name, list_id?, due_date?, priority?, notes?, tags? })`: create a reminder.
-- `os.updateReminder({ id, name?, list_id?, due_date?, priority?, notes?, tags?, completed? })`: change an existing reminder in place; only the fields you pass change.
+- `os.createReminder({ name, list_id?, due_date?, priority?, notes?, tags?, alarms? })`: create a reminder.
+- `os.updateReminder({ id, name?, list_id?, due_date?, priority?, notes?, tags?, completed?, alarms? })`: change an existing reminder in place; only the fields you pass change.
 - `os.completeReminder({ id })`: mark a reminder as completed.
 
 ## Pitfalls
@@ -36,6 +36,9 @@ Always run steps 1–2 before guessing a tool name or parameter. The live schema
 - **Tags are stored in the notes field** as `[#tag]` markers (EventKit has no native tag property). `listReminders` and `getReminder` extract them into a separate `tags` array; pass `tags: ["work"]` to `createReminder`. Do not embed `[#tag]` manually.
 - **Due dates:** `"2026-06-15"` makes an all-day reminder; `"2026-06-15T09:30:00"` means 09:30 in the user's local time (an offset or `Z` is converted to local time). Responses use the same two shapes and add `all_day`. Relative phrases ("tomorrow") must be resolved to an absolute date first.
 - **`updateReminder` changes only the fields you pass.** `due_date: null` removes the due date (and any recurrence); `notes` alone keeps the tags, `tags` alone keeps the notes, `tags: []` clears them; `completed: false` reopens a completed reminder. Prefer it over "create a new one and complete the old one" when the user wants a correction.
+- **`alarms` is an array; each element has exactly one of three variants.** `{ at: "2026-06-15T08:30:00" }` is an absolute time (local time, parsed like `due_date`). `{ offset_minutes: -30 }` fires 30 minutes before the due date (negative is before, so the reminder needs a due date). `{ location: { name: "Biuro", latitude: 52.23, longitude: 21.01, radius_m: 100, on: "arrive" } }` fires on arriving at or leaving (`"leave"`) a place; `radius_m` is optional (omitted uses the system default radius). `listReminders` and `getReminder` return `alarms` in the same format.
+- **Location alarms need coordinates; addresses are not geocoded.** If the user names a place without coordinates, ask for them or get them from another source; do not guess. Location alarms fail with a readable error on lists whose account has no location support (for example some Exchange or CalDAV accounts); iCloud and on-this-Mac lists work.
+- **`alarms` on `updateReminder` replaces all current alarms.** Pass `null` or `[]` to remove every alarm; omit it to keep them. Email and procedure alarms, alarm sounds and early reminders are not supported. Alarms the API does not read (email, procedure, and location alarms without coordinates such as car connect/disconnect triggers) are not returned and are removed by any `alarms` replace, so warn the user before replacing alarms on a reminder created in Reminders.app.
 - **No recurrence-rule (RRULE) support** in the current API. If the user asks to create a repeating reminder, inform them this is not supported and offer to create a one-time reminder instead.
 - **iCloud-synced lists work** because the system sync layer handles it: the API sees all lists the device has, regardless of backend.
 - **macOS TCC permission is pre-validated by Speedwave Settings.** If this integration is enabled, assume access is granted; do not ask the user to check permissions.

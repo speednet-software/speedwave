@@ -10,7 +10,7 @@ import {
   META_KEYS,
 } from '@speedwave/mcp-shared';
 import {
-  withValidation,
+  guardedTool,
   ToolResult,
   validateAll,
   requireFields,
@@ -21,6 +21,23 @@ import { runCommand } from '../platform-runner.js';
 
 /** Tags become `[#tag]` markers inside the notes field, so these characters would forge markers. */
 const TAG_MARKER_CHARS = { pattern: /[[\]#]/, describe: '[, ], or # characters' };
+
+/** One reminder alarm: exactly one of `at`, `offset_minutes`, `location`. */
+interface ReminderAlarm {
+  /** Local time, same parsing as `due_date`. */
+  at?: string;
+  /** Minutes from the due date; negative is before it. */
+  offset_minutes?: number;
+  /** Fires on arriving at or leaving a place given by coordinates. */
+  location?: {
+    name: string;
+    latitude: number;
+    longitude: number;
+    /** Radius in metres; omitted means the system default. */
+    radius_m?: number;
+    on: 'arrive' | 'leave';
+  };
+}
 
 /** Input parameters for the listReminderLists tool (no params required). */
 type ListReminderListsParams = Record<string, never>;
@@ -55,6 +72,8 @@ interface CreateReminderParams {
   notes?: string;
   /** Tags to assign (stored as [#tag] markers in the notes field). */
   tags?: string[];
+  /** Alarms to set; each element has exactly one of `at`, `offset_minutes`, `location`. */
+  alarms?: ReminderAlarm[];
 }
 
 /** Input parameters for the updateReminder tool; omitted fields keep their current value. */
@@ -75,6 +94,8 @@ interface UpdateReminderParams {
   tags?: string[];
   /** Mark as completed (true) or reopen (false). */
   completed?: boolean;
+  /** New alarms, replacing all current ones; `null` or `[]` removes them. */
+  alarms?: ReminderAlarm[] | null;
 }
 
 /** Input parameters for the completeReminder tool. */
@@ -82,6 +103,42 @@ interface CompleteReminderParams {
   /** Reminder ID to complete. */
   id: string;
 }
+
+const ALARM_ITEM_SCHEMA = {
+  type: 'object',
+  description: 'Exactly one of at, offset_minutes, location',
+  properties: {
+    at: {
+      type: 'string',
+      description:
+        'Absolute alarm time, local time like due_date (YYYY-MM-DDTHH:MM:SS; an offset or Z is converted)',
+    },
+    offset_minutes: {
+      type: 'integer',
+      description: 'Minutes from the due date; negative is before it (-30 = 30 minutes before)',
+    },
+    location: {
+      type: 'object',
+      description:
+        'Place alarm: coordinates are required, addresses are not geocoded. Fails on lists whose account has no location support',
+      properties: {
+        name: { type: 'string', description: 'Place name shown in the reminder' },
+        latitude: { type: 'number', description: '-90 to 90' },
+        longitude: { type: 'number', description: '-180 to 180' },
+        radius_m: {
+          type: 'number',
+          description: 'Radius in metres, 0 or omitted = system default',
+        },
+        on: {
+          type: 'string',
+          enum: ['arrive', 'leave'],
+          description: 'Trigger on arriving or leaving',
+        },
+      },
+      required: ['name', 'latitude', 'longitude', 'on'],
+    },
+  },
+} as const;
 
 const listReminderListsTool: Tool = {
   name: 'listReminderLists',
@@ -181,6 +238,11 @@ const listRemindersTool: Tool = {
               type: 'string',
               description: 'Completion time as local time with UTC offset',
             },
+            alarms: {
+              type: 'array',
+              items: ALARM_ITEM_SCHEMA,
+              description: 'Alarms in the input format. Absent when none.',
+            },
           },
         },
       },
@@ -248,6 +310,11 @@ const getReminderTool: Tool = {
       },
       list_id: { type: 'string' },
       list_name: { type: 'string' },
+      alarms: {
+        type: 'array',
+        items: ALARM_ITEM_SCHEMA,
+        description: 'Alarms in the input format. Absent when none.',
+      },
     },
   },
   inputExamples: [
@@ -295,6 +362,12 @@ const createReminderTool: Tool = {
         items: { type: 'string' },
         description: 'Tags to assign (stored as [#tag] markers in the notes field)',
       },
+      alarms: {
+        type: 'array',
+        items: ALARM_ITEM_SCHEMA,
+        description:
+          'Alarms: at (absolute local time), offset_minutes (relative to due_date, negative = before) or location (coordinates, arrive/leave)',
+      },
     },
     required: ['name'],
   },
@@ -313,6 +386,31 @@ const createReminderTool: Tool = {
     {
       description: 'All-day: a bare date sets no time of day',
       input: { name: 'Pay rent', due_date: '2026-07-01' },
+    },
+    {
+      description: 'Alarm 30 minutes before the due date',
+      input: {
+        name: 'Call the bank',
+        due_date: '2026-06-15T10:00:00',
+        alarms: [{ offset_minutes: -30 }],
+      },
+    },
+    {
+      description: 'Alarm on arriving at a place (coordinates required)',
+      input: {
+        name: 'Hand in the report',
+        alarms: [
+          {
+            location: {
+              name: 'Biuro',
+              latitude: 52.23,
+              longitude: 21.01,
+              radius_m: 100,
+              on: 'arrive',
+            },
+          },
+        ],
+      },
     },
     {
       description: 'Full: create with all fields',
@@ -388,6 +486,12 @@ const updateReminderTool: Tool = {
         type: 'boolean',
         description: 'true marks the reminder completed, false reopens a completed reminder',
       },
+      alarms: {
+        type: ['array', 'null'],
+        items: ALARM_ITEM_SCHEMA,
+        description:
+          'New alarms, replacing all current ones. Pass null or [] to remove every alarm; omit to keep them',
+      },
     },
     required: ['id'],
   },
@@ -409,6 +513,14 @@ const updateReminderTool: Tool = {
     {
       description: 'Remove the due date',
       input: { id: 'abc-123', due_date: null },
+    },
+    {
+      description: 'Replace all alarms with one at a fixed time',
+      input: { id: 'abc-123', alarms: [{ at: '2026-06-15T08:30:00' }] },
+    },
+    {
+      description: 'Remove every alarm',
+      input: { id: 'abc-123', alarms: null },
     },
     {
       description: 'Full: reschedule, move and retag at once',
@@ -519,6 +631,7 @@ export async function handleCreateReminder(params: CreateReminderParams): Promis
     integers: [['priority', 0, 9]],
     dates: ['due_date'],
     stringArrays: [['tags', 50, MAX_LENGTHS.short, TAG_MARKER_CHARS]],
+    alarms: ['alarms'],
   });
   if (!v.valid) return v.error;
   const result = await runCommand('reminders', 'create_reminder', p);
@@ -542,8 +655,9 @@ export async function handleUpdateReminder(params: UpdateReminderParams): Promis
     ],
     integers: [['priority', 0, 9]],
     dates: ['due_date'],
-    nullable: ['due_date'],
+    nullable: ['due_date', 'alarms'],
     stringArrays: [['tags', 50, MAX_LENGTHS.short, TAG_MARKER_CHARS]],
+    alarms: ['alarms'],
   });
   if (!v.valid) return v.error;
   if (p.name !== undefined) {
@@ -572,11 +686,11 @@ export async function handleCompleteReminder(params: CompleteReminderParams): Pr
 /** Creates tool definitions for all reminder operations. */
 export function createReminderTools(): ToolDefinition[] {
   return [
-    { tool: listReminderListsTool, handler: withValidation(handleListReminderLists) },
-    { tool: listRemindersTool, handler: withValidation(handleListReminders) },
-    { tool: getReminderTool, handler: withValidation(handleGetReminder) },
-    { tool: createReminderTool, handler: withValidation(handleCreateReminder) },
-    { tool: updateReminderTool, handler: withValidation(handleUpdateReminder) },
-    { tool: completeReminderTool, handler: withValidation(handleCompleteReminder) },
+    guardedTool(listReminderListsTool, handleListReminderLists),
+    guardedTool(listRemindersTool, handleListReminders),
+    guardedTool(getReminderTool, handleGetReminder),
+    guardedTool(createReminderTool, handleCreateReminder),
+    guardedTool(updateReminderTool, handleUpdateReminder),
+    guardedTool(completeReminderTool, handleCompleteReminder),
   ];
 }

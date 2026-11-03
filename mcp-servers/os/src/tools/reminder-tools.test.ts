@@ -442,6 +442,16 @@ describe('reminder-tools', () => {
   });
 
   describe('createReminderTools', () => {
+    it('rejects an undeclared argument without running the command', async () => {
+      const tool = createReminderTools().find((t) => t.tool.name === 'createReminder')!;
+
+      const result = await tool.handler({ name: 'x', alarm: { offset_minutes: -5 } });
+
+      expect(result.isError).toBe(true);
+      expect((result.content[0] as { text: string }).text).toContain('alarm');
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
     it('returns 6 tool definitions', () => {
       const tools = createReminderTools();
 
@@ -682,6 +692,137 @@ describe('reminder-tools', () => {
         const result = await handleCompleteReminder({ id: 'a'.repeat(513) });
         expect(result.success).toBe(false);
         expect(result.error?.code).toBe('FIELD_TOO_LONG');
+      });
+    });
+  });
+
+  describe('alarms', () => {
+    const office = {
+      name: 'Biuro',
+      latitude: 52.23,
+      longitude: 21.01,
+      radius_m: 100,
+      on: 'arrive' as const,
+    };
+    const validAlarms = [
+      { at: '2026-06-15T08:30:00' },
+      { offset_minutes: -30 },
+      { location: office },
+      { location: { name: 'Dom', latitude: -90, longitude: 180, on: 'leave' as const } },
+    ];
+
+    const invalidAlarms: [string, unknown, string][] = [
+      [
+        'two variants in one element',
+        [{ at: '2026-06-15T08:30:00', offset_minutes: -5 }],
+        'INVALID_PARAM',
+      ],
+      ['no variant in an element', [{}], 'INVALID_PARAM'],
+      ['an element that is not an object', ['soon'], 'INVALID_TYPE'],
+      ['an element that is an array', [[]], 'INVALID_TYPE'],
+      ['an element that is null', [null], 'INVALID_TYPE'],
+      ['alarms that are not an array', { offset_minutes: -5 }, 'INVALID_TYPE'],
+      ['an invalid at', [{ at: 'tomorrow' }], 'INVALID_DATE'],
+      ['a non-string at', [{ at: 20260615 }], 'INVALID_DATE'],
+      ['a fractional offset', [{ offset_minutes: -0.5 }], 'INVALID_TYPE'],
+      ['an offset beyond one year', [{ offset_minutes: 525601 }], 'INVALID_TYPE'],
+      ['a string offset', [{ offset_minutes: '-30' }], 'INVALID_TYPE'],
+      ['a location that is not an object', [{ location: 'Biuro' }], 'INVALID_TYPE'],
+      ['a location without a name', [{ location: { ...office, name: '' } }], 'INVALID_TYPE'],
+      [
+        'a location name that is not a string',
+        [{ location: { ...office, name: 7 } }],
+        'INVALID_TYPE',
+      ],
+      ['a latitude above 90', [{ location: { ...office, latitude: 90.1 } }], 'OUT_OF_RANGE'],
+      ['a latitude below -90', [{ location: { ...office, latitude: -91 } }], 'OUT_OF_RANGE'],
+      ['a longitude above 180', [{ location: { ...office, longitude: 181 } }], 'OUT_OF_RANGE'],
+      ['a longitude below -180', [{ location: { ...office, longitude: -180.5 } }], 'OUT_OF_RANGE'],
+      ['a missing latitude', [{ location: { ...office, latitude: undefined } }], 'INVALID_TYPE'],
+      [
+        'a non-finite longitude',
+        [{ location: { ...office, longitude: Infinity } }],
+        'INVALID_TYPE',
+      ],
+      ['a negative radius', [{ location: { ...office, radius_m: -1 } }], 'OUT_OF_RANGE'],
+      ['a non-numeric radius', [{ location: { ...office, radius_m: 'big' } }], 'INVALID_TYPE'],
+      ['an unknown on', [{ location: { ...office, on: 'nearby' } }], 'INVALID_PARAM'],
+      ['a missing on', [{ location: { ...office, on: undefined } }], 'INVALID_PARAM'],
+    ];
+
+    describe('handleCreateReminder', () => {
+      it('passes valid alarms of every variant through unchanged', async () => {
+        vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { id: 'r-1' } });
+        const params = { name: 'Call', due_date: '2026-06-15T09:00:00', alarms: validAlarms };
+
+        const result = await handleCreateReminder(params);
+
+        expect(result.success).toBe(true);
+        expect(runCommand).toHaveBeenCalledWith('reminders', 'create_reminder', params);
+      });
+
+      it('passes an empty alarms array through', async () => {
+        vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { id: 'r-1' } });
+
+        const result = await handleCreateReminder({ name: 'Call', alarms: [] });
+
+        expect(result.success).toBe(true);
+      });
+
+      it('rejects alarms null (only updateReminder can clear alarms)', async () => {
+        const result = await handleCreateReminder({ name: 'Call', alarms: null as any });
+
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('INVALID_TYPE');
+        expect(runCommand).not.toHaveBeenCalled();
+      });
+
+      it.each(invalidAlarms)('rejects %s', async (_label, alarms, code) => {
+        const result = await handleCreateReminder({ name: 'Call', alarms: alarms as any });
+
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe(code);
+        expect(runCommand).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('handleUpdateReminder', () => {
+      it('passes valid alarms of every variant through unchanged', async () => {
+        vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { status: 'updated' } });
+        const params = { id: 'r-1', alarms: validAlarms };
+
+        const result = await handleUpdateReminder(params);
+
+        expect(result.success).toBe(true);
+        expect(runCommand).toHaveBeenCalledWith('reminders', 'update_reminder', params);
+      });
+
+      it('passes alarms null through so the CLI removes every alarm', async () => {
+        vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { status: 'updated' } });
+
+        const result = await handleUpdateReminder({ id: 'r-1', alarms: null });
+
+        expect(result.success).toBe(true);
+        expect(runCommand).toHaveBeenCalledWith('reminders', 'update_reminder', {
+          id: 'r-1',
+          alarms: null,
+        });
+      });
+
+      it('passes an empty alarms array through', async () => {
+        vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { status: 'updated' } });
+
+        const result = await handleUpdateReminder({ id: 'r-1', alarms: [] });
+
+        expect(result.success).toBe(true);
+      });
+
+      it.each(invalidAlarms)('rejects %s', async (_label, alarms, code) => {
+        const result = await handleUpdateReminder({ id: 'r-1', alarms: alarms as any });
+
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe(code);
+        expect(runCommand).not.toHaveBeenCalled();
       });
     });
   });

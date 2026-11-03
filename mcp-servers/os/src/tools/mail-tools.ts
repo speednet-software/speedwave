@@ -2,8 +2,8 @@
  * Mail Tools — OS Mail integration
  */
 
-import { Tool, ToolDefinition, withDeclaredParams } from '@speedwave/mcp-shared';
-import { withValidation, ToolResult } from './validation.js';
+import { ToolDefinition } from '@speedwave/mcp-shared';
+import { guardedTool } from './validation.js';
 import {
   detectMailClientsTool,
   listMailboxesTool,
@@ -86,16 +86,4 @@ export function createMailTools(): ToolDefinition[] {
     guardedTool(saveDraftTool, handleSaveDraft),
     guardedTool(listMailSignaturesTool, handleListMailSignatures),
   ];
-}
-
-/**
- * Pairs a tool with its validated handler, rejecting any argument its inputSchema does not declare.
- * @param tool - Tool definition.
- * @param handler - Handler returning a ToolResult.
- */
-function guardedTool<T>(
-  tool: Tool,
-  handler: (params: T) => ToolResult | Promise<ToolResult>
-): ToolDefinition {
-  return { tool, handler: withDeclaredParams(tool, withValidation(handler)) };
 }

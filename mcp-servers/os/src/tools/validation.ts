@@ -1,7 +1,10 @@
 /** Validation helpers for OS tool parameters, following the Speedwave MCP pattern. */
 
 import {
+  withDeclaredParams,
   withResultValidation,
+  type Tool,
+  type ToolDefinition,
   teachingToolResult,
   type ToolResult,
   type ToolsCallResult,
@@ -99,6 +102,9 @@ const CONTROL_CHARS_BODY = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/;
 /** Regex matching ALL control characters \x00-\x1f (strict mode — no newlines allowed). */
 // eslint-disable-next-line no-control-regex
 const CONTROL_CHARS_STRICT = /[\x00-\x1f\x7f]/;
+
+const ALARM_VARIANTS = ['at', 'offset_minutes', 'location'];
+const ALARM_PROXIMITIES = ['arrive', 'leave'];
 
 /**
  * Validate string fields for max length and control characters.
@@ -365,9 +371,11 @@ export interface ValidationSpec {
   integers?: NumberFieldSpec[];
   booleans?: string[];
   dates?: string[];
-  /** Date fields that accept an explicit null (a PATCH "clear this field"); every other null is rejected. */
+  /** Date and alarm fields that accept an explicit null (a PATCH "clear this field"); every other null is rejected. */
   nullable?: string[];
   stringArrays?: StringArrayFieldSpec[];
+  /** Reminder alarm arrays; names also listed in `nullable` accept an explicit null (remove all alarms). */
+  alarms?: string[];
 }
 
 /**
@@ -407,7 +415,23 @@ export function validateAll(
     const sa = validateStringArrayFields(params, spec.stringArrays);
     if (!sa.valid) return sa;
   }
+  if (spec.alarms) {
+    const a = validateAlarmFields(params, spec.alarms, spec.nullable);
+    if (!a.valid) return a;
+  }
   return { valid: true };
+}
+
+/**
+ * Pairs a tool with its validated handler, rejecting any argument its inputSchema does not declare.
+ * @param tool - Tool definition.
+ * @param handler - Handler returning a ToolResult.
+ */
+export function guardedTool<T>(
+  tool: Tool,
+  handler: (params: T) => ToolResult | Promise<ToolResult>
+): ToolDefinition {
+  return { tool, handler: withDeclaredParams(tool, withValidation(handler)) };
 }
 
 /**
@@ -489,4 +513,146 @@ export function isValidISO8601(value: unknown): value is string {
 
   const date = new Date(value);
   return !isNaN(date.getTime());
+}
+
+const MAX_ALARM_OFFSET_MINUTES = 525600;
+
+function validateAlarmFields(
+  params: Record<string, unknown>,
+  fields: string[],
+  nullable: string[] = []
+): { valid: true } | { valid: false; error: ToolResult } {
+  for (const field of fields) {
+    const value = params[field];
+    if (value === undefined) continue;
+    if (value === null) {
+      if (nullable.includes(field)) continue;
+      return alarmError(
+        field,
+        value,
+        `Pass ${field} as an array of alarms, or omit it; null is not accepted here.`,
+        'INVALID_TYPE'
+      );
+    }
+    if (!Array.isArray(value)) {
+      return alarmError(field, value, `Pass ${field} as an array of alarms.`, 'INVALID_TYPE');
+    }
+    for (let i = 0; i < value.length; i++) {
+      const alarm = validateAlarm(value[i], `${field}[${i}]`);
+      if (!alarm.valid) return alarm;
+    }
+  }
+  return { valid: true };
+}
+
+function validateAlarm(
+  value: unknown,
+  name: string
+): { valid: true } | { valid: false; error: ToolResult } {
+  const alarm = asObject(value);
+  if (!alarm) {
+    return alarmError(name, value, `Pass ${name} as an object.`, 'INVALID_TYPE');
+  }
+  const present = ALARM_VARIANTS.filter((variant) => alarm[variant] !== undefined);
+  if (present.length !== 1) {
+    return alarmError(
+      name,
+      present.length === 0 ? 'no variant' : present.join(' and '),
+      `Pass exactly one of ${ALARM_VARIANTS.join(', ')} in ${name}.`,
+      'INVALID_PARAM'
+    );
+  }
+  if (alarm.at !== undefined) {
+    return isValidISO8601(alarm.at)
+      ? { valid: true }
+      : alarmError(
+          `${name}.at`,
+          alarm.at,
+          `Pass ${name}.at as an ISO8601 date string, e.g. "2026-06-15T08:30:00".`,
+          'INVALID_DATE'
+        );
+  }
+  if (alarm.offset_minutes !== undefined) {
+    return Number.isSafeInteger(alarm.offset_minutes) &&
+      Math.abs(alarm.offset_minutes as number) <= MAX_ALARM_OFFSET_MINUTES
+      ? { valid: true }
+      : alarmError(
+          `${name}.offset_minutes`,
+          alarm.offset_minutes,
+          `Pass ${name}.offset_minutes as a whole number of minutes between -${MAX_ALARM_OFFSET_MINUTES} and ${MAX_ALARM_OFFSET_MINUTES} (one year); negative is before the due date.`,
+          'INVALID_TYPE'
+        );
+  }
+  return validateAlarmLocation(alarm.location, `${name}.location`);
+}
+
+function validateAlarmLocation(
+  value: unknown,
+  name: string
+): { valid: true } | { valid: false; error: ToolResult } {
+  const location = asObject(value);
+  if (!location) {
+    return alarmError(name, value, `Pass ${name} as an object.`, 'INVALID_TYPE');
+  }
+  if (
+    typeof location.name !== 'string' ||
+    location.name.trim() === '' ||
+    location.name.length > MAX_LENGTHS.short
+  ) {
+    return alarmError(
+      `${name}.name`,
+      location.name,
+      `Pass ${name}.name as a non-empty place name of at most ${MAX_LENGTHS.short} characters.`,
+      'INVALID_TYPE'
+    );
+  }
+  const ranges: [key: string, min: number, max: number, required: boolean, bounds: string][] = [
+    ['latitude', -90, 90, true, 'between -90 and 90'],
+    ['longitude', -180, 180, true, 'between -180 and 180'],
+    ['radius_m', 0, Infinity, false, 'of at least 0 (metres)'],
+  ];
+  for (const [key, min, max, required, bounds] of ranges) {
+    const number = location[key];
+    if (number === undefined && !required) continue;
+    if (typeof number !== 'number' || !Number.isFinite(number)) {
+      return alarmError(
+        `${name}.${key}`,
+        number,
+        `Pass ${name}.${key} as a finite number ${bounds}.`,
+        'INVALID_TYPE'
+      );
+    }
+    if (number < min || number > max) {
+      return alarmError(
+        `${name}.${key}`,
+        number,
+        `Pass ${name}.${key} as a number ${bounds}.`,
+        'OUT_OF_RANGE'
+      );
+    }
+  }
+  if (typeof location.on !== 'string' || !ALARM_PROXIMITIES.includes(location.on)) {
+    return alarmError(
+      `${name}.on`,
+      location.on,
+      `Pass ${name}.on as "arrive" or "leave".`,
+      'INVALID_PARAM'
+    );
+  }
+  return { valid: true };
+}
+
+function asObject(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function alarmError(
+  name: string,
+  received: unknown,
+  nextStep: string,
+  code: string
+): { valid: false; error: ToolResult } {
+  return { valid: false, error: teachingToolResult({ paramName: name, received, nextStep }, code) };
 }
