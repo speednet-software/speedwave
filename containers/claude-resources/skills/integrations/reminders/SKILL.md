@@ -25,6 +25,9 @@ Always run steps 1–2 before guessing a tool name or parameter. The live schema
 - `os.createReminder({ name, list_id?, due_date?, priority?, notes?, tags? })`: create a reminder.
 - `os.updateReminder({ id, name?, list_id?, due_date?, priority?, notes?, tags?, completed? })`: change an existing reminder in place; only the fields you pass change.
 - `os.completeReminder({ id })`: mark a reminder as completed.
+- `os.createReminderList({ name, color? })`: create a list in the same account as the default list for new reminders. `color` is `#RRGGBB`.
+- `os.updateReminderList({ list_id, name?, color? })`: rename a list or change its color; only the fields you pass change. `list_id` is the list's ID or its exact name.
+- `os.deleteReminderList({ list_id, force? })`: permanently delete a list. A list that still holds reminders is refused unless `force: true`; the error gives the reminder count.
 
 ## Pitfalls
 
@@ -36,13 +39,18 @@ Always run steps 1–2 before guessing a tool name or parameter. The live schema
 - **Tags are stored in the notes field** as `[#tag]` markers (EventKit has no native tag property). `listReminders` and `getReminder` extract them into a separate `tags` array; pass `tags: ["work"]` to `createReminder`. Do not embed `[#tag]` manually.
 - **Due dates:** `"2026-06-15"` makes an all-day reminder; `"2026-06-15T09:30:00"` means 09:30 in the user's local time (an offset or `Z` is converted to local time). Responses use the same two shapes and add `all_day`. Relative phrases ("tomorrow") must be resolved to an absolute date first.
 - **`updateReminder` changes only the fields you pass.** `due_date: null` removes the due date (and any recurrence); `notes` alone keeps the tags, `tags` alone keeps the notes, `tags: []` clears them; `completed: false` reopens a completed reminder. Prefer it over "create a new one and complete the old one" when the user wants a correction.
+- **List colors use `#RRGGBB`**, the same format `listReminderLists` returns. Other formats (`#fff`, color names) are rejected.
+- **Read-only lists cannot be changed.** `updateReminderList` and `deleteReminderList` return an error for lists that do not allow modifications (for example some subscribed or shared lists); do not retry, tell the user.
+- **`deleteReminderList` deletes every reminder in the list when `force: true`**, completed ones included. Never pass `force: true` before the user has seen the reminder count.
 - **No recurrence-rule (RRULE) support** in the current API. If the user asks to create a repeating reminder, inform them this is not supported and offer to create a one-time reminder instead.
 - **iCloud-synced lists work** because the system sync layer handles it: the API sees all lists the device has, regardless of backend.
 - **macOS TCC permission is pre-validated by Speedwave Settings.** If this integration is enabled, assume access is granted; do not ask the user to check permissions.
 
 ## Confirmation rule
 
-Per `CLAUDE.md`: `createReminder`, `updateReminder` and `completeReminder` are write operations and require explicit user confirmation before execution. `listReminderLists`, `listReminders`, and `getReminder` are read-only and need no confirmation.
+Per `CLAUDE.md`: `createReminder`, `updateReminder`, `completeReminder`, `createReminderList`, `updateReminderList` and `deleteReminderList` are write operations and require explicit user confirmation before execution. `listReminderLists`, `listReminders`, and `getReminder` are read-only and need no confirmation.
+
+`deleteReminderList` is destructive and irreversible. Before calling it, find the list with `listReminderLists`, count its reminders with `listReminders({ list_id, show_completed: true, limit: 10000 })`, and show the user the list name and the reminder count. Say that the deletion is permanent and removes all reminders in the list. Call `deleteReminderList` only after the user explicitly confirms that list; pass `force: true` only when the list holds reminders and the user confirmed deleting them with it. Confirm each list separately; never delete several lists on one general approval.
 
 ## When NOT to use
 
