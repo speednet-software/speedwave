@@ -633,6 +633,7 @@ describe('reminder-tools', () => {
       const result = await handleDeleteReminderList({ list_id: 'id-1', force: 'yes' as never });
 
       expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('INVALID_TYPE');
       expect(runCommand).not.toHaveBeenCalled();
     });
   });

@@ -20,6 +20,33 @@ func createList(store: EKEventStore, params: [String: Any]) throws -> [String: A
     ]
 }
 
+func requiredListName(_ params: [String: Any]) throws -> String {
+    guard let name = params["name"] as? String,
+          !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        throw CLIError.missingField("name")
+    }
+    return name
+}
+
+func listColor(_ params: [String: Any]) throws -> CGColor? {
+    guard let hex = params["color"] as? String else { return nil }
+    guard let color = parseHexColor(hex) else {
+        throw CLIError.invalidValue("Invalid color '\(hex)'. Expected #RRGGBB")
+    }
+    return color
+}
+
+/// The account of the default list for new reminders, else the first account that already holds reminder lists.
+func newListSource(store: EKEventStore) throws -> EKSource {
+    if let source = store.defaultCalendarForNewReminders()?.source {
+        return source
+    }
+    if let source = store.sources.first(where: { !$0.calendars(for: .reminder).isEmpty }) {
+        return source
+    }
+    throw CLIError.notFound("No account that supports reminder lists was found")
+}
+
 func updateList(store: EKEventStore, params: [String: Any]) throws -> [String: Any] {
     guard let filter = params["list_id"] as? String else {
         throw CLIError.missingField("list_id")
@@ -46,6 +73,23 @@ func updateList(store: EKEventStore, params: [String: Any]) throws -> [String: A
     return ["status": "updated"]
 }
 
+func ensureListWritable(_ list: EKCalendar) throws {
+    if let message = listWriteBlocker(
+        name: list.title,
+        allowsContentModifications: list.allowsContentModifications,
+        isImmutable: list.isImmutable
+    ) {
+        throw CLIError.invalidValue(message)
+    }
+}
+
+func listWriteBlocker(name: String, allowsContentModifications: Bool, isImmutable: Bool) -> String? {
+    guard allowsContentModifications, !isImmutable else {
+        return "Reminder list '\(name)' is read-only and cannot be changed or deleted"
+    }
+    return nil
+}
+
 func deleteList(store: EKEventStore, params: [String: Any]) throws -> [String: Any] {
     guard let filter = params["list_id"] as? String else {
         throw CLIError.missingField("list_id")
@@ -66,56 +110,6 @@ func deleteList(store: EKEventStore, params: [String: Any]) throws -> [String: A
     ]
 }
 
-/// The account of the default list for new reminders, else the first account that already holds reminder lists.
-func newListSource(store: EKEventStore) throws -> EKSource {
-    if let source = store.defaultCalendarForNewReminders()?.source {
-        return source
-    }
-    if let source = store.sources.first(where: { !$0.calendars(for: .reminder).isEmpty }) {
-        return source
-    }
-    throw CLIError.notFound("No account that supports reminder lists was found")
-}
-
-func requiredListName(_ params: [String: Any]) throws -> String {
-    guard let name = params["name"] as? String,
-          !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-        throw CLIError.missingField("name")
-    }
-    return name
-}
-
-func listColor(_ params: [String: Any]) throws -> CGColor? {
-    guard let hex = params["color"] as? String else { return nil }
-    guard let color = parseHexColor(hex) else {
-        throw CLIError.invalidValue("Invalid color '\(hex)'. Expected #RRGGBB")
-    }
-    return color
-}
-
-func ensureListWritable(_ list: EKCalendar) throws {
-    if let message = listWriteBlocker(
-        name: list.title,
-        allowsContentModifications: list.allowsContentModifications,
-        isImmutable: list.isImmutable
-    ) {
-        throw CLIError.invalidValue(message)
-    }
-}
-
-func listWriteBlocker(name: String, allowsContentModifications: Bool, isImmutable: Bool) -> String? {
-    guard allowsContentModifications, !isImmutable else {
-        return "Reminder list '\(name)' is read-only and cannot be changed or deleted"
-    }
-    return nil
-}
-
-func nonEmptyListMessage(name: String, reminderCount: Int) -> String {
-    let noun = reminderCount == 1 ? "reminder" : "reminders"
-    return "Reminder list '\(name)' still holds \(reminderCount) \(noun). "
-        + "Pass force: true to delete the list together with its reminders; this cannot be undone"
-}
-
 func reminderCount(in list: EKCalendar, store: EKEventStore) throws -> Int {
     let semaphore = DispatchSemaphore(value: 0)
     var fetched: [EKReminder]?
@@ -126,5 +120,19 @@ func reminderCount(in list: EKCalendar, store: EKEventStore) throws -> Int {
     guard semaphore.wait(timeout: .now() + 10) == .success else {
         throw CLIError.invalidValue("Timed out counting the reminders of list '\(list.title)' after 10s")
     }
-    return fetched?.count ?? 0
+    return try countFetched(fetched, listName: list.title)
+}
+
+/// A fetch that completed with nil is an error: reading it as 0 would let a non-empty list be deleted without force.
+func countFetched(_ fetched: [EKReminder]?, listName: String) throws -> Int {
+    guard let fetched = fetched else {
+        throw CLIError.invalidValue("Could not count the reminders of list '\(listName)': the fetch returned no result")
+    }
+    return fetched.count
+}
+
+func nonEmptyListMessage(name: String, reminderCount: Int) -> String {
+    let noun = reminderCount == 1 ? "reminder" : "reminders"
+    return "Reminder list '\(name)' still holds \(reminderCount) \(noun). "
+        + "Pass force: true to delete the list together with its reminders; this cannot be undone"
 }

@@ -366,6 +366,17 @@ final class RemindersTests: XCTestCase {
         XCTAssertTrue(nonEmptyListMessage(name: "Work", reminderCount: 1).contains("holds 1 reminder."))
     }
 
+    func testCountFetchedCountsTheReminders() throws {
+        XCTAssertEqual(try countFetched([], listName: "Work"), 0)
+    }
+
+    func testCountFetchedRejectsAMissingResultNamingTheList() {
+        XCTAssertThrowsError(try countFetched(nil, listName: "Work")) { error in
+            guard case CLIError.invalidValue(let message) = error else { return XCTFail("unexpected \(error)") }
+            XCTAssertTrue(message.contains("'Work'"), message)
+        }
+    }
+
     func testListWriteBlockerRefusesReadOnlyAndImmutableLists() {
         let expected = "Reminder list 'Siri' is read-only and cannot be changed or deleted"
         XCTAssertEqual(

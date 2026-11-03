@@ -11,7 +11,6 @@ public func hexColor(from cgColor: CGColor) -> String? {
 }
 
 /// Parses `#RRGGBB` (the format `hexColor(from:)` writes) into an sRGB color; nil for anything else.
-/// Each channel is centered in its 1/255 step so `hexColor(from:)`, which truncates, reads the same bytes back.
 public func parseHexColor(_ string: String) -> CGColor? {
     let digits = Array(string.dropFirst())
     guard string.hasPrefix("#"), digits.count == 6, digits.allSatisfy({ $0.isHexDigit }) else {

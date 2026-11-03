@@ -45,7 +45,7 @@ Always run steps 1–2 before guessing a tool name or parameter. The live schema
 - **Completing and deleting are different requests.** "Done", "mark it", "check it off" mean `completeReminder`; only an explicit "delete" or "remove" means `deleteReminder`.
 - **List colors use `#RRGGBB`**, the same format `listReminderLists` returns. Other formats (`#fff`, color names) are rejected.
 - **Read-only lists cannot be changed.** `updateReminderList` and `deleteReminderList` return an error for lists that do not allow modifications (for example some subscribed or shared lists); do not retry, tell the user.
-- **`deleteReminderList` deletes every reminder in the list when `force: true`**, completed ones included. Never pass `force: true` before the user has seen the reminder count.
+- **`deleteReminderList` deletes every reminder in the list when `force: true`**, completed ones included. Never pass `force: true` before the user has seen the reminder count from the refusal and confirmed.
 - **No recurrence-rule (RRULE) support** in the current API. If the user asks to create a repeating reminder, inform them this is not supported and offer to create a one-time reminder instead.
 - **iCloud-synced lists work** because the system sync layer handles it: the API sees all lists the device has, regardless of backend.
 - **macOS TCC permission is pre-validated by Speedwave Settings.** If this integration is enabled, assume access is granted; do not ask the user to check permissions.
@@ -56,7 +56,7 @@ Per `CLAUDE.md`: `createReminder`, `updateReminder`, `completeReminder`, `delete
 
 `deleteReminder` is destructive and irreversible. Before calling it, fetch the reminder with `getReminder`, show the user its name, list and due date, say that the deletion is permanent, and call `deleteReminder` only after the user explicitly confirms that reminder. Confirm each reminder separately; never delete several reminders on one general approval.
 
-`deleteReminderList` is destructive and irreversible. Before calling it, find the list with `listReminderLists`, read the reminder count from `listReminders({ list_id, show_completed: true, limit: 1 }).total`, and show the user the list name and the reminder count. Say that the deletion is permanent and removes all reminders in the list. Call `deleteReminderList` only after the user explicitly confirms that list; pass `force: true` only when the list holds reminders and the user confirmed deleting them with it. Confirm each list separately; never delete several lists on one general approval.
+`deleteReminderList` is destructive and irreversible. Flow: identify the list with `listReminderLists`; ask the user to confirm deleting that list by name, saying the deletion is permanent; call `deleteReminderList` without `force`. If it is refused because the list still holds reminders, show the user the count from the error and ask again; pass `force: true` only after the user confirms deleting the list together with those reminders. Confirm each list separately; never delete several lists on one general approval.
 
 ## When NOT to use
 
