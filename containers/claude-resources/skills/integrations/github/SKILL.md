@@ -1,6 +1,6 @@
 ---
 name: github
-description: Use GitHub integration to query and manage GitHub.com repositories, pull requests, issues, branches, commits, Actions workflow runs, labels, tags, and releases. Use whenever the user asks about GitHub, opening or reviewing PRs, getting PR diffs, listing or commenting on issues, comparing branches, reading workflow logs, creating releases, searching code, checking "my open PRs" or "my assigned issues", etc. Use even when you think you know the answer, repository state is dynamic, only the live API reflects current PR status, workflow runs, or issue assignments. Do not use for plain git operations on the local checkout, GitLab or self-hosted GitHub Enterprise (out of scope), general code review questions, or any repo not on GitHub.com.
+description: Use GitHub integration to query and manage GitHub.com repositories, pull requests, issues, branches, commits, Actions workflow runs, labels, tags, and releases. Use whenever the user asks about GitHub, opening or reviewing PRs, getting PR diffs, listing or commenting on issues, comparing branches, reading workflow logs, creating releases, searching code, checking "my open PRs" or "my assigned issues", etc. Use even when you think you know the answer, repository state is dynamic, only the live API reflects current PR status, workflow runs, or issue assignments. Do not use for plain git operations on the local checkout (commit, push and fetch go through `git`), GitLab or self-hosted GitHub Enterprise (out of scope), general code review questions, or any repo not on GitHub.com.
 user-invocable: false
 allowed-tools: mcp__speedwave-hub__search_tools mcp__speedwave-hub__execute_code
 ---
@@ -32,6 +32,8 @@ Always do steps 1-2 before calling a tool for the first time in a conversation.
 **Two PR comment endpoints**: one posts a general conversation comment on the PR; the other anchors to a specific file and diff line. The live schema distinguishes them; pick the right one, the payloads differ and mixing them causes API errors or misdirected comments.
 
 **Rate limit**: authenticated calls share a 5 000/hour budget per token. On a `403 rate limit exceeded`, stop and tell the user; do not retry in a loop.
+
+**Publishing code is `git push`**: the integration creates no commits. Commit locally and run plain `git push` / `git fetch` on the checkout, with `origin` left as it is (ssh `git@github.com:` or `https://github.com/`): the container's git config routes github.com through the Speedwave proxy, which adds the credential; there is no token in the container and none to ask for. Use the integration for pull requests, issues, reviews and CI. GitHub rejects a push that adds or changes files under `.github/workflows/`, because the token has no `workflow` scope: tell the user to push that commit from the host.
 
 **Write/delete confirmation**: follow the global rule in `claude-resources/CLAUDE.md`: always restate the action and wait for explicit user go-ahead before any create, update, merge, close, delete, trigger, or comment operation.
 

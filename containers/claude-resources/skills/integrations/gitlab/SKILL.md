@@ -26,10 +26,11 @@ Always run step 1-2 before guessing a tool name. The live schema is the source o
 - **Search beats tree-walking.** When looking for a symbol or file, reach for `searchCode` before listing directories blindly.
 - **Job IDs come from pipelines.** `getJobLog`, `downloadArtifact`, and `deleteArtifacts` take a `job_id`, get valid values from `getPipelineFull`'s `jobs` array, not by guessing. `deleteArtifacts` is irreversible and erases the job log too, not only the artifacts: treat it with the same confirmation weight as any other destructive delete.
 - **`downloadArtifact` returns a job log, not the CI artifact zip.** This worker cannot fetch raw artifact bundle contents.
+- **Publishing code is `git push`.** The integration creates no commits. Commit locally and run plain `git push` / `git fetch` on the checkout, with `origin` left as it is (ssh `git@<host>:` or `https://<host>/` of the configured instance): the container's git config routes that host through the Speedwave proxy, which adds the credential; there is no token in the container and none to ask for. A push that gets 401 or 403 means the configured token lacks `write_repository` or the branch is protected: tell the user, do not retry. Use the integration for merge requests, issues, reviews and pipelines.
 - **Write/delete confirmation.** Per `claude-resources/CLAUDE.md`, every create/update/close/merge/delete needs explicit user approval before execution. Read operations (list/get/search/compare/diff/blame) never need confirmation.
 
 ## When NOT to use
 
-- Plain git operations on the local checkout (clone, commit, push): use the shell, not this integration.
+- Plain git operations on the local checkout (clone, commit, fetch, push): use `git` in the shell, not this integration.
 - GitHub.com repositories: use the github integration instead.
 - Anything outside the single GitLab instance configured for this project.
