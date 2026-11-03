@@ -415,16 +415,18 @@ export class ProjectStateService {
     }
   }
 
-  /** Re-checks Claude auth status after user completes authentication. */
+  /** Re-checks Claude auth status after user completes authentication; a result that lands after a project switch started is dropped. */
   async retryAuth(): Promise<void> {
-    if (!this.activeProject()) return;
+    const project = this.activeProject();
+    if (!project) return;
+    const mark = this.settledMark(project);
     try {
-      const auth = await this.tauri.invoke<AuthStatusResponse>('get_auth_status', {
-        project: this.activeProject(),
-      });
+      const auth = await this.tauri.invoke<AuthStatusResponse>('get_auth_status', { project });
+      if (!this.isStillSettledOn(project, mark)) return;
       const next = authStatusToProjectStatus(auth);
       if (next === 'ready') {
         await this.waitForSystemHealthy();
+        if (!this.isStillSettledOn(project, mark)) return;
         this.status.set('ready');
         this.notifyChange();
         this.notifyReady();
@@ -434,6 +436,7 @@ export class ProjectStateService {
         this.notifyChange();
       }
     } catch (err) {
+      if (!this.isStillSettledOn(project, mark)) return;
       const msg = err instanceof Error ? err.message : String(err);
       this.status.set('error');
       this.error = msg;
