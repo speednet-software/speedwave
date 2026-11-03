@@ -4,7 +4,7 @@
  * Central registry for all SharePoint tools following the domain-tools pattern.
  */
 
-import { ToolDefinition } from '@speedwave/mcp-shared';
+import { ToolDefinition, withDeclaredParams } from '@speedwave/mcp-shared';
 import { SharePointClient } from '../client.js';
 
 export { withValidation, validateGraphId, ToolResult } from './validation.js';
@@ -24,5 +24,5 @@ export function createToolDefinitions(client: SharePointClient | null): ToolDefi
     ...createUserTools(client),
     ...createPageTools(client),
     ...createListTools(client),
-  ];
+  ].map(({ tool, handler }) => ({ tool, handler: withDeclaredParams(tool, handler) }));
 }

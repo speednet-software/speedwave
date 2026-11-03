@@ -4,7 +4,7 @@
  * Central registry for all OS tools following the domain-tools pattern.
  */
 
-import { ToolDefinition } from '@speedwave/mcp-shared';
+import { ToolDefinition, withDeclaredParams } from '@speedwave/mcp-shared';
 import type { OsDomain } from '../platform-runner.js';
 
 export {
@@ -87,7 +87,8 @@ export const ALLOWED_COMMANDS: Record<OsDomain, ReadonlySet<string>> = {
 };
 
 /**
- * Creates complete tool definitions array for OS MCP server.
+ * Creates complete tool definitions array for OS MCP server; every handler rejects arguments its
+ * tool's inputSchema does not declare before any native CLI runs.
  */
 export function createToolDefinitions(): ToolDefinition[] {
   return [
@@ -95,5 +96,5 @@ export function createToolDefinitions(): ToolDefinition[] {
     ...createCalendarTools(),
     ...createMailTools(),
     ...createNoteTools(),
-  ];
+  ].map(({ tool, handler }) => ({ tool, handler: withDeclaredParams(tool, handler) }));
 }

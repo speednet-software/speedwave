@@ -3,7 +3,7 @@
  * @module mcp-context7/tools
  */
 
-import { ToolDefinition } from '@speedwave/mcp-shared';
+import { ToolDefinition, withDeclaredParams } from '@speedwave/mcp-shared';
 import { Context7Client } from '../client.js';
 import { createResolveLibraryIdTool } from './resolve_library_id.js';
 import { createQueryDocsTool } from './query_docs.js';
@@ -13,7 +13,9 @@ import { createQueryDocsTool } from './query_docs.js';
  * @param client - Configured Context7 client
  */
 export function createToolDefinitions(client: Context7Client): ToolDefinition[] {
-  return [createResolveLibraryIdTool(client), createQueryDocsTool(client)];
+  return [createResolveLibraryIdTool(client), createQueryDocsTool(client)].map(
+    ({ tool, handler }) => ({ tool, handler: withDeclaredParams(tool, handler) })
+  );
 }
 
 export { resolveLibraryIdTool, createResolveLibraryIdTool } from './resolve_library_id.js';

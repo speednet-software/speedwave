@@ -73,7 +73,26 @@ export function withNumericForgiveness(def: ToolDefinition): ToolDefinition {
 }
 
 /**
- * Wraps a tool handler with client-presence, owner/repo forgiveness, and error handling.
+ * Wraps a tool so a combined `owner/repo` string passed in `repo` is split into `owner` and `repo`
+ * before the declared-parameter guard sees the call. Only tools that declare both params are wrapped.
+ * @param def - The tool definition to wrap
+ */
+export function withOwnerRepoForgiveness(def: ToolDefinition): ToolDefinition {
+  const declared = Object.keys(def.tool.inputSchema.properties);
+  if (!declared.includes('owner') || !declared.includes('repo')) return def;
+  const handler = def.handler;
+  return {
+    tool: def.tool,
+    handler: (params, context) => {
+      const ownerRepo = normalizeOwnerRepo(params);
+      if (!ownerRepo.ok) return Promise.resolve(ownerRepo.error);
+      return handler(ownerRepo.value, context);
+    },
+  };
+}
+
+/**
+ * Wraps a tool handler with client-presence and error handling.
  * @param client - GitHub client instance (null when the service is not configured)
  * @param handler - Tool handler function
  */
@@ -84,26 +103,14 @@ export function withValidation<T>(
     params: T
   ) => Promise<ReturnType<typeof jsonResult> | ReturnType<typeof textResult>>
 ): (params: T) => Promise<ToolsCallResult> {
-  return withClientValidation(
-    client,
-    (c, params: T) => {
-      const raw = params as Record<string, unknown>;
-      if (!raw || typeof raw !== 'object') {
-        return handler(c, raw as T);
+  return withClientValidation(client, handler, {
+    serviceName: 'GitHub',
+    formatError: (error) => GitHubClient.formatError(error),
+    onUnexpectedError: (error) => {
+      const hasOctokitStatus = typeof (error as { status?: unknown } | null)?.status === 'number';
+      if (!hasOctokitStatus && !isExpectedError(error)) {
+        console.error(`${ts()} Unexpected (non-Octokit) error in GitHub tool handler:`, error);
       }
-      const ownerRepo = normalizeOwnerRepo(raw);
-      if (!ownerRepo.ok) return Promise.resolve(ownerRepo.error);
-      return handler(c, ownerRepo.value as T);
     },
-    {
-      serviceName: 'GitHub',
-      formatError: (error) => GitHubClient.formatError(error),
-      onUnexpectedError: (error) => {
-        const hasOctokitStatus = typeof (error as { status?: unknown } | null)?.status === 'number';
-        if (!hasOctokitStatus && !isExpectedError(error)) {
-          console.error(`${ts()} Unexpected (non-Octokit) error in GitHub tool handler:`, error);
-        }
-      },
-    }
-  );
+  });
 }

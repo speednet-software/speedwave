@@ -2,9 +2,9 @@
  * GitHub Tools Aggregator: exports the GitHub tool definitions via factory functions.
  */
 
-import { ToolDefinition } from '@speedwave/mcp-shared';
+import { ToolDefinition, withDeclaredParams } from '@speedwave/mcp-shared';
 import { GitHubClient } from '../client.js';
-import { withNumericForgiveness } from './validation.js';
+import { withNumericForgiveness, withOwnerRepoForgiveness } from './validation.js';
 import { createRepoTools } from './repo-tools.js';
 import { createPrTools } from './pr-tools.js';
 import { createPrReviewTools } from './pr-review-tools.js';
@@ -34,7 +34,20 @@ export function createToolDefinitions(client: GitHubClient | null): ToolDefiniti
     ...createIssueTools(client),
     ...createLabelTools(client),
     ...createReleaseTools(client),
-  ].map(withNumericForgiveness);
+  ].map(guardDeclaredParams);
+}
+
+/**
+ * Wraps a definition so undeclared and missing required arguments are rejected before numeric-id
+ * coercion and the handler run; a combined `owner/repo` is split first so `owner` can stay required.
+ * @param def - The tool definition to wrap
+ */
+function guardDeclaredParams(def: ToolDefinition): ToolDefinition {
+  const forgiving = withNumericForgiveness(def);
+  return withOwnerRepoForgiveness({
+    tool: forgiving.tool,
+    handler: withDeclaredParams(forgiving.tool, forgiving.handler),
+  });
 }
 
 export { createRepoTools } from './repo-tools.js';

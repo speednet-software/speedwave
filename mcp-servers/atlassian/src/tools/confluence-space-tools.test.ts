@@ -50,8 +50,8 @@ describe('unconfigured client', () => {
   it('lists all tools but every handler errors', async () => {
     const defs = createConfluenceSpaceTools(null);
     expect(defs).toHaveLength(2);
-    for (const { handler } of defs) {
-      const res = await handler({} as never);
+    for (const { tool, handler } of defs) {
+      const res = await handler(tool.inputExamples![0].input);
       expect(res.isError).toBe(true);
       expect(res.content[0].text).toMatch(/not configured|configure/i);
     }

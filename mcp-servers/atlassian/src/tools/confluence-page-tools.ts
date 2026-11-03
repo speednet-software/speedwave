@@ -7,15 +7,14 @@ import {
   type Tool,
   type ToolDefinition,
   jsonResult,
-  errorResult,
-  notConfiguredMessage,
+  withDeclaredParams,
   META_KEYS,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
 import { AtlassianClient } from '../client.js';
 import { createConfluencePagesClient } from '../domains/confluence-pages.js';
-import { toStorageBodyInput, withValidation } from './validation.js';
+import { toStorageBodyInput, unconfiguredDefinitions, withValidation } from './validation.js';
 
 const searchPagesTool: Tool = {
   name: 'searchPages',
@@ -242,13 +241,10 @@ export function createConfluencePageTools(client: AtlassianClient | null): ToolD
     updatePageTool,
     getPageChildrenTool,
   ];
-  if (!client) {
-    const unconfigured = async () => errorResult(notConfiguredMessage('Atlassian'));
-    return tools.map((tool) => ({ tool, handler: unconfigured }));
-  }
+  if (!client) return unconfiguredDefinitions(tools);
   const pages = createConfluencePagesClient(client);
 
-  return [
+  const definitions: ToolDefinition[] = [
     {
       tool: searchPagesTool,
       handler: withValidation(client, async (_c, params) => {
@@ -320,4 +316,8 @@ export function createConfluencePageTools(client: AtlassianClient | null): ToolD
       }),
     },
   ];
+  return definitions.map(({ tool, handler }) => ({
+    tool,
+    handler: withDeclaredParams(tool, handler),
+  }));
 }

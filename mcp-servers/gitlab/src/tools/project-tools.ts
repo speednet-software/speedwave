@@ -36,6 +36,7 @@ const listProjectIdsTool: Tool = {
           "Only projects owned by the authenticated user (answers 'my projects'). No separate identity lookup needed.",
       },
       limit: { type: 'number', description: 'Max results (default 20, max 100)' },
+      page: { type: 'number', description: 'Page number (default 1)' },
     },
   },
   outputSchema: {
@@ -199,6 +200,7 @@ export function createProjectTools(client: GitLabClient | null): ToolDefinition[
           params as {
             search?: string;
             limit?: number;
+            page?: number;
             owned?: boolean;
             membership?: boolean;
             archived?: boolean;

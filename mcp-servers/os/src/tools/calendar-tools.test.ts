@@ -316,6 +316,23 @@ describe('calendar-tools', () => {
       );
     });
 
+    it('forwards all_day to updateEvent runCommand', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { status: 'updated' } });
+      await handleUpdateEvent({ id: 'e-1', start: '2026-06-15', end: '2026-06-16', all_day: true });
+      expect(runCommand).toHaveBeenCalledWith(
+        'calendar',
+        'update_event',
+        expect.objectContaining({ all_day: true })
+      );
+    });
+
+    it('rejects all_day as string "true" on update', async () => {
+      const result = await handleUpdateEvent({ id: 'e-1', all_day: 'true' as any });
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('INVALID_TYPE');
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
     it('forwards description to updateEvent runCommand', async () => {
       vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { status: 'updated' } });
       await handleUpdateEvent({ id: 'e-1', description: 'Updated notes' });

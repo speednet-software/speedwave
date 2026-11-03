@@ -70,6 +70,8 @@ interface UpdateEventParams {
   location?: string;
   /** New description. */
   description?: string;
+  /** Whether the event becomes an all-day event. */
+  all_day?: boolean;
 }
 
 /** Input parameters for the deleteEvent tool. */
@@ -320,6 +322,11 @@ const updateEventTool: Tool = {
       end: { type: 'string', description: `New end: ${LOCAL_DATE_FORMS}` },
       location: { type: 'string', description: 'New location' },
       description: { type: 'string', description: 'New description' },
+      all_day: {
+        type: 'boolean',
+        description:
+          'true to make it an all-day event, false to give it times again; pass start and end in the matching form',
+      },
     },
     required: ['id'],
   },
@@ -454,6 +461,7 @@ export async function handleUpdateEvent(params: UpdateEventParams): Promise<Tool
   const p = asRecord(params);
   const v = validateAll(p, {
     required: ['id'],
+    booleans: ['all_day'],
     strings: [
       ['id', MAX_LENGTHS.id, false],
       ['summary', MAX_LENGTHS.short, false],

@@ -241,7 +241,7 @@ describe('Pull Request Tools', () => {
     it('splits a combined owner/repo string passed in repo', async () => {
       mockClient.getPullRequest.mockResolvedValue(makePr({ number: 7 }));
 
-      const tools = createPrTools(mockClient as unknown as GitHubClient);
+      const tools = createToolDefinitions(mockClient as unknown as GitHubClient);
       const handler = tools.find((t) => t.tool.name === 'getPullRequest')?.handler;
       await handler!({ repo: 'octocat/hello-world', number: 7 });
 

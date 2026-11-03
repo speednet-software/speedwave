@@ -1491,6 +1491,17 @@ describe('GitHubClient', () => {
         });
     });
 
+    it('rejects missing content before any API call and names content', async () => {
+      await expect(
+        client.createOrUpdateFile('o', 'r', {
+          path: 'a.txt',
+          message: 'm',
+        })
+      ).rejects.toThrow("needs 'content' as a string");
+      expect(octokit.rest.repos.getContent).not.toHaveBeenCalled();
+      expect(octokit.rest.repos.createOrUpdateFileContents).not.toHaveBeenCalled();
+    });
+
     it('teaches a directory target instead of writing over it', async () => {
       octokit.rest.repos.getContent.mockResolvedValue({ data: [{ type: 'file', path: 'dir/a' }] });
       await expect(
