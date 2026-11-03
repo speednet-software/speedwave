@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { withValidation, withNumericForgiveness } from './validation.js';
+import { withValidation, withNumericForgiveness, withOwnerRepoForgiveness } from './validation.js';
 import { GitHubClient } from '../client.js';
 import {
   notConfiguredMessage,
@@ -140,60 +140,52 @@ describe('withValidation', () => {
     );
   });
 
-  describe('owner/repo forgiveness', () => {
+  describe('owner/repo forgiveness (withOwnerRepoForgiveness)', () => {
+    const ownerRepoProps = { owner: { type: 'string' }, repo: { type: 'string' } };
+
     it('splits a combined owner/repo string passed in repo when owner is omitted', async () => {
-      const client = new GitHubClient({ token: 'x' });
-      let seen: Record<string, unknown> | undefined;
-      const wrapped = withValidation<{ repo: string }>(client, async (_c, params) => {
-        seen = params as unknown as Record<string, unknown>;
-        return jsonResult({ ok: true });
-      });
+      const seen: { value?: Record<string, unknown> } = {};
+      const wrapped = withOwnerRepoForgiveness(defWith(ownerRepoProps, seen));
 
-      await wrapped({ repo: 'octocat/hello-world' });
+      await wrapped.handler({ repo: 'octocat/hello-world' });
 
-      expect(seen).toEqual({ owner: 'octocat', repo: 'hello-world' });
+      expect(seen.value).toEqual({ owner: 'octocat', repo: 'hello-world' });
     });
 
     it('leaves params untouched when owner is already present', async () => {
-      const client = new GitHubClient({ token: 'x' });
-      let seen: Record<string, unknown> | undefined;
-      const wrapped = withValidation<{ owner: string; repo: string }>(
-        client,
-        async (_c, params) => {
-          seen = params as unknown as Record<string, unknown>;
-          return jsonResult({ ok: true });
-        }
-      );
+      const seen: { value?: Record<string, unknown> } = {};
+      const wrapped = withOwnerRepoForgiveness(defWith(ownerRepoProps, seen));
 
-      await wrapped({ owner: 'octocat', repo: 'octocat/hello-world' });
+      await wrapped.handler({ owner: 'octocat', repo: 'octocat/hello-world' });
 
-      expect(seen).toEqual({ owner: 'octocat', repo: 'octocat/hello-world' });
+      expect(seen.value).toEqual({ owner: 'octocat', repo: 'octocat/hello-world' });
     });
 
     it('leaves repo untouched when it has no slash', async () => {
-      const client = new GitHubClient({ token: 'x' });
-      let seen: Record<string, unknown> | undefined;
-      const wrapped = withValidation<{ repo: string }>(client, async (_c, params) => {
-        seen = params as unknown as Record<string, unknown>;
-        return jsonResult({ ok: true });
-      });
+      const seen: { value?: Record<string, unknown> } = {};
+      const wrapped = withOwnerRepoForgiveness(defWith(ownerRepoProps, seen));
 
-      await wrapped({ repo: 'hello-world' });
+      await wrapped.handler({ repo: 'hello-world' });
 
-      expect(seen).toEqual({ repo: 'hello-world' });
+      expect(seen.value).toEqual({ repo: 'hello-world' });
+    });
+
+    it('returns the unwrapped definition when the tool does not declare both owner and repo', () => {
+      const seen: { value?: Record<string, unknown> } = {};
+      const onlyRepo = defWith({ repo: { type: 'string' } }, seen);
+      const onlyOwner = defWith({ owner: { type: 'string' } }, seen);
+
+      expect(withOwnerRepoForgiveness(onlyRepo)).toBe(onlyRepo);
+      expect(withOwnerRepoForgiveness(onlyOwner)).toBe(onlyOwner);
     });
 
     it('teaches instead of forwarding a repo with more than one slash (nested owner segment)', async () => {
-      const client = new GitHubClient({ token: 'x' });
-      let handlerCalled = false;
-      const wrapped = withValidation<{ repo: string }>(client, async () => {
-        handlerCalled = true;
-        return jsonResult({ ok: true });
-      });
+      const seen: { value?: Record<string, unknown> } = {};
+      const wrapped = withOwnerRepoForgiveness(defWith(ownerRepoProps, seen));
 
-      const result = await wrapped({ repo: 'octocat/hello/world' });
+      const result = await wrapped.handler({ repo: 'octocat/hello/world' });
 
-      expect(handlerCalled).toBe(false);
+      expect(seen.value).toBeUndefined();
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain(
         "Pass repo as either a bare repository name (with a separate 'owner' param) or a single 'owner/repo' string"
@@ -201,16 +193,12 @@ describe('withValidation', () => {
     });
 
     it('returns a teaching error and never calls the handler when the repo split yields an empty segment', async () => {
-      const client = new GitHubClient({ token: 'x' });
-      let handlerCalled = false;
-      const wrapped = withValidation<{ repo: string }>(client, async () => {
-        handlerCalled = true;
-        return jsonResult({ ok: true });
-      });
+      const seen: { value?: Record<string, unknown> } = {};
+      const wrapped = withOwnerRepoForgiveness(defWith(ownerRepoProps, seen));
 
-      const result = await wrapped({ repo: '/hello-world' });
+      const result = await wrapped.handler({ repo: '/hello-world' });
 
-      expect(handlerCalled).toBe(false);
+      expect(seen.value).toBeUndefined();
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toBe(
         'Error: Invalid repo (received: "/hello-world"). Pass repo as either a bare repository name ' +

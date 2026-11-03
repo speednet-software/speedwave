@@ -7,15 +7,14 @@ import {
   type Tool,
   type ToolDefinition,
   jsonResult,
-  errorResult,
-  notConfiguredMessage,
+  withDeclaredParams,
   META_KEYS,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
 import { AtlassianClient } from '../client.js';
 import { createConfluenceContentClient } from '../domains/confluence-content.js';
-import { toStorageBodyInput, withValidation } from './validation.js';
+import { toStorageBodyInput, unconfiguredDefinitions, withValidation } from './validation.js';
 
 const addPageCommentTool: Tool = {
   name: 'addPageComment',
@@ -183,13 +182,10 @@ export function createConfluenceContentTools(client: AtlassianClient | null): To
     getPageLabelsTool,
     listAttachmentsTool,
   ];
-  if (!client) {
-    const unconfigured = async () => errorResult(notConfiguredMessage('Atlassian'));
-    return tools.map((tool) => ({ tool, handler: unconfigured }));
-  }
+  if (!client) return unconfiguredDefinitions(tools);
   const content = createConfluenceContentClient(client);
 
-  return [
+  const definitions: ToolDefinition[] = [
     {
       tool: addPageCommentTool,
       handler: withValidation(client, async (_c, params) => {
@@ -226,4 +222,8 @@ export function createConfluenceContentTools(client: AtlassianClient | null): To
       }),
     },
   ];
+  return definitions.map(({ tool, handler }) => ({
+    tool,
+    handler: withDeclaredParams(tool, handler),
+  }));
 }

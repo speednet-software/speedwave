@@ -7,14 +7,13 @@ import {
   type Tool,
   type ToolDefinition,
   jsonResult,
-  errorResult,
-  notConfiguredMessage,
+  withDeclaredParams,
   META_KEYS,
   READ_ONLY_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
 import { AtlassianClient } from '../client.js';
 import { createConfluenceSpacesClient } from '../domains/confluence-spaces.js';
-import { withValidation } from './validation.js';
+import { unconfiguredDefinitions, withValidation } from './validation.js';
 
 const listSpacesTool: Tool = {
   name: 'listSpaces',
@@ -82,13 +81,10 @@ const getSpaceTool: Tool = {
  */
 export function createConfluenceSpaceTools(client: AtlassianClient | null): ToolDefinition[] {
   const tools = [listSpacesTool, getSpaceTool];
-  if (!client) {
-    const unconfigured = async () => errorResult(notConfiguredMessage('Atlassian'));
-    return tools.map((tool) => ({ tool, handler: unconfigured }));
-  }
+  if (!client) return unconfiguredDefinitions(tools);
   const spaces = createConfluenceSpacesClient(client);
 
-  return [
+  const definitions: ToolDefinition[] = [
     {
       tool: listSpacesTool,
       handler: withValidation(client, async (_c, params) => {
@@ -104,4 +100,8 @@ export function createConfluenceSpaceTools(client: AtlassianClient | null): Tool
       }),
     },
   ];
+  return definitions.map(({ tool, handler }) => ({
+    tool,
+    handler: withDeclaredParams(tool, handler),
+  }));
 }

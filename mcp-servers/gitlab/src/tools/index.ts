@@ -3,7 +3,7 @@
  * The exact tool count is pinned by `metadata.test.ts`, not restated here.
  */
 
-import { ToolDefinition } from '@speedwave/mcp-shared';
+import { ToolDefinition, withDeclaredParams } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import { createProjectTools } from './project-tools.js';
 import { createUserTools } from './user-tools.js';
@@ -20,7 +20,8 @@ import { createLabelTools } from './label-tools.js';
 import { createReleaseTools } from './release-tools.js';
 
 /**
- * Tool handler function
+ * Builds every GitLab tool definition, each guarded by `withDeclaredParams` so an argument the
+ * schema does not declare is rejected instead of silently dropped.
  * @param client - GitLab client instance
  */
 export function createToolDefinitions(client: GitLabClient | null): ToolDefinition[] {
@@ -38,7 +39,7 @@ export function createToolDefinitions(client: GitLabClient | null): ToolDefiniti
     ...createIssueTools(client),
     ...createLabelTools(client),
     ...createReleaseTools(client),
-  ];
+  ].map(({ tool, handler }) => ({ tool, handler: withDeclaredParams(tool, handler) }));
 }
 
 export { createProjectTools } from './project-tools.js';

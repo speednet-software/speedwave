@@ -12,6 +12,7 @@ import {
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
   META_KEYS,
+  withDeclaredParams,
 } from '@speedwave/mcp-shared';
 import { DEFAULT_MAX_CHARS, MAX_PDF_PAGES } from '../config.js';
 import { readDocumentToMarkdown, readPdfText } from '../engine/extract.js';
@@ -874,7 +875,7 @@ const fillPdfFormTool: Tool = {
 };
 
 /**
- * Build the full list of office tool definitions with their handlers.
+ * Build the full list of office tool definitions with their handlers; every handler rejects arguments its tool's inputSchema does not declare.
  * @returns All {@link ToolDefinition}s for the worker.
  */
 export function createToolDefinitions(): ToolDefinition[] {
@@ -1065,7 +1066,7 @@ export function createToolDefinitions(): ToolDefinition[] {
         );
       }),
     },
-  ];
+  ].map(({ tool, handler }) => ({ tool, handler: withDeclaredParams(tool, handler) }));
 }
 
 /** Re-exported for tests / docs: the supported conversion matrix. */

@@ -139,7 +139,10 @@ const createOrUpdateFileTool: Tool = {
       owner: { type: 'string', description: 'Repository owner (user or org)' },
       repo: { type: 'string', description: 'Repository name' },
       path: { type: 'string', description: 'File path from the repository root' },
-      content: { type: 'string', description: 'File content (UTF-8)' },
+      content: {
+        type: 'string',
+        description: 'File content (UTF-8); an empty string creates an empty file',
+      },
       message: { type: 'string', description: 'Commit message' },
       branch: {
         type: 'string',
@@ -151,7 +154,7 @@ const createOrUpdateFileTool: Tool = {
           'Blob SHA of the file being replaced — required when updating an existing file; the worker fetches it automatically if omitted',
       },
     },
-    required: ['owner', 'repo', 'path', 'content', 'message'],
+    required: ['owner', 'repo', 'path', 'message'],
   },
   outputSchema: {
     type: 'object',

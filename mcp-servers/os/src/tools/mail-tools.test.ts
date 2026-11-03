@@ -28,7 +28,7 @@ import {
   handleCopyEmails,
   handleRenameMailbox,
 } from './mail-organizing.js';
-import { createMailTools } from './mail-tools.js';
+import { createToolDefinitions } from './index.js';
 import { ASK_USER_FIRST } from './mail-shared.js';
 
 vi.mock('../platform-runner.js', () => ({
@@ -36,6 +36,11 @@ vi.mock('../platform-runner.js', () => ({
 }));
 
 import { runCommand } from '../platform-runner.js';
+
+/** The mail tools as the server exposes them, behind the declared-parameter guard of `createToolDefinitions`. */
+function createMailTools() {
+  return createToolDefinitions().filter((d) => d.tool._meta?.[META_KEYS.OS_CATEGORY] === 'mail');
+}
 
 const PROCESS_TIMEOUT = expect.any(Number);
 

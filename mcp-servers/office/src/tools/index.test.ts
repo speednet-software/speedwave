@@ -284,7 +284,14 @@ describe('handler dispatch — read', () => {
   it('readDocument returns an error result when path is missing', async () => {
     const res = await call('readDocument', {});
     expect(res.isError).toBe(true);
-    expect(res.content[0].text).toMatch(/path is required/);
+    expect(res.content[0].text).toMatch(/readDocument requires path/);
+    expect(eng.readDocumentToMarkdown).not.toHaveBeenCalled();
+  });
+
+  it('readDocument rejects a non-string path from the handler helper', async () => {
+    const res = await call('readDocument', { path: 5 });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/path is required and must be a non-empty string/);
   });
 
   it('readPdfText and pdfMetadata work', async () => {

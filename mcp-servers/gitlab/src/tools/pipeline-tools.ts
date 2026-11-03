@@ -47,6 +47,7 @@ const listPipelineIdsTool: Tool = {
         description: 'Pipeline status',
       },
       limit: { type: 'number', description: 'Max results (default 5, max 100)' },
+      page: { type: 'number', description: 'Page number (default 1)' },
     },
     required: ['project_id'],
   },
@@ -351,6 +352,7 @@ export function createPipelineTools(client: GitLabClient | null): ToolDefinition
           status?: string;
           ref?: string;
           limit?: number;
+          page?: number;
         };
         const result = await c.listPipelines(project_id, options);
         return jsonResult({

@@ -2,7 +2,7 @@
  * Mail Tools — OS Mail integration
  */
 
-import { Tool, ToolDefinition, withDeclaredParams } from '@speedwave/mcp-shared';
+import { Tool, ToolDefinition } from '@speedwave/mcp-shared';
 import { withValidation, ToolResult } from './validation.js';
 import {
   detectMailClientsTool,
@@ -62,40 +62,40 @@ import {
 /** Creates tool definitions for all mail operations. */
 export function createMailTools(): ToolDefinition[] {
   return [
-    guardedTool(detectMailClientsTool, handleDetectMailClients),
-    guardedTool(listMailboxesTool, handleListMailboxes),
-    guardedTool(listEmailsTool, handleListEmails),
-    guardedTool(getEmailTool, handleGetEmail),
-    guardedTool(searchEmailsTool, handleSearchEmails),
-    guardedTool(sendEmailTool, handleSendEmail),
-    guardedTool(replyToEmailTool, handleReplyToEmail),
-    guardedTool(forwardEmailTool, handleForwardEmail),
-    guardedTool(redirectEmailTool, handleRedirectEmail),
-    guardedTool(listMailRulesTool, handleListMailRules),
-    guardedTool(checkMailTool, handleCheckMail),
-    guardedTool(deleteEmailsTool, handleDeleteEmails),
-    guardedTool(markEmailsReadTool, handleMarkEmailsRead),
-    guardedTool(flagEmailsTool, handleFlagEmails),
-    guardedTool(moveEmailsTool, handleMoveEmails),
-    guardedTool(copyEmailsTool, handleCopyEmails),
-    guardedTool(archiveEmailsTool, handleArchiveEmails),
-    guardedTool(createMailboxTool, handleCreateMailbox),
-    guardedTool(markEmailsSpamTool, handleMarkEmailsSpam),
-    guardedTool(markEmailsNotSpamTool, handleMarkEmailsNotSpam),
-    guardedTool(renameMailboxTool, handleRenameMailbox),
-    guardedTool(saveDraftTool, handleSaveDraft),
-    guardedTool(listMailSignaturesTool, handleListMailSignatures),
+    validatedTool(detectMailClientsTool, handleDetectMailClients),
+    validatedTool(listMailboxesTool, handleListMailboxes),
+    validatedTool(listEmailsTool, handleListEmails),
+    validatedTool(getEmailTool, handleGetEmail),
+    validatedTool(searchEmailsTool, handleSearchEmails),
+    validatedTool(sendEmailTool, handleSendEmail),
+    validatedTool(replyToEmailTool, handleReplyToEmail),
+    validatedTool(forwardEmailTool, handleForwardEmail),
+    validatedTool(redirectEmailTool, handleRedirectEmail),
+    validatedTool(listMailRulesTool, handleListMailRules),
+    validatedTool(checkMailTool, handleCheckMail),
+    validatedTool(deleteEmailsTool, handleDeleteEmails),
+    validatedTool(markEmailsReadTool, handleMarkEmailsRead),
+    validatedTool(flagEmailsTool, handleFlagEmails),
+    validatedTool(moveEmailsTool, handleMoveEmails),
+    validatedTool(copyEmailsTool, handleCopyEmails),
+    validatedTool(archiveEmailsTool, handleArchiveEmails),
+    validatedTool(createMailboxTool, handleCreateMailbox),
+    validatedTool(markEmailsSpamTool, handleMarkEmailsSpam),
+    validatedTool(markEmailsNotSpamTool, handleMarkEmailsNotSpam),
+    validatedTool(renameMailboxTool, handleRenameMailbox),
+    validatedTool(saveDraftTool, handleSaveDraft),
+    validatedTool(listMailSignaturesTool, handleListMailSignatures),
   ];
 }
 
 /**
- * Pairs a tool with its validated handler, rejecting any argument its inputSchema does not declare.
+ * Pairs a tool with its validated handler.
  * @param tool - Tool definition.
  * @param handler - Handler returning a ToolResult.
  */
-function guardedTool<T>(
+function validatedTool<T>(
   tool: Tool,
   handler: (params: T) => ToolResult | Promise<ToolResult>
 ): ToolDefinition {
-  return { tool, handler: withDeclaredParams(tool, withValidation(handler)) };
+  return { tool, handler: withValidation(handler) };
 }
