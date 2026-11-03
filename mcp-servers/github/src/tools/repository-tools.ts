@@ -8,7 +8,6 @@ import {
   ToolDefinition,
   jsonResult,
   READ_ONLY_ANNOTATIONS,
-  WRITE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
 import { GitHubClient } from '../client.js';
 import { withValidation } from './validation.js';
@@ -125,85 +124,6 @@ const getFileContentsTool: Tool = {
   ],
 };
 
-const createOrUpdateFileTool: Tool = {
-  name: 'createOrUpdateFile',
-  description: 'Creates a new file or updates an existing one with a commit.',
-  annotations: WRITE_ANNOTATIONS,
-  _meta: { [META_KEYS.DEFER_LOADING]: true },
-  keywords: ['github', 'file', 'create', 'update', 'write', 'commit'],
-  example:
-    'const { commit_sha } = await github.createOrUpdateFile({ owner: "octocat", repo: "hello", path: "docs/x.md", content: "# Hi", message: "add doc" })',
-  inputSchema: {
-    type: 'object',
-    properties: {
-      owner: { type: 'string', description: 'Repository owner (user or org)' },
-      repo: { type: 'string', description: 'Repository name' },
-      path: { type: 'string', description: 'File path from the repository root' },
-      content: {
-        type: 'string',
-        description: 'File content (UTF-8); an empty string creates an empty file',
-      },
-      message: { type: 'string', description: 'Commit message' },
-      branch: {
-        type: 'string',
-        description: "Target branch; default is the repo's default branch",
-      },
-      sha: {
-        type: 'string',
-        description:
-          'Blob SHA of the file being replaced — required when updating an existing file; the worker fetches it automatically if omitted',
-      },
-    },
-    required: ['owner', 'repo', 'path', 'message'],
-  },
-  outputSchema: {
-    type: 'object',
-    properties: {
-      success: { type: 'boolean' },
-      commit_sha: { type: 'string' },
-      path: { type: 'string' },
-      html_url: { type: 'string' },
-      error: { type: 'string' },
-    },
-    required: ['success'],
-  },
-  inputExamples: [
-    {
-      description: 'Minimal: create a new file on the default branch',
-      input: {
-        owner: 'octocat',
-        repo: 'hello-world',
-        path: 'NOTES.md',
-        content: '# Notes',
-        message: 'Add notes',
-      },
-    },
-    {
-      description: 'Partial: create a file on a specific branch',
-      input: {
-        owner: 'octocat',
-        repo: 'hello-world',
-        path: 'docs/guide.md',
-        content: '# Guide',
-        message: 'Add guide',
-        branch: 'docs',
-      },
-    },
-    {
-      description: 'Full: update an existing file with its blob SHA',
-      input: {
-        owner: 'octocat',
-        repo: 'hello-world',
-        path: 'README.md',
-        content: '# Hello World (updated)',
-        message: 'Update README',
-        branch: 'main',
-        sha: 'a1b2c3d4',
-      },
-    },
-  ],
-};
-
 /**
  * Builds the repository-content tool definitions for the GitHub worker.
  * @param client - GitHub client instance (null when the service is not configured)
@@ -243,22 +163,6 @@ export function createRepositoryTools(client: GitHubClient | null): ToolDefiniti
           sha: result.sha,
           size: result.size,
         });
-      }),
-    },
-    {
-      tool: createOrUpdateFileTool,
-      handler: withValidation(client, async (c, params) => {
-        const { owner, repo, ...rest } = params as {
-          owner: string;
-          repo: string;
-          path: string;
-          content?: string;
-          message: string;
-          branch?: string;
-          sha?: string;
-        };
-        const result = await c.createOrUpdateFile(owner, repo, rest);
-        return jsonResult(result);
       }),
     },
   ];

@@ -10,13 +10,11 @@ import type { GitHubClient } from '../client.js';
 type MockClient = {
   getTree: Mock;
   getFileContents: Mock;
-  createOrUpdateFile: Mock;
 };
 
 const createMockClient = (): MockClient => ({
   getTree: vi.fn(),
   getFileContents: vi.fn(),
-  createOrUpdateFile: vi.fn(),
 });
 
 const findHandler = (tools: ReturnType<typeof createRepositoryTools>, name: string) =>
@@ -36,31 +34,24 @@ describe('repository-tools', () => {
     vi.clearAllMocks();
   });
 
-  it('exposes exactly the 3 expected tools, all deferred', () => {
+  it('exposes exactly the 2 expected tools, all deferred', () => {
     const tools = createRepositoryTools(null);
-    expect(tools.map((t) => t.tool.name)).toEqual([
-      'getTree',
-      'getFileContents',
-      'createOrUpdateFile',
-    ]);
+    expect(tools.map((t) => t.tool.name)).toEqual(['getTree', 'getFileContents']);
     expect(tools.every((t) => t.tool._meta![META_KEYS.DEFER_LOADING] === true)).toBe(true);
   });
 
   describe('unconfigured client', () => {
-    it.each(['getTree', 'getFileContents', 'createOrUpdateFile'])(
-      'returns not-configured error for %s',
-      async (name) => {
-        const handler = findHandler(createRepositoryTools(null), name);
-        const result = await handler({
-          owner: 'octocat',
-          repo: 'hello-world',
-          path: 'README.md',
-          content: 'x',
-          message: 'm',
-        });
-        expect(result).toEqual(notConfigured);
-      }
-    );
+    it.each(['getTree', 'getFileContents'])('returns not-configured error for %s', async (name) => {
+      const handler = findHandler(createRepositoryTools(null), name);
+      const result = await handler({
+        owner: 'octocat',
+        repo: 'hello-world',
+        path: 'README.md',
+        content: 'x',
+        message: 'm',
+      });
+      expect(result).toEqual(notConfigured);
+    });
   });
 
   describe('getTree', () => {
@@ -196,95 +187,6 @@ describe('repository-tools', () => {
 
       expect(result).toEqual({
         content: [{ type: 'text', text: 'Error: Path is a directory, not a file' }],
-        isError: true,
-      });
-    });
-  });
-
-  describe('createOrUpdateFile', () => {
-    it('passes required params and returns the commit summary', async () => {
-      const client = createMockClient();
-      client.createOrUpdateFile.mockResolvedValue({
-        commit_sha: 'commit1',
-        path: 'NOTES.md',
-        html_url: 'https://github.com/octocat/hello-world/blob/main/NOTES.md',
-      });
-      const handler = findHandler(
-        createRepositoryTools(client as unknown as GitHubClient),
-        'createOrUpdateFile'
-      );
-
-      const result = await handler({
-        owner: 'octocat',
-        repo: 'hello-world',
-        path: 'NOTES.md',
-        content: '# Notes',
-        message: 'Add notes',
-      });
-
-      expect(result).toEqual(
-        json({
-          commit_sha: 'commit1',
-          path: 'NOTES.md',
-          html_url: 'https://github.com/octocat/hello-world/blob/main/NOTES.md',
-        })
-      );
-      expect(client.createOrUpdateFile).toHaveBeenCalledWith('octocat', 'hello-world', {
-        path: 'NOTES.md',
-        content: '# Notes',
-        message: 'Add notes',
-      });
-    });
-
-    it('forwards optional branch and sha', async () => {
-      const client = createMockClient();
-      client.createOrUpdateFile.mockResolvedValue({
-        commit_sha: 'c2',
-        path: 'README.md',
-        html_url: 'u',
-      });
-      const handler = findHandler(
-        createRepositoryTools(client as unknown as GitHubClient),
-        'createOrUpdateFile'
-      );
-
-      await handler({
-        owner: 'octocat',
-        repo: 'hello-world',
-        path: 'README.md',
-        content: '# Updated',
-        message: 'Update README',
-        branch: 'main',
-        sha: 'a1b2c3',
-      });
-
-      expect(client.createOrUpdateFile).toHaveBeenCalledWith('octocat', 'hello-world', {
-        path: 'README.md',
-        content: '# Updated',
-        message: 'Update README',
-        branch: 'main',
-        sha: 'a1b2c3',
-      });
-    });
-
-    it('returns an error result on a 422 validation error', async () => {
-      const client = createMockClient();
-      client.createOrUpdateFile.mockRejectedValue({ status: 422, message: 'sha required' });
-      const handler = findHandler(
-        createRepositoryTools(client as unknown as GitHubClient),
-        'createOrUpdateFile'
-      );
-
-      const result = await handler({
-        owner: 'octocat',
-        repo: 'hello-world',
-        path: 'README.md',
-        content: 'x',
-        message: 'm',
-      });
-
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: GitHub validation error: sha required' }],
         isError: true,
       });
     });

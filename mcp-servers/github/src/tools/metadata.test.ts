@@ -39,7 +39,6 @@ const EXPECTED_TOOL_NAMES = [
   'getCommitDiff',
   'getTree',
   'getFileContents',
-  'createOrUpdateFile',
   'listWorkflowRuns',
   'getWorkflowRun',
   'getRunLogs',
@@ -70,8 +69,8 @@ const USER_SCOPED_TOOL_NAMES = [
 ];
 
 describe('GitHub tool metadata', () => {
-  it('exports exactly 46 tools', () => {
-    expect(ALL_TOOLS).toHaveLength(46);
+  it('exports exactly 45 tools', () => {
+    expect(ALL_TOOLS).toHaveLength(45);
   });
 
   it('exports all expected tool names with no extras', () => {
