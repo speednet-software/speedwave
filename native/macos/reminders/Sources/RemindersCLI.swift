@@ -351,7 +351,7 @@ private func alarm(from item: Any, label: String, timeZone: TimeZone) throws -> 
         return EKAlarm(absoluteDate: date)
     }
     if let minutes = fields["offset_minutes"] as? Int {
-        return EKAlarm(relativeOffset: TimeInterval(minutes * 60))
+        return EKAlarm(relativeOffset: TimeInterval(minutes) * 60)
     }
     if let location = fields["location"] as? [String: Any] {
         return try locationAlarm(from: location, label: label)
@@ -390,16 +390,36 @@ private func saveReminder(_ reminder: EKReminder, store: EKEventStore) throws {
     }
 }
 
+func alarmSaveError(_ error: Error) -> Error {
+    let nsError = error as NSError
+    guard nsError.domain == EKErrorDomain else { return error }
+    switch EKError.Code(rawValue: nsError.code) {
+    case .reminderLocationsNotSupported?:
+        return CLIError.invalid(
+            "This reminder list's account does not support location alarms. Use a list in iCloud or on this Mac, or an at/offset_minutes alarm"
+        )
+    case .alarmProximityNotSupported?:
+        return CLIError.invalid(
+            "This reminder list's account does not support arrive/leave triggers on location alarms. Use a list in iCloud or on this Mac, or an at/offset_minutes alarm"
+        )
+    default:
+        return error
+    }
+}
+
 private func alarmDict(_ alarm: EKAlarm, timeZone: TimeZone) -> [String: Any]? {
     if alarm.type == .email || alarm.type == .procedure {
         return nil
     }
     if let place = alarm.structuredLocation {
-        guard let coordinate = place.geoLocation?.coordinate, let on = proximityName(alarm.proximity) else {
+        guard let name = place.title, !name.isEmpty,
+              let coordinate = place.geoLocation?.coordinate,
+              let on = proximityName(alarm.proximity)
+        else {
             return nil
         }
         var location: [String: Any] = [
-            "name": place.title ?? "",
+            "name": name,
             "latitude": coordinate.latitude,
             "longitude": coordinate.longitude,
             "on": on,
@@ -420,23 +440,6 @@ private func proximityName(_ proximity: EKAlarmProximity) -> String? {
     case .enter: return "arrive"
     case .leave: return "leave"
     default: return nil
-    }
-}
-
-func alarmSaveError(_ error: Error) -> Error {
-    let nsError = error as NSError
-    guard nsError.domain == EKErrorDomain else { return error }
-    switch EKError.Code(rawValue: nsError.code) {
-    case .reminderLocationsNotSupported?:
-        return CLIError.invalid(
-            "This reminder list's account does not support location alarms. Use a list in iCloud or on this Mac, or an at/offset_minutes alarm"
-        )
-    case .alarmProximityNotSupported?:
-        return CLIError.invalid(
-            "This reminder list's account does not support arrive/leave triggers on location alarms. Use a list in iCloud or on this Mac, or an at/offset_minutes alarm"
-        )
-    default:
-        return error
     }
 }
 

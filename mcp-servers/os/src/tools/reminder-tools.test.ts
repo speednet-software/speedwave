@@ -725,6 +725,7 @@ describe('reminder-tools', () => {
       ['an invalid at', [{ at: 'tomorrow' }], 'INVALID_DATE'],
       ['a non-string at', [{ at: 20260615 }], 'INVALID_DATE'],
       ['a fractional offset', [{ offset_minutes: -0.5 }], 'INVALID_TYPE'],
+      ['an offset beyond one year', [{ offset_minutes: 525601 }], 'INVALID_TYPE'],
       ['a string offset', [{ offset_minutes: '-30' }], 'INVALID_TYPE'],
       ['a location that is not an object', [{ location: 'Biuro' }], 'INVALID_TYPE'],
       ['a location without a name', [{ location: { ...office, name: '' } }], 'INVALID_TYPE'],
