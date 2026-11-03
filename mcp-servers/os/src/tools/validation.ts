@@ -100,6 +100,9 @@ const CONTROL_CHARS_BODY = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/;
 // eslint-disable-next-line no-control-regex
 const CONTROL_CHARS_STRICT = /[\x00-\x1f\x7f]/;
 
+const ALARM_VARIANTS = ['at', 'offset_minutes', 'location'];
+const ALARM_PROXIMITIES = ['arrive', 'leave'];
+
 /**
  * Validate string fields for max length and control characters.
  * @param params - Tool input parameters to validate.
@@ -497,11 +500,6 @@ export function isValidISO8601(value: unknown): value is string {
   return !isNaN(date.getTime());
 }
 
-type Validation = { valid: true } | { valid: false; error: ToolResult };
-
-const ALARM_VARIANTS = ['at', 'offset_minutes', 'location'];
-const ALARM_PROXIMITIES = ['arrive', 'leave'];
-
 /**
  * Validate reminder alarm arrays: each element has exactly one of `at`, `offset_minutes`, `location`.
  * The Swift side parses the same format in `RemindersCLI.swift` (`alarm(from:label:timeZone:)`).
@@ -509,11 +507,11 @@ const ALARM_PROXIMITIES = ['arrive', 'leave'];
  * @param fields - List of alarm array field names to check.
  * @param nullable - Fields for which an explicit null is accepted (remove all alarms).
  */
-export function validateAlarmFields(
+function validateAlarmFields(
   params: Record<string, unknown>,
   fields: string[],
   nullable: string[] = []
-): Validation {
+): { valid: true } | { valid: false; error: ToolResult } {
   for (const field of fields) {
     const value = params[field];
     if (value === undefined) continue;
@@ -537,17 +535,10 @@ export function validateAlarmFields(
   return { valid: true };
 }
 
-function alarmError(name: string, received: unknown, nextStep: string, code: string): Validation {
-  return { valid: false, error: teachingToolResult({ paramName: name, received, nextStep }, code) };
-}
-
-function asObject(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
-
-function validateAlarm(value: unknown, name: string): Validation {
+function validateAlarm(
+  value: unknown,
+  name: string
+): { valid: true } | { valid: false; error: ToolResult } {
   const alarm = asObject(value);
   if (!alarm) {
     return alarmError(name, value, `Pass ${name} as an object.`, 'INVALID_TYPE');
@@ -584,7 +575,10 @@ function validateAlarm(value: unknown, name: string): Validation {
   return validateAlarmLocation(alarm.location, `${name}.location`);
 }
 
-function validateAlarmLocation(value: unknown, name: string): Validation {
+function validateAlarmLocation(
+  value: unknown,
+  name: string
+): { valid: true } | { valid: false; error: ToolResult } {
   const location = asObject(value);
   if (!location) {
     return alarmError(name, value, `Pass ${name} as an object.`, 'INVALID_TYPE');
@@ -635,4 +629,19 @@ function validateAlarmLocation(value: unknown, name: string): Validation {
     );
   }
   return { valid: true };
+}
+
+function asObject(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function alarmError(
+  name: string,
+  received: unknown,
+  nextStep: string,
+  code: string
+): { valid: true } | { valid: false; error: ToolResult } {
+  return { valid: false, error: teachingToolResult({ paramName: name, received, nextStep }, code) };
 }
