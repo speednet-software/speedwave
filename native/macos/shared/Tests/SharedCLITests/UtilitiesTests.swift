@@ -137,9 +137,15 @@ final class SharedCLITests: XCTestCase {
     }
 
     func testParseHexColorRejectsAnythingButSixHexDigitsAfterHash() {
-        for bad in ["", "#", "#fff", "123456", "#1234567", "#12345g", "red", " #123456", "#+12345"] {
+        for bad in ["", "#", "#fff", "123456", "#1234567", "#12345g", "red", " #123456", "#+12345", "#\u{FF11}23456"] {
             XCTAssertNil(parseHexColor(bad), bad)
         }
+    }
+
+    func testParseHexColorKeepsEveryChannelWithinSRGBRange() throws {
+        let color = try XCTUnwrap(parseHexColor("#ffffff"))
+        let components = try XCTUnwrap(color.components)
+        XCTAssertEqual(Array(components.prefix(3)), [1.0, 1.0, 1.0])
     }
 
     func testHexColorClampsWideGamutValues() {
