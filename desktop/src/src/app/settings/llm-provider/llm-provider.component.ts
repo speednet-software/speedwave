@@ -1020,11 +1020,9 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
         project,
         apiKey,
       });
-      if (needsRestart) this.projectState.requestRestartFor(project);
       this.anthropicApiKeySaved.set(true);
       this.anthropicApiKeyInput.set('');
-      await this.loadAuthStatus();
-      await this.loadConfig();
+      await this.applyAnthropicKeyChange(project, needsRestart);
       setTimeout(() => {
         this.anthropicApiKeySaved.set(false);
         this.cdr.markForCheck();
@@ -1043,13 +1041,18 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     this.errorOccurred.emit('');
     try {
       const needsRestart = await this.tauri.invoke<boolean>('delete_api_key', { project });
-      if (needsRestart) this.projectState.requestRestartFor(project);
-      await this.loadAuthStatus();
-      await this.loadConfig();
+      await this.applyAnthropicKeyChange(project, needsRestart);
     } catch (e: unknown) {
       this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
     }
     this.cdr.markForCheck();
+  }
+
+  private async applyAnthropicKeyChange(project: string, needsRestart: boolean): Promise<void> {
+    await this.loadAuthStatus();
+    if (!needsRestart) return;
+    this.projectState.requestRestartFor(project);
+    await this.loadConfig();
   }
 
   private oauthDoneInFlight = false;

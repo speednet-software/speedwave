@@ -3272,15 +3272,40 @@ describe('LlmProviderComponent', () => {
       calls.length = 0;
       await component.saveAnthropicApiKey();
       expect(requestSpy.mock.calls).toEqual(expectedRequests);
-      expect(calls).toContain('get_llm_config');
+      expect(calls.includes('get_llm_config')).toBe(needsRestart);
 
       requestSpy.mockClear();
       calls.length = 0;
       await component.deleteAnthropicApiKey();
       expect(requestSpy.mock.calls).toEqual(expectedRequests);
-      expect(calls).toContain('get_llm_config');
+      expect(calls.includes('get_llm_config')).toBe(needsRestart);
     }
   );
+
+  it('asks for the restart after the saved key settles a project without a provider', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'save_api_key') return true;
+      if (cmd === 'get_auth_status') {
+        return {
+          api_key_configured: true,
+          oauth_authenticated: false,
+          needs_anthropic_auth: false,
+          provider_configured: true,
+        };
+      }
+      return undefined;
+    };
+    const projectState = TestBed.inject(ProjectStateService);
+    projectState.activeProject.set('proj');
+    projectState.status.set('no_provider');
+    fixture.componentRef.setInput('activeProject', 'proj');
+    component.anthropicApiKeyInput.set('sk-ant-test');
+
+    await component.saveAnthropicApiKey();
+
+    expect(projectState.status()).toBe('ready');
+    expect(projectState.needsRestart).toBe(true);
+  });
 
   it('refreshes auth status when the oauth terminal completes', async () => {
     let statusCalls = 0;

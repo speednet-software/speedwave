@@ -578,6 +578,7 @@ export class ProjectStateService {
     }
     if (this.status() === 'ready' || this.status() === 'auth_required') {
       this.pendingRestartOnSettle = false;
+      this.restartRequests += 1;
       this.needsRestart = true;
     }
   }
