@@ -38,6 +38,7 @@ import {
 import { FileAttachmentService } from '../../services/file-attachment.service';
 import type { ChatAttachment } from '../../models/chat';
 import { ComposerAttachments } from './composer-attachments';
+import { AttachMenuComponent, type PickedFiles } from './attach-menu.component';
 
 const SLASH_TRIGGER = /^(\s*)\/([^\s/]*)$/;
 
@@ -49,7 +50,7 @@ const PLAN_MODE_PREFIX =
   '[Plan mode] Produce a plan only — do NOT modify files, do NOT run tools that mutate state. Then ask me to confirm before acting.\n\n';
 
 /**
- * Stateless composer: textarea, slash button, slash-menu popover, send button. Enter submits, Shift+Enter
+ * Stateless composer: attach menu, textarea, slash button, slash-menu popover, send button. Enter submits, Shift+Enter
  * newlines, `/` opens the slash menu; ADR-045: while `streaming`, submit emits `queueRequested`, not `submitted`.
  */
 @Component({
@@ -65,6 +66,7 @@ const PLAN_MODE_PREFIX =
     FileDropDirective,
     ResizeHandleDirective,
     ModelSelectorComponent,
+    AttachMenuComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'relative block min-w-0' },
@@ -162,7 +164,8 @@ const PLAN_MODE_PREFIX =
           class="h-0.5 w-8 rounded-full bg-[var(--line-strong)] opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
         ></span>
       </div>
-      <div class="px-3 py-2.5">
+      <div class="flex items-start gap-2 px-3 py-2.5">
+        <app-attach-menu [disabled]="disabled()" (picked)="onPicked($event)" />
         <textarea
           #textarea
           data-testid="chat-input"
@@ -172,7 +175,7 @@ const PLAN_MODE_PREFIX =
           cdkOverlayOrigin
           #overlayOrigin="cdkOverlayOrigin"
           aria-label="Compose message"
-          class="block w-full resize-none border-0 bg-transparent p-0 text-[14px] leading-relaxed text-[var(--ink)] placeholder-[var(--ink-mute)] focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+          class="block w-full min-w-0 resize-none border-0 bg-transparent p-0 text-[14px] leading-relaxed text-[var(--ink)] placeholder-[var(--ink-mute)] focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
           [placeholder]="effectivePlaceholder()"
           [formControl]="text"
           (keydown.enter)="onEnter($event)"
@@ -587,6 +590,16 @@ export class ComposerComponent implements AfterViewInit {
   }
 
   /**
+   * Picked-files handler for the "+" menu (SPEED-74): attaches like a drop, then returns the caret to the
+   * field without resetting a height the user dragged, as a drop or paste leaves it.
+   * @param picked - Files the dialog returned and the menu's notices about refused ones.
+   */
+  onPicked(picked: PickedFiles): void {
+    void this.ingest({ files: picked.files, folders: [] }, picked.notices);
+    queueMicrotask(() => this.textareaRef?.nativeElement?.focus());
+  }
+
+  /**
    * Removes one attachment by id.
    * @param id - Attachment id from the view-model.
    */
@@ -617,12 +630,16 @@ export class ComposerComponent implements AfterViewInit {
     return '';
   });
 
-  private async ingest({ files, folders }: DroppedItems): Promise<void> {
+  private async ingest(
+    { files, folders }: DroppedItems,
+    notices: readonly string[] = []
+  ): Promise<void> {
     const draft = this.attachmentDraft();
     draft.error.set('');
     if (folders.length > 0) {
       draft.reportError(`Folders cannot be attached: ${folders.join(', ')}`);
     }
+    for (const notice of notices) draft.reportError(notice);
     if (files.length === 0) return;
     const project = this.projectState.activeProject();
     if (!project) {
