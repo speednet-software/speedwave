@@ -64,6 +64,7 @@ pub const IMAGES: &[ImageDef] = &[
             "containers/entrypoint.sh",
             "containers/install-claude.sh",
             "containers/osc52-copy.sh",
+            "containers/git-transport.sh",
         ],
     },
     ImageDef {
