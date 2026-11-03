@@ -32,12 +32,17 @@ describe('Context7 declared-parameter guard', () => {
         expect(getContext).not.toHaveBeenCalled();
       });
 
-      it('declares every argument its input examples use', () => {
+      it('runs every input example through the handler without a parameter rejection', async () => {
+        const { client } = makeStubClient();
+        const tool = createToolDefinitions(client).find((d) => d.tool.name === def.tool.name)!;
         const declared = Object.keys(def.tool.inputSchema.properties);
         for (const example of def.tool.inputExamples ?? []) {
           expect(declared, example.description).toEqual(
             expect.arrayContaining(Object.keys(example.input))
           );
+          const text = textOf(await tool.handler(example.input));
+          expect(text, example.description).not.toContain('does not accept');
+          expect(text, example.description).not.toMatch(/requires \w+/);
         }
       });
     }

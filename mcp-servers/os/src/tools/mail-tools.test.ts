@@ -38,7 +38,7 @@ vi.mock('../platform-runner.js', () => ({
 import { runCommand } from '../platform-runner.js';
 
 /** The mail tools as the server exposes them, behind the declared-parameter guard of `createToolDefinitions`. */
-function createMailTools() {
+function guardedMailTools() {
   return createToolDefinitions().filter((d) => d.tool._meta?.[META_KEYS.OS_CATEGORY] === 'mail');
 }
 
@@ -99,7 +99,7 @@ describe('mail-tools', () => {
     });
 
     it('tells Claude every mailbox carries its unread count', () => {
-      const tool = createMailTools().find((t) => t.tool.name === 'listMailboxes')!.tool;
+      const tool = guardedMailTools().find((t) => t.tool.name === 'listMailboxes')!.tool;
       const mailbox = (tool.outputSchema as any).properties.mailboxes.items.properties;
 
       expect(mailbox.unread_count.type).toBe('number');
@@ -129,7 +129,7 @@ describe('mail-tools', () => {
 
     it('passes the page and the unread and flagged filters through to mail-cli', async () => {
       vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { emails: [], total: 0 } });
-      const tool = createMailTools().find((t) => t.tool.name === 'listEmails')!;
+      const tool = guardedMailTools().find((t) => t.tool.name === 'listEmails')!;
       const input = {
         mailbox: 'INBOX',
         account: 'iCloud',
@@ -211,7 +211,7 @@ describe('mail-tools', () => {
     });
 
     it('declares the truncation flags of the headers and the source', () => {
-      const tool = createMailTools().find((t) => t.tool.name === 'getEmail')!;
+      const tool = guardedMailTools().find((t) => t.tool.name === 'getEmail')!;
       const email = (tool.tool.outputSchema as any).properties.email.properties;
       const input = tool.tool.inputSchema.properties as Record<string, { type: string }>;
 
@@ -250,7 +250,7 @@ describe('mail-tools', () => {
 
     it('passes the filters, the page and a Unicode query with quotes through to mail-cli', async () => {
       vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { emails: [], total: 0 } });
-      const tool = createMailTools().find((t) => t.tool.name === 'searchEmails')!;
+      const tool = guardedMailTools().find((t) => t.tool.name === 'searchEmails')!;
       const input = {
         query: 'Zażółć "東京" \\ 🚀',
         mailbox: 'INBOX',
@@ -290,13 +290,13 @@ describe('mail-tools', () => {
         (call[2] as Record<string, unknown>).script_timeout_ms as number;
       expect(scriptMs(slow)).toBeGreaterThan(scriptMs(fast));
       expect(slow[3]).toBeGreaterThan(fast[3]!);
-      const tool = createMailTools().find((t) => t.tool.name === 'searchEmails')!;
+      const tool = guardedMailTools().find((t) => t.tool.name === 'searchEmails')!;
       expect(tool.tool._meta?.[META_KEYS.TIMEOUT_MS]).toBeGreaterThan(slow[3]!);
       expect(tool.tool._meta?.[META_KEYS.TIMEOUT_CLASS]).toBe('long');
     });
 
     it("declares the long timeout class on every tool whose budget does not fit the hub's standard execute_code limit", () => {
-      const tooLong = createMailTools().filter(
+      const tooLong = guardedMailTools().filter(
         (t) => (t.tool._meta?.[META_KEYS.TIMEOUT_MS] as number) >= TIMEOUTS.EXECUTION_MS
       );
 
@@ -312,7 +312,7 @@ describe('mail-tools', () => {
     });
 
     it('tells Claude that a body search is slow', () => {
-      const tool = createMailTools().find((t) => t.tool.name === 'searchEmails')!;
+      const tool = guardedMailTools().find((t) => t.tool.name === 'searchEmails')!;
       const schema = tool.tool.inputSchema as {
         properties: Record<string, { description: string }>;
       };
@@ -391,7 +391,7 @@ describe('mail-tools', () => {
     });
 
     it('declares recipient and requires no parameter', () => {
-      const tool = createMailTools().find((t) => t.tool.name === 'searchEmails')!.tool;
+      const tool = guardedMailTools().find((t) => t.tool.name === 'searchEmails')!.tool;
       const schema = tool.inputSchema as {
         properties: Record<string, { type: string; description: string }>;
         required?: string[];
@@ -427,7 +427,7 @@ describe('mail-tools', () => {
     });
 
     it('tells Claude a search without a mailbox skips Trash and Junk', () => {
-      const tool = createMailTools().find((t) => t.tool.name === 'searchEmails')!.tool;
+      const tool = guardedMailTools().find((t) => t.tool.name === 'searchEmails')!.tool;
       const schema = tool.inputSchema as { properties: Record<string, { description: string }> };
 
       expect(tool.description).toMatch(/without mailbox/i);
@@ -481,7 +481,7 @@ describe('mail-tools', () => {
     });
 
     it('promises no HTML body and no attachments', () => {
-      const tool = createMailTools().find((t) => t.tool.name === 'sendEmail')!.tool;
+      const tool = guardedMailTools().find((t) => t.tool.name === 'sendEmail')!.tool;
       const input = Object.keys(tool.inputSchema.properties ?? {});
 
       expect(input).not.toContain('html_body');
@@ -492,7 +492,7 @@ describe('mail-tools', () => {
 
     it('warns that Mail shows scripted text as a quote only where a script sets the text', () => {
       const description = (name: string) =>
-        createMailTools().find((t) => t.tool.name === name)!.tool.description;
+        guardedMailTools().find((t) => t.tool.name === name)!.tool.description;
 
       for (const name of ['sendEmail', 'replyToEmail', 'saveDraft']) {
         expect(description(name), name).toMatch(/as a quote.*tell the user/);
@@ -504,7 +504,7 @@ describe('mail-tools', () => {
 
     it('says a reply goes to the Reply-To or sender and a reply or forward that Mail makes otherwise is not sent', () => {
       const description = (name: string) =>
-        createMailTools().find((t) => t.tool.name === name)!.tool.description;
+        guardedMailTools().find((t) => t.tool.name === name)!.tool.description;
 
       expect(description('replyToEmail')).toContain('Reply-To');
       expect(description('replyToEmail')).toMatch(/reply_all.*own addresses/);
@@ -529,7 +529,7 @@ describe('mail-tools', () => {
 
     it('sends from the account given and tells to show the user the sender before asking', async () => {
       vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: SEND_PREVIEW });
-      const tool = createMailTools().find((t) => t.tool.name === 'sendEmail')!.tool;
+      const tool = guardedMailTools().find((t) => t.tool.name === 'sendEmail')!.tool;
 
       await handleSendEmail({ to: 'a@x', subject: 's', body: 'b', account: 'Work' });
 
@@ -613,7 +613,7 @@ describe('mail-tools', () => {
 
     it('passes cc and bcc to mail-cli, which adds them to the recipients Mail chose', async () => {
       vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: REPLY_PREVIEW });
-      const tool = createMailTools().find((t) => t.tool.name === 'replyToEmail')!.tool;
+      const tool = guardedMailTools().find((t) => t.tool.name === 'replyToEmail')!.tool;
 
       await handleReplyToEmail({ id: MAIL_ID, body: 'Ok', cc: 'ewa@x', bcc: 'boss@x' });
 
@@ -733,7 +733,7 @@ describe('mail-tools', () => {
     it.each(['forwardEmail', 'redirectEmail'])(
       '%s takes no comment, since any change to a forward drops its quote and attachments',
       async (name) => {
-        const tool = createMailTools().find((t) => t.tool.name === name)!;
+        const tool = guardedMailTools().find((t) => t.tool.name === name)!;
 
         expect(tool.tool.inputSchema.properties).not.toHaveProperty('comment');
         expect(tool.tool.outputSchema?.properties).not.toHaveProperty('comment');
@@ -747,7 +747,7 @@ describe('mail-tools', () => {
 
   describe('createMailTools', () => {
     it('returns 23 tool definitions', () => {
-      const tools = createMailTools();
+      const tools = guardedMailTools();
 
       expect(tools).toHaveLength(23);
       expect(tools.map((t) => t.tool.name)).toEqual([
@@ -778,7 +778,7 @@ describe('mail-tools', () => {
     });
 
     it('all tools have handlers', () => {
-      const tools = createMailTools();
+      const tools = guardedMailTools();
       for (const t of tools) {
         expect(t.handler).toBeTypeOf('function');
       }
@@ -800,14 +800,14 @@ describe('mail-tools', () => {
     });
 
     it('listMailRules is read-only', () => {
-      const tool = createMailTools().find((t) => t.tool.name === 'listMailRules')!;
+      const tool = guardedMailTools().find((t) => t.tool.name === 'listMailRules')!;
 
       expect(tool.tool.annotations?.readOnlyHint).toBe(true);
       expect(tool.tool.annotations?.destructiveHint).toBe(false);
     });
 
     it('no mail tool creates, changes or deletes a rule', () => {
-      const ruleTools = createMailTools().filter((t) =>
+      const ruleTools = guardedMailTools().filter((t) =>
         /rule/i.test(`${t.tool.name} ${t.tool.keywords?.join(' ')}`)
       );
 
@@ -816,7 +816,7 @@ describe('mail-tools', () => {
     });
 
     it('listMailRules takes no arguments', async () => {
-      const tool = createMailTools().find((t) => t.tool.name === 'listMailRules')!;
+      const tool = guardedMailTools().find((t) => t.tool.name === 'listMailRules')!;
 
       const result = await tool.handler({ name: 'Forward all', enabled: false });
 
@@ -861,7 +861,7 @@ describe('mail-tools', () => {
     });
 
     it('is a non-destructive write', () => {
-      const tool = createMailTools().find((t) => t.tool.name === 'checkMail')!;
+      const tool = guardedMailTools().find((t) => t.tool.name === 'checkMail')!;
 
       expect(tool.tool.annotations?.readOnlyHint).toBe(false);
       expect(tool.tool.annotations?.destructiveHint).toBe(false);
@@ -871,7 +871,7 @@ describe('mail-tools', () => {
       vi.mocked(runCommand).mockRejectedValue(
         new Error("mail.check_mail failed: MAIL_ACCOUNT_NOT_FOUND: Account 'Nope' not found.")
       );
-      const tool = createMailTools().find((t) => t.tool.name === 'checkMail')!;
+      const tool = guardedMailTools().find((t) => t.tool.name === 'checkMail')!;
 
       const result = await tool.handler({ account: 'Nope' });
 
@@ -887,7 +887,7 @@ describe('mail-tools', () => {
       '%s passes mailbox and account through to mail-cli',
       async (name) => {
         vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { emails: [] } });
-        const tool = createMailTools().find((t) => t.tool.name === name)!;
+        const tool = guardedMailTools().find((t) => t.tool.name === name)!;
         const input = { ...validInput(name), mailbox: 'Drafts', account: 'Google' };
 
         await tool.handler(input);
@@ -899,7 +899,7 @@ describe('mail-tools', () => {
     it.each(['listEmails', 'searchEmails'])(
       '%s rejects an account with control characters',
       async (name) => {
-        const tool = createMailTools().find((t) => t.tool.name === name)!;
+        const tool = guardedMailTools().find((t) => t.tool.name === name)!;
 
         const result = await tool.handler({
           ...validInput(name),
@@ -916,12 +916,12 @@ describe('mail-tools', () => {
 
   describe('mail client choice', () => {
     it('no mail tool offers a client parameter', () => {
-      for (const t of createMailTools()) {
+      for (const t of guardedMailTools()) {
         expect(Object.keys(t.tool.inputSchema.properties), t.tool.name).not.toContain('client');
       }
     });
 
-    it.each(createMailTools().map((t) => [t.tool.name, t] as const))(
+    it.each(guardedMailTools().map((t) => [t.tool.name, t] as const))(
       '%s rejects a client argument without calling the native CLI',
       async (_name, t) => {
         const result = await t.handler({ ...validInput(t.tool.name), client: 'outlook' });
@@ -935,7 +935,7 @@ describe('mail-tools', () => {
     );
 
     it('detectMailClients declares the supported flag and the instructions of an unsupported client', () => {
-      const tool = createMailTools().find((t) => t.tool.name === 'detectMailClients')!;
+      const tool = guardedMailTools().find((t) => t.tool.name === 'detectMailClients')!;
       const item = (tool.tool.outputSchema as any).properties.clients.items.properties;
 
       expect(Object.keys(item).sort()).toEqual(['instructions', 'name', 'supported']);
@@ -948,7 +948,7 @@ describe('mail-tools', () => {
     it.each(['listEmails', 'searchEmails'])(
       '%s rows carry attachment_count, which may include embedded images, with getEmail for the list',
       (name) => {
-        const tool = createMailTools().find((t) => t.tool.name === name)!.tool;
+        const tool = guardedMailTools().find((t) => t.tool.name === name)!.tool;
         const row = (tool.outputSchema as any).properties.emails.items.properties;
 
         expect(row.attachment_count.type).toBe('number');
@@ -961,9 +961,9 @@ describe('mail-tools', () => {
 
   describe('flags on the read side', () => {
     const flagEnum = (name: string, path: (schema: any) => any) =>
-      path(createMailTools().find((t) => t.tool.name === name)!.tool.outputSchema).enum;
+      path(guardedMailTools().find((t) => t.tool.name === name)!.tool.outputSchema).enum;
     const flagEmailsColors = (
-      createMailTools().find((t) => t.tool.name === 'flagEmails')!.tool.inputSchema as any
+      guardedMailTools().find((t) => t.tool.name === 'flagEmails')!.tool.inputSchema as any
     ).properties.flag.enum;
 
     it.each([
@@ -978,7 +978,7 @@ describe('mail-tools', () => {
     it.each(['listEmails', 'searchEmails'])(
       '%s declares flagged_only and mentions it in its description',
       (name) => {
-        const tool = createMailTools().find((t) => t.tool.name === name)!.tool;
+        const tool = guardedMailTools().find((t) => t.tool.name === name)!.tool;
         const schema = tool.inputSchema as { properties: Record<string, { type: string }> };
 
         expect(schema.properties.flagged_only.type).toBe('boolean');
@@ -1102,13 +1102,13 @@ describe('mail-tools', () => {
 
     it('covers every mail tool', () => {
       expect(Object.keys(NATIVE_OUTPUT).sort()).toEqual(
-        createMailTools()
+        guardedMailTools()
           .map((t) => t.tool.name)
           .sort()
       );
     });
 
-    it.each(createMailTools().map((t) => [t.tool.name, t] as const))(
+    it.each(guardedMailTools().map((t) => [t.tool.name, t] as const))(
       '%s declares exactly the keys it emits',
       async (name, t) => {
         vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: NATIVE_OUTPUT[name] });
@@ -1230,7 +1230,7 @@ describe('mail-tools', () => {
   });
 
   describe('time budget', () => {
-    it.each(createMailTools().map((t) => [t.tool.name, t] as const))(
+    it.each(guardedMailTools().map((t) => [t.tool.name, t] as const))(
       '%s ends the script before mail-cli is killed, and mail-cli before the hub gives up',
       async (name, t) => {
         vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: {} });
@@ -1319,7 +1319,7 @@ describe('mail-tools', () => {
     });
 
     it('is destructive and declares the confirmation and the 25-id limit', () => {
-      const tool = createMailTools().find((t) => t.tool.name === 'deleteEmails')!.tool;
+      const tool = guardedMailTools().find((t) => t.tool.name === 'deleteEmails')!.tool;
 
       expect(tool.annotations?.destructiveHint).toBe(true);
       expect(tool.annotations?.readOnlyHint).toBe(false);
@@ -1349,7 +1349,7 @@ describe('mail-tools', () => {
     const ids = (count: number): string[] =>
       Array.from({ length: count }, (_, i) => `${MAIL_ID.slice(0, -2)}${i}`);
 
-    const tool = (name: string) => createMailTools().find((t) => t.tool.name === name)!;
+    const tool = (name: string) => guardedMailTools().find((t) => t.tool.name === name)!;
 
     it.each([
       ['flagEmails without valid ids', () => handleFlagEmails({ ids: [], flag: 'red' }), 'ids'],
@@ -1405,7 +1405,7 @@ describe('mail-tools', () => {
     });
 
     it('no mail tool description tells Claude that a change needs no confirmation', () => {
-      for (const { tool: t } of createMailTools()) {
+      for (const { tool: t } of guardedMailTools()) {
         const text = [
           t.description,
           ...Object.values(t.inputSchema.properties ?? {}).map(
@@ -1422,7 +1422,7 @@ describe('mail-tools', () => {
     });
 
     it('every mail tool that changes mail without a confirm flag tells Claude to ask the user first', () => {
-      const ungatedWrites = createMailTools()
+      const ungatedWrites = guardedMailTools()
         .map((t) => t.tool)
         .filter((t) => t.annotations?.readOnlyHint === false && t.name !== 'checkMail')
         .filter(
@@ -1699,7 +1699,7 @@ describe('mail-tools', () => {
     });
 
     it('saveDraft is a non-destructive write with no confirmation flag', () => {
-      const tool = createMailTools().find((t) => t.tool.name === 'saveDraft')!.tool;
+      const tool = guardedMailTools().find((t) => t.tool.name === 'saveDraft')!.tool;
 
       expect(tool.annotations?.readOnlyHint).toBe(false);
       expect(tool.annotations?.destructiveHint).toBe(false);
@@ -1717,7 +1717,7 @@ describe('mail-tools', () => {
 
     it('listMailSignatures is read-only and reads the names through mail-cli', async () => {
       vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { signatures: ['Work'] } });
-      const tool = createMailTools().find((t) => t.tool.name === 'listMailSignatures')!;
+      const tool = guardedMailTools().find((t) => t.tool.name === 'listMailSignatures')!;
 
       const result = await handleListMailSignatures({});
 
@@ -1737,7 +1737,7 @@ describe('mail-tools', () => {
       ['saveDraft', 'save_draft'],
     ])('%s passes the chosen signature through to mail-cli', async (name, command) => {
       vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: {} });
-      const tool = createMailTools().find((t) => t.tool.name === name)!;
+      const tool = guardedMailTools().find((t) => t.tool.name === name)!;
       const input = { ...validInput(name), signature: 'Work' };
 
       const result = await tool.handler(input);
@@ -2069,7 +2069,7 @@ describe('mail-tools', () => {
       vi.mocked(runCommand).mockRejectedValue(
         cliFailure('list_emails', 'MAIL_TIMEOUT: Mail.app did not answer within 25 s.')
       );
-      const tool = createMailTools().find((t) => t.tool.name === 'listEmails')!;
+      const tool = guardedMailTools().find((t) => t.tool.name === 'listEmails')!;
 
       const result = await tool.handler({ mailbox: 'INBOX', limit: 5 });
 
@@ -2187,7 +2187,7 @@ describe('mail-tools', () => {
       vi.mocked(runCommand).mockRejectedValue(
         cliFailure('get_email', 'AppleScript error: Mail got an error: Can’t get message 1.')
       );
-      const tool = createMailTools().find((t) => t.tool.name === 'getEmail')!;
+      const tool = guardedMailTools().find((t) => t.tool.name === 'getEmail')!;
 
       const result = await tool.handler({ id: MAIL_ID });
 

@@ -1399,6 +1399,11 @@ export class GitHubClient {
     params: { path: string; content: string; message: string; branch?: string; sha?: string }
   ): Promise<{ commit_sha: string; path: string; html_url: string }> {
     this.validateRequired({ owner, repo, path: params.path, message: params.message });
+    if (typeof params.content !== 'string') {
+      throw new TeachingError(
+        `createOrUpdateFile needs 'content' as a string for '${params.path}'. Pass an empty string to create an empty file.`
+      );
+    }
     let sha = params.sha;
     if (!sha) {
       let existingData: unknown;

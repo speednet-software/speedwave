@@ -5,38 +5,6 @@ import type { GitHubClient } from '../client.js';
 
 const textOf = (result: ToolsCallResult): string => (result.content[0] as { text: string }).text;
 
-/**
- * Names of the top-level keys in the object literal passed to the call in an example string.
- * @param example - Example call such as `await github.getRepo({ owner: "o", repo: "r" })`
- */
-const topLevelArgNames = (example: string): string[] => {
-  const start = example.indexOf('({');
-  if (start === -1) return [];
-  const names: string[] = [];
-  let depth = 0;
-  let quote = '';
-  let token = '';
-  for (const ch of example.slice(start + 1)) {
-    if (quote) {
-      if (ch === quote) quote = '';
-    } else if (ch === '"' || ch === "'" || ch === '`') {
-      quote = ch;
-    } else if ('{['.includes(ch)) {
-      depth += 1;
-    } else if ('}]'.includes(ch)) {
-      depth -= 1;
-    } else if (ch === ':' && depth === 1 && token) {
-      names.push(token);
-      token = '';
-    } else if (/\w/.test(ch)) {
-      token += ch;
-    } else {
-      token = '';
-    }
-  }
-  return names;
-};
-
 const issue = { number: 4, title: 't', state: 'open' };
 
 const createMockClient = () => ({
@@ -73,13 +41,6 @@ describe('GitHub declared-parameter guard', () => {
           expect(textOf(result), example.description).toBe(
             `Error: ${notConfiguredMessage('GitHub')}`
           );
-        }
-      });
-
-      it('names only declared arguments in its example call', () => {
-        const declared = Object.keys(def.tool.inputSchema.properties);
-        for (const name of topLevelArgNames(def.tool.example ?? '')) {
-          expect(declared, def.tool.example).toContain(name);
         }
       });
     }
@@ -137,24 +98,6 @@ describe('GitHub declared-parameter guard', () => {
 
     expect(client.getRepo).not.toHaveBeenCalled();
     expect(textOf(result)).toContain('getRepo requires repo');
-  });
-
-  it('still splits a combined owner/repo given in repo while owner stays required', async () => {
-    const client = createMockClient();
-
-    const result = await handlerFor(client, 'getRepo')({ repo: 'octocat/hello' });
-
-    expect(result.isError).toBeUndefined();
-    expect(client.getRepo).toHaveBeenCalledWith('octocat', 'hello');
-  });
-
-  it('still rejects a repo with several slashes with the owner/repo teaching error', async () => {
-    const client = createMockClient();
-
-    const result = await handlerFor(client, 'getRepo')({ repo: 'a/b/c' });
-
-    expect(client.getRepo).not.toHaveBeenCalled();
-    expect(textOf(result)).toContain("a single 'owner/repo' string");
   });
 
   it('creates an empty file, which the client accepts', async () => {

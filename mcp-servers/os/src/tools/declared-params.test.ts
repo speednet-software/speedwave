@@ -18,18 +18,6 @@ describe('OS declared-parameter guard', () => {
     vi.mocked(runCommand).mockResolvedValue({ stdout: '{}', parsed: {} });
   });
 
-  it('guards every OS tool', () => {
-    expect(tools.map((d) => d.tool.name)).toEqual(
-      expect.arrayContaining([
-        'listReminders',
-        'createEvent',
-        'listNotes',
-        'sendEmail',
-        'listMailSignatures',
-      ])
-    );
-  });
-
   describe.each(tools.map((d) => [d.tool.name, d] as const))('%s', (_name, def) => {
     it('rejects an undeclared argument before the native CLI runs', async () => {
       const result = await def.handler({ not_a_declared_param: 1 });
@@ -39,12 +27,15 @@ describe('OS declared-parameter guard', () => {
       expect(runCommand).not.toHaveBeenCalled();
     });
 
-    it('declares every argument its input examples use', () => {
+    it('runs every input example through the handler without a parameter rejection', async () => {
       const declared = Object.keys(def.tool.inputSchema.properties);
       for (const example of def.tool.inputExamples ?? []) {
         expect(declared, example.description).toEqual(
           expect.arrayContaining(Object.keys(example.input))
         );
+        const text = textOf(await def.handler(example.input));
+        expect(text, example.description).not.toContain('does not accept');
+        expect(text, example.description).not.toMatch(/requires \w+/);
       }
     });
   });

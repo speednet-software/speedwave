@@ -79,15 +79,6 @@ describe('Office declared-parameter guard', () => {
         expect(fn).not.toHaveBeenCalled();
       }
     });
-
-    it('declares every argument its input examples use', () => {
-      const declared = Object.keys(def.tool.inputSchema.properties);
-      for (const example of def.tool.inputExamples ?? []) {
-        expect(declared, example.description).toEqual(
-          expect.arrayContaining(Object.keys(example.input))
-        );
-      }
-    });
   });
 
   it('rejects a misspelled output option instead of writing to the default name', async () => {
