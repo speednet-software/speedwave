@@ -109,6 +109,8 @@ export class ChatComponent implements OnInit, OnDestroy {
   private tauri = inject(TauriService);
   private router = inject(Router);
   private log = inject(LoggerService);
+  private readonly diagId = Math.random().toString(36).slice(2, 8);
+  private diagDestroyed = false;
   private readonly injector = inject(Injector);
   private unsubProjectReady: (() => void) | null = null;
   private unsubAuthWatch: (() => void) | null = null;
@@ -237,11 +239,18 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   /** Boots the chat session and subscribes to project lifecycle events (auth + ready). */
   async ngOnInit(): Promise<void> {
+    this.log.info(`[chat] component ${this.diagId} init`);
     await Promise.all([this.chat.init(), this.refreshGitBranch()]);
+    this.log.info(
+      `[chat] component ${this.diagId} registers watchers destroyed=${this.diagDestroyed}`
+    );
     this.cdr.markForCheck();
 
     this.unsubAuthWatch = this.projectState.onChange(() => {
       if (this.projectState.status() === 'auth_required') {
+        this.log.info(
+          `[chat] auth watcher redirects to /settings, component=${this.diagId} destroyed=${this.diagDestroyed}`
+        );
         this.router.navigate(['/settings']);
       }
     });
@@ -540,6 +549,8 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   /** Tears down project-lifecycle subscriptions and saves the active tab's composer state. */
   ngOnDestroy(): void {
+    this.diagDestroyed = true;
+    this.log.info(`[chat] component ${this.diagId} destroyed`);
     this.chat.setChatViewOpen(false);
     this.saveOutgoingTabState(this.chat.activeTabId());
     if (this.unsubProjectReady) {

@@ -10,13 +10,21 @@ import {
 } from '@angular/core';
 import { DOCUMENT } from '@angular/common';
 import { Dialog } from '@angular/cdk/dialog';
-import { NavigationEnd, Router, RouterOutlet } from '@angular/router';
+import {
+  NavigationCancel,
+  NavigationEnd,
+  NavigationError,
+  NavigationStart,
+  Router,
+  RouterOutlet,
+} from '@angular/router';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import type { Subscription } from 'rxjs';
 import { filter } from 'rxjs/operators';
 import { ProjectSwitcherComponent } from '../project-switcher/project-switcher.component';
 import { UpdateNotificationComponent } from '../update-notification/update-notification.component';
 import { BetaService } from '../services/beta.service';
+import { LoggerService } from '../services/logger.service';
 import { ChatStateService } from '../services/chat-state.service';
 import { NotificationsService } from '../services/notifications.service';
 import { ProjectStateService } from '../services/project-state.service';
@@ -206,6 +214,8 @@ export class ShellComponent implements OnInit, OnDestroy {
   private readonly notifications = inject(NotificationsService);
   private unsubscribe: (() => void) | null = null;
   private routerSub: Subscription | null = null;
+  private navLogSub: Subscription | null = null;
+  private readonly log = inject(LoggerService);
   private stopNotificationRouting: UnlistenFn | null = null;
   private stopTabSwitchKeys: (() => void) | null = null;
   private destroyed = false;
@@ -300,6 +310,18 @@ export class ShellComponent implements OnInit, OnDestroy {
     this.routerSub = this.router.events
       .pipe(filter((e): e is NavigationEnd => e instanceof NavigationEnd))
       .subscribe((e) => this.currentUrlSignal.set(e.urlAfterRedirects));
+    this.navLogSub = this.router.events.subscribe((e) => {
+      if (e instanceof NavigationStart) {
+        this.log.info(`[router] start #${e.id} ${e.url} trigger=${e.navigationTrigger}`);
+      } else if (e instanceof NavigationEnd) {
+        this.log.info(`[router] end #${e.id} ${e.urlAfterRedirects}`);
+      } else if (e instanceof NavigationCancel) {
+        this.log.warn(`[router] cancel #${e.id} ${e.url} code=${e.code} reason=${e.reason}`);
+      } else if (e instanceof NavigationError) {
+        const err = e.error instanceof Error ? (e.error.stack ?? e.error.message) : String(e.error);
+        this.log.warn(`[router] error #${e.id} ${e.url}: ${err}`);
+      }
+    });
     void this.routeNotificationClicks();
     this.routeTabSwitchKeys();
   }
@@ -447,6 +469,8 @@ export class ShellComponent implements OnInit, OnDestroy {
       this.routerSub.unsubscribe();
       this.routerSub = null;
     }
+    this.navLogSub?.unsubscribe();
+    this.navLogSub = null;
   }
 
   private async routeNotificationClicks(): Promise<void> {

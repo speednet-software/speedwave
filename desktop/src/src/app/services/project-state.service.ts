@@ -131,6 +131,27 @@ export class ProjectStateService {
   private tauri = inject(TauriService);
   private log = inject(LoggerService);
   private healthStore = inject(HealthStoreService);
+
+  constructor() {
+    const setStatus = this.status.set.bind(this.status);
+    this.status.set = (next: ProjectStatus): void => {
+      if (next !== this.status()) {
+        this.log.info(
+          `[project-state] status ${this.status()} -> ${next} project=${this.activeProject()} target=${this.targetProject} at ${callerFrames()}`
+        );
+      }
+      setStatus(next);
+    };
+    const setActive = this.activeProject.set.bind(this.activeProject);
+    this.activeProject.set = (next: string | null): void => {
+      if (next !== this.activeProject()) {
+        this.log.info(
+          `[project-state] active project ${this.activeProject()} -> ${next} status=${this.status()}`
+        );
+      }
+      setActive(next);
+    };
+  }
   /** Set of integration status re-fetchers, called after a failed restart. */
   private statusRefreshers: Array<() => void> = [];
   private changeListeners: Array<() => void> = [];
@@ -783,4 +804,12 @@ export class ProjectStateService {
   private notifySettled(): void {
     for (const cb of this.settledListeners) cb();
   }
+}
+
+function callerFrames(): string {
+  return (new Error().stack ?? '')
+    .split('\n')
+    .slice(2, 7)
+    .map((line) => line.trim())
+    .join(' <- ');
 }
