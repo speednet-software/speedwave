@@ -18,11 +18,11 @@ struct EventStoreGate: PermissionGate {
 
 
 /// reminders-cli <command> [json-args]
-/// Commands: check_permission, list_lists, list_reminders, get_reminder, create_reminder, update_reminder, complete_reminder
+/// Commands: check_permission, list_lists, list_reminders, get_reminder, create_reminder, update_reminder, complete_reminder, delete_reminder
 @main
 struct RemindersCLI {
     static let commandList =
-        "check_permission, list_lists, list_reminders, get_reminder, create_reminder, update_reminder, complete_reminder"
+        "check_permission, list_lists, list_reminders, get_reminder, create_reminder, update_reminder, complete_reminder, delete_reminder"
 
     static func main() {
         let store = EKEventStore()
@@ -46,6 +46,7 @@ struct RemindersCLI {
                 "create_reminder": { try createReminder(store: store, params: $0) },
                 "update_reminder": { try updateReminder(store: store, params: $0) },
                 "complete_reminder": { try completeReminder(store: store, params: $0) },
+                "delete_reminder": { try deleteReminder(store: store, params: $0) },
             ]
         )
     }
@@ -277,6 +278,20 @@ func completeReminder(store: EKEventStore, params: [String: Any]) throws -> [Str
     try store.save(reminder, commit: true)
 
     return ["status": "completed"]
+}
+
+func deleteReminder(store: EKEventStore, params: [String: Any]) throws -> [String: Any] {
+    guard let id = params["id"] as? String else {
+        throw CLIError.missingField("id")
+    }
+
+    guard let reminder = store.calendarItem(withIdentifier: id) as? EKReminder else {
+        throw CLIError.notFound("Reminder with id '\(id)' not found")
+    }
+
+    try store.remove(reminder, commit: true)
+
+    return ["status": "deleted"]
 }
 
 

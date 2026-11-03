@@ -7,6 +7,7 @@ import {
   ToolDefinition,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
+  DESTRUCTIVE_ANNOTATIONS,
   META_KEYS,
 } from '@speedwave/mcp-shared';
 import {
@@ -80,6 +81,12 @@ interface UpdateReminderParams {
 /** Input parameters for the completeReminder tool. */
 interface CompleteReminderParams {
   /** Reminder ID to complete. */
+  id: string;
+}
+
+/** Input parameters for the deleteReminder tool. */
+interface DeleteReminderParams {
+  /** Reminder ID to delete. */
   id: string;
 }
 
@@ -461,6 +468,42 @@ const completeReminderTool: Tool = {
   ],
 };
 
+const deleteReminderTool: Tool = {
+  name: 'deleteReminder',
+  description: 'Permanently delete a reminder (there is no trash to restore it from)',
+  annotations: DESTRUCTIVE_ANNOTATIONS,
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.OS_CATEGORY]: 'reminders',
+  },
+  keywords: ['os', 'reminder', 'delete', 'remove'],
+  example: 'await os.deleteReminder({ id: "abc-123" })',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      id: {
+        type: 'string',
+        description:
+          'Reminder ID to delete (must be the exact id returned by a list/get/create call; names are not accepted)',
+      },
+    },
+    required: ['id'],
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      status: { type: 'string', description: '"deleted"' },
+    },
+  },
+  inputExamples: [
+    {
+      description: 'Delete a reminder',
+      input: { id: 'abc-123' },
+    },
+  ],
+};
+
 /**
  * Lists all reminder lists/groups available on this device.
  * @param _params - Unused tool input parameters.
@@ -569,6 +612,21 @@ export async function handleCompleteReminder(params: CompleteReminderParams): Pr
   return { success: true, data: result.parsed };
 }
 
+/**
+ * Permanently deletes a reminder.
+ * @param params - Tool input parameters.
+ */
+export async function handleDeleteReminder(params: DeleteReminderParams): Promise<ToolResult> {
+  const p = asRecord(params);
+  const v = validateAll(p, {
+    required: ['id'],
+    strings: [['id', MAX_LENGTHS.id, false]],
+  });
+  if (!v.valid) return v.error;
+  const result = await runCommand('reminders', 'delete_reminder', p);
+  return { success: true, data: result.parsed };
+}
+
 /** Creates tool definitions for all reminder operations. */
 export function createReminderTools(): ToolDefinition[] {
   return [
@@ -578,5 +636,6 @@ export function createReminderTools(): ToolDefinition[] {
     { tool: createReminderTool, handler: withValidation(handleCreateReminder) },
     { tool: updateReminderTool, handler: withValidation(handleUpdateReminder) },
     { tool: completeReminderTool, handler: withValidation(handleCompleteReminder) },
+    { tool: deleteReminderTool, handler: withValidation(handleDeleteReminder) },
   ];
 }
