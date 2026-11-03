@@ -27,7 +27,7 @@ pub(crate) mod usage;
 use config::Config;
 
 /// Header the `claude` container sends with the per-project caller secret.
-pub(crate) const CALLER_AUTH_HEADER: &str = "x-speedwave-proxy-auth";
+const CALLER_AUTH_HEADER: &str = "x-speedwave-proxy-auth";
 
 const MAX_REQUEST_BODY_BYTES: usize = 32 * 1024 * 1024;
 

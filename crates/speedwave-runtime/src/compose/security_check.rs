@@ -366,9 +366,8 @@ pub enum SecurityRule {
     #[strum(props(description = "Atlassian has /workspace mount"))]
     AtlassianMissingWorkspaceMount,
 
-    /// Speedwave proxy mounts exactly config:ro + tokens:ro + usage:rw (plus the
-    /// optional git token mounts) and no host network (ADR-073 — it is a
-    /// worker-class token holder).
+    /// Speedwave proxy mounts exactly config:ro, tokens:ro, usage:rw and the optional
+    /// git token mounts, with no host network (ADR-073).
     #[strum(to_string = "PROXY_VOLUMES")]
     #[strum(props(
         description = "Speedwave proxy mounts are config:ro, tokens:ro, usage:rw and the optional github/gitlab git token mounts only"
@@ -1221,10 +1220,8 @@ impl SecurityCheck {
         violations
     }
 
-    /// ADR-073: proxy mounts exactly `/config:ro`, `<tokens>/llm:/tokens:ro`, `/usage:rw`
-    /// and, when the integration is enabled, `<tokens>/github:/git-tokens/github:ro` and
-    /// `<tokens>/gitlab:/git-tokens/gitlab:ro` (policy/audit mounts are validated by
-    /// `check_proxy_policy_mount`/`check_audit_mount`). Any other `/git-tokens*` mount is rejected.
+    /// ADR-073: proxy mounts exactly config:ro, llm tokens:ro, usage:rw and the optional
+    /// `/git-tokens/<github|gitlab>:ro`; any other `/git-tokens*` mount is rejected.
     fn check_proxy_volumes(
         doc: &serde_yaml_ng::Value,
         expected_paths: &SecurityExpectedPaths,
@@ -1304,7 +1301,7 @@ impl SecurityCheck {
                 }
                 matched += 1;
             } else if let Some((kind, host, mode)) = GitForgeKind::ALL.iter().find_map(|kind| {
-                extract_volume_for_target(vol, kind.token_mount_target())
+                extract_volume_for_target(vol, &kind.token_mount_target())
                     .map(|(host, mode)| (*kind, host, mode))
             }) {
                 let expected_git_tokens = format!(

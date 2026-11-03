@@ -32,18 +32,20 @@ struct RenderConfig<'a> {
     git_forges: &'a [GitForge],
 }
 
+const GIT_TOKENS_MOUNT_ROOT: &str = "/git-tokens";
+
 /// Integration whose token the proxy holds for the git transport.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum GitForgeKind {
+pub(super) enum GitForgeKind {
     Github,
     Gitlab,
 }
 
 impl GitForgeKind {
-    pub(crate) const ALL: [GitForgeKind; 2] = [GitForgeKind::Github, GitForgeKind::Gitlab];
+    pub(super) const ALL: [GitForgeKind; 2] = [GitForgeKind::Github, GitForgeKind::Gitlab];
 
     /// Token namespace under `<data_dir>/tokens/<project>/`, also the mount's last segment.
-    pub(crate) fn tokens_subdir(self) -> &'static str {
+    pub(super) fn tokens_subdir(self) -> &'static str {
         match self {
             Self::Github => "github",
             Self::Gitlab => "gitlab",
@@ -51,11 +53,8 @@ impl GitForgeKind {
     }
 
     /// Read-only mount target of the token namespace inside the proxy container.
-    pub(crate) fn token_mount_target(self) -> &'static str {
-        match self {
-            Self::Github => "/git-tokens/github",
-            Self::Gitlab => "/git-tokens/gitlab",
-        }
+    pub(super) fn token_mount_target(self) -> String {
+        format!("{GIT_TOKENS_MOUNT_ROOT}/{}", self.tokens_subdir())
     }
 
     fn login(self) -> &'static str {
@@ -65,23 +64,20 @@ impl GitForgeKind {
         }
     }
 
-    fn token_file(self) -> &'static str {
-        match self {
-            Self::Github => "/git-tokens/github/token",
-            Self::Gitlab => "/git-tokens/gitlab/token",
-        }
+    fn token_file(self) -> String {
+        format!("{}/token", self.token_mount_target())
     }
 }
 
 /// One `git_forges` entry of `proxy.json`.
 #[derive(Serialize)]
-pub(crate) struct GitForge {
+pub(super) struct GitForge {
     #[serde(skip)]
-    pub(crate) kind: GitForgeKind,
-    pub(crate) host: String,
+    pub(super) kind: GitForgeKind,
+    pub(super) host: String,
     base_url: String,
     login: &'static str,
-    token_file: &'static str,
+    token_file: String,
 }
 
 impl GitForge {
@@ -99,23 +95,9 @@ impl GitForge {
 const GITHUB_GIT_HOST: &str = "github.com";
 const GITLAB_DEFAULT_HOST_URL: &str = "https://gitlab.com";
 
-/// `https://<authority>` host of a GitLab `host_url`, or `None` when it is not an
-/// https URL with a plain host (no userinfo).
-fn gitlab_git_host(host_url: &str) -> Option<String> {
-    let url = url::Url::parse(host_url.trim()).ok()?;
-    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
-        return None;
-    }
-    let host = url.host_str()?;
-    Some(match url.port() {
-        Some(port) => format!("{host}:{port}"),
-        None => host.to_string(),
-    })
-}
-
 /// Git forges the proxy serves for this project, sorted by host: github when its
 /// integration is enabled, gitlab when enabled and its `host_url` is https.
-pub(crate) fn git_forges_in(
+pub(super) fn git_forges_in(
     data_dir: &Path,
     project: &str,
     integrations: &ResolvedIntegrationsConfig,
@@ -128,22 +110,45 @@ pub(crate) fn git_forges_in(
         let host_url_path = super::tokens::resolve_tokens_dir_in(data_dir, project)
             .join(GitForgeKind::Gitlab.tokens_subdir())
             .join("host_url");
-        let configured = std::fs::read_to_string(&host_url_path).unwrap_or_default();
-        let configured = configured.trim();
-        let host_url = if configured.is_empty() {
-            GITLAB_DEFAULT_HOST_URL
-        } else {
-            configured
-        };
-        match gitlab_git_host(host_url) {
-            Some(host) => forges.push(GitForge::new(GitForgeKind::Gitlab, host)),
-            None => log::warn!(
-                "gitlab host_url is not an https URL with a plain host: git transport skipped"
-            ),
+        match std::fs::read_to_string(&host_url_path) {
+            Ok(raw) => {
+                let configured = raw.trim();
+                let host_url = if configured.is_empty() {
+                    GITLAB_DEFAULT_HOST_URL
+                } else {
+                    configured
+                };
+                match gitlab_git_host(host_url) {
+                    Some(host) => forges.push(GitForge::new(GitForgeKind::Gitlab, host)),
+                    None => log::warn!(
+                        "gitlab host_url is not an https URL with a plain host: git transport skipped"
+                    ),
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if let Some(host) = gitlab_git_host(GITLAB_DEFAULT_HOST_URL) {
+                    forges.push(GitForge::new(GitForgeKind::Gitlab, host));
+                }
+            }
+            Err(e) => log::warn!("could not read gitlab host_url, git transport skipped: {e}"),
         }
     }
     forges.sort_by(|a, b| a.host.cmp(&b.host));
     forges
+}
+
+/// `https://<authority>` host of a GitLab `host_url`, or `None` when it is not an
+/// https URL with a plain host (no userinfo).
+fn gitlab_git_host(host_url: &str) -> Option<String> {
+    let url = url::Url::parse(host_url.trim()).ok()?;
+    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
+        return None;
+    }
+    let host = url.host_str()?;
+    Some(match url.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_string(),
+    })
 }
 
 /// Port the proxy container listens on (fixed in the forwarder binary).
@@ -834,6 +839,34 @@ mod tests {
     fn git_forges_gitlab_empty_host_url_falls_back_to_default() {
         let (_dir, forges) = forges_with(&both_forges_enabled(), Some("  \n"));
         assert!(forges.iter().any(|f| f.host == "gitlab.com"));
+    }
+
+    #[test]
+    fn git_forges_skip_gitlab_when_host_url_is_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let gitlab = super::super::tokens::resolve_tokens_dir_in(dir.path(), "proj").join("gitlab");
+        std::fs::create_dir_all(gitlab.join("host_url")).unwrap();
+        let forges = git_forges_in(
+            dir.path(),
+            "proj",
+            &ResolvedIntegrationsConfig {
+                gitlab: true,
+                ..Default::default()
+            },
+        );
+        assert!(forges.is_empty());
+    }
+
+    #[test]
+    fn git_forges_gitlab_missing_host_url_falls_back_to_default() {
+        let (_dir, forges) = forges_with(
+            &ResolvedIntegrationsConfig {
+                gitlab: true,
+                ..Default::default()
+            },
+            None,
+        );
+        assert_eq!(forges[0].host, "gitlab.com");
     }
 
     #[test]

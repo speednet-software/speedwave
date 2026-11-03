@@ -35,8 +35,10 @@ run_transport() {
 
 @test "multiple hosts each get their own prefix" {
     run run_transport "github.com,gitlab.example.com:8443"
-    run env HOME="$TMP_HOME" git ls-remote --get-url git@gitlab.example.com:8443:o/r.git
-    [ "$output" = "http://proxy:4000/git/gitlab.example.com:8443/o/r.git" ]
+    run env HOME="$TMP_HOME" git ls-remote --get-url git@gitlab.example.com:g/r.git
+    [ "$output" = "http://proxy:4000/git/gitlab.example.com:8443/g/r.git" ]
+    run env HOME="$TMP_HOME" git ls-remote --get-url https://gitlab.example.com:8443/g/r.git
+    [ "$output" = "http://proxy:4000/git/gitlab.example.com:8443/g/r.git" ]
     run env HOME="$TMP_HOME" git ls-remote --get-url git@github.com:o/r.git
     [ "$output" = "http://proxy:4000/git/github.com/o/r.git" ]
 }

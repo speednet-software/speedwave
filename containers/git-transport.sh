@@ -48,7 +48,7 @@ tmp="${conf_file}.tmp.$$"
 {
     for host in "${hosts[@]}"; do
         printf '[url "%s/%s/"]\n' "$proxy_url" "$host"
-        printf '\tinsteadOf = git@%s:\n' "$host"
+        printf '\tinsteadOf = git@%s:\n' "${host%%:*}"
         printf '\tinsteadOf = https://%s/\n' "$host"
     done
     printf '[http "%s/"]\n' "$proxy_url"

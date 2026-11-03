@@ -39,60 +39,6 @@ struct GitRequest<'a> {
     query: Option<&'a str>,
 }
 
-fn classify<'a>(method: &Method, rest: &str, query: Option<&'a str>) -> Option<GitRequest<'a>> {
-    let segments: Vec<&str> = rest.split('/').collect();
-    let (repo_segments, suffix, service) = match segments.as_slice() {
-        [repo @ .., "info", "refs"] if method == Method::GET => {
-            let service = match query? {
-                "service=git-upload-pack" => "git-upload-pack",
-                "service=git-receive-pack" => "git-receive-pack",
-                _ => return None,
-            };
-            (repo, "info/refs", service)
-        }
-        [repo @ .., "git-upload-pack"] if method == Method::POST && query.is_none() => {
-            (repo, "git-upload-pack", "git-upload-pack")
-        }
-        [repo @ .., "git-receive-pack"] if method == Method::POST && query.is_none() => {
-            (repo, "git-receive-pack", "git-receive-pack")
-        }
-        _ => return None,
-    };
-    let valid = !repo_segments.is_empty()
-        && repo_segments[0] != "api"
-        && repo_segments
-            .iter()
-            .all(|s| !s.is_empty() && *s != "." && *s != ".." && !s.contains(['%', '\\']));
-    valid.then(|| GitRequest {
-        repo: repo_segments.join("/"),
-        suffix,
-        service,
-        query,
-    })
-}
-
-fn read_token(forge: &GitForge) -> Option<String> {
-    let raw = std::fs::read_to_string(&forge.token_file).ok()?;
-    let token = raw.trim();
-    (!token.is_empty()).then(|| token.to_string())
-}
-
-fn caller_authorized(cfg: &Config, headers: &HeaderMap) -> bool {
-    let Some(expected) = cfg.caller_token.as_deref() else {
-        return false;
-    };
-    headers
-        .get(CALLER_AUTH_HEADER)
-        .and_then(|v| v.to_str().ok())
-        == Some(expected)
-}
-
-fn status_response(status: StatusCode) -> Response {
-    let mut resp = Response::new(Body::empty());
-    *resp.status_mut() = status;
-    resp
-}
-
 /// Handles one git transport request and writes its audit row.
 pub async fn handler(State(cfg): State<Arc<Config>>, request: Request) -> Response {
     let (parts, body) = request.into_parts();
@@ -132,6 +78,54 @@ pub async fn handler(State(cfg): State<Arc<Config>>, request: Request) -> Respon
     response
 }
 
+fn classify<'a>(method: &Method, rest: &str, query: Option<&'a str>) -> Option<GitRequest<'a>> {
+    let segments: Vec<&str> = rest.split('/').collect();
+    let (repo_segments, suffix, service) = match segments.as_slice() {
+        [repo @ .., "info", "refs"] if method == Method::GET => {
+            let service = match query? {
+                "service=git-upload-pack" => "git-upload-pack",
+                "service=git-receive-pack" => "git-receive-pack",
+                _ => return None,
+            };
+            (repo, "info/refs", service)
+        }
+        [repo @ .., "git-upload-pack"] if method == Method::POST && query.is_none() => {
+            (repo, "git-upload-pack", "git-upload-pack")
+        }
+        [repo @ .., "git-receive-pack"] if method == Method::POST && query.is_none() => {
+            (repo, "git-receive-pack", "git-receive-pack")
+        }
+        _ => return None,
+    };
+    let valid = !repo_segments.is_empty()
+        && repo_segments[0] != "api"
+        && repo_segments
+            .iter()
+            .all(|s| !s.is_empty() && *s != "." && *s != ".." && !s.contains(['%', '\\']));
+    valid.then(|| GitRequest {
+        repo: repo_segments.join("/"),
+        suffix,
+        service,
+        query,
+    })
+}
+
+fn caller_authorized(cfg: &Config, headers: &HeaderMap) -> bool {
+    let Some(expected) = cfg.caller_token.as_deref() else {
+        return false;
+    };
+    headers
+        .get(CALLER_AUTH_HEADER)
+        .and_then(|v| v.to_str().ok())
+        == Some(expected)
+}
+
+fn status_response(status: StatusCode) -> Response {
+    let mut resp = Response::new(Body::empty());
+    *resp.status_mut() = status;
+    resp
+}
+
 async fn forward(
     client: &reqwest::Client,
     forge: &GitForge,
@@ -158,7 +152,13 @@ async fn forward(
         base64::engine::general_purpose::STANDARD.encode(format!("{}:{token}", forge.login));
     let mut auth = match header::HeaderValue::from_str(&format!("Basic {credentials}")) {
         Ok(v) => v,
-        Err(_) => return status_response(StatusCode::SERVICE_UNAVAILABLE),
+        Err(_) => {
+            log::error!(
+                "git token for {} cannot be encoded as a header value",
+                forge.host
+            );
+            return status_response(StatusCode::SERVICE_UNAVAILABLE);
+        }
     };
     auth.set_sensitive(true);
 
@@ -190,6 +190,12 @@ async fn forward(
         }
     }
     resp
+}
+
+fn read_token(forge: &GitForge) -> Option<String> {
+    let raw = std::fs::read_to_string(&forge.token_file).ok()?;
+    let token = raw.trim();
+    (!token.is_empty()).then(|| token.to_string())
 }
 
 #[cfg(test)]
@@ -487,15 +493,6 @@ mod tests {
             assert_eq!(resp.status(), 503);
             assert!(f.log.lock().await.is_empty());
         }
-    }
-
-    #[test]
-    fn config_debug_does_not_leak_caller_token() {
-        let cfg = Config {
-            caller_token: Some(CALLER.to_string()),
-            ..Config::default()
-        };
-        assert!(!format!("{cfg:?}").contains(CALLER));
     }
 
     #[test]

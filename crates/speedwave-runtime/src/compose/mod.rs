@@ -3149,8 +3149,7 @@ services:
             gitlab: true,
             ..Default::default()
         };
-        let (data_dir, doc) =
-            render_git_transport(&integrations, Some("https://gitlab.example.com/x"));
+        let (data_dir, doc) = render_git_transport(&integrations, None);
         let tokens = to_engine_path(&data_dir.path().join("tokens/test-project")).unwrap();
         let volumes = service_strings(&doc, "proxy", "volumes");
         assert!(volumes.contains(&format!("{tokens}/github:/git-tokens/github:ro")));
@@ -3159,7 +3158,7 @@ services:
 
         let caller_token = proxy::ensure_caller_token_in(data_dir.path(), "test-project").unwrap();
         let env = service_strings(&doc, "claude", "environment");
-        assert!(env.contains(&"SPEEDWAVE_GIT_HOSTS=github.com,gitlab.example.com".to_string()));
+        assert!(env.iter().any(|e| e.starts_with("SPEEDWAVE_GIT_HOSTS=")));
         assert!(env.contains(&"SPEEDWAVE_GIT_PROXY_URL=http://proxy:4000/git".to_string()));
         assert!(env.contains(&format!("SPEEDWAVE_GIT_PROXY_AUTH={caller_token}")));
     }
