@@ -81,6 +81,12 @@ provision:
       UNIT
       systemctl daemon-reload
       systemctl try-restart lima-guestagent.service || true
+  - mode: boot
+    script: |
+      #!/bin/sh
+      set -eu
+      entry="127.0.1.1 $(hostname)"
+      grep -qxF "$entry" /etc/hosts || echo "$entry" >> /etc/hosts
 "#,
         desired_lima_vm_cpus(),
         desired_lima_vm_memory()
@@ -103,6 +109,19 @@ const LIMA_VPN_PROVISION_SENTINEL: &str = "99-speedwave-prefer-vznat.yaml";
 #[cfg(any(target_os = "macos", test))]
 const LIMA_TIMESYNC_PROVISION_SENTINEL: &str = "99-speedwave-no-settime.conf";
 
+/// Host-name provision: `sudo` resolves the guest's own name, which `/etc/hosts` must answer
+/// before the upstream DNS of the host's search domains can stall it (SPEED-940).
+#[cfg(any(target_os = "macos", test))]
+const LIMA_HOSTNAME_PROVISION_SENTINEL: &str = "127.0.1.1 $(hostname)";
+
+/// Every managed provision script's sentinel; a config missing one is regenerated.
+#[cfg(any(target_os = "macos", test))]
+const LIMA_PROVISION_SENTINELS: [&str; 3] = [
+    LIMA_VPN_PROVISION_SENTINEL,
+    LIMA_TIMESYNC_PROVISION_SENTINEL,
+    LIMA_HOSTNAME_PROVISION_SENTINEL,
+];
+
 /// Returns `true` if the Lima config needs regenerating: either managed provision drop-in
 /// missing, or `memory`/`cpus` drifted. Unparseable = no-drift (never touch a hand-mangled file).
 #[cfg(any(target_os = "macos", test))]
@@ -118,9 +137,7 @@ pub fn lima_vm_config_needs_update_with(
     desired_gib: u32,
     desired_cpus: u32,
 ) -> bool {
-    if !config_content.contains(LIMA_VPN_PROVISION_SENTINEL)
-        || !config_content.contains(LIMA_TIMESYNC_PROVISION_SENTINEL)
-    {
+    if !carries_every_provision_sentinel(config_content) {
         return true;
     }
     let line_present = |prefix: &str| config_content.lines().any(|l| l.trim().starts_with(prefix));
@@ -139,6 +156,14 @@ pub fn lima_vm_config_needs_update_with(
         line_val(prefix).is_some_and(|current| current != desired)
     };
     needs_update("memory:", desired_gib) || needs_update("cpus:", desired_cpus)
+}
+
+/// `true` when the config carries every managed provision script (see `LIMA_PROVISION_SENTINELS`).
+#[cfg(any(target_os = "macos", test))]
+fn carries_every_provision_sentinel(config_content: &str) -> bool {
+    LIMA_PROVISION_SENTINELS
+        .iter()
+        .all(|sentinel| config_content.contains(sentinel))
 }
 
 /// Rewrites only the managed `memory:`/`cpus:` values in an existing lima.yaml, preserving every
@@ -237,9 +262,7 @@ pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
 
     let desired_gib = crate::resources::resolved_vm_memory_gib();
     let desired_cpus = desired_lima_vm_cpus();
-    let (updated, surgical) = if content.contains(LIMA_VPN_PROVISION_SENTINEL)
-        && content.contains(LIMA_TIMESYNC_PROVISION_SENTINEL)
-    {
+    let (updated, surgical) = if carries_every_provision_sentinel(&content) {
         match update_lima_managed_fields(&content, desired_gib, desired_cpus) {
             Some(u) => (u, true),
             None => {
@@ -1670,11 +1693,11 @@ mod tests {
         assert!(lima_vm_config_needs_update_with(config, 12, 4));
     }
 
-    /// Appends both managed provision sentinels so memory/CPU tests don't also
+    /// Appends every managed provision sentinel so memory/CPU tests don't also
     /// trigger the provision-absent migration branch.
     fn with_provision_sentinel(base: &str) -> String {
         format!(
-            "{base}provision:\n  - mode: boot\n    script: |\n      cat > /etc/netplan/99-speedwave-prefer-vznat.yaml <<'YAML'\n  - mode: boot\n    script: |\n      cat > /etc/systemd/system/lima-guestagent.service.d/99-speedwave-no-settime.conf <<'UNIT'\n"
+            "{base}provision:\n  - mode: boot\n    script: |\n      cat > /etc/netplan/99-speedwave-prefer-vznat.yaml <<'YAML'\n  - mode: boot\n    script: |\n      cat > /etc/systemd/system/lima-guestagent.service.d/99-speedwave-no-settime.conf <<'UNIT'\n  - mode: boot\n    script: |\n      entry=\"127.0.1.1 $(hostname)\"\n"
         )
     }
 
@@ -1819,6 +1842,100 @@ mod tests {
         assert!(lima_vm_config_needs_update_with(&config, 8, 4));
     }
 
+    /// SSOT guard: the host-name script in the template must carry its sentinel.
+    #[test]
+    fn lima_config_contains_hostname_provision_sentinel() {
+        assert!(lima_config().contains(LIMA_HOSTNAME_PROVISION_SENTINEL));
+    }
+
+    #[test]
+    fn lima_vm_config_missing_any_one_sentinel_triggers_update() {
+        let full = with_provision_sentinel("vmType: vz\ncpus: 4\nmemory: \"8GiB\"\n");
+        assert!(!lima_vm_config_needs_update_with(&full, 8, 4));
+        for sentinel in LIMA_PROVISION_SENTINELS {
+            let config = full.replace(sentinel, "");
+            assert!(
+                lima_vm_config_needs_update_with(&config, 8, 4),
+                "a config without {sentinel} must be regenerated"
+            );
+        }
+    }
+
+    /// The template's host-name script, with `/etc/hosts` pointed at `hosts`.
+    #[cfg(unix)]
+    fn hostname_provision_script(hosts: &std::path::Path) -> String {
+        let config = lima_config();
+        let start = config
+            .find(LIMA_HOSTNAME_PROVISION_SENTINEL)
+            .expect("template carries the host-name script");
+        let block_start = config[..start]
+            .rfind("  - mode: boot")
+            .expect("script block");
+        let block = &config[block_start..];
+        let block_end = block[1..].find("  - mode: ").map_or(block.len(), |i| i + 1);
+        block[..block_end]
+            .lines()
+            .filter_map(|line| line.strip_prefix("      "))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .replace("/etc/hosts", &hosts.display().to_string())
+    }
+
+    #[cfg(unix)]
+    fn run_hostname_provision(script: &str) {
+        let status = std::process::Command::new("sh")
+            .args(["-c", script])
+            .status()
+            .expect("sh runs");
+        assert!(status.success(), "the host-name script must succeed");
+    }
+
+    #[cfg(unix)]
+    fn own_hostname() -> String {
+        let out = std::process::Command::new("hostname")
+            .output()
+            .expect("hostname runs");
+        String::from_utf8(out.stdout)
+            .expect("utf-8")
+            .trim()
+            .to_owned()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hostname_provision_appends_the_own_name_once_and_keeps_other_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let hosts = dir.path().join("hosts");
+        let before = "127.0.0.1 localhost\n192.168.5.2\thost.lima.internal\n";
+        std::fs::write(&hosts, before).unwrap();
+        let script = hostname_provision_script(&hosts);
+
+        run_hostname_provision(&script);
+        run_hostname_provision(&script);
+
+        let entry = format!("127.0.1.1 {}", own_hostname());
+        let after = std::fs::read_to_string(&hosts).unwrap();
+        assert!(after.starts_with(before), "existing lines stay: {after:?}");
+        assert_eq!(
+            after.lines().filter(|l| *l == entry).count(),
+            1,
+            "the own-name line is added exactly once: {after:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hostname_provision_leaves_a_hosts_file_that_already_names_the_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let hosts = dir.path().join("hosts");
+        let before = format!("127.0.0.1 localhost\n127.0.1.1 {}\n", own_hostname());
+        std::fs::write(&hosts, &before).unwrap();
+
+        run_hostname_provision(&hostname_provision_script(&hosts));
+
+        assert_eq!(std::fs::read_to_string(&hosts).unwrap(), before);
+    }
+
     #[test]
     fn lima_vm_config_both_sentinels_and_matching_values_no_update() {
         let config =
@@ -1934,12 +2051,8 @@ mod tests {
             "full-regeneration fallback must warn loudly"
         );
         assert!(
-            body.contains("LIMA_VPN_PROVISION_SENTINEL"),
-            "full regeneration must be gated on the missing provision sentinel"
-        );
-        assert!(
-            body.contains("LIMA_TIMESYNC_PROVISION_SENTINEL"),
-            "full regeneration must also be gated on the clock-step provision sentinel"
+            body.contains("carries_every_provision_sentinel"),
+            "full regeneration must be gated on a missing provision sentinel"
         );
     }
 
