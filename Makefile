@@ -562,7 +562,8 @@ test-e2e-update-dirty: build-cli
 test-entrypoint:
 	@$(REQUIRE_BATS)
 	bats _tests/entrypoint/entrypoint.bats _tests/entrypoint/install-claude.bats \
-	  _tests/entrypoint/statusline.bats _tests/entrypoint/osc52-copy.bats
+	  _tests/entrypoint/statusline.bats _tests/entrypoint/osc52-copy.bats \
+	  _tests/entrypoint/git-transport.bats
 	@echo "✅ Entrypoint tests passed"
 
 test-ci:

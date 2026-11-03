@@ -79,6 +79,8 @@ if ! grep -q '\.local/bin' "${HOME}/.bashrc" 2>/dev/null; then
     echo 'export PATH="$HOME/.local/bin:$PATH"' >> "${HOME}/.bashrc"
 fi
 
+/usr/local/bin/git-transport.sh || echo "WARNING: git-transport.sh failed" >&2
+
 mkdir -p "${HOME}/.claude"
 
 
