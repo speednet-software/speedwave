@@ -216,19 +216,23 @@ export async function configureLocalProvider(baseUrl: string, apiKey: string): P
   await keyInput.setValue(apiKey);
 
   await (await $('[data-testid="settings-llm-refresh"]')).click();
-  const success = await $('[data-testid="settings-llm-test-success"]');
-  const localError = await $('[data-testid="settings-llm-discovery-error"]');
-  const messagesError = await $('[data-testid="settings-llm-messages-endpoint-warning"]');
+  const outcomes = [
+    '[data-testid="settings-llm-test-success"]',
+    '[data-testid="settings-llm-discovery-error"]',
+    '[data-testid="settings-llm-messages-endpoint-warning"]',
+  ];
   await browser.waitUntil(
-    async () =>
-      (await success.isExisting()) ||
-      (await localError.isExisting()) ||
-      (await messagesError.isExisting()),
+    async () => {
+      for (const outcome of outcomes) {
+        if (await $(outcome).isExisting()) return true;
+      }
+      return false;
+    },
     { timeout: 60_000, timeoutMsg: 'local connection test never settled' }
   );
-  for (const failure of [localError, messagesError]) {
-    if (await failure.isExisting()) {
-      throw new Error(`local connection test failed: ${await failure.getText()}`);
+  for (const failure of outcomes.slice(1)) {
+    if (await $(failure).isExisting()) {
+      throw new Error(`local connection test failed: ${await $(failure).getText()}`);
     }
   }
 
