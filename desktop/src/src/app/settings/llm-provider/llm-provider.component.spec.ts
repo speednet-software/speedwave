@@ -3675,95 +3675,58 @@ describe('LlmProviderComponent', () => {
       const extraBtn = fixture.nativeElement.querySelector(
         "[data-testid='settings-llm-extra-refresh-openrouter']"
       );
-      expect(localBtn.textContent.trim()).toContain('test connection');
-      expect(extraBtn.textContent.trim()).toContain('test connection');
+      expect(localBtn.textContent.trim()).toBe('\u21BB test connection');
+      expect(extraBtn.textContent.trim()).toBe('\u21BB test connection');
     });
 
-    it('save blocks on an offline local server (no update_llm_config, no restart)', async () => {
-      const projectState = TestBed.inject(ProjectStateService);
-      const restartSpy = vi.spyOn(projectState, 'requestRestart');
-      let invoked = false;
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'update_llm_config') invoked = true;
-        if (cmd === 'discover_llm_models') throw new Error('offline');
-        return undefined;
-      };
-      component.provider.set('local');
-      component.selectedTarget.set('local');
-      component.baseUrl.set('http://host.docker.internal:11434');
-      component.model.set('llama3.3');
+    it.each([
+      ['offline', 'offline', undefined, 'not reachable'],
+      ['unsupported', 'unsupported', undefined, 'does not support model discovery'],
+      ['auth', 'auth', undefined, 'check the API key'],
+      ['server-error', 'LLM server returned HTTP 500', 500, 'returned HTTP 500'],
+    ])(
+      'save blocks on a local probe failure (%s) and writes nothing',
+      async (reason, message, status, expectedText) => {
+        const projectState = TestBed.inject(ProjectStateService);
+        const restartSpy = vi.spyOn(projectState, 'requestRestart');
+        const restartForSpy = vi.spyOn(projectState, 'requestRestartFor');
+        const writes: string[] = [];
+        mockTauri.invokeHandler = async (cmd: string) => {
+          if (cmd === 'update_llm_config' || cmd === 'restart_llm_proxy') writes.push(cmd);
+          if (cmd === 'discover_llm_models') throw new Error(message);
+          return undefined;
+        };
+        component.provider.set('local');
+        component.selectedTarget.set('local');
+        component.baseUrl.set('http://host.docker.internal:11434');
+        component.model.set('llama3.3');
 
-      await component.saveConfig();
+        await component.saveConfig();
+        fixture.detectChanges();
 
-      expect(invoked).toBe(false);
-      expect(restartSpy).not.toHaveBeenCalled();
-      expect(component.discoveryState().kind).toBe('failed');
-      fixture.detectChanges();
-      const err = fixture.nativeElement.querySelector(
-        "[data-testid='settings-llm-discovery-error']"
-      );
-      expect(err.textContent).toContain('Fix the connection to save.');
-    });
-
-    it('save blocks when the server does not support discovery (unsupported)', async () => {
-      let invoked = false;
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'update_llm_config') invoked = true;
-        if (cmd === 'discover_llm_models') throw new Error('unsupported');
-        return undefined;
-      };
-      component.provider.set('local');
-      component.baseUrl.set('http://host.docker.internal:11434');
-      component.model.set('llama3.3');
-
-      await component.saveConfig();
-
-      expect(invoked).toBe(false);
-      expect(component.discoveryState()).toMatchObject({ kind: 'failed', reason: 'unsupported' });
-    });
-
-    it('save blocks on a rejected api key (auth)', async () => {
-      let invoked = false;
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'update_llm_config') invoked = true;
-        if (cmd === 'discover_llm_models') throw new Error('auth');
-        return undefined;
-      };
-      component.provider.set('local');
-      component.baseUrl.set('http://host.docker.internal:11434');
-      component.model.set('llama3.3');
-
-      await component.saveConfig();
-
-      expect(invoked).toBe(false);
-      expect(component.discoveryState()).toMatchObject({ kind: 'failed', reason: 'auth' });
-    });
-
-    it('save blocks on a server-error response', async () => {
-      let invoked = false;
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'update_llm_config') invoked = true;
-        if (cmd === 'discover_llm_models') throw new Error('LLM server returned HTTP 500');
-        return undefined;
-      };
-      component.provider.set('local');
-      component.baseUrl.set('http://host.docker.internal:11434');
-      component.model.set('llama3.3');
-
-      await component.saveConfig();
-
-      expect(invoked).toBe(false);
-      expect(component.discoveryState()).toMatchObject({
-        kind: 'failed',
-        reason: 'server-error',
-        status: 500,
-      });
-    });
+        expect(writes).toEqual([]);
+        expect(restartSpy).not.toHaveBeenCalled();
+        expect(restartForSpy).not.toHaveBeenCalled();
+        expect(component.discoveryState()).toMatchObject(
+          status ? { kind: 'failed', reason, status } : { kind: 'failed', reason }
+        );
+        const err = fixture.nativeElement.querySelector(
+          "[data-testid='settings-llm-discovery-error']"
+        );
+        expect(err.textContent).toContain(expectedText);
+        expect((err.textContent as string).trim().endsWith('Fix the connection to save.')).toBe(
+          true
+        );
+      }
+    );
 
     it('save blocks when the server lists models but does not answer POST /v1/messages', async () => {
-      let invoked = false;
+      const projectState = TestBed.inject(ProjectStateService);
+      const restartSpy = vi.spyOn(projectState, 'requestRestart');
+      const restartForSpy = vi.spyOn(projectState, 'requestRestartFor');
+      const writes: string[] = [];
       mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'update_llm_config') invoked = true;
+        if (cmd === 'update_llm_config' || cmd === 'restart_llm_proxy') writes.push(cmd);
         if (cmd === 'discover_llm_models') {
           return { models: [{ id: 'llama3.3' }], messages_endpoint_ok: false };
         }
@@ -3775,18 +3738,23 @@ describe('LlmProviderComponent', () => {
       component.model.set('llama3.3');
 
       await component.saveConfig();
+      fixture.detectChanges();
 
-      expect(invoked).toBe(false);
+      expect(writes).toEqual([]);
+      expect(restartSpy).not.toHaveBeenCalled();
+      expect(restartForSpy).not.toHaveBeenCalled();
       expect(component.discoveryState()).toMatchObject({
         kind: 'failed',
         reason: 'messages-endpoint',
       });
-      fixture.detectChanges();
       const warn = fixture.nativeElement.querySelector(
         "[data-testid='settings-llm-messages-endpoint-warning']"
       );
       expect(warn).not.toBeNull();
-      expect(warn.textContent).toContain('Fix the connection to save.');
+      expect(warn.textContent).toContain('POST /v1/messages');
+      expect((warn.textContent as string).trim().endsWith('Fix the connection to save.')).toBe(
+        true
+      );
       expect(warn.textContent).not.toContain('Save is allowed');
     });
 
@@ -3864,7 +3832,6 @@ describe('LlmProviderComponent', () => {
           discoverCalls++;
           return { models: [{ id: 'llama3.3' }] };
         }
-        if (cmd === 'update_llm_config') return undefined;
         return undefined;
       };
       component.provider.set('local');
@@ -3888,7 +3855,6 @@ describe('LlmProviderComponent', () => {
           discoverCalls++;
           return { models: [{ id: 'llama3.3' }] };
         }
-        if (cmd === 'update_llm_config') return undefined;
         return undefined;
       };
       component.provider.set('local');
@@ -3978,10 +3944,24 @@ describe('LlmProviderComponent', () => {
       ).toBeNull();
     });
 
+    it('no hint sentence renders under the OpenRouter row before a test', () => {
+      component.toggleExtraExpanded(component.extraProviders()[0]);
+      fixture.detectChanges();
+
+      expect(
+        fixture.nativeElement.querySelector(
+          "[data-testid='settings-llm-extra-test-success-openrouter']"
+        )
+      ).toBeNull();
+      expect(fixture.nativeElement.textContent).not.toContain('new sessions start on');
+    });
+
     it('openrouter success line falls back to the SSOT auto-default model id for a row without a stored model, never a literal', async () => {
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'discover_llm_models') {
-          return { models: [{ id: 'anthropic/claude-sonnet-5' }] };
+          return {
+            models: [{ id: 'aaa/first-catalog-model' }, { id: 'anthropic/claude-sonnet-5' }],
+          };
         }
         if (cmd === 'get_openrouter_default_model') {
           return 'anthropic/claude-sonnet-5';
@@ -4001,7 +3981,8 @@ describe('LlmProviderComponent', () => {
       expect(success).not.toBeNull();
       const text = success.textContent as string;
       expect(text).toContain('Key OK');
-      expect(text).toContain('anthropic/claude-sonnet-5');
+      expect(text).toContain('new sessions start on anthropic/claude-sonnet-5');
+      expect(text).not.toContain('aaa/first-catalog-model');
     });
 
     it('openrouter success line names the stored row model over the SSOT auto-default (a composer pick persists into the entry)', async () => {
@@ -4226,13 +4207,23 @@ describe('LlmProviderComponent', () => {
       component.selectedTarget.set('anthropic');
       component.oauthAuthenticated.set(true);
       fixture.detectChanges();
+      const readBadges = (): string =>
+        Array.from(
+          fixture.nativeElement.querySelectorAll(
+            "[data-testid='auth-status-value'], [data-testid='auth-status-method']"
+          ) as NodeListOf<HTMLElement>
+        )
+          .map((el) => el.textContent?.trim())
+          .join('|');
+      const badgesBefore = readBadges();
 
       await component.saveConfig();
 
       expect(discoverCalls).toBe(0);
       expect(saveInvoked).toBe(true);
-      const authRow = fixture.nativeElement.querySelector("[data-testid='auth-status-row']");
-      expect(authRow.textContent).toContain('connected');
+      fixture.detectChanges();
+      expect(readBadges()).toBe(badgesBefore);
+      expect(badgesBefore).toContain('connected');
     });
 
     it.each([
