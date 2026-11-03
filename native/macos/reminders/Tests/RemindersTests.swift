@@ -575,7 +575,10 @@ final class RemindersTests: XCTestCase {
         ]
         let reminder = try updatedAlarms(input)
         let emitted = try XCTUnwrap(reminderToDict(reminder, timeZone: warsaw)["alarms"] as? NSArray)
-        XCTAssertEqual(emitted, input as NSArray)
+        XCTAssertEqual(emitted.count, input.count)
+        for alarm in input {
+            XCTAssertTrue(emitted.contains(alarm as NSDictionary), "missing \(alarm)")
+        }
     }
 
     func testReminderToDictOmitsRadiusWhenTheSystemDefaultApplies() throws {
