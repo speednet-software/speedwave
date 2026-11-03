@@ -368,7 +368,7 @@ export interface ValidationSpec {
   integers?: NumberFieldSpec[];
   booleans?: string[];
   dates?: string[];
-  /** Date fields that accept an explicit null (a PATCH "clear this field"); every other null is rejected. */
+  /** Date and alarm fields that accept an explicit null (a PATCH "clear this field"); every other null is rejected. */
   nullable?: string[];
   stringArrays?: StringArrayFieldSpec[];
   /** Reminder alarm arrays; names also listed in `nullable` accept an explicit null (remove all alarms). */
@@ -500,13 +500,8 @@ export function isValidISO8601(value: unknown): value is string {
   return !isNaN(date.getTime());
 }
 
-/**
- * Validate reminder alarm arrays: each element has exactly one of `at`, `offset_minutes`, `location`.
- * The Swift side parses the same format in `RemindersCLI.swift` (`alarm(from:label:timeZone:)`).
- * @param params - Tool input parameters to validate.
- * @param fields - List of alarm array field names to check.
- * @param nullable - Fields for which an explicit null is accepted (remove all alarms).
- */
+const MAX_ALARM_OFFSET_MINUTES = 525600;
+
 function validateAlarmFields(
   params: Record<string, unknown>,
   fields: string[],
@@ -563,12 +558,13 @@ function validateAlarm(
         );
   }
   if (alarm.offset_minutes !== undefined) {
-    return Number.isInteger(alarm.offset_minutes)
+    return Number.isSafeInteger(alarm.offset_minutes) &&
+      Math.abs(alarm.offset_minutes as number) <= MAX_ALARM_OFFSET_MINUTES
       ? { valid: true }
       : alarmError(
           `${name}.offset_minutes`,
           alarm.offset_minutes,
-          `Pass ${name}.offset_minutes as a whole number of minutes; negative is before the due date.`,
+          `Pass ${name}.offset_minutes as a whole number of minutes between -${MAX_ALARM_OFFSET_MINUTES} and ${MAX_ALARM_OFFSET_MINUTES} (one year); negative is before the due date.`,
           'INVALID_TYPE'
         );
   }
@@ -642,6 +638,6 @@ function alarmError(
   received: unknown,
   nextStep: string,
   code: string
-): { valid: true } | { valid: false; error: ToolResult } {
+): { valid: false; error: ToolResult } {
   return { valid: false, error: teachingToolResult({ paramName: name, received, nextStep }, code) };
 }
