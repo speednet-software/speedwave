@@ -1,4 +1,4 @@
-import { RESTART_WAIT_MS, requestBackendRestart } from './shell';
+import { RESTART_WAIT_MS, confirmRestartAndWait, requestBackendRestart } from './shell';
 import { waitForReadySession } from './spawn-args';
 import { invokeOr } from './tauri-invoke';
 
@@ -89,12 +89,17 @@ export async function configureAnthropicApiKey(apiKey: string): Promise<void> {
     { timeout: 20_000, interval: 500, timeoutMsg: 'the Anthropic key never stuck in its input' }
   );
   await (await $(save)).click();
+  await browser.waitUntil(async () => (await storedAnthropic()).kind === 'anthropic_api_key', {
+    timeout: 30_000,
+    interval: 500,
+    timeoutMsg: 'the anthropic entry never got the anthropic_api_key kind after saving the key',
+  });
   await browser.waitUntil(apiKeyConnected, {
     timeout: 30_000,
     interval: 500,
     timeoutMsg: 'auth-status-value never showed connected via api key after saving the key',
   });
-  await requestBackendRestart();
+  await restartAfterKeyChange(true);
   await browser.waitUntil(apiKeyConnected, {
     timeout: 60_000,
     interval: 500,
@@ -103,6 +108,7 @@ export async function configureAnthropicApiKey(apiKey: string): Promise<void> {
 }
 
 export async function removeAnthropicApiKey(): Promise<void> {
+  let removed = false;
   try {
     await openAnthropicApiKeyPanel();
     const remove = '[data-testid="settings-api-key-remove"]';
@@ -113,8 +119,28 @@ export async function removeAnthropicApiKey(): Promise<void> {
         interval: 500,
         timeoutMsg: 'the saved api key is still present after remove',
       });
+      removed = true;
     }
   } finally {
+    await restartAfterKeyChange(removed);
+  }
+}
+
+async function storedAnthropic(): Promise<{ kind: string | null; active: boolean }> {
+  const config = await invokeOr<{
+    providers?: { id: string; kind: string }[];
+    active?: { provider_id: string } | null;
+  } | null>(null, 'get_llm_config');
+  return {
+    kind: config?.providers?.find((p) => p.id === 'anthropic')?.kind ?? null,
+    active: config?.active?.provider_id === 'anthropic',
+  };
+}
+
+async function restartAfterKeyChange(keyChanged: boolean): Promise<void> {
+  if (keyChanged && (await storedAnthropic()).active) {
+    await confirmRestartAndWait();
+  } else {
     await requestBackendRestart();
   }
 }

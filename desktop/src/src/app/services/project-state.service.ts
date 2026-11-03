@@ -108,6 +108,7 @@ export class ProjectStateService {
   }
   restartInFlight: Promise<void> | null = null;
   restartError = '';
+  private restartRequests = 0;
   /** Restart requested while status was pre-ready; surfaced once we settle. */
   private pendingRestartOnSettle = false;
   private restartOwedTo: string | null = null;
@@ -563,6 +564,7 @@ export class ProjectStateService {
       this.pendingRestartOnSettle = true;
       return;
     }
+    this.restartRequests += 1;
     this.needsRestart = true;
     this.notifyChange();
   }
@@ -628,9 +630,10 @@ export class ProjectStateService {
       return 'skipped';
     }
     let restartedOk = false;
+    const requestsBefore = this.restartRequests;
     try {
       await this.tauri.invoke('restart_integration_containers', { project, justEnabled });
-      this.needsRestart = false;
+      if (this.restartRequests === requestsBefore) this.needsRestart = false;
       restartedOk = true;
       try {
         await this.tauri.invoke('invalidate_slash_cache', { projectId: project });
