@@ -1284,6 +1284,12 @@ mod tests {
     }
 
     #[test]
+    fn does_not_redact_git_proxy_auth_env_name_alone() {
+        let s = "SPEEDWAVE_GIT_PROXY_AUTH is absent without an enabled forge";
+        assert_eq!(sanitize(s), s);
+    }
+
+    #[test]
     fn does_not_redact_proxy_auth_header_name_alone() {
         let s = "the x-speedwave-proxy-auth header is required";
         assert_eq!(sanitize(s), s, "bare header-name prose must pass through");
