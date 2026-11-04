@@ -113,16 +113,13 @@ describe('SettingsComponent', () => {
     expect(advancedEl).not.toBeNull();
   });
 
-  it('renders TranscriptionSectionComponent when beta is enabled', () => {
-    fixture.detectChanges();
-    const el = fixture.nativeElement.querySelector('app-transcription-section');
-    expect(el).not.toBeNull();
-  });
-
-  it('hides TranscriptionSectionComponent when beta is disabled', () => {
+  it('renders TranscriptionSectionComponent whether beta is on or off', () => {
     betaEnabled.set(false);
     fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('app-transcription-section')).toBeNull();
+    expect(fixture.nativeElement.querySelector('app-transcription-section')).not.toBeNull();
+    betaEnabled.set(true);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('app-transcription-section')).not.toBeNull();
   });
 
   it('renders NotificationsSectionComponent when beta is enabled', () => {

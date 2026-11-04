@@ -404,7 +404,7 @@ describe('ShellComponent', () => {
     expect(fixture.nativeElement.querySelector('[data-testid="nav-chat"]')).not.toBeNull();
   });
 
-  it('hides the meeting-transcription nav entry when beta is disabled', () => {
+  it('shows the meeting-transcription nav entry when beta is disabled', () => {
     betaEnabled.set(false);
     fixture.detectChanges();
 
@@ -412,11 +412,11 @@ describe('ShellComponent', () => {
     const ids = Array.from(nav.querySelectorAll('a[data-testid^="nav-"]')).map((a) =>
       (a as HTMLAnchorElement).getAttribute('data-testid')
     );
-    expect(ids).not.toContain('nav-meeting-transcription');
     expect(ids).toEqual([
       'nav-chat',
       'nav-integrations',
       'nav-plugins',
+      'nav-meeting-transcription',
       'nav-usage',
       'nav-settings',
       'nav-logs',
@@ -483,7 +483,7 @@ describe('ShellComponent', () => {
       expect(fixture.nativeElement.querySelector(DOT)).not.toBeNull();
     });
 
-    it('drops the entry again once the recording ends with beta off', () => {
+    it('keeps the entry without its dot once the recording ends with beta off', () => {
       startRecording();
       betaEnabled.set(false);
       fixture.detectChanges();
@@ -493,7 +493,8 @@ describe('ShellComponent', () => {
 
       expect(
         fixture.nativeElement.querySelector('[data-testid="nav-meeting-transcription"]')
-      ).toBeNull();
+      ).not.toBeNull();
+      expect(fixture.nativeElement.querySelector(DOT)).toBeNull();
     });
   });
 
@@ -725,25 +726,14 @@ describe('ShellComponent', () => {
       document.dispatchEvent(new KeyboardEvent('keydown', { key: '4', metaKey: true }));
     }
 
-    it('navigates when beta is enabled', () => {
+    it('navigates whether beta is on or off', () => {
       const nav = vi.spyOn(TestBed.inject(Router), 'navigateByUrl').mockResolvedValue(true);
       pressCmd4();
-      expect(nav).toHaveBeenCalledWith('/meeting-transcription');
-    });
-
-    it('navigates during a recording even with beta disabled', () => {
       betaEnabled.set(false);
-      recordingSessionId.set('a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d');
-      const nav = vi.spyOn(TestBed.inject(Router), 'navigateByUrl').mockResolvedValue(true);
       pressCmd4();
-      expect(nav).toHaveBeenCalledWith('/meeting-transcription');
-    });
-
-    it('stays inert with beta disabled and no recording', () => {
-      betaEnabled.set(false);
-      const nav = vi.spyOn(TestBed.inject(Router), 'navigateByUrl').mockResolvedValue(true);
-      pressCmd4();
-      expect(nav).not.toHaveBeenCalled();
+      expect(nav).toHaveBeenCalledTimes(2);
+      expect(nav).toHaveBeenNthCalledWith(1, '/meeting-transcription');
+      expect(nav).toHaveBeenNthCalledWith(2, '/meeting-transcription');
     });
   });
 

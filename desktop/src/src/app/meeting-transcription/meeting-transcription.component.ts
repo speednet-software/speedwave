@@ -25,7 +25,7 @@ import { LiveTranscriptComponent } from './live-transcript/live-transcript.compo
 import { SessionListComponent } from './session-list/session-list.component';
 
 /**
- * Meeting transcription tab (beta-gated): Record in the header, the recording bar while a
+ * Meeting transcription tab: Record in the header, the recording bar while a
  * recording captures or waits paused, the recordings list, and the open recording. Transcription
  * is local; only sending the transcript to chat uses the network. Without a model the view offers
  * the one download it needs.
