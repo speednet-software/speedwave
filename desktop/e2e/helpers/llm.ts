@@ -201,13 +201,24 @@ export async function configureLocalProvider(baseUrl: string, apiKey: string): P
   await keyInput.setValue(apiKey);
 
   await (await $('[data-testid="settings-llm-refresh"]')).click();
+  const outcomes = [
+    '[data-testid="settings-llm-test-success"]',
+    '[data-testid="settings-llm-discovery-error"]',
+    '[data-testid="settings-llm-messages-endpoint-warning"]',
+  ];
   await browser.waitUntil(
-    async () => !(await $('[data-testid="settings-llm-discovering"]').isExisting()),
-    { timeout: 60_000, timeoutMsg: 'local model discovery never settled' }
+    async () => {
+      for (const outcome of outcomes) {
+        if (await $(outcome).isExisting()) return true;
+      }
+      return false;
+    },
+    { timeout: 60_000, timeoutMsg: 'local connection test never settled' }
   );
-  const localError = await $('[data-testid="settings-llm-discovery-error"]');
-  if (await localError.isExisting()) {
-    throw new Error(`local discovery failed: ${await localError.getText()}`);
+  for (const failure of outcomes.slice(1)) {
+    if (await $(failure).isExisting()) {
+      throw new Error(`local connection test failed: ${await $(failure).getText()}`);
+    }
   }
 
   await saveProvider();
