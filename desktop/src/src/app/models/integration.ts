@@ -94,3 +94,16 @@ export interface OsIntegrationValidation {
   new_enabled: boolean;
   reason: string;
 }
+
+/** A remote found in the project directory and not listed yet; `source_dir` is `"."` for the root. */
+export interface GitRepositorySuggestion {
+  entry: string;
+  source_dir: string;
+}
+
+/** One integration's repository allowlist; `host` is null when the GitLab host URL is unusable. */
+export interface GitRepositoriesView {
+  host: string | null;
+  repositories: string[];
+  suggestions: GitRepositorySuggestion[];
+}
