@@ -255,10 +255,9 @@ export class ShellComponent implements OnInit, OnDestroy {
 
   readonly visibleEntries = computed<readonly NavRailEntry[]>(() => {
     const recording = this.transcription.recording();
-    const show = this.beta.enabled() || this.transcription.captureOpen();
-    return this.entryCatalog
-      .filter((e) => e.id !== TRANSCRIPTION_ENTRY_ID || show)
-      .map((e) => (e.id === TRANSCRIPTION_ENTRY_ID ? { ...e, recording } : e));
+    return this.entryCatalog.map((e) =>
+      e.id === TRANSCRIPTION_ENTRY_ID ? { ...e, recording } : e
+    );
   });
 
   /** Active entry id derived from the current router URL — used by the rail. */
@@ -353,9 +352,7 @@ export class ShellComponent implements OnInit, OnDestroy {
         return;
       case '4':
         event.preventDefault();
-        if (this.beta.enabled() || this.transcription.captureOpen()) {
-          void this.router.navigateByUrl('/meeting-transcription');
-        }
+        void this.router.navigateByUrl('/meeting-transcription');
         return;
       case '5':
         event.preventDefault();

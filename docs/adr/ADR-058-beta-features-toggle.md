@@ -2,6 +2,8 @@
 
 > **Status:** Accepted
 > **Context:** Work-in-progress Desktop UI surfaces need a runtime switch a developer or early adopter can flip without a rebuild, while staying hidden from ordinary users.
+>
+> **Amendment (2026-11-04):** Meeting transcription left beta (ADR-056, Amendment 25, SPEED-957). It was the only route behind `beta-enabled.guard.ts`, so the guard was removed; no route is beta-gated today, and the remaining beta surfaces are hidden by `BetaService` alone. The "Frontend" entry below describes the guard as it was.
 
 ## Decision
 

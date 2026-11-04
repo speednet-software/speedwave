@@ -125,9 +125,7 @@ const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
           (errorOccurred)="error = $event"
         />
 
-        @if (beta.enabled()) {
-          <app-transcription-section (errorOccurred)="error = $event" />
-        }
+        <app-transcription-section (errorOccurred)="error = $event" />
 
         <section
           id="section-appearance"
@@ -231,7 +229,7 @@ export class SettingsComponent implements OnInit, OnDestroy {
   readonly theme = inject(ThemeService);
   /** UI state service exposed for the project switcher trigger in the header. */
   readonly ui = inject(UiStateService);
-  /** Beta-features gate — the transcription, notifications and telemetry sections are beta-only. */
+  /** Beta-features gate: the notifications, telemetry and security sections are beta-only. */
   readonly beta = inject(BetaService);
 
   private router = inject(Router);
