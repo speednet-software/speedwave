@@ -29,6 +29,8 @@ const ICON_NAMES: readonly IconName[] = [
   'search',
   'more-horizontal',
   'pause',
+  'play',
+  'replay',
   'stop',
 ];
 

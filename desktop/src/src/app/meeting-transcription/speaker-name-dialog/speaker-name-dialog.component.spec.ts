@@ -85,4 +85,21 @@ describe('SpeakerNameDialogComponent', () => {
   it('shows no offered names when there are none', () => {
     expect(q('speaker-name-suggestions')).toBeNull();
   });
+  it('offers a sample only when the voice can be heard, and says when it plays', () => {
+    expect(q('speaker-name-sample')).toBeNull();
+
+    let asked = 0;
+    fixture.componentInstance.sample.subscribe(() => asked++);
+    fixture.componentRef.setInput('canSample', true);
+    fixture.detectChanges();
+    expect(q('speaker-name-sample')!.textContent?.trim()).toBe('Hear a sample');
+
+    q('speaker-name-sample')!.click();
+    fixture.componentRef.setInput('samplePlaying', true);
+    fixture.detectChanges();
+
+    expect(asked).toBe(1);
+    expect(q('speaker-name-sample')!.textContent?.trim()).toBe('Pause sample');
+    expect(events).toEqual([]);
+  });
 });

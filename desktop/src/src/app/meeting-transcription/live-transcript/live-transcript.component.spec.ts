@@ -21,6 +21,33 @@ import type {
   TranscriptSummary,
 } from '../../models/transcript';
 import { makeTranscriptSession as session } from '../../testing/transcript-session';
+import {
+  RecordingPlaybackService,
+  type Playback,
+  type PlaybackRequest,
+} from '../../services/recording-playback.service';
+import { RECORDING_UNAVAILABLE } from '../../models/transcript';
+
+/** Plays nothing: records the requests and moves through the states a real playback would. */
+class FakePlayback {
+  current = signal<Playback | null>(null);
+  position = signal(0);
+  duration = signal(0);
+  playable = Number.POSITIVE_INFINITY;
+  failWith: string | null = null;
+  playableSecs = vi.fn(async () => this.playable);
+  stop = vi.fn(() => this.current.set(null));
+  replay = vi.fn(async () => undefined);
+  toggle = vi.fn(async (request: PlaybackRequest) => {
+    if (this.failWith) throw new Error(this.failWith);
+    const now = this.current();
+    if (now && now.sessionId === request.sessionId && now.key === request.key) {
+      this.current.set({ ...now, state: now.state === 'playing' ? 'paused' : 'playing' });
+      return;
+    }
+    this.current.set({ ...request, state: 'playing' });
+  });
+}
 
 /**
  * The list row of the session under test.
@@ -92,6 +119,7 @@ describe('LiveTranscriptComponent', () => {
     speakerAttribution: ReturnType<typeof vi.fn>;
     renameSpeaker: ReturnType<typeof vi.fn>;
   };
+  let playback: FakePlayback;
   let chat: {
     hasConversation: WritableSignal<boolean>;
     isStreamingFromState: WritableSignal<boolean>;
@@ -126,10 +154,12 @@ describe('LiveTranscriptComponent', () => {
       isStreamingFromState: signal(false),
       newChatBlockedReason: signal(''),
     };
+    playback = new FakePlayback();
     await TestBed.configureTestingModule({
       imports: [LiveTranscriptComponent],
       providers: [
         { provide: TranscriptionService, useValue: svc },
+        { provide: RecordingPlaybackService, useValue: playback },
         { provide: ChatStateService, useValue: chat },
         provideRouter([{ path: '**', children: [] }]),
       ],
@@ -624,6 +654,291 @@ describe('LiveTranscriptComponent', () => {
       expect(q('retranscribe-item')!.textContent).toContain(
         'Speaker names will be detached and offered again.'
       );
+    });
+  });
+
+  describe('playback', () => {
+    const sys = (start: number, text: string, speaker_id?: number, length = 1) => ({
+      start: { secs: start, nanos: 0 },
+      end: { secs: start + length, nanos: 0 },
+      text,
+      words: [],
+      source: 'system' as const,
+      speaker_id,
+    });
+    const q = (id: string): HTMLElement | null =>
+      fixture.nativeElement.querySelector(`[data-testid="${id}"]`);
+    const all = (id: string): HTMLElement[] =>
+      Array.from(fixture.nativeElement.querySelectorAll(`[data-testid="${id}"]`));
+    const plays = (): HTMLButtonElement[] => all('line-play') as HTMLButtonElement[];
+    const lineRows = (): HTMLElement[] => all('transcript-line');
+
+    async function open(
+      overrides: Parameters<typeof session>[0] = {},
+      named: Record<string, string> = {}
+    ): Promise<void> {
+      fixture.componentRef.setInput(
+        'session',
+        session({
+          status: { state: 'done' },
+          final_segments: [
+            { ...sys(0, 'zaczynamy', 1), start: { secs: 0, nanos: 500_000_000 } },
+            { ...seg(2, 'cześć'), source: 'mic' as const },
+            sys(4, 'długie pytanie o budżet', 2, 12),
+            sys(20, 'dalej', 1, 3),
+          ],
+          models_used: { live: null, finalize: 'large-v3', diarization: 'nemotron' },
+          named_speakers: named,
+          ...overrides,
+        })
+      );
+      fixture.detectChanges();
+      await fixture.whenStable();
+      fixture.detectChanges();
+    }
+
+    it('turns the time of every line of a finished recording into a play button', async () => {
+      await open();
+      expect(plays().map((b) => b.getAttribute('aria-label'))).toEqual([
+        'Play from 00:00',
+        'Play from 00:02',
+        'Play from 00:04',
+        'Play from 00:20',
+      ]);
+      expect(plays().every((b) => !b.disabled)).toBe(true);
+      expect(plays()[0].textContent?.trim()).toBe('00:00');
+      const icon = plays()[0].querySelector('app-icon')!;
+      expect(icon.className).toContain('opacity-0');
+      expect(icon.className).toContain('group-hover/line:opacity-100');
+      expect(playback.playableSecs).toHaveBeenCalledWith('sess-1');
+    });
+
+    it('offers no playback while the recording runs or is being transcribed', async () => {
+      await open({ status: { state: 'recording' }, live_segments: [seg(0, 'hi')] });
+      expect(plays()).toEqual([]);
+      await open({ status: { state: 'finalizing', progress: 0.3 } });
+      expect(plays()).toEqual([]);
+    });
+
+    it('plays the span of the clicked line with its channel and speaker', async () => {
+      await open();
+      plays()[0].click();
+      plays()[1].click();
+      await fixture.whenStable();
+
+      expect(playback.toggle.mock.calls.map(([r]) => r)).toEqual([
+        {
+          sessionId: 'sess-1',
+          key: 'line:0',
+          startSecs: 0.5,
+          endSecs: 1,
+          source: 'system',
+          speaker: 1,
+        },
+        {
+          sessionId: 'sess-1',
+          key: 'line:1',
+          startSecs: 2,
+          endSecs: 3,
+          source: 'mic',
+          speaker: null,
+        },
+      ]);
+    });
+
+    it('marks the line that plays, offers Pause on it, and shows the bar', async () => {
+      await open();
+      plays()[2].click();
+      await fixture.whenStable();
+      fixture.detectChanges();
+
+      expect(lineRows()[2].getAttribute('aria-current')).toBe('true');
+      expect(lineRows()[2].className).toContain('bg-[var(--accent-soft)]');
+      expect(lineRows()[0].getAttribute('aria-current')).toBeNull();
+      expect(plays()[2].getAttribute('aria-label')).toBe('Pause');
+      expect(plays()[2].querySelector('app-icon')!.className).not.toContain('opacity-0');
+      expect(q('playback-what')?.textContent).toContain('Speaker 2');
+
+      plays()[2].click();
+      await fixture.whenStable();
+      fixture.detectChanges();
+      expect(plays()[2].getAttribute('aria-label')).toBe('Play from 00:04');
+      expect(lineRows()[2].getAttribute('aria-current')).toBe('true');
+    });
+
+    it('disables every line and says why when the recording file is gone', async () => {
+      playback.playable = 0;
+      await open();
+
+      expect(plays().every((b) => b.disabled)).toBe(true);
+      expect(q('recording-missing')?.textContent?.trim()).toBe(RECORDING_UNAVAILABLE);
+      const tooltip = fixture.debugElement
+        .queryAll(By.directive(TooltipDirective))
+        .map((d) => d.injector.get(TooltipDirective).label())
+        .filter((label) => label === RECORDING_UNAVAILABLE);
+      expect(tooltip).toHaveLength(4);
+    });
+
+    it('disables only the lines past a missing part of the recording', async () => {
+      playback.playable = 3;
+      await open();
+
+      expect(plays().map((b) => b.disabled)).toEqual([false, false, true, true]);
+      expect(q('recording-missing')).not.toBeNull();
+    });
+
+    it('says nothing about the recording while its length is not known yet', async () => {
+      playback.playableSecs.mockImplementation(() => new Promise<number>(() => undefined));
+      await open();
+
+      expect(plays().every((b) => b.disabled)).toBe(true);
+      expect(q('recording-missing')).toBeNull();
+    });
+
+    it('reports a line that cannot be played and asks again how much can be', async () => {
+      await open();
+      const errors: string[] = [];
+      component.errorOccurred.subscribe((e) => errors.push(e));
+      playback.failWith = RECORDING_UNAVAILABLE;
+      playback.playable = 0;
+
+      plays()[0].click();
+      await fixture.whenStable();
+      fixture.detectChanges();
+
+      expect(errors).toEqual([RECORDING_UNAVAILABLE]);
+      expect(playback.playableSecs).toHaveBeenCalledTimes(2);
+      expect(plays().every((b) => b.disabled)).toBe(true);
+    });
+
+    it('stops playback when another recording opens or this one is transcribed again', async () => {
+      await open();
+      plays()[0].click();
+      await fixture.whenStable();
+
+      await open({ id: 'sess-2' });
+      expect(playback.stop).toHaveBeenCalledTimes(1);
+
+      plays()[0].click();
+      await fixture.whenStable();
+      await open({ id: 'sess-2', status: { state: 'finalizing', progress: 0 } });
+      expect(playback.stop).toHaveBeenCalledTimes(2);
+      expect(playback.current()).toBeNull();
+    });
+
+    it('keeps playing when a speaker is named during playback', async () => {
+      await open();
+      plays()[2].click();
+      await fixture.whenStable();
+
+      await open({}, { '2': 'Marta' });
+
+      expect(playback.stop).not.toHaveBeenCalled();
+      expect(q('playback-what')?.textContent).toContain('Marta');
+    });
+
+    it('stops playback when the pane goes away', async () => {
+      await open();
+      fixture.destroy();
+      expect(playback.stop).toHaveBeenCalled();
+    });
+
+    it('Esc stops playback, but not while it closes a menu or leaves a field', async () => {
+      await open();
+      plays()[0].click();
+      await fixture.whenStable();
+
+      component.openMenu.set('more');
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+      expect(component.openMenu()).toBeNull();
+      expect(playback.stop).not.toHaveBeenCalled();
+
+      const input = document.createElement('input');
+      document.body.appendChild(input);
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      input.remove();
+      expect(playback.stop).not.toHaveBeenCalled();
+
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+      expect(playback.stop).toHaveBeenCalledTimes(1);
+    });
+
+    it('names the speaker of the playing line from the bar, under that line', async () => {
+      await open();
+      plays()[2].click();
+      await fixture.whenStable();
+      fixture.detectChanges();
+
+      q('playback-name')!.click();
+      fixture.detectChanges();
+
+      expect(component.naming()?.speaker).toBe(2);
+      expect(component.naming()?.at).toBe(2);
+      expect(q('speaker-name-dialog')).not.toBeNull();
+    });
+
+    it('plays the longest line of a speaker, at most 8 s, as a sample from the legend', async () => {
+      await open();
+      const sample = all('speaker-sample').find((b) =>
+        b.getAttribute('aria-label')?.endsWith('Speaker 2')
+      )!;
+      sample.click();
+      await fixture.whenStable();
+      fixture.detectChanges();
+
+      expect(playback.toggle).toHaveBeenLastCalledWith({
+        sessionId: 'sess-1',
+        key: 'sample:2',
+        startSecs: 4,
+        endSecs: 12,
+        source: 'system',
+        speaker: 2,
+      });
+      expect(sample.getAttribute('aria-label')).toBe('Pause the sample of Speaker 2');
+      expect(q('playback-what')?.textContent).toContain('Speaker 2');
+      expect(lineRows().some((r) => r.getAttribute('aria-current') === 'true')).toBe(false);
+    });
+
+    it('samples each label apart when two labels share a name', async () => {
+      await open({}, { '1': 'Marta', '2': 'Marta' });
+      for (const b of all('speaker-sample')) b.click();
+      await fixture.whenStable();
+
+      const keys = playback.toggle.mock.calls.map(([r]) => r.key).sort();
+      expect(keys).toEqual(['sample:1', 'sample:2']);
+    });
+
+    it('plays a sample from the name dialog and names from the bar under the legend', async () => {
+      await open();
+      component.openNaming({ id: 1, trigger: null }, 'legend');
+      fixture.detectChanges();
+
+      q('speaker-name-sample')!.click();
+      await fixture.whenStable();
+      fixture.detectChanges();
+
+      expect(playback.toggle).toHaveBeenLastCalledWith(
+        expect.objectContaining({ key: 'sample:1', startSecs: 20, endSecs: 23 })
+      );
+      expect(q('speaker-name-sample')?.textContent?.trim()).toBe('Pause sample');
+
+      component.closeNaming();
+      fixture.detectChanges();
+      q('playback-name')!.click();
+      fixture.detectChanges();
+      expect(component.naming()?.at).toBe('legend');
+    });
+
+    it('offers no sample of a speaker whose every line is past the readable recording', async () => {
+      playback.playable = 3;
+      await open();
+      const sample = all('speaker-sample').find((b) =>
+        b.getAttribute('aria-label')?.endsWith('Speaker 2')
+      )!;
+      sample.click();
+      await fixture.whenStable();
+
+      expect(playback.toggle).not.toHaveBeenCalled();
     });
   });
 

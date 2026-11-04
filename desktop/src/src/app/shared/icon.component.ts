@@ -30,6 +30,8 @@ export type IconName =
   | 'search'
   | 'more-horizontal'
   | 'pause'
+  | 'play'
+  | 'replay'
   | 'stop';
 
 /**
@@ -165,6 +167,12 @@ export type IconName =
         }
         @case ('pause') {
           <path d="M9 5v14M15 5v14" />
+        }
+        @case ('play') {
+          <path d="M7 4.5v15L19 12z" />
+        }
+        @case ('replay') {
+          <path d="M4 12a8 8 0 1 0 2.34-5.66L4 8.66M4 4v4.66h4.66" />
         }
         @case ('stop') {
           <path d="M7 7h10v10H7z" />
