@@ -30,7 +30,7 @@ import { GitForgeService, GitRepositoriesView } from '../../models/integration';
         included; a bare <code class="mono">*</code> or a whole host is refused.
       </p>
 
-      @if (enabled() && loaded() && view().repositories.length === 0) {
+      @if (enabled() && loaded() && view().host !== null && view().repositories.length === 0) {
         <p class="mb-2 text-[12px] text-[var(--ink)]" data-testid="git-repositories-empty-notice">
           Push and fetch from the container work only for repositories on this list, and the list is
           empty.

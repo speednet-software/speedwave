@@ -225,6 +225,7 @@ describe('GitRepositoriesComponent', () => {
     responses['get_git_repositories'] = async () => view({ host: null });
     await create(true, 'gitlab');
     expect(el('git-repositories-host-unusable')).not.toBeNull();
+    expect(el('git-repositories-empty-notice')).toBeNull();
     expect((el('git-repositories-add') as HTMLButtonElement).disabled).toBe(true);
   });
 
