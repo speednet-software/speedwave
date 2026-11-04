@@ -2,7 +2,7 @@ use crate::types::check_project;
 use serde::Serialize;
 use speedwave_runtime::config::{self, SpeedwaveUserConfig};
 use speedwave_runtime::git_allowlist::{
-    forge_host_in, normalise_entry, suggestions_in, GitForgeService,
+    enforced_entries, forge_host_in, normalise_entry, suggestions_in, GitForgeService,
 };
 use std::path::Path;
 
@@ -60,8 +60,8 @@ pub fn remove_git_repository(
     check_project(&project)?;
     let service = parse_service(&service)?;
     log::info!("removing a git repository entry project={project} service={service:?}");
-    update_allowlist(&project, service, |_, user_config| {
-        remove_in(user_config, &project, service, &entry)
+    update_allowlist(&project, service, |data_dir, user_config| {
+        remove_in(data_dir, user_config, &project, service, &entry)
     })
 }
 
@@ -98,18 +98,15 @@ fn view_in(
         .require_project(project)
         .map_err(|e| e.to_string())?;
     let host = forge_host_in(data_dir, project, service);
-    let repositories: Vec<String> = entry
+    let stored = entry
         .integrations
         .as_ref()
         .map(|integrations| integrations.repositories_of(service))
-        .unwrap_or_default()
-        .iter()
-        .filter(|stored| {
-            host.as_deref()
-                .is_none_or(|host| normalise_entry(stored, host).is_ok())
-        })
-        .cloned()
-        .collect();
+        .unwrap_or_default();
+    let repositories = host
+        .as_deref()
+        .map(|host| enforced_entries(stored, host).0)
+        .unwrap_or_default();
     let suggestions = host
         .as_deref()
         .map(|host| suggestions_in(Path::new(&entry.dir), host, &repositories))
@@ -153,11 +150,13 @@ fn add_in(
 }
 
 fn remove_in(
+    data_dir: &Path,
     user_config: &mut SpeedwaveUserConfig,
     project: &str,
     service: GitForgeService,
     entry: &str,
 ) -> Result<(), String> {
+    let host = forge_host_in(data_dir, project, service);
     let project_entry = user_config
         .find_project_mut(project)
         .ok_or_else(|| format!("project '{project}' not found in config"))?;
@@ -166,7 +165,12 @@ fn remove_in(
             integrations
                 .git_forge_mut(service)
                 .repositories
-                .retain(|stored| stored != entry);
+                .retain(|stored| {
+                    stored != entry
+                        && host.as_deref().is_none_or(|host| {
+                            normalise_entry(stored, host).as_deref() != Ok(entry)
+                        })
+                });
         }
     }
     Ok(())
@@ -375,20 +379,91 @@ mod tests {
         let mut f = fixture();
         add(&mut f, GitForgeService::Github, "owner/repo").unwrap();
         add(&mut f, GitForgeService::Github, "owner/*").unwrap();
-        remove_in(&mut f.config, "proj", GitForgeService::Github, "owner/repo").unwrap();
+        remove_in(
+            f.data_dir.path(),
+            &mut f.config,
+            "proj",
+            GitForgeService::Github,
+            "owner/repo",
+        )
+        .unwrap();
         assert_eq!(view(&f, GitForgeService::Github).repositories, ["owner/*"]);
-        remove_in(&mut f.config, "proj", GitForgeService::Github, "owner/repo").unwrap();
-        remove_in(&mut f.config, "proj", GitForgeService::Github, "OWNER/*").unwrap();
+        remove_in(
+            f.data_dir.path(),
+            &mut f.config,
+            "proj",
+            GitForgeService::Github,
+            "owner/repo",
+        )
+        .unwrap();
+        remove_in(
+            f.data_dir.path(),
+            &mut f.config,
+            "proj",
+            GitForgeService::Github,
+            "OWNER/*",
+        )
+        .unwrap();
         assert_eq!(view(&f, GitForgeService::Github).repositories, ["owner/*"]);
+    }
+
+    #[test]
+    fn remove_drops_a_hand_stored_entry_by_the_form_the_view_shows() {
+        let mut f = fixture();
+        add(&mut f, GitForgeService::Github, "team/app").unwrap();
+        f.config.projects[0]
+            .integrations
+            .as_mut()
+            .unwrap()
+            .git_forge_mut(GitForgeService::Github)
+            .repositories
+            .push("Owner/Repo.git".to_string());
+        assert_eq!(
+            view(&f, GitForgeService::Github).repositories,
+            ["owner/repo", "team/app"]
+        );
+        remove_in(
+            f.data_dir.path(),
+            &mut f.config,
+            "proj",
+            GitForgeService::Github,
+            "owner/repo",
+        )
+        .unwrap();
+        assert_eq!(view(&f, GitForgeService::Github).repositories, ["team/app"]);
+    }
+
+    #[test]
+    fn view_of_an_unusable_host_lists_nothing_the_proxy_would_not_get() {
+        let mut f = fixture();
+        add(&mut f, GitForgeService::Gitlab, "group/app").unwrap();
+        write_gitlab_host_url(f.data_dir.path(), "http://insecure.example.com");
+        let view = view(&f, GitForgeService::Gitlab);
+        assert_eq!(view.host, None);
+        assert!(view.repositories.is_empty());
     }
 
     #[test]
     fn remove_without_stored_settings_creates_none() {
         let mut f = fixture();
-        remove_in(&mut f.config, "proj", GitForgeService::Gitlab, "a/b").unwrap();
+        remove_in(
+            f.data_dir.path(),
+            &mut f.config,
+            "proj",
+            GitForgeService::Gitlab,
+            "a/b",
+        )
+        .unwrap();
         assert!(f.config.projects[0].integrations.is_none());
         f.config.projects[0].integrations = Some(Default::default());
-        remove_in(&mut f.config, "proj", GitForgeService::Gitlab, "a/b").unwrap();
+        remove_in(
+            f.data_dir.path(),
+            &mut f.config,
+            "proj",
+            GitForgeService::Gitlab,
+            "a/b",
+        )
+        .unwrap();
         let integrations = f.config.projects[0].integrations.as_ref().unwrap();
         assert!(integrations.gitlab.is_none());
     }
@@ -399,7 +474,14 @@ mod tests {
         write_remotes(f.project_dir.path(), &["https://github.com/owner/repo"]);
         add(&mut f, GitForgeService::Github, "owner/repo").unwrap();
         assert!(view(&f, GitForgeService::Github).suggestions.is_empty());
-        remove_in(&mut f.config, "proj", GitForgeService::Github, "owner/repo").unwrap();
+        remove_in(
+            f.data_dir.path(),
+            &mut f.config,
+            "proj",
+            GitForgeService::Github,
+            "owner/repo",
+        )
+        .unwrap();
         assert_eq!(view(&f, GitForgeService::Github).suggestions.len(), 1);
     }
 

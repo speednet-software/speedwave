@@ -1,13 +1,14 @@
 //! Repository allowlist of the git transport (ADR-106): the forge host of an integration,
 //! validation of allowlist entries, and the suggestions drawn from the project's git remotes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 const GITHUB_GIT_HOST: &str = "github.com";
 const GITLAB_DEFAULT_HOST_URL: &str = "https://gitlab.com";
+const GITLAB_COM_GIT_HOST: &str = "gitlab.com";
 
 const SKIPPED_DIRS: [&str; 9] = [
     ".git",
@@ -128,6 +129,22 @@ pub fn normalise_entry(raw: &str, host: &str) -> Result<String, GitEntryError> {
     normalise_path(path_on_host(raw, host)?)
 }
 
+/// Entries the proxy enforces for the stored `entries` on `host` (normalised, sorted, without
+/// duplicates), and the indices of stored entries that no longer validate.
+pub fn enforced_entries(entries: &[String], host: &str) -> (Vec<String>, Vec<usize>) {
+    let mut enforced = BTreeSet::new();
+    let mut rejected = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        match normalise_entry(entry, host) {
+            Ok(normalised) => {
+                enforced.insert(normalised);
+            }
+            Err(_) => rejected.push(index),
+        }
+    }
+    (enforced.into_iter().collect(), rejected)
+}
+
 /// Repositories the project's git remotes name on the forge at `host` (project directory and
 /// two levels down), sorted by entry, without the entries already in `listed`.
 pub fn suggestions_in(
@@ -227,7 +244,11 @@ fn starts_with_port(after_colon: &str) -> bool {
 fn names_a_host(first: &str, host: &str) -> bool {
     let github_owner_cannot_hold_a_dot =
         host_without_port(host).eq_ignore_ascii_case(GITHUB_GIT_HOST) && first.contains('.');
-    first.contains([':', '@']) || on_host(first, host) || github_owner_cannot_hold_a_dot
+    let public_forge = on_host(first, GITHUB_GIT_HOST) || on_host(first, GITLAB_COM_GIT_HOST);
+    first.contains([':', '@'])
+        || on_host(first, host)
+        || public_forge
+        || github_owner_cannot_hold_a_dot
 }
 
 fn on_host(authority: &str, host: &str) -> bool {
@@ -684,6 +705,48 @@ mod tests {
         ] {
             assert_eq!(normalise_entry(raw, GITHUB), Err(expected), "{raw:?}");
         }
+    }
+
+    #[test]
+    fn normalise_entry_reads_a_public_forge_host_as_a_host_on_every_panel() {
+        for raw in [
+            "github.com/*",
+            "gitlab.com/group/repo",
+            "GitHub.com/owner/repo",
+        ] {
+            assert_eq!(
+                normalise_entry(raw, GITLAB_CORP),
+                Err(GitEntryError::OtherHost),
+                "{raw}"
+            );
+        }
+        assert_eq!(
+            normalise_entry("gitlab.com/group/*", "gitlab.com").as_deref(),
+            Ok("group/*")
+        );
+        assert_eq!(
+            normalise_entry("gitlab.com/*", "gitlab.com"),
+            Err(GitEntryError::WholeHost)
+        );
+    }
+
+    #[test]
+    fn enforced_entries_normalise_sort_deduplicate_and_name_the_rejected() {
+        let stored = [
+            "team/*".to_string(),
+            "Owner/Repo.git".to_string(),
+            "*".to_string(),
+            "owner/repo".to_string(),
+            "https://gitlab.com/a/b".to_string(),
+        ];
+        assert_eq!(
+            enforced_entries(&stored, GITHUB),
+            (
+                vec!["owner/repo".to_string(), "team/*".to_string()],
+                vec![2, 4]
+            )
+        );
+        assert_eq!(enforced_entries(&[], GITHUB), (vec![], vec![]));
     }
 
     #[test]

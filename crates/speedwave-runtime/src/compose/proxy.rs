@@ -1,7 +1,6 @@
 use crate::config::{GitRepositoryLists, LlmConfig, LlmProviderKind, ResolvedIntegrationsConfig};
-use crate::git_allowlist::{forge_host_in, normalise_entry, GitForgeService};
+use crate::git_allowlist::{enforced_entries, forge_host_in, GitForgeService};
 use serde::Serialize;
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 #[derive(Serialize)]
@@ -95,27 +94,17 @@ pub(super) fn git_forges_in(
         let Some(host) = forge_host_in(data_dir, project, service) else {
             continue;
         };
-        let allowed = valid_repositories(service, &host, repositories.of(service));
+        let (allowed, rejected) = enforced_entries(repositories.of(service), &host);
+        for index in rejected {
+            log::warn!(
+                "{} repository entry {index} is not valid for {host} and is not passed to the proxy",
+                service.config_key()
+            );
+        }
         forges.push(GitForge::new(service, host, allowed));
     }
     forges.sort_by(|a, b| a.host.cmp(&b.host));
     forges
-}
-
-fn valid_repositories(service: GitForgeService, host: &str, entries: &[String]) -> Vec<String> {
-    let mut valid = BTreeSet::new();
-    for (index, entry) in entries.iter().enumerate() {
-        match normalise_entry(entry, host) {
-            Ok(normalised) => {
-                valid.insert(normalised);
-            }
-            Err(_) => log::warn!(
-                "{} repository entry {index} is not valid for {host} and is not passed to the proxy",
-                service.config_key()
-            ),
-        }
-    }
-    valid.into_iter().collect()
 }
 
 /// Port the proxy container listens on (fixed in the forwarder binary).
