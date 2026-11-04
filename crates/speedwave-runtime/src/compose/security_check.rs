@@ -3,10 +3,10 @@
 
 use crate::consts;
 use crate::engine_path::to_engine_path;
+use crate::git_allowlist::GitForgeService;
 use crate::plugin::{self, PluginManifest};
 use strum::EnumProperty;
 
-use super::proxy::GitForgeKind;
 use super::{container_user, resolve_tokens_dir_in};
 
 /// Expected engine paths for security validation.
@@ -1300,14 +1300,14 @@ impl SecurityCheck {
                     });
                 }
                 matched += 1;
-            } else if let Some((kind, host, mode)) = GitForgeKind::ALL.iter().find_map(|kind| {
+            } else if let Some((kind, host, mode)) = GitForgeService::ALL.iter().find_map(|kind| {
                 extract_volume_for_target(vol, &kind.token_mount_target())
                     .map(|(host, mode)| (*kind, host, mode))
             }) {
                 let expected_git_tokens = format!(
                     "{}/{}",
                     expected_paths.tokens_engine_dir(),
-                    kind.tokens_subdir()
+                    kind.config_key()
                 );
                 if mode.as_deref() != Some("ro") || host != expected_git_tokens {
                     violations.push(SecurityViolation {

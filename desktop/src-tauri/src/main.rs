@@ -19,6 +19,7 @@ mod diagnostics;
 mod e2e_support;
 mod firewall;
 mod git_cmd;
+mod git_repositories_cmd;
 mod health;
 mod health_cmd;
 mod history;
@@ -1272,6 +1273,9 @@ fn main() {
             export_diagnostics,
             integrations_cmd::get_integrations,
             integrations_cmd::set_integration_enabled,
+            git_repositories_cmd::get_git_repositories,
+            git_repositories_cmd::add_git_repository,
+            git_repositories_cmd::remove_git_repository,
             integrations_cmd::set_os_integration_enabled,
             integrations_cmd::validate_os_integrations_on_startup,
             integrations_cmd::save_integration_credentials,
