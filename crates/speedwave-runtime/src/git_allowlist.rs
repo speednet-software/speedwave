@@ -43,7 +43,7 @@ impl GitForgeService {
     }
 
     /// Integration config key, also the token namespace under `tokens/<project>/`.
-    pub fn config_key(self) -> &'static str {
+    pub(crate) fn config_key(self) -> &'static str {
         match self {
             Self::Github => "github",
             Self::Gitlab => "gitlab",
@@ -712,23 +712,6 @@ mod tests {
             normalise_entry("https://[::1]:8443/g/r", "[::1]:8443").as_deref(),
             Ok("g/r")
         );
-    }
-
-    #[test]
-    fn normalised_entries_equal_the_proxy_comparison_key_of_the_request_path() {
-        for (entry, request_path) in [
-            ("https://github.com/Owner/Repo.git", "/Owner/Repo.git/"),
-            ("git@github.com:owner/repo", "OWNER/repo"),
-            ("https://github.com/Group/Sub/Repo", "group/sub/repo.git"),
-        ] {
-            let normalised = normalise_entry(entry, GITHUB).unwrap();
-            let trimmed = request_path.trim_matches('/');
-            let key = trimmed
-                .strip_suffix(".git")
-                .unwrap_or(trimmed)
-                .to_ascii_lowercase();
-            assert_eq!(normalised, key, "{entry} vs {request_path}");
-        }
     }
 
     #[test]

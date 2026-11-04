@@ -10,7 +10,7 @@ import {
 import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
 import { LoggerService } from '../../services/logger.service';
-import { GitRepositoriesView } from '../../models/integration';
+import { GitForgeService, GitRepositoriesView } from '../../models/integration';
 
 /** Repository allowlist editor of one git integration (GitHub or GitLab) in one project. */
 @Component({
@@ -132,7 +132,7 @@ import { GitRepositoriesView } from '../../models/integration';
 })
 export class GitRepositoriesComponent {
   readonly project = input.required<string>();
-  readonly service = input.required<'github' | 'gitlab'>();
+  readonly service = input.required<GitForgeService>();
   readonly enabled = input.required<boolean>();
 
   protected readonly view = signal<GitRepositoriesView>({
@@ -186,7 +186,7 @@ export class GitRepositoriesComponent {
     await this.write('remove_git_repository', entry, false);
   }
 
-  private async load(project: string, service: 'github' | 'gitlab'): Promise<void> {
+  private async load(project: string, service: GitForgeService): Promise<void> {
     this.error.set('');
     this.loaded.set(false);
     try {
@@ -230,7 +230,7 @@ export class GitRepositoriesComponent {
     }
   }
 
-  private isShown(project: string, service: 'github' | 'gitlab'): boolean {
+  private isShown(project: string, service: GitForgeService): boolean {
     return this.project() === project && this.service() === service;
   }
 

@@ -874,7 +874,7 @@ mod tests {
                 &[
                     "team/app",
                     "https://gitlab.com/old/host",
-                    "github.com/not/here",
+                    "github.com:not/here.git",
                 ],
             ),
         );

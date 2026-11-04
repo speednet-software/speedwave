@@ -568,6 +568,13 @@ impl IntegrationsConfig {
         }
     }
 
+    /// Stored repository allowlist of a git forge integration, empty when it has none.
+    pub fn repositories_of(&self, service: GitForgeService) -> &[String] {
+        self.git_forge(service)
+            .map(|forge| forge.repositories.as_slice())
+            .unwrap_or_default()
+    }
+
     /// Settings of a git forge integration, created empty when the config has none.
     pub fn git_forge_mut(&mut self, service: GitForgeService) -> &mut GitForgeIntegrationConfig {
         match service {
@@ -1562,7 +1569,7 @@ pub struct GitRepositoryLists {
 
 impl GitRepositoryLists {
     /// Entries of one forge integration.
-    pub fn of(&self, service: GitForgeService) -> &[String] {
+    pub(crate) fn of(&self, service: GitForgeService) -> &[String] {
         match service {
             GitForgeService::Github => &self.github,
             GitForgeService::Gitlab => &self.gitlab,
@@ -1802,8 +1809,8 @@ pub(crate) fn resolve_project_config_in_with_managed(
         .find_project(project_name)
         .and_then(|p| p.integrations.as_ref())
         .map(|i| GitRepositoryLists {
-            github: stored_repositories(i, GitForgeService::Github),
-            gitlab: stored_repositories(i, GitForgeService::Gitlab),
+            github: i.repositories_of(GitForgeService::Github).to_vec(),
+            gitlab: i.repositories_of(GitForgeService::Gitlab).to_vec(),
         })
         .unwrap_or_default();
 
@@ -1817,13 +1824,6 @@ pub(crate) fn resolve_project_config_in_with_managed(
         git_repositories,
     };
     (claude, integrations)
-}
-
-fn stored_repositories(integrations: &IntegrationsConfig, service: GitForgeService) -> Vec<String> {
-    integrations
-        .git_forge(service)
-        .map(|forge| forge.repositories.clone())
-        .unwrap_or_default()
 }
 
 fn apply_repo_model_suggestion(llm: &mut LlmConfig, suggestion: Option<String>) {

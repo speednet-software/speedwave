@@ -72,10 +72,11 @@ impl GitForge {
 }
 
 fn normalise(path: &str) -> String {
-    let path = path.trim_matches('/');
-    path.strip_suffix(".git")
-        .unwrap_or(path)
-        .to_ascii_lowercase()
+    let lowered = path.trim_matches('/').to_ascii_lowercase();
+    match lowered.strip_suffix(".git") {
+        Some(stripped) => stripped.to_string(),
+        None => lowered,
+    }
 }
 
 fn entry_matches(entry: &str, repo: &str) -> bool {
@@ -266,6 +267,7 @@ mod tests {
     fn exact_entry_matches_only_the_same_repository() {
         let forge = forge_allowing(&["owner/repo"]);
         assert!(forge.allows("owner/repo"));
+        assert!(forge.allows("Owner/Repo.GIT"));
         assert!(!forge.allows("owner/repo-fork"));
         assert!(!forge.allows("owner/repo/sub"));
         assert!(!forge.allows("other/owner/repo"));

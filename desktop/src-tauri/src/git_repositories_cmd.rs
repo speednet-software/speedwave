@@ -98,12 +98,18 @@ fn view_in(
         .require_project(project)
         .map_err(|e| e.to_string())?;
     let host = forge_host_in(data_dir, project, service);
-    let repositories = entry
+    let repositories: Vec<String> = entry
         .integrations
         .as_ref()
-        .and_then(|integrations| integrations.git_forge(service))
-        .map(|forge| forge.repositories.clone())
-        .unwrap_or_default();
+        .map(|integrations| integrations.repositories_of(service))
+        .unwrap_or_default()
+        .iter()
+        .filter(|stored| {
+            host.as_deref()
+                .is_none_or(|host| normalise_entry(stored, host).is_ok())
+        })
+        .cloned()
+        .collect();
     let suggestions = host
         .as_deref()
         .map(|host| suggestions_in(Path::new(&entry.dir), host, &repositories))
@@ -143,7 +149,6 @@ fn add_in(
         forge.repositories.push(normalised);
     }
     forge.repositories.sort();
-    forge.repositories.dedup();
     Ok(())
 }
 
@@ -396,6 +401,43 @@ mod tests {
         assert!(view(&f, GitForgeService::Github).suggestions.is_empty());
         remove_in(&mut f.config, "proj", GitForgeService::Github, "owner/repo").unwrap();
         assert_eq!(view(&f, GitForgeService::Github).suggestions.len(), 1);
+    }
+
+    #[test]
+    fn view_leaves_out_stored_entries_the_renderer_would_drop() {
+        let mut f = fixture();
+        add(&mut f, GitForgeService::Github, "owner/repo").unwrap();
+        f.config.projects[0]
+            .integrations
+            .as_mut()
+            .unwrap()
+            .git_forge_mut(GitForgeService::Github)
+            .repositories
+            .extend(["*".to_string(), "https://gitlab.com/a/b".to_string()]);
+        assert_eq!(
+            view(&f, GitForgeService::Github).repositories,
+            ["owner/repo"]
+        );
+    }
+
+    #[test]
+    fn git_forge_service_matches_ts_union() {
+        for service in [GitForgeService::Github, GitForgeService::Gitlab] {
+            match service {
+                GitForgeService::Github | GitForgeService::Gitlab => {}
+            }
+        }
+        let src = include_str!("../../src/src/app/models/integration.ts");
+        let services: Vec<Option<GitForgeService>> =
+            crate::ts_mirror::ts_union_members(src, "GitForgeService")
+                .into_iter()
+                .map(GitForgeService::from_config_key)
+                .collect();
+        assert_eq!(
+            services,
+            [Some(GitForgeService::Github), Some(GitForgeService::Gitlab)],
+            "TS GitForgeService union must match the Rust config keys"
+        );
     }
 
     #[test]

@@ -95,6 +95,9 @@ export interface OsIntegrationValidation {
   reason: string;
 }
 
+/** Integration whose repository allowlist the git transport enforces (Rust `GitForgeService`). */
+export type GitForgeService = 'github' | 'gitlab';
+
 /** A remote found in the project directory and not listed yet; `source_dir` is `"."` for the root. */
 export interface GitRepositorySuggestion {
   entry: string;

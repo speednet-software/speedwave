@@ -7,7 +7,7 @@ import { LoggerService } from '../../services/logger.service';
 import { MockTauriService } from '../../testing/mock-tauri.service';
 import { makeMockLogger } from '../../testing/mock-logger';
 import { createDeferred } from '../../testing/deferred';
-import type { GitRepositoriesView } from '../../models/integration';
+import type { GitForgeService, GitRepositoriesView } from '../../models/integration';
 
 function view(overrides?: Partial<GitRepositoriesView>): GitRepositoriesView {
   return { host: 'https://github.com', repositories: [], suggestions: [], ...overrides };
@@ -27,10 +27,14 @@ describe('GitRepositoriesComponent', () => {
 
   const el = (id: string): HTMLElement | null =>
     fixture.nativeElement.querySelector(`[data-testid="${id}"]`);
+  const settle = async (): Promise<void> => {
+    await fixture.whenStable();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    fixture.detectChanges();
+  };
   const click = async (id: string): Promise<void> => {
     (el(id) as HTMLElement).click();
-    await fixture.whenStable();
-    fixture.detectChanges();
+    await settle();
   };
   const type = async (value: string): Promise<void> => {
     const input = el('git-repositories-input') as HTMLInputElement;
@@ -40,14 +44,13 @@ describe('GitRepositoriesComponent', () => {
   };
   const invoked = (cmd: string) => calls.filter((c) => c.cmd === cmd);
 
-  async function create(enabled = true, service: 'github' | 'gitlab' = 'github'): Promise<void> {
+  async function create(enabled = true, service: GitForgeService = 'github'): Promise<void> {
     fixture = TestBed.createComponent(GitRepositoriesComponent);
     fixture.componentRef.setInput('project', 'proj');
     fixture.componentRef.setInput('service', service);
     fixture.componentRef.setInput('enabled', enabled);
     fixture.detectChanges();
-    await fixture.whenStable();
-    fixture.detectChanges();
+    await settle();
   }
 
   beforeEach(() => {
@@ -235,8 +238,7 @@ describe('GitRepositoriesComponent', () => {
     expect((el('git-repositories-add') as HTMLButtonElement).disabled).toBe(true);
     expect((el('git-repositories-input') as HTMLInputElement).disabled).toBe(true);
     pending.resolve(view({ repositories: ['acme/api'] }));
-    await fixture.whenStable();
-    fixture.detectChanges();
+    await settle();
     expect((el('git-repositories-add') as HTMLButtonElement).disabled).toBe(false);
   });
 
@@ -254,8 +256,7 @@ describe('GitRepositoriesComponent', () => {
     fixture.detectChanges();
     await fixture.whenStable();
     first.resolve(view({ repositories: ['a/repo'] }));
-    await fixture.whenStable();
-    fixture.detectChanges();
+    await settle();
     expect(el('git-repositories-row-b/repo')).not.toBeNull();
     expect(el('git-repositories-row-a/repo')).toBeNull();
   });
