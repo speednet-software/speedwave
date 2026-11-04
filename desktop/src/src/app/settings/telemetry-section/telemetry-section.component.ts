@@ -2,6 +2,7 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
+  DestroyRef,
   OnDestroy,
   OnInit,
   WritableSignal,
@@ -13,6 +14,7 @@ import {
 
 import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
+import { SettingsDirtyService } from '../settings-dirty.service';
 import { ToggleComponent } from '../../shared/toggle.component';
 import { eventChecked, eventValue } from '../../shared/dom-event';
 import type {
@@ -477,7 +479,7 @@ class TriStateField<T> {
                   <button
                     type="button"
                     class="mono rounded bg-[var(--accent)] px-4 py-1.5 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-                    [disabled]="saving()"
+                    [disabled]="saving() || !isDirty()"
                     (click)="save()"
                     data-testid="telemetry-save"
                   >
@@ -531,6 +533,7 @@ export class TelemetrySectionComponent implements OnInit, OnDestroy {
   readonly probing = signal(false);
   /** Empty until a probe runs; then 'reachable' or 'unreachable from this host'. */
   readonly probeResult = signal('');
+  private readonly loadedFormSnapshot = signal('');
 
   readonly enabled = signal(false);
   readonly protocol = signal<OtlpProtocol>('grpc');
@@ -559,10 +562,26 @@ export class TelemetrySectionComponent implements OnInit, OnDestroy {
   readonly logsExportIntervalMs = this.logsIntervalField.value;
   readonly logsIntervalTouched = this.logsIntervalField.touched;
 
+  /** True when the form differs from the last loaded/saved state; false until the first load. */
+  readonly isDirty = computed<boolean>(
+    () => this.config() !== null && this.computeFormSnapshot() !== this.loadedFormSnapshot()
+  );
+
   private readonly tauri = inject(TauriService);
   private readonly cdr = inject(ChangeDetectorRef);
   private readonly projectState = inject(ProjectStateService);
+  private readonly dirtyRegistry = inject(SettingsDirtyService);
   private savedTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Registers this section's dirty state with the settings leave guard. */
+  constructor() {
+    const unregister = this.dirtyRegistry.register({
+      name: 'Telemetry',
+      isDirty: this.isDirty,
+      save: () => this.save(),
+    });
+    inject(DestroyRef).onDestroy(unregister);
+  }
 
   /** Loads the effective telemetry config on first paint. */
   async ngOnInit(): Promise<void> {
@@ -588,10 +607,30 @@ export class TelemetrySectionComponent implements OnInit, OnDestroy {
       this.logToolDetails.set(c.log_tool_details);
       this.logRawApiBodies.set(c.log_raw_api_bodies);
       this.error.set('');
+      this.loadedFormSnapshot.set(this.computeFormSnapshot());
     } catch (e: unknown) {
       this.emitError(e);
     }
     this.cdr.markForCheck();
+  }
+
+  private computeFormSnapshot(): string {
+    return JSON.stringify({
+      enabled: this.enabled(),
+      protocol: this.protocol(),
+      exportMetrics: this.exportMetrics(),
+      exportLogs: this.exportLogs(),
+      includeAccountUuid: this.includeAccountUuid(),
+      logUserPrompts: this.logUserPrompts(),
+      logAssistantResponses: this.logAssistantResponses(),
+      logToolDetails: this.logToolDetails(),
+      logRawApiBodies: this.logRawApiBodies(),
+      endpoint: [this.endpoint(), this.endpointTouched()],
+      headers: [this.headers(), this.headersTouched()],
+      resourceAttributes: [this.resourceAttributes(), this.resourceAttributesTouched()],
+      metricInterval: [this.metricExportIntervalMs(), this.metricIntervalTouched()],
+      logsInterval: [this.logsExportIntervalMs(), this.logsIntervalTouched()],
+    });
   }
 
   /**
@@ -690,12 +729,23 @@ export class TelemetrySectionComponent implements OnInit, OnDestroy {
     this.cdr.markForCheck();
   }
 
+  private saveInFlight: Promise<void> | null = null;
+
+  /** Single-flight wrapper: a save already in flight is returned as-is, never started twice. */
+  async save(): Promise<void> {
+    if (this.saveInFlight) return this.saveInFlight;
+    this.saveInFlight = this.doSave().finally(() => {
+      this.saveInFlight = null;
+    });
+    return this.saveInFlight;
+  }
+
   /**
    * Persists the editable fields. Locked fields are omitted entirely (never
    * just server-ignored) so a save with one locked field never blocks an
    * unrelated unlocked edit.
    */
-  async save(): Promise<void> {
+  private async doSave(): Promise<void> {
     this.saving.set(true);
     this.saved.set(false);
     this.cdr.markForCheck();

@@ -23,6 +23,8 @@ import { UpdateSectionComponent } from './update-section/update-section.componen
 import { NotificationsSectionComponent } from './notifications-section/notifications-section.component';
 import { ProjectPillComponent } from '../project-switcher/project-pill.component';
 import { RecreateOnDirective } from '../shared/recreate-on.directive';
+import { ModalOverlayComponent } from '../shell/modal-overlay/modal-overlay.component';
+import { SettingsDirtyService } from './settings-dirty.service';
 
 /** One theme card in the Appearance accent grid; swatch reads live `--accent` via `data-theme`. */
 interface ThemeCard {
@@ -77,6 +79,7 @@ const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
     NotificationsSectionComponent,
     ProjectPillComponent,
     RecreateOnDirective,
+    ModalOverlayComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: {
@@ -214,6 +217,25 @@ const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
         />
       </div>
     </div>
+
+    <app-modal-overlay
+      [open]="dirty.promptOpen()"
+      kicker="⚠ unsaved changes"
+      kickerColor="amber"
+      modalTitle="Unsaved changes"
+      [body]="unsavedBody()"
+      primaryLabel="save"
+      secondaryLabel=""
+      tertiaryLabel="discard"
+      [showClose]="true"
+      testId="settings-unsaved-modal"
+      primaryTestId="unsaved-save-btn"
+      tertiaryTestId="unsaved-discard-btn"
+      closeTestId="unsaved-close-btn"
+      (primary)="dirty.resolvePrompt('save')"
+      (tertiary)="dirty.resolvePrompt('discard')"
+      (closed)="dirty.resolvePrompt('stay')"
+    />
   `,
 })
 export class SettingsComponent implements OnInit, OnDestroy {
@@ -231,6 +253,16 @@ export class SettingsComponent implements OnInit, OnDestroy {
   readonly ui = inject(UiStateService);
   /** Beta-features gate: the notifications, telemetry and security sections are beta-only. */
   readonly beta = inject(BetaService);
+  /** Dirty-section registry exposed to the template for the leave prompt. */
+  readonly dirty = inject(SettingsDirtyService);
+
+  /** Modal body naming every dirty section; falls back to a generic message once the list empties. */
+  readonly unsavedBody = computed(() => {
+    const names = this.dirty.dirtySectionNames();
+    return names.length
+      ? `Unsaved changes in: ${names.join(', ')}. Save before leaving?`
+      : 'Unsaved changes. Save before leaving?';
+  });
 
   private router = inject(Router);
   private route = inject(ActivatedRoute);
@@ -279,6 +311,7 @@ export class SettingsComponent implements OnInit, OnDestroy {
 
   /** Handles factory reset completion by navigating to setup. */
   onResetCompleted(): void {
+    this.dirty.suppressNextPrompt();
     this.router.navigate(['/setup'], { replaceUrl: true });
   }
 }
