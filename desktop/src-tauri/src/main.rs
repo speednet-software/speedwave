@@ -866,6 +866,7 @@ fn main() {
             }
 
             notifications::install(app.handle());
+            keep_awake::install();
 
             if let Ok(mut slot) = clipboard_bridge_slot.lock() {
                 *slot = clipboard_bridge::spawn(app.handle().clone());

@@ -62,6 +62,16 @@ pub(crate) fn release_on_exit() {
     KEEPER.set_enabled(false);
 }
 
+/// Renews the assertion whenever the display comes back on: Windows can clear it in battery standby.
+pub(crate) fn install() {
+    #[cfg(windows)]
+    if let Err(e) = platform::watch_display() {
+        log::warn!(
+            "could not watch the display, so a wake will not renew the idle-sleep assertion: {e}"
+        );
+    }
+}
+
 /// Reads the Settings switch; unset means on.
 #[tauri::command]
 pub async fn get_keep_awake() -> Result<bool, String> {
@@ -157,6 +167,23 @@ impl Keeper {
         }
     }
 
+    #[cfg(any(windows, test))]
+    fn renew(&self) {
+        let mut state = self.lock();
+        if state.holders == 0 || state.enabled != Some(true) {
+            return;
+        }
+        match (self.acquire)() {
+            Ok(fresh) => {
+                state.assertion = Some(fresh);
+                log::info!("renewed the idle-sleep assertion after the display came back on");
+            }
+            Err(e) => log::warn!(
+                "could not renew the idle-sleep assertion after the display came back on: {e}"
+            ),
+        }
+    }
+
     fn release_if_idle(&self, generation: u64) {
         let mut state = self.lock();
         if state.holders == 0 && state.generation == generation {
@@ -169,6 +196,11 @@ impl Keeper {
             log::info!("the computer may idle-sleep again");
         }
     }
+}
+
+#[cfg(windows)]
+fn renew_after_wake() {
+    KEEPER.renew();
 }
 
 fn acquire_os() -> Result<OsAssertion, String> {
@@ -361,6 +393,71 @@ mod tests {
         let turn = keeper.hold("a chat turn");
         assert_eq!(counts(&calls), (1, 0));
         drop(recording);
+        drop(turn);
+    }
+
+    #[test]
+    fn a_wake_replaces_the_assertion_of_running_work() {
+        let (keeper, calls) = keeper(NEVER, on);
+        let pass = keeper.hold("an offline transcription pass");
+        keeper.renew();
+        assert_eq!(counts(&calls), (2, 1));
+        assert!(keeper.lock().assertion.is_some());
+        drop(pass);
+    }
+
+    #[test]
+    fn a_wake_takes_the_assertion_a_refused_hold_never_got() {
+        let (keeper, calls) = keeper(NEVER, on);
+        calls.refuse.store(true, Ordering::SeqCst);
+        let recording = keeper.hold("a recording");
+        calls.refuse.store(false, Ordering::SeqCst);
+        keeper.renew();
+        assert_eq!(counts(&calls), (1, 0));
+        drop(recording);
+    }
+
+    #[test]
+    fn a_refused_renewal_keeps_the_assertion_it_had() {
+        let (keeper, calls) = keeper(NEVER, on);
+        let turn = keeper.hold("a chat turn");
+        calls.refuse.store(true, Ordering::SeqCst);
+        keeper.renew();
+        assert_eq!(counts(&calls), (1, 0));
+        assert!(keeper.lock().assertion.is_some());
+        drop(turn);
+    }
+
+    #[test]
+    fn a_wake_with_no_work_running_takes_nothing() {
+        let (keeper, calls) = keeper(NEVER, on);
+        keeper.renew();
+        assert_eq!(counts(&calls), (0, 0));
+        drop(keeper.hold("a chat turn"));
+        keeper.renew();
+        assert_eq!(
+            counts(&calls),
+            (1, 0),
+            "an assertion left only for the grace is released by its timer, not renewed"
+        );
+    }
+
+    #[test]
+    fn a_wake_after_the_switch_was_turned_off_or_the_app_exits_takes_nothing() {
+        let (keeper, calls) = keeper(NEVER, on);
+        let recording = keeper.hold("a recording");
+        keeper.set_enabled(false);
+        keeper.renew();
+        assert_eq!(counts(&calls), (1, 1));
+        drop(recording);
+    }
+
+    #[test]
+    fn a_wake_with_the_switch_stored_off_takes_nothing() {
+        let (keeper, calls) = keeper(NEVER, off);
+        let turn = keeper.hold("a chat turn");
+        keeper.renew();
+        assert_eq!(counts(&calls), (0, 0));
         drop(turn);
     }
 
