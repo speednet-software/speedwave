@@ -523,7 +523,7 @@ interface ProgressTrack {
               [highlighted]="highlightedIds()"
               [canReapply]="canReapplyNames()"
               [editable]="canName()"
-              [canSample]="canName()"
+              [canSample]="canSample()"
               [sampling]="samplingSpeaker()"
               (name)="openNaming($event, 'legend')"
               (hover)="hoveredSpeaker.set($event)"
@@ -737,7 +737,7 @@ interface ProgressTrack {
             numberLabel(target.id)
           "
           [describe]="describeName()"
-          [canSample]="canName()"
+          [canSample]="canSample()"
           [samplePlaying]="samplingSpeaker() === target.id"
           (saved)="saveSpeakerName($event)"
           (cancelled)="closeNaming()"
@@ -859,6 +859,9 @@ export class LiveTranscriptComponent {
     const speaker = this.speakers().find((s) => s.id === sampled);
     return speaker ? { label: speaker.label, speaker } : null;
   });
+
+  /** Whether a speaker's voice can be heard: some line of the recording can be played. */
+  readonly canSample = computed(() => this.canName() && (this.playableSecs() ?? 0) > 0);
 
   /** Whether some line cannot be played because its audio file is gone. */
   readonly missingAudio = computed(
@@ -1287,7 +1290,11 @@ export class LiveTranscriptComponent {
     const menuOpen = this.openMenu() !== null;
     this.closeMenus();
     const target = event.target instanceof Element ? event.target : null;
-    if (menuOpen || target?.closest('input, textarea, [role="dialog"], [role="alertdialog"]'))
+    if (
+      menuOpen ||
+      this.naming() !== null ||
+      target?.closest('input, textarea, [role="dialog"], [role="alertdialog"]')
+    )
       return;
     this.playback.stop();
   }
@@ -1654,15 +1661,18 @@ export class LiveTranscriptComponent {
   }
 
   /**
-   * Asks the backend how much of the recording can be played, kept only while it stays open.
+   * Asks the backend how much of the recording can be played, kept only while it stays open; a
+   * failed question goes to the error banner and leaves every line disabled.
    * @param id - the recording's session id.
    */
   private async refreshPlayable(id: string): Promise<void> {
     try {
       const secs = await this.playback.playableSecs(id);
-      if (this.sessionId() === id) this.playableSecs.set(typeof secs === 'number' ? secs : null);
-    } catch {
-      if (this.sessionId() === id) this.playableSecs.set(null);
+      if (this.sessionId() === id) this.playableSecs.set(secs);
+    } catch (e) {
+      if (this.sessionId() !== id) return;
+      this.playableSecs.set(null);
+      this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
     }
   }
 }

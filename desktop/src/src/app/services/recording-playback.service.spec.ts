@@ -228,14 +228,40 @@ describe('RecordingPlaybackService', () => {
     expect(audio.play).toHaveBeenCalledTimes(1);
   });
 
-  it('stopFor stops only the playback of that session', async () => {
+  it('a play the next span interrupted is no error', async () => {
+    const first = createDeferred<void>();
+    audio.play.mockImplementationOnce(() => first.promise);
+
+    const interrupted = svc.play(line('line:0'));
+    await vi.waitFor(() => expect(audio.play).toHaveBeenCalledTimes(1));
+    await svc.play(line('line:1'));
+    first.reject(new DOMException('interrupted by a new load request', 'AbortError'));
+
+    await expect(interrupted).resolves.toBeUndefined();
+    expect(svc.current()).toMatchObject({ key: 'line:1', state: 'playing' });
+  });
+
+  it('a resume the next span interrupted is no error', async () => {
     await svc.play(line('line:0'));
+    svc.pause();
+    const resumed = createDeferred<void>();
+    audio.play.mockImplementationOnce(() => resumed.promise);
 
-    svc.stopFor('sess-2');
-    expect(svc.current()?.key).toBe('line:0');
+    const resuming = svc.resume();
+    await svc.play(line('line:1'));
+    resumed.reject(new DOMException('interrupted', 'AbortError'));
 
-    svc.stopFor('sess-1');
-    expect(svc.current()).toBeNull();
+    await expect(resuming).resolves.toBeUndefined();
+    expect(svc.current()).toMatchObject({ key: 'line:1', state: 'playing' });
+  });
+
+  it('a resume the webview refuses rejects and keeps the span paused', async () => {
+    await svc.play(line('line:0'));
+    svc.pause();
+    audio.play.mockRejectedValueOnce(new Error('NotAllowedError'));
+
+    await expect(svc.resume()).rejects.toThrow('NotAllowedError');
+    expect(svc.current()?.state).toBe('paused');
   });
 
   it('pause, resume and replay do nothing while nothing plays', async () => {

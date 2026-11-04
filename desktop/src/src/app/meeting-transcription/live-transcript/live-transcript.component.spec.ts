@@ -795,6 +795,39 @@ describe('LiveTranscriptComponent', () => {
       expect(q('recording-missing')).toBeNull();
     });
 
+    it('reports a failed question about the recording and leaves every line disabled', async () => {
+      const errors: string[] = [];
+      component.errorOccurred.subscribe((e) => errors.push(e));
+      playback.playableSecs.mockRejectedValueOnce('no such transcript session: sess-1');
+      await open();
+
+      expect(errors).toEqual(['no such transcript session: sess-1']);
+      expect(plays().every((b) => b.disabled)).toBe(true);
+      expect(q('recording-missing')).toBeNull();
+    });
+
+    it('offers no sample while no line of the recording can be played', async () => {
+      playback.playable = 0;
+      await open();
+      expect(all('speaker-sample')).toEqual([]);
+
+      component.openNaming({ id: 1, trigger: null }, 'legend');
+      fixture.detectChanges();
+      expect(q('speaker-name-sample')).toBeNull();
+    });
+
+    it('Esc leaves playback alone while the name dialog is open', async () => {
+      await open();
+      plays()[0].click();
+      await fixture.whenStable();
+      component.openNaming({ id: 1, trigger: null }, 'legend');
+      fixture.detectChanges();
+
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+
+      expect(playback.stop).not.toHaveBeenCalled();
+    });
+
     it('reports a line that cannot be played and asks again how much can be', async () => {
       await open();
       const errors: string[] = [];

@@ -17,7 +17,7 @@ export interface PlaybackRequest {
 }
 
 /** Where the playing span is. */
-export type PlaybackState = 'loading' | 'playing' | 'paused';
+type PlaybackState = 'loading' | 'playing' | 'paused';
 
 /** The span that plays or waits paused, with its state. */
 export interface Playback extends PlaybackRequest {
@@ -103,7 +103,8 @@ export class RecordingPlaybackService {
     try {
       await audio.play();
     } catch (e) {
-      if (generation === this.generation) this.stop();
+      if (generation !== this.generation) return;
+      this.stop();
       throw new Error(`The recording could not be played: ${String(e)}`, { cause: e });
     }
     if (generation === this.generation) this.setState('playing');
@@ -121,8 +122,7 @@ export class RecordingPlaybackService {
     const audio = this.audio;
     if (this.current()?.state !== 'paused' || !audio) return;
     if (audio.ended) audio.currentTime = 0;
-    await audio.play();
-    this.setState('playing');
+    await this.playCurrent(audio);
   }
 
   /** Plays the current span again from its start. */
@@ -131,8 +131,7 @@ export class RecordingPlaybackService {
     if (!audio || !this.current() || this.current()?.state === 'loading') return;
     audio.currentTime = 0;
     this.position.set(0);
-    await audio.play();
-    this.setState('playing');
+    await this.playCurrent(audio);
   }
 
   /** Stops playback and forgets the span. */
@@ -143,19 +142,22 @@ export class RecordingPlaybackService {
   }
 
   /**
-   * Stops playback when it belongs to the session; for a recording deleted or transcribed again.
-   * @param sessionId - the session whose playback ends.
-   */
-  stopFor(sessionId: string): void {
-    if (this.current()?.sessionId === sessionId) this.stop();
-  }
-
-  /**
    * Seconds of the session's recording that can be played from its start; 0 when it is gone.
    * @param sessionId - the session to ask about.
    */
   playableSecs(sessionId: string): Promise<number> {
     return this.tauri.invoke<number>('transcript_playable_secs', { sessionId });
+  }
+
+  private async playCurrent(audio: HTMLAudioElement): Promise<void> {
+    const generation = this.generation;
+    try {
+      await audio.play();
+    } catch (e) {
+      if (generation !== this.generation) return;
+      throw e;
+    }
+    if (generation === this.generation) this.setState('playing');
   }
 
   private element(): HTMLAudioElement {

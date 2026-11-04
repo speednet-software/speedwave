@@ -13,10 +13,16 @@ pub const RECORDING_UNAVAILABLE: &str =
     "Recording file not found. It was moved or deleted, so lines can't be played.";
 
 /// Audio kept on each side of a span, so a segment boundary a little off does not cut a syllable.
-pub const CLIP_PADDING: Duration = Duration::from_millis(250);
+const CLIP_PADDING: Duration = Duration::from_millis(250);
 
 /// The longest span one clip carries, padding included.
-pub const MAX_CLIP: Duration = Duration::from_secs(60);
+const MAX_CLIP: Duration = Duration::from_secs(60);
+
+struct ReadablePart<'a> {
+    path: &'a Path,
+    start: Duration,
+    end: Duration,
+}
 
 /// Why a span could not be read.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -60,18 +66,15 @@ pub fn clip(
         return Err(ClipError::Unavailable);
     }
     let from = start.saturating_sub(CLIP_PADDING);
-    let to = (end + CLIP_PADDING).min(from + MAX_CLIP).min(known_end);
+    let to = end
+        .saturating_add(CLIP_PADDING)
+        .min(from + MAX_CLIP)
+        .min(known_end);
     let mut samples: Vec<i16> = Vec::new();
     for part in readable.iter().filter(|p| p.start < to && p.end > from) {
         read_span(part, from, to, source, &mut samples)?;
     }
     encode_wav(&samples)
-}
-
-struct ReadablePart<'a> {
-    path: &'a Path,
-    start: Duration,
-    end: Duration,
 }
 
 fn readable_parts(parts: &[PathBuf]) -> Vec<ReadablePart<'_>> {
@@ -443,6 +446,17 @@ mod tests {
             clip(&[wav], secs(1.5), secs(1.0), None),
             Err(ClipError::InvalidSpan(_))
         ));
+    }
+
+    #[test]
+    fn a_span_ending_at_the_largest_time_is_cut_at_the_end_of_the_recording() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("audio.wav");
+        write_mono(&wav, &ramp(2, 0));
+
+        let (_, samples) = decode(&clip(&[wav], secs(1.0), Duration::MAX, None).unwrap());
+
+        assert_eq!(samples.len(), RATE * 125 / 100);
     }
 
     #[test]
