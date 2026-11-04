@@ -108,6 +108,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-100](ADR-100-native-os-notifications-for-chat-session-events.md)  | Native OS notifications for chat-session events: backend-decided, native permission read, click opens the tab               | Accepted                                                                           |
 | [ADR-104](ADR-104-apple-mail-control-through-applescript.md)           | Apple Mail control through AppleScript: gates, Trash-only delete, read-only rules, and living with Mail 16 bugs             | Accepted                                                                           |
 | [ADR-105](ADR-105-caller-shaped-jira-tools-in-the-atlassian-worker.md) | Caller-shaped Jira tools in the Atlassian worker: API designed from the caller side, decoupled from Jira REST               | Accepted                                                                           |
+| [ADR-107](ADR-107-keep-the-computer-awake-while-work-runs.md)          | Keep the computer out of idle sleep while work runs: one counted OS assertion, a Settings switch                            | Accepted                                                                           |
 
 ## Creating a New ADR
 

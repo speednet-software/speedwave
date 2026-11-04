@@ -255,6 +255,7 @@ fn spawn_driver(
     let stop_for_cleanup = cfg.stop.clone();
     let driver = TranscriptDriver::new(cfg);
     tokio::task::spawn_blocking(move || {
+        let _awake = crate::keep_awake::hold("a recording");
         if let Err(e) = driver.run(&audio_wav) {
             log::warn!(
                 "transcript driver for {} ended with error: {e}",
@@ -605,6 +606,7 @@ fn spawn_offline_pass(
                 return;
             }
         }
+        let _awake = crate::keep_awake::hold("an offline transcription pass");
         let _turn = take_offline_pass_turn(&store_arc, id);
         let pass = match store_arc.begin_offline_pass(id) {
             Ok(pass) => pass,
@@ -1705,7 +1707,11 @@ mod tests {
     #[test]
     fn stop_and_transcribe_share_the_one_offline_pass_spawner() {
         let src = include_str!("transcription_cmd.rs");
-        for name in ["stop_transcription", "transcribe_transcript"] {
+        for name in [
+            "stop_transcription",
+            "transcribe_transcript",
+            "import_transcription",
+        ] {
             assert_eq!(
                 count_calls(fn_body(src, name), "spawn_offline_pass"),
                 1,
@@ -1717,6 +1723,40 @@ mod tests {
             1,
             "run_finalize has exactly one caller, spawn_offline_pass"
         );
+    }
+
+    #[test]
+    fn a_capture_keeps_the_computer_awake_until_its_driver_returns() {
+        let body = fn_body(include_str!("transcription_cmd.rs"), "spawn_driver");
+        let hold = body
+            .find("let _awake = crate::keep_awake::hold(")
+            .expect("the capture must hold the computer awake");
+        assert!(hold < body.find("driver.run(").expect("driver run"));
+        assert_eq!(count_calls(body, "hold"), 1);
+        let src = include_str!("transcription_cmd.rs");
+        let production = &src[..src.find("#[cfg(test)]").expect("test module")];
+        assert_eq!(
+            count_calls(production, "TranscriptDriver::new"),
+            1,
+            "a capture started outside spawn_driver would record with nothing keeping the computer awake"
+        );
+    }
+
+    #[test]
+    fn every_offline_pass_keeps_the_computer_awake_from_its_turn_to_its_end() {
+        let body = fn_body(include_str!("transcription_cmd.rs"), "spawn_offline_pass");
+        let hold = body
+            .find("let _awake = crate::keep_awake::hold(")
+            .expect("the pass must hold the computer awake");
+        assert!(
+            body.find("wait_while_recording").expect("wind-down wait") < hold,
+            "a recording put off or deleted during Stop starts no pass and holds nothing"
+        );
+        assert!(
+            hold < body.find("take_offline_pass_turn").expect("turn"),
+            "a pass queued behind another one is still work the user started"
+        );
+        assert_eq!(count_calls(body, "hold"), 1);
     }
 
     #[test]

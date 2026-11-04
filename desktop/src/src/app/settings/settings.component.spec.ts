@@ -32,6 +32,8 @@ function setupMockTauri(mockTauri: MockTauriService): void {
         return { api_key_configured: false, oauth_authenticated: false };
       case 'list_transcripts':
         return [];
+      case 'get_keep_awake':
+        return true;
       default:
         return undefined;
     }
@@ -132,6 +134,15 @@ describe('SettingsComponent', () => {
     betaEnabled.set(false);
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('app-notifications-section')).toBeNull();
+  });
+
+  it('renders the Sleep section whether beta is on or off', () => {
+    betaEnabled.set(false);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('app-sleep-section')).not.toBeNull();
+    betaEnabled.set(true);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('app-sleep-section')).not.toBeNull();
   });
 
   it('renders TelemetrySectionComponent when beta is enabled', () => {
