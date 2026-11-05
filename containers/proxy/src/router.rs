@@ -71,7 +71,7 @@ impl GitForge {
     }
 }
 
-fn normalise(path: &str) -> String {
+pub(crate) fn normalise(path: &str) -> String {
     let lowered = path.trim_matches('/').to_ascii_lowercase();
     match lowered.strip_suffix(".git") {
         Some(stripped) => stripped.to_string(),

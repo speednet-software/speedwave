@@ -129,9 +129,10 @@ fn status_response(status: StatusCode) -> Response {
 }
 
 fn not_listed_response(host: &str, repo: &str) -> Response {
+    let entry = crate::router::normalise(repo);
     let mut resp = Response::new(Body::from(format!(
         "Speedwave: {host}/{repo} is not on this project's repository list. \
-         A person adds it in Speedwave Desktop: Integrations, the GitHub or GitLab panel, Repositories.\n"
+         A person adds the entry {entry} in Speedwave Desktop: Integrations, the GitHub or GitLab panel, Repositories.\n"
     )));
     *resp.status_mut() = StatusCode::FORBIDDEN;
     resp.headers_mut().insert(
@@ -517,7 +518,8 @@ mod tests {
         let text = String::from_utf8(body.to_vec()).unwrap();
         assert!(
             text.starts_with(
-                "Speedwave: github.com/other/repo.git is not on this project's repository list."
+                "Speedwave: github.com/other/repo.git is not on this project's repository list. \
+                 A person adds the entry other/repo in Speedwave Desktop"
             ),
             "{text}"
         );
