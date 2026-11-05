@@ -123,15 +123,12 @@ export class SpeakerNameDialogComponent {
   readonly suggestions = input<string[]>([]);
   /** The keyboard hint beside the buttons. */
   readonly hint = input('');
-  /** Whether the speaker's voice can be heard from here. */
   readonly canSample = input(false);
-  /** Whether the speaker's sample plays now. */
   readonly samplePlaying = input(false);
   /** The text in the field when the user saved. */
   readonly saved = output<string>();
   /** The user cancelled: Cancel, Esc, or a press outside the dialog. */
   readonly cancelled = output<void>();
-  /** The user asked to hear, or to pause, a sample of the speaker's voice. */
   readonly sample = output<void>();
 
   protected readonly maxChars = SPEAKER_NAME_MAX_CHARS;

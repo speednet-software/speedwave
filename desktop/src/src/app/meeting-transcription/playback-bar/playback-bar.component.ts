@@ -9,9 +9,7 @@ import type { Speaker } from '../speaker-names';
 
 /** Who speaks in the playing span, as the transcript shows them. */
 export interface PlaybackSpeaker {
-  /** The line's speaker text: a name, `Speaker N`, `You` or `Meeting`; null for none. */
   label: string | null;
-  /** The diarized speaker, for the mark and the Name action; null otherwise. */
   speaker: Pick<Speaker, 'id' | 'color' | 'mark'> | null;
 }
 
@@ -98,17 +96,12 @@ export interface PlaybackSpeaker {
   `,
 })
 export class PlaybackBarComponent {
-  /** Who speaks in the playing span. */
   readonly who = input<PlaybackSpeaker | null>(null);
-  /** Whether the transcript accepts speaker names now. */
   readonly nameable = input(false);
-  /** The user asked to name the speaker of the span; the element focus returns to afterwards. */
   readonly name = output<{ id: number; trigger: HTMLElement | null }>();
-  /** Resuming or replaying failed; the text is for the error banner. */
   readonly failed = output<string>();
 
   protected readonly playback = inject(RecordingPlaybackService);
-  /** Beta on draws the Beta badge over the bar's right end (`shell.component.ts`); stop moves clear of it. */
   protected readonly beta = inject(BetaService);
 
   protected readonly range = computed(() => {

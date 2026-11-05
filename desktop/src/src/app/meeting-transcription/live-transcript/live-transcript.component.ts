@@ -93,7 +93,6 @@ const ETA_PACE_WINDOW_MS = 120_000;
 const ETA_MIN_PACE_SPAN_MS = 30_000;
 const ETA_MIN_MOVED = 0.05;
 const ETA_MIN_ELAPSED_MS = 5000;
-/** Longest speaker sample, in seconds: enough to know a voice, short enough to wait for. */
 const SAMPLE_MAX_SECS = 8;
 
 /**
@@ -114,10 +113,6 @@ function bySegmentStart(a: Segment, b: Segment): number {
   return a.start.secs - b.start.secs || a.start.nanos - b.start.nanos;
 }
 
-/**
- * A serde `Duration` in seconds.
- * @param d - `{secs, nanos}` from the backend
- */
 function toSecs(d: Segment['start']): number {
   return d.secs + d.nanos / 1e9;
 }
@@ -161,13 +156,6 @@ function speakerOf(
   return { speaker: null, diarized: null };
 }
 
-/**
- * Orders two lines as speaker samples: more text first, then the longer one. Speech fills a line
- * with text; noise before it only stretches its time.
- * @param a - the line to compare.
- * @param b - the line it is compared with.
- * @returns a positive number when `a` makes the better sample.
- */
 function sampleRank(a: TranscriptLine, b: TranscriptLine): number {
   const byText = a.text.trim().length - b.text.trim().length;
   return byText !== 0 ? byText : a.endSecs - a.startSecs - (b.endSecs - b.startSecs);
@@ -832,32 +820,26 @@ export class LiveTranscriptComponent {
   /** Whether the speakers can be named: once the transcription is over, as the backend requires. */
   readonly canName = computed(() => ['done', 'postponed', 'failed'].includes(this.status()));
 
-  /** Seconds of the recording that can be played from its start; null until the backend says. */
   readonly playableSecs = signal<number | null>(null);
 
-  /** What plays from this recording now, or null; another recording's playback does not count. */
   private readonly playingHere = computed(() => {
     const now = this.playback.current();
     return now && now.sessionId === this.sessionId() ? now : null;
   });
 
-  /** The state of this recording's playback, or null when nothing of it plays. */
   readonly playbackState = computed(() => this.playingHere()?.state ?? null);
 
-  /** The index of the line that plays or waits paused, else null. */
   readonly playingLine = computed(() => {
     const key = this.playingHere()?.key;
     return key?.startsWith('line:') ? Number(key.slice('line:'.length)) : null;
   });
 
-  /** The speaker whose sample plays or loads, else null; a paused sample counts as stopped. */
   readonly samplingSpeaker = computed(() => {
     const now = this.playingHere();
     if (!now?.key.startsWith('sample:') || now.state === 'paused') return null;
     return now.speaker;
   });
 
-  /** Who speaks in what plays, for the playback bar. */
   readonly playingWho = computed<PlaybackSpeaker | null>(() => {
     const line = this.playingLine();
     if (line !== null) {
@@ -869,10 +851,8 @@ export class LiveTranscriptComponent {
     return speaker ? { label: speaker.label, speaker } : null;
   });
 
-  /** Whether a speaker's voice can be heard: some line of the recording can be played. */
   readonly canSample = computed(() => this.canName() && (this.playableSecs() ?? 0) > 0);
 
-  /** Whether some line cannot be played because its audio file is gone. */
   readonly missingAudio = computed(
     () =>
       this.canName() &&

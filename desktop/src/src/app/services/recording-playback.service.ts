@@ -6,17 +6,13 @@ import { TauriService } from './tauri.service';
 /** A span of a recording to play: one transcript line, or a sample of one speaker. */
 export interface PlaybackRequest {
   sessionId: string;
-  /** What plays, unique within the session (`line:3`, `sample:2`): a second toggle on it pauses. */
   key: string;
   startSecs: number;
   endSecs: number;
-  /** The channel the span was decoded from; null plays every channel. */
   source: TranscriptSource | null;
-  /** The diarized speaker of the span, offered for naming from the bar; null otherwise. */
   speaker: number | null;
 }
 
-/** Where the playing span is. */
 type PlaybackState = 'loading' | 'playing' | 'paused';
 
 /** The span that plays or waits paused, with its state. */
@@ -47,11 +43,8 @@ export const AUDIO_OUTPUT = new InjectionToken<AudioOutput>('AUDIO_OUTPUT', {
  */
 @Injectable({ providedIn: 'root' })
 export class RecordingPlaybackService {
-  /** The span that plays, loads or waits paused; null when nothing does. */
   readonly current = signal<Playback | null>(null);
-  /** Seconds played into the current span. */
   readonly position = signal(0);
-  /** Length of the current span in seconds, padding included; 0 until it loaded. */
   readonly duration = signal(0);
 
   private readonly tauri = inject(TauriService);

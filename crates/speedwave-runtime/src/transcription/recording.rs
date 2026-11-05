@@ -12,10 +12,8 @@ use super::transcriber::TranscriptSource;
 pub const RECORDING_UNAVAILABLE: &str =
     "Recording file not found. It was moved or deleted, so lines can't be played.";
 
-/// Audio kept on each side of a span, so a segment boundary a little off does not cut a syllable.
 const CLIP_PADDING: Duration = Duration::from_millis(250);
 
-/// The longest span one clip carries, padding included.
 const MAX_CLIP: Duration = Duration::from_secs(60);
 
 struct ReadablePart<'a> {

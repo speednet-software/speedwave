@@ -1091,8 +1091,6 @@ pub async fn reveal_transcript_audio(
     reveal_in_file_manager(&target)
 }
 
-/// One span of the session's recording as a WAV (`transcription::recording::clip`), for the
-/// transcript pane to play; the bytes go to the webview only, never off this machine.
 #[tauri::command]
 pub async fn transcript_audio_clip(
     session_id: String,
@@ -1111,8 +1109,6 @@ pub async fn transcript_audio_clip(
         .map_err(|e| e.to_string())
 }
 
-/// Seconds of the session's recording that can be played from its start
-/// (`transcription::recording::playable_until`); 0 when its audio is gone.
 #[tauri::command]
 pub async fn transcript_playable_secs(
     session_id: String,
