@@ -26,7 +26,7 @@ import { ControlChipComponent } from '../blocks/control-chip.component';
         @for (block of renderBlocks(); track $index) {
           @switch (block.type) {
             @case ('text') {
-              <div data-find-scope>{{ block.content }}</div>
+              <div data-find-scope class="whitespace-pre-wrap break-words">{{ block.content }}</div>
             }
             @case ('image') {
               <div
