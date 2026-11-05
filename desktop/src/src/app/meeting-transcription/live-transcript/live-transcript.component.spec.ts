@@ -909,7 +909,7 @@ describe('LiveTranscriptComponent', () => {
       expect(q('speaker-name-dialog')).not.toBeNull();
     });
 
-    it('plays the longest line of a speaker, at most 8 s, as a sample', async () => {
+    it('plays the last 8 s of the line of a speaker with the most text as a sample', async () => {
       await open();
       component.openNaming({ id: 2, trigger: null }, 'legend');
       fixture.detectChanges();
@@ -920,14 +920,46 @@ describe('LiveTranscriptComponent', () => {
       expect(playback.toggle).toHaveBeenLastCalledWith({
         sessionId: 'sess-1',
         key: 'sample:2',
-        startSecs: 4,
-        endSecs: 12,
+        startSecs: 8,
+        endSecs: 16,
         source: 'system',
         speaker: 2,
       });
       expect(q('speaker-name-sample')?.textContent?.trim()).toBe('Pause sample');
       expect(q('playback-what')?.textContent).toContain('Speaker 2');
       expect(lineRows().some((r) => r.getAttribute('aria-current') === 'true')).toBe(false);
+    });
+
+    it('samples the line with the most speech, not the one noise stretched', async () => {
+      await open({
+        final_segments: [
+          sys(1486, 'no dobra', 2, 27),
+          sys(1600, 'to policzmy jeszcze raz wszystkie koszty projektu', 2, 12),
+          sys(1700, 'tak', 1, 2),
+        ],
+      });
+      component.openNaming({ id: 2, trigger: null }, 'legend');
+      fixture.detectChanges();
+      q('speaker-name-sample')!.click();
+      await fixture.whenStable();
+
+      expect(playback.toggle).toHaveBeenLastCalledWith(
+        expect.objectContaining({ key: 'sample:2', startSecs: 1604, endSecs: 1612 })
+      );
+    });
+
+    it('takes the longer line when two lines of a speaker have as much text', async () => {
+      await open({
+        final_segments: [sys(0, 'abc', 1, 2), sys(10, 'xyz', 1, 5), sys(20, 'ok', 2, 1)],
+      });
+      component.openNaming({ id: 1, trigger: null }, 'legend');
+      fixture.detectChanges();
+      q('speaker-name-sample')!.click();
+      await fixture.whenStable();
+
+      expect(playback.toggle).toHaveBeenLastCalledWith(
+        expect.objectContaining({ key: 'sample:1', startSecs: 10, endSecs: 15 })
+      );
     });
 
     it('samples each label apart when two labels share a name', async () => {
@@ -955,7 +987,7 @@ describe('LiveTranscriptComponent', () => {
       fixture.detectChanges();
 
       expect(playback.toggle).toHaveBeenLastCalledWith(
-        expect.objectContaining({ key: 'sample:1', startSecs: 20, endSecs: 23 })
+        expect.objectContaining({ key: 'sample:1', startSecs: 0.5, endSecs: 1 })
       );
       expect(q('speaker-name-sample')?.textContent?.trim()).toBe('Pause sample');
 

@@ -143,6 +143,18 @@ interface NamingTarget {
   trigger: HTMLElement | null;
 }
 
+/**
+ * Orders two lines as speaker samples: more text first, then the longer one. Speech fills a line
+ * with text; noise before it only stretches its time.
+ * @param a - the line to compare.
+ * @param b - the line it is compared with.
+ * @returns a positive number when `a` makes the better sample.
+ */
+function sampleRank(a: TranscriptLine, b: TranscriptLine): number {
+  const byText = a.text.trim().length - b.text.trim().length;
+  return byText !== 0 ? byText : a.endSecs - a.startSecs - (b.endSecs - b.startSecs);
+}
+
 const MICROPHONE_ONLY_NO_LABELS =
   'Speaker labels are not available for a microphone-only recording.';
 
@@ -1322,25 +1334,24 @@ export class LiveTranscriptComponent {
   }
 
   /**
-   * Plays a sample of the speaker's voice: their longest line, at most {@link SAMPLE_MAX_SECS};
-   * a second call while it plays pauses it.
+   * Plays a sample of the speaker's voice: the last {@link SAMPLE_MAX_SECS} of their line with the
+   * most text, the longer one on a tie; a second call while it plays pauses it.
    * @param speaker - the speaker number.
    */
   async toggleSample(speaker: number): Promise<void> {
-    const longest = this.lines()
+    const richest = this.lines()
       .filter((line) => line.diarized?.id === speaker && this.lineAvailable(line))
       .reduce<TranscriptLine | null>(
-        (best, line) =>
-          !best || line.endSecs - line.startSecs > best.endSecs - best.startSecs ? line : best,
+        (best, line) => (!best || sampleRank(line, best) > 0 ? line : best),
         null
       );
-    if (!longest) return;
+    if (!richest) return;
     await this.toggle({
       sessionId: this.sessionId(),
       key: `sample:${speaker}`,
-      startSecs: longest.startSecs,
-      endSecs: Math.min(longest.endSecs, longest.startSecs + SAMPLE_MAX_SECS),
-      source: longest.source ?? null,
+      startSecs: Math.max(richest.startSecs, richest.endSecs - SAMPLE_MAX_SECS),
+      endSecs: richest.endSecs,
+      source: richest.source ?? null,
       speaker,
     });
   }
