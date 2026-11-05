@@ -6,7 +6,6 @@ use speedwave_runtime::git_allowlist::{
 };
 use std::path::Path;
 
-/// Repository allowlist of one git integration, with the repositories found in the project.
 #[derive(Serialize, Debug, PartialEq)]
 pub struct GitRepositoriesView {
     host: Option<String>,
@@ -14,7 +13,6 @@ pub struct GitRepositoriesView {
     suggestions: Vec<GitRepositorySuggestionView>,
 }
 
-/// A repository found in the project directory that is not on the allowlist yet.
 #[derive(Serialize, Debug, PartialEq)]
 pub struct GitRepositorySuggestionView {
     entry: String,

@@ -1220,8 +1220,6 @@ impl SecurityCheck {
         violations
     }
 
-    /// ADR-073: proxy mounts exactly config:ro, llm tokens:ro, usage:rw and the optional
-    /// `/git-tokens/<github|gitlab>:ro`; any other `/git-tokens*` mount is rejected.
     fn check_proxy_volumes(
         doc: &serde_yaml_ng::Value,
         expected_paths: &SecurityExpectedPaths,
