@@ -948,6 +948,24 @@ describe('LiveTranscriptComponent', () => {
       );
     });
 
+    it('plays the end of a long line with the most text that starts after the others', async () => {
+      await open({
+        final_segments: [
+          sys(100, 'krótko', 2, 3),
+          sys(1486, 'no to przejdźmy teraz do budżetu na przyszły kwartał', 2, 27),
+          sys(1700, 'tak', 1, 2),
+        ],
+      });
+      component.openNaming({ id: 2, trigger: null }, 'legend');
+      fixture.detectChanges();
+      q('speaker-name-sample')!.click();
+      await fixture.whenStable();
+
+      expect(playback.toggle).toHaveBeenLastCalledWith(
+        expect.objectContaining({ key: 'sample:2', startSecs: 1505, endSecs: 1513 })
+      );
+    });
+
     it('takes the longer line when two lines of a speaker have as much text', async () => {
       await open({
         final_segments: [sys(0, 'abc', 1, 2), sys(10, 'xyz', 1, 5), sys(20, 'ok', 2, 1)],

@@ -108,6 +108,7 @@ export class PlaybackBarComponent {
   readonly failed = output<string>();
 
   protected readonly playback = inject(RecordingPlaybackService);
+  /** Beta on draws the Beta badge over the bar's right end (`shell.component.ts`); stop moves clear of it. */
   protected readonly beta = inject(BetaService);
 
   protected readonly range = computed(() => {
