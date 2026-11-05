@@ -1244,6 +1244,8 @@ fn main() {
             transcription_cmd::import_transcription,
             transcription_cmd::export_transcript,
             transcription_cmd::reveal_transcript_audio,
+            transcription_cmd::transcript_audio_clip,
+            transcription_cmd::transcript_playable_secs,
             transcription_cmd::recommended_transcription_model,
             transcription_cmd::list_transcription_models,
             transcription_cmd::download_transcription_model,
@@ -1883,6 +1885,27 @@ mod tests {
         assert!(
             directive.contains("data:"),
             "CSP image directive must allow data: for image sources; got: {directive}"
+        );
+    }
+
+    #[test]
+    fn csp_media_src_allows_blob_for_transcript_playback() {
+        let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json"))
+            .expect("tauri.conf.json parses");
+        let csp = conf["app"]["security"]["csp"]
+            .as_str()
+            .expect("app.security.csp is a string");
+
+        let directive = csp
+            .split(';')
+            .map(str::trim)
+            .find(|d| d.starts_with("media-src"))
+            .unwrap_or_else(|| panic!("CSP must define media-src; got: {csp}"));
+
+        assert_eq!(
+            directive, "media-src 'self' blob:",
+            "the transcript pane plays a recording span from a blob: URL, and WebView2 \
+             refuses it without media-src blob:; nothing else may load media; got: {directive}"
         );
     }
 

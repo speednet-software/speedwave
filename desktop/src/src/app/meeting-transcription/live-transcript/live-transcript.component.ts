@@ -4,6 +4,7 @@ import {
   ElementRef,
   Injector,
   afterNextRender,
+  DestroyRef,
   computed,
   effect,
   inject,
@@ -22,6 +23,11 @@ import { IconComponent } from '../../shared/icon.component';
 import { ChatStateService, NEW_CONVERSATION_STREAMING } from '../../services/chat-state.service';
 import { TranscriptionService, type SendTarget } from '../../services/transcription.service';
 import {
+  RecordingPlaybackService,
+  type PlaybackRequest,
+} from '../../services/recording-playback.service';
+import {
+  RECORDING_UNAVAILABLE,
   effectiveSegments,
   type Segment,
   type TranscriptSession,
@@ -33,6 +39,7 @@ import {
   type NameRequest,
 } from '../speaker-legend/speaker-legend.component';
 import { SpeakerMarkComponent } from '../speaker-mark/speaker-mark.component';
+import { PlaybackBarComponent, type PlaybackSpeaker } from '../playback-bar/playback-bar.component';
 import { SpeakerNameDialogComponent } from '../speaker-name-dialog/speaker-name-dialog.component';
 import {
   nameChangeNote,
@@ -86,6 +93,7 @@ const ETA_PACE_WINDOW_MS = 120_000;
 const ETA_MIN_PACE_SPAN_MS = 30_000;
 const ETA_MIN_MOVED = 0.05;
 const ETA_MIN_ELAPSED_MS = 5000;
+const SAMPLE_MAX_SECS = 8;
 
 /**
  * Seconds → `MM:SS`. Segment timestamps are serde `Duration` `{secs,nanos}`; the caller passes
@@ -105,9 +113,16 @@ function bySegmentStart(a: Segment, b: Segment): number {
   return a.start.secs - b.start.secs || a.start.nanos - b.start.nanos;
 }
 
+function toSecs(d: Segment['start']): number {
+  return d.secs + d.nanos / 1e9;
+}
+
 /** A timestamped transcript line, for rendering. */
 interface TranscriptLine {
   startLabel: string;
+  startSecs: number;
+  endSecs: number;
+  source: Segment['source'];
   /** 'You', 'Meeting', the speaker's name or 'Speaker N' when diarized; else null. */
   speaker: string | null;
   /** The diarized speaker of the line, null for any other line. */
@@ -139,6 +154,11 @@ function speakerOf(
   }
   if (seg.source === 'system') return { speaker: 'Meeting', diarized: null };
   return { speaker: null, diarized: null };
+}
+
+function sampleRank(a: TranscriptLine, b: TranscriptLine): number {
+  const byText = a.text.trim().length - b.text.trim().length;
+  return byText !== 0 ? byText : a.endSecs - a.startSecs - (b.endSecs - b.startSecs);
 }
 
 /** The quality line under the title: its words and colour. */
@@ -176,12 +196,13 @@ interface ProgressTrack {
     SpeakerLegendComponent,
     SpeakerMarkComponent,
     SpeakerNameDialogComponent,
+    PlaybackBarComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: {
     class: 'flex min-h-0 flex-1 flex-col',
     '(document:click)': 'onDocumentClick($event)',
-    '(document:keydown.escape)': 'closeMenus()',
+    '(document:keydown.escape)': 'onEscape($event)',
   },
   template: `
     <section class="flex h-full min-h-0 flex-col" data-testid="live-transcript">
@@ -511,6 +532,16 @@ interface ProgressTrack {
             }
           }
 
+          @if (missingAudio()) {
+            <p
+              class="mt-2.5 flex items-center gap-1.5 text-[11.5px] text-[var(--ink-mute)]"
+              data-testid="recording-missing"
+            >
+              <app-icon name="alert-triangle" class="h-3 w-3 shrink-0" />
+              {{ recordingUnavailable }}
+            </p>
+          }
+
           @if (confirmingDelete()) {
             <div
               class="mt-3 max-w-xl rounded-md border border-[var(--red)]/40 bg-[var(--red-soft)] p-3 text-[12.5px]"
@@ -565,14 +596,51 @@ interface ProgressTrack {
           }
           @for (line of lines(); track $index) {
             <div
-              class="-mx-2 mb-2.5 rounded px-2 py-0.5"
+              class="group/line -mx-2 mb-2.5 rounded px-2 py-0.5"
               data-testid="transcript-line"
+              [class.bg-[var(--accent-soft)]]="playingLine() === $index"
               [class.bg-[var(--bg-1)]]="
-                line.diarized !== null && highlightedIds().includes(line.diarized.id)
+                playingLine() !== $index &&
+                line.diarized !== null &&
+                highlightedIds().includes(line.diarized.id)
               "
+              [attr.aria-current]="playingLine() === $index ? 'true' : null"
             >
               <div class="mb-0.5 flex items-center gap-1.5 text-[11px] tabular-nums">
-                <span class="text-[var(--ink-mute)]">{{ line.startLabel }}</span>
+                @if (canName()) {
+                  <span
+                    class="-ml-1 inline-flex"
+                    [appTooltip]="lineAvailable(line) ? '' : recordingUnavailable"
+                  >
+                    <button
+                      type="button"
+                      class="inline-flex h-6 min-w-6 items-center gap-1 rounded px-1 text-[var(--ink-mute)] hover:bg-[var(--bg-2)] hover:text-[var(--ink)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--accent)] disabled:cursor-default disabled:hover:bg-transparent disabled:hover:text-[var(--ink-mute)]"
+                      data-testid="line-play"
+                      [disabled]="!lineAvailable(line)"
+                      [attr.aria-label]="
+                        playingLine() === $index && playbackState() === 'playing'
+                          ? 'Pause'
+                          : 'Play from ' + line.startLabel
+                      "
+                      (click)="togglePlay(line, $index)"
+                    >
+                      <app-icon
+                        [name]="
+                          playingLine() === $index && playbackState() !== 'paused'
+                            ? 'pause'
+                            : 'play'
+                        "
+                        class="h-2.5 w-2.5"
+                        [class.opacity-0]="playingLine() !== $index || !lineAvailable(line)"
+                        [class.group-hover/line:opacity-100]="lineAvailable(line)"
+                        [class.group-focus-within/line:opacity-100]="lineAvailable(line)"
+                      />
+                      {{ line.startLabel }}
+                    </button>
+                  </span>
+                } @else {
+                  <span class="text-[var(--ink-mute)]">{{ line.startLabel }}</span>
+                }
                 @if (line.diarized; as sp) {
                   @if (canName()) {
                     <button
@@ -644,6 +712,12 @@ interface ProgressTrack {
           }
         </div>
       </div>
+      <app-playback-bar
+        [who]="playingWho()"
+        [nameable]="canName()"
+        (name)="nameFromBar($event)"
+        (failed)="errorOccurred.emit($event)"
+      />
     </section>
 
     <ng-template #nameDialog>
@@ -660,8 +734,11 @@ interface ProgressTrack {
             numberLabel(target.id)
           "
           [describe]="describeName()"
+          [canSample]="canSample()"
+          [samplePlaying]="samplingSpeaker() === target.id"
           (saved)="saveSpeakerName($event)"
           (cancelled)="closeNaming()"
+          (sample)="toggleSample(target.id)"
         />
       }
     </ng-template>
@@ -703,6 +780,9 @@ export class LiveTranscriptComponent {
   private readonly router = inject(Router);
   private readonly injector = inject(Injector);
   private readonly clipboard = inject(Clipboard);
+  private readonly playback = inject(RecordingPlaybackService);
+
+  protected readonly recordingUnavailable = RECORDING_UNAVAILABLE;
 
   private readonly speakerAttribution = this.transcription.speakerAttribution();
 
@@ -722,6 +802,9 @@ export class LiveTranscriptComponent {
     const ordered = [...this.segments()].sort(bySegmentStart);
     return ordered.map((seg) => ({
       startLabel: fmtTs(seg.start.secs),
+      startSecs: toSecs(seg.start),
+      endSecs: toSecs(seg.end),
+      source: seg.source ?? null,
       ...speakerOf(seg, names, speakers),
       text: seg.text.trim(),
     }));
@@ -736,6 +819,45 @@ export class LiveTranscriptComponent {
 
   /** Whether the speakers can be named: once the transcription is over, as the backend requires. */
   readonly canName = computed(() => ['done', 'postponed', 'failed'].includes(this.status()));
+
+  readonly playableSecs = signal<number | null>(null);
+
+  private readonly playingHere = computed(() => {
+    const now = this.playback.current();
+    return now && now.sessionId === this.sessionId() ? now : null;
+  });
+
+  readonly playbackState = computed(() => this.playingHere()?.state ?? null);
+
+  readonly playingLine = computed(() => {
+    const key = this.playingHere()?.key;
+    return key?.startsWith('line:') ? Number(key.slice('line:'.length)) : null;
+  });
+
+  readonly samplingSpeaker = computed(() => {
+    const now = this.playingHere();
+    if (!now?.key.startsWith('sample:') || now.state === 'paused') return null;
+    return now.speaker;
+  });
+
+  readonly playingWho = computed<PlaybackSpeaker | null>(() => {
+    const line = this.playingLine();
+    if (line !== null) {
+      const shown = this.lines()[line];
+      return shown ? { label: shown.speaker, speaker: shown.diarized } : null;
+    }
+    const sampled = this.playingHere()?.speaker;
+    const speaker = this.speakers().find((s) => s.id === sampled);
+    return speaker ? { label: speaker.label, speaker } : null;
+  });
+
+  readonly canSample = computed(() => this.canName() && (this.playableSecs() ?? 0) > 0);
+
+  readonly missingAudio = computed(
+    () =>
+      this.canName() &&
+      this.lines().some((line) => this.playableSecs() !== null && !this.lineAvailable(line))
+  );
 
   /**
    * The labels whose lines are highlighted: the one label being named, since a name changes only
@@ -1068,6 +1190,17 @@ export class LiveTranscriptComponent {
 
   /** Wires the auto-scroll and progress-anchor effects (constructor = injection context). */
   constructor() {
+    inject(DestroyRef).onDestroy(() => this.playback.stop());
+    effect(() => {
+      const id = this.sessionId();
+      const playable = this.canName();
+      untracked(() => {
+        const now = this.playback.current();
+        if (now && (now.sessionId !== id || !playable)) this.playback.stop();
+        this.playableSecs.set(null);
+        if (id && playable) void this.refreshPlayable(id);
+      });
+    });
     effect(() => {
       this.sessionId();
       this.stickToBottom.set(true);
@@ -1135,6 +1268,78 @@ export class LiveTranscriptComponent {
   /** Closes any open menu. */
   closeMenus(): void {
     this.openMenu.set(null);
+  }
+
+  /**
+   * Handles Escape.
+   * @param event - the keydown.
+   */
+  onEscape(event: Event): void {
+    const menuOpen = this.openMenu() !== null;
+    this.closeMenus();
+    const target = event.target instanceof Element ? event.target : null;
+    if (
+      menuOpen ||
+      this.naming() !== null ||
+      target?.closest('input, textarea, [role="dialog"], [role="alertdialog"]')
+    )
+      return;
+    this.playback.stop();
+  }
+
+  /**
+   * Whether the line can be played.
+   * @param line - the line.
+   */
+  lineAvailable(line: TranscriptLine): boolean {
+    const playable = this.playableSecs();
+    return playable !== null && line.startSecs < playable;
+  }
+
+  /**
+   * Plays or pauses the line.
+   * @param line - the line.
+   * @param index - its index.
+   */
+  async togglePlay(line: TranscriptLine, index: number): Promise<void> {
+    await this.toggle({
+      sessionId: this.sessionId(),
+      key: `line:${index}`,
+      startSecs: line.startSecs,
+      endSecs: line.endSecs,
+      source: line.source ?? null,
+      speaker: line.diarized?.id ?? null,
+    });
+  }
+
+  /**
+   * Plays or pauses a sample of the speaker.
+   * @param speaker - the speaker id.
+   */
+  async toggleSample(speaker: number): Promise<void> {
+    const sampleLine = this.lines()
+      .filter((line) => line.diarized?.id === speaker && this.lineAvailable(line))
+      .reduce<TranscriptLine | null>(
+        (best, line) => (!best || sampleRank(line, best) > 0 ? line : best),
+        null
+      );
+    if (!sampleLine) return;
+    await this.toggle({
+      sessionId: this.sessionId(),
+      key: `sample:${speaker}`,
+      startSecs: Math.max(sampleLine.startSecs, sampleLine.endSecs - SAMPLE_MAX_SECS),
+      endSecs: sampleLine.endSecs,
+      source: sampleLine.source ?? null,
+      speaker,
+    });
+  }
+
+  /**
+   * Opens the name dialog from the bar.
+   * @param request - the name request.
+   */
+  nameFromBar(request: NameRequest): void {
+    this.openNaming(request, this.playingLine() ?? 'legend');
   }
 
   /**
@@ -1424,5 +1629,25 @@ export class LiveTranscriptComponent {
       },
       { injector: this.injector }
     );
+  }
+
+  private async toggle(request: PlaybackRequest): Promise<void> {
+    try {
+      await this.playback.toggle(request);
+    } catch (e) {
+      this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
+      await this.refreshPlayable(request.sessionId);
+    }
+  }
+
+  private async refreshPlayable(id: string): Promise<void> {
+    try {
+      const secs = await this.playback.playableSecs(id);
+      if (this.sessionId() === id) this.playableSecs.set(secs);
+    } catch (e) {
+      if (this.sessionId() !== id) return;
+      this.playableSecs.set(null);
+      this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
+    }
   }
 }

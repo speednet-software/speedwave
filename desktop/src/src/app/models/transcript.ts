@@ -14,6 +14,9 @@ export const IMPORT_FORMATS_LABEL = 'WAV, MP3, M4A, MP4, FLAC or OGG';
 /** Longest name a user can give a speaker, or themselves (Rust `SPEAKER_NAME_MAX_CHARS`). */
 export const SPEAKER_NAME_MAX_CHARS = 40;
 
+export const RECORDING_UNAVAILABLE =
+  "Recording file not found. It was moved or deleted, so lines can't be played.";
+
 /** The kind of an {@link AudioSource}. */
 export type AudioSourceKind = AudioSource['kind'];
 

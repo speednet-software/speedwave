@@ -1091,6 +1091,49 @@ pub async fn reveal_transcript_audio(
     reveal_in_file_manager(&target)
 }
 
+#[tauri::command]
+pub async fn transcript_audio_clip(
+    session_id: String,
+    start_secs: f64,
+    end_secs: f64,
+    source: Option<transcription::transcriber::TranscriptSource>,
+    store: tauri::State<'_, TranscriptStoreHandle>,
+) -> Result<tauri::ipc::Response, String> {
+    let id = parse_transcript_id(&session_id)?;
+    let (start, end) = clip_span(start_secs, end_secs)?;
+    let parts = store.get(id).map_err(|e| e.to_string())?.all_audio_parts();
+    tokio::task::spawn_blocking(move || transcription::recording::clip(&parts, start, end, source))
+        .await
+        .map_err(|e| format!("clip task panicked: {e}"))?
+        .map(tauri::ipc::Response::new)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn transcript_playable_secs(
+    session_id: String,
+    store: tauri::State<'_, TranscriptStoreHandle>,
+) -> Result<f64, String> {
+    let id = parse_transcript_id(&session_id)?;
+    let parts = store.get(id).map_err(|e| e.to_string())?.all_audio_parts();
+    tokio::task::spawn_blocking(move || {
+        transcription::recording::playable_until(&parts).as_secs_f64()
+    })
+    .await
+    .map_err(|e| format!("playable length task panicked: {e}"))
+}
+
+fn clip_span(
+    start_secs: f64,
+    end_secs: f64,
+) -> Result<(std::time::Duration, std::time::Duration), String> {
+    let at = |secs: f64| {
+        std::time::Duration::try_from_secs_f64(secs)
+            .map_err(|_| format!("invalid time in the recording: {secs}"))
+    };
+    Ok((at(start_secs)?, at(end_secs)?))
+}
+
 #[cfg(target_os = "macos")]
 fn reveal_in_file_manager(path: &std::path::Path) -> Result<(), String> {
     speedwave_runtime::binary::system_command("open")
@@ -1806,6 +1849,34 @@ mod tests {
             count_calls(fn_body(src, "postpone_transcription"), "postpone"),
             1
         );
+    }
+
+    #[test]
+    fn clip_span_takes_seconds_from_the_start_of_the_recording() {
+        assert_eq!(
+            clip_span(1.5, 4.25).unwrap(),
+            (
+                std::time::Duration::from_millis(1500),
+                std::time::Duration::from_millis(4250)
+            )
+        );
+        assert_eq!(
+            clip_span(0.0, 0.0).unwrap(),
+            (std::time::Duration::ZERO, std::time::Duration::ZERO)
+        );
+    }
+
+    #[test]
+    fn clip_span_refuses_a_negative_or_non_finite_time() {
+        for (start, end) in [
+            (-1.0, 2.0),
+            (1.0, f64::NAN),
+            (f64::INFINITY, 2.0),
+            (0.0, -0.5),
+        ] {
+            let err = clip_span(start, end).unwrap_err();
+            assert!(err.starts_with("invalid time in the recording"), "{err}");
+        }
     }
 
     #[test]

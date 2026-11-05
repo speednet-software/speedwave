@@ -12,6 +12,7 @@ import {
 } from '@angular/core';
 
 import { SPEAKER_NAME_MAX_CHARS } from '../../models/transcript';
+import { IconComponent } from '../../shared/icon.component';
 
 let nextDialogId = 0;
 
@@ -21,6 +22,7 @@ let nextDialogId = 0;
  */
 @Component({
   selector: 'app-speaker-name-dialog',
+  imports: [IconComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block', '(document:mousedown)': 'onDocumentMousedown($event)' },
   template: `
@@ -92,6 +94,17 @@ let nextDialogId = 0;
         >
           Cancel
         </button>
+        @if (canSample()) {
+          <button
+            type="button"
+            class="mono inline-flex items-center gap-1 rounded border border-[var(--line)] px-2.5 py-1 text-[11px] text-[var(--ink-dim)] hover:text-[var(--ink)]"
+            data-testid="speaker-name-sample"
+            (click)="sample.emit()"
+          >
+            <app-icon [name]="samplePlaying() ? 'pause' : 'play'" class="h-2.5 w-2.5" />
+            {{ samplePlaying() ? 'Pause sample' : 'Hear a sample' }}
+          </button>
+        }
         <span class="ml-auto text-[10.5px] text-[var(--ink-mute)]">{{ hint() }}</span>
       </div>
     </div>
@@ -110,10 +123,13 @@ export class SpeakerNameDialogComponent {
   readonly suggestions = input<string[]>([]);
   /** The keyboard hint beside the buttons. */
   readonly hint = input('');
+  readonly canSample = input(false);
+  readonly samplePlaying = input(false);
   /** The text in the field when the user saved. */
   readonly saved = output<string>();
   /** The user cancelled: Cancel, Esc, or a press outside the dialog. */
   readonly cancelled = output<void>();
+  readonly sample = output<void>();
 
   protected readonly maxChars = SPEAKER_NAME_MAX_CHARS;
   protected readonly inputId = `speaker-name-${++nextDialogId}`;

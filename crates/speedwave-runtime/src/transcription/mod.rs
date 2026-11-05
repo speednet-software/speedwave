@@ -14,6 +14,7 @@ mod import;
 pub mod mix;
 pub mod model_catalog;
 pub mod model_store;
+pub mod recording;
 pub mod transcriber;
 pub mod transcript;
 pub mod transcript_driver;
