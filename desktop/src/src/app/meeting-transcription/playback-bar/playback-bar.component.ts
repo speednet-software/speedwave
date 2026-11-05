@@ -7,16 +7,13 @@ import { formatClock } from '../recording-format';
 import { SpeakerMarkComponent } from '../speaker-mark/speaker-mark.component';
 import type { Speaker } from '../speaker-names';
 
-/** Who speaks in the playing span, as the transcript shows them. */
+/** Who speaks in the playing span. */
 export interface PlaybackSpeaker {
   label: string | null;
   speaker: Pick<Speaker, 'id' | 'color' | 'mark'> | null;
 }
 
-/**
- * The bar under the transcript while a span plays or waits paused: pause and resume, play again,
- * who speaks and when, how much has played, Name for a diarized speaker, and stop.
- */
+/** Recording playback bar. */
 @Component({
   selector: 'app-playback-bar',
   imports: [IconComponent, SpeakerMarkComponent],

@@ -1,5 +1,4 @@
-//! Reads a span of a session's recording back as a WAV the UI can play (SPEED-938): maps the
-//! transcript timeline onto the audio parts and keeps the channel the span's speech came from.
+//! Playback spans of a recording.
 
 use std::io::{BufReader, Cursor};
 use std::path::{Path, PathBuf};
@@ -8,7 +7,7 @@ use std::time::Duration;
 use super::audio::SAMPLE_RATE_HZ;
 use super::transcriber::TranscriptSource;
 
-/// What the user reads when a span cannot be played because its audio file is gone.
+/// Message for a missing recording.
 pub const RECORDING_UNAVAILABLE: &str =
     "Recording file not found. It was moved or deleted, so lines can't be played.";
 
@@ -22,31 +21,28 @@ struct ReadablePart<'a> {
     end: Duration,
 }
 
-/// Why a span could not be read.
+/// Clip error.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ClipError {
-    /// The span lies past the audio that can be read: its part is missing or unreadable.
+    /// The audio is missing.
     #[error("{RECORDING_UNAVAILABLE}")]
     Unavailable,
-    /// The span is not a forward range on the transcript timeline.
+    /// The span is invalid.
     #[error("invalid span: {0}")]
     InvalidSpan(String),
-    /// A readable part failed while its samples were read.
+    /// Reading failed.
     #[error("could not read the recording: {0}")]
     Read(String),
 }
 
-/// How much of the recording, from its start, can be played: the parts up to the first one
-/// that is missing or unreadable. Later parts are left out, since their place on the timeline
-/// depends on the length of the part before them.
+/// Playable length of the recording.
 pub fn playable_until(parts: &[PathBuf]) -> Duration {
     readable_parts(parts)
         .last()
         .map_or(Duration::ZERO, |p| p.end)
 }
 
-/// The audio from `start` to `end` on the transcript timeline, padded by [`CLIP_PADDING`] and
-/// capped at [`MAX_CLIP`], as a 16-bit mono WAV of the channel `source` names.
+/// WAV of a span of the recording.
 pub fn clip(
     parts: &[PathBuf],
     start: Duration,

@@ -1271,9 +1271,8 @@ export class LiveTranscriptComponent {
   }
 
   /**
-   * Esc closes an open menu; otherwise, unless it was meant for a field or a dialog, it stops
-   * playback.
-   * @param event - the Escape keydown anywhere in the document.
+   * Handles Escape.
+   * @param event - the keydown.
    */
   onEscape(event: Event): void {
     const menuOpen = this.openMenu() !== null;
@@ -1289,8 +1288,8 @@ export class LiveTranscriptComponent {
   }
 
   /**
-   * Whether the line's audio can be played: it starts before the end of the readable recording.
-   * @param line - a transcript line.
+   * Whether the line can be played.
+   * @param line - the line.
    */
   lineAvailable(line: TranscriptLine): boolean {
     const playable = this.playableSecs();
@@ -1298,9 +1297,9 @@ export class LiveTranscriptComponent {
   }
 
   /**
-   * Plays the line's span of the recording, or pauses and resumes it when it is the one playing.
-   * @param line - the line clicked.
-   * @param index - its position in {@link lines}.
+   * Plays or pauses the line.
+   * @param line - the line.
+   * @param index - its index.
    */
   async togglePlay(line: TranscriptLine, index: number): Promise<void> {
     await this.toggle({
@@ -1314,9 +1313,8 @@ export class LiveTranscriptComponent {
   }
 
   /**
-   * Plays a sample of the speaker's voice: the last {@link SAMPLE_MAX_SECS} of their line with the
-   * most text, the longer one on a tie; a second call while it plays pauses it.
-   * @param speaker - the speaker number.
+   * Plays or pauses a sample of the speaker.
+   * @param speaker - the speaker id.
    */
   async toggleSample(speaker: number): Promise<void> {
     const sampleLine = this.lines()
@@ -1337,9 +1335,8 @@ export class LiveTranscriptComponent {
   }
 
   /**
-   * Opens the name dialog for the speaker of what plays: under its line, or under the legend for
-   * a sample.
-   * @param request - the speaker and the bar's Name button.
+   * Opens the name dialog from the bar.
+   * @param request - the name request.
    */
   nameFromBar(request: NameRequest): void {
     this.openNaming(request, this.playingLine() ?? 'legend');
@@ -1634,11 +1631,6 @@ export class LiveTranscriptComponent {
     );
   }
 
-  /**
-   * Plays or pauses the span; a span that cannot be played goes to the error banner and makes the
-   * pane ask again how much of the recording is left.
-   * @param request - the span to play.
-   */
   private async toggle(request: PlaybackRequest): Promise<void> {
     try {
       await this.playback.toggle(request);
@@ -1648,11 +1640,6 @@ export class LiveTranscriptComponent {
     }
   }
 
-  /**
-   * Asks the backend how much of the recording can be played, kept only while it stays open; a
-   * failed question goes to the error banner and leaves every line disabled.
-   * @param id - the recording's session id.
-   */
   private async refreshPlayable(id: string): Promise<void> {
     try {
       const secs = await this.playback.playableSecs(id);

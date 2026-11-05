@@ -3,7 +3,7 @@ import { Injectable, InjectionToken, inject, signal } from '@angular/core';
 import type { TranscriptSource } from '../models/transcript';
 import { TauriService } from './tauri.service';
 
-/** A span of a recording to play: one transcript line, or a sample of one speaker. */
+/** A span to play. */
 export interface PlaybackRequest {
   sessionId: string;
   key: string;
@@ -15,19 +15,18 @@ export interface PlaybackRequest {
 
 type PlaybackState = 'loading' | 'playing' | 'paused';
 
-/** The span that plays or waits paused, with its state. */
+/** The playing span. */
 export interface Playback extends PlaybackRequest {
   state: PlaybackState;
 }
 
-/** The browser pieces playback needs, swapped for fakes in tests. */
+/** Browser audio. */
 export interface AudioOutput {
   createAudio(): HTMLAudioElement;
   createUrl(blob: Blob): string;
   revokeUrl(url: string): void;
 }
 
-/** The {@link AudioOutput} of the running webview. */
 export const AUDIO_OUTPUT = new InjectionToken<AudioOutput>('AUDIO_OUTPUT', {
   providedIn: 'root',
   factory: () => ({
@@ -37,10 +36,7 @@ export const AUDIO_OUTPUT = new InjectionToken<AudioOutput>('AUDIO_OUTPUT', {
   }),
 });
 
-/**
- * Plays spans of a recording through one audio element, one span at a time: a new span stops the
- * one before it, and the blob URL of a span is revoked as soon as it stops playing.
- */
+/** Recording playback. */
 @Injectable({ providedIn: 'root' })
 export class RecordingPlaybackService {
   readonly current = signal<Playback | null>(null);
@@ -54,8 +50,8 @@ export class RecordingPlaybackService {
   private generation = 0;
 
   /**
-   * Plays the span, or pauses and resumes it when it is the one already playing.
-   * @param request - the span to play.
+   * Plays or pauses the span.
+   * @param request - the span.
    */
   async toggle(request: PlaybackRequest): Promise<void> {
     const now = this.current();
@@ -68,9 +64,8 @@ export class RecordingPlaybackService {
   }
 
   /**
-   * Stops whatever plays and plays the span from its start. Rejects with the backend's message
-   * when the span cannot be read; nothing plays then.
-   * @param request - the span to play.
+   * Plays the span.
+   * @param request - the span.
    */
   async play(request: PlaybackRequest): Promise<void> {
     this.release();
@@ -103,14 +98,14 @@ export class RecordingPlaybackService {
     if (generation === this.generation) this.setState('playing');
   }
 
-  /** Pauses the playing span; the bar stays until {@link stop}. */
+  /** Pauses. */
   pause(): void {
     if (this.current()?.state !== 'playing') return;
     this.audio?.pause();
     this.setState('paused');
   }
 
-  /** Resumes the paused span, from its start when it had played to its end. */
+  /** Resumes. */
   async resume(): Promise<void> {
     const audio = this.audio;
     if (this.current()?.state !== 'paused' || !audio) return;
@@ -118,7 +113,7 @@ export class RecordingPlaybackService {
     await this.playCurrent(audio);
   }
 
-  /** Plays the current span again from its start. */
+  /** Replays. */
   async replay(): Promise<void> {
     const audio = this.audio;
     if (!audio || !this.current() || this.current()?.state === 'loading') return;
@@ -127,7 +122,7 @@ export class RecordingPlaybackService {
     await this.playCurrent(audio);
   }
 
-  /** Stops playback and forgets the span. */
+  /** Stops. */
   stop(): void {
     this.generation++;
     this.release();
@@ -135,8 +130,8 @@ export class RecordingPlaybackService {
   }
 
   /**
-   * Seconds of the session's recording that can be played from its start; 0 when it is gone.
-   * @param sessionId - the session to ask about.
+   * Playable seconds of the recording.
+   * @param sessionId - the session.
    */
   playableSecs(sessionId: string): Promise<number> {
     return this.tauri.invoke<number>('transcript_playable_secs', { sessionId });

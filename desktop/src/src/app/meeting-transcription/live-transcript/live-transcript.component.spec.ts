@@ -28,7 +28,6 @@ import {
 } from '../../services/recording-playback.service';
 import { RECORDING_UNAVAILABLE } from '../../models/transcript';
 
-/** Plays nothing: records the requests and moves through the states a real playback would. */
 class FakePlayback {
   current = signal<Playback | null>(null);
   position = signal(0);
