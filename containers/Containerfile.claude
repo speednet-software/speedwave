@@ -41,6 +41,7 @@ RUN CLAUDE_BIN=$(readlink -f /home/speedwave/.local/bin/claude) && \
     ln -sf /usr/local/bin/claude /home/speedwave/.local/bin/claude
 
 COPY --chmod=755 osc52-copy.sh /usr/local/bin/osc52-copy.sh
+COPY --chmod=755 git-transport.sh /usr/local/bin/git-transport.sh
 RUN ln -s osc52-copy.sh /usr/local/bin/pbcopy && \
     ln -s osc52-copy.sh /usr/local/bin/xclip && \
     ln -s osc52-copy.sh /usr/local/bin/xsel && \

@@ -48,9 +48,51 @@ pub struct Route {
     pub provider_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct GitForge {
+    pub host: String,
+    pub base_url: String,
+    pub login: String,
+    pub token_file: PathBuf,
+    #[serde(default)]
+    pub repositories: Vec<String>,
+}
+
+impl GitForge {
+    pub fn allows(&self, repo: &str) -> bool {
+        let wanted = normalise(repo);
+        self.repositories
+            .iter()
+            .any(|entry| entry_matches(&normalise(entry), &wanted))
+    }
+}
+
+pub(crate) fn normalise(path: &str) -> String {
+    let lowered = path.trim_matches('/').to_ascii_lowercase();
+    match lowered.strip_suffix(".git") {
+        Some(stripped) => stripped.to_string(),
+        None => lowered,
+    }
+}
+
+fn entry_matches(entry: &str, repo: &str) -> bool {
+    if !entry.contains('*') {
+        return entry == repo;
+    }
+    match entry.strip_suffix("/*") {
+        Some(prefix) if !prefix.contains('*') => repo
+            .strip_prefix(prefix)
+            .and_then(|rest| rest.strip_prefix('/'))
+            .is_some_and(|rest| !rest.is_empty()),
+        _ => false,
+    }
+}
+
 #[derive(Deserialize)]
 pub struct Config {
     pub routes: Vec<Route>,
+    #[serde(default)]
+    pub git_forges: Vec<GitForge>,
     #[serde(default)]
     pub caller_token: Option<String>,
     #[serde(skip)]
@@ -74,6 +116,7 @@ impl std::fmt::Debug for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Config")
             .field("routes", &self.routes)
+            .field("git_forges", &self.git_forges)
             .field(
                 "caller_token",
                 &self.caller_token.as_ref().map(|_| "[redacted]"),
@@ -103,6 +146,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             routes: Vec::new(),
+            git_forges: Vec::new(),
             caller_token: None,
             usage_path: PathBuf::from(
                 std::env::var("SPW_USAGE_PATH")
@@ -119,6 +163,8 @@ impl Default for Config {
 #[derive(Deserialize)]
 struct RoutesFile {
     routes: Vec<Route>,
+    #[serde(default)]
+    git_forges: Vec<GitForge>,
     #[serde(default)]
     caller_token: Option<String>,
     #[serde(default)]
@@ -140,6 +186,7 @@ impl Config {
         };
         Ok(Self {
             routes: parsed.routes,
+            git_forges: parsed.git_forges,
             caller_token: parsed.caller_token,
             ner,
             ..Self::default()
@@ -199,6 +246,46 @@ mod tests {
             ],
             usage_path: PathBuf::from("/usage/usage.jsonl"),
             ..Default::default()
+        }
+    }
+
+    fn forge_allowing(repositories: &[&str]) -> GitForge {
+        GitForge {
+            host: "github.com".to_string(),
+            base_url: "https://github.com".to_string(),
+            login: "x-access-token".to_string(),
+            token_file: PathBuf::from("/git-tokens/github/token"),
+            repositories: repositories.iter().map(|r| r.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn exact_entry_matches_only_the_same_repository() {
+        let forge = forge_allowing(&["owner/repo"]);
+        assert!(forge.allows("owner/repo"));
+        assert!(forge.allows("Owner/Repo.GIT"));
+        assert!(!forge.allows("owner/repo-fork"));
+        assert!(!forge.allows("owner/repo/sub"));
+        assert!(!forge.allows("other/owner/repo"));
+    }
+
+    #[test]
+    fn prefix_wildcard_matches_repositories_below_the_prefix() {
+        let forge = forge_allowing(&["group/*", "a/b/*"]);
+        assert!(forge.allows("group/repo"));
+        assert!(forge.allows("Group/Team/Repo.git"));
+        assert!(forge.allows("a/b/c"));
+        assert!(!forge.allows("group"));
+        assert!(!forge.allows("a/b"));
+        assert!(!forge.allows("group-evil/repo"));
+        assert!(!forge.allows("a/bc/d"));
+    }
+
+    #[test]
+    fn rejected_wildcard_shapes_match_nothing() {
+        let forge = forge_allowing(&["*", "a/*/b", "owner/re*", "*/repo"]);
+        for repo in ["a/x/b", "owner/repo", "owner/re", "a/b", "x"] {
+            assert!(!forge.allows(repo), "{repo}");
         }
     }
 

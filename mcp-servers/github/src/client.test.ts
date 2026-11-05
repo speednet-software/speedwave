@@ -53,7 +53,6 @@ function buildMockOctokit(): {
       getCommit: Mock;
       compareCommitsWithBasehead: Mock;
       getContent: Mock;
-      createOrUpdateFileContents: Mock;
       createRelease: Mock;
     };
     pulls: {
@@ -104,7 +103,6 @@ function buildMockOctokit(): {
         getCommit: vi.fn(),
         compareCommitsWithBasehead: vi.fn(),
         getContent: vi.fn(),
-        createOrUpdateFileContents: vi.fn(),
         createRelease: vi.fn(),
       },
       pulls: {
@@ -1431,137 +1429,6 @@ describe('GitHubClient', () => {
     });
   });
 
-  describe('createOrUpdateFile', () => {
-    it('base64-encodes content and fetches the existing SHA when not provided', async () => {
-      octokit.rest.repos.getContent.mockResolvedValue({
-        data: {
-          type: 'file',
-          path: 'a.txt',
-          content: 'old',
-          encoding: 'base64',
-          sha: 'oldsha',
-          size: 3,
-        },
-      });
-      octokit.rest.repos.createOrUpdateFileContents.mockResolvedValue({
-        data: { commit: { sha: 'newsha' }, content: { path: 'a.txt', html_url: 'h' } },
-      });
-      const result = await client.createOrUpdateFile('o', 'r', {
-        path: 'a.txt',
-        content: 'new',
-        message: 'update',
-      });
-      expect(octokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalledWith(
-        expect.objectContaining({
-          path: 'a.txt',
-          message: 'update',
-          content: Buffer.from('new', 'utf-8').toString('base64'),
-          sha: 'oldsha',
-        })
-      );
-      expect(result).toEqual({ commit_sha: 'newsha', path: 'a.txt', html_url: 'h' });
-    });
-
-    it('ignores a 404 when the file does not exist yet', async () => {
-      octokit.rest.repos.getContent.mockRejectedValue({ status: 404 });
-      octokit.rest.repos.createOrUpdateFileContents.mockResolvedValue({
-        data: { commit: { sha: 's' }, content: { path: 'new.txt', html_url: 'h' } },
-      });
-      const result = await client.createOrUpdateFile('o', 'r', {
-        path: 'new.txt',
-        content: 'x',
-        message: 'create',
-      });
-      expect(octokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalledWith(
-        expect.objectContaining({ sha: undefined })
-      );
-      expect(result.commit_sha).toBe('s');
-    });
-
-    it('wraps non-404 errors from the SHA lookup as an expected teaching error', async () => {
-      octokit.rest.repos.getContent.mockRejectedValue({ status: 403, message: 'forbidden' });
-      await expect(
-        client.createOrUpdateFile('o', 'r', { path: 'a.txt', content: 'x', message: 'm' })
-      ).rejects.toThrow("Could not check whether 'a.txt' already exists in o/r before writing");
-      expect(octokit.rest.repos.createOrUpdateFileContents).not.toHaveBeenCalled();
-      await client
-        .createOrUpdateFile('o', 'r', { path: 'a.txt', content: 'x', message: 'm' })
-        .catch((error) => {
-          expect(isExpectedError(error)).toBe(true);
-        });
-    });
-
-    it('rejects missing content before any API call and names content', async () => {
-      await expect(
-        client.createOrUpdateFile('o', 'r', {
-          path: 'a.txt',
-          message: 'm',
-        })
-      ).rejects.toThrow("needs 'content' as a string");
-      expect(octokit.rest.repos.getContent).not.toHaveBeenCalled();
-      expect(octokit.rest.repos.createOrUpdateFileContents).not.toHaveBeenCalled();
-    });
-
-    it('teaches a directory target instead of writing over it', async () => {
-      octokit.rest.repos.getContent.mockResolvedValue({ data: [{ type: 'file', path: 'dir/a' }] });
-      await expect(
-        client.createOrUpdateFile('o', 'r', { path: 'dir', content: 'x', message: 'm' })
-      ).rejects.toThrow("Path 'dir' is a directory, not a file.");
-      expect(octokit.rest.repos.createOrUpdateFileContents).not.toHaveBeenCalled();
-    });
-
-    it('teaches instead of overwriting a symlink target', async () => {
-      octokit.rest.repos.getContent.mockResolvedValue({
-        data: { type: 'symlink', path: 'link', sha: 'linksha', target: '../other' },
-      });
-      await expect(
-        client.createOrUpdateFile('o', 'r', { path: 'link', content: 'x', message: 'm' })
-      ).rejects.toThrow("Path 'link' is a directory, not a file.");
-      expect(octokit.rest.repos.createOrUpdateFileContents).not.toHaveBeenCalled();
-    });
-
-    it('teaches instead of overwriting a submodule target', async () => {
-      octokit.rest.repos.getContent.mockResolvedValue({
-        data: { type: 'submodule', path: 'sub', sha: 'subsha' },
-      });
-      await expect(
-        client.createOrUpdateFile('o', 'r', { path: 'sub', content: 'x', message: 'm' })
-      ).rejects.toThrow("Path 'sub' is a directory, not a file.");
-      expect(octokit.rest.repos.createOrUpdateFileContents).not.toHaveBeenCalled();
-    });
-
-    it('propagates a non-Octokit SHA-lookup error unchanged (no numeric status)', async () => {
-      const bug = new TypeError('cannot read property of undefined');
-      octokit.rest.repos.getContent.mockRejectedValue(bug);
-      await expect(
-        client.createOrUpdateFile('o', 'r', { path: 'a.txt', content: 'x', message: 'm' })
-      ).rejects.toBe(bug);
-      expect(octokit.rest.repos.createOrUpdateFileContents).not.toHaveBeenCalled();
-      await client
-        .createOrUpdateFile('o', 'r', { path: 'a.txt', content: 'x', message: 'm' })
-        .catch((error) => {
-          expect(isExpectedError(error)).toBe(false);
-        });
-    });
-
-    it('uses the provided SHA without a lookup', async () => {
-      octokit.rest.repos.createOrUpdateFileContents.mockResolvedValue({
-        data: { commit: { sha: 's' }, content: { path: 'a.txt', html_url: 'h' } },
-      });
-      await client.createOrUpdateFile('o', 'r', {
-        path: 'a.txt',
-        content: 'x',
-        message: 'm',
-        sha: 'given',
-        branch: 'dev',
-      });
-      expect(octokit.rest.repos.getContent).not.toHaveBeenCalled();
-      expect(octokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalledWith(
-        expect.objectContaining({ sha: 'given', branch: 'dev' })
-      );
-    });
-  });
-
   describe('listWorkflowRuns', () => {
     it('lists workflow runs', async () => {
       octokit.paginate.mockResolvedValue([
@@ -2665,17 +2532,6 @@ describe('Response mappers — defensive fallbacks', () => {
       sha: '',
       size: 0,
     });
-  });
-
-  it('fills defaults for a sparse createOrUpdateFile response', async () => {
-    octokit.rest.repos.createOrUpdateFileContents.mockResolvedValue({ data: {} });
-    const result = await client.createOrUpdateFile('o', 'r', {
-      path: 'x.md',
-      content: 'c',
-      message: 'm',
-      sha: 'given',
-    });
-    expect(result).toEqual({ commit_sha: '', path: 'x.md', html_url: '' });
   });
 
   it('throws when getRunLogs gets no redirect url (neither Location header nor res.url)', async () => {

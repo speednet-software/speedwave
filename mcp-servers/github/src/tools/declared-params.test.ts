@@ -11,9 +11,6 @@ const createMockClient = () => ({
   updateIssue: vi.fn().mockResolvedValue(issue),
   getRepo: vi.fn().mockResolvedValue({ full_name: 'o/r' }),
   getCurrentUser: vi.fn().mockResolvedValue({ login: 'octocat' }),
-  createOrUpdateFile: vi
-    .fn()
-    .mockResolvedValue({ commit_sha: 'abc', path: 'a.txt', html_url: 'u' }),
 });
 
 const handlerFor = (client: ReturnType<typeof createMockClient>, name: string) =>
@@ -98,27 +95,5 @@ describe('GitHub declared-parameter guard', () => {
 
     expect(client.getRepo).not.toHaveBeenCalled();
     expect(textOf(result)).toContain('getRepo requires repo');
-  });
-
-  it('creates an empty file, which the client accepts', async () => {
-    const client = createMockClient();
-
-    const result = await handlerFor(
-      client,
-      'createOrUpdateFile'
-    )({
-      owner: 'o',
-      repo: 'r',
-      path: 'a.txt',
-      content: '',
-      message: 'm',
-    });
-
-    expect(result.isError).toBeUndefined();
-    expect(client.createOrUpdateFile).toHaveBeenCalledWith('o', 'r', {
-      path: 'a.txt',
-      content: '',
-      message: 'm',
-    });
   });
 });

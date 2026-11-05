@@ -24,8 +24,8 @@ mod workers;
 pub(crate) use proxy::migrate_legacy_local_key_in;
 pub use proxy::{
     proxy_config_dir_in, proxy_config_path_in, remove_llm_provider_key_in, render_proxy_config,
-    spw_key_env_name, write_llm_provider_key_in, write_proxy_config_in, PROXY_BASE_URL,
-    PROXY_CALLER_AUTH_HEADER, PROXY_PORT,
+    spw_key_env_name, write_llm_provider_key_in, PROXY_BASE_URL, PROXY_CALLER_AUTH_HEADER,
+    PROXY_PORT,
 };
 
 pub use pii_ner::{
@@ -297,11 +297,18 @@ pub fn render_compose_in(
     })?;
     yaml = yaml.replace("${IDE_LOCK_DIR}", &to_engine_path(&ide_lock_dir)?);
 
+    let git_forges = proxy::git_forges_in(
+        data_dir,
+        project_name,
+        integrations,
+        &resolved_config.git_repositories,
+    );
     proxy::write_proxy_config_in(
         data_dir,
         project_name,
         &resolved_config.llm,
         resolved_config.pii_ner_enabled,
+        &git_forges,
     )?;
     let proxy_config_dir = proxy::proxy_config_dir_in(data_dir, project_name);
     std::fs::create_dir_all(&proxy_config_dir)?;
@@ -372,6 +379,8 @@ pub fn render_compose_in(
     }
 
     yaml = apply_llm_config_in(data_dir, &yaml, &resolved_config.llm, project_name)?;
+
+    yaml = apply_git_transport_in(data_dir, &yaml, project_name, &tokens_dir, &git_forges)?;
 
     if let Some(rt) = runtime {
         let enabled_ids = integrations.enabled_plugin_service_ids();
@@ -1143,6 +1152,34 @@ fn add_service_volume(
         .ok_or_else(|| anyhow::anyhow!("'{service}' volumes is not a sequence"))?;
     vol_seq.push(serde_yaml_ng::Value::String(mount.to_string()));
     Ok(())
+}
+
+fn apply_git_transport_in(
+    data_dir: &Path,
+    yaml: &str,
+    project: &str,
+    tokens_dir: &Path,
+    git_forges: &[proxy::GitForge],
+) -> anyhow::Result<String> {
+    if git_forges.is_empty() {
+        return Ok(yaml.to_string());
+    }
+    let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
+    for forge in git_forges {
+        let source = to_engine_path(&tokens_dir.join(forge.kind.config_key()))?;
+        let mount = format!("{source}:{}:ro", forge.kind.token_mount_target());
+        add_service_volume(&mut doc, "proxy", &mount)?;
+    }
+    let hosts: Vec<&str> = git_forges.iter().map(|f| f.host.as_str()).collect();
+    add_claude_env_var(&mut doc, "SPEEDWAVE_GIT_HOSTS", &hosts.join(","));
+    add_claude_env_var(
+        &mut doc,
+        "SPEEDWAVE_GIT_PROXY_URL",
+        &format!("{PROXY_BASE_URL}/git"),
+    );
+    let caller_token = proxy::ensure_caller_token_in(data_dir, project)?;
+    add_claude_env_var(&mut doc, "SPEEDWAVE_GIT_PROXY_AUTH", &caller_token);
+    Ok(serde_yaml_ng::to_string(&doc)?)
 }
 
 pub(crate) fn add_claude_env_var(doc: &mut serde_yaml_ng::Value, key: &str, value: &str) {
@@ -3054,6 +3091,134 @@ services:
                 .filter(|l| l.contains("/workspace"))
                 .collect::<Vec<_>>()
                 .join("\n")
+        );
+    }
+
+    fn render_git_transport(
+        integrations: &ResolvedIntegrationsConfig,
+        gitlab_host_url: Option<&str>,
+    ) -> (tempfile::TempDir, serde_yaml_ng::Value) {
+        let data_dir = tempfile::tempdir().unwrap();
+        if let Some(host_url) = gitlab_host_url {
+            let gitlab = data_dir.path().join("tokens/test-project/gitlab");
+            std::fs::create_dir_all(&gitlab).unwrap();
+            std::fs::write(gitlab.join("host_url"), host_url).unwrap();
+        }
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: configured_anthropic_llm(),
+            ..Default::default()
+        };
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            tmp_project_dir(),
+            &config,
+            integrations,
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+        (data_dir, serde_yaml_ng::from_str(&yaml).unwrap())
+    }
+
+    fn service_strings(doc: &serde_yaml_ng::Value, service: &str, key: &str) -> Vec<String> {
+        doc["services"][service][key]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect()
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn git_transport_is_absent_without_github_or_gitlab() {
+        let (_data_dir, doc) = render_git_transport(&ResolvedIntegrationsConfig::default(), None);
+        assert!(!service_strings(&doc, "proxy", "volumes")
+            .iter()
+            .any(|v| v.contains("/git-tokens")));
+        assert!(!service_strings(&doc, "claude", "environment")
+            .iter()
+            .any(|e| e.starts_with("SPEEDWAVE_GIT_")));
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn git_transport_wires_mounts_and_claude_env_for_enabled_forges() {
+        let integrations = ResolvedIntegrationsConfig {
+            github: true,
+            gitlab: true,
+            ..Default::default()
+        };
+        let (data_dir, doc) = render_git_transport(&integrations, None);
+        let tokens = to_engine_path(&data_dir.path().join("tokens/test-project")).unwrap();
+        let volumes = service_strings(&doc, "proxy", "volumes");
+        assert!(volumes.contains(&format!("{tokens}/github:/git-tokens/github:ro")));
+        assert!(volumes.contains(&format!("{tokens}/gitlab:/git-tokens/gitlab:ro")));
+        assert!(data_dir.path().join("tokens/test-project/github").is_dir());
+
+        let caller_token = proxy::ensure_caller_token_in(data_dir.path(), "test-project").unwrap();
+        let env = service_strings(&doc, "claude", "environment");
+        assert!(env.iter().any(|e| e.starts_with("SPEEDWAVE_GIT_HOSTS=")));
+        assert!(env.contains(&"SPEEDWAVE_GIT_PROXY_URL=http://proxy:4000/git".to_string()));
+        assert!(env.contains(&format!("SPEEDWAVE_GIT_PROXY_AUTH={caller_token}")));
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn git_transport_mounts_only_the_enabled_forge() {
+        let integrations = ResolvedIntegrationsConfig {
+            github: true,
+            ..Default::default()
+        };
+        let (_data_dir, doc) = render_git_transport(&integrations, None);
+        let volumes = service_strings(&doc, "proxy", "volumes");
+        assert!(volumes
+            .iter()
+            .any(|v| v.ends_with(":/git-tokens/github:ro")));
+        assert!(!volumes.iter().any(|v| v.contains("/git-tokens/gitlab")));
+        let env = service_strings(&doc, "claude", "environment");
+        assert!(env.contains(&"SPEEDWAVE_GIT_HOSTS=github.com".to_string()));
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn git_transport_lists_the_configured_repositories_per_forge_in_proxy_json() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: configured_anthropic_llm(),
+            git_repositories: crate::config::GitRepositoryLists {
+                github: vec!["Owner/Repo".to_string(), "team/*".to_string()],
+                gitlab: vec!["group/sub/repo".to_string()],
+            },
+            ..Default::default()
+        };
+        render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            tmp_project_dir(),
+            &config,
+            &ResolvedIntegrationsConfig {
+                github: true,
+                ..Default::default()
+            },
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+        let rendered: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(proxy::proxy_config_path_in(data_dir.path(), "test-project"))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(rendered["git_forges"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            rendered["git_forges"][0]["repositories"],
+            serde_json::json!(["owner/repo", "team/*"])
         );
     }
 

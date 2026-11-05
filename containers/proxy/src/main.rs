@@ -1,4 +1,4 @@
-//! Per-project LLM forwarder: routes provider-prefixed models, tokenizes and
+//! Per-project LLM forwarder and git transport: routes provider-prefixed models, tokenizes and
 //! detokenizes `/v1/messages` both ways, and is the sole appender of the usage JSONL.
 
 use std::sync::Arc;
@@ -16,6 +16,7 @@ mod audit;
 mod config;
 mod count_tokens;
 mod forward;
+mod git;
 mod keys;
 mod ner;
 mod pii;
@@ -62,6 +63,7 @@ fn build_router(cfg: Arc<Config>) -> Router {
             require_caller_auth,
         ));
     Router::new()
+        .route("/git/{host}/{*path}", axum::routing::any(git::handler))
         .route(
             "/health",
             get(|| async { ([("content-type", "application/json")], r#"{"status":"ok"}"#) }),

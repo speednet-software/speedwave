@@ -3,6 +3,7 @@
 
 use crate::consts;
 use crate::engine_path::to_engine_path;
+use crate::git_allowlist::GitForgeService;
 use crate::plugin::{self, PluginManifest};
 use strum::EnumProperty;
 
@@ -365,11 +366,11 @@ pub enum SecurityRule {
     #[strum(props(description = "Atlassian has /workspace mount"))]
     AtlassianMissingWorkspaceMount,
 
-    /// Speedwave proxy mounts exactly config:ro + tokens:ro + usage:rw and no
-    /// host network (ADR-073 — it is a worker-class token holder).
+    /// Speedwave proxy mounts exactly config:ro, tokens:ro, usage:rw and the optional
+    /// git token mounts, with no host network (ADR-073).
     #[strum(to_string = "PROXY_VOLUMES")]
     #[strum(props(
-        description = "Speedwave proxy mounts are config:ro, tokens:ro, usage:rw only"
+        description = "Speedwave proxy mounts are config:ro, tokens:ro, usage:rw and the optional github/gitlab git token mounts only"
     ))]
     SpeedwaveProxyVolumes,
 
@@ -1219,8 +1220,6 @@ impl SecurityCheck {
         violations
     }
 
-    /// ADR-073: proxy mounts exactly `/config:ro`, `<tokens>/llm:/tokens:ro`, `/usage:rw`
-    /// (policy/audit mounts are validated by `check_proxy_policy_mount`/`check_audit_mount`).
     fn check_proxy_volumes(
         doc: &serde_yaml_ng::Value,
         expected_paths: &SecurityExpectedPaths,
@@ -1299,6 +1298,27 @@ impl SecurityCheck {
                     });
                 }
                 matched += 1;
+            } else if let Some((kind, host, mode)) = GitForgeService::ALL.iter().find_map(|kind| {
+                extract_volume_for_target(vol, &kind.token_mount_target())
+                    .map(|(host, mode)| (*kind, host, mode))
+            }) {
+                let expected_git_tokens = format!(
+                    "{}/{}",
+                    expected_paths.tokens_engine_dir(),
+                    kind.config_key()
+                );
+                if mode.as_deref() != Some("ro") || host != expected_git_tokens {
+                    violations.push(SecurityViolation {
+                        container: name.clone(),
+                        rule: SecurityRule::SpeedwaveProxyVolumes,
+                        message: format!(
+                            "proxy {} mount must be '{expected_git_tokens}' mounted ro, got: {vol}",
+                            kind.token_mount_target()
+                        ),
+                        remediation:
+                            "Mount '<data_dir>/tokens/<project>/<github|gitlab>' read-only at /git-tokens/<github|gitlab>.",
+                    });
+                }
             } else if extract_volume_for_target(vol, "/policy").is_some()
                 || extract_volume_for_target(vol, "/audit").is_some()
             {
@@ -1308,7 +1328,7 @@ impl SecurityCheck {
                     rule: SecurityRule::SpeedwaveProxyVolumes,
                     message: format!("proxy has an unexpected volume: {vol}"),
                     remediation:
-                        "proxy mounts exactly /config:ro, /tokens:ro, /usage:rw, /policy:ro and /audit:rw.",
+                        "proxy mounts exactly /config:ro, /tokens:ro, /usage:rw, /policy:ro, /audit:rw and the optional /git-tokens/github:ro and /git-tokens/gitlab:ro.",
                 });
             }
         }
@@ -2405,6 +2425,64 @@ mod tests {
             SecurityRule::SpeedwaveProxyVolumes.to_string(),
             "PROXY_VOLUMES",
         );
+    }
+
+    const GIT_TOKENS_ROOT: &str = "/host/.speedwave/tokens/p";
+
+    fn proxy_volume_violations(git_mounts: &[&str]) -> Vec<SecurityViolation> {
+        let mut volumes = vec![
+            "/host/.speedwave/proxy/p:/config:ro".to_string(),
+            format!("{GIT_TOKENS_ROOT}/llm:/tokens:ro"),
+            "/host/.speedwave/usage/p/proxy:/usage:rw".to_string(),
+        ];
+        volumes.extend(git_mounts.iter().map(|m| m.to_string()));
+        let refs: Vec<&str> = volumes.iter().map(String::as_str).collect();
+        let doc = service_doc("proxy", &refs, &[]);
+        let expected = SecurityExpectedPaths::from_raw("/proj", GIT_TOKENS_ROOT);
+        SecurityCheck::check_proxy_volumes(&doc, &expected)
+    }
+
+    #[test]
+    fn proxy_volumes_accept_no_git_mounts_and_both_canonical_git_mounts() {
+        assert!(proxy_volume_violations(&[]).is_empty());
+        let v = proxy_volume_violations(&[
+            "/host/.speedwave/tokens/p/github:/git-tokens/github:ro",
+            "/host/.speedwave/tokens/p/gitlab:/git-tokens/gitlab:ro",
+        ]);
+        assert!(v.is_empty(), "{v:?}");
+    }
+
+    #[test]
+    fn proxy_volumes_reject_git_mounts_with_wrong_source_or_mode() {
+        for bad in [
+            "/host/.speedwave/tokens/p/gitlab:/git-tokens/github:ro",
+            "/host/.speedwave/tokens/other/github:/git-tokens/github:ro",
+            "/host/.speedwave/tokens/p/github:/git-tokens/github:rw",
+            "/host/.speedwave/tokens/p/github:/git-tokens/github",
+            "/host/.speedwave/tokens/p:/git-tokens/gitlab:ro",
+        ] {
+            let v = proxy_volume_violations(&[bad]);
+            assert!(
+                v.iter()
+                    .any(|x| x.rule == SecurityRule::SpeedwaveProxyVolumes),
+                "'{bad}' must be rejected, got: {v:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_volumes_reject_any_other_git_tokens_target() {
+        for bad in [
+            "/host/.speedwave/tokens/p/github:/git-tokens:ro",
+            "/host/.speedwave/tokens/p/github:/git-tokens/github/sub:ro",
+            "/host/.speedwave/tokens/p/slack:/git-tokens/slack:ro",
+        ] {
+            let v = proxy_volume_violations(&[bad]);
+            assert!(
+                v.iter().any(|x| x.message.contains("unexpected volume")),
+                "'{bad}' must be rejected, got: {v:?}"
+            );
+        }
     }
 
     #[test]
