@@ -109,6 +109,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-104](ADR-104-apple-mail-control-through-applescript.md)           | Apple Mail control through AppleScript: gates, Trash-only delete, read-only rules, and living with Mail 16 bugs             | Accepted                                                                           |
 | [ADR-105](ADR-105-caller-shaped-jira-tools-in-the-atlassian-worker.md) | Caller-shaped Jira tools in the Atlassian worker: API designed from the caller side, decoupled from Jira REST               | Accepted                                                                           |
 | [ADR-106](ADR-106-git-push-from-the-container-through-the-proxy.md)    | Git push from the container through the proxy: the integration token stays in the proxy, the integration creates no commits | Accepted (repository allowlist amended 2026-11-04)                                 |
+| [ADR-107](ADR-107-keep-the-computer-awake-while-work-runs.md)          | Keep the computer out of idle sleep while work runs: one counted OS assertion, a Settings switch                            | Accepted                                                                           |
 
 ## Creating a New ADR
 

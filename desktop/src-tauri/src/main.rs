@@ -31,6 +31,7 @@ use bridges::ide_bridge;
 mod github_oauth_cmd;
 mod ide_bridge_cmd;
 mod integrations_cmd;
+mod keep_awake;
 mod llm_cmd;
 mod logging_cmd;
 mod mic_permission_cmd;
@@ -866,6 +867,7 @@ fn main() {
             }
 
             notifications::install(app.handle());
+            keep_awake::install();
 
             if let Ok(mut slot) = clipboard_bridge_slot.lock() {
                 *slot = clipboard_bridge::spawn(app.handle().clone());
@@ -1316,6 +1318,8 @@ fn main() {
             system_settings_cmd::open_audio_capture_pane,
             notifications::get_notification_settings,
             notifications::set_notification_prefs,
+            keep_awake::get_keep_awake,
+            keep_awake::set_keep_awake,
             notifications::request_notification_permission,
             notifications::open_notification_settings,
             #[cfg(feature = "e2e")]

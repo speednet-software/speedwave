@@ -731,6 +731,9 @@ pub struct UiPrefsConfig {
     /// Native OS notifications for chat-session events (SPEED-522).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notifications: Option<NotificationPrefsConfig>,
+    /// Keep the computer out of idle sleep while work runs (SPEED-917). Default = on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_awake: Option<bool>,
 }
 
 /// Stored notification switches; an unset switch resolves to on.
@@ -1555,6 +1558,16 @@ impl SpeedwaveUserConfig {
     /// Stores every notification switch explicitly.
     pub fn set_notification_prefs(&mut self, prefs: NotificationPrefs) {
         self.ui.get_or_insert_with(Default::default).notifications = Some(prefs.into());
+    }
+
+    /// `true` unless the user turned off keeping the computer awake (top-level only).
+    pub fn keep_awake_enabled(&self) -> bool {
+        self.ui.as_ref().and_then(|u| u.keep_awake).unwrap_or(true)
+    }
+
+    /// Stores the keep-awake switch explicitly.
+    pub fn set_keep_awake(&mut self, enabled: bool) {
+        self.ui.get_or_insert_with(Default::default).keep_awake = Some(enabled);
     }
 }
 
@@ -2763,6 +2776,48 @@ mod tests {
         let parsed: SpeedwaveUserConfig =
             serde_json::from_str(r#"{"projects":[],"ui":{"beta_enabled":true}}"#).expect("parse");
         assert!(parsed.ui.and_then(|u| u.notifications).is_none());
+    }
+
+    #[test]
+    fn keep_awake_is_on_until_the_user_turns_it_off() {
+        assert!(SpeedwaveUserConfig::default().keep_awake_enabled());
+        let empty_ui = SpeedwaveUserConfig {
+            ui: Some(UiPrefsConfig::default()),
+            ..Default::default()
+        };
+        assert!(empty_ui.keep_awake_enabled());
+        let parsed: SpeedwaveUserConfig =
+            serde_json::from_str(r#"{"projects":[],"ui":{"keep_awake":false}}"#).expect("parse");
+        assert!(!parsed.keep_awake_enabled());
+    }
+
+    #[test]
+    fn set_keep_awake_keeps_the_other_ui_prefs_and_round_trips() {
+        let mut cfg = SpeedwaveUserConfig {
+            ui: Some(UiPrefsConfig {
+                beta_enabled: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        cfg.set_keep_awake(false);
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        let back: SpeedwaveUserConfig = serde_json::from_str(&json).expect("deserialize");
+        assert!(back.beta_enabled());
+        assert!(!back.keep_awake_enabled());
+        let mut on = back;
+        on.set_keep_awake(true);
+        assert!(on.keep_awake_enabled());
+    }
+
+    #[test]
+    fn ui_prefs_without_keep_awake_serialize_without_the_key() {
+        let json = serde_json::to_string(&SpeedwaveUserConfig {
+            ui: Some(UiPrefsConfig::default()),
+            ..Default::default()
+        })
+        .expect("serialize");
+        assert!(!json.contains("keep_awake"), "{json}");
     }
 
     #[test]

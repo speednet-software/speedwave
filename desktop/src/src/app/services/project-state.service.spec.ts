@@ -1293,6 +1293,93 @@ describe('ProjectStateService', () => {
       expect(service.status()).toBe('no_provider');
     });
 
+    describe('retryAuth across a project switch', () => {
+      let releaseAuthCheck: (outcome: { auth?: unknown; error?: Error }) => void;
+
+      beforeEach(async () => {
+        let holdAuthCheck = false;
+        mockTauri.invokeHandler = async (cmd: string) => {
+          switch (cmd) {
+            case 'list_projects':
+              return {
+                projects: [
+                  { name: 'signed-out', dir: '/tmp/a' },
+                  { name: 'routed', dir: '/tmp/b' },
+                ],
+                active_project: 'signed-out',
+              };
+            case 'get_bundle_reconcile_state':
+              return MOCK_BUNDLE_RECONCILE_DONE;
+            case 'run_system_check':
+              return undefined;
+            case 'check_containers_running':
+              return true;
+            case 'get_auth_status':
+              if (!holdAuthCheck) {
+                return {
+                  api_key_configured: false,
+                  oauth_authenticated: false,
+                  needs_anthropic_auth: true,
+                  provider_configured: true,
+                };
+              }
+              return new Promise((resolve, reject) => {
+                releaseAuthCheck = ({ auth, error }) => (error ? reject(error) : resolve(auth));
+              });
+            default:
+              return undefined;
+          }
+        };
+        await service.init();
+        expect(service.status()).toBe('auth_required');
+        holdAuthCheck = true;
+      });
+
+      it('drops an auth_required result that lands after the switch started', async () => {
+        const retry = service.retryAuth();
+        mockTauri.dispatchEvent('project_switch_started', { project: 'routed' });
+        releaseAuthCheck({
+          auth: {
+            api_key_configured: false,
+            oauth_authenticated: false,
+            needs_anthropic_auth: true,
+            provider_configured: true,
+          },
+        });
+        await retry;
+
+        expect(service.status()).toBe('switching');
+      });
+
+      it('drops a failed check that lands after the switch started', async () => {
+        const failed = vi.fn();
+        service.onProjectFailed(failed);
+        const retry = service.retryAuth();
+        mockTauri.dispatchEvent('project_switch_started', { project: 'routed' });
+        releaseAuthCheck({ error: new Error('container gone') });
+        await retry;
+
+        expect(service.status()).toBe('switching');
+        expect(service.error).toBe('');
+        expect(failed).not.toHaveBeenCalled();
+      });
+
+      it('still applies the result when no switch started', async () => {
+        const retry = service.retryAuth();
+        releaseAuthCheck({
+          auth: {
+            api_key_configured: false,
+            oauth_authenticated: false,
+            needs_anthropic_auth: true,
+            provider_configured: false,
+          },
+        });
+        await retry;
+
+        expect(service.status()).toBe('no_provider');
+      });
+    });
+
     it('applyAuthStatus sets ready when auth is valid', () => {
       service.status.set('auth_required');
       service.applyAuthStatus({

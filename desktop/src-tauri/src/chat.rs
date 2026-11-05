@@ -1818,30 +1818,57 @@ fn unless_next_turn_started(
 }
 
 #[derive(Clone)]
-struct AwaitedResult(Arc<std::sync::atomic::AtomicBool>);
+struct AwaitedResult {
+    awaited: Arc<std::sync::atomic::AtomicBool>,
+    turn_awake: Arc<Mutex<Option<crate::keep_awake::Hold>>>,
+}
 
 impl AwaitedResult {
     fn new() -> Self {
-        Self(Arc::new(std::sync::atomic::AtomicBool::new(true)))
+        Self {
+            awaited: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            turn_awake: Arc::new(Mutex::new(None)),
+        }
     }
 
     fn observe(&self, chunks: &[StreamChunk]) {
+        if turn_end_event(chunks).is_some() {
+            self.release_turn();
+        }
         if chunks
             .iter()
             .any(|c| matches!(c, StreamChunk::Result { .. } | StreamChunk::Error { .. }))
         {
-            self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+            self.awaited
+                .store(false, std::sync::atomic::Ordering::SeqCst);
         } else if !chunks.is_empty() {
-            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.awaited
+                .store(true, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
     fn message_written(&self) {
-        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.awaited
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.hold_turn();
+    }
+
+    fn hold_turn(&self) {
+        self.turn_awake
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_or_insert_with(|| crate::keep_awake::hold("a chat turn"));
     }
 
     fn is_awaited(&self) -> bool {
-        self.0.load(std::sync::atomic::Ordering::SeqCst)
+        self.awaited.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn release_turn(&self) {
+        self.turn_awake
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
     }
 }
 
@@ -2287,6 +2314,7 @@ impl ChatSession {
                             },
                             &display_policy,
                         );
+                        awaited_for_reader.release_turn();
                         notify_session_event(
                             &app_handle,
                             &project_for_reader,
@@ -2470,6 +2498,7 @@ impl ChatSession {
                 );
             }
             control_for_reader.close();
+            awaited_for_reader.release_turn();
             end_session_info(&info_for_reader, info_emitter_for_reader.as_ref());
 
             let stopping = stopping_for_reader.load(std::sync::atomic::Ordering::SeqCst);
@@ -2606,8 +2635,11 @@ impl ChatSession {
         if matches!(blocks, [WireContentBlock::Text { text }] if settles_model(text)) {
             self.model_settled.settle_by_command();
         }
-        writeln!(stdin, "{}", serialized)?;
-        stdin.flush()?;
+        self.awaited_result.hold_turn();
+        if let Err(e) = writeln!(stdin, "{}", serialized).and_then(|_| stdin.flush()) {
+            self.awaited_result.release_turn();
+            return Err(e.into());
+        }
         drop(stdin);
         self.awaited_result.message_written();
 
@@ -2705,12 +2737,14 @@ impl ChatSession {
             .lock()
             .map_err(|e| anyhow::anyhow!("stdin lock poisoned: {e}"))?;
 
+        self.awaited_result.hold_turn();
         if let Err(e) = writeln!(stdin, "{}", serialized).and_then(|_| stdin.flush()) {
             log::error!(
                 "failed to write answer for {} (tool_use_id={tool_use_id}): {e}",
                 partial.request.tool_name
             );
             drop(stdin);
+            self.awaited_result.release_turn();
             self.restore_partial(tool_use_id, &partial, Some(question_idx));
             return Err(anyhow::anyhow!("failed to write answer to stdin: {e}"));
         }
@@ -2814,6 +2848,7 @@ impl ChatSession {
             .store(true, std::sync::atomic::Ordering::SeqCst);
         self.shared_stdin = None;
         self.control.close();
+        self.awaited_result.release_turn();
         end_session_info(&self.session_info, self.session_info_emitter.as_ref());
         self.reap_instance();
         if let Some(mut child) = self.child.take() {
@@ -3851,6 +3886,65 @@ mod tests {
         );
     }
 
+    fn holds_the_turn_awake(awaited: &AwaitedResult) -> bool {
+        awaited.turn_awake.lock().unwrap().is_some()
+    }
+
+    #[test]
+    fn a_chat_turn_keeps_the_computer_awake_from_its_message_to_its_end() {
+        let awaited = AwaitedResult::new();
+        assert!(
+            !holds_the_turn_awake(&awaited),
+            "an idle session that waits for its first message must let the computer sleep"
+        );
+        awaited.message_written();
+        assert!(holds_the_turn_awake(&awaited));
+        awaited.observe(&[StreamChunk::Text {
+            content: "working".to_string(),
+        }]);
+        awaited.observe(&[StreamChunk::Error {
+            content: "retrying".to_string(),
+            turn_ended: false,
+        }]);
+        assert!(
+            holds_the_turn_awake(&awaited),
+            "an error that leaves the turn running keeps it awake"
+        );
+        awaited.observe(&[finished_turn()]);
+        assert!(!holds_the_turn_awake(&awaited));
+    }
+
+    #[test]
+    fn a_turn_ending_error_or_the_end_of_the_stream_lets_the_computer_sleep() {
+        let awaited = AwaitedResult::new();
+        awaited.message_written();
+        awaited.observe(&[StreamChunk::Error {
+            content: "overloaded".to_string(),
+            turn_ended: true,
+        }]);
+        assert!(!holds_the_turn_awake(&awaited));
+        awaited.message_written();
+        awaited.release_turn();
+        assert!(
+            !holds_the_turn_awake(&awaited),
+            "a process that dies mid-turn must not keep the computer awake"
+        );
+    }
+
+    #[test]
+    fn a_queued_message_after_a_result_starts_a_new_awake_turn() {
+        let awaited = AwaitedResult::new();
+        awaited.message_written();
+        awaited.message_written();
+        awaited.observe(&[finished_turn()]);
+        assert!(
+            !holds_the_turn_awake(&awaited),
+            "one turn holds the computer once, however many messages it took"
+        );
+        awaited.message_written();
+        assert!(holds_the_turn_awake(&awaited));
+    }
+
     #[test]
     fn a_finished_turn_or_a_turn_ending_error_names_its_notification() {
         assert_eq!(turn_end_event(&[]), None);
@@ -3933,6 +4027,7 @@ mod tests {
             .send_message_with_emit(&text_only("next question"), |_| {})
             .unwrap();
         assert!(session.awaited_result.is_awaited());
+        assert!(holds_the_turn_awake(&session.awaited_result));
     }
 
     #[test]
@@ -3948,6 +4043,7 @@ mod tests {
             .send_message_with_emit(&text_only("next question"), |_| {})
             .unwrap_err();
         assert!(!session.awaited_result.is_awaited());
+        assert!(!holds_the_turn_awake(&session.awaited_result));
     }
 
     #[test]
@@ -4055,9 +4151,86 @@ mod tests {
             "awaited_for_reader.observe(&chunks)",
             "awaited_for_reader.message_written()",
             "awaited_for_reader.is_awaited() && !stopping",
+            "awaited_for_reader.release_turn()",
         ] {
             assert!(body.contains(wiring), "the reader must use `{wiring}`");
         }
+    }
+
+    #[test]
+    fn the_stdout_reader_ends_the_awake_turn_before_a_queued_message_starts_the_next() {
+        let source = include_str!("chat.rs");
+        let start = source
+            .find("pub fn start_with_retry(")
+            .expect("start_with_retry must exist");
+        let body = &source[start..];
+        let body = &body[..body
+            .find("pub fn send_message(")
+            .expect("send_message must follow start_with_retry")];
+        let observed = body
+            .find("awaited_for_reader.observe(&chunks)")
+            .expect("observe");
+        let drained = body.find("if drain_queued_message(").expect("drain");
+        let written = body
+            .find("awaited_for_reader.message_written()")
+            .expect("message_written");
+        assert!(
+            observed < drained && drained < written,
+            "a queued turn taken before the finished one is observed would be released with it"
+        );
+        let asked = body
+            .find("StreamChunk::AskUserQuestion {")
+            .expect("AskUserQuestion emit");
+        let released = asked
+            + body[asked..]
+                .find("awaited_for_reader.release_turn();")
+                .expect("a question waiting for the user lets the computer sleep");
+        assert!(released < body.find("SessionEvent::AwaitingInput").expect("event"));
+    }
+
+    #[test]
+    fn an_answer_or_a_message_holds_the_turn_awake_before_it_reaches_claude_code() {
+        let source = include_str!("chat.rs");
+        for name in [
+            "pub fn submit_question_answer(",
+            "fn send_message_with_emit(",
+        ] {
+            let start = source.find(name).expect("writer must exist");
+            let body = &source[start..];
+            let body = &body[..body.find("\n    }\n").expect("end of fn")];
+            let held = body
+                .find("self.awaited_result.hold_turn();")
+                .unwrap_or_else(|| panic!("{name} must hold the turn awake"));
+            let written = body.find("writeln!(").expect("stdin write");
+            let failed = body
+                .find("if let Err(e) = writeln!(")
+                .expect("write failure");
+            assert!(
+                held < written,
+                "{name}: a fast answer could end the turn first"
+            );
+            assert!(
+                body[failed..].contains("self.awaited_result.release_turn();"),
+                "{name}: a write that never reached Claude Code must not keep the computer awake"
+            );
+        }
+    }
+
+    #[test]
+    fn stopping_a_session_mid_turn_lets_the_computer_sleep_even_if_its_reader_hangs() {
+        let mut session = ChatSession::new(
+            "proj",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
+        session.set_test_stdin_sink(Vec::new());
+        session
+            .send_message_with_emit(&text_only("long task"), |_| {})
+            .unwrap();
+        let reader_view = session.awaited_result.clone();
+        assert!(holds_the_turn_awake(&reader_view));
+        session.stop().unwrap();
+        assert!(!holds_the_turn_awake(&reader_view));
     }
 
     #[test]
@@ -5642,7 +5815,7 @@ mod tests {
         };
         let locked = at(&send, "letmutstdin=shared.lock()");
         let settled = at(&send, "self.model_settled.settle_by_command();");
-        let written = at(&send, "writeln!(stdin,\"{}\",serialized)?;");
+        let written = at(&send, "writeln!(stdin,\"{}\",serialized).and_then(");
         assert!(locked < settled && settled < written);
 
         let drain = body_of("fn write_and_emit_drained_message(", "#[cfg(test)]");

@@ -1,7 +1,7 @@
 import { Routes } from '@angular/router';
 import { setupCompleteGuard } from './guards/setup-complete.guard';
 import { setupNotCompleteGuard } from './guards/setup-not-complete.guard';
-import { transcriptionRouteGuard } from './guards/transcription-route.guard';
+import { settingsUnsavedChangesGuard } from './guards/settings-unsaved-changes.guard';
 
 export const routes: Routes = [
   {
@@ -38,7 +38,6 @@ export const routes: Routes = [
       },
       {
         path: 'meeting-transcription',
-        canActivate: [transcriptionRouteGuard],
         loadComponent: () =>
           import('./meeting-transcription/meeting-transcription.component').then(
             (m) => m.MeetingTranscriptionComponent
@@ -51,6 +50,7 @@ export const routes: Routes = [
       },
       {
         path: 'settings',
+        canDeactivate: [settingsUnsavedChangesGuard],
         loadComponent: () =>
           import('./settings/settings.component').then((m) => m.SettingsComponent),
       },

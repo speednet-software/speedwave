@@ -21,6 +21,7 @@ export type IconName =
   | 'cube'
   | 'settings'
   | 'document'
+  | 'image'
   | 'microphone'
   | 'refresh'
   | 'trash'
@@ -131,6 +132,11 @@ export type IconName =
           <path
             d="M9 12h6m-6 4h6m2 5H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5.586a1 1 0 0 1 .707.293l5.414 5.414a1 1 0 0 1 .293.707V19a2 2 0 0 1-2 2z"
           />
+        }
+        @case ('image') {
+          <rect x="3" y="3" width="18" height="18" rx="2" />
+          <circle cx="9" cy="9" r="2" />
+          <path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" />
         }
         @case ('microphone') {
           <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z" />

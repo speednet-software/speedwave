@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { By } from '@angular/platform-browser';
-import { RouterModule } from '@angular/router';
+import { Router, RouterModule } from '@angular/router';
 import { SettingsComponent } from './settings.component';
 import { LlmProviderComponent } from './llm-provider/llm-provider.component';
 import { SecuritySectionComponent } from './security-section/security-section.component';
@@ -12,6 +12,7 @@ import { ProjectStateService } from '../services/project-state.service';
 import { ThemeService, THEME_IDS, THEME_MODES } from '../services/theme.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 import { createDeferred } from '../testing/deferred';
+import { SettingsDirtyService } from './settings-dirty.service';
 
 function setupMockTauri(mockTauri: MockTauriService): void {
   mockTauri.invokeHandler = async (cmd: string) => {
@@ -31,6 +32,8 @@ function setupMockTauri(mockTauri: MockTauriService): void {
         return { api_key_configured: false, oauth_authenticated: false };
       case 'list_transcripts':
         return [];
+      case 'get_keep_awake':
+        return true;
       default:
         return undefined;
     }
@@ -113,16 +116,13 @@ describe('SettingsComponent', () => {
     expect(advancedEl).not.toBeNull();
   });
 
-  it('renders TranscriptionSectionComponent when beta is enabled', () => {
-    fixture.detectChanges();
-    const el = fixture.nativeElement.querySelector('app-transcription-section');
-    expect(el).not.toBeNull();
-  });
-
-  it('hides TranscriptionSectionComponent when beta is disabled', () => {
+  it('renders TranscriptionSectionComponent whether beta is on or off', () => {
     betaEnabled.set(false);
     fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('app-transcription-section')).toBeNull();
+    expect(fixture.nativeElement.querySelector('app-transcription-section')).not.toBeNull();
+    betaEnabled.set(true);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('app-transcription-section')).not.toBeNull();
   });
 
   it('renders NotificationsSectionComponent when beta is enabled', () => {
@@ -134,6 +134,15 @@ describe('SettingsComponent', () => {
     betaEnabled.set(false);
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('app-notifications-section')).toBeNull();
+  });
+
+  it('renders the Sleep section whether beta is on or off', () => {
+    betaEnabled.set(false);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('app-sleep-section')).not.toBeNull();
+    betaEnabled.set(true);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('app-sleep-section')).not.toBeNull();
   });
 
   it('renders TelemetrySectionComponent when beta is enabled', () => {
@@ -714,6 +723,60 @@ describe('SettingsComponent', () => {
       );
       expect(section.textContent?.toLowerCase()).toContain('mode');
       expect(section.textContent).not.toContain('Backgrounds stay dark');
+    });
+  });
+
+  describe('unsaved-changes modal (SPEED-637)', () => {
+    afterEach(() => {
+      TestBed.inject(SettingsDirtyService).resolvePrompt('stay');
+    });
+
+    it('renders the modal with the dirty section names while a prompt is open', async () => {
+      const registry = TestBed.inject(SettingsDirtyService);
+      registry.register({ name: 'Telemetry', isDirty: signal(true), save: async () => {} });
+      component.ngOnInit();
+      await fixture.whenStable();
+      const pending = registry.confirmLeave();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      const modal = document.querySelector('[data-testid="settings-unsaved-modal"]');
+      expect(modal).not.toBeNull();
+      expect(document.querySelector('[data-testid="modal-body"]')?.textContent).toContain(
+        'Telemetry'
+      );
+      expect(document.querySelector('[data-testid="unsaved-stay-btn"]')).toBeNull();
+      (document.querySelector('[data-testid="unsaved-close-btn"]') as HTMLElement).click();
+      await expect(pending).resolves.toBe('stay');
+    });
+
+    it('save and discard buttons resolve their choices and the close ✕ resolves stay', async () => {
+      const registry = TestBed.inject(SettingsDirtyService);
+      registry.register({ name: 'Security', isDirty: signal(true), save: async () => {} });
+      component.ngOnInit();
+      await fixture.whenStable();
+      const pending = registry.confirmLeave();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      (document.querySelector('[data-testid="unsaved-save-btn"]') as HTMLElement).click();
+      await expect(pending).resolves.toBe('save');
+      const pending2 = registry.confirmLeave();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      (document.querySelector('[data-testid="unsaved-discard-btn"]') as HTMLElement).click();
+      await expect(pending2).resolves.toBe('discard');
+      const pending3 = registry.confirmLeave();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      (document.querySelector('[data-testid="unsaved-close-btn"]') as HTMLElement).click();
+      await expect(pending3).resolves.toBe('stay');
+    });
+
+    it('factory reset suppresses the next leave prompt', () => {
+      const registry = TestBed.inject(SettingsDirtyService);
+      const navigate = vi.spyOn(TestBed.inject(Router), 'navigate').mockResolvedValue(true);
+      component.onResetCompleted();
+      expect(registry.consumeSuppression()).toBe(true);
+      expect(navigate).toHaveBeenCalledWith(['/setup'], { replaceUrl: true });
     });
   });
 });

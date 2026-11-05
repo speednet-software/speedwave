@@ -9,6 +9,7 @@ import { ProjectStateService, type AuthStatusResponse } from '../../services/pro
 import { TauriService } from '../../services/tauri.service';
 import { LoggerService } from '../../services/logger.service';
 import { FileAttachmentService } from '../../services/file-attachment.service';
+import { ImagePreprocessorService } from '../../services/image-preprocessor.service';
 import type { StagedAttachment } from '../../models/chat';
 import { MockTauriService } from '../../testing/mock-tauri.service';
 import { makeMockLogger } from '../../testing/mock-logger';
@@ -1151,6 +1152,207 @@ describe('ComposerComponent', () => {
 
       expect(component.attachmentDraft().announcement()).toBe('File removed: notes.pdf');
       expect(staged?.discard).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe('attach menu (SPEED-74)', () => {
+    type PickItem = 'composer-attach-files' | 'composer-attach-images';
+
+    let uploads: FileAttachmentStub;
+
+    function flush(): Promise<void> {
+      return new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    function setProject(name: string | null): void {
+      (TestBed.inject(ProjectStateService) as unknown as ProjectStateStub).activeProject.set(name);
+    }
+
+    function attachButton(): HTMLButtonElement {
+      return rootEl.querySelector<HTMLButtonElement>('[data-testid="composer-attach"]')!;
+    }
+
+    function pick(item: PickItem, files: File[]): void {
+      const input = rootEl.querySelector<HTMLInputElement>('[data-testid="composer-file-picker"]')!;
+      input.click = vi.fn<() => void>();
+      attachButton().click();
+      fixture.detectChanges();
+      document.querySelector<HTMLButtonElement>(`[data-testid="${item}"]`)!.click();
+      fixture.detectChanges();
+      Object.defineProperty(input, 'files', { value: files, configurable: true });
+      input.dispatchEvent(new Event('change'));
+    }
+
+    function errorText(): string | undefined {
+      return rootEl.querySelector('[data-testid="composer-attachment-error"]')?.textContent?.trim();
+    }
+
+    const pdf = (): File => new File(['%PDF-1.7'], 'notes.pdf', { type: 'application/pdf' });
+    const png = (): File => new File(['p'], 'shot.png', { type: 'image/png' });
+
+    beforeEach(() => {
+      uploads = TestBed.inject(FileAttachmentService) as unknown as FileAttachmentStub;
+    });
+
+    it('puts the "+" left of the message field', () => {
+      const row = textarea().parentElement!;
+
+      expect(row.firstElementChild?.tagName.toLowerCase()).toBe('app-attach-menu');
+    });
+
+    it('stages a picked file like a dropped one and renders its pill', async () => {
+      setProject('acme');
+      const file = pdf();
+
+      pick('composer-attach-files', [file]);
+      await flush();
+      fixture.detectChanges();
+
+      expect(uploads.stage).toHaveBeenCalledWith(file, 'acme', expect.any(AbortSignal));
+      expect(
+        rootEl.querySelector('[data-testid="composer-attachment-file"]')?.textContent
+      ).toContain('notes.pdf');
+      expect(errorText()).toBeUndefined();
+    });
+
+    it('stages every file of a multi-file pick in order', async () => {
+      setProject('acme');
+
+      pick('composer-attach-files', [
+        new File(['a'], 'a.txt', { type: 'text/plain' }),
+        new File(['b'], 'b.txt', { type: 'text/plain' }),
+      ]);
+      await flush();
+
+      expect(uploads.stage.mock.calls.map(([f]) => f.name)).toEqual(['a.txt', 'b.txt']);
+    });
+
+    it('sends a picked image through the image pipeline and shows its preview', async () => {
+      setProject('acme');
+      const preprocess = vi
+        .spyOn(TestBed.inject(ImagePreprocessorService), 'preprocess')
+        .mockResolvedValue(makeStagedImage('shot.png'));
+      const image = png();
+
+      pick('composer-attach-files', [image]);
+      await flush();
+      fixture.detectChanges();
+
+      expect(preprocess).toHaveBeenCalledWith(image, 'sonnet', 'acme');
+      expect(uploads.stage).not.toHaveBeenCalled();
+      const preview = rootEl.querySelector<HTMLImageElement>(
+        '[data-testid="composer-attachment-strip"] img'
+      );
+      expect(preview?.getAttribute('src')).toBe('blob:shot.png');
+    });
+
+    it('attaches the images of a mixed "Attach images…" pick and names the rest', async () => {
+      setProject('acme');
+      vi.spyOn(TestBed.inject(ImagePreprocessorService), 'preprocess').mockResolvedValue(
+        makeStagedImage('shot.png')
+      );
+
+      pick('composer-attach-images', [png(), pdf()]);
+      await flush();
+      fixture.detectChanges();
+
+      expect(errorText()).toBe('Only images can be attached with Attach images…: notes.pdf');
+      expect(uploads.stage).not.toHaveBeenCalled();
+      expect(
+        component
+          .attachmentDraft()
+          .records()
+          .map((r) => [r.filename, r.kind])
+      ).toEqual([['shot.png', 'image']]);
+    });
+
+    it('shows the same no-project error as a drop', () => {
+      pick('composer-attach-files', [pdf()]);
+      fixture.detectChanges();
+
+      expect(errorText()).toBe('Select a project before attaching a file.');
+      expect(uploads.stage).not.toHaveBeenCalled();
+    });
+
+    it('stages a file picked while a response streams and blocks its send, as a drop does', async () => {
+      setProject('acme');
+      fixture.componentRef.setInput('streaming', true);
+      fixture.detectChanges();
+
+      pick('composer-attach-files', [pdf()]);
+      await flush();
+      fixture.detectChanges();
+
+      expect(uploads.stage).toHaveBeenCalledOnce();
+      expect(component.attachmentDraft().records()).toHaveLength(1);
+      expect(component.canSubmit()).toBe(false);
+      expect(component.submitBlockedReason()).toBe(
+        'Wait for the response to finish before sending an attachment.'
+      );
+    });
+
+    it('attaches the same file again after it was removed from the strip', async () => {
+      setProject('acme');
+      const file = pdf();
+      pick('composer-attach-files', [file]);
+      await flush();
+      fixture.detectChanges();
+      rootEl
+        .querySelector<HTMLButtonElement>('[data-testid="composer-attachment-remove"]')!
+        .click();
+
+      pick('composer-attach-files', [file]);
+      await flush();
+      fixture.detectChanges();
+
+      expect(uploads.stage).toHaveBeenCalledTimes(2);
+      expect(
+        component
+          .attachmentDraft()
+          .records()
+          .map((r) => r.filename)
+      ).toEqual(['notes.pdf']);
+    });
+
+    it('replaces the errors of an earlier drop', () => {
+      const dropTarget = rootEl.querySelector('[appFileDrop]') as HTMLElement;
+      dropTarget.dispatchEvent(makeDragEvent('drop', [{ directory: 'docs' }]));
+
+      pick('composer-attach-images', [pdf()]);
+      fixture.detectChanges();
+
+      expect(errorText()).toBe('Only images can be attached with Attach images…: notes.pdf');
+    });
+
+    it('returns the caret to the message field after a pick', async () => {
+      setProject('acme');
+      attachButton().focus();
+
+      pick('composer-attach-files', [pdf()]);
+      await flush();
+
+      expect(document.activeElement).toBe(textarea());
+    });
+
+    it('keeps a height the user dragged the field to, as a drop does', async () => {
+      setProject('acme');
+      component.onResizeStart();
+      component.onResizeBy(120);
+      const dragged = textarea().style.height;
+
+      pick('composer-attach-files', [pdf()]);
+      await flush();
+
+      expect(dragged).not.toBe('');
+      expect(textarea().style.height).toBe(dragged);
+      expect(component.resizeValueNow()).not.toBeNull();
+    });
+
+    it('disables the "+" while the composer is disabled', () => {
+      fixture.componentRef.setInput('disabled', true);
+      fixture.detectChanges();
+
+      expect(attachButton().disabled).toBe(true);
     });
   });
 

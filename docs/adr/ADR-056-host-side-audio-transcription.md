@@ -177,6 +177,8 @@
 > - **The banner clears itself:** when the mic delivers again, `mix.rs::refresh_health` emits `CaptureHealth::Cleared(MicrophoneStalled)` as before (Amendment 4), so the "microphone stopped" banner goes away.
 >
 > **Not changed:** the 0.2 s debounce, the tap API (`installTapOnBus:`, now called from `SPWSafeTap`, deprecated from macOS 27.0 in favour of `installAudioTap(onBus:bufferSize:format:tapProvider:)`[^40]), and the Rust side of the capture.
+>
+> **Amendment 25 (out of beta, SPEED-957, 2026-11-04):** Meeting transcription, speaker attribution included, is no longer a beta feature. The tab and its Settings section show whether the beta toggle (ADR-058) is on or off: the nav-rail entry and the `⌘4` shortcut (`shell.component.ts::visibleEntries`, `onKeydown`), the Settings section (`settings.component.ts`), and the `/meeting-transcription` route, which has no guard (`app.routes.ts`). Amendment 2's "The tab stays beta-gated", the Decision's "behind the beta-features gate", "Access is governed by the beta gate" under **No per-feature toggle**, and the beta-off exception of the window indicator no longer hold; `transcriptionRouteGuard` and `betaEnabledGuard` were removed, since no route used them any more. A checked-in repo `.speedwave.json` still cannot start a recording: nothing records until the user presses Record.
 
 ## Decision
 

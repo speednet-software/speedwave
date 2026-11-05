@@ -1004,6 +1004,7 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
         return None;
     }
     speedwave_runtime::runtime::begin_engine_teardown();
+    crate::keep_awake::release_on_exit();
 
     crate::WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
     crate::OAUTH_WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1205,6 +1206,22 @@ mod tests {
         assert!(
             save_pos < restore_pos,
             "a failed restore must not drop already-downed projects from the retry list"
+        );
+    }
+
+    #[test]
+    fn exit_cleanup_lets_the_computer_sleep_before_the_slow_teardown() {
+        let source = include_str!("reconcile.rs");
+        let fn_start = source
+            .find("pub(crate) fn run_exit_cleanup(")
+            .expect("run_exit_cleanup must exist");
+        let body = &source[fn_start..];
+        let release = body
+            .find("crate::keep_awake::release_on_exit();")
+            .expect("exit must release the idle-sleep assertion");
+        assert!(
+            release < body.find("std::thread::spawn").expect("teardown thread"),
+            "the assertion lives in a static no exit drops, and the teardown can take minutes"
         );
     }
 
