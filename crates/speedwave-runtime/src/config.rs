@@ -1581,7 +1581,6 @@ pub struct GitRepositoryLists {
 }
 
 impl GitRepositoryLists {
-    /// Entries of one forge integration.
     pub(crate) fn of(&self, service: GitForgeService) -> &[String] {
         match service {
             GitForgeService::Github => &self.github,
@@ -1609,8 +1608,7 @@ pub struct ResolvedClaudeConfig {
     pub pii_policy: Result<crate::pii_policy::ResolvedPiiPolicy, String>,
     /// Whether this project's proxy gets the host PII NER detector (ADR-096).
     pub pii_ner_enabled: bool,
-    /// Git transport allowlists, read from the user config only (a repo `.speedwave.json` cannot
-    /// widen what its own agent may push to).
+    /// Git transport allowlists.
     pub git_repositories: GitRepositoryLists,
 }
 

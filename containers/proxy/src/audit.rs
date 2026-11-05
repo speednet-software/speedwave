@@ -31,6 +31,17 @@ struct PiiAuditLine {
     source: Option<&'static str>,
 }
 
+#[derive(Serialize)]
+struct GitAuditLine<'a> {
+    ts: String,
+    layer: &'static str,
+    method: &'a str,
+    host: &'a str,
+    repo: Option<&'a str>,
+    service: Option<&'a str>,
+    status: u16,
+}
+
 /// Appends one JSONL line per detection to `<audit_dir>/audit-proxy.jsonl`; no-op when `None`.
 /// A write failure warns and is swallowed; timestamp is local `chrono`, not the `ts()` SSOT.
 pub fn write_pii_audit(audit_dir: Option<&Path>, detections: &[Detection]) {
@@ -64,19 +75,6 @@ pub fn write_ner_unavailable(audit_dir: Option<&Path>) {
     write_pii_audit_with_source(audit_dir, &[row], Some(NER_SOURCE));
 }
 
-#[derive(Serialize)]
-struct GitAuditLine<'a> {
-    ts: String,
-    layer: &'static str,
-    method: &'a str,
-    host: &'a str,
-    repo: Option<&'a str>,
-    service: Option<&'a str>,
-    status: u16,
-}
-
-/// Appends one `git` layer row (no token, no body) to `<audit_dir>/audit-proxy.jsonl`;
-/// no-op when `None`, a write failure warns and is swallowed.
 pub fn write_git_audit(
     audit_dir: Option<&Path>,
     method: &str,

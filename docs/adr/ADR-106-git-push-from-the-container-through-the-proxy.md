@@ -27,7 +27,7 @@
 
 - The proxy becomes the second consumer of the `github` and `gitlab` tokens. This changes the rule of [ADR-009](ADR-009-per-project-isolation-preserved.md) that a token directory is mounted only into its own worker: a compromised proxy exposes the LLM keys and the forge tokens of its project. The proxy already holds the LLM provider keys and the PII key and accepts requests only with the caller secret, which is the reason it was chosen over the worker.
 - The `claude` container still holds no service token. It holds the caller secret, which it already received for `/v1/*` in `ANTHROPIC_CUSTOM_HEADERS` on the proxy path.
-- The GitHub OAuth `repo` scope reaches every repository the user can access[^6], so the agent can push to any of them, not only the project's repository. This is the accepted cost of using one token, the integration's.
+- The GitHub OAuth `repo` scope reaches every repository the user can access[^6], so the agent can push to any of them, not only the project's repository. This is the accepted cost of using one token, the integration's. Superseded for the git transport by the amendment of 2026-11-04 below.
 - A path-prefixed GitLab instance (`https://host/gitlab`) is reached at its host root; GitLab with a private CA and hosts without TLS are not supported. Git LFS is not supported.
 - The SPEED-320 assumption "token-free container, no git push bridge" is revoked.
 

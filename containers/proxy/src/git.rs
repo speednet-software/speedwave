@@ -1,7 +1,3 @@
-//! Git smart-HTTP transport: `ANY /git/{host}/{*path}` streams fetch and push traffic to an
-//! allowlisted repository of a configured forge, injecting the integration token the `claude`
-//! container never sees.
-
 use std::sync::Arc;
 
 use axum::{
@@ -40,7 +36,6 @@ struct GitRequest<'a> {
     query: Option<&'a str>,
 }
 
-/// Handles one git transport request and writes its audit row.
 pub async fn handler(State(cfg): State<Arc<Config>>, request: Request) -> Response {
     let (parts, body) = request.into_parts();
     let rest_of_path = parts.uri.path().strip_prefix("/git/").unwrap_or_default();

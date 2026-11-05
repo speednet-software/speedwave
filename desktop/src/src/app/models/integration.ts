@@ -95,16 +95,16 @@ export interface OsIntegrationValidation {
   reason: string;
 }
 
-/** Integration whose repository allowlist the git transport enforces (Rust `GitForgeService`). */
+/** Integration whose repository allowlist the git transport enforces. */
 export type GitForgeService = 'github' | 'gitlab';
 
-/** A remote found in the project directory and not listed yet; `source_dir` is `"."` for the root. */
+/** A remote found in the project directory and not listed yet. */
 export interface GitRepositorySuggestion {
   entry: string;
   source_dir: string;
 }
 
-/** One integration's repository allowlist; `host` is null when the GitLab host URL is unusable. */
+/** One integration's repository allowlist. */
 export interface GitRepositoriesView {
   host: string | null;
   repositories: string[];

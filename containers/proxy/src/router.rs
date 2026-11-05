@@ -48,8 +48,6 @@ pub struct Route {
     pub provider_id: String,
 }
 
-/// One git host the `/git/{host}/...` transport may reach; the token stays in `token_file`
-/// and only `repositories` (`owner/repo` or `owner/*`, GitLab subgroups included) are forwarded.
 #[derive(Debug, Deserialize)]
 pub struct GitForge {
     pub host: String,
@@ -61,8 +59,6 @@ pub struct GitForge {
 }
 
 impl GitForge {
-    /// Whether `repo` is on the allowlist, ignoring letter case and a `.git` suffix;
-    /// an empty allowlist admits nothing and `prefix/*` admits every repository below `prefix`.
     pub fn allows(&self, repo: &str) -> bool {
         let wanted = normalise(repo);
         self.repositories

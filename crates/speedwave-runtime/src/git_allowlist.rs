@@ -1,5 +1,4 @@
-//! Repository allowlist of the git transport (ADR-106): the forge host of an integration,
-//! validation of allowlist entries, and the suggestions drawn from the project's git remotes.
+//! Repository allowlist of the git transport.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -43,7 +42,6 @@ impl GitForgeService {
         Self::ALL.into_iter().find(|s| s.config_key() == key)
     }
 
-    /// Integration config key, also the token namespace under `tokens/<project>/`.
     pub(crate) fn config_key(self) -> &'static str {
         match self {
             Self::Github => "github",
@@ -105,8 +103,7 @@ pub struct GitRepositorySuggestion {
     pub source_dir: String,
 }
 
-/// Git host of a forge for one project (`host[:port]`), or `None` when GitLab's `host_url`
-/// is unreadable or not an https URL with a plain host.
+/// Git host of a forge for one project.
 pub fn forge_host_in(data_dir: &Path, project: &str, service: GitForgeService) -> Option<String> {
     match service {
         GitForgeService::Github => Some(GITHUB_GIT_HOST.to_string()),
@@ -129,8 +126,7 @@ pub fn normalise_entry(raw: &str, host: &str) -> Result<String, GitEntryError> {
     normalise_path(path_on_host(raw, host)?)
 }
 
-/// Entries the proxy enforces for the stored `entries` on `host` (normalised, sorted, without
-/// duplicates), and the indices of stored entries that no longer validate.
+/// Entries the proxy enforces, and the indices of stored entries that do not validate.
 pub fn enforced_entries(entries: &[String], host: &str) -> (Vec<String>, Vec<usize>) {
     let mut enforced = BTreeSet::new();
     let mut rejected = Vec::new();
@@ -145,8 +141,7 @@ pub fn enforced_entries(entries: &[String], host: &str) -> (Vec<String>, Vec<usi
     (enforced.into_iter().collect(), rejected)
 }
 
-/// Repositories the project's git remotes name on the forge at `host` (project directory and
-/// two levels down), sorted by entry, without the entries already in `listed`.
+/// Repositories the project's git remotes name on the forge at `host`.
 pub fn suggestions_in(
     project_dir: &Path,
     host: &str,

@@ -12,7 +12,7 @@ import { ProjectStateService } from '../../services/project-state.service';
 import { LoggerService } from '../../services/logger.service';
 import { GitForgeService, GitRepositoriesView } from '../../models/integration';
 
-/** Repository allowlist editor of one git integration (GitHub or GitLab) in one project. */
+/** Repository allowlist editor of one git integration. */
 @Component({
   selector: 'app-git-repositories',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -158,18 +158,10 @@ export class GitRepositoriesComponent {
     });
   }
 
-  /**
-   * Stores the typed text of the entry field.
-   * @param event - the input event of the field
-   */
   protected onDraft(event: Event): void {
     this.draft.set((event.target as HTMLInputElement).value);
   }
 
-  /**
-   * Adds an entry to the allowlist and applies the change to the running proxy.
-   * @param raw - the entry as typed or suggested
-   */
   protected async add(raw: string): Promise<void> {
     const entry = raw.trim();
     if (!entry || this.busy() || this.view().host === null) return;
@@ -177,10 +169,6 @@ export class GitRepositoriesComponent {
     await this.write('add_git_repository', entry, fromField);
   }
 
-  /**
-   * Removes an entry from the allowlist and applies the change to the running proxy.
-   * @param entry - the entry to remove
-   */
   protected async remove(entry: string): Promise<void> {
     if (this.busy()) return;
     await this.write('remove_git_repository', entry, false);
@@ -248,10 +236,6 @@ export class GitRepositoriesComponent {
   }
 }
 
-/**
- * Readable text of a rejected command.
- * @param e - the caught value
- */
 function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }

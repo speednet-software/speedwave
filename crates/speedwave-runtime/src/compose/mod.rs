@@ -1154,8 +1154,6 @@ fn add_service_volume(
     Ok(())
 }
 
-/// Wires the git transport: mounts each served forge's token namespace into proxy
-/// (`:ro`) and tells claude the hosts, proxy URL and caller secret. No-op without forges.
 fn apply_git_transport_in(
     data_dir: &Path,
     yaml: &str,

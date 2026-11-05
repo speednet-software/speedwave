@@ -33,10 +33,16 @@ struct RenderConfig<'a> {
     git_forges: &'a [GitForge],
 }
 
+/// Port the proxy container listens on (fixed in the forwarder binary).
+pub const PROXY_PORT: u16 = 4000;
+
+/// In-network proxy URL every session points `ANTHROPIC_BASE_URL` at; routing
+/// is by the request body's model prefix, not the URL path.
+pub const PROXY_BASE_URL: &str = "http://proxy:4000";
+
 const GIT_TOKENS_MOUNT_ROOT: &str = "/git-tokens";
 
 impl GitForgeService {
-    /// Read-only mount target of the token namespace inside the proxy container.
     pub(super) fn token_mount_target(self) -> String {
         format!("{GIT_TOKENS_MOUNT_ROOT}/{}", self.config_key())
     }
@@ -53,7 +59,6 @@ impl GitForgeService {
     }
 }
 
-/// One `git_forges` entry of `proxy.json`; an empty `repositories` list admits nothing.
 #[derive(Serialize)]
 pub(super) struct GitForge {
     #[serde(skip)]
@@ -78,8 +83,6 @@ impl GitForge {
     }
 }
 
-/// Git forges the proxy serves for this project, sorted by host: each enabled integration
-/// whose host resolves, with the repositories its allowlist still validates for that host.
 pub(super) fn git_forges_in(
     data_dir: &Path,
     project: &str,
@@ -106,13 +109,6 @@ pub(super) fn git_forges_in(
     forges.sort_by(|a, b| a.host.cmp(&b.host));
     forges
 }
-
-/// Port the proxy container listens on (fixed in the forwarder binary).
-pub const PROXY_PORT: u16 = 4000;
-
-/// In-network proxy URL every session points `ANTHROPIC_BASE_URL` at; routing
-/// is by the request body's model prefix, not the URL path.
-pub const PROXY_BASE_URL: &str = "http://proxy:4000";
 
 /// `SPW_KEY_<ID>` env name (hyphens → underscores, uppercased — like
 /// `plugin::derive_worker_env`). SSOT inverse: `containers/proxy/src/keys.rs::provider_id_from_env_name`.
@@ -254,7 +250,6 @@ pub(crate) fn render_proxy_config_full(
 
 /// Renders + atomically persists the config (0600 + fsync) under `<data_dir>/proxy/<project>/`.
 /// `ner` is rendered only when `pii_ner_enabled` and the detector's lock names a live process.
-/// `git_forges` (from [`git_forges_in`]) is rendered when non-empty.
 pub(crate) fn write_proxy_config_in(
     data_dir: &Path,
     project: &str,

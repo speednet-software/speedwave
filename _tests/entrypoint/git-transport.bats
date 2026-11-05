@@ -78,8 +78,8 @@ run_transport() {
     [ "$status" -eq 0 ]
     run env HOME="$TMP_HOME" git ls-remote --get-url git@github.com:o/r.git
     [ "$output" = "http://proxy:4000/git/github.com/o/r.git" ]
-    run grep -c 'insteadOf = git@' "$CONF"
-    [ "$output" = "1" ]
+    run env HOME="$TMP_HOME" git config --global --includes --get-regexp '^url\..*\.insteadof$'
+    [ "${#lines[@]}" -eq 2 ]
     [ ! -e pwned.com ]
 }
 
