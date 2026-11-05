@@ -809,7 +809,6 @@ describe('LiveTranscriptComponent', () => {
     it('offers no sample while no line of the recording can be played', async () => {
       playback.playable = 0;
       await open();
-      expect(all('speaker-sample')).toEqual([]);
 
       component.openNaming({ id: 1, trigger: null }, 'legend');
       fixture.detectChanges();
@@ -910,12 +909,11 @@ describe('LiveTranscriptComponent', () => {
       expect(q('speaker-name-dialog')).not.toBeNull();
     });
 
-    it('plays the longest line of a speaker, at most 8 s, as a sample from the legend', async () => {
+    it('plays the longest line of a speaker, at most 8 s, as a sample', async () => {
       await open();
-      const sample = all('speaker-sample').find((b) =>
-        b.getAttribute('aria-label')?.endsWith('Speaker 2')
-      )!;
-      sample.click();
+      component.openNaming({ id: 2, trigger: null }, 'legend');
+      fixture.detectChanges();
+      q('speaker-name-sample')!.click();
       await fixture.whenStable();
       fixture.detectChanges();
 
@@ -927,15 +925,21 @@ describe('LiveTranscriptComponent', () => {
         source: 'system',
         speaker: 2,
       });
-      expect(sample.getAttribute('aria-label')).toBe('Pause the sample of Speaker 2');
+      expect(q('speaker-name-sample')?.textContent?.trim()).toBe('Pause sample');
       expect(q('playback-what')?.textContent).toContain('Speaker 2');
       expect(lineRows().some((r) => r.getAttribute('aria-current') === 'true')).toBe(false);
     });
 
     it('samples each label apart when two labels share a name', async () => {
       await open({}, { '1': 'Marta', '2': 'Marta' });
-      for (const b of all('speaker-sample')) b.click();
-      await fixture.whenStable();
+      for (const id of [1, 2]) {
+        component.openNaming({ id, trigger: null }, 'legend');
+        fixture.detectChanges();
+        q('speaker-name-sample')!.click();
+        await fixture.whenStable();
+        component.closeNaming();
+        fixture.detectChanges();
+      }
 
       const keys = playback.toggle.mock.calls.map(([r]) => r.key).sort();
       expect(keys).toEqual(['sample:1', 'sample:2']);
@@ -965,10 +969,9 @@ describe('LiveTranscriptComponent', () => {
     it('offers no sample of a speaker whose every line is past the readable recording', async () => {
       playback.playable = 3;
       await open();
-      const sample = all('speaker-sample').find((b) =>
-        b.getAttribute('aria-label')?.endsWith('Speaker 2')
-      )!;
-      sample.click();
+      component.openNaming({ id: 2, trigger: null }, 'legend');
+      fixture.detectChanges();
+      q('speaker-name-sample')?.click();
       await fixture.whenStable();
 
       expect(playback.toggle).not.toHaveBeenCalled();

@@ -523,12 +523,9 @@ interface ProgressTrack {
               [highlighted]="highlightedIds()"
               [canReapply]="canReapplyNames()"
               [editable]="canName()"
-              [canSample]="canSample()"
-              [sampling]="samplingSpeaker()"
               (name)="openNaming($event, 'legend')"
               (hover)="hoveredSpeaker.set($event)"
               (reapply)="reapplyNames($event)"
-              (sample)="toggleSample($event)"
             />
             @if (naming()?.at === 'legend') {
               <ng-container *ngTemplateOutlet="nameDialog" />

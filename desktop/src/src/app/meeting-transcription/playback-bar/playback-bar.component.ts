@@ -1,6 +1,7 @@
 import { ChangeDetectionStrategy, Component, computed, inject, input, output } from '@angular/core';
 
 import { IconComponent } from '../../shared/icon.component';
+import { BetaService } from '../../services/beta.service';
 import { RecordingPlaybackService } from '../../services/recording-playback.service';
 import { formatClock } from '../recording-format';
 import { SpeakerMarkComponent } from '../speaker-mark/speaker-mark.component';
@@ -28,7 +29,9 @@ export interface PlaybackSpeaker {
       <div
         role="region"
         aria-label="Recording playback"
-        class="flex items-center gap-2 border-t border-[var(--line)] bg-[var(--bg-1)] px-8 py-1.5 text-[12px]"
+        class="flex items-center gap-2 border-t border-[var(--line)] bg-[var(--bg-1)] py-1.5 pl-8 text-[12px]"
+        [class.pr-8]="!beta.enabled()"
+        [class.pr-16]="beta.enabled()"
         data-testid="playback-bar"
       >
         <button
@@ -105,6 +108,7 @@ export class PlaybackBarComponent {
   readonly failed = output<string>();
 
   protected readonly playback = inject(RecordingPlaybackService);
+  protected readonly beta = inject(BetaService);
 
   protected readonly range = computed(() => {
     const now = this.playback.current();

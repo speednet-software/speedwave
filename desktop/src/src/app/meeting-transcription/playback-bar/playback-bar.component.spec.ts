@@ -4,6 +4,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 
 import { PlaybackBarComponent, type PlaybackSpeaker } from './playback-bar.component';
 import { RecordingPlaybackService, type Playback } from '../../services/recording-playback.service';
+import { BetaService } from '../../services/beta.service';
 
 class FakePlayback {
   current = signal<Playback | null>(null);
@@ -35,15 +36,20 @@ describe('PlaybackBarComponent', () => {
   let playback: FakePlayback;
   let named: { id: number; trigger: HTMLElement | null }[];
   let failures: string[];
+  const betaEnabled = signal(false);
 
   const q = (id: string): HTMLElement | null =>
     fixture.nativeElement.querySelector(`[data-testid="${id}"]`);
 
   beforeEach(async () => {
     playback = new FakePlayback();
+    betaEnabled.set(false);
     await TestBed.configureTestingModule({
       imports: [PlaybackBarComponent],
-      providers: [{ provide: RecordingPlaybackService, useValue: playback }],
+      providers: [
+        { provide: RecordingPlaybackService, useValue: playback },
+        { provide: BetaService, useValue: { enabled: betaEnabled.asReadonly() } },
+      ],
     }).compileComponents();
     fixture = TestBed.createComponent(PlaybackBarComponent);
     named = [];
@@ -159,5 +165,18 @@ describe('PlaybackBarComponent', () => {
     fixture.componentRef.setInput('nameable', false);
     fixture.detectChanges();
     expect(q('playback-name')).toBeNull();
+  });
+
+  it('keeps stop clear of the Beta badge in the corner while beta is on', () => {
+    playback.current.set(playing());
+    render();
+    expect(q('playback-bar')?.classList).toContain('pr-8');
+    expect(q('playback-bar')?.classList).not.toContain('pr-16');
+
+    betaEnabled.set(true);
+    fixture.detectChanges();
+
+    expect(q('playback-bar')?.classList).toContain('pr-16');
+    expect(q('playback-bar')?.classList).not.toContain('pr-8');
   });
 });

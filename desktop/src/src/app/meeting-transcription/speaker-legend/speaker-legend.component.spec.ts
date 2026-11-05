@@ -150,27 +150,4 @@ describe('SpeakerLegendComponent', () => {
     expect(note.getAttribute('aria-label')).toContain('one person can get two labels');
     expect(note.getAttribute('aria-label')).toContain('transcripts you attach to a chat');
   });
-  it('offers a sample of each speaker only when the voice can be heard', () => {
-    render([speaker(1, 2, 'Marta'), speaker(2, 1)]);
-    expect(all('speaker-sample')).toEqual([]);
-
-    const sampled: number[] = [];
-    fixture.componentInstance.sample.subscribe((id) => sampled.push(id));
-    fixture.componentRef.setInput('canSample', true);
-    fixture.componentRef.setInput('sampling', 2);
-    fixture.detectChanges();
-
-    const buttons = all('speaker-sample');
-    expect(buttons.map((b) => b.getAttribute('aria-label'))).toEqual([
-      'Hear a sample of Marta',
-      'Pause the sample of Speaker 2',
-    ]);
-    expect(buttons[0].className).toContain('opacity-0');
-    expect(buttons[0].className).toContain('group-hover/chip:opacity-100');
-    expect(buttons[1].classList.contains('opacity-0')).toBe(false);
-
-    buttons[0].click();
-    expect(sampled).toEqual([1]);
-    expect(named).toEqual([]);
-  });
 });

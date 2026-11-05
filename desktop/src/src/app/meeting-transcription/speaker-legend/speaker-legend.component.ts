@@ -31,60 +31,44 @@ export interface NameRequest {
   template: `
     <div class="mt-2.5 flex flex-wrap items-center gap-1.5" data-testid="speaker-legend">
       @for (s of shown(); track s.id) {
-        <span class="group/chip inline-flex min-w-0 max-w-full items-center">
-          <button
-            type="button"
-            class="inline-flex min-w-0 max-w-[min(16rem,100%)] items-center gap-1.5 rounded-md border bg-[var(--bg-1)] py-1 pl-2 pr-2.5 text-[12px] hover:bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--accent)] disabled:cursor-default disabled:hover:bg-[var(--bg-1)]"
-            data-testid="speaker-chip"
-            [class.border-dashed]="!s.name"
-            [class.border-[var(--line-strong)]]="!s.name && !highlighted().includes(s.id)"
-            [class.border-[var(--line)]]="!!s.name && !highlighted().includes(s.id)"
-            [class.border-[var(--accent)]]="highlighted().includes(s.id)"
-            [disabled]="!editable()"
-            [attr.aria-label]="editable() ? actionLabel(s) : s.label + ', ' + lines(s.lines)"
-            (click)="name.emit({ id: s.id, trigger: $any($event.currentTarget) })"
-            (mouseenter)="hover.emit(s.id)"
-            (mouseleave)="hover.emit(null)"
-            (focus)="hover.emit(s.id)"
-            (blur)="hover.emit(null)"
+        <button
+          type="button"
+          class="inline-flex min-w-0 max-w-[min(16rem,100%)] items-center gap-1.5 rounded-md border bg-[var(--bg-1)] py-1 pl-2 pr-2.5 text-[12px] hover:bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--accent)] disabled:cursor-default disabled:hover:bg-[var(--bg-1)]"
+          data-testid="speaker-chip"
+          [class.border-dashed]="!s.name"
+          [class.border-[var(--line-strong)]]="!s.name && !highlighted().includes(s.id)"
+          [class.border-[var(--line)]]="!!s.name && !highlighted().includes(s.id)"
+          [class.border-[var(--accent)]]="highlighted().includes(s.id)"
+          [disabled]="!editable()"
+          [attr.aria-label]="editable() ? actionLabel(s) : s.label + ', ' + lines(s.lines)"
+          (click)="name.emit({ id: s.id, trigger: $any($event.currentTarget) })"
+          (mouseenter)="hover.emit(s.id)"
+          (mouseleave)="hover.emit(null)"
+          (focus)="hover.emit(s.id)"
+          (blur)="hover.emit(null)"
+        >
+          <app-speaker-mark [speaker]="s" />
+          <span
+            class="truncate"
+            [class.font-medium]="!!s.name"
+            [class.text-[var(--ink)]]="!!s.name"
+            [class.text-[var(--ink-dim)]]="!s.name"
+            >{{ s.label }}</span
           >
-            <app-speaker-mark [speaker]="s" />
+          @if (s.sharesName) {
             <span
-              class="truncate"
-              [class.font-medium]="!!s.name"
-              [class.text-[var(--ink)]]="!!s.name"
-              [class.text-[var(--ink-dim)]]="!s.name"
-              >{{ s.label }}</span
+              class="mono shrink-0 text-[10.5px] text-[var(--ink-dim)]"
+              data-testid="speaker-number"
+              >#{{ s.id }}</span
             >
-            @if (s.sharesName) {
-              <span
-                class="mono shrink-0 text-[10.5px] text-[var(--ink-dim)]"
-                data-testid="speaker-number"
-                >#{{ s.id }}</span
-              >
-            }
-            <span class="mono shrink-0 text-[10.5px] text-[var(--ink-mute)]">{{
-              lines(s.lines)
-            }}</span>
-            @if (!s.name && editable()) {
-              <app-icon name="pencil" class="h-3 w-3 shrink-0 text-[var(--ink-mute)] opacity-60" />
-            }
-          </button>
-          @if (canSample()) {
-            <button
-              type="button"
-              class="ml-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--ink-mute)] hover:bg-[var(--bg-2)] hover:text-[var(--ink)] focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--accent)] group-hover/chip:opacity-100"
-              data-testid="speaker-sample"
-              [class.opacity-0]="sampling() !== s.id"
-              [attr.aria-label]="
-                (sampling() === s.id ? 'Pause the sample of ' : 'Hear a sample of ') + s.label
-              "
-              (click)="sample.emit(s.id)"
-            >
-              <app-icon [name]="sampling() === s.id ? 'pause' : 'play'" class="h-2.5 w-2.5" />
-            </button>
           }
-        </span>
+          <span class="mono shrink-0 text-[10.5px] text-[var(--ink-mute)]">{{
+            lines(s.lines)
+          }}</span>
+          @if (!s.name && editable()) {
+            <app-icon name="pencil" class="h-3 w-3 shrink-0 text-[var(--ink-mute)] opacity-60" />
+          }
+        </button>
       }
       @if (hidden().length > 0 && !expanded()) {
         <button
@@ -144,18 +128,12 @@ export class SpeakerLegendComponent {
   readonly editable = input(true);
   /** Whether names from before the last transcription can be given again. */
   readonly canReapply = input(false);
-  /** Whether a speaker's voice can be heard: the recording is there and the transcription is over. */
-  readonly canSample = input(false);
-  /** The speaker whose sample plays now, else null. */
-  readonly sampling = input<number | null>(null);
   /** The user asked to name a speaker. */
   readonly name = output<NameRequest>();
   /** The speaker under the pointer or focus, or null when it left. */
   readonly hover = output<number | null>();
   /** The user asked to give the earlier names again; carries the button. */
   readonly reapply = output<HTMLElement | null>();
-  /** The user asked to hear, or to pause, a sample of a speaker's voice. */
-  readonly sample = output<number>();
 
   protected readonly approximateNote = APPROXIMATE_NOTE;
   protected readonly expanded = signal(false);
