@@ -1,4 +1,4 @@
-import { openSettings, requireLocalLlm } from '../helpers/llm';
+import { leaveSettings, openSettings, requireLocalLlm } from '../helpers/llm';
 import { localLlmUnreachable } from '../helpers/preflight';
 
 const OFFLINE_BASE_URL = 'http://127.0.0.1:9';
@@ -12,7 +12,7 @@ describe('Provider Error Paths', function () {
 
   afterEach(async function () {
     this.timeout(30_000);
-    await (await $("[data-testid='nav-chat']")).click();
+    await leaveSettings();
   });
 
   it('surfaces a discovery error for a bad api key', async function () {
@@ -49,7 +49,7 @@ describe('Provider Error Paths', function () {
     );
     expect(await $("[data-testid='settings-llm-saved']").isExisting()).toBe(false);
 
-    await (await $("[data-testid='nav-chat']")).click();
+    await leaveSettings();
     await openSettings();
     expect(
       await $("[data-testid='settings-llm-provider-local']").getAttribute('aria-checked')
