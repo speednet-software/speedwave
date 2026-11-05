@@ -37,6 +37,21 @@ export async function openSettings(): Promise<void> {
   });
 }
 
+export async function leaveSettings(): Promise<void> {
+  await (await $('[data-testid="nav-chat"]')).click();
+  await browser.waitUntil(
+    async () => {
+      const discard = await $('[data-testid="unsaved-discard-btn"]');
+      if (await discard.isExisting()) await discard.click().catch(() => undefined);
+      return !(await $('[data-testid="settings-title"]').isExisting());
+    },
+    {
+      timeout: 15_000,
+      timeoutMsg: 'settings-title still shown after nav-chat and discarding unsaved changes',
+    }
+  );
+}
+
 export async function storedProviderModel(providerId: string): Promise<string | null> {
   const config = await invokeOr<{ providers?: { id: string; model?: string | null }[] } | null>(
     null,
