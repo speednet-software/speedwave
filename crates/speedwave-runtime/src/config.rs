@@ -1,6 +1,7 @@
 //! Config schema and the layered merge (defaults → repo → user). See ADR-011.
 
 use crate::defaults;
+use crate::git_allowlist::GitForgeService;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -462,6 +463,16 @@ pub struct IntegrationConfig {
     pub enabled: Option<bool>,
 }
 
+/// Enable toggle and repository allowlist of a git forge integration (GitHub, GitLab).
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
+pub struct GitForgeIntegrationConfig {
+    /// Whether the integration is enabled (`None` = inherit default).
+    pub enabled: Option<bool>,
+    /// Repositories the git transport may reach (`owner/repo`, `owner/*`), approved in Desktop.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repositories: Vec<String>,
+}
+
 /// Toggles for the macOS native integrations (Reminders, Calendar, Mail, Notes).
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct OsIntegrationsConfig {
@@ -511,10 +522,10 @@ pub struct IntegrationsConfig {
     pub sharepoint: Option<IntegrationConfig>,
     /// Redmine integration toggle.
     pub redmine: Option<IntegrationConfig>,
-    /// GitLab integration toggle.
-    pub gitlab: Option<IntegrationConfig>,
-    /// GitHub integration toggle.
-    pub github: Option<IntegrationConfig>,
+    /// GitLab integration toggle and repository allowlist.
+    pub gitlab: Option<GitForgeIntegrationConfig>,
+    /// GitHub integration toggle and repository allowlist.
+    pub github: Option<GitForgeIntegrationConfig>,
     /// Atlassian integration toggle.
     pub atlassian: Option<IntegrationConfig>,
     /// Office documents integration toggle.
@@ -531,15 +542,15 @@ pub struct IntegrationsConfig {
 }
 
 impl IntegrationsConfig {
-    /// Sets the enabled state for a MCP service by config key.
-    /// Returns `false` if the key is unknown.
+    /// Sets the enabled state for a MCP service by config key; a git forge keeps its
+    /// repository list. Returns `false` if the key is unknown.
     pub fn set_service(&mut self, key: &str, cfg: IntegrationConfig) -> bool {
         match key {
             "slack" => self.slack = Some(cfg),
             "sharepoint" => self.sharepoint = Some(cfg),
             "redmine" => self.redmine = Some(cfg),
-            "gitlab" => self.gitlab = Some(cfg),
-            "github" => self.github = Some(cfg),
+            "gitlab" => self.gitlab.get_or_insert_with(Default::default).enabled = cfg.enabled,
+            "github" => self.github.get_or_insert_with(Default::default).enabled = cfg.enabled,
             "atlassian" => self.atlassian = Some(cfg),
             "office" => self.office = Some(cfg),
             "playwright" => self.playwright = Some(cfg),
@@ -547,6 +558,29 @@ impl IntegrationsConfig {
             _ => return false,
         }
         true
+    }
+
+    /// Stored settings of a git forge integration, if the config has any.
+    pub fn git_forge(&self, service: GitForgeService) -> Option<&GitForgeIntegrationConfig> {
+        match service {
+            GitForgeService::Github => self.github.as_ref(),
+            GitForgeService::Gitlab => self.gitlab.as_ref(),
+        }
+    }
+
+    /// Stored repository allowlist of a git forge integration, empty when it has none.
+    pub fn repositories_of(&self, service: GitForgeService) -> &[String] {
+        self.git_forge(service)
+            .map(|forge| forge.repositories.as_slice())
+            .unwrap_or_default()
+    }
+
+    /// Settings of a git forge integration, created empty when the config has none.
+    pub fn git_forge_mut(&mut self, service: GitForgeService) -> &mut GitForgeIntegrationConfig {
+        match service {
+            GitForgeService::Github => self.github.get_or_insert_with(Default::default),
+            GitForgeService::Gitlab => self.gitlab.get_or_insert_with(Default::default),
+        }
     }
 
     /// Set plugin enabled state. Does NOT validate against installed manifests
@@ -1524,6 +1558,25 @@ impl SpeedwaveUserConfig {
     }
 }
 
+/// Repository allowlists of the git forge integrations, as stored in the user config.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GitRepositoryLists {
+    /// GitHub entries (`owner/repo`, `owner/*`).
+    pub github: Vec<String>,
+    /// GitLab entries (`group/sub/repo`, `group/*`).
+    pub gitlab: Vec<String>,
+}
+
+impl GitRepositoryLists {
+    /// Entries of one forge integration.
+    pub(crate) fn of(&self, service: GitForgeService) -> &[String] {
+        match service {
+            GitForgeService::Github => &self.github,
+            GitForgeService::Gitlab => &self.gitlab,
+        }
+    }
+}
+
 /// Fully resolved Claude container config after the layered merge.
 #[derive(Debug, Clone)]
 pub struct ResolvedClaudeConfig {
@@ -1543,6 +1596,9 @@ pub struct ResolvedClaudeConfig {
     pub pii_policy: Result<crate::pii_policy::ResolvedPiiPolicy, String>,
     /// Whether this project's proxy gets the host PII NER detector (ADR-096).
     pub pii_ner_enabled: bool,
+    /// Git transport allowlists, read from the user config only (a repo `.speedwave.json` cannot
+    /// widen what its own agent may push to).
+    pub git_repositories: GitRepositoryLists,
 }
 
 impl Default for ResolvedClaudeConfig {
@@ -1554,6 +1610,7 @@ impl Default for ResolvedClaudeConfig {
             telemetry: ResolvedTelemetry::default(),
             pii_policy: Ok(crate::pii_policy::ResolvedPiiPolicy::default()),
             pii_ner_enabled: false,
+            git_repositories: GitRepositoryLists::default(),
         }
     }
 }
@@ -1748,6 +1805,15 @@ pub(crate) fn resolve_project_config_in_with_managed(
         project_policy,
     );
 
+    let git_repositories = user_config
+        .find_project(project_name)
+        .and_then(|p| p.integrations.as_ref())
+        .map(|i| GitRepositoryLists {
+            github: i.repositories_of(GitForgeService::Github).to_vec(),
+            gitlab: i.repositories_of(GitForgeService::Gitlab).to_vec(),
+        })
+        .unwrap_or_default();
+
     let claude = ResolvedClaudeConfig {
         env,
         flags,
@@ -1755,6 +1821,7 @@ pub(crate) fn resolve_project_config_in_with_managed(
         telemetry,
         pii_policy,
         pii_ner_enabled,
+        git_repositories,
     };
     (claude, integrations)
 }
@@ -1823,10 +1890,12 @@ pub fn resolve_integrations(
 }
 
 fn apply_toggle(target: &mut bool, source: &Option<IntegrationConfig>) {
-    if let Some(cfg) = source {
-        if let Some(enabled) = cfg.enabled {
-            *target = enabled;
-        }
+    apply_enabled(target, source.as_ref().and_then(|cfg| cfg.enabled));
+}
+
+fn apply_enabled(target: &mut bool, enabled: Option<bool>) {
+    if let Some(enabled) = enabled {
+        *target = enabled;
     }
 }
 
@@ -1834,8 +1903,14 @@ fn apply_integrations_layer(result: &mut ResolvedIntegrationsConfig, layer: &Int
     apply_toggle(&mut result.slack, &layer.slack);
     apply_toggle(&mut result.sharepoint, &layer.sharepoint);
     apply_toggle(&mut result.redmine, &layer.redmine);
-    apply_toggle(&mut result.gitlab, &layer.gitlab);
-    apply_toggle(&mut result.github, &layer.github);
+    apply_enabled(
+        &mut result.gitlab,
+        layer.gitlab.as_ref().and_then(|cfg| cfg.enabled),
+    );
+    apply_enabled(
+        &mut result.github,
+        layer.github.as_ref().and_then(|cfg| cfg.enabled),
+    );
     apply_toggle(&mut result.atlassian, &layer.atlassian);
     apply_toggle(&mut result.office, &layer.office);
     apply_toggle(&mut result.playwright, &layer.playwright);
@@ -2799,6 +2874,145 @@ mod tests {
             .any(|f| f == defaults::MCP_CONFIG_PATH));
         assert!(resolved.flags.iter().any(|f| f == "--strict-mcp-config"));
         assert!(resolved.flags.iter().any(|f| f == "--ide"));
+    }
+
+    fn user_config_with_integrations(
+        dir: &Path,
+        integrations: IntegrationsConfig,
+    ) -> SpeedwaveUserConfig {
+        SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "test-project".to_string(),
+                dir: dir.to_string_lossy().to_string(),
+                claude: None,
+                integrations: Some(integrations),
+                plugin_settings: None,
+                policy: None,
+                effort_pin: None,
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn git_repositories_come_from_the_user_config_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join(".speedwave.json"),
+            r#"{"integrations": {"github": {"enabled": true, "repositories": ["attacker/repo"]}}, "claude": {}}"#,
+        )
+        .unwrap();
+        let without_user_entry = SpeedwaveUserConfig::default();
+        let (claude, integrations) =
+            resolve_project_config_for_test(tmp.path(), &without_user_entry, "test-project");
+        assert_eq!(claude.git_repositories, GitRepositoryLists::default());
+        assert!(integrations.github, "the repo layer still toggles github");
+
+        let user_config = user_config_with_integrations(
+            tmp.path(),
+            IntegrationsConfig {
+                github: Some(GitForgeIntegrationConfig {
+                    enabled: Some(true),
+                    repositories: vec!["listed/repo".to_string(), "team/*".to_string()],
+                }),
+                gitlab: Some(GitForgeIntegrationConfig {
+                    enabled: None,
+                    repositories: vec!["group/sub/repo".to_string()],
+                }),
+                ..Default::default()
+            },
+        );
+        let resolved = resolve_claude_config_for_test(tmp.path(), &user_config, "test-project");
+        assert_eq!(resolved.git_repositories.github, ["listed/repo", "team/*"]);
+        assert_eq!(resolved.git_repositories.gitlab, ["group/sub/repo"]);
+        assert_eq!(
+            resolved.git_repositories.of(GitForgeService::Gitlab),
+            ["group/sub/repo"]
+        );
+    }
+
+    #[test]
+    fn git_repositories_are_empty_without_a_stored_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_config = user_config_with_integrations(
+            tmp.path(),
+            IntegrationsConfig {
+                github: Some(GitForgeIntegrationConfig {
+                    enabled: Some(true),
+                    repositories: Vec::new(),
+                }),
+                ..Default::default()
+            },
+        );
+        let resolved = resolve_claude_config_for_test(tmp.path(), &user_config, "test-project");
+        assert_eq!(resolved.git_repositories, GitRepositoryLists::default());
+    }
+
+    #[test]
+    fn set_service_toggles_a_git_forge_and_keeps_its_repositories() {
+        let mut integrations = IntegrationsConfig::default();
+        integrations
+            .git_forge_mut(GitForgeService::Github)
+            .repositories = vec!["owner/repo".to_string()];
+        for enabled in [false, true, false] {
+            assert!(integrations.set_service(
+                "github",
+                IntegrationConfig {
+                    enabled: Some(enabled)
+                }
+            ));
+            let stored = integrations.git_forge(GitForgeService::Github).unwrap();
+            assert_eq!(stored.enabled, Some(enabled));
+            assert_eq!(stored.repositories, ["owner/repo"]);
+        }
+        assert!(integrations.git_forge(GitForgeService::Gitlab).is_none());
+        assert!(integrations.set_service(
+            "gitlab",
+            IntegrationConfig {
+                enabled: Some(true)
+            }
+        ));
+        let gitlab = integrations.git_forge(GitForgeService::Gitlab).unwrap();
+        assert_eq!(gitlab.enabled, Some(true));
+        assert!(gitlab.repositories.is_empty());
+    }
+
+    #[test]
+    fn git_forge_config_serialises_repositories_only_when_present() {
+        let with_list = IntegrationsConfig {
+            github: Some(GitForgeIntegrationConfig {
+                enabled: Some(true),
+                repositories: vec!["owner/repo".to_string(), "owner/*".to_string()],
+            }),
+            gitlab: Some(GitForgeIntegrationConfig {
+                enabled: Some(false),
+                repositories: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&with_list).unwrap();
+        assert_eq!(
+            json["github"],
+            serde_json::json!({"enabled": true, "repositories": ["owner/repo", "owner/*"]})
+        );
+        assert_eq!(json["gitlab"], serde_json::json!({"enabled": false}));
+        let back: IntegrationsConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(back.github, with_list.github);
+        assert_eq!(back.gitlab, with_list.gitlab);
+    }
+
+    #[test]
+    fn git_forge_config_reads_the_toggle_only_shape_of_older_configs() {
+        let parsed: IntegrationsConfig =
+            serde_json::from_str(r#"{"github": {"enabled": true}, "gitlab": {}}"#).unwrap();
+        assert_eq!(
+            parsed.github,
+            Some(GitForgeIntegrationConfig {
+                enabled: Some(true),
+                repositories: Vec::new()
+            })
+        );
+        assert_eq!(parsed.gitlab, Some(GitForgeIntegrationConfig::default()));
     }
 
     #[test]

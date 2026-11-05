@@ -38,6 +38,24 @@
 - **ssh key or personal access token in the `claude` container.** Puts a credential where prompt injection runs; rejected at the 2026-10-27 SDLC meeting for the personal ssh key.
 - **Ref policy in the proxy.** Duplicates what the forge's branch protection already enforces and would require parsing the pushed pack.
 
+## Amendment (2026-11-04): per-project repository allowlist (SPEED-956)
+
+The third consequence above accepted that the git transport reaches every repository the token reaches. The security review of SPEED-532 on 2026-11-04 rejected that: a prompt injection in one project could push to another client's repository, fetch any private repository of the user and carry it out, or push the content of `/workspace` to a public repository. The proxy knew the hosts of a project, not its repositories.
+
+1. **The proxy forwards only listed repositories.** Every `git_forges` entry of `proxy.json` carries `repositories` (`containers/proxy/src/router.rs::GitForge::allows`). A request passes when its repository path equals an entry, or when an entry ends in `/*` and the path continues below that prefix, segment by segment (`group/*` admits `group/repo` and `group/team/repo`, not `group-other/repo`); letter case and a `.git` suffix are ignored. Any other request on an enabled forge gets 403 without a request upstream, the audit row of decision 6 and a `text/plain` body that names the repository, which git prints as `remote:` lines when ref discovery fails[^7]. An empty or missing list refuses every request. This holds for `git-upload-pack` and `git-receive-pack` alike.
+2. **The list is per project and per integration, approved by a person.** It lives in the user config, `projects[].integrations.github.repositories` and `projects[].integrations.gitlab.repositories` (`crates/speedwave-runtime/src/config.rs::GitForgeIntegrationConfig`); a repository's `.speedwave.json` has no effect on it, and the `claude` container has no mount of the user config. A person edits it in Desktop, in the GitHub and GitLab panels of the Integrations view (`desktop/src-tauri/src/git_repositories_cmd.rs`). An entry is `owner/repo`, a GitLab path with subgroups, `owner/*`, or a clone URL of the integration's host; `crates/speedwave-runtime/src/git_allowlist.rs::normalise_entry` refuses a bare `*`, a whole host, a `*` anywhere but as the last segment and a URL of another host. The renderer validates every stored entry again and drops one that no longer validates.
+3. **The project directory only suggests entries.** Desktop lists the `url` and `pushurl` remotes of the git repositories in the project directory that point at the integration's host, each with its directory and its own Add button; nothing enters the list without that click. The agent can write `/workspace`, so a remote that an injected prompt adds to `.git/config` would otherwise join the list at the next render.
+4. **A save applies at once.** It re-renders `proxy.json` and recreates only the proxy container (`containers_cmd.rs::restart_llm_proxy`); the chat session keeps running.
+5. **`insteadOf` stays per host** (`containers/git-transport.sh`). With the integration enabled, every request to that host goes through the proxy, so a public repository on it needs an entry too.
+
+Consequences:
+
+- The token still reaches every repository the user can access; the git transport reaches only the listed ones. The GitHub and GitLab MCP tools are not limited by the list yet (SPEED-961).
+- `owner/*` also admits a repository created under that owner later, by anyone with access to it.
+- An organisation-forced list that narrows the user's list belongs to the managed policy (SPEED-955).
+
+Alternatives rejected: the remotes found in the project directory as the source of the list (decision 3); one list per account instead of per project (it leaves lateral movement between projects open); separate lists for fetch and push (a read-only mode is SPEED-67); an absent list meaning "everything" during a migration (no release carries the git transport without the list, so there is nothing to migrate).
+
 ## References
 
 [^1]: Git, "HTTP transfer protocols", smart clients: `GET $GIT_URL/info/refs?service=git-upload-pack`, "The request MUST contain exactly one query parameter, `service=$servicename`", and `POST $GIT_URL/git-upload-pack` / `POST $GIT_URL/git-receive-pack`: https://git-scm.com/docs/http-protocol
@@ -51,3 +69,5 @@
 [^5]: GitHub Docs, "Scopes for OAuth apps", `workflow`: "Grants the ability to add and update GitHub Actions workflow files.": https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps
 
 [^6]: GitHub Docs, "Scopes for OAuth apps", `repo`: "Grants full access to public and private repositories including read and write access to code": https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps
+
+[^7]: Git, `remote-curl.c`, `show_http_message`: on a failed ref discovery (`discover_refs`) git prints a `text/plain` response body to stderr, each line prefixed with `remote:`: https://github.com/git/git/blob/master/remote-curl.c

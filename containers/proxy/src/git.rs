@@ -1,5 +1,6 @@
-//! Git smart-HTTP transport: `ANY /git/{host}/{*path}` streams fetch and push traffic to a
-//! configured forge, injecting the integration token the `claude` container never sees.
+//! Git smart-HTTP transport: `ANY /git/{host}/{*path}` streams fetch and push traffic to an
+//! allowlisted repository of a configured forge, injecting the integration token the `claude`
+//! container never sees.
 
 use std::sync::Arc;
 
@@ -51,9 +52,10 @@ pub async fn handler(State(cfg): State<Arc<Config>>, request: Request) -> Respon
         status_response(StatusCode::UNAUTHORIZED)
     } else {
         match (cfg.git_forges.iter().find(|f| f.host == host), &classified) {
-            (Some(forge), Some(git)) => {
+            (Some(forge), Some(git)) if forge.allows(&git.repo) => {
                 forward(&cfg.client, forge, git, &parts.method, &parts.headers, body).await
             }
+            (Some(_), Some(git)) => not_listed_response(host, &git.repo),
             _ => status_response(StatusCode::FORBIDDEN),
         }
     };
@@ -123,6 +125,20 @@ fn caller_authorized(cfg: &Config, headers: &HeaderMap) -> bool {
 fn status_response(status: StatusCode) -> Response {
     let mut resp = Response::new(Body::empty());
     *resp.status_mut() = status;
+    resp
+}
+
+fn not_listed_response(host: &str, repo: &str) -> Response {
+    let entry = crate::router::normalise(repo);
+    let mut resp = Response::new(Body::from(format!(
+        "Speedwave: {host}/{repo} is not on this project's repository list. \
+         A person adds the entry {entry} in Speedwave Desktop: Integrations, the GitHub or GitLab panel, Repositories.\n"
+    )));
+    *resp.status_mut() = StatusCode::FORBIDDEN;
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
     resp
 }
 
@@ -276,6 +292,14 @@ mod tests {
     }
 
     async fn fixture(caller_token: Option<&str>, token: Option<&str>) -> Fixture {
+        fixture_allowing(caller_token, token, &["owner/repo"]).await
+    }
+
+    async fn fixture_allowing(
+        caller_token: Option<&str>,
+        token: Option<&str>,
+        repositories: &[&str],
+    ) -> Fixture {
         let (base_url, log) = spawn_upstream().await;
         let tokens = tempfile::tempdir().unwrap();
         let token_file = tokens.path().join("token");
@@ -290,6 +314,7 @@ mod tests {
                 base_url,
                 login: "x-access-token".to_string(),
                 token_file,
+                repositories: repositories.iter().map(|r| r.to_string()).collect(),
             }],
             audit_dir: Some(audit.path().to_path_buf()),
             ..Config::default()
@@ -438,6 +463,137 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repository_outside_the_allowlist_gets_403_without_upstream_and_is_audited() {
+        let f = fixture(Some(CALLER), Some(TOKEN)).await;
+        let cases = [
+            (
+                "GET",
+                "/git/github.com/other/repo/info/refs?service=git-upload-pack",
+            ),
+            (
+                "GET",
+                "/git/github.com/owner/repo-fork.git/info/refs?service=git-receive-pack",
+            ),
+            ("POST", "/git/github.com/other/repo/git-upload-pack"),
+            ("POST", "/git/github.com/owner/other/git-receive-pack"),
+            ("POST", "/git/github.com/group/owner/repo/git-receive-pack"),
+        ];
+        for (method, uri) in cases {
+            let resp = f
+                .app
+                .clone()
+                .oneshot(req(method, uri, Some(CALLER), Body::empty()))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 403, "{method} {uri}");
+        }
+        assert!(f.log.lock().await.is_empty());
+        let rows = audit_rows(&f);
+        assert_eq!(rows.len(), cases.len());
+        assert!(rows.iter().all(|r| r["status"] == 403));
+        assert_eq!(rows[0]["repo"], "other/repo");
+        assert_eq!(rows[0]["service"], "git-upload-pack");
+    }
+
+    #[tokio::test]
+    async fn repository_outside_the_allowlist_is_named_in_a_plain_text_body_git_shows() {
+        let f = fixture(Some(CALLER), Some(TOKEN)).await;
+        let resp = f
+            .app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/git/github.com/other/repo.git/info/refs?service=git-receive-pack",
+                Some(CALLER),
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 403);
+        assert_eq!(
+            resp.headers()[header::CONTENT_TYPE],
+            "text/plain; charset=utf-8"
+        );
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            text.starts_with(
+                "Speedwave: github.com/other/repo.git is not on this project's repository list. \
+                 A person adds the entry other/repo in Speedwave Desktop"
+            ),
+            "{text}"
+        );
+
+        let unknown_host = f
+            .app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/git/example.com/other/repo/info/refs?service=git-upload-pack",
+                Some(CALLER),
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(unknown_host.status(), 403);
+        let body = unknown_host.into_body().collect().await.unwrap().to_bytes();
+        assert!(body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn allowlist_ignores_letter_case_and_the_git_suffix() {
+        let f = fixture_allowing(
+            Some(CALLER),
+            Some(TOKEN),
+            &["Owner/Repo.git", "group/sub/repo"],
+        )
+        .await;
+        for uri in [
+            "/git/github.com/OWNER/repo/info/refs?service=git-upload-pack",
+            "/git/github.com/owner/REPO.git/info/refs?service=git-receive-pack",
+            "/git/github.com/Group/Sub/Repo.git/info/refs?service=git-upload-pack",
+        ] {
+            let resp = f
+                .app
+                .clone()
+                .oneshot(req("GET", uri, Some(CALLER), Body::empty()))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200, "{uri}");
+        }
+        let seen = f.log.lock().await.clone();
+        assert_eq!(seen.len(), 3);
+        assert_eq!(
+            seen[0].path_and_query,
+            "/OWNER/repo/info/refs?service=git-upload-pack"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_allowlist_rejects_every_repository() {
+        let f = fixture_allowing(Some(CALLER), Some(TOKEN), &[]).await;
+        for (method, uri) in [
+            (
+                "GET",
+                "/git/github.com/owner/repo/info/refs?service=git-upload-pack",
+            ),
+            ("POST", "/git/github.com/owner/repo/git-receive-pack"),
+        ] {
+            let resp = f
+                .app
+                .clone()
+                .oneshot(req(method, uri, Some(CALLER), Body::empty()))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 403, "{method} {uri}");
+        }
+        assert!(f.log.lock().await.is_empty());
+        let rows = audit_rows(&f);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r["status"] == 403));
+    }
+
+    #[tokio::test]
     async fn wrong_or_missing_caller_header_gets_401() {
         let f = fixture(Some(CALLER), Some(TOKEN)).await;
         for caller in [None, Some("wrong")] {
@@ -501,15 +657,22 @@ mod tests {
         let path = dir.path().join("proxy.json");
         std::fs::write(
             &path,
-            r#"{"routes":[],"git_forges":[{"host":"github.com","base_url":"https://github.com","login":"x-access-token","token_file":"/git-tokens/github/token"}]}"#,
+            r#"{"routes":[],"git_forges":[{"host":"github.com","base_url":"https://github.com","login":"x-access-token","token_file":"/git-tokens/github/token","repositories":["speednet-software/speedwave"]},{"host":"gitlab.com","base_url":"https://gitlab.com","login":"oauth2","token_file":"/git-tokens/gitlab/token"}]}"#,
         )
         .unwrap();
         let cfg = Config::load_from(&path).unwrap();
-        assert_eq!(cfg.git_forges.len(), 1);
+        assert_eq!(cfg.git_forges.len(), 2);
         assert_eq!(cfg.git_forges[0].host, "github.com");
         assert_eq!(
             cfg.git_forges[0].token_file,
             std::path::PathBuf::from("/git-tokens/github/token")
         );
+        assert_eq!(
+            cfg.git_forges[0].repositories,
+            ["speednet-software/speedwave"]
+        );
+        assert!(cfg.git_forges[0].allows("Speednet-Software/Speedwave.git"));
+        assert!(cfg.git_forges[1].repositories.is_empty());
+        assert!(!cfg.git_forges[1].allows("owner/repo"));
     }
 }

@@ -1,4 +1,5 @@
-use crate::config::{LlmConfig, LlmProviderKind, ResolvedIntegrationsConfig};
+use crate::config::{GitRepositoryLists, LlmConfig, LlmProviderKind, ResolvedIntegrationsConfig};
+use crate::git_allowlist::{enforced_entries, forge_host_in, GitForgeService};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -34,27 +35,10 @@ struct RenderConfig<'a> {
 
 const GIT_TOKENS_MOUNT_ROOT: &str = "/git-tokens";
 
-/// Integration whose token the proxy holds for the git transport.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum GitForgeKind {
-    Github,
-    Gitlab,
-}
-
-impl GitForgeKind {
-    pub(super) const ALL: [GitForgeKind; 2] = [GitForgeKind::Github, GitForgeKind::Gitlab];
-
-    /// Token namespace under `<data_dir>/tokens/<project>/`, also the mount's last segment.
-    pub(super) fn tokens_subdir(self) -> &'static str {
-        match self {
-            Self::Github => "github",
-            Self::Gitlab => "gitlab",
-        }
-    }
-
+impl GitForgeService {
     /// Read-only mount target of the token namespace inside the proxy container.
     pub(super) fn token_mount_target(self) -> String {
-        format!("{GIT_TOKENS_MOUNT_ROOT}/{}", self.tokens_subdir())
+        format!("{GIT_TOKENS_MOUNT_ROOT}/{}", self.config_key())
     }
 
     fn login(self) -> &'static str {
@@ -69,86 +53,58 @@ impl GitForgeKind {
     }
 }
 
-/// One `git_forges` entry of `proxy.json`.
+/// One `git_forges` entry of `proxy.json`; an empty `repositories` list admits nothing.
 #[derive(Serialize)]
 pub(super) struct GitForge {
     #[serde(skip)]
-    pub(super) kind: GitForgeKind,
+    pub(super) kind: GitForgeService,
     pub(super) host: String,
     base_url: String,
     login: &'static str,
     token_file: String,
+    repositories: Vec<String>,
 }
 
 impl GitForge {
-    fn new(kind: GitForgeKind, host: String) -> Self {
+    fn new(kind: GitForgeService, host: String, repositories: Vec<String>) -> Self {
         Self {
             kind,
             base_url: format!("https://{host}"),
             host,
             login: kind.login(),
             token_file: kind.token_file(),
+            repositories,
         }
     }
 }
 
-const GITHUB_GIT_HOST: &str = "github.com";
-const GITLAB_DEFAULT_HOST_URL: &str = "https://gitlab.com";
-
-/// Git forges the proxy serves for this project, sorted by host: github when its
-/// integration is enabled, gitlab when enabled and its `host_url` is https.
+/// Git forges the proxy serves for this project, sorted by host: each enabled integration
+/// whose host resolves, with the repositories its allowlist still validates for that host.
 pub(super) fn git_forges_in(
     data_dir: &Path,
     project: &str,
     integrations: &ResolvedIntegrationsConfig,
+    repositories: &GitRepositoryLists,
 ) -> Vec<GitForge> {
     let mut forges = Vec::new();
-    if integrations.github {
-        forges.push(GitForge::new(GitForgeKind::Github, GITHUB_GIT_HOST.into()));
-    }
-    if integrations.gitlab {
-        let host_url_path = super::tokens::resolve_tokens_dir_in(data_dir, project)
-            .join(GitForgeKind::Gitlab.tokens_subdir())
-            .join("host_url");
-        match std::fs::read_to_string(&host_url_path) {
-            Ok(raw) => {
-                let configured = raw.trim();
-                let host_url = if configured.is_empty() {
-                    GITLAB_DEFAULT_HOST_URL
-                } else {
-                    configured
-                };
-                match gitlab_git_host(host_url) {
-                    Some(host) => forges.push(GitForge::new(GitForgeKind::Gitlab, host)),
-                    None => log::warn!(
-                        "gitlab host_url is not an https URL with a plain host: git transport skipped"
-                    ),
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                if let Some(host) = gitlab_git_host(GITLAB_DEFAULT_HOST_URL) {
-                    forges.push(GitForge::new(GitForgeKind::Gitlab, host));
-                }
-            }
-            Err(e) => log::warn!("could not read gitlab host_url, git transport skipped: {e}"),
+    for service in GitForgeService::ALL {
+        if integrations.is_service_enabled(service.config_key()) != Some(true) {
+            continue;
         }
+        let Some(host) = forge_host_in(data_dir, project, service) else {
+            continue;
+        };
+        let (allowed, rejected) = enforced_entries(repositories.of(service), &host);
+        for index in rejected {
+            log::warn!(
+                "{} repository entry {index} is not valid for {host} and is not passed to the proxy",
+                service.config_key()
+            );
+        }
+        forges.push(GitForge::new(service, host, allowed));
     }
     forges.sort_by(|a, b| a.host.cmp(&b.host));
     forges
-}
-
-/// `https://<authority>` host of a GitLab `host_url`, or `None` when it is not an
-/// https URL with a plain host (no userinfo).
-fn gitlab_git_host(host_url: &str) -> Option<String> {
-    let url = url::Url::parse(host_url.trim()).ok()?;
-    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
-        return None;
-    }
-    let host = url.host_str()?;
-    Some(match url.port() {
-        Some(port) => format!("{host}:{port}"),
-        None => host.to_string(),
-    })
 }
 
 /// Port the proxy container listens on (fixed in the forwarder binary).
@@ -780,6 +736,18 @@ mod tests {
         integrations: &ResolvedIntegrationsConfig,
         gitlab_host_url: Option<&str>,
     ) -> (tempfile::TempDir, Vec<GitForge>) {
+        forges_with_lists(
+            integrations,
+            gitlab_host_url,
+            &GitRepositoryLists::default(),
+        )
+    }
+
+    fn forges_with_lists(
+        integrations: &ResolvedIntegrationsConfig,
+        gitlab_host_url: Option<&str>,
+        lists: &GitRepositoryLists,
+    ) -> (tempfile::TempDir, Vec<GitForge>) {
         let dir = tempfile::tempdir().unwrap();
         if let Some(host_url) = gitlab_host_url {
             let gitlab =
@@ -787,7 +755,7 @@ mod tests {
             std::fs::create_dir_all(&gitlab).unwrap();
             std::fs::write(gitlab.join("host_url"), host_url).unwrap();
         }
-        let forges = git_forges_in(dir.path(), "proj", integrations);
+        let forges = git_forges_in(dir.path(), "proj", integrations, lists);
         (dir, forges)
     }
 
@@ -821,9 +789,118 @@ mod tests {
         assert_eq!(
             rendered_git_forges(&forges),
             serde_json::json!([
-                {"host": "github.com", "base_url": "https://github.com", "login": "x-access-token", "token_file": "/git-tokens/github/token"},
-                {"host": "gitlab.com", "base_url": "https://gitlab.com", "login": "oauth2", "token_file": "/git-tokens/gitlab/token"}
+                {"host": "github.com", "base_url": "https://github.com", "login": "x-access-token", "token_file": "/git-tokens/github/token", "repositories": []},
+                {"host": "gitlab.com", "base_url": "https://gitlab.com", "login": "oauth2", "token_file": "/git-tokens/gitlab/token", "repositories": []}
             ])
+        );
+    }
+
+    fn lists(github: &[&str], gitlab: &[&str]) -> GitRepositoryLists {
+        GitRepositoryLists {
+            github: github.iter().map(|s| s.to_string()).collect(),
+            gitlab: gitlab.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn repositories_of<'a>(forges: &'a [GitForge], host: &str) -> &'a [String] {
+        &forges.iter().find(|f| f.host == host).unwrap().repositories
+    }
+
+    #[test]
+    fn git_forges_carry_their_own_repository_list() {
+        let (_dir, forges) = forges_with_lists(
+            &both_forges_enabled(),
+            None,
+            &lists(
+                &["Speednet-Software/Speedwave", "other/*"],
+                &["group/sub/repo"],
+            ),
+        );
+        assert_eq!(
+            repositories_of(&forges, "github.com"),
+            ["other/*", "speednet-software/speedwave"]
+        );
+        assert_eq!(repositories_of(&forges, "gitlab.com"), ["group/sub/repo"]);
+        let json = rendered_git_forges(&forges);
+        assert_eq!(
+            json[0]["repositories"],
+            serde_json::json!(["other/*", "speednet-software/speedwave"])
+        );
+        assert_eq!(
+            json[1]["repositories"],
+            serde_json::json!(["group/sub/repo"])
+        );
+    }
+
+    #[test]
+    fn git_forges_sort_and_deduplicate_the_normalised_entries() {
+        let (_dir, forges) = forges_with_lists(
+            &ResolvedIntegrationsConfig {
+                github: true,
+                ..Default::default()
+            },
+            None,
+            &lists(
+                &[
+                    "b/repo",
+                    "https://github.com/B/Repo.git",
+                    "github.com/a/repo",
+                    "a/repo",
+                ],
+                &[],
+            ),
+        );
+        assert_eq!(repositories_of(&forges, "github.com"), ["a/repo", "b/repo"]);
+    }
+
+    #[test]
+    fn git_forges_drop_entries_that_no_longer_validate_for_the_host() {
+        let (_dir, forges) = forges_with_lists(
+            &both_forges_enabled(),
+            Some("https://gitlab.example.com"),
+            &lists(
+                &["ok/repo", "*", "a/*/b", "gitlab.example.com/moved/repo", ""],
+                &[
+                    "team/app",
+                    "https://gitlab.com/old/host",
+                    "github.com:not/here.git",
+                ],
+            ),
+        );
+        assert_eq!(repositories_of(&forges, "github.com"), ["ok/repo"]);
+        assert_eq!(repositories_of(&forges, "gitlab.example.com"), ["team/app"]);
+    }
+
+    #[test]
+    fn git_forges_of_a_disabled_integration_ignore_its_list() {
+        let (_dir, forges) = forges_with_lists(
+            &ResolvedIntegrationsConfig {
+                github: true,
+                ..Default::default()
+            },
+            None,
+            &lists(&["a/b"], &["c/d"]),
+        );
+        assert_eq!(forges.len(), 1);
+        assert_eq!(repositories_of(&forges, "github.com"), ["a/b"]);
+    }
+
+    #[test]
+    fn git_forges_render_an_empty_list_as_an_empty_array() {
+        let (_dir, forges) = forges_with_lists(
+            &ResolvedIntegrationsConfig {
+                github: true,
+                ..Default::default()
+            },
+            None,
+            &lists(&["*"], &[]),
+        );
+        assert!(forges[0].repositories.is_empty());
+        let json = render_proxy_config_full(&full_provider_mix(), Some("c"), None, &forges);
+        assert!(json.contains(r#""repositories":[]"#), "{json}");
+        assert_eq!(
+            rendered_git_forges(&forges)[0]["repositories"],
+            serde_json::json!([])
         );
     }
 
@@ -853,6 +930,7 @@ mod tests {
                 gitlab: true,
                 ..Default::default()
             },
+            &GitRepositoryLists::default(),
         );
         assert!(forges.is_empty());
     }
@@ -913,6 +991,7 @@ mod tests {
                 github: true,
                 ..Default::default()
             },
+            &GitRepositoryLists::default(),
         );
         write_proxy_config_in(dir.path(), "proj", &full_provider_mix(), true, &forges).unwrap();
         let written = std::fs::read_to_string(proxy_config_path_in(dir.path(), "proj")).unwrap();
@@ -1133,6 +1212,26 @@ mod tests {
         let proxy_json = proxy_config_path_in(dir.path(), "proj");
         std::fs::write(&proxy_json, r#"{"routes":[]}"#).unwrap();
         assert_ne!(d1, proxy_state_digest_in(dir.path(), "proj"));
+    }
+
+    #[test]
+    fn state_digest_changes_with_the_repository_list_of_a_forge() {
+        let dir = tempfile::tempdir().unwrap();
+        let github = ResolvedIntegrationsConfig {
+            github: true,
+            ..Default::default()
+        };
+        let digest_with = |entries: &[&str]| {
+            let forges = git_forges_in(dir.path(), "proj", &github, &lists(entries, &[]));
+            write_proxy_config_in(dir.path(), "proj", &full_provider_mix(), true, &forges).unwrap();
+            proxy_state_digest_in(dir.path(), "proj")
+        };
+        let empty = digest_with(&[]);
+        let one = digest_with(&["owner/repo"]);
+        let two = digest_with(&["owner/repo", "other/repo"]);
+        assert_ne!(empty, one);
+        assert_ne!(one, two);
+        assert_eq!(one, digest_with(&["owner/repo"]));
     }
 
     #[test]

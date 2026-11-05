@@ -48,13 +48,48 @@ pub struct Route {
     pub provider_id: String,
 }
 
-/// One git host the `/git/{host}/...` transport may reach; the token stays in `token_file`.
+/// One git host the `/git/{host}/...` transport may reach; the token stays in `token_file`
+/// and only `repositories` (`owner/repo` or `owner/*`, GitLab subgroups included) are forwarded.
 #[derive(Debug, Deserialize)]
 pub struct GitForge {
     pub host: String,
     pub base_url: String,
     pub login: String,
     pub token_file: PathBuf,
+    #[serde(default)]
+    pub repositories: Vec<String>,
+}
+
+impl GitForge {
+    /// Whether `repo` is on the allowlist, ignoring letter case and a `.git` suffix;
+    /// an empty allowlist admits nothing and `prefix/*` admits every repository below `prefix`.
+    pub fn allows(&self, repo: &str) -> bool {
+        let wanted = normalise(repo);
+        self.repositories
+            .iter()
+            .any(|entry| entry_matches(&normalise(entry), &wanted))
+    }
+}
+
+pub(crate) fn normalise(path: &str) -> String {
+    let lowered = path.trim_matches('/').to_ascii_lowercase();
+    match lowered.strip_suffix(".git") {
+        Some(stripped) => stripped.to_string(),
+        None => lowered,
+    }
+}
+
+fn entry_matches(entry: &str, repo: &str) -> bool {
+    if !entry.contains('*') {
+        return entry == repo;
+    }
+    match entry.strip_suffix("/*") {
+        Some(prefix) if !prefix.contains('*') => repo
+            .strip_prefix(prefix)
+            .and_then(|rest| rest.strip_prefix('/'))
+            .is_some_and(|rest| !rest.is_empty()),
+        _ => false,
+    }
 }
 
 #[derive(Deserialize)]
@@ -215,6 +250,46 @@ mod tests {
             ],
             usage_path: PathBuf::from("/usage/usage.jsonl"),
             ..Default::default()
+        }
+    }
+
+    fn forge_allowing(repositories: &[&str]) -> GitForge {
+        GitForge {
+            host: "github.com".to_string(),
+            base_url: "https://github.com".to_string(),
+            login: "x-access-token".to_string(),
+            token_file: PathBuf::from("/git-tokens/github/token"),
+            repositories: repositories.iter().map(|r| r.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn exact_entry_matches_only_the_same_repository() {
+        let forge = forge_allowing(&["owner/repo"]);
+        assert!(forge.allows("owner/repo"));
+        assert!(forge.allows("Owner/Repo.GIT"));
+        assert!(!forge.allows("owner/repo-fork"));
+        assert!(!forge.allows("owner/repo/sub"));
+        assert!(!forge.allows("other/owner/repo"));
+    }
+
+    #[test]
+    fn prefix_wildcard_matches_repositories_below_the_prefix() {
+        let forge = forge_allowing(&["group/*", "a/b/*"]);
+        assert!(forge.allows("group/repo"));
+        assert!(forge.allows("Group/Team/Repo.git"));
+        assert!(forge.allows("a/b/c"));
+        assert!(!forge.allows("group"));
+        assert!(!forge.allows("a/b"));
+        assert!(!forge.allows("group-evil/repo"));
+        assert!(!forge.allows("a/bc/d"));
+    }
+
+    #[test]
+    fn rejected_wildcard_shapes_match_nothing() {
+        let forge = forge_allowing(&["*", "a/*/b", "owner/re*", "*/repo"]);
+        for repo in ["a/x/b", "owner/repo", "owner/re", "a/b", "x"] {
+            assert!(!forge.allows(repo), "{repo}");
         }
     }
 

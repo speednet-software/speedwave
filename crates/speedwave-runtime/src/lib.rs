@@ -17,6 +17,7 @@ pub mod diagnostic_sources;
 pub mod engine_path;
 pub mod fs_perms;
 pub mod fs_security;
+pub mod git_allowlist;
 pub mod host_mcp_process;
 pub mod http_debug_collator;
 pub mod legacy_token_cleanup;

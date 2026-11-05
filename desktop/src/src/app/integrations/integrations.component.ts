@@ -25,6 +25,7 @@ import {
 } from '../models/integration';
 import { ServiceCardComponent, SaveCredentialsEvent } from './service-card/service-card.component';
 import { RedmineConfigComponent } from './redmine-config/redmine-config.component';
+import { GitRepositoriesComponent } from './git-repositories/git-repositories.component';
 import { IdeBridgeComponent } from './ide-bridge/ide-bridge.component';
 import { ProjectPillComponent } from '../project-switcher/project-pill.component';
 
@@ -50,7 +51,13 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
 /** Manages MCP service integrations and native OS integration toggles. */
 @Component({
   selector: 'app-integrations',
-  imports: [ServiceCardComponent, RedmineConfigComponent, IdeBridgeComponent, ProjectPillComponent],
+  imports: [
+    ServiceCardComponent,
+    RedmineConfigComponent,
+    GitRepositoriesComponent,
+    IdeBridgeComponent,
+    ProjectPillComponent,
+  ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div
@@ -286,6 +293,13 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
                     (cancelOAuth)="handleCancelOAuth()"
                     (openVerificationUrl)="handleOpenVerificationUrl($event)"
                   />
+                  @if (activeProject && (svc.service === 'github' || svc.service === 'gitlab')) {
+                    <app-git-repositories
+                      [project]="activeProject"
+                      [service]="svc.service"
+                      [enabled]="svc.enabled"
+                    />
+                  }
                   @if (svc.service === 'slack' && slackFeatures().length > 0) {
                     <div
                       class="m-3 rounded border border-[var(--line)] p-3 text-sm"
