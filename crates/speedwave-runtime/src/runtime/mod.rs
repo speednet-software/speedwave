@@ -1174,11 +1174,13 @@ pub(crate) fn name_store_conflicts(e: &anyhow::Error, project: &str) -> Vec<(Str
 const TASK_CREATE_COLLISION_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
 const TASK_BUNDLE_DIR_FRAGMENT: &str = "io.containerd.runtime.v2.task/";
 const TASK_ALREADY_EXISTS_FRAGMENT: &str = ": already exists";
+const TASK_KILLED_BEFORE_START_FRAGMENT: &str = "cannot start a container that has stopped";
 
 fn is_task_create_collision(e: &anyhow::Error) -> bool {
     let s = e.to_string().to_lowercase();
     (s.contains("mkdir ") && s.contains(TASK_BUNDLE_DIR_FRAGMENT) && s.contains("file exists"))
         || names_an_existing_task(&s)
+        || s.contains(TASK_KILLED_BEFORE_START_FRAGMENT)
 }
 
 fn names_an_existing_task(s: &str) -> bool {
@@ -3667,6 +3669,31 @@ services:
             } else {
                 Ok(())
             }
+        });
+        assert!(r.is_ok(), "the retry after the collision succeeds: {r:?}");
+        assert_eq!(ups.load(Ordering::SeqCst), 2, "up runs twice");
+        assert_eq!(
+            settles,
+            vec![TASK_CREATE_COLLISION_SETTLE],
+            "waits once before the retry"
+        );
+    }
+
+    #[test]
+    fn engine_state_heal_waits_then_retries_once_when_another_start_killed_the_created_task() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let ups = AtomicUsize::new(0);
+        let (r, settles) = heal_recording_settles(|| {
+            if ups.fetch_add(1, Ordering::SeqCst) == 0 {
+                anyhow::bail!(
+                    "limactl failed: time=\"2026-11-05T11:53:59+01:00\" level=fatal \
+                     msg=\"OCI runtime start failed: cannot start a container that has stopped\"\n\
+                     time=\"2026-11-05T11:53:59+01:00\" level=fatal msg=\"error while creating container \
+                     speedwave_e2e-test_proxy: error while creating container speedwave_e2e-test_proxy: \
+                     exit status 1\""
+                )
+            }
+            Ok(())
         });
         assert!(r.is_ok(), "the retry after the collision succeeds: {r:?}");
         assert_eq!(ups.load(Ordering::SeqCst), 2, "up runs twice");
