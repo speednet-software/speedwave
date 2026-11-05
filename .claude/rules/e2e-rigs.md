@@ -18,7 +18,7 @@ Rules for the clean-install rig pipeline and the engine-level bats suites (`_tes
 
 ## Probing a change before it merges
 
-- The rig e2e never runs on a pull request or in the queue (git-workflow rules), so an e2e fix is checked before merge on a throwaway branch against the `e2e-probe` environment, which is kept for this. Its branch policy admits only `probe/speed-863-local-llm`, so the probe branch carries that name: the change under test plus `e2e.yml` with both jobs' `environment:` set to `e2e-probe`, started with "Run workflow" on that branch. The probe branch is deleted after the run; the environment stays. Run 41990499556 checked the spec 12 fix of #1516 this way (2026-11-05).
+- The rig e2e never runs on a pull request or in the queue (git-workflow rules), so an e2e fix is checked before merge on a throwaway branch against the `e2e-probe` environment, which is kept for this. Its branch policy admits only `probe/e2e-probe`, so the probe branch carries that name: the change under test plus `e2e.yml` with both jobs' `environment:` set to `e2e-probe`, started with "Run workflow" on that branch. The probe branch is deleted after the run; the environment stays. Run 41990499556 checked the spec 12 fix of #1516 this way (2026-11-05).
 - `e2e-probe` holds no `ANTHROPIC_API_KEY`, so the preflight fails the run unless the probe commit also turns that check into a warning, and spec 20 then fails in its `before all`; neither says anything about the change under test.
 
 ## Windows transport rules (all empirically verified on the rig)
