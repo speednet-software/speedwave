@@ -23,6 +23,19 @@ describe('UserMessageComponent', () => {
     expect(body.textContent).toContain('Hello from the user');
   });
 
+  it('keeps the newlines of a multi-line text block', () => {
+    fixture.componentRef.setInput('blocks', [
+      { type: 'text', content: 'pierwsza linia\ndruga linia' },
+    ]);
+    fixture.detectChanges();
+
+    const text = fixture.nativeElement.querySelector(
+      '[data-testid="user-message-body"] [data-find-scope]'
+    ) as HTMLElement;
+    expect(text.textContent).toBe('pierwsza linia\ndruga linia');
+    expect(text.classList).toContain('whitespace-pre-wrap');
+  });
+
   it('renders multiple text blocks in order', () => {
     fixture.componentRef.setInput('blocks', [
       { type: 'text', content: 'First line' },
