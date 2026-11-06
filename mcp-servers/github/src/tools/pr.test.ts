@@ -51,19 +51,6 @@ function makePr(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function mappedPr(pr: ReturnType<typeof makePr>) {
-  return {
-    number: pr.number,
-    title: pr.title,
-    state: pr.state,
-    head: pr.head.ref,
-    base: pr.base.ref,
-    user: pr.user.login,
-    draft: pr.draft,
-    html_url: pr.html_url,
-  };
-}
-
 const ALL_TOOL_NAMES = [
   'listPullRequests',
   'getPullRequest',
@@ -147,7 +134,7 @@ describe('Pull Request Tools', () => {
       const handler = tools.find((t) => t.tool.name === 'listPullRequests')?.handler;
       const result = await handler!({ owner: 'octocat', repo: 'hello-world' });
 
-      const expected = { prs: prs.map(mappedPr), count: 2 };
+      const expected = { prs: prs, count: 2 };
       expect(result).toEqual({
         content: [{ type: 'text', text: JSON.stringify(expected, null, 2) }],
       });
@@ -204,6 +191,23 @@ describe('Pull Request Tools', () => {
   });
 
   describe('getPullRequest', () => {
+    it('returns the full PR state, including merged, head.sha and merge_commit_sha', async () => {
+      const pr = makePr({ state: 'closed', merged: true, merge_commit_sha: 'mcs1' });
+      mockClient.getPullRequest.mockResolvedValue(pr);
+
+      const tools = createPrTools(mockClient as unknown as GitHubClient);
+      const handler = tools.find((t) => t.tool.name === 'getPullRequest')?.handler;
+      const result = await handler!({ owner: 'o', repo: 'r', number: 42 });
+
+      const parsed = JSON.parse((result as { content: { text: string }[] }).content[0].text);
+      expect(parsed).toMatchObject({
+        merged: true,
+        head: { ref: 'feature/x', sha: 'abc123' },
+        merge_commit_sha: 'mcs1',
+        body: 'Implements feature X',
+      });
+    });
+
     it('returns the mapped PR', async () => {
       const pr = makePr({ number: 7, draft: true });
       mockClient.getPullRequest.mockResolvedValue(pr);
@@ -213,7 +217,7 @@ describe('Pull Request Tools', () => {
       const result = await handler!({ owner: 'octocat', repo: 'hello-world', number: 7 });
 
       expect(result).toEqual({
-        content: [{ type: 'text', text: JSON.stringify(mappedPr(pr), null, 2) }],
+        content: [{ type: 'text', text: JSON.stringify(pr, null, 2) }],
       });
       expect(mockClient.getPullRequest).toHaveBeenCalledWith('octocat', 'hello-world', 7);
     });
@@ -265,7 +269,7 @@ describe('Pull Request Tools', () => {
       });
 
       expect(result).toEqual({
-        content: [{ type: 'text', text: JSON.stringify(mappedPr(pr), null, 2) }],
+        content: [{ type: 'text', text: JSON.stringify(pr, null, 2) }],
       });
       expect(mockClient.createPullRequest).toHaveBeenCalledWith('octocat', 'hello-world', {
         title: 'Add docs',
@@ -312,9 +316,9 @@ describe('Pull Request Tools', () => {
   describe('mergePullRequest', () => {
     it('merges with no options and returns the merge result', async () => {
       const mergeResult = {
-        merged: true,
-        sha: 'deadbeef',
-        message: 'Pull Request successfully merged',
+        status: 'enqueued',
+        merged: false,
+        message: 'Queued',
       };
       mockClient.mergePullRequest.mockResolvedValue(mergeResult);
 
@@ -329,7 +333,7 @@ describe('Pull Request Tools', () => {
     });
 
     it('forwards merge_method and commit_title', async () => {
-      mockClient.mergePullRequest.mockResolvedValue({ merged: true, sha: 'x', message: 'ok' });
+      mockClient.mergePullRequest.mockResolvedValue({ status: 'merged', merged: true, sha: 'x' });
 
       const tools = createPrTools(mockClient as unknown as GitHubClient);
       const handler = tools.find((t) => t.tool.name === 'mergePullRequest')?.handler;
@@ -368,7 +372,7 @@ describe('Pull Request Tools', () => {
       const result = await handler!({ owner: 'o', repo: 'r', number: 42 });
 
       expect(result).toEqual({
-        content: [{ type: 'text', text: JSON.stringify(mappedPr(pr), null, 2) }],
+        content: [{ type: 'text', text: JSON.stringify(pr, null, 2) }],
       });
       expect(mockClient.updatePullRequest).toHaveBeenCalledWith('o', 'r', 42, {});
     });
