@@ -2235,7 +2235,7 @@ export class ChatSessionStore {
     let sessionKept = false;
     try {
       if (!project) {
-        outcome = 'failed';
+        this.returnStartSlot();
         return;
       }
 
