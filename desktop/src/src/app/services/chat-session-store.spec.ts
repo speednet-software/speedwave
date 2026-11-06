@@ -7508,7 +7508,7 @@ describe('ChatSessionStore', () => {
       expect(sent()[0]).toMatchObject({ displayText: 'survives the reset' });
     });
 
-    it('neither sends nor drops a held slot when a resume finds no active project', async () => {
+    it('returns a held slot when a resume finds no active project', async () => {
       const { done: failing } = await beginStart();
       await store.queueMessage('no project to resume in');
       startFails = 'chat backend crashed';
@@ -7521,7 +7521,7 @@ describe('ChatSessionStore', () => {
       await new Promise((r) => setTimeout(r, 0));
 
       expect(sent()).toEqual([]);
-      expect(store.pendingQueue?.text).toBe('no project to resume in');
+      expect(store.returnedStartSlot()).toBe('no project to resume in');
     });
 
     it('queues to the backend as before when no start is in flight', async () => {
