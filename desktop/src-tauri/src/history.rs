@@ -247,6 +247,32 @@ fn scan_tail(path: &Path) -> std::io::Result<TailScan> {
     Ok(TailScan { timestamp, titles })
 }
 
+fn self_started_turn_origin(parsed: &serde_json::Value) -> Option<crate::chat::TurnOrigin> {
+    if parsed["promptSource"].as_str() != Some("system") {
+        return None;
+    }
+    match parsed["turnOrigin"].as_str()? {
+        "scheduled" => Some(crate::chat::TurnOrigin::Scheduled),
+        "task_notification" => Some(crate::chat::TurnOrigin::TaskNotification),
+        _ => None,
+    }
+}
+
+fn turn_origin_message(
+    parsed: &serde_json::Value,
+    origin: crate::chat::TurnOrigin,
+) -> ConversationMessage {
+    ConversationMessage {
+        role: "user".to_string(),
+        content: String::new(),
+        blocks: Some(vec![MessageBlock::TurnOrigin { origin }]),
+        timestamp: parsed["timestamp"].as_str().map(String::from),
+        uuid: parsed["uuid"].as_str().map(String::from),
+        model: None,
+        usage: None,
+    }
+}
+
 fn is_synthetic_user_entry(parsed: &serde_json::Value) -> bool {
     let content = &parsed["message"]["content"];
     if let Some(s) = content.as_str() {
@@ -300,39 +326,6 @@ fn tag_body<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
     let start = text.find(&open)? + open.len();
     let end = text[start..].find(&format!("</{tag}>"))? + start;
     Some(&text[start..end])
-}
-
-fn self_started_turn_origin(parsed: &serde_json::Value) -> Option<crate::chat::TurnOrigin> {
-    if parsed["promptSource"].as_str() != Some("system") {
-        return None;
-    }
-    match parsed["turnOrigin"].as_str()? {
-        "scheduled" => Some(crate::chat::TurnOrigin::Scheduled),
-        "task_notification" => Some(crate::chat::TurnOrigin::TaskNotification),
-        _ => None,
-    }
-}
-
-fn turn_origin_message(
-    parsed: &serde_json::Value,
-    origin: crate::chat::TurnOrigin,
-) -> ConversationMessage {
-    ConversationMessage {
-        role: "user".to_string(),
-        content: String::new(),
-        blocks: Some(vec![MessageBlock::TurnOrigin { origin }]),
-        timestamp: parsed["timestamp"].as_str().map(String::from),
-        uuid: parsed["uuid"].as_str().map(String::from),
-        model: None,
-        usage: None,
-    }
-}
-
-fn is_turn_origin_message(msg: &ConversationMessage) -> bool {
-    matches!(
-        msg.blocks.as_deref(),
-        Some([MessageBlock::TurnOrigin { .. }])
-    )
 }
 
 fn control_line_message(parsed: &serde_json::Value, line: String) -> ConversationMessage {
@@ -554,6 +547,13 @@ fn fold_history_control_chips(messages: &mut Vec<ConversationMessage>) {
         }
         i += 1;
     }
+}
+
+fn is_turn_origin_message(msg: &ConversationMessage) -> bool {
+    matches!(
+        msg.blocks.as_deref(),
+        Some([MessageBlock::TurnOrigin { .. }])
+    )
 }
 
 pub fn list_conversations(project: &str) -> anyhow::Result<Vec<ConversationSummary>> {
@@ -4603,7 +4603,7 @@ mod tests {
 
         let ts = include_str!("../../src/src/app/models/chat.ts");
         assert!(
-            ts.contains("{ type: 'turn_origin'; origin: TurnOrigin }"),
+            ts.contains("{ type: 'turn_origin'; origin: SelfStartedTurnOrigin }"),
             "models/chat.ts MessageBlock must carry the turn_origin block as history sends it"
         );
     }

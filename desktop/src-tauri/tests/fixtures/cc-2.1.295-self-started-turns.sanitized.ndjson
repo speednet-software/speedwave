@@ -36,3 +36,19 @@
 {"type":"assistant","message":{"id":"msg_011Cgn4vH2kf5bsxKMUYxSoE","role":"assistant","model":"claude-haiku-5-5","content":[{"type":"text","text":"CRONFIRED"}]},"parent_tool_use_id":null,"session_id":"e6d5c763-64ac-44c6-b76c-d725124d98a0"}
 {"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"CRONFIRED","session_id":"e6d5c763-64ac-44c6-b76c-d725124d98a0","origin":null}
 {"type":"command_lifecycle","command_uuid":"ee312d61-68ee-401d-81d8-e56fe1af5a1a","state":"completed","session_id":"e6d5c763-64ac-44c6-b76c-d725124d98a0"}
+{"type":"system","subtype":"init","model":"claude-haiku-5-5","session_id":"a9607bf5-28c9-41ba-9133-d68273620fb6","claude_code_version":"2.1.295"}
+{"type":"assistant","message":{"id":"msg_011Cgn6JbQGwVpMMv48x9i8v","role":"assistant","model":"claude-haiku-5-5","content":[{"type":"thinking","thinking":""}]},"parent_tool_use_id":null,"session_id":"a9607bf5-28c9-41ba-9133-d68273620fb6"}
+{"type":"assistant","message":{"id":"msg_011Cgn6JbQGwVpMMv48x9i8v","role":"assistant","model":"claude-haiku-5-5","content":[{"type":"tool_use","id":"toolu_01A87CQ9gCUgdJHjkqoBswds","name":"Bash","input":{}}]},"parent_tool_use_id":null,"session_id":"a9607bf5-28c9-41ba-9133-d68273620fb6"}
+{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b5dtwtk48","task_type":"local_bash"}],"session_id":"a9607bf5-28c9-41ba-9133-d68273620fb6"}
+{"type":"system","subtype":"task_started","task_id":"b5dtwtk48","task_type":"local_bash","is_backgrounded":true,"session_id":"a9607bf5-28c9-41ba-9133-d68273620fb6"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01A87CQ9gCUgdJHjkqoBswds","content":"<redacted>","is_error":false}]},"parent_tool_use_id":null,"session_id":"a9607bf5-28c9-41ba-9133-d68273620fb6"}
+{"type":"assistant","message":{"id":"msg_011Cgn6JbQGwVpMMv48x9i8v","role":"assistant","model":"claude-haiku-5-5","content":[{"type":"tool_use","id":"toolu_01BY9JjKQGYqkCSEhT8wu1qT","name":"Bash","input":{}}]},"parent_tool_use_id":null,"session_id":"a9607bf5-28c9-41ba-9133-d68273620fb6"}
+{"type":"system","subtype":"task_updated","task_id":"b5dtwtk48","patch":{"status":"completed","end_time":1793987174615},"session_id":"a9607bf5-28c9-41ba-9133-d68273620fb6"}
+{"type":"system","subtype":"task_notification","task_id":"b5dtwtk48","tool_use_id":"toolu_01A87CQ9gCUgdJHjkqoBswds","status":"completed","summary":"Background command \"Background sleep then echo bg-done\" completed (exit code 0)","session_id":"a9607bf5-28c9-41ba-9133-d68273620fb6"}
+{"type":"system","subtype":"background_tasks_changed","tasks":[],"session_id":"a9607bf5-28c9-41ba-9133-d68273620fb6"}
+{"type":"system","subtype":"task_started","task_id":"bviek7oxh","task_type":"local_bash","is_backgrounded":false,"session_id":"a9607bf5-28c9-41ba-9133-d68273620fb6"}
+{"type":"system","subtype":"task_notification","task_id":"bviek7oxh","tool_use_id":"toolu_01BY9JjKQGYqkCSEhT8wu1qT","status":"completed","summary":"Foreground python sleep for 20 seconds","session_id":"a9607bf5-28c9-41ba-9133-d68273620fb6"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01BY9JjKQGYqkCSEhT8wu1qT","content":"<redacted>","is_error":false}]},"parent_tool_use_id":null,"session_id":"a9607bf5-28c9-41ba-9133-d68273620fb6"}
+{"type":"assistant","message":{"id":"msg_011Cgn6LDuWNsF3vj8kXeTmc","role":"assistant","model":"claude-haiku-5-5","content":[{"type":"thinking","thinking":""}]},"parent_tool_use_id":null,"session_id":"a9607bf5-28c9-41ba-9133-d68273620fb6"}
+{"type":"assistant","message":{"id":"msg_011Cgn6LDuWNsF3vj8kXeTmc","role":"assistant","model":"claude-haiku-5-5","content":[{"type":"text","text":"NOTIFIED"}]},"parent_tool_use_id":null,"session_id":"a9607bf5-28c9-41ba-9133-d68273620fb6"}
+{"type":"result","subtype":"success","is_error":false,"num_turns":3,"result":"NOTIFIED","session_id":"a9607bf5-28c9-41ba-9133-d68273620fb6","origin":null}

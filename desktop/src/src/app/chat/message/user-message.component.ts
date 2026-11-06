@@ -1,8 +1,13 @@
 import { ChangeDetectionStrategy, Component, computed, input } from '@angular/core';
-import type { MessageBlock, TurnOrigin } from '../../models/chat';
+import type { MessageBlock, SelfStartedTurnOrigin } from '../../models/chat';
 import { formatBytes } from '../../shared/format-bytes';
 import { IconComponent } from '../../shared/icon.component';
 import { ControlChipComponent } from '../blocks/control-chip.component';
+
+const TURN_ORIGIN_LABELS: Record<SelfStartedTurnOrigin, string> = {
+  scheduled: 'scheduled task',
+  task_notification: 'background task finished',
+};
 
 /** Renders text + image + file + chip blocks; image and file are placeholder pills (ADR-065, ADR-094). */
 @Component({
@@ -107,9 +112,3 @@ type RenderableUserBlock = Extract<
   MessageBlock,
   { type: 'text' | 'image' | 'file' | 'chip' | 'turn_origin' }
 >;
-
-const TURN_ORIGIN_LABELS: Record<TurnOrigin, string> = {
-  user: 'message',
-  scheduled: 'scheduled task',
-  task_notification: 'background task finished',
-};

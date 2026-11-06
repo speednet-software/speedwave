@@ -57,6 +57,9 @@ export type StreamChunk =
 /** What started a Claude Code turn. */
 export type TurnOrigin = 'user' | 'scheduled' | 'task_notification';
 
+/** Origin of a turn Claude Code started without a user message. */
+export type SelfStartedTurnOrigin = Exclude<TurnOrigin, 'user'>;
+
 /** `chat_stream` payload: the tagged chunk plus the owning tab. Mirror of Rust chat.rs::TabStreamChunk. */
 export type TabStreamChunk = StreamChunk & { tab_id: string };
 
@@ -175,7 +178,7 @@ export type MessageBlock =
       decided?: 'allow_once' | 'allow_always' | 'deny';
     }
   | { type: 'chip'; command: string; argument: string }
-  | { type: 'turn_origin'; origin: TurnOrigin }
+  | { type: 'turn_origin'; origin: SelfStartedTurnOrigin }
   | { type: 'image'; media_type: string; alt?: string }
   | { type: 'file'; filename: string; size_bytes: number };
 

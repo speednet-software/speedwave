@@ -1302,19 +1302,7 @@ export class ChatSessionStore {
     }
     const isControlSend = chatInput.attachments.length === 0 && isControlShaped(chatInput.text);
     if (isControlSend) this.recordTypedModelCommand(chatInput.text);
-    if (!isControlSend) {
-      this._messages = [
-        ...this._messages,
-        {
-          role: 'user',
-          blocks: displayBlocks,
-          timestamp: Date.now(),
-        },
-      ];
-    }
-    this.isStreaming = true;
-    this._turnId += 1;
-    this._currentBlocks = [];
+    this.openTurn(isControlSend ? null : displayBlocks);
     this.requestAutoScroll();
     this.notifyChange();
 
@@ -1789,35 +1777,15 @@ export class ChatSessionStore {
 
       case 'TurnStarted':
         if (chunk.data.origin === 'user' || this.isStreaming) return;
-        this._messages = [
-          ...this._messages,
-          {
-            role: 'user',
-            blocks: [{ type: 'turn_origin', origin: chunk.data.origin }],
-            timestamp: Date.now(),
-          },
-        ];
-        this.isStreaming = true;
-        this._turnId += 1;
-        this._currentBlocks = [];
+        this.openTurn([{ type: 'turn_origin', origin: chunk.data.origin }]);
         break;
 
       case 'QueueDrained': {
         this._pendingQueue = null;
         this._queueAwaitingSession = false;
-        if (!isControlShaped(chunk.data.text)) {
-          this._messages = [
-            ...this._messages,
-            {
-              role: 'user',
-              blocks: [{ type: 'text', content: chunk.data.text }],
-              timestamp: Date.now(),
-            },
-          ];
-        }
-        this.isStreaming = true;
-        this._turnId += 1;
-        this._currentBlocks = [];
+        this.openTurn(
+          isControlShaped(chunk.data.text) ? null : [{ type: 'text', content: chunk.data.text }]
+        );
         break;
       }
 
@@ -1825,6 +1793,18 @@ export class ChatSessionStore {
         return;
     }
     this.notifyChange();
+  }
+
+  private openTurn(userBlocks: MessageBlock[] | null): void {
+    if (userBlocks) {
+      this._messages = [
+        ...this._messages,
+        { role: 'user', blocks: userBlocks, timestamp: Date.now() },
+      ];
+    }
+    this.isStreaming = true;
+    this._turnId += 1;
+    this._currentBlocks = [];
   }
 
   private forgetContextWindow(): void {

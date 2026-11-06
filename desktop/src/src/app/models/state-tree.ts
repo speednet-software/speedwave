@@ -1,4 +1,4 @@
-import type { TurnOrigin } from './chat';
+import type { SelfStartedTurnOrigin } from './chat';
 
 /** Conversation role. */
 export type EntryRole = 'user' | 'assistant';
@@ -70,7 +70,7 @@ export type MessageBlockState =
   | { kind: 'image'; media_type: string; alt: string | null }
   | { kind: 'file'; filename: string; size_bytes: number }
   | { kind: 'chip'; command: string; argument: string }
-  | { kind: 'turn_origin'; origin: TurnOrigin };
+  | { kind: 'turn_origin'; origin: SelfStartedTurnOrigin };
 
 /** One entry in the conversation — user or assistant. */
 export interface ConversationEntryState {

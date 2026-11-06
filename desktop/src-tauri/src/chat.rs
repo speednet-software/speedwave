@@ -482,7 +482,10 @@ impl StreamParser {
         match msg_type {
             "stream_event" => option_to_vec(self.parse_stream_event(&parsed["event"])),
             "user" => self.parse_user_message(parsed),
-            "result" => option_to_vec(self.parse_result(parsed)),
+            "result" => {
+                self.next_turn_origin = None;
+                option_to_vec(self.parse_result(parsed))
+            }
             "assistant" => {
                 self.capture_assistant_uuid(parsed);
                 self.capture_assistant_model(parsed);
@@ -1089,20 +1092,17 @@ impl StreamParser {
         &mut self,
         parsed: &serde_json::Value,
     ) -> (Vec<StreamChunk>, Option<LogEntry>) {
-        match parsed["subtype"].as_str() {
-            Some("task_notification") => {
-                self.next_turn_origin = Some(TurnOrigin::TaskNotification);
-            }
-            Some("init") => {
-                let (mut chunks, log) = option_to_vec(self.parse_system_message(parsed));
-                chunks.push(StreamChunk::TurnStarted {
-                    origin: self.next_turn_origin.take().unwrap_or(TurnOrigin::User),
-                });
-                return (chunks, log);
-            }
-            _ => {}
+        let subtype = parsed["subtype"].as_str();
+        if subtype == Some("task_notification") {
+            self.next_turn_origin = Some(TurnOrigin::TaskNotification);
         }
-        option_to_vec(self.parse_system_message(parsed))
+        let (mut chunks, log) = option_to_vec(self.parse_system_message(parsed));
+        if subtype == Some("init") {
+            chunks.push(StreamChunk::TurnStarted {
+                origin: self.next_turn_origin.take().unwrap_or(TurnOrigin::User),
+            });
+        }
+        (chunks, log)
     }
 
     fn parse_system_message(
@@ -7766,6 +7766,7 @@ mod tests {
                 TurnOrigin::User,
                 TurnOrigin::User,
                 TurnOrigin::Scheduled,
+                TurnOrigin::User,
             ]
         );
         let results = chunks
@@ -7807,6 +7808,22 @@ mod tests {
             turn_origins(&parse_line_all_str(&mut parser, init)),
             vec![TurnOrigin::TaskNotification]
         );
+        assert_eq!(
+            turn_origins(&parse_line_all_str(&mut parser, init)),
+            vec![TurnOrigin::User]
+        );
+    }
+
+    #[test]
+    fn a_notification_folded_into_a_running_turn_does_not_mark_the_next_one() {
+        let mut parser = StreamParser::new();
+        let init = r#"{"type":"system","subtype":"init","model":"m"}"#;
+        let notification =
+            r#"{"type":"system","subtype":"task_notification","task_id":"t","status":"completed"}"#;
+        let result = r#"{"type":"result","subtype":"success","is_error":false,"session_id":"s"}"#;
+        parse_line_all_str(&mut parser, init);
+        parse_line_all_str(&mut parser, notification);
+        parse_line_all_str(&mut parser, result);
         assert_eq!(
             turn_origins(&parse_line_all_str(&mut parser, init)),
             vec![TurnOrigin::User]
