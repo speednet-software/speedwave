@@ -134,7 +134,7 @@ describe('Pull Request Tools', () => {
       const handler = tools.find((t) => t.tool.name === 'listPullRequests')?.handler;
       const result = await handler!({ owner: 'octocat', repo: 'hello-world' });
 
-      const expected = { prs: prs, count: 2 };
+      const expected = { prs, count: 2 };
       expect(result).toEqual({
         content: [{ type: 'text', text: JSON.stringify(expected, null, 2) }],
       });
@@ -208,7 +208,7 @@ describe('Pull Request Tools', () => {
       });
     });
 
-    it('returns the mapped PR', async () => {
+    it('returns the PR as the client gives it', async () => {
       const pr = makePr({ number: 7, draft: true });
       mockClient.getPullRequest.mockResolvedValue(pr);
 

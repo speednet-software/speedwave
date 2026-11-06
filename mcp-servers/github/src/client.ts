@@ -821,6 +821,7 @@ export class GitHubClient {
           merge_method: options.merge_method || 'merge',
           commit_title: options.commit_title,
           headers: { 'X-GitHub-Api-Version': '2026-03-10' },
+          request: { retries: 0 },
         }
       );
       return this.mapMergeResult(res.data as Record<string, unknown>);

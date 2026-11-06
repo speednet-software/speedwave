@@ -779,6 +779,7 @@ describe('GitHubClient', () => {
         merge_method: 'merge',
         commit_title: undefined,
         headers: { 'X-GitHub-Api-Version': '2026-03-10' },
+        request: { retries: 0 },
       });
       expect(result).toEqual({
         status: 'enqueued',
