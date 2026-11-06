@@ -3212,6 +3212,42 @@ mod tests {
     }
 
     #[test]
+    fn access_service_id_rule_matches_plugin_slug_pattern() {
+        let plugin_src = include_str!("../../../crates/speedwave-runtime/src/plugin.rs");
+        let slug_re = regex::Regex::new(r#"const SLUG_PATTERN: &str = r"([^"]+)";"#).unwrap();
+        let slug = regex::Regex::new(
+            &slug_re
+                .captures(plugin_src)
+                .expect("plugin.rs must declare `const SLUG_PATTERN`")[1],
+        )
+        .unwrap();
+        let samples = [
+            "slack",
+            "custom-my-mcp",
+            "os-mail",
+            "a",
+            &format!("a{}", "b".repeat(63)),
+            &format!("a{}", "b".repeat(64)),
+            "",
+            "1abc",
+            "-abc",
+            "Abc",
+            "a_b",
+            "a b",
+            "ab\u{e9}",
+        ];
+        for id in samples {
+            let json = format!(r#"{{"services":{{"{id}":"read_only"}}}}"#);
+            let policy: speedwave_pii_engine::AccessPolicy = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                policy.validate().is_ok(),
+                slug.is_match(id),
+                "access service id rule must equal plugin.rs SLUG_PATTERN for {id:?}"
+            );
+        }
+    }
+
+    #[test]
     fn only_sharepoint_site_id_has_hint() {
         for svc in TOGGLEABLE_MCP_SERVICES {
             for field in svc.auth_fields {

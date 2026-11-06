@@ -12,9 +12,8 @@ import {
 import { TauriService } from '../../services/tauri.service';
 import { AccessRestartService } from '../../services/access-restart.service';
 import { AccessMode, IntegrationAccessView } from '../../models/access';
+import { isGitForge } from '../../models/integration';
 import { errorText } from '../error-text';
-
-const GIT_FORGES: ReadonlySet<string> = new Set(['github', 'gitlab']);
 
 /** Access control of one integration. */
 @Component({
@@ -85,7 +84,7 @@ export class IntegrationAccessComponent {
   protected readonly busy = signal(false);
   protected readonly error = signal('');
   protected readonly helpText = computed(() =>
-    GIT_FORGES.has(this.service())
+    isGitForge(this.service())
       ? 'Read-only blocks the tools that send, create, edit or delete, and git push. Reads, fetch and pull still work.'
       : 'Read-only blocks the tools that send, create, edit or delete. Reads still work.'
   );

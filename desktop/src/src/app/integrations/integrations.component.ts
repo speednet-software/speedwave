@@ -17,6 +17,7 @@ import {
   LoopbackFlowStart,
   IntegrationsResponse,
   IntegrationStatusEntry,
+  isGitForge,
   OAuthFlowStatus,
   OAuthProgressEvent,
   OsIntegrationStatusEntry,
@@ -295,7 +296,7 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
                     (cancelOAuth)="handleCancelOAuth()"
                     (openVerificationUrl)="handleOpenVerificationUrl($event)"
                   />
-                  @if (activeProject && (svc.service === 'github' || svc.service === 'gitlab')) {
+                  @if (activeProject && isGitForge(svc.service)) {
                     <app-git-repositories
                       [project]="activeProject"
                       [service]="svc.service"
@@ -459,6 +460,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   private unsubStatusRefresher: (() => void) | null = null;
 
   readonly betaEnabled = this.beta.enabled;
+  protected readonly isGitForge = isGitForge;
 
   /** Re-fetch on beta toggle — response.services is not cached, so filter-only won't reveal beta-only services. */
   constructor() {

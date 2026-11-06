@@ -100,8 +100,8 @@ fn classify<'a>(method: &Method, rest: &str, query: Option<&'a str>) -> Option<G
         [repo @ .., "git-upload-pack"] if method == Method::POST && query.is_none() => {
             (repo, "git-upload-pack", "git-upload-pack")
         }
-        [repo @ .., "git-receive-pack"] if method == Method::POST && query.is_none() => {
-            (repo, "git-receive-pack", "git-receive-pack")
+        [repo @ .., RECEIVE_PACK] if method == Method::POST && query.is_none() => {
+            (repo, RECEIVE_PACK, RECEIVE_PACK)
         }
         _ => return None,
     };

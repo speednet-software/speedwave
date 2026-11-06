@@ -71,9 +71,32 @@ export function readOnlyNotice(blocked: readonly string[]): string | undefined {
   return `Read-only mode is on: tools that change data are blocked for ${blocked.join(', ')} and marked blocked below, reads still work.`;
 }
 
+const OS_CATEGORY_LABELS = {
+  reminders: 'Reminders',
+  calendar: 'Calendar',
+  mail: 'Mail',
+  notes: 'Notes',
+} as const;
+
+function deniedLabel(metadata: ToolMetadata): string {
+  return metadata.osCategory ? OS_CATEGORY_LABELS[metadata.osCategory] : metadata.service;
+}
+
+function modeEntryKeys(metadata: ToolMetadata): string[] {
+  if (metadata.service !== OS_SERVICE) return [metadata.service];
+  return metadata.osCategory ? [osKey(metadata.osCategory)] : OS_CATEGORIES.map(osKey);
+}
+
+function turnOffHint(rules: AccessRules, metadata: ToolMetadata): string {
+  const perService = modeEntryKeys(metadata).some((key) => rules.services[key] === 'read_only');
+  return perService
+    ? 'Turn it off in Speedwave Desktop: the Access setting of this integration.'
+    : 'Turn it off in Speedwave Desktop: Agent access in the project settings, unless the organization enforces the mode.';
+}
+
 function blockedBecause(service: string, metadata: ToolMetadata): string {
   if (service.startsWith(CUSTOM_SERVICE_PREFIX)) {
-    return 'tools of custom MCP servers are blocked entirely in this mode';
+    return 'custom MCP servers are blocked in this mode';
   }
   if (!metadata.annotations) {
     return 'it has no read-only annotation';
@@ -99,7 +122,7 @@ export function decideAccess(rules: AccessRules, metadata: ToolMetadata): Access
     service,
     tool,
     message: buildTeachingMessage({
-      nextStep: `Read-only mode is on for ${service}, so ${service}.${tool} did not run: ${blockedBecause(service, metadata)}. Reads from ${service} still work, use a tool that only reads. A person can turn it off in Speedwave Desktop: Agent access in the project settings, or the Access setting of the ${service} integration. Only the organization can change it when it enforces the mode.`,
+      nextStep: `Read-only mode is on for ${deniedLabel(metadata)}, so ${service}.${tool} did not run: ${blockedBecause(service, metadata)}. Reads still work, use a tool that only reads. ${turnOffHint(rules, metadata)}`,
     }),
   };
 }

@@ -8,6 +8,7 @@ import {
 } from './access-policy.js';
 import type { ToolMetadata } from './hub-types.js';
 
+const LONG_SERVICE = 'custom-' + 'a'.repeat(57);
 const FULL: AccessRules = { default: 'full', services: {} };
 const ALL_READ_ONLY: AccessRules = { default: 'read_only', services: {} };
 const SLACK_READ_ONLY: AccessRules = { default: 'full', services: { slack: 'read_only' } };
@@ -98,25 +99,40 @@ describe('decideAccess', () => {
     expect(decision.message).toContain('slack.sendChannel');
     expect(decision.message).toContain('Reads');
     expect(decision.message).toContain('Agent access in the project settings');
+    expect(decision.message).toContain('organization');
   });
 
-  it('names the integration Access setting and the organization lock in a per-service denial', () => {
+  it('names the integration Access setting in a per-service denial', () => {
     const decision = decideAccess(
       SLACK_READ_ONLY,
       tool('slack', 'sendChannel', { readOnlyHint: false })
     );
     if (decision.allowed) throw new Error('expected a denial');
-    expect(decision.message).toContain('Access setting of the slack integration');
-    expect(decision.message).toContain('organization');
+    expect(decision.message).toContain('Access setting of this integration');
+    expect(decision.message).not.toContain('Agent access');
+    expect(decision.message).not.toContain('organization');
   });
 
-  it('keeps the denial message short enough to survive the executor error cap', () => {
+  it.each([
+    ['global default', ALL_READ_ONLY],
+    [
+      'per-service entry',
+      { default: 'full', services: { [LONG_SERVICE]: 'read_only' } } as AccessRules,
+    ],
+  ])('keeps the %s denial under the executor error cap for long names', (_, rules) => {
+    const decision = decideAccess(rules, tool(LONG_SERVICE, 'x'.repeat(60)));
+    if (decision.allowed) throw new Error('expected a denial');
+    expect(decision.message.length).toBeLessThan(450);
+  });
+
+  it('names the os category as Desktop shows it', () => {
     const decision = decideAccess(
-      ALL_READ_ONLY,
-      tool('custom-some-long-service-name', 'someVeryLongToolNameForTheMessage')
+      { default: 'full', services: { 'os-mail': 'read_only' } },
+      { ...tool('os', 'sendEmail', { readOnlyHint: false }), osCategory: 'mail' }
     );
     if (decision.allowed) throw new Error('expected a denial');
-    expect(decision.message.length).toBeLessThan(500);
+    expect(decision.message).toContain('for Mail,');
+    expect(decision.message).toContain('Access setting of this integration');
   });
 
   it('names why a custom-* service is blocked', () => {
