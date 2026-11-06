@@ -123,6 +123,7 @@ def build_parser():
     p_issue = sub.add_parser("issue-plan")
     p_issue.add_argument("--existing", required=True)
     p_issue.add_argument("--title", required=True)
+    p_issue.add_argument("--status", required=True, choices=["red", "green"])
     p_issue.set_defaults(func=cmd_issue_plan)
 
     p_default_severity = sub.add_parser("print-npm-default-severity")
@@ -168,11 +169,14 @@ def cmd_lockfiles_touched(args):
 def cmd_issue_plan(args):
     with open(args.existing) as f:
         issues = json.load(f)
-    matches = [i for i in issues if i.get("title") == args.title and i.get("state", "").upper() == "OPEN"]
-    if matches:
-        chosen = min(matches, key=lambda i: i["number"])
-        duplicates = sorted(i["number"] for i in matches if i["number"] != chosen["number"])
-        print(json.dumps({"action": "update", "number": chosen["number"], "close": duplicates}))
+    matches = sorted(
+        (i for i in issues if i.get("title") == args.title and i.get("state", "").upper() == "OPEN"),
+        key=lambda i: i["number"],
+    )
+    if args.status == "green":
+        print(json.dumps({"action": "close", "close": [i["number"] for i in matches]}))
+    elif matches:
+        print(json.dumps({"action": "update", "number": matches[0]["number"], "close": [i["number"] for i in matches[1:]]}))
     else:
         print(json.dumps({"action": "create", "close": []}))
     return 0

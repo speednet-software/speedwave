@@ -193,38 +193,52 @@ _audited_lockfiles() {
 }
 
 @test "issue-plan: creates when no matching open issue exists" {
-  run "$PYTHON" "$SCRIPT" issue-plan --existing "$FIXTURES/issues-none.json" \
+  run "$PYTHON" "$SCRIPT" issue-plan --status red --existing "$FIXTURES/issues-none.json" \
     --title "audit-schedule: known vulnerabilities on dev"
   [ "$status" -eq 0 ]
   [ "$output" = '{"action": "create", "close": []}' ]
 }
 
 @test "issue-plan: updates the existing open issue instead of creating a second one" {
-  run "$PYTHON" "$SCRIPT" issue-plan --existing "$FIXTURES/issues-one-open.json" \
+  run "$PYTHON" "$SCRIPT" issue-plan --status red --existing "$FIXTURES/issues-one-open.json" \
     --title "audit-schedule: known vulnerabilities on dev"
   [ "$status" -eq 0 ]
   [ "$output" = '{"action": "update", "number": 42, "close": []}' ]
 }
 
 @test "issue-plan: a closed issue with a matching title does not block a new one" {
-  run "$PYTHON" "$SCRIPT" issue-plan --existing "$FIXTURES/issues-one-closed.json" \
+  run "$PYTHON" "$SCRIPT" issue-plan --status red --existing "$FIXTURES/issues-one-closed.json" \
     --title "audit-schedule: known vulnerabilities on dev"
   [ "$status" -eq 0 ]
   [ "$output" = '{"action": "create", "close": []}' ]
 }
 
 @test "issue-plan: two open duplicates still resolve to exactly one issue, the oldest, and plans to close the other" {
-  run "$PYTHON" "$SCRIPT" issue-plan --existing "$FIXTURES/issues-two-open-duplicates.json" \
+  run "$PYTHON" "$SCRIPT" issue-plan --status red --existing "$FIXTURES/issues-two-open-duplicates.json" \
     --title "audit-schedule: known vulnerabilities on dev"
   [ "$status" -eq 0 ]
   [ "$output" = '{"action": "update", "number": 10, "close": [55]}' ]
 }
 
 @test "issue-plan: three open duplicates keep the oldest and plan to close all the others" {
-  run "$PYTHON" "$SCRIPT" issue-plan --existing "$FIXTURES/issues-three-open-duplicates.json" \
+  run "$PYTHON" "$SCRIPT" issue-plan --status red --existing "$FIXTURES/issues-three-open-duplicates.json" \
     --title "audit-schedule: known vulnerabilities on dev"
   [ "$status" -eq 0 ]
   [ "$output" = '{"action": "update", "number": 7, "close": [20, 33]}' ]
+}
+
+@test "issue-plan: green closes every open issue with the title" {
+  run "$PYTHON" "$SCRIPT" issue-plan --status green --existing "$FIXTURES/issues-two-open-duplicates.json" \
+    --title "audit-schedule: known vulnerabilities on dev"
+  [ "$status" -eq 0 ]
+  [ "$output" = '{"action": "close", "close": [10, 55]}' ]
+}
+
+@test "issue-plan: green with no open issue closes nothing" {
+  run "$PYTHON" "$SCRIPT" issue-plan --status green --existing "$FIXTURES/issues-one-closed.json" \
+    --title "audit-schedule: known vulnerabilities on dev"
+  [ "$status" -eq 0 ]
+  [ "$output" = '{"action": "close", "close": []}' ]
 }
 
 @test "print-npm-default-severity: prints the one severity threshold" {
