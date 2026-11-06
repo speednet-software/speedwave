@@ -3,14 +3,15 @@ import {
   ChangeDetectionStrategy,
   Component,
   ElementRef,
+  Injector,
   ViewChild,
+  afterNextRender,
   computed,
   effect,
   inject,
   input,
   output,
   signal,
-  untracked,
 } from '@angular/core';
 import { toSignal } from '@angular/core/rxjs-interop';
 import { FormControl, ReactiveFormsModule } from '@angular/forms';
@@ -375,6 +376,7 @@ export class ComposerComponent implements AfterViewInit {
   protected readonly projectState = inject(ProjectStateService);
   private readonly preprocessor = inject(ImagePreprocessorService);
   private readonly fileAttachments = inject(FileAttachmentService);
+  private readonly injector = inject(Injector);
 
   readonly text = new FormControl<string>('', { nonNullable: true });
 
@@ -431,11 +433,13 @@ export class ComposerComponent implements AfterViewInit {
     effect(() => {
       const returned = this.returnedText();
       if (!returned) return;
-      this.takeBackQueuedText(
-        returned,
-        untracked(() => this.textValue())
+      afterNextRender(
+        () => {
+          this.takeBackReturnedText(returned, this.textValue());
+          this.returnedTextHandled.emit();
+        },
+        { injector: this.injector }
       );
-      this.returnedTextHandled.emit();
     });
   }
 
@@ -467,7 +471,7 @@ export class ComposerComponent implements AfterViewInit {
     });
   }
 
-  private takeBackQueuedText(payload: string, typed: string): void {
+  private takeBackReturnedText(payload: string, typed: string): void {
     const planned = payload.startsWith(PLAN_MODE_PREFIX);
     const text = planned ? payload.slice(PLAN_MODE_PREFIX.length) : payload;
     if (typed.trim() === '') {
@@ -653,9 +657,9 @@ export class ComposerComponent implements AfterViewInit {
     if (this.disabled()) return '';
     const draft = this.attachmentDraft();
     if (draft.anyStaging()) return 'Preparing attachment…';
-    if (draft.records().length > 0 && this.streaming()) {
-      return 'Wait for the response to finish before sending an attachment.';
-    }
+    if (draft.records().length === 0) return '';
+    if (this.streaming()) return 'Wait for the response to finish before sending an attachment.';
+    if (this.sendBlocked()()) return 'Wait for the session to start before sending an attachment.';
     return '';
   });
 

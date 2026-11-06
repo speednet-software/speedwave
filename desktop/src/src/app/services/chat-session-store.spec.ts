@@ -7390,6 +7390,24 @@ describe('ChatSessionStore', () => {
       expect(store.returnedStartSlot()).toBe('needs sign-in');
     });
 
+    it('does not send a returned slot no composer took yet with the next successful start', async () => {
+      const { done: failing } = await beginStart();
+      await store.queueMessage('returned while no composer was shown');
+      startFails = 'chat backend crashed';
+      pendingStart.resolve();
+      await failing;
+
+      startFails = null;
+      pendingStart = createDeferred<void>();
+      const { done: retry } = await beginStart();
+      pendingStart.resolve();
+      await retry;
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(sent()).toEqual([]);
+      expect(store.returnedStartSlot()).toBe('returned while no composer was shown');
+    });
+
     it('a new text queued during the next start replaces the returned one', async () => {
       const { done: failing } = await beginStart();
       await store.queueMessage('older');

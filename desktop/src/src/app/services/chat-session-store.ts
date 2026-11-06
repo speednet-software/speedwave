@@ -1994,7 +1994,7 @@ export class ChatSessionStore {
     this.notifyChange();
   }
 
-  /** Drops the start slot once the composer took {@link returnedStartSlot} back into its field. */
+  /** Drops the start slot. */
   settleReturnedStartSlot(): void {
     this.clearStartSlot();
   }
@@ -2269,7 +2269,7 @@ export class ChatSessionStore {
 
   private takeStartSlot(): void {
     const slot = this._startSlot;
-    if (!slot || this.sessionStartInFlightFromState()) return;
+    if (!slot || this._returnedStartSlot() !== null || this.sessionStartInFlightFromState()) return;
     this.clearStartSlot();
     if (this.isStreaming) void this.queueMessage(slot.text);
     else void this.sendMessage(slot.text);
