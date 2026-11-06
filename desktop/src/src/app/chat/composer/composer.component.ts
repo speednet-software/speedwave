@@ -10,6 +10,7 @@ import {
   input,
   output,
   signal,
+  untracked,
 } from '@angular/core';
 import { toSignal } from '@angular/core/rxjs-interop';
 import { FormControl, ReactiveFormsModule } from '@angular/forms';
@@ -51,7 +52,7 @@ const PLAN_MODE_PREFIX =
 
 /**
  * Stateless composer: attach menu, textarea, slash button, slash-menu popover, send button. Enter submits, Shift+Enter
- * newlines, `/` opens the slash menu; ADR-045: while `streaming`, submit emits `queueRequested`, not `submitted`.
+ * newlines, `/` opens the slash menu; ADR-045: while `streaming` or `sendBlocked`, submit emits `queueRequested`, not `submitted`.
  */
 @Component({
   selector: 'app-composer',
@@ -342,6 +343,8 @@ export class ComposerComponent implements AfterViewInit {
 
   readonly draftText = input('');
 
+  readonly returnedText = input('');
+
   /** Per-tab attachment state (`ChatSessionStore.composerAttachments`, SPEED-785) — never instance-held, so it survives a tab switch. */
   readonly attachmentDraft = input.required<ComposerAttachments>();
 
@@ -358,6 +361,8 @@ export class ComposerComponent implements AfterViewInit {
   readonly transcriptDetached = output<void>();
 
   readonly draftApplied = output<void>();
+
+  readonly returnedTextHandled = output<boolean>();
 
   readonly stopRequested = output<void>();
 
@@ -424,6 +429,13 @@ export class ComposerComponent implements AfterViewInit {
       this.setText(draft);
       this.draftApplied.emit();
     });
+    effect(() => {
+      const returned = this.returnedText();
+      if (!returned) return;
+      const taken = untracked(() => this.textValue()).trim() === '';
+      if (taken) this.takeBackQueuedText(returned);
+      this.returnedTextHandled.emit(taken);
+    });
   }
 
   /** Auto-focus the textarea on mount so the user can start typing immediately. */
@@ -452,6 +464,12 @@ export class ComposerComponent implements AfterViewInit {
       ta.focus();
       ta.setSelectionRange(value.length, value.length);
     });
+  }
+
+  private takeBackQueuedText(payload: string): void {
+    const planned = payload.startsWith(PLAN_MODE_PREFIX);
+    this.setPlanMode(planned);
+    this.setText(planned ? payload.slice(PLAN_MODE_PREFIX.length) : payload);
   }
 
   /**
@@ -514,16 +532,16 @@ export class ComposerComponent implements AfterViewInit {
     if (this.autosize) this.autosize.enabled = true;
   }
 
-  /** Text submits queue while streaming (ADR-045); submits with attachments don't (ADR-065). */
+  /** Text submits queue while streaming or starting (ADR-045); submits with attachments don't (ADR-065). */
   canSubmit(): boolean {
-    if (this.disabled() || this.sendBlocked()()) return false;
+    if (this.disabled()) return false;
     const draft = this.attachmentDraft();
     if (draft.anyStaging()) return false;
     const text = this.textValue();
     const hasText = !isBlankOrSlashOnly(text);
     const hasAttachments = draft.records().length > 0;
     if (!hasText && !hasAttachments) return false;
-    return !(hasAttachments && this.streaming());
+    return !(hasAttachments && this.queuesSubmit());
   }
 
   /** Truncated preview of the queued slot (single-line, max 80 chars). */
@@ -550,14 +568,14 @@ export class ComposerComponent implements AfterViewInit {
     this.submit();
   }
 
-  /** Routes to queueRequested while streaming (ADR-045); submitted otherwise. */
+  /** Routes to queueRequested while streaming or starting (ADR-045); submitted otherwise. */
   submit(): void {
     if (!this.canSubmit()) return;
     const text = this.textValue().trim();
     const payload = this.planMode() ? `${PLAN_MODE_PREFIX}${text}` : text;
     const draft = this.attachmentDraft();
     const attachments = draft.ready();
-    if (this.streaming()) {
+    if (this.queuesSubmit()) {
       if (attachments.length > 0) return;
       this.queueRequested.emit(payload);
     } else {
@@ -567,6 +585,10 @@ export class ComposerComponent implements AfterViewInit {
     this.restoreAutoSize();
     draft.clear();
     this.closeSlash();
+  }
+
+  private queuesSubmit(): boolean {
+    return this.streaming() || this.sendBlocked()();
   }
 
   /**

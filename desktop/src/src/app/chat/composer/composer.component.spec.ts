@@ -273,41 +273,96 @@ describe('ComposerComponent', () => {
   });
 
   describe('send blocked while a session starts', () => {
-    it('keeps the text and emits nothing on Enter', () => {
-      const emitted: string[] = [];
-      component.submitted.subscribe((v) => emitted.push(v.payload));
+    function enter(): void {
+      textarea().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: false }));
+    }
+
+    function routes(): { submitted: string[]; queued: string[] } {
+      const out = { submitted: [] as string[], queued: [] as string[] };
+      component.submitted.subscribe((v) => out.submitted.push(v.payload));
+      component.queueRequested.subscribe((v) => out.queued.push(v));
+      return out;
+    }
+
+    async function attachImage(): Promise<void> {
+      await component
+        .attachmentDraft()
+        .add(new File(['x'], 'img.png', { type: 'image/png' }), 'image', async () =>
+          makeStagedImage('img.png')
+        );
+    }
+
+    it('queues the text on Enter and clears the field', () => {
+      const out = routes();
       fixture.componentRef.setInput('sendBlocked', () => true);
       component.text.setValue('wait for the session');
       fixture.detectChanges();
 
-      textarea().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: false }));
+      enter();
 
-      expect(emitted).toEqual([]);
-      expect(component.text.value).toBe('wait for the session');
+      expect(out).toEqual({ submitted: [], queued: ['wait for the session'] });
+      expect(component.text.value).toBe('');
     });
 
-    it('refuses a submit when a start began after the last render', () => {
-      const emitted: string[] = [];
-      component.submitted.subscribe((v) => emitted.push(v.payload));
+    it('queues a submit when a start began after the last render', () => {
+      const out = routes();
       const blocked = signal(false);
       fixture.componentRef.setInput('sendBlocked', blocked);
       component.text.setValue('typed before the start');
       fixture.detectChanges();
 
       blocked.set(true);
-      textarea().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: false }));
+      enter();
 
-      expect(emitted).toEqual([]);
-      expect(component.text.value).toBe('typed before the start');
+      expect(out).toEqual({ submitted: [], queued: ['typed before the start'] });
     });
 
-    it('disables the send button but leaves the field editable', () => {
+    it('queues the plan-mode payload', () => {
+      const out = routes();
+      fixture.componentRef.setInput('sendBlocked', () => true);
+      component.setPlanMode(true);
+      component.text.setValue('plan it');
+      fixture.detectChanges();
+
+      enter();
+
+      expect(out.queued).toHaveLength(1);
+      expect(out.queued[0].startsWith('[Plan mode]')).toBe(true);
+      expect(out.queued[0].endsWith('plan it')).toBe(true);
+    });
+
+    it('keeps the send button enabled for text and the field editable', () => {
       fixture.componentRef.setInput('sendBlocked', () => true);
       component.text.setValue('ready');
       fixture.detectChanges();
 
-      expect(sendButton().hasAttribute('disabled')).toBe(true);
+      expect(component.canSubmit()).toBe(true);
+      expect(sendButton().hasAttribute('disabled')).toBe(false);
       expect(textarea().hasAttribute('disabled')).toBe(false);
+    });
+
+    it('disables the send for blank text', () => {
+      fixture.componentRef.setInput('sendBlocked', () => true);
+      component.text.setValue('   ');
+      fixture.detectChanges();
+
+      expect(component.canSubmit()).toBe(false);
+      expect(sendButton().hasAttribute('disabled')).toBe(true);
+    });
+
+    it('refuses a submit with an attachment and keeps the draft (ADR-065)', async () => {
+      const out = routes();
+      fixture.componentRef.setInput('sendBlocked', () => true);
+      component.text.setValue('with a picture');
+      await attachImage();
+      fixture.detectChanges();
+
+      expect(component.canSubmit()).toBe(false);
+      enter();
+
+      expect(out).toEqual({ submitted: [], queued: [] });
+      expect(component.text.value).toBe('with a picture');
+      expect(component.attachmentDraft().records()).toHaveLength(1);
     });
 
     it('tells the user the session is starting, ahead of the queue hint', () => {
@@ -326,33 +381,93 @@ describe('ComposerComponent', () => {
     });
 
     it('sends when the block lifted after the last render', () => {
-      const emitted: string[] = [];
-      component.submitted.subscribe((v) => emitted.push(v.payload));
+      const out = routes();
       const blocked = signal(true);
       fixture.componentRef.setInput('sendBlocked', blocked);
       component.text.setValue('the start just ended');
       fixture.detectChanges();
 
       blocked.set(false);
-      textarea().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: false }));
+      enter();
 
-      expect(emitted).toEqual(['the start just ended']);
+      expect(out).toEqual({ submitted: ['the start just ended'], queued: [] });
     });
+  });
 
-    it('sends the kept text once the block lifts', () => {
-      const emitted: string[] = [];
-      component.submitted.subscribe((v) => emitted.push(v.payload));
-      const blocked = signal(true);
-      fixture.componentRef.setInput('sendBlocked', blocked);
-      component.text.setValue('now it goes');
+  describe('text returned from a failed session start', () => {
+    function handled(): boolean[] {
+      const out: boolean[] = [];
+      component.returnedTextHandled.subscribe((taken) => out.push(taken));
+      return out;
+    }
+
+    it('puts the text into an empty field and reports it taken', () => {
+      const out = handled();
+      fixture.componentRef.setInput('returnedText', 'my early message');
       fixture.detectChanges();
 
-      blocked.set(false);
-      fixture.detectChanges();
-      textarea().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: false }));
-
-      expect(emitted).toEqual(['now it goes']);
+      expect(component.text.value).toBe('my early message');
+      expect(component.planMode()).toBe(false);
+      expect(out).toEqual([true]);
     });
+
+    it('restores plan mode and strips its prefix from a plan-mode payload', () => {
+      const payload = planPayload('plan it');
+      const out = handled();
+
+      fixture.componentRef.setInput('returnedText', payload);
+      fixture.detectChanges();
+
+      expect(component.text.value).toBe('plan it');
+      expect(component.planMode()).toBe(true);
+      expect(out).toEqual([true]);
+    });
+
+    it('keeps text the user typed meanwhile and reports the returned text not taken', () => {
+      const out = handled();
+      component.text.setValue('something newer');
+      fixture.detectChanges();
+
+      fixture.componentRef.setInput('returnedText', 'my early message');
+      fixture.detectChanges();
+
+      expect(component.text.value).toBe('something newer');
+      expect(out).toEqual([false]);
+    });
+
+    it('treats a whitespace-only field as empty', () => {
+      const out = handled();
+      component.text.setValue('  \n ');
+      fixture.detectChanges();
+
+      fixture.componentRef.setInput('returnedText', 'my early message');
+      fixture.detectChanges();
+
+      expect(component.text.value).toBe('my early message');
+      expect(out).toEqual([true]);
+    });
+
+    it('does nothing for an empty returned text', () => {
+      const out = handled();
+      component.text.setValue('typed');
+      fixture.componentRef.setInput('returnedText', '');
+      fixture.detectChanges();
+
+      expect(component.text.value).toBe('typed');
+      expect(out).toEqual([]);
+    });
+
+    function planPayload(text: string): string {
+      let payload = '';
+      component.queueRequested.subscribe((v) => (payload = v));
+      component.setPlanMode(true);
+      fixture.componentRef.setInput('sendBlocked', () => true);
+      component.text.setValue(text);
+      component.submit();
+      fixture.componentRef.setInput('sendBlocked', () => false);
+      component.setPlanMode(false);
+      return payload;
+    }
   });
 
   describe('slash menu trigger', () => {
