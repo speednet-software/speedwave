@@ -9,7 +9,7 @@ const TURN_ORIGIN_LABELS: Record<SelfStartedTurnOrigin, string> = {
   task_notification: 'background task finished',
 };
 
-/** Renders text + image + file + chip blocks; image and file are placeholder pills (ADR-065, ADR-094). */
+/** Renders text + image + file + chip + turn_origin blocks; image and file are placeholder pills (ADR-065, ADR-094). */
 @Component({
   selector: 'app-user-message',
   imports: [ControlChipComponent, IconComponent],

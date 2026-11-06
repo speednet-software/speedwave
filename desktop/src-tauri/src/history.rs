@@ -549,13 +549,6 @@ fn fold_history_control_chips(messages: &mut Vec<ConversationMessage>) {
     }
 }
 
-fn is_turn_origin_message(msg: &ConversationMessage) -> bool {
-    matches!(
-        msg.blocks.as_deref(),
-        Some([MessageBlock::TurnOrigin { .. }])
-    )
-}
-
 pub fn list_conversations(project: &str) -> anyhow::Result<Vec<ConversationSummary>> {
     list_conversations_impl(consts::data_dir(), project)
 }
@@ -718,6 +711,13 @@ fn list_conversations_impl(
     }
 
     Ok(summaries)
+}
+
+fn is_turn_origin_message(msg: &ConversationMessage) -> bool {
+    matches!(
+        msg.blocks.as_deref(),
+        Some([MessageBlock::TurnOrigin { .. }])
+    )
 }
 
 pub fn get_conversation(project: &str, session_id: &str) -> anyhow::Result<ConversationTranscript> {
