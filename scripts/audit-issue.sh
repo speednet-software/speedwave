@@ -48,7 +48,6 @@ gh issue list --repo "$GH_REPO" --state open --search "\"$TITLE\" in:title" --li
 PLAN="$(python3 "$GATE" issue-plan --status "$STATUS" --existing "$WORKDIR/existing.json" --title "$TITLE")"
 ACTION="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["action"])' "$PLAN")"
 
-CLOSE_COMMENT="Duplicate of the single audit-schedule issue, superseded by the one open issue."
 case "$ACTION" in
     create)
         NUMBER="$(gh issue create --repo "$GH_REPO" --title "$TITLE" --body-file "$WORKDIR/report.md" | grep -oE '[0-9]+$')"
