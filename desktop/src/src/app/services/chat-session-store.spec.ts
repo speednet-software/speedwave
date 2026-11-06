@@ -7464,6 +7464,66 @@ describe('ChatSessionStore', () => {
       expect(sent()).toEqual([]);
     });
 
+    it('moves a slot kept after a failed start to the backend queue once the next turn is sent', async () => {
+      const { done: failing } = await beginStart();
+      await store.queueMessage('kept behind the next turn');
+      startFails = 'chat backend crashed';
+      pendingStart.resolve();
+      await failing;
+      store.settleReturnedStartSlot(false);
+
+      store.seedSessionId('sess-kept');
+      await store.sendMessage('typed after the failure');
+
+      expect(sent()).toHaveLength(1);
+      expect(sent()[0]).toMatchObject({ displayText: 'typed after the failure' });
+      await vi.waitFor(() =>
+        expect(backendQueueCalls()).toEqual([
+          {
+            cmd: 'queue_message',
+            args: { sessionId: 'sess-kept', text: 'kept behind the next turn' },
+          },
+        ])
+      );
+      expect(store.pendingQueue?.text).toBe('kept behind the next turn');
+    });
+
+    it('keeps the slot across a reset and sends it after the start that follows', async () => {
+      const { done: superseded } = await beginStart();
+      await store.queueMessage('survives the reset');
+
+      store.resetForNewConversation();
+      expect(store.pendingQueue?.text).toBe('survives the reset');
+      pendingStart.resolve();
+      await superseded;
+      await new Promise((r) => setTimeout(r, 0));
+      expect(sent()).toEqual([]);
+
+      pendingStart = createDeferred<void>();
+      const { done: next } = await beginStart();
+      pendingStart.resolve();
+      await next;
+
+      await vi.waitFor(() => expect(sent()).toHaveLength(1));
+      expect(sent()[0]).toMatchObject({ displayText: 'survives the reset' });
+    });
+
+    it('neither sends nor drops a held slot when a resume finds no active project', async () => {
+      const { done: failing } = await beginStart();
+      await store.queueMessage('no project to resume in');
+      startFails = 'chat backend crashed';
+      pendingStart.resolve();
+      await failing;
+      store.settleReturnedStartSlot(false);
+      TestBed.inject(ProjectStateService).activeProject.set(null);
+
+      await store.resumeConversation('sess-resumed');
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(sent()).toEqual([]);
+      expect(store.pendingQueue?.text).toBe('no project to resume in');
+    });
+
     it('queues to the backend as before when no start is in flight', async () => {
       store.seedSessionId('sess-live');
       store.isStreaming = true;

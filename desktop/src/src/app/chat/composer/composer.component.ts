@@ -51,8 +51,7 @@ const PLAN_MODE_PREFIX =
   '[Plan mode] Produce a plan only — do NOT modify files, do NOT run tools that mutate state. Then ask me to confirm before acting.\n\n';
 
 /**
- * Stateless composer: attach menu, textarea, slash button, slash-menu popover, send button. Enter submits, Shift+Enter
- * newlines, `/` opens the slash menu; ADR-045: while `streaming` or `sendBlocked`, submit emits `queueRequested`, not `submitted`.
+ * Stateless composer: attach menu, textarea, slash button, slash-menu popover, send button.
  */
 @Component({
   selector: 'app-composer',
@@ -532,7 +531,7 @@ export class ComposerComponent implements AfterViewInit {
     if (this.autosize) this.autosize.enabled = true;
   }
 
-  /** Text submits queue while streaming or starting (ADR-045); submits with attachments don't (ADR-065). */
+  /** Whether the current draft can be submitted. */
   canSubmit(): boolean {
     if (this.disabled()) return false;
     const draft = this.attachmentDraft();
@@ -568,7 +567,7 @@ export class ComposerComponent implements AfterViewInit {
     this.submit();
   }
 
-  /** Routes to queueRequested while streaming or starting (ADR-045); submitted otherwise. */
+  /** Submits or queues the draft. */
   submit(): void {
     if (!this.canSubmit()) return;
     const text = this.textValue().trim();

@@ -258,7 +258,6 @@ export class ChatSessionStore {
   private _queueAwaitingSession = false;
   private _startSlot: QueuedMessage | null = null;
   private readonly _returnedStartSlot = signal<string | null>(null);
-  /** Text of a message queued during a session start that failed, until the composer settles it. */
   readonly returnedStartSlot: Signal<string | null> = this._returnedStartSlot.asReadonly();
   /** Public read-only accessor for the queued slot. */
   get pendingQueue(): QueuedMessage | null {
@@ -295,31 +294,6 @@ export class ChatSessionStore {
     const effort = this._pendingEffort;
     this.clearPendingPicks();
     return this.takeReleasedPicks(model, effort);
-  }
-
-  private releaseForReadySession(): void {
-    const generation = this._sessionGeneration;
-    void this.takePendingPicks().finally(() => {
-      if (generation === this._sessionGeneration) this.takeStartSlot();
-    });
-  }
-
-  private takeStartSlot(): void {
-    const slot = this._startSlot;
-    if (!slot || this.sessionStartInFlightFromState()) return;
-    this.clearStartSlot();
-    if (this.isStreaming) void this.queueMessage(slot.text);
-    else void this.sendMessage(slot.text);
-  }
-
-  private returnStartSlot(): void {
-    if (this._startSlot) this._returnedStartSlot.set(this._startSlot.text);
-  }
-
-  private clearStartSlot(): void {
-    this._startSlot = null;
-    this._returnedStartSlot.set(null);
-    this.notifyChange();
   }
 
   private clearPendingPicks(): void {
@@ -1363,6 +1337,7 @@ export class ChatSessionStore {
     try {
       await this.deps.ensureListeners();
       await this.deps.tauri.invoke('send_message', invokeArgs);
+      if (sameConversation()) this.takeStartSlot();
     } catch (err) {
       const errStr = String(err);
       if (
@@ -1953,7 +1928,6 @@ export class ChatSessionStore {
   /**
    * Queue a message as the next turn (ADR-045); replace semantics. Before the first session id
    * (init not yet parsed), backend registration defers to {@link flushDeferredQueue} so an early queue is never dropped.
-   * During a session start the slot stays in this store until the session is ready.
    * @param text - The message to queue.
    */
   async queueMessage(text: string): Promise<string | null> {
@@ -2022,7 +1996,7 @@ export class ChatSessionStore {
   }
 
   /**
-   * Settles {@link returnedStartSlot}: the slot is dropped when the composer took its text back.
+   * Settles {@link returnedStartSlot}.
    * @param taken - Whether the composer put the text back into its field.
    */
   settleReturnedStartSlot(taken: boolean): void {
@@ -2202,7 +2176,10 @@ export class ChatSessionStore {
     let outcome: StartOutcome = 'started';
     let sessionKept = false;
     try {
-      if (!project) return;
+      if (!project) {
+        outcome = 'failed';
+        return;
+      }
 
       if (this._modelWork.size > 0) await this.modelPicksSettled();
       await this.deps.tauri.invoke('resume_conversation', {
@@ -2286,6 +2263,31 @@ export class ChatSessionStore {
     }
     if (!sessionKept) this.dropPendingPicks();
     this.returnStartSlot();
+  }
+
+  private releaseForReadySession(): void {
+    const generation = this._sessionGeneration;
+    void this.takePendingPicks().finally(() => {
+      if (generation === this._sessionGeneration) this.takeStartSlot();
+    });
+  }
+
+  private takeStartSlot(): void {
+    const slot = this._startSlot;
+    if (!slot || this.sessionStartInFlightFromState()) return;
+    this.clearStartSlot();
+    if (this.isStreaming) void this.queueMessage(slot.text);
+    else void this.sendMessage(slot.text);
+  }
+
+  private returnStartSlot(): void {
+    if (this._startSlot) this._returnedStartSlot.set(this._startSlot.text);
+  }
+
+  private clearStartSlot(): void {
+    this._startSlot = null;
+    this._returnedStartSlot.set(null);
+    this.notifyChange();
   }
 
   private static readonly DEFERRED_RECONCILE_BACKOFF_MS = [
