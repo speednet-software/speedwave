@@ -1,5 +1,181 @@
 # Changelog
 
+## [0.21.0](https://github.com/speednet-software/speedwave/compare/v0.20.0...v0.21.0+260) (2026-11-06)
+
+
+### Bug Fixes
+- Bump pypdf to 6.21.4 for CVE-2026-119203 to CVE-2026-119209 (#1521)
+
+### Features
+- Play a transcript line or a speaker sample from the recording (#1517)
+- Git push from the container through the proxy (#1513)
+
+### Bug Fixes
+- Retry compose up when the restart monitor killed the created task (#1519)
+- Keep newlines in user chat messages (#1520)
+
+### Features
+- Take meeting transcription out of beta (#1514)
+- Warn about unsaved changes when leaving Settings (#1207)
+- Keep the computer awake while a recording, transcription or chat turn runs (#1499)
+
+### Features
+- Add a "+" attach menu to the chat composer (#1505)
+
+### Bug Fixes
+- Answer the Lima guest's own host name from /etc/hosts (#1504)
+- Record the Anthropic key kind when the key is saved (#1506)
+- Reject undeclared tool arguments in every built-in worker (#1508)
+- Drop an auth retry result that lands after a project switch started (#1512)
+
+### Features
+- Let the user name the speakers of a diarized transcript (#1492)
+
+### Bug Fixes
+- Outlast a stalled Lima sudo in the reap and trace it in the e2e capture (#1496)
+
+### Features
+- Add a Ctrl+Tab switcher and marks on unseen chat tabs (#1489)
+
+### Bug Fixes
+- Keep reconciling a late OpenRouter cost in the chat footer (#1493)
+
+### Features
+- Tell speakers apart in mono recordings of the meeting audio (#1469)
+
+### Bug Fixes
+- Link the native CLI Info.plist by absolute path with a fallback (#1473)
+- Upload the rig failure screenshots and the Desktop log of both e2e lanes (#1475)
+- Keep recording through microphone device changes on macOS (#1474)
+- Keep the attribution block whenever the stored Anthropic API key is injected (#1478)
+- Open the model picker with an empty search (#1481)
+- Wait for the boot reconcile before a project is ready, capture rig evidence (#1484)
+
+### Features
+- Transcribe an audio file recorded outside Speedwave (#1450)
+
+### Bug Fixes
+- Match gh's uppercase issue state in audit issue plan (#1463)
+- Show a paste hint at Anthropic sign-in and quiet routine logs (#1465)
+- Pass secrets to the e2e workflow from the beta run (#1466)
+
+### Performance
+- Diarize on the CPU when the only GPU is integrated (#1451)
+
+### Features
+- Caller-shaped Jira tools with parent, components, links and Markdown (#1449)
+
+### Bug Fixes
+- Keep the Claude Code attribution block for Claude billed by an API key (#1454)
+
+### Features
+- Native OS notifications for chat-session events (#1434)
+
+### Bug Fixes
+- Build MCP images from the lockfile and run rig e2e once per beta (#1435)
+- Make transcription status colours readable in the light theme (#1448)
+
+### Features
+- Pin transcription model downloads to a Hugging Face commit (#1433)
+
+### Bug Fixes
+- Let Calendar, Notes and Mail ask for macOS permission on signed builds (#1402)
+- Stop repeating speech at offline-pass window steps (#1404)
+
+### Performance
+- Read offline-pass audio without an interleaved copy (#1403)
+
+### Features
+- Control Apple Mail from the chat with in-chat confirmation (#1396)
+- Show download progress while an update installs (#1401)
+
+### Bug Fixes
+- Estimate the transcription time left from the decode pace (#1398)
+- Lift the model gate when a download finishes after a remount (#1397)
+
+### Features
+- Find in chat tab with regex and case toggles (#1393)
+
+### Features
+- Render Mermaid diagrams and full Markdown in chat and plugin views (#1372)
+- Optional speaker attribution with Nemotron-3 diarization (#1365)
+
+### Features
+- Open a new chat tab for an attached transcript (#1370)
+
+### Features
+- Opt-in Slack features and teaching parameter errors (#1371)
+
+### Features
+- Tag proxy usage lines with a hash of the Claude Code session (#1364)
+- Upload workspace files to a channel, DM or thread (#1368)
+
+### Bug Fixes
+- Isolate the office worker network on nerdctl (#1343)
+- Install and detect Python 3 for the model prep on Windows (#1366)
+
+### Bug Fixes
+- Build e2e WebDriver plugin against webview2-com 0.39 (#1362)
+
+### Features
+- Attach any file by paste or drop, streamed to disk (#1357)
+- Per-project switch for the on-device PII detector (#1201)
+- Audit all npm lockfiles including devDependencies (#1363)
+
+### Bug Fixes
+- Keep chat scroll pinned and label history by session title (#1358)
+- Correct ADR-083/084 to the code, close SPEED-405 follow-ups (#1122)
+
+### Bug Fixes
+- Build ggml for a portable CPU baseline on Windows (#1354)
+
+### Bug Fixes
+- Persist composer draft across nav-rail tab switches (#1200)
+- Disable native drag-drop so composer HTML5 DnD fires, f… (#1202)
+
+### Bug Fixes
+- Default appearance mode to auto on first run (#1190)
+
+### Features
+- Pause, transcribe later and a rebuilt recordings screen (#1347)
+
+### Bug Fixes
+- Give a beta without user-facing changes a placeholder note (#1342)
+- Make desktop and runtime tests and clippy green on Windows (#1349)
+
+### Bug Fixes
+- Stop the transcription progress bar freezing after a tab switch (#1337)
+- Scope composer attachments to the chat tab that staged them (#1338)
+
+### Features
+- Bump Claude Code to 2.1.295 with Sonnet 5.5 and Haiku 5.5 in the catalog (#1298)
+
+### Features
+- Parallel chat tabs behind beta, with per-tab model selection (#1261)
+
+### Bug Fixes
+- Offer the newer version when the update banner goes stale (#1296)
+
+### Features
+- Show the selected update channel like the theme picker (#1295)
+
+### Features
+- 13-lane merge gate, commitlint validate, diff-based audit (#1292)
+
+### Bug Fixes
+- Accept beta build numbers in release asset verification (#1290)
+
+### Features
+- Add --version and -V flags (#1269)
+- Derive the app version from git (#1279)
+- Update channel switch, beta updater endpoint and self-update by channel (#1289)
+- Beta and stable release workflows, drop release-please (#1288)
+
+### Bug Fixes
+- Bump Angular to 22.2.1 for GHSA-ff3f-86qr-9cv3 (#1280)
+- Bump proxy-addr to 2.0.8 for GHSA-jqcg-44mw-7w3h (#1284)
+
+
 
 ## [0.20.0](https://github.com/speednet-software/speedwave/compare/v0.19.0...v0.20.0) (2026-09-25)
 
