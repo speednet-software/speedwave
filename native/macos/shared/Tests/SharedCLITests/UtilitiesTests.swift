@@ -190,6 +190,10 @@ final class SharedCLITests: XCTestCase {
         )
     }
 
+    func testCLIErrorInvalidValue() {
+        XCTAssertEqual(CLIError.invalidValue("Invalid sort: x").errorDescription, "Invalid sort: x")
+    }
+
     func testCLIErrorMissingFieldHasDescription() {
         let error = CLIError.missingField("id")
         XCTAssertNotNil(error.errorDescription)

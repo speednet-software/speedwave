@@ -575,6 +575,24 @@ describe('reminder-tools', () => {
       expect(items?.properties?.completed_date).toBeDefined();
     });
 
+    it('listRemindersTool outputSchema reports total and truncated', () => {
+      const listTool = createReminderTools().find((t) => t.tool.name === 'listReminders')!;
+      const props = (listTool.tool.outputSchema as any).properties;
+      expect(props.total.type).toBe('number');
+      expect(props.truncated.type).toBe('boolean');
+    });
+
+    it('listRemindersTool inputSchema declares the filters and the sort enum', () => {
+      const listTool = createReminderTools().find((t) => t.tool.name === 'listReminders')!;
+      const props = (listTool.tool.inputSchema as any).properties;
+      expect(props.due_from.type).toBe('string');
+      expect(props.due_to.type).toBe('string');
+      expect(props.overdue.type).toBe('boolean');
+      expect(props.search.type).toBe('string');
+      expect(props.sort.enum).toEqual(['due_date', 'created', 'name']);
+      expect(props.limit.description).toContain('default 50');
+    });
+
     it('getReminderTool outputSchema includes tags', () => {
       const tools = createReminderTools();
       const getTool = tools.find((t) => t.tool.name === 'getReminder')!;
@@ -602,6 +620,63 @@ describe('reminder-tools', () => {
         const result = await handleListReminders({ show_completed: 'true' as any });
         expect(result.success).toBe(false);
         expect(result.error?.code).toBe('INVALID_TYPE');
+      });
+
+      it.each(['due_from', 'due_to'] as const)('rejects an invalid %s', async (field) => {
+        const result = await handleListReminders({ [field]: '15.06.2026' });
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('INVALID_DATE');
+        expect(runCommand).not.toHaveBeenCalled();
+      });
+
+      it('rejects overdue as string', async () => {
+        const result = await handleListReminders({ overdue: 'true' as any });
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('INVALID_TYPE');
+      });
+
+      it('rejects an empty search', async () => {
+        const result = await handleListReminders({ search: '  ' });
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('EMPTY_FIELDS');
+      });
+
+      it('rejects a search longer than the short limit', async () => {
+        const result = await handleListReminders({ search: 'a'.repeat(1001) });
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('FIELD_TOO_LONG');
+      });
+
+      it('rejects an unknown sort and names the allowed values', async () => {
+        const result = await handleListReminders({ sort: 'priority' as any });
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('INVALID_VALUE');
+        expect(JSON.stringify(result.error)).toContain('due_date, created, name');
+        expect(runCommand).not.toHaveBeenCalled();
+      });
+
+      it('rejects limit above 10000', async () => {
+        const result = await handleListReminders({ limit: 10_001 });
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('OUT_OF_RANGE');
+      });
+
+      it('passes every filter to the CLI unchanged', async () => {
+        vi.mocked(runCommand).mockResolvedValueOnce({
+          stdout: '',
+          parsed: { reminders: [], total: 0, truncated: false },
+        });
+        const params = {
+          due_from: '2026-06-15',
+          due_to: '2026-06-16T09:00:00',
+          overdue: true,
+          search: 'faktura',
+          sort: 'name' as const,
+          limit: 5,
+        };
+        const result = await handleListReminders(params);
+        expect(result.success).toBe(true);
+        expect(runCommand).toHaveBeenCalledWith('reminders', 'list_reminders', params);
       });
     });
 

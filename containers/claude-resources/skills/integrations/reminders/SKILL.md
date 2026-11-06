@@ -20,7 +20,7 @@ Always run steps 1–2 before guessing a tool name or parameter. The live schema
 ## Key methods
 
 - `os.listReminderLists()`: list all reminder lists (no params).
-- `os.listReminders({ list_id?, limit?, show_completed? })`: list reminders, incomplete by default.
+- `os.listReminders({ list_id?, limit?, show_completed?, due_from?, due_to?, overdue?, search?, sort? })`: list reminders, incomplete by default; returns `{ reminders, total, truncated }`.
 - `os.getReminder({ id })`: fetch a single reminder by ID.
 - `os.createReminder({ name, list_id?, due_date?, priority?, notes?, tags? })`: create a reminder.
 - `os.updateReminder({ id, name?, list_id?, due_date?, priority?, notes?, tags?, completed? })`: change an existing reminder in place; only the fields you pass change.
@@ -34,6 +34,8 @@ Always run steps 1–2 before guessing a tool name or parameter. The live schema
 - **`list_id` accepts either the list's ID or its exact display name** (used by `listReminders`/`createReminder` to filter/target a list). The `id` passed to `getReminder`/`updateReminder`/`completeReminder`/`deleteReminder`, by contrast, must be the exact id string from a list/get/create call: a display name is not accepted there.
 - **`show_completed` defaults to `false`**: completed reminders are excluded unless explicitly requested.
 - **`priority` encoding:** 0 = none, 1-4 = high, 5 = medium, 6-9 = low (EventKit treats 1-9 as a gradient; any value in range is accepted).
+- **`listReminders` filters:** `due_from`/`due_to` take the `due_date` format; a bare `due_to` day includes that whole day, a bare `due_from` day starts at local midnight. Reminders without a due date appear only when no range is given. `overdue: true` returns incomplete reminders already past due (an all-day one only after its day ended), ignores `show_completed` and combines with a range. `search` matches the name and notes, ignoring case and diacritics ("faktura" finds "Faktúra").
+- **`listReminders` order and size:** `sort` is `due_date` (default: earliest first, undated last), `created` (oldest first) or `name` (alphabetical). `limit` defaults to 50. `total` is the match count before the limit; when `truncated` is true, narrow the query (`list_id`, a due range, `search`) instead of raising `limit` blindly. There is no offset.
 - **Tags are stored in the notes field** as `[#tag]` markers (EventKit has no native tag property). `listReminders` and `getReminder` extract them into a separate `tags` array; pass `tags: ["work"]` to `createReminder`. Do not embed `[#tag]` manually.
 - **Due dates:** `"2026-06-15"` makes an all-day reminder; `"2026-06-15T09:30:00"` means 09:30 in the user's local time (an offset or `Z` is converted to local time). Responses use the same two shapes and add `all_day`. Relative phrases ("tomorrow") must be resolved to an absolute date first.
 - **`updateReminder` changes only the fields you pass.** `due_date: null` removes the due date (and any recurrence); `notes` alone keeps the tags, `tags` alone keeps the notes, `tags: []` clears them; `completed: false` reopens a completed reminder. Prefer it over "create a new one and complete the old one" when the user wants a correction.
