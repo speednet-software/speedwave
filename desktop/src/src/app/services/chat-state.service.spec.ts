@@ -2528,6 +2528,89 @@ describe('ChatStateService', () => {
     });
   });
 
+  describe('a turn Claude Code started on its own (SPEED-908)', () => {
+    const dispatch = (chunk_type: string, data: Record<string, unknown>): void =>
+      mockTauri.dispatchEvent('chat_stream', { chunk_type, tab_id: service.tabId, data });
+
+    beforeEach(async () => {
+      mockTauri.isRunningInTauri = () => true;
+      await service.init();
+    });
+
+    it('shows a task-notification turn with its origin row, thinking, tool and answer', () => {
+      dispatch('SystemInit', { model: 'claude-opus-5-5', session_id: 's-1' });
+      dispatch('TurnStarted', { origin: 'task_notification' });
+      expect(service.isStreaming).toBe(true);
+      dispatch('Thinking', { content: 'the tests finished' });
+      dispatch('ToolStart', { tool_id: 't1', tool_name: 'Bash' });
+      dispatch('ToolResult', { tool_id: 't1', content: 'ok', is_error: false });
+      dispatch('Text', { content: 'All tests pass.' });
+      dispatch('Result', { session_id: 's-1', result_text: 'All tests pass.' });
+
+      expect(service.isStreaming).toBe(false);
+      expect(service.messages).toHaveLength(2);
+      expect(service.messages[0].role).toBe('user');
+      expect(service.messages[0].blocks).toEqual([
+        { type: 'turn_origin', origin: 'task_notification' },
+      ]);
+      expect(service.messages[1].role).toBe('assistant');
+      expect(service.messages[1].blocks.map((b) => b.type)).toEqual([
+        'thinking',
+        'tool_use',
+        'text',
+      ]);
+    });
+
+    it('shows a scheduled turn with its origin row', () => {
+      dispatch('TurnStarted', { origin: 'scheduled' });
+      dispatch('Text', { content: 'Reminder: stand-up.' });
+      dispatch('Result', { session_id: 's-1' });
+      expect(service.messages.map((m) => m.blocks[0])).toEqual([
+        { type: 'turn_origin', origin: 'scheduled' },
+        { type: 'text', content: 'Reminder: stand-up.' },
+      ]);
+    });
+
+    it('a composer turn is unchanged: no origin row, one user message', async () => {
+      await service.sendMessage('hello');
+      dispatch('SystemInit', { model: 'claude-opus-5-5', session_id: 's-1' });
+      dispatch('TurnStarted', { origin: 'user' });
+      dispatch('Text', { content: 'hi' });
+      dispatch('Result', { session_id: 's-1' });
+      expect(service.messages.map((m) => m.role)).toEqual(['user', 'assistant']);
+      expect(service.messages[0].blocks).toEqual([{ type: 'text', content: 'hello' }]);
+    });
+
+    it('an origin arriving while a turn streams adds no row', () => {
+      service.isStreaming = true;
+      dispatch('TurnStarted', { origin: 'task_notification' });
+      expect(service.messages).toHaveLength(0);
+      expect(service.isStreaming).toBe(true);
+    });
+
+    it('chunks left over after Stop are still dropped', async () => {
+      service.isStreaming = true;
+      await service.stopConversation();
+      dispatch('TurnStarted', { origin: 'user' });
+      dispatch('Text', { content: 'late content from stopped turn' });
+      dispatch('Result', { session_id: 's-1' });
+      expect(service.isStreaming).toBe(false);
+      expect(service.messages).toHaveLength(0);
+    });
+
+    it('a self-started turn can be stopped like any other', async () => {
+      dispatch('TurnStarted', { origin: 'scheduled' });
+      dispatch('Text', { content: 'partial' });
+      await service.stopConversation();
+      dispatch('Text', { content: 'after stop' });
+      expect(service.isStreaming).toBe(false);
+      expect(service.messages.map((m) => m.blocks)).toEqual([
+        [{ type: 'turn_origin', origin: 'scheduled' }],
+        [{ type: 'text', content: 'partial' }],
+      ]);
+    });
+  });
+
   describe('context usage from get_context_usage (Anthropic)', () => {
     const SNAPSHOT_1M = {
       model: 'claude-opus-5[1m]',

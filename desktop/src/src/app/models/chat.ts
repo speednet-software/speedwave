@@ -51,7 +51,11 @@ export type StreamChunk =
   | {
       chunk_type: 'QueueDrained';
       data: { session_id: string; text: string };
-    };
+    }
+  | { chunk_type: 'TurnStarted'; data: { origin: TurnOrigin } };
+
+/** What started a Claude Code turn. */
+export type TurnOrigin = 'user' | 'scheduled' | 'task_notification';
 
 /** `chat_stream` payload: the tagged chunk plus the owning tab. Mirror of Rust chat.rs::TabStreamChunk. */
 export type TabStreamChunk = StreamChunk & { tab_id: string };
@@ -171,6 +175,7 @@ export type MessageBlock =
       decided?: 'allow_once' | 'allow_always' | 'deny';
     }
   | { type: 'chip'; command: string; argument: string }
+  | { type: 'turn_origin'; origin: TurnOrigin }
   | { type: 'image'; media_type: string; alt?: string }
   | { type: 'file'; filename: string; size_bytes: number };
 

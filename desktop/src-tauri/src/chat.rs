@@ -97,6 +97,17 @@ pub enum StreamChunk {
         session_id: String,
         text: String,
     },
+    TurnStarted {
+        origin: TurnOrigin,
+    },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnOrigin {
+    User,
+    Scheduled,
+    TaskNotification,
 }
 
 pub(crate) fn sanitize_chunk(chunk: StreamChunk) -> StreamChunk {
@@ -417,6 +428,7 @@ pub struct StreamParser {
     previous_session_cost: Option<f64>,
     model_tracker: crate::session_model::SessionModelTracker,
     seen_unknown_types: std::collections::HashSet<String>,
+    next_turn_origin: Option<TurnOrigin>,
 }
 
 const MAX_TRACKED_UNKNOWN_TYPES: usize = 32;
@@ -432,6 +444,7 @@ impl StreamParser {
             previous_session_cost: None,
             model_tracker: crate::session_model::SessionModelTracker::default(),
             seen_unknown_types: std::collections::HashSet::new(),
+            next_turn_origin: None,
         }
     }
 
@@ -476,8 +489,14 @@ impl StreamParser {
                 self.capture_context_usage(parsed);
                 (Self::complete_tool_inputs(parsed), None)
             }
-            "system" => option_to_vec(self.parse_system_message(parsed)),
+            "system" => self.parse_system_line(parsed),
             "rate_limit_event" => option_to_vec(Self::parse_rate_limit_event(parsed)),
+            "command_lifecycle" => {
+                if parsed["state"].as_str() == Some("started") {
+                    self.next_turn_origin = Some(TurnOrigin::Scheduled);
+                }
+                (Vec::new(), None)
+            }
             other => {
                 let label = if other.is_empty() { "<none>" } else { other };
                 if self.seen_unknown_types.len() < MAX_TRACKED_UNKNOWN_TYPES
@@ -1065,6 +1084,26 @@ impl StreamParser {
         "billing",
         "Error:",
     ];
+
+    fn parse_system_line(
+        &mut self,
+        parsed: &serde_json::Value,
+    ) -> (Vec<StreamChunk>, Option<LogEntry>) {
+        match parsed["subtype"].as_str() {
+            Some("task_notification") => {
+                self.next_turn_origin = Some(TurnOrigin::TaskNotification);
+            }
+            Some("init") => {
+                let (mut chunks, log) = option_to_vec(self.parse_system_message(parsed));
+                chunks.push(StreamChunk::TurnStarted {
+                    origin: self.next_turn_origin.take().unwrap_or(TurnOrigin::User),
+                });
+                return (chunks, log);
+            }
+            _ => {}
+        }
+        option_to_vec(self.parse_system_message(parsed))
+    }
 
     fn parse_system_message(
         &mut self,
@@ -7653,22 +7692,174 @@ mod tests {
     }
 
     #[test]
-    fn parse_system_init_with_empty_model_and_no_session_falls_through() {
+    fn parse_system_init_with_empty_model_and_no_session_only_starts_the_turn() {
         let mut parser = StreamParser::new();
         let line = r#"{"type":"system","subtype":"init","model":""}"#;
-        assert!(
-            parse_line_str(&mut parser, line).is_none(),
-            "init with empty model and no session id should fall through and produce None"
+        assert_eq!(
+            turn_origins(&parse_line_all_str(&mut parser, line)),
+            vec![TurnOrigin::User],
+            "init with empty model and no session id should only start the turn"
         );
     }
 
     #[test]
-    fn parse_system_init_with_null_model_falls_through() {
+    fn parse_system_init_with_null_model_only_starts_the_turn() {
         let mut parser = StreamParser::new();
         let line = r#"{"type":"system","subtype":"init","model":null}"#;
+        assert_eq!(
+            turn_origins(&parse_line_all_str(&mut parser, line)),
+            vec![TurnOrigin::User],
+            "init with null model should only start the turn"
+        );
+    }
+
+    fn turn_origins(chunks: &[StreamChunk]) -> Vec<TurnOrigin> {
+        chunks
+            .iter()
+            .filter_map(|c| match c {
+                StreamChunk::TurnStarted { origin } => Some(*origin),
+                StreamChunk::SystemInit { .. } => None,
+                other => panic!("init must emit only SystemInit and TurnStarted, got {other:?}"),
+            })
+            .collect()
+    }
+
+    const SELF_STARTED_TURNS_CAPTURE: &str =
+        include_str!("../tests/fixtures/cc-2.1.295-self-started-turns.sanitized.ndjson");
+
+    #[test]
+    fn the_self_started_turn_capture_is_of_the_pinned_claude_code() {
+        let versions: Vec<String> = capture_lines(SELF_STARTED_TURNS_CAPTURE)
+            .iter()
+            .filter(|l| l["type"] == "system" && l["subtype"] == "init")
+            .map(|l| l["claude_code_version"].as_str().unwrap().to_string())
+            .collect();
+        assert!(!versions.is_empty());
         assert!(
-            parse_line_str(&mut parser, line).is_none(),
-            "init with null model should fall through and produce None"
+            versions
+                .iter()
+                .all(|v| v == speedwave_runtime::defaults::CLAUDE_VERSION),
+            "re-capture the self-started turns from Claude Code {} (got {versions:?})",
+            speedwave_runtime::defaults::CLAUDE_VERSION
+        );
+    }
+
+    #[test]
+    fn every_turn_in_the_capture_starts_with_its_origin() {
+        let mut parser = StreamParser::new();
+        let chunks: Vec<StreamChunk> = capture_lines(SELF_STARTED_TURNS_CAPTURE)
+            .iter()
+            .flat_map(|l| parser.parse_line(l).0)
+            .collect();
+        let started: Vec<TurnOrigin> = chunks
+            .iter()
+            .filter_map(|c| match c {
+                StreamChunk::TurnStarted { origin } => Some(*origin),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            started,
+            vec![
+                TurnOrigin::User,
+                TurnOrigin::TaskNotification,
+                TurnOrigin::User,
+                TurnOrigin::User,
+                TurnOrigin::Scheduled,
+            ]
+        );
+        let results = chunks
+            .iter()
+            .filter(|c| matches!(c, StreamChunk::Result { .. }))
+            .count();
+        assert_eq!(
+            results,
+            started.len(),
+            "every started turn ends in a result"
+        );
+    }
+
+    #[test]
+    fn init_emits_turn_started_after_system_init() {
+        let mut parser = StreamParser::new();
+        let chunks = parse_line_all_str(
+            &mut parser,
+            r#"{"type":"system","subtype":"init","model":"m","session_id":"s"}"#,
+        );
+        assert!(matches!(chunks[0], StreamChunk::SystemInit { .. }));
+        assert!(matches!(
+            chunks[1],
+            StreamChunk::TurnStarted {
+                origin: TurnOrigin::User
+            }
+        ));
+        assert_eq!(chunks.len(), 2);
+    }
+
+    #[test]
+    fn a_turn_origin_applies_to_the_next_turn_only() {
+        let mut parser = StreamParser::new();
+        let init = r#"{"type":"system","subtype":"init","model":"m"}"#;
+        let notification =
+            r#"{"type":"system","subtype":"task_notification","task_id":"t","status":"completed"}"#;
+        assert!(parse_line_all_str(&mut parser, notification).is_empty());
+        assert_eq!(
+            turn_origins(&parse_line_all_str(&mut parser, init)),
+            vec![TurnOrigin::TaskNotification]
+        );
+        assert_eq!(
+            turn_origins(&parse_line_all_str(&mut parser, init)),
+            vec![TurnOrigin::User]
+        );
+    }
+
+    #[test]
+    fn only_a_started_command_lifecycle_marks_a_scheduled_turn() {
+        let mut parser = StreamParser::new();
+        let init = r#"{"type":"system","subtype":"init","model":"m"}"#;
+        let completed = r#"{"type":"command_lifecycle","command_uuid":"c","state":"completed"}"#;
+        let started = r#"{"type":"command_lifecycle","command_uuid":"c","state":"started"}"#;
+        let (chunks, log) = parse_line_full(&mut parser, completed);
+        assert!(chunks.is_none());
+        assert!(log.is_none(), "command_lifecycle is a known type");
+        assert_eq!(
+            turn_origins(&parse_line_all_str(&mut parser, init)),
+            vec![TurnOrigin::User]
+        );
+        assert!(parse_line_all_str(&mut parser, started).is_empty());
+        assert_eq!(
+            turn_origins(&parse_line_all_str(&mut parser, init)),
+            vec![TurnOrigin::Scheduled]
+        );
+    }
+
+    #[test]
+    fn turn_origin_matches_ts_mirror() {
+        let ts = include_str!("../../src/src/app/models/chat.ts");
+        let wire: Vec<String> = [
+            TurnOrigin::User,
+            TurnOrigin::Scheduled,
+            TurnOrigin::TaskNotification,
+        ]
+        .iter()
+        .map(|o| format!("'{}'", serde_json::to_value(o).unwrap().as_str().unwrap()))
+        .collect();
+        let mirror = format!("export type TurnOrigin = {};", wire.join(" | "));
+        assert!(
+            ts.contains(&mirror),
+            "models/chat.ts must declare `{mirror}`"
+        );
+    }
+
+    #[test]
+    fn turn_started_serializes_its_origin_in_snake_case() {
+        let json = serde_json::to_string(&StreamChunk::TurnStarted {
+            origin: TurnOrigin::TaskNotification,
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            r#"{"chunk_type":"TurnStarted","data":{"origin":"task_notification"}}"#
         );
     }
 

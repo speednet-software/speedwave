@@ -1787,6 +1787,21 @@ export class ChatSessionStore {
         break;
       }
 
+      case 'TurnStarted':
+        if (chunk.data.origin === 'user' || this.isStreaming) return;
+        this._messages = [
+          ...this._messages,
+          {
+            role: 'user',
+            blocks: [{ type: 'turn_origin', origin: chunk.data.origin }],
+            timestamp: Date.now(),
+          },
+        ];
+        this.isStreaming = true;
+        this._turnId += 1;
+        this._currentBlocks = [];
+        break;
+
       case 'QueueDrained': {
         this._pendingQueue = null;
         this._queueAwaitingSession = false;
@@ -2469,6 +2484,7 @@ function findRetryAnchorIn(
     if (m.uuid_status !== undefined && m.uuid_status !== committedTag) return null;
     const firstBlock = m.blocks?.[0];
     if (firstBlock?.type === 'chip' || firstBlock?.kind === 'chip') return null;
+    if (firstBlock?.type === 'turn_origin' || firstBlock?.kind === 'turn_origin') return null;
     return { userUuid: m.uuid, lastAssistantIdx, userIdx: i };
   }
   return null;
@@ -2697,6 +2713,9 @@ export function stateBlocksToMessageBlocks(blocks: readonly MessageBlockState[])
       case 'chip':
         out.push({ type: 'chip', command: b.command, argument: b.argument });
         break;
+      case 'turn_origin':
+        out.push({ type: 'turn_origin', origin: b.origin });
+        break;
       default: {
         const unknownKind = (b as { kind: string }).kind;
         pluginLogWarn(
@@ -2768,6 +2787,9 @@ export function messageBlocksToState(blocks: readonly MessageBlock[]): MessageBl
         break;
       case 'chip':
         out.push({ kind: 'chip', command: b.command, argument: b.argument });
+        break;
+      case 'turn_origin':
+        out.push({ kind: 'turn_origin', origin: b.origin });
         break;
     }
   }

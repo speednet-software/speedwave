@@ -32,6 +32,8 @@ pub enum MessageBlock {
     Error { content: String },
     #[serde(rename = "control_chip")]
     ControlChip { command: String, argument: String },
+    #[serde(rename = "turn_origin")]
+    TurnOrigin { origin: crate::chat::TurnOrigin },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -135,6 +137,9 @@ fn parse_jsonl_message(line: &str) -> Option<ConversationMessage> {
     let msg_type = parsed["type"].as_str().unwrap_or("");
 
     if msg_type == "user" {
+        if let Some(origin) = self_started_turn_origin(&parsed) {
+            return Some(turn_origin_message(&parsed, origin));
+        }
         if let Some(line) = control_command_from_synthetic_entry(&parsed) {
             return Some(control_line_message(&parsed, line));
         }
@@ -295,6 +300,39 @@ fn tag_body<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
     let start = text.find(&open)? + open.len();
     let end = text[start..].find(&format!("</{tag}>"))? + start;
     Some(&text[start..end])
+}
+
+fn self_started_turn_origin(parsed: &serde_json::Value) -> Option<crate::chat::TurnOrigin> {
+    if parsed["promptSource"].as_str() != Some("system") {
+        return None;
+    }
+    match parsed["turnOrigin"].as_str()? {
+        "scheduled" => Some(crate::chat::TurnOrigin::Scheduled),
+        "task_notification" => Some(crate::chat::TurnOrigin::TaskNotification),
+        _ => None,
+    }
+}
+
+fn turn_origin_message(
+    parsed: &serde_json::Value,
+    origin: crate::chat::TurnOrigin,
+) -> ConversationMessage {
+    ConversationMessage {
+        role: "user".to_string(),
+        content: String::new(),
+        blocks: Some(vec![MessageBlock::TurnOrigin { origin }]),
+        timestamp: parsed["timestamp"].as_str().map(String::from),
+        uuid: parsed["uuid"].as_str().map(String::from),
+        model: None,
+        usage: None,
+    }
+}
+
+fn is_turn_origin_message(msg: &ConversationMessage) -> bool {
+    matches!(
+        msg.blocks.as_deref(),
+        Some([MessageBlock::TurnOrigin { .. }])
+    )
 }
 
 fn control_line_message(parsed: &serde_json::Value, line: String) -> ConversationMessage {
@@ -597,7 +635,7 @@ fn list_conversations_impl(
                     && speedwave_runtime::slash::parse_control_command(&msg.content).is_some();
                 let is_synthetic_chip_reply = msg.role == "assistant"
                     && msg.model.as_deref() == Some(crate::session_model::SYNTHETIC_MODEL);
-                if is_control_chip_user || is_synthetic_chip_reply {
+                if is_control_chip_user || is_synthetic_chip_reply || is_turn_origin_message(&msg) {
                     continue;
                 }
                 if msg.role == "assistant" {
@@ -4436,6 +4474,138 @@ mod tests {
         delete_conversation_impl(tmp.path(), "proj", id_a).unwrap();
         assert!(!dir.join(format!("{id_a}.jsonl")).exists());
         assert!(dir.join(format!("{id_b}.jsonl")).exists());
+    }
+
+    const SCHEDULED_TURN_LINE: &str = r#"{"type":"user","isMeta":true,"promptSource":"system","turnOrigin":"scheduled","uuid":"u-cron","message":{"role":"user","content":"reply with the word CRONFIRED only."},"timestamp":"2026-11-06T17:28:00Z"}"#;
+    const TASK_NOTIFICATION_TURN_LINE: &str = r#"{"type":"user","promptSource":"system","turnOrigin":"task_notification","origin":{"kind":"task-notification"},"uuid":"u-task","message":{"role":"user","content":"<task-notification>\n<task-id>b2s3bnh3p</task-id>\n<status>completed</status>\n</task-notification>"},"timestamp":"2026-11-06T17:25:57Z"}"#;
+
+    fn turn_origin_of(msg: &ConversationMessage) -> Option<crate::chat::TurnOrigin> {
+        match msg.blocks.as_deref() {
+            Some([MessageBlock::TurnOrigin { origin }]) => Some(*origin),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn parse_jsonl_message_turns_a_scheduled_prompt_into_a_turn_origin_row() {
+        let msg = parse_jsonl_message(SCHEDULED_TURN_LINE).expect("scheduled turn must be kept");
+        assert_eq!(msg.role, "user");
+        assert_eq!(
+            turn_origin_of(&msg),
+            Some(crate::chat::TurnOrigin::Scheduled)
+        );
+        assert_eq!(msg.uuid.as_deref(), Some("u-cron"));
+        assert_eq!(msg.timestamp.as_deref(), Some("2026-11-06T17:28:00Z"));
+        assert!(msg.content.is_empty(), "the prompt text is not shown");
+    }
+
+    #[test]
+    fn parse_jsonl_message_turns_a_task_notification_into_a_turn_origin_row() {
+        let msg = parse_jsonl_message(TASK_NOTIFICATION_TURN_LINE)
+            .expect("task notification turn must be kept");
+        assert_eq!(
+            turn_origin_of(&msg),
+            Some(crate::chat::TurnOrigin::TaskNotification)
+        );
+        assert!(
+            msg.content.is_empty(),
+            "the notification markup is not shown"
+        );
+    }
+
+    #[test]
+    fn parse_jsonl_message_keeps_composer_messages_and_unknown_origins_as_they_were() {
+        let sdk = r#"{"type":"user","promptSource":"sdk","turnOrigin":"sdk","message":{"role":"user","content":"hello"}}"#;
+        let msg = parse_jsonl_message(sdk).unwrap();
+        assert_eq!(msg.content, "hello");
+        assert_eq!(turn_origin_of(&msg), None);
+
+        let unknown = r#"{"type":"user","isMeta":true,"promptSource":"system","turnOrigin":"something_new","message":{"role":"user","content":"x"}}"#;
+        assert!(parse_jsonl_message(unknown).is_none());
+
+        let not_system = r#"{"type":"user","promptSource":"sdk","turnOrigin":"scheduled","message":{"role":"user","content":"typed"}}"#;
+        assert_eq!(parse_jsonl_message(not_system).unwrap().content, "typed");
+    }
+
+    #[test]
+    fn get_conversation_starts_a_self_started_turn_with_its_origin_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","uuid":"u1","promptSource":"sdk","message":{"role":"user","content":"run it in the background"},"timestamp":"2026-11-06T17:25:40Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"STARTED"}]},"timestamp":"2026-11-06T17:25:42Z"}"#,
+                TASK_NOTIFICATION_TURN_LINE,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"FINISHED"}]},"timestamp":"2026-11-06T17:25:59Z"}"#,
+                SCHEDULED_TURN_LINE,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"CRONFIRED"}]},"timestamp":"2026-11-06T17:28:01Z"}"#,
+            ],
+        );
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+        let rows: Vec<(String, Option<crate::chat::TurnOrigin>, String)> = transcript
+            .messages
+            .iter()
+            .map(|m| (m.role.clone(), turn_origin_of(m), m.content.clone()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("user".into(), None, "run it in the background".into()),
+                ("assistant".into(), None, "STARTED".into()),
+                (
+                    "user".into(),
+                    Some(crate::chat::TurnOrigin::TaskNotification),
+                    String::new()
+                ),
+                ("assistant".into(), None, "FINISHED".into()),
+                (
+                    "user".into(),
+                    Some(crate::chat::TurnOrigin::Scheduled),
+                    String::new()
+                ),
+                ("assistant".into(), None, "CRONFIRED".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn list_conversations_does_not_count_or_preview_turn_origin_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        write_session(
+            &dir,
+            id,
+            &[
+                SCHEDULED_TURN_LINE,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"CRONFIRED"}]},"timestamp":"2026-11-06T17:28:01Z"}"#,
+                r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"first typed question"},"timestamp":"2026-11-06T17:29:00Z"}"#,
+            ],
+        );
+
+        let list = list_conversations_impl(tmp.path(), "proj").unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].preview, "first typed question");
+        assert_eq!(list[0].message_count, 2);
+    }
+
+    #[test]
+    fn turn_origin_block_matches_ts() {
+        let json = serde_json::to_string(&MessageBlock::TurnOrigin {
+            origin: crate::chat::TurnOrigin::Scheduled,
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"type":"turn_origin","origin":"scheduled"}"#);
+
+        let ts = include_str!("../../src/src/app/models/chat.ts");
+        assert!(
+            ts.contains("{ type: 'turn_origin'; origin: TurnOrigin }"),
+            "models/chat.ts MessageBlock must carry the turn_origin block as history sends it"
+        );
     }
 
     #[test]

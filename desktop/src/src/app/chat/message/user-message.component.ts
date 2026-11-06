@@ -1,5 +1,5 @@
 import { ChangeDetectionStrategy, Component, computed, input } from '@angular/core';
-import type { MessageBlock } from '../../models/chat';
+import type { MessageBlock, TurnOrigin } from '../../models/chat';
 import { formatBytes } from '../../shared/format-bytes';
 import { IconComponent } from '../../shared/icon.component';
 import { ControlChipComponent } from '../blocks/control-chip.component';
@@ -53,6 +53,15 @@ import { ControlChipComponent } from '../blocks/control-chip.component';
             @case ('chip') {
               <app-control-chip [command]="block.command" [argument]="block.argument" />
             }
+            @case ('turn_origin') {
+              <span
+                data-testid="turn-origin"
+                [attr.data-origin]="block.origin"
+                class="mono text-[11.5px] text-[var(--ink-mute)]"
+              >
+                {{ turnOriginLabels[block.origin] }}
+              </span>
+            }
           }
         }
       </div>
@@ -67,7 +76,11 @@ export class UserMessageComponent {
   readonly renderBlocks = computed<readonly RenderableUserBlock[]>(() =>
     this.blocks().filter(
       (b): b is RenderableUserBlock =>
-        b.type === 'text' || b.type === 'image' || b.type === 'file' || b.type === 'chip'
+        b.type === 'text' ||
+        b.type === 'image' ||
+        b.type === 'file' ||
+        b.type === 'chip' ||
+        b.type === 'turn_origin'
     )
   );
 
@@ -76,6 +89,8 @@ export class UserMessageComponent {
   );
 
   readonly formatBytes = formatBytes;
+
+  readonly turnOriginLabels = TURN_ORIGIN_LABELS;
 
   /**
    * Filename if known, else humanised MIME (e.g. `PNG`).
@@ -88,4 +103,13 @@ export class UserMessageComponent {
   }
 }
 
-type RenderableUserBlock = Extract<MessageBlock, { type: 'text' | 'image' | 'file' | 'chip' }>;
+type RenderableUserBlock = Extract<
+  MessageBlock,
+  { type: 'text' | 'image' | 'file' | 'chip' | 'turn_origin' }
+>;
+
+const TURN_ORIGIN_LABELS: Record<TurnOrigin, string> = {
+  user: 'message',
+  scheduled: 'scheduled task',
+  task_notification: 'background task finished',
+};
