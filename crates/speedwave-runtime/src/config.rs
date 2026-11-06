@@ -463,22 +463,18 @@ pub struct ClaudeOverrides {
 pub struct IntegrationConfig {
     /// Whether the integration is enabled (`None` = inherit default).
     pub enabled: Option<bool>,
-    /// Access mode of the integration's tools (absent = full).
-    #[serde(default, skip_serializing_if = "is_full_access")]
+    /// Access mode of the integration.
+    #[serde(default, skip_serializing_if = "AccessMode::is_full")]
     pub access: AccessMode,
 }
 
-fn is_full_access(mode: &AccessMode) -> bool {
-    *mode == AccessMode::Full
-}
-
-/// Enable toggle, access mode and repository allowlist of a git forge integration (GitHub, GitLab).
+/// Enable toggle and repository allowlist of a git forge integration (GitHub, GitLab).
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
 pub struct GitForgeIntegrationConfig {
     /// Whether the integration is enabled (`None` = inherit default).
     pub enabled: Option<bool>,
-    /// Access mode of the integration's tools and of the git push (absent = full).
-    #[serde(default, skip_serializing_if = "is_full_access")]
+    /// Access mode of the integration.
+    #[serde(default, skip_serializing_if = "AccessMode::is_full")]
     pub access: AccessMode,
     /// Repositories the git transport may reach (`owner/repo`, `owner/*`), approved in Desktop.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -520,8 +516,7 @@ impl OsIntegrationsConfig {
         }
     }
 
-    /// Sets the access mode of an OS integration by config key, keeping its enabled state.
-    /// Returns `false` if the key is unknown.
+    /// Sets the access mode of an OS integration.
     pub fn set_access(&mut self, key: &str, mode: AccessMode) -> bool {
         let Some(slot) = self.slot_mut(key) else {
             return false;
@@ -573,7 +568,7 @@ pub struct IntegrationsConfig {
 
 impl IntegrationsConfig {
     /// Sets the enabled state for a MCP service by config key; a git forge keeps its
-    /// repository list and every integration keeps its access mode. Returns `false` if the key is unknown.
+    /// repository list. Returns `false` if the key is unknown.
     pub fn set_service(&mut self, key: &str, cfg: IntegrationConfig) -> bool {
         match key {
             "gitlab" => self.gitlab.get_or_insert_with(Default::default).enabled = cfg.enabled,
@@ -602,8 +597,7 @@ impl IntegrationsConfig {
         }
     }
 
-    /// Sets the access mode of an integration by config key (built-in, macOS native service or
-    /// plugin service id), keeping its enabled state. A key that is no built-in names a plugin.
+    /// Sets the access mode of an integration.
     pub fn set_access(&mut self, key: &str, mode: AccessMode) -> bool {
         match key {
             "gitlab" => self.git_forge_mut(GitForgeService::Gitlab).access = mode,
@@ -628,7 +622,7 @@ impl IntegrationsConfig {
         true
     }
 
-    /// Access mode stored for an integration by config key (full when none is stored).
+    /// Access mode of an integration.
     pub fn access_of(&self, key: &str) -> AccessMode {
         let hub_id = if crate::consts::TOGGLEABLE_OS_SERVICES
             .iter()
@@ -644,8 +638,7 @@ impl IntegrationsConfig {
             .unwrap_or(AccessMode::Full)
     }
 
-    /// Access modes that differ from full, keyed by the hub's service name: the config key of a
-    /// built-in integration, `os-<key>` for a macOS native service and the service id of a plugin.
+    /// Access modes that differ from full.
     pub fn access_modes(&self) -> BTreeMap<String, AccessMode> {
         let built_in = [
             ("slack", self.slack.as_ref().map(|c| c.access)),
@@ -677,7 +670,7 @@ impl IntegrationsConfig {
             .chain(os)
             .chain(plugins)
             .filter_map(|(id, mode)| mode.map(|m| (id, m)))
-            .filter(|(_, mode)| *mode != AccessMode::Full)
+            .filter(|(_, mode)| !mode.is_full())
             .collect()
     }
 
@@ -827,7 +820,7 @@ pub struct ProjectUserEntry {
     /// `None` = no pin, so the spawn omits `--effort` (Claude Code's default applies).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort_pin: Option<String>,
-    /// Global read-only mode: every integration's write tools are blocked (`false` = off).
+    /// Project-wide read-only mode.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub read_only: bool,
 }
@@ -1103,11 +1096,11 @@ pub struct ManagedPiiPolicyConfig {
     pub forced_policies: Vec<String>,
 }
 
-/// MDM-layer access policy: forces the global read-only mode on (presence-is-lock).
+/// MDM-forced access policy.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedAccessConfig {
-    /// Must be `true`; the managed file omits the `access` key to leave the mode user-editable.
+    /// Forces read-only mode on.
     pub read_only: bool,
 }
 
@@ -1737,7 +1730,7 @@ pub struct ResolvedClaudeConfig {
     pub pii_ner_enabled: bool,
     /// Git transport allowlists.
     pub git_repositories: GitRepositoryLists,
-    /// Composed tool access modes the host writes to `policy.json` for the hub.
+    /// Composed access policy.
     pub access: speedwave_pii_engine::AccessPolicy,
 }
 

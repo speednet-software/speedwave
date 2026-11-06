@@ -1,14 +1,8 @@
-/**
- * Access annotation tests: every Office tool carries readOnlyHint, set correctly for the hub's read-only mode.
- */
-
 import { describe, it, expect } from 'vitest';
 import { createToolDefinitions } from './index.js';
 
-/** Tools that only read: the hub lets them through in read-only mode (ADR-108). */
 const READ_ONLY_TOOL_NAMES = ['readDocument', 'readPdfText', 'pdfMetadata'];
 
-/** Tools that create, change, delete or write files: the hub blocks them in read-only mode. */
 const CHANGING_TOOL_NAMES = [
   'markdownToPdf',
   'htmlToPdf',

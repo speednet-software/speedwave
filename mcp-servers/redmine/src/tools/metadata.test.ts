@@ -155,7 +155,6 @@ describe('Redmine tool metadata', () => {
   });
 });
 
-/** Tools that only read: the hub lets them through in read-only mode (ADR-108). */
 const READ_ONLY_TOOL_NAMES = [
   'listIssueIds',
   'getIssueFull',
@@ -174,7 +173,6 @@ const READ_ONLY_TOOL_NAMES = [
   'getConfig',
 ];
 
-/** Tools that create, change, delete or write files: the hub blocks them in read-only mode. */
 const CHANGING_TOOL_NAMES = [
   'createIssue',
   'updateIssue',

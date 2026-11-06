@@ -97,7 +97,17 @@ describe('decideAccess', () => {
     expect(decision.message).toContain('Read-only mode');
     expect(decision.message).toContain('slack.sendChannel');
     expect(decision.message).toContain('Reads');
-    expect(decision.message).toContain('Project settings, Agent access');
+    expect(decision.message).toContain('Agent access in the project settings');
+  });
+
+  it('names the integration Access setting and the organization lock in a per-service denial', () => {
+    const decision = decideAccess(
+      SLACK_READ_ONLY,
+      tool('slack', 'sendChannel', { readOnlyHint: false })
+    );
+    if (decision.allowed) throw new Error('expected a denial');
+    expect(decision.message).toContain('Access setting of the slack integration');
+    expect(decision.message).toContain('organization');
   });
 
   it('keeps the denial message short enough to survive the executor error cap', () => {
@@ -106,7 +116,7 @@ describe('decideAccess', () => {
       tool('custom-some-long-service-name', 'someVeryLongToolNameForTheMessage')
     );
     if (decision.allowed) throw new Error('expected a denial');
-    expect(decision.message.length).toBeLessThan(450);
+    expect(decision.message.length).toBeLessThan(500);
   });
 
   it('names why a custom-* service is blocked', () => {
@@ -159,10 +169,21 @@ describe('os sub-services', () => {
     );
   });
 
-  it('lists the enabled read-only sub-services, not the os service', () => {
+  it('lists os with its enabled read-only sub-services', () => {
     expect(readOnlyServices(MAIL_READ_ONLY, ['os', 'slack'], new Set(['reminders']))).toEqual([
-      'os-mail',
+      'os (mail)',
     ]);
+  });
+
+  it('denies an os write tool without a category when any sub-service is read-only', () => {
+    expect(decideAccess(MAIL_READ_ONLY, tool('os', 'unknownWrite', write))).toMatchObject({
+      allowed: false,
+      reason: 'read-only',
+    });
+  });
+
+  it('allows an os write tool without a category when no sub-service is read-only', () => {
+    expect(decideAccess(FULL, tool('os', 'unknownWrite', write))).toEqual({ allowed: true });
   });
 
   it('leaves out a disabled read-only sub-service', () => {

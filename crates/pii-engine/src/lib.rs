@@ -1,6 +1,7 @@
 //! PII tokenization engine core: deterministic AES-SIV seal/open plus
 //! base64url payload encoding, shared by the hub, proxy, and CLI.
 
+/// Access modes of the `access` section.
 pub mod access;
 pub mod patterns;
 pub mod policy;

@@ -1,6 +1,7 @@
 import {
   ChangeDetectionStrategy,
   Component,
+  computed,
   effect,
   inject,
   input,
@@ -11,8 +12,11 @@ import {
 import { TauriService } from '../../services/tauri.service';
 import { AccessRestartService } from '../../services/access-restart.service';
 import { AccessMode, IntegrationAccessView } from '../../models/access';
+import { errorText } from '../error-text';
 
-/** The Access control of one integration: Full or Read-only. */
+const GIT_FORGES: ReadonlySet<string> = new Set(['github', 'gitlab']);
+
+/** Access control of one integration. */
 @Component({
   selector: 'app-integration-access',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -53,7 +57,7 @@ import { AccessMode, IntegrationAccessView } from '../../models/access';
       }
       @if (!compact()) {
         <p class="mt-1 text-[11px] text-[var(--ink-mute)]" data-testid="integration-access-help">
-          Read-only blocks the tools that send, create, edit or delete. Reads still work.
+          {{ helpText() }}
         </p>
       }
       @if (error()) {
@@ -80,11 +84,16 @@ export class IntegrationAccessComponent {
   protected readonly view = signal<IntegrationAccessView | null>(null);
   protected readonly busy = signal(false);
   protected readonly error = signal('');
+  protected readonly helpText = computed(() =>
+    GIT_FORGES.has(this.service())
+      ? 'Read-only blocks the tools that send, create, edit or delete, and git push. Reads, fetch and pull still work.'
+      : 'Read-only blocks the tools that send, create, edit or delete. Reads still work.'
+  );
 
   private readonly tauri = inject(TauriService);
   private readonly hub = inject(AccessRestartService);
 
-  /** Reloads the stored mode whenever the project or the integration changes. */
+  /** Reloads the view when the project or integration changes. */
   constructor() {
     effect(() => {
       const project = this.project();
@@ -139,8 +148,4 @@ export class IntegrationAccessComponent {
       this.error.set(errorText(e));
     }
   }
-}
-
-function errorText(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
 }

@@ -122,7 +122,6 @@ describe('identity metadata', () => {
   }
 });
 
-/** Tools that only read: the hub lets them through in read-only mode (ADR-108). */
 const READ_ONLY_TOOL_NAMES = [
   'getChannelMessages',
   'getThreadMessages',
@@ -134,7 +133,6 @@ const READ_ONLY_TOOL_NAMES = [
   'getCurrentUser',
 ];
 
-/** Tools that create, change, delete or write files: the hub blocks them in read-only mode. */
 const CHANGING_TOOL_NAMES = ['sendChannel', 'openDirectMessage', 'downloadFile', 'uploadFile'];
 
 describe('Slack read-only access annotations', () => {

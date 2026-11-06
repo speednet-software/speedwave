@@ -1,49 +1,52 @@
-//! The optional top-level `access` section of `policy.json` v3: the composed
-//! tool access modes the host computes and the hub enforces. The PII engine
-//! parses and validates it here and otherwise ignores it.
-
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 const MAX_SERVICES: usize = 256;
-const SERVICE_ID_MAX_LEN: usize = 63;
+const SERVICE_ID_MAX_LEN: usize = 64;
 
-/// How a service's tools may be used by the agent.
+/// Access mode of a service.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum AccessMode {
-    /// Every tool of the service may be called.
+    /// Every tool may be called.
     #[default]
     Full,
-    /// Only tools annotated as read-only may be called.
+    /// Only read-only tools may be called.
     ReadOnly,
 }
 
-/// The composed access modes: a default for every service and per-service modes
-/// that differ from it. An absent section means every service is `Full`.
+impl AccessMode {
+    /// True for `Full`.
+    pub fn is_full(&self) -> bool {
+        *self == AccessMode::Full
+    }
+}
+
+/// Composed access modes.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AccessPolicy {
-    /// Mode of every service not named in `services`.
+    /// Mode of services not in `services`.
     #[serde(default)]
     pub default: AccessMode,
-    /// Mode of single services, keyed by service id.
+    /// Modes of single services.
     #[serde(default)]
     pub services: BTreeMap<String, AccessMode>,
 }
 
 impl AccessPolicy {
-    /// Mode of one service: its own entry, else the default.
+    /// Mode of one service.
     pub fn mode_of(&self, service: &str) -> AccessMode {
         self.services.get(service).copied().unwrap_or(self.default)
     }
 
-    /// True when every service is `Full`, so the section can be left out of `policy.json`.
+    /// True when every service is `Full`.
     pub fn is_unrestricted(&self) -> bool {
         self.default == AccessMode::Full && self.services.values().all(|m| *m == AccessMode::Full)
     }
 
-    pub(crate) fn validate(&self) -> Result<(), String> {
+    /// Checks the service count and ids.
+    pub fn validate(&self) -> Result<(), String> {
         if self.services.len() > MAX_SERVICES {
             return Err(format!(
                 "too many access services: {} exceeds limit of {MAX_SERVICES}",
@@ -115,6 +118,16 @@ mod tests {
     fn plugin_style_service_id_passes_validation() {
         let policy = parse(r#"{"services":{"custom-my-mcp":"read_only","figma":"full"}}"#);
         assert!(policy.validate().is_ok());
+    }
+
+    #[test]
+    fn service_id_of_the_plugin_slug_maximum_length_passes_validation() {
+        let id = format!("a{}", "b".repeat(63));
+        let policy = parse(&format!(r#"{{"services":{{"{id}":"read_only"}}}}"#));
+        assert!(policy.validate().is_ok());
+        let too_long = format!("{id}b");
+        let policy = parse(&format!(r#"{{"services":{{"{too_long}":"read_only"}}}}"#));
+        assert!(policy.validate().is_err());
     }
 
     #[test]

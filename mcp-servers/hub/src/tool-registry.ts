@@ -490,8 +490,7 @@ export function buildServiceBridge(
 export type AccessDenial = Extract<AccessDecision, { allowed: false }>;
 
 /**
- * Function type for wrapping tool calls with audit logging; `denial` marks a call the access
- * policy refused, so the audit entry records outcome `denied` with the reason.
+ * Function type for wrapping tool calls with audit logging.
  */
 export type WrapWithAuditFn = <TParams, TResult>(
   service: string,

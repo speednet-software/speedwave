@@ -1,6 +1,6 @@
 # Managed (MDM/org) Policy Config
 
-Speedwave supports organization-forced policy that a user cannot bypass. Today this drives OTLP telemetry (`telemetry`), the PII policy (`pii_policy`: `forced_policies` for policy ids) and the global read-only mode (`access`: `{"read_only": true}`); the mechanism is general — reuse it for any future org policy rather than inventing a second channel.
+Speedwave supports organization-forced policy that a user cannot bypass. Today this drives OTLP telemetry (`telemetry`), the PII policy (`pii_policy`: `forced_policies` for policy ids) and the global read-only mode (`access`: `{"read_only": true}`); the mechanism is general, reuse it for any future org policy rather than inventing a second channel.
 
 ## Where the policy lives
 

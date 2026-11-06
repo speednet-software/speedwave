@@ -74,7 +74,7 @@ impl CompiledPolicy {
         &self.keywords
     }
 
-    /// Composed tool access modes; every service is `Full` when the document has no `access` section.
+    /// Access policy of the document.
     pub fn access(&self) -> &AccessPolicy {
         &self.access
     }

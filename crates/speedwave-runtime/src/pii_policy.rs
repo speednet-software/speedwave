@@ -1099,8 +1099,7 @@ struct PolicyDocument<'a> {
     access: &'a AccessPolicy,
 }
 
-/// Writes the resolved PII policy and the composed access policy as `policy.json`,
-/// mounted `:ro` into mcp-hub. The `access` section is left out while every service is `Full`.
+/// Writes the resolved PII policy as `policy.json`, mounted `:ro` into mcp-hub.
 /// Dir owner-only (0o700 / DACL), file 0o600 via fs_perms atomic write (mirrors
 /// `claude_managed.rs::write_managed_settings`).
 pub fn write_policy_config_in(
@@ -1109,6 +1108,9 @@ pub fn write_policy_config_in(
     policy: &ResolvedPiiPolicy,
     access: &AccessPolicy,
 ) -> anyhow::Result<()> {
+    access
+        .validate()
+        .map_err(|e| anyhow::anyhow!("invalid access policy: {e}"))?;
     let dir = policy_config_dir_in(data_dir, project);
     crate::fs_perms::ensure_owner_only_dir(&dir)?;
     let content = serde_json::to_string_pretty(&PolicyDocument {
@@ -2206,6 +2208,20 @@ keywords: []
         assert!(v.get("categories").is_none());
         assert!(v.get("customPatterns").is_none());
         assert!(v.get("sensitiveKeys").is_none());
+    }
+
+    #[test]
+    fn write_policy_config_rejects_an_invalid_access_section() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut access = AccessPolicy::default();
+        access.services.insert(
+            "Bad Id".to_string(),
+            speedwave_pii_engine::AccessMode::ReadOnly,
+        );
+        let result =
+            write_policy_config_in(tmp.path(), "proj", &ResolvedPiiPolicy::default(), &access);
+        assert!(result.is_err());
+        assert!(!policy_config_path_in(tmp.path(), "proj").exists());
     }
 
     #[test]

@@ -40,7 +40,6 @@ export interface SearchToolsParams {
  * Result of a tool search operation
  */
 export interface SearchToolsResult {
-  /** Present only while some service is read-only: one sentence naming the blocked services. */
   notice?: string;
   /** Array of matching tools */
   matches: ToolSearchResult[];
@@ -237,7 +236,8 @@ export async function searchTools(params: SearchToolsParams): Promise<SearchTool
   const rules = getEngine().access;
   const results: ToolSearchResult[] = scored.map(({ service: svc, tool }) => {
     const entry = buildSearchResult(svc, tool, detailLevel);
-    if (!decideAccess(rules, tool).allowed) entry.blocked = 'read-only';
+    const decision = decideAccess(rules, tool);
+    if (!decision.allowed) entry.blocked = decision.reason;
     return entry;
   });
 

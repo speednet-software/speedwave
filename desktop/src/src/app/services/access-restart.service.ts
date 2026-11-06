@@ -2,8 +2,9 @@ import { Injectable, inject } from '@angular/core';
 import { TauriService } from './tauri.service';
 import { ProjectStateService } from './project-state.service';
 import { LoggerService } from './logger.service';
+import { errorText } from '../shared/error-text';
 
-/** Applies a change of the access rules by recreating the hub and the proxy, or restarting the project when it cannot. */
+/** Applies changed access rules. */
 @Injectable({ providedIn: 'root' })
 export class AccessRestartService {
   private readonly tauri = inject(TauriService);
@@ -11,8 +12,8 @@ export class AccessRestartService {
   private readonly log = inject(LoggerService);
 
   /**
-   * Recreates the hub and the proxy of a project, or asks for a project restart when they cannot be restarted alone.
-   * @param project - project whose hub and proxy read the changed rules
+   * Restarts the hub and the proxy.
+   * @param project - Project name.
    */
   async apply(project: string): Promise<void> {
     if (!this.projectState.isSettledOn(project) || this.projectState.status() !== 'ready') {
@@ -24,7 +25,7 @@ export class AccessRestartService {
       await this.tauri.invoke('restart_llm_proxy', { project });
     } catch (e: unknown) {
       this.log.warn(
-        `restart of the hub or the proxy failed, falling back to full restart: ${e instanceof Error ? e.message : String(e)}`
+        `restart of the hub or the proxy failed, falling back to full restart: ${errorText(e)}`
       );
       this.projectState.requestRestartFor(project);
     }

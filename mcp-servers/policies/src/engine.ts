@@ -31,10 +31,10 @@ export interface TokenizeResult {
   detections: Detection[];
 }
 
-/** Access mode of a service: every tool callable, or only tools annotated as read-only. */
+/** Access mode of a service. */
 export type AccessMode = 'full' | 'read_only';
 
-/** The composed `access` section of policy.json: a default mode and the services that differ. */
+/** The composed access section of policy.json. */
 export interface AccessRules {
   default: AccessMode;
   services: Record<string, AccessMode>;

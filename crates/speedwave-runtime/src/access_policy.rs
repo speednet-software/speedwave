@@ -1,24 +1,19 @@
-//! Composition of the effective tool access modes written into `policy.json`
-//! (ADR-108): MDM over the project's global mode over the per-service modes,
-//! the most restrictive winning. The hub and the proxy receive the composed
-//! result and do no precedence logic of their own.
-
 use crate::config::SpeedwaveUserConfig;
 use crate::managed_config::ManagedConfig;
 use speedwave_pii_engine::{AccessMode, AccessPolicy};
 use std::collections::BTreeMap;
 
-/// Every layer that sets a mode.
+/// Layers that set an access mode.
 pub struct AccessInputs<'a> {
-    /// The organization forces read-only mode for every service.
+    /// Organization forces read-only.
     pub managed_read_only: bool,
-    /// The project's global read-only switch.
+    /// Project-wide read-only switch.
     pub project_read_only: bool,
-    /// Per-service modes set by the user.
+    /// Modes set per service.
     pub service_modes: &'a BTreeMap<String, AccessMode>,
 }
 
-/// Composes the effective access policy; entries equal to the default are left out.
+/// Composes the effective access policy.
 pub fn compose_access_policy(inputs: &AccessInputs<'_>) -> AccessPolicy {
     let default = if inputs.managed_read_only || inputs.project_read_only {
         AccessMode::ReadOnly
@@ -34,16 +29,16 @@ pub fn compose_access_policy(inputs: &AccessInputs<'_>) -> AccessPolicy {
     AccessPolicy { default, services }
 }
 
-/// What the Desktop toggle shows: the effective switch and whether the organization locks it.
+/// State of the project-wide read-only switch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReadOnlyState {
-    /// Read-only mode is on, set by the user or forced by the organization.
+    /// Read-only is on.
     pub enabled: bool,
-    /// The organization forces the mode on, so the user cannot change it.
+    /// The organization locks the switch.
     pub locked: bool,
 }
 
-/// Read-only state of a project under the MDM policy, if any.
+/// Read-only state of a project.
 pub fn read_only_state(
     user_config: &SpeedwaveUserConfig,
     project: &str,
@@ -61,7 +56,7 @@ pub fn read_only_state(
     }
 }
 
-/// Sets the project's global read-only switch; refused while the organization locks it.
+/// Sets the project-wide read-only switch.
 pub fn set_read_only(
     user_config: &mut SpeedwaveUserConfig,
     project: &str,
@@ -80,16 +75,16 @@ pub fn set_read_only(
     Ok(())
 }
 
-/// What an integration's Access control shows: its stored mode and the project-wide mode above it.
+/// Access state of one integration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IntegrationAccessState {
-    /// Mode the user stored for the integration.
+    /// Mode stored for the integration.
     pub mode: AccessMode,
-    /// The project-wide read-only mode, which overrides the stored mode while on.
+    /// Project-wide read-only state.
     pub global: ReadOnlyState,
 }
 
-/// Access state of one integration (config key of a built-in, macOS native service or plugin).
+/// Access state of one integration.
 pub fn integration_access_state(
     user_config: &SpeedwaveUserConfig,
     project: &str,
@@ -106,7 +101,7 @@ pub fn integration_access_state(
     }
 }
 
-/// Stores the access mode of one integration; the key must be a known integration.
+/// Stores the access mode of one integration.
 pub fn set_integration_access(
     user_config: &mut SpeedwaveUserConfig,
     project: &str,

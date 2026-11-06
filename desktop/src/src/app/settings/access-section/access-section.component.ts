@@ -13,8 +13,9 @@ import { TauriService } from '../../services/tauri.service';
 import { AccessRestartService } from '../../services/access-restart.service';
 import { ToggleComponent } from '../../shared/toggle.component';
 import { AccessSettingsView } from '../../models/access';
+import { errorText } from '../../shared/error-text';
 
-/** Settings, Agent access: the project's global read-only mode for integrations. */
+/** Agent access section. */
 @Component({
   selector: 'app-access-section',
   imports: [ToggleComponent],
@@ -43,7 +44,7 @@ import { AccessSettingsView } from '../../models/access';
               </div>
             } @else {
               <div class="text-[11px] text-[var(--ink-mute)]">
-                Speedwave restarts the tool hub to apply the change.
+                Speedwave restarts the hub and the proxy to apply the change.
               </div>
             }
           </div>
@@ -64,7 +65,7 @@ import { AccessSettingsView } from '../../models/access';
         <p>Read-only mode does not cover:</p>
         <ul class="mt-1 list-disc pl-5">
           <li>Claude Code's own tools: Write, Edit, Bash and WebFetch.</li>
-          <li>Internet access from the container, which a separate offline mode will limit.</li>
+          <li>Internet access from the container.</li>
           <li>Credentials you put into the container by hand.</li>
         </ul>
       </div>
@@ -81,7 +82,7 @@ export class AccessSectionComponent {
   private readonly tauri = inject(TauriService);
   private readonly hub = inject(AccessRestartService);
 
-  /** Reloads the stored mode whenever the project changes. */
+  /** Reloads the view when the project changes. */
   constructor() {
     effect(() => {
       const project = this.project();
@@ -121,8 +122,4 @@ export class AccessSectionComponent {
       this.errorOccurred.emit(errorText(e));
     }
   }
-}
-
-function errorText(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
 }

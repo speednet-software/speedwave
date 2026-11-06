@@ -75,7 +75,6 @@ describe('SharePoint tool metadata', () => {
   });
 });
 
-/** Tools that only read: the hub lets them through in read-only mode (ADR-108). */
 const READ_ONLY_TOOL_NAMES = [
   'listFileIds',
   'getFileFull',
@@ -88,7 +87,6 @@ const READ_ONLY_TOOL_NAMES = [
   'getItem',
 ];
 
-/** Tools that create, change, delete or write files: the hub blocks them in read-only mode. */
 const CHANGING_TOOL_NAMES = [
   'downloadFile',
   'uploadFile',

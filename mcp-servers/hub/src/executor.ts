@@ -31,7 +31,7 @@ import {
   WrapBridgeCallFn,
   type AccessDenial,
 } from './tool-registry.js';
-import type { DenialReason } from './access-policy.js';
+import type { DenialReason } from './hub-types.js';
 import { resolveSandboxGlobals, type SandboxGlobalResolution } from './service-list.js';
 import { toCamelCase } from './tool-discovery.js';
 
@@ -331,7 +331,7 @@ function createToolWrappers(
    * @param service - Service name for audit tracking (e.g. 'gitlab', 'slack').
    * @param tool - Tool name for audit tracking (e.g. 'getMrFull', 'sendChannel').
    * @param fn - Function to wrap with audit logging.
-   * @param denial - Set when the access policy refused the call.
+   * @param denial - Denial to record.
    */
   const wrapWithAudit: WrapWithAuditFn = <TParams, TResult>(
     service: string,

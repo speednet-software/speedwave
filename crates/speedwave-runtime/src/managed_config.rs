@@ -13,7 +13,7 @@ pub struct ManagedConfig {
     pub telemetry: Option<ManagedTelemetryConfig>,
     /// MDM-forced PII policy ids (absent = user fully self-service).
     pub pii_policy: Option<ManagedPiiPolicyConfig>,
-    /// MDM-forced global read-only mode (absent = user fully self-service).
+    /// MDM-forced access policy.
     pub access: Option<ManagedAccessConfig>,
 }
 

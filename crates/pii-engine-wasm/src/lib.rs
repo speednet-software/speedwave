@@ -74,9 +74,7 @@ impl PiiEngine {
         serde_json::to_string(&out).map_err(|e| JsError::new(&e.to_string()))
     }
 
-    /// The composed access policy of the document as JSON,
-    /// `{"default": "full"|"read_only", "services": {"<id>": "full"|"read_only"}}`;
-    /// every service is `full` when the document has no `access` section.
+    /// The composed access policy as JSON.
     pub fn access_json(&self) -> Result<String, JsError> {
         serde_json::to_string(self.policy.access()).map_err(|e| JsError::new(&e.to_string()))
     }

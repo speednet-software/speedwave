@@ -69,12 +69,8 @@ pub(super) struct GitForge {
     login: &'static str,
     token_file: String,
     repositories: Vec<String>,
-    #[serde(skip_serializing_if = "is_full")]
+    #[serde(skip_serializing_if = "AccessMode::is_full")]
     access: AccessMode,
-}
-
-fn is_full(mode: &AccessMode) -> bool {
-    *mode == AccessMode::Full
 }
 
 impl GitForge {

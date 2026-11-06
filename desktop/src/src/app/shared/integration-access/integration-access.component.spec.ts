@@ -252,4 +252,19 @@ describe('IntegrationAccessComponent', () => {
 
     expect(el('integration-access-help')?.textContent).toContain('send, create, edit or delete');
   });
+
+  it.each(['github', 'gitlab'])(
+    'says that read-only also blocks git push for %s',
+    async (service) => {
+      await create(service);
+
+      expect(el('integration-access-help')?.textContent).toContain('git push');
+    }
+  );
+
+  it('does not mention git push for a service without git', async () => {
+    await create('slack');
+
+    expect(el('integration-access-help')?.textContent).not.toContain('git push');
+  });
 });

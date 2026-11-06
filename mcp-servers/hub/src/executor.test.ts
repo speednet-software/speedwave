@@ -2088,7 +2088,7 @@ describe('executor', () => {
       expect(result.error?.message).toContain('Read-only mode is on for slack');
       expect(result.error?.message).toContain('slack.sendChannel');
       expect(result.error?.message).toContain('Reads');
-      expect(result.error?.message).toContain('Project settings, Agent access');
+      expect(result.error?.message).toContain('Agent access in the project settings');
       expect(fetchMock).not.toHaveBeenCalled();
     });
 

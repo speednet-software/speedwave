@@ -1,13 +1,13 @@
-/** The agent access settings of one project. */
+/** Agent access of a project. */
 export interface AccessSettingsView {
   read_only: boolean;
   read_only_locked: boolean;
 }
 
-/** Access mode of an integration's tools. */
+/** Access mode of an integration. */
 export type AccessMode = 'full' | 'read_only';
 
-/** The access mode of one integration and the project-wide mode above it. */
+/** Access of one integration. */
 export interface IntegrationAccessView {
   mode: AccessMode;
   global_read_only: boolean;
