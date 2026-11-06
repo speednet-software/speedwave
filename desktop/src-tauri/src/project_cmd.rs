@@ -244,6 +244,7 @@ mod tests {
                     plugin_settings: None,
                     policy: None,
                     effort_pin: None,
+                    read_only: false,
                 },
                 ProjectUserEntry {
                     name: "beta".to_string(),
@@ -253,6 +254,7 @@ mod tests {
                     plugin_settings: None,
                     policy: None,
                     effort_pin: None,
+                    read_only: false,
                 },
             ],
             active_project: Some("alpha".to_string()),
@@ -528,6 +530,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,

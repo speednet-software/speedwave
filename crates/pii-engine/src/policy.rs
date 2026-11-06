@@ -2,6 +2,7 @@
 //! (host renders it, proxy and hub consume the compiled form). Rules are
 //! data: every category comes from the document, none are hardcoded here.
 
+use crate::access::AccessPolicy;
 use regex::{Regex, RegexBuilder};
 use serde::Deserialize;
 use std::sync::LazyLock;
@@ -59,6 +60,7 @@ pub struct CompiledKeyword {
 pub struct CompiledPolicy {
     rules: Vec<CompiledRule>,
     keywords: Vec<CompiledKeyword>,
+    access: AccessPolicy,
 }
 
 impl CompiledPolicy {
@@ -70,6 +72,11 @@ impl CompiledPolicy {
     /// Literal keyword substitutions, in file order.
     pub fn keywords(&self) -> &[CompiledKeyword] {
         &self.keywords
+    }
+
+    /// Composed tool access modes; every service is `Full` when the document has no `access` section.
+    pub fn access(&self) -> &AccessPolicy {
+        &self.access
     }
 }
 
@@ -102,6 +109,8 @@ struct PolicyFileV3 {
     rules: Vec<RuleV3>,
     #[serde(default)]
     keywords: Vec<KeywordV3>,
+    #[serde(default)]
+    access: AccessPolicy,
 }
 
 /// Policy provenance metadata; parsed and validated structurally but not
@@ -181,10 +190,16 @@ pub fn compile_policy_v3(json: &str) -> Result<CompiledPolicy, PolicyError> {
         )));
     }
 
+    file.access.validate().map_err(PolicyError::Semantic)?;
+
     let rules = compile_rules(file.rules)?;
     let keywords = compile_keywords(file.keywords)?;
 
-    Ok(CompiledPolicy { rules, keywords })
+    Ok(CompiledPolicy {
+        rules,
+        keywords,
+        access: file.access,
+    })
 }
 
 fn compile_rules(rules: Vec<RuleV3>) -> Result<Vec<CompiledRule>, PolicyError> {
@@ -388,6 +403,67 @@ mod tests {
         assert_eq!(policy.keywords()[0].match_text, "Coca-Cola");
         assert_eq!(policy.keywords()[0].alias, "Brandex");
         assert!(!policy.keywords()[0].case_sensitive);
+    }
+
+    #[test]
+    fn v3_without_access_section_is_unrestricted() {
+        let policy = compile_policy_v3(VALID_V3_POLICY).expect("valid policy");
+        assert!(policy.access().is_unrestricted());
+    }
+
+    #[test]
+    fn v3_access_section_is_accepted_and_exposed() {
+        let json = VALID_V3_POLICY.replacen(
+            "\"keywords\": [",
+            "\"access\": {\"default\": \"read_only\", \"services\": {\"slack\": \"full\"}}, \"keywords\": [",
+            1,
+        );
+        let policy = compile_policy_v3(&json).expect("policy with access");
+        assert_eq!(policy.access().default, crate::access::AccessMode::ReadOnly);
+        assert_eq!(
+            policy.access().mode_of("slack"),
+            crate::access::AccessMode::Full
+        );
+        assert_eq!(policy.rules().len(), 2);
+    }
+
+    #[test]
+    fn v3_access_section_does_not_change_scanning_rules() {
+        let with_access = VALID_V3_POLICY.replacen(
+            "\"keywords\": [",
+            "\"access\": {\"default\": \"read_only\"}, \"keywords\": [",
+            1,
+        );
+        let a = compile_policy_v3(VALID_V3_POLICY).expect("policy");
+        let b = compile_policy_v3(&with_access).expect("policy with access");
+        assert_eq!(a.rules().len(), b.rules().len());
+        assert_eq!(a.keywords().len(), b.keywords().len());
+    }
+
+    #[test]
+    fn v3_access_section_with_unknown_mode_is_a_parse_error() {
+        let json = VALID_V3_POLICY.replacen(
+            "\"keywords\": [",
+            "\"access\": {\"default\": \"confirm\"}, \"keywords\": [",
+            1,
+        );
+        assert!(matches!(
+            compile_policy_v3(&json),
+            Err(PolicyError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn v3_access_section_with_invalid_service_id_is_a_semantic_error() {
+        let json = VALID_V3_POLICY.replacen(
+            "\"keywords\": [",
+            "\"access\": {\"services\": {\"Bad Id\": \"read_only\"}}, \"keywords\": [",
+            1,
+        );
+        match compile_policy_v3(&json) {
+            Err(PolicyError::Semantic(msg)) => assert!(msg.contains("access")),
+            other => panic!("expected a semantic access error, got {other:?}"),
+        }
     }
 
     #[test]

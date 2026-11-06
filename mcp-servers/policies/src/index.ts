@@ -5,4 +5,4 @@
  */
 
 export { loadEngine } from './engine.js';
-export type { Detection, TokenizeResult, PiiEngine } from './engine.js';
+export type { AccessMode, AccessRules, Detection, TokenizeResult, PiiEngine } from './engine.js';

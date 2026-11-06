@@ -8,6 +8,7 @@ import { getAllServiceNames } from './service-list.js';
 import { discoverAndMergeService } from './tool-discovery.js';
 import { ts, TIMEOUTS } from '@speedwave/mcp-shared';
 import { DISCOVERY_RETRY_DELAYS_MS } from './http-bridge.js';
+import { checkToolAccess, type AccessDecision } from './access-policy.js';
 
 /**
  * Escape special regex characters in a string to prevent regex injection.
@@ -485,13 +486,18 @@ export function buildServiceBridge(
   return bridge;
 }
 
+/** A denied access decision. */
+export type AccessDenial = Extract<AccessDecision, { allowed: false }>;
+
 /**
- * Function type for wrapping tool calls with audit logging.
+ * Function type for wrapping tool calls with audit logging; `denial` marks a call the access
+ * policy refused, so the audit entry records outcome `denied` with the reason.
  */
 export type WrapWithAuditFn = <TParams, TResult>(
   service: string,
   tool: string,
-  fn: (params: TParams) => Promise<TResult>
+  fn: (params: TParams) => Promise<TResult>,
+  denial?: AccessDenial
 ) => (params: TParams) => Promise<TResult>;
 
 /**
@@ -548,6 +554,17 @@ export function buildExecutorWrappers(
         `[tool-registry] Bridge method not found: ${service}.${methodName}. ` +
           `Available bridge methods: ${Object.keys(bridge).join(', ')}`
       );
+    }
+
+    const decision = checkToolAccess(metadata);
+    if (!decision.allowed) {
+      wrappers[methodName] = wrapWithAudit(
+        service,
+        methodName,
+        (): Promise<unknown> => Promise.reject(new Error(decision.message)),
+        decision
+      );
+      continue;
     }
 
     wrappers[methodName] = wrapWithAudit(

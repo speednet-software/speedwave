@@ -22,6 +22,7 @@ import {
   buildMockToolMetadata,
 } from './test-helpers.js';
 import type { ToolMetadata } from './hub-types.js';
+import { loadPolicy } from './policy.js';
 
 describe('executor', () => {
   beforeAll(() => {
@@ -1769,6 +1770,7 @@ describe('executor', () => {
     it('degrades to a generic message when the PII engine itself fails to tokenize an error', async () => {
       const policyModule = await import('./policy.js');
       const spy = vi.spyOn(policyModule, 'getEngine').mockReturnValue({
+        access: { default: 'full', services: {} },
         tokenize: () => {
           throw new Error('engine boom');
         },
@@ -1984,6 +1986,206 @@ describe('executor', () => {
       for (const row of toolResultEmailRows) {
         expect(row).toMatchObject({ action: 'tokenized', count: 1 });
       }
+    });
+  });
+
+  describe('read-only access policy', () => {
+    const savedEnabledServices = process.env.ENABLED_SERVICES;
+    const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
+    let policyDir: string | undefined;
+    let originalFetch: typeof globalThis.fetch;
+    let fetchMock: ReturnType<typeof vi.fn>;
+
+    function applyAccess(access: unknown): void {
+      policyDir = mkdtempSync(join(tmpdir(), 'hub-access-'));
+      const file = join(policyDir, 'policy.json');
+      writeFileSync(
+        file,
+        JSON.stringify({
+          version: 3,
+          source: { policies: [], forced: [] },
+          rules: [],
+          keywords: [],
+          access,
+        })
+      );
+      writeFileSync(join(policyDir, 'key'), 'ab'.repeat(32));
+      vi.stubEnv('POLICY_FILE', file);
+      loadPolicy();
+    }
+
+    function annotate(service: string, tool: string, annotations: ToolMetadata['annotations']) {
+      mutableRegistry[service][tool] = { ...mutableRegistry[service][tool], annotations };
+    }
+
+    beforeEach(() => {
+      for (const service of ['slack', 'redmine', 'sharepoint']) {
+        process.env[`WORKER_${service.toUpperCase()}_URL`] = `http://mcp-${service}:3001`;
+      }
+      process.env.ENABLED_SERVICES = 'slack,redmine,sharepoint,custom-notes';
+      resetServiceCaches();
+      annotate('slack', 'listChannelIds', { readOnlyHint: true, destructiveHint: false });
+      annotate('slack', 'sendChannel', { readOnlyHint: false, destructiveHint: false });
+      annotate('redmine', 'createIssue', { readOnlyHint: false, destructiveHint: false });
+      mutableRegistry['custom-notes'] = {
+        listNotes: buildMockToolMetadata('custom-notes', 'listNotes', {}),
+      };
+      annotate('custom-notes', 'listNotes', { readOnlyHint: true, destructiveHint: false });
+      _setServiceNamesForTesting(['slack', 'redmine', 'sharepoint', 'custom-notes']);
+      originalFetch = globalThis.fetch;
+      fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({
+          jsonrpc: '2.0',
+          id: 'test',
+          result: { content: [{ type: 'text', text: JSON.stringify({ ok: true }) }] },
+        }),
+        text: async () => '',
+      });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+    });
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+      vi.unstubAllEnvs();
+      loadPolicy();
+      if (policyDir) {
+        rmSync(policyDir, { recursive: true, force: true });
+        policyDir = undefined;
+      }
+      for (const service of ['slack', 'redmine', 'sharepoint']) {
+        delete process.env[`WORKER_${service.toUpperCase()}_URL`];
+      }
+      if (savedEnabledServices === undefined) {
+        delete process.env.ENABLED_SERVICES;
+      } else {
+        process.env.ENABLED_SERVICES = savedEnabledServices;
+      }
+      delete mutableRegistry['custom-notes'];
+      for (const [service, tool] of [
+        ['slack', 'listChannelIds'],
+        ['slack', 'sendChannel'],
+        ['redmine', 'createIssue'],
+      ]) {
+        delete mutableRegistry[service][tool].annotations;
+      }
+      resetServiceCaches();
+      populateRegistryWithMockTools();
+    });
+
+    it('denies a write called inside execute_code before the worker is reached', async () => {
+      applyAccess({ default: 'read_only', services: {} });
+
+      const result = await executeCode({
+        code: `return await slack.sendChannel({ channel: 'general', text: 'hi' });`,
+        timeoutMs: 5000,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('Read-only mode is on for slack');
+      expect(result.error?.message).toContain('slack.sendChannel');
+      expect(result.error?.message).toContain('Reads');
+      expect(result.error?.message).toContain('Project settings, Agent access');
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('lets a read annotated readOnlyHint reach the worker', async () => {
+      applyAccess({ default: 'read_only', services: {} });
+
+      const result = await executeCode({
+        code: `return await slack.listChannelIds();`,
+        timeoutMs: 5000,
+      });
+
+      expect(result.success).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('denies a tool without annotations', async () => {
+      applyAccess({ default: 'read_only', services: {} });
+
+      const result = await executeCode({
+        code: `return await sharepoint.listFileIds();`,
+        timeoutMs: 5000,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('no read-only annotation');
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('blocks a custom-* service entirely, even a tool annotated read-only', async () => {
+      applyAccess({ default: 'read_only', services: {} });
+
+      const result = await executeCode({
+        code: `return await customNotes.listNotes();`,
+        timeoutMs: 5000,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('custom MCP servers');
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('applies a per-service mode only to that service', async () => {
+      applyAccess({ default: 'full', services: { slack: 'read_only' } });
+
+      const slack = await executeCode({
+        code: `return await slack.sendChannel({ channel: 'general', text: 'hi' });`,
+        timeoutMs: 5000,
+      });
+      const redmine = await executeCode({
+        code: `return await redmine.createIssue({ subject: 'x' });`,
+        timeoutMs: 5000,
+      });
+
+      expect(slack.success).toBe(false);
+      expect(redmine.success).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('changes nothing without an access section', async () => {
+      applyAccess(undefined);
+
+      const result = await executeCode({
+        code: `return await slack.sendChannel({ channel: 'general', text: 'hi' });`,
+        timeoutMs: 5000,
+      });
+
+      expect(result.success).toBe(true);
+    });
+
+    it('audits a denied call with outcome denied and reason read-only, keeping the category', async () => {
+      applyAccess({ default: 'read_only', services: {} });
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      await executeCode({
+        code: `return await slack.sendChannel({ channel: 'general', text: 'hi' });`,
+        timeoutMs: 5000,
+      });
+
+      const lines = logSpy.mock.calls.map((args) => String(args[0]));
+      logSpy.mockRestore();
+      expect(
+        lines.some((l) =>
+          /\[WRITE\] slack\.sendChannel\(.*\) outcome=denied reason=read-only/.test(l)
+        )
+      ).toBe(true);
+    });
+
+    it('audits an allowed call without a denial marker', async () => {
+      applyAccess({ default: 'read_only', services: {} });
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      await executeCode({ code: `return await slack.listChannelIds();`, timeoutMs: 5000 });
+
+      const lines = logSpy.mock.calls.map((args) => String(args[0]));
+      logSpy.mockRestore();
+      expect(lines.some((l) => /\[READ\] slack\.listChannelIds/.test(l))).toBe(true);
+      expect(lines.some((l) => l.includes('outcome=denied'))).toBe(false);
     });
   });
 });

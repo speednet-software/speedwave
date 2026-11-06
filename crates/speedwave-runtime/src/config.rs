@@ -711,6 +711,9 @@ pub struct ProjectUserEntry {
     /// `None` = no pin, so the spawn omits `--effort` (Claude Code's default applies).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort_pin: Option<String>,
+    /// Global read-only mode: every integration's write tools are blocked (`false` = off).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_only: bool,
 }
 
 /// The IDE selected for the IDE bridge.
@@ -982,6 +985,14 @@ pub struct ManagedPiiPolicyConfig {
     /// Policy ids forced on regardless of the user's own selection.
     #[serde(default)]
     pub forced_policies: Vec<String>,
+}
+
+/// MDM-layer access policy: forces the global read-only mode on (presence-is-lock).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedAccessConfig {
+    /// Must be `true`; the managed file omits the `access` key to leave the mode user-editable.
+    pub read_only: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -1610,6 +1621,8 @@ pub struct ResolvedClaudeConfig {
     pub pii_ner_enabled: bool,
     /// Git transport allowlists.
     pub git_repositories: GitRepositoryLists,
+    /// Composed tool access modes the host writes to `policy.json` for the hub.
+    pub access: speedwave_pii_engine::AccessPolicy,
 }
 
 impl Default for ResolvedClaudeConfig {
@@ -1622,6 +1635,7 @@ impl Default for ResolvedClaudeConfig {
             pii_policy: Ok(crate::pii_policy::ResolvedPiiPolicy::default()),
             pii_ner_enabled: false,
             git_repositories: GitRepositoryLists::default(),
+            access: speedwave_pii_engine::AccessPolicy::default(),
         }
     }
 }
@@ -1664,9 +1678,9 @@ pub(crate) fn resolve_project_config_in_with_load(
 ) -> (ResolvedClaudeConfig, ResolvedIntegrationsConfig) {
     match managed_load {
         Ok(managed) => {
-            let (managed_telemetry, managed_pii_policy) = match managed {
-                Some(m) => (m.telemetry, m.pii_policy),
-                None => (None, None),
+            let (managed_telemetry, managed_pii_policy, managed_access) = match managed {
+                Some(m) => (m.telemetry, m.pii_policy, m.access),
+                None => (None, None, None),
             };
             resolve_project_config_in_with_managed(
                 data_dir,
@@ -1675,6 +1689,7 @@ pub(crate) fn resolve_project_config_in_with_load(
                 project_name,
                 managed_telemetry.as_ref(),
                 managed_pii_policy.as_ref(),
+                managed_access.as_ref(),
             )
         }
         Err(e) => {
@@ -1683,6 +1698,7 @@ pub(crate) fn resolve_project_config_in_with_load(
                 project_dir,
                 user_config,
                 project_name,
+                None,
                 None,
                 None,
             );
@@ -1711,6 +1727,7 @@ pub(crate) fn resolve_project_config_in_with_managed(
     project_name: &str,
     managed_telemetry: Option<&ManagedTelemetryConfig>,
     managed_pii_policy: Option<&ManagedPiiPolicyConfig>,
+    managed_access: Option<&ManagedAccessConfig>,
 ) -> (ResolvedClaudeConfig, ResolvedIntegrationsConfig) {
     let repo = load_repo_config_logged(project_dir);
 
@@ -1825,6 +1842,14 @@ pub(crate) fn resolve_project_config_in_with_managed(
         })
         .unwrap_or_default();
 
+    let access = crate::access_policy::compose_access_policy(&crate::access_policy::AccessInputs {
+        managed_read_only: managed_access.is_some_and(|m| m.read_only),
+        project_read_only: user_config
+            .find_project(project_name)
+            .is_some_and(|p| p.read_only),
+        service_modes: &std::collections::BTreeMap::new(),
+    });
+
     let claude = ResolvedClaudeConfig {
         env,
         flags,
@@ -1833,6 +1858,7 @@ pub(crate) fn resolve_project_config_in_with_managed(
         pii_policy,
         pii_ner_enabled,
         git_repositories,
+        access,
     };
     (claude, integrations)
 }
@@ -2173,6 +2199,7 @@ fn resolve_project_config_in_for_test(
         project_dir,
         user_config,
         project_name,
+        None,
         None,
         None,
     )
@@ -2885,6 +2912,7 @@ mod tests {
             "mcp-desc",
             None,
             None,
+            None,
         );
 
         assert_eq!(
@@ -2942,6 +2970,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             ..Default::default()
         }
@@ -3131,6 +3160,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -3643,6 +3673,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -3661,6 +3692,7 @@ mod tests {
             &user_config,
             "p",
             Some(&managed),
+            None,
             None,
         )
         .0;
@@ -3694,6 +3726,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -3710,6 +3743,7 @@ mod tests {
             &user_config,
             "p",
             Some(&managed),
+            None,
             None,
         )
         .0;
@@ -3742,6 +3776,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -3759,6 +3794,7 @@ mod tests {
             &user_config,
             "p",
             Some(&managed),
+            None,
             None,
         )
         .0;
@@ -3786,6 +3822,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -3802,6 +3839,7 @@ mod tests {
             tmp.path(),
             &user_config,
             "p",
+            None,
             None,
             None,
         )
@@ -3824,6 +3862,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -3862,6 +3901,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -3895,6 +3935,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -3960,6 +4001,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -4433,6 +4475,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             ..Default::default()
         };
@@ -4489,6 +4532,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             ..Default::default()
         };
@@ -4851,6 +4895,7 @@ mod tests {
             plugin_settings: None,
             policy: None,
             effort_pin: None,
+            read_only: false,
         };
         let config = SpeedwaveUserConfig {
             projects: vec![proj("with-creds", "/x"), proj("fresh", "/y")],
@@ -5053,6 +5098,7 @@ mod tests {
             plugin_settings: None,
             policy: None,
             effort_pin: None,
+            read_only: false,
         };
         let config = SpeedwaveUserConfig {
             projects: vec![
@@ -5322,6 +5368,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -5444,6 +5491,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: Some("acme".to_string()),
             selected_ide: None,
@@ -5471,6 +5519,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: Some("test".to_string()),
             selected_ide: None,
@@ -5518,6 +5567,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: Some("test".to_string()),
             selected_ide: None,
@@ -5577,6 +5627,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: Some("durable".to_string()),
             selected_ide: None,
@@ -5608,6 +5659,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: Some("v1".to_string()),
             selected_ide: None,
@@ -5625,6 +5677,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: Some("v2".to_string()),
             selected_ide: None,
@@ -5668,6 +5721,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -5867,6 +5921,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -6089,6 +6144,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -6160,6 +6216,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -6200,6 +6257,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -6483,6 +6541,7 @@ mod tests {
                     ..Default::default()
                 }),
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -6497,6 +6556,7 @@ mod tests {
             tmp.path(),
             &user_config,
             "p",
+            None,
             None,
             None,
         );
@@ -6526,6 +6586,7 @@ mod tests {
                     ..Default::default()
                 }),
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -6537,6 +6598,7 @@ mod tests {
             tmp.path(),
             &user_config,
             "p",
+            None,
             None,
             None,
         );
@@ -6564,6 +6626,7 @@ mod tests {
                     ..Default::default()
                 }),
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -6577,11 +6640,107 @@ mod tests {
             "p",
             None,
             None,
+            None,
         );
         assert_eq!(
             claude.pii_policy,
             Ok(crate::pii_policy::disabled_policy()),
             "an invalid policy id must not error while the feature is beta-gated off"
+        );
+    }
+
+    fn config_with_read_only(dir: &Path, read_only: bool) -> SpeedwaveUserConfig {
+        SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "p".into(),
+                dir: dir.to_string_lossy().to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+                policy: None,
+                effort_pin: None,
+                read_only,
+            }],
+            active_project: None,
+            selected_ide: None,
+            ui: None,
+            telemetry: None,
+        }
+    }
+
+    fn resolved_access(
+        dir: &Path,
+        read_only: bool,
+        managed: Option<&ManagedAccessConfig>,
+    ) -> speedwave_pii_engine::AccessPolicy {
+        resolve_project_config_in_with_managed(
+            dir,
+            dir,
+            &config_with_read_only(dir, read_only),
+            "p",
+            None,
+            None,
+            managed,
+        )
+        .0
+        .access
+    }
+
+    #[test]
+    fn project_entry_without_a_read_only_field_means_off() {
+        let entry: ProjectUserEntry =
+            serde_json::from_str(r#"{"name":"p","dir":"/tmp/p"}"#).unwrap();
+        assert!(!entry.read_only);
+    }
+
+    #[test]
+    fn project_entry_stores_the_read_only_switch_only_while_on() {
+        let tmp = tempfile::tempdir().unwrap();
+        let off =
+            serde_json::to_value(&config_with_read_only(tmp.path(), false).projects[0]).unwrap();
+        assert!(off.get("read_only").is_none());
+        let on =
+            serde_json::to_value(&config_with_read_only(tmp.path(), true).projects[0]).unwrap();
+        assert_eq!(on["read_only"], true);
+    }
+
+    #[test]
+    fn resolved_access_is_unrestricted_by_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(resolved_access(tmp.path(), false, None).is_unrestricted());
+    }
+
+    #[test]
+    fn project_switch_reaches_resolved_access() {
+        let tmp = tempfile::tempdir().unwrap();
+        let access = resolved_access(tmp.path(), true, None);
+        assert_eq!(access.default, speedwave_pii_engine::AccessMode::ReadOnly);
+    }
+
+    #[test]
+    fn managed_read_only_reaches_resolved_access_over_an_off_project_switch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let managed = ManagedAccessConfig { read_only: true };
+        let access = resolved_access(tmp.path(), false, Some(&managed));
+        assert_eq!(access.default, speedwave_pii_engine::AccessMode::ReadOnly);
+    }
+
+    #[test]
+    fn mdm_read_only_loaded_from_the_managed_file_reaches_resolved_access() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("managed-config.json");
+        std::fs::write(&path, r#"{"access":{"read_only":true}}"#).unwrap();
+        let managed = crate::managed_config::load_managed_config_from(&path).unwrap();
+        let (claude, _) = resolve_project_config_in_with_load(
+            tmp.path(),
+            tmp.path(),
+            &config_with_read_only(tmp.path(), false),
+            "p",
+            Ok(managed),
+        );
+        assert_eq!(
+            claude.access.default,
+            speedwave_pii_engine::AccessMode::ReadOnly
         );
     }
 
@@ -6597,6 +6756,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -6613,6 +6773,7 @@ mod tests {
             "p",
             None,
             Some(&managed),
+            None,
         );
         let resolved = claude.pii_policy.unwrap();
         assert_eq!(
@@ -6641,6 +6802,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -6657,6 +6819,7 @@ mod tests {
             "p",
             None,
             Some(&managed),
+            None,
         );
         assert!(
             claude.pii_policy.is_err(),
@@ -6719,6 +6882,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             ..Default::default()
         };
@@ -6890,6 +7054,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -6917,6 +7082,7 @@ mod tests {
                     plugin_settings: None,
                     policy: None,
                     effort_pin: None,
+                    read_only: false,
                 },
                 ProjectUserEntry {
                     name: "beta".to_string(),
@@ -6926,6 +7092,7 @@ mod tests {
                     plugin_settings: None,
                     policy: None,
                     effort_pin: None,
+                    read_only: false,
                 },
             ],
             active_project: None,
@@ -6994,6 +7161,7 @@ mod tests {
                     plugin_settings: None,
                     policy: None,
                     effort_pin: None,
+                    read_only: false,
                 },
                 ProjectUserEntry {
                     name: "beta".to_string(),
@@ -7003,6 +7171,7 @@ mod tests {
                     plugin_settings: None,
                     policy: None,
                     effort_pin: None,
+                    read_only: false,
                 },
             ],
             active_project: Some("beta".to_string()),
@@ -7032,6 +7201,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: Some("deleted-project".to_string()),
             selected_ide: None,
@@ -7315,6 +7485,7 @@ mod plugin_order_tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,

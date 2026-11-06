@@ -1,7 +1,7 @@
 //! MDM-deployed managed policy (read-only, fail-closed): a malformed
 //! `managed-config.json` is a hard error so a policy never silently vanishes.
 
-use crate::config::{ManagedPiiPolicyConfig, ManagedTelemetryConfig};
+use crate::config::{ManagedAccessConfig, ManagedPiiPolicyConfig, ManagedTelemetryConfig};
 use std::path::{Path, PathBuf};
 
 /// Root policy object read from the system-level managed-config file. Rejects
@@ -13,6 +13,8 @@ pub struct ManagedConfig {
     pub telemetry: Option<ManagedTelemetryConfig>,
     /// MDM-forced PII policy ids (absent = user fully self-service).
     pub pii_policy: Option<ManagedPiiPolicyConfig>,
+    /// MDM-forced global read-only mode (absent = user fully self-service).
+    pub access: Option<ManagedAccessConfig>,
 }
 
 /// System-level managed-config path (macOS/Windows); `Ok(None)` on other platforms,
@@ -85,6 +87,13 @@ pub(crate) fn load_managed_config_from(path: &Path) -> anyhow::Result<Option<Man
         .map_err(|e| anyhow::anyhow!("reading managed config {}: {e}", path.display()))?;
     let cfg: ManagedConfig = serde_json::from_str(&content)
         .map_err(|e| anyhow::anyhow!("managed config {} is invalid: {e}", path.display()))?;
+    if cfg.access.as_ref().is_some_and(|a| !a.read_only) {
+        anyhow::bail!(
+            "managed config {} is invalid: access.read_only can only force the mode on, \
+             omit the access key to leave it user-editable",
+            path.display()
+        );
+    }
     Ok(Some(cfg))
 }
 
@@ -160,6 +169,49 @@ mod tests {
         assert_eq!(
             c.pii_policy.unwrap().forced_policies,
             vec!["gdpr-art32".to_string()]
+        );
+    }
+
+    #[test]
+    fn valid_file_parses_forced_read_only_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("managed-config.json");
+        std::fs::write(&p, r#"{"access":{"read_only":true}}"#).unwrap();
+        let c = load_managed_config_from(&p).unwrap().unwrap();
+        assert_eq!(c.access, Some(ManagedAccessConfig { read_only: true }));
+    }
+
+    #[test]
+    fn access_key_is_absent_by_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("managed-config.json");
+        std::fs::write(&p, r#"{"telemetry":{"enabled":false}}"#).unwrap();
+        assert!(load_managed_config_from(&p)
+            .unwrap()
+            .unwrap()
+            .access
+            .is_none());
+    }
+
+    #[test]
+    fn managed_read_only_false_is_hard_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("managed-config.json");
+        std::fs::write(&p, r#"{"access":{"read_only":false}}"#).unwrap();
+        assert!(
+            load_managed_config_from(&p).is_err(),
+            "presence is the lock: a false value must not parse as a forced off"
+        );
+    }
+
+    #[test]
+    fn unknown_access_key_is_hard_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("managed-config.json");
+        std::fs::write(&p, r#"{"access":{"readonly":true}}"#).unwrap();
+        assert!(
+            load_managed_config_from(&p).is_err(),
+            "an unknown access key must fail-closed, not leave the mode user-editable"
         );
     }
 

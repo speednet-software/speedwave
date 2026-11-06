@@ -7,6 +7,7 @@
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use speedwave_pii_engine::AccessPolicy;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -1090,17 +1091,30 @@ pub fn policy_config_path_in(data_dir: &Path, project: &str) -> PathBuf {
     policy_config_dir_in(data_dir, project).join("policy.json")
 }
 
-/// Writes the resolved PII policy as `policy.json`, mounted `:ro` into mcp-hub.
+#[derive(Serialize)]
+struct PolicyDocument<'a> {
+    #[serde(flatten)]
+    pii: &'a ResolvedPiiPolicy,
+    #[serde(skip_serializing_if = "AccessPolicy::is_unrestricted")]
+    access: &'a AccessPolicy,
+}
+
+/// Writes the resolved PII policy and the composed access policy as `policy.json`,
+/// mounted `:ro` into mcp-hub. The `access` section is left out while every service is `Full`.
 /// Dir owner-only (0o700 / DACL), file 0o600 via fs_perms atomic write (mirrors
 /// `claude_managed.rs::write_managed_settings`).
 pub fn write_policy_config_in(
     data_dir: &Path,
     project: &str,
     policy: &ResolvedPiiPolicy,
+    access: &AccessPolicy,
 ) -> anyhow::Result<()> {
     let dir = policy_config_dir_in(data_dir, project);
     crate::fs_perms::ensure_owner_only_dir(&dir)?;
-    let content = serde_json::to_string_pretty(policy)?;
+    let content = serde_json::to_string_pretty(&PolicyDocument {
+        pii: policy,
+        access,
+    })?;
     crate::fs_perms::write_restricted_file_atomic(
         &policy_config_path_in(data_dir, project),
         &content,
@@ -2163,7 +2177,7 @@ keywords: []
             pii_ner_enabled: None,
         };
         let policy = resolve_pii_policy(Some(&user), None).unwrap();
-        write_policy_config_in(tmp.path(), "proj", &policy).unwrap();
+        write_policy_config_in(tmp.path(), "proj", &policy, &AccessPolicy::default()).unwrap();
 
         let path = policy_config_path_in(tmp.path(), "proj");
         let v: serde_json::Value =
@@ -2197,7 +2211,13 @@ keywords: []
     #[test]
     fn write_policy_config_is_owner_only() {
         let tmp = tempfile::tempdir().unwrap();
-        write_policy_config_in(tmp.path(), "proj", &ResolvedPiiPolicy::default()).unwrap();
+        write_policy_config_in(
+            tmp.path(),
+            "proj",
+            &ResolvedPiiPolicy::default(),
+            &AccessPolicy::default(),
+        )
+        .unwrap();
         let path = policy_config_path_in(tmp.path(), "proj");
         assert!(path.is_file());
         #[cfg(unix)]
@@ -2217,7 +2237,13 @@ keywords: []
     #[test]
     fn policy_state_digest_changes_with_content_and_is_stable_otherwise() {
         let tmp = tempfile::tempdir().unwrap();
-        write_policy_config_in(tmp.path(), "proj", &ResolvedPiiPolicy::default()).unwrap();
+        write_policy_config_in(
+            tmp.path(),
+            "proj",
+            &ResolvedPiiPolicy::default(),
+            &AccessPolicy::default(),
+        )
+        .unwrap();
         let d1 = policy_state_digest_in(tmp.path(), "proj");
         assert_eq!(d1.len(), 64);
         assert!(d1.chars().all(|c| c.is_ascii_hexdigit()));
@@ -2225,7 +2251,7 @@ keywords: []
 
         let mut other = ResolvedPiiPolicy::default();
         other.rules.retain(|r| r.id != "EMAIL");
-        write_policy_config_in(tmp.path(), "proj", &other).unwrap();
+        write_policy_config_in(tmp.path(), "proj", &other, &AccessPolicy::default()).unwrap();
         let d2 = policy_state_digest_in(tmp.path(), "proj");
         assert_ne!(d1, d2, "changed policy content must change the digest");
     }
@@ -2236,5 +2262,77 @@ keywords: []
         let d = policy_state_digest_in(tmp.path(), "proj");
         assert_eq!(d.len(), 64);
         assert_eq!(d, policy_state_digest_in(tmp.path(), "proj"));
+    }
+
+    fn read_only_access() -> AccessPolicy {
+        AccessPolicy {
+            default: speedwave_pii_engine::AccessMode::ReadOnly,
+            services: Default::default(),
+        }
+    }
+
+    #[test]
+    fn policy_json_has_no_access_section_while_every_service_is_full() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_policy_config_in(
+            tmp.path(),
+            "proj",
+            &ResolvedPiiPolicy::default(),
+            &AccessPolicy::default(),
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(policy_config_path_in(tmp.path(), "proj")).unwrap(),
+        )
+        .unwrap();
+        assert!(v.get("access").is_none());
+    }
+
+    #[test]
+    fn policy_json_carries_the_composed_access_section() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut access = read_only_access();
+        access.default = speedwave_pii_engine::AccessMode::Full;
+        access.services.insert(
+            "slack".to_string(),
+            speedwave_pii_engine::AccessMode::ReadOnly,
+        );
+        write_policy_config_in(tmp.path(), "proj", &ResolvedPiiPolicy::default(), &access).unwrap();
+        let v: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(policy_config_path_in(tmp.path(), "proj")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            v["access"],
+            serde_json::json!({ "default": "full", "services": { "slack": "read_only" } })
+        );
+        assert_eq!(v["version"], 3);
+    }
+
+    #[test]
+    fn written_policy_with_an_access_section_compiles_in_the_engine() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_policy_config_in(
+            tmp.path(),
+            "proj",
+            &ResolvedPiiPolicy::default(),
+            &read_only_access(),
+        )
+        .unwrap();
+        let json = std::fs::read_to_string(policy_config_path_in(tmp.path(), "proj")).unwrap();
+        let compiled = speedwave_pii_engine::compile_policy_v3(&json).unwrap();
+        assert_eq!(compiled.access(), &read_only_access());
+        assert!(!compiled.rules().is_empty());
+    }
+
+    #[test]
+    fn policy_state_digest_changes_when_read_only_mode_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let policy = ResolvedPiiPolicy::default();
+        write_policy_config_in(tmp.path(), "proj", &policy, &AccessPolicy::default()).unwrap();
+        let full = policy_state_digest_in(tmp.path(), "proj");
+        write_policy_config_in(tmp.path(), "proj", &policy, &read_only_access()).unwrap();
+        let read_only = policy_state_digest_in(tmp.path(), "proj");
+        assert_ne!(full, read_only, "a mode change must recreate mcp-hub");
     }
 }
