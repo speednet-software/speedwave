@@ -810,7 +810,8 @@ export class ChatStateService {
         if (
           chunk.chunk_type === 'SystemInit' ||
           chunk.chunk_type === 'RateLimit' ||
-          chunk.chunk_type === 'QueueDrained'
+          chunk.chunk_type === 'QueueDrained' ||
+          chunk.chunk_type === 'TurnStarted'
         ) {
           store.handleStreamChunk(chunk);
           return;
