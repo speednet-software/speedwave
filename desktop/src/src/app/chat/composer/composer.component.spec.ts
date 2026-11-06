@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { signal } from '@angular/core';
+import { Injector, afterNextRender, signal } from '@angular/core';
 import { By } from '@angular/platform-browser';
 import { CdkTextareaAutosize } from '@angular/cdk/text-field';
 import { ComposerComponent } from './composer.component';
@@ -447,6 +447,18 @@ describe('ComposerComponent', () => {
 
       expect(component.text.value).toBe('plan it\n\nsomething newer');
       expect(component.planMode()).toBe(true);
+      expect(out.count).toBe(1);
+    });
+
+    it('takes the text back after the render, so a draft restored in that render keeps it', () => {
+      const out = handled();
+      fixture.componentRef.setInput('returnedText', 'my early message');
+      afterNextRender(() => component.setText('restored draft'), {
+        injector: TestBed.inject(Injector),
+      });
+      fixture.detectChanges();
+
+      expect(component.text.value).toBe('my early message\n\nrestored draft');
       expect(out.count).toBe(1);
     });
 
@@ -1418,6 +1430,21 @@ describe('ComposerComponent', () => {
       expect(component.canSubmit()).toBe(false);
       expect(component.submitBlockedReason()).toBe(
         'Wait for the response to finish before sending an attachment.'
+      );
+    });
+
+    it('explains a file blocked while the session starts', async () => {
+      setProject('acme');
+      fixture.componentRef.setInput('sendBlocked', () => true);
+      fixture.detectChanges();
+
+      pick('composer-attach-files', [pdf()]);
+      await flush();
+      fixture.detectChanges();
+
+      expect(component.canSubmit()).toBe(false);
+      expect(component.submitBlockedReason()).toBe(
+        'Wait for the session to start before sending an attachment.'
       );
     });
 
