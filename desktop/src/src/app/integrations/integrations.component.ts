@@ -24,6 +24,7 @@ import {
   SlackFeatureStatus,
 } from '../models/integration';
 import { ServiceCardComponent, SaveCredentialsEvent } from './service-card/service-card.component';
+import { IntegrationAccessComponent } from '../shared/integration-access/integration-access.component';
 import { RedmineConfigComponent } from './redmine-config/redmine-config.component';
 import { GitRepositoriesComponent } from './git-repositories/git-repositories.component';
 import { IdeBridgeComponent } from './ide-bridge/ide-bridge.component';
@@ -55,6 +56,7 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
     ServiceCardComponent,
     RedmineConfigComponent,
     GitRepositoriesComponent,
+    IntegrationAccessComponent,
     IdeBridgeComponent,
     ProjectPillComponent,
   ],
@@ -349,6 +351,11 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
                     </div>
                   }
                 }
+                @if (activeProject) {
+                  <div class="px-5 py-3">
+                    <app-integration-access [project]="activeProject" [service]="svc.service" />
+                  </div>
+                }
               </div>
             }
           }
@@ -374,9 +381,17 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
                     <span class="mono text-[11px] text-[var(--ink-mute)]">{{
                       os.description
                     }}</span>
+                    @if (activeProject) {
+                      <app-integration-access
+                        class="ml-auto"
+                        [project]="activeProject"
+                        [service]="os.service"
+                        [compact]="true"
+                      />
+                    }
                     <button
                       type="button"
-                      class="toggle ml-auto"
+                      class="toggle"
                       [class.on]="os.enabled"
                       [attr.aria-pressed]="os.enabled"
                       [attr.aria-label]="(os.enabled ? 'Disable ' : 'Enable ') + os.service"

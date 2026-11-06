@@ -244,7 +244,8 @@ export async function searchTools(params: SearchToolsParams): Promise<SearchTool
   const notice = readOnlyNotice(
     readOnlyServices(
       rules,
-      SERVICE_NAMES.filter((s) => enabled.has(s) && !skipped.has(s))
+      SERVICE_NAMES.filter((s) => enabled.has(s) && !skipped.has(s)),
+      disabledOs
     )
   );
 

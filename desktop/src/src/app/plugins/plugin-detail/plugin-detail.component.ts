@@ -23,6 +23,7 @@ import {
 } from '../../models/integration';
 import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-settings-form.component';
 import { PluginCredentialsFormComponent } from '../plugin-credentials-form/plugin-credentials-form.component';
+import { IntegrationAccessComponent } from '../../shared/integration-access/integration-access.component';
 import { ProjectPillComponent } from '../../project-switcher/project-pill.component';
 import { TooltipDirective } from '../../shared/tooltip.directive';
 import { parseMarkdownSync, pluginMarkdown } from '../../shared/markdown';
@@ -43,6 +44,7 @@ const NO_ACTIVE_PROJECT_MSG = 'No active project — open or create a project fi
     PluginSettingsFormComponent,
     PluginCredentialsFormComponent,
     ProjectPillComponent,
+    IntegrationAccessComponent,
     TooltipDirective,
     BridgeConnectionComponent,
     MermaidSlotsDirective,
@@ -188,6 +190,15 @@ const NO_ACTIVE_PROJECT_MSG = 'No active project — open or create a project fi
                   >
                   {{ plugin.verification_error }}
                 </p>
+              }
+
+              @if (activeProject && plugin.service_id) {
+                <div
+                  class="mb-4 rounded border border-[var(--line)] bg-[var(--bg-1)] p-4"
+                  data-testid="plugin-access"
+                >
+                  <app-integration-access [project]="activeProject" [service]="plugin.service_id" />
+                </div>
               }
 
               <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
@@ -467,7 +478,7 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
   private tauri = inject(TauriService);
   private projectState = inject(ProjectStateService);
   private log = inject(LoggerService);
-  private activeProject: string | null = null;
+  protected activeProject: string | null = null;
   private unsubProjectReady: (() => void) | null = null;
 
   /** Returns integration names that are not yet configured. */

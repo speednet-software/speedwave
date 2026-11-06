@@ -1484,6 +1484,7 @@ mod tests {
                             "example-plugin".into(),
                             config::IntegrationConfig {
                                 enabled: Some(true),
+                                ..Default::default()
                             },
                         )])),
                         ..Default::default()
@@ -1503,12 +1504,14 @@ mod tests {
                                 "example-plugin".into(),
                                 config::IntegrationConfig {
                                     enabled: Some(true),
+                                    ..Default::default()
                                 },
                             ),
                             (
                                 "other".into(),
                                 config::IntegrationConfig {
                                     enabled: Some(false),
+                                    ..Default::default()
                                 },
                             ),
                         ])),

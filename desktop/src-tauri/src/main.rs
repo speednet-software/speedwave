@@ -1184,6 +1184,8 @@ fn main() {
             containers_cmd::restart_hub,
             access_cmd::get_access_settings,
             access_cmd::set_read_only_mode,
+            access_cmd::get_integration_access,
+            access_cmd::set_integration_access_mode,
             pin_cmd::get_effort_pin,
             pin_cmd::set_effort_pin,
             pin_cmd::get_model_hint,

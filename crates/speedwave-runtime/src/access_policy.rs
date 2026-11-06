@@ -80,6 +80,58 @@ pub fn set_read_only(
     Ok(())
 }
 
+/// What an integration's Access control shows: its stored mode and the project-wide mode above it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IntegrationAccessState {
+    /// Mode the user stored for the integration.
+    pub mode: AccessMode,
+    /// The project-wide read-only mode, which overrides the stored mode while on.
+    pub global: ReadOnlyState,
+}
+
+/// Access state of one integration (config key of a built-in, macOS native service or plugin).
+pub fn integration_access_state(
+    user_config: &SpeedwaveUserConfig,
+    project: &str,
+    key: &str,
+    managed: Option<&ManagedConfig>,
+) -> IntegrationAccessState {
+    let mode = user_config
+        .find_project(project)
+        .and_then(|p| p.integrations.as_ref())
+        .map_or(AccessMode::Full, |i| i.access_of(key));
+    IntegrationAccessState {
+        mode,
+        global: read_only_state(user_config, project, managed),
+    }
+}
+
+/// Stores the access mode of one integration; the key must be a known integration.
+pub fn set_integration_access(
+    user_config: &mut SpeedwaveUserConfig,
+    project: &str,
+    key: &str,
+    mode: AccessMode,
+    is_known_plugin: impl Fn(&str) -> bool,
+) -> Result<(), String> {
+    let known = crate::consts::find_mcp_service(key).is_some()
+        || crate::consts::TOGGLEABLE_OS_SERVICES
+            .iter()
+            .any(|svc| svc.config_key == key)
+        || is_known_plugin(key);
+    if !known {
+        return Err(format!("unknown integration: {key}"));
+    }
+    let entry = user_config
+        .find_project_mut(project)
+        .ok_or_else(|| format!("project '{project}' not found in config"))?;
+    entry
+        .integrations
+        .get_or_insert_with(Default::default)
+        .set_access(key, mode);
+    Ok(())
+}
+
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
@@ -180,6 +232,85 @@ mod tests {
         let mut cfg = user_config(false);
         let err = set_read_only(&mut cfg, "other", true, None).unwrap_err();
         assert!(err.contains("other"));
+    }
+
+    #[test]
+    fn integration_state_is_full_and_unlocked_by_default() {
+        let state = integration_access_state(&user_config(false), "proj", "slack", None);
+        assert_eq!(state.mode, AccessMode::Full);
+        assert!(!state.global.enabled);
+    }
+
+    #[test]
+    fn set_integration_access_stores_the_mode_per_integration() {
+        let mut cfg = user_config(false);
+        set_integration_access(&mut cfg, "proj", "slack", AccessMode::ReadOnly, |_| false).unwrap();
+        set_integration_access(&mut cfg, "proj", "mail", AccessMode::ReadOnly, |_| false).unwrap();
+        assert_eq!(
+            integration_access_state(&cfg, "proj", "slack", None).mode,
+            AccessMode::ReadOnly
+        );
+        assert_eq!(
+            integration_access_state(&cfg, "proj", "mail", None).mode,
+            AccessMode::ReadOnly
+        );
+        assert_eq!(
+            integration_access_state(&cfg, "proj", "redmine", None).mode,
+            AccessMode::Full
+        );
+        set_integration_access(&mut cfg, "proj", "slack", AccessMode::Full, |_| false).unwrap();
+        assert_eq!(
+            integration_access_state(&cfg, "proj", "slack", None).mode,
+            AccessMode::Full
+        );
+    }
+
+    #[test]
+    fn set_integration_access_accepts_an_installed_plugin_only() {
+        let mut cfg = user_config(false);
+        let is_plugin = |key: &str| key == "my-plugin";
+        set_integration_access(
+            &mut cfg,
+            "proj",
+            "my-plugin",
+            AccessMode::ReadOnly,
+            is_plugin,
+        )
+        .unwrap();
+        let err = set_integration_access(&mut cfg, "proj", "typo", AccessMode::ReadOnly, is_plugin)
+            .unwrap_err();
+        assert!(err.contains("typo"));
+        assert_eq!(
+            integration_access_state(&cfg, "proj", "my-plugin", None).mode,
+            AccessMode::ReadOnly
+        );
+    }
+
+    #[test]
+    fn set_integration_access_fails_for_an_unknown_project() {
+        let mut cfg = user_config(false);
+        let err =
+            set_integration_access(&mut cfg, "other", "slack", AccessMode::ReadOnly, |_| false)
+                .unwrap_err();
+        assert!(err.contains("other"));
+    }
+
+    #[test]
+    fn integration_state_carries_the_project_wide_mode_and_its_lock() {
+        let state =
+            integration_access_state(&user_config(false), "proj", "slack", Some(&mdm(true)));
+        assert!(state.global.enabled && state.global.locked);
+        let own = integration_access_state(&user_config(true), "proj", "slack", None);
+        assert!(own.global.enabled && !own.global.locked);
+    }
+
+    #[test]
+    fn a_stored_integration_mode_survives_the_project_wide_mode_and_composes_to_read_only() {
+        let mut cfg = user_config(true);
+        set_integration_access(&mut cfg, "proj", "slack", AccessMode::ReadOnly, |_| false).unwrap();
+        let state = integration_access_state(&cfg, "proj", "slack", None);
+        assert_eq!(state.mode, AccessMode::ReadOnly);
+        assert!(state.global.enabled);
     }
 
     fn modes(entries: &[(&str, AccessMode)]) -> BTreeMap<String, AccessMode> {

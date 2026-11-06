@@ -10,8 +10,7 @@ import {
 } from '@angular/core';
 
 import { TauriService } from '../../services/tauri.service';
-import { ProjectStateService } from '../../services/project-state.service';
-import { LoggerService } from '../../services/logger.service';
+import { HubRestartService } from '../../services/hub-restart.service';
 import { ToggleComponent } from '../../shared/toggle.component';
 import { AccessSettingsView } from '../../models/access';
 
@@ -80,8 +79,7 @@ export class AccessSectionComponent {
   protected readonly busy = signal(false);
 
   private readonly tauri = inject(TauriService);
-  private readonly projectState = inject(ProjectStateService);
-  private readonly log = inject(LoggerService);
+  private readonly hub = inject(HubRestartService);
 
   /** Reloads the stored mode whenever the project changes. */
   constructor() {
@@ -106,7 +104,7 @@ export class AccessSectionComponent {
         enabled,
       });
       if (this.project() === project) this.view.set(next);
-      await this.applyToHub(project);
+      await this.hub.apply(project);
     } catch (e: unknown) {
       this.errorOccurred.emit(errorText(e));
       await this.load(project);
@@ -121,19 +119,6 @@ export class AccessSectionComponent {
       if (this.project() === project && next) this.view.set(next);
     } catch (e: unknown) {
       this.errorOccurred.emit(errorText(e));
-    }
-  }
-
-  private async applyToHub(project: string): Promise<void> {
-    if (!this.projectState.isSettledOn(project) || this.projectState.status() !== 'ready') {
-      this.projectState.requestRestartFor(project);
-      return;
-    }
-    try {
-      await this.tauri.invoke('restart_hub', { project });
-    } catch (e: unknown) {
-      this.log.warn(`restart_hub failed, falling back to full restart: ${errorText(e)}`);
-      this.projectState.requestRestartFor(project);
     }
   }
 }

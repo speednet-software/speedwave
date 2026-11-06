@@ -154,3 +154,55 @@ describe('Redmine tool metadata', () => {
     });
   });
 });
+
+/** Tools that only read: the hub lets them through in read-only mode (ADR-108). */
+const READ_ONLY_TOOL_NAMES = [
+  'listIssueIds',
+  'getIssueFull',
+  'searchIssueIds',
+  'listTimeEntries',
+  'listJournals',
+  'listUsers',
+  'resolveUser',
+  'getCurrentUser',
+  'listProjectIds',
+  'getProjectFull',
+  'searchProjectIds',
+  'listVersions',
+  'listRelations',
+  'getMappings',
+  'getConfig',
+];
+
+/** Tools that create, change, delete or write files: the hub blocks them in read-only mode. */
+const CHANGING_TOOL_NAMES = [
+  'createIssue',
+  'updateIssue',
+  'commentIssue',
+  'createTimeEntry',
+  'updateTimeEntry',
+  'updateJournal',
+  'deleteJournal',
+  'createRelation',
+  'deleteRelation',
+];
+
+describe('Redmine read-only access annotations', () => {
+  const tools = ALL_TOOLS;
+  const names = (predicate: (hint: unknown) => boolean) =>
+    tools.filter((t) => predicate(t.annotations?.readOnlyHint)).map((t) => t.name);
+
+  it('lists every tool as either reading or changing', () => {
+    expect([...tools.map((t) => t.name)].sort()).toEqual(
+      [...READ_ONLY_TOOL_NAMES, ...CHANGING_TOOL_NAMES].sort()
+    );
+  });
+
+  it('marks exactly the reading tools readOnlyHint true', () => {
+    expect(names((hint) => hint === true).sort()).toEqual([...READ_ONLY_TOOL_NAMES].sort());
+  });
+
+  it.each(CHANGING_TOOL_NAMES)('does not mark %s as read-only', (name) => {
+    expect(tools.find((t) => t.name === name)?.annotations?.readOnlyHint).not.toBe(true);
+  });
+});

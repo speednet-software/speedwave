@@ -125,6 +125,51 @@ describe('decideAccess', () => {
   });
 });
 
+describe('os sub-services', () => {
+  const MAIL_READ_ONLY: AccessRules = { default: 'full', services: { 'os-mail': 'read_only' } };
+  const write = { readOnlyHint: false };
+
+  function osTool(name: string, osCategory: 'reminders' | 'mail', a?: ToolMetadata['annotations']) {
+    return { ...tool('os', name, a), osCategory } satisfies ToolMetadata;
+  }
+
+  it('denies a write tool of the read-only sub-service', () => {
+    expect(decideAccess(MAIL_READ_ONLY, osTool('sendMail', 'mail', write))).toMatchObject({
+      allowed: false,
+      reason: 'read-only',
+    });
+  });
+
+  it('allows a write tool of a sub-service that stays full', () => {
+    expect(decideAccess(MAIL_READ_ONLY, osTool('createReminder', 'reminders', write))).toEqual({
+      allowed: true,
+    });
+  });
+
+  it('allows a read tool of the read-only sub-service', () => {
+    const read = { readOnlyHint: true };
+    expect(decideAccess(MAIL_READ_ONLY, osTool('listEmails', 'mail', read))).toEqual({
+      allowed: true,
+    });
+  });
+
+  it('follows the default when the sub-service has no entry', () => {
+    expect(decideAccess(ALL_READ_ONLY, osTool('createReminder', 'reminders', write))).toMatchObject(
+      { allowed: false }
+    );
+  });
+
+  it('lists the enabled read-only sub-services, not the os service', () => {
+    expect(readOnlyServices(MAIL_READ_ONLY, ['os', 'slack'], new Set(['reminders']))).toEqual([
+      'os-mail',
+    ]);
+  });
+
+  it('leaves out a disabled read-only sub-service', () => {
+    expect(readOnlyServices(MAIL_READ_ONLY, ['os'], new Set(['mail']))).toEqual([]);
+  });
+});
+
 describe('serviceAccessMode', () => {
   it('uses the service entry over the default', () => {
     expect(serviceAccessMode(SLACK_READ_ONLY, 'slack')).toBe('read_only');

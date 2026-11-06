@@ -34,13 +34,36 @@ export function serviceAccessMode(rules: AccessRules, service: string): AccessMo
   return rules.services[service] ?? rules.default;
 }
 
+const OS_SERVICE = 'os';
+const OS_CATEGORIES = ['reminders', 'calendar', 'mail', 'notes'] as const;
+
 /**
- * The services among `services` whose mode is read-only.
+ * The access rules key of a tool: `os-<category>` for a tool of an OS sub-integration, else its service.
+ * @param service - Service name
+ * @param osCategory - OS sub-integration of the tool, if any
+ */
+function accessKey(service: string, osCategory?: string): string {
+  return service === OS_SERVICE && osCategory ? `${OS_SERVICE}-${osCategory}` : service;
+}
+
+/**
+ * The services among `services` whose mode is read-only; the `os` service counts per enabled sub-integration.
  * @param rules - Composed access rules from policy.json
  * @param services - Service names to check
+ * @param disabledOs - OS sub-integrations that are switched off
  */
-export function readOnlyServices(rules: AccessRules, services: readonly string[]): string[] {
-  return services.filter((s) => serviceAccessMode(rules, s) === 'read_only');
+export function readOnlyServices(
+  rules: AccessRules,
+  services: readonly string[],
+  disabledOs: ReadonlySet<string> = new Set()
+): string[] {
+  return services
+    .flatMap((s) =>
+      s === OS_SERVICE
+        ? OS_CATEGORIES.filter((c) => !disabledOs.has(c)).map((c) => accessKey(s, c))
+        : [s]
+    )
+    .filter((key) => serviceAccessMode(rules, key) === 'read_only');
 }
 
 /**
@@ -75,7 +98,8 @@ function blockedBecause(service: string, metadata: ToolMetadata): string {
  */
 export function decideAccess(rules: AccessRules, metadata: ToolMetadata): AccessDecision {
   const { service, name: tool } = metadata;
-  if (serviceAccessMode(rules, service) === 'full') return { allowed: true };
+  if (serviceAccessMode(rules, accessKey(service, metadata.osCategory)) === 'full')
+    return { allowed: true };
   if (!service.startsWith(CUSTOM_SERVICE_PREFIX) && metadata.annotations?.readOnlyHint === true) {
     return { allowed: true };
   }
