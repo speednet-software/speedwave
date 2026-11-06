@@ -7220,6 +7220,262 @@ describe('ChatSessionStore', () => {
     });
   });
 
+  describe('a message queued during a session start (SPEED-919)', () => {
+    type Call = { cmd: string; args: unknown };
+    let calls: Call[];
+    let pendingStart: Deferred<void>;
+    let pendingResume: Deferred<void>;
+    let startFails: string | null;
+
+    beforeEach(async () => {
+      await TestBed.inject(ProjectStateService).init();
+      calls = [];
+      pendingStart = createDeferred<void>();
+      pendingResume = createDeferred<void>();
+      startFails = null;
+      mockTauri.invokeHandler = async (cmd: string, args?: unknown) => {
+        calls.push({ cmd, args });
+        switch (cmd) {
+          case 'start_chat':
+            await pendingStart.promise;
+            if (startFails) throw new Error(startFails);
+            return undefined;
+          case 'resume_conversation':
+            await pendingResume.promise;
+            if (startFails) throw new Error(startFails);
+            return undefined;
+          case 'get_conversation':
+            return { session_id: 'sess-resumed', messages: [] };
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'check_containers_running':
+            return true;
+          default:
+            return undefined;
+        }
+      };
+    });
+
+    function sent(): unknown[] {
+      return calls.filter((c) => c.cmd === 'send_message').map((c) => c.args);
+    }
+
+    function backendQueueCalls(): Call[] {
+      return calls.filter((c) => c.cmd === 'queue_message' || c.cmd === 'cancel_queued_message');
+    }
+
+    async function beginStart(): Promise<{ done: Promise<unknown> }> {
+      const done = store.startChatSession();
+      await vi.waitFor(() => expect(calls.map((c) => c.cmd)).toContain('start_chat'));
+      expect(store.sessionStartInFlightFromState()).toBe(true);
+      return { done };
+    }
+
+    it('holds the text in the store and sends it as a new turn once the start completes', async () => {
+      const { done: starting } = await beginStart();
+
+      const displaced = await store.queueMessage('typed while starting');
+
+      expect(displaced).toBeNull();
+      expect(store.pendingQueue?.text).toBe('typed while starting');
+      expect(store.pendingQueueFromState()?.text).toBe('typed while starting');
+      expect(sent()).toEqual([]);
+      expect(backendQueueCalls()).toEqual([]);
+
+      pendingStart.resolve();
+      await starting;
+
+      await vi.waitFor(() =>
+        expect(sent()).toEqual([
+          {
+            blocks: [{ type: 'text', text: 'typed while starting' }],
+            displayText: 'typed while starting',
+            tabId: 'test-tab-id',
+          },
+        ])
+      );
+      expect(store.pendingQueue).toBeNull();
+      expect(store.isStreaming).toBe(true);
+      expect(store.messages.at(-1)?.blocks).toEqual([
+        { type: 'text', content: 'typed while starting' },
+      ]);
+      expect(backendQueueCalls()).toEqual([]);
+    });
+
+    it('replaces an earlier text queued during the same start', async () => {
+      const { done: starting } = await beginStart();
+
+      await store.queueMessage('first thought');
+      const displaced = await store.queueMessage('second thought');
+
+      expect(displaced).toBe('first thought');
+      pendingStart.resolve();
+      await starting;
+      await vi.waitFor(() => expect(sent()).toHaveLength(1));
+      expect(sent()[0]).toMatchObject({ displayText: 'second thought' });
+    });
+
+    it('hands the text to the backend queue when a turn began before the session was ready', async () => {
+      const { done: starting } = await beginStart();
+      await store.queueMessage('after the running turn');
+
+      store.isStreaming = true;
+      pendingStart.resolve();
+      await starting;
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(sent()).toEqual([]);
+      expect(store.pendingQueue?.text).toBe('after the running turn');
+      store.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-6', session_id: 'sess-turn' },
+      });
+      await vi.waitFor(() =>
+        expect(backendQueueCalls()).toEqual([
+          {
+            cmd: 'queue_message',
+            args: { sessionId: 'sess-turn', text: 'after the running turn' },
+          },
+        ])
+      );
+      store.handleStreamChunk({
+        chunk_type: 'QueueDrained',
+        data: { session_id: 'sess-turn', text: 'after the running turn' },
+      });
+      expect(store.pendingQueue).toBeNull();
+    });
+
+    it('cancel clears the slot without a backend call and the start sends nothing', async () => {
+      const { done: starting } = await beginStart();
+      await store.queueMessage('never mind');
+
+      await store.cancelQueuedMessage();
+
+      expect(store.pendingQueue).toBeNull();
+      pendingStart.resolve();
+      await starting;
+      await new Promise((r) => setTimeout(r, 0));
+      expect(sent()).toEqual([]);
+      expect(backendQueueCalls()).toEqual([]);
+    });
+
+    it('returns the text after a failed start and drops the slot once the composer took it', async () => {
+      const { done: starting } = await beginStart();
+      await store.queueMessage('lost start');
+
+      startFails = 'chat backend crashed';
+      pendingStart.resolve();
+      await starting;
+
+      expect(store.returnedStartSlot()).toBe('lost start');
+      expect(store.pendingQueue?.text).toBe('lost start');
+      expect(sent()).toEqual([]);
+
+      store.settleReturnedStartSlot(true);
+
+      expect(store.returnedStartSlot()).toBeNull();
+      expect(store.pendingQueue).toBeNull();
+    });
+
+    it('returns the text after a start refused for sign-in', async () => {
+      const { done: starting } = await beginStart();
+      await store.queueMessage('needs sign-in');
+
+      startFails = 'not authenticated';
+      pendingStart.resolve();
+      await starting;
+
+      expect(store.returnedStartSlot()).toBe('needs sign-in');
+    });
+
+    it('keeps the slot the composer could not take and sends it after the next successful start', async () => {
+      const { done: failing } = await beginStart();
+      await store.queueMessage('kept for later');
+      startFails = 'chat backend crashed';
+      pendingStart.resolve();
+      await failing;
+
+      store.settleReturnedStartSlot(false);
+
+      expect(store.returnedStartSlot()).toBeNull();
+      expect(store.pendingQueue?.text).toBe('kept for later');
+
+      startFails = null;
+      pendingStart = createDeferred<void>();
+      calls = [];
+      const { done: retry } = await beginStart();
+      expect(sent()).toEqual([]);
+      pendingStart.resolve();
+      await retry;
+
+      await vi.waitFor(() => expect(sent()).toHaveLength(1));
+      expect(sent()[0]).toMatchObject({ displayText: 'kept for later' });
+      expect(store.pendingQueue).toBeNull();
+    });
+
+    it('a new text queued during the next start replaces the returned one', async () => {
+      const { done: failing } = await beginStart();
+      await store.queueMessage('older');
+      startFails = 'chat backend crashed';
+      pendingStart.resolve();
+      await failing;
+
+      startFails = null;
+      pendingStart = createDeferred<void>();
+      const { done: retry } = await beginStart();
+      const displaced = await store.queueMessage('newer');
+
+      expect(displaced).toBe('older');
+      expect(store.returnedStartSlot()).toBeNull();
+      pendingStart.resolve();
+      await retry;
+      await vi.waitFor(() => expect(sent()).toHaveLength(1));
+      expect(sent()[0]).toMatchObject({ displayText: 'newer' });
+    });
+
+    it('sends the text after a resume completes', async () => {
+      const resuming = store.resumeConversation('sess-resumed');
+      await vi.waitFor(() => expect(calls.map((c) => c.cmd)).toContain('resume_conversation'));
+      expect(store.sessionStartInFlightFromState()).toBe(true);
+
+      await store.queueMessage('continue please');
+      expect(backendQueueCalls()).toEqual([]);
+
+      pendingResume.resolve();
+      await resuming;
+
+      await vi.waitFor(() => expect(sent()).toHaveLength(1));
+      expect(sent()[0]).toMatchObject({ displayText: 'continue please' });
+      expect(store.pendingQueue).toBeNull();
+    });
+
+    it('returns the text after a failed resume', async () => {
+      const resuming = store.resumeConversation('sess-resumed');
+      await vi.waitFor(() => expect(calls.map((c) => c.cmd)).toContain('resume_conversation'));
+      await store.queueMessage('resume failed');
+
+      startFails = 'failed to spawn claude';
+      pendingResume.resolve();
+      await resuming;
+
+      expect(store.returnedStartSlot()).toBe('resume failed');
+      expect(sent()).toEqual([]);
+    });
+
+    it('queues to the backend as before when no start is in flight', async () => {
+      store.seedSessionId('sess-live');
+      store.isStreaming = true;
+
+      await store.queueMessage('mid-turn');
+
+      expect(backendQueueCalls()).toEqual([
+        { cmd: 'queue_message', args: { sessionId: 'sess-live', text: 'mid-turn' } },
+      ]);
+    });
+  });
+
   describe('state-tree signal projections', () => {
     it('initial state matches DEFAULT_STATE_TREE', () => {
       const s = store.state();

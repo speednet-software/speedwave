@@ -256,9 +256,13 @@ export class ChatSessionStore {
 
   private _pendingQueue: QueuedMessage | null = null;
   private _queueAwaitingSession = false;
+  private _startSlot: QueuedMessage | null = null;
+  private readonly _returnedStartSlot = signal<string | null>(null);
+  /** Text of a message queued during a session start that failed, until the composer settles it. */
+  readonly returnedStartSlot: Signal<string | null> = this._returnedStartSlot.asReadonly();
   /** Public read-only accessor for the queued slot. */
   get pendingQueue(): QueuedMessage | null {
-    return this._pendingQueue;
+    return this._pendingQueue ?? this._startSlot;
   }
 
   private readonly _pendingModelPick = signal<ModelPick | null>(null);
@@ -282,11 +286,40 @@ export class ChatSessionStore {
   readonly deferredEffort: Signal<string | null> = this._deferredEffort.asReadonly();
 
   private releasePendingPicks(): void {
-    if (this.isStreaming) return;
+    void this.takePendingPicks();
+  }
+
+  private takePendingPicks(): Promise<void> {
+    if (this.isStreaming) return Promise.resolve();
     const model = this._pendingModelPick();
     const effort = this._pendingEffort;
     this.clearPendingPicks();
-    void this.takeReleasedPicks(model, effort);
+    return this.takeReleasedPicks(model, effort);
+  }
+
+  private releaseForReadySession(): void {
+    const generation = this._sessionGeneration;
+    void this.takePendingPicks().finally(() => {
+      if (generation === this._sessionGeneration) this.takeStartSlot();
+    });
+  }
+
+  private takeStartSlot(): void {
+    const slot = this._startSlot;
+    if (!slot || this.sessionStartInFlightFromState()) return;
+    this.clearStartSlot();
+    if (this.isStreaming) void this.queueMessage(slot.text);
+    else void this.sendMessage(slot.text);
+  }
+
+  private returnStartSlot(): void {
+    if (this._startSlot) this._returnedStartSlot.set(this._startSlot.text);
+  }
+
+  private clearStartSlot(): void {
+    this._startSlot = null;
+    this._returnedStartSlot.set(null);
+    this.notifyChange();
   }
 
   private clearPendingPicks(): void {
@@ -1137,7 +1170,7 @@ export class ChatSessionStore {
         messages: this._messages,
         currentBlocks: this._currentBlocks,
         isStreaming: this.isStreaming,
-        pendingQueue: this._pendingQueue,
+        pendingQueue: this.pendingQueue,
         sessionStats: this._sessionStats(),
         model: this._model,
       })
@@ -1225,9 +1258,10 @@ export class ChatSessionStore {
           this.startingSession = false;
         }
       }
-      if (outcome === 'started') this.releasePendingPicks();
-      else if (outcome !== 'skipped' && !(keepPicksForKeptSession && sessionKept)) {
-        this.dropPendingPicks();
+      if (outcome === 'started') this.releaseForReadySession();
+      else if (outcome !== 'skipped') {
+        if (!(keepPicksForKeptSession && sessionKept)) this.dropPendingPicks();
+        this.returnStartSlot();
       }
       return { outcome, sessionKept };
     }
@@ -1387,6 +1421,7 @@ export class ChatSessionStore {
               return;
             }
             if (!sameConversation()) return;
+            this.takeStartSlot();
             await this.deps.tauri.invoke('send_message', invokeArgs);
             return;
           }
@@ -1918,10 +1953,19 @@ export class ChatSessionStore {
   /**
    * Queue a message as the next turn (ADR-045); replace semantics. Before the first session id
    * (init not yet parsed), backend registration defers to {@link flushDeferredQueue} so an early queue is never dropped.
+   * During a session start the slot stays in this store until the session is ready.
    * @param text - The message to queue.
    */
   async queueMessage(text: string): Promise<string | null> {
     if (!text) return null;
+    if (this.sessionStartInFlightFromState() && !this.isStreaming) {
+      const displaced = this.pendingQueue?.text ?? null;
+      this._startSlot = { text, queued_at: Date.now() };
+      this._returnedStartSlot.set(null);
+      this.requestAutoScroll();
+      this.notifyChange();
+      return displaced;
+    }
     const prior = this._pendingQueue?.text ?? null;
     this._pendingQueue = { text, queued_at: Date.now() };
     this.requestAutoScroll();
@@ -1957,6 +2001,10 @@ export class ChatSessionStore {
 
   /** Cancel the queued message for the active session; no-op when empty. */
   async cancelQueuedMessage(): Promise<void> {
+    if (!this._pendingQueue && this._startSlot) {
+      this.clearStartSlot();
+      return;
+    }
     this._queueAwaitingSession = false;
     const sessionId = this._sessionStats()?.session_id;
     if (!sessionId) {
@@ -1971,6 +2019,15 @@ export class ChatSessionStore {
     }
     this._pendingQueue = null;
     this.notifyChange();
+  }
+
+  /**
+   * Settles {@link returnedStartSlot}: the slot is dropped when the composer took its text back.
+   * @param taken - Whether the composer put the text back into its field.
+   */
+  settleReturnedStartSlot(taken: boolean): void {
+    if (taken) this.clearStartSlot();
+    else this._returnedStartSlot.set(null);
   }
 
   /**
@@ -2130,6 +2187,7 @@ export class ChatSessionStore {
     }
     if (!settled) {
       this._resumeInProgress = false;
+      this.returnStartSlot();
       return;
     }
     const prior = this.captureConversationView();
@@ -2222,8 +2280,12 @@ export class ChatSessionStore {
       }
     }
     if (gen !== this._sessionGeneration || this._disposed || !sameProject()) return;
-    if (outcome === 'started') this.releasePendingPicks();
-    else if (!sessionKept) this.dropPendingPicks();
+    if (outcome === 'started') {
+      this.releaseForReadySession();
+      return;
+    }
+    if (!sessionKept) this.dropPendingPicks();
+    this.returnStartSlot();
   }
 
   private static readonly DEFERRED_RECONCILE_BACKOFF_MS = [
