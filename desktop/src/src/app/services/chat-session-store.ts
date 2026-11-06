@@ -1359,7 +1359,6 @@ export class ChatSessionStore {
     try {
       await this.deps.ensureListeners();
       await this.deps.tauri.invoke('send_message', invokeArgs);
-      if (sameConversation()) this.takeStartSlot();
     } catch (err) {
       const errStr = String(err);
       if (
@@ -2053,13 +2052,9 @@ export class ChatSessionStore {
     this.notifyChange();
   }
 
-  /**
-   * Settles {@link returnedStartSlot}.
-   * @param taken - Whether the composer put the text back into its field.
-   */
-  settleReturnedStartSlot(taken: boolean): void {
-    if (taken) this.clearStartSlot();
-    else this._returnedStartSlot.set(null);
+  /** Drops the start slot once the composer took {@link returnedStartSlot} back into its field. */
+  settleReturnedStartSlot(): void {
+    this.clearStartSlot();
   }
 
   /**
