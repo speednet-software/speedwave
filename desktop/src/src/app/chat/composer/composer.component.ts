@@ -3,7 +3,9 @@ import {
   ChangeDetectionStrategy,
   Component,
   ElementRef,
+  Injector,
   ViewChild,
+  afterNextRender,
   computed,
   effect,
   inject,
@@ -50,8 +52,7 @@ const PLAN_MODE_PREFIX =
   '[Plan mode] Produce a plan only — do NOT modify files, do NOT run tools that mutate state. Then ask me to confirm before acting.\n\n';
 
 /**
- * Stateless composer: attach menu, textarea, slash button, slash-menu popover, send button. Enter submits, Shift+Enter
- * newlines, `/` opens the slash menu; ADR-045: while `streaming`, submit emits `queueRequested`, not `submitted`.
+ * Stateless composer: attach menu, textarea, slash button, slash-menu popover, send button.
  */
 @Component({
   selector: 'app-composer',
@@ -342,6 +343,8 @@ export class ComposerComponent implements AfterViewInit {
 
   readonly draftText = input('');
 
+  readonly returnedText = input('');
+
   /** Per-tab attachment state (`ChatSessionStore.composerAttachments`, SPEED-785) — never instance-held, so it survives a tab switch. */
   readonly attachmentDraft = input.required<ComposerAttachments>();
 
@@ -359,6 +362,8 @@ export class ComposerComponent implements AfterViewInit {
 
   readonly draftApplied = output<void>();
 
+  readonly returnedTextHandled = output<void>();
+
   readonly stopRequested = output<void>();
 
   readonly modelSelected = output<ModelSelection>();
@@ -371,6 +376,7 @@ export class ComposerComponent implements AfterViewInit {
   protected readonly projectState = inject(ProjectStateService);
   private readonly preprocessor = inject(ImagePreprocessorService);
   private readonly fileAttachments = inject(FileAttachmentService);
+  private readonly injector = inject(Injector);
 
   readonly text = new FormControl<string>('', { nonNullable: true });
 
@@ -424,6 +430,17 @@ export class ComposerComponent implements AfterViewInit {
       this.setText(draft);
       this.draftApplied.emit();
     });
+    effect(() => {
+      const returned = this.returnedText();
+      if (!returned) return;
+      afterNextRender(
+        () => {
+          this.takeBackReturnedText(returned, this.textValue());
+          this.returnedTextHandled.emit();
+        },
+        { injector: this.injector }
+      );
+    });
   }
 
   /** Auto-focus the textarea on mount so the user can start typing immediately. */
@@ -452,6 +469,18 @@ export class ComposerComponent implements AfterViewInit {
       ta.focus();
       ta.setSelectionRange(value.length, value.length);
     });
+  }
+
+  private takeBackReturnedText(payload: string, typed: string): void {
+    const planned = payload.startsWith(PLAN_MODE_PREFIX);
+    const text = planned ? payload.slice(PLAN_MODE_PREFIX.length) : payload;
+    if (typed.trim() === '') {
+      this.setPlanMode(planned);
+      this.setText(text);
+      return;
+    }
+    if (planned) this.setPlanMode(true);
+    this.setText(`${text}\n\n${typed}`);
   }
 
   /**
@@ -514,16 +543,16 @@ export class ComposerComponent implements AfterViewInit {
     if (this.autosize) this.autosize.enabled = true;
   }
 
-  /** Text submits queue while streaming (ADR-045); submits with attachments don't (ADR-065). */
+  /** Whether the current draft can be submitted. */
   canSubmit(): boolean {
-    if (this.disabled() || this.sendBlocked()()) return false;
+    if (this.disabled()) return false;
     const draft = this.attachmentDraft();
     if (draft.anyStaging()) return false;
     const text = this.textValue();
     const hasText = !isBlankOrSlashOnly(text);
     const hasAttachments = draft.records().length > 0;
     if (!hasText && !hasAttachments) return false;
-    return !(hasAttachments && this.streaming());
+    return !(hasAttachments && this.queuesSubmit());
   }
 
   /** Truncated preview of the queued slot (single-line, max 80 chars). */
@@ -550,14 +579,14 @@ export class ComposerComponent implements AfterViewInit {
     this.submit();
   }
 
-  /** Routes to queueRequested while streaming (ADR-045); submitted otherwise. */
+  /** Submits or queues the draft. */
   submit(): void {
     if (!this.canSubmit()) return;
     const text = this.textValue().trim();
     const payload = this.planMode() ? `${PLAN_MODE_PREFIX}${text}` : text;
     const draft = this.attachmentDraft();
     const attachments = draft.ready();
-    if (this.streaming()) {
+    if (this.queuesSubmit()) {
       if (attachments.length > 0) return;
       this.queueRequested.emit(payload);
     } else {
@@ -567,6 +596,10 @@ export class ComposerComponent implements AfterViewInit {
     this.restoreAutoSize();
     draft.clear();
     this.closeSlash();
+  }
+
+  private queuesSubmit(): boolean {
+    return this.streaming() || this.sendBlocked()();
   }
 
   /**
@@ -624,9 +657,9 @@ export class ComposerComponent implements AfterViewInit {
     if (this.disabled()) return '';
     const draft = this.attachmentDraft();
     if (draft.anyStaging()) return 'Preparing attachment…';
-    if (draft.records().length > 0 && this.streaming()) {
-      return 'Wait for the response to finish before sending an attachment.';
-    }
+    if (draft.records().length === 0) return '';
+    if (this.streaming()) return 'Wait for the response to finish before sending an attachment.';
+    if (this.sendBlocked()()) return 'Wait for the session to start before sending an attachment.';
     return '';
   });
 
