@@ -267,7 +267,9 @@ so the shape rule stays the single SSOT: `/clear`, an argument-less `/model`
 counts still exclude the rebuilt line, and the live path is untouched.
 
 **Amendment (SPEED-911, 2026-11-06: history restores every typed command
-line).** Dropping every other synthetic command entry also dropped the user's
+line; replaces the SPEED-545 amendment's "`/clear`, an argument-less `/model`
+and multi-word arguments remain dropped").** Dropping every other synthetic
+command entry also dropped the user's
 message whenever it went through a skill or a custom command: Claude Code
 records `/yt-subs <url> question` only as the `<command-name>` /
 `<command-args>` entry (the skill body follows in a separate `isMeta` entry),
