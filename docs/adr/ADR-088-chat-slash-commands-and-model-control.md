@@ -266,6 +266,21 @@ so the shape rule stays the single SSOT: `/clear`, an argument-less `/model`
 (the picker) and multi-word arguments remain dropped, previews and unread
 counts still exclude the rebuilt line, and the live path is untouched.
 
+**Amendment (SPEED-911, 2026-11-06: history restores every typed command
+line).** Dropping every other synthetic command entry also dropped the user's
+message whenever it went through a skill or a custom command: Claude Code
+records `/yt-subs <url> question` only as the `<command-name>` /
+`<command-args>` entry (the skill body follows in a separate `isMeta` entry),
+so a resumed conversation started from the agent's answer. `parse_jsonl_message`
+now rebuilds the line from every `<command-name>` entry
+(`command_line_from_synthetic_entry`): `name args`, or `name` alone without
+arguments, `/clear` and the argument-less `/model` included. The control-chip
+shape rule is unchanged: only a line `parse_control_command` accepts becomes a
+chip, everything else is a plain user message, and it now counts toward the
+preview and the message count. An entry marked `isMeta` is restored only when
+its line is a control command (the `/effort` entry Claude Code marks that way);
+the command output entries stay dropped.
+
 **Amendment (SPEED-657, 2026-09-21: a routed pick with no live session
 re-renders the compose, the only carrier the next spawn reads).** For local
 and OpenRouter providers the picked model reaches Claude Code exclusively as
