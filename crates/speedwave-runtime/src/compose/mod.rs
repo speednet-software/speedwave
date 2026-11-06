@@ -302,6 +302,7 @@ pub fn render_compose_in(
         project_name,
         integrations,
         &resolved_config.git_repositories,
+        &resolved_config.access,
     );
     proxy::write_proxy_config_in(
         data_dir,
@@ -3225,6 +3226,49 @@ services:
             rendered["git_forges"][0]["repositories"],
             serde_json::json!(["owner/repo", "team/*"])
         );
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn git_transport_renders_the_composed_access_mode_of_each_forge_in_proxy_json() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: configured_anthropic_llm(),
+            access: speedwave_pii_engine::AccessPolicy {
+                default: speedwave_pii_engine::AccessMode::Full,
+                services: [(
+                    "github".to_string(),
+                    speedwave_pii_engine::AccessMode::ReadOnly,
+                )]
+                .into(),
+            },
+            ..Default::default()
+        };
+        render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            tmp_project_dir(),
+            &config,
+            &ResolvedIntegrationsConfig {
+                github: true,
+                gitlab: true,
+                ..Default::default()
+            },
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+        let rendered: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(proxy::proxy_config_path_in(data_dir.path(), "test-project"))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(rendered["git_forges"][0]["host"], "github.com");
+        assert_eq!(rendered["git_forges"][0]["access"], "read_only");
+        assert_eq!(rendered["git_forges"][1]["host"], "gitlab.com");
+        assert!(rendered["git_forges"][1].get("access").is_none());
     }
 
     #[test]

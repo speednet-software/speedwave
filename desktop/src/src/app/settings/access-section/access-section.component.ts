@@ -10,7 +10,7 @@ import {
 } from '@angular/core';
 
 import { TauriService } from '../../services/tauri.service';
-import { HubRestartService } from '../../services/hub-restart.service';
+import { AccessRestartService } from '../../services/access-restart.service';
 import { ToggleComponent } from '../../shared/toggle.component';
 import { AccessSettingsView } from '../../models/access';
 
@@ -79,7 +79,7 @@ export class AccessSectionComponent {
   protected readonly busy = signal(false);
 
   private readonly tauri = inject(TauriService);
-  private readonly hub = inject(HubRestartService);
+  private readonly hub = inject(AccessRestartService);
 
   /** Reloads the stored mode whenever the project changes. */
   constructor() {

@@ -9,7 +9,7 @@ import {
 } from '@angular/core';
 
 import { TauriService } from '../../services/tauri.service';
-import { HubRestartService } from '../../services/hub-restart.service';
+import { AccessRestartService } from '../../services/access-restart.service';
 import { AccessMode, IntegrationAccessView } from '../../models/access';
 
 /** The Access control of one integration: Full or Read-only. */
@@ -82,7 +82,7 @@ export class IntegrationAccessComponent {
   protected readonly error = signal('');
 
   private readonly tauri = inject(TauriService);
-  private readonly hub = inject(HubRestartService);
+  private readonly hub = inject(AccessRestartService);
 
   /** Reloads the stored mode whenever the project or the integration changes. */
   constructor() {

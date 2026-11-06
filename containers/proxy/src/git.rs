@@ -10,6 +10,9 @@ use base64::Engine;
 
 use crate::router::{Config, GitForge};
 use crate::{audit, CALLER_AUTH_HEADER};
+use speedwave_pii_engine::AccessMode;
+
+const RECEIVE_PACK: &str = "git-receive-pack";
 
 const REQUEST_HEADERS: [HeaderName; 6] = [
     header::CONTENT_TYPE,
@@ -42,11 +45,18 @@ pub async fn handler(State(cfg): State<Arc<Config>>, request: Request) -> Respon
     let (host, rest) = rest_of_path.split_once('/').unwrap_or((rest_of_path, ""));
     let classified = classify(&parts.method, rest, parts.uri.query());
 
+    let mut denial = None;
     let response = if !caller_authorized(&cfg, &parts.headers) {
         log::warn!("rejected /git request with missing or invalid caller auth");
         status_response(StatusCode::UNAUTHORIZED)
     } else {
         match (cfg.git_forges.iter().find(|f| f.host == host), &classified) {
+            (Some(forge), Some(git))
+                if forge.access == AccessMode::ReadOnly && git.service == RECEIVE_PACK =>
+            {
+                denial = Some(audit::READ_ONLY_REASON);
+                read_only_response(host)
+            }
             (Some(forge), Some(git)) if forge.allows(&git.repo) => {
                 forward(&cfg.client, forge, git, &parts.method, &parts.headers, body).await
             }
@@ -71,6 +81,7 @@ pub async fn handler(State(cfg): State<Arc<Config>>, request: Request) -> Respon
         repo,
         service,
         response.status().as_u16(),
+        denial,
     );
     response
 }
@@ -81,7 +92,7 @@ fn classify<'a>(method: &Method, rest: &str, query: Option<&'a str>) -> Option<G
         [repo @ .., "info", "refs"] if method == Method::GET => {
             let service = match query? {
                 "service=git-upload-pack" => "git-upload-pack",
-                "service=git-receive-pack" => "git-receive-pack",
+                "service=git-receive-pack" => RECEIVE_PACK,
                 _ => return None,
             };
             (repo, "info/refs", service)
@@ -128,6 +139,22 @@ fn not_listed_response(host: &str, repo: &str) -> Response {
     let mut resp = Response::new(Body::from(format!(
         "Speedwave: {host}/{repo} is not on this project's repository list. \
          A person adds the entry {entry} in Speedwave Desktop: Integrations, the GitHub or GitLab panel, Repositories.\n"
+    )));
+    *resp.status_mut() = StatusCode::FORBIDDEN;
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    resp
+}
+
+fn read_only_response(host: &str) -> Response {
+    let mut resp = Response::new(Body::from(format!(
+        "Speedwave: the integration for {host} is in Read-only mode, so push is blocked. \
+         Fetch and pull still work.\n\
+         A person turns Read-only mode off in Speedwave Desktop: project settings, Agent access, \
+         or the Access setting of the integration. \
+         If your organization enforces Read-only mode, only the organization can change it.\n"
     )));
     *resp.status_mut() = StatusCode::FORBIDDEN;
     resp.headers_mut().insert(
@@ -295,6 +322,15 @@ mod tests {
         token: Option<&str>,
         repositories: &[&str],
     ) -> Fixture {
+        fixture_with_access(caller_token, token, repositories, AccessMode::Full).await
+    }
+
+    async fn fixture_with_access(
+        caller_token: Option<&str>,
+        token: Option<&str>,
+        repositories: &[&str],
+        access: AccessMode,
+    ) -> Fixture {
         let (base_url, log) = spawn_upstream().await;
         let tokens = tempfile::tempdir().unwrap();
         let token_file = tokens.path().join("token");
@@ -310,6 +346,7 @@ mod tests {
                 login: "x-access-token".to_string(),
                 token_file,
                 repositories: repositories.iter().map(|r| r.to_string()).collect(),
+                access,
             }],
             audit_dir: Some(audit.path().to_path_buf()),
             ..Config::default()
@@ -644,6 +681,207 @@ mod tests {
             assert_eq!(resp.status(), 503);
             assert!(f.log.lock().await.is_empty());
         }
+    }
+
+    async fn body_text(resp: Response) -> String {
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        String::from_utf8(body.to_vec()).unwrap()
+    }
+
+    const RECEIVE_PACK_REQUESTS: [(&str, &str); 2] = [
+        (
+            "GET",
+            "/git/github.com/owner/repo/info/refs?service=git-receive-pack",
+        ),
+        ("POST", "/git/github.com/owner/repo/git-receive-pack"),
+    ];
+
+    #[tokio::test]
+    async fn read_only_forge_refuses_both_receive_pack_requests_with_a_plain_text_body() {
+        let f = fixture_with_access(
+            Some(CALLER),
+            Some(TOKEN),
+            &["owner/repo"],
+            AccessMode::ReadOnly,
+        )
+        .await;
+        for (method, uri) in RECEIVE_PACK_REQUESTS {
+            let resp = f
+                .app
+                .clone()
+                .oneshot(req(method, uri, Some(CALLER), Body::from("PACK")))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 403, "{method} {uri}");
+            assert_eq!(
+                resp.headers()[header::CONTENT_TYPE],
+                "text/plain; charset=utf-8"
+            );
+            let text = body_text(resp).await;
+            assert!(text.contains("Read-only mode"), "{text}");
+            assert!(text.contains("github.com"), "{text}");
+            assert!(text.contains("Fetch and pull still work"), "{text}");
+            assert!(text.contains("Agent access"), "{text}");
+            assert!(text.contains("organization"), "{text}");
+            assert!(!text.contains(TOKEN) && !text.contains(CALLER));
+        }
+        assert!(f.log.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_only_forge_still_serves_upload_pack() {
+        let f = fixture_with_access(
+            Some(CALLER),
+            Some(TOKEN),
+            &["owner/repo"],
+            AccessMode::ReadOnly,
+        )
+        .await;
+        for (method, uri) in [
+            (
+                "GET",
+                "/git/github.com/owner/repo/info/refs?service=git-upload-pack",
+            ),
+            ("POST", "/git/github.com/owner/repo/git-upload-pack"),
+        ] {
+            let resp = f
+                .app
+                .clone()
+                .oneshot(req(method, uri, Some(CALLER), Body::empty()))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200, "{method} {uri}");
+        }
+        assert_eq!(f.log.lock().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn full_forge_still_forwards_receive_pack() {
+        let f =
+            fixture_with_access(Some(CALLER), Some(TOKEN), &["owner/repo"], AccessMode::Full).await;
+        for (method, uri) in RECEIVE_PACK_REQUESTS {
+            let resp = f
+                .app
+                .clone()
+                .oneshot(req(method, uri, Some(CALLER), Body::empty()))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200, "{method} {uri}");
+        }
+        assert_eq!(f.log.lock().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn read_only_refusal_is_audited_as_denied_with_the_read_only_reason() {
+        let f = fixture_with_access(
+            Some(CALLER),
+            Some(TOKEN),
+            &["owner/repo"],
+            AccessMode::ReadOnly,
+        )
+        .await;
+        for (method, uri) in RECEIVE_PACK_REQUESTS {
+            f.app
+                .clone()
+                .oneshot(req(method, uri, Some(CALLER), Body::empty()))
+                .await
+                .unwrap();
+        }
+        f.app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/git/github.com/owner/repo/info/refs?service=git-upload-pack",
+                Some(CALLER),
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        let rows = audit_rows(&f);
+        assert_eq!(rows.len(), 3);
+        for row in &rows[..2] {
+            assert_eq!(row["layer"], "git");
+            assert_eq!(row["host"], "github.com");
+            assert_eq!(row["repo"], "owner/repo");
+            assert_eq!(row["service"], "git-receive-pack");
+            assert_eq!(row["status"], 403);
+            assert_eq!(row["outcome"], "denied");
+            assert_eq!(row["reason"], "read-only");
+        }
+        assert_eq!(rows[2]["status"], 200);
+        assert!(rows[2].get("outcome").is_none() && rows[2].get("reason").is_none());
+    }
+
+    #[tokio::test]
+    async fn read_only_is_reported_before_the_allowlist_for_receive_pack() {
+        let f = fixture_with_access(Some(CALLER), Some(TOKEN), &[], AccessMode::ReadOnly).await;
+        let resp = f
+            .app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/git/github.com/other/repo/git-receive-pack",
+                Some(CALLER),
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 403);
+        let text = body_text(resp).await;
+        assert!(text.contains("Read-only mode"), "{text}");
+        assert!(!text.contains("repository list"), "{text}");
+        assert_eq!(audit_rows(&f)[0]["reason"], "read-only");
+    }
+
+    #[tokio::test]
+    async fn read_only_forge_keeps_the_allowlist_for_upload_pack() {
+        let f = fixture_with_access(Some(CALLER), Some(TOKEN), &[], AccessMode::ReadOnly).await;
+        let resp = f
+            .app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/git/github.com/other/repo/info/refs?service=git-upload-pack",
+                Some(CALLER),
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 403);
+        let text = body_text(resp).await;
+        assert!(text.contains("repository list"), "{text}");
+        assert!(audit_rows(&f)[0].get("reason").is_none());
+    }
+
+    #[tokio::test]
+    async fn read_only_does_not_hide_a_missing_caller_token() {
+        let f = fixture_with_access(Some(CALLER), Some(TOKEN), &[], AccessMode::ReadOnly).await;
+        let resp = f
+            .app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/git/github.com/owner/repo/git-receive-pack",
+                None,
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 401);
+    }
+
+    #[test]
+    fn forge_access_deserializes_from_proxy_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("proxy.json");
+        std::fs::write(
+            &path,
+            r#"{"routes":[],"git_forges":[{"host":"github.com","base_url":"https://github.com","login":"x-access-token","token_file":"/t","access":"read_only"},{"host":"gitlab.com","base_url":"https://gitlab.com","login":"oauth2","token_file":"/t"}]}"#,
+        )
+        .unwrap();
+        let cfg = Config::load_from(&path).unwrap();
+        assert_eq!(cfg.git_forges[0].access, AccessMode::ReadOnly);
+        assert_eq!(cfg.git_forges[1].access, AccessMode::Full);
     }
 
     #[test]

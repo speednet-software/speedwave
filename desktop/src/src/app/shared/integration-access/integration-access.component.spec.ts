@@ -50,6 +50,7 @@ describe('IntegrationAccessComponent', () => {
       get_integration_access: async () => view(),
       set_integration_access_mode: async () => view({ mode: 'read_only' }),
       restart_hub: async () => undefined,
+      restart_llm_proxy: async () => undefined,
     };
     tauri = new MockTauriService();
     tauri.invokeHandler = async (cmd, args) => {
@@ -105,7 +106,7 @@ describe('IntegrationAccessComponent', () => {
     expect(button('integration-access-read-only').getAttribute('aria-checked')).toBe('true');
   });
 
-  it('stores the mode of the integration and restarts the hub alone', async () => {
+  it('stores the mode of the integration and restarts the hub and the proxy', async () => {
     await create('mail');
 
     button('integration-access-read-only').click();
@@ -117,6 +118,7 @@ describe('IntegrationAccessComponent', () => {
       mode: 'read_only',
     });
     expect(invoked('restart_hub')[0].args).toEqual({ project: 'proj' });
+    expect(invoked('restart_llm_proxy')[0].args).toEqual({ project: 'proj' });
     expect(projectState.requestRestartFor).not.toHaveBeenCalled();
     expect(button('integration-access-read-only').getAttribute('aria-checked')).toBe('true');
   });
@@ -151,6 +153,7 @@ describe('IntegrationAccessComponent', () => {
     await settle();
 
     expect(invoked('restart_hub')).toHaveLength(0);
+    expect(invoked('restart_llm_proxy')).toHaveLength(0);
     expect(projectState.requestRestartFor).toHaveBeenCalledWith('proj');
   });
 
@@ -163,6 +166,19 @@ describe('IntegrationAccessComponent', () => {
     button('integration-access-read-only').click();
     await settle();
 
+    expect(projectState.requestRestartFor).toHaveBeenCalledWith('proj');
+  });
+
+  it('falls back to a full restart when the proxy restart fails', async () => {
+    responses['restart_llm_proxy'] = async () => {
+      throw new Error('proxy down');
+    };
+    await create();
+
+    button('integration-access-read-only').click();
+    await settle();
+
+    expect(invoked('restart_hub')).toHaveLength(1);
     expect(projectState.requestRestartFor).toHaveBeenCalledWith('proj');
   });
 

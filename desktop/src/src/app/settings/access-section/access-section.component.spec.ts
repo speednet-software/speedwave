@@ -57,6 +57,7 @@ describe('AccessSectionComponent', () => {
       get_access_settings: async () => view(),
       set_read_only_mode: async () => view({ read_only: true }),
       restart_hub: async () => undefined,
+      restart_llm_proxy: async () => undefined,
     };
     tauri = new MockTauriService();
     tauri.invokeHandler = async (cmd, args) => {
@@ -116,6 +117,7 @@ describe('AccessSectionComponent', () => {
 
     expect(invoked('set_read_only_mode')[0].args).toEqual({ project: 'proj', enabled: true });
     expect(invoked('restart_hub')[0].args).toEqual({ project: 'proj' });
+    expect(invoked('restart_llm_proxy')[0].args).toEqual({ project: 'proj' });
     expect(projectState.requestRestartFor).not.toHaveBeenCalled();
     expect(toggle().checked).toBe(true);
   });
@@ -127,6 +129,7 @@ describe('AccessSectionComponent', () => {
     await flip(true);
 
     expect(invoked('restart_hub')).toHaveLength(0);
+    expect(invoked('restart_llm_proxy')).toHaveLength(0);
     expect(projectState.requestRestartFor).toHaveBeenCalledWith('proj');
   });
 
@@ -139,6 +142,19 @@ describe('AccessSectionComponent', () => {
     await flip(true);
 
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('hub down'));
+    expect(projectState.requestRestartFor).toHaveBeenCalledWith('proj');
+  });
+
+  it('falls back to a full restart when the proxy restart fails', async () => {
+    responses['restart_llm_proxy'] = async () => {
+      throw new Error('proxy down');
+    };
+    await create();
+
+    await flip(true);
+
+    expect(invoked('restart_hub')).toHaveLength(1);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('proxy down'));
     expect(projectState.requestRestartFor).toHaveBeenCalledWith('proj');
   });
 

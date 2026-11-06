@@ -1,6 +1,7 @@
 use crate::config::{GitRepositoryLists, LlmConfig, LlmProviderKind, ResolvedIntegrationsConfig};
 use crate::git_allowlist::{enforced_entries, forge_host_in, GitForgeService};
 use serde::Serialize;
+use speedwave_pii_engine::{AccessMode, AccessPolicy};
 use std::path::{Path, PathBuf};
 
 #[derive(Serialize)]
@@ -68,10 +69,21 @@ pub(super) struct GitForge {
     login: &'static str,
     token_file: String,
     repositories: Vec<String>,
+    #[serde(skip_serializing_if = "is_full")]
+    access: AccessMode,
+}
+
+fn is_full(mode: &AccessMode) -> bool {
+    *mode == AccessMode::Full
 }
 
 impl GitForge {
-    fn new(kind: GitForgeService, host: String, repositories: Vec<String>) -> Self {
+    fn new(
+        kind: GitForgeService,
+        host: String,
+        repositories: Vec<String>,
+        access: AccessMode,
+    ) -> Self {
         Self {
             kind,
             base_url: format!("https://{host}"),
@@ -79,6 +91,7 @@ impl GitForge {
             login: kind.login(),
             token_file: kind.token_file(),
             repositories,
+            access,
         }
     }
 }
@@ -88,6 +101,7 @@ pub(super) fn git_forges_in(
     project: &str,
     integrations: &ResolvedIntegrationsConfig,
     repositories: &GitRepositoryLists,
+    access: &AccessPolicy,
 ) -> Vec<GitForge> {
     let mut forges = Vec::new();
     for service in GitForgeService::ALL {
@@ -104,7 +118,12 @@ pub(super) fn git_forges_in(
                 service.config_key()
             );
         }
-        forges.push(GitForge::new(service, host, allowed));
+        forges.push(GitForge::new(
+            service,
+            host,
+            allowed,
+            access.mode_of(service.config_key()),
+        ));
     }
     forges.sort_by(|a, b| a.host.cmp(&b.host));
     forges
@@ -750,7 +769,13 @@ mod tests {
             std::fs::create_dir_all(&gitlab).unwrap();
             std::fs::write(gitlab.join("host_url"), host_url).unwrap();
         }
-        let forges = git_forges_in(dir.path(), "proj", integrations, lists);
+        let forges = git_forges_in(
+            dir.path(),
+            "proj",
+            integrations,
+            lists,
+            &AccessPolicy::default(),
+        );
         (dir, forges)
     }
 
@@ -899,6 +924,124 @@ mod tests {
         );
     }
 
+    fn composed(managed: bool, project: bool, modes: &[(&str, AccessMode)]) -> AccessPolicy {
+        let service_modes = modes
+            .iter()
+            .map(|(service, mode)| ((*service).to_string(), *mode))
+            .collect();
+        crate::access_policy::compose_access_policy(&crate::access_policy::AccessInputs {
+            managed_read_only: managed,
+            project_read_only: project,
+            service_modes: &service_modes,
+        })
+    }
+
+    fn rendered_access_modes(access: &AccessPolicy) -> Vec<(String, Option<String>)> {
+        let dir = tempfile::tempdir().unwrap();
+        let forges = git_forges_in(
+            dir.path(),
+            "proj",
+            &both_forges_enabled(),
+            &GitRepositoryLists::default(),
+            access,
+        );
+        rendered_git_forges(&forges)
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|forge| {
+                (
+                    forge["host"].as_str().unwrap().to_string(),
+                    forge.get("access").map(|a| a.as_str().unwrap().to_string()),
+                )
+            })
+            .collect()
+    }
+
+    fn mode(host: &str, access: Option<&str>) -> (String, Option<String>) {
+        (host.to_string(), access.map(str::to_string))
+    }
+
+    #[test]
+    fn git_forges_carry_no_access_key_while_nothing_is_read_only() {
+        assert_eq!(
+            rendered_access_modes(&composed(false, false, &[])),
+            [mode("github.com", None), mode("gitlab.com", None)]
+        );
+    }
+
+    #[test]
+    fn integration_mode_makes_only_that_forge_read_only() {
+        assert_eq!(
+            rendered_access_modes(&composed(false, false, &[("github", AccessMode::ReadOnly)])),
+            [
+                mode("github.com", Some("read_only")),
+                mode("gitlab.com", None)
+            ]
+        );
+        assert_eq!(
+            rendered_access_modes(&composed(false, false, &[("gitlab", AccessMode::ReadOnly)])),
+            [
+                mode("github.com", None),
+                mode("gitlab.com", Some("read_only"))
+            ]
+        );
+    }
+
+    #[test]
+    fn other_integrations_modes_do_not_touch_the_forges() {
+        assert_eq!(
+            rendered_access_modes(&composed(false, false, &[("slack", AccessMode::ReadOnly)])),
+            [mode("github.com", None), mode("gitlab.com", None)]
+        );
+    }
+
+    #[test]
+    fn project_wide_mode_makes_every_forge_read_only() {
+        assert_eq!(
+            rendered_access_modes(&composed(false, true, &[])),
+            [
+                mode("github.com", Some("read_only")),
+                mode("gitlab.com", Some("read_only"))
+            ]
+        );
+    }
+
+    #[test]
+    fn mdm_makes_every_forge_read_only_even_when_an_integration_says_full() {
+        assert_eq!(
+            rendered_access_modes(&composed(
+                true,
+                false,
+                &[("github", AccessMode::Full), ("gitlab", AccessMode::Full)]
+            )),
+            [
+                mode("github.com", Some("read_only")),
+                mode("gitlab.com", Some("read_only"))
+            ]
+        );
+    }
+
+    #[test]
+    fn state_digest_changes_with_the_access_mode_of_a_forge() {
+        let dir = tempfile::tempdir().unwrap();
+        let digest_with = |access: &AccessPolicy| {
+            let forges = git_forges_in(
+                dir.path(),
+                "proj",
+                &both_forges_enabled(),
+                &GitRepositoryLists::default(),
+                access,
+            );
+            write_proxy_config_in(dir.path(), "proj", &full_provider_mix(), true, &forges).unwrap();
+            proxy_state_digest_in(dir.path(), "proj")
+        };
+        let full = digest_with(&composed(false, false, &[]));
+        let read_only = digest_with(&composed(false, true, &[]));
+        assert_ne!(full, read_only);
+        assert_eq!(full, digest_with(&composed(false, false, &[])));
+    }
+
     #[test]
     fn git_forges_sort_by_host_not_by_integration() {
         let (_dir, forges) =
@@ -926,6 +1069,7 @@ mod tests {
                 ..Default::default()
             },
             &GitRepositoryLists::default(),
+            &AccessPolicy::default(),
         );
         assert!(forges.is_empty());
     }
@@ -987,6 +1131,7 @@ mod tests {
                 ..Default::default()
             },
             &GitRepositoryLists::default(),
+            &AccessPolicy::default(),
         );
         write_proxy_config_in(dir.path(), "proj", &full_provider_mix(), true, &forges).unwrap();
         let written = std::fs::read_to_string(proxy_config_path_in(dir.path(), "proj")).unwrap();
@@ -1217,7 +1362,13 @@ mod tests {
             ..Default::default()
         };
         let digest_with = |entries: &[&str]| {
-            let forges = git_forges_in(dir.path(), "proj", &github, &lists(entries, &[]));
+            let forges = git_forges_in(
+                dir.path(),
+                "proj",
+                &github,
+                &lists(entries, &[]),
+                &AccessPolicy::default(),
+            );
             write_proxy_config_in(dir.path(), "proj", &full_provider_mix(), true, &forges).unwrap();
             proxy_state_digest_in(dir.path(), "proj")
         };
