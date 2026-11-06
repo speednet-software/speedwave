@@ -14,7 +14,7 @@ final class RemindersTests: XCTestCase {
 
     func testCommandListAdvertisesAllCommands() {
         for cmd in ["check_permission", "list_lists", "list_reminders",
-                    "get_reminder", "create_reminder", "update_reminder", "complete_reminder"] {
+                    "get_reminder", "create_reminder", "update_reminder", "complete_reminder", "delete_reminder"] {
             XCTAssertTrue(RemindersCLI.commandList.contains(cmd),
                           "commandList must advertise '\(cmd)'")
         }
@@ -69,6 +69,20 @@ final class RemindersTests: XCTestCase {
     func testUpdateReminderWithUnknownIdIsNotFoundInsteadOfSilentSuccess() {
         let params: [String: Any] = ["id": "speedwave-test-no-such-reminder", "name": "x"]
         XCTAssertThrowsError(try updateReminder(store: EKEventStore(), params: params)) { error in
+            guard case CLIError.notFound(let message) = error else { return XCTFail("unexpected \(error)") }
+            XCTAssertTrue(message.contains("speedwave-test-no-such-reminder"), message)
+        }
+    }
+
+    func testDeleteReminderWithoutIdIsAMissingField() {
+        XCTAssertThrowsError(try deleteReminder(store: EKEventStore(), params: [:])) { error in
+            guard case CLIError.missingField("id") = error else { return XCTFail("unexpected \(error)") }
+        }
+    }
+
+    func testDeleteReminderWithUnknownIdIsNotFoundInsteadOfSilentSuccess() {
+        let params: [String: Any] = ["id": "speedwave-test-no-such-reminder"]
+        XCTAssertThrowsError(try deleteReminder(store: EKEventStore(), params: params)) { error in
             guard case CLIError.notFound(let message) = error else { return XCTFail("unexpected \(error)") }
             XCTAssertTrue(message.contains("speedwave-test-no-such-reminder"), message)
         }

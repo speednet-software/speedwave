@@ -10,6 +10,7 @@ import {
   handleCreateReminder,
   handleUpdateReminder,
   handleCompleteReminder,
+  handleDeleteReminder,
   createReminderTools,
 } from './reminder-tools.js';
 
@@ -441,11 +442,40 @@ describe('reminder-tools', () => {
     });
   });
 
+  describe('handleDeleteReminder', () => {
+    it('deletes reminder successfully', async () => {
+      const mockData = { status: 'deleted' };
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: mockData });
+
+      const result = await handleDeleteReminder({ id: 'r-1' });
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual(mockData);
+      expect(runCommand).toHaveBeenCalledWith('reminders', 'delete_reminder', { id: 'r-1' });
+    });
+
+    it('fails when id is empty', async () => {
+      const result = await handleDeleteReminder({ id: '' });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('EMPTY_FIELDS');
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it('propagates the CLI notFound error for an unknown id instead of a silent success', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        new Error("reminders.delete_reminder failed: Reminder with id 'nope' not found")
+      );
+
+      await expect(handleDeleteReminder({ id: 'nope' })).rejects.toThrow('not found');
+    });
+  });
+
   describe('createReminderTools', () => {
-    it('returns 6 tool definitions', () => {
+    it('returns 7 tool definitions', () => {
       const tools = createReminderTools();
 
-      expect(tools).toHaveLength(6);
+      expect(tools).toHaveLength(7);
       expect(tools.map((t) => t.tool.name)).toEqual([
         'listReminderLists',
         'listReminders',
@@ -453,7 +483,17 @@ describe('reminder-tools', () => {
         'createReminder',
         'updateReminder',
         'completeReminder',
+        'deleteReminder',
       ]);
+    });
+
+    it('deleteReminderTool requires id and is declared destructive', () => {
+      const tools = createReminderTools();
+      const deleteTool = tools.find((t) => t.tool.name === 'deleteReminder')!;
+
+      expect(deleteTool.tool.inputSchema.required).toEqual(['id']);
+      expect(deleteTool.tool.annotations?.destructiveHint).toBe(true);
+      expect(deleteTool.tool.annotations?.readOnlyHint).toBe(false);
     });
 
     it('updateReminderTool requires only id and lets due_date be null', () => {
