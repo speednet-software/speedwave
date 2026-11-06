@@ -395,20 +395,20 @@ describe('ComposerComponent', () => {
   });
 
   describe('text returned from a failed session start', () => {
-    function handled(): boolean[] {
-      const out: boolean[] = [];
-      component.returnedTextHandled.subscribe((taken) => out.push(taken));
+    function handled(): { count: number } {
+      const out = { count: 0 };
+      component.returnedTextHandled.subscribe(() => out.count++);
       return out;
     }
 
-    it('puts the text into an empty field and reports it taken', () => {
+    it('puts the text into an empty field', () => {
       const out = handled();
       fixture.componentRef.setInput('returnedText', 'my early message');
       fixture.detectChanges();
 
       expect(component.text.value).toBe('my early message');
       expect(component.planMode()).toBe(false);
-      expect(out).toEqual([true]);
+      expect(out.count).toBe(1);
     });
 
     it('restores plan mode and strips its prefix from a plan-mode payload', () => {
@@ -420,10 +420,10 @@ describe('ComposerComponent', () => {
 
       expect(component.text.value).toBe('plan it');
       expect(component.planMode()).toBe(true);
-      expect(out).toEqual([true]);
+      expect(out.count).toBe(1);
     });
 
-    it('keeps text the user typed meanwhile and reports the returned text not taken', () => {
+    it('puts the returned text before text the user typed meanwhile, after a blank line', () => {
       const out = handled();
       component.text.setValue('something newer');
       fixture.detectChanges();
@@ -431,8 +431,23 @@ describe('ComposerComponent', () => {
       fixture.componentRef.setInput('returnedText', 'my early message');
       fixture.detectChanges();
 
-      expect(component.text.value).toBe('something newer');
-      expect(out).toEqual([false]);
+      expect(component.text.value).toBe('my early message\n\nsomething newer');
+      expect(component.planMode()).toBe(false);
+      expect(out.count).toBe(1);
+    });
+
+    it('turns plan mode on when a plan-mode payload comes back into a typed field', () => {
+      const payload = planPayload('plan it');
+      const out = handled();
+      component.text.setValue('something newer');
+      fixture.detectChanges();
+
+      fixture.componentRef.setInput('returnedText', payload);
+      fixture.detectChanges();
+
+      expect(component.text.value).toBe('plan it\n\nsomething newer');
+      expect(component.planMode()).toBe(true);
+      expect(out.count).toBe(1);
     });
 
     it('treats a whitespace-only field as empty', () => {
@@ -444,7 +459,7 @@ describe('ComposerComponent', () => {
       fixture.detectChanges();
 
       expect(component.text.value).toBe('my early message');
-      expect(out).toEqual([true]);
+      expect(out.count).toBe(1);
     });
 
     it('does nothing for an empty returned text', () => {
@@ -454,7 +469,7 @@ describe('ComposerComponent', () => {
       fixture.detectChanges();
 
       expect(component.text.value).toBe('typed');
-      expect(out).toEqual([]);
+      expect(out.count).toBe(0);
     });
 
     function planPayload(text: string): string {

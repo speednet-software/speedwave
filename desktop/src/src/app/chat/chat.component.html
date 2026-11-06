@@ -152,7 +152,7 @@
             (queueCancelled)="onQueueCancelled()"
             (transcriptDetached)="chat.activeStore().unstageTranscript()"
             (draftApplied)="chat.activeStore().composerPromptDraft.set('')"
-            (returnedTextHandled)="chat.activeStore().settleReturnedStartSlot($event)"
+            (returnedTextHandled)="chat.activeStore().settleReturnedStartSlot()"
             (stopRequested)="onStopClicked()"
             (modelSelected)="chat.applyModelSelection($event)"
             (effortSelected)="chat.applyEffortSelection($event)"

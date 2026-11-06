@@ -361,7 +361,7 @@ export class ComposerComponent implements AfterViewInit {
 
   readonly draftApplied = output<void>();
 
-  readonly returnedTextHandled = output<boolean>();
+  readonly returnedTextHandled = output<void>();
 
   readonly stopRequested = output<void>();
 
@@ -431,9 +431,11 @@ export class ComposerComponent implements AfterViewInit {
     effect(() => {
       const returned = this.returnedText();
       if (!returned) return;
-      const taken = untracked(() => this.textValue()).trim() === '';
-      if (taken) this.takeBackQueuedText(returned);
-      this.returnedTextHandled.emit(taken);
+      this.takeBackQueuedText(
+        returned,
+        untracked(() => this.textValue())
+      );
+      this.returnedTextHandled.emit();
     });
   }
 
@@ -465,10 +467,16 @@ export class ComposerComponent implements AfterViewInit {
     });
   }
 
-  private takeBackQueuedText(payload: string): void {
+  private takeBackQueuedText(payload: string, typed: string): void {
     const planned = payload.startsWith(PLAN_MODE_PREFIX);
-    this.setPlanMode(planned);
-    this.setText(planned ? payload.slice(PLAN_MODE_PREFIX.length) : payload);
+    const text = planned ? payload.slice(PLAN_MODE_PREFIX.length) : payload;
+    if (typed.trim() === '') {
+      this.setPlanMode(planned);
+      this.setText(text);
+      return;
+    }
+    if (planned) this.setPlanMode(true);
+    this.setText(`${text}\n\n${typed}`);
   }
 
   /**

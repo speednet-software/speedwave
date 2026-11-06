@@ -7373,7 +7373,7 @@ describe('ChatSessionStore', () => {
       expect(store.pendingQueue?.text).toBe('lost start');
       expect(sent()).toEqual([]);
 
-      store.settleReturnedStartSlot(true);
+      store.settleReturnedStartSlot();
 
       expect(store.returnedStartSlot()).toBeNull();
       expect(store.pendingQueue).toBeNull();
@@ -7388,31 +7388,6 @@ describe('ChatSessionStore', () => {
       await starting;
 
       expect(store.returnedStartSlot()).toBe('needs sign-in');
-    });
-
-    it('keeps the slot the composer could not take and sends it after the next successful start', async () => {
-      const { done: failing } = await beginStart();
-      await store.queueMessage('kept for later');
-      startFails = 'chat backend crashed';
-      pendingStart.resolve();
-      await failing;
-
-      store.settleReturnedStartSlot(false);
-
-      expect(store.returnedStartSlot()).toBeNull();
-      expect(store.pendingQueue?.text).toBe('kept for later');
-
-      startFails = null;
-      pendingStart = createDeferred<void>();
-      calls = [];
-      const { done: retry } = await beginStart();
-      expect(sent()).toEqual([]);
-      pendingStart.resolve();
-      await retry;
-
-      await vi.waitFor(() => expect(sent()).toHaveLength(1));
-      expect(sent()[0]).toMatchObject({ displayText: 'kept for later' });
-      expect(store.pendingQueue).toBeNull();
     });
 
     it('a new text queued during the next start replaces the returned one', async () => {
@@ -7464,28 +7439,22 @@ describe('ChatSessionStore', () => {
       expect(sent()).toEqual([]);
     });
 
-    it('moves a slot kept after a failed start to the backend queue once the next turn is sent', async () => {
+    it('does not send a returned slot with the next turn', async () => {
       const { done: failing } = await beginStart();
-      await store.queueMessage('kept behind the next turn');
+      await store.queueMessage('returned to the composer');
       startFails = 'chat backend crashed';
       pendingStart.resolve();
       await failing;
-      store.settleReturnedStartSlot(false);
+      store.settleReturnedStartSlot();
 
       store.seedSessionId('sess-kept');
       await store.sendMessage('typed after the failure');
+      await new Promise((r) => setTimeout(r, 0));
 
       expect(sent()).toHaveLength(1);
       expect(sent()[0]).toMatchObject({ displayText: 'typed after the failure' });
-      await vi.waitFor(() =>
-        expect(backendQueueCalls()).toEqual([
-          {
-            cmd: 'queue_message',
-            args: { sessionId: 'sess-kept', text: 'kept behind the next turn' },
-          },
-        ])
-      );
-      expect(store.pendingQueue?.text).toBe('kept behind the next turn');
+      expect(backendQueueCalls()).toEqual([]);
+      expect(store.pendingQueue).toBeNull();
     });
 
     it('keeps the slot across a reset and sends it after the start that follows', async () => {
@@ -7514,7 +7483,6 @@ describe('ChatSessionStore', () => {
       startFails = 'chat backend crashed';
       pendingStart.resolve();
       await failing;
-      store.settleReturnedStartSlot(false);
       TestBed.inject(ProjectStateService).activeProject.set(null);
 
       await store.resumeConversation('sess-resumed');
