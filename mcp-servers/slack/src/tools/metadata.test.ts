@@ -121,3 +121,36 @@ describe('identity metadata', () => {
     });
   }
 });
+
+const READ_ONLY_TOOL_NAMES = [
+  'getChannelMessages',
+  'getThreadMessages',
+  'listChannelIds',
+  'listDirectMessages',
+  'getFileContent',
+  'getUsers',
+  'findUsers',
+  'getCurrentUser',
+];
+
+const CHANGING_TOOL_NAMES = ['sendChannel', 'openDirectMessage', 'downloadFile', 'uploadFile'];
+
+describe('Slack read-only access annotations', () => {
+  const tools = allTools.map((td) => td.tool);
+  const names = (predicate: (hint: unknown) => boolean) =>
+    tools.filter((t) => predicate(t.annotations?.readOnlyHint)).map((t) => t.name);
+
+  it('lists every tool as either reading or changing', () => {
+    expect([...tools.map((t) => t.name)].sort()).toEqual(
+      [...READ_ONLY_TOOL_NAMES, ...CHANGING_TOOL_NAMES].sort()
+    );
+  });
+
+  it('marks exactly the reading tools readOnlyHint true', () => {
+    expect(names((hint) => hint === true).sort()).toEqual([...READ_ONLY_TOOL_NAMES].sort());
+  });
+
+  it.each(CHANGING_TOOL_NAMES)('does not mark %s as read-only', (name) => {
+    expect(tools.find((t) => t.name === name)?.annotations?.readOnlyHint).not.toBe(true);
+  });
+});

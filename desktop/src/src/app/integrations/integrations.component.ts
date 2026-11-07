@@ -17,6 +17,7 @@ import {
   LoopbackFlowStart,
   IntegrationsResponse,
   IntegrationStatusEntry,
+  isGitForge,
   OAuthFlowStatus,
   OAuthProgressEvent,
   OsIntegrationStatusEntry,
@@ -24,6 +25,7 @@ import {
   SlackFeatureStatus,
 } from '../models/integration';
 import { ServiceCardComponent, SaveCredentialsEvent } from './service-card/service-card.component';
+import { IntegrationAccessComponent } from '../shared/integration-access/integration-access.component';
 import { RedmineConfigComponent } from './redmine-config/redmine-config.component';
 import { GitRepositoriesComponent } from './git-repositories/git-repositories.component';
 import { IdeBridgeComponent } from './ide-bridge/ide-bridge.component';
@@ -55,6 +57,7 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
     ServiceCardComponent,
     RedmineConfigComponent,
     GitRepositoriesComponent,
+    IntegrationAccessComponent,
     IdeBridgeComponent,
     ProjectPillComponent,
   ],
@@ -293,7 +296,7 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
                     (cancelOAuth)="handleCancelOAuth()"
                     (openVerificationUrl)="handleOpenVerificationUrl($event)"
                   />
-                  @if (activeProject && (svc.service === 'github' || svc.service === 'gitlab')) {
+                  @if (activeProject && isGitForge(svc.service)) {
                     <app-git-repositories
                       [project]="activeProject"
                       [service]="svc.service"
@@ -349,6 +352,11 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
                     </div>
                   }
                 }
+                @if (activeProject) {
+                  <div class="px-5 py-3">
+                    <app-integration-access [project]="activeProject" [service]="svc.service" />
+                  </div>
+                }
               </div>
             }
           }
@@ -374,9 +382,17 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
                     <span class="mono text-[11px] text-[var(--ink-mute)]">{{
                       os.description
                     }}</span>
+                    @if (activeProject) {
+                      <app-integration-access
+                        class="ml-auto"
+                        [project]="activeProject"
+                        [service]="os.service"
+                        [compact]="true"
+                      />
+                    }
                     <button
                       type="button"
-                      class="toggle ml-auto"
+                      class="toggle"
                       [class.on]="os.enabled"
                       [attr.aria-pressed]="os.enabled"
                       [attr.aria-label]="(os.enabled ? 'Disable ' : 'Enable ') + os.service"
@@ -444,6 +460,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   private unsubStatusRefresher: (() => void) | null = null;
 
   readonly betaEnabled = this.beta.enabled;
+  protected readonly isGitForge = isGitForge;
 
   /** Re-fetch on beta toggle — response.services is not cached, so filter-only won't reveal beta-only services. */
   constructor() {

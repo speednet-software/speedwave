@@ -748,6 +748,68 @@ describe('IntegrationsComponent', () => {
     });
   });
 
+  describe('Access control', () => {
+    const accessCalls: Record<string, unknown>[] = [];
+
+    function respondWithAccess(): void {
+      const base = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === 'get_integration_access') {
+          accessCalls.push(args ?? {});
+          return { mode: 'read_only', global_read_only: false, global_locked: false };
+        }
+        return base(cmd, args);
+      };
+    }
+
+    beforeEach(() => {
+      accessCalls.length = 0;
+      respondWithAccess();
+    });
+
+    async function render(): Promise<void> {
+      await component.ngOnInit();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      await fixture.whenStable();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      fixture.detectChanges();
+    }
+
+    it('shows the Access control in the panel of the expanded integration', async () => {
+      component.expandedService = 'gitlab';
+      await render();
+
+      const panel = fixture.nativeElement.querySelector(
+        '[data-testid="integrations-expanded-gitlab"] [data-testid="integration-access"]'
+      );
+      expect(panel).not.toBeNull();
+      expect(accessCalls).toContainEqual({ project: 'test-project', service: 'gitlab' });
+      expect(
+        fixture.nativeElement
+          .querySelector('[data-testid="integration-access-read-only"]')
+          .getAttribute('aria-checked')
+      ).toBe('true');
+    });
+
+    it('shows no Access control while no integration is expanded', async () => {
+      await render();
+
+      const expanded = fixture.nativeElement.querySelector(
+        '[data-testid^="integrations-expanded-"]'
+      );
+      expect(expanded).toBeNull();
+    });
+
+    it('shows the Access control in the row of an OS integration', async () => {
+      await render();
+
+      const row = fixture.nativeElement.querySelector('[data-testid="integrations-os"]');
+      expect(row.querySelector('[data-testid="integration-access"]')).not.toBeNull();
+      expect(accessCalls).toContainEqual({ project: 'test-project', service: 'reminders' });
+    });
+  });
+
   describe('project_switch_succeeded event', () => {
     it('reloads active project and integrations on project_switch_succeeded', async () => {
       const projectState = TestBed.inject(ProjectStateService);

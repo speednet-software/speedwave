@@ -34,6 +34,8 @@ function setupMockTauri(mockTauri: MockTauriService): void {
         return [];
       case 'get_keep_awake':
         return true;
+      case 'get_access_settings':
+        return { read_only: false, read_only_locked: false };
       default:
         return undefined;
     }
@@ -143,6 +145,15 @@ describe('SettingsComponent', () => {
     betaEnabled.set(true);
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('app-sleep-section')).not.toBeNull();
+  });
+
+  it('renders the Agent access section whether beta is on or off', () => {
+    betaEnabled.set(false);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('app-access-section')).not.toBeNull();
+    betaEnabled.set(true);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('app-access-section')).not.toBeNull();
   });
 
   it('renders TelemetrySectionComponent when beta is enabled', () => {

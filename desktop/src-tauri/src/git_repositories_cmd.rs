@@ -202,6 +202,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             ..Default::default()
         };

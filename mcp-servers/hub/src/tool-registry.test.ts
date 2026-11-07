@@ -29,6 +29,7 @@ import {
 import { TIMEOUTS } from '@speedwave/mcp-shared';
 import type { ToolMetadata } from './hub-types.js';
 import { populateRegistryWithMockTools, _resetRegistryForTesting } from './test-helpers.js';
+import * as policyModule from './policy.js';
 
 vi.mock('./tool-discovery.js', async (importOriginal) => {
   const original = await importOriginal<typeof import('./tool-discovery.js')>();
@@ -259,6 +260,71 @@ describe('tool-registry', () => {
 
       const sendCall = wrapWithAuditCalls.find((c) => c.tool === 'sendChannel');
       expect(sendCall?.service).toBe('slack');
+    });
+
+    describe('under read-only access rules', () => {
+      beforeEach(() => {
+        vi.spyOn(policyModule, 'getEngine').mockReturnValue({
+          access: { default: 'read_only', services: {} },
+          tokenize: (value: unknown) => ({ value, detections: [] }),
+          detokenize: (value: unknown) => value,
+        });
+        const slack = TOOL_REGISTRY['slack'] as Record<string, ToolMetadata>;
+        slack['listChannelIds'] = {
+          ...slack['listChannelIds'],
+          annotations: { readOnlyHint: true },
+        };
+      });
+
+      afterEach(() => {
+        vi.restoreAllMocks();
+      });
+
+      function build(bridge: Record<string, ReturnType<typeof vi.fn>>) {
+        const audits: Array<{ tool: string; denial?: unknown }> = [];
+        const wrappers = buildExecutorWrappers(
+          'slack',
+          bridge,
+          vi.fn((_svc, tool, fn, denial) => {
+            audits.push({ tool, denial });
+            return fn;
+          }),
+          vi.fn((p) => p),
+          vi.fn((fn) => fn())
+        );
+        return { wrappers, audits };
+      }
+
+      function bridgeOfSlack() {
+        const bridge: Record<string, ReturnType<typeof vi.fn>> = {};
+        for (const m of getServiceMethods('slack')) bridge[m] = vi.fn().mockResolvedValue('ok');
+        return bridge;
+      }
+
+      it('rejects a blocked tool without calling the bridge and marks the audit as denied', async () => {
+        const bridge = bridgeOfSlack();
+        const { wrappers, audits } = build(bridge);
+
+        await expect(wrappers.sendChannel({ channel: 'c', text: 't' })).rejects.toThrow(
+          'Read-only mode is on for slack'
+        );
+
+        expect(bridge.sendChannel).not.toHaveBeenCalled();
+        expect(audits.find((a) => a.tool === 'sendChannel')?.denial).toMatchObject({
+          allowed: false,
+          reason: 'read-only',
+        });
+      });
+
+      it('passes an annotated read through to the bridge with no denial', async () => {
+        const bridge = bridgeOfSlack();
+        const { wrappers, audits } = build(bridge);
+
+        await expect(wrappers.listChannelIds({})).resolves.toBe('ok');
+
+        expect(bridge.listChannelIds).toHaveBeenCalledTimes(1);
+        expect(audits.find((a) => a.tool === 'listChannelIds')?.denial).toBeUndefined();
+      });
     });
 
     it('should throw when bridge method is missing', () => {

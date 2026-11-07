@@ -4,6 +4,8 @@ use crate::defaults;
 use crate::git_allowlist::GitForgeService;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
+use speedwave_pii_engine::AccessMode;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -461,6 +463,9 @@ pub struct ClaudeOverrides {
 pub struct IntegrationConfig {
     /// Whether the integration is enabled (`None` = inherit default).
     pub enabled: Option<bool>,
+    /// Access mode of the integration.
+    #[serde(default, skip_serializing_if = "AccessMode::is_full")]
+    pub access: AccessMode,
 }
 
 /// Enable toggle and repository allowlist of a git forge integration (GitHub, GitLab).
@@ -468,6 +473,9 @@ pub struct IntegrationConfig {
 pub struct GitForgeIntegrationConfig {
     /// Whether the integration is enabled (`None` = inherit default).
     pub enabled: Option<bool>,
+    /// Access mode of the integration.
+    #[serde(default, skip_serializing_if = "AccessMode::is_full")]
+    pub access: AccessMode,
     /// Repositories the git transport may reach (`owner/repo`, `owner/*`), approved in Desktop.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repositories: Vec<String>,
@@ -490,13 +498,30 @@ impl OsIntegrationsConfig {
     /// Sets the enabled state for an OS integration service by config key.
     /// Returns `false` if the key is unknown.
     pub fn set_service(&mut self, key: &str, cfg: IntegrationConfig) -> bool {
+        let Some(slot) = self.slot_mut(key) else {
+            return false;
+        };
+        let access = slot.as_ref().map_or(cfg.access, |stored| stored.access);
+        *slot = Some(IntegrationConfig { access, ..cfg });
+        true
+    }
+
+    fn slot_mut(&mut self, key: &str) -> Option<&mut Option<IntegrationConfig>> {
         match key {
-            "reminders" => self.reminders = Some(cfg),
-            "calendar" => self.calendar = Some(cfg),
-            "mail" => self.mail = Some(cfg),
-            "notes" => self.notes = Some(cfg),
-            _ => return false,
+            "reminders" => Some(&mut self.reminders),
+            "calendar" => Some(&mut self.calendar),
+            "mail" => Some(&mut self.mail),
+            "notes" => Some(&mut self.notes),
+            _ => None,
         }
+    }
+
+    /// Sets the access mode of an OS integration.
+    pub fn set_access(&mut self, key: &str, mode: AccessMode) -> bool {
+        let Some(slot) = self.slot_mut(key) else {
+            return false;
+        };
+        slot.get_or_insert_with(Default::default).access = mode;
         true
     }
 
@@ -546,18 +571,107 @@ impl IntegrationsConfig {
     /// repository list. Returns `false` if the key is unknown.
     pub fn set_service(&mut self, key: &str, cfg: IntegrationConfig) -> bool {
         match key {
-            "slack" => self.slack = Some(cfg),
-            "sharepoint" => self.sharepoint = Some(cfg),
-            "redmine" => self.redmine = Some(cfg),
             "gitlab" => self.gitlab.get_or_insert_with(Default::default).enabled = cfg.enabled,
             "github" => self.github.get_or_insert_with(Default::default).enabled = cfg.enabled,
-            "atlassian" => self.atlassian = Some(cfg),
-            "office" => self.office = Some(cfg),
-            "playwright" => self.playwright = Some(cfg),
-            "context7" => self.context7 = Some(cfg),
-            _ => return false,
+            _ => {
+                let Some(slot) = self.toggle_slot_mut(key) else {
+                    return false;
+                };
+                let access = slot.as_ref().map_or(cfg.access, |stored| stored.access);
+                *slot = Some(IntegrationConfig { access, ..cfg });
+            }
         }
         true
+    }
+
+    fn toggle_slot_mut(&mut self, key: &str) -> Option<&mut Option<IntegrationConfig>> {
+        match key {
+            "slack" => Some(&mut self.slack),
+            "sharepoint" => Some(&mut self.sharepoint),
+            "redmine" => Some(&mut self.redmine),
+            "atlassian" => Some(&mut self.atlassian),
+            "office" => Some(&mut self.office),
+            "playwright" => Some(&mut self.playwright),
+            "context7" => Some(&mut self.context7),
+            _ => None,
+        }
+    }
+
+    /// Sets the access mode of an integration.
+    pub fn set_access(&mut self, key: &str, mode: AccessMode) -> bool {
+        match key {
+            "gitlab" => self.git_forge_mut(GitForgeService::Gitlab).access = mode,
+            "github" => self.git_forge_mut(GitForgeService::Github).access = mode,
+            "reminders" | "calendar" | "mail" | "notes" => {
+                return self
+                    .os
+                    .get_or_insert_with(Default::default)
+                    .set_access(key, mode);
+            }
+            _ => match self.toggle_slot_mut(key) {
+                Some(slot) => slot.get_or_insert_with(Default::default).access = mode,
+                None => {
+                    self.plugins
+                        .get_or_insert_with(HashMap::new)
+                        .entry(key.to_string())
+                        .or_default()
+                        .access = mode;
+                }
+            },
+        }
+        true
+    }
+
+    /// Access mode of an integration.
+    pub fn access_of(&self, key: &str) -> AccessMode {
+        let hub_id = if crate::consts::TOGGLEABLE_OS_SERVICES
+            .iter()
+            .any(|svc| svc.config_key == key)
+        {
+            format!("os-{key}")
+        } else {
+            key.to_string()
+        };
+        self.access_modes()
+            .get(&hub_id)
+            .copied()
+            .unwrap_or(AccessMode::Full)
+    }
+
+    /// Access modes that differ from full.
+    pub fn access_modes(&self) -> BTreeMap<String, AccessMode> {
+        let built_in = [
+            ("slack", self.slack.as_ref().map(|c| c.access)),
+            ("sharepoint", self.sharepoint.as_ref().map(|c| c.access)),
+            ("redmine", self.redmine.as_ref().map(|c| c.access)),
+            ("gitlab", self.gitlab.as_ref().map(|c| c.access)),
+            ("github", self.github.as_ref().map(|c| c.access)),
+            ("atlassian", self.atlassian.as_ref().map(|c| c.access)),
+            ("office", self.office.as_ref().map(|c| c.access)),
+            ("playwright", self.playwright.as_ref().map(|c| c.access)),
+            ("context7", self.context7.as_ref().map(|c| c.access)),
+        ]
+        .into_iter()
+        .map(|(key, mode)| (key.to_string(), mode));
+        let os = crate::consts::TOGGLEABLE_OS_SERVICES.iter().map(|svc| {
+            let mode = self
+                .os
+                .as_ref()
+                .and_then(|os| os.get_service(svc.config_key))
+                .map(|c| c.access);
+            (format!("os-{}", svc.config_key), mode)
+        });
+        let plugins = self
+            .plugins
+            .iter()
+            .flatten()
+            .map(|(id, cfg)| (id.clone(), Some(cfg.access)));
+        built_in
+            .chain(os)
+            .chain(plugins)
+            .filter_map(|(id, mode)| mode.map(|m| (id, m)))
+            .filter(|(_, mode)| !mode.is_full())
+            .collect()
     }
 
     /// Stored settings of a git forge integration, if the config has any.
@@ -587,12 +701,7 @@ impl IntegrationsConfig {
     /// (caller's job). Separate from `set_service` so typos can't create entries.
     pub fn set_plugin_enabled(&mut self, service_id: &str, enabled: bool) {
         let plugins = self.plugins.get_or_insert_with(HashMap::new);
-        plugins.insert(
-            service_id.to_string(),
-            IntegrationConfig {
-                enabled: Some(enabled),
-            },
-        );
+        plugins.entry(service_id.to_string()).or_default().enabled = Some(enabled);
     }
 }
 
@@ -711,6 +820,9 @@ pub struct ProjectUserEntry {
     /// `None` = no pin, so the spawn omits `--effort` (Claude Code's default applies).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort_pin: Option<String>,
+    /// Project-wide read-only mode.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_only: bool,
 }
 
 /// The IDE selected for the IDE bridge.
@@ -982,6 +1094,14 @@ pub struct ManagedPiiPolicyConfig {
     /// Policy ids forced on regardless of the user's own selection.
     #[serde(default)]
     pub forced_policies: Vec<String>,
+}
+
+/// MDM-forced access policy.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedAccessConfig {
+    /// Forces read-only mode on.
+    pub read_only: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -1610,6 +1730,8 @@ pub struct ResolvedClaudeConfig {
     pub pii_ner_enabled: bool,
     /// Git transport allowlists.
     pub git_repositories: GitRepositoryLists,
+    /// Composed access policy.
+    pub access: speedwave_pii_engine::AccessPolicy,
 }
 
 impl Default for ResolvedClaudeConfig {
@@ -1622,6 +1744,7 @@ impl Default for ResolvedClaudeConfig {
             pii_policy: Ok(crate::pii_policy::ResolvedPiiPolicy::default()),
             pii_ner_enabled: false,
             git_repositories: GitRepositoryLists::default(),
+            access: speedwave_pii_engine::AccessPolicy::default(),
         }
     }
 }
@@ -1664,9 +1787,9 @@ pub(crate) fn resolve_project_config_in_with_load(
 ) -> (ResolvedClaudeConfig, ResolvedIntegrationsConfig) {
     match managed_load {
         Ok(managed) => {
-            let (managed_telemetry, managed_pii_policy) = match managed {
-                Some(m) => (m.telemetry, m.pii_policy),
-                None => (None, None),
+            let (managed_telemetry, managed_pii_policy, managed_access) = match managed {
+                Some(m) => (m.telemetry, m.pii_policy, m.access),
+                None => (None, None, None),
             };
             resolve_project_config_in_with_managed(
                 data_dir,
@@ -1675,6 +1798,7 @@ pub(crate) fn resolve_project_config_in_with_load(
                 project_name,
                 managed_telemetry.as_ref(),
                 managed_pii_policy.as_ref(),
+                managed_access.as_ref(),
             )
         }
         Err(e) => {
@@ -1683,6 +1807,7 @@ pub(crate) fn resolve_project_config_in_with_load(
                 project_dir,
                 user_config,
                 project_name,
+                None,
                 None,
                 None,
             );
@@ -1711,6 +1836,7 @@ pub(crate) fn resolve_project_config_in_with_managed(
     project_name: &str,
     managed_telemetry: Option<&ManagedTelemetryConfig>,
     managed_pii_policy: Option<&ManagedPiiPolicyConfig>,
+    managed_access: Option<&ManagedAccessConfig>,
 ) -> (ResolvedClaudeConfig, ResolvedIntegrationsConfig) {
     let repo = load_repo_config_logged(project_dir);
 
@@ -1825,6 +1951,18 @@ pub(crate) fn resolve_project_config_in_with_managed(
         })
         .unwrap_or_default();
 
+    let access = crate::access_policy::compose_access_policy(&crate::access_policy::AccessInputs {
+        managed_read_only: managed_access.is_some_and(|m| m.read_only),
+        project_read_only: user_config
+            .find_project(project_name)
+            .is_some_and(|p| p.read_only),
+        service_modes: &user_config
+            .find_project(project_name)
+            .and_then(|p| p.integrations.as_ref())
+            .map(IntegrationsConfig::access_modes)
+            .unwrap_or_default(),
+    });
+
     let claude = ResolvedClaudeConfig {
         env,
         flags,
@@ -1833,6 +1971,7 @@ pub(crate) fn resolve_project_config_in_with_managed(
         pii_policy,
         pii_ner_enabled,
         git_repositories,
+        access,
     };
     (claude, integrations)
 }
@@ -2173,6 +2312,7 @@ fn resolve_project_config_in_for_test(
         project_dir,
         user_config,
         project_name,
+        None,
         None,
         None,
     )
@@ -2885,6 +3025,7 @@ mod tests {
             "mcp-desc",
             None,
             None,
+            None,
         );
 
         assert_eq!(
@@ -2942,6 +3083,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             ..Default::default()
         }
@@ -2967,10 +3109,12 @@ mod tests {
                 github: Some(GitForgeIntegrationConfig {
                     enabled: Some(true),
                     repositories: vec!["listed/repo".to_string(), "team/*".to_string()],
+                    ..Default::default()
                 }),
                 gitlab: Some(GitForgeIntegrationConfig {
                     enabled: None,
                     repositories: vec!["group/sub/repo".to_string()],
+                    ..Default::default()
                 }),
                 ..Default::default()
             },
@@ -2993,6 +3137,7 @@ mod tests {
                 github: Some(GitForgeIntegrationConfig {
                     enabled: Some(true),
                     repositories: Vec::new(),
+                    ..Default::default()
                 }),
                 ..Default::default()
             },
@@ -3011,7 +3156,8 @@ mod tests {
             assert!(integrations.set_service(
                 "github",
                 IntegrationConfig {
-                    enabled: Some(enabled)
+                    enabled: Some(enabled),
+                    ..Default::default()
                 }
             ));
             let stored = integrations.git_forge(GitForgeService::Github).unwrap();
@@ -3022,7 +3168,8 @@ mod tests {
         assert!(integrations.set_service(
             "gitlab",
             IntegrationConfig {
-                enabled: Some(true)
+                enabled: Some(true),
+                ..Default::default()
             }
         ));
         let gitlab = integrations.git_forge(GitForgeService::Gitlab).unwrap();
@@ -3036,10 +3183,12 @@ mod tests {
             github: Some(GitForgeIntegrationConfig {
                 enabled: Some(true),
                 repositories: vec!["owner/repo".to_string(), "owner/*".to_string()],
+                ..Default::default()
             }),
             gitlab: Some(GitForgeIntegrationConfig {
                 enabled: Some(false),
                 repositories: Vec::new(),
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -3062,7 +3211,8 @@ mod tests {
             parsed.github,
             Some(GitForgeIntegrationConfig {
                 enabled: Some(true),
-                repositories: Vec::new()
+                repositories: Vec::new(),
+                ..Default::default()
             })
         );
         assert_eq!(parsed.gitlab, Some(GitForgeIntegrationConfig::default()));
@@ -3131,6 +3281,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -3643,6 +3794,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -3661,6 +3813,7 @@ mod tests {
             &user_config,
             "p",
             Some(&managed),
+            None,
             None,
         )
         .0;
@@ -3694,6 +3847,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -3710,6 +3864,7 @@ mod tests {
             &user_config,
             "p",
             Some(&managed),
+            None,
             None,
         )
         .0;
@@ -3742,6 +3897,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -3759,6 +3915,7 @@ mod tests {
             &user_config,
             "p",
             Some(&managed),
+            None,
             None,
         )
         .0;
@@ -3786,6 +3943,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -3802,6 +3960,7 @@ mod tests {
             tmp.path(),
             &user_config,
             "p",
+            None,
             None,
             None,
         )
@@ -3824,6 +3983,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -3862,6 +4022,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -3895,6 +4056,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -3960,6 +4122,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -4433,6 +4596,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             ..Default::default()
         };
@@ -4489,6 +4653,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             ..Default::default()
         };
@@ -4851,6 +5016,7 @@ mod tests {
             plugin_settings: None,
             policy: None,
             effort_pin: None,
+            read_only: false,
         };
         let config = SpeedwaveUserConfig {
             projects: vec![proj("with-creds", "/x"), proj("fresh", "/y")],
@@ -5053,6 +5219,7 @@ mod tests {
             plugin_settings: None,
             policy: None,
             effort_pin: None,
+            read_only: false,
         };
         let config = SpeedwaveUserConfig {
             projects: vec![
@@ -5322,6 +5489,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -5444,6 +5612,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: Some("acme".to_string()),
             selected_ide: None,
@@ -5471,6 +5640,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: Some("test".to_string()),
             selected_ide: None,
@@ -5518,6 +5688,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: Some("test".to_string()),
             selected_ide: None,
@@ -5577,6 +5748,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: Some("durable".to_string()),
             selected_ide: None,
@@ -5608,6 +5780,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: Some("v1".to_string()),
             selected_ide: None,
@@ -5625,6 +5798,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: Some("v2".to_string()),
             selected_ide: None,
@@ -5668,6 +5842,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -5867,6 +6042,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -5918,6 +6094,7 @@ mod tests {
                     svc.config_key,
                     IntegrationConfig {
                         enabled: Some(true),
+                        ..Default::default()
                     }
                 ),
                 "IntegrationsConfig::set_service does not know '{}'",
@@ -5982,6 +6159,7 @@ mod tests {
             "playwright",
             IntegrationConfig {
                 enabled: Some(true),
+                ..Default::default()
             },
         ));
 
@@ -6014,10 +6192,12 @@ mod tests {
         let config = IntegrationsConfig {
             slack: Some(IntegrationConfig {
                 enabled: Some(false),
+                ..Default::default()
             }),
             sharepoint: None,
             redmine: Some(IntegrationConfig {
                 enabled: Some(true),
+                ..Default::default()
             }),
             gitlab: None,
             github: None,
@@ -6028,6 +6208,7 @@ mod tests {
             os: Some(OsIntegrationsConfig {
                 reminders: Some(IntegrationConfig {
                     enabled: Some(false),
+                    ..Default::default()
                 }),
                 calendar: None,
                 mail: None,
@@ -6074,6 +6255,7 @@ mod tests {
                 integrations: Some(IntegrationsConfig {
                     slack: Some(IntegrationConfig {
                         enabled: Some(true),
+                        ..Default::default()
                     }),
                     sharepoint: None,
                     redmine: None,
@@ -6089,6 +6271,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -6148,10 +6331,12 @@ mod tests {
                     os: Some(OsIntegrationsConfig {
                         reminders: Some(IntegrationConfig {
                             enabled: Some(false),
+                            ..Default::default()
                         }),
                         calendar: None,
                         mail: Some(IntegrationConfig {
                             enabled: Some(false),
+                            ..Default::default()
                         }),
                         notes: None,
                     }),
@@ -6160,6 +6345,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -6185,6 +6371,7 @@ mod tests {
                 integrations: Some(IntegrationsConfig {
                     slack: Some(IntegrationConfig {
                         enabled: Some(true),
+                        ..Default::default()
                     }),
                     sharepoint: None,
                     redmine: None,
@@ -6200,6 +6387,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -6483,6 +6671,7 @@ mod tests {
                     ..Default::default()
                 }),
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -6497,6 +6686,7 @@ mod tests {
             tmp.path(),
             &user_config,
             "p",
+            None,
             None,
             None,
         );
@@ -6526,6 +6716,7 @@ mod tests {
                     ..Default::default()
                 }),
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -6537,6 +6728,7 @@ mod tests {
             tmp.path(),
             &user_config,
             "p",
+            None,
             None,
             None,
         );
@@ -6564,6 +6756,7 @@ mod tests {
                     ..Default::default()
                 }),
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -6577,12 +6770,265 @@ mod tests {
             "p",
             None,
             None,
+            None,
         );
         assert_eq!(
             claude.pii_policy,
             Ok(crate::pii_policy::disabled_policy()),
             "an invalid policy id must not error while the feature is beta-gated off"
         );
+    }
+
+    fn config_with_read_only(dir: &Path, read_only: bool) -> SpeedwaveUserConfig {
+        SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "p".into(),
+                dir: dir.to_string_lossy().to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+                policy: None,
+                effort_pin: None,
+                read_only,
+            }],
+            active_project: None,
+            selected_ide: None,
+            ui: None,
+            telemetry: None,
+        }
+    }
+
+    fn resolved_access(
+        dir: &Path,
+        read_only: bool,
+        managed: Option<&ManagedAccessConfig>,
+    ) -> speedwave_pii_engine::AccessPolicy {
+        resolve_project_config_in_with_managed(
+            dir,
+            dir,
+            &config_with_read_only(dir, read_only),
+            "p",
+            None,
+            None,
+            managed,
+        )
+        .0
+        .access
+    }
+
+    #[test]
+    fn project_entry_without_a_read_only_field_means_off() {
+        let entry: ProjectUserEntry =
+            serde_json::from_str(r#"{"name":"p","dir":"/tmp/p"}"#).unwrap();
+        assert!(!entry.read_only);
+    }
+
+    #[test]
+    fn project_entry_stores_the_read_only_switch_only_while_on() {
+        let tmp = tempfile::tempdir().unwrap();
+        let off =
+            serde_json::to_value(&config_with_read_only(tmp.path(), false).projects[0]).unwrap();
+        assert!(off.get("read_only").is_none());
+        let on =
+            serde_json::to_value(&config_with_read_only(tmp.path(), true).projects[0]).unwrap();
+        assert_eq!(on["read_only"], true);
+    }
+
+    #[test]
+    fn resolved_access_is_unrestricted_by_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(resolved_access(tmp.path(), false, None).is_unrestricted());
+    }
+
+    #[test]
+    fn project_switch_reaches_resolved_access() {
+        let tmp = tempfile::tempdir().unwrap();
+        let access = resolved_access(tmp.path(), true, None);
+        assert_eq!(access.default, speedwave_pii_engine::AccessMode::ReadOnly);
+    }
+
+    #[test]
+    fn managed_read_only_reaches_resolved_access_over_an_off_project_switch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let managed = ManagedAccessConfig { read_only: true };
+        let access = resolved_access(tmp.path(), false, Some(&managed));
+        assert_eq!(access.default, speedwave_pii_engine::AccessMode::ReadOnly);
+    }
+
+    #[test]
+    fn mdm_read_only_loaded_from_the_managed_file_reaches_resolved_access() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("managed-config.json");
+        std::fs::write(&path, r#"{"access":{"read_only":true}}"#).unwrap();
+        let managed = crate::managed_config::load_managed_config_from(&path).unwrap();
+        let (claude, _) = resolve_project_config_in_with_load(
+            tmp.path(),
+            tmp.path(),
+            &config_with_read_only(tmp.path(), false),
+            "p",
+            Ok(managed),
+        );
+        assert_eq!(
+            claude.access.default,
+            speedwave_pii_engine::AccessMode::ReadOnly
+        );
+    }
+
+    fn config_with_integrations(
+        dir: &Path,
+        integrations: IntegrationsConfig,
+    ) -> SpeedwaveUserConfig {
+        let mut cfg = config_with_read_only(dir, false);
+        cfg.projects[0].integrations = Some(integrations);
+        cfg
+    }
+
+    #[test]
+    fn integration_entry_without_an_access_field_is_full() {
+        let parsed: IntegrationsConfig =
+            serde_json::from_str(r#"{"slack": {"enabled": true}}"#).unwrap();
+        assert_eq!(
+            parsed.slack.unwrap().access,
+            speedwave_pii_engine::AccessMode::Full
+        );
+    }
+
+    #[test]
+    fn integration_entry_stores_the_access_mode_only_while_read_only() {
+        let full = serde_json::to_value(IntegrationConfig::default()).unwrap();
+        assert!(full.get("access").is_none());
+        let mut integrations = IntegrationsConfig::default();
+        assert!(integrations.set_access("slack", speedwave_pii_engine::AccessMode::ReadOnly));
+        let json = serde_json::to_value(&integrations).unwrap();
+        assert_eq!(json["slack"]["access"], "read_only");
+        let back: IntegrationsConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            back.slack.unwrap().access,
+            speedwave_pii_engine::AccessMode::ReadOnly
+        );
+    }
+
+    #[test]
+    fn set_access_reaches_every_kind_of_integration() {
+        use speedwave_pii_engine::AccessMode::ReadOnly;
+        let mut integrations = IntegrationsConfig::default();
+        for key in [
+            "slack",
+            "sharepoint",
+            "redmine",
+            "gitlab",
+            "github",
+            "atlassian",
+            "office",
+            "playwright",
+            "context7",
+            "reminders",
+            "calendar",
+            "mail",
+            "notes",
+            "my-plugin",
+        ] {
+            assert!(integrations.set_access(key, ReadOnly), "{key}");
+        }
+        let modes = integrations.access_modes();
+        assert_eq!(modes.len(), 14);
+        assert!(modes.values().all(|m| *m == ReadOnly));
+    }
+
+    #[test]
+    fn access_modes_are_keyed_by_the_hub_service_name() {
+        use speedwave_pii_engine::AccessMode::ReadOnly;
+        let mut integrations = IntegrationsConfig::default();
+        for key in ["slack", "github", "mail", "my-plugin"] {
+            integrations.set_access(key, ReadOnly);
+        }
+        let keys: Vec<String> = integrations.access_modes().into_keys().collect();
+        assert_eq!(keys, ["github", "my-plugin", "os-mail", "slack"]);
+    }
+
+    #[test]
+    fn full_entries_are_left_out_of_the_access_modes() {
+        let mut integrations = IntegrationsConfig::default();
+        integrations.set_access("slack", speedwave_pii_engine::AccessMode::Full);
+        assert!(integrations.access_modes().is_empty());
+    }
+
+    #[test]
+    fn toggling_an_integration_keeps_its_access_mode() {
+        use speedwave_pii_engine::AccessMode::ReadOnly;
+        let mut integrations = IntegrationsConfig::default();
+        for key in ["slack", "github", "mail", "my-plugin"] {
+            integrations.set_access(key, ReadOnly);
+        }
+        let on = IntegrationConfig {
+            enabled: Some(true),
+            ..Default::default()
+        };
+        assert!(integrations.set_service("slack", on.clone()));
+        assert!(integrations.set_service("github", on.clone()));
+        integrations.os.as_mut().unwrap().set_service("mail", on);
+        integrations.set_plugin_enabled("my-plugin", true);
+        assert_eq!(integrations.access_modes().len(), 4);
+        assert_eq!(integrations.slack.as_ref().unwrap().enabled, Some(true));
+        assert_eq!(
+            integrations.plugins.as_ref().unwrap()["my-plugin"].enabled,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn set_access_on_an_unlisted_key_creates_a_plugin_entry() {
+        let mut integrations = IntegrationsConfig::default();
+        assert!(integrations.set_access("some-plugin", speedwave_pii_engine::AccessMode::ReadOnly));
+        assert!(integrations.plugins.unwrap().contains_key("some-plugin"));
+    }
+
+    #[test]
+    fn integration_modes_reach_the_resolved_access_policy() {
+        use speedwave_pii_engine::AccessMode::{Full, ReadOnly};
+        let tmp = tempfile::tempdir().unwrap();
+        let mut integrations = IntegrationsConfig::default();
+        integrations.set_access("slack", ReadOnly);
+        integrations.set_access("reminders", ReadOnly);
+        integrations.set_access("my-plugin", ReadOnly);
+        let (claude, _) = resolve_project_config_in_with_managed(
+            tmp.path(),
+            tmp.path(),
+            &config_with_integrations(tmp.path(), integrations),
+            "p",
+            None,
+            None,
+            None,
+        );
+        assert_eq!(claude.access.default, Full);
+        assert_eq!(claude.access.mode_of("slack"), ReadOnly);
+        assert_eq!(claude.access.mode_of("os-reminders"), ReadOnly);
+        assert_eq!(claude.access.mode_of("my-plugin"), ReadOnly);
+        assert_eq!(claude.access.mode_of("redmine"), Full);
+    }
+
+    #[test]
+    fn a_repo_cannot_set_integration_access_modes() {
+        use speedwave_pii_engine::AccessMode::{Full, ReadOnly};
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join(".speedwave.json"),
+            r#"{"integrations":{"slack":{"enabled":true,"access":"full"}}}"#,
+        )
+        .unwrap();
+        let mut integrations = IntegrationsConfig::default();
+        integrations.set_access("slack", ReadOnly);
+        let (claude, _) = resolve_project_config_in_with_managed(
+            tmp.path(),
+            tmp.path(),
+            &config_with_integrations(tmp.path(), integrations),
+            "p",
+            None,
+            None,
+            None,
+        );
+        assert_eq!(claude.access.mode_of("slack"), ReadOnly);
+        assert_eq!(claude.access.mode_of("redmine"), Full);
     }
 
     #[test]
@@ -6597,6 +7043,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -6613,6 +7060,7 @@ mod tests {
             "p",
             None,
             Some(&managed),
+            None,
         );
         let resolved = claude.pii_policy.unwrap();
         assert_eq!(
@@ -6641,6 +7089,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -6657,6 +7106,7 @@ mod tests {
             "p",
             None,
             Some(&managed),
+            None,
         );
         assert!(
             claude.pii_policy.is_err(),
@@ -6719,6 +7169,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             ..Default::default()
         };
@@ -6735,43 +7186,50 @@ mod tests {
         assert!(cfg.set_service(
             "slack",
             IntegrationConfig {
-                enabled: Some(true)
+                enabled: Some(true),
+                ..Default::default()
             }
         ));
         assert!(cfg.set_service(
             "sharepoint",
             IntegrationConfig {
-                enabled: Some(true)
+                enabled: Some(true),
+                ..Default::default()
             }
         ));
         assert!(cfg.set_service(
             "redmine",
             IntegrationConfig {
-                enabled: Some(true)
+                enabled: Some(true),
+                ..Default::default()
             }
         ));
         assert!(cfg.set_service(
             "gitlab",
             IntegrationConfig {
-                enabled: Some(true)
+                enabled: Some(true),
+                ..Default::default()
             }
         ));
         assert!(cfg.set_service(
             "github",
             IntegrationConfig {
-                enabled: Some(true)
+                enabled: Some(true),
+                ..Default::default()
             }
         ));
         assert!(cfg.set_service(
             "office",
             IntegrationConfig {
-                enabled: Some(true)
+                enabled: Some(true),
+                ..Default::default()
             }
         ));
         assert!(cfg.set_service(
             "atlassian",
             IntegrationConfig {
-                enabled: Some(true)
+                enabled: Some(true),
+                ..Default::default()
             }
         ));
         assert_eq!(cfg.slack.unwrap().enabled, Some(true));
@@ -6783,13 +7241,15 @@ mod tests {
         assert!(!cfg.set_service(
             "unknown",
             IntegrationConfig {
-                enabled: Some(true)
+                enabled: Some(true),
+                ..Default::default()
             }
         ));
         assert!(!cfg.set_service(
             "os",
             IntegrationConfig {
-                enabled: Some(true)
+                enabled: Some(true),
+                ..Default::default()
             }
         ));
     }
@@ -6884,12 +7344,14 @@ mod tests {
                         "example-plugin".to_string(),
                         IntegrationConfig {
                             enabled: Some(true),
+                            ..Default::default()
                         },
                     )])),
                 }),
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -6917,6 +7379,7 @@ mod tests {
                     plugin_settings: None,
                     policy: None,
                     effort_pin: None,
+                    read_only: false,
                 },
                 ProjectUserEntry {
                     name: "beta".to_string(),
@@ -6926,6 +7389,7 @@ mod tests {
                     plugin_settings: None,
                     policy: None,
                     effort_pin: None,
+                    read_only: false,
                 },
             ],
             active_project: None,
@@ -6994,6 +7458,7 @@ mod tests {
                     plugin_settings: None,
                     policy: None,
                     effort_pin: None,
+                    read_only: false,
                 },
                 ProjectUserEntry {
                     name: "beta".to_string(),
@@ -7003,6 +7468,7 @@ mod tests {
                     plugin_settings: None,
                     policy: None,
                     effort_pin: None,
+                    read_only: false,
                 },
             ],
             active_project: Some("beta".to_string()),
@@ -7032,6 +7498,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: Some("deleted-project".to_string()),
             selected_ide: None,
@@ -7050,6 +7517,7 @@ mod tests {
             let mut cfg = OsIntegrationsConfig::default();
             let ic = IntegrationConfig {
                 enabled: Some(true),
+                ..Default::default()
             };
             assert!(
                 cfg.set_service(key, ic),
@@ -7064,6 +7532,7 @@ mod tests {
         let mut cfg = OsIntegrationsConfig::default();
         let ic = IntegrationConfig {
             enabled: Some(true),
+            ..Default::default()
         };
         assert!(!cfg.set_service("unknown", ic));
     }
@@ -7075,12 +7544,14 @@ mod tests {
             "calendar",
             IntegrationConfig {
                 enabled: Some(true),
+                ..Default::default()
             },
         );
         cfg.set_service(
             "calendar",
             IntegrationConfig {
                 enabled: Some(false),
+                ..Default::default()
             },
         );
         assert_eq!(cfg.calendar.unwrap().enabled, Some(false));
@@ -7315,6 +7786,7 @@ mod plugin_order_tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,

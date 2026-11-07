@@ -1,5 +1,8 @@
 /** Hub-specific types (executor, skills); PII types live in \@speedwave/policy-engine; base types from \@speedwave/mcp-shared */
 
+/** Why the access policy refused a tool call; the audit trail records it verbatim. */
+export type DenialReason = 'read-only';
+
 /**
  * Tool execution error
  */
@@ -153,6 +156,7 @@ export interface ToolSearchResult {
   deferLoading?: boolean;
   /** Self-reference sentence for userScoped tools; present at every detail level. */
   identityHint?: string;
+  blocked?: DenialReason;
   /**
    * execute_code global to call this service under, set only when it differs from `service`
    * (a dashed slug like `my-plugin` is exposed as `myPlugin`). Use `service` for search filtering.

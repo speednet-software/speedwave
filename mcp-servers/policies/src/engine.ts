@@ -31,8 +31,18 @@ export interface TokenizeResult {
   detections: Detection[];
 }
 
+/** Access mode of a service. */
+export type AccessMode = 'full' | 'read_only';
+
+/** The composed access section of policy.json. */
+export interface AccessRules {
+  default: AccessMode;
+  services: Record<string, AccessMode>;
+}
+
 /** A policy-bound PII engine instance, ready to scan or detokenize values. */
 export interface PiiEngine {
+  readonly access: AccessRules;
   /**
    * Tokenize any value (string/object/array); policy keywords are then masked (match → alias).
    * @param value - Value to scan
@@ -116,6 +126,7 @@ export function loadEngine(env: Record<string, string | undefined> = process.env
   }
 
   return {
+    access: JSON.parse(wasmEngine.access_json()) as AccessRules,
     tokenize(value: unknown): TokenizeResult {
       if (value === undefined) {
         return { value: undefined, detections: [] };

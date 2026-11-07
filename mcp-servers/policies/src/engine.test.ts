@@ -210,3 +210,55 @@ describe('keyword masking', () => {
     });
   });
 });
+
+describe('access rules', () => {
+  it('are full for every service when the policy has no access section', () => {
+    expect(loadEngine({}).access).toEqual({ default: 'full', services: {} });
+  });
+
+  it('carry the composed access section of the policy file', () => {
+    withTempDir((dir) => {
+      const policyFile = join(dir, 'policy.json');
+      writeFileSync(
+        policyFile,
+        JSON.stringify({
+          ...VALID_POLICY_V3,
+          access: { default: 'read_only', services: { slack: 'full' } },
+        })
+      );
+      writeFileSync(join(dir, 'key'), 'ab'.repeat(32));
+      expect(loadEngine({ POLICY_FILE: policyFile }).access).toEqual({
+        default: 'read_only',
+        services: { slack: 'full' },
+      });
+    });
+  });
+
+  it('fail closed on an access section with an unknown mode', () => {
+    withTempDir((dir) => {
+      const policyFile = join(dir, 'policy.json');
+      writeFileSync(
+        policyFile,
+        JSON.stringify({ ...VALID_POLICY_V3, access: { default: 'confirm' } })
+      );
+      writeFileSync(join(dir, 'key'), 'ab'.repeat(32));
+      expect(() => loadEngine({ POLICY_FILE: policyFile })).toThrow(
+        /PII policy engine failed to initialize/
+      );
+    });
+  });
+
+  it('fail closed on an access section with an unknown key', () => {
+    withTempDir((dir) => {
+      const policyFile = join(dir, 'policy.json');
+      writeFileSync(
+        policyFile,
+        JSON.stringify({ ...VALID_POLICY_V3, access: { services: {}, extra: true } })
+      );
+      writeFileSync(join(dir, 'key'), 'ab'.repeat(32));
+      expect(() => loadEngine({ POLICY_FILE: policyFile })).toThrow(
+        /PII policy engine failed to initialize/
+      );
+    });
+  });
+});

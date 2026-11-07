@@ -546,6 +546,7 @@ pub fn set_integration_enabled(
         let integrations = entry.integrations.get_or_insert_with(Default::default);
         let cfg = config::IntegrationConfig {
             enabled: Some(enabled),
+            ..Default::default()
         };
 
         if !integrations.set_service(&service, cfg) {
@@ -769,6 +770,7 @@ pub fn set_os_integration_enabled(
         let os = integrations.os.get_or_insert_with(Default::default);
         let cfg = config::IntegrationConfig {
             enabled: Some(enabled),
+            ..Default::default()
         };
 
         if !os.set_service(&service, cfg) {
@@ -891,6 +893,7 @@ pub fn validate_os_integrations_on_startup(
                     svc,
                     config::IntegrationConfig {
                         enabled: Some(false),
+                        ..Default::default()
                     },
                 );
             }
@@ -1197,6 +1200,7 @@ pub fn delete_integration_credentials(project: String, service: String) -> Resul
                 let integrations = entry.integrations.get_or_insert_with(Default::default);
                 let cfg = config::IntegrationConfig {
                     enabled: Some(false),
+                    ..Default::default()
                 };
                 integrations.set_service(&service, cfg);
                 config::save_user_config(&user_config)?;
@@ -1285,6 +1289,7 @@ fn rollback_integration_to_disabled(project: &str, service: &str) {
         let integrations = entry.integrations.get_or_insert_with(Default::default);
         let cfg = config::IntegrationConfig {
             enabled: Some(false),
+            ..Default::default()
         };
         if !integrations.set_service(service, cfg) {
             let is_installed_plugin = speedwave_runtime::plugin::list_installed_plugins()
@@ -1418,6 +1423,7 @@ mod tests {
         let mut cfg = config::IntegrationsConfig::default();
         let ic = config::IntegrationConfig {
             enabled: Some(true),
+            ..Default::default()
         };
         assert!(cfg.set_service("slack", ic));
         assert_eq!(cfg.slack.unwrap().enabled, Some(true));
@@ -1438,6 +1444,7 @@ mod tests {
             let mut cfg = config::IntegrationsConfig::default();
             let ic = config::IntegrationConfig {
                 enabled: Some(true),
+                ..Default::default()
             };
             assert!(
                 cfg.set_service(key, ic),
@@ -1452,12 +1459,14 @@ mod tests {
         let mut cfg = config::IntegrationsConfig::default();
         let ic = config::IntegrationConfig {
             enabled: Some(true),
+            ..Default::default()
         };
         assert!(!cfg.set_service("unknown", ic));
         assert!(!cfg.set_service(
             "os",
             config::IntegrationConfig {
-                enabled: Some(true)
+                enabled: Some(true),
+                ..Default::default()
             }
         ));
     }
@@ -1900,12 +1909,14 @@ mod tests {
             "slack",
             config::IntegrationConfig {
                 enabled: Some(true),
+                ..Default::default()
             },
         );
         cfg.set_service(
             "slack",
             config::IntegrationConfig {
                 enabled: Some(false),
+                ..Default::default()
             },
         );
         assert_eq!(cfg.slack.unwrap().enabled, Some(false));
@@ -1955,7 +1966,8 @@ mod tests {
                 cfg.set_service(
                     svc.config_key,
                     IntegrationConfig {
-                        enabled: Some(true)
+                        enabled: Some(true),
+                        ..Default::default()
                     }
                 ),
                 "set_service must accept '{}'",

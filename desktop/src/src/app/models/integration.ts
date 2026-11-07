@@ -98,6 +98,17 @@ export interface OsIntegrationValidation {
 /** Integration whose repository allowlist the git transport enforces. */
 export type GitForgeService = 'github' | 'gitlab';
 
+export const GIT_FORGES: readonly GitForgeService[] = ['github', 'gitlab'];
+
+/**
+ * Whether a service is a git forge.
+ * @param service - Integration service id
+ * @returns True for a git forge
+ */
+export function isGitForge(service: string): service is GitForgeService {
+  return (GIT_FORGES as readonly string[]).includes(service);
+}
+
 /** A remote found in the project directory and not listed yet. */
 export interface GitRepositorySuggestion {
   entry: string;

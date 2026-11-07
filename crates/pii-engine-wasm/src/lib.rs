@@ -74,6 +74,11 @@ impl PiiEngine {
         serde_json::to_string(&out).map_err(|e| JsError::new(&e.to_string()))
     }
 
+    /// The composed access policy as JSON.
+    pub fn access_json(&self) -> Result<String, JsError> {
+        serde_json::to_string(self.policy.access()).map_err(|e| JsError::new(&e.to_string()))
+    }
+
     /// Detokenizes every token span in `value_json`, all-or-nothing: the first invalid or
     /// tampered token aborts with `Err` and leaves no partial result. Keywords are unmasked
     /// (alias → match) first — the inverse of `tokenize` — so bridge params reaching an
@@ -128,6 +133,29 @@ mod tests {
     fn keyword_engine() -> PiiEngine {
         PiiEngine::new(&keyword_policy_json(), &"ab".repeat(32))
             .expect("keyword policy engine builds")
+    }
+
+    #[test]
+    fn access_json_is_full_without_an_access_section() {
+        let engine = keyword_engine();
+        let json = engine.access_json().expect("access json");
+        assert_eq!(json, r#"{"default":"full","services":{}}"#);
+    }
+
+    #[test]
+    fn access_json_carries_the_composed_section() {
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&keyword_policy_json()).expect("policy json");
+        doc["access"] = serde_json::json!({
+            "default": "read_only",
+            "services": { "slack": "full" }
+        });
+        let engine = PiiEngine::new(&doc.to_string(), &"ab".repeat(32)).expect("engine builds");
+        let json = engine.access_json().expect("access json");
+        assert_eq!(
+            json,
+            r#"{"default":"read_only","services":{"slack":"full"}}"#
+        );
     }
 
     #[test]
