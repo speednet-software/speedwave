@@ -18,7 +18,6 @@ struct EventStoreGate: PermissionGate {
 
 
 /// reminders-cli <command> [json-args]
-/// Commands: check_permission, list_lists, list_reminders, get_reminder, create_reminder, update_reminder, complete_reminder, delete_reminder, create_list, update_list, delete_list
 @main
 struct RemindersCLI {
     static let commandList =

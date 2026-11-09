@@ -105,29 +105,19 @@ interface DeleteReminderParams {
   id: string;
 }
 
-/** Input parameters for the createReminderList tool. */
 interface CreateReminderListParams {
-  /** Name of the new list. */
   name: string;
-  /** List color as #RRGGBB. */
   color?: string;
 }
 
-/** Input parameters for the updateReminderList tool; omitted fields keep their current value. */
 interface UpdateReminderListParams {
-  /** List to update (ID or exact display name). */
   list_id: string;
-  /** New list name. */
   name?: string;
-  /** New list color as #RRGGBB. */
   color?: string;
 }
 
-/** Input parameters for the deleteReminderList tool. */
 interface DeleteReminderListParams {
-  /** List to delete (ID or exact display name). */
   list_id: string;
-  /** Delete the list together with the reminders it still holds. */
   force?: boolean;
 }
 
