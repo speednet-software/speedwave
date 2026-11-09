@@ -2151,7 +2151,7 @@ describe('executor', () => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
-    it('changes nothing without an access section', async () => {
+    it('changes nothing without access rules', async () => {
       applyAccess(undefined);
 
       const result = await executeCode({
