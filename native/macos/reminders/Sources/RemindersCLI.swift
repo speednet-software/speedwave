@@ -18,11 +18,10 @@ struct EventStoreGate: PermissionGate {
 
 
 /// reminders-cli <command> [json-args]
-/// Commands: check_permission, list_lists, list_reminders, get_reminder, create_reminder, update_reminder, complete_reminder, delete_reminder
 @main
 struct RemindersCLI {
     static let commandList =
-        "check_permission, list_lists, list_reminders, get_reminder, create_reminder, update_reminder, complete_reminder, delete_reminder"
+        "check_permission, list_lists, list_reminders, get_reminder, create_reminder, update_reminder, complete_reminder, delete_reminder, create_list, update_list, delete_list"
 
     static func main() {
         let store = EKEventStore()
@@ -47,6 +46,9 @@ struct RemindersCLI {
                 "update_reminder": { try updateReminder(store: store, params: $0) },
                 "complete_reminder": { try completeReminder(store: store, params: $0) },
                 "delete_reminder": { try deleteReminder(store: store, params: $0) },
+                "create_list": { try createList(store: store, params: $0) },
+                "update_list": { try updateList(store: store, params: $0) },
+                "delete_list": { try deleteList(store: store, params: $0) },
             ]
         )
     }

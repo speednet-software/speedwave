@@ -123,6 +123,31 @@ final class SharedCLITests: XCTestCase {
         XCTAssertNil(result)
     }
 
+    func testParseHexColorRoundTripsEveryChannelValue() throws {
+        for byte in 0...255 {
+            let hex = String(format: "#%02x%02x%02x", byte, 255 - byte, byte / 2)
+            let color = try XCTUnwrap(parseHexColor(hex), hex)
+            XCTAssertEqual(hexColor(from: color), hex)
+        }
+    }
+
+    func testParseHexColorAcceptsUpperCase() throws {
+        let color = try XCTUnwrap(parseHexColor("#1A2B3C"))
+        XCTAssertEqual(hexColor(from: color), "#1a2b3c")
+    }
+
+    func testParseHexColorRejectsAnythingButSixHexDigitsAfterHash() {
+        for bad in ["", "#", "#fff", "123456", "#1234567", "#12345g", "red", " #123456", "#+12345", "#\u{FF11}23456"] {
+            XCTAssertNil(parseHexColor(bad), bad)
+        }
+    }
+
+    func testParseHexColorKeepsEveryChannelWithinSRGBRange() throws {
+        let color = try XCTUnwrap(parseHexColor("#ffffff"))
+        let components = try XCTUnwrap(color.components)
+        XCTAssertEqual(Array(components.prefix(3)), [1.0, 1.0, 1.0])
+    }
+
     func testHexColorClampsWideGamutValues() {
         let wideGamut = CGColor(
             colorSpace: CGColorSpace(name: CGColorSpace.displayP3)!,

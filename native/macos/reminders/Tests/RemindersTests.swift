@@ -14,7 +14,8 @@ final class RemindersTests: XCTestCase {
 
     func testCommandListAdvertisesAllCommands() {
         for cmd in ["check_permission", "list_lists", "list_reminders",
-                    "get_reminder", "create_reminder", "update_reminder", "complete_reminder", "delete_reminder"] {
+                    "get_reminder", "create_reminder", "update_reminder", "complete_reminder", "delete_reminder",
+                    "create_list", "update_list", "delete_list"] {
             XCTAssertTrue(RemindersCLI.commandList.contains(cmd),
                           "commandList must advertise '\(cmd)'")
         }
@@ -294,6 +295,107 @@ final class RemindersTests: XCTestCase {
             guard case CLIError.notFound(let message) = error else { return XCTFail("unexpected \(error)") }
             XCTAssertTrue(message.contains("speedwave-test-no-such-reminder"), message)
         }
+    }
+
+    func testCreateListWithoutNameIsAMissingField() {
+        for params in [[:], ["name": ""], ["name": "  "]] as [[String: Any]] {
+            XCTAssertThrowsError(try createList(store: EKEventStore(), params: params)) { error in
+                guard case CLIError.missingField("name") = error else { return XCTFail("unexpected \(error)") }
+            }
+        }
+    }
+
+    func testCreateListWithMalformedColorIsRejectedBeforeAnythingIsSaved() {
+        let params: [String: Any] = ["name": "Home", "color": "green"]
+        XCTAssertThrowsError(try createList(store: EKEventStore(), params: params)) { error in
+            guard case CLIError.invalidValue(let message) = error else { return XCTFail("unexpected \(error)") }
+            XCTAssertTrue(message.contains("#RRGGBB"), message)
+        }
+    }
+
+    func testUpdateListWithoutListIdIsAMissingField() {
+        XCTAssertThrowsError(try updateList(store: EKEventStore(), params: ["name": "x"])) { error in
+            guard case CLIError.missingField("list_id") = error else { return XCTFail("unexpected \(error)") }
+        }
+    }
+
+    func testUpdateListWithNothingToChangeIsAMissingField() {
+        XCTAssertThrowsError(try updateList(store: EKEventStore(), params: ["list_id": "x"])) { error in
+            guard case CLIError.missingField("name or color") = error else { return XCTFail("unexpected \(error)") }
+        }
+    }
+
+    func testUpdateListWithBlankNameIsAMissingField() {
+        let params: [String: Any] = ["list_id": "x", "name": " "]
+        XCTAssertThrowsError(try updateList(store: EKEventStore(), params: params)) { error in
+            guard case CLIError.missingField("name") = error else { return XCTFail("unexpected \(error)") }
+        }
+    }
+
+    func testUpdateListWithUnknownListIsNotFound() {
+        let params: [String: Any] = ["list_id": "speedwave-test-no-such-list", "name": "x"]
+        XCTAssertThrowsError(try updateList(store: EKEventStore(), params: params)) { error in
+            guard case CLIError.notFound(let message) = error else { return XCTFail("unexpected \(error)") }
+            XCTAssertTrue(message.contains("speedwave-test-no-such-list"), message)
+        }
+    }
+
+    func testDeleteListWithoutListIdIsAMissingField() {
+        XCTAssertThrowsError(try deleteList(store: EKEventStore(), params: [:])) { error in
+            guard case CLIError.missingField("list_id") = error else { return XCTFail("unexpected \(error)") }
+        }
+    }
+
+    func testDeleteListWithUnknownListIsNotFound() {
+        let params: [String: Any] = ["list_id": "speedwave-test-no-such-list", "force": true]
+        XCTAssertThrowsError(try deleteList(store: EKEventStore(), params: params)) { error in
+            guard case CLIError.notFound(let message) = error else { return XCTFail("unexpected \(error)") }
+            XCTAssertTrue(message.contains("speedwave-test-no-such-list"), message)
+        }
+    }
+
+    func testNonEmptyListMessageGivesTheReminderCountAndNamesForce() {
+        XCTAssertEqual(
+            nonEmptyListMessage(name: "Work", reminderCount: 3),
+            "Reminder list 'Work' still holds 3 reminders. "
+                + "Pass force: true to delete the list together with its reminders; this cannot be undone"
+        )
+    }
+
+    func testNonEmptyListMessageUsesTheSingularForOneReminder() {
+        XCTAssertTrue(nonEmptyListMessage(name: "Work", reminderCount: 1).contains("holds 1 reminder."))
+    }
+
+    func testCountFetchedCountsTheReminders() throws {
+        XCTAssertEqual(try countFetched([], listName: "Work"), 0)
+        let store = EKEventStore()
+        let reminders = [EKReminder(eventStore: store), EKReminder(eventStore: store)]
+        XCTAssertEqual(try countFetched(reminders, listName: "Work"), 2)
+    }
+
+    func testCountFetchedRejectsAMissingResultNamingTheList() {
+        XCTAssertThrowsError(try countFetched(nil, listName: "Work")) { error in
+            guard case CLIError.invalidValue(let message) = error else { return XCTFail("unexpected \(error)") }
+            XCTAssertTrue(message.contains("'Work'"), message)
+        }
+    }
+
+    func testListWriteBlockerRefusesReadOnlyAndImmutableLists() {
+        let expected = "Reminder list 'Siri' is read-only and cannot be changed or deleted"
+        XCTAssertEqual(
+            listWriteBlocker(name: "Siri", allowsContentModifications: false, isImmutable: false), expected)
+        XCTAssertEqual(
+            listWriteBlocker(name: "Siri", allowsContentModifications: true, isImmutable: true), expected)
+    }
+
+    func testListWriteBlockerAllowsAWritableList() {
+        XCTAssertNil(listWriteBlocker(name: "Work", allowsContentModifications: true, isImmutable: false))
+    }
+
+    func testListColorParsesTheFormatListReminderListsReturns() throws {
+        let color = try XCTUnwrap(try listColor(["color": "#34c759"]))
+        XCTAssertEqual(hexColor(from: color), "#34c759")
+        XCTAssertNil(try listColor([:]))
     }
 
     func testApplyReminderUpdateWithOnlyNameKeepsEveryOtherField() throws {
