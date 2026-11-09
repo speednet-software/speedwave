@@ -1,10 +1,12 @@
-//! Access modes of services, their composition and the `access` section of `policy.json`.
+//! Access modes of services, their composition and the `access.json` file format.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 const MAX_SERVICES: usize = 256;
 const SERVICE_ID_MAX_LEN: usize = 64;
+const ACCESS_FILE_VERSION: u32 = 1;
+const MAX_ACCESS_FILE_BYTES: usize = 65_536;
 
 /// Access mode of a service.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -64,6 +66,50 @@ impl AccessPolicy {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccessFile {
+    version: u32,
+    #[serde(default)]
+    default: AccessMode,
+    #[serde(default)]
+    services: BTreeMap<String, AccessMode>,
+}
+
+/// Serializes a validated policy as the content of `access.json`.
+pub fn to_access_file(policy: &AccessPolicy) -> Result<String, String> {
+    policy.validate()?;
+    let file = AccessFile {
+        version: ACCESS_FILE_VERSION,
+        default: policy.default,
+        services: policy.services.clone(),
+    };
+    serde_json::to_string_pretty(&file).map_err(|e| format!("access file: {e}"))
+}
+
+/// Parses and validates the content of `access.json`.
+pub fn parse_access_file(json: &str) -> Result<AccessPolicy, String> {
+    if json.len() > MAX_ACCESS_FILE_BYTES {
+        return Err(format!(
+            "access file is {} bytes, limit is {MAX_ACCESS_FILE_BYTES}",
+            json.len()
+        ));
+    }
+    let file: AccessFile = serde_json::from_str(json).map_err(|e| format!("access file: {e}"))?;
+    if file.version != ACCESS_FILE_VERSION {
+        return Err(format!(
+            "unsupported access file version {}, expected {ACCESS_FILE_VERSION}",
+            file.version
+        ));
+    }
+    let policy = AccessPolicy {
+        default: file.default,
+        services: file.services,
+    };
+    policy.validate()?;
+    Ok(policy)
+}
+
 /// Layers that set an access mode.
 pub struct AccessInputs<'a> {
     /// Organization forces read-only.
@@ -102,7 +148,7 @@ mod tests {
     use super::*;
 
     fn parse(json: &str) -> AccessPolicy {
-        serde_json::from_str(json).unwrap_or_else(|e| panic!("access section parses: {e}"))
+        serde_json::from_str(json).unwrap_or_else(|e| panic!("access policy parses: {e}"))
     }
 
     #[test]
@@ -241,5 +287,32 @@ mod tests {
         let policy = compose(false, false, &modes(&[("slack", AccessMode::Full)]));
         assert!(policy.services.is_empty());
         assert!(policy.is_unrestricted());
+    }
+
+    #[test]
+    fn written_access_file_parses_back_to_the_same_policy() {
+        let policy = compose(
+            false,
+            false,
+            &modes(&[
+                ("slack", AccessMode::ReadOnly),
+                ("os-mail", AccessMode::ReadOnly),
+            ]),
+        );
+        let json = to_access_file(&policy).unwrap_or_else(|e| panic!("serializes: {e}"));
+        assert_eq!(parse_access_file(&json), Ok(policy));
+    }
+
+    #[test]
+    fn written_access_file_carries_the_version() {
+        let json = to_access_file(&AccessPolicy::default()).unwrap_or_default();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap_or_default();
+        assert_eq!(value["version"], 1);
+    }
+
+    #[test]
+    fn an_invalid_policy_is_not_serialized() {
+        let policy = parse(r#"{"services":{"Bad Id":"read_only"}}"#);
+        assert!(to_access_file(&policy).is_err());
     }
 }

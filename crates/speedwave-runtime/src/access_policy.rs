@@ -1,6 +1,34 @@
 use crate::config::SpeedwaveUserConfig;
 use crate::managed_config::ManagedConfig;
-use speedwave_access_policy::AccessMode;
+use speedwave_access_policy::{AccessMode, AccessPolicy};
+use std::path::{Path, PathBuf};
+
+/// The access.json path inside the per-project policy dir.
+pub fn access_config_path_in(data_dir: &Path, project: &str) -> PathBuf {
+    crate::pii_policy::policy_config_dir_in(data_dir, project).join("access.json")
+}
+
+/// Writes the composed access policy as `access.json` next to `policy.json`, or removes the file
+/// while every service is `Full`.
+pub fn write_access_config_in(
+    data_dir: &Path,
+    project: &str,
+    access: &AccessPolicy,
+) -> anyhow::Result<()> {
+    let path = access_config_path_in(data_dir, project);
+    let content = speedwave_access_policy::to_access_file(access)
+        .map_err(|e| anyhow::anyhow!("invalid access policy: {e}"))?;
+    if access.is_unrestricted() {
+        return match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+            _ => Ok(()),
+        };
+    }
+    crate::fs_perms::ensure_owner_only_dir(&crate::pii_policy::policy_config_dir_in(
+        data_dir, project,
+    ))?;
+    crate::fs_perms::write_restricted_file_atomic(&path, &content)
+}
 
 /// State of the project-wide read-only switch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +136,71 @@ pub fn set_integration_access(
 mod tests {
     use super::*;
     use crate::config::{ManagedAccessConfig, ProjectUserEntry};
+
+    fn read_only_policy() -> AccessPolicy {
+        AccessPolicy {
+            default: AccessMode::Full,
+            services: [("slack".to_string(), AccessMode::ReadOnly)].into(),
+        }
+    }
+
+    #[test]
+    fn access_file_carries_the_composed_policy() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_access_config_in(tmp.path(), "proj", &read_only_policy()).unwrap();
+        let json = std::fs::read_to_string(access_config_path_in(tmp.path(), "proj")).unwrap();
+        assert_eq!(
+            speedwave_access_policy::parse_access_file(&json),
+            Ok(read_only_policy())
+        );
+    }
+
+    #[test]
+    fn access_file_sits_next_to_policy_json() {
+        assert_eq!(
+            access_config_path_in(Path::new("/d"), "proj").parent(),
+            crate::pii_policy::policy_config_path_in(Path::new("/d"), "proj").parent()
+        );
+    }
+
+    #[test]
+    fn no_access_file_is_written_while_every_service_is_full() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_access_config_in(tmp.path(), "proj", &AccessPolicy::default()).unwrap();
+        assert!(!access_config_path_in(tmp.path(), "proj").exists());
+    }
+
+    #[test]
+    fn a_stale_access_file_is_removed_when_every_service_is_full_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_access_config_in(tmp.path(), "proj", &read_only_policy()).unwrap();
+        write_access_config_in(tmp.path(), "proj", &AccessPolicy::default()).unwrap();
+        assert!(!access_config_path_in(tmp.path(), "proj").exists());
+    }
+
+    #[test]
+    fn an_invalid_policy_writes_no_access_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let invalid = AccessPolicy {
+            default: AccessMode::Full,
+            services: [("Bad Id".to_string(), AccessMode::ReadOnly)].into(),
+        };
+        assert!(write_access_config_in(tmp.path(), "proj", &invalid).is_err());
+        assert!(!access_config_path_in(tmp.path(), "proj").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn access_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        write_access_config_in(tmp.path(), "proj", &read_only_policy()).unwrap();
+        let mode = std::fs::metadata(access_config_path_in(tmp.path(), "proj"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
 
     fn user_config(read_only: bool) -> SpeedwaveUserConfig {
         SpeedwaveUserConfig {

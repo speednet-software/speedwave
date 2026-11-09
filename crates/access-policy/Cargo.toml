@@ -2,7 +2,7 @@
 name = "speedwave-access-policy"
 version = "0.0.0"
 edition = "2021"
-description = "Access modes and the access section of policy.json"
+description = "Access modes, their composition and the access.json file format"
 authors = ["Speednet"]
 license = "Apache-2.0"
 repository = "https://github.com/speednet-software/speedwave"
@@ -10,8 +10,6 @@ homepage = "https://github.com/speednet-software/speedwave"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-
-[dev-dependencies]
 serde_json = "1"
 
 [lints.clippy]

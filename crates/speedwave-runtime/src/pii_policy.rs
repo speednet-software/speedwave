@@ -1123,12 +1123,19 @@ pub fn write_policy_config_in(
     )
 }
 
-/// sha256 of the rendered `policy.json`; digest change forces mcp-hub recreate
+/// sha256 of the rendered `policy.json` and `access.json`; digest change forces mcp-hub recreate
 /// (mirrors `compose/proxy.rs::proxy_state_digest_in`).
 pub(crate) fn policy_state_digest_in(data_dir: &Path, project: &str) -> String {
     use sha2::{Digest, Sha256};
-    let content = std::fs::read(policy_config_path_in(data_dir, project)).unwrap_or_default();
-    crate::bundle::bytes_to_hex(&Sha256::digest(content))
+    let mut hasher = Sha256::new();
+    hasher.update(std::fs::read(policy_config_path_in(data_dir, project)).unwrap_or_default());
+    if let Ok(access) = std::fs::read(crate::access_policy::access_config_path_in(
+        data_dir, project,
+    )) {
+        hasher.update(b"\0access.json\0");
+        hasher.update(access);
+    }
+    crate::bundle::bytes_to_hex(&hasher.finalize())
 }
 
 #[cfg(test)]
@@ -2351,5 +2358,28 @@ keywords: []
         write_policy_config_in(tmp.path(), "proj", &policy, &read_only_access()).unwrap();
         let read_only = policy_state_digest_in(tmp.path(), "proj");
         assert_ne!(full, read_only, "a mode change must recreate mcp-hub");
+    }
+
+    #[test]
+    fn policy_state_digest_covers_access_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_policy_config_in(
+            tmp.path(),
+            "proj",
+            &ResolvedPiiPolicy::default(),
+            &AccessPolicy::default(),
+        )
+        .unwrap();
+        let without = policy_state_digest_in(tmp.path(), "proj");
+        let access = AccessPolicy {
+            default: speedwave_access_policy::AccessMode::ReadOnly,
+            services: Default::default(),
+        };
+        crate::access_policy::write_access_config_in(tmp.path(), "proj", &access).unwrap();
+        let with = policy_state_digest_in(tmp.path(), "proj");
+        assert_ne!(without, with);
+        crate::access_policy::write_access_config_in(tmp.path(), "proj", &Default::default())
+            .unwrap();
+        assert_eq!(without, policy_state_digest_in(tmp.path(), "proj"));
     }
 }
