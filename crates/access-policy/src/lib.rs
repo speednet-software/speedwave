@@ -1,3 +1,5 @@
+//! Access modes of services and the `access` section of `policy.json`.
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 

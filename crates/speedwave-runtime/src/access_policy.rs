@@ -1,6 +1,6 @@
 use crate::config::SpeedwaveUserConfig;
 use crate::managed_config::ManagedConfig;
-use speedwave_pii_engine::{AccessMode, AccessPolicy};
+use speedwave_access_policy::{AccessMode, AccessPolicy};
 use std::collections::BTreeMap;
 
 /// Layers that set an access mode.

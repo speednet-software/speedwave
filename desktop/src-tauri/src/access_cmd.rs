@@ -1,6 +1,6 @@
 use crate::types::check_project;
 use serde::Serialize;
-use speedwave_pii_engine::AccessMode;
+use speedwave_access_policy::AccessMode;
 use speedwave_runtime::access_policy::{
     integration_access_state, read_only_state, set_integration_access, set_read_only,
 };

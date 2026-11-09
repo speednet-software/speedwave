@@ -10,7 +10,7 @@ use base64::Engine;
 
 use crate::router::{Config, GitForge};
 use crate::{audit, CALLER_AUTH_HEADER};
-use speedwave_pii_engine::AccessMode;
+use speedwave_access_policy::AccessMode;
 
 const RECEIVE_PACK: &str = "git-receive-pack";
 

@@ -3236,11 +3236,11 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
-            access: speedwave_pii_engine::AccessPolicy {
-                default: speedwave_pii_engine::AccessMode::Full,
+            access: speedwave_access_policy::AccessPolicy {
+                default: speedwave_access_policy::AccessMode::Full,
                 services: [(
                     "github".to_string(),
-                    speedwave_pii_engine::AccessMode::ReadOnly,
+                    speedwave_access_policy::AccessMode::ReadOnly,
                 )]
                 .into(),
             },
@@ -4281,7 +4281,7 @@ services:
 
     fn render_with_access(
         data_dir: &Path,
-        access: speedwave_pii_engine::AccessPolicy,
+        access: speedwave_access_policy::AccessPolicy,
     ) -> serde_yaml_ng::Value {
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -4303,9 +4303,9 @@ services:
         serde_yaml_ng::from_str(&yaml).unwrap()
     }
 
-    fn read_only_access() -> speedwave_pii_engine::AccessPolicy {
-        speedwave_pii_engine::AccessPolicy {
-            default: speedwave_pii_engine::AccessMode::ReadOnly,
+    fn read_only_access() -> speedwave_access_policy::AccessPolicy {
+        speedwave_access_policy::AccessPolicy {
+            default: speedwave_access_policy::AccessMode::ReadOnly,
             services: Default::default(),
         }
     }

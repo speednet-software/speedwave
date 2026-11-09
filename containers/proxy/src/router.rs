@@ -57,7 +57,7 @@ pub struct GitForge {
     #[serde(default)]
     pub repositories: Vec<String>,
     #[serde(default)]
-    pub access: speedwave_pii_engine::AccessMode,
+    pub access: speedwave_access_policy::AccessMode,
 }
 
 impl GitForge {
@@ -258,7 +258,7 @@ mod tests {
             login: "x-access-token".to_string(),
             token_file: PathBuf::from("/git-tokens/github/token"),
             repositories: repositories.iter().map(|r| r.to_string()).collect(),
-            access: speedwave_pii_engine::AccessMode::Full,
+            access: speedwave_access_policy::AccessMode::Full,
         }
     }
 

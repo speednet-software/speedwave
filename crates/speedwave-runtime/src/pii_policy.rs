@@ -7,7 +7,7 @@
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use speedwave_pii_engine::AccessPolicy;
+use speedwave_access_policy::AccessPolicy;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -2216,7 +2216,7 @@ keywords: []
         let mut access = AccessPolicy::default();
         access.services.insert(
             "Bad Id".to_string(),
-            speedwave_pii_engine::AccessMode::ReadOnly,
+            speedwave_access_policy::AccessMode::ReadOnly,
         );
         let result =
             write_policy_config_in(tmp.path(), "proj", &ResolvedPiiPolicy::default(), &access);
@@ -2282,7 +2282,7 @@ keywords: []
 
     fn read_only_access() -> AccessPolicy {
         AccessPolicy {
-            default: speedwave_pii_engine::AccessMode::ReadOnly,
+            default: speedwave_access_policy::AccessMode::ReadOnly,
             services: Default::default(),
         }
     }
@@ -2308,10 +2308,10 @@ keywords: []
     fn policy_json_carries_the_composed_access_section() {
         let tmp = tempfile::tempdir().unwrap();
         let mut access = read_only_access();
-        access.default = speedwave_pii_engine::AccessMode::Full;
+        access.default = speedwave_access_policy::AccessMode::Full;
         access.services.insert(
             "slack".to_string(),
-            speedwave_pii_engine::AccessMode::ReadOnly,
+            speedwave_access_policy::AccessMode::ReadOnly,
         );
         write_policy_config_in(tmp.path(), "proj", &ResolvedPiiPolicy::default(), &access).unwrap();
         let v: serde_json::Value = serde_json::from_str(

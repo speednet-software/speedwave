@@ -11,6 +11,7 @@ homepage = "https://github.com/speednet-software/speedwave"
 
 [dependencies]
 speedwave-runtime = { path = "../../crates/speedwave-runtime", features = ["audio-transcription"] }
+speedwave-access-policy = { path = "../../crates/access-policy" }
 speedwave-pii-engine = { path = "../../crates/pii-engine" }
 speedwave-pii-ner = { path = "../../crates/pii-ner" }
 axum = "0.8"

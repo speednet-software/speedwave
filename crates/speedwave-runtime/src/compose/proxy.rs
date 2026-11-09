@@ -1,7 +1,7 @@
 use crate::config::{GitRepositoryLists, LlmConfig, LlmProviderKind, ResolvedIntegrationsConfig};
 use crate::git_allowlist::{enforced_entries, forge_host_in, GitForgeService};
 use serde::Serialize;
-use speedwave_pii_engine::{AccessMode, AccessPolicy};
+use speedwave_access_policy::{AccessMode, AccessPolicy};
 use std::path::{Path, PathBuf};
 
 #[derive(Serialize)]

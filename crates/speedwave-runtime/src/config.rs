@@ -4,7 +4,7 @@ use crate::defaults;
 use crate::git_allowlist::GitForgeService;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use speedwave_pii_engine::AccessMode;
+use speedwave_access_policy::AccessMode;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::Path;
@@ -1731,7 +1731,7 @@ pub struct ResolvedClaudeConfig {
     /// Git transport allowlists.
     pub git_repositories: GitRepositoryLists,
     /// Composed access policy.
-    pub access: speedwave_pii_engine::AccessPolicy,
+    pub access: speedwave_access_policy::AccessPolicy,
 }
 
 impl Default for ResolvedClaudeConfig {
@@ -1744,7 +1744,7 @@ impl Default for ResolvedClaudeConfig {
             pii_policy: Ok(crate::pii_policy::ResolvedPiiPolicy::default()),
             pii_ner_enabled: false,
             git_repositories: GitRepositoryLists::default(),
-            access: speedwave_pii_engine::AccessPolicy::default(),
+            access: speedwave_access_policy::AccessPolicy::default(),
         }
     }
 }
@@ -6802,7 +6802,7 @@ mod tests {
         dir: &Path,
         read_only: bool,
         managed: Option<&ManagedAccessConfig>,
-    ) -> speedwave_pii_engine::AccessPolicy {
+    ) -> speedwave_access_policy::AccessPolicy {
         resolve_project_config_in_with_managed(
             dir,
             dir,
@@ -6844,7 +6844,10 @@ mod tests {
     fn project_switch_reaches_resolved_access() {
         let tmp = tempfile::tempdir().unwrap();
         let access = resolved_access(tmp.path(), true, None);
-        assert_eq!(access.default, speedwave_pii_engine::AccessMode::ReadOnly);
+        assert_eq!(
+            access.default,
+            speedwave_access_policy::AccessMode::ReadOnly
+        );
     }
 
     #[test]
@@ -6852,7 +6855,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let managed = ManagedAccessConfig { read_only: true };
         let access = resolved_access(tmp.path(), false, Some(&managed));
-        assert_eq!(access.default, speedwave_pii_engine::AccessMode::ReadOnly);
+        assert_eq!(
+            access.default,
+            speedwave_access_policy::AccessMode::ReadOnly
+        );
     }
 
     #[test]
@@ -6870,7 +6876,7 @@ mod tests {
         );
         assert_eq!(
             claude.access.default,
-            speedwave_pii_engine::AccessMode::ReadOnly
+            speedwave_access_policy::AccessMode::ReadOnly
         );
     }
 
@@ -6889,7 +6895,7 @@ mod tests {
             serde_json::from_str(r#"{"slack": {"enabled": true}}"#).unwrap();
         assert_eq!(
             parsed.slack.unwrap().access,
-            speedwave_pii_engine::AccessMode::Full
+            speedwave_access_policy::AccessMode::Full
         );
     }
 
@@ -6898,19 +6904,19 @@ mod tests {
         let full = serde_json::to_value(IntegrationConfig::default()).unwrap();
         assert!(full.get("access").is_none());
         let mut integrations = IntegrationsConfig::default();
-        assert!(integrations.set_access("slack", speedwave_pii_engine::AccessMode::ReadOnly));
+        assert!(integrations.set_access("slack", speedwave_access_policy::AccessMode::ReadOnly));
         let json = serde_json::to_value(&integrations).unwrap();
         assert_eq!(json["slack"]["access"], "read_only");
         let back: IntegrationsConfig = serde_json::from_value(json).unwrap();
         assert_eq!(
             back.slack.unwrap().access,
-            speedwave_pii_engine::AccessMode::ReadOnly
+            speedwave_access_policy::AccessMode::ReadOnly
         );
     }
 
     #[test]
     fn set_access_reaches_every_kind_of_integration() {
-        use speedwave_pii_engine::AccessMode::ReadOnly;
+        use speedwave_access_policy::AccessMode::ReadOnly;
         let mut integrations = IntegrationsConfig::default();
         for key in [
             "slack",
@@ -6937,7 +6943,7 @@ mod tests {
 
     #[test]
     fn access_modes_are_keyed_by_the_hub_service_name() {
-        use speedwave_pii_engine::AccessMode::ReadOnly;
+        use speedwave_access_policy::AccessMode::ReadOnly;
         let mut integrations = IntegrationsConfig::default();
         for key in ["slack", "github", "mail", "my-plugin"] {
             integrations.set_access(key, ReadOnly);
@@ -6949,13 +6955,13 @@ mod tests {
     #[test]
     fn full_entries_are_left_out_of_the_access_modes() {
         let mut integrations = IntegrationsConfig::default();
-        integrations.set_access("slack", speedwave_pii_engine::AccessMode::Full);
+        integrations.set_access("slack", speedwave_access_policy::AccessMode::Full);
         assert!(integrations.access_modes().is_empty());
     }
 
     #[test]
     fn toggling_an_integration_keeps_its_access_mode() {
-        use speedwave_pii_engine::AccessMode::ReadOnly;
+        use speedwave_access_policy::AccessMode::ReadOnly;
         let mut integrations = IntegrationsConfig::default();
         for key in ["slack", "github", "mail", "my-plugin"] {
             integrations.set_access(key, ReadOnly);
@@ -6979,13 +6985,15 @@ mod tests {
     #[test]
     fn set_access_on_an_unlisted_key_creates_a_plugin_entry() {
         let mut integrations = IntegrationsConfig::default();
-        assert!(integrations.set_access("some-plugin", speedwave_pii_engine::AccessMode::ReadOnly));
+        assert!(
+            integrations.set_access("some-plugin", speedwave_access_policy::AccessMode::ReadOnly)
+        );
         assert!(integrations.plugins.unwrap().contains_key("some-plugin"));
     }
 
     #[test]
     fn integration_modes_reach_the_resolved_access_policy() {
-        use speedwave_pii_engine::AccessMode::{Full, ReadOnly};
+        use speedwave_access_policy::AccessMode::{Full, ReadOnly};
         let tmp = tempfile::tempdir().unwrap();
         let mut integrations = IntegrationsConfig::default();
         integrations.set_access("slack", ReadOnly);
@@ -7009,7 +7017,7 @@ mod tests {
 
     #[test]
     fn a_repo_cannot_set_integration_access_modes() {
-        use speedwave_pii_engine::AccessMode::{Full, ReadOnly};
+        use speedwave_access_policy::AccessMode::{Full, ReadOnly};
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(
             tmp.path().join(".speedwave.json"),

@@ -882,6 +882,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "speedwave-access-policy",
  "speedwave-pii-engine",
  "tempfile",
  "tokio",
@@ -1299,6 +1300,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "speedwave-access-policy"
+version = "0.0.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "speedwave-pii-engine"
 version = "0.0.0"
 dependencies = [
@@ -1308,6 +1316,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml_ng",
+ "speedwave-access-policy",
  "zeroize",
 ]
 

@@ -2,9 +2,9 @@
 //! (host renders it, proxy and hub consume the compiled form). Rules are
 //! data: every category comes from the document, none are hardcoded here.
 
-use crate::access::AccessPolicy;
 use regex::{Regex, RegexBuilder};
 use serde::Deserialize;
+use speedwave_access_policy::AccessPolicy;
 use std::sync::LazyLock;
 
 /// A rule may declare at most this many patterns; a document may declare at
@@ -419,10 +419,13 @@ mod tests {
             1,
         );
         let policy = compile_policy_v3(&json).expect("policy with access");
-        assert_eq!(policy.access().default, crate::access::AccessMode::ReadOnly);
+        assert_eq!(
+            policy.access().default,
+            speedwave_access_policy::AccessMode::ReadOnly
+        );
         assert_eq!(
             policy.access().mode_of("slack"),
-            crate::access::AccessMode::Full
+            speedwave_access_policy::AccessMode::Full
         );
         assert_eq!(policy.rules().len(), 2);
     }
