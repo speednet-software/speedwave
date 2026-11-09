@@ -20,7 +20,7 @@ func createList(store: EKEventStore, params: [String: Any]) throws -> [String: A
     ]
 }
 
-func requiredListName(_ params: [String: Any]) throws -> String {
+private func requiredListName(_ params: [String: Any]) throws -> String {
     guard let name = params["name"] as? String,
           !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
         throw CLIError.missingField("name")
@@ -36,7 +36,7 @@ func listColor(_ params: [String: Any]) throws -> CGColor? {
     return color
 }
 
-func newListSource(store: EKEventStore) throws -> EKSource {
+private func newListSource(store: EKEventStore) throws -> EKSource {
     if let source = store.defaultCalendarForNewReminders()?.source {
         return source
     }
@@ -72,7 +72,7 @@ func updateList(store: EKEventStore, params: [String: Any]) throws -> [String: A
     return ["status": "updated"]
 }
 
-func ensureListWritable(_ list: EKCalendar) throws {
+private func ensureListWritable(_ list: EKCalendar) throws {
     if let message = listWriteBlocker(
         name: list.title,
         allowsContentModifications: list.allowsContentModifications,
@@ -109,7 +109,7 @@ func deleteList(store: EKEventStore, params: [String: Any]) throws -> [String: A
     ]
 }
 
-func reminderCount(in list: EKCalendar, store: EKEventStore) throws -> Int {
+private func reminderCount(in list: EKCalendar, store: EKEventStore) throws -> Int {
     let semaphore = DispatchSemaphore(value: 0)
     var fetched: [EKReminder]?
     store.fetchReminders(matching: store.predicateForReminders(in: [list])) { reminders in

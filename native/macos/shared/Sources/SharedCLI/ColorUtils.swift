@@ -10,7 +10,6 @@ public func hexColor(from cgColor: CGColor) -> String? {
     return String(format: "#%02x%02x%02x", r, g, b)
 }
 
-/// Parses `#RRGGBB` (the format `hexColor(from:)` writes) into an sRGB color; nil for anything else.
 public func parseHexColor(_ string: String) -> CGColor? {
     let digits = Array(string.dropFirst())
     guard string.hasPrefix("#"), digits.count == 6, digits.allSatisfy({ $0.isASCII && $0.isHexDigit }) else {
