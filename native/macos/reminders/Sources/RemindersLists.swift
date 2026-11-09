@@ -20,32 +20,6 @@ func createList(store: EKEventStore, params: [String: Any]) throws -> [String: A
     ]
 }
 
-private func requiredListName(_ params: [String: Any]) throws -> String {
-    guard let name = params["name"] as? String,
-          !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-        throw CLIError.missingField("name")
-    }
-    return name
-}
-
-func listColor(_ params: [String: Any]) throws -> CGColor? {
-    guard let hex = params["color"] as? String else { return nil }
-    guard let color = parseHexColor(hex) else {
-        throw CLIError.invalidValue("Invalid color '\(hex)'. Expected #RRGGBB")
-    }
-    return color
-}
-
-private func newListSource(store: EKEventStore) throws -> EKSource {
-    if let source = store.defaultCalendarForNewReminders()?.source {
-        return source
-    }
-    if let source = store.sources.first(where: { !$0.calendars(for: .reminder).isEmpty }) {
-        return source
-    }
-    throw CLIError.notFound("No account that supports reminder lists was found")
-}
-
 func updateList(store: EKEventStore, params: [String: Any]) throws -> [String: Any] {
     guard let filter = params["list_id"] as? String else {
         throw CLIError.missingField("list_id")
@@ -72,23 +46,6 @@ func updateList(store: EKEventStore, params: [String: Any]) throws -> [String: A
     return ["status": "updated"]
 }
 
-private func ensureListWritable(_ list: EKCalendar) throws {
-    if let message = listWriteBlocker(
-        name: list.title,
-        allowsContentModifications: list.allowsContentModifications,
-        isImmutable: list.isImmutable
-    ) {
-        throw CLIError.invalidValue(message)
-    }
-}
-
-func listWriteBlocker(name: String, allowsContentModifications: Bool, isImmutable: Bool) -> String? {
-    guard allowsContentModifications, !isImmutable else {
-        return "Reminder list '\(name)' is read-only and cannot be changed or deleted"
-    }
-    return nil
-}
-
 func deleteList(store: EKEventStore, params: [String: Any]) throws -> [String: Any] {
     guard let filter = params["list_id"] as? String else {
         throw CLIError.missingField("list_id")
@@ -107,6 +64,49 @@ func deleteList(store: EKEventStore, params: [String: Any]) throws -> [String: A
         "status": "deleted",
         "deleted_reminders": count,
     ]
+}
+
+private func requiredListName(_ params: [String: Any]) throws -> String {
+    guard let name = params["name"] as? String,
+          !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        throw CLIError.missingField("name")
+    }
+    return name
+}
+
+func listColor(_ params: [String: Any]) throws -> CGColor? {
+    guard let hex = params["color"] as? String else { return nil }
+    guard let color = parseHexColor(hex) else {
+        throw CLIError.invalidValue("Invalid color '\(hex)'. Expected #RRGGBB")
+    }
+    return color
+}
+
+private func newListSource(store: EKEventStore) throws -> EKSource {
+    if let source = store.defaultCalendarForNewReminders()?.source {
+        return source
+    }
+    if let source = store.sources.first(where: { !$0.calendars(for: .reminder).isEmpty }) {
+        return source
+    }
+    throw CLIError.notFound("No account that supports reminder lists was found")
+}
+
+private func ensureListWritable(_ list: EKCalendar) throws {
+    if let message = listWriteBlocker(
+        name: list.title,
+        allowsContentModifications: list.allowsContentModifications,
+        isImmutable: list.isImmutable
+    ) {
+        throw CLIError.invalidValue(message)
+    }
+}
+
+func listWriteBlocker(name: String, allowsContentModifications: Bool, isImmutable: Bool) -> String? {
+    guard allowsContentModifications, !isImmutable else {
+        return "Reminder list '\(name)' is read-only and cannot be changed or deleted"
+    }
+    return nil
 }
 
 private func reminderCount(in list: EKCalendar, store: EKEventStore) throws -> Int {
