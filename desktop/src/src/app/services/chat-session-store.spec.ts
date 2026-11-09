@@ -33,7 +33,12 @@ import { PlanUsageService } from './plan-usage.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
 import { createDeferred, type Deferred } from '../testing/deferred';
 import { makeMockLogger } from '../testing/mock-logger';
-import type { ConversationTranscript, StreamChunk, ToolUseBlock } from '../models/chat';
+import type {
+  ConversationTranscript,
+  MessageBlock,
+  StreamChunk,
+  ToolUseBlock,
+} from '../models/chat';
 import type { ModelSwitchOutcome } from '../models/claude-control';
 import { DEFAULT_CONTEXT_TOKENS } from '../models/llm';
 
@@ -8999,6 +9004,78 @@ describe('ChatSessionStore', () => {
 
         expect(callsAfterRestart().filter((c) => c === 'start_chat')).toHaveLength(1);
       });
+    });
+  });
+  describe('task plan', () => {
+    function taskTool(
+      tool_id: string,
+      tool_name: string,
+      input: Record<string, unknown>,
+      result: string | null
+    ): MessageBlock {
+      const base = {
+        type: 'tool_use' as const,
+        tool_id,
+        tool_name,
+        input_json: JSON.stringify(input),
+      };
+      return {
+        type: 'tool_use',
+        tool:
+          result === null
+            ? { ...base, status: 'running' }
+            : { ...base, status: 'done', result, result_is_error: false },
+      };
+    }
+
+    it('has no plan in a conversation without task tools', () => {
+      expect(store.taskPlan()).toBeNull();
+    });
+
+    it('folds committed and streaming task calls once each', () => {
+      store.isStreaming = true;
+      store._setState({
+        messages: [
+          { role: 'user', blocks: [{ type: 'text', content: 'plan it' }], timestamp: 1 },
+          {
+            role: 'assistant',
+            blocks: [
+              taskTool(
+                'c1',
+                'TaskCreate',
+                { subject: 'Read' },
+                'Task #1 created successfully: Read'
+              ),
+              taskTool('c2', 'TaskCreate', { subject: 'Fix' }, 'Task #2 created successfully: Fix'),
+            ],
+            timestamp: 2,
+            uuid: 'msg_a1',
+            uuid_status: 'Committed',
+          },
+        ],
+        currentBlocks: [taskTool('u1', 'TaskUpdate', { taskId: '1', status: 'in_progress' }, null)],
+      });
+
+      expect(store.taskPlan()).toEqual([
+        { id: '1', subject: 'Read', status: 'in_progress', activeForm: undefined },
+        { id: '2', subject: 'Fix', status: 'pending', activeForm: undefined },
+      ]);
+    });
+
+    it('follows a new streaming call without a new message', () => {
+      store.isStreaming = true;
+      store._setState({
+        currentBlocks: [taskTool('c1', 'TaskCreate', { subject: 'Read' }, null)],
+      });
+      expect(store.taskPlan()?.map((t) => t.subject)).toEqual(['Read']);
+
+      store._setState({
+        currentBlocks: [
+          taskTool('c1', 'TaskCreate', { subject: 'Read' }, 'Task #1 created successfully: Read'),
+          taskTool('c2', 'TaskCreate', { subject: 'Fix' }, null),
+        ],
+      });
+      expect(store.taskPlan()?.map((t) => t.subject)).toEqual(['Read', 'Fix']);
     });
   });
 });

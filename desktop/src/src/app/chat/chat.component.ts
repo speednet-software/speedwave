@@ -30,6 +30,7 @@ import { ChatMessageListComponent } from './message-list/chat-message-list.compo
 import { ComposerComponent } from './composer/composer.component';
 import { SessionStatsComponent } from './session-stats/session-stats.component';
 import { MemoryPanelComponent } from './memory-panel/memory-panel.component';
+import { TaskPlanPanelComponent } from './task-plan/task-plan-panel.component';
 import { ConversationsSidebarComponent } from './conversations-sidebar/conversations-sidebar.component';
 import { ModalOverlayComponent } from '../shell/modal-overlay/modal-overlay.component';
 import { capitalizeLevel } from './composer/model-selector/effort-slider.component';
@@ -47,6 +48,7 @@ import { onRequestCounter } from '../shared/request-counter';
     ComposerComponent,
     SessionStatsComponent,
     MemoryPanelComponent,
+    TaskPlanPanelComponent,
     ConversationsSidebarComponent,
     ModalOverlayComponent,
   ],
