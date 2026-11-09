@@ -1,4 +1,0 @@
-rule EMAIL tokenize=true log=false validator=false patterns=["[a-z]+@[a-z]+\\.com"]
-rule PESEL tokenize=false log=true validator=true patterns=["\\d{11}", "P-\\d{11}"]
-keyword "Coca-Cola" -> "Brandex" case_sensitive=false
-keyword "Sprite" -> "Mixer" case_sensitive=true

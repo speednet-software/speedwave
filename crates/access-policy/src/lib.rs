@@ -27,14 +27,11 @@ impl AccessMode {
 }
 
 /// Composed access modes.
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AccessPolicy {
     /// Mode of services not in `services`.
-    #[serde(default)]
     pub default: AccessMode,
     /// Modes of single services.
-    #[serde(default)]
     pub services: BTreeMap<String, AccessMode>,
 }
 
@@ -147,8 +144,11 @@ fn is_valid_service_id(id: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn parse(json: &str) -> AccessPolicy {
-        serde_json::from_str(json).unwrap_or_else(|e| panic!("access policy parses: {e}"))
+    fn policy(default: AccessMode, services: &[(&str, AccessMode)]) -> AccessPolicy {
+        AccessPolicy {
+            default,
+            services: modes(services),
+        }
     }
 
     #[test]
@@ -160,7 +160,7 @@ mod tests {
 
     #[test]
     fn service_entry_overrides_the_default() {
-        let policy = parse(r#"{"default":"full","services":{"slack":"read_only"}}"#);
+        let policy = policy(AccessMode::Full, &[("slack", AccessMode::ReadOnly)]);
         assert_eq!(policy.mode_of("slack"), AccessMode::ReadOnly);
         assert_eq!(policy.mode_of("redmine"), AccessMode::Full);
         assert!(!policy.is_unrestricted());
@@ -168,39 +168,13 @@ mod tests {
 
     #[test]
     fn read_only_default_applies_to_unnamed_services() {
-        let policy = parse(r#"{"default":"read_only"}"#);
+        let policy = policy(AccessMode::ReadOnly, &[]);
         assert_eq!(policy.mode_of("anything"), AccessMode::ReadOnly);
     }
 
     #[test]
-    fn unknown_mode_is_rejected() {
-        assert!(serde_json::from_str::<AccessPolicy>(r#"{"default":"confirm"}"#).is_err());
-    }
-
-    #[test]
-    fn unknown_key_is_rejected() {
-        assert!(serde_json::from_str::<AccessPolicy>(r#"{"defualt":"full"}"#).is_err());
-    }
-
-    #[test]
     fn invalid_service_id_fails_validation() {
-        let policy = parse(r#"{"services":{"Bad Id":"read_only"}}"#);
-        assert!(policy.validate().is_err());
-    }
-
-    #[test]
-    fn plugin_style_service_id_passes_validation() {
-        let policy = parse(r#"{"services":{"custom-my-mcp":"read_only","figma":"full"}}"#);
-        assert!(policy.validate().is_ok());
-    }
-
-    #[test]
-    fn service_id_of_the_plugin_slug_maximum_length_passes_validation() {
-        let id = format!("a{}", "b".repeat(63));
-        let policy = parse(&format!(r#"{{"services":{{"{id}":"read_only"}}}}"#));
-        assert!(policy.validate().is_ok());
-        let too_long = format!("{id}b");
-        let policy = parse(&format!(r#"{{"services":{{"{too_long}":"read_only"}}}}"#));
+        let policy = policy(AccessMode::Full, &[("Bad Id", AccessMode::ReadOnly)]);
         assert!(policy.validate().is_err());
     }
 
@@ -312,7 +286,7 @@ mod tests {
 
     #[test]
     fn an_invalid_policy_is_not_serialized() {
-        let policy = parse(r#"{"services":{"Bad Id":"read_only"}}"#);
+        let policy = policy(AccessMode::Full, &[("Bad Id", AccessMode::ReadOnly)]);
         assert!(to_access_file(&policy).is_err());
     }
 }

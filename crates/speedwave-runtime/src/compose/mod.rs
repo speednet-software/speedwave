@@ -339,12 +339,7 @@ pub fn render_compose_in(
         .as_ref()
         .map_err(|e| anyhow::anyhow!("PII policy configuration is invalid: {e}"))?;
     crate::pii_key::ensure_project_key_in(data_dir, project_name)?;
-    crate::pii_policy::write_policy_config_in(
-        data_dir,
-        project_name,
-        pii_policy,
-        &resolved_config.access,
-    )?;
+    crate::pii_policy::write_policy_config_in(data_dir, project_name, pii_policy)?;
     crate::access_policy::write_access_config_in(data_dir, project_name, &resolved_config.access)?;
     let policy_config_dir = crate::pii_policy::policy_config_dir_in(data_dir, project_name);
     yaml = yaml.replace("${POLICY_CONFIG_DIR}", &to_engine_path(&policy_config_dir)?);
@@ -4309,36 +4304,6 @@ services:
             default: speedwave_access_policy::AccessMode::ReadOnly,
             services: Default::default(),
         }
-    }
-
-    #[test]
-    #[serial_test::parallel(host_addressing)]
-    fn test_rendered_policy_json_carries_the_read_only_access_section() {
-        let data_dir = tempfile::tempdir().unwrap();
-        render_with_access(data_dir.path(), read_only_access());
-
-        let json = std::fs::read_to_string(crate::pii_policy::policy_config_path_in(
-            data_dir.path(),
-            "test-project",
-        ))
-        .unwrap();
-        let document = speedwave_pii_engine::parse_policy_v3(&json).unwrap();
-        assert_eq!(document.access, read_only_access());
-    }
-
-    #[test]
-    #[serial_test::parallel(host_addressing)]
-    fn test_rendered_policy_json_has_no_access_section_by_default() {
-        let data_dir = tempfile::tempdir().unwrap();
-        render_with_access(data_dir.path(), Default::default());
-
-        let json = std::fs::read_to_string(crate::pii_policy::policy_config_path_in(
-            data_dir.path(),
-            "test-project",
-        ))
-        .unwrap();
-        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert!(value.get("access").is_none());
     }
 
     #[test]

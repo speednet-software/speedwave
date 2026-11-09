@@ -3077,14 +3077,14 @@ mod tests {
             let rest = src
                 .split(&needle)
                 .nth(1)
-                .unwrap_or_else(|| panic!("`{name}` not found in the policy crate"));
+                .unwrap_or_else(|| panic!("`{name}` not found in pii-engine policy.rs"));
             let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
             digits
                 .parse()
                 .unwrap_or_else(|_| panic!("`{name}` is not a plain integer literal"))
         }
 
-        let engine = include_str!("../../policy/src/lib.rs");
+        let engine = include_str!("../../pii-engine/src/policy.rs");
         for (name, ours) in [
             ("MAX_RULES", PII_MAX_RULES),
             ("MAX_PATTERNS", PII_MAX_PATTERNS),
@@ -3101,9 +3101,9 @@ mod tests {
         }
 
         assert!(
-            engine.contains("self.match_text.chars().count()")
-                && engine.contains("self.alias.chars().count()"),
-            "the policy crate must count keyword length in characters, not bytes"
+            engine.contains("kw.r#match.chars().count()")
+                && engine.contains("kw.alias.chars().count()"),
+            "pii-engine must count keyword length in characters, not bytes"
         );
     }
 
@@ -3131,7 +3131,6 @@ mod tests {
         let proxy = include_str!("../../../containers/proxy/Cargo.toml");
         let pii_engine = include_str!("../../pii-engine/Cargo.toml");
         let access_policy = include_str!("../../access-policy/Cargo.toml");
-        let policy = include_str!("../../policy/Cargo.toml");
 
         let root_clippy = lint_table(root, "[workspace.lints.clippy]");
         assert!(
@@ -3177,16 +3176,6 @@ mod tests {
             lint_table(root, "[workspace.lints.rust]"),
             lint_table(access_policy, "[lints.rust]"),
             "root [workspace.lints.rust] must equal access-policy [lints.rust]"
-        );
-        assert_eq!(
-            root_clippy,
-            lint_table(policy, "[lints.clippy]"),
-            "root [workspace.lints.clippy] must equal policy [lints.clippy]"
-        );
-        assert_eq!(
-            lint_table(root, "[workspace.lints.rust]"),
-            lint_table(policy, "[lints.rust]"),
-            "root [workspace.lints.rust] must equal policy [lints.rust]"
         );
     }
 
@@ -3259,11 +3248,9 @@ mod tests {
             "ab\u{e9}",
         ];
         for id in samples {
-            let json = format!(r#"{{"services":{{"{id}":"read_only"}}}}"#);
-            let policy: speedwave_access_policy::AccessPolicy =
-                serde_json::from_str(&json).unwrap();
+            let json = format!(r#"{{"version":1,"services":{{"{id}":"read_only"}}}}"#);
             assert_eq!(
-                policy.validate().is_ok(),
+                speedwave_access_policy::parse_access_file(&json).is_ok(),
                 slug.is_match(id),
                 "access service id rule must equal plugin.rs SLUG_PATTERN for {id:?}"
             );

@@ -1,6 +1,6 @@
 //! `mcp-servers/policies/rules.yaml` is the single source of truth for the built-in
 //! PII rule library: the engine's compiled-in default policy
-//! (`speedwave_pii_engine::default_policy_json`, `crates/policy/src/lib.rs`) and
+//! (`speedwave_pii_engine::default_policy_json`, `crates/pii-engine/src/policy.rs`) and
 //! the resolver's library (`speedwave_runtime::pii_policy::rule_library`) each embed
 //! it independently via their own `include_str!` (ssot-registry.md). This test parses
 //! the file a third, wholly independent way and cross-checks all three views never

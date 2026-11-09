@@ -12,8 +12,9 @@ homepage = "https://github.com/speednet-software/speedwave"
 aes-siv = { version = "0.8.0", default-features = false, features = ["alloc", "zeroize"] }
 base64 = "0.23"
 regex = "1"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-speedwave-policy = { path = "../policy" }
+serde_yaml_ng = "0.10"
 zeroize = "1"
 
 [lints.clippy]

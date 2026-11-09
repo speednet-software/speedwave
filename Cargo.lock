@@ -6129,8 +6129,9 @@ dependencies = [
  "aes-siv",
  "base64 0.23.1",
  "regex",
+ "serde",
  "serde_json",
- "speedwave-policy",
+ "serde_yaml_ng",
  "zeroize",
 ]
 
@@ -6157,17 +6158,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokenizers 0.23.2",
-]
-
-[[package]]
-name = "speedwave-policy"
-version = "0.0.0"
-dependencies = [
- "regex",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "speedwave-access-policy",
 ]
 
 [[package]]

@@ -22,4 +22,3 @@ pub use scan::{
     ScanError, ScanOutcome, StringLeaf, TOKEN_SPAN_RE,
 };
 pub use siv::{EngineKey, SivError};
-pub use speedwave_policy::{parse_policy_v3, parse_policy_v3_unchecked, PolicyDocument};
