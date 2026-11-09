@@ -9,8 +9,8 @@ repository = "https://github.com/speednet-software/speedwave"
 homepage = "https://github.com/speednet-software/speedwave"
 
 [dependencies]
-speedwave-access-policy = { path = "../access-policy" }
 aes-siv = { version = "0.8.0", default-features = false, features = ["alloc", "zeroize"] }
+speedwave-access-policy = { path = "../access-policy" }
 base64 = "0.23"
 regex = "1"
 serde = { version = "1", features = ["derive"] }

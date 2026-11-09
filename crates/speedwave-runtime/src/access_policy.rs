@@ -1,33 +1,6 @@
 use crate::config::SpeedwaveUserConfig;
 use crate::managed_config::ManagedConfig;
-use speedwave_access_policy::{AccessMode, AccessPolicy};
-use std::collections::BTreeMap;
-
-/// Layers that set an access mode.
-pub struct AccessInputs<'a> {
-    /// Organization forces read-only.
-    pub managed_read_only: bool,
-    /// Project-wide read-only switch.
-    pub project_read_only: bool,
-    /// Modes set per service.
-    pub service_modes: &'a BTreeMap<String, AccessMode>,
-}
-
-/// Composes the effective access policy.
-pub fn compose_access_policy(inputs: &AccessInputs<'_>) -> AccessPolicy {
-    let default = if inputs.managed_read_only || inputs.project_read_only {
-        AccessMode::ReadOnly
-    } else {
-        AccessMode::Full
-    };
-    let services = inputs
-        .service_modes
-        .iter()
-        .map(|(service, mode)| (service.clone(), (*mode).max(default)))
-        .filter(|(_, mode)| *mode != default)
-        .collect();
-    AccessPolicy { default, services }
-}
+use speedwave_access_policy::AccessMode;
 
 /// State of the project-wide read-only switch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -306,78 +279,5 @@ mod tests {
         let state = integration_access_state(&cfg, "proj", "slack", None);
         assert_eq!(state.mode, AccessMode::ReadOnly);
         assert!(state.global.enabled);
-    }
-
-    fn modes(entries: &[(&str, AccessMode)]) -> BTreeMap<String, AccessMode> {
-        entries
-            .iter()
-            .map(|(service, mode)| ((*service).to_string(), *mode))
-            .collect()
-    }
-
-    fn compose(
-        managed: bool,
-        project: bool,
-        service_modes: &BTreeMap<String, AccessMode>,
-    ) -> AccessPolicy {
-        compose_access_policy(&AccessInputs {
-            managed_read_only: managed,
-            project_read_only: project,
-            service_modes,
-        })
-    }
-
-    #[test]
-    fn nothing_set_leaves_every_service_full() {
-        assert!(compose(false, false, &BTreeMap::new()).is_unrestricted());
-    }
-
-    #[test]
-    fn project_switch_makes_every_service_read_only() {
-        let policy = compose(false, true, &BTreeMap::new());
-        assert_eq!(policy.default, AccessMode::ReadOnly);
-        assert_eq!(policy.mode_of("slack"), AccessMode::ReadOnly);
-    }
-
-    #[test]
-    fn mdm_forces_read_only_over_an_unset_project_switch() {
-        let policy = compose(true, false, &BTreeMap::new());
-        assert_eq!(policy.default, AccessMode::ReadOnly);
-    }
-
-    #[test]
-    fn mdm_and_project_switch_together_stay_read_only() {
-        assert_eq!(
-            compose(true, true, &BTreeMap::new()).default,
-            AccessMode::ReadOnly
-        );
-    }
-
-    #[test]
-    fn a_service_mode_restricts_only_that_service() {
-        let policy = compose(false, false, &modes(&[("slack", AccessMode::ReadOnly)]));
-        assert_eq!(policy.default, AccessMode::Full);
-        assert_eq!(policy.mode_of("slack"), AccessMode::ReadOnly);
-        assert_eq!(policy.mode_of("redmine"), AccessMode::Full);
-    }
-
-    #[test]
-    fn a_full_service_mode_cannot_loosen_the_global_switch() {
-        let policy = compose(false, true, &modes(&[("slack", AccessMode::Full)]));
-        assert_eq!(policy.mode_of("slack"), AccessMode::ReadOnly);
-        assert!(policy.services.is_empty());
-    }
-
-    #[test]
-    fn a_full_service_mode_cannot_loosen_mdm() {
-        let policy = compose(true, false, &modes(&[("slack", AccessMode::Full)]));
-        assert_eq!(policy.mode_of("slack"), AccessMode::ReadOnly);
-    }
-
-    #[test]
-    fn a_full_service_entry_under_a_full_default_is_left_out() {
-        let policy = compose(false, false, &modes(&[("slack", AccessMode::Full)]));
-        assert!(policy.services.is_empty());
-        assert!(policy.is_unrestricted());
     }
 }

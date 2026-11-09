@@ -1951,17 +1951,18 @@ pub(crate) fn resolve_project_config_in_with_managed(
         })
         .unwrap_or_default();
 
-    let access = crate::access_policy::compose_access_policy(&crate::access_policy::AccessInputs {
-        managed_read_only: managed_access.is_some_and(|m| m.read_only),
-        project_read_only: user_config
-            .find_project(project_name)
-            .is_some_and(|p| p.read_only),
-        service_modes: &user_config
-            .find_project(project_name)
-            .and_then(|p| p.integrations.as_ref())
-            .map(IntegrationsConfig::access_modes)
-            .unwrap_or_default(),
-    });
+    let access =
+        speedwave_access_policy::compose_access_policy(&speedwave_access_policy::AccessInputs {
+            managed_read_only: managed_access.is_some_and(|m| m.read_only),
+            project_read_only: user_config
+                .find_project(project_name)
+                .is_some_and(|p| p.read_only),
+            service_modes: &user_config
+                .find_project(project_name)
+                .and_then(|p| p.integrations.as_ref())
+                .map(IntegrationsConfig::access_modes)
+                .unwrap_or_default(),
+        });
 
     let claude = ResolvedClaudeConfig {
         env,

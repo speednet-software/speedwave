@@ -925,7 +925,7 @@ mod tests {
             .iter()
             .map(|(service, mode)| ((*service).to_string(), *mode))
             .collect();
-        crate::access_policy::compose_access_policy(&crate::access_policy::AccessInputs {
+        speedwave_access_policy::compose_access_policy(&speedwave_access_policy::AccessInputs {
             managed_read_only: managed,
             project_read_only: project,
             service_modes: &service_modes,
