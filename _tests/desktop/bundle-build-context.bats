@@ -269,7 +269,7 @@ EOF
 
     REAL_TAR="$real_tar" TAR_STUB_LOG="$stub_log" PATH="$stub_dir:$PATH" run "$SCRIPT"
     [ "$status" -eq 0 ]
-    [ "$(wc -l <"$stub_log" | tr -d ' ')" -eq 2 ]
+    [ "$(wc -l <"$stub_log" | tr -d ' ')" -eq 3 ]
     [ -f "$DEST/build-context/containers/proxy/src/main.rs" ]
     [ -f "$DEST/build-context/containers/crates/pii-engine/Cargo.toml" ]
     [ -f "$DEST/build-context/containers/crates/access-policy/Cargo.toml" ]
