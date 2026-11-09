@@ -376,7 +376,7 @@ endif
 	@echo "✅ Build phase complete"
 
 test-rust-run: guard-not-prod-data-dir
-	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-access-policy -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner -p speedwave-version --features speedwave-runtime/test-support,speedwave-version/cli)
+	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-access-policy -p speedwave-policy -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner -p speedwave-version --features speedwave-runtime/test-support,speedwave-version/cli)
 	"$(MAKE)" test-transcription
 	@echo "✅ Rust tests passed"
 
@@ -415,7 +415,7 @@ test-proxy: guard-not-prod-data-dir
 	@echo "✅ proxy tests passed"
 
 test-rust: guard-not-prod-data-dir
-	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-access-policy -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner -p speedwave-version --features speedwave-runtime/test-support,speedwave-version/cli)
+	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-access-policy -p speedwave-policy -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner -p speedwave-version --features speedwave-runtime/test-support,speedwave-version/cli)
 	"$(MAKE)" test-transcription
 	@echo "✅ Rust tests passed"
 
@@ -515,7 +515,7 @@ coverage: coverage-rust coverage-mcp coverage-angular
 
 coverage-rust:
 	@command -v cargo-llvm-cov >/dev/null 2>&1 || { echo "❌ cargo-llvm-cov not found. Install: cargo install cargo-llvm-cov"; exit 1; }
-	cargo llvm-cov -p speedwave-runtime -p speedwave-cli -p speedwave-access-policy -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner -p speedwave-version --features speedwave-version/cli --fail-under-lines 70
+	cargo llvm-cov -p speedwave-runtime -p speedwave-cli -p speedwave-access-policy -p speedwave-policy -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner -p speedwave-version --features speedwave-version/cli --fail-under-lines 70
 	@echo "✅ Rust coverage passed (≥70% lines)"
 
 coverage-mcp: build-mcp
@@ -704,7 +704,7 @@ setup-e2e-vms:
 	@bash scripts/e2e-vm-setup.sh all
 
 check-clippy:
-	cargo clippy -p speedwave-runtime -p speedwave-cli -p speedwave-access-policy -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner -p speedwave-version --features speedwave-version/cli --all-targets -- -D warnings
+	cargo clippy -p speedwave-runtime -p speedwave-cli -p speedwave-access-policy -p speedwave-policy -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner -p speedwave-version --features speedwave-version/cli --all-targets -- -D warnings
 	cargo clippy -p speedwave-runtime --all-targets --features test-support,audio-transcription -- -D warnings
 	cargo clippy -p speedwave-pii-ner --all-targets --features bench,model-e2e -- -D warnings
 	@echo "✅ Clippy: 0 warnings"
@@ -827,7 +827,7 @@ fmt:
 	@echo "✅ Formatted"
 
 lint: $(MCP_NPM_INSTALL) $(ANGULAR_NPM_INSTALL)
-	cargo clippy -p speedwave-runtime -p speedwave-cli -p speedwave-access-policy -p speedwave-pii-engine -p speedwave-pii-ner -p speedwave-version --features speedwave-version/cli -- -D warnings
+	cargo clippy -p speedwave-runtime -p speedwave-cli -p speedwave-access-policy -p speedwave-policy -p speedwave-pii-engine -p speedwave-pii-ner -p speedwave-version --features speedwave-version/cli -- -D warnings
 	cd desktop/src-tauri && cargo clippy -- -D warnings
 	cd mcp-servers && $(NPX) eslint --fix .
 	cd desktop/src && $(NPX) eslint --fix 'src/**/*.ts'

@@ -157,13 +157,15 @@ teardown() {
     [ -f "$DEST/build-context/containers/Containerfile.claude" ]
 }
 
-@test "bundle script vendors crates/pii-engine and crates/access-policy into containers/crates for the proxy build context" {
+@test "bundle script vendors crates/pii-engine, crates/policy and crates/access-policy into containers/crates for the proxy build context" {
     local DEST="$SHARED_DEST"
     [ -f "$DEST/build-context/containers/crates/access-policy/Cargo.toml" ]
     [ ! -d "$DEST/build-context/containers/crates/access-policy/target" ]
     [ -d "$DEST/build-context/containers/crates/pii-engine/src" ]
     [ -f "$DEST/build-context/containers/crates/pii-engine/Cargo.toml" ]
     [ ! -d "$DEST/build-context/containers/crates/pii-engine/target" ]
+    [ -f "$DEST/build-context/containers/crates/policy/Cargo.toml" ]
+    [ ! -d "$DEST/build-context/containers/crates/policy/target" ]
     [ -f "$DEST/build-context/containers/mcp-servers/policies/rules.yaml" ]
 }
 
@@ -269,10 +271,11 @@ EOF
 
     REAL_TAR="$real_tar" TAR_STUB_LOG="$stub_log" PATH="$stub_dir:$PATH" run "$SCRIPT"
     [ "$status" -eq 0 ]
-    [ "$(wc -l <"$stub_log" | tr -d ' ')" -eq 3 ]
+    [ "$(wc -l <"$stub_log" | tr -d ' ')" -eq 4 ]
     [ -f "$DEST/build-context/containers/proxy/src/main.rs" ]
     [ -f "$DEST/build-context/containers/crates/pii-engine/Cargo.toml" ]
     [ -f "$DEST/build-context/containers/crates/access-policy/Cargo.toml" ]
+    [ -f "$DEST/build-context/containers/crates/policy/Cargo.toml" ]
 }
 
 @test "bundle script creates mcp-servers with tsconfig.base.json" {

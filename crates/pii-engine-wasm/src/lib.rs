@@ -3,9 +3,9 @@
 
 use serde::Serialize;
 use speedwave_pii_engine::{
-    alias_json, compile_policy_v3, default_policy_json as core_default_policy_json,
-    detokenize_json, scan_json, unalias_json_preserving_tokens, CompiledPolicy, Detection,
-    DetectionAction, EngineKey,
+    alias_json, default_policy_json as core_default_policy_json, detokenize_json,
+    parse_policy_v3_unchecked, policy::compile, scan_json, unalias_json_preserving_tokens,
+    CompiledPolicy, Detection, DetectionAction, EngineKey, PolicyDocument,
 };
 use wasm_bindgen::prelude::*;
 
@@ -40,6 +40,7 @@ struct TokenizeOut {
 /// A compiled policy plus tokenization key, ready to scan or detokenize JSON values.
 #[wasm_bindgen]
 pub struct PiiEngine {
+    document: PolicyDocument,
     policy: CompiledPolicy,
     key: EngineKey,
 }
@@ -50,9 +51,15 @@ impl PiiEngine {
     /// hex chars, 32 bytes); either failure is returned as `Err`, never a panic (fail-closed).
     #[wasm_bindgen(constructor)]
     pub fn new(policy_json: &str, key_hex: &str) -> Result<PiiEngine, JsError> {
-        let policy = compile_policy_v3(policy_json).map_err(|e| JsError::new(&e.to_string()))?;
+        let document =
+            parse_policy_v3_unchecked(policy_json).map_err(|e| JsError::new(&e.to_string()))?;
+        let policy = compile(&document).map_err(|e| JsError::new(&e.to_string()))?;
         let key = EngineKey::from_hex(key_hex).map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(Self { policy, key })
+        Ok(Self {
+            document,
+            policy,
+            key,
+        })
     }
 
     /// Scans `value_json` (a `JSON.stringify`d string, object, or array) and returns a JSON
@@ -76,7 +83,7 @@ impl PiiEngine {
 
     /// The composed access policy as JSON.
     pub fn access_json(&self) -> Result<String, JsError> {
-        serde_json::to_string(self.policy.access()).map_err(|e| JsError::new(&e.to_string()))
+        serde_json::to_string(&self.document.access).map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Detokenizes every token span in `value_json`, all-or-nothing: the first invalid or
@@ -108,6 +115,7 @@ pub fn default_policy_json() -> String {
 )]
 mod tests {
     use super::*;
+    use speedwave_pii_engine::compile_policy_v3;
 
     fn keyword_policy_json() -> String {
         serde_json::json!({

@@ -55,6 +55,7 @@ copy_tree "$CONTAINERS_DIR" "$DEST/build-context/containers"
 
 copy_tree "$REPO_ROOT/crates/access-policy" "$DEST/build-context/containers/crates/access-policy"
 copy_tree "$REPO_ROOT/crates/pii-engine" "$DEST/build-context/containers/crates/pii-engine"
+copy_tree "$REPO_ROOT/crates/policy" "$DEST/build-context/containers/crates/policy"
 
 mkdir -p "$DEST/build-context/containers/mcp-servers/policies"
 cp "$MCP_SERVERS_DIR/policies/rules.yaml" "$DEST/build-context/containers/mcp-servers/policies/"

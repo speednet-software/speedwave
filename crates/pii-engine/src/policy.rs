@@ -1,26 +1,9 @@
-//! Parser and compiler for the `policy.json` v3 inter-component contract
-//! (host renders it, proxy and hub consume the compiled form). Rules are
-//! data: every category comes from the document, none are hardcoded here.
+//! Compiler for the `policy.json` v3 document parsed by `speedwave-policy`: turns the PII
+//! sections (rules and keywords) into regexes and validators ready to scan.
 
 use regex::{Regex, RegexBuilder};
-use serde::Deserialize;
-use speedwave_access_policy::AccessPolicy;
-use std::sync::LazyLock;
-
-/// A rule may declare at most this many patterns; a document may declare at
-/// most this many rules, keywords, and total patterns across all rules.
-const MAX_RULES: usize = 256;
-const MAX_PATTERNS: usize = 1024;
-const MAX_KEYWORDS: usize = 256;
-const MAX_PATTERN_LEN: usize = 512;
-
-const KEYWORD_MIN_CHARS: usize = 3;
-const KEYWORD_MAX_CHARS: usize = 128;
-
-static RULE_ID_RE: LazyLock<Result<Regex, regex::Error>> =
-    LazyLock::new(|| Regex::new(r"^[A-Z][A-Z0-9_]{0,63}$"));
-static ALIAS_RE: LazyLock<Result<Regex, regex::Error>> =
-    LazyLock::new(|| Regex::new(r"^[A-Za-z][A-Za-z0-9]*$"));
+pub use speedwave_policy::{default_policy_json, is_valid_rule_id, PolicyError};
+use speedwave_policy::{parse_policy_v3_unchecked, PolicyDocument, PolicyKeyword, PolicyRule};
 
 /// Per-rule protection flags from policy.json v3.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -55,12 +38,11 @@ pub struct CompiledKeyword {
     pub case_sensitive: bool,
 }
 
-/// A policy.json v3, parsed, validated and compiled for scanning.
+/// The PII sections of a policy.json v3, compiled for scanning.
 #[derive(Debug)]
 pub struct CompiledPolicy {
     rules: Vec<CompiledRule>,
     keywords: Vec<CompiledKeyword>,
-    access: AccessPolicy,
 }
 
 impl CompiledPolicy {
@@ -73,159 +55,29 @@ impl CompiledPolicy {
     pub fn keywords(&self) -> &[CompiledKeyword] {
         &self.keywords
     }
-
-    /// Access policy of the document.
-    pub fn access(&self) -> &AccessPolicy {
-        &self.access
-    }
 }
 
-/// A policy.json v3 document failed to parse or violates the contract's semantics.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PolicyError {
-    /// Malformed JSON or a v3 shape mismatch; the message carries only line/column, never content.
-    Parse(String),
-    /// A v3 semantic rule was violated; the message carries only field/category/pattern ids.
-    Semantic(String),
-}
-
-impl std::fmt::Display for PolicyError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Parse(msg) => write!(f, "policy parse error: {msg}"),
-            Self::Semantic(msg) => write!(f, "policy semantic error: {msg}"),
-        }
-    }
-}
-
-impl std::error::Error for PolicyError {}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PolicyFileV3 {
-    version: u32,
-    #[serde(rename = "source")]
-    _source: SourceMeta,
-    rules: Vec<RuleV3>,
-    #[serde(default)]
-    keywords: Vec<KeywordV3>,
-    #[serde(default)]
-    access: AccessPolicy,
-}
-
-/// Policy provenance metadata; parsed and validated structurally but not
-/// consumed by compilation.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SourceMeta {
-    #[serde(rename = "policies")]
-    _policies: Vec<String>,
-    #[serde(rename = "forced")]
-    _forced: Vec<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct RuleV3 {
-    id: String,
-    #[serde(rename = "displayName")]
-    _display_name: String,
-    patterns: Vec<String>,
-    #[serde(default)]
-    validator: Option<String>,
-    #[serde(default = "default_case_sensitive")]
-    case_sensitive: bool,
-    tokenize: bool,
-    log: bool,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct KeywordV3 {
-    r#match: String,
-    alias: String,
-    #[serde(default = "default_case_sensitive")]
-    case_sensitive: bool,
-}
-
-fn default_case_sensitive() -> bool {
-    true
-}
-
-/// Parses + validates + compiles policy.json v3. Any structural or semantic problem is Err.
+/// Parses, validates and compiles policy.json v3. Any structural or semantic problem is Err.
 pub fn compile_policy_v3(json: &str) -> Result<CompiledPolicy, PolicyError> {
-    let file: PolicyFileV3 = serde_json::from_str(json).map_err(|e| {
-        PolicyError::Parse(format!(
-            "malformed policy document at line {} column {}",
-            e.line(),
-            e.column()
-        ))
-    })?;
-
-    if file.version != 3 {
-        return Err(PolicyError::Semantic(format!(
-            "unsupported policy version {}, engine supports version 3 only",
-            file.version
-        )));
-    }
-
-    if file.rules.len() > MAX_RULES {
-        return Err(PolicyError::Semantic(format!(
-            "too many rules: {} exceeds limit of {MAX_RULES}",
-            file.rules.len()
-        )));
-    }
-
-    let pattern_count: usize = file.rules.iter().map(|r| r.patterns.len()).sum();
-    if pattern_count > MAX_PATTERNS {
-        return Err(PolicyError::Semantic(format!(
-            "too many patterns: {pattern_count} exceeds limit of {MAX_PATTERNS}"
-        )));
-    }
-
-    if file.keywords.len() > MAX_KEYWORDS {
-        return Err(PolicyError::Semantic(format!(
-            "too many keywords: {} exceeds limit of {MAX_KEYWORDS}",
-            file.keywords.len()
-        )));
-    }
-
-    file.access.validate().map_err(PolicyError::Semantic)?;
-
-    let rules = compile_rules(file.rules)?;
-    let keywords = compile_keywords(file.keywords)?;
-
-    Ok(CompiledPolicy {
-        rules,
-        keywords,
-        access: file.access,
-    })
+    compile(&parse_policy_v3_unchecked(json)?)
 }
 
-fn compile_rules(rules: Vec<RuleV3>) -> Result<Vec<CompiledRule>, PolicyError> {
+/// Compiles the rules and keywords of `document`, running the format checks of each rule
+/// and keyword just before compiling it.
+pub fn compile(document: &PolicyDocument) -> Result<CompiledPolicy, PolicyError> {
+    let rules = compile_rules(&document.rules)?;
+    let keywords = compile_keywords(&document.keywords)?;
+    Ok(CompiledPolicy { rules, keywords })
+}
+
+fn compile_rules(rules: &[PolicyRule]) -> Result<Vec<CompiledRule>, PolicyError> {
     let mut compiled = Vec::with_capacity(rules.len());
     for rule in rules {
-        if !is_valid_rule_id(&rule.id) {
-            return Err(PolicyError::Semantic(format!(
-                "invalid rule id format '{}'",
-                rule.id
-            )));
-        }
-        if rule.patterns.is_empty() {
-            return Err(PolicyError::Semantic(format!(
-                "rule '{}' must have at least one pattern",
-                rule.id
-            )));
-        }
+        rule.validate_head()?;
 
         let mut patterns = Vec::with_capacity(rule.patterns.len());
         for (i, pattern) in rule.patterns.iter().enumerate() {
-            if pattern.len() > MAX_PATTERN_LEN {
-                return Err(PolicyError::Semantic(format!(
-                    "rule '{}' pattern {i} exceeds {MAX_PATTERN_LEN} chars",
-                    rule.id
-                )));
-            }
+            rule.validate_pattern(i)?;
             let regex = RegexBuilder::new(pattern)
                 .case_insensitive(!rule.case_sensitive)
                 .build()
@@ -252,7 +104,7 @@ fn compile_rules(rules: Vec<RuleV3>) -> Result<Vec<CompiledRule>, PolicyError> {
 
         if flags.tokenize || flags.log {
             compiled.push(CompiledRule {
-                category: rule.id,
+                category: rule.id.clone(),
                 patterns,
                 validator,
                 flags,
@@ -262,98 +114,18 @@ fn compile_rules(rules: Vec<RuleV3>) -> Result<Vec<CompiledRule>, PolicyError> {
     Ok(compiled)
 }
 
-fn compile_keywords(keywords: Vec<KeywordV3>) -> Result<Vec<CompiledKeyword>, PolicyError> {
-    let mut compiled = Vec::with_capacity(keywords.len());
-    for kw in keywords {
-        if !(KEYWORD_MIN_CHARS..=KEYWORD_MAX_CHARS).contains(&kw.r#match.chars().count()) {
-            return Err(PolicyError::Semantic(format!(
-                "keyword match must be {KEYWORD_MIN_CHARS}-{KEYWORD_MAX_CHARS} characters"
-            )));
-        }
-        if !(KEYWORD_MIN_CHARS..=KEYWORD_MAX_CHARS).contains(&kw.alias.chars().count()) {
-            return Err(PolicyError::Semantic(format!(
-                "keyword alias must be {KEYWORD_MIN_CHARS}-{KEYWORD_MAX_CHARS} characters"
-            )));
-        }
-        if kw.r#match == kw.alias {
-            return Err(PolicyError::Semantic(
-                "keyword match and alias must be different".to_string(),
-            ));
-        }
-        if !alias_format_valid(&kw.alias) {
-            return Err(PolicyError::Semantic(format!(
-                "invalid alias format '{}'",
-                kw.alias
-            )));
-        }
-        compiled.push(CompiledKeyword {
-            match_text: kw.r#match,
-            alias: kw.alias,
-            case_sensitive: kw.case_sensitive,
-        });
-    }
-    Ok(compiled)
-}
-
-/// Whether `id` has the shape of a policy rule id (and so of a token category).
-pub fn is_valid_rule_id(id: &str) -> bool {
-    RULE_ID_RE.as_ref().is_ok_and(|re| re.is_match(id))
-}
-
-fn alias_format_valid(alias: &str) -> bool {
-    alias.chars().count() <= KEYWORD_MAX_CHARS
-        && ALIAS_RE.as_ref().is_ok_and(|re| re.is_match(alias))
-}
-
-#[derive(Deserialize)]
-struct RulesYamlFile {
-    version: u32,
-    rules: Vec<RulesYamlRule>,
-}
-
-#[derive(Deserialize)]
-struct RulesYamlRule {
-    id: String,
-    #[serde(rename = "displayName")]
-    display_name: String,
-    patterns: Vec<String>,
-    #[serde(default)]
-    validator: Option<String>,
-}
-
-/// Serializes the compiled-in default policy.json v3 from the built-in rule
-/// library (`mcp-servers/policies/rules.yaml`): every rule tokenize-on, no
-/// keywords. SSOT fallback for every "no POLICY_FILE" caller (proxy, hub-wasm).
-pub fn default_policy_json() -> String {
-    let yaml = include_str!("../../../mcp-servers/policies/rules.yaml");
-    let file: RulesYamlFile = serde_yaml_ng::from_str(yaml).unwrap_or(RulesYamlFile {
-        version: 3,
-        rules: Vec::new(),
-    });
-
-    let rules: Vec<serde_json::Value> = file
-        .rules
-        .into_iter()
-        .map(|r| {
-            serde_json::json!({
-                "id": r.id,
-                "displayName": r.display_name,
-                "patterns": r.patterns,
-                "validator": r.validator,
-                "caseSensitive": true,
-                "tokenize": true,
-                "log": false,
+fn compile_keywords(keywords: &[PolicyKeyword]) -> Result<Vec<CompiledKeyword>, PolicyError> {
+    keywords
+        .iter()
+        .map(|kw| {
+            kw.validate()?;
+            Ok(CompiledKeyword {
+                match_text: kw.match_text.clone(),
+                alias: kw.alias.clone(),
+                case_sensitive: kw.case_sensitive,
             })
         })
-        .collect();
-
-    serde_json::json!({
-        "version": file.version,
-        "source": { "policies": [], "forced": [] },
-        "rules": rules,
-        "keywords": [],
-    })
-    .to_string()
+        .collect()
 }
 
 #[cfg(test)]
@@ -406,31 +178,6 @@ mod tests {
     }
 
     #[test]
-    fn v3_without_access_section_is_unrestricted() {
-        let policy = compile_policy_v3(VALID_V3_POLICY).expect("valid policy");
-        assert!(policy.access().is_unrestricted());
-    }
-
-    #[test]
-    fn v3_access_section_is_accepted_and_exposed() {
-        let json = VALID_V3_POLICY.replacen(
-            "\"keywords\": [",
-            "\"access\": {\"default\": \"read_only\", \"services\": {\"slack\": \"full\"}}, \"keywords\": [",
-            1,
-        );
-        let policy = compile_policy_v3(&json).expect("policy with access");
-        assert_eq!(
-            policy.access().default,
-            speedwave_access_policy::AccessMode::ReadOnly
-        );
-        assert_eq!(
-            policy.access().mode_of("slack"),
-            speedwave_access_policy::AccessMode::Full
-        );
-        assert_eq!(policy.rules().len(), 2);
-    }
-
-    #[test]
     fn v3_access_section_does_not_change_scanning_rules() {
         let with_access = VALID_V3_POLICY.replacen(
             "\"keywords\": [",
@@ -444,148 +191,6 @@ mod tests {
     }
 
     #[test]
-    fn v3_access_section_with_unknown_mode_is_a_parse_error() {
-        let json = VALID_V3_POLICY.replacen(
-            "\"keywords\": [",
-            "\"access\": {\"default\": \"confirm\"}, \"keywords\": [",
-            1,
-        );
-        assert!(matches!(
-            compile_policy_v3(&json),
-            Err(PolicyError::Parse(_))
-        ));
-    }
-
-    #[test]
-    fn v3_access_section_with_invalid_service_id_is_a_semantic_error() {
-        let json = VALID_V3_POLICY.replacen(
-            "\"keywords\": [",
-            "\"access\": {\"services\": {\"Bad Id\": \"read_only\"}}, \"keywords\": [",
-            1,
-        );
-        match compile_policy_v3(&json) {
-            Err(PolicyError::Semantic(msg)) => assert!(msg.contains("access")),
-            other => panic!("expected a semantic access error, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn v3_version_2_is_rejected() {
-        let json = VALID_V3_POLICY.replacen("\"version\": 3,", "\"version\": 2,", 1);
-        match compile_policy_v3(&json) {
-            Err(PolicyError::Semantic(msg)) => assert!(msg.contains("version")),
-            other => panic!("expected a semantic version error, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn v3_malformed_json_is_a_parse_error() {
-        match compile_policy_v3("{ not json") {
-            Err(PolicyError::Parse(msg)) => assert!(msg.contains("line")),
-            other => panic!("expected a parse error, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn v3_unknown_top_level_field_is_rejected() {
-        let json = VALID_V3_POLICY.replacen(
-            "\"version\": 3,",
-            "\"version\": 3, \"bogusTopLevel\": true,",
-            1,
-        );
-        match compile_policy_v3(&json) {
-            Err(PolicyError::Parse(msg)) => assert!(msg.contains("line")),
-            other => panic!("expected a parse error, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn v3_enforces_rule_limit() {
-        let mut rules = Vec::new();
-        for i in 0..257 {
-            rules.push(format!(
-                r#"{{"id": "RULE_{i}", "displayName": "Rule {i}", "patterns": ["pattern"], "caseSensitive": true, "tokenize": true, "log": false}}"#
-            ));
-        }
-        let json = format!(
-            r#"{{"version": 3, "source": {{"policies": [], "forced": []}}, "rules": [{}], "keywords": []}}"#,
-            rules.join(",")
-        );
-        match compile_policy_v3(&json) {
-            Err(PolicyError::Semantic(msg)) => assert!(msg.contains("too many rules")),
-            other => panic!("expected semantic error for rule limit, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn v3_enforces_pattern_count_limit() {
-        let mut patterns = Vec::new();
-        for i in 0..1025 {
-            patterns.push(format!("\"p{i}\""));
-        }
-        let json = format!(
-            r#"{{"version": 3, "source": {{"policies": [], "forced": []}}, "rules": [
-                {{"id": "BIG", "displayName": "Big", "patterns": [{}], "caseSensitive": true, "tokenize": true, "log": false}}
-            ], "keywords": []}}"#,
-            patterns.join(",")
-        );
-        match compile_policy_v3(&json) {
-            Err(PolicyError::Semantic(msg)) => assert!(msg.contains("too many patterns")),
-            other => panic!("expected semantic error for pattern limit, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn v3_enforces_keyword_limit() {
-        let mut keywords = Vec::new();
-        for i in 0..257 {
-            keywords.push(format!(
-                r#"{{"match": "needle{i}", "alias": "alias{i}", "caseSensitive": true}}"#
-            ));
-        }
-        let json = format!(
-            r#"{{"version": 3, "source": {{"policies": [], "forced": []}}, "rules": [], "keywords": [{}]}}"#,
-            keywords.join(",")
-        );
-        match compile_policy_v3(&json) {
-            Err(PolicyError::Semantic(msg)) => assert!(msg.contains("too many keywords")),
-            other => panic!("expected semantic error for keyword limit, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn v3_enforces_pattern_length_limit() {
-        let long_pattern = "a".repeat(513);
-        let json = format!(
-            r#"{{"version": 3, "source": {{"policies": [], "forced": []}}, "rules": [
-                {{"id": "LONG", "displayName": "Long", "patterns": ["{long_pattern}"], "caseSensitive": true, "tokenize": true, "log": false}}
-            ], "keywords": []}}"#
-        );
-        match compile_policy_v3(&json) {
-            Err(PolicyError::Semantic(msg)) => assert!(msg.contains("exceeds")),
-            other => panic!("expected semantic error for pattern length, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn v3_rejects_invalid_rule_id() {
-        let json = r#"{"version": 3, "source": {"policies": [], "forced": []}, "rules": [{"id": "123", "displayName": "Bad", "patterns": ["x"], "caseSensitive": true, "tokenize": true, "log": false}], "keywords": []}"#;
-        match compile_policy_v3(json) {
-            Err(PolicyError::Semantic(msg)) => assert!(msg.contains("invalid rule id")),
-            other => panic!("expected a semantic error, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn v3_rejects_lowercase_rule_id() {
-        let json = r#"{"version": 3, "source": {"policies": [], "forced": []}, "rules": [{"id": "email", "displayName": "Bad", "patterns": ["x"], "caseSensitive": true, "tokenize": true, "log": false}], "keywords": []}"#;
-        match compile_policy_v3(json) {
-            Err(PolicyError::Semantic(msg)) => assert!(msg.contains("invalid rule id")),
-            other => panic!("expected a semantic error, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn v3_rejects_unknown_validator() {
         let json = r#"{"version": 3, "source": {"policies": [], "forced": []}, "rules": [{"id": "FOO", "displayName": "Foo", "patterns": ["x"], "validator": "bogus", "caseSensitive": true, "tokenize": true, "log": false}], "keywords": []}"#;
         match compile_policy_v3(json) {
@@ -593,15 +198,6 @@ mod tests {
                 assert!(msg.contains("unknown validator"));
                 assert!(msg.contains("bogus"));
             }
-            other => panic!("expected a semantic error, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn v3_rejects_empty_patterns() {
-        let json = r#"{"version": 3, "source": {"policies": [], "forced": []}, "rules": [{"id": "FOO", "displayName": "Foo", "patterns": [], "caseSensitive": true, "tokenize": true, "log": false}], "keywords": []}"#;
-        match compile_policy_v3(json) {
-            Err(PolicyError::Semantic(msg)) => assert!(msg.contains("at least one pattern")),
             other => panic!("expected a semantic error, got {other:?}"),
         }
     }
@@ -647,37 +243,11 @@ mod tests {
     }
 
     #[test]
-    fn v3_keyword_match_alias_and_min_length_rules() {
-        let too_short = r#"{"version": 3, "source": {"policies": [], "forced": []}, "rules": [], "keywords": [{"match": "ab", "alias": "xyz", "caseSensitive": true}]}"#;
-        match compile_policy_v3(too_short) {
-            Err(PolicyError::Semantic(msg)) => assert!(msg.contains("match")),
-            other => panic!("expected a semantic error, got {other:?}"),
-        }
-
-        let same = r#"{"version": 3, "source": {"policies": [], "forced": []}, "rules": [], "keywords": [{"match": "secret", "alias": "secret", "caseSensitive": true}]}"#;
-        match compile_policy_v3(same) {
-            Err(PolicyError::Semantic(msg)) => assert!(msg.contains("must be different")),
-            other => panic!("expected a semantic error, got {other:?}"),
-        }
-
-        let bad_alias = r#"{"version": 3, "source": {"policies": [], "forced": []}, "rules": [], "keywords": [{"match": "secretco", "alias": "123bad", "caseSensitive": true}]}"#;
-        match compile_policy_v3(bad_alias) {
-            Err(PolicyError::Semantic(msg)) => assert!(msg.contains("invalid alias format")),
-            other => panic!("expected a semantic error, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn default_policy_json_v3_compiles() {
         let json = default_policy_json();
         let policy = compile_policy_v3(&json).expect("default policy must compile");
         assert_eq!(policy.rules().len(), 7);
         assert!(policy.keywords().is_empty());
-    }
-
-    #[test]
-    fn default_policy_json_is_deterministic() {
-        assert_eq!(default_policy_json(), default_policy_json());
     }
 
     #[test]

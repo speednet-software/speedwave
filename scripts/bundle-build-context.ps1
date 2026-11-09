@@ -93,6 +93,7 @@ Copy-Tree $containersDir "$dest\build-context\containers"
 
 Copy-Tree crates\access-policy "$dest\build-context\containers\crates\access-policy"
 Copy-Tree crates\pii-engine "$dest\build-context\containers\crates\pii-engine"
+Copy-Tree crates\policy "$dest\build-context\containers\crates\policy"
 
 New-Item -ItemType Directory -Path "$dest\build-context\containers\mcp-servers\policies" -Force | Out-Null
 Copy-Item "$mcpServersDir\policies\rules.yaml" "$dest\build-context\containers\mcp-servers\policies\rules.yaml"

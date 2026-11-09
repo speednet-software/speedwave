@@ -7,7 +7,9 @@
     reason = "test code: panics on setup failure are acceptable"
 )]
 
-use speedwave_pii_engine::{compile_policy_v3, default_policy_json, CompiledPolicy};
+use speedwave_pii_engine::{
+    compile_policy_v3, default_policy_json, parse_policy_v3, CompiledPolicy,
+};
 
 const POLICY_WITH_ACCESS: &str = r#"{
     "version": 3,
@@ -84,7 +86,12 @@ fn policy_with_access_compiles_to_the_golden_snapshot() {
         include_str!("golden/policy_with_access.txt").trim_end()
     );
     assert_eq!(
-        serde_json::to_string(policy.access()).expect("access serializes"),
+        serde_json::to_string(
+            &parse_policy_v3(POLICY_WITH_ACCESS)
+                .expect("document parses")
+                .access
+        )
+        .expect("access serializes"),
         r#"{"default":"read_only","services":{"gitlab":"read_only","slack":"full"}}"#
     );
 }

@@ -4321,8 +4321,8 @@ services:
             "test-project",
         ))
         .unwrap();
-        let compiled = speedwave_pii_engine::compile_policy_v3(&json).unwrap();
-        assert_eq!(compiled.access(), &read_only_access());
+        let document = speedwave_pii_engine::parse_policy_v3(&json).unwrap();
+        assert_eq!(document.access, read_only_access());
     }
 
     #[test]

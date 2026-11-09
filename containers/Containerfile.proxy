@@ -7,6 +7,7 @@ WORKDIR /build
 COPY proxy /build/containers/proxy
 COPY crates/access-policy /build/crates/access-policy
 COPY crates/pii-engine /build/crates/pii-engine
+COPY crates/policy /build/crates/policy
 COPY mcp-servers/policies/rules.yaml /build/mcp-servers/policies/rules.yaml
 WORKDIR /build/containers/proxy
 

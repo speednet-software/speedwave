@@ -2337,7 +2337,8 @@ keywords: []
         .unwrap();
         let json = std::fs::read_to_string(policy_config_path_in(tmp.path(), "proj")).unwrap();
         let compiled = speedwave_pii_engine::compile_policy_v3(&json).unwrap();
-        assert_eq!(compiled.access(), &read_only_access());
+        let document = speedwave_pii_engine::parse_policy_v3(&json).unwrap();
+        assert_eq!(document.access, read_only_access());
         assert!(!compiled.rules().is_empty());
     }
 
