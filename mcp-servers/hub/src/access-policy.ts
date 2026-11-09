@@ -1,7 +1,6 @@
 import { buildTeachingMessage } from '@speedwave/mcp-shared';
-import type { AccessMode, AccessRules } from '@speedwave/policy-engine';
+import { getAccessRules, type AccessMode, type AccessRules } from './access-config.js';
 import type { DenialReason, ToolMetadata } from './hub-types.js';
-import { getEngine } from './policy.js';
 
 /** Outcome of an access decision: allowed, or denied with the reason and a teaching message. */
 export type AccessDecision =
@@ -20,7 +19,7 @@ const OS_CATEGORIES = ['reminders', 'calendar', 'mail', 'notes'] as const;
 
 /**
  * Access mode of a service: its own entry, else the default.
- * @param rules - Composed access rules from policy.json
+ * @param rules - Composed access rules
  * @param service - Service name
  * @returns The mode that applies to the service
  */
@@ -42,7 +41,7 @@ function toolAccessMode(rules: AccessRules, metadata: ToolMetadata): AccessMode 
 
 /**
  * The services among `services` whose mode is read-only; `os` is listed with its read-only sub-integrations.
- * @param rules - Composed access rules from policy.json
+ * @param rules - Composed access rules
  * @param services - Service names to check
  * @param disabledOs - OS sub-integrations that are switched off
  * @returns Service names, `os` as `os (mail, calendar)`
@@ -106,7 +105,7 @@ function blockedBecause(service: string, metadata: ToolMetadata): string {
 
 /**
  * Decide whether the agent may call a tool.
- * @param rules - Composed access rules from policy.json
+ * @param rules - Composed access rules
  * @param metadata - Tool metadata from the registry
  * @returns Allowed, or denied with a teaching message
  */
@@ -128,10 +127,10 @@ export function decideAccess(rules: AccessRules, metadata: ToolMetadata): Access
 }
 
 /**
- * Decide with the rules of the loaded policy.json.
+ * Decide with the access rules loaded at startup.
  * @param metadata - Tool metadata from the registry
  * @returns Allowed, or denied with a teaching message
  */
 export function checkToolAccess(metadata: ToolMetadata): AccessDecision {
-  return decideAccess(getEngine().access, metadata);
+  return decideAccess(getAccessRules(), metadata);
 }

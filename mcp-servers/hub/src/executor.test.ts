@@ -23,6 +23,7 @@ import {
 } from './test-helpers.js';
 import type { ToolMetadata } from './hub-types.js';
 import { loadPolicy } from './policy.js';
+import { loadAccess } from './access-config.js';
 
 describe('executor', () => {
   beforeAll(() => {
@@ -1770,7 +1771,6 @@ describe('executor', () => {
     it('degrades to a generic message when the PII engine itself fails to tokenize an error', async () => {
       const policyModule = await import('./policy.js');
       const spy = vi.spyOn(policyModule, 'getEngine').mockReturnValue({
-        access: { default: 'full', services: {} },
         tokenize: () => {
           throw new Error('engine boom');
         },
@@ -1998,20 +1998,23 @@ describe('executor', () => {
 
     function applyAccess(access: unknown): void {
       policyDir = mkdtempSync(join(tmpdir(), 'hub-access-'));
-      const file = join(policyDir, 'policy.json');
       writeFileSync(
-        file,
+        join(policyDir, 'policy.json'),
         JSON.stringify({
           version: 3,
           source: { policies: [], forced: [] },
           rules: [],
           keywords: [],
-          access,
         })
       );
       writeFileSync(join(policyDir, 'key'), 'ab'.repeat(32));
-      vi.stubEnv('POLICY_FILE', file);
+      writeFileSync(
+        join(policyDir, 'access.json'),
+        JSON.stringify({ version: 1, ...(access as object) })
+      );
+      vi.stubEnv('POLICY_FILE', join(policyDir, 'policy.json'));
       loadPolicy();
+      loadAccess();
     }
 
     function annotate(service: string, tool: string, annotations: ToolMetadata['annotations']) {
@@ -2052,6 +2055,7 @@ describe('executor', () => {
       globalThis.fetch = originalFetch;
       vi.unstubAllEnvs();
       loadPolicy();
+      loadAccess();
       if (policyDir) {
         rmSync(policyDir, { recursive: true, force: true });
         policyDir = undefined;

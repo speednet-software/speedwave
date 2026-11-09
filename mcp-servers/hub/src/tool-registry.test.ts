@@ -29,7 +29,7 @@ import {
 import { TIMEOUTS } from '@speedwave/mcp-shared';
 import type { ToolMetadata } from './hub-types.js';
 import { populateRegistryWithMockTools, _resetRegistryForTesting } from './test-helpers.js';
-import * as policyModule from './policy.js';
+import * as accessConfig from './access-config.js';
 
 vi.mock('./tool-discovery.js', async (importOriginal) => {
   const original = await importOriginal<typeof import('./tool-discovery.js')>();
@@ -264,10 +264,9 @@ describe('tool-registry', () => {
 
     describe('under read-only access rules', () => {
       beforeEach(() => {
-        vi.spyOn(policyModule, 'getEngine').mockReturnValue({
-          access: { default: 'read_only', services: {} },
-          tokenize: (value: unknown) => ({ value, detections: [] }),
-          detokenize: (value: unknown) => value,
+        vi.spyOn(accessConfig, 'getAccessRules').mockReturnValue({
+          default: 'read_only',
+          services: {},
         });
         const slack = TOOL_REGISTRY['slack'] as Record<string, ToolMetadata>;
         slack['listChannelIds'] = {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import type { AccessRules } from '@speedwave/policy-engine';
+import type { AccessRules } from './access-config.js';
 import {
   decideAccess,
   readOnlyServices,

@@ -9,8 +9,8 @@ import {
   buildMockToolMetadata,
 } from './test-helpers.js';
 import type { ToolMetadata } from './hub-types.js';
-import * as policyModule from './policy.js';
-import type { AccessRules } from '@speedwave/policy-engine';
+import * as accessConfig from './access-config.js';
+import type { AccessRules } from './access-config.js';
 
 describe('searchTools', () => {
   const savedEnabledServices = process.env.ENABLED_SERVICES;
@@ -1338,11 +1338,7 @@ describe('searchTools under read-only access rules', () => {
   const savedEnabledServices = process.env.ENABLED_SERVICES;
 
   function useRules(access: AccessRules): void {
-    vi.spyOn(policyModule, 'getEngine').mockReturnValue({
-      access,
-      tokenize: (value: unknown) => ({ value, detections: [] }),
-      detokenize: (value: unknown) => value,
-    });
+    vi.spyOn(accessConfig, 'getAccessRules').mockReturnValue(access);
   }
 
   beforeEach(() => {

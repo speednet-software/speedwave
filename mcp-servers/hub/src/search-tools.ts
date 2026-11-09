@@ -14,7 +14,7 @@ import {
 import { sandboxGlobalName } from './service-list.js';
 import { enabledSandboxGlobals } from './executor.js';
 import { decideAccess, readOnlyNotice, readOnlyServices } from './access-policy.js';
-import { getEngine } from './policy.js';
+import { getAccessRules } from './access-config.js';
 
 /** Valid detail levels for search_tools, ascending verbosity (SSOT for schema and validation). */
 export const DETAIL_LEVELS = ['names_only', 'with_descriptions', 'full_schema'] as const;
@@ -233,7 +233,7 @@ export async function searchTools(params: SearchToolsParams): Promise<SearchTool
     return a.tool.name.localeCompare(b.tool.name);
   });
 
-  const rules = getEngine().access;
+  const rules = getAccessRules();
   const results: ToolSearchResult[] = scored.map(({ service: svc, tool }) => {
     const entry = buildSearchResult(svc, tool, detailLevel);
     const decision = decideAccess(rules, tool);
