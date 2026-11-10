@@ -98,7 +98,8 @@ describe('loadAccessRules', () => {
     const file = join(d, 'access.json');
     const writer = spawn(process.execPath, [
       '-e',
-      `setTimeout(() => require('fs').writeFileSync(${JSON.stringify(file)}, '{"version":1,"default":"read_only"}'), 100)`,
+      `setTimeout(() => require('fs').writeFileSync(process.argv[1], '{"version":1,"default":"read_only"}'), 100)`,
+      file,
     ]);
     const exited = new Promise((resolve) => writer.once('exit', resolve));
     await new Promise((resolve) => writer.once('spawn', resolve));
