@@ -16,14 +16,12 @@ export type AccessDecision =
 const OS_SERVICE = 'os';
 const OS_CATEGORIES = ['reminders', 'calendar', 'mail', 'notes'] as const;
 
-/**
- * Access mode of a service: its own entry, else the default.
- * @param rules - Composed access rules
- * @param service - Service name
- * @returns The mode that applies to the service
- */
-export function serviceAccessMode(rules: AccessRules, service: string): AccessMode {
+function serviceAccessMode(rules: AccessRules, service: string): AccessMode {
   return rules.services[service] ?? rules.default;
+}
+
+function isReadOnly(rules: AccessRules, service: string): boolean {
+  return serviceAccessMode(rules, service) === 'read_only';
 }
 
 function osKey(category: string): string {
@@ -33,9 +31,7 @@ function osKey(category: string): string {
 function toolAccessMode(rules: AccessRules, metadata: ToolMetadata): AccessMode {
   if (metadata.service !== OS_SERVICE) return serviceAccessMode(rules, metadata.service);
   if (metadata.osCategory) return serviceAccessMode(rules, osKey(metadata.osCategory));
-  return OS_CATEGORIES.some((c) => serviceAccessMode(rules, osKey(c)) === 'read_only')
-    ? 'read_only'
-    : 'full';
+  return OS_CATEGORIES.some((c) => isReadOnly(rules, osKey(c))) ? 'read_only' : 'full';
 }
 
 /**
@@ -51,9 +47,9 @@ export function readOnlyServices(
   disabledOs: ReadonlySet<string> = new Set()
 ): string[] {
   return services.flatMap((s) => {
-    if (s !== OS_SERVICE) return serviceAccessMode(rules, s) === 'read_only' ? [s] : [];
+    if (s !== OS_SERVICE) return isReadOnly(rules, s) ? [s] : [];
     const categories = OS_CATEGORIES.filter(
-      (c) => !disabledOs.has(c) && serviceAccessMode(rules, osKey(c)) === 'read_only'
+      (c) => !disabledOs.has(c) && isReadOnly(rules, osKey(c))
     );
     return categories.length > 0 ? [`${OS_SERVICE} (${categories.join(', ')})`] : [];
   });

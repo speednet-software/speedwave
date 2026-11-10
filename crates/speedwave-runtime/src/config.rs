@@ -6954,6 +6954,28 @@ mod tests {
     }
 
     #[test]
+    fn os_categories_match_the_hub_access_policy_ts() {
+        let ts = include_str!("../../../mcp-servers/hub/src/access-policy.ts");
+        let line = ts
+            .lines()
+            .find(|l| l.starts_with("const OS_CATEGORIES = ["))
+            .expect("OS_CATEGORIES in access-policy.ts");
+        let listed: Vec<&str> = line
+            .split('[')
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .expect("OS_CATEGORIES list")
+            .split(',')
+            .map(|item| item.trim().trim_matches('\''))
+            .collect();
+        let keys: Vec<&str> = crate::consts::TOGGLEABLE_OS_SERVICES
+            .iter()
+            .map(|svc| svc.config_key)
+            .collect();
+        assert_eq!(listed, keys);
+    }
+
+    #[test]
     fn full_entries_are_left_out_of_the_access_modes() {
         let mut integrations = IntegrationsConfig::default();
         integrations.set_access("slack", speedwave_access_policy::AccessMode::Full);

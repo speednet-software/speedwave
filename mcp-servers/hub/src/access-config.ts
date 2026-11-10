@@ -107,16 +107,16 @@ export function loadAccessRules(
 
 let rules: AccessRules | undefined;
 
-/** Load the access rules for this process. Called once at server startup; throws when the file is invalid (fail-closed). */
+/** Load the access rules for this process at server startup; throws when the file is invalid. */
 export function loadAccess(): void {
   rules = loadAccessRules();
 }
 
 /**
- * The access rules in effect for this process; every service `full` until `loadAccess()` has run.
+ * The access rules in effect for this process, loaded from `access.json` if `loadAccess()` has not run.
  * @returns The access rules
  */
 export function getAccessRules(): AccessRules {
-  rules ??= loadAccessRules({});
+  rules ??= loadAccessRules();
   return rules;
 }

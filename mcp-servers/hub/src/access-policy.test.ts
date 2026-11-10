@@ -1,11 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { AccessRules } from './access-config.js';
-import {
-  decideAccess,
-  readOnlyServices,
-  serviceAccessMode,
-  readOnlyNotice,
-} from './access-policy.js';
+import { decideAccess, readOnlyServices, readOnlyNotice } from './access-policy.js';
 import type { ToolMetadata } from './hub-types.js';
 
 const LONG_SERVICE = 'custom-' + 'a'.repeat(57);
@@ -201,17 +196,6 @@ describe('os sub-services', () => {
 
   it('leaves out a disabled read-only sub-service', () => {
     expect(readOnlyServices(MAIL_READ_ONLY, ['os'], new Set(['mail']))).toEqual([]);
-  });
-});
-
-describe('serviceAccessMode', () => {
-  it('uses the service entry over the default', () => {
-    expect(serviceAccessMode(SLACK_READ_ONLY, 'slack')).toBe('read_only');
-    expect(serviceAccessMode(SLACK_READ_ONLY, 'redmine')).toBe('full');
-  });
-
-  it('falls back to the default for an unnamed service', () => {
-    expect(serviceAccessMode(ALL_READ_ONLY, 'anything')).toBe('read_only');
   });
 });
 

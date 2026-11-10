@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
 import { readFileSync } from 'fs';
 import { tmpdir } from 'os';
@@ -108,5 +108,27 @@ describe('loadAccessRules', () => {
     expect(() => loadAccessRules({ POLICY_FILE: join(d, 'policy.json') })).toThrow(
       /access\.json is invalid/
     );
+  });
+});
+
+describe('getAccessRules', () => {
+  let dir: string | undefined;
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+    if (dir) rmSync(dir, { recursive: true, force: true });
+    dir = undefined;
+  });
+
+  it('reads access.json when loadAccess has not run, so a missed startup call does not open every service', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'hub-access-rules-'));
+    writeFileSync(join(dir, 'access.json'), '{"version":1,"default":"read_only"}');
+    vi.stubEnv('POLICY_FILE', join(dir, 'policy.json'));
+    vi.resetModules();
+
+    const { getAccessRules } = await import('./access-config.js');
+
+    expect(getAccessRules()).toEqual({ default: 'read_only', services: {} });
   });
 });
