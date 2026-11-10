@@ -6836,9 +6836,12 @@ mod tests {
     }
 
     #[test]
-    fn resolved_access_is_unrestricted_by_default() {
+    fn resolved_access_is_full_by_default() {
         let tmp = tempfile::tempdir().unwrap();
-        assert!(resolved_access(tmp.path(), false, None).is_unrestricted());
+        assert_eq!(
+            resolved_access(tmp.path(), false, None),
+            speedwave_access_policy::AccessPolicy::default()
+        );
     }
 
     #[test]

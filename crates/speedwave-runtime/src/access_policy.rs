@@ -8,8 +8,8 @@ pub fn access_config_path_in(data_dir: &Path, project: &str) -> PathBuf {
     crate::pii_policy::policy_config_dir_in(data_dir, project).join("access.json")
 }
 
-/// Writes the composed access policy as `access.json` next to `policy.json`, or removes the file
-/// while every service is `Full`.
+/// Writes the composed access policy as `access.json` next to `policy.json`, also while every
+/// service is `Full`, so the hub can read a missing file as an error.
 pub fn write_access_config_in(
     data_dir: &Path,
     project: &str,
@@ -18,12 +18,6 @@ pub fn write_access_config_in(
     let path = access_config_path_in(data_dir, project);
     let content = speedwave_access_policy::to_access_file(access)
         .map_err(|e| anyhow::anyhow!("invalid access policy: {e}"))?;
-    if access.is_unrestricted() {
-        return match std::fs::remove_file(&path) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
-            _ => Ok(()),
-        };
-    }
     crate::fs_perms::ensure_owner_only_dir(&crate::pii_policy::policy_config_dir_in(
         data_dir, project,
     ))?;
@@ -165,18 +159,26 @@ mod tests {
     }
 
     #[test]
-    fn no_access_file_is_written_while_every_service_is_full() {
+    fn an_access_file_is_written_while_every_service_is_full() {
         let tmp = tempfile::tempdir().unwrap();
         write_access_config_in(tmp.path(), "proj", &AccessPolicy::default()).unwrap();
-        assert!(!access_config_path_in(tmp.path(), "proj").exists());
+        let json = std::fs::read_to_string(access_config_path_in(tmp.path(), "proj")).unwrap();
+        assert_eq!(
+            speedwave_access_policy::parse_access_file(&json),
+            Ok(AccessPolicy::default())
+        );
     }
 
     #[test]
-    fn a_stale_access_file_is_removed_when_every_service_is_full_again() {
+    fn a_read_only_access_file_is_replaced_when_every_service_is_full_again() {
         let tmp = tempfile::tempdir().unwrap();
         write_access_config_in(tmp.path(), "proj", &read_only_policy()).unwrap();
         write_access_config_in(tmp.path(), "proj", &AccessPolicy::default()).unwrap();
-        assert!(!access_config_path_in(tmp.path(), "proj").exists());
+        let json = std::fs::read_to_string(access_config_path_in(tmp.path(), "proj")).unwrap();
+        assert_eq!(
+            speedwave_access_policy::parse_access_file(&json),
+            Ok(AccessPolicy::default())
+        );
     }
 
     #[test]

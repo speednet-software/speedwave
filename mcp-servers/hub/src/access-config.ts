@@ -1,10 +1,7 @@
 /**
- * Access rules: startup read of `access.json`, the sibling of `POLICY_FILE`.
+ * Startup read of `access.json` beside `POLICY_FILE`. The runtime writes it on every start, so a
+ * file still missing after the retries, or an invalid one, throws.
  * @module access-config
- *
- * Absent `POLICY_FILE` or an absent file means every service is `full`. A present file that
- * cannot be read or fails validation throws; `index.ts` is the single process-death point, so this
- * module never calls `process.exit`. The validation mirrors `crates/access-policy` (`parse_access_file`).
  */
 
 import { readFileSync } from 'node:fs';
@@ -19,12 +16,19 @@ export interface AccessRules {
   services: Record<string, AccessMode>;
 }
 
+/** How often, and how far apart, a missing `access.json` is read again before the load fails. */
+export interface ReadRetry {
+  attempts: number;
+  delayMs: number;
+}
+
 const ACCESS_FILE = 'access.json';
 const ACCESS_FILE_VERSION = 1;
 const MAX_ACCESS_FILE_BYTES = 65_536;
 const MAX_SERVICES = 256;
 const SERVICE_ID = /^[a-z][a-z0-9-]{0,63}$/;
 const KEYS = new Set(['version', 'default', 'services']);
+const STARTUP_RETRY: ReadRetry = { attempts: 20, delayMs: 250 };
 
 const ALL_FULL: AccessRules = { default: 'full', services: {} };
 
@@ -47,17 +51,18 @@ export function getAccessRules(): AccessRules {
 /**
  * Load the access rules next to `POLICY_FILE`.
  * @param env - Environment to read `POLICY_FILE` from
- * @returns The access rules; every service `full` when there is no file
+ * @param retry - Reads of a missing file before the load fails
+ * @returns The access rules; every service `full` without `POLICY_FILE`
  */
 export function loadAccessRules(
-  env: Record<string, string | undefined> = process.env
+  env: Record<string, string | undefined> = process.env,
+  retry: ReadRetry = STARTUP_RETRY
 ): AccessRules {
   const policyFile = env.POLICY_FILE;
   if (!policyFile) return ALL_FULL;
   const path = join(dirname(policyFile), ACCESS_FILE);
   try {
-    const text = readAccessFile(path);
-    return text === undefined ? ALL_FULL : parseAccessRules(text);
+    return parseAccessRules(readAccessFile(path, retry));
   } catch (e) {
     throw new Error(
       `Access config ${path} is invalid: ${e instanceof Error ? e.message : String(e)}`,
@@ -101,15 +106,18 @@ export function parseAccessRules(text: string): AccessRules {
   return { default: defaultMode, services };
 }
 
-function readAccessFile(path: string): string | undefined {
-  let bytes: Buffer;
-  try {
-    bytes = readFileSync(path);
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-    throw e;
+function readAccessFile(path: string, retry: ReadRetry): string {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(readFileSync(path));
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+      if (attempt >= retry.attempts) {
+        throw new Error(`file not found after ${retry.attempts} reads`, { cause: e });
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, retry.delayMs);
+    }
   }
-  return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

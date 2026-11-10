@@ -4325,13 +4325,19 @@ services:
 
     #[test]
     #[serial_test::parallel(host_addressing)]
-    fn test_rendered_access_json_is_absent_while_every_service_is_full() {
+    fn test_rendered_access_json_is_all_full_while_every_service_is_full() {
         let data_dir = tempfile::tempdir().unwrap();
         render_with_access(data_dir.path(), read_only_access());
         render_with_access(data_dir.path(), Default::default());
 
-        assert!(
-            !crate::access_policy::access_config_path_in(data_dir.path(), "test-project").exists()
+        let json = std::fs::read_to_string(crate::access_policy::access_config_path_in(
+            data_dir.path(),
+            "test-project",
+        ))
+        .unwrap();
+        assert_eq!(
+            speedwave_access_policy::parse_access_file(&json),
+            Ok(Default::default())
         );
     }
 

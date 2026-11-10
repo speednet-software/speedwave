@@ -5,9 +5,7 @@ import { Router } from '@angular/router';
 import { IntegrationAccessComponent } from './integration-access.component';
 import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
-import { LoggerService } from '../../services/logger.service';
 import { MockTauriService } from '../../testing/mock-tauri.service';
-import { makeMockLogger } from '../../testing/mock-logger';
 import { createDeferred } from '../../testing/deferred';
 import type { IntegrationAccessView } from '../../models/access';
 
@@ -18,7 +16,6 @@ function view(overrides?: Partial<IntegrationAccessView>): IntegrationAccessView
 describe('IntegrationAccessComponent', () => {
   let fixture: ComponentFixture<IntegrationAccessComponent>;
   let tauri: MockTauriService;
-  let logger: ReturnType<typeof makeMockLogger>;
   let projectState: {
     requestRestartFor: ReturnType<typeof vi.fn>;
   };
@@ -63,7 +60,6 @@ describe('IntegrationAccessComponent', () => {
       if (!handler) throw new Error(`unexpected ${cmd}`);
       return handler();
     };
-    logger = makeMockLogger();
     router = { navigate: vi.fn().mockResolvedValue(true) };
     projectState = {
       requestRestartFor: vi.fn(),
@@ -72,7 +68,6 @@ describe('IntegrationAccessComponent', () => {
       imports: [IntegrationAccessComponent],
       providers: [
         { provide: TauriService, useValue: tauri },
-        { provide: LoggerService, useValue: logger },
         { provide: ProjectStateService, useValue: projectState },
         { provide: Router, useValue: router },
       ],

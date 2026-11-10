@@ -1,9 +1,15 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
 import { readFileSync } from 'fs';
+import { spawn } from 'child_process';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { loadAccessRules, parseAccessRules, type AccessRules } from './access-config.js';
+import {
+  loadAccessRules,
+  parseAccessRules,
+  type AccessRules,
+  type ReadRetry,
+} from './access-config.js';
 
 interface FixtureCase {
   name: string;
@@ -69,9 +75,43 @@ describe('loadAccessRules', () => {
     expect(loadAccessRules({})).toEqual(FULL);
   });
 
-  it('is full for every service when the policy directory has no access.json', () => {
+  const ONE_READ: ReadRetry = { attempts: 1, delayMs: 0 };
+
+  it('throws when the policy directory has no access.json, so a missing file never opens every service', () => {
     const d = policyDir();
-    expect(loadAccessRules({ POLICY_FILE: join(d, 'policy.json') })).toEqual(FULL);
+    expect(() => loadAccessRules({ POLICY_FILE: join(d, 'policy.json') }, ONE_READ)).toThrow(
+      /access\.json is invalid: file not found after 1 reads/
+    );
+  });
+
+  it('reads a missing access.json again before it gives up', () => {
+    const d = policyDir();
+    const started = Date.now();
+    expect(() =>
+      loadAccessRules({ POLICY_FILE: join(d, 'policy.json') }, { attempts: 3, delayMs: 20 })
+    ).toThrow(/file not found after 3 reads/);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(40);
+  });
+
+  it('reads an access.json that appears while it retries', async () => {
+    const d = policyDir();
+    const file = join(d, 'access.json');
+    const writer = spawn(process.execPath, [
+      '-e',
+      `setTimeout(() => require('fs').writeFileSync(${JSON.stringify(file)}, '{"version":1,"default":"read_only"}'), 100)`,
+    ]);
+    const exited = new Promise((resolve) => writer.once('exit', resolve));
+    await new Promise((resolve) => writer.once('spawn', resolve));
+    expect(
+      loadAccessRules({ POLICY_FILE: join(d, 'policy.json') }, { attempts: 100, delayMs: 50 })
+    ).toEqual({ default: 'read_only', services: {} });
+    await exited;
+  });
+
+  it('reads an all-full access.json', () => {
+    const d = policyDir();
+    writeFileSync(join(d, 'access.json'), '{"version":1,"default":"full","services":{}}');
+    expect(loadAccessRules({ POLICY_FILE: join(d, 'policy.json') }, ONE_READ)).toEqual(FULL);
   });
 
   it('reads access.json from the directory of POLICY_FILE', () => {
@@ -105,7 +145,7 @@ describe('loadAccessRules', () => {
   it('throws when access.json cannot be read', () => {
     const d = policyDir();
     mkdirSync(join(d, 'access.json'));
-    expect(() => loadAccessRules({ POLICY_FILE: join(d, 'policy.json') })).toThrow(
+    expect(() => loadAccessRules({ POLICY_FILE: join(d, 'policy.json') }, ONE_READ)).toThrow(
       /access\.json is invalid/
     );
   });

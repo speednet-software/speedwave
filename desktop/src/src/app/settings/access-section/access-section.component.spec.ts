@@ -4,9 +4,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { AccessSectionComponent } from './access-section.component';
 import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
-import { LoggerService } from '../../services/logger.service';
 import { MockTauriService } from '../../testing/mock-tauri.service';
-import { makeMockLogger } from '../../testing/mock-logger';
 import { createDeferred } from '../../testing/deferred';
 import type { AccessSettingsView } from '../../models/access';
 
@@ -17,7 +15,6 @@ function view(overrides?: Partial<AccessSettingsView>): AccessSettingsView {
 describe('AccessSectionComponent', () => {
   let fixture: ComponentFixture<AccessSectionComponent>;
   let tauri: MockTauriService;
-  let logger: ReturnType<typeof makeMockLogger>;
   let projectState: {
     requestRestartFor: ReturnType<typeof vi.fn>;
   };
@@ -62,7 +59,6 @@ describe('AccessSectionComponent', () => {
       if (!handler) throw new Error(`unexpected ${cmd}`);
       return handler();
     };
-    logger = makeMockLogger();
     projectState = {
       requestRestartFor: vi.fn(),
     };
@@ -70,7 +66,6 @@ describe('AccessSectionComponent', () => {
       imports: [AccessSectionComponent],
       providers: [
         { provide: TauriService, useValue: tauri },
-        { provide: LoggerService, useValue: logger },
         { provide: ProjectStateService, useValue: projectState },
       ],
     });

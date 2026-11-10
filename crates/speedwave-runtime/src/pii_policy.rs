@@ -2254,17 +2254,18 @@ keywords: []
     fn policy_state_digest_covers_access_json() {
         let tmp = tempfile::tempdir().unwrap();
         write_policy_config_in(tmp.path(), "proj", &ResolvedPiiPolicy::default()).unwrap();
-        let without = policy_state_digest_in(tmp.path(), "proj");
+        crate::access_policy::write_access_config_in(tmp.path(), "proj", &Default::default())
+            .unwrap();
+        let full = policy_state_digest_in(tmp.path(), "proj");
         let access = speedwave_access_policy::AccessPolicy {
             default: speedwave_access_policy::AccessMode::ReadOnly,
             services: Default::default(),
         };
         crate::access_policy::write_access_config_in(tmp.path(), "proj", &access).unwrap();
-        let with = policy_state_digest_in(tmp.path(), "proj");
-        assert_ne!(without, with);
+        assert_ne!(full, policy_state_digest_in(tmp.path(), "proj"));
         crate::access_policy::write_access_config_in(tmp.path(), "proj", &Default::default())
             .unwrap();
-        assert_eq!(without, policy_state_digest_in(tmp.path(), "proj"));
+        assert_eq!(full, policy_state_digest_in(tmp.path(), "proj"));
     }
 
     #[test]

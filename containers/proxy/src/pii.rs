@@ -13,8 +13,6 @@ use speedwave_pii_engine::{
     DetokenizeError, EngineKey, ExternalSpan, ScanError,
 };
 
-/// How often a policy or key file that is not there yet is read again at startup: a freshly
-/// renamed file can be missing for a moment behind the macOS virtiofs mount.
 const READ_ATTEMPTS: u32 = 20;
 const READ_RETRY_DELAY: Duration = Duration::from_millis(250);
 
@@ -61,8 +59,8 @@ fn ephemeral_key() -> EngineKey {
     EngineKey::from_bytes(bytes)
 }
 
-/// Reads and compiles `policy_file` plus its sibling `key` file (mirrors
-/// `engine.ts::resolvePolicyAndKey`); any failure is `Failed`, never a silent default.
+/// Reads and compiles `policy_file` plus its sibling `key` file; any failure is `Failed`, never a
+/// silent default.
 fn load_from_file(policy_file: &Path, attempts: u32, delay: Duration) -> PiiEngineState {
     let policy_json = match read_retrying_not_found(policy_file, attempts, delay) {
         Ok(s) => s,
@@ -483,7 +481,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let started = std::time::Instant::now();
         let result = read_retrying_not_found(dir.path(), 50, Duration::from_millis(100));
-        assert!(result.is_err());
+        assert_ne!(result.unwrap_err().kind(), std::io::ErrorKind::NotFound);
         assert!(started.elapsed() < Duration::from_secs(1));
     }
 

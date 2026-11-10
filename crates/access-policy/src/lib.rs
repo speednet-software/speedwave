@@ -41,11 +41,6 @@ impl AccessPolicy {
         self.services.get(service).copied().unwrap_or(self.default)
     }
 
-    /// True when every service is `Full`.
-    pub fn is_unrestricted(&self) -> bool {
-        self.default == AccessMode::Full && self.services.values().all(|m| *m == AccessMode::Full)
-    }
-
     /// Checks the service count and ids.
     pub fn validate(&self) -> Result<(), String> {
         if self.services.len() > MAX_SERVICES {
@@ -152,9 +147,10 @@ mod tests {
     }
 
     #[test]
-    fn default_policy_is_unrestricted_full() {
+    fn default_policy_is_full_for_every_service() {
         let policy = AccessPolicy::default();
-        assert!(policy.is_unrestricted());
+        assert_eq!(policy.default, AccessMode::Full);
+        assert!(policy.services.is_empty());
         assert_eq!(policy.mode_of("slack"), AccessMode::Full);
     }
 
@@ -163,7 +159,7 @@ mod tests {
         let policy = policy(AccessMode::Full, &[("slack", AccessMode::ReadOnly)]);
         assert_eq!(policy.mode_of("slack"), AccessMode::ReadOnly);
         assert_eq!(policy.mode_of("redmine"), AccessMode::Full);
-        assert!(!policy.is_unrestricted());
+        assert_ne!(policy, AccessPolicy::default());
     }
 
     #[test]
@@ -211,7 +207,10 @@ mod tests {
 
     #[test]
     fn nothing_set_leaves_every_service_full() {
-        assert!(compose(false, false, &BTreeMap::new()).is_unrestricted());
+        assert_eq!(
+            compose(false, false, &BTreeMap::new()),
+            AccessPolicy::default()
+        );
     }
 
     #[test]
@@ -259,8 +258,7 @@ mod tests {
     #[test]
     fn a_full_service_entry_under_a_full_default_is_left_out() {
         let policy = compose(false, false, &modes(&[("slack", AccessMode::Full)]));
-        assert!(policy.services.is_empty());
-        assert!(policy.is_unrestricted());
+        assert_eq!(policy, AccessPolicy::default());
     }
 
     #[test]

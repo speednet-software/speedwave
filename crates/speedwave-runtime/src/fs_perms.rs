@@ -1295,4 +1295,13 @@ mod tests {
         assert!(write_restricted_file_atomic_if_changed(&path, "b").unwrap());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "b");
     }
+
+    #[test]
+    fn write_if_changed_reports_a_write_it_cannot_do() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.json");
+        std::fs::create_dir(&path).unwrap();
+        assert!(write_restricted_file_atomic_if_changed(&path, "a").is_err());
+        assert!(path.is_dir());
+    }
 }
