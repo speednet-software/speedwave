@@ -1,4 +1,4 @@
-/** Agent access of a project. */
+/** Integration access of a project. */
 export interface AccessSettingsView {
   read_only: boolean;
   read_only_locked: boolean;

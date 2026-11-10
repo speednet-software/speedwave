@@ -45,6 +45,7 @@ const EVENT_ROWS: readonly EventRow[] = [
   selector: 'app-notifications-section',
   imports: [ToggleComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
+  host: { class: 'block' },
   template: `
     <section
       id="section-notifications"

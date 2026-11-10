@@ -26,6 +26,7 @@ import {
 } from '../models/integration';
 import { ServiceCardComponent, SaveCredentialsEvent } from './service-card/service-card.component';
 import { IntegrationAccessComponent } from '../shared/integration-access/integration-access.component';
+import { ReadOnlyBannerComponent } from '../shared/read-only-banner/read-only-banner.component';
 import { RedmineConfigComponent } from './redmine-config/redmine-config.component';
 import { GitRepositoriesComponent } from './git-repositories/git-repositories.component';
 import { IdeBridgeComponent } from './ide-bridge/ide-bridge.component';
@@ -58,6 +59,7 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
     RedmineConfigComponent,
     GitRepositoriesComponent,
     IntegrationAccessComponent,
+    ReadOnlyBannerComponent,
     IdeBridgeComponent,
     ProjectPillComponent,
   ],
@@ -80,6 +82,8 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
 
     <div class="flex-1 overflow-y-auto p-4 md:p-6" data-testid="integrations-body">
       <div class="mx-auto max-w-3xl">
+        <app-read-only-banner [project]="activeProject" [mentionsBrowser]="true" />
+
         @if (error) {
           <div
             class="mb-4 rounded ring-1 ring-red-500/40 bg-red-500/[0.06] px-3 py-2 text-[12px] text-red-300 whitespace-pre-line"

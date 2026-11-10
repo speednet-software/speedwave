@@ -66,7 +66,7 @@ pub fn set_read_only(
 ) -> Result<(), String> {
     if read_only_state(user_config, project, managed).locked {
         return Err(
-            "Read-only mode is set by your organization and cannot be changed here.".to_string(),
+            "Read-only access is set by your organization and cannot be changed here.".to_string(),
         );
     }
     let entry = user_config

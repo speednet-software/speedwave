@@ -64,6 +64,12 @@ describe('SleepSectionComponent', () => {
     }).compileComponents();
   });
 
+  it('is a block so the page spacing applies above it', async () => {
+    const el = await render();
+
+    expect(el.classList).toContain('block');
+  });
+
   it('shows the switch on by default and explains what still puts the computer to sleep', async () => {
     const el = await render();
 

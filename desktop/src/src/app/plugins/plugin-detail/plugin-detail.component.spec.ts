@@ -336,6 +336,22 @@ describe('PluginDetailComponent', () => {
     expect(calls).toContainEqual({ project: 'test-project', service: 'example-plugin' });
   });
 
+  it('explains the project-wide read-only mode next to the plugin Access control', async () => {
+    const { component, fixture } = setup();
+    const base = mockTauri.invokeHandler;
+    mockTauri.invokeHandler = (cmd: string, args?: Record<string, unknown>) =>
+      cmd === 'get_integration_access'
+        ? Promise.resolve({ mode: 'full', global_read_only: true, global_locked: false })
+        : base(cmd, args);
+    await initAndDetect(component, fixture);
+    await fixture.whenStable();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    fixture.detectChanges();
+
+    const reason = fixture.nativeElement.querySelector('[data-testid="integration-access-reason"]');
+    expect(reason?.textContent).toContain('All integrations and plugins are read-only');
+  });
+
   it('shows no Access control for a plugin without a service id', async () => {
     const { component, fixture } = setupWithPlugin({ service_id: null });
     await initAndDetect(component, fixture);

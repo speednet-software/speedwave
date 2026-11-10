@@ -113,6 +113,23 @@ describe('PluginsComponent', () => {
     expect(component).toBeTruthy();
   });
 
+  it('shows the read-only banner while every integration and plugin is read-only', async () => {
+    const base = mockTauri.invokeHandler;
+    mockTauri.invokeHandler = (cmd: string, args?: Record<string, unknown>) =>
+      cmd === 'get_access_settings'
+        ? Promise.resolve({ read_only: true, read_only_locked: false })
+        : base(cmd, args);
+    await component.ngOnInit();
+    fixture.detectChanges();
+    await fixture.whenStable();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    fixture.detectChanges();
+
+    const banner = fixture.nativeElement.querySelector('[data-testid="read-only-banner"]');
+    expect(banner?.textContent).toContain('All integrations and plugins are read-only');
+    expect(banner?.textContent).not.toContain('Playwright');
+  });
+
   it('should load active project and plugins on init', async () => {
     await component.ngOnInit();
     expect(component.activeProject).toBe('test-project');

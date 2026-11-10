@@ -36,10 +36,11 @@ describe('IntegrationAccessComponent', () => {
     fixture.detectChanges();
   };
 
-  async function create(service = 'slack'): Promise<void> {
+  async function create(service = 'slack', explainGlobal = false): Promise<void> {
     fixture = TestBed.createComponent(IntegrationAccessComponent);
     fixture.componentRef.setInput('project', 'proj');
     fixture.componentRef.setInput('service', service);
+    fixture.componentRef.setInput('explainGlobal', explainGlobal);
     fixture.detectChanges();
     await settle();
   }
@@ -190,23 +191,56 @@ describe('IntegrationAccessComponent', () => {
     expect(button('integration-access-full').getAttribute('aria-checked')).toBe('false');
     expect(button('integration-access-full').disabled).toBe(true);
     expect(button('integration-access-read-only').disabled).toBe(true);
-    expect(el('integration-access-reason')?.textContent).toContain('Agent access');
-    expect(el('integration-access-reason')?.textContent).not.toContain('organization');
   });
 
-  it('says the organization set it when MDM forces the mode', async () => {
+  it('leaves the reason to the screen banner and puts a hint on the buttons', async () => {
+    responses['get_integration_access'] = async () => view({ global_read_only: true });
+    await create();
+
+    expect(el('integration-access-reason')).toBeNull();
+    expect(button('integration-access-full').title).toBe(
+      'Set for all integrations and plugins in Settings, Integration access'
+    );
+    expect(button('integration-access-read-only').title).toBe(
+      'Set for all integrations and plugins in Settings, Integration access'
+    );
+  });
+
+  it('names the organization in the hint when MDM forces the mode', async () => {
     responses['get_integration_access'] = async () =>
       view({ global_read_only: true, global_locked: true });
     await create();
 
     expect(button('integration-access-full').disabled).toBe(true);
+    expect(button('integration-access-full').title).toBe(
+      'Set for all integrations and plugins by your organization'
+    );
+  });
+
+  it('explains the global mode in place when asked to, without a hint', async () => {
+    responses['get_integration_access'] = async () => view({ global_read_only: true });
+    await create('example-plugin', true);
+
+    expect(el('integration-access-reason')?.textContent).toContain(
+      'All integrations and plugins are read-only (Settings, Integration access)'
+    );
+    expect(el('integration-access-reason')?.textContent).not.toContain('organization');
+    expect(button('integration-access-full').hasAttribute('title')).toBe(false);
+  });
+
+  it('says in place that the organization set it when asked to explain', async () => {
+    responses['get_integration_access'] = async () =>
+      view({ global_read_only: true, global_locked: true });
+    await create('example-plugin', true);
+
     expect(el('integration-access-reason')?.textContent).toContain('Set by your organization');
   });
 
-  it('shows no reason while the control is editable', async () => {
-    await create();
+  it('shows no reason and no hint while the control is editable', async () => {
+    await create('slack', true);
 
     expect(el('integration-access-reason')).toBeNull();
+    expect(button('integration-access-full').hasAttribute('title')).toBe(false);
   });
 
   it('reports a rejected save in place and shows the stored mode', async () => {
@@ -261,6 +295,15 @@ describe('IntegrationAccessComponent', () => {
       expect(el('integration-access-help')?.textContent).toContain('git push');
     }
   );
+
+  it('says that read-only stops the browser for playwright', async () => {
+    await create('playwright');
+
+    expect(el('integration-access-help')?.textContent).toContain(
+      'the browser does not work in this mode'
+    );
+    expect(el('integration-access-help')?.textContent).not.toContain('git push');
+  });
 
   it('does not mention git push for a service without git', async () => {
     await create('slack');

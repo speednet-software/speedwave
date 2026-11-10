@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { provideRouter } from '@angular/router';
 import { IntegrationsComponent } from './integrations.component';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
@@ -182,6 +183,7 @@ describe('IntegrationsComponent', () => {
         { provide: TauriService, useValue: mockTauri },
         { provide: LoggerService, useValue: mockLogger },
         { provide: BetaService, useValue: { enabled: betaEnabled.asReadonly() } },
+        provideRouter([]),
       ],
     }).compileComponents();
 
@@ -199,6 +201,23 @@ describe('IntegrationsComponent', () => {
 
   it('should create', () => {
     expect(component).toBeTruthy();
+  });
+
+  it('shows the read-only banner while every integration and plugin is read-only', async () => {
+    const base = mockTauri.invokeHandler;
+    mockTauri.invokeHandler = (cmd: string, args?: Record<string, unknown>) =>
+      cmd === 'get_access_settings'
+        ? Promise.resolve({ read_only: true, read_only_locked: false })
+        : base(cmd, args);
+    await component.ngOnInit();
+    fixture.detectChanges();
+    await fixture.whenStable();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    fixture.detectChanges();
+
+    const banner = fixture.nativeElement.querySelector('[data-testid="read-only-banner"]');
+    expect(banner?.textContent).toContain('All integrations and plugins are read-only');
+    expect(banner?.textContent).toContain('Playwright cannot open pages in this mode');
   });
 
   it('should load active project and integrations on init', async () => {

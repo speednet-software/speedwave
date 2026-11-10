@@ -197,7 +197,11 @@ const NO_ACTIVE_PROJECT_MSG = 'No active project — open or create a project fi
                   class="mb-4 rounded border border-[var(--line)] bg-[var(--bg-1)] p-4"
                   data-testid="plugin-access"
                 >
-                  <app-integration-access [project]="activeProject" [service]="plugin.service_id" />
+                  <app-integration-access
+                    [project]="activeProject"
+                    [service]="plugin.service_id"
+                    [explainGlobal]="true"
+                  />
                 </div>
               }
 

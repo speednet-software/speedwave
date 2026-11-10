@@ -15,43 +15,44 @@ import { ToggleComponent } from '../../shared/toggle.component';
 import { AccessSettingsView } from '../../models/access';
 import { errorText } from '../../shared/error-text';
 
-/** Agent access section. */
+/** Integration access section. */
 @Component({
   selector: 'app-access-section',
   imports: [ToggleComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
+  host: { class: 'block' },
   template: `
     <section
       id="section-access"
       class="border-t border-[var(--line)] pt-6"
       data-testid="settings-section-access"
     >
-      <h2 class="view-title view-title-section text-[var(--ink)]">Agent access</h2>
-      <p class="mt-1 text-[12.5px] leading-relaxed text-[var(--ink-dim)]">
-        In read-only mode the agent reads from every integration but cannot change anything in it:
-        tools that send, create, edit or delete are blocked, and a blocked call returns an
-        explanation to the agent. Tools that only save files into the project folder, such as
-        downloads and generated documents, still work.
+      <h2 class="view-title view-title-section text-[var(--ink)]">Integration access</h2>
+      <p
+        class="mt-1 text-[12.5px] leading-relaxed text-[var(--ink-dim)]"
+        data-testid="read-only-intro"
+      >
+        Read-only stops the agent from changing anything in the services Speedwave connects to: it
+        cannot send messages, edit issues or push code. It can still read from them.
       </p>
 
       @let current = view();
       @if (current !== null) {
         <div class="mt-4 flex items-center justify-between gap-3">
           <div>
-            <div class="text-[12px] text-[var(--ink)]">Read-only mode</div>
+            <div class="text-[12px] text-[var(--ink)]">All integrations and plugins read-only</div>
+            <div class="text-[11px] text-[var(--ink-mute)]" data-testid="read-only-summary">
+              Applies to every integration, macOS integration and installed plugin.
+            </div>
             @if (current.read_only_locked) {
               <div class="text-[11px] text-[var(--ink-mute)]" data-testid="read-only-locked-note">
                 Set by your organization. It cannot be changed here.
-              </div>
-            } @else {
-              <div class="text-[11px] text-[var(--ink-mute)]">
-                Speedwave restarts the hub and the proxy to apply the change.
               </div>
             }
           </div>
           <app-toggle
             testId="read-only-toggle"
-            ariaLabel="Read-only mode"
+            ariaLabel="All integrations and plugins read-only"
             [checked]="current.read_only"
             [disabled]="current.read_only_locked || busy()"
             (changed)="onToggle($event)"
@@ -59,20 +60,46 @@ import { errorText } from '../../shared/error-text';
         </div>
       }
 
-      <div
-        class="mt-4 text-[11px] leading-relaxed text-[var(--ink-mute)]"
-        data-testid="read-only-help"
+      <details
+        class="mt-4 rounded border border-[var(--line)] bg-[var(--bg-1)] px-3 py-3"
+        data-testid="read-only-details"
       >
-        <p>Read-only mode does not cover:</p>
-        <ul class="mt-1 list-disc pl-5">
-          <li>
-            The agent's built-in tools in the container: editing files, running commands and
-            fetching web pages.
-          </li>
-          <li>Internet access from the container.</li>
-          <li>Credentials you put into the container by hand.</li>
-        </ul>
-      </div>
+        <summary class="cursor-pointer select-none text-[12px] text-[var(--ink-dim)]">
+          What read-only blocks and allows
+        </summary>
+        <dl
+          class="mt-3 space-y-2 text-[11.5px] leading-relaxed text-[var(--ink-dim)]"
+          data-testid="read-only-help"
+        >
+          <div>
+            <dt class="text-[var(--ink)]">Blocked</dt>
+            <dd>
+              Changes in every integration, macOS integration and installed plugin: no messages
+              sent, no issues created or edited, nothing deleted, no git push.
+            </dd>
+          </div>
+          <div>
+            <dt class="text-[var(--ink)]">Still works</dt>
+            <dd>
+              Reading from them, and the agent's work in the project: it edits files, runs commands
+              and saves downloads and documents into the project folder.
+            </dd>
+          </div>
+          <div>
+            <dt class="text-[var(--ink)]">Not covered</dt>
+            <dd>
+              Internet access from the container, credentials you put into the container by hand.
+            </dd>
+          </div>
+          <div>
+            <dt class="text-[var(--ink)]">One integration only</dt>
+            <dd>Set its Access to Read-only in its panel.</dd>
+          </div>
+        </dl>
+        <p class="mt-3 text-[11px] text-[var(--ink-mute)]">
+          Changing the switch restarts the hub and the proxy.
+        </p>
+      </details>
     </section>
   `,
 })

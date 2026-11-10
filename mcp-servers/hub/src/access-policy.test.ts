@@ -98,7 +98,7 @@ describe('decideAccess', () => {
     expect(decision.message).toContain('Read-only mode');
     expect(decision.message).toContain('slack.sendChannel');
     expect(decision.message).toContain('Reads');
-    expect(decision.message).toContain('Agent access in the project settings');
+    expect(decision.message).toContain('Settings, Integration access');
     expect(decision.message).toContain('organization');
   });
 
@@ -109,7 +109,7 @@ describe('decideAccess', () => {
     );
     if (decision.allowed) throw new Error('expected a denial');
     expect(decision.message).toContain('Access setting of this integration');
-    expect(decision.message).not.toContain('Agent access');
+    expect(decision.message).not.toContain('Integration access');
     expect(decision.message).not.toContain('organization');
   });
 

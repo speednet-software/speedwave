@@ -82,11 +82,13 @@ describe('AccessSectionComponent', () => {
     });
   });
 
-  it('shows the Agent access section with the read-only switch off by default', async () => {
+  it('shows the Integration access section with the read-only switch off by default', async () => {
     await create();
 
-    expect(el('settings-section-access')?.textContent).toContain('Agent access');
-    expect(el('settings-section-access')?.textContent).toContain('Read-only mode');
+    expect(el('settings-section-access')?.textContent).toContain('Integration access');
+    expect(el('settings-section-access')?.textContent).toContain(
+      'All integrations and plugins read-only'
+    );
     expect(toggle().checked).toBe(false);
     expect(toggle().disabled).toBe(false);
     expect(invoked('get_access_settings')[0].args).toEqual({ project: 'proj' });
@@ -174,14 +176,51 @@ describe('AccessSectionComponent', () => {
     expect(el('read-only-locked-note')).toBeNull();
   });
 
-  it('lists what read-only mode does not cover', async () => {
+  it('says what the section is for under its title', async () => {
+    await create();
+
+    expect(el('read-only-intro')?.textContent).toContain(
+      'Read-only stops the agent from changing anything in the services Speedwave connects to'
+    );
+    expect(el('read-only-intro')?.textContent).toContain('It can still read from them');
+  });
+
+  it('names the scope of the switch next to it', async () => {
+    await create();
+
+    expect(el('read-only-summary')?.textContent).toContain(
+      'Applies to every integration, macOS integration and installed plugin'
+    );
+  });
+
+  it('is a block so the page spacing applies above it', async () => {
+    await create();
+
+    expect(fixture.nativeElement.classList).toContain('block');
+  });
+
+  it('keeps the details folded until asked', async () => {
+    await create();
+
+    const details = el('read-only-details') as HTMLDetailsElement;
+    expect(details.open).toBe(false);
+    expect(details.querySelector('summary')?.textContent).toContain(
+      'What read-only blocks and allows'
+    );
+  });
+
+  it('says the switch covers integrations and plugins, not the work in the project', async () => {
     await create();
 
     const help = el('read-only-help')?.textContent ?? '';
-    expect(help).toContain("The agent's built-in tools in the container");
-    expect(help).not.toContain('Claude Code');
+    expect(help).toContain('every integration, macOS integration and installed plugin');
+    expect(help).toContain('no git push');
+    expect(help).toContain("the agent's work in the project");
     expect(help).toContain('Internet access from the container');
-    expect(help).toContain('Credentials you put into the container by hand');
+    expect(help).toContain('credentials you put into the container');
+    expect(help).toContain('Set its Access to Read-only in its panel');
+    expect(help).not.toContain('Claude Code');
+    expect(el('read-only-details')?.textContent).toContain('restarts the hub and the proxy');
   });
 
   it('reports a rejected save, restarts nothing and shows the stored mode', async () => {
@@ -193,11 +232,11 @@ describe('AccessSectionComponent', () => {
     toggle().dispatchEvent(new Event('change'));
     fixture.detectChanges();
     expect(toggle().checked).toBe(true);
-    pending.reject('Read-only mode is set by your organization and cannot be changed here.');
+    pending.reject('Read-only access is set by your organization and cannot be changed here.');
     await settle();
 
     expect(errors).toEqual([
-      'Read-only mode is set by your organization and cannot be changed here.',
+      'Read-only access is set by your organization and cannot be changed here.',
     ]);
     expect(invoked('restart_hub')).toHaveLength(0);
     expect(invoked('get_access_settings')).toHaveLength(2);

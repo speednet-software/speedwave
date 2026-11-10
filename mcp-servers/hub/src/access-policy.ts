@@ -90,7 +90,7 @@ function turnOffHint(rules: AccessRules, metadata: ToolMetadata): string {
   const perService = modeEntryKeys(metadata).some((key) => rules.services[key] === 'read_only');
   return perService
     ? 'Turn it off in Speedwave Desktop: the Access setting of this integration.'
-    : 'Turn it off in Speedwave Desktop: Agent access in the project settings, unless the organization enforces the mode.';
+    : 'Turn it off in Speedwave Desktop: Settings, Integration access, unless the organization enforces the mode.';
 }
 
 function blockedBecause(service: string, metadata: ToolMetadata): string {
