@@ -2146,14 +2146,14 @@ fn clear_active_llm_provider_in(
     .map_err(|e: anyhow::Error| e.to_string())
 }
 
-fn ensure_service_restart_for_active_project(
+fn ensure_proxy_restart_for_active_project(
     active: Option<&str>,
     project: &str,
 ) -> Result<(), String> {
     match active {
         Some(active) if active == project => Ok(()),
         Some(active) => Err(format!(
-            "the active project is now '{active}', not '{project}'; its service was not restarted"
+            "the active project is now '{active}', not '{project}'; its proxy was not restarted"
         )),
         None => Err("No active project".to_string()),
     }
@@ -2161,23 +2161,14 @@ fn ensure_service_restart_for_active_project(
 
 #[tauri::command]
 pub async fn restart_llm_proxy(project: String) -> Result<(), String> {
-    restart_project_service(&project, "proxy")
-}
-
-#[tauri::command]
-pub async fn restart_hub(project: String) -> Result<(), String> {
-    restart_project_service(&project, "mcp-hub")
-}
-
-fn restart_project_service(project: &str, service: &str) -> Result<(), String> {
-    check_project(project)?;
+    check_project(&project)?;
     let active = config::load_user_config()
         .map_err(|e| e.to_string())?
         .active_project;
-    ensure_service_restart_for_active_project(active.as_deref(), project)?;
-    render_and_save_compose(project)?;
+    ensure_proxy_restart_for_active_project(active.as_deref(), &project)?;
+    render_and_save_compose(&project)?;
     let rt = speedwave_runtime::runtime::detect_runtime();
-    rt.compose_up_service(project, service)
+    rt.compose_up_service(&project, "proxy")
         .map_err(|e| e.to_string())
 }
 
@@ -2895,17 +2886,17 @@ mod tests {
     }
 
     #[test]
-    fn a_service_restart_is_only_for_the_active_project() {
+    fn a_proxy_restart_is_only_for_the_active_project() {
         assert_eq!(
-            ensure_service_restart_for_active_project(Some("alpha"), "alpha"),
+            ensure_proxy_restart_for_active_project(Some("alpha"), "alpha"),
             Ok(())
         );
-        let other = ensure_service_restart_for_active_project(Some("beta"), "alpha").unwrap_err();
+        let other = ensure_proxy_restart_for_active_project(Some("beta"), "alpha").unwrap_err();
         assert!(
             other.contains("'beta'") && other.contains("'alpha'"),
             "{other}"
         );
-        assert!(ensure_service_restart_for_active_project(None, "alpha").is_err());
+        assert!(ensure_proxy_restart_for_active_project(None, "alpha").is_err());
     }
 
     #[test]

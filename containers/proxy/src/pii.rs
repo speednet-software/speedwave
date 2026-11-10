@@ -2,6 +2,7 @@
 //! `messages[].content` before every forward using the same crate the hub wraps in wasm.
 
 use std::path::Path;
+use std::time::Duration;
 
 use rand::RngCore;
 use speedwave_pii_engine::{
@@ -11,6 +12,11 @@ use speedwave_pii_engine::{
     unalias_text_preserving_tokens_with, CompiledKeyword, CompiledPolicy, Detection,
     DetokenizeError, EngineKey, ExternalSpan, ScanError,
 };
+
+/// How often a policy or key file that is not there yet is read again at startup: a freshly
+/// renamed file can be missing for a moment behind the macOS virtiofs mount.
+const READ_ATTEMPTS: u32 = 20;
+const READ_RETRY_DELAY: Duration = Duration::from_millis(250);
 
 /// Loaded PII engine state: ready to scan, or a fatal load error. `Failed` is surfaced by
 /// every `/v1/messages` call as a 5xx: never a silent fallback to an unscanned forward.
@@ -32,7 +38,7 @@ pub fn load_engine_state() -> std::sync::Arc<PiiEngineState> {
 
 fn load_engine_state_from_env(policy_file: Option<String>) -> PiiEngineState {
     match policy_file {
-        Some(path) => load_from_file(Path::new(&path)),
+        Some(path) => load_from_file(Path::new(&path), READ_ATTEMPTS, READ_RETRY_DELAY),
         None => default_state(),
     }
 }
@@ -57,8 +63,8 @@ fn ephemeral_key() -> EngineKey {
 
 /// Reads and compiles `policy_file` plus its sibling `key` file (mirrors
 /// `engine.ts::resolvePolicyAndKey`); any failure is `Failed`, never a silent default.
-fn load_from_file(policy_file: &Path) -> PiiEngineState {
-    let policy_json = match std::fs::read_to_string(policy_file) {
+fn load_from_file(policy_file: &Path, attempts: u32, delay: Duration) -> PiiEngineState {
+    let policy_json = match read_retrying_not_found(policy_file, attempts, delay) {
         Ok(s) => s,
         Err(e) => {
             return PiiEngineState::Failed(format!(
@@ -82,7 +88,7 @@ fn load_from_file(policy_file: &Path) -> PiiEngineState {
             policy_file.display()
         ));
     };
-    let key_hex = match std::fs::read_to_string(&key_path) {
+    let key_hex = match read_retrying_not_found(&key_path, attempts, delay) {
         Ok(s) => s,
         Err(e) => {
             return PiiEngineState::Failed(format!(
@@ -95,6 +101,23 @@ fn load_from_file(policy_file: &Path) -> PiiEngineState {
         Ok(key) => PiiEngineState::Ready { policy, key },
         Err(e) => {
             PiiEngineState::Failed(format!("decoding policy key '{}': {e}", key_path.display()))
+        }
+    }
+}
+
+fn read_retrying_not_found(
+    path: &Path,
+    attempts: u32,
+    delay: Duration,
+) -> std::io::Result<String> {
+    let mut attempt = 1;
+    loop {
+        match std::fs::read_to_string(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && attempt < attempts => {
+                attempt += 1;
+                std::thread::sleep(delay);
+            }
+            result => return result,
         }
     }
 }
@@ -432,8 +455,36 @@ mod tests {
 
     #[test]
     fn missing_policy_file_fails_closed() {
-        let state = load_engine_state_from_env(Some("/nonexistent/policy.json".to_string()));
+        let state = load_from_file(
+            Path::new("/nonexistent/policy.json"),
+            3,
+            Duration::from_millis(1),
+        );
         assert!(matches!(state, PiiEngineState::Failed(_)));
+    }
+
+    #[test]
+    fn a_policy_file_that_appears_while_retrying_loads_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.json");
+        std::fs::write(dir.path().join("key"), "ab".repeat(32)).unwrap();
+        let late = path.clone();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            std::fs::write(&late, default_policy_json()).unwrap();
+        });
+        let state = load_from_file(&path, 200, Duration::from_millis(5));
+        writer.join().unwrap();
+        assert!(matches!(state, PiiEngineState::Ready { .. }));
+    }
+
+    #[test]
+    fn a_read_error_other_than_not_found_is_not_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let started = std::time::Instant::now();
+        let result = read_retrying_not_found(dir.path(), 50, Duration::from_millis(100));
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]
@@ -441,7 +492,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("policy.json");
         std::fs::write(&path, "not json").unwrap();
-        assert!(matches!(load_from_file(&path), PiiEngineState::Failed(_)));
+        assert!(matches!(load_from_file(&path, 1, Duration::ZERO), PiiEngineState::Failed(_)));
     }
 
     #[test]
@@ -449,7 +500,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("policy.json");
         std::fs::write(&path, default_policy_json()).unwrap();
-        assert!(matches!(load_from_file(&path), PiiEngineState::Failed(_)));
+        assert!(matches!(load_from_file(&path, 1, Duration::ZERO), PiiEngineState::Failed(_)));
     }
 
     #[test]
@@ -458,7 +509,7 @@ mod tests {
         let path = dir.path().join("policy.json");
         std::fs::write(&path, default_policy_json()).unwrap();
         std::fs::write(dir.path().join("key"), "not-hex").unwrap();
-        assert!(matches!(load_from_file(&path), PiiEngineState::Failed(_)));
+        assert!(matches!(load_from_file(&path, 1, Duration::ZERO), PiiEngineState::Failed(_)));
     }
 
     #[test]
@@ -468,7 +519,7 @@ mod tests {
         std::fs::write(&path, default_policy_json()).unwrap();
         std::fs::write(dir.path().join("key"), "ab".repeat(32)).unwrap();
         assert!(matches!(
-            load_from_file(&path),
+            load_from_file(&path, 1, Duration::ZERO),
             PiiEngineState::Ready { .. }
         ));
     }

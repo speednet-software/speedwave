@@ -11,7 +11,7 @@ import {
 import { Router } from '@angular/router';
 
 import { TauriService } from '../../services/tauri.service';
-import { AccessRestartService } from '../../services/access-restart.service';
+import { ProjectStateService } from '../../services/project-state.service';
 import { AccessMode, IntegrationAccessView, READ_ONLY_SECTION_ID } from '../../models/access';
 import { BROWSER_SERVICE, isGitForge } from '../../models/integration';
 import { errorText } from '../error-text';
@@ -93,7 +93,7 @@ export class IntegrationAccessComponent {
   });
 
   private readonly tauri = inject(TauriService);
-  private readonly hub = inject(AccessRestartService);
+  private readonly projectState = inject(ProjectStateService);
   private readonly router = inject(Router);
 
   /** Reloads the view when the project or integration changes. */
@@ -130,7 +130,7 @@ export class IntegrationAccessComponent {
         mode,
       });
       if (this.project() === project && this.service() === service) this.view.set(next);
-      await this.hub.apply(project);
+      this.projectState.requestRestartFor(project);
     } catch (e: unknown) {
       this.error.set(errorText(e));
       await this.load(project, service);

@@ -20,8 +20,6 @@ describe('IntegrationAccessComponent', () => {
   let tauri: MockTauriService;
   let logger: ReturnType<typeof makeMockLogger>;
   let projectState: {
-    isSettledOn: ReturnType<typeof vi.fn>;
-    status: ReturnType<typeof vi.fn>;
     requestRestartFor: ReturnType<typeof vi.fn>;
   };
   let router: { navigate: ReturnType<typeof vi.fn> };
@@ -57,8 +55,6 @@ describe('IntegrationAccessComponent', () => {
     responses = {
       get_integration_access: async () => view(),
       set_integration_access_mode: async () => view({ mode: 'read_only' }),
-      restart_hub: async () => undefined,
-      restart_llm_proxy: async () => undefined,
     };
     tauri = new MockTauriService();
     tauri.invokeHandler = async (cmd, args) => {
@@ -70,8 +66,6 @@ describe('IntegrationAccessComponent', () => {
     logger = makeMockLogger();
     router = { navigate: vi.fn().mockResolvedValue(true) };
     projectState = {
-      isSettledOn: vi.fn().mockReturnValue(true),
-      status: vi.fn().mockReturnValue('ready'),
       requestRestartFor: vi.fn(),
     };
     TestBed.configureTestingModule({
@@ -131,7 +125,7 @@ describe('IntegrationAccessComponent', () => {
     expect(toggle().checked).toBe(true);
   });
 
-  it('stores always read-only and restarts the hub and the proxy', async () => {
+  it('stores always read-only and asks for a restart of the project', async () => {
     await create('mail');
 
     flip(true);
@@ -142,9 +136,7 @@ describe('IntegrationAccessComponent', () => {
       service: 'mail',
       mode: 'read_only',
     });
-    expect(invoked('restart_hub')[0].args).toEqual({ project: 'proj' });
-    expect(invoked('restart_llm_proxy')[0].args).toEqual({ project: 'proj' });
-    expect(projectState.requestRestartFor).not.toHaveBeenCalled();
+    expect(projectState.requestRestartFor).toHaveBeenCalledWith('proj');
     expect(toggle().checked).toBe(true);
   });
 
@@ -158,43 +150,6 @@ describe('IntegrationAccessComponent', () => {
 
     expect(invoked('set_integration_access_mode')[0].args).toMatchObject({ mode: 'full' });
     expect(toggle().checked).toBe(false);
-  });
-
-  it('asks for a restart of the project when it is not ready to restart the hub alone', async () => {
-    projectState.status.mockReturnValue('loading');
-    await create();
-
-    flip(true);
-    await settle();
-
-    expect(invoked('restart_hub')).toHaveLength(0);
-    expect(invoked('restart_llm_proxy')).toHaveLength(0);
-    expect(projectState.requestRestartFor).toHaveBeenCalledWith('proj');
-  });
-
-  it('falls back to a full restart when the hub restart fails', async () => {
-    responses['restart_hub'] = async () => {
-      throw new Error('hub down');
-    };
-    await create();
-
-    flip(true);
-    await settle();
-
-    expect(projectState.requestRestartFor).toHaveBeenCalledWith('proj');
-  });
-
-  it('falls back to a full restart when the proxy restart fails', async () => {
-    responses['restart_llm_proxy'] = async () => {
-      throw new Error('proxy down');
-    };
-    await create();
-
-    flip(true);
-    await settle();
-
-    expect(invoked('restart_hub')).toHaveLength(1);
-    expect(projectState.requestRestartFor).toHaveBeenCalledWith('proj');
   });
 
   it('keeps the switch editable and says the project setting makes it read-only', async () => {
@@ -266,7 +221,7 @@ describe('IntegrationAccessComponent', () => {
     await settle();
 
     expect(el('integration-access-error')?.textContent).toContain('unknown integration: slack');
-    expect(invoked('restart_hub')).toHaveLength(0);
+    expect(projectState.requestRestartFor).not.toHaveBeenCalled();
     expect(toggle().checked).toBe(false);
   });
 

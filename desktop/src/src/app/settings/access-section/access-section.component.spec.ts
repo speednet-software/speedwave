@@ -19,8 +19,6 @@ describe('AccessSectionComponent', () => {
   let tauri: MockTauriService;
   let logger: ReturnType<typeof makeMockLogger>;
   let projectState: {
-    isSettledOn: ReturnType<typeof vi.fn>;
-    status: ReturnType<typeof vi.fn>;
     requestRestartFor: ReturnType<typeof vi.fn>;
   };
   let calls: { cmd: string; args?: Record<string, unknown> }[];
@@ -56,8 +54,6 @@ describe('AccessSectionComponent', () => {
     responses = {
       get_access_settings: async () => view(),
       set_read_only_mode: async () => view({ read_only: true }),
-      restart_hub: async () => undefined,
-      restart_llm_proxy: async () => undefined,
     };
     tauri = new MockTauriService();
     tauri.invokeHandler = async (cmd, args) => {
@@ -68,8 +64,6 @@ describe('AccessSectionComponent', () => {
     };
     logger = makeMockLogger();
     projectState = {
-      isSettledOn: vi.fn().mockReturnValue(true),
-      status: vi.fn().mockReturnValue('ready'),
       requestRestartFor: vi.fn(),
     };
     TestBed.configureTestingModule({
@@ -113,52 +107,14 @@ describe('AccessSectionComponent', () => {
     expect(toggle().checked).toBe(true);
   });
 
-  it('stores the mode and restarts the hub without asking for a full restart', async () => {
+  it('stores the mode and asks for a restart of the project', async () => {
     await create();
 
     await flip(true);
 
     expect(invoked('set_read_only_mode')[0].args).toEqual({ project: 'proj', enabled: true });
-    expect(invoked('restart_hub')[0].args).toEqual({ project: 'proj' });
-    expect(invoked('restart_llm_proxy')[0].args).toEqual({ project: 'proj' });
-    expect(projectState.requestRestartFor).not.toHaveBeenCalled();
+    expect(projectState.requestRestartFor).toHaveBeenCalledWith('proj');
     expect(toggle().checked).toBe(true);
-  });
-
-  it('asks for a restart of the project when it is not ready to restart the hub alone', async () => {
-    projectState.status.mockReturnValue('loading');
-    await create();
-
-    await flip(true);
-
-    expect(invoked('restart_hub')).toHaveLength(0);
-    expect(invoked('restart_llm_proxy')).toHaveLength(0);
-    expect(projectState.requestRestartFor).toHaveBeenCalledWith('proj');
-  });
-
-  it('falls back to a full restart when the hub restart fails', async () => {
-    responses['restart_hub'] = async () => {
-      throw new Error('hub down');
-    };
-    await create();
-
-    await flip(true);
-
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('hub down'));
-    expect(projectState.requestRestartFor).toHaveBeenCalledWith('proj');
-  });
-
-  it('falls back to a full restart when the proxy restart fails', async () => {
-    responses['restart_llm_proxy'] = async () => {
-      throw new Error('proxy down');
-    };
-    await create();
-
-    await flip(true);
-
-    expect(invoked('restart_hub')).toHaveLength(1);
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('proxy down'));
-    expect(projectState.requestRestartFor).toHaveBeenCalledWith('proj');
   });
 
   it('disables the switch and says the organization set it when MDM forces the mode', async () => {
@@ -221,7 +177,9 @@ describe('AccessSectionComponent', () => {
     expect(help).toContain('credentials you put into the container');
     expect(help).toContain('Turn on Always read-only in its panel');
     expect(help).not.toContain('Claude Code');
-    expect(el('read-only-details')?.textContent).toContain('restarts the hub and the proxy');
+    expect(el('read-only-details')?.textContent).toContain(
+      'restarts the containers of the project'
+    );
   });
 
   it('reports a rejected save, restarts nothing and shows the stored mode', async () => {
@@ -239,7 +197,7 @@ describe('AccessSectionComponent', () => {
     expect(errors).toEqual([
       'Read-only mode is set by your organization and cannot be changed here.',
     ]);
-    expect(invoked('restart_hub')).toHaveLength(0);
+    expect(projectState.requestRestartFor).not.toHaveBeenCalled();
     expect(invoked('get_access_settings')).toHaveLength(2);
     expect(toggle().checked).toBe(false);
   });

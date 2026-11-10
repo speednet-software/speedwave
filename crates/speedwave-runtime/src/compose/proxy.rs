@@ -290,7 +290,7 @@ pub(crate) fn write_proxy_config_in(
             super::pii_ner::ner_render_config(&live)
         });
     let content = render_proxy_config_full(llm, Some(&token), ner.as_ref(), git_forges);
-    crate::fs_perms::write_restricted_file_atomic(&path, &content)?;
+    crate::fs_perms::write_restricted_file_atomic_if_changed(&path, &content)?;
     Ok(path)
 }
 

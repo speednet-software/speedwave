@@ -1181,7 +1181,6 @@ fn main() {
             containers_cmd::set_provider_model,
             containers_cmd::clear_active_llm_provider,
             containers_cmd::restart_llm_proxy,
-            containers_cmd::restart_hub,
             access_cmd::get_access_settings,
             access_cmd::set_read_only_mode,
             access_cmd::get_integration_access,

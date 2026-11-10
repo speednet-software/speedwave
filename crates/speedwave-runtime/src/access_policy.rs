@@ -27,7 +27,8 @@ pub fn write_access_config_in(
     crate::fs_perms::ensure_owner_only_dir(&crate::pii_policy::policy_config_dir_in(
         data_dir, project,
     ))?;
-    crate::fs_perms::write_restricted_file_atomic(&path, &content)
+    crate::fs_perms::write_restricted_file_atomic_if_changed(&path, &content)?;
+    Ok(())
 }
 
 /// State of the project-wide read-only switch.

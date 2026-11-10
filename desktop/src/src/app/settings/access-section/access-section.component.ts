@@ -10,7 +10,7 @@ import {
 } from '@angular/core';
 
 import { TauriService } from '../../services/tauri.service';
-import { AccessRestartService } from '../../services/access-restart.service';
+import { ProjectStateService } from '../../services/project-state.service';
 import { ToggleComponent } from '../../shared/toggle.component';
 import { AccessSettingsView, READ_ONLY_SECTION_ID } from '../../models/access';
 import { errorText } from '../../shared/error-text';
@@ -97,7 +97,7 @@ import { errorText } from '../../shared/error-text';
           </div>
         </dl>
         <p class="mt-3 text-[11px] text-[var(--ink-mute)]">
-          Changing the switch restarts the hub and the proxy.
+          Changing the switch restarts the containers of the project.
         </p>
       </details>
     </section>
@@ -112,7 +112,7 @@ export class AccessSectionComponent {
   protected readonly busy = signal(false);
 
   private readonly tauri = inject(TauriService);
-  private readonly hub = inject(AccessRestartService);
+  private readonly projectState = inject(ProjectStateService);
 
   /** Reloads the view when the project changes. */
   constructor() {
@@ -137,7 +137,7 @@ export class AccessSectionComponent {
         enabled,
       });
       if (this.project() === project) this.view.set(next);
-      await this.hub.apply(project);
+      this.projectState.requestRestartFor(project);
     } catch (e: unknown) {
       this.errorOccurred.emit(errorText(e));
       await this.load(project);

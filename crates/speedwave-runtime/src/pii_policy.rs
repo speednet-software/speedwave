@@ -1101,10 +1101,11 @@ pub fn write_policy_config_in(
     let dir = policy_config_dir_in(data_dir, project);
     crate::fs_perms::ensure_owner_only_dir(&dir)?;
     let content = serde_json::to_string_pretty(policy)?;
-    crate::fs_perms::write_restricted_file_atomic(
+    crate::fs_perms::write_restricted_file_atomic_if_changed(
         &policy_config_path_in(data_dir, project),
         &content,
-    )
+    )?;
+    Ok(())
 }
 
 /// sha256 of the rendered `policy.json` and `access.json`; digest change forces mcp-hub recreate
