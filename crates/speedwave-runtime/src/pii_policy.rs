@@ -1113,11 +1113,15 @@ pub(crate) fn policy_state_digest_in(data_dir: &Path, project: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(std::fs::read(policy_config_path_in(data_dir, project)).unwrap_or_default());
-    if let Ok(access) = std::fs::read(crate::access_policy::access_config_path_in(
+    match std::fs::read(crate::access_policy::access_config_path_in(
         data_dir, project,
     )) {
-        hasher.update(b"\0access.json\0");
-        hasher.update(access);
+        Ok(access) => {
+            hasher.update(b"\0access.json\0");
+            hasher.update(access);
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => hasher.update(b"\0access.json unreadable\0"),
     }
     crate::bundle::bytes_to_hex(&hasher.finalize())
 }
@@ -2260,5 +2264,18 @@ keywords: []
         crate::access_policy::write_access_config_in(tmp.path(), "proj", &Default::default())
             .unwrap();
         assert_eq!(without, policy_state_digest_in(tmp.path(), "proj"));
+    }
+
+    #[test]
+    fn policy_state_digest_tells_an_unreadable_access_json_from_a_missing_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_policy_config_in(tmp.path(), "proj", &ResolvedPiiPolicy::default()).unwrap();
+        let missing = policy_state_digest_in(tmp.path(), "proj");
+        std::fs::create_dir_all(crate::access_policy::access_config_path_in(
+            tmp.path(),
+            "proj",
+        ))
+        .unwrap();
+        assert_ne!(missing, policy_state_digest_in(tmp.path(), "proj"));
     }
 }
