@@ -18,7 +18,6 @@ import {
   PluginsResponse,
 } from '../models/plugin';
 import { ProjectPillComponent } from '../project-switcher/project-pill.component';
-import { ReadOnlyBannerComponent } from '../shared/read-only-banner/read-only-banner.component';
 import {
   ProgressStepsComponent,
   type SetupStep,
@@ -88,7 +87,7 @@ const RESOURCE_ONLY_INSTALL_STEPS: readonly SetupStep[] = [
 /** Manages installed plugins: list, install, remove, enable/disable, credentials. */
 @Component({
   selector: 'app-plugins',
-  imports: [CommonModule, ProjectPillComponent, ProgressStepsComponent, ReadOnlyBannerComponent],
+  imports: [CommonModule, ProjectPillComponent, ProgressStepsComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (installing) {
@@ -138,8 +137,6 @@ const RESOURCE_ONLY_INSTALL_STEPS: readonly SetupStep[] = [
 
     <div class="flex-1 overflow-y-auto p-4 md:p-6" data-testid="plugins-body">
       <div class="mx-auto max-w-3xl">
-        <app-read-only-banner [project]="activeProject" />
-
         @if (error) {
           <div
             class="mb-4 rounded ring-1 ring-red-500/40 bg-red-500/[0.06] px-3 py-2 text-[12px] text-red-300"

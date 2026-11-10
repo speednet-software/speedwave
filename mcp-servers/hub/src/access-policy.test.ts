@@ -102,13 +102,13 @@ describe('decideAccess', () => {
     expect(decision.message).toContain('organization');
   });
 
-  it('names the integration Access setting in a per-service denial', () => {
+  it('names the Always read-only switch of the integration in a per-service denial', () => {
     const decision = decideAccess(
       SLACK_READ_ONLY,
       tool('slack', 'sendChannel', { readOnlyHint: false })
     );
     if (decision.allowed) throw new Error('expected a denial');
-    expect(decision.message).toContain('Access setting of this integration');
+    expect(decision.message).toContain('Always read-only switch of this integration');
     expect(decision.message).not.toContain('Integration access');
     expect(decision.message).not.toContain('organization');
   });
@@ -132,7 +132,7 @@ describe('decideAccess', () => {
     );
     if (decision.allowed) throw new Error('expected a denial');
     expect(decision.message).toContain('for Mail,');
-    expect(decision.message).toContain('Access setting of this integration');
+    expect(decision.message).toContain('Always read-only switch of this integration');
   });
 
   it('names why a custom-* service is blocked', () => {

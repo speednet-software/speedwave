@@ -203,23 +203,6 @@ describe('IntegrationsComponent', () => {
     expect(component).toBeTruthy();
   });
 
-  it('shows the read-only banner while every integration and plugin is read-only', async () => {
-    const base = mockTauri.invokeHandler;
-    mockTauri.invokeHandler = (cmd: string, args?: Record<string, unknown>) =>
-      cmd === 'get_access_settings'
-        ? Promise.resolve({ read_only: true, read_only_locked: false })
-        : base(cmd, args);
-    await component.ngOnInit();
-    fixture.detectChanges();
-    await fixture.whenStable();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    fixture.detectChanges();
-
-    const banner = fixture.nativeElement.querySelector('[data-testid="read-only-banner"]');
-    expect(banner?.textContent).toContain('All integrations and plugins are read-only');
-    expect(banner?.textContent).toContain('Playwright cannot open pages in this mode');
-  });
-
   it('should load active project and integrations on init', async () => {
     await component.ngOnInit();
     expect(component.activeProject).toBe('test-project');
@@ -805,10 +788,8 @@ describe('IntegrationsComponent', () => {
       expect(panel).not.toBeNull();
       expect(accessCalls).toContainEqual({ project: 'test-project', service: 'gitlab' });
       expect(
-        fixture.nativeElement
-          .querySelector('[data-testid="integration-access-read-only"]')
-          .getAttribute('aria-checked')
-      ).toBe('true');
+        fixture.nativeElement.querySelector('[data-testid="integration-access-always"]').checked
+      ).toBe(true);
     });
 
     it('shows no Access control while no integration is expanded', async () => {
@@ -820,12 +801,27 @@ describe('IntegrationsComponent', () => {
       expect(expanded).toBeNull();
     });
 
-    it('shows the Access control in the row of an OS integration', async () => {
+    it('opens the Access switch under an enabled OS integration', async () => {
       await render();
 
-      const row = fixture.nativeElement.querySelector('[data-testid="integrations-os"]');
+      const row = fixture.nativeElement.querySelector(
+        '[data-testid="integrations-os-row-reminders"]'
+      );
       expect(row.querySelector('[data-testid="integration-access"]')).not.toBeNull();
       expect(accessCalls).toContainEqual({ project: 'test-project', service: 'reminders' });
+    });
+
+    it('shows no Access switch under a disabled OS integration', async () => {
+      await render();
+      component.osIntegrations = component.osIntegrations.map((o) => ({ ...o, enabled: false }));
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+
+      const row = fixture.nativeElement.querySelector(
+        '[data-testid="integrations-os-row-reminders"]'
+      );
+      expect(row.querySelector('[data-testid="integration-access"]')).toBeNull();
+      expect(row.querySelector('[data-testid="integrations-os-toggle-reminders"]')).not.toBeNull();
     });
   });
 

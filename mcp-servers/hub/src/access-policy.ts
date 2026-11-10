@@ -89,7 +89,7 @@ function modeEntryKeys(metadata: ToolMetadata): string[] {
 function turnOffHint(rules: AccessRules, metadata: ToolMetadata): string {
   const perService = modeEntryKeys(metadata).some((key) => rules.services[key] === 'read_only');
   return perService
-    ? 'Turn it off in Speedwave Desktop: the Access setting of this integration.'
+    ? 'Turn it off in Speedwave Desktop: the Always read-only switch of this integration.'
     : 'Turn it off in Speedwave Desktop: Settings, Integration access, unless the organization enforces the mode.';
 }
 

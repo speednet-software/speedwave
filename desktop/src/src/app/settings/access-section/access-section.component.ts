@@ -93,7 +93,7 @@ import { errorText } from '../../shared/error-text';
           </div>
           <div>
             <dt class="text-[var(--ink)]">One integration only</dt>
-            <dd>Set its Access to Read-only in its panel.</dd>
+            <dd>Turn on Always read-only in its panel.</dd>
           </div>
         </dl>
         <p class="mt-3 text-[11px] text-[var(--ink-mute)]">

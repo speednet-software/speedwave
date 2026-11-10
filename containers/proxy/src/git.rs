@@ -153,7 +153,7 @@ fn read_only_response(host: &str) -> Response {
         "Speedwave: the integration for {host} is in Read-only mode, so push is blocked. \
          Fetch and pull still work.\n\
          A person turns Read-only mode off in Speedwave Desktop: Settings, Integration access, \
-         or the Access setting of the integration. \
+         or the Always read-only switch of the integration. \
          If your organization enforces Read-only mode, only the organization can change it.\n"
     )));
     *resp.status_mut() = StatusCode::FORBIDDEN;

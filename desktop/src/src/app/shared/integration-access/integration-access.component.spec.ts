@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { Router } from '@angular/router';
 
 import { IntegrationAccessComponent } from './integration-access.component';
 import { TauriService } from '../../services/tauri.service';
@@ -23,12 +24,18 @@ describe('IntegrationAccessComponent', () => {
     status: ReturnType<typeof vi.fn>;
     requestRestartFor: ReturnType<typeof vi.fn>;
   };
+  let router: { navigate: ReturnType<typeof vi.fn> };
   let calls: { cmd: string; args?: Record<string, unknown> }[];
   let responses: Record<string, () => Promise<unknown>>;
 
   const el = (id: string): HTMLElement | null =>
     fixture.nativeElement.querySelector(`[data-testid="${id}"]`);
-  const button = (id: string): HTMLButtonElement => el(id) as HTMLButtonElement;
+  const toggle = (): HTMLInputElement => el('integration-access-always') as HTMLInputElement;
+  const flip = (on: boolean): void => {
+    toggle().checked = on;
+    toggle().dispatchEvent(new Event('change'));
+    fixture.detectChanges();
+  };
   const invoked = (cmd: string) => calls.filter((c) => c.cmd === cmd);
   const settle = async (): Promise<void> => {
     await fixture.whenStable();
@@ -36,11 +43,11 @@ describe('IntegrationAccessComponent', () => {
     fixture.detectChanges();
   };
 
-  async function create(service = 'slack', explainGlobal = false): Promise<void> {
+  async function create(service = 'slack', name = ''): Promise<void> {
     fixture = TestBed.createComponent(IntegrationAccessComponent);
     fixture.componentRef.setInput('project', 'proj');
     fixture.componentRef.setInput('service', service);
-    fixture.componentRef.setInput('explainGlobal', explainGlobal);
+    fixture.componentRef.setInput('name', name);
     fixture.detectChanges();
     await settle();
   }
@@ -61,6 +68,7 @@ describe('IntegrationAccessComponent', () => {
       return handler();
     };
     logger = makeMockLogger();
+    router = { navigate: vi.fn().mockResolvedValue(true) };
     projectState = {
       isSettledOn: vi.fn().mockReturnValue(true),
       status: vi.fn().mockReturnValue('ready'),
@@ -72,45 +80,61 @@ describe('IntegrationAccessComponent', () => {
         { provide: TauriService, useValue: tauri },
         { provide: LoggerService, useValue: logger },
         { provide: ProjectStateService, useValue: projectState },
+        { provide: Router, useValue: router },
       ],
     });
   });
 
-  it('shows Access with Full selected by default', async () => {
+  it('follows the project setting by default and says the access is full', async () => {
     await create();
 
-    expect(el('integration-access')?.textContent).toContain('Access');
-    expect(button('integration-access-full').getAttribute('aria-checked')).toBe('true');
-    expect(button('integration-access-read-only').getAttribute('aria-checked')).toBe('false');
-    expect(button('integration-access-full').disabled).toBe(false);
+    expect(el('integration-access')?.textContent).toContain('Always read-only');
+    expect(toggle().checked).toBe(false);
+    expect(toggle().disabled).toBe(false);
+    expect(el('integration-access-status')?.textContent).toContain(
+      'Currently full. Follows the project setting.'
+    );
     expect(invoked('get_integration_access')[0].args).toEqual({
       project: 'proj',
       service: 'slack',
     });
   });
 
-  it('shows a stored Read-only mode', async () => {
+  it('names the integration in the accessible name of the switch', async () => {
+    await create('slack', 'Slack');
+
+    expect(toggle().getAttribute('aria-label')).toBe('Always read-only for Slack');
+  });
+
+  it('falls back to the service id when no name is given', async () => {
+    await create('reminders');
+
+    expect(toggle().getAttribute('aria-label')).toBe('Always read-only for reminders');
+  });
+
+  it('shows a stored always read-only mode', async () => {
     responses['get_integration_access'] = async () => view({ mode: 'read_only' });
     await create();
 
-    expect(button('integration-access-read-only').getAttribute('aria-checked')).toBe('true');
+    expect(toggle().checked).toBe(true);
+    expect(el('integration-access-status')?.textContent).toContain('Currently read-only.');
   });
 
   it('shows nothing until the stored mode arrives', async () => {
     const pending = createDeferred<IntegrationAccessView>();
     responses['get_integration_access'] = () => pending.promise;
     await create();
-    expect(el('integration-access-full')).toBeNull();
+    expect(el('integration-access-always')).toBeNull();
 
     pending.resolve(view({ mode: 'read_only' }));
     await settle();
-    expect(button('integration-access-read-only').getAttribute('aria-checked')).toBe('true');
+    expect(toggle().checked).toBe(true);
   });
 
-  it('stores the mode of the integration and restarts the hub and the proxy', async () => {
+  it('stores always read-only and restarts the hub and the proxy', async () => {
     await create('mail');
 
-    button('integration-access-read-only').click();
+    flip(true);
     await settle();
 
     expect(invoked('set_integration_access_mode')[0].args).toEqual({
@@ -121,36 +145,26 @@ describe('IntegrationAccessComponent', () => {
     expect(invoked('restart_hub')[0].args).toEqual({ project: 'proj' });
     expect(invoked('restart_llm_proxy')[0].args).toEqual({ project: 'proj' });
     expect(projectState.requestRestartFor).not.toHaveBeenCalled();
-    expect(button('integration-access-read-only').getAttribute('aria-checked')).toBe('true');
+    expect(toggle().checked).toBe(true);
   });
 
-  it('stores Full when the user switches back', async () => {
+  it('stores the follow mode when the user turns the switch off', async () => {
     responses['get_integration_access'] = async () => view({ mode: 'read_only' });
     responses['set_integration_access_mode'] = async () => view();
     await create();
 
-    button('integration-access-full').click();
+    flip(false);
     await settle();
 
     expect(invoked('set_integration_access_mode')[0].args).toMatchObject({ mode: 'full' });
-    expect(button('integration-access-full').getAttribute('aria-checked')).toBe('true');
-  });
-
-  it('does not save when the clicked mode is already the stored one', async () => {
-    await create();
-
-    button('integration-access-full').click();
-    await settle();
-
-    expect(invoked('set_integration_access_mode')).toHaveLength(0);
-    expect(invoked('restart_hub')).toHaveLength(0);
+    expect(toggle().checked).toBe(false);
   });
 
   it('asks for a restart of the project when it is not ready to restart the hub alone', async () => {
     projectState.status.mockReturnValue('loading');
     await create();
 
-    button('integration-access-read-only').click();
+    flip(true);
     await settle();
 
     expect(invoked('restart_hub')).toHaveLength(0);
@@ -164,7 +178,7 @@ describe('IntegrationAccessComponent', () => {
     };
     await create();
 
-    button('integration-access-read-only').click();
+    flip(true);
     await settle();
 
     expect(projectState.requestRestartFor).toHaveBeenCalledWith('proj');
@@ -176,71 +190,67 @@ describe('IntegrationAccessComponent', () => {
     };
     await create();
 
-    button('integration-access-read-only').click();
+    flip(true);
     await settle();
 
     expect(invoked('restart_hub')).toHaveLength(1);
     expect(projectState.requestRestartFor).toHaveBeenCalledWith('proj');
   });
 
-  it('shows Read-only and disables the control while the project is in read-only mode', async () => {
+  it('keeps the switch editable and says the project setting makes it read-only', async () => {
     responses['get_integration_access'] = async () => view({ global_read_only: true });
     await create();
 
-    expect(button('integration-access-read-only').getAttribute('aria-checked')).toBe('true');
-    expect(button('integration-access-full').getAttribute('aria-checked')).toBe('false');
-    expect(button('integration-access-full').disabled).toBe(true);
-    expect(button('integration-access-read-only').disabled).toBe(true);
+    expect(toggle().checked).toBe(false);
+    expect(toggle().disabled).toBe(false);
+    expect(el('integration-access-status')?.textContent).toContain(
+      'Currently read-only, from the project setting in Settings.'
+    );
   });
 
-  it('leaves the reason to the screen banner and puts a hint on the buttons', async () => {
+  it('opens the switch in Settings from the status link', async () => {
     responses['get_integration_access'] = async () => view({ global_read_only: true });
     await create();
 
-    expect(el('integration-access-reason')).toBeNull();
-    expect(button('integration-access-full').title).toBe(
-      'Set for all integrations and plugins in Settings, Integration access'
-    );
-    expect(button('integration-access-read-only').title).toBe(
-      'Set for all integrations and plugins in Settings, Integration access'
-    );
+    const click = new MouseEvent('click', { cancelable: true });
+    el('integration-access-settings-link')?.dispatchEvent(click);
+
+    expect(click.defaultPrevented).toBe(true);
+    expect(router.navigate).toHaveBeenCalledWith(['/settings'], { fragment: 'section-access' });
   });
 
-  it('names the organization in the hint when MDM forces the mode', async () => {
+  it('names the organization and offers no link when MDM forces the project setting', async () => {
     responses['get_integration_access'] = async () =>
       view({ global_read_only: true, global_locked: true });
     await create();
 
-    expect(button('integration-access-full').disabled).toBe(true);
-    expect(button('integration-access-full').title).toBe(
-      'Set for all integrations and plugins by your organization'
+    expect(el('integration-access-status')?.textContent).toContain(
+      'Currently read-only, set by your organization for all integrations.'
     );
+    expect(el('integration-access-settings-link')).toBeNull();
+    expect(toggle().disabled).toBe(false);
   });
 
-  it('explains the global mode in place when asked to, without a hint', async () => {
-    responses['get_integration_access'] = async () => view({ global_read_only: true });
-    await create('example-plugin', true);
-
-    expect(el('integration-access-reason')?.textContent).toContain(
-      'All integrations and plugins are read-only (Settings, Integration access)'
-    );
-    expect(el('integration-access-reason')?.textContent).not.toContain('organization');
-    expect(button('integration-access-full').hasAttribute('title')).toBe(false);
-  });
-
-  it('says in place that the organization set it when asked to explain', async () => {
+  it('says the integration is read-only by its own choice whatever the project setting', async () => {
     responses['get_integration_access'] = async () =>
-      view({ global_read_only: true, global_locked: true });
-    await create('example-plugin', true);
+      view({ mode: 'read_only', global_read_only: true });
+    await create();
 
-    expect(el('integration-access-reason')?.textContent).toContain('Set by your organization');
+    expect(el('integration-access-status')?.textContent).toContain('Currently read-only.');
+    expect(el('integration-access-settings-link')).toBeNull();
   });
 
-  it('shows no reason and no hint while the control is editable', async () => {
-    await create('slack', true);
+  it('stores always read-only while the project setting is on', async () => {
+    responses['get_integration_access'] = async () => view({ global_read_only: true });
+    responses['set_integration_access_mode'] = async () =>
+      view({ mode: 'read_only', global_read_only: true });
+    await create();
 
-    expect(el('integration-access-reason')).toBeNull();
-    expect(button('integration-access-full').hasAttribute('title')).toBe(false);
+    flip(true);
+    await settle();
+
+    expect(invoked('set_integration_access_mode')[0].args).toMatchObject({ mode: 'read_only' });
+    expect(toggle().checked).toBe(true);
   });
 
   it('reports a rejected save in place and shows the stored mode', async () => {
@@ -249,12 +259,12 @@ describe('IntegrationAccessComponent', () => {
     };
     await create();
 
-    button('integration-access-read-only').click();
+    flip(true);
     await settle();
 
     expect(el('integration-access-error')?.textContent).toContain('unknown integration: slack');
     expect(invoked('restart_hub')).toHaveLength(0);
-    expect(button('integration-access-full').getAttribute('aria-checked')).toBe('true');
+    expect(toggle().checked).toBe(false);
   });
 
   it('reports a mode it cannot read', async () => {
@@ -264,7 +274,7 @@ describe('IntegrationAccessComponent', () => {
     await create();
 
     expect(el('integration-access-error')?.textContent).toContain('config.json is not valid JSON');
-    expect(el('integration-access-full')).toBeNull();
+    expect(el('integration-access-always')).toBeNull();
   });
 
   it('blocks a second change while a save is running', async () => {
@@ -272,13 +282,13 @@ describe('IntegrationAccessComponent', () => {
     responses['set_integration_access_mode'] = () => pending.promise;
     await create();
 
-    button('integration-access-read-only').click();
-    fixture.detectChanges();
-    expect(button('integration-access-full').disabled).toBe(true);
+    flip(true);
+    expect(toggle().disabled).toBe(true);
+    expect(toggle().checked).toBe(true);
 
     pending.resolve(view({ mode: 'read_only' }));
     await settle();
-    expect(button('integration-access-full').disabled).toBe(false);
+    expect(toggle().disabled).toBe(false);
   });
 
   it('says what read-only blocks', async () => {

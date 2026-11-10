@@ -218,7 +218,7 @@ describe('AccessSectionComponent', () => {
     expect(help).toContain("the agent's work in the project");
     expect(help).toContain('Internet access from the container');
     expect(help).toContain('credentials you put into the container');
-    expect(help).toContain('Set its Access to Read-only in its panel');
+    expect(help).toContain('Turn on Always read-only in its panel');
     expect(help).not.toContain('Claude Code');
     expect(el('read-only-details')?.textContent).toContain('restarts the hub and the proxy');
   });

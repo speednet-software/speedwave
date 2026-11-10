@@ -26,7 +26,6 @@ import {
 } from '../models/integration';
 import { ServiceCardComponent, SaveCredentialsEvent } from './service-card/service-card.component';
 import { IntegrationAccessComponent } from '../shared/integration-access/integration-access.component';
-import { ReadOnlyBannerComponent } from '../shared/read-only-banner/read-only-banner.component';
 import { RedmineConfigComponent } from './redmine-config/redmine-config.component';
 import { GitRepositoriesComponent } from './git-repositories/git-repositories.component';
 import { IdeBridgeComponent } from './ide-bridge/ide-bridge.component';
@@ -59,7 +58,6 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
     RedmineConfigComponent,
     GitRepositoriesComponent,
     IntegrationAccessComponent,
-    ReadOnlyBannerComponent,
     IdeBridgeComponent,
     ProjectPillComponent,
   ],
@@ -82,8 +80,6 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
 
     <div class="flex-1 overflow-y-auto p-4 md:p-6" data-testid="integrations-body">
       <div class="mx-auto max-w-3xl">
-        <app-read-only-banner [project]="activeProject" [mentionsBrowser]="true" />
-
         @if (error) {
           <div
             class="mb-4 rounded ring-1 ring-red-500/40 bg-red-500/[0.06] px-3 py-2 text-[12px] text-red-300 whitespace-pre-line"
@@ -358,7 +354,11 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
                 }
                 @if (activeProject) {
                   <div class="px-5 py-3">
-                    <app-integration-access [project]="activeProject" [service]="svc.service" />
+                    <app-integration-access
+                      [project]="activeProject"
+                      [service]="svc.service"
+                      [name]="svc.display_name"
+                    />
                   </div>
                 }
               </div>
@@ -381,28 +381,31 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
             <div class="overflow-hidden rounded border border-[var(--line)]">
               <div class="divide-y divide-[var(--line)]">
                 @for (os of osIntegrations; track os.service) {
-                  <div class="flex items-center gap-3 px-4 py-2.5">
-                    <span class="mono text-[13px] text-[var(--ink)]">{{ os.display_name }}</span>
-                    <span class="mono text-[11px] text-[var(--ink-mute)]">{{
-                      os.description
-                    }}</span>
-                    @if (activeProject) {
-                      <app-integration-access
-                        class="ml-auto"
-                        [project]="activeProject"
-                        [service]="os.service"
-                        [compact]="true"
-                      />
+                  <div [attr.data-testid]="'integrations-os-row-' + os.service">
+                    <div class="flex items-center gap-3 px-4 py-2.5">
+                      <span class="mono text-[13px] text-[var(--ink)]">{{ os.display_name }}</span>
+                      <span class="mono text-[11px] text-[var(--ink-mute)]">{{
+                        os.description
+                      }}</span>
+                      <button
+                        type="button"
+                        class="toggle ml-auto"
+                        [class.on]="os.enabled"
+                        [attr.aria-pressed]="os.enabled"
+                        [attr.aria-label]="(os.enabled ? 'Disable ' : 'Enable ') + os.service"
+                        [attr.data-testid]="'integrations-os-toggle-' + os.service"
+                        (click)="onOsToggleClick(os, $event)"
+                      ></button>
+                    </div>
+                    @if (os.enabled && activeProject) {
+                      <div class="border-t border-[var(--line)] bg-[var(--bg-1)] px-4 py-3">
+                        <app-integration-access
+                          [project]="activeProject"
+                          [service]="os.service"
+                          [name]="os.display_name"
+                        />
+                      </div>
                     }
-                    <button
-                      type="button"
-                      class="toggle"
-                      [class.on]="os.enabled"
-                      [attr.aria-pressed]="os.enabled"
-                      [attr.aria-label]="(os.enabled ? 'Disable ' : 'Enable ') + os.service"
-                      [attr.data-testid]="'integrations-os-toggle-' + os.service"
-                      (click)="onOsToggleClick(os, $event)"
-                    ></button>
                   </div>
                 }
               </div>
