@@ -117,6 +117,8 @@ The classification happens once, at the command boundary (`control_channel.rs::C
 
 From 2.1.281, `totalTokens` also counts the messages added since the last response, so the counter can read higher than before[^8]. That is Claude Code's fix, not a Speedwave change.
 
+**Amendment (SPEED-989, 2026-11-10: Fable 5.2).** Claude Code 2.1.321 added `claude-fable-5-2`, "now the default Fable model, 1M context, $8/$40 per Mtok with $0.20/Mtok cache reads"[^11]. The catalog gets it at the head of `ANTHROPIC_MODELS` as the latest Fable entry: `Native` 1M window, all five effort levels, default effort `medium` (the model configuration page lists Fable 5.2 among the models that default to `medium`[^1]), and the prices of the pricing page read on 2026-11-10: input 8, cache read 0.20, cache write 10, output 40 USD per million tokens, the same at 1M[^12]. `claude-fable-5-1` stays in the catalog, no longer latest, at its own rates. The `fable` and `fable[1m]` aliases resolve to `claude-fable-5-2` through `defaults.rs::resolve_model_alias`, which reads the latest Fable entry; measured on 2.1.322, Claude Code resolves the alias the same way. Speedwave does not migrate an explicit `claude-fable-5-1` pin. Claude Code 2.1.321 itself moves a saved `claude-fable-5-1` in user settings to the `fable` alias on Pro and Max plans, and on Team and Enterprise plans once the organization allows it[^1], and an alias pin resolves to the latest entry. The control-response capture is still the 2.1.295 file until it is recorded again on a real account with 2.1.322 (SPEED-989 runbook); the picker tests over it still read `claude-fable-5-1[1m]`, and `fixture_is_the_capture_of_the_pinned_claude_code` fails until the new capture replaces it.
+
 ## Consequences
 
 - One row per model, clean names, a plan-aware window and real limits for subscription users; API-key users see the context section only.
@@ -152,3 +154,7 @@ From 2.1.281, `totalTokens` also counts the messages added since the last respon
 [^9]: `@anthropic-ai/claude-agent-sdk` 0.3.268, `claudeCodeVersion` 2.1.268: the `get_context_usage` response category gains `kind: 'used' | 'free' | 'buffer' | 'deferred'`, described as "Classify on this, never on the English name"; the 0.3.267 response category has no `kind`. https://unpkg.com/@anthropic-ai/claude-agent-sdk@0.3.268/sdk.d.ts and https://unpkg.com/@anthropic-ai/claude-agent-sdk@0.3.267/sdk.d.ts
 
 [^10]: Claude Code changelog, 2.1.285: "Changed sessions behind a custom `ANTHROPIC_BASE_URL` to use the 1M context window of models that have one (Opus 4.7+, Sonnet 5+, Fable)". https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md
+
+[^11]: Claude Code changelog, 2.1.321, and the `latest` release 2.1.322. https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md
+
+[^12]: Anthropic API pricing page, Claude Fable 5.2 row, read on 2026-11-10. https://platform.claude.com/docs/en/about-claude/pricing

@@ -587,6 +587,49 @@ release manifest[^11], against the same stub `/v1/messages`, and are now named
   `fallback_credit`, transcript user lines carry `turnPosition`, and transcript
   assistant lines carry `requestedModel`. No parser of these lines denies unknown fields.
 
+**Amendment (SPEED-989, 2026-11-10: the captures move to Claude Code 2.1.322).**
+The `cc-2.1.295-*` captures except `control-responses` were recorded again from
+the 2.1.322 linux-arm64 binary, whose SHA256 matches its release manifest[^13],
+with the same harness and stub; a run of the 2.1.295 binary reproduced the
+committed files before the 2.1.322 runs were trusted. What 2.1.322 changes:
+
+- **The one-token check of `set_model` waits 15 s, not 5 s.** Against a stub that
+  never answers, `set_model` is answered `check_failed` after 15.2 s
+  (`cc-2.1.322-set-model-check.sanitized.json`); 2.1.295 answered after 5.2 s. The
+  15 s `SET_MODEL_TIMEOUT` would have fired first, so it is now 20 s
+  (`control_channel.rs::SET_MODEL_TIMEOUT`), and `FIRST_TURN_WAIT` follows it.
+  `claude_code_refuses_an_unanswered_set_model_check_before_speedwave_stops_waiting`
+  fails again if Claude Code's wait outgrows the timeout.
+- **`set_model` answers carry more.** A success carries `response.model`, the id
+  Claude Code settled on, and an error carries `model`, the id the session stayed
+  on. The error code of an unknown model is `not_found`, where 2.1.295 said
+  `catalog_unknown`. Nothing in Speedwave reads `error_code`.
+- **`fable` resolves to `claude-fable-5-2`.** `set_model` with `claude-fable-5-2`,
+  `claude-fable-5-2[1m]`, `fable` and `fable[1m]` all settle on `claude-fable-5-2`
+  with a 1,000,000 window and a one-token check; `claude-fable-5-1` is still
+  accepted and kept. The account default stays `claude-opus-5-5`.
+- **A typed `/model` for an id Claude Code does not know says so.** The
+  confirmation is "Set model to `<id>` for this session only", then a second
+  line that Claude Code does not recognise the model and assumes a 200k window.
+  `refused_model_command` reads only the prefix.
+- **New fields, none read by Speedwave.** The `modelUsage` entries of `result` lines and
+  transcript lines carry `cacheCreationEphemeral5mInputTokens` and `cacheCreationEphemeral1hInputTokens`,
+  `result` carries `model_usage_since_last_result`, transcript assistant lines carry
+  `promptCacheRequested` and `requestRef`.
+- **Tool search is on by default behind a custom `ANTHROPIC_BASE_URL`** (2.1.304
+  changelog). The first request of a session behind the proxy lists a handful of
+  built-in tools plus `ToolSearch`, and an MCP tool appears only after the model
+  searches for it; `ENABLE_TOOL_SEARCH=false` restores the full list. The default
+  cut of an MCP tool description is 4096 characters, where 2.1.295 cut at 2048;
+  `CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH=8192` still lifts it. No Speedwave test
+  covers tool search.
+- **Unchanged:** event order, `num_turns`, the one-token check request (`max_tokens: 1`,
+  not streamed), the safety-check exchange, the `apply_flag_settings` effects, the
+  resume transcripts apart from the new fields above, the `mid_conv_system` fallback,
+  the attribution block (`cc_entrypoint=sdk-cli`, absent with
+  `CLAUDE_CODE_ATTRIBUTION_HEADER=0`), the `custom-title` line, and the
+  `syncClaudeAiSkills` and `syncClaudeAiPlugins` settings keys.
+
 ### 5. Effort control: the launch hold, and its release for live wire control
 
 Empirically, sending `/effort <level>` over the wire is refused whenever a
@@ -1349,3 +1392,5 @@ stays selectable without typing its id.
 [^11]: Claude Code 2.1.295 release manifest with the per-platform binary checksums. https://downloads.claude.ai/claude-code-releases/2.1.295/manifest.json
 
 [^12]: Claude Code changelog, 2.1.285. https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md
+
+[^13]: Claude Code 2.1.322 release manifest with the per-platform binary checksums. https://downloads.claude.ai/claude-code-releases/2.1.322/manifest.json

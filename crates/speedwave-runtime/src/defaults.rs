@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Pinned Claude Code version installed inside the container.
-pub const CLAUDE_VERSION: &str = "2.1.295";
+pub const CLAUDE_VERSION: &str = "2.1.322";
 /// Path inside the container where entrypoint.sh generates the MCP config.
 pub const MCP_CONFIG_PATH: &str = "/home/speedwave/.claude/mcp-config.json";
 
@@ -254,6 +254,12 @@ const FABLE_PRICING: ModelPricing = ModelPricing {
     cache_write: 12.5,
     output: 50.0,
 };
+const FABLE_5_2_PRICING: ModelPricing = ModelPricing {
+    input: 8.0,
+    cached_input: 0.20,
+    cache_write: 10.0,
+    output: 40.0,
+};
 const FABLE_5_1_PRICING: ModelPricing = ModelPricing {
     input: 10.0,
     cached_input: 0.25,
@@ -314,17 +320,17 @@ const HAIKU_PRICING: ModelPricing = ModelPricing {
 /// **Order matters** — frontend renders this list as-is.
 pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
     AnthropicModelInfo {
-        id: "claude-fable-5-1",
-        family: "Fable 5.1",
+        id: "claude-fable-5-2",
+        family: "Fable 5.2",
         context_tokens: 1_000_000,
         latest: true,
         premium: true,
-        pricing: FABLE_5_1_PRICING,
-        pricing_1m: Some(FABLE_5_1_PRICING),
+        pricing: FABLE_5_2_PRICING,
+        pricing_1m: Some(FABLE_5_2_PRICING),
         long_prompt: None,
         one_million_context: OneMillionContext::Native,
         effort_levels: EFFORT_LEVELS,
-        default_effort: Some("high"),
+        default_effort: Some("medium"),
     },
     AnthropicModelInfo {
         id: "claude-opus-5-5",
@@ -402,6 +408,19 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         premium: true,
         pricing: OPUS_PRICING,
         pricing_1m: Some(OPUS_PRICING),
+        long_prompt: None,
+        one_million_context: OneMillionContext::Native,
+        effort_levels: EFFORT_LEVELS,
+        default_effort: Some("high"),
+    },
+    AnthropicModelInfo {
+        id: "claude-fable-5-1",
+        family: "Fable 5.1",
+        context_tokens: 1_000_000,
+        latest: false,
+        premium: true,
+        pricing: FABLE_5_1_PRICING,
+        pricing_1m: Some(FABLE_5_1_PRICING),
         long_prompt: None,
         one_million_context: OneMillionContext::Native,
         effort_levels: EFFORT_LEVELS,
@@ -898,17 +917,35 @@ mod tests {
     }
 
     #[test]
-    fn fable_5_1_is_the_latest_fable_entry() {
+    fn fable_5_2_is_the_latest_fable_entry() {
+        let fable = ANTHROPIC_MODELS
+            .iter()
+            .find(|m| m.id == "claude-fable-5-2")
+            .expect("claude-fable-5-2 must be in the catalog");
+        assert!(fable.latest, "Fable 5.2 must be in the Latest group");
+        assert!(fable.premium);
+        assert_eq!(fable.context_tokens, 1_000_000);
+        assert_eq!(fable.default_effort, Some("medium"));
+        assert_eq!(fable.pricing.input, 8.0);
+        assert_eq!(fable.pricing.cached_input, 0.20);
+        assert_eq!(fable.pricing.cache_write, 10.0);
+        assert_eq!(fable.pricing.output, 40.0);
+        assert_eq!(fable.pricing_1m, Some(fable.pricing));
+        assert_eq!(ANTHROPIC_MODELS[0].id, "claude-fable-5-2");
+    }
+
+    #[test]
+    fn fable_5_1_is_demoted_to_legacy_at_its_own_rates() {
         let fable = ANTHROPIC_MODELS
             .iter()
             .find(|m| m.id == "claude-fable-5-1")
-            .expect("claude-fable-5-1 must be in the catalog");
-        assert!(fable.latest, "Fable 5.1 must be in the Latest group");
-        assert!(fable.premium);
-        assert_eq!(fable.context_tokens, 1_000_000);
+            .expect("claude-fable-5-1 must remain in the catalog");
+        assert!(!fable.latest, "Fable 5.1 must be demoted to Legacy");
         assert_eq!(fable.pricing.input, 10.0);
+        assert_eq!(fable.pricing.cached_input, 0.25);
         assert_eq!(fable.pricing.cache_write, 12.5);
         assert_eq!(fable.pricing.output, 50.0);
+        assert_eq!(fable.default_effort, Some("high"));
     }
 
     #[test]
@@ -939,13 +976,14 @@ mod tests {
     #[test]
     fn one_million_context_table_matches_the_plan_decisions() {
         let expected = [
-            ("claude-fable-5-1", OneMillionContext::Native),
+            ("claude-fable-5-2", OneMillionContext::Native),
             ("claude-opus-5-5", OneMillionContext::Native),
             ("claude-sonnet-5-5", OneMillionContext::Native),
             ("claude-haiku-5-5", OneMillionContext::Native),
             ("claude-sonnet-5", OneMillionContext::Native),
             ("claude-haiku-4-5", OneMillionContext::Never),
             ("claude-opus-5", OneMillionContext::Native),
+            ("claude-fable-5-1", OneMillionContext::Native),
             ("claude-fable-5", OneMillionContext::Native),
             ("claude-opus-4-8", OneMillionContext::Native),
             ("claude-opus-4-7", OneMillionContext::Native),
@@ -1017,6 +1055,7 @@ mod tests {
             "claude-sonnet-5-5",
             "claude-sonnet-5",
             "claude-haiku-5-5",
+            "claude-fable-5-2",
             "claude-fable-5-1",
             "claude-fable-5",
         ] {
@@ -1457,12 +1496,12 @@ mod tests {
     fn has_1m_mirrors_pricing_1m_presence() {
         let fable = ANTHROPIC_MODELS
             .iter()
-            .find(|m| m.id == "claude-fable-5-1")
-            .expect("claude-fable-5-1 must be in the catalog");
+            .find(|m| m.id == "claude-fable-5-2")
+            .expect("claude-fable-5-2 must be in the catalog");
         assert_eq!(fable.context_tokens, 1_000_000);
         assert!(
             fable.has_1m(),
-            "claude-fable-5-1 must report has_1m() == true"
+            "claude-fable-5-2 must report has_1m() == true"
         );
 
         let haiku = ANTHROPIC_MODELS
@@ -1534,20 +1573,20 @@ mod tests {
         assert_eq!(resolve_model_alias("opus"), "claude-opus-5-5");
         assert_eq!(resolve_model_alias("sonnet"), "claude-sonnet-5-5");
         assert_eq!(resolve_model_alias("haiku"), "claude-haiku-5-5");
-        assert_eq!(resolve_model_alias("fable"), "claude-fable-5-1");
+        assert_eq!(resolve_model_alias("fable"), "claude-fable-5-2");
     }
 
     #[test]
     fn resolve_model_alias_preserves_the_1m_suffix() {
         assert_eq!(resolve_model_alias("opus[1m]"), "claude-opus-5-5[1m]");
         assert_eq!(resolve_model_alias("sonnet[1m]"), "claude-sonnet-5-5[1m]");
-        assert_eq!(resolve_model_alias("fable[1m]"), "claude-fable-5-1[1m]");
+        assert_eq!(resolve_model_alias("fable[1m]"), "claude-fable-5-2[1m]");
         assert_eq!(resolve_model_alias("haiku[1m]"), "claude-haiku-5-5[1m]");
     }
 
     #[test]
     fn resolve_model_alias_matches_the_documented_fable_rewrite_demo() {
-        assert_eq!(resolve_model_alias("fable[1m]"), "claude-fable-5-1[1m]");
+        assert_eq!(resolve_model_alias("fable[1m]"), "claude-fable-5-2[1m]");
     }
 
     #[test]
@@ -1670,6 +1709,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{id} missing from catalog"))
         };
         for id in [
+            "claude-fable-5-2",
             "claude-fable-5-1",
             "claude-fable-5",
             "claude-opus-5-5",
@@ -1701,14 +1741,15 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_models_default_effort_is_high_except_opus_4_7_and_the_5_5_tier() {
+    fn anthropic_models_default_effort_is_high_except_opus_4_7_and_the_medium_tier() {
         for m in ANTHROPIC_MODELS {
             if m.effort_levels.is_empty() {
                 continue;
             }
             let expected = match m.id {
                 "claude-opus-4-7" => "xhigh",
-                "claude-opus-5-5" | "claude-sonnet-5-5" | "claude-haiku-5-5" => "medium",
+                "claude-fable-5-2" | "claude-opus-5-5" | "claude-sonnet-5-5"
+                | "claude-haiku-5-5" => "medium",
                 _ => "high",
             };
             assert_eq!(

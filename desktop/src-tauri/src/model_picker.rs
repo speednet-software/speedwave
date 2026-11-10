@@ -704,12 +704,12 @@ mod tests {
 
     #[test]
     fn picker_preserves_the_selected_rows_usage_credit_warning() {
-        let mut paid = listed("claude-fable-5-1", Some("claude-fable-5-1"), "Fable");
-        paid.description = "Fable 5.1 · Requires usage credits for this account".to_string();
+        let mut paid = listed("claude-fable-5-2", Some("claude-fable-5-2"), "Fable");
+        paid.description = "Fable 5.2 · Requires usage credits for this account".to_string();
         let row = &picker_of(&info_of(vec![paid], Some("Claude Pro")), AnthropicPlan::Pro).rows[0];
         assert_eq!(
             row.description.as_deref(),
-            Some("Fable 5.1 · Requires usage credits for this account")
+            Some("Fable 5.2 · Requires usage credits for this account")
         );
         assert!(row.requires_usage_credits);
     }
@@ -805,6 +805,7 @@ mod tests {
             ("claude-opus-5", AnthropicPlan::Max),
             ("claude-opus-5[1m]", AnthropicPlan::Max),
             ("claude-opus-5-5[1m]", AnthropicPlan::Pro),
+            ("claude-fable-5-2[1m]", AnthropicPlan::Max),
             ("claude-fable-5-1[1m]", AnthropicPlan::Max),
         ] {
             assert_eq!(
@@ -826,6 +827,7 @@ mod tests {
 
     #[test]
     fn normalized_pin_leaves_a_pin_that_already_matches_the_policy() {
+        assert_eq!(normalized_pin("claude-fable-5-2", AnthropicPlan::Max), None);
         assert_eq!(normalized_pin("claude-fable-5-1", AnthropicPlan::Max), None);
         assert_eq!(normalized_pin("claude-opus-4-6", AnthropicPlan::Pro), None);
         assert_eq!(normalized_pin("claude-opus-5-5", AnthropicPlan::Pro), None);

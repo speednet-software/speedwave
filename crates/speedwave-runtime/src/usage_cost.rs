@@ -978,6 +978,19 @@ mod tests {
     }
 
     #[test]
+    fn fable_5_2_cache_hit_uses_its_own_non_standard_rate() {
+        let e = compute_cost_with(
+            &record("anthropic_apikey", "claude-fable-5-2", 0, 0, 1_000_000, 0),
+            &|_| None,
+        );
+        assert!(
+            (e.cost_usd.unwrap() - 0.20).abs() < 1e-9,
+            "expected the 0.20/MTok cache-hit rate, got {:?}",
+            e.cost_usd
+        );
+    }
+
+    #[test]
     fn fable_5_1_cache_hit_uses_its_own_non_standard_rate() {
         let e = compute_cost_with(
             &record("anthropic_apikey", "claude-fable-5-1", 0, 0, 1_000_000, 0),

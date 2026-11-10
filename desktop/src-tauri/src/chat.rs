@@ -5866,15 +5866,15 @@ mod tests {
     }
 
     const SOFT_IMPOSE_CAPTURE: &str =
-        include_str!("../tests/fixtures/cc-2.1.295-soft-impose.sanitized.ndjson");
+        include_str!("../tests/fixtures/cc-2.1.322-soft-impose.sanitized.ndjson");
     const MID_TURN_COMMAND_CAPTURE: &str =
-        include_str!("../tests/fixtures/cc-2.1.295-model-command-mid-tool-turn.sanitized.ndjson");
+        include_str!("../tests/fixtures/cc-2.1.322-model-command-mid-tool-turn.sanitized.ndjson");
     const MODEL_PICKS_CAPTURE: &str =
-        include_str!("../tests/fixtures/cc-2.1.295-model-picks.sanitized.ndjson");
+        include_str!("../tests/fixtures/cc-2.1.322-model-picks.sanitized.ndjson");
     const MODEL_PICKS_REQUESTS: &str =
-        include_str!("../tests/fixtures/cc-2.1.295-model-picks-requests.sanitized.json");
+        include_str!("../tests/fixtures/cc-2.1.322-model-picks-requests.sanitized.json");
     const SET_MODEL_CHECK: &str =
-        include_str!("../tests/fixtures/cc-2.1.295-set-model-check.sanitized.json");
+        include_str!("../tests/fixtures/cc-2.1.322-set-model-check.sanitized.json");
 
     fn set_model_check() -> serde_json::Value {
         serde_json::from_str(SET_MODEL_CHECK).unwrap()
@@ -6463,8 +6463,8 @@ mod tests {
         assert_eq!(routed_answers, 1);
         assert_eq!(
             pending.wait(std::time::Duration::from_secs(1)),
-            Ok(serde_json::Value::Null),
-            "the captured answer resolves the request"
+            Ok(serde_json::json!({ "model": ROUTED_PICK })),
+            "the captured answer resolves the request with the model Claude Code settled on"
         );
         let turn_ends: Vec<(Option<String>, Option<String>)> = emitted
             .iter()
@@ -8382,7 +8382,7 @@ mod tests {
     }
 
     const SAFETY_CHECK_CAPTURE: &str =
-        include_str!("../tests/fixtures/cc-2.1.295-safety-check.sanitized.json");
+        include_str!("../tests/fixtures/cc-2.1.322-safety-check.sanitized.json");
 
     fn safety_check_capture() -> serde_json::Value {
         serde_json::from_str(SAFETY_CHECK_CAPTURE).unwrap()

@@ -21,7 +21,7 @@ const SUBTYPE_APPLY_FLAG_SETTINGS: &str = "apply_flag_settings";
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(15);
 const GET_USAGE_TIMEOUT: Duration = Duration::from_secs(10);
 const GET_CONTEXT_USAGE_TIMEOUT: Duration = Duration::from_secs(5);
-pub(crate) const SET_MODEL_TIMEOUT: Duration = Duration::from_secs(15);
+pub(crate) const SET_MODEL_TIMEOUT: Duration = Duration::from_secs(20);
 pub(crate) const APPLY_EFFORT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -567,7 +567,7 @@ pub(crate) const FIXTURE: &str =
 
 #[cfg(test)]
 const APPLY_EFFORT_FIXTURE: &str =
-    include_str!("../tests/fixtures/cc-2.1.295-apply-effort.sanitized.json");
+    include_str!("../tests/fixtures/cc-2.1.322-apply-effort.sanitized.json");
 
 #[cfg(test)]
 #[expect(
