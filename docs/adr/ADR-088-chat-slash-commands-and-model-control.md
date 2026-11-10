@@ -623,21 +623,18 @@ committed files before the 2.1.322 runs were trusted. What 2.1.322 changes:
   cut of an MCP tool description is 4096 characters, where 2.1.295 cut at 2048;
   `CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH=8192` still lifts it. No Speedwave test
   covers tool search.
-- **Checked, no change.** The built-in aliases of Claude Code's model-config page
+- **Re-checked.** The built-in aliases of Claude Code's model-config page
   (`default`, `best`, `fable`, `sonnet`, `opus`, `haiku`, the `[1m]` forms,
   `opusplan`) match `CLAUDE_CODE_MODEL_ALIASES`; the alias strings are also in the
   binary. The `cost-state` transcript line keeps its keys (`sessionId`,
   `totalCostUSD`, the duration and line counters, `modelUsage`,
   `hasUnknownModelCost`; the `type` literal and the schema are in the binary), with
-  the two `cacheCreationEphemeral*` fields added inside `modelUsage`. A resumed run
+  the fields listed above. A resumed run
   ended with SIGTERM exits 143 and still writes its `cost-state` line
   (`cc-2.1.322-resume-transcript-after.sanitized.jsonl` has two). Structured outputs
   (`output_config.format` as `json_schema` plus beta `structured-outputs-2025-12-15`)
   go out only on the request of a `prompt`-type hook, never on the main turn, and
-  `CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS=1` removes both, as on 2.1.295. The main
-  turn no longer lists the betas `mid-conversation-system-2026-04-07` and
-  `prompt-caching-scope-2026-01-05`; the `mid_conv_system` rejection is still
-  answered by a resend without the system turn.
+  `CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS=1` removes both, as on 2.1.295.
 - **Unchanged:** event order, `num_turns`, the one-token check request (`max_tokens: 1`,
   not streamed), the safety-check exchange, the `apply_flag_settings` effects, the
   resume transcripts apart from the new fields above, the `mid_conv_system` fallback,
