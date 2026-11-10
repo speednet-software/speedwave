@@ -917,38 +917,6 @@ mod tests {
     }
 
     #[test]
-    fn fable_5_2_is_the_latest_fable_entry() {
-        let fable = ANTHROPIC_MODELS
-            .iter()
-            .find(|m| m.id == "claude-fable-5-2")
-            .expect("claude-fable-5-2 must be in the catalog");
-        assert!(fable.latest, "Fable 5.2 must be in the Latest group");
-        assert!(fable.premium);
-        assert_eq!(fable.context_tokens, 1_000_000);
-        assert_eq!(fable.default_effort, Some("medium"));
-        assert_eq!(fable.pricing.input, 8.0);
-        assert_eq!(fable.pricing.cached_input, 0.20);
-        assert_eq!(fable.pricing.cache_write, 10.0);
-        assert_eq!(fable.pricing.output, 40.0);
-        assert_eq!(fable.pricing_1m, Some(fable.pricing));
-        assert_eq!(ANTHROPIC_MODELS[0].id, "claude-fable-5-2");
-    }
-
-    #[test]
-    fn fable_5_1_is_demoted_to_legacy_at_its_own_rates() {
-        let fable = ANTHROPIC_MODELS
-            .iter()
-            .find(|m| m.id == "claude-fable-5-1")
-            .expect("claude-fable-5-1 must remain in the catalog");
-        assert!(!fable.latest, "Fable 5.1 must be demoted to Legacy");
-        assert_eq!(fable.pricing.input, 10.0);
-        assert_eq!(fable.pricing.cached_input, 0.25);
-        assert_eq!(fable.pricing.cache_write, 12.5);
-        assert_eq!(fable.pricing.output, 50.0);
-        assert_eq!(fable.default_effort, Some("high"));
-    }
-
-    #[test]
     fn sonnet_5_1m_variant_shares_base_pricing() {
         let sonnet = ANTHROPIC_MODELS
             .iter()

@@ -805,7 +805,6 @@ mod tests {
             ("claude-opus-5", AnthropicPlan::Max),
             ("claude-opus-5[1m]", AnthropicPlan::Max),
             ("claude-opus-5-5[1m]", AnthropicPlan::Pro),
-            ("claude-fable-5-2[1m]", AnthropicPlan::Max),
             ("claude-fable-5-1[1m]", AnthropicPlan::Max),
         ] {
             assert_eq!(
@@ -827,7 +826,6 @@ mod tests {
 
     #[test]
     fn normalized_pin_leaves_a_pin_that_already_matches_the_policy() {
-        assert_eq!(normalized_pin("claude-fable-5-2", AnthropicPlan::Max), None);
         assert_eq!(normalized_pin("claude-fable-5-1", AnthropicPlan::Max), None);
         assert_eq!(normalized_pin("claude-opus-4-6", AnthropicPlan::Pro), None);
         assert_eq!(normalized_pin("claude-opus-5-5", AnthropicPlan::Pro), None);

@@ -617,12 +617,27 @@ committed files before the 2.1.322 runs were trusted. What 2.1.322 changes:
   `result` carries `model_usage_since_last_result`, transcript assistant lines carry
   `promptCacheRequested` and `requestRef`.
 - **Tool search is on by default behind a custom `ANTHROPIC_BASE_URL`** (2.1.304
-  changelog). The first request of a session behind the proxy lists a handful of
+  changelog[^14]). The first request of a session behind the proxy lists a handful of
   built-in tools plus `ToolSearch`, and an MCP tool appears only after the model
   searches for it; `ENABLE_TOOL_SEARCH=false` restores the full list. The default
   cut of an MCP tool description is 4096 characters, where 2.1.295 cut at 2048;
   `CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH=8192` still lifts it. No Speedwave test
   covers tool search.
+- **Checked, no change.** The built-in aliases of Claude Code's model-config page
+  (`default`, `best`, `fable`, `sonnet`, `opus`, `haiku`, the `[1m]` forms,
+  `opusplan`) match `CLAUDE_CODE_MODEL_ALIASES`; the alias strings are also in the
+  binary. The `cost-state` transcript line keeps its keys (`sessionId`,
+  `totalCostUSD`, the duration and line counters, `modelUsage`,
+  `hasUnknownModelCost`; the `type` literal and the schema are in the binary), with
+  the two `cacheCreationEphemeral*` fields added inside `modelUsage`. A resumed run
+  ended with SIGTERM exits 143 and still writes its `cost-state` line
+  (`cc-2.1.322-resume-transcript-after.sanitized.jsonl` has two). Structured outputs
+  (`output_config.format` as `json_schema` plus beta `structured-outputs-2025-12-15`)
+  go out only on the request of a `prompt`-type hook, never on the main turn, and
+  `CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS=1` removes both, as on 2.1.295. The main
+  turn no longer lists the betas `mid-conversation-system-2026-04-07` and
+  `prompt-caching-scope-2026-01-05`; the `mid_conv_system` rejection is still
+  answered by a resend without the system turn.
 - **Unchanged:** event order, `num_turns`, the one-token check request (`max_tokens: 1`,
   not streamed), the safety-check exchange, the `apply_flag_settings` effects, the
   resume transcripts apart from the new fields above, the `mid_conv_system` fallback,
@@ -1394,3 +1409,5 @@ stays selectable without typing its id.
 [^12]: Claude Code changelog, 2.1.285. https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md
 
 [^13]: Claude Code 2.1.322 release manifest with the per-platform binary checksums. https://downloads.claude.ai/claude-code-releases/2.1.322/manifest.json
+
+[^14]: Claude Code changelog, 2.1.304: "Changed tool search to be on by default behind a custom `ANTHROPIC_BASE_URL`; a 400 or 422 from the gateway is retried without it". https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md
