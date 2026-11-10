@@ -337,10 +337,7 @@ pub fn write_restricted_file_atomic(path: &Path, content: &str) -> anyhow::Resul
 
 /// [`write_restricted_file_atomic`] that leaves a file with the same content untouched; returns
 /// whether it wrote. A container reading the file through virtiofs never sees an unneeded rename.
-pub fn write_restricted_file_atomic_if_changed(
-    path: &Path,
-    content: &str,
-) -> anyhow::Result<bool> {
+pub fn write_restricted_file_atomic_if_changed(path: &Path, content: &str) -> anyhow::Result<bool> {
     if std::fs::read(path).is_ok_and(|current| current == content.as_bytes()) {
         return Ok(false);
     }
@@ -1278,7 +1275,10 @@ mod tests {
         write_restricted_file_atomic(&path, "a").unwrap();
         let before = std::fs::metadata(&path).unwrap().modified().unwrap();
         assert!(!write_restricted_file_atomic_if_changed(&path, "a").unwrap());
-        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), before);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            before
+        );
         let leftovers: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(Result::ok)

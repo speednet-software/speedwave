@@ -103,11 +103,7 @@ fn load_from_file(policy_file: &Path, attempts: u32, delay: Duration) -> PiiEngi
     }
 }
 
-fn read_retrying_not_found(
-    path: &Path,
-    attempts: u32,
-    delay: Duration,
-) -> std::io::Result<String> {
+fn read_retrying_not_found(path: &Path, attempts: u32, delay: Duration) -> std::io::Result<String> {
     let mut attempt = 1;
     loop {
         match std::fs::read_to_string(path) {
@@ -490,7 +486,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("policy.json");
         std::fs::write(&path, "not json").unwrap();
-        assert!(matches!(load_from_file(&path, 1, Duration::ZERO), PiiEngineState::Failed(_)));
+        assert!(matches!(
+            load_from_file(&path, 1, Duration::ZERO),
+            PiiEngineState::Failed(_)
+        ));
     }
 
     #[test]
@@ -498,7 +497,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("policy.json");
         std::fs::write(&path, default_policy_json()).unwrap();
-        assert!(matches!(load_from_file(&path, 1, Duration::ZERO), PiiEngineState::Failed(_)));
+        assert!(matches!(
+            load_from_file(&path, 1, Duration::ZERO),
+            PiiEngineState::Failed(_)
+        ));
     }
 
     #[test]
@@ -507,7 +509,10 @@ mod tests {
         let path = dir.path().join("policy.json");
         std::fs::write(&path, default_policy_json()).unwrap();
         std::fs::write(dir.path().join("key"), "not-hex").unwrap();
-        assert!(matches!(load_from_file(&path, 1, Duration::ZERO), PiiEngineState::Failed(_)));
+        assert!(matches!(
+            load_from_file(&path, 1, Duration::ZERO),
+            PiiEngineState::Failed(_)
+        ));
     }
 
     #[test]
