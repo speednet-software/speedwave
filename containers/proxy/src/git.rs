@@ -152,7 +152,7 @@ fn read_only_response(host: &str) -> Response {
     let mut resp = Response::new(Body::from(format!(
         "Speedwave: the integration for {host} is in Read-only mode, so push is blocked. \
          Fetch and pull still work.\n\
-         A person turns Read-only mode off in Speedwave Desktop: Settings, Integration access, \
+         A person turns Read-only mode off in Speedwave Desktop: Settings, Read-only integrations, \
          or the Always read-only switch of the integration. \
          If your organization enforces Read-only mode, only the organization can change it.\n"
     )));
@@ -721,7 +721,7 @@ mod tests {
             assert!(text.contains("Read-only mode"), "{text}");
             assert!(text.contains("github.com"), "{text}");
             assert!(text.contains("Fetch and pull still work"), "{text}");
-            assert!(text.contains("Integration access"), "{text}");
+            assert!(text.contains("Read-only integrations"), "{text}");
             assert!(text.contains("organization"), "{text}");
             assert!(!text.contains(TOKEN) && !text.contains(CALLER));
         }

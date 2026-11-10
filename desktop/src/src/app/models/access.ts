@@ -1,4 +1,4 @@
-/** Integration access of a project. */
+/** Read-only settings of a project and its integrations. */
 export interface AccessSettingsView {
   read_only: boolean;
   read_only_locked: boolean;

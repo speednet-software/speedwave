@@ -15,7 +15,7 @@ import { ToggleComponent } from '../../shared/toggle.component';
 import { AccessSettingsView } from '../../models/access';
 import { errorText } from '../../shared/error-text';
 
-/** Integration access section. */
+/** Read-only integrations section. */
 @Component({
   selector: 'app-access-section',
   imports: [ToggleComponent],
@@ -27,7 +27,7 @@ import { errorText } from '../../shared/error-text';
       class="border-t border-[var(--line)] pt-6"
       data-testid="settings-section-access"
     >
-      <h2 class="view-title view-title-section text-[var(--ink)]">Integration access</h2>
+      <h2 class="view-title view-title-section text-[var(--ink)]">Read-only integrations</h2>
       <p
         class="mt-1 text-[12.5px] leading-relaxed text-[var(--ink-dim)]"
         data-testid="read-only-intro"

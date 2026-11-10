@@ -82,10 +82,10 @@ describe('AccessSectionComponent', () => {
     });
   });
 
-  it('shows the Integration access section with the read-only switch off by default', async () => {
+  it('shows the Read-only integrations section with the read-only switch off by default', async () => {
     await create();
 
-    expect(el('settings-section-access')?.textContent).toContain('Integration access');
+    expect(el('settings-section-access')?.textContent).toContain('Read-only integrations');
     expect(el('settings-section-access')?.textContent).toContain(
       'All integrations and plugins read-only'
     );
