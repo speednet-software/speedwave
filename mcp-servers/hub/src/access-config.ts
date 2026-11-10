@@ -28,13 +28,44 @@ const KEYS = new Set(['version', 'default', 'services']);
 
 const ALL_FULL: AccessRules = { default: 'full', services: {} };
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+let rules: AccessRules | undefined;
+
+/** Load the access rules for this process at server startup; throws when the file is invalid. */
+export function loadAccess(): void {
+  rules = loadAccessRules();
 }
 
-function toMode(value: unknown, what: string): AccessMode {
-  if (value === 'full' || value === 'read_only') return value;
-  throw new Error(`${what} must be "full" or "read_only"`);
+/**
+ * The access rules in effect for this process, loaded from `access.json` if `loadAccess()` has not run.
+ * @returns The access rules
+ */
+export function getAccessRules(): AccessRules {
+  rules ??= loadAccessRules();
+  return rules;
+}
+
+/**
+ * Load the access rules next to `POLICY_FILE`.
+ * @param env - Environment to read `POLICY_FILE` from
+ * @returns The access rules; every service `full` when there is no file
+ */
+export function loadAccessRules(
+  env: Record<string, string | undefined> = process.env
+): AccessRules {
+  const policyFile = env.POLICY_FILE;
+  if (!policyFile) return ALL_FULL;
+  const path = join(dirname(policyFile), ACCESS_FILE);
+  try {
+    const text = readAccessFile(path);
+    return text === undefined ? ALL_FULL : parseAccessRules(text);
+  } catch (e) {
+    throw new Error(
+      `Access config ${path} is invalid: ${e instanceof Error ? e.message : String(e)}`,
+      {
+        cause: e,
+      }
+    );
+  }
 }
 
 /**
@@ -81,42 +112,11 @@ function readAccessFile(path: string): string | undefined {
   return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
 }
 
-/**
- * Load the access rules next to `POLICY_FILE`.
- * @param env - Environment to read `POLICY_FILE` from
- * @returns The access rules; every service `full` when there is no file
- */
-export function loadAccessRules(
-  env: Record<string, string | undefined> = process.env
-): AccessRules {
-  const policyFile = env.POLICY_FILE;
-  if (!policyFile) return ALL_FULL;
-  const path = join(dirname(policyFile), ACCESS_FILE);
-  try {
-    const text = readAccessFile(path);
-    return text === undefined ? ALL_FULL : parseAccessRules(text);
-  } catch (e) {
-    throw new Error(
-      `Access config ${path} is invalid: ${e instanceof Error ? e.message : String(e)}`,
-      {
-        cause: e,
-      }
-    );
-  }
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-let rules: AccessRules | undefined;
-
-/** Load the access rules for this process at server startup; throws when the file is invalid. */
-export function loadAccess(): void {
-  rules = loadAccessRules();
-}
-
-/**
- * The access rules in effect for this process, loaded from `access.json` if `loadAccess()` has not run.
- * @returns The access rules
- */
-export function getAccessRules(): AccessRules {
-  rules ??= loadAccessRules();
-  return rules;
+function toMode(value: unknown, what: string): AccessMode {
+  if (value === 'full' || value === 'read_only') return value;
+  throw new Error(`${what} must be "full" or "read_only"`);
 }

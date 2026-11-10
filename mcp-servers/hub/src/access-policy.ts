@@ -16,22 +16,41 @@ export type AccessDecision =
 const OS_SERVICE = 'os';
 const OS_CATEGORIES = ['reminders', 'calendar', 'mail', 'notes'] as const;
 
-function serviceAccessMode(rules: AccessRules, service: string): AccessMode {
-  return rules.services[service] ?? rules.default;
+const OS_CATEGORY_LABELS = {
+  reminders: 'Reminders',
+  calendar: 'Calendar',
+  mail: 'Mail',
+  notes: 'Notes',
+} as const;
+
+/**
+ * Decide with the access rules loaded at startup.
+ * @param metadata - Tool metadata from the registry
+ * @returns Allowed, or denied with a teaching message
+ */
+export function checkToolAccess(metadata: ToolMetadata): AccessDecision {
+  return decideAccess(getAccessRules(), metadata);
 }
 
-function isReadOnly(rules: AccessRules, service: string): boolean {
-  return serviceAccessMode(rules, service) === 'read_only';
-}
-
-function osKey(category: string): string {
-  return `${OS_SERVICE}-${category}`;
-}
-
-function toolAccessMode(rules: AccessRules, metadata: ToolMetadata): AccessMode {
-  if (metadata.service !== OS_SERVICE) return serviceAccessMode(rules, metadata.service);
-  if (metadata.osCategory) return serviceAccessMode(rules, osKey(metadata.osCategory));
-  return OS_CATEGORIES.some((c) => isReadOnly(rules, osKey(c))) ? 'read_only' : 'full';
+/**
+ * Decide whether the agent may call a tool.
+ * @param rules - Composed access rules
+ * @param metadata - Tool metadata from the registry
+ * @returns Allowed, or denied with a teaching message
+ */
+export function decideAccess(rules: AccessRules, metadata: ToolMetadata): AccessDecision {
+  const { service, name: tool } = metadata;
+  if (toolAccessMode(rules, metadata) === 'full') return { allowed: true };
+  if (metadata.annotations?.readOnlyHint === true) return { allowed: true };
+  return {
+    allowed: false,
+    reason: 'read-only',
+    service,
+    tool,
+    message: buildTeachingMessage({
+      nextStep: `Read-only mode is on for ${deniedLabel(metadata)}, so ${service}.${tool} did not run: ${blockedBecause(metadata)}. Reads still work. ${turnOffHint(rules, metadata)}`,
+    }),
+  };
 }
 
 /**
@@ -65,20 +84,30 @@ export function readOnlyNotice(blocked: readonly string[]): string | undefined {
   return `Read-only mode is on: tools that change data are blocked for ${blocked.join(', ')} and marked blocked below, reads still work.`;
 }
 
-const OS_CATEGORY_LABELS = {
-  reminders: 'Reminders',
-  calendar: 'Calendar',
-  mail: 'Mail',
-  notes: 'Notes',
-} as const;
+function toolAccessMode(rules: AccessRules, metadata: ToolMetadata): AccessMode {
+  if (metadata.service !== OS_SERVICE) return serviceAccessMode(rules, metadata.service);
+  if (metadata.osCategory) return serviceAccessMode(rules, osKey(metadata.osCategory));
+  return OS_CATEGORIES.some((c) => isReadOnly(rules, osKey(c))) ? 'read_only' : 'full';
+}
+
+function serviceAccessMode(rules: AccessRules, service: string): AccessMode {
+  return rules.services[service] ?? rules.default;
+}
+
+function isReadOnly(rules: AccessRules, service: string): boolean {
+  return serviceAccessMode(rules, service) === 'read_only';
+}
+
+function osKey(category: string): string {
+  return `${OS_SERVICE}-${category}`;
+}
 
 function deniedLabel(metadata: ToolMetadata): string {
   return metadata.osCategory ? OS_CATEGORY_LABELS[metadata.osCategory] : metadata.service;
 }
 
-function modeEntryKeys(metadata: ToolMetadata): string[] {
-  if (metadata.service !== OS_SERVICE) return [metadata.service];
-  return metadata.osCategory ? [osKey(metadata.osCategory)] : OS_CATEGORIES.map(osKey);
+function blockedBecause(metadata: ToolMetadata): string {
+  return metadata.annotations ? 'it can change data' : 'it has no read-only annotation';
 }
 
 function turnOffHint(rules: AccessRules, metadata: ToolMetadata): string {
@@ -88,36 +117,7 @@ function turnOffHint(rules: AccessRules, metadata: ToolMetadata): string {
     : "Turn it off in Speedwave Desktop: Settings, Read-only integrations, and this integration's Always read-only switch if on. The organization may enforce the mode.";
 }
 
-function blockedBecause(metadata: ToolMetadata): string {
-  return metadata.annotations ? 'it can change data' : 'it has no read-only annotation';
-}
-
-/**
- * Decide whether the agent may call a tool.
- * @param rules - Composed access rules
- * @param metadata - Tool metadata from the registry
- * @returns Allowed, or denied with a teaching message
- */
-export function decideAccess(rules: AccessRules, metadata: ToolMetadata): AccessDecision {
-  const { service, name: tool } = metadata;
-  if (toolAccessMode(rules, metadata) === 'full') return { allowed: true };
-  if (metadata.annotations?.readOnlyHint === true) return { allowed: true };
-  return {
-    allowed: false,
-    reason: 'read-only',
-    service,
-    tool,
-    message: buildTeachingMessage({
-      nextStep: `Read-only mode is on for ${deniedLabel(metadata)}, so ${service}.${tool} did not run: ${blockedBecause(metadata)}. Reads still work. ${turnOffHint(rules, metadata)}`,
-    }),
-  };
-}
-
-/**
- * Decide with the access rules loaded at startup.
- * @param metadata - Tool metadata from the registry
- * @returns Allowed, or denied with a teaching message
- */
-export function checkToolAccess(metadata: ToolMetadata): AccessDecision {
-  return decideAccess(getAccessRules(), metadata);
+function modeEntryKeys(metadata: ToolMetadata): string[] {
+  if (metadata.service !== OS_SERVICE) return [metadata.service];
+  return metadata.osCategory ? [osKey(metadata.osCategory)] : OS_CATEGORIES.map(osKey);
 }

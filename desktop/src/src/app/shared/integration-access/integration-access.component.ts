@@ -12,11 +12,10 @@ import { Router } from '@angular/router';
 
 import { TauriService } from '../../services/tauri.service';
 import { AccessRestartService } from '../../services/access-restart.service';
-import { AccessMode, IntegrationAccessView } from '../../models/access';
+import { AccessMode, IntegrationAccessView, READ_ONLY_SECTION_ID } from '../../models/access';
 import { BROWSER_SERVICE, isGitForge } from '../../models/integration';
 import { errorText } from '../error-text';
 import { ToggleComponent } from '../toggle.component';
-import { READ_ONLY_SECTION_ID } from '../../models/access';
 
 /** Access switch of one integration: always read-only, or follow the project setting. */
 @Component({
