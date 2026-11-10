@@ -98,7 +98,7 @@ export interface OsIntegrationValidation {
 /** Integration whose repository allowlist the git transport enforces. */
 export type GitForgeService = 'github' | 'gitlab';
 
-export const GIT_FORGES: readonly GitForgeService[] = ['github', 'gitlab'];
+const GIT_FORGES: readonly GitForgeService[] = ['github', 'gitlab'];
 
 /**
  * Whether a service is a git forge.
