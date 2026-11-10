@@ -6,6 +6,7 @@ import {
   Tool,
   ToolDefinition,
   READ_ONLY_ANNOTATIONS,
+  WORKSPACE_WRITE_ANNOTATIONS,
   WRITE_ANNOTATIONS,
   META_KEYS,
 } from '@speedwave/mcp-shared';
@@ -86,7 +87,7 @@ const downloadFileTool: Tool = {
     },
     required: ['file'],
   },
-  annotations: WRITE_ANNOTATIONS,
+  annotations: WORKSPACE_WRITE_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['slack', 'file', 'download', 'save', 'pdf', 'binary', 'workspace', 'attachment'],
   example: 'const saved = await slack.downloadFile({ file: "F0123ABC456" })',

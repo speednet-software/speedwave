@@ -178,7 +178,8 @@ describe('AccessSectionComponent', () => {
     await create();
 
     const help = el('read-only-help')?.textContent ?? '';
-    expect(help).toContain('Write, Edit, Bash and WebFetch');
+    expect(help).toContain("The agent's built-in tools in the container");
+    expect(help).not.toContain('Claude Code');
     expect(help).toContain('Internet access from the container');
     expect(help).toContain('Credentials you put into the container by hand');
   });

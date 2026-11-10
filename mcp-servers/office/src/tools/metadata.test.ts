@@ -1,9 +1,10 @@
 import { describe, it, expect } from 'vitest';
+import { READ_ONLY_ANNOTATIONS, WORKSPACE_WRITE_ANNOTATIONS } from '@speedwave/mcp-shared';
 import { createToolDefinitions } from './index.js';
 
 const READ_ONLY_TOOL_NAMES = ['readDocument', 'readPdfText', 'pdfMetadata'];
 
-const CHANGING_TOOL_NAMES = [
+const WORKSPACE_WRITE_TOOL_NAMES = [
   'markdownToPdf',
   'htmlToPdf',
   'markdownToDocx',
@@ -26,20 +27,23 @@ const CHANGING_TOOL_NAMES = [
 
 describe('Office read-only access annotations', () => {
   const tools = createToolDefinitions().map((td) => td.tool);
-  const names = (predicate: (hint: unknown) => boolean) =>
-    tools.filter((t) => predicate(t.annotations?.readOnlyHint)).map((t) => t.name);
 
-  it('lists every tool as either reading or changing', () => {
+  it('lists every tool as either reading or writing only into the workspace', () => {
     expect([...tools.map((t) => t.name)].sort()).toEqual(
-      [...READ_ONLY_TOOL_NAMES, ...CHANGING_TOOL_NAMES].sort()
+      [...READ_ONLY_TOOL_NAMES, ...WORKSPACE_WRITE_TOOL_NAMES].sort()
     );
   });
 
-  it('marks exactly the reading tools readOnlyHint true', () => {
-    expect(names((hint) => hint === true).sort()).toEqual([...READ_ONLY_TOOL_NAMES].sort());
+  it.each(READ_ONLY_TOOL_NAMES)('marks %s with the read-only annotations', (name) => {
+    expect(tools.find((t) => t.name === name)?.annotations).toEqual(READ_ONLY_ANNOTATIONS);
   });
 
-  it.each(CHANGING_TOOL_NAMES)('does not mark %s as read-only', (name) => {
-    expect(tools.find((t) => t.name === name)?.annotations?.readOnlyHint).not.toBe(true);
-  });
+  it.each(WORKSPACE_WRITE_TOOL_NAMES)(
+    'marks %s with the workspace-write annotations, which read-only mode lets through',
+    (name) => {
+      const annotations = tools.find((t) => t.name === name)?.annotations;
+      expect(annotations).toEqual(WORKSPACE_WRITE_ANNOTATIONS);
+      expect(annotations?.readOnlyHint).toBe(true);
+    }
+  );
 });

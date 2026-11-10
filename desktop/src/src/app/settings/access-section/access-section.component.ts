@@ -30,7 +30,8 @@ import { errorText } from '../../shared/error-text';
       <p class="mt-1 text-[12.5px] leading-relaxed text-[var(--ink-dim)]">
         In read-only mode the agent reads from every integration but cannot change anything in it:
         tools that send, create, edit or delete are blocked, and a blocked call returns an
-        explanation to the agent.
+        explanation to the agent. Tools that only save files into the project folder, such as
+        downloads and generated documents, still work.
       </p>
 
       @let current = view();
@@ -64,7 +65,10 @@ import { errorText } from '../../shared/error-text';
       >
         <p>Read-only mode does not cover:</p>
         <ul class="mt-1 list-disc pl-5">
-          <li>Claude Code's own tools: Write, Edit, Bash and WebFetch.</li>
+          <li>
+            The agent's built-in tools in the container: editing files, running commands and
+            fetching web pages.
+          </li>
           <li>Internet access from the container.</li>
           <li>Credentials you put into the container by hand.</li>
         </ul>
