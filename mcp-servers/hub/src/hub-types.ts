@@ -3,6 +3,12 @@
 /** Why the access policy refused a tool call; the audit trail records it verbatim. */
 export type DenialReason = 'read-only';
 
+/** OS sub-integrations of the `os` service, in the order of `consts::TOGGLEABLE_OS_SERVICES`. */
+export const OS_CATEGORIES = ['reminders', 'calendar', 'mail', 'notes'] as const;
+
+/** One OS sub-integration. */
+export type OsCategory = (typeof OS_CATEGORIES)[number];
+
 /**
  * Tool execution error
  */
@@ -122,8 +128,8 @@ export interface ToolMetadata {
   timeoutClass?: TimeoutClass;
   /** Custom timeout in milliseconds for long-running operations (overrides WORKER_REQUEST_MS) */
   timeoutMs?: number;
-  /** OS sub-integration category (only for os service): 'reminders', 'calendar', 'mail', 'notes' */
-  osCategory?: 'reminders' | 'calendar' | 'mail' | 'notes';
+  /** OS sub-integration category (only for os service) */
+  osCategory?: OsCategory;
   /** Behavioral annotations from the worker (readOnlyHint, destructiveHint, etc.) */
   annotations?: import('@speedwave/mcp-shared').ToolAnnotations;
   /** True when results depend on the authenticated user's identity. */

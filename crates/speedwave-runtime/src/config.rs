@@ -6957,12 +6957,12 @@ mod tests {
     }
 
     #[test]
-    fn os_categories_match_the_hub_access_policy_ts() {
-        let ts = include_str!("../../../mcp-servers/hub/src/access-policy.ts");
+    fn os_categories_match_the_hub_types_ts() {
+        let ts = include_str!("../../../mcp-servers/hub/src/hub-types.ts");
         let line = ts
             .lines()
-            .find(|l| l.starts_with("const OS_CATEGORIES = ["))
-            .expect("OS_CATEGORIES in access-policy.ts");
+            .find(|l| l.starts_with("export const OS_CATEGORIES = ["))
+            .expect("OS_CATEGORIES in hub-types.ts");
         let listed: Vec<&str> = line
             .split('[')
             .nth(1)

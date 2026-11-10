@@ -1,6 +1,6 @@
 import { buildTeachingMessage } from '@speedwave/mcp-shared';
 import { getAccessRules, type AccessMode, type AccessRules } from './access-config.js';
-import type { DenialReason, ToolMetadata } from './hub-types.js';
+import { OS_CATEGORIES, type DenialReason, type ToolMetadata } from './hub-types.js';
 
 /** Outcome of an access decision: allowed, or denied with the reason and a teaching message. */
 export type AccessDecision =
@@ -14,7 +14,6 @@ export type AccessDecision =
     };
 
 const OS_SERVICE = 'os';
-const OS_CATEGORIES = ['reminders', 'calendar', 'mail', 'notes'] as const;
 
 const OS_CATEGORY_LABELS = {
   reminders: 'Reminders',
