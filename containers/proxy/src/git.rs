@@ -153,7 +153,7 @@ fn read_only_response(host: &str) -> Response {
         "Speedwave: the integration for {host} is in Read-only mode, so push is blocked. \
          Fetch and pull still work.\n\
          A person turns Read-only mode off in Speedwave Desktop: Settings, Read-only integrations, \
-         or the Always read-only switch of the integration. \
+         and the Always read-only switch of the integration if it is on. \
          If your organization enforces Read-only mode, only the organization can change it.\n"
     )));
     *resp.status_mut() = StatusCode::FORBIDDEN;
@@ -722,6 +722,7 @@ mod tests {
             assert!(text.contains("github.com"), "{text}");
             assert!(text.contains("Fetch and pull still work"), "{text}");
             assert!(text.contains("Read-only integrations"), "{text}");
+            assert!(text.contains("Always read-only switch"), "{text}");
             assert!(text.contains("organization"), "{text}");
             assert!(!text.contains(TOKEN) && !text.contains(CALLER));
         }

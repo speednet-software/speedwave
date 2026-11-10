@@ -13,9 +13,10 @@ import { Router } from '@angular/router';
 import { TauriService } from '../../services/tauri.service';
 import { AccessRestartService } from '../../services/access-restart.service';
 import { AccessMode, IntegrationAccessView } from '../../models/access';
-import { isGitForge } from '../../models/integration';
+import { BROWSER_SERVICE, isGitForge } from '../../models/integration';
 import { errorText } from '../error-text';
 import { ToggleComponent } from '../toggle.component';
+import { READ_ONLY_SECTION_ID } from '../../models/access';
 
 /** Access switch of one integration: always read-only, or follow the project setting. */
 @Component({
@@ -39,10 +40,10 @@ import { ToggleComponent } from '../toggle.component';
               } @else {
                 Currently read-only, from the project setting in
                 <a
-                  href="/settings#section-access"
+                  [href]="'/settings#' + settingsSection"
+                  (click)="openSettings($event)"
                   class="text-inherit underline decoration-current/40 underline-offset-2 hover:decoration-current focus-visible:rounded-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-current"
                   data-testid="integration-access-settings-link"
-                  (click)="openSettings($event)"
                   >Settings</a
                 >.
               }
@@ -50,7 +51,7 @@ import { ToggleComponent } from '../toggle.component';
           </div>
           <app-toggle
             testId="integration-access-always"
-            [ariaLabel]="'Always read-only for ' + (name() || service())"
+            [ariaLabel]="'Always read-only for ' + (displayName() || service())"
             [checked]="current.mode === 'read_only'"
             [disabled]="busy()"
             (changed)="onToggle($event)"
@@ -75,8 +76,9 @@ import { ToggleComponent } from '../toggle.component';
 export class IntegrationAccessComponent {
   readonly project = input<string | null>(null);
   readonly service = input.required<string>();
-  readonly name = input('');
+  readonly displayName = input('');
 
+  protected readonly settingsSection = READ_ONLY_SECTION_ID;
   protected readonly view = signal<IntegrationAccessView | null>(null);
   protected readonly busy = signal(false);
   protected readonly error = signal('');
@@ -85,7 +87,7 @@ export class IntegrationAccessComponent {
     if (isGitForge(service)) {
       return 'Read-only blocks the tools that send, create, edit or delete, and git push. Reads, fetch and pull still work.';
     }
-    if (service === 'playwright') {
+    if (service === BROWSER_SERVICE) {
       return 'Read-only blocks opening pages, clicking and typing, so the browser does not work in this mode.';
     }
     return 'Read-only blocks the tools that send, create, edit or delete. Reads still work.';
@@ -110,7 +112,7 @@ export class IntegrationAccessComponent {
 
   protected openSettings(event: Event): void {
     event.preventDefault();
-    void this.router.navigate(['/settings'], { fragment: 'section-access' });
+    void this.router.navigate(['/settings'], { fragment: this.settingsSection });
   }
 
   protected async onToggle(event: Event): Promise<void> {

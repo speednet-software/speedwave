@@ -200,7 +200,7 @@ const NO_ACTIVE_PROJECT_MSG = 'No active project — open or create a project fi
                   <app-integration-access
                     [project]="activeProject"
                     [service]="plugin.service_id"
-                    [name]="plugin.name"
+                    [displayName]="plugin.name"
                   />
                 </div>
               }

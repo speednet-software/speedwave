@@ -99,6 +99,7 @@ describe('decideAccess', () => {
     expect(decision.message).toContain('slack.sendChannel');
     expect(decision.message).toContain('Reads');
     expect(decision.message).toContain('Settings, Read-only integrations');
+    expect(decision.message).toContain("this integration's Always read-only switch if on");
     expect(decision.message).toContain('organization');
   });
 

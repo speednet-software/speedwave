@@ -86,6 +86,7 @@ describe('AccessSectionComponent', () => {
     await create();
 
     expect(el('settings-section-access')?.textContent).toContain('Read-only integrations');
+    expect(el('settings-section-access')?.id).toBe('section-access');
     expect(el('settings-section-access')?.textContent).toContain(
       'All integrations and plugins read-only'
     );
@@ -180,7 +181,7 @@ describe('AccessSectionComponent', () => {
     await create();
 
     expect(el('read-only-intro')?.textContent).toContain(
-      'Read-only stops the agent from changing anything in the services Speedwave connects to'
+      "Read-only stops the agent from changing anything through Speedwave's integrations and"
     );
     expect(el('read-only-intro')?.textContent).toContain('It can still read from them');
   });
@@ -232,11 +233,11 @@ describe('AccessSectionComponent', () => {
     toggle().dispatchEvent(new Event('change'));
     fixture.detectChanges();
     expect(toggle().checked).toBe(true);
-    pending.reject('Read-only access is set by your organization and cannot be changed here.');
+    pending.reject('Read-only mode is set by your organization and cannot be changed here.');
     await settle();
 
     expect(errors).toEqual([
-      'Read-only access is set by your organization and cannot be changed here.',
+      'Read-only mode is set by your organization and cannot be changed here.',
     ]);
     expect(invoked('restart_hub')).toHaveLength(0);
     expect(invoked('get_access_settings')).toHaveLength(2);

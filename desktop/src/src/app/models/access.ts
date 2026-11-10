@@ -1,3 +1,6 @@
+/** Id of the Settings section with the project read-only switch, the target of links to it. */
+export const READ_ONLY_SECTION_ID = 'section-access';
+
 /** Read-only settings of a project and its integrations. */
 export interface AccessSettingsView {
   read_only: boolean;

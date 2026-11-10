@@ -160,7 +160,7 @@ describe('Slack read-only access annotations', () => {
   });
 
   it.each(WORKSPACE_WRITE_TOOL_NAMES)('marks %s with the workspace-write annotations', (name) => {
-    expect(tools.find((t) => t.name === name)?.annotations).toEqual(WORKSPACE_WRITE_ANNOTATIONS);
+    expect(tools.find((t) => t.name === name)?.annotations).toBe(WORKSPACE_WRITE_ANNOTATIONS);
   });
 
   it.each(CHANGING_TOOL_NAMES)('does not mark %s as read-only', (name) => {

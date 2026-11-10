@@ -12,10 +12,10 @@ import {
 import { TauriService } from '../../services/tauri.service';
 import { AccessRestartService } from '../../services/access-restart.service';
 import { ToggleComponent } from '../../shared/toggle.component';
-import { AccessSettingsView } from '../../models/access';
+import { AccessSettingsView, READ_ONLY_SECTION_ID } from '../../models/access';
 import { errorText } from '../../shared/error-text';
 
-/** Read-only integrations section. */
+/** Project switch that makes every integration and plugin read-only. */
 @Component({
   selector: 'app-access-section',
   imports: [ToggleComponent],
@@ -23,7 +23,7 @@ import { errorText } from '../../shared/error-text';
   host: { class: 'block' },
   template: `
     <section
-      id="section-access"
+      [id]="sectionId"
       class="border-t border-[var(--line)] pt-6"
       data-testid="settings-section-access"
     >
@@ -32,8 +32,8 @@ import { errorText } from '../../shared/error-text';
         class="mt-1 text-[12.5px] leading-relaxed text-[var(--ink-dim)]"
         data-testid="read-only-intro"
       >
-        Read-only stops the agent from changing anything in the services Speedwave connects to: it
-        cannot send messages, edit issues or push code. It can still read from them.
+        Read-only stops the agent from changing anything through Speedwave's integrations and
+        plugins: it cannot send messages, edit issues or push code. It can still read from them.
       </p>
 
       @let current = view();
@@ -107,6 +107,7 @@ export class AccessSectionComponent {
   readonly project = input<string | null>(null);
   readonly errorOccurred = output<string>();
 
+  protected readonly sectionId = READ_ONLY_SECTION_ID;
   protected readonly view = signal<AccessSettingsView | null>(null);
   protected readonly busy = signal(false);
 

@@ -241,7 +241,7 @@ describe('file-tools', () => {
       expect(read._meta?.[META_KEYS.DEFER_LOADING]).toBe(true);
       const download = tools[1].tool;
       expect(download.inputSchema.required).toEqual(['file']);
-      expect(download.annotations).toEqual(WORKSPACE_WRITE_ANNOTATIONS);
+      expect(download.annotations).toBe(WORKSPACE_WRITE_ANNOTATIONS);
       expect(download._meta?.[META_KEYS.DEFER_LOADING]).toBe(true);
       const upload = tools[2].tool;
       expect(upload.inputSchema.required).toEqual(['channel', 'filePaths']);

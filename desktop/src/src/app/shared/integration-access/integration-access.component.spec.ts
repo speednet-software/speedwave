@@ -47,7 +47,7 @@ describe('IntegrationAccessComponent', () => {
     fixture = TestBed.createComponent(IntegrationAccessComponent);
     fixture.componentRef.setInput('project', 'proj');
     fixture.componentRef.setInput('service', service);
-    fixture.componentRef.setInput('name', name);
+    fixture.componentRef.setInput('displayName', name);
     fixture.detectChanges();
     await settle();
   }
@@ -215,6 +215,9 @@ describe('IntegrationAccessComponent', () => {
     const click = new MouseEvent('click', { cancelable: true });
     el('integration-access-settings-link')?.dispatchEvent(click);
 
+    expect(el('integration-access-settings-link')?.getAttribute('href')).toBe(
+      '/settings#section-access'
+    );
     expect(click.defaultPrevented).toBe(true);
     expect(router.navigate).toHaveBeenCalledWith(['/settings'], { fragment: 'section-access' });
   });

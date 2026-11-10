@@ -90,12 +90,12 @@ function turnOffHint(rules: AccessRules, metadata: ToolMetadata): string {
   const perService = modeEntryKeys(metadata).some((key) => rules.services[key] === 'read_only');
   return perService
     ? 'Turn it off in Speedwave Desktop: the Always read-only switch of this integration.'
-    : 'Turn it off in Speedwave Desktop: Settings, Read-only integrations, unless the organization enforces the mode.';
+    : "Turn it off in Speedwave Desktop: Settings, Read-only integrations, and this integration's Always read-only switch if on. The organization may enforce the mode.";
 }
 
 function blockedBecause(service: string, metadata: ToolMetadata): string {
   if (service.startsWith(CUSTOM_SERVICE_PREFIX)) {
-    return 'custom MCP servers are blocked in this mode';
+    return 'custom MCP servers are blocked';
   }
   if (!metadata.annotations) {
     return 'it has no read-only annotation';
@@ -121,7 +121,7 @@ export function decideAccess(rules: AccessRules, metadata: ToolMetadata): Access
     service,
     tool,
     message: buildTeachingMessage({
-      nextStep: `Read-only mode is on for ${deniedLabel(metadata)}, so ${service}.${tool} did not run: ${blockedBecause(service, metadata)}. Reads still work, use a tool that only reads. ${turnOffHint(rules, metadata)}`,
+      nextStep: `Read-only mode is on for ${deniedLabel(metadata)}, so ${service}.${tool} did not run: ${blockedBecause(service, metadata)}. Reads still work. ${turnOffHint(rules, metadata)}`,
     }),
   };
 }

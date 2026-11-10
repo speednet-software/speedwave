@@ -109,6 +109,9 @@ export function isGitForge(service: string): service is GitForgeService {
   return (GIT_FORGES as readonly string[]).includes(service);
 }
 
+/** The browser integration, whose every page action is blocked in read-only mode. */
+export const BROWSER_SERVICE = 'playwright';
+
 /** A remote found in the project directory and not listed yet. */
 export interface GitRepositorySuggestion {
   entry: string;

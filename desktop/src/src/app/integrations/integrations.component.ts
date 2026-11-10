@@ -357,7 +357,7 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
                     <app-integration-access
                       [project]="activeProject"
                       [service]="svc.service"
-                      [name]="svc.display_name"
+                      [displayName]="svc.display_name"
                     />
                   </div>
                 }
@@ -402,7 +402,7 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
                         <app-integration-access
                           [project]="activeProject"
                           [service]="os.service"
-                          [name]="os.display_name"
+                          [displayName]="os.display_name"
                         />
                       </div>
                     }

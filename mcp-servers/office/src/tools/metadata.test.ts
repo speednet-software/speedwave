@@ -35,14 +35,14 @@ describe('Office read-only access annotations', () => {
   });
 
   it.each(READ_ONLY_TOOL_NAMES)('marks %s with the read-only annotations', (name) => {
-    expect(tools.find((t) => t.name === name)?.annotations).toEqual(READ_ONLY_ANNOTATIONS);
+    expect(tools.find((t) => t.name === name)?.annotations).toBe(READ_ONLY_ANNOTATIONS);
   });
 
   it.each(WORKSPACE_WRITE_TOOL_NAMES)(
     'marks %s with the workspace-write annotations, which read-only mode lets through',
     (name) => {
       const annotations = tools.find((t) => t.name === name)?.annotations;
-      expect(annotations).toEqual(WORKSPACE_WRITE_ANNOTATIONS);
+      expect(annotations).toBe(WORKSPACE_WRITE_ANNOTATIONS);
       expect(annotations?.readOnlyHint).toBe(true);
     }
   );
