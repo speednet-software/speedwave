@@ -13,7 +13,6 @@ export type AccessDecision =
       message: string;
     };
 
-const CUSTOM_SERVICE_PREFIX = 'custom-';
 const OS_SERVICE = 'os';
 const OS_CATEGORIES = ['reminders', 'calendar', 'mail', 'notes'] as const;
 
@@ -93,14 +92,8 @@ function turnOffHint(rules: AccessRules, metadata: ToolMetadata): string {
     : "Turn it off in Speedwave Desktop: Settings, Read-only integrations, and this integration's Always read-only switch if on. The organization may enforce the mode.";
 }
 
-function blockedBecause(service: string, metadata: ToolMetadata): string {
-  if (service.startsWith(CUSTOM_SERVICE_PREFIX)) {
-    return 'custom MCP servers are blocked';
-  }
-  if (!metadata.annotations) {
-    return 'it has no read-only annotation';
-  }
-  return 'it can change data';
+function blockedBecause(metadata: ToolMetadata): string {
+  return metadata.annotations ? 'it can change data' : 'it has no read-only annotation';
 }
 
 /**
@@ -112,16 +105,14 @@ function blockedBecause(service: string, metadata: ToolMetadata): string {
 export function decideAccess(rules: AccessRules, metadata: ToolMetadata): AccessDecision {
   const { service, name: tool } = metadata;
   if (toolAccessMode(rules, metadata) === 'full') return { allowed: true };
-  if (!service.startsWith(CUSTOM_SERVICE_PREFIX) && metadata.annotations?.readOnlyHint === true) {
-    return { allowed: true };
-  }
+  if (metadata.annotations?.readOnlyHint === true) return { allowed: true };
   return {
     allowed: false,
     reason: 'read-only',
     service,
     tool,
     message: buildTeachingMessage({
-      nextStep: `Read-only mode is on for ${deniedLabel(metadata)}, so ${service}.${tool} did not run: ${blockedBecause(service, metadata)}. Reads still work. ${turnOffHint(rules, metadata)}`,
+      nextStep: `Read-only mode is on for ${deniedLabel(metadata)}, so ${service}.${tool} did not run: ${blockedBecause(metadata)}. Reads still work. ${turnOffHint(rules, metadata)}`,
     }),
   };
 }

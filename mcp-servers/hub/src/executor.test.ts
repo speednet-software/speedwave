@@ -2025,6 +2025,7 @@ describe('executor', () => {
       for (const service of ['slack', 'redmine', 'sharepoint']) {
         process.env[`WORKER_${service.toUpperCase()}_URL`] = `http://mcp-${service}:3001`;
       }
+      process.env.WORKER_CUSTOM_NOTES_URL = 'http://mcp-custom-notes:3001';
       process.env.ENABLED_SERVICES = 'slack,redmine,sharepoint,custom-notes';
       resetServiceCaches();
       annotate('slack', 'listChannelIds', { readOnlyHint: true, destructiveHint: false });
@@ -2063,6 +2064,7 @@ describe('executor', () => {
       for (const service of ['slack', 'redmine', 'sharepoint']) {
         delete process.env[`WORKER_${service.toUpperCase()}_URL`];
       }
+      delete process.env.WORKER_CUSTOM_NOTES_URL;
       if (savedEnabledServices === undefined) {
         delete process.env.ENABLED_SERVICES;
       } else {
@@ -2121,7 +2123,7 @@ describe('executor', () => {
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
-    it('blocks a custom-* service entirely, even a tool annotated read-only', async () => {
+    it('lets a custom-* tool annotated read-only reach its server', async () => {
       applyAccess({ default: 'read_only', services: {} });
 
       const result = await executeCode({
@@ -2129,9 +2131,8 @@ describe('executor', () => {
         timeoutMs: 5000,
       });
 
-      expect(result.success).toBe(false);
-      expect(result.error?.message).toContain('custom MCP servers');
-      expect(fetchMock).not.toHaveBeenCalled();
+      expect(result.success).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
     it('applies a per-service mode only to that service', async () => {

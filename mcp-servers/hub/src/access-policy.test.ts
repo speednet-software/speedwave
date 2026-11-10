@@ -63,9 +63,14 @@ describe('decideAccess', () => {
     expect(decideAccess(ALL_READ_ONLY, t)).toMatchObject({ allowed: false });
   });
 
-  it('denies every tool of a custom-* service in read-only mode, even annotated read-only', () => {
-    const t = tool('custom-notes', 'listNotes', { readOnlyHint: true });
-    expect(decideAccess(ALL_READ_ONLY, t)).toMatchObject({
+  it('judges a custom-* service by its annotations like any integration', () => {
+    expect(
+      decideAccess(ALL_READ_ONLY, tool('custom-notes', 'listNotes', { readOnlyHint: true }))
+    ).toEqual({ allowed: true });
+    expect(
+      decideAccess(ALL_READ_ONLY, tool('custom-notes', 'addNote', { readOnlyHint: false }))
+    ).toMatchObject({ allowed: false, reason: 'read-only' });
+    expect(decideAccess(ALL_READ_ONLY, tool('custom-notes', 'addNote'))).toMatchObject({
       allowed: false,
       reason: 'read-only',
     });
@@ -134,15 +139,6 @@ describe('decideAccess', () => {
     if (decision.allowed) throw new Error('expected a denial');
     expect(decision.message).toContain('for Mail,');
     expect(decision.message).toContain('Always read-only switch of this integration');
-  });
-
-  it('names why a custom-* service is blocked', () => {
-    const decision = decideAccess(
-      ALL_READ_ONLY,
-      tool('custom-notes', 'listNotes', { readOnlyHint: true })
-    );
-    if (decision.allowed) throw new Error('expected a denial');
-    expect(decision.message).toContain('custom');
   });
 
   it('names a missing annotation as the cause', () => {
