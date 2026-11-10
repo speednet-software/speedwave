@@ -59,7 +59,6 @@ function buildMockOctokit(): {
       list: Mock;
       get: Mock;
       create: Mock;
-      merge: Mock;
       update: Mock;
       listFiles: Mock;
       listCommits: Mock;
@@ -90,6 +89,7 @@ function buildMockOctokit(): {
     search: { repos: Mock; code: Mock; commits: Mock };
   };
   paginate: Mock;
+  request: Mock;
 } {
   return {
     rest: {
@@ -109,7 +109,6 @@ function buildMockOctokit(): {
         list: vi.fn(),
         get: vi.fn(),
         create: vi.fn(),
-        merge: vi.fn(),
         update: vi.fn(),
         listFiles: vi.fn(),
         listCommits: vi.fn(),
@@ -140,6 +139,7 @@ function buildMockOctokit(): {
       search: { repos: vi.fn(), code: vi.fn(), commits: vi.fn() },
     },
     paginate: vi.fn(),
+    request: vi.fn(),
   };
 }
 
@@ -697,6 +697,15 @@ describe('GitHubClient', () => {
       expect(pr).toMatchObject({ number: 7, state: 'closed', merged: true, draft: false });
     });
 
+    it('maps merge_commit_sha when present and leaves it undefined otherwise', async () => {
+      octokit.rest.pulls.get.mockResolvedValueOnce({
+        data: { number: 7, merge_commit_sha: 'mcs' },
+      });
+      octokit.rest.pulls.get.mockResolvedValueOnce({ data: { number: 8 } });
+      expect((await client.getPullRequest('o', 'r', 7)).merge_commit_sha).toBe('mcs');
+      expect((await client.getPullRequest('o', 'r', 8)).merge_commit_sha).toBeUndefined();
+    });
+
     it('throws a teaching 404 naming the PR number and source tools', async () => {
       octokit.rest.pulls.get.mockRejectedValue({ status: 404 });
       await expect(client.getPullRequest('o', 'r', 999)).rejects.toThrow(
@@ -758,25 +767,76 @@ describe('GitHubClient', () => {
   });
 
   describe('mergePullRequest', () => {
-    it('merges with the default method', async () => {
-      octokit.rest.pulls.merge.mockResolvedValue({
-        data: { merged: true, sha: 'm', message: 'Merged' },
-      });
+    const ROUTE = 'PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge-async';
+
+    it('calls merge-async with the default method and the pinned API version', async () => {
+      octokit.request.mockResolvedValue({ data: { status: 'enqueued', message: 'Queued' } });
       const result = await client.mergePullRequest('o', 'r', 3);
-      expect(octokit.rest.pulls.merge).toHaveBeenCalledWith(
-        expect.objectContaining({ owner: 'o', repo: 'r', pull_number: 3, merge_method: 'merge' })
-      );
-      expect(result).toEqual({ merged: true, sha: 'm', message: 'Merged' });
+      expect(octokit.request).toHaveBeenCalledWith(ROUTE, {
+        owner: 'o',
+        repo: 'r',
+        pull_number: 3,
+        merge_method: 'merge',
+        commit_title: undefined,
+        headers: { 'X-GitHub-Api-Version': '2026-03-10' },
+        request: { retries: 0 },
+      });
+      expect(result).toEqual({
+        status: 'enqueued',
+        merged: false,
+        sha: undefined,
+        message: 'Queued',
+      });
     });
 
     it('honors merge_method and commit_title', async () => {
-      octokit.rest.pulls.merge.mockResolvedValue({
-        data: { merged: true, sha: 'm', message: 'ok' },
+      octokit.request.mockResolvedValue({ data: { status: 'merged', sha: 'm' } });
+      const result = await client.mergePullRequest('o', 'r', 3, {
+        merge_method: 'squash',
+        commit_title: 'CT',
       });
-      await client.mergePullRequest('o', 'r', 3, { merge_method: 'squash', commit_title: 'CT' });
-      expect(octokit.rest.pulls.merge).toHaveBeenCalledWith(
+      expect(octokit.request).toHaveBeenCalledWith(
+        ROUTE,
         expect.objectContaining({ merge_method: 'squash', commit_title: 'CT' })
       );
+      expect(result).toEqual({ status: 'merged', merged: true, sha: 'm', message: undefined });
+    });
+
+    it.each(['pending', 'failed'])('passes status %s through as not merged', async (status) => {
+      octokit.request.mockResolvedValue({ data: { status } });
+      const result = await client.mergePullRequest('o', 'r', 3);
+      expect(result.status).toBe(status);
+      expect(result.merged).toBe(false);
+    });
+
+    it('treats a response without status as pending', async () => {
+      octokit.request.mockResolvedValue({ data: {} });
+      const result = await client.mergePullRequest('o', 'r', 3);
+      expect(result).toEqual({
+        status: 'pending',
+        merged: false,
+        sha: undefined,
+        message: undefined,
+      });
+    });
+
+    it('maps 409 (request in progress) to pending with the GitHub message', async () => {
+      octokit.request.mockRejectedValue({ status: 409, message: 'Merge in progress' });
+      const result = await client.mergePullRequest('o', 'r', 3);
+      expect(result).toEqual({ status: 'pending', merged: false, message: 'Merge in progress' });
+    });
+
+    it('rethrows other GitHub errors', async () => {
+      const error = { status: 422, message: 'Pull Request is not mergeable' };
+      octokit.request.mockRejectedValue(error);
+      await expect(client.mergePullRequest('o', 'r', 3)).rejects.toBe(error);
+    });
+
+    it('requires owner, repo and number', async () => {
+      await expect(client.mergePullRequest('', 'r', 3)).rejects.toThrow(
+        'Missing required parameter'
+      );
+      expect(octokit.request).not.toHaveBeenCalled();
     });
   });
 
@@ -2506,12 +2566,6 @@ describe('Response mappers — defensive fallbacks', () => {
     octokit.rest.search.commits.mockResolvedValue({ data: {} });
     const commits = await client.searchCommits('fix');
     expect(commits).toEqual([]);
-  });
-
-  it('fills defaults for a sparse merge response (mergePullRequest)', async () => {
-    octokit.rest.pulls.merge.mockResolvedValue({ data: {} });
-    const result = await client.mergePullRequest('o', 'r', 3);
-    expect(result).toEqual({ merged: false, sha: '', message: '' });
   });
 
   it('fills defaults for sparse PR file entries (getPrFiles)', async () => {

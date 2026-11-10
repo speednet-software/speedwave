@@ -78,15 +78,25 @@ EOF
   chmod +x "$FAKE_BIN/gh"
 }
 
-@test "a clean absolute audit reports nothing and never calls gh" {
+@test "a clean absolute audit with no open issue only lists issues" {
   _init_audit_root
   _stub_clean_tools
   _stub_gh '[]'
 
   run bash -c "cd '$FIXTURE' && PATH='$FAKE_BIN:$PATH' GH_REPO='test/test' ./scripts/audit-issue.sh"
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "nothing to report" ]]
-  [ ! -s "$GH_LOG" ]
+  run grep -cE 'issue (create|edit|close)' "$GH_LOG"
+  [ "$output" = "0" ]
+}
+
+@test "a clean absolute audit closes the open issue with the sha and run link" {
+  _init_audit_root
+  _stub_clean_tools
+  _stub_gh '[{"number": 42, "title": "audit-schedule: known vulnerabilities on dev", "state": "OPEN"}]'
+
+  run bash -c "cd '$FIXTURE' && PATH='$FAKE_BIN:$PATH' GH_REPO='test/test' GITHUB_SHA=0123456789abcdef GITHUB_SERVER_URL=https://github.test GITHUB_REPOSITORY=test/test GITHUB_RUN_ID=77 ./scripts/audit-issue.sh"
+  [ "$status" -eq 0 ]
+  grep -q "issue close 42 --repo test/test --comment Audit green on dev at 0123456, run https://github.test/test/test/actions/runs/77" "$GH_LOG"
 }
 
 @test "a red audit with no existing issue creates one" {
@@ -95,7 +105,7 @@ EOF
   _stub_gh '[]'
 
   run bash -c "cd '$FIXTURE' && PATH='$FAKE_BIN:$PATH' GH_REPO='test/test' ./scripts/audit-issue.sh"
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 1 ]
   grep -q "issue create" "$GH_LOG"
   ! grep -q "issue close" "$GH_LOG"
 }
@@ -106,7 +116,7 @@ EOF
   _stub_gh '[{"number": 42, "title": "audit-schedule: known vulnerabilities on dev", "state": "OPEN"}]'
 
   run bash -c "cd '$FIXTURE' && PATH='$FAKE_BIN:$PATH' GH_REPO='test/test' ./scripts/audit-issue.sh"
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 1 ]
   grep -q "issue edit 42" "$GH_LOG"
   run grep -cE 'issue (create|close)' "$GH_LOG"
   [ "$output" = "0" ]
@@ -118,7 +128,7 @@ EOF
   _stub_gh '[{"number": 55, "title": "audit-schedule: known vulnerabilities on dev", "state": "OPEN"}, {"number": 10, "title": "audit-schedule: known vulnerabilities on dev", "state": "OPEN"}]'
 
   run bash -c "cd '$FIXTURE' && PATH='$FAKE_BIN:$PATH' GH_REPO='test/test' ./scripts/audit-issue.sh"
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 1 ]
   grep -q "issue edit 10" "$GH_LOG"
   grep -q "issue close 55" "$GH_LOG"
   ! grep -q "issue create" "$GH_LOG"
@@ -158,7 +168,7 @@ EOF
   chmod +x "$FAKE_BIN/npm"
 
   run bash -c "cd '$FIXTURE' && PATH='$FAKE_BIN:$PATH' GH_REPO='test/test' ./scripts/audit-issue.sh"
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 1 ]
   grep -q "issue create" "$GH_LOG"
 }
 
@@ -174,6 +184,6 @@ EOF
   chmod +x "$PIP_AUDIT_STUB"
 
   run bash -c "cd '$FIXTURE' && PATH='$FAKE_BIN:$PATH' GH_REPO='test/test' ./scripts/audit-issue.sh"
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 1 ]
   grep -q "issue create" "$GH_LOG"
 }

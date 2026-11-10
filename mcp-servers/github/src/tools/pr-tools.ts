@@ -12,7 +12,6 @@ import {
   DESTRUCTIVE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
 import { GitHubClient } from '../client.js';
-import { GitHubPullRequest } from '../types.js';
 import { DIFF_OUTPUT_SCHEMA } from './schemas.js';
 import { withValidation } from './validation.js';
 import { TOOL_NAMES } from '../tool-names.js';
@@ -21,11 +20,19 @@ const PR_ITEM_PROPERTIES = {
   number: { type: 'number' },
   title: { type: 'string' },
   state: { type: 'string', enum: ['open', 'closed'] },
-  head: { type: 'string' },
-  base: { type: 'string' },
-  user: { type: 'string' },
+  body: { type: 'string' },
+  merged: { type: 'boolean' },
+  head: {
+    type: 'object',
+    properties: { ref: { type: 'string' }, sha: { type: 'string' } },
+  },
+  base: { type: 'object', properties: { ref: { type: 'string' } } },
+  user: { type: 'object', properties: { login: { type: 'string' } } },
   draft: { type: 'boolean' },
   html_url: { type: 'string' },
+  created_at: { type: 'string' },
+  updated_at: { type: 'string' },
+  merge_commit_sha: { type: 'string' },
 };
 
 /** Output schema shared by tools returning a single PR at the TOP level (never nested under a 'pr' key). */
@@ -37,7 +44,7 @@ const PR_OUTPUT_SCHEMA = {
 
 const listPullRequestsTool: Tool = {
   name: TOOL_NAMES.LIST_PULL_REQUESTS,
-  description: `List pull requests in a repository with optional filters. There is no author filter: for 'my PRs' questions, resolve the login with ${TOOL_NAMES.GET_CURRENT_USER}, then match it against each PR's user field yourself (this worker has no PR-search tool).`,
+  description: `List pull requests in a repository with optional filters. There is no author filter: for 'my PRs' questions, resolve the login with ${TOOL_NAMES.GET_CURRENT_USER}, then match it against each PR's user.login yourself (this worker has no PR-search tool).`,
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['github', 'pr', 'pull', 'request', 'list', 'merge'],
@@ -90,7 +97,8 @@ const listPullRequestsTool: Tool = {
 
 const getPullRequestTool: Tool = {
   name: 'getPullRequest',
-  description: 'Get detailed information about a specific pull request.',
+  description:
+    'Get a pull request: state, merged, head.sha, base.ref, author, dates, draft and merge_commit_sha once merged.',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'pr', 'pull', 'request', 'get', 'show', 'detail'],
@@ -164,7 +172,8 @@ const createPullRequestTool: Tool = {
 
 const mergePullRequestTool: Tool = {
   name: 'mergePullRequest',
-  description: 'Merge a pull request.',
+  description:
+    'Request an asynchronous merge of a pull request. On a base branch with a merge queue the PR joins the queue (status enqueued); otherwise it merges at once (status merged). Returns without waiting: on status pending, call again to check (GitHub answers 200 when the PR is already merged or queued, 409 while the request is in progress).',
   annotations: DESTRUCTIVE_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'pr', 'pull', 'request', 'merge', 'squash', 'rebase'],
@@ -189,6 +198,7 @@ const mergePullRequestTool: Tool = {
     type: 'object',
     properties: {
       success: { type: 'boolean' },
+      status: { type: 'string', enum: ['merged', 'enqueued', 'pending', 'failed'] },
       merged: { type: 'boolean' },
       sha: { type: 'string' },
       message: { type: 'string' },
@@ -347,23 +357,6 @@ const getPrFilesTool: Tool = {
 };
 
 /**
- * Maps a normalized GitHub pull request to the compact tool output shape.
- * @param pr - Normalized pull request as returned by GitHubClient
- */
-function mapPr(pr: GitHubPullRequest) {
-  return {
-    number: pr.number,
-    title: pr.title,
-    state: pr.state,
-    head: pr.head.ref,
-    base: pr.base.ref,
-    user: pr.user.login,
-    draft: pr.draft,
-    html_url: pr.html_url,
-  };
-}
-
-/**
  * Builds the pull request tool definitions.
  * @param client - GitHub client instance (null when the service is not configured)
  */
@@ -381,7 +374,7 @@ export function createPrTools(client: GitHubClient | null): ToolDefinition[] {
           limit?: number;
         };
         const result = await c.listPullRequests(owner, repo, options);
-        return jsonResult({ prs: result.map(mapPr), count: result.length });
+        return jsonResult({ prs: result, count: result.length });
       }),
     },
     {
@@ -389,7 +382,7 @@ export function createPrTools(client: GitHubClient | null): ToolDefinition[] {
       handler: withValidation(client, async (c, params) => {
         const { owner, repo, number } = params as { owner: string; repo: string; number: number };
         const result = await c.getPullRequest(owner, repo, number);
-        return jsonResult(mapPr(result));
+        return jsonResult(result);
       }),
     },
     {
@@ -405,7 +398,7 @@ export function createPrTools(client: GitHubClient | null): ToolDefinition[] {
           draft?: boolean;
         };
         const result = await c.createPullRequest(owner, repo, rest);
-        return jsonResult(mapPr(result));
+        return jsonResult(result);
       }),
     },
     {
@@ -435,7 +428,7 @@ export function createPrTools(client: GitHubClient | null): ToolDefinition[] {
           base?: string;
         };
         const result = await c.updatePullRequest(owner, repo, number, rest);
-        return jsonResult(mapPr(result));
+        return jsonResult(result);
       }),
     },
     {

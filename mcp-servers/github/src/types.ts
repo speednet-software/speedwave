@@ -64,6 +64,19 @@ export interface GitHubPullRequest {
   updated_at: string;
   /** Whether the PR is a draft */
   draft?: boolean;
+  /** SHA of the merge commit once the PR is merged (the squash commit for squash merges) */
+  merge_commit_sha?: string;
+}
+
+/** Outcome of an asynchronous merge request as reported by GitHub. */
+export type MergeStatus = 'merged' | 'enqueued' | 'pending' | 'failed';
+
+/** Result of {@link GitHubClient.mergePullRequest}. */
+export interface GitHubMergeResult {
+  status: MergeStatus;
+  merged: boolean;
+  sha?: string;
+  message?: string;
 }
 
 /**

@@ -18,11 +18,10 @@ struct EventStoreGate: PermissionGate {
 
 
 /// reminders-cli <command> [json-args]
-/// Commands: check_permission, list_lists, list_reminders, get_reminder, create_reminder, update_reminder, complete_reminder
 @main
 struct RemindersCLI {
     static let commandList =
-        "check_permission, list_lists, list_reminders, get_reminder, create_reminder, update_reminder, complete_reminder"
+        "check_permission, list_lists, list_reminders, get_reminder, create_reminder, update_reminder, complete_reminder, delete_reminder, create_list, update_list, delete_list"
 
     static func main() {
         let store = EKEventStore()
@@ -46,6 +45,10 @@ struct RemindersCLI {
                 "create_reminder": { try createReminder(store: store, params: $0) },
                 "update_reminder": { try updateReminder(store: store, params: $0) },
                 "complete_reminder": { try completeReminder(store: store, params: $0) },
+                "delete_reminder": { try deleteReminder(store: store, params: $0) },
+                "create_list": { try createList(store: store, params: $0) },
+                "update_list": { try updateList(store: store, params: $0) },
+                "delete_list": { try deleteList(store: store, params: $0) },
             ]
         )
     }
@@ -100,14 +103,43 @@ func listLists(store: EKEventStore) throws -> [String: Any] {
     return ["lists": lists]
 }
 
+enum ReminderSort: String {
+    case dueDate = "due_date"
+    case created
+    case name
+}
+
+/// The parsed `list_reminders` filters; `dueTo` is an exclusive upper bound.
+struct ListQuery {
+    var dueFrom: Date?
+    var dueTo: Date?
+    var overdue = false
+    var search: String?
+    var sort = ReminderSort.dueDate
+    var limit = 50
+    var now = Date()
+    var timeZone = TimeZone.current
+
+    var hasDueRange: Bool { dueFrom != nil || dueTo != nil }
+
+    /// EventKit's handling of all-day due dates and bound inclusivity is undocumented, so both bounds
+    /// are widened by a day; `applyListQuery` makes the exact cut.
+    var predicateStart: Date? { dueFrom.map { addingDays(-1, to: $0, in: timeZone) } }
+
+    var predicateEnd: Date? {
+        let end = overdue ? (dueTo.map { min($0, now) } ?? now) : dueTo
+        return end.map { addingDays(1, to: $0, in: timeZone) }
+    }
+}
+
 func listReminders(store: EKEventStore, params: [String: Any]) throws -> [String: Any] {
-    let limit = params["limit"] as? Int ?? 20
+    let query = try parseListQuery(params)
     var calendars: [EKCalendar]?
     if let filter = params["list_id"] as? String {
         calendars = try resolveCalendars(for: .reminder, filter: filter, store: store)
     }
 
-    let showCompleted = params["show_completed"] as? Bool ?? false
+    let showCompleted = !query.overdue && (params["show_completed"] as? Bool ?? false)
 
     var fetchedReminders: [EKReminder]?
 
@@ -117,7 +149,7 @@ func listReminders(store: EKEventStore, params: [String: Any]) throws -> [String
         var completedResults: [EKReminder]?
 
         let incompletePred = store.predicateForIncompleteReminders(
-            withDueDateStarting: nil, ending: nil, calendars: calendars
+            withDueDateStarting: query.predicateStart, ending: query.predicateEnd, calendars: calendars
         )
         group.enter()
         store.fetchReminders(matching: incompletePred) { reminders in
@@ -142,7 +174,7 @@ func listReminders(store: EKEventStore, params: [String: Any]) throws -> [String
     } else {
         let semaphore = DispatchSemaphore(value: 0)
         let predicate = store.predicateForIncompleteReminders(
-            withDueDateStarting: nil, ending: nil, calendars: calendars
+            withDueDateStarting: query.predicateStart, ending: query.predicateEnd, calendars: calendars
         )
         store.fetchReminders(matching: predicate) { reminders in
             fetchedReminders = reminders
@@ -154,11 +186,128 @@ func listReminders(store: EKEventStore, params: [String: Any]) throws -> [String
         }
     }
 
-    let reminders = (fetchedReminders ?? []).prefix(limit).map { r in
-        reminderToDict(r)
-    }
+    return listResponse(applyListQuery(query, to: fetchedReminders ?? []), limit: query.limit)
+}
 
-    return ["reminders": Array(reminders)]
+func parseListQuery(_ params: [String: Any], now: Date = Date(), timeZone: TimeZone = .current) throws -> ListQuery {
+    var query = ListQuery(now: now, timeZone: timeZone)
+    query.limit = params["limit"] as? Int ?? query.limit
+    query.overdue = params["overdue"] as? Bool ?? false
+    query.search = params["search"] as? String
+    if let raw = params["sort"] as? String {
+        guard let sort = ReminderSort(rawValue: raw) else {
+            throw CLIError.invalidValue("Invalid sort: \(raw). Expected due_date, created or name")
+        }
+        query.sort = sort
+    }
+    if let raw = params["due_from"] as? String {
+        query.dueFrom = try parseDueBound(raw, in: timeZone).date
+    }
+    if let raw = params["due_to"] as? String {
+        let bound = try parseDueBound(raw, in: timeZone)
+        query.dueTo = upperBound(of: bound.input, at: bound.date, in: timeZone)
+    }
+    return query
+}
+
+private func parseDueBound(_ raw: String, in timeZone: TimeZone) throws -> (input: ISODateInput, date: Date) {
+    guard let input = parseISODateInput(raw), let date = input.date(in: timeZone) else {
+        throw CLIError.invalidDate(raw)
+    }
+    return (input, date)
+}
+
+/// A bare day ends after that whole day; a time is included itself.
+private func upperBound(of input: ISODateInput, at date: Date, in timeZone: TimeZone) -> Date {
+    if case .day = input {
+        return addingDays(1, to: date, in: timeZone)
+    }
+    return Date(timeIntervalSinceReferenceDate: date.timeIntervalSinceReferenceDate.nextUp)
+}
+
+private func addingDays(_ days: Int, to date: Date, in timeZone: TimeZone) -> Date {
+    var calendar = gregorian
+    calendar.timeZone = timeZone
+    return calendar.date(byAdding: .day, value: days, to: date) ?? date
+}
+
+/// Due filter, overdue, search and sort, in that order; the caller truncates.
+func applyListQuery(_ query: ListQuery, to reminders: [EKReminder]) -> [EKReminder] {
+    let filtered = reminders.filter { reminder in
+        matchesDueFilter(reminder, query) && matchesSearch(reminder, query.search)
+    }
+    return sortReminders(filtered, by: query.sort, timeZone: query.timeZone)
+}
+
+private func matchesDueFilter(_ reminder: EKReminder, _ query: ListQuery) -> Bool {
+    guard query.hasDueRange || query.overdue else { return true }
+    guard let due = dueWindow(of: reminder, timeZone: query.timeZone) else { return false }
+    if let from = query.dueFrom, due.start < from { return false }
+    if let to = query.dueTo, due.start >= to { return false }
+    guard query.overdue else { return true }
+    return !reminder.isCompleted && due.end <= query.now
+}
+
+private func matchesSearch(_ reminder: EKReminder, _ search: String?) -> Bool {
+    guard let search else { return true }
+    let options: String.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
+    return (reminder.title ?? "").range(of: search, options: options) != nil
+        || stripTags(from: reminder.notes ?? "").range(of: search, options: options) != nil
+}
+
+/// When a reminder is due: `start` is its moment (local midnight when all-day), `end` is when it counts as overdue.
+func dueWindow(of reminder: EKReminder, timeZone: TimeZone = .current) -> (start: Date, end: Date)? {
+    guard var components = reminder.dueDateComponents else { return nil }
+    var calendar = gregorian
+    calendar.timeZone = components.timeZone ?? timeZone
+    components.calendar = calendar
+    components.timeZone = calendar.timeZone
+    guard let start = components.date else { return nil }
+    guard isAllDay(components) else { return (start, start) }
+    return (start, calendar.date(byAdding: .day, value: 1, to: start) ?? start)
+}
+
+func sortReminders(
+    _ reminders: [EKReminder],
+    by sort: ReminderSort,
+    timeZone: TimeZone = .current,
+    creationDate: (EKReminder) -> Date? = { $0.creationDate }
+) -> [EKReminder] {
+    func primary(_ a: EKReminder, _ b: EKReminder) -> ComparisonResult {
+        switch sort {
+        case .dueDate:
+            return compareLastWhenNil(dueWindow(of: a, timeZone: timeZone)?.start, dueWindow(of: b, timeZone: timeZone)?.start)
+        case .created:
+            return compareLastWhenNil(creationDate(a), creationDate(b))
+        case .name:
+            return .orderedSame
+        }
+    }
+    return reminders.sorted { a, b in
+        let byKey = primary(a, b)
+        if byKey != .orderedSame { return byKey == .orderedAscending }
+        let byName = (a.title ?? "").localizedStandardCompare(b.title ?? "")
+        if byName != .orderedSame { return byName == .orderedAscending }
+        return a.calendarItemIdentifier < b.calendarItemIdentifier
+    }
+}
+
+private func compareLastWhenNil(_ a: Date?, _ b: Date?) -> ComparisonResult {
+    switch (a, b) {
+    case let (a?, b?): return a < b ? .orderedAscending : (a > b ? .orderedDescending : .orderedSame)
+    case (nil, nil): return .orderedSame
+    case (nil, _): return .orderedDescending
+    case (_, nil): return .orderedAscending
+    }
+}
+
+/// The first `limit` reminders plus `total` (the count before truncating) and whether anything was cut.
+func listResponse(_ matched: [EKReminder], limit: Int) -> [String: Any] {
+    [
+        "reminders": matched.prefix(limit).map { reminderToDict($0) },
+        "total": matched.count,
+        "truncated": matched.count > limit,
+    ]
 }
 
 func getReminder(store: EKEventStore, params: [String: Any]) throws -> [String: Any] {
@@ -277,6 +426,20 @@ func completeReminder(store: EKEventStore, params: [String: Any]) throws -> [Str
     try store.save(reminder, commit: true)
 
     return ["status": "completed"]
+}
+
+func deleteReminder(store: EKEventStore, params: [String: Any]) throws -> [String: Any] {
+    guard let id = params["id"] as? String else {
+        throw CLIError.missingField("id")
+    }
+
+    guard let reminder = store.calendarItem(withIdentifier: id) as? EKReminder else {
+        throw CLIError.notFound("Reminder with id '\(id)' not found")
+    }
+
+    try store.remove(reminder, commit: true)
+
+    return ["status": "deleted"]
 }
 
 
