@@ -812,16 +812,21 @@ describe('IntegrationsComponent', () => {
     });
 
     it('shows no Access switch under a disabled OS integration', async () => {
+      const base = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd !== 'get_integrations') return base(cmd, args);
+        const integrations = cloneMockIntegrations();
+        integrations.os = integrations.os.map((o) => ({ ...o, enabled: false }));
+        return integrations;
+      };
       await render();
-      component.osIntegrations = component.osIntegrations.map((o) => ({ ...o, enabled: false }));
-      fixture.changeDetectorRef.markForCheck();
-      fixture.detectChanges();
 
       const row = fixture.nativeElement.querySelector(
         '[data-testid="integrations-os-row-reminders"]'
       );
       expect(row.querySelector('[data-testid="integration-access"]')).toBeNull();
       expect(row.querySelector('[data-testid="integrations-os-toggle-reminders"]')).not.toBeNull();
+      expect(accessCalls).not.toContainEqual({ project: 'test-project', service: 'reminders' });
     });
   });
 
