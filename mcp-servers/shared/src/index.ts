@@ -151,3 +151,10 @@ export {
   WorkspaceFileError,
 } from './workspace-file.js';
 export type { WorkspaceFile, WorkspaceFileErrorKind } from './workspace-file.js';
+export {
+  MAX_WORKSPACE_FILES,
+  WorkspaceFileListError,
+  resolveWorkspaceFileList,
+  sanitizeFilename,
+  writeWorkspaceDownload,
+} from './workspace-transfer.js';
