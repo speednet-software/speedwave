@@ -11,48 +11,64 @@ import {
   type ReadRetry,
 } from './access-config.js';
 
-interface FixtureCase {
+interface WrittenFile {
   name: string;
-  text?: string;
-  generate?: { services?: number; padding?: number };
-  expected?: AccessRules;
-  expected_service_count?: number;
-  error?: boolean;
+  policy: AccessRules;
+  text: string;
 }
 
-const CASES: FixtureCase[] = JSON.parse(
+const WRITTEN: WrittenFile[] = JSON.parse(
   readFileSync(
-    new URL('../../../crates/access-policy/tests/fixtures/access-file-cases.json', import.meta.url),
+    new URL(
+      '../../../crates/access-policy/tests/fixtures/written-access-files.json',
+      import.meta.url
+    ),
     'utf8'
   )
 );
 
-function textOf(c: FixtureCase): string {
-  if (c.text !== undefined) return c.text;
-  if (c.generate?.services !== undefined) {
-    const services = Object.fromEntries(
-      Array.from({ length: c.generate.services }, (_, i) => [`svc${i}`, 'read_only'])
-    );
-    return JSON.stringify({ version: 1, services });
-  }
-  return `{"version":1}${' '.repeat(c.generate?.padding ?? 0)}`;
-}
-
-describe('parseAccessRules against the shared fixture cases', () => {
-  it('reads the fixture file', () => {
-    expect(CASES.length).toBeGreaterThan(0);
+describe('parseAccessRules', () => {
+  it('reads the files the host writes', () => {
+    expect(WRITTEN.length).toBeGreaterThan(0);
   });
 
-  it.each(CASES.map((c) => [c.name, c] as const))('%s', (_name, c) => {
-    if (c.error) {
-      expect(() => parseAccessRules(textOf(c))).toThrow();
-    } else if (c.expected_service_count !== undefined) {
-      expect(Object.keys(parseAccessRules(textOf(c)).services)).toHaveLength(
-        c.expected_service_count
-      );
-    } else {
-      expect(parseAccessRules(textOf(c))).toEqual(c.expected);
-    }
+  it.each(WRITTEN.map((f) => [f.name, f] as const))('reads the written file: %s', (_name, f) => {
+    expect(parseAccessRules(f.text)).toEqual(f.policy);
+  });
+
+  it('takes a missing default and services as full', () => {
+    expect(parseAccessRules('{"version":1}')).toEqual({ default: 'full', services: {} });
+  });
+
+  it('keeps every service name the host wrote', () => {
+    expect(
+      parseAccessRules('{"version":1,"services":{"Not A Slug":"read_only","constructor":"full"}}')
+        .services
+    ).toEqual({ 'Not A Slug': 'read_only', constructor: 'full' });
+  });
+
+  it('has no inherited entries, so an object property name is not a mode', () => {
+    const rules = parseAccessRules('{"version":1,"default":"read_only"}');
+    expect(rules.services['constructor']).toBeUndefined();
+    expect(rules.services['toString']).toBeUndefined();
+  });
+
+  it.each([
+    ['an unknown default mode', '{"version":1,"default":"confirm"}'],
+    ['an unknown service mode', '{"version":1,"services":{"slack":"confirm"}}'],
+    ['a mode of the wrong type', '{"version":1,"services":{"slack":true}}'],
+    ['an unknown top-level key', '{"version":1,"confirm":{}}'],
+    ['a missing version', '{"default":"full"}'],
+    ['an unsupported version', '{"version":2}'],
+    ['a version of the wrong type', '{"version":"1"}'],
+    ['services as an array', '{"version":1,"services":[]}'],
+    ['services as null', '{"version":1,"services":null}'],
+    ['a top-level array', '[]'],
+    ['a top-level null', 'null'],
+    ['text that is not JSON', '{"version":1'],
+    ['an empty file', ''],
+  ])('rejects %s', (_name, text) => {
+    expect(() => parseAccessRules(text)).toThrow();
   });
 });
 
@@ -71,8 +87,8 @@ describe('loadAccessRules', () => {
 
   const FULL: AccessRules = { default: 'full', services: {} };
 
-  it('is full for every service without POLICY_FILE', () => {
-    expect(loadAccessRules({})).toEqual(FULL);
+  it('throws without POLICY_FILE, so a hub started without its policy directory never opens every service', () => {
+    expect(() => loadAccessRules({})).toThrow(/POLICY_FILE is not set/);
   });
 
   const ONE_READ: ReadRetry = { attempts: 1, delayMs: 0 };

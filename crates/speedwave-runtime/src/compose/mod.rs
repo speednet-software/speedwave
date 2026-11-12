@@ -4318,8 +4318,8 @@ services:
         ))
         .unwrap();
         assert_eq!(
-            speedwave_access_policy::parse_access_file(&json),
-            Ok(read_only_access())
+            json,
+            speedwave_access_policy::to_access_file(&read_only_access()).unwrap()
         );
     }
 
@@ -4336,8 +4336,11 @@ services:
         ))
         .unwrap();
         assert_eq!(
-            speedwave_access_policy::parse_access_file(&json),
-            Ok(Default::default())
+            json,
+            speedwave_access_policy::to_access_file(
+                &speedwave_access_policy::AccessPolicy::default()
+            )
+            .unwrap()
         );
     }
 

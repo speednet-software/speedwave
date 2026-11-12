@@ -145,8 +145,8 @@ mod tests {
         write_access_config_in(tmp.path(), "proj", &read_only_policy()).unwrap();
         let json = std::fs::read_to_string(access_config_path_in(tmp.path(), "proj")).unwrap();
         assert_eq!(
-            speedwave_access_policy::parse_access_file(&json),
-            Ok(read_only_policy())
+            json,
+            speedwave_access_policy::to_access_file(&read_only_policy()).unwrap()
         );
     }
 
@@ -164,8 +164,8 @@ mod tests {
         write_access_config_in(tmp.path(), "proj", &AccessPolicy::default()).unwrap();
         let json = std::fs::read_to_string(access_config_path_in(tmp.path(), "proj")).unwrap();
         assert_eq!(
-            speedwave_access_policy::parse_access_file(&json),
-            Ok(AccessPolicy::default())
+            json,
+            speedwave_access_policy::to_access_file(&AccessPolicy::default()).unwrap()
         );
     }
 
@@ -176,20 +176,9 @@ mod tests {
         write_access_config_in(tmp.path(), "proj", &AccessPolicy::default()).unwrap();
         let json = std::fs::read_to_string(access_config_path_in(tmp.path(), "proj")).unwrap();
         assert_eq!(
-            speedwave_access_policy::parse_access_file(&json),
-            Ok(AccessPolicy::default())
+            json,
+            speedwave_access_policy::to_access_file(&AccessPolicy::default()).unwrap()
         );
-    }
-
-    #[test]
-    fn an_invalid_policy_writes_no_access_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let invalid = AccessPolicy {
-            default: AccessMode::Full,
-            services: [("Bad Id".to_string(), AccessMode::ReadOnly)].into(),
-        };
-        assert!(write_access_config_in(tmp.path(), "proj", &invalid).is_err());
-        assert!(!access_config_path_in(tmp.path(), "proj").exists());
     }
 
     #[cfg(unix)]

@@ -24,13 +24,8 @@ export interface ReadRetry {
 
 const ACCESS_FILE = 'access.json';
 const ACCESS_FILE_VERSION = 1;
-const MAX_ACCESS_FILE_BYTES = 65_536;
-const MAX_SERVICES = 256;
-const SERVICE_ID = /^[a-z][a-z0-9-]{0,63}$/;
 const KEYS = new Set(['version', 'default', 'services']);
 const STARTUP_RETRY: ReadRetry = { attempts: 20, delayMs: 250 };
-
-const ALL_FULL: AccessRules = { default: 'full', services: {} };
 
 let rules: AccessRules | undefined;
 
@@ -52,14 +47,14 @@ export function getAccessRules(): AccessRules {
  * Load the access rules next to `POLICY_FILE`.
  * @param env - Environment to read `POLICY_FILE` from
  * @param retry - Reads of a missing file before the load fails
- * @returns The access rules; every service `full` without `POLICY_FILE`
+ * @returns The access rules
  */
 export function loadAccessRules(
   env: Record<string, string | undefined> = process.env,
   retry: ReadRetry = STARTUP_RETRY
 ): AccessRules {
   const policyFile = env.POLICY_FILE;
-  if (!policyFile) return ALL_FULL;
+  if (!policyFile) throw new Error(`POLICY_FILE is not set, so ${ACCESS_FILE} cannot be read`);
   const path = join(dirname(policyFile), ACCESS_FILE);
   try {
     return parseAccessRules(readAccessFile(path, retry));
@@ -79,10 +74,6 @@ export function loadAccessRules(
  * @returns The access rules
  */
 export function parseAccessRules(text: string): AccessRules {
-  const bytes = Buffer.byteLength(text, 'utf8');
-  if (bytes > MAX_ACCESS_FILE_BYTES) {
-    throw new Error(`access file is ${bytes} bytes, limit is ${MAX_ACCESS_FILE_BYTES}`);
-  }
   const file: unknown = JSON.parse(text);
   if (!isObject(file)) throw new Error('access file must be an object');
   for (const key of Object.keys(file)) {
@@ -94,13 +85,8 @@ export function parseAccessRules(text: string): AccessRules {
   const defaultMode = file.default === undefined ? 'full' : toMode(file.default, 'default');
   const entries = file.services === undefined ? {} : file.services;
   if (!isObject(entries)) throw new Error('services must be an object');
-  const ids = Object.keys(entries);
-  if (ids.length > MAX_SERVICES) {
-    throw new Error(`too many access services: ${ids.length} exceeds limit of ${MAX_SERVICES}`);
-  }
-  const services: Record<string, AccessMode> = {};
-  for (const id of ids) {
-    if (!SERVICE_ID.test(id)) throw new Error(`invalid access service id "${id}"`);
+  const services: Record<string, AccessMode> = Object.create(null);
+  for (const id of Object.keys(entries)) {
     services[id] = toMode(entries[id], `mode of "${id}"`);
   }
   return { default: defaultMode, services };
