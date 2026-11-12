@@ -7581,22 +7581,29 @@ describe('ChatSessionStore', () => {
   });
 
   describe('mapNotLoggedInError', () => {
-    it('maps Claude Code\'s "not logged in" error to a Settings-pointing message', () => {
-      expect(mapNotLoggedInError('Not logged in · Please run /login')).toContain('Settings');
-      expect(mapNotLoggedInError('some unrelated error')).toBeNull();
+    it('maps Claude Code\'s "not logged in" error to a message for the active provider', () => {
+      expect(mapNotLoggedInError('Not logged in · Please run /login', 'anthropic_oauth')).toBe(
+        'Your claude.ai session expired. Sign in again in Settings.'
+      );
+      for (const kind of ['anthropic_api_key', 'local', 'open_router', null] as const) {
+        expect(mapNotLoggedInError('Not logged in · Please run /login', kind)).toBe(
+          'The provider rejected the credentials. Check the API key or provider settings.'
+        );
+      }
+      expect(mapNotLoggedInError('some unrelated error', 'anthropic_oauth')).toBeNull();
     });
 
     it('matches "not authenticated" wording variants', () => {
-      expect(mapNotLoggedInError('Not authenticated')).not.toBeNull();
+      expect(mapNotLoggedInError('Not authenticated', null)).not.toBeNull();
     });
 
     it('is case-insensitive', () => {
-      expect(mapNotLoggedInError('NOT LOGGED IN')).not.toBeNull();
+      expect(mapNotLoggedInError('NOT LOGGED IN', null)).not.toBeNull();
     });
 
     it('returns null for unknown errors', () => {
-      expect(mapNotLoggedInError('')).toBeNull();
-      expect(mapNotLoggedInError('rate limit exceeded')).toBeNull();
+      expect(mapNotLoggedInError('', null)).toBeNull();
+      expect(mapNotLoggedInError('rate limit exceeded', null)).toBeNull();
     });
   });
 
@@ -7652,7 +7659,7 @@ describe('ChatSessionStore', () => {
   });
 
   describe('handleStreamChunk Error — not-logged-in mapping', () => {
-    it('replaces Claude Code\'s "not logged in" error with a Settings-pointing message', () => {
+    it('replaces Claude Code\'s "not logged in" error with a provider-settings message', () => {
       store.isStreaming = true;
 
       store.handleStreamChunk({
@@ -7665,8 +7672,170 @@ describe('ChatSessionStore', () => {
       );
       expect(errBlock).toBeDefined();
       if (errBlock?.type === 'error') {
-        expect(errBlock.content).toContain('Settings');
+        expect(errBlock.content).toContain('provider settings');
       }
+    });
+  });
+
+  describe('handleStreamChunk Error — authentication failure', () => {
+    const AUTH_ERROR: StreamChunk = {
+      chunk_type: 'Error',
+      data: {
+        content: 'Failed to authenticate: OAuth session expired and could not be refreshed',
+        turn_ended: true,
+        kind: 'authentication_failed',
+      },
+    };
+    const AUTH_REQUIRED_STATUS = {
+      status: 'auth_required',
+      api_key_configured: false,
+      oauth_authenticated: false,
+      needs_anthropic_auth: true,
+      provider_configured: true,
+    };
+    const READY_STATUS = {
+      status: 'ready',
+      api_key_configured: false,
+      oauth_authenticated: true,
+      needs_anthropic_auth: true,
+      provider_configured: true,
+    };
+    let projectState: ProjectStateService;
+    let invoked: string[];
+
+    function answerWith(authStatus: object, providerKind = 'anthropic_oauth'): void {
+      invoked = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        invoked.push(cmd);
+        if (cmd === 'get_auth_status') return authStatus;
+        if (cmd === 'get_llm_config') {
+          return {
+            provider: 'anthropic',
+            model: null,
+            base_url: null,
+            default_base_url: null,
+            providers: [{ id: 'p1', kind: providerKind }],
+            active: { provider_id: 'p1' },
+          };
+        }
+        return undefined;
+      };
+    }
+
+    function lastErrorBlock(): { content: string; kind?: string } | undefined {
+      const block = store.messages[store.messages.length - 1]?.blocks.find(
+        (b) => b.type === 'error'
+      );
+      return block?.type === 'error' ? block : undefined;
+    }
+
+    beforeEach(() => {
+      projectState = TestBed.inject(ProjectStateService);
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      store.isStreaming = true;
+    });
+
+    it('re-checks the login and turns a confirmed expiry into an auth_required block', async () => {
+      answerWith(AUTH_REQUIRED_STATUS);
+      await store.refreshLlmConfigCache();
+
+      store.handleStreamChunk(AUTH_ERROR);
+      await vi.waitFor(() => expect(lastErrorBlock()?.kind).toBe('auth_required'));
+
+      expect(invoked).toContain('get_auth_status');
+      expect(projectState.status()).toBe('auth_required');
+      expect(lastErrorBlock()?.content).toBe(
+        'Your claude.ai session expired. Sign in again in Settings.'
+      );
+      expect(store.authFailed()).toBe(true);
+      expect(store.isStreaming).toBe(false);
+    });
+
+    it('shows the auth_required kind in the rendered state tree', async () => {
+      answerWith(AUTH_REQUIRED_STATUS);
+      await store.refreshLlmConfigCache();
+
+      store.handleStreamChunk(AUTH_ERROR);
+      await vi.waitFor(() => expect(store.authFailed()).toBe(true));
+      await vi.waitFor(() => expect(invoked).toContain('close_chat_tab'));
+
+      const rendered = store.messagesFromState();
+      const block = rendered[rendered.length - 1]?.blocks.find((b) => b.type === 'error');
+      expect(block).toMatchObject({ kind: 'auth_required' });
+    });
+
+    it('words the message for a provider other than claude.ai', async () => {
+      answerWith(AUTH_REQUIRED_STATUS, 'anthropic_api_key');
+      await store.refreshLlmConfigCache();
+
+      store.handleStreamChunk(AUTH_ERROR);
+      await vi.waitFor(() => expect(lastErrorBlock()?.kind).toBe('auth_required'));
+
+      expect(lastErrorBlock()?.content).toBe(
+        'The provider rejected the credentials. Check the API key or provider settings.'
+      );
+    });
+
+    it('stops the Claude Code session of the tab', async () => {
+      answerWith(AUTH_REQUIRED_STATUS);
+
+      store.handleStreamChunk(AUTH_ERROR);
+      await vi.waitFor(() => expect(invoked).toContain('close_chat_tab'));
+    });
+
+    it('keeps the chat on screen while the check runs and after it confirms the expiry', async () => {
+      answerWith(AUTH_REQUIRED_STATUS);
+      const observed: boolean[] = [];
+      projectState.onChange(() => {
+        if (projectState.status() === 'auth_required') observed.push(store.authFailed());
+      });
+
+      store.handleStreamChunk(AUTH_ERROR);
+      await vi.waitFor(() => expect(invoked).toContain('close_chat_tab'));
+
+      expect(observed).toEqual([true]);
+      expect(store.authFailed()).toBe(true);
+    });
+
+    it('lets the input back once the project is signed in again', async () => {
+      answerWith(AUTH_REQUIRED_STATUS);
+      store.handleStreamChunk(AUTH_ERROR);
+      await vi.waitFor(() => expect(store.authFailed()).toBe(true));
+      await vi.waitFor(() => expect(invoked).toContain('close_chat_tab'));
+
+      store.releaseAuthFailure();
+
+      expect(store.authFailed()).toBe(false);
+    });
+
+    it('treats the error as a plain one when the login is still valid', async () => {
+      answerWith(READY_STATUS);
+
+      store.handleStreamChunk(AUTH_ERROR);
+      await vi.waitFor(() => expect(invoked).toContain('get_auth_status'));
+      await vi.waitFor(() => expect(store.authFailed()).toBe(false));
+
+      expect(projectState.status()).toBe('ready');
+      expect(lastErrorBlock()).toStrictEqual({
+        type: 'error',
+        content: 'Failed to authenticate: OAuth session expired and could not be refreshed',
+      });
+      expect(invoked).not.toContain('close_chat_tab');
+    });
+
+    it('does not re-check the login for an error without a kind', async () => {
+      answerWith(AUTH_REQUIRED_STATUS);
+
+      store.handleStreamChunk({
+        chunk_type: 'Error',
+        data: { content: 'API Error: 500', turn_ended: true },
+      });
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(invoked).not.toContain('get_auth_status');
+      expect(store.authFailed()).toBe(false);
+      expect(lastErrorBlock()).toStrictEqual({ type: 'error', content: 'API Error: 500' });
     });
   });
 

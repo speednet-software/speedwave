@@ -34,6 +34,7 @@ import {
   contextTokensFrom,
   watchdogErrorKind,
   type ChatInput,
+  type ErrorBlockKind,
   type ChatMessage,
   type MessageBlock,
   type SessionStats,
@@ -169,15 +170,31 @@ export function mapContextOverflowError(raw: string): string | null {
   return null;
 }
 
+const SESSION_EXPIRED_MESSAGE = 'Your claude.ai session expired. Sign in again in Settings.';
+
+const CREDENTIALS_REJECTED_MESSAGE =
+  'The provider rejected the credentials. Check the API key or provider settings.';
+
 /**
  * Claude Code's own message points at `/login`, which doesn't apply here.
  * @param raw - Raw error message from the backend.
+ * @param provider - Kind of the active provider; null until the config is read.
  */
-export function mapNotLoggedInError(raw: string): string | null {
+export function mapNotLoggedInError(raw: string, provider: LlmProviderKind | null): string | null {
   if (/not logged in/i.test(raw) || /not authenticated/i.test(raw)) {
-    return 'Not logged in. Go to Settings and choose an LLM provider.';
+    return rejectedCredentialsMessage(provider);
   }
   return null;
+}
+
+function rejectedCredentialsMessage(provider: LlmProviderKind | null): string {
+  return provider === 'anthropic_oauth' ? SESSION_EXPIRED_MESSAGE : CREDENTIALS_REJECTED_MESSAGE;
+}
+
+function authErrorBlockKind(content: string): ErrorBlockKind | undefined {
+  return content === SESSION_EXPIRED_MESSAGE || content === CREDENTIALS_REJECTED_MESSAGE
+    ? 'auth_required'
+    : undefined;
 }
 
 /**
@@ -905,6 +922,15 @@ export class ChatSessionStore {
   /** Hides this tab's find bar; the query and the toggles stay for the next open. */
   closeFind(): void {
     this.find.update((s) => ({ ...s, open: false }));
+  }
+
+  private readonly _authFailure = signal<'checking' | 'confirmed' | null>(null);
+  /** True from an authentication-failed turn until login is back: the chat stays on screen and its input is off. */
+  readonly authFailed: Signal<boolean> = computed(() => this._authFailure() !== null);
+
+  /** Re-enables input once the project is signed in again; a check still in flight is left alone. */
+  releaseAuthFailure(): void {
+    if (this._authFailure() === 'confirmed') this._authFailure.set(null);
   }
 
   private readonly _sessionEnded = signal(false);
@@ -1765,7 +1791,7 @@ export class ChatSessionStore {
       case 'Error': {
         const errContent =
           mapContextOverflowError(chunk.data.content) ??
-          mapNotLoggedInError(chunk.data.content) ??
+          mapNotLoggedInError(chunk.data.content, this._activeKind) ??
           chunk.data.content;
         const watchdogKind = watchdogErrorKind(errContent);
         this._currentBlocks = [
@@ -1776,14 +1802,19 @@ export class ChatSessionStore {
             ...(watchdogKind !== undefined ? { kind: watchdogKind } : {}),
           },
         ];
-        this._messages = [
-          ...this._messages,
-          { role: 'assistant', blocks: [...this._currentBlocks], timestamp: Date.now() },
-        ];
+        const errorMessage: ChatMessage = {
+          role: 'assistant',
+          blocks: [...this._currentBlocks],
+          timestamp: Date.now(),
+        };
+        this._messages = [...this._messages, errorMessage];
         this._currentBlocks = [];
         this.isStreaming = false;
         if (chunk.data.turn_ended) this.releasePendingPicks();
         void this.refreshControlData();
+        if (chunk.data.kind === 'authentication_failed') {
+          void this.handleAuthenticationFailure(errorMessage);
+        }
         break;
       }
 
@@ -1810,6 +1841,37 @@ export class ChatSessionStore {
         return;
     }
     this.notifyChange();
+  }
+
+  private async handleAuthenticationFailure(failed: ChatMessage): Promise<void> {
+    this._authFailure.set('checking');
+    await this.deps.projectState.retryAuth();
+    if (this.deps.projectState.status() !== 'auth_required') {
+      this._authFailure.set(null);
+      return;
+    }
+    if (this._activeKind === null) await this.refreshLlmConfigCache();
+    this._authFailure.set('confirmed');
+    const authBlock: MessageBlock = {
+      type: 'error',
+      content: rejectedCredentialsMessage(this._activeKind),
+      kind: 'auth_required',
+    };
+    this._messages = this._messages.map((m) =>
+      m === failed ? { ...m, blocks: [...m.blocks.slice(0, -1), authBlock] } : m
+    );
+    this.notifyChange();
+    await this.stopBackendSession();
+  }
+
+  private async stopBackendSession(): Promise<void> {
+    try {
+      await this.deps.tauri.invoke('close_chat_tab', { tabId: this.tabId });
+    } catch (err) {
+      this.deps.log.warn(
+        `[chat-state] stopping the session after auth failure failed: ${String(err)}`
+      );
+    }
   }
 
   private forgetContextWindow(): void {
@@ -2680,11 +2742,11 @@ export function stateBlocksToMessageBlocks(blocks: readonly MessageBlockState[])
         });
         break;
       case 'error': {
-        const watchdogKind = watchdogErrorKind(b.content);
+        const errorKind = watchdogErrorKind(b.content) ?? authErrorBlockKind(b.content);
         out.push({
           type: 'error',
           content: b.content,
-          ...(watchdogKind !== undefined ? { kind: watchdogKind } : {}),
+          ...(errorKind !== undefined ? { kind: errorKind } : {}),
         });
         break;
       }

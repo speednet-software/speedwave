@@ -134,6 +134,11 @@ export class ChatStateService {
   /** Whether another tab can be opened under `MAX_CHAT_TABS` (beta gating is the UI's job). */
   readonly canOpenTab: Signal<boolean> = computed(() => this._tabs().size < MAX_CHAT_TABS);
 
+  /** True while any tab shows an authentication failure that keeps the chat on screen. */
+  readonly sessionAuthFailed: Signal<boolean> = computed(() =>
+    Array.from(this._tabs().values()).some((store) => store.authFailed())
+  );
+
   /** Reads Claude Code's control data as soon as a session answers `initialize`, and clears the mark of a tab the user keeps in view. */
   constructor() {
     this.deps = {
@@ -735,6 +740,7 @@ export class ChatStateService {
         this._sawSwitching = true;
         this.resetTabsForProjectSwitch();
       } else if (status === 'ready') {
+        for (const store of this._tabs().values()) store.releaseAuthFailure();
         void this.refreshLlmConfigCache();
         if (this._sawSwitching) {
           this._sawSwitching = false;
