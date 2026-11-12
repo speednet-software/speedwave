@@ -6528,6 +6528,18 @@ describe('ChatSessionStore', () => {
       expect(store.canRetryLastAssistant()).toBe(true);
     });
 
+    it('canRetryLastAssistant returns false for a turn Claude Code started on its own', () => {
+      seedRetryableSession();
+      const messages = store.messages;
+      const userIdx = messages.map((m) => m.role).lastIndexOf('user');
+      store._setState({
+        messages: messages.map((m, i) =>
+          i === userIdx ? { ...m, blocks: [{ type: 'turn_origin', origin: 'scheduled' }] } : m
+        ),
+      });
+      expect(store.canRetryLastAssistant()).toBe(false);
+    });
+
     it('canRetryLastAssistant returns false while streaming', () => {
       seedRetryableSession();
       store.isStreaming = true;
@@ -8063,6 +8075,16 @@ describe('ChatSessionStore', () => {
         transcriptWith([{ type: 'control_chip', command: 'model', argument: 'claude-sonnet-5' }])
       );
       expect(msg.blocks).toEqual([{ type: 'chip', command: 'model', argument: 'claude-sonnet-5' }]);
+    });
+
+    it('keeps a history turn_origin block as the live-path origin row', () => {
+      const [msg] = toChatMessages(transcriptWith([{ type: 'turn_origin', origin: 'scheduled' }]));
+      expect(msg.blocks).toEqual([{ type: 'turn_origin', origin: 'scheduled' }]);
+    });
+
+    it('round-trips a turn_origin block through the state tree', () => {
+      const blocks = [{ type: 'turn_origin' as const, origin: 'task_notification' as const }];
+      expect(stateBlocksToMessageBlocks(messageBlocksToState(blocks))).toEqual(blocks);
     });
   });
 
