@@ -590,6 +590,5 @@ describe('downloadAttachmentContent', () => {
     await vi.runAllTimersAsync();
     await expect(pending).resolves.toBe('second attempt');
     expect(destroy).toHaveBeenCalledTimes(1);
-    vi.useRealTimers();
   });
 });

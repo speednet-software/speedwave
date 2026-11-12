@@ -9,7 +9,7 @@ import { workspaceRoot } from '@speedwave/mcp-shared';
 const JIRA_DOWNLOAD_SUBPATH = path.join('.speedwave', 'jira');
 
 /**
- * Stream an attachment into `<workspace>/.speedwave/jira/<id>-<name>`.
+ * Save an attachment stream into the workspace.
  * @param id - The attachment ID.
  * @param filename - The attachment file name as Jira reports it.
  * @param content - The attachment bytes.
@@ -20,7 +20,12 @@ export async function saveAttachment(
   content: Readable
 ): Promise<{ path: string; size: number }> {
   const dir = path.join(workspaceRoot(), JIRA_DOWNLOAD_SUBPATH);
-  await mkdir(dir, { recursive: true });
+  try {
+    await mkdir(dir, { recursive: true });
+  } catch (error) {
+    content.destroy();
+    throw error;
+  }
   const target = path.join(dir, `${sanitizeFilename(id)}-${sanitizeFilename(filename)}`);
   const partial = `${target}.${randomUUID()}.part`;
   try {

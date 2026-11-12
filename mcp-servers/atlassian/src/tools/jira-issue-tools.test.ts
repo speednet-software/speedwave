@@ -12,11 +12,7 @@ import { Readable } from 'node:stream';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AxiosError, type AxiosResponse } from 'axios';
-import {
-  META_KEYS,
-  WORKSPACE_WRITE_ANNOTATIONS,
-  type ToolsCallResult,
-} from '@speedwave/mcp-shared';
+import { META_KEYS, type ToolsCallResult } from '@speedwave/mcp-shared';
 import { createJiraIssueTools } from './jira-issue-tools.js';
 import { schemaKeys } from './jira-test-helpers.js';
 import type { AtlassianClient } from '../client.js';
@@ -1117,6 +1113,8 @@ describe('downloadAttachment', () => {
     ['..\\..\\evil.sh', '10475-evil.sh'],
     ['.hidden', '10475-hidden'],
     ['a b$c.txt', '10475-a_b_c.txt'],
+    ['...', '10475-file'],
+    ['dir/', '10475-file'],
   ])('keeps the file inside .speedwave/jira for the name %s', async (name, saved) => {
     const fields = ISSUE_WITH_ATTACHMENT.fields;
     client.get.mockResolvedValueOnce({
@@ -1128,6 +1126,16 @@ describe('downloadAttachment', () => {
       await run('downloadAttachment', { issue: 'PROJ-7', attachment_id: '10475' })
     );
     expect(emitted.path).toBe(join(ws, '.speedwave', 'jira', saved));
+  });
+
+  it('destroys the content stream when the jira directory cannot be created', async () => {
+    writeFileSync(join(ws, '.speedwave'), 'a file where the directory should be');
+    client.get.mockResolvedValueOnce(ISSUE_WITH_ATTACHMENT);
+    const content = Readable.from([Buffer.from('x')]);
+    client.downloadAttachmentContent.mockResolvedValueOnce(content);
+    const result = await run('downloadAttachment', { issue: 'PROJ-7', attachment_id: '10475' });
+    expect(result.isError).toBe(true);
+    expect(content.destroyed).toBe(true);
   });
 
   it('leaves no partial file when the stream fails', async () => {

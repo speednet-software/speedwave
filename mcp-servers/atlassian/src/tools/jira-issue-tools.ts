@@ -134,6 +134,11 @@ const issueParam = (extra = '') => ({
   description: `Issue key (e.g. PROJ-123) or numeric ID.${extra}`,
 });
 
+const attachmentIdParam = {
+  type: 'string',
+  description: 'Attachment ID from the attachments of getIssue (e.g. 10475)',
+};
+
 const descriptionProperties = {
   description: {
     type: 'string',
@@ -572,11 +577,6 @@ const addAttachmentTool: Tool = {
   ],
 };
 
-const attachmentIdParam = {
-  type: 'string',
-  description: 'Attachment ID from the attachments of getIssue (e.g. 10475)',
-};
-
 const downloadAttachmentTool: Tool = {
   name: 'downloadAttachment',
   description:
@@ -891,12 +891,12 @@ export function createJiraIssueTools(client: AtlassianClient | null): ToolDefini
       try {
         return jsonResult({ ...(await issues.downloadAttachment(issue, attachment_id)) });
       } catch (error) {
-        return (
-          attachmentRejection(error, attachment_id, 'nothing was saved', {
-            403: 'Jira says this account lacks permission to view the content of',
-            404: 'Jira found no visible',
-          }) ?? redirectRejection(error, attachment_id)
-        );
+        const rejection = attachmentRejection(error, attachment_id, 'nothing was saved', {
+          403: 'Jira says this account lacks permission to view the content of',
+          404: 'Jira found no visible',
+        });
+        if (rejection) return rejection;
+        throw error;
       }
     }),
 
@@ -917,38 +917,6 @@ export function createJiraIssueTools(client: AtlassianClient | null): ToolDefini
   };
 
   return tools.map((tool) => ({ tool, handler: withDeclaredParams(tool, handlers[tool.name]) }));
-}
-
-function attachmentRejection(
-  error: unknown,
-  attachmentId: string,
-  outcome: string,
-  statusReasons: Record<number, string>
-) {
-  if (error instanceof AttachmentNotFoundError) {
-    return teachingErrorResult({
-      paramName: 'attachment_id',
-      correctValueTool: 'getIssue',
-      nextStep: `${error.issue} has no attachment ${attachmentId}, so ${outcome}. Its attachments: ${error.available.join(', ') || 'none'}. Retry with an id from the attachments of getIssue for this issue.`,
-    });
-  }
-  const status = responseStatus(error);
-  const reason = status === undefined ? undefined : statusReasons[status];
-  if (reason === undefined) return undefined;
-  return teachingErrorResult({
-    paramName: 'attachment_id',
-    correctValueTool: 'getIssue',
-    nextStep: `${reason} attachment ${attachmentId}, so ${outcome}. Check the id with getIssue${status === 403 ? ' and the account permissions in that project' : ''}.`,
-  });
-}
-
-function redirectRejection(error: unknown, attachmentId: string) {
-  const status = responseStatus(error);
-  if (status === undefined || status < 300 || status > 399) throw error;
-  return teachingErrorResult({
-    paramName: 'attachment_id',
-    nextStep: `Jira answered with a redirect instead of the content of attachment ${attachmentId}, so nothing was saved. The worker does not follow redirects to another host.`,
-  });
 }
 
 function translateWriteRejection(error: unknown, context: WriteContext) {
@@ -999,4 +967,33 @@ function jiraRejection(error: unknown): JiraRejection | undefined {
     errorMessages?: string[];
   };
   return { fields: data.errors ?? {}, messages: data.errorMessages ?? [] };
+}
+
+function attachmentRejection(
+  error: unknown,
+  attachmentId: string,
+  outcome: string,
+  statusReasons: Record<number, string>
+) {
+  if (error instanceof AttachmentNotFoundError) {
+    return teachingErrorResult({
+      paramName: 'attachment_id',
+      correctValueTool: 'getIssue',
+      nextStep: `${error.issue} has no attachment ${attachmentId}, so ${outcome}. Its attachments: ${error.available.join(', ') || 'none'}. Retry with an id from the attachments of getIssue for this issue.`,
+    });
+  }
+  const status = responseStatus(error);
+  if (status !== undefined && status >= 300 && status <= 399) {
+    return teachingErrorResult({
+      paramName: 'attachment_id',
+      nextStep: `Jira answered with a redirect for attachment ${attachmentId}, so ${outcome}. The worker does not follow redirects to another host.`,
+    });
+  }
+  const reason = status === undefined ? undefined : statusReasons[status];
+  if (reason === undefined) return undefined;
+  return teachingErrorResult({
+    paramName: 'attachment_id',
+    correctValueTool: 'getIssue',
+    nextStep: `${reason} attachment ${attachmentId}, so ${outcome}. Check the id with getIssue${status === 403 ? ' and the account permissions in that project' : ''}.`,
+  });
 }
