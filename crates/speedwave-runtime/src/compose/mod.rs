@@ -11616,7 +11616,7 @@ services:
         assert_eq!(
             redmine_by_method, redmine_by_prefix,
             "is_redmine() count ({redmine_by_method}) differs from REDMINE-prefixed variant count \
-             ({redmine_by_prefix}) — update SecurityRule::is_redmine() to include the new variant"
+             ({redmine_by_prefix}); update SecurityRule::is_redmine() to include the new variant"
         );
         assert_eq!(
             slack_by_method, slack_by_prefix,
