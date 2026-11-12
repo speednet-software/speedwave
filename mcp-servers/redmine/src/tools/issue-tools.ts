@@ -15,6 +15,7 @@ import {
 } from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
 import { resolveParams } from './helpers.js';
+import { resolveAttachmentFiles } from './attachment-files.js';
 import { withRedmineErrors } from './error-handling.js';
 import { successResultSchema } from './schema-helpers.js';
 
@@ -249,10 +250,11 @@ const searchIssueIdsTool: Tool = {
 const createIssueTool: Tool = {
   name: 'createIssue',
   description:
-    "Create a new Redmine issue. tracker/priority/status names must match this project's configured mappings (see getMappings); an unrecognized name throws an error listing valid values.",
+    "Create a new Redmine issue. tracker/priority/status names must match this project's configured mappings (see getMappings); an unrecognized name throws an error listing valid values. file_paths attaches 1 to 10 files from /workspace; a path outside /workspace is rejected before anything is created.",
   annotations: WRITE_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_CLASS]: 'long',
     [META_KEYS.USER_SCOPED]: true,
     [META_KEYS.SELF_PARAM]: "assigned_to: 'me'",
   },
@@ -280,6 +282,14 @@ const createIssueTool: Tool = {
       fixed_version_id: {
         type: 'number',
         description: 'Target version ID — obtained from listVersions',
+      },
+      file_paths: {
+        type: 'array',
+        items: { type: 'string' },
+        minItems: 1,
+        maxItems: 10,
+        description:
+          'Paths under /workspace of files to attach, e.g. ["/workspace/screenshot.png"]',
       },
     },
     required: ['project_id', 'subject'],
@@ -316,6 +326,15 @@ const createIssueTool: Tool = {
         tracker: 'bug',
         priority: 'high',
         assigned_to: 'me',
+      },
+    },
+    {
+      description: 'Partial: bug with a screenshot attached',
+      input: {
+        subject: 'Layout broken on mobile',
+        project_id: 'my-project',
+        tracker: 'bug',
+        file_paths: ['/workspace/screenshot.png'],
       },
     },
     {
@@ -544,12 +563,19 @@ export function createIssueTools(client: RedmineClient | null): ToolDefinition[]
       tool: createIssueTool,
       handler: async (params) =>
         withRedmineErrors(versionContext(params), async () => {
-          const resolved = resolveParams(params as Record<string, unknown>, client.getMappings());
+          const { file_paths, ...fields } = params as Record<string, unknown>;
+          const attachments =
+            file_paths === undefined
+              ? { files: undefined }
+              : await resolveAttachmentFiles(file_paths);
+          if ('error' in attachments) return attachments.error;
+          const resolved = resolveParams(fields, client.getMappings());
           const assignError = await resolveAssignedTo(client, resolved);
           if (assignError) return assignError;
-          const result = await client.createIssue(
-            resolved as Parameters<typeof client.createIssue>[0]
-          );
+          const result = await client.createIssue({
+            ...(resolved as Parameters<typeof client.createIssue>[0]),
+            files: attachments.files,
+          });
           return jsonResult(result);
         }),
     },
