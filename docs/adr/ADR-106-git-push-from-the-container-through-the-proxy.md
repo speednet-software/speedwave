@@ -21,7 +21,7 @@
 6. **Audit.** Every git request is one row in the proxy audit file (`audit-proxy.jsonl`, `layer: "git"`): method, host, repository, service, status. No token, no body.
 7. **Git configuration in the container.** The renderer passes `SPEEDWAVE_GIT_HOSTS`, `SPEEDWAVE_GIT_PROXY_URL` and `SPEEDWAVE_GIT_PROXY_AUTH` to the `claude` container when at least one forge is enabled. The entrypoint writes `~/.config/speedwave/git-transport.gitconfig` with `url.<proxy>/git/<host>/.insteadOf` for the ssh form (`git@<host>:`) and the https form (`https://<host>/`) of each host, plus `http.<proxy>/git/.extraHeader` with the caller secret[^4], and includes it once from `~/.gitconfig`. Repository `.git/config` is untouched, so the host keeps pushing over ssh with the same `origin`. With no forge enabled the file is removed; git ignores an include of a missing file.
 8. **No `workflow` scope.** `GITHUB_OAUTH_SCOPES` (`crates/speedwave-runtime/src/consts.rs`) stays `repo read:user`. Without `workflow` GitHub refuses a push that adds or changes a workflow file[^5], so a prompt-injected agent cannot push a workflow that runs with the repository's secrets on a `push` trigger. Such a change is pushed from the host.
-9. **No feature flag.** The route works whenever the integration is enabled. A read-only switch (SPEED-67) can later disable `git-receive-pack` in the proxy.
+9. **No feature flag.** The route works whenever the integration is enabled. A read-only mode of the integration disables `git-receive-pack` in the proxy (section "Integration mode and git push" of [ADR-108](ADR-108-access-policy-in-the-hub-and-read-only-mode.md), SPEED-67); fetch is unchanged.
 
 ## Consequences
 
@@ -54,7 +54,7 @@ Consequences:
 - `owner/*` also admits a repository created under that owner later, by anyone with access to it.
 - An organisation-forced list that narrows the user's list belongs to the managed policy (SPEED-955).
 
-Alternatives rejected: the remotes found in the project directory as the source of the list (decision 3); one list per account instead of per project (it leaves lateral movement between projects open); separate lists for fetch and push (a read-only mode is SPEED-67); an absent list meaning "everything" during a migration (no release carries the git transport without the list, so there is nothing to migrate).
+Alternatives rejected: the remotes found in the project directory as the source of the list (decision 3); one list per account instead of per project (it leaves lateral movement between projects open); separate lists for fetch and push (the read-only mode of the integration blocks push for the whole forge, ADR-108); an absent list meaning "everything" during a migration (no release carries the git transport without the list, so there is nothing to migrate).
 
 ## References
 

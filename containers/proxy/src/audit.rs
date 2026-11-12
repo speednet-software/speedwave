@@ -40,6 +40,10 @@ struct GitAuditLine<'a> {
     repo: Option<&'a str>,
     service: Option<&'a str>,
     status: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'static str>,
 }
 
 /// Appends one JSONL line per detection to `<audit_dir>/audit-proxy.jsonl`; no-op when `None`.
@@ -75,6 +79,8 @@ pub fn write_ner_unavailable(audit_dir: Option<&Path>) {
     write_pii_audit_with_source(audit_dir, &[row], Some(NER_SOURCE));
 }
 
+pub const READ_ONLY_REASON: &str = "read-only";
+
 pub fn write_git_audit(
     audit_dir: Option<&Path>,
     method: &str,
@@ -82,6 +88,7 @@ pub fn write_git_audit(
     repo: Option<&str>,
     service: Option<&str>,
     status: u16,
+    denial: Option<&'static str>,
 ) {
     let Some(dir) = audit_dir else {
         return;
@@ -94,6 +101,8 @@ pub fn write_git_audit(
         repo,
         service,
         status,
+        outcome: denial.map(|_| "denied"),
+        reason: denial,
     };
     let write = || -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;

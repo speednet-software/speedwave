@@ -6,7 +6,7 @@
 import { randomUUID } from 'crypto';
 import type { Tool } from '@speedwave/mcp-shared';
 import { TIMEOUTS, LATEST_PROTOCOL_VERSION, ts, META_KEYS, metaValue } from '@speedwave/mcp-shared';
-import type { ToolMetadata } from './hub-types.js';
+import { OS_CATEGORIES, type ToolMetadata } from './hub-types.js';
 import { getAuthToken } from './auth-tokens.js';
 import { validateWorkerUrl } from '@speedwave/mcp-shared';
 import { parseResponse, buildWorkerHeaders } from './http-bridge.js';
@@ -188,7 +188,6 @@ export function mergeToolWithMeta(tool: Tool, service: string, methodName: strin
   const currentUserTool = metaValue(meta, META_KEYS.CURRENT_USER_TOOL, 'currentUserTool');
   const selfParam = metaValue(meta, META_KEYS.SELF_PARAM, 'selfParam');
 
-  const validOsCategories = ['reminders', 'calendar', 'mail', 'notes'] as const;
   const rawOsCategory = typeof osCategoryRaw === 'string' ? osCategoryRaw : undefined;
 
   return {
@@ -206,7 +205,7 @@ export function mergeToolWithMeta(tool: Tool, service: string, methodName: strin
       timeoutClass === 'long' ? 'long' : timeoutClass === 'standard' ? 'standard' : undefined,
     timeoutMs: typeof timeoutMsRaw === 'number' && timeoutMsRaw > 0 ? timeoutMsRaw : undefined,
     osCategory:
-      rawOsCategory && (validOsCategories as readonly string[]).includes(rawOsCategory)
+      rawOsCategory && (OS_CATEGORIES as readonly string[]).includes(rawOsCategory)
         ? (rawOsCategory as ToolMetadata['osCategory'])
         : undefined,
     annotations: tool.annotations,

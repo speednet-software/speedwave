@@ -6,7 +6,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import path from 'path';
-import { RefreshLock, META_KEYS, WRITE_ANNOTATIONS } from '@speedwave/mcp-shared';
+import {
+  RefreshLock,
+  META_KEYS,
+  WORKSPACE_WRITE_ANNOTATIONS,
+  WRITE_ANNOTATIONS,
+} from '@speedwave/mcp-shared';
 import {
   handleGetFileContent,
   handleDownloadFile,
@@ -236,7 +241,7 @@ describe('file-tools', () => {
       expect(read._meta?.[META_KEYS.DEFER_LOADING]).toBe(true);
       const download = tools[1].tool;
       expect(download.inputSchema.required).toEqual(['file']);
-      expect(download.annotations?.readOnlyHint).not.toBe(true);
+      expect(download.annotations).toBe(WORKSPACE_WRITE_ANNOTATIONS);
       expect(download._meta?.[META_KEYS.DEFER_LOADING]).toBe(true);
       const upload = tools[2].tool;
       expect(upload.inputSchema.required).toEqual(['channel', 'filePaths']);

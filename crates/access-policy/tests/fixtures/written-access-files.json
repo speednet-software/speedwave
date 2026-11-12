@@ -1,0 +1,40 @@
+[
+  {
+    "name": "every service full",
+    "policy": {
+      "default": "full",
+      "services": {}
+    },
+    "text": "{\n  \"version\": 1,\n  \"default\": \"full\",\n  \"services\": {}\n}"
+  },
+  {
+    "name": "project switch on",
+    "policy": {
+      "default": "read_only",
+      "services": {}
+    },
+    "text": "{\n  \"version\": 1,\n  \"default\": \"read_only\",\n  \"services\": {}\n}"
+  },
+  {
+    "name": "one integration read-only",
+    "policy": {
+      "default": "full",
+      "services": {
+        "slack": "read_only"
+      }
+    },
+    "text": "{\n  \"version\": 1,\n  \"default\": \"full\",\n  \"services\": {\n    \"slack\": \"read_only\"\n  }\n}"
+  },
+  {
+    "name": "macOS integration and plugins read-only",
+    "policy": {
+      "default": "full",
+      "services": {
+        "custom-my-mcp": "read_only",
+        "figma": "read_only",
+        "os-mail": "read_only"
+      }
+    },
+    "text": "{\n  \"version\": 1,\n  \"default\": \"full\",\n  \"services\": {\n    \"custom-my-mcp\": \"read_only\",\n    \"figma\": \"read_only\",\n    \"os-mail\": \"read_only\"\n  }\n}"
+  }
+]

@@ -29,7 +29,9 @@ import {
   WrapWithAuditFn,
   PrepareParamsFn,
   WrapBridgeCallFn,
+  type AccessDenial,
 } from './tool-registry.js';
+import type { DenialReason } from './hub-types.js';
 import { resolveSandboxGlobals, type SandboxGlobalResolution } from './service-list.js';
 import { toCamelCase } from './tool-discovery.js';
 
@@ -130,6 +132,8 @@ interface AuditEntry {
   tool: string;
   /** Parameters passed to the tool */
   params: Record<string, unknown>;
+  outcome: 'allowed' | 'denied';
+  reason?: DenialReason;
 }
 
 /**
@@ -137,14 +141,14 @@ interface AuditEntry {
  */
 interface AuditContext {
   /** Log a tool execution */
-  log: (service: string, tool: string, params: unknown) => void;
+  log: (service: string, tool: string, params: unknown, denial?: AccessDenial) => void;
 }
 
 /** Create audit context: logs each tool call; PII Tokenizer protects sensitive data first. */
 function createAuditContext(): AuditContext {
   const entries: AuditEntry[] = [];
   return {
-    log: (service, tool, params) => {
+    log: (service, tool, params, denial) => {
       const category = deriveAuditCategory(service, tool);
       const entry: AuditEntry = {
         timestamp: new Date().toISOString(),
@@ -152,9 +156,14 @@ function createAuditContext(): AuditContext {
         service,
         tool,
         params: (params ?? {}) as Record<string, unknown>,
+        outcome: denial ? 'denied' : 'allowed',
+        ...(denial && { reason: denial.reason }),
       };
       entries.push(entry);
-      console.log(`${ts()} [${category}] ${service}.${tool}(${JSON.stringify(params ?? {})})`);
+      const verdict = denial ? ` outcome=denied reason=${denial.reason}` : '';
+      console.log(
+        `${ts()} [${category}] ${service}.${tool}(${JSON.stringify(params ?? {})})${verdict}`
+      );
     },
   };
 }
@@ -322,14 +331,16 @@ function createToolWrappers(
    * @param service - Service name for audit tracking (e.g. 'gitlab', 'slack').
    * @param tool - Tool name for audit tracking (e.g. 'getMrFull', 'sendChannel').
    * @param fn - Function to wrap with audit logging.
+   * @param denial - Denial to record.
    */
   const wrapWithAudit: WrapWithAuditFn = <TParams, TResult>(
     service: string,
     tool: string,
-    fn: (params: TParams) => Promise<TResult>
+    fn: (params: TParams) => Promise<TResult>,
+    denial?: AccessDenial
   ) => {
     return async (params: TParams): Promise<TResult> => {
-      auditContext.log(service, tool, params);
+      auditContext.log(service, tool, params, denial);
       return fn(params);
     };
   };

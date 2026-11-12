@@ -302,6 +302,7 @@ pub fn render_compose_in(
         project_name,
         integrations,
         &resolved_config.git_repositories,
+        &resolved_config.access,
     );
     proxy::write_proxy_config_in(
         data_dir,
@@ -339,6 +340,7 @@ pub fn render_compose_in(
         .map_err(|e| anyhow::anyhow!("PII policy configuration is invalid: {e}"))?;
     crate::pii_key::ensure_project_key_in(data_dir, project_name)?;
     crate::pii_policy::write_policy_config_in(data_dir, project_name, pii_policy)?;
+    crate::access_policy::write_access_config_in(data_dir, project_name, &resolved_config.access)?;
     let policy_config_dir = crate::pii_policy::policy_config_dir_in(data_dir, project_name);
     yaml = yaml.replace("${POLICY_CONFIG_DIR}", &to_engine_path(&policy_config_dir)?);
     yaml = yaml.replace(
@@ -3224,6 +3226,49 @@ services:
 
     #[test]
     #[serial_test::serial(host_addressing)]
+    fn git_transport_renders_the_composed_access_mode_of_each_forge_in_proxy_json() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: configured_anthropic_llm(),
+            access: speedwave_access_policy::AccessPolicy {
+                default: speedwave_access_policy::AccessMode::Full,
+                services: [(
+                    "github".to_string(),
+                    speedwave_access_policy::AccessMode::ReadOnly,
+                )]
+                .into(),
+            },
+            ..Default::default()
+        };
+        render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            tmp_project_dir(),
+            &config,
+            &ResolvedIntegrationsConfig {
+                github: true,
+                gitlab: true,
+                ..Default::default()
+            },
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+        let rendered: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(proxy::proxy_config_path_in(data_dir.path(), "test-project"))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(rendered["git_forges"][0]["host"], "github.com");
+        assert_eq!(rendered["git_forges"][0]["access"], "read_only");
+        assert_eq!(rendered["git_forges"][1]["host"], "gitlab.com");
+        assert!(rendered["git_forges"][1].get("access").is_none());
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_playwright_service_present() {
         let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
@@ -4228,6 +4273,87 @@ services:
             key_path.is_file(),
             "render_compose must ensure the per-project tokenization key next to policy.json"
         );
+    }
+
+    fn render_with_access(
+        data_dir: &Path,
+        access: speedwave_access_policy::AccessPolicy,
+    ) -> serde_yaml_ng::Value {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: configured_anthropic_llm(),
+            access,
+            ..Default::default()
+        };
+        let yaml = render_compose_isolated(
+            data_dir,
+            "test-project",
+            tmp_project_dir(),
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+        serde_yaml_ng::from_str(&yaml).unwrap()
+    }
+
+    fn read_only_access() -> speedwave_access_policy::AccessPolicy {
+        speedwave_access_policy::AccessPolicy {
+            default: speedwave_access_policy::AccessMode::ReadOnly,
+            services: Default::default(),
+        }
+    }
+
+    #[test]
+    #[serial_test::parallel(host_addressing)]
+    fn test_rendered_access_json_carries_the_composed_access_policy() {
+        let data_dir = tempfile::tempdir().unwrap();
+        render_with_access(data_dir.path(), read_only_access());
+
+        let json = std::fs::read_to_string(crate::access_policy::access_config_path_in(
+            data_dir.path(),
+            "test-project",
+        ))
+        .unwrap();
+        assert_eq!(
+            json,
+            speedwave_access_policy::to_access_file(&read_only_access()).unwrap()
+        );
+    }
+
+    #[test]
+    #[serial_test::parallel(host_addressing)]
+    fn test_rendered_access_json_is_all_full_while_every_service_is_full() {
+        let data_dir = tempfile::tempdir().unwrap();
+        render_with_access(data_dir.path(), read_only_access());
+        render_with_access(data_dir.path(), Default::default());
+
+        let json = std::fs::read_to_string(crate::access_policy::access_config_path_in(
+            data_dir.path(),
+            "test-project",
+        ))
+        .unwrap();
+        assert_eq!(
+            json,
+            speedwave_access_policy::to_access_file(
+                &speedwave_access_policy::AccessPolicy::default()
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    #[serial_test::parallel(host_addressing)]
+    fn test_read_only_mode_changes_the_hub_policy_digest_so_the_hub_recreates() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let digest_of = |doc: &serde_yaml_ng::Value| {
+            find_env_value(&get_hub_env_seq(doc), "POLICY_DIGEST=").unwrap()
+        };
+        let full = digest_of(&render_with_access(data_dir.path(), Default::default()));
+        let read_only = digest_of(&render_with_access(data_dir.path(), read_only_access()));
+        assert_ne!(full, read_only);
     }
 
     #[test]

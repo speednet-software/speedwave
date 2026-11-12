@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { provideRouter } from '@angular/router';
 import { IntegrationsComponent } from './integrations.component';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
@@ -182,6 +183,7 @@ describe('IntegrationsComponent', () => {
         { provide: TauriService, useValue: mockTauri },
         { provide: LoggerService, useValue: mockLogger },
         { provide: BetaService, useValue: { enabled: betaEnabled.asReadonly() } },
+        provideRouter([]),
       ],
     }).compileComponents();
 
@@ -745,6 +747,86 @@ describe('IntegrationsComponent', () => {
       const osSection = fixture.nativeElement.querySelector('[data-testid="integrations-os"]');
       expect(osSection).not.toBeNull();
       expect(component.osIntegrations.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe('Access control', () => {
+    const accessCalls: Record<string, unknown>[] = [];
+
+    function respondWithAccess(): void {
+      const base = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === 'get_integration_access') {
+          accessCalls.push(args ?? {});
+          return { mode: 'read_only', global_read_only: false, global_locked: false };
+        }
+        return base(cmd, args);
+      };
+    }
+
+    beforeEach(() => {
+      accessCalls.length = 0;
+      respondWithAccess();
+    });
+
+    async function render(): Promise<void> {
+      await component.ngOnInit();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      await fixture.whenStable();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      fixture.detectChanges();
+    }
+
+    it('shows the Access control in the panel of the expanded integration', async () => {
+      component.expandedService = 'gitlab';
+      await render();
+
+      const panel = fixture.nativeElement.querySelector(
+        '[data-testid="integrations-expanded-gitlab"] [data-testid="integration-access"]'
+      );
+      expect(panel).not.toBeNull();
+      expect(accessCalls).toContainEqual({ project: 'test-project', service: 'gitlab' });
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="integration-access-always"]').checked
+      ).toBe(true);
+    });
+
+    it('shows no Access control while no integration is expanded', async () => {
+      await render();
+
+      const expanded = fixture.nativeElement.querySelector(
+        '[data-testid^="integrations-expanded-"]'
+      );
+      expect(expanded).toBeNull();
+    });
+
+    it('opens the Access switch under an enabled OS integration', async () => {
+      await render();
+
+      const row = fixture.nativeElement.querySelector(
+        '[data-testid="integrations-os-row-reminders"]'
+      );
+      expect(row.querySelector('[data-testid="integration-access"]')).not.toBeNull();
+      expect(accessCalls).toContainEqual({ project: 'test-project', service: 'reminders' });
+    });
+
+    it('shows no Access switch under a disabled OS integration', async () => {
+      const base = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd !== 'get_integrations') return base(cmd, args);
+        const integrations = cloneMockIntegrations();
+        integrations.os = integrations.os.map((o) => ({ ...o, enabled: false }));
+        return integrations;
+      };
+      await render();
+
+      const row = fixture.nativeElement.querySelector(
+        '[data-testid="integrations-os-row-reminders"]'
+      );
+      expect(row.querySelector('[data-testid="integration-access"]')).toBeNull();
+      expect(row.querySelector('[data-testid="integrations-os-toggle-reminders"]')).not.toBeNull();
+      expect(accessCalls).not.toContainEqual({ project: 'test-project', service: 'reminders' });
     });
   });
 

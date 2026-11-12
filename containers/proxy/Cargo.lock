@@ -882,6 +882,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "speedwave-access-policy",
  "speedwave-pii-engine",
  "tempfile",
  "tokio",
@@ -1296,6 +1297,14 @@ checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
  "windows-sys 0.60.2",
+]
+
+[[package]]
+name = "speedwave-access-policy"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

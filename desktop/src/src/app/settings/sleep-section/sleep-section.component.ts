@@ -8,6 +8,7 @@ import { ToggleComponent } from '../../shared/toggle.component';
   selector: 'app-sleep-section',
   imports: [ToggleComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
+  host: { class: 'block' },
   template: `
     <section
       id="section-sleep"

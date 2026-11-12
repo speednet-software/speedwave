@@ -53,6 +53,7 @@ copy_tree() {
 
 copy_tree "$CONTAINERS_DIR" "$DEST/build-context/containers"
 
+copy_tree "$REPO_ROOT/crates/access-policy" "$DEST/build-context/containers/crates/access-policy"
 copy_tree "$REPO_ROOT/crates/pii-engine" "$DEST/build-context/containers/crates/pii-engine"
 
 mkdir -p "$DEST/build-context/containers/mcp-servers/policies"

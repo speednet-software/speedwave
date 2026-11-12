@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { META_KEYS } from '@speedwave/mcp-shared';
+import { META_KEYS, WORKSPACE_WRITE_ANNOTATIONS } from '@speedwave/mcp-shared';
 import { createToolDefinitions } from './index.js';
 
 describe('SharePoint tool metadata', () => {
@@ -72,5 +72,66 @@ describe('SharePoint tool metadata', () => {
       expect(meta?.[META_KEYS.USER_SCOPED], `${tool.name} unexpectedly user-scoped`).toBeFalsy();
       expect(meta?.userScoped, `${tool.name} uses legacy userScoped`).toBeFalsy();
     }
+  });
+});
+
+const READ_ONLY_TOOL_NAMES = [
+  'listFileIds',
+  'getFileFull',
+  'getCurrentUser',
+  'listPages',
+  'getPage',
+  'listLists',
+  'getList',
+  'listItems',
+  'getItem',
+];
+
+const WORKSPACE_WRITE_TOOL_NAMES = ['downloadFile'];
+
+const CHANGING_TOOL_NAMES = [
+  'uploadFile',
+  'createPage',
+  'updatePage',
+  'addWebPart',
+  'updateWebPart',
+  'removeWebPart',
+  'publishPage',
+  'generateTableOfContents',
+  'addImageWebPart',
+  'createList',
+  'updateList',
+  'deleteList',
+  'addListColumn',
+  'removeListColumn',
+  'createItem',
+  'updateItem',
+  'deleteItem',
+  'deletePage',
+];
+
+describe('SharePoint read-only access annotations', () => {
+  const tools = createToolDefinitions(null).map((td) => td.tool);
+  const names = (predicate: (hint: unknown) => boolean) =>
+    tools.filter((t) => predicate(t.annotations?.readOnlyHint)).map((t) => t.name);
+
+  it('lists every tool as reading, writing only into the workspace, or changing', () => {
+    expect([...tools.map((t) => t.name)].sort()).toEqual(
+      [...READ_ONLY_TOOL_NAMES, ...WORKSPACE_WRITE_TOOL_NAMES, ...CHANGING_TOOL_NAMES].sort()
+    );
+  });
+
+  it('marks exactly the reading and workspace-writing tools readOnlyHint true', () => {
+    expect(names((hint) => hint === true).sort()).toEqual(
+      [...READ_ONLY_TOOL_NAMES, ...WORKSPACE_WRITE_TOOL_NAMES].sort()
+    );
+  });
+
+  it.each(WORKSPACE_WRITE_TOOL_NAMES)('marks %s with the workspace-write annotations', (name) => {
+    expect(tools.find((t) => t.name === name)?.annotations).toBe(WORKSPACE_WRITE_ANNOTATIONS);
+  });
+
+  it.each(CHANGING_TOOL_NAMES)('does not mark %s as read-only', (name) => {
+    expect(tools.find((t) => t.name === name)?.annotations?.readOnlyHint).not.toBe(true);
   });
 });

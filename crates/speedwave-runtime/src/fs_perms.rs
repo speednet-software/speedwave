@@ -335,6 +335,17 @@ pub fn write_restricted_file_atomic(path: &Path, content: &str) -> anyhow::Resul
     Ok(())
 }
 
+pub(crate) fn write_restricted_file_atomic_if_changed(
+    path: &Path,
+    content: &str,
+) -> anyhow::Result<bool> {
+    if std::fs::read(path).is_ok_and(|current| current == content.as_bytes()) {
+        return Ok(false);
+    }
+    write_restricted_file_atomic(path, content)?;
+    Ok(true)
+}
+
 /// Atomic write WITHOUT permission tightening — for shared, non-secret files
 /// other principals must read (e.g. `.wslconfig`, read by the WSL service).
 pub fn write_shared_file_atomic(path: &Path, content: &str) -> anyhow::Result<()> {
@@ -1248,5 +1259,50 @@ mod tests {
 
         assert_eq!(removed, 0);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "proj-a");
+    }
+
+    #[test]
+    fn write_if_changed_writes_a_new_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.json");
+        assert!(write_restricted_file_atomic_if_changed(&path, "a").unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a");
+    }
+
+    #[test]
+    fn write_if_changed_leaves_an_identical_file_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.json");
+        write_restricted_file_atomic(&path, "a").unwrap();
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert!(!write_restricted_file_atomic_if_changed(&path, "a").unwrap());
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            before
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name() != "policy.json")
+            .collect();
+        assert!(leftovers.is_empty());
+    }
+
+    #[test]
+    fn write_if_changed_replaces_different_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.json");
+        write_restricted_file_atomic(&path, "a").unwrap();
+        assert!(write_restricted_file_atomic_if_changed(&path, "b").unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "b");
+    }
+
+    #[test]
+    fn write_if_changed_reports_a_write_it_cannot_do() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.json");
+        std::fs::create_dir(&path).unwrap();
+        assert!(write_restricted_file_atomic_if_changed(&path, "a").is_err());
+        assert!(path.is_dir());
     }
 }

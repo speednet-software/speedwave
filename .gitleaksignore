@@ -45,3 +45,5 @@ desktop/src/src/app/settings/transcription-section/transcription-section.compone
 
 desktop/src/src/app/services/transcription.service.spec.ts:generic-api-key:1942
 desktop/src/src/app/meeting-transcription/recording-controls/recording-controls.component.spec.ts:generic-api-key:102
+
+.claude/rules/architecture.md:generic-api-key:7
