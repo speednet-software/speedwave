@@ -1,0 +1,421 @@
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { createHash, randomBytes } from 'node:crypto';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { promises as fsp } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { RedmineClient } from './client.js';
+
+type Received = { method: string; url: string; headers: http.IncomingHttpHeaders; body: Buffer };
+type Reply = { status: number; body?: unknown; raw?: Buffer; headers?: Record<string, string> };
+type Route = (request: Received) => Reply | 'destroy';
+
+const sha = (data: Buffer) => createHash('sha256').update(data).digest('hex');
+
+describe('RedmineClient attachments', () => {
+  let server: http.Server;
+  let baseUrl: string;
+  let received: Received[];
+  let route: Route;
+  let workspace: string;
+  let previousWorkspace: string | undefined;
+
+  const attachment = (id: number, over: Record<string, unknown> = {}) => ({
+    id,
+    filename: `file-${id}.png`,
+    filesize: 5,
+    content_type: 'image/png',
+    content_url: `${baseUrl}/attachments/download/${id}/file-${id}.png`,
+    ...over,
+  });
+
+  const issueReply = (attachments: unknown[], projectId = 1): Reply => ({
+    status: 200,
+    body: { issue: { id: 7, project: { id: projectId, name: 'P' }, attachments } },
+  });
+
+  const client = (projectId?: string) =>
+    new RedmineClient(
+      { url: baseUrl, apiKey: 'secret-key' },
+      projectId ? { host_url: baseUrl, project_id: projectId } : null
+    );
+
+  const writeWorkspaceFile = async (name: string, data: Buffer) => {
+    const real = path.join(workspace, name);
+    await fsp.mkdir(path.dirname(real), { recursive: true });
+    await fsp.writeFile(real, data);
+    return { path: real, name, size: data.length };
+  };
+
+  const callsTo = (method: string, pathPrefix: string) =>
+    received.filter((r) => r.method === method && r.url.startsWith(pathPrefix));
+
+  beforeEach(async () => {
+    received = [];
+    route = () => ({ status: 404 });
+    workspace = await fsp.realpath(await fsp.mkdtemp(path.join(os.tmpdir(), 'redmine-att-')));
+    previousWorkspace = process.env.WORKSPACE_DIR;
+    process.env.WORKSPACE_DIR = workspace;
+    server = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (c: Buffer) => chunks.push(c));
+      req.on('end', () => {
+        const request = {
+          method: req.method ?? '',
+          url: req.url ?? '',
+          headers: req.headers,
+          body: Buffer.concat(chunks),
+        };
+        received.push(request);
+        const reply = route(request);
+        if (reply === 'destroy') {
+          res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': '100000' });
+          res.write(Buffer.alloc(1000));
+          setTimeout(() => res.destroy(), 20);
+          return;
+        }
+        const payload = reply.raw ?? (reply.body === undefined ? '' : JSON.stringify(reply.body));
+        res.writeHead(reply.status, {
+          ...(reply.raw ? {} : { 'Content-Type': 'application/json' }),
+          ...reply.headers,
+        });
+        res.end(payload);
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+
+  afterEach(async () => {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+    if (previousWorkspace === undefined) delete process.env.WORKSPACE_DIR;
+    else process.env.WORKSPACE_DIR = previousWorkspace;
+    await fsp.rm(workspace, { recursive: true, force: true });
+  });
+
+  describe('addAttachments', () => {
+    it('streams each file as octet-stream and attaches both with the comment in one PUT', async () => {
+      const first = await writeWorkspaceFile('a.bin', randomBytes(300_000));
+      const second = await writeWorkspaceFile('b.txt', Buffer.from('hello'));
+      let uploads = 0;
+      let issueReads = 0;
+      route = (r) => {
+        if (r.method === 'POST' && r.url.startsWith('/uploads.json')) {
+          uploads += 1;
+          return { status: 201, body: { upload: { token: `tok-${uploads}` } } };
+        }
+        if (r.method === 'GET' && r.url.startsWith('/issues/7.json')) {
+          issueReads += 1;
+          return issueReply(issueReads === 1 ? [attachment(1)] : [attachment(1), attachment(2)]);
+        }
+        if (r.method === 'PUT') return { status: 204 };
+        return { status: 404 };
+      };
+
+      const added = await client().addAttachments(7, [first, second], 'see files');
+
+      const posts = callsTo('POST', '/uploads.json');
+      expect(posts).toHaveLength(2);
+      expect(posts[0].url).toBe('/uploads.json?filename=a.bin');
+      expect(posts[0].headers['content-type']).toBe('application/octet-stream');
+      expect(posts[0].headers['content-length']).toBe('300000');
+      expect(posts[0].headers['x-redmine-api-key']).toBe('secret-key');
+      expect(sha(posts[0].body)).toBe(sha(await fsp.readFile(first.path)));
+      expect(posts[1].url).toBe('/uploads.json?filename=b.txt');
+      expect(posts[1].body.toString()).toBe('hello');
+      const puts = callsTo('PUT', '/issues/7.json');
+      expect(puts).toHaveLength(1);
+      expect(JSON.parse(puts[0].body.toString())).toEqual({
+        issue: {
+          notes: 'see files',
+          uploads: [
+            { token: 'tok-1', filename: 'a.bin' },
+            { token: 'tok-2', filename: 'b.txt' },
+          ],
+        },
+      });
+      expect(added.map((a) => a.id)).toEqual([2]);
+    });
+
+    it('sends no notes key when no comment is given', async () => {
+      const file = await writeWorkspaceFile('a.txt', Buffer.from('x'));
+      route = (r) =>
+        r.method === 'POST'
+          ? { status: 201, body: { upload: { token: 't' } } }
+          : r.method === 'PUT'
+            ? { status: 204 }
+            : issueReply([]);
+
+      await client().addAttachments(7, [file]);
+
+      const body = JSON.parse(callsTo('PUT', '/issues/7.json')[0].body.toString());
+      expect(body.issue).toEqual({ uploads: [{ token: 't', filename: 'a.txt' }] });
+    });
+
+    it('rejects an issue of another project before uploading anything', async () => {
+      const file = await writeWorkspaceFile('a.txt', Buffer.from('x'));
+      route = (r) => {
+        if (r.url.startsWith('/projects/mine.json')) {
+          return { status: 200, body: { project: { id: 1 } } };
+        }
+        return issueReply([], 99);
+      };
+
+      await expect(client('mine').addAttachments(7, [file])).rejects.toThrow(
+        /Project scope violation/
+      );
+
+      expect(callsTo('POST', '/uploads.json')).toHaveLength(0);
+      expect(callsTo('PUT', '/issues')).toHaveLength(0);
+    });
+
+    it('turns a 422 on upload into the server message and attaches nothing', async () => {
+      const file = await writeWorkspaceFile('big.bin', Buffer.from('x'));
+      route = (r) =>
+        r.method === 'POST'
+          ? { status: 422, body: { errors: ['File is too large (maximum size is 5 MB)'] } }
+          : issueReply([]);
+
+      const error = await client()
+        .addAttachments(7, [file])
+        .catch((e: Error) => e);
+
+      expect((error as Error).message).toContain('big.bin');
+      expect((error as Error).message).toContain('File is too large (maximum size is 5 MB)');
+      expect((error as Error).message).toContain('nothing was attached');
+      expect(callsTo('PUT', '/issues')).toHaveLength(0);
+    });
+
+    it('says the limit was exceeded when a proxy answers 413', async () => {
+      const file = await writeWorkspaceFile('big.bin', Buffer.from('x'));
+      route = (r) => (r.method === 'POST' ? { status: 413 } : issueReply([]));
+
+      await expect(client().addAttachments(7, [file])).rejects.toThrow(
+        /big\.bin.*too large.*nothing was attached/s
+      );
+    });
+
+    it('lets a 403 on upload through for the permission message and attaches nothing', async () => {
+      const file = await writeWorkspaceFile('a.txt', Buffer.from('x'));
+      route = (r) => (r.method === 'POST' ? { status: 403 } : issueReply([]));
+
+      const error = await client()
+        .addAttachments(7, [file])
+        .catch((e: unknown) => e);
+
+      expect(RedmineClient.formatError(error)).toContain('Permission denied');
+      expect(callsTo('PUT', '/issues')).toHaveLength(0);
+    });
+
+    it('fails with the read error when the file vanished after it was resolved', async () => {
+      route = () => issueReply([]);
+
+      await expect(
+        client().addAttachments(7, [
+          { path: path.join(workspace, 'gone.txt'), name: 'gone.txt', size: 1 },
+        ])
+      ).rejects.toThrow(/ENOENT/);
+
+      expect(callsTo('PUT', '/issues')).toHaveLength(0);
+    });
+  });
+
+  describe('createIssue with files', () => {
+    it('uploads the files and creates the issue with their tokens', async () => {
+      const file = await writeWorkspaceFile('shot.png', Buffer.from('png-bytes'));
+      route = (r) =>
+        r.url.startsWith('/uploads.json')
+          ? { status: 201, body: { upload: { token: 'tok' } } }
+          : { status: 201, body: { issue: { id: 55 } } };
+
+      const issue = await client().createIssue({ project_id: 'p', subject: 's', files: [file] });
+
+      expect(issue.id).toBe(55);
+      const create = callsTo('POST', '/issues.json')[0];
+      expect(JSON.parse(create.body.toString()).issue.uploads).toEqual([
+        { token: 'tok', filename: 'shot.png' },
+      ]);
+    });
+
+    it('creates no issue when an upload fails', async () => {
+      const file = await writeWorkspaceFile('shot.png', Buffer.from('x'));
+      route = (r) =>
+        r.url.startsWith('/uploads.json')
+          ? { status: 422, body: { errors: ['Too large'] } }
+          : { status: 201, body: { issue: { id: 55 } } };
+
+      await expect(
+        client().createIssue({ project_id: 'p', subject: 's', files: [file] })
+      ).rejects.toThrow(/Too large/);
+
+      expect(callsTo('POST', '/issues.json')).toHaveLength(0);
+    });
+  });
+
+  describe('downloadAttachment', () => {
+    it('streams the bytes to the workspace and reports path, size and type', async () => {
+      const bytes = randomBytes(200_000);
+      route = (r) => {
+        if (r.url.startsWith('/issues/7.json')) {
+          return issueReply([attachment(3, { filesize: bytes.length, filename: 'My shot.png' })]);
+        }
+        if (r.url.startsWith('/attachments/download/3/')) {
+          return { status: 200, raw: bytes, headers: { 'Content-Type': 'image/png' } };
+        }
+        return { status: 404 };
+      };
+
+      const saved = await client().downloadAttachment(7, 3);
+
+      const expected = path.join(workspace, '.speedwave', 'redmine', '3-My_shot.png');
+      expect(saved).toEqual({
+        id: 3,
+        filename: 'My shot.png',
+        content_type: 'image/png',
+        size: bytes.length,
+        path: expected,
+      });
+      expect(sha(await fsp.readFile(expected))).toBe(sha(bytes));
+      expect(callsTo('GET', '/attachments/download/3/')[0].headers['x-redmine-api-key']).toBe(
+        'secret-key'
+      );
+    });
+
+    it('reduces a hostile filename to a basename without separators or leading dots', async () => {
+      route = (r) =>
+        r.url.startsWith('/issues/7.json')
+          ? issueReply([attachment(3, { filename: '../../.ssh/..evil' })])
+          : { status: 200, raw: Buffer.from('x'), headers: { 'Content-Type': 'image/png' } };
+
+      const saved = await client().downloadAttachment(7, 3);
+
+      expect(saved.path).toBe(path.join(workspace, '.speedwave', 'redmine', '3-evil'));
+    });
+
+    it('overwrites the same file on a repeated download', async () => {
+      let version = 'first';
+      route = (r) =>
+        r.url.startsWith('/issues/7.json')
+          ? issueReply([attachment(3)])
+          : { status: 200, raw: Buffer.from(version), headers: { 'Content-Type': 'image/png' } };
+
+      const one = await client().downloadAttachment(7, 3);
+      version = 'second!';
+      const two = await client().downloadAttachment(7, 3);
+
+      expect(two.path).toBe(one.path);
+      expect(await fsp.readFile(two.path, 'utf8')).toBe('second!');
+      expect(await fsp.readdir(path.dirname(two.path))).toEqual(['3-file-3.png']);
+    });
+
+    it('points to getIssueFull and calls no attachment URL for an attachment of another issue', async () => {
+      route = (r) =>
+        r.url.startsWith('/issues/7.json') ? issueReply([attachment(3)]) : { status: 200 };
+
+      const error = await client()
+        .downloadAttachment(7, 99)
+        .catch((e: Error) => e);
+
+      expect((error as Error).message).toContain('attachment_id');
+      expect((error as Error).message).toContain('getIssueFull');
+      expect((error as Error).message).toContain('"attachments"');
+      expect(received.some((r) => r.url.startsWith('/attachments'))).toBe(false);
+    });
+
+    it('refuses a content_url on another origin so the API key is never sent there', async () => {
+      route = (r) =>
+        r.url.startsWith('/issues/7.json')
+          ? issueReply([attachment(3, { content_url: 'http://127.0.0.2:1/attachments/3' })])
+          : { status: 200 };
+
+      await expect(client().downloadAttachment(7, 3)).rejects.toThrow(/host_url/);
+
+      expect(received.some((r) => r.url.startsWith('/attachments'))).toBe(false);
+    });
+
+    it('fails instead of saving a login page when Redmine answers with HTML', async () => {
+      route = (r) =>
+        r.url.startsWith('/issues/7.json')
+          ? issueReply([attachment(3)])
+          : {
+              status: 200,
+              raw: Buffer.from('<html>login</html>'),
+              headers: { 'Content-Type': 'text/html' },
+            };
+
+      await expect(client().downloadAttachment(7, 3)).rejects.toThrow(/web page/);
+
+      const dir = path.join(workspace, '.speedwave', 'redmine');
+      expect(await fsp.readdir(dir).catch(() => [])).toEqual([]);
+    });
+
+    it('reports a redirect to the login page as a host_url problem and saves nothing', async () => {
+      route = (r) =>
+        r.url.startsWith('/issues/7.json')
+          ? issueReply([attachment(3)])
+          : { status: 302, headers: { Location: `${baseUrl}/login` } };
+
+      await expect(client().downloadAttachment(7, 3)).rejects.toThrow(/redirect/);
+
+      const dir = path.join(workspace, '.speedwave', 'redmine');
+      expect(await fsp.readdir(dir).catch(() => [])).toEqual([]);
+    });
+
+    it('leaves no partial file when the connection drops mid-download', async () => {
+      route = (r) => (r.url.startsWith('/issues/7.json') ? issueReply([attachment(3)]) : 'destroy');
+
+      await expect(client().downloadAttachment(7, 3)).rejects.toThrow();
+
+      const dir = path.join(workspace, '.speedwave', 'redmine');
+      expect(await fsp.readdir(dir)).toEqual([]);
+    });
+
+    it('rejects an issue of another project before reading its attachments', async () => {
+      route = (r) =>
+        r.url.startsWith('/projects/mine.json')
+          ? { status: 200, body: { project: { id: 1 } } }
+          : issueReply([attachment(3)], 99);
+
+      await expect(client('mine').downloadAttachment(7, 3)).rejects.toThrow(
+        /Project scope violation/
+      );
+
+      expect(received.some((r) => r.url.startsWith('/attachments'))).toBe(false);
+    });
+  });
+
+  describe('deleteAttachment', () => {
+    it('deletes an attachment that belongs to the issue', async () => {
+      route = (r) => (r.method === 'DELETE' ? { status: 204 } : issueReply([attachment(3)]));
+
+      await client().deleteAttachment(7, 3);
+
+      expect(callsTo('DELETE', '/attachments/3.json')).toHaveLength(1);
+    });
+
+    it('points to getIssueFull and sends no DELETE for an attachment of another issue', async () => {
+      route = (r) => (r.method === 'DELETE' ? { status: 204 } : issueReply([attachment(3)]));
+
+      await expect(client().deleteAttachment(7, 99)).rejects.toThrow(/getIssueFull/);
+
+      expect(callsTo('DELETE', '/attachments')).toHaveLength(0);
+    });
+
+    it('rejects an issue of another project before deleting', async () => {
+      route = (r) =>
+        r.url.startsWith('/projects/mine.json')
+          ? { status: 200, body: { project: { id: 1 } } }
+          : r.method === 'DELETE'
+            ? { status: 204 }
+            : issueReply([attachment(3)], 99);
+
+      await expect(client('mine').deleteAttachment(7, 3)).rejects.toThrow(
+        /Project scope violation/
+      );
+
+      expect(callsTo('DELETE', '/attachments')).toHaveLength(0);
+    });
+  });
+});
