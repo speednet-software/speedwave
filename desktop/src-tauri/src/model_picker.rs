@@ -5,10 +5,13 @@ use serde::Serialize;
 use speedwave_runtime::claude_settings;
 use speedwave_runtime::config::{self, LlmProviderKind};
 use speedwave_runtime::defaults::{
-    anthropic_wire_model_id, canonical_anthropic_model_id, AnthropicModelInfo, AnthropicPlan,
-    OneMillionContext, ANTHROPIC_MODELS, DEFAULT_MODEL_ALIAS, EFFORT_LEVELS, ONE_MILLION_SUFFIX,
+    anthropic_wire_model_id, canonical_anthropic_model_id, resolve_model_alias, AnthropicModelInfo,
+    AnthropicPlan, OneMillionContext, ANTHROPIC_MODELS, DEFAULT_MODEL_ALIAS, EFFORT_LEVELS,
+    ONE_MILLION_SUFFIX,
 };
 use std::path::Path;
+
+const FABLE_SLOGAN: &str = "Most capable for your hardest and longest-running tasks";
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct PickerRow {
@@ -32,6 +35,57 @@ pub(crate) fn plan_for(kind: LlmProviderKind, info: Option<&SessionInfo>) -> Ant
         return AnthropicPlan::Api;
     }
     AnthropicPlan::from_claude_code(info.and_then(|i| i.account.subscription_type.as_deref()))
+}
+
+/// The `--settings` value that adds the catalog's latest Fable to Claude Code's model list,
+/// which behind the proxy carries only the Fable row Anthropic's bootstrap names (ADR-089).
+/// Claude Code takes `modelPicker` whole from one source, so the user's own value is kept and
+/// extended; `None` leaves it in charge when it already lists that model or replaces the
+/// built-in rows.
+pub(crate) fn picker_settings_arg(user_picker: Option<&serde_json::Value>) -> Option<String> {
+    let fable = catalog_entry(&resolve_model_alias("fable"))?;
+    let mut picker = match user_picker.and_then(serde_json::Value::as_object) {
+        Some(own) if own.get("options").is_some_and(serde_json::Value::is_array) => own.clone(),
+        _ => serde_json::Map::new(),
+    };
+    if picker.get("replaceBuiltInOptions") == Some(&serde_json::Value::Bool(true)) {
+        return None;
+    }
+    let rows = picker
+        .entry("options")
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()?;
+    let listed = rows.iter().any(|row| {
+        row.get("model")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            == Some(fable.id)
+    });
+    if listed {
+        return None;
+    }
+    rows.push(serde_json::json!({
+        "model": fable.id,
+        "label": fable.family,
+        "description": format!("{} \u{b7} {FABLE_SLOGAN}", fable.family),
+    }));
+    let settings = serde_json::json!({ "modelPicker": picker });
+    Some(ascii_json(&settings.to_string()))
+}
+
+fn ascii_json(json: &str) -> String {
+    let mut out = String::with_capacity(json.len());
+    for c in json.chars() {
+        if c.is_ascii() {
+            out.push(c);
+            continue;
+        }
+        let mut units = [0u16; 2];
+        for unit in c.encode_utf16(&mut units) {
+            out.push_str(&format!("\\u{unit:04x}"));
+        }
+    }
+    out
 }
 
 fn row_model(row: &ModelRow) -> &str {
@@ -328,6 +382,101 @@ mod tests {
 
     fn picker_of(info: &SessionInfo, plan: AnthropicPlan) -> ModelPicker {
         build_picker(info, plan).expect("Claude Code listed at least one model")
+    }
+
+    #[test]
+    fn picker_settings_offer_the_latest_catalog_fable_in_claude_codes_row_style() {
+        let arg = picker_settings_arg(None).expect("the catalog has a latest Fable");
+        let parsed: serde_json::Value = serde_json::from_str(&arg).expect("valid JSON");
+        assert_eq!(
+            parsed,
+            serde_json::json!({
+                "modelPicker": {
+                    "options": [{
+                        "model": "claude-fable-5-2",
+                        "label": "Fable 5.2",
+                        "description":
+                            "Fable 5.2 \u{b7} Most capable for your hardest and longest-running tasks",
+                    }],
+                },
+            })
+        );
+    }
+
+    fn picker_options(arg: &str) -> Vec<serde_json::Value> {
+        let parsed: serde_json::Value = serde_json::from_str(arg).expect("valid JSON");
+        parsed["modelPicker"]["options"]
+            .as_array()
+            .expect("an options list")
+            .clone()
+    }
+
+    #[test]
+    fn picker_settings_keep_the_users_rows_and_flag_and_add_fable_after_them() {
+        let own = serde_json::json!({
+            "options": [{"model": "claude-opus-4-8", "label": "Opus 4.8"}],
+            "replaceBuiltInOptions": false,
+        });
+        let arg = picker_settings_arg(Some(&own)).expect("the user does not list Fable 5.2");
+        let parsed: serde_json::Value = serde_json::from_str(&arg).expect("valid JSON");
+        assert_eq!(parsed["modelPicker"]["replaceBuiltInOptions"], false);
+        let models: Vec<&str> = picker_options(&arg)
+            .iter()
+            .map(|row| row["model"].as_str().expect("a model"))
+            .collect();
+        assert_eq!(models, ["claude-opus-4-8", "claude-fable-5-2"]);
+    }
+
+    #[test]
+    fn picker_settings_leave_the_user_in_charge_when_they_list_the_model_already() {
+        let own = serde_json::json!({
+            "options": [{"model": " claude-fable-5-2 ", "label": "My Fable"}],
+        });
+        assert_eq!(picker_settings_arg(Some(&own)), None);
+    }
+
+    #[test]
+    fn picker_settings_leave_a_user_list_that_replaces_the_built_in_rows_alone() {
+        let own = serde_json::json!({
+            "options": [{"model": "claude-sonnet-5-5"}],
+            "replaceBuiltInOptions": true,
+        });
+        assert_eq!(picker_settings_arg(Some(&own)), None);
+    }
+
+    #[test]
+    fn picker_settings_replace_a_user_value_claude_code_could_not_read() {
+        for own in [
+            serde_json::json!("claude-fable-5-2"),
+            serde_json::json!({"options": "claude-fable-5-2"}),
+            serde_json::json!({"replaceBuiltInOptions": true}),
+        ] {
+            let arg = picker_settings_arg(Some(&own)).expect("ours replaces it");
+            let parsed: serde_json::Value = serde_json::from_str(&arg).expect("valid JSON");
+            assert_eq!(
+                parsed,
+                serde_json::from_str::<serde_json::Value>(
+                    &picker_settings_arg(None).expect("ours")
+                )
+                .expect("valid JSON"),
+                "{own}"
+            );
+        }
+    }
+
+    #[test]
+    fn picker_settings_cross_the_exec_transport_as_ascii() {
+        let arg = picker_settings_arg(None).expect("the catalog has a latest Fable");
+        assert!(arg.is_ascii(), "{arg}");
+        assert!(arg.contains("\\u00b7"), "{arg}");
+    }
+
+    #[test]
+    fn ascii_json_escapes_characters_outside_the_basic_plane_as_surrogate_pairs() {
+        let escaped = ascii_json(r#"{"label":"a·😀"}"#);
+        assert_eq!(escaped, r#"{"label":"a·😀"}"#);
+        let parsed: serde_json::Value = serde_json::from_str(&escaped).expect("valid JSON");
+        assert_eq!(parsed["label"], "a·😀");
     }
 
     #[test]

@@ -1872,6 +1872,22 @@ impl AwaitedResult {
     }
 }
 
+/// What a spawn reads from the project's Claude Code `settings.json`.
+#[derive(Debug, Default)]
+pub struct LaunchSettings {
+    pub model_pin: Option<String>,
+    pub model_picker: Option<serde_json::Value>,
+}
+
+impl LaunchSettings {
+    fn read(data_dir: &std::path::Path, project: &str) -> Self {
+        Self {
+            model_pin: claude_settings::get_model_pin(data_dir, project),
+            model_picker: claude_settings::get_model_picker(data_dir, project),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct PreparedSpawn {
     pub args: Vec<String>,
@@ -1963,7 +1979,7 @@ impl ChatSession {
         resume_session_id: Option<&str>,
         resume_at_uuid: Option<&str>,
         model_override: Option<&str>,
-        model_pin: Option<&str>,
+        settings: &LaunchSettings,
     ) -> anyhow::Result<PreparedSpawn> {
         if let Some(id) = resume_session_id {
             history::validate_session_id(id)?;
@@ -1986,7 +2002,10 @@ impl ChatSession {
             .active_provider()
             .is_none_or(|entry| entry.kind.is_anthropic());
         let launch_model = if is_anthropic {
-            Some(launch_model_id(model_pin, model_override)?)
+            Some(launch_model_id(
+                settings.model_pin.as_deref(),
+                model_override,
+            )?)
         } else {
             if let Some(model) = model_override {
                 log::info!(
@@ -1998,6 +2017,14 @@ impl ChatSession {
         if let Some(model) = &launch_model {
             flags.push("--model".to_string());
             flags.push(model.clone());
+        }
+        if is_anthropic {
+            if let Some(picker) =
+                crate::model_picker::picker_settings_arg(settings.model_picker.as_ref())
+            {
+                flags.push("--settings".to_string());
+                flags.push(picker);
+            }
         }
 
         let args = build_claude_args(instance_id, resume_session_id, resume_at_uuid, &flags);
@@ -2045,10 +2072,8 @@ impl ChatSession {
         )?;
 
         let instance_id = speedwave_runtime::session::new_instance_id();
-        let model_pin = claude_settings::get_model_pin(
-            speedwave_runtime::consts::data_dir(),
-            &self.project_name,
-        );
+        let launch_settings =
+            LaunchSettings::read(speedwave_runtime::consts::data_dir(), &self.project_name);
         let PreparedSpawn { args, container } = Self::prepare_args(
             &self.project_name,
             &user_config,
@@ -2056,7 +2081,7 @@ impl ChatSession {
             resume_session_id,
             resume_at_uuid,
             model_override,
-            model_pin.as_deref(),
+            &launch_settings,
         )?;
         #[cfg(feature = "e2e")]
         let args = crate::e2e_support::with_claude_debug(args);
@@ -8959,8 +8984,15 @@ mod tests {
             ui: None,
             telemetry: None,
         };
-        let result =
-            ChatSession::prepare_args("nonexistent", &user_config, "inst", None, None, None, None);
+        let result = ChatSession::prepare_args(
+            "nonexistent",
+            &user_config,
+            "inst",
+            None,
+            None,
+            None,
+            &LaunchSettings::default(),
+        );
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
@@ -8993,7 +9025,7 @@ mod tests {
             Some("../../../etc/passwd"),
             None,
             None,
-            None,
+            &LaunchSettings::default(),
         );
         assert!(result.is_err());
     }
@@ -9022,7 +9054,7 @@ mod tests {
             Some("550e8400-e29b-41d4-a716-446655440000"),
             Some("$(rm -rf /)"),
             None,
-            None,
+            &LaunchSettings::default(),
         );
         assert!(result.is_err(), "shell-injection uuid must be rejected");
     }
@@ -9044,8 +9076,15 @@ mod tests {
             ui: None,
             telemetry: None,
         };
-        let result =
-            ChatSession::prepare_args("myproject", &user_config, "inst", None, None, None, None);
+        let result = ChatSession::prepare_args(
+            "myproject",
+            &user_config,
+            "inst",
+            None,
+            None,
+            None,
+            &LaunchSettings::default(),
+        );
         assert!(result.is_ok());
         let PreparedSpawn {
             args, container, ..
@@ -9075,20 +9114,34 @@ mod tests {
             ui: None,
             telemetry: None,
         };
-        let args =
-            ChatSession::prepare_args("myproject", &user_config, "inst", None, None, None, None)
-                .unwrap()
-                .args;
+        let args = ChatSession::prepare_args(
+            "myproject",
+            &user_config,
+            "inst",
+            None,
+            None,
+            None,
+            &LaunchSettings::default(),
+        )
+        .unwrap()
+        .args;
         let effort_count = args.iter().filter(|a| *a == "--effort").count();
         assert_eq!(effort_count, 1, "exactly one --effort flag, got: {args:?}");
         let pos = args.iter().position(|a| a == "--effort").unwrap();
         assert_eq!(args[pos + 1], "xhigh");
 
         user_config.projects[0].effort_pin = Some("max".to_string());
-        let args =
-            ChatSession::prepare_args("myproject", &user_config, "inst", None, None, None, None)
-                .unwrap()
-                .args;
+        let args = ChatSession::prepare_args(
+            "myproject",
+            &user_config,
+            "inst",
+            None,
+            None,
+            None,
+            &LaunchSettings::default(),
+        )
+        .unwrap()
+        .args;
         let effort_count = args.iter().filter(|a| *a == "--effort").count();
         assert_eq!(effort_count, 1);
         let pos = args.iter().position(|a| a == "--effort").unwrap();
@@ -9120,7 +9173,7 @@ mod tests {
             Some(session_id),
             None,
             None,
-            None,
+            &LaunchSettings::default(),
         )
         .unwrap();
         assert!(!spawn.args.contains(&"--effort".to_string()));
@@ -9133,7 +9186,7 @@ mod tests {
             Some(session_id),
             None,
             None,
-            None,
+            &LaunchSettings::default(),
         )
         .unwrap();
         let pos = spawn.args.iter().position(|a| a == "--effort").unwrap();
@@ -9148,7 +9201,7 @@ mod tests {
             Some(session_id),
             None,
             None,
-            None,
+            &LaunchSettings::default(),
         )
         .unwrap();
         assert!(
@@ -9219,7 +9272,7 @@ mod tests {
             Some(session_id),
             None,
             None,
-            None,
+            &LaunchSettings::default(),
         );
         assert!(result.is_ok());
         let args = result.unwrap().args;
@@ -9258,12 +9311,19 @@ mod tests {
             Some(session_id),
             Some(uuid),
             None,
-            None,
+            &LaunchSettings::default(),
         );
         assert!(result.is_ok());
         let args = result.unwrap().args;
         assert!(args.contains(&"--resume-session-at".to_string()));
         assert!(args.contains(&uuid.to_string()));
+    }
+
+    fn pinned(model: &str) -> LaunchSettings {
+        LaunchSettings {
+            model_pin: Some(model.to_string()),
+            ..Default::default()
+        }
     }
 
     fn single_project_user_config() -> config::SpeedwaveUserConfig {
@@ -9287,9 +9347,17 @@ mod tests {
     #[test]
     fn prepare_args_launches_the_default_alias_without_a_pin_or_override() {
         let user_config = single_project_user_config();
-        let args = ChatSession::prepare_args("proj", &user_config, "inst", None, None, None, None)
-            .unwrap()
-            .args;
+        let args = ChatSession::prepare_args(
+            "proj",
+            &user_config,
+            "inst",
+            None,
+            None,
+            None,
+            &LaunchSettings::default(),
+        )
+        .unwrap()
+        .args;
         let count = args.iter().filter(|a| *a == "--model").count();
         assert_eq!(count, 1, "exactly one --model flag, got: {args:?}");
         let pos = args.iter().position(|a| a == "--model").unwrap();
@@ -9306,7 +9374,7 @@ mod tests {
             None,
             None,
             None,
-            Some("claude-sonnet-4-6[1m]"),
+            &pinned("claude-sonnet-4-6[1m]"),
         )
         .unwrap()
         .args;
@@ -9326,7 +9394,7 @@ mod tests {
             None,
             None,
             Some("claude-opus-4-8"),
-            Some("claude-haiku-5-5"),
+            &pinned("claude-haiku-5-5"),
         )
         .unwrap()
         .args;
@@ -9345,7 +9413,7 @@ mod tests {
             Some("550e8400-e29b-41d4-a716-446655440000"),
             None,
             Some("claude-sonnet-5"),
-            None,
+            &LaunchSettings::default(),
         )
         .unwrap()
         .args;
@@ -9365,7 +9433,7 @@ mod tests {
                 None,
                 None,
                 Some(bad),
-                None,
+                &LaunchSettings::default(),
             );
             assert!(result.is_err(), "override {bad:?} must be rejected");
         }
@@ -9381,7 +9449,7 @@ mod tests {
             None,
             None,
             None,
-            Some("local/qwen3"),
+            &pinned("local/qwen3"),
         )
         .unwrap()
         .args;
@@ -9424,7 +9492,7 @@ mod tests {
             None,
             None,
             Some("claude-opus-4-8"),
-            Some("claude-sonnet-5"),
+            &pinned("claude-sonnet-5"),
         )
         .unwrap()
         .args;
@@ -9432,6 +9500,81 @@ mod tests {
             !args.contains(&"--model".to_string()),
             "routed spawns never take --model: {args:?}"
         );
+        assert!(
+            !args.contains(&"--settings".to_string()),
+            "routed spawns never get the Anthropic picker rows: {args:?}"
+        );
+    }
+
+    #[test]
+    fn prepare_args_adds_the_picker_settings_to_an_anthropic_spawn_once() {
+        let args = ChatSession::prepare_args(
+            "proj",
+            &single_project_user_config(),
+            "inst",
+            None,
+            None,
+            None,
+            &LaunchSettings::default(),
+        )
+        .unwrap()
+        .args;
+        assert_eq!(
+            args.iter().filter(|a| *a == "--settings").count(),
+            1,
+            "{args:?}"
+        );
+        let pos = args.iter().position(|a| a == "--settings").unwrap();
+        assert_eq!(
+            Some(&args[pos + 1]),
+            crate::model_picker::picker_settings_arg(None).as_ref()
+        );
+    }
+
+    #[test]
+    fn prepare_args_extends_the_users_own_model_picker() {
+        let own = serde_json::json!({"options": [{"model": "claude-opus-4-8"}]});
+        let args = ChatSession::prepare_args(
+            "proj",
+            &single_project_user_config(),
+            "inst",
+            None,
+            None,
+            None,
+            &LaunchSettings {
+                model_picker: Some(own.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .args;
+        let pos = args.iter().position(|a| a == "--settings").unwrap();
+        assert_eq!(
+            Some(&args[pos + 1]),
+            crate::model_picker::picker_settings_arg(Some(&own)).as_ref()
+        );
+    }
+
+    #[test]
+    fn prepare_args_passes_no_settings_when_the_users_picker_replaces_the_built_in_rows() {
+        let args = ChatSession::prepare_args(
+            "proj",
+            &single_project_user_config(),
+            "inst",
+            None,
+            None,
+            None,
+            &LaunchSettings {
+                model_picker: Some(serde_json::json!({
+                    "options": [{"model": "claude-sonnet-5-5"}],
+                    "replaceBuiltInOptions": true,
+                })),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .args;
+        assert!(!args.contains(&"--settings".to_string()), "{args:?}");
     }
 
     #[test]
