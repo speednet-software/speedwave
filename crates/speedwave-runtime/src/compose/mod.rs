@@ -1198,7 +1198,7 @@ mod tests {
     use super::*;
     use strum::IntoEnumIterator;
 
-    const SECURITY_RULE_COUNT: usize = 54;
+    const SECURITY_RULE_COUNT: usize = 61;
 
     fn test_bundle_manifest() -> bundle::BundleManifest {
         bundle::BundleManifest {
@@ -11609,6 +11609,15 @@ services:
             .filter(|r| r.to_string().starts_with("ATLASSIAN_"))
             .count();
         let atlassian_by_method = SecurityRule::iter().filter(|r| r.is_atlassian()).count();
+        let redmine_by_prefix = SecurityRule::iter()
+            .filter(|r| r.to_string().starts_with("REDMINE_"))
+            .count();
+        let redmine_by_method = SecurityRule::iter().filter(|r| r.is_redmine()).count();
+        assert_eq!(
+            redmine_by_method, redmine_by_prefix,
+            "is_redmine() count ({redmine_by_method}) differs from REDMINE-prefixed variant count \
+             ({redmine_by_prefix}) — update SecurityRule::is_redmine() to include the new variant"
+        );
         assert_eq!(
             slack_by_method, slack_by_prefix,
             "is_slack() count ({slack_by_method}) differs from SLACK-prefixed variant count \

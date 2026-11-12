@@ -516,7 +516,7 @@ impl SecurityRule {
         )
     }
 
-    /// Returns `true` for Redmine-specific rules (workspace mount is `:rw`).
+    /// Returns `true` for Redmine-specific rules.
     pub fn is_redmine(self) -> bool {
         matches!(
             self,
@@ -1958,8 +1958,6 @@ impl SecurityCheck {
         )
     }
 
-    /// Validates volumes for built-in mcp-redmine (not a plugin); /workspace is :rw
-    /// because downloadAttachment writes the file there.
     fn check_builtin_redmine_volumes(
         doc: &serde_yaml_ng::Value,
         expected_paths: &SecurityExpectedPaths,
