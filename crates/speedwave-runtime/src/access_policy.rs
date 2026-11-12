@@ -3,14 +3,11 @@ use crate::managed_config::ManagedConfig;
 use speedwave_access_policy::{AccessMode, AccessPolicy};
 use std::path::{Path, PathBuf};
 
-/// The access.json path inside the per-project policy dir.
-pub fn access_config_path_in(data_dir: &Path, project: &str) -> PathBuf {
+pub(crate) fn access_config_path_in(data_dir: &Path, project: &str) -> PathBuf {
     crate::pii_policy::policy_config_dir_in(data_dir, project).join("access.json")
 }
 
-/// Writes the composed access policy as `access.json` next to `policy.json`, also while every
-/// service is `Full`, so the hub can read a missing file as an error.
-pub fn write_access_config_in(
+pub(crate) fn write_access_config_in(
     data_dir: &Path,
     project: &str,
     access: &AccessPolicy,
