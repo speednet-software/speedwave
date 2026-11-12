@@ -225,6 +225,16 @@ export type NormalizedToolInput =
       kind: 'todo_write';
       todos: Array<{ content: string; status: string; activeForm?: string }>;
     }
+  | { kind: 'task_create'; subject: string; description: string; activeForm?: string }
+  | {
+      kind: 'task_update';
+      task_id: string;
+      status?: string;
+      subject?: string;
+      activeForm?: string;
+    }
+  | { kind: 'task_list' }
+  | { kind: 'task_get'; task_id: string }
   | { kind: 'web_search'; query: string }
   | { kind: 'web_fetch'; url: string }
   | { kind: 'agent'; description: string }

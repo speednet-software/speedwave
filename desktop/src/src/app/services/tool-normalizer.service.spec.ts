@@ -70,6 +70,62 @@ describe('ToolNormalizerService', () => {
     expect(result).toEqual({ kind: 'todo_write', todos });
   });
 
+  it('normalizes TaskCreate tool', () => {
+    const result = service.normalize(
+      'TaskCreate',
+      '{"subject":"Write the fold","description":"Pure function","activeForm":"Writing the fold"}'
+    );
+    expect(result).toEqual({
+      kind: 'task_create',
+      subject: 'Write the fold',
+      description: 'Pure function',
+      activeForm: 'Writing the fold',
+    });
+  });
+
+  it('normalizes TaskCreate tool without optional fields', () => {
+    const result = service.normalize('TaskCreate', '{"subject":"Ship it"}');
+    expect(result).toEqual({
+      kind: 'task_create',
+      subject: 'Ship it',
+      description: '',
+      activeForm: undefined,
+    });
+  });
+
+  it('normalizes TaskUpdate tool', () => {
+    const result = service.normalize('TaskUpdate', '{"taskId":"3","status":"in_progress"}');
+    expect(result).toEqual({
+      kind: 'task_update',
+      task_id: '3',
+      status: 'in_progress',
+      subject: undefined,
+      activeForm: undefined,
+    });
+  });
+
+  it('normalizes a numeric TaskUpdate id to a string', () => {
+    const result = service.normalize('TaskUpdate', '{"taskId":7,"subject":"Renamed"}');
+    expect(result).toEqual({
+      kind: 'task_update',
+      task_id: '7',
+      status: undefined,
+      subject: 'Renamed',
+      activeForm: undefined,
+    });
+  });
+
+  it('normalizes TaskList tool', () => {
+    expect(service.normalize('TaskList', '{}')).toEqual({ kind: 'task_list' });
+  });
+
+  it('normalizes TaskGet tool', () => {
+    expect(service.normalize('TaskGet', '{"taskId":"2"}')).toEqual({
+      kind: 'task_get',
+      task_id: '2',
+    });
+  });
+
   it('normalizes WebSearch tool', () => {
     const result = service.normalize('WebSearch', '{"query":"rust async"}');
     expect(result).toEqual({ kind: 'web_search', query: 'rust async' });
