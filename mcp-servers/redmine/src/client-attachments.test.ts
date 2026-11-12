@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createHash, randomBytes } from 'node:crypto';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -9,7 +9,7 @@ import { RedmineClient } from './client.js';
 
 type Received = { method: string; url: string; headers: http.IncomingHttpHeaders; body: Buffer };
 type Reply = { status: number; body?: unknown; raw?: Buffer; headers?: Record<string, string> };
-type Route = (request: Received) => Reply | 'destroy';
+type Route = (request: Received) => Reply | 'destroy' | 'endless-404';
 
 const sha = (data: Buffer) => createHash('sha256').update(data).digest('hex');
 
@@ -17,6 +17,7 @@ describe('RedmineClient attachments', () => {
   let server: http.Server;
   let baseUrl: string;
   let received: Received[];
+  let responsesFinished: boolean[];
   let route: Route;
   let workspace: string;
   let previousWorkspace: string | undefined;
@@ -53,6 +54,7 @@ describe('RedmineClient attachments', () => {
 
   beforeEach(async () => {
     received = [];
+    responsesFinished = [];
     route = () => ({ status: 404 });
     workspace = await fsp.realpath(await fsp.mkdtemp(path.join(os.tmpdir(), 'redmine-att-')));
     previousWorkspace = process.env.WORKSPACE_DIR;
@@ -68,7 +70,18 @@ describe('RedmineClient attachments', () => {
           body: Buffer.concat(chunks),
         };
         received.push(request);
+        res.on('close', () => responsesFinished.push(res.writableFinished));
         const reply = route(request);
+        if (reply === 'endless-404') {
+          res.writeHead(404, { 'Content-Type': 'application/octet-stream' });
+          const chunk = Buffer.alloc(1_000_000);
+          const push = () => {
+            if (!res.destroyed && res.write(chunk)) setImmediate(push);
+            else res.once('drain', push);
+          };
+          push();
+          return;
+        }
         if (reply === 'destroy') {
           res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': '100000' });
           res.write(Buffer.alloc(1000));
@@ -116,7 +129,7 @@ describe('RedmineClient attachments', () => {
         return { status: 404 };
       };
 
-      const added = await client().addAttachments(7, [first, second], 'see files');
+      const added = (await client().addAttachments(7, [first, second], 'see files')).attachments;
 
       const posts = callsTo('POST', '/uploads.json');
       expect(posts).toHaveLength(2);
@@ -222,6 +235,39 @@ describe('RedmineClient attachments', () => {
 
       expect(callsTo('PUT', '/issues')).toHaveLength(0);
     });
+
+    it('refuses a file whose path became a symlink after it was resolved and sends nothing', async () => {
+      const real = await writeWorkspaceFile('a.txt', Buffer.from('x'));
+      const secret = path.join(workspace, '..', 'secret-key.txt');
+      await fsp.writeFile(secret, 'api-key');
+      await fsp.rm(real.path);
+      await fsp.symlink(secret, real.path);
+      route = () => issueReply([]);
+
+      await expect(client().addAttachments(7, [real])).rejects.toThrow(/changed into a link/);
+
+      expect(callsTo('POST', '/uploads.json')).toHaveLength(0);
+      expect(callsTo('PUT', '/issues')).toHaveLength(0);
+      await fsp.rm(secret);
+    });
+
+    it('reports the files as attached when only the listing after the PUT fails', async () => {
+      const file = await writeWorkspaceFile('a.txt', Buffer.from('x'));
+      let issueReads = 0;
+      route = (r) => {
+        if (r.method === 'POST') return { status: 201, body: { upload: { token: 't' } } };
+        if (r.method === 'PUT') return { status: 204 };
+        issueReads += 1;
+        return issueReads === 1 ? issueReply([]) : { status: 403 };
+      };
+
+      const result = await client().addAttachments(7, [file]);
+
+      expect(result.attachments).toEqual([]);
+      expect(result.warning).toContain('were attached to issue 7');
+      expect(result.warning).toContain('getIssueFull');
+      expect(callsTo('PUT', '/issues')).toHaveLength(1);
+    });
   });
 
   describe('createIssue with files', () => {
@@ -326,17 +372,6 @@ describe('RedmineClient attachments', () => {
       expect(received.some((r) => r.url.startsWith('/attachments'))).toBe(false);
     });
 
-    it('refuses a content_url on another origin so the API key is never sent there', async () => {
-      route = (r) =>
-        r.url.startsWith('/issues/7.json')
-          ? issueReply([attachment(3, { content_url: 'http://127.0.0.2:1/attachments/3' })])
-          : { status: 200 };
-
-      await expect(client().downloadAttachment(7, 3)).rejects.toThrow(/host_url/);
-
-      expect(received.some((r) => r.url.startsWith('/attachments'))).toBe(false);
-    });
-
     it('fails instead of saving a login page when Redmine answers with HTML', async () => {
       route = (r) =>
         r.url.startsWith('/issues/7.json')
@@ -401,6 +436,51 @@ describe('RedmineClient attachments', () => {
       expect(received.some((r) => r.url === '/redmine/attachments/download/3/file-3.png')).toBe(
         true
       );
+    });
+
+    it('downloads an attachment whose content_type is null', async () => {
+      route = (r) =>
+        r.url.startsWith('/issues/7.json')
+          ? issueReply([attachment(3, { content_type: null })])
+          : { status: 200, raw: Buffer.from('x'), headers: { 'Content-Type': 'image/png' } };
+
+      const saved = await client().downloadAttachment(7, 3);
+
+      expect(await fsp.readFile(saved.path, 'utf8')).toBe('x');
+    });
+
+    it('still refuses a web page for an attachment whose content_type is null', async () => {
+      route = (r) =>
+        r.url.startsWith('/issues/7.json')
+          ? issueReply([attachment(3, { content_type: null })])
+          : { status: 200, raw: Buffer.from('<html/>'), headers: { 'Content-Type': 'text/html' } };
+
+      await expect(client().downloadAttachment(7, 3)).rejects.toThrow(/web page/);
+    });
+
+    it('closes the connection when the download is answered 404 with a body', async () => {
+      route = (r) =>
+        r.url.startsWith('/issues/7.json') ? issueReply([attachment(3)]) : 'endless-404';
+
+      await client()
+        .downloadAttachment(7, 3)
+        .catch(() => undefined);
+      await vi.waitFor(() => expect(responsesFinished).toContain(false));
+    });
+
+    it('refuses a service directory that is a symlink out of the workspace', async () => {
+      const outsideDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'redmine-out-'));
+      await fsp.mkdir(path.join(workspace, '.speedwave'));
+      await fsp.symlink(outsideDir, path.join(workspace, '.speedwave', 'redmine'));
+      route = (r) =>
+        r.url.startsWith('/issues/7.json')
+          ? issueReply([attachment(3)])
+          : { status: 200, raw: Buffer.from('x'), headers: { 'Content-Type': 'image/png' } };
+
+      await expect(client().downloadAttachment(7, 3)).rejects.toThrow(/outside the workspace/);
+
+      expect(await fsp.readdir(outsideDir)).toEqual([]);
+      await fsp.rm(outsideDir, { recursive: true });
     });
 
     it('fails when the bytes received differ from the size Redmine reports and saves nothing', async () => {

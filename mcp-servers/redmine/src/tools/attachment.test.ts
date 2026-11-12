@@ -43,7 +43,7 @@ describe('attachment tools', () => {
   describe('addAttachment', () => {
     it('sends the resolved files and the comment as one call and returns the added attachments', async () => {
       const added = [{ id: 11, filename: 'a.txt', filesize: 3, content_type: 'text/plain' }];
-      client.addAttachments.mockResolvedValue(added);
+      client.addAttachments.mockResolvedValue({ attachments: added });
 
       const result = await call('addAttachment', {
         issue_id: 7,
@@ -62,6 +62,20 @@ describe('attachment tools', () => {
       );
       const emitted = expectEmittedKeysDeclared(tool('addAttachment').tool, result);
       expect(emitted).toEqual({ attachments: added });
+    });
+
+    it('passes on the warning when the files were attached but the listing failed', async () => {
+      client.addAttachments.mockResolvedValue({
+        attachments: [],
+        warning: 'attached, listing failed',
+      });
+
+      const result = await call('addAttachment', { issue_id: 7, file_paths: ['a.txt'] });
+
+      expect(expectEmittedKeysDeclared(tool('addAttachment').tool, result)).toEqual({
+        attachments: [],
+        warning: 'attached, listing failed',
+      });
     });
 
     it.each([

@@ -56,6 +56,10 @@ const addAttachmentTool: Tool = {
         },
       },
     },
+    warning: {
+      type: 'string',
+      description: 'Present when the files were attached but listing them afterwards failed',
+    },
   }),
   inputExamples: [
     {
@@ -91,7 +95,7 @@ const downloadAttachmentTool: Tool = {
   outputSchema: successResultSchema({
     id: { type: 'number', description: 'Attachment ID' },
     filename: { type: 'string', description: 'Original file name' },
-    content_type: { type: 'string' },
+    content_type: { type: ['string', 'null'] },
     size: { type: 'number', description: 'Bytes written' },
     path: { type: 'string', description: 'Workspace path the file was written to' },
   }),
@@ -155,8 +159,8 @@ export function createAttachmentTools(client: RedmineClient | null): ToolDefinit
         const resolved = await resolveAttachmentFiles(file_paths);
         if ('error' in resolved) return resolved.error;
         return withRedmineErrors({ issue_id }, async () => {
-          const attachments = await client.addAttachments(issue_id, resolved.files, notes);
-          return jsonResult({ attachments });
+          const result = await client.addAttachments(issue_id, resolved.files, notes);
+          return jsonResult(result);
         });
       },
     },
