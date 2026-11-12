@@ -134,7 +134,6 @@ export class ChatStateService {
   /** Whether another tab can be opened under `MAX_CHAT_TABS` (beta gating is the UI's job). */
   readonly canOpenTab: Signal<boolean> = computed(() => this._tabs().size < MAX_CHAT_TABS);
 
-  /** True while any tab shows an authentication failure that keeps the chat on screen. */
   readonly sessionAuthFailed: Signal<boolean> = computed(() =>
     Array.from(this._tabs().values()).some((store) => store.authFailed())
   );

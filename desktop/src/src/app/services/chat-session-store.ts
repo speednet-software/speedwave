@@ -178,7 +178,7 @@ const CREDENTIALS_REJECTED_MESSAGE =
 /**
  * Claude Code's own message points at `/login`, which doesn't apply here.
  * @param raw - Raw error message from the backend.
- * @param provider - Kind of the active provider; null until the config is read.
+ * @param provider - Kind of the active provider.
  */
 export function mapNotLoggedInError(raw: string, provider: LlmProviderKind | null): string | null {
   if (/not logged in/i.test(raw) || /not authenticated/i.test(raw)) {
@@ -189,12 +189,6 @@ export function mapNotLoggedInError(raw: string, provider: LlmProviderKind | nul
 
 function rejectedCredentialsMessage(provider: LlmProviderKind | null): string {
   return provider === 'anthropic_oauth' ? SESSION_EXPIRED_MESSAGE : CREDENTIALS_REJECTED_MESSAGE;
-}
-
-function authErrorBlockKind(content: string): ErrorBlockKind | undefined {
-  return content === SESSION_EXPIRED_MESSAGE || content === CREDENTIALS_REJECTED_MESSAGE
-    ? 'auth_required'
-    : undefined;
 }
 
 /**
@@ -925,12 +919,14 @@ export class ChatSessionStore {
   }
 
   private readonly _authFailure = signal<'checking' | 'confirmed' | null>(null);
-  /** True from an authentication-failed turn until login is back: the chat stays on screen and its input is off. */
   readonly authFailed: Signal<boolean> = computed(() => this._authFailure() !== null);
 
-  /** Re-enables input once the project is signed in again; a check still in flight is left alone. */
+  /** Re-enables input once the project is signed in again. */
   releaseAuthFailure(): void {
-    if (this._authFailure() === 'confirmed') this._authFailure.set(null);
+    if (this._authFailure() !== 'confirmed') return;
+    this._authFailure.set(null);
+    const id = this._lastKnownSessionId;
+    if (id !== null) void this.resumeConversation(id);
   }
 
   private readonly _sessionEnded = signal(false);
@@ -2770,6 +2766,12 @@ export function stateBlocksToMessageBlocks(blocks: readonly MessageBlockState[])
     }
   }
   return out;
+}
+
+function authErrorBlockKind(content: string): ErrorBlockKind | undefined {
+  return content === SESSION_EXPIRED_MESSAGE || content === CREDENTIALS_REJECTED_MESSAGE
+    ? 'auth_required'
+    : undefined;
 }
 
 function cloneQuestionItem(q: AskUserQuestionItem): AskUserQuestionItem {

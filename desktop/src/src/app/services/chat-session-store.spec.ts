@@ -7809,6 +7809,30 @@ describe('ChatSessionStore', () => {
       expect(store.authFailed()).toBe(false);
     });
 
+    it('resumes the known session once the sign-in is back', async () => {
+      answerWith(AUTH_REQUIRED_STATUS);
+      store.seedSessionId('sess-1');
+      store.handleStreamChunk(AUTH_ERROR);
+      await vi.waitFor(() => expect(invoked).toContain('close_chat_tab'));
+      invoked.length = 0;
+
+      store.releaseAuthFailure();
+
+      await vi.waitFor(() => expect(invoked).toContain('resume_conversation'));
+    });
+
+    it('does not resume when no session is known', async () => {
+      answerWith(AUTH_REQUIRED_STATUS);
+      store.handleStreamChunk(AUTH_ERROR);
+      await vi.waitFor(() => expect(invoked).toContain('close_chat_tab'));
+      invoked.length = 0;
+
+      store.releaseAuthFailure();
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(invoked).not.toContain('resume_conversation');
+    });
+
     it('treats the error as a plain one when the login is still valid', async () => {
       answerWith(READY_STATUS);
 
