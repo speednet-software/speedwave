@@ -5,7 +5,8 @@ use crate::history;
 use crate::notifications::{notify_session_event, SessionEvent};
 use crate::pii_display::DisplayPolicy;
 use speedwave_runtime::stream::{
-    AskUserOption, AskUserQuestionItem, MAX_ASK_USER_QUESTIONS, MAX_ASK_USER_WIRE_BYTES,
+    classify_turn_error, AskUserOption, AskUserQuestionItem, TurnErrorKind, MAX_ASK_USER_QUESTIONS,
+    MAX_ASK_USER_WIRE_BYTES,
 };
 use speedwave_runtime::{claude_settings, config, consts, runtime};
 use std::collections::HashMap;
@@ -70,6 +71,8 @@ pub enum StreamChunk {
         content: String,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         turn_ended: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<TurnErrorKind>,
     },
     SystemInit {
         model: String,
@@ -120,9 +123,11 @@ pub(crate) fn sanitize_chunk(chunk: StreamChunk) -> StreamChunk {
         StreamChunk::Error {
             content,
             turn_ended,
+            kind,
         } => StreamChunk::Error {
             content: sanitize(&content),
             turn_ended,
+            kind,
         },
         StreamChunk::Result {
             result_text: Some(text),
@@ -198,9 +203,11 @@ fn detokenize_chunk(chunk: StreamChunk, policy: &DisplayPolicy) -> StreamChunk {
         StreamChunk::Error {
             content,
             turn_ended,
+            kind,
         } => StreamChunk::Error {
             content: detok(policy, &content),
             turn_ended,
+            kind,
         },
         StreamChunk::Result {
             result_text: Some(text),
@@ -411,6 +418,7 @@ fn option_to_vec(
 pub struct StreamParser {
     active_blocks: HashMap<u64, (String, String)>,
     pending_assistant_uuid: Option<String>,
+    pending_turn_error_kind: Option<TurnErrorKind>,
     committed_user_uuids: std::collections::HashSet<String>,
     previous_session_usage: TurnUsage,
     last_context_usage: Option<TurnUsage>,
@@ -426,6 +434,7 @@ impl StreamParser {
         Self {
             active_blocks: HashMap::new(),
             pending_assistant_uuid: None,
+            pending_turn_error_kind: None,
             committed_user_uuids: std::collections::HashSet::new(),
             previous_session_usage: TurnUsage::default(),
             last_context_usage: None,
@@ -474,6 +483,7 @@ impl StreamParser {
                 self.capture_assistant_uuid(parsed);
                 self.capture_assistant_model(parsed);
                 self.capture_context_usage(parsed);
+                self.capture_turn_error_kind(parsed);
                 (Self::complete_tool_inputs(parsed), None)
             }
             "system" => option_to_vec(self.parse_system_message(parsed)),
@@ -513,6 +523,15 @@ impl StreamParser {
         }
         if let Some(model) = parsed["message"]["model"].as_str() {
             self.model_tracker.observe_assistant(model);
+        }
+    }
+
+    fn capture_turn_error_kind(&mut self, parsed: &serde_json::Value) {
+        if is_sidechain_event(parsed) {
+            return;
+        }
+        if let Some(kind) = parsed["error"].as_str().and_then(classify_turn_error) {
+            self.pending_turn_error_kind = Some(kind);
         }
     }
 
@@ -894,6 +913,7 @@ impl StreamParser {
         parsed: &serde_json::Value,
     ) -> (Option<StreamChunk>, Option<LogEntry>) {
         let assistant_uuid = self.pending_assistant_uuid.take();
+        let turn_error_kind = self.pending_turn_error_kind.take();
 
         let is_error = parsed["is_error"].as_bool().unwrap_or(false);
 
@@ -924,6 +944,7 @@ impl StreamParser {
                 Some(StreamChunk::Error {
                     content: error_text,
                     turn_ended: true,
+                    kind: turn_error_kind,
                 }),
                 Some(LogEntry {
                     prefix: "RESULT",
@@ -1128,6 +1149,7 @@ impl StreamParser {
                 Some(StreamChunk::Error {
                     content: message.to_string(),
                     turn_ended: false,
+                    kind: None,
                 }),
                 log_entry,
             )
@@ -2298,6 +2320,7 @@ impl ChatSession {
                                         content: "Internal error: pending_requests lock poisoned"
                                             .to_string(),
                                         turn_ended: false,
+                                        kind: None,
                                     },
                                     &display_policy,
                                 );
@@ -2343,6 +2366,7 @@ impl ChatSession {
                                                 "Failed to write auto-approve to stdin: {e}"
                                             ),
                                             turn_ended: false,
+                                            kind: None,
                                         },
                                         &display_policy,
                                     );
@@ -2360,6 +2384,7 @@ impl ChatSession {
                                                 "Failed to flush auto-approve to stdin: {e}"
                                             ),
                                             turn_ended: false,
+                                            kind: None,
                                         },
                                         &display_policy,
                                     );
@@ -2374,6 +2399,7 @@ impl ChatSession {
                                     StreamChunk::Error {
                                         content: "Internal error: stdin lock poisoned".to_string(),
                                         turn_ended: false,
+                                        kind: None,
                                     },
                                     &display_policy,
                                 );
@@ -2441,6 +2467,7 @@ impl ChatSession {
                         StreamChunk::Error {
                             content: refusal,
                             turn_ended: false,
+                            kind: None,
                         },
                         &display_policy,
                     );
@@ -2509,6 +2536,7 @@ impl ChatSession {
                         "Claude session ended unexpectedly. Check the session log for details."
                             .to_string(),
                     turn_ended: false,
+                    kind: None,
                 };
                 emit_sanitized_chunk(&app_handle, &tab_id_for_reader, chunk, &display_policy);
                 notify_session_event(
@@ -3312,6 +3340,7 @@ mod tests {
             StreamChunk::Error {
                 content: secret.into(),
                 turn_ended: false,
+                kind: None,
             },
         ] {
             let out = format!("{:?}", sanitize_chunk(chunk));
@@ -3458,15 +3487,18 @@ mod tests {
             StreamChunk::Error {
                 content: tokenized.clone(),
                 turn_ended: true,
+                kind: Some(TurnErrorKind::AuthenticationFailed),
             },
             &policy,
         ) {
             StreamChunk::Error {
                 content,
                 turn_ended,
+                kind,
             } => {
                 assert_eq!(content, "secret@example.com");
                 assert!(turn_ended, "detokenizing must keep the turn-end marker");
+                assert_eq!(kind, Some(TurnErrorKind::AuthenticationFailed));
             }
             other => panic!("variant changed: {other:?}"),
         }
@@ -3905,6 +3937,7 @@ mod tests {
         awaited.observe(&[StreamChunk::Error {
             content: "retrying".to_string(),
             turn_ended: false,
+            kind: None,
         }]);
         assert!(
             holds_the_turn_awake(&awaited),
@@ -3921,6 +3954,7 @@ mod tests {
         awaited.observe(&[StreamChunk::Error {
             content: "overloaded".to_string(),
             turn_ended: true,
+            kind: None,
         }]);
         assert!(!holds_the_turn_awake(&awaited));
         awaited.message_written();
@@ -3961,6 +3995,7 @@ mod tests {
             turn_end_event(&[StreamChunk::Error {
                 content: "overloaded".to_string(),
                 turn_ended: true,
+                kind: None,
             }]),
             Some(SessionEvent::SessionError)
         );
@@ -3968,6 +4003,7 @@ mod tests {
             turn_end_event(&[StreamChunk::Error {
                 content: "model refused".to_string(),
                 turn_ended: false,
+                kind: None,
             }]),
             None,
             "an error that leaves the turn running is not the end of the session's work"
@@ -3997,6 +4033,7 @@ mod tests {
         awaited.observe(&[StreamChunk::Error {
             content: "boom".to_string(),
             turn_ended: false,
+            kind: None,
         }]);
         assert!(!awaited.is_awaited());
         awaited.observe(&[]);
@@ -7342,6 +7379,89 @@ mod tests {
     }
 
     #[test]
+    fn authentication_failed_assistant_error_tags_the_ending_result() {
+        let mut parser = StreamParser::new();
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"assistant","error":"authentication_failed","message":{"id":"msg_1","role":"assistant"}}"#,
+        );
+        let line = r#"{"type":"result","is_error":true,"result":"Failed to authenticate: OAuth session expired and could not be refreshed"}"#;
+        match parse_line_str(&mut parser, line).unwrap() {
+            StreamChunk::Error {
+                turn_ended, kind, ..
+            } => {
+                assert!(turn_ended);
+                assert_eq!(kind, Some(TurnErrorKind::AuthenticationFailed));
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn server_error_assistant_error_leaves_the_ending_result_untagged() {
+        let mut parser = StreamParser::new();
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"assistant","error":"server_error","message":{"id":"msg_1","role":"assistant"}}"#,
+        );
+        let line = r#"{"type":"result","is_error":true,"result":"API Error: 500"}"#;
+        match parse_line_str(&mut parser, line).unwrap() {
+            StreamChunk::Error { kind, .. } => assert_eq!(kind, None),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn turn_error_kind_does_not_leak_into_the_next_turn() {
+        let mut parser = StreamParser::new();
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"assistant","error":"authentication_failed","message":{"id":"msg_1","role":"assistant"}}"#,
+        );
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"result","is_error":false,"session_id":"abc","result":"ok"}"#,
+        );
+        let line = r#"{"type":"result","is_error":true,"result":"boom"}"#;
+        match parse_line_str(&mut parser, line).unwrap() {
+            StreamChunk::Error { kind, .. } => assert_eq!(kind, None),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sidechain_authentication_error_does_not_tag_the_main_turn() {
+        let mut parser = StreamParser::new();
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"assistant","error":"authentication_failed","parent_tool_use_id":"toolu_1","message":{"id":"msg_1","role":"assistant"}}"#,
+        );
+        let line = r#"{"type":"result","is_error":true,"result":"boom"}"#;
+        match parse_line_str(&mut parser, line).unwrap() {
+            StreamChunk::Error { kind, .. } => assert_eq!(kind, None),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_kind_is_serialized_only_when_present() {
+        let tagged = serde_json::to_value(StreamChunk::Error {
+            content: "expired".to_string(),
+            turn_ended: true,
+            kind: Some(TurnErrorKind::AuthenticationFailed),
+        })
+        .unwrap();
+        assert_eq!(tagged["data"]["kind"], "authentication_failed");
+        let plain = serde_json::to_value(StreamChunk::Error {
+            content: "boom".to_string(),
+            turn_ended: true,
+            kind: None,
+        })
+        .unwrap();
+        assert!(plain["data"].get("kind").is_none(), "{plain}");
+    }
+
+    #[test]
     fn parse_result_error_produces_error_chunk() {
         let mut parser = StreamParser::new();
         let line = r#"{"type":"result","is_error":true,"result":"Something went wrong"}"#;
@@ -7350,12 +7470,14 @@ mod tests {
             StreamChunk::Error {
                 content,
                 turn_ended,
+                kind,
             } => {
                 assert_eq!(content, "Something went wrong");
                 assert!(
                     turn_ended,
                     "an is_error result ends the turn of a live process"
                 );
+                assert_eq!(kind, None);
             }
             other => panic!("expected Error, got {other:?}"),
         }
@@ -7572,9 +7694,11 @@ mod tests {
             StreamChunk::Error {
                 content,
                 turn_ended,
+                kind,
             } => {
                 assert!(content.contains("hit your limit"));
                 assert!(!turn_ended, "a system message may arrive mid-turn");
+                assert_eq!(kind, None);
             }
             other => panic!("expected Error, got {other:?}"),
         }
@@ -9177,6 +9301,7 @@ mod tests {
         let mid_turn = serde_json::to_value(StreamChunk::Error {
             content: "rate limit".to_string(),
             turn_ended: false,
+            kind: None,
         })
         .unwrap();
         assert!(mid_turn["data"].get("turn_ended").is_none(), "{mid_turn}");
@@ -9184,6 +9309,7 @@ mod tests {
         let ended = serde_json::to_value(StreamChunk::Error {
             content: "overloaded".to_string(),
             turn_ended: true,
+            kind: None,
         })
         .unwrap();
         assert_eq!(ended["data"]["turn_ended"], serde_json::Value::Bool(true));

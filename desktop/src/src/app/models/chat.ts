@@ -1,5 +1,8 @@
 import type { ClaudeContextUsage } from './claude-control';
 
+/** Mirror of Rust `speedwave_runtime::stream::TurnErrorKind`. */
+export type TurnErrorKind = 'authentication_failed';
+
 /** Tagged union matching Rust StreamChunk enum (serde tagged) */
 export type StreamChunk =
   | { chunk_type: 'Text'; data: { content: string } }
@@ -34,7 +37,10 @@ export type StreamChunk =
         context_usage?: TurnUsage;
       };
     }
-  | { chunk_type: 'Error'; data: { content: string; turn_ended?: boolean } }
+  | {
+      chunk_type: 'Error';
+      data: { content: string; turn_ended?: boolean; kind?: TurnErrorKind };
+    }
   | { chunk_type: 'SystemInit'; data: { model: string; session_id?: string } }
   | {
       chunk_type: 'ControlChip';

@@ -32,7 +32,7 @@
     (closed)="onRestartCancel()"
   />
 }
-@if (projectState.status() === 'ready') {
+@if (projectState.status() === 'ready' || chat.sessionAuthFailed()) {
   <section
     class="relative flex h-full overflow-hidden bg-[var(--bg)]"
     data-testid="chat-view"
@@ -135,6 +135,7 @@
             #composer
             [streaming]="chat.isStreamingFromState()"
             [sendBlocked]="chat.sessionStartInFlightFromState"
+            [disabled]="chat.sessionAuthFailed()"
             [sessionAwaited]="chat.sessionAwaitedFromState()"
             [queuedText]="chat.pendingQueueFromState()?.text ?? ''"
             [model]="chat.sessionStatsFromState()?.model ?? ''"
