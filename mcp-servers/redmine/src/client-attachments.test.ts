@@ -24,7 +24,7 @@ describe('RedmineClient attachments', () => {
   const attachment = (id: number, over: Record<string, unknown> = {}) => ({
     id,
     filename: `file-${id}.png`,
-    filesize: 5,
+    filesize: 1,
     content_type: 'image/png',
     content_url: `${baseUrl}/attachments/download/${id}/file-${id}.png`,
     ...over,
@@ -108,7 +108,9 @@ describe('RedmineClient attachments', () => {
         }
         if (r.method === 'GET' && r.url.startsWith('/issues/7.json')) {
           issueReads += 1;
-          return issueReply(issueReads === 1 ? [attachment(1)] : [attachment(1), attachment(2)]);
+          return issueReply(
+            issueReads === 1 ? [attachment(1)] : [attachment(1), attachment(2), attachment(3)]
+          );
         }
         if (r.method === 'PUT') return { status: 204 };
         return { status: 404 };
@@ -136,7 +138,7 @@ describe('RedmineClient attachments', () => {
           ],
         },
       });
-      expect(added.map((a) => a.id)).toEqual([2]);
+      expect(added.map((a) => a.id)).toEqual([2, 3]);
     });
 
     it('sends no notes key when no comment is given', async () => {
@@ -298,7 +300,7 @@ describe('RedmineClient attachments', () => {
       let version = 'first';
       route = (r) =>
         r.url.startsWith('/issues/7.json')
-          ? issueReply([attachment(3)])
+          ? issueReply([attachment(3, { filesize: version.length })])
           : { status: 200, raw: Buffer.from(version), headers: { 'Content-Type': 'image/png' } };
 
       const one = await client().downloadAttachment(7, 3);
@@ -351,17 +353,89 @@ describe('RedmineClient attachments', () => {
       expect(await fsp.readdir(dir).catch(() => [])).toEqual([]);
     });
 
-    it('reports a redirect to the login page as a host_url problem and saves nothing', async () => {
+    it('says the API key may not be allowed when Redmine redirects to its own login page', async () => {
       route = (r) =>
         r.url.startsWith('/issues/7.json')
           ? issueReply([attachment(3)])
           : { status: 302, headers: { Location: `${baseUrl}/login` } };
 
-      await expect(client().downloadAttachment(7, 3)).rejects.toThrow(/redirect/);
+      await expect(client().downloadAttachment(7, 3)).rejects.toThrow(
+        /API key may not be allowed to view attachments/
+      );
 
       const dir = path.join(workspace, '.speedwave', 'redmine');
       expect(await fsp.readdir(dir).catch(() => [])).toEqual([]);
     });
+
+    it('points at host_url when the download is redirected to another origin', async () => {
+      route = (r) =>
+        r.url.startsWith('/issues/7.json')
+          ? issueReply([attachment(3)])
+          : { status: 301, headers: { Location: 'https://elsewhere.example/attachments/3' } };
+
+      await expect(client().downloadAttachment(7, 3)).rejects.toThrow(/host_url/);
+    });
+
+    it('requests the download path built from the attachment, not the content_url path', async () => {
+      route = (r) =>
+        r.url.startsWith('/issues/7.json')
+          ? issueReply([attachment(3, { content_url: `${baseUrl}/somewhere/else.png?x=1` })])
+          : { status: 200, raw: Buffer.from('x'), headers: { 'Content-Type': 'image/png' } };
+
+      await client().downloadAttachment(7, 3);
+
+      expect(received.filter((r) => r.url.startsWith('/attachments'))[0].url).toBe(
+        '/attachments/download/3/file-3.png'
+      );
+    });
+
+    it('keeps a path prefix of host_url when building the download URL', async () => {
+      route = (r) =>
+        r.url.startsWith('/redmine/issues/7.json')
+          ? issueReply([attachment(3)])
+          : { status: 200, raw: Buffer.from('x'), headers: { 'Content-Type': 'image/png' } };
+      const prefixed = new RedmineClient({ url: `${baseUrl}/redmine`, apiKey: 'secret-key' });
+
+      await prefixed.downloadAttachment(7, 3);
+
+      expect(received.some((r) => r.url === '/redmine/attachments/download/3/file-3.png')).toBe(
+        true
+      );
+    });
+
+    it('fails when the bytes received differ from the size Redmine reports and saves nothing', async () => {
+      route = (r) =>
+        r.url.startsWith('/issues/7.json')
+          ? issueReply([attachment(3, { filesize: 50, content_type: 'text/html' })])
+          : {
+              status: 200,
+              raw: Buffer.from('<html>login</html>'),
+              headers: { 'Content-Type': 'text/html' },
+            };
+
+      await expect(client().downloadAttachment(7, 3)).rejects.toThrow(/18 bytes.*50/);
+
+      expect(await fsp.readdir(path.join(workspace, '.speedwave', 'redmine'))).toEqual([]);
+    });
+
+    it.each([
+      [403, 'Permission denied'],
+      [404, 'attachment_id=3'],
+      [404, 'include ["attachments"]'],
+    ])(
+      'turns a %i on the download into a readable message naming the attachment',
+      async (status, text) => {
+        route = (r) =>
+          r.url.startsWith('/issues/7.json') ? issueReply([attachment(3)]) : { status };
+
+        const error = await client()
+          .downloadAttachment(7, 3)
+          .catch((e: unknown) => e);
+
+        expect(RedmineClient.formatError(error, { issue_id: 7, attachment_id: 3 })).toContain(text);
+        expect(await fsp.readdir(path.join(workspace, '.speedwave')).catch(() => [])).toEqual([]);
+      }
+    );
 
     it('leaves no partial file when the connection drops mid-download', async () => {
       route = (r) => (r.url.startsWith('/issues/7.json') ? issueReply([attachment(3)]) : 'destroy');

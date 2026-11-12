@@ -5,9 +5,7 @@
 
 import axios, { AxiosInstance, AxiosError, InternalAxiosRequestConfig } from 'axios';
 import fs from 'fs/promises';
-import { createReadStream, createWriteStream } from 'fs';
-import { pipeline } from 'stream/promises';
-import path from 'path';
+import { createReadStream } from 'fs';
 import {
   TIMEOUTS,
   ts,
@@ -17,7 +15,7 @@ import {
   tokensDir,
   clampPageSize,
   buildTeachingMessage,
-  workspaceRoot,
+  writeWorkspaceDownload,
   type WorkspaceFile,
 } from '@speedwave/mcp-shared';
 import { MAPPABLE_FIELDS } from './tools/helpers.js';
@@ -641,6 +639,8 @@ export interface IssueRelation {
   delay?: number;
 }
 
+type UploadRef = { token: string; filename: string };
+
 /**
  * Payload for creating or updating an issue.
  * @interface IssuePayload
@@ -687,10 +687,7 @@ interface IssuePayload {
    * Update notes/comment.
    */
   notes?: string;
-  /**
-   * Upload tokens of files to attach.
-   */
-  uploads?: Array<{ token: string; filename: string }>;
+  uploads?: UploadRef[];
 }
 
 /**
@@ -857,6 +854,7 @@ const NOT_FOUND_RECOVERY_HINTS: Record<string, string> = {
   project_id: `Verify the project ID with ${TOOL_NAMES.LIST_PROJECT_IDS} or ${TOOL_NAMES.SEARCH_PROJECT_IDS}.`,
   journal_id: `Verify the journal ID with ${TOOL_NAMES.LIST_JOURNALS}(issue_id).`,
   relation_id: `Verify the relation ID with ${TOOL_NAMES.LIST_RELATIONS}(issue_id).`,
+  attachment_id: `Verify the attachment ID with ${TOOL_NAMES.GET_ISSUE_FULL}(issue_id, include ["attachments"]).`,
   time_entry_id: `Verify the time entry ID with ${TOOL_NAMES.LIST_TIME_ENTRIES}.`,
 };
 
@@ -925,14 +923,6 @@ function formatValidationError(errors: unknown, context?: ErrorContext): string 
     names(MAPPABLE_FIELDS) && 'Call getMappings for valid values in this project.',
   ].filter((hint): hint is string => typeof hint === 'string');
   return hints.length > 0 ? `${prefixed}. ${hints.join(' ')}` : prefixed;
-}
-
-const ATTACHMENT_DOWNLOAD_SUBPATH = path.join('.speedwave', 'redmine');
-
-function sanitizeFilename(name: string): string {
-  const base = name.split(/[\\/]/).pop() || 'file';
-  const cleaned = base.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '');
-  return cleaned || 'file';
 }
 
 function uploadRejection(error: unknown, filename: string): unknown {
@@ -1355,7 +1345,6 @@ export class RedmineClient {
    * @param issueId - The issue ID.
    * @param files - Files resolved under the workspace, streamed to Redmine one by one.
    * @param notes - Comment saved with the files.
-   * @returns The attachments Redmine added to the issue.
    */
   async addAttachments(
     issueId: number,
@@ -1384,10 +1373,15 @@ export class RedmineClient {
         `Attachment ${attachmentId} points at ${origin ?? 'an unreadable URL'}, not the configured Redmine host, so the API key was not sent there. Check host_url in the Redmine settings.`
       );
     }
-    const response = await this.client.get(attachment.content_url, {
+    const response = await this.client.get(this._downloadUrl(attachment), {
       responseType: 'stream',
       timeout: TIMEOUTS.LONG_OPERATION_MS,
+      validateStatus: (status) => (status >= 200 && status < 400) || REDIRECT_STATUSES.has(status),
     });
+    if (REDIRECT_STATUSES.has(response.status)) {
+      response.data.destroy();
+      throw this._downloadRedirect(attachmentId, response.headers.location);
+    }
     const type = String(response.headers['content-type'] ?? '');
     if (type.startsWith('text/html') && !attachment.content_type.startsWith('text/html')) {
       response.data.destroy();
@@ -1395,24 +1389,19 @@ export class RedmineClient {
         `Redmine answered the download of attachment ${attachmentId} with a web page (usually a login page), not the file. Check that the API key may view attachments of this project.`
       );
     }
-    const dir = path.join(workspaceRoot(), ATTACHMENT_DOWNLOAD_SUBPATH);
-    await fs.mkdir(dir, { recursive: true });
-    const target = path.join(dir, `${attachment.id}-${sanitizeFilename(attachment.filename)}`);
-    const partial = `${target}.part`;
-    try {
-      await pipeline(response.data, createWriteStream(partial));
-      await fs.rename(partial, target);
-    } catch (error) {
-      await fs.rm(partial, { force: true });
-      throw error;
-    }
-    const { size } = await fs.stat(target);
+    const saved = await writeWorkspaceDownload({
+      service: 'redmine',
+      id: attachment.id,
+      name: attachment.filename,
+      source: response.data,
+      expectedSize: attachment.filesize,
+    });
     return {
       id: attachment.id,
       filename: attachment.filename,
       content_type: attachment.content_type,
-      size,
-      path: target,
+      size: saved.size,
+      path: saved.path,
     };
   }
 
@@ -1434,7 +1423,7 @@ export class RedmineClient {
         buildTeachingMessage({
           paramName: 'attachment_id',
           received: attachmentId,
-          correctValueTool: 'getIssueFull',
+          correctValueTool: TOOL_NAMES.GET_ISSUE_FULL,
           nextStep: `Attachment ${attachmentId} is not attached to issue ${issueId}. Call getIssueFull({ issue_id: ${issueId}, include: ["attachments"] }) and use an id from its attachments list.`,
         })
       );
@@ -1442,10 +1431,26 @@ export class RedmineClient {
     return attachment;
   }
 
-  private async _uploadFiles(
-    files: WorkspaceFile[]
-  ): Promise<Array<{ token: string; filename: string }>> {
-    const uploads: Array<{ token: string; filename: string }> = [];
+  private _downloadUrl(attachment: RedmineAttachment): string {
+    const base = this.config.url.endsWith('/') ? this.config.url : `${this.config.url}/`;
+    const file = pathSegment(attachment.filename);
+    return new URL(`attachments/download/${attachment.id}/${file}`, base).toString();
+  }
+
+  private _downloadRedirect(attachmentId: number, location: unknown): Error {
+    const target = redirectTargetOrigin(location, this.config.url);
+    if (target === new URL(this.config.url).origin) {
+      return new Error(
+        `Redmine redirected the download of attachment ${attachmentId} to another page on its own host, usually the login page: the API key may not be allowed to view attachments of this project.`
+      );
+    }
+    return new Error(
+      `Redmine redirected the download of attachment ${attachmentId} to ${target ?? 'an unreadable location'}. Redirects are not followed to protect the API key; check host_url in the Redmine settings.`
+    );
+  }
+
+  private async _uploadFiles(files: WorkspaceFile[]): Promise<UploadRef[]> {
+    const uploads: UploadRef[] = [];
     for (const file of files) {
       uploads.push({ token: await this._uploadFile(file), filename: file.name });
     }

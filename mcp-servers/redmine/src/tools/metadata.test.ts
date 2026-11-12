@@ -1,7 +1,3 @@
-/**
- * Metadata Tests - validates that all 27 Redmine tools have required metadata fields
- */
-
 import { describe, it, expect } from 'vitest';
 import { createToolDefinitions } from './index.js';
 import {

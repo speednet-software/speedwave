@@ -12,6 +12,7 @@ import {
   WRITE_ANNOTATIONS,
   teachingErrorResult,
   META_KEYS,
+  MAX_WORKSPACE_FILES,
 } from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
 import { resolveParams } from './helpers.js';
@@ -249,8 +250,7 @@ const searchIssueIdsTool: Tool = {
 
 const createIssueTool: Tool = {
   name: 'createIssue',
-  description:
-    "Create a new Redmine issue. tracker/priority/status names must match this project's configured mappings (see getMappings); an unrecognized name throws an error listing valid values. file_paths attaches 1 to 10 files from /workspace; a path outside /workspace is rejected before anything is created.",
+  description: `Create a new Redmine issue. tracker/priority/status names must match this project's configured mappings (see getMappings); an unrecognized name throws an error listing valid values. file_paths attaches 1 to ${MAX_WORKSPACE_FILES} files from /workspace; a path outside /workspace is rejected before anything is created.`,
   annotations: WRITE_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
@@ -287,7 +287,7 @@ const createIssueTool: Tool = {
         type: 'array',
         items: { type: 'string' },
         minItems: 1,
-        maxItems: 10,
+        maxItems: MAX_WORKSPACE_FILES,
         description:
           'Paths under /workspace of files to attach, e.g. ["/workspace/screenshot.png"]',
       },

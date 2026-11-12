@@ -1,5 +1,3 @@
-/** Redmine tools aggregator: exports all 27 tools across issue/attachment/time entry/journal/user/project/relation/config domains. */
-
 import {
   Tool,
   ToolDefinition,

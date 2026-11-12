@@ -1,7 +1,3 @@
-/**
- * Attachment Tools - 3 tools for Redmine issue attachments
- */
-
 import {
   Tool,
   ToolDefinition,
@@ -12,6 +8,7 @@ import {
   WORKSPACE_WRITE_ANNOTATIONS,
   DESTRUCTIVE_ANNOTATIONS,
   META_KEYS,
+  MAX_WORKSPACE_FILES,
 } from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
 import { withRedmineErrors } from './error-handling.js';
@@ -23,8 +20,7 @@ const ATTACHMENT_ID_SOURCE =
 
 const addAttachmentTool: Tool = {
   name: 'addAttachment',
-  description:
-    'Attach 1 to 10 files from /workspace to an issue; the files and the optional comment become one history entry. Files are streamed, so size is limited only by the Redmine server (a refusal says so and attaches nothing). A path outside /workspace is rejected before anything is sent. List existing attachments with getIssueFull and include ["attachments"].',
+  description: `Attach 1 to ${MAX_WORKSPACE_FILES} files from /workspace to an issue; the files and the optional comment become one history entry. Files are streamed, so size is limited only by the Redmine server (a refusal says so and attaches nothing). A path outside /workspace is rejected before anything is sent. List existing attachments with getIssueFull and include ["attachments"].`,
   annotations: WRITE_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true, [META_KEYS.TIMEOUT_CLASS]: 'long' },
   keywords: ['redmine', 'attachment', 'attach', 'upload', 'file', 'screenshot', 'issue'],
@@ -37,7 +33,7 @@ const addAttachmentTool: Tool = {
         type: 'array',
         items: { type: 'string' },
         minItems: 1,
-        maxItems: 10,
+        maxItems: MAX_WORKSPACE_FILES,
         description: 'Paths under /workspace of the files to attach, e.g. ["/workspace/log.txt"]',
       },
       notes: { type: 'string', description: 'Comment saved together with the files' },
@@ -134,7 +130,7 @@ const deleteAttachmentTool: Tool = {
 };
 
 /**
- * Tool factory.
+ * Attachment tool definitions.
  * @param client - Redmine client instance
  */
 export function createAttachmentTools(client: RedmineClient | null): ToolDefinition[] {
@@ -168,7 +164,7 @@ export function createAttachmentTools(client: RedmineClient | null): ToolDefinit
       tool: downloadAttachmentTool,
       handler: async (params) => {
         const { issue_id, attachment_id } = params as { issue_id: number; attachment_id: number };
-        return withRedmineErrors({ issue_id }, async () =>
+        return withRedmineErrors({ issue_id, attachment_id }, async () =>
           jsonResult(await client.downloadAttachment(issue_id, attachment_id))
         );
       },
@@ -177,7 +173,7 @@ export function createAttachmentTools(client: RedmineClient | null): ToolDefinit
       tool: deleteAttachmentTool,
       handler: async (params) => {
         const { issue_id, attachment_id } = params as { issue_id: number; attachment_id: number };
-        return withRedmineErrors({ issue_id }, async () => {
+        return withRedmineErrors({ issue_id, attachment_id }, async () => {
           await client.deleteAttachment(issue_id, attachment_id);
           return jsonResult({ deleted_attachment_id: attachment_id });
         });
