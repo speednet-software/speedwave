@@ -4,6 +4,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import type { Readable } from 'node:stream';
 import axios, { type AxiosInstance, type AxiosRequestConfig } from 'axios';
 import {
   ts,
@@ -236,6 +237,25 @@ export class AtlassianClient {
         },
       },
       { retryable: false }
+    );
+  }
+
+  /**
+   * Stream an attachment's content from the Jira host (`redirect=false`, so the media host is never contacted).
+   * Redirects stay disabled: a 3xx surfaces as an error. Retried like any GET.
+   * @param attachmentId - The global attachment ID.
+   * @returns The response body as a stream.
+   */
+  downloadAttachmentContent(attachmentId: string): Promise<Readable> {
+    return this.request<Readable>(
+      {
+        method: 'GET',
+        url: `/rest/api/3/attachment/content/${encodeURIComponent(attachmentId)}`,
+        params: { redirect: false },
+        responseType: 'stream',
+        headers: { Accept: '*/*' },
+      },
+      { retryable: true }
     );
   }
 

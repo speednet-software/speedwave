@@ -549,3 +549,33 @@ describe('uploadAttachment', () => {
     expect(requestMock).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('downloadAttachmentContent', () => {
+  it('GETs the content endpoint with redirect=false as a stream on the Jira host', async () => {
+    const stream = { pipe: vi.fn() };
+    requestMock.mockResolvedValueOnce({ data: stream });
+    const client = new AtlassianClient(CONFIG);
+    expect(await client.downloadAttachmentContent('20001')).toBe(stream);
+    const cfg = requestMock.mock.calls[0][0] as AxiosRequestConfig;
+    expect(cfg.method).toBe('GET');
+    expect(cfg.url).toBe('/rest/api/3/attachment/content/20001');
+    expect(cfg.params).toEqual({ redirect: false });
+    expect(cfg.responseType).toBe('stream');
+    expect(createMock.mock.calls[0][0]).toMatchObject({
+      baseURL: 'https://acme.atlassian.net',
+      maxRedirects: 0,
+    });
+  });
+
+  it('encodes the attachment ID in the URL', async () => {
+    requestMock.mockResolvedValueOnce({ data: {} });
+    await new AtlassianClient(CONFIG).downloadAttachmentContent('a/b');
+    expect(requestMock.mock.calls[0][0].url).toBe('/rest/api/3/attachment/content/a%2Fb');
+  });
+
+  it('does not follow a redirect: the error surfaces after one attempt', async () => {
+    requestMock.mockRejectedValue(httpError(303));
+    await expect(new AtlassianClient(CONFIG).downloadAttachmentContent('1')).rejects.toBeTruthy();
+    expect(requestMock).toHaveBeenCalledTimes(1);
+  });
+});

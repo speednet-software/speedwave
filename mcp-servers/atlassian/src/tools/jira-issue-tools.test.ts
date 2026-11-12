@@ -1,9 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { Readable } from 'node:stream';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AxiosError, type AxiosResponse } from 'axios';
-import { META_KEYS, type ToolsCallResult } from '@speedwave/mcp-shared';
+import {
+  META_KEYS,
+  WORKSPACE_WRITE_ANNOTATIONS,
+  type ToolsCallResult,
+} from '@speedwave/mcp-shared';
 import { createJiraIssueTools } from './jira-issue-tools.js';
 import { schemaKeys } from './jira-test-helpers.js';
 import type { AtlassianClient } from '../client.js';
@@ -15,6 +27,7 @@ const client = {
   put: vi.fn(),
   del: vi.fn(),
   uploadAttachment: vi.fn(),
+  downloadAttachmentContent: vi.fn(),
 };
 const CLIENT = client as unknown as AtlassianClient;
 
@@ -119,7 +132,14 @@ function serverError(): AxiosError {
 
 beforeEach(() => {
   client.jiraProjectKeys = [];
-  for (const m of [client.get, client.post, client.put, client.del, client.uploadAttachment]) {
+  for (const m of [
+    client.get,
+    client.post,
+    client.put,
+    client.del,
+    client.uploadAttachment,
+    client.downloadAttachmentContent,
+  ]) {
     m.mockReset();
   }
 });
@@ -154,6 +174,7 @@ describe('definitions', () => {
       'assignIssue',
       'getMyself',
       'addAttachment',
+      'downloadAttachment',
       'deleteAttachment',
     ]);
     for (const { tool } of defs()) {
@@ -185,6 +206,19 @@ describe('definitions', () => {
       'getMyself',
     ]) {
       expect(byName[name].annotations?.readOnlyHint, name).toBe(true);
+    }
+  });
+
+  it('marks downloadAttachment as a workspace write that may run in read-only mode, with the long timeout class', () => {
+    const tool = defs().find((d) => d.tool.name === 'downloadAttachment')!.tool;
+    expect(tool.annotations).toEqual(WORKSPACE_WRITE_ANNOTATIONS);
+    expect((tool._meta as Record<string, unknown>)[META_KEYS.TIMEOUT_CLASS]).toBe('long');
+  });
+
+  it('requires issue and attachment_id on downloadAttachment and deleteAttachment', () => {
+    for (const name of ['downloadAttachment', 'deleteAttachment']) {
+      const tool = defs().find((d) => d.tool.name === name)!.tool;
+      expect(tool.inputSchema.required, name).toEqual(['issue', 'attachment_id']);
     }
   });
 
@@ -307,6 +341,9 @@ describe('emitted JSON matches outputSchema', () => {
       if (url.endsWith('/transitions')) {
         return { transitions: [{ id: '5', name: 'Go', to: { name: 'Done' } }] };
       }
+      if (url.includes('/issue/')) {
+        return { ...RAW_ISSUE, fields: { ...RAW_ISSUE.fields, attachment: [{ id: '1' }] } };
+      }
       return { accountId: 'u1', displayName: 'Ann' };
     });
     client.uploadAttachment.mockResolvedValue([
@@ -329,7 +366,7 @@ describe('emitted JSON matches outputSchema', () => {
       ['transitionIssue', { issue: 'PROJ-1', transition_id: '5' }],
       ['assignIssue', { issue: 'PROJ-1', assignee: 'u1' }],
       ['getMyself', {}],
-      ['deleteAttachment', { attachment_id: '1' }],
+      ['deleteAttachment', { issue: 'PROJ-1', attachment_id: '1' }],
     ];
     for (const [name, params] of cases) {
       expectEmittedMatchesSchema(name, payload(await run(name, params)));
@@ -977,20 +1014,164 @@ describe('addAttachment size cap', () => {
   });
 });
 
-describe('deleteAttachment', () => {
-  it('deletes by attachment_id', async () => {
-    client.del.mockResolvedValueOnce(undefined);
-    expect(payload(await run('deleteAttachment', { attachment_id: '10475' }))).toEqual({
-      deleted: true,
+const ISSUE_WITH_ATTACHMENT = {
+  ...RAW_ISSUE,
+  fields: {
+    ...RAW_ISSUE.fields,
+    attachment: [
+      {
+        id: '10475',
+        filename: 'shot.png',
+        size: 3,
+        mimeType: 'image/png',
+        created: '2026-07-02T00:00:00.000+0000',
+        author: { accountId: 'u1', displayName: 'Ann' },
+      },
+    ],
+  },
+};
+
+describe('getIssue attachments', () => {
+  it('lists the attachments of the issue', async () => {
+    client.get.mockResolvedValueOnce(ISSUE_WITH_ATTACHMENT);
+    const { issue } = payload(await run('getIssue', { issue: 'PROJ-7' })) as {
+      issue: { attachments: unknown[] };
+    };
+    expect(issue.attachments).toEqual([
+      {
+        id: '10475',
+        filename: 'shot.png',
+        size: 3,
+        mime_type: 'image/png',
+        created: '2026-07-02T00:00:00.000+0000',
+        author: { account_id: 'u1', name: 'Ann' },
+      },
+    ]);
+  });
+
+  it('returns an empty list for an issue without attachments', async () => {
+    client.get.mockResolvedValueOnce(RAW_ISSUE);
+    const { issue } = payload(await run('getIssue', { issue: 'PROJ-7' })) as {
+      issue: { attachments: unknown[] };
+    };
+    expect(issue.attachments).toEqual([]);
+  });
+});
+
+describe('downloadAttachment', () => {
+  let ws: string;
+  let prevEnv: string | undefined;
+
+  beforeEach(() => {
+    prevEnv = process.env.WORKSPACE_DIR;
+    ws = realpathSync(mkdtempSync(join(tmpdir(), 'atl-dl-')));
+    process.env.WORKSPACE_DIR = ws;
+  });
+  afterEach(() => {
+    if (prevEnv === undefined) delete process.env.WORKSPACE_DIR;
+    else process.env.WORKSPACE_DIR = prevEnv;
+    rmSync(ws, { recursive: true, force: true });
+  });
+
+  it('saves the file under .speedwave/jira and returns path, size and MIME type without the bytes', async () => {
+    client.get.mockResolvedValueOnce(ISSUE_WITH_ATTACHMENT);
+    client.downloadAttachmentContent.mockResolvedValueOnce(Readable.from([Buffer.from('abc')]));
+    const emitted = payload(
+      await run('downloadAttachment', { issue: 'PROJ-7', attachment_id: '10475' })
+    );
+    expectEmittedMatchesSchema('downloadAttachment', emitted);
+    expect(emitted).toEqual({
+      id: '10475',
+      filename: 'shot.png',
+      mime_type: 'image/png',
+      size: 3,
+      path: join(ws, '.speedwave', 'jira', '10475-shot.png'),
     });
+    expect(readFileSync(emitted.path as string, 'utf-8')).toBe('abc');
+  });
+
+  it('points to getIssue for an attachment the issue does not have and requests no content', async () => {
+    client.get.mockResolvedValueOnce(ISSUE_WITH_ATTACHMENT);
+    const result = await run('downloadAttachment', { issue: 'PROJ-7', attachment_id: '999' });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('getIssue');
+    expect(textOf(result)).toContain('10475');
+    expect(client.downloadAttachmentContent).not.toHaveBeenCalled();
+  });
+
+  it('refuses an issue outside the project allowlist and requests no content', async () => {
+    client.jiraProjectKeys = ['OTHER'];
+    client.get.mockResolvedValueOnce(ISSUE_WITH_ATTACHMENT);
+    const result = await run('downloadAttachment', { issue: 'PROJ-7', attachment_id: '10475' });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toMatch(/outside the allowed list/);
+    expect(client.downloadAttachmentContent).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [403, 'lacks permission to view the content of attachment 10475'],
+    [404, 'Jira found no visible attachment 10475'],
+    [303, 'answered with a redirect'],
+  ])(
+    'explains a %s from the content request and says nothing was saved',
+    async (status, reason) => {
+      client.get.mockResolvedValueOnce(ISSUE_WITH_ATTACHMENT);
+      client.downloadAttachmentContent.mockRejectedValueOnce(httpError(status));
+      const result = await run('downloadAttachment', { issue: 'PROJ-7', attachment_id: '10475' });
+      expect(result.isError).toBe(true);
+      expect(textOf(result)).toContain(reason);
+      expect(textOf(result)).toContain('nothing was saved');
+      expect(existsSync(join(ws, '.speedwave', 'jira', '10475-shot.png'))).toBe(false);
+    }
+  );
+});
+
+describe('deleteAttachment', () => {
+  it('deletes the attachment of the issue', async () => {
+    client.get.mockResolvedValueOnce(ISSUE_WITH_ATTACHMENT);
+    client.del.mockResolvedValueOnce(undefined);
+    expect(
+      payload(await run('deleteAttachment', { issue: 'PROJ-7', attachment_id: '10475' }))
+    ).toEqual({ deleted: true });
     expect(client.del.mock.calls[0][0]).toBe('/rest/api/3/attachment/10475');
   });
 
-  it('surfaces the allowlist refusal as an error result', async () => {
+  it('works while a project allowlist is configured', async () => {
     client.jiraProjectKeys = ['PROJ'];
-    const result = await run('deleteAttachment', { attachment_id: '10475' });
+    client.get.mockResolvedValueOnce(ISSUE_WITH_ATTACHMENT);
+    client.del.mockResolvedValueOnce(undefined);
+    expect(
+      payload(await run('deleteAttachment', { issue: 'PROJ-7', attachment_id: '10475' }))
+    ).toEqual({ deleted: true });
+  });
+
+  it('refuses an issue outside the project allowlist and deletes nothing', async () => {
+    client.jiraProjectKeys = ['OTHER'];
+    client.get.mockResolvedValueOnce(ISSUE_WITH_ATTACHMENT);
+    const result = await run('deleteAttachment', { issue: 'PROJ-7', attachment_id: '10475' });
     expect(result.isError).toBe(true);
-    expect(textOf(result)).toMatch(/allowlist/);
+    expect(textOf(result)).toMatch(/outside the allowed list/);
     expect(client.del).not.toHaveBeenCalled();
+  });
+
+  it('points to getIssue for an attachment of another issue and deletes nothing', async () => {
+    client.get.mockResolvedValueOnce(ISSUE_WITH_ATTACHMENT);
+    const result = await run('deleteAttachment', { issue: 'PROJ-7', attachment_id: '999' });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('getIssue');
+    expect(textOf(result)).toContain('nothing was removed');
+    expect(client.del).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [403, 'lacks permission to delete attachment 10475'],
+    [404, 'Jira found no visible attachment 10475'],
+  ])('explains a %s from Jira and says nothing was removed', async (status, reason) => {
+    client.get.mockResolvedValueOnce(ISSUE_WITH_ATTACHMENT);
+    client.del.mockRejectedValueOnce(httpError(status));
+    const result = await run('deleteAttachment', { issue: 'PROJ-7', attachment_id: '10475' });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain(reason);
+    expect(textOf(result)).toContain('nothing was removed');
   });
 });
