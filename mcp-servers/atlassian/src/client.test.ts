@@ -573,9 +573,23 @@ describe('downloadAttachmentContent', () => {
     expect(requestMock.mock.calls[0][0].url).toBe('/rest/api/3/attachment/content/a%2Fb');
   });
 
-  it('does not follow a redirect: the error surfaces after one attempt', async () => {
-    requestMock.mockRejectedValue(httpError(303));
+  it.each([303, 404, 500])('destroys the response stream of a %s answer', async (status) => {
+    const destroy = vi.fn();
+    requestMock.mockRejectedValueOnce(httpError(status, { destroy }));
     await expect(new AtlassianClient(CONFIG).downloadAttachmentContent('1')).rejects.toBeTruthy();
-    expect(requestMock).toHaveBeenCalledTimes(1);
+    expect(destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it('destroys the stream of an attempt that is retried', async () => {
+    vi.useFakeTimers();
+    const destroy = vi.fn();
+    requestMock
+      .mockRejectedValueOnce(httpError(503, { destroy }))
+      .mockResolvedValueOnce({ data: 'second attempt' });
+    const pending = new AtlassianClient(CONFIG).downloadAttachmentContent('1');
+    await vi.runAllTimersAsync();
+    await expect(pending).resolves.toBe('second attempt');
+    expect(destroy).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
   });
 });

@@ -74,6 +74,8 @@ export class UnknownLinkRelationError extends Error {
   }
 }
 
+type IssueWithAttachments = JiraIssue & { attachments: JiraIssueAttachment[] };
+
 /** Thrown when an attachment ID is not among the attachments of the issue the call names. */
 export class AttachmentNotFoundError extends Error {
   /**
@@ -103,7 +105,7 @@ export interface JiraIssuesClient {
     maxResults?: number;
     nextPageToken?: string;
   }): Promise<JiraSearchResult>;
-  /** Get a single issue by key (e.g. `PROJ-123`) or numeric ID, with its attachment list. */
+  /** Get a single issue by key (e.g. `PROJ-123`) or numeric ID. */
   get(issueIdOrKey: string): Promise<JiraIssue>;
   /**
    * Create an issue from the caller shape (Markdown `description` or raw `description_adf`,
@@ -146,17 +148,7 @@ export interface JiraIssuesClient {
     issueIdOrKey: string,
     params: { filename: string; data: Buffer; contentType: string }
   ): Promise<JiraAttachment>;
-  /**
-   * Stream an attachment of `issue` into `/workspace/.speedwave/jira/` and describe the saved file.
-   * @throws {ScopeError} When the issue's project is outside the allowlist.
-   * @throws {AttachmentNotFoundError} When the issue has no attachment with that ID; no content request is sent.
-   */
   downloadAttachment(issue: string, attachmentId: string): Promise<JiraDownloadedAttachment>;
-  /**
-   * Delete an attachment of `issue` by its global attachment ID.
-   * @throws {ScopeError} When the issue's project is outside the allowlist.
-   * @throws {AttachmentNotFoundError} When the issue has no attachment with that ID; nothing is deleted.
-   */
   deleteAttachment(issue: string, attachmentId: string): Promise<void>;
 }
 
@@ -171,7 +163,7 @@ export function createJiraIssuesClient(client: AtlassianClient): JiraIssuesClien
   const enforceFromIssueKey = (issueIdOrKey: string): void =>
     assertJiraIssueKeyAllowed(issueIdOrKey, client.jiraProjectKeys);
 
-  const fetchIssue = async (issueIdOrKey: string): Promise<JiraIssue> => ({
+  const fetchIssue = async (issueIdOrKey: string): Promise<IssueWithAttachments> => ({
     attachments: [],
     ...mapIssue(
       await client.get<unknown>(`/rest/api/3/issue/${encodeURIComponent(issueIdOrKey)}`, {
@@ -180,7 +172,7 @@ export function createJiraIssuesClient(client: AtlassianClient): JiraIssuesClien
     ),
   });
 
-  const getAllowed = async (issueIdOrKey: string): Promise<JiraIssue> => {
+  const getAllowed = async (issueIdOrKey: string): Promise<IssueWithAttachments> => {
     const issue = await fetchIssue(issueIdOrKey);
     assertJiraProjectAllowed(issue.project, client.jiraProjectKeys);
     return issue;
@@ -190,7 +182,7 @@ export function createJiraIssuesClient(client: AtlassianClient): JiraIssuesClien
     issueIdOrKey: string,
     attachmentId: string
   ): Promise<JiraIssueAttachment> => {
-    const attachments = (await getAllowed(issueIdOrKey)).attachments ?? [];
+    const { attachments } = await getAllowed(issueIdOrKey);
     const found = attachments.find((a) => a.id === attachmentId.trim());
     if (!found) {
       throw new AttachmentNotFoundError(
@@ -444,11 +436,6 @@ export function mapAttachment(raw: unknown): JiraAttachment {
   };
 }
 
-function mapIssueAttachment(raw: unknown): JiraIssueAttachment {
-  const { id, filename, size, mime_type, author, created } = mapAttachment(raw);
-  return { id, filename, size, mime_type, author, created };
-}
-
 /**
  * Map a raw Jira issue (with `fields`, Atlassian REST API shape) to {@link JiraIssue}.
  * @param raw - The raw object as returned by the Atlassian REST API.
@@ -484,6 +471,11 @@ function mapIssue(raw: unknown): JiraIssue {
     issue.attachments = f.attachment.map(mapIssueAttachment);
   }
   return issue;
+}
+
+function mapIssueAttachment(raw: unknown): JiraIssueAttachment {
+  const { id, filename, size, mime_type, author, created } = mapAttachment(raw);
+  return { id, filename, size, mime_type, author, created };
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

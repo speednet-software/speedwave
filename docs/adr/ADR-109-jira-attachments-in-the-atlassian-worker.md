@@ -11,7 +11,7 @@
 - `/workspace` was mounted `:ro` in the `mcp-atlassian` service, enforced by the `ATLASSIAN_WORKSPACE_MOUNT_MODE` rule (`crates/speedwave-runtime/src/compose/security_check.rs`). A worker that only reads the workspace needs nothing more.
 - An attachment ID alone does not name a project, so a call that takes only the ID cannot be checked against the project allowlist. `deleteAttachment` failed closed in that case.
 - The Slack and SharePoint workers already mount `/workspace:rw` and write downloads to `/workspace/.speedwave/<service>/` (ADR-071 point 9, ADR-060).
-- The endpoint for attachment content is `GET /rest/api/3/attachment/content/{id}`; by default it answers with a redirect to a media host, and the `redirect` query parameter controls that[^1].
+- The endpoint for attachment content is `GET /rest/api/3/attachment/content/{id}`; by default it answers with a redirect to a media host, and the Atlassian reference documents a `redirect` query parameter[^1]. The reference does not say that `redirect=false` returns the bytes from the Jira host; that is the one unconfirmed point of this decision.
 
 ## Decision
 
@@ -24,7 +24,7 @@
 
 ## Consequences
 
-- If `?redirect=false` does not return the file bytes from the Jira host, the download fails with an error that says so and the decision on handling the media-host redirect returns to the owner of SPEED-998. This is checked on a live instance, because the behavior is not documented in the Atlassian reference.
+- If `?redirect=false` does not return the file bytes from the Jira host, the download fails with an error that says the worker does not follow redirects, and the decision on handling the media-host redirect returns to the owner of SPEED-998. This is checked on a live instance before release.
 - `addAttachment` is unchanged: one file per call, read fully into memory, capped at `ATLASSIAN_MAX_ATTACHMENT_BYTES`.
 - Attachments embedded in comments or descriptions as ADF media without an entry in the issue's attachment list are not covered.
 - The download code is a third copy of the Slack pattern (SPEED-982 has the second); SPEED-999 moves it into `mcp-servers/shared`.

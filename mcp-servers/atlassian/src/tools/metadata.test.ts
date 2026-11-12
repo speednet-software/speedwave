@@ -55,7 +55,7 @@ describe('Atlassian read-only access annotations', () => {
   const names = (predicate: (hint: unknown) => boolean) =>
     tools.filter((t) => predicate(t.annotations?.readOnlyHint)).map((t) => t.name);
 
-  it('lists every tool as either reading or changing', () => {
+  it('lists every tool as reading, writing only into the workspace, or changing', () => {
     expect([...tools.map((t) => t.name)].sort()).toEqual(
       [...READ_ONLY_TOOL_NAMES, ...WORKSPACE_WRITE_TOOL_NAMES, ...CHANGING_TOOL_NAMES].sort()
     );

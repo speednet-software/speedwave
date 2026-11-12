@@ -133,6 +133,12 @@ export class AtlassianClient {
         return res.data;
       } catch (error) {
         lastError = error;
+        if (config.responseType === 'stream') {
+          (axios.isAxiosError(error)
+            ? (error.response?.data as Readable | undefined)
+            : undefined
+          )?.destroy();
+        }
         if (attempt === MAX_RETRIES) break;
 
         const status = axios.isAxiosError(error) ? error.response?.status : undefined;
@@ -241,10 +247,8 @@ export class AtlassianClient {
   }
 
   /**
-   * Stream an attachment's content from the Jira host (`redirect=false`, so the media host is never contacted).
-   * Redirects stay disabled: a 3xx surfaces as an error. Retried like any GET.
+   * Stream an attachment's content from the Jira host.
    * @param attachmentId - The global attachment ID.
-   * @returns The response body as a stream.
    */
   downloadAttachmentContent(attachmentId: string): Promise<Readable> {
     return this.request<Readable>(

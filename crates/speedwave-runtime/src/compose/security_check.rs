@@ -472,8 +472,7 @@ impl SecurityRule {
         )
     }
 
-    /// Returns `true` for Atlassian-specific rules. The workspace mount is :rw, like
-    /// SharePoint and Slack: downloadAttachment writes under `.speedwave/jira/`.
+    /// Returns `true` for Atlassian-specific rules.
     pub fn is_atlassian(self) -> bool {
         matches!(
             self,
@@ -1899,8 +1898,6 @@ impl SecurityCheck {
         )
     }
 
-    /// Validates volumes for built-in mcp-atlassian (not a plugin). The workspace mount is
-    /// :rw: downloadAttachment writes under `.speedwave/jira/`.
     fn check_builtin_atlassian_volumes(
         doc: &serde_yaml_ng::Value,
         expected_paths: &SecurityExpectedPaths,

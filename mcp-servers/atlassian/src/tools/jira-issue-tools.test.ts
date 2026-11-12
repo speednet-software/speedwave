@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   existsSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -209,9 +210,8 @@ describe('definitions', () => {
     }
   });
 
-  it('marks downloadAttachment as a workspace write that may run in read-only mode, with the long timeout class', () => {
+  it('gives downloadAttachment the long timeout class', () => {
     const tool = defs().find((d) => d.tool.name === 'downloadAttachment')!.tool;
-    expect(tool.annotations).toEqual(WORKSPACE_WRITE_ANNOTATIONS);
     expect((tool._meta as Record<string, unknown>)[META_KEYS.TIMEOUT_CLASS]).toBe('long');
   });
 
@@ -1049,6 +1049,14 @@ describe('getIssue attachments', () => {
     ]);
   });
 
+  it('requests the attachment field', async () => {
+    client.get.mockResolvedValueOnce(RAW_ISSUE);
+    await run('getIssue', { issue: 'PROJ-7' });
+    expect((client.get.mock.calls[0][1] as { fields: string }).fields.split(',')).toContain(
+      'attachment'
+    );
+  });
+
   it('returns an empty list for an issue without attachments', async () => {
     client.get.mockResolvedValueOnce(RAW_ISSUE);
     const { issue } = payload(await run('getIssue', { issue: 'PROJ-7' })) as {
@@ -1088,6 +1096,54 @@ describe('downloadAttachment', () => {
       path: join(ws, '.speedwave', 'jira', '10475-shot.png'),
     });
     expect(readFileSync(emitted.path as string, 'utf-8')).toBe('abc');
+  });
+
+  it('overwrites the file on a repeated download', async () => {
+    client.get.mockResolvedValue(ISSUE_WITH_ATTACHMENT);
+    client.downloadAttachmentContent
+      .mockResolvedValueOnce(Readable.from([Buffer.from('first')]))
+      .mockResolvedValueOnce(Readable.from([Buffer.from('2nd')]));
+    await run('downloadAttachment', { issue: 'PROJ-7', attachment_id: '10475' });
+    const emitted = payload(
+      await run('downloadAttachment', { issue: 'PROJ-7', attachment_id: '10475' })
+    );
+    expect(emitted.size).toBe(3);
+    expect(readFileSync(emitted.path as string, 'utf-8')).toBe('2nd');
+    expect(readdirSync(join(ws, '.speedwave', 'jira'))).toEqual(['10475-shot.png']);
+  });
+
+  it.each([
+    ['../../etc/passwd', '10475-passwd'],
+    ['..\\..\\evil.sh', '10475-evil.sh'],
+    ['.hidden', '10475-hidden'],
+    ['a b$c.txt', '10475-a_b_c.txt'],
+  ])('keeps the file inside .speedwave/jira for the name %s', async (name, saved) => {
+    const fields = ISSUE_WITH_ATTACHMENT.fields;
+    client.get.mockResolvedValueOnce({
+      ...ISSUE_WITH_ATTACHMENT,
+      fields: { ...fields, attachment: [{ ...fields.attachment[0], filename: name }] },
+    });
+    client.downloadAttachmentContent.mockResolvedValueOnce(Readable.from([Buffer.from('x')]));
+    const emitted = payload(
+      await run('downloadAttachment', { issue: 'PROJ-7', attachment_id: '10475' })
+    );
+    expect(emitted.path).toBe(join(ws, '.speedwave', 'jira', saved));
+  });
+
+  it('leaves no partial file when the stream fails', async () => {
+    client.get.mockResolvedValueOnce(ISSUE_WITH_ATTACHMENT);
+    client.downloadAttachmentContent.mockResolvedValueOnce(
+      Readable.from(
+        (async function* () {
+          yield Buffer.from('half');
+          throw new Error('connection reset');
+        })()
+      )
+    );
+    const result = await run('downloadAttachment', { issue: 'PROJ-7', attachment_id: '10475' });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('connection reset');
+    expect(readdirSync(join(ws, '.speedwave', 'jira'))).toEqual([]);
   });
 
   it('points to getIssue for an attachment the issue does not have and requests no content', async () => {

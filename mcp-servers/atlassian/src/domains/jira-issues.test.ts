@@ -3,16 +3,8 @@
  * including allowlist scope enforcement and response normalisation.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { Readable } from 'node:stream';
-import {
-  AttachmentNotFoundError,
-  createJiraIssuesClient,
-  UnknownLinkRelationError,
-} from './jira-issues.js';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { createJiraIssuesClient, UnknownLinkRelationError } from './jira-issues.js';
 import { markdownToAdf } from '../adf.js';
 import { ScopeError } from '../scope.js';
 import type { AtlassianClient } from '../client.js';
@@ -25,7 +17,6 @@ function stubClient(projectKeys: string[] = []) {
     put: vi.fn(),
     del: vi.fn(),
     uploadAttachment: vi.fn(),
-    downloadAttachmentContent: vi.fn(),
     jiraProjectKeys: projectKeys,
     confluenceSpaceKeys: [] as string[],
   } as unknown as AtlassianClient & {
@@ -34,7 +25,6 @@ function stubClient(projectKeys: string[] = []) {
     put: ReturnType<typeof vi.fn>;
     del: ReturnType<typeof vi.fn>;
     uploadAttachment: ReturnType<typeof vi.fn>;
-    downloadAttachmentContent: ReturnType<typeof vi.fn>;
   };
 }
 
@@ -69,18 +59,6 @@ function rawIssue(over: Record<string, unknown> = {}, fields: Record<string, unk
       ...fields,
     },
     ...over,
-  };
-}
-
-function rawIssueAttachment(id: string, filename: string) {
-  return {
-    id,
-    filename,
-    size: 4,
-    mimeType: 'image/png',
-    created: '2026-07-02T00:00:00.000+0000',
-    content: `https://acme.atlassian.net/rest/api/3/attachment/content/${id}`,
-    author: { accountId: 'u1', displayName: 'Alice', active: true },
   };
 }
 
@@ -262,31 +240,6 @@ describe('get', () => {
       created: '2026-01-01T00:00:00.000+0000',
       updated: '2026-01-02T00:00:00.000+0000',
     });
-  });
-
-  it('returns the issue attachments with id, name, size, MIME type, author and creation time', async () => {
-    client.get.mockResolvedValueOnce(
-      rawIssue({}, { attachment: [rawIssueAttachment('20001', 'bug.png')] })
-    );
-    const c = createJiraIssuesClient(client);
-    expect((await c.get('PROJ-1')).attachments).toEqual([
-      {
-        id: '20001',
-        filename: 'bug.png',
-        size: 4,
-        mime_type: 'image/png',
-        created: '2026-07-02T00:00:00.000+0000',
-        author: { account_id: 'u1', name: 'Alice' },
-      },
-    ]);
-  });
-
-  it('requests the attachment field', async () => {
-    client.get.mockResolvedValueOnce(rawIssue());
-    const c = createJiraIssuesClient(client);
-    await c.get('PROJ-1');
-    const fields = (client.get.mock.calls[0][1] as { fields: string }).fields.split(',');
-    expect(fields).toContain('attachment');
   });
 
   it('requests parent, components, links, issue type and description', async () => {
@@ -832,158 +785,5 @@ describe('addAttachment', () => {
       })
     ).rejects.toBeInstanceOf(ScopeError);
     expect(restricted.uploadAttachment).not.toHaveBeenCalled();
-  });
-});
-
-describe('searchIssues attachments', () => {
-  it('does not request or return attachments', async () => {
-    client.post.mockResolvedValueOnce({ issues: [rawIssue()], isLast: true });
-    const c = createJiraIssuesClient(client);
-    const res = await c.search({ jql: 'x' });
-    expect(client.post.mock.calls[0][1].fields).not.toContain('attachment');
-    expect(res.issues[0]).not.toHaveProperty('attachments');
-  });
-});
-
-describe('deleteAttachment', () => {
-  const withAttachments = () =>
-    rawIssue({}, { attachment: [rawIssueAttachment('10475', 'a.png')] });
-
-  it('DELETEs the attachment of the issue by ID', async () => {
-    client.get.mockResolvedValueOnce(withAttachments());
-    client.del.mockResolvedValueOnce(undefined);
-    const c = createJiraIssuesClient(client);
-    await c.deleteAttachment('PROJ-1', '10475');
-    expect(client.del).toHaveBeenCalledWith('/rest/api/3/attachment/10475');
-  });
-
-  it('works while a project allowlist is configured and the issue is in it', async () => {
-    const restricted = stubClient(['PROJ']);
-    restricted.get.mockResolvedValueOnce(withAttachments());
-    restricted.del.mockResolvedValueOnce(undefined);
-    await createJiraIssuesClient(restricted).deleteAttachment('PROJ-1', '10475');
-    expect(restricted.del).toHaveBeenCalledWith('/rest/api/3/attachment/10475');
-  });
-
-  it('refuses an attachment that belongs to another issue and deletes nothing', async () => {
-    client.get.mockResolvedValueOnce(withAttachments());
-    const c = createJiraIssuesClient(client);
-    await expect(c.deleteAttachment('PROJ-1', '99999')).rejects.toBeInstanceOf(
-      AttachmentNotFoundError
-    );
-    expect(client.del).not.toHaveBeenCalled();
-  });
-
-  it('refuses an issue outside the project allowlist and deletes nothing', async () => {
-    const restricted = stubClient(['ALLOWED']);
-    restricted.get.mockResolvedValueOnce(rawIssue({}, { project: { key: 'OTHER' } }));
-    await expect(
-      createJiraIssuesClient(restricted).deleteAttachment('OTHER-1', '10475')
-    ).rejects.toBeInstanceOf(ScopeError);
-    expect(restricted.del).not.toHaveBeenCalled();
-  });
-});
-
-describe('downloadAttachment', () => {
-  let workspace: string;
-  let previous: string | undefined;
-
-  beforeEach(() => {
-    workspace = mkdtempSync(join(tmpdir(), 'atl-dl-'));
-    previous = process.env.WORKSPACE_DIR;
-    process.env.WORKSPACE_DIR = workspace;
-  });
-
-  afterEach(() => {
-    if (previous === undefined) delete process.env.WORKSPACE_DIR;
-    else process.env.WORKSPACE_DIR = previous;
-    rmSync(workspace, { recursive: true, force: true });
-  });
-
-  const issueWith = (id: string, filename: string) =>
-    rawIssue({}, { attachment: [rawIssueAttachment(id, filename)] });
-
-  it('streams the content into .speedwave/jira and returns path, size and MIME type', async () => {
-    client.get.mockResolvedValueOnce(issueWith('20001', 'bug.png'));
-    client.downloadAttachmentContent.mockResolvedValueOnce(Readable.from([Buffer.from('png!')]));
-    const res = await createJiraIssuesClient(client).downloadAttachment('PROJ-1', '20001');
-    const target = join(workspace, '.speedwave', 'jira', '20001-bug.png');
-    expect(res).toEqual({
-      id: '20001',
-      filename: 'bug.png',
-      mime_type: 'image/png',
-      size: 4,
-      path: target,
-    });
-    expect(readFileSync(target, 'utf-8')).toBe('png!');
-    expect(client.downloadAttachmentContent).toHaveBeenCalledWith('20001');
-  });
-
-  it('overwrites the file on a repeated download', async () => {
-    const c = createJiraIssuesClient(client);
-    client.get.mockResolvedValue(issueWith('20001', 'bug.png'));
-    client.downloadAttachmentContent
-      .mockResolvedValueOnce(Readable.from([Buffer.from('first')]))
-      .mockResolvedValueOnce(Readable.from([Buffer.from('2nd')]));
-    await c.downloadAttachment('PROJ-1', '20001');
-    const res = await c.downloadAttachment('PROJ-1', '20001');
-    expect(res.size).toBe(3);
-    expect(readFileSync(res.path, 'utf-8')).toBe('2nd');
-    expect(readdirSync(join(workspace, '.speedwave', 'jira'))).toEqual(['20001-bug.png']);
-  });
-
-  it.each([
-    ['../../etc/passwd', '20001-passwd'],
-    ['..\\..\\evil.sh', '20001-evil.sh'],
-    ['.hidden', '20001-hidden'],
-    ['a b$c.txt', '20001-a_b_c.txt'],
-  ])('keeps the file inside the jira directory for the name %s', async (name, saved) => {
-    client.get.mockResolvedValueOnce(issueWith('20001', name));
-    client.downloadAttachmentContent.mockResolvedValueOnce(Readable.from([Buffer.from('x')]));
-    const res = await createJiraIssuesClient(client).downloadAttachment('PROJ-1', '20001');
-    expect(res.path).toBe(join(workspace, '.speedwave', 'jira', saved));
-  });
-
-  it('leaves no partial file when the stream fails', async () => {
-    client.get.mockResolvedValueOnce(issueWith('20001', 'bug.png'));
-    client.downloadAttachmentContent.mockResolvedValueOnce(
-      Readable.from(
-        (async function* () {
-          yield Buffer.from('half');
-          throw new Error('connection reset');
-        })()
-      )
-    );
-    await expect(
-      createJiraIssuesClient(client).downloadAttachment('PROJ-1', '20001')
-    ).rejects.toThrow('connection reset');
-    expect(readdirSync(join(workspace, '.speedwave', 'jira'))).toEqual([]);
-  });
-
-  it('refuses an attachment of another issue and makes no content request', async () => {
-    client.get.mockResolvedValueOnce(issueWith('20001', 'bug.png'));
-    await expect(
-      createJiraIssuesClient(client).downloadAttachment('PROJ-1', '99999')
-    ).rejects.toBeInstanceOf(AttachmentNotFoundError);
-    expect(client.downloadAttachmentContent).not.toHaveBeenCalled();
-  });
-
-  it('refuses an issue outside the project allowlist and makes no content request', async () => {
-    const restricted = stubClient(['ALLOWED']);
-    restricted.get.mockResolvedValueOnce(rawIssue({}, { project: { key: 'OTHER' } }));
-    await expect(
-      createJiraIssuesClient(restricted).downloadAttachment('OTHER-1', '20001')
-    ).rejects.toBeInstanceOf(ScopeError);
-    expect(restricted.downloadAttachmentContent).not.toHaveBeenCalled();
-  });
-
-  it('does not touch the workspace when the attachment is refused', async () => {
-    mkdirSync(join(workspace, 'keep'));
-    writeFileSync(join(workspace, 'keep', 'f'), 'x');
-    client.get.mockResolvedValueOnce(issueWith('20001', 'bug.png'));
-    await expect(
-      createJiraIssuesClient(client).downloadAttachment('PROJ-1', '1')
-    ).rejects.toBeInstanceOf(AttachmentNotFoundError);
-    expect(readdirSync(workspace)).toEqual(['keep']);
   });
 });
