@@ -1,4 +1,4 @@
-import { constants, promises as fsp } from 'node:fs';
+import { constants, promises as fsp, type Stats } from 'node:fs';
 import path from 'node:path';
 import type { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -10,7 +10,6 @@ import {
   type WorkspaceFileErrorKind,
 } from './workspace-file.js';
 
-/** Most workspace files one tool call accepts. */
 export const MAX_WORKSPACE_FILES = 10;
 
 /** Rejection of a file list; the message says what to change. */
@@ -139,4 +138,31 @@ async function ensureInsideDir(root: string, dir: string): Promise<string> {
     );
   }
   return real;
+}
+
+/**
+ * Open a resolved workspace file for reading without following a link swapped in for its last path element.
+ * @param file - The file `resolveWorkspaceFile` returned.
+ */
+export async function openWorkspaceFile(
+  file: WorkspaceFile
+): Promise<{ handle: fsp.FileHandle; size: number }> {
+  let handle: fsp.FileHandle;
+  try {
+    handle = await fsp.open(file.path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ELOOP') {
+      throw new WorkspaceFileError(
+        'outside_workspace',
+        `File changed into a link after it was checked: ${file.path}`
+      );
+    }
+    throw error;
+  }
+  const stats: Stats = await handle.stat();
+  if (!stats.isFile()) {
+    await handle.close();
+    throw new WorkspaceFileError('not_a_file', `Not a regular file: ${file.path}`);
+  }
+  return { handle, size: stats.size };
 }

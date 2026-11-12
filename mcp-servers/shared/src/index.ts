@@ -154,6 +154,7 @@ export type { WorkspaceFile, WorkspaceFileErrorKind } from './workspace-file.js'
 export {
   MAX_WORKSPACE_FILES,
   WorkspaceFileListError,
+  openWorkspaceFile,
   resolveWorkspaceFileList,
   sanitizeFilename,
   writeWorkspaceDownload,

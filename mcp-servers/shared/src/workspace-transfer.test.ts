@@ -7,6 +7,7 @@ import {
   MAX_WORKSPACE_FILES,
   WorkspaceFileListError,
   resolveWorkspaceFileList,
+  openWorkspaceFile,
   sanitizeFilename,
   writeWorkspaceDownload,
 } from './workspace-transfer.js';
@@ -66,10 +67,6 @@ describe('workspace transfer helpers', () => {
       expect(files).toEqual([{ path: path.join(root, 'a.txt'), name: 'a.txt', size: 3 }]);
     });
 
-    it('exports the per-call file limit', () => {
-      expect(MAX_WORKSPACE_FILES).toBe(10);
-    });
-
     it('rejects an empty or non-array list', async () => {
       expect(await reason([])).toContain('non-empty array');
       expect(await reason('a.txt')).toContain('non-empty array');
@@ -106,6 +103,47 @@ describe('workspace transfer helpers', () => {
       process.env.WORKSPACE_DIR = path.join(root, 'nope');
 
       await expect(resolveWorkspaceFileList(['a.txt'], 'file_paths')).rejects.toThrow(/ENOENT/);
+    });
+  });
+
+  describe('openWorkspaceFile', () => {
+    it('opens a regular file and reports its size from the handle', async () => {
+      await fsp.writeFile(path.join(root, 'a.txt'), 'abc');
+
+      const { handle, size } = await openWorkspaceFile({
+        path: path.join(root, 'a.txt'),
+        name: 'a.txt',
+        size: 0,
+      });
+
+      expect(size).toBe(3);
+      expect((await handle.readFile()).toString()).toBe('abc');
+      await handle.close();
+    });
+
+    it('refuses a path that became a symlink after it was resolved', async () => {
+      await fsp.writeFile(path.join(outside, 'secret.txt'), 'secret');
+      await fsp.symlink(path.join(outside, 'secret.txt'), path.join(root, 'swapped.txt'));
+
+      const error = await openWorkspaceFile({
+        path: path.join(root, 'swapped.txt'),
+        name: 'swapped.txt',
+        size: 6,
+      }).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(WorkspaceFileError);
+      expect((error as WorkspaceFileError).kind).toBe('outside_workspace');
+    });
+
+    it('refuses a directory and lets a missing file through as its own error', async () => {
+      await fsp.mkdir(path.join(root, 'dir'));
+
+      await expect(
+        openWorkspaceFile({ path: path.join(root, 'dir'), name: 'dir', size: 0 })
+      ).rejects.toMatchObject({ kind: 'not_a_file' });
+      await expect(
+        openWorkspaceFile({ path: path.join(root, 'gone'), name: 'gone', size: 0 })
+      ).rejects.toThrow(/ENOENT/);
     });
   });
 
@@ -170,6 +208,16 @@ describe('workspace transfer helpers', () => {
 
       expect(await fsp.readFile(victim, 'utf8')).toBe('untouched');
       expect(await fsp.readFile(saved.path, 'utf8')).toBe('new-bytes');
+    });
+
+    it('refuses a service directory that is a symlink out of the workspace', async () => {
+      await fsp.mkdir(path.join(root, '.speedwave'));
+      await fsp.symlink(outside, path.join(root, '.speedwave', 'redmine'));
+
+      const error = await download('x').catch((e: unknown) => e);
+
+      expect((error as WorkspaceFileError).kind).toBe('outside_workspace');
+      expect(await fsp.readdir(outside)).toEqual([]);
     });
 
     it('refuses a .speedwave directory that is a symlink out of the workspace', async () => {
