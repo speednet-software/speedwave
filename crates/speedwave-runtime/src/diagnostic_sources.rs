@@ -4,6 +4,10 @@
 use std::path::{Path, PathBuf};
 
 use crate::consts;
+use crate::export_window::{Retention, TimestampShape};
+
+/// Bytes of an untimestamped source (`lima/serial.log`) the export keeps.
+pub const SERIAL_LOG_EXPORT_BYTES: usize = 256 * 1024;
 
 /// Platforms a source exists on. `lima/serial.log` is macOS-only.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -54,6 +58,8 @@ pub struct DiagnosticSource {
     pub platforms: Platforms,
     /// How the source's raw text is obtained.
     pub kind: SourceKind,
+    /// What the diagnostics export keeps of it for a time window.
+    pub retention: Retention,
 }
 
 fn mcp_os_path(data_dir: &Path, _project: &str) -> Option<PathBuf> {
@@ -101,6 +107,7 @@ pub const DIAGNOSTIC_SOURCES: &[DiagnosticSource] = &[
         displayable: true,
         platforms: Platforms::All,
         kind: SourceKind::ComposeLogs,
+        retention: Retention::Windowed(TimestampShape::ContainerPrefix),
     },
     DiagnosticSource {
         key: "desktop",
@@ -108,6 +115,7 @@ pub const DIAGNOSTIC_SOURCES: &[DiagnosticSource] = &[
         displayable: true,
         platforms: Platforms::All,
         kind: SourceKind::DesktopLogDir,
+        retention: Retention::Windowed(TimestampShape::Rfc3339Prefix),
     },
     DiagnosticSource {
         key: "mcp-os",
@@ -115,6 +123,7 @@ pub const DIAGNOSTIC_SOURCES: &[DiagnosticSource] = &[
         displayable: true,
         platforms: Platforms::All,
         kind: SourceKind::File(mcp_os_path),
+        retention: Retention::Windowed(TimestampShape::Rfc3339Prefix),
     },
     DiagnosticSource {
         key: "claude",
@@ -122,6 +131,7 @@ pub const DIAGNOSTIC_SOURCES: &[DiagnosticSource] = &[
         displayable: true,
         platforms: Platforms::All,
         kind: SourceKind::File(claude_session_path),
+        retention: Retention::Windowed(TimestampShape::Rfc3339Prefix),
     },
     DiagnosticSource {
         key: "entrypoint",
@@ -129,6 +139,7 @@ pub const DIAGNOSTIC_SOURCES: &[DiagnosticSource] = &[
         displayable: true,
         platforms: Platforms::All,
         kind: SourceKind::File(entrypoint_path),
+        retention: Retention::Windowed(TimestampShape::Rfc3339Prefix),
     },
     DiagnosticSource {
         key: "lima",
@@ -136,6 +147,7 @@ pub const DIAGNOSTIC_SOURCES: &[DiagnosticSource] = &[
         displayable: true,
         platforms: Platforms::MacOnly,
         kind: SourceKind::File(lima_serial_path),
+        retention: Retention::LastBytes(SERIAL_LOG_EXPORT_BYTES),
     },
     DiagnosticSource {
         key: "compose-yml",
@@ -143,6 +155,7 @@ pub const DIAGNOSTIC_SOURCES: &[DiagnosticSource] = &[
         displayable: false,
         platforms: Platforms::All,
         kind: SourceKind::File(compose_yml_path),
+        retention: Retention::Whole,
     },
     DiagnosticSource {
         key: "audit-proxy",
@@ -150,6 +163,7 @@ pub const DIAGNOSTIC_SOURCES: &[DiagnosticSource] = &[
         displayable: true,
         platforms: Platforms::All,
         kind: SourceKind::File(audit_proxy_path),
+        retention: Retention::Windowed(TimestampShape::JsonlTs),
     },
     DiagnosticSource {
         key: "audit-hub",
@@ -157,6 +171,7 @@ pub const DIAGNOSTIC_SOURCES: &[DiagnosticSource] = &[
         displayable: true,
         platforms: Platforms::All,
         kind: SourceKind::File(audit_hub_path),
+        retention: Retention::Windowed(TimestampShape::JsonlTs),
     },
     DiagnosticSource {
         key: "proxy-usage",
@@ -164,6 +179,7 @@ pub const DIAGNOSTIC_SOURCES: &[DiagnosticSource] = &[
         displayable: false,
         platforms: Platforms::All,
         kind: SourceKind::File(proxy_usage_path),
+        retention: Retention::Windowed(TimestampShape::JsonlTs),
     },
 ];
 
@@ -250,6 +266,37 @@ mod tests {
             .expect("entrypoint source must be registered");
         assert!(s.displayable);
         assert_eq!(s.zip_entry, "claude/entrypoint.log");
+    }
+
+    #[test]
+    fn retention_matches_the_timestamp_shape_each_source_writes() {
+        let retention = |key: &str| {
+            DIAGNOSTIC_SOURCES
+                .iter()
+                .find(|s| s.key == key)
+                .map(|s| s.retention)
+        };
+        let rfc3339 = Some(Retention::Windowed(TimestampShape::Rfc3339Prefix));
+        for key in ["desktop", "mcp-os", "claude", "entrypoint"] {
+            assert_eq!(retention(key), rfc3339, "{key}");
+        }
+        assert_eq!(
+            retention("compose"),
+            Some(Retention::Windowed(TimestampShape::ContainerPrefix))
+        );
+        assert_eq!(
+            retention("lima"),
+            Some(Retention::LastBytes(SERIAL_LOG_EXPORT_BYTES))
+        );
+        assert_eq!(retention("compose-yml"), Some(Retention::Whole));
+        for s in DIAGNOSTIC_SOURCES {
+            assert_eq!(
+                s.zip_entry.ends_with(".jsonl"),
+                s.retention == Retention::Windowed(TimestampShape::JsonlTs),
+                "{}",
+                s.key
+            );
+        }
     }
 
     #[test]

@@ -36,6 +36,20 @@ export interface LogFilters {
   source: string;
 }
 
+/** Time window of a diagnostics export; mirrors `export_window.rs::ExportWindow`. */
+export type ExportWindow = '2h' | '24h' | '7d' | '30d';
+
+/** Window choices of the export selector, in display order. */
+export const EXPORT_WINDOWS: readonly { value: ExportWindow; label: string }[] = [
+  { value: '2h', label: '2 h' },
+  { value: '24h', label: '24 h' },
+  { value: '7d', label: '7 days' },
+  { value: '30d', label: '30 days' },
+];
+
+/** Window the selector starts on at every visit. */
+export const DEFAULT_EXPORT_WINDOW: ExportWindow = '7d';
+
 /** How many lines to request from the backend on each fetch. */
 export const LOGS_TAIL_LINES = 500;
 
@@ -293,13 +307,26 @@ export function sortLogLinesByTime(lines: LogLine[]): LogLine[] {
         >
           ↻<span class="hidden sm:inline"> refresh</span>
         </button>
+        <select
+          class="mono flex-shrink-0 rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-2 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)] disabled:opacity-40 disabled:cursor-not-allowed"
+          data-testid="logs-export-window"
+          aria-label="Time window of the diagnostics export"
+          [disabled]="diagnosticsExporting()"
+          (change)="onExportWindowChange($event)"
+        >
+          @for (opt of exportWindows; track opt.value) {
+            <option [value]="opt.value" [selected]="opt.value === exportWindow()">
+              {{ opt.label }}
+            </option>
+          }
+        </select>
         <button
           type="button"
           class="mono flex-shrink-0 rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-2 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-40 disabled:cursor-not-allowed"
           data-testid="logs-export"
           [disabled]="diagnosticsExporting() || !projectState.activeProject()"
           (click)="exportDiagnostics()"
-          appTooltip="Collects app logs, container logs, and system info into a sanitized ZIP (no tokens or secrets)."
+          appTooltip="Collects app logs, container logs, and system info from the chosen time window into a sanitized ZIP (no tokens or secrets)."
           placement="bottom"
         >
           {{ diagnosticsExporting() ? 'exporting…' : 'export diagnostics' }}
@@ -526,6 +553,10 @@ export class LogsViewComponent implements OnInit, OnDestroy {
   readonly health = this.systemHealth.health;
   /** Whether the expandable details row is open. */
   readonly detailsOpen = signal<boolean>(false);
+  /** Time window the next diagnostics export covers. */
+  readonly exportWindow = signal<ExportWindow>(DEFAULT_EXPORT_WINDOW);
+  /** Window choices rendered by the export selector. */
+  protected readonly exportWindows = EXPORT_WINDOWS;
   /** True while a diagnostics export is in flight. */
   readonly diagnosticsExporting = signal<boolean>(false);
   /** Path to the most recently exported diagnostics ZIP (empty when none). */
@@ -805,7 +836,10 @@ export class LogsViewComponent implements OnInit, OnDestroy {
     this.diagnosticsPath.set('');
     this.diagnosticsCopied.set(false);
     try {
-      const path = await this.tauri.invoke<string>('export_diagnostics', { project });
+      const path = await this.tauri.invoke<string>('export_diagnostics', {
+        project,
+        window: this.exportWindow(),
+      });
       const trimmed = (path ?? '').trim();
       this.diagnosticsPath.set(trimmed);
       if (trimmed.length > 0) {
@@ -816,6 +850,16 @@ export class LogsViewComponent implements OnInit, OnDestroy {
     } finally {
       this.diagnosticsExporting.set(false);
     }
+  }
+
+  /**
+   * Native `<select>` change handler of the export window; a value outside the known windows is ignored.
+   * @param event - DOM change event from the export window dropdown.
+   */
+  protected onExportWindowChange(event: Event): void {
+    const value = (event.target as HTMLSelectElement | null)?.value;
+    const chosen = EXPORT_WINDOWS.find((w) => w.value === value);
+    if (chosen) this.exportWindow.set(chosen.value);
   }
 
   /** Copies the diagnostics path to the clipboard; on rejection surfaces the error banner. */
