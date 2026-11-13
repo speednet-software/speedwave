@@ -832,9 +832,11 @@ export class GitHubClient {
           pull_number: number,
           uuid: result.uuid,
           headers: { 'X-GitHub-Api-Version': MERGE_API_VERSION },
+          request: { retries: 0 },
         }
       );
-      result = this.mapMergeResult(res.data as Record<string, unknown>);
+      const polled = this.mapMergeResult(res.data as Record<string, unknown>);
+      result = { ...polled, uuid: polled.uuid ?? result.uuid };
     }
     return {
       status: result.status,

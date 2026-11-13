@@ -771,7 +771,6 @@ describe('GitHubClient', () => {
     const RESULT_ROUTE = 'GET /repos/{owner}/{repo}/pulls/{pull_number}/merge-async/{uuid}';
     const pending = { status: 'pending', details: { uuid: 'u-1', message: 'Working' } };
 
-    /** Runs a merge call while advancing fake timers so the poll sleeps resolve. */
     async function runMerge(...args: Parameters<GitHubClientType['mergePullRequest']>) {
       vi.useFakeTimers();
       try {
@@ -844,6 +843,7 @@ describe('GitHubClient', () => {
         pull_number: 3,
         uuid: 'u-1',
         headers: { 'X-GitHub-Api-Version': '2026-03-10' },
+        request: { retries: 0 },
       });
       expect(result).toEqual({
         status: 'enqueued',
@@ -883,6 +883,20 @@ describe('GitHubClient', () => {
         2,
         RESULT_ROUTE,
         expect.objectContaining({ uuid: 'u-1' })
+      );
+      expect(result.status).toBe('enqueued');
+    });
+
+    it('reads a top-level uuid from the 409 body and keeps polling without a uuid in the poll', async () => {
+      octokit.request
+        .mockRejectedValueOnce({ status: 409, response: { data: { uuid: 'u-2' } } })
+        .mockResolvedValueOnce({ data: { status: 'pending' } })
+        .mockResolvedValueOnce({ data: { status: 'enqueued' } });
+      const result = await runMerge('o', 'r', 3);
+      expect(octokit.request).toHaveBeenNthCalledWith(
+        3,
+        RESULT_ROUTE,
+        expect.objectContaining({ uuid: 'u-2' })
       );
       expect(result.status).toBe('enqueued');
     });
