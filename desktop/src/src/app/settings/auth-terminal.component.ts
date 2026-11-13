@@ -62,7 +62,7 @@ import { LoggerService } from '../services/logger.service';
       }
       @if (isWindows) {
         <p class="mono mt-2 text-[10px] leading-relaxed text-[var(--ink-mute)]">
-          On Windows, run this in a PowerShell terminal (where the speedwave command is on PATH).
+          On Windows, run this in a PowerShell terminal.
         </p>
       }
       @if (error) {

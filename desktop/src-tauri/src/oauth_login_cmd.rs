@@ -2,7 +2,7 @@
 //! project. OAuth happens in the container; Speedwave never sees or stores the token.
 
 use crate::auth_commands::{
-    build_auth_command_for_platform, ensure_cli_installed, resolve_project_dirs,
+    build_auth_command_for_platform, ensure_cli_installed, resolve_login_dirs,
 };
 use crate::types::check_project;
 
@@ -227,15 +227,13 @@ pub async fn start_oauth_login(project: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         log::info!("starting OAuth login terminal for project {project}");
 
-        let (project_dir, home, data_dir, default_data_dir) = resolve_project_dirs(&project)?;
+        let (home, data_dir) = resolve_login_dirs(&project)?;
         ensure_cli_installed()?;
 
         let cmd = build_auth_command_for_platform(
             &project,
-            &project_dir,
             &home,
             &data_dir,
-            default_data_dir.as_deref(),
             cfg!(target_os = "windows"),
         );
         open_terminal_with_command(&cmd).map_err(|e| {
