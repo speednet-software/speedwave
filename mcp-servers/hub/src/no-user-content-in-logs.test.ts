@@ -234,6 +234,36 @@ describe('hub logging carries no user content', () => {
       expect(output()).not.toContain('SENTINEL-997');
     });
 
+    it('logs the service and NO_SUCH_TOOL for a tool the service does not have', async () => {
+      const result = await executeCode({
+        code: `return await slack.SENTINEL_997_tool({});`,
+        timeoutMs: 5000,
+      });
+
+      expect(result.error?.message).toContain('SENTINEL_997_tool is not a function');
+      expect(output()).toContain(
+        `[executor] unknown tool service=slack name length=${'SENTINEL_997_tool'.length} code=NO_SUCH_TOOL`
+      );
+      expect(output()).not.toContain('SENTINEL_997');
+    });
+
+    it('logs no unknown tool line for an object that is not a service', async () => {
+      await executeCode({
+        code: `const SENTINEL_997_obj = {}; return SENTINEL_997_obj.SENTINEL_997_call();`,
+        timeoutMs: 5000,
+      });
+
+      expect(output()).not.toContain('unknown tool');
+      expect(output()).not.toContain('SENTINEL_997');
+    });
+
+    it('logs no unknown tool line for a sandbox global that is not a service', async () => {
+      await executeCode({ code: `return console.SENTINEL_997_call();`, timeoutMs: 5000 });
+
+      expect(output()).not.toContain('unknown tool');
+      expect(output()).not.toContain('SENTINEL_997');
+    });
+
     it('logs the denylist pattern and the hit position for rejected code', async () => {
       const code = `const v = 'SENTINEL-997-reject'; eval(v);`;
 

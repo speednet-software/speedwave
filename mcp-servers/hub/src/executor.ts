@@ -603,6 +603,11 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
       const serviceTools = sandboxContext[serviceName as keyof typeof sandboxContext];
 
       if (serviceTools && typeof serviceTools === 'object') {
+        if (Object.hasOwn(tools, serviceName)) {
+          console.warn(
+            `${ts()} [executor] unknown tool service=${serviceName} name length=${attemptedMethod.length} code=NO_SUCH_TOOL`
+          );
+        }
         const availableMethods = Object.keys(serviceTools).filter(
           (k) => typeof (serviceTools as Record<string, unknown>)[k] === 'function'
         );

@@ -503,13 +503,16 @@ export function _clearWorkerSessionCacheForTesting(): void {
 }
 
 const TOOL_ERROR_LEADS: readonly { pattern: RegExp; code?: string }[] = [
-  { pattern: /^(?:[a-z]+\.[A-Za-z]+: )?(net::ERR_[A-Z_]{1,60})\b/ },
+  { pattern: /^(?:[A-Za-z]+\.[A-Za-z]+: )?(net::ERR_[A-Z_]{1,60})\b/ },
   { pattern: /^(TimeoutError|TargetClosedError|AbortError|TypeError|RangeError|SyntaxError)\b/ },
   { pattern: /^(?:HTTP |Request failed with status code )([1-5]\d{2})\b/, code: 'HTTP' },
-  { pattern: /^Resource not found in /, code: 'NOT_FOUND' },
-  { pattern: /^Permission denied/, code: 'PERMISSION_DENIED' },
-  { pattern: /^Authentication failed/, code: 'AUTH_FAILED' },
-  { pattern: /^GitHub API rate limit exceeded/, code: 'RATE_LIMITED' },
+  { pattern: /^(?:Resource not found in |Atlassian resource not found\b)/, code: 'NOT_FOUND' },
+  { pattern: /^(?:Atlassian p|P)ermission denied/, code: 'PERMISSION_DENIED' },
+  { pattern: /^(?:Atlassian a|A)uthentication failed/, code: 'AUTH_FAILED' },
+  { pattern: /^(?:GitHub API|Atlassian) rate limit exceeded/, code: 'RATE_LIMITED' },
+  { pattern: /^Ref \S+ not found in the current page snapshot\b/, code: 'REF_NOT_FOUND' },
+  { pattern: /^Tool "[^"\n]*" not found$/, code: 'NO_SUCH_TOOL' },
+  { pattern: /^Invalid [A-Za-z_]/, code: 'INVALID_PARAM' },
 ];
 
 function workerError(message: string, code: string): Error {

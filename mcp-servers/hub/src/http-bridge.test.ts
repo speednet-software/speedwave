@@ -938,6 +938,62 @@ describe('http-bridge', () => {
           'RATE_LIMITED',
         ],
         ['a phrase in the middle', 'Page says: Resource not found in the archive', 'TOOL_ERROR'],
+        [
+          'the Playwright navigation of a host that does not resolve',
+          '### Error\nError: browserBackend.callTool: net::ERR_NAME_NOT_RESOLVED at http://x.invalid/\n  - navigating to "http://x.invalid/", waiting until "domcontentloaded"',
+          'net::ERR_NAME_NOT_RESOLVED',
+        ],
+        [
+          'the Playwright navigation of a refused connection',
+          '### Error\nError: browserBackend.callTool: net::ERR_CONNECTION_REFUSED at http://127.0.0.1:9/',
+          'net::ERR_CONNECTION_REFUSED',
+        ],
+        [
+          'a method prefix with a space',
+          'browser Backend.callTool: net::ERR_NAME_NOT_RESOLVED',
+          'TOOL_ERROR',
+        ],
+        [
+          'the Playwright ref that is not in the snapshot',
+          '### Error\nError: Ref e42 not found in the current page snapshot. Try capturing new snapshot.',
+          'REF_NOT_FOUND',
+        ],
+        [
+          'the Playwright tool that does not exist',
+          '### Error\nTool "browser_nope" not found',
+          'NO_SUCH_TOOL',
+        ],
+        [
+          'a parameter the tool does not declare',
+          'Error: Invalid issue_key. getIssue does not accept this parameter, so the call was rejected and nothing was sent.',
+          'INVALID_PARAM',
+        ],
+        [
+          'a required parameter that is missing',
+          'Error: Invalid project_id (received: undefined). getProjectFull requires project_id, so the call was rejected and nothing was sent.',
+          'INVALID_PARAM',
+        ],
+        [
+          'the atlassian not found message',
+          'Error: Atlassian resource not found: Issue does not exist or you do not have permission to see it.',
+          'NOT_FOUND',
+        ],
+        [
+          'the atlassian permission message',
+          'Error: Atlassian permission denied. The account may lack permission for this project/space.',
+          'PERMISSION_DENIED',
+        ],
+        [
+          'the atlassian authentication message',
+          'Error: Atlassian authentication failed. Check the account email and API token.',
+          'AUTH_FAILED',
+        ],
+        [
+          'the atlassian rate limit message',
+          'Error: Atlassian rate limit exceeded. Try again shortly.',
+          'RATE_LIMITED',
+        ],
+        ['an Invalid word in the middle', 'Page says Invalid input here', 'TOOL_ERROR'],
       ])('logs the code for %s', async (_label, text, code) => {
         const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
@@ -956,6 +1012,17 @@ describe('http-bridge', () => {
         await failWith('Error: file SENTINEL-997-bridge has no access');
         await failWith('{"code":"SENTINEL-997-bridge"}');
         await failWith('TimeoutError: SENTINEL-997-bridge');
+        await failWith(
+          '### Error\nError: browserBackend.callTool: net::ERR_NAME_NOT_RESOLVED at http://SENTINEL-997-bridge.invalid/'
+        );
+        await failWith(
+          '### Error\nError: Ref SENTINEL-997-bridge not found in the current page snapshot.'
+        );
+        await failWith('### Error\nTool "SENTINEL-997-bridge" not found');
+        await failWith(
+          'Error: Invalid SENTINEL-997-bridge. getIssue does not accept this parameter'
+        );
+        await failWith('Error: Atlassian resource not found: SENTINEL-997-bridge');
 
         expect(
           inspect(
