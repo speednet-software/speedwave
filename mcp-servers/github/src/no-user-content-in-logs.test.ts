@@ -41,4 +41,16 @@ describe('GitHub request log', () => {
     expect(logged()).not.toContain('SENTINEL-997');
     expect(logged()).toMatch(/GET \/search\/code - 422 with id REQ-997/);
   });
+
+  it('keeps the query out of the warnings and drops the debug and info lines of the Octokit log', () => {
+    const logged = spyOnConsole();
+    const client = new GitHubClient({ token: 'x' });
+
+    client['octokit'].log.debug('SENTINEL-997-debug');
+    client['octokit'].log.info('SENTINEL-997-info');
+    client['octokit'].log.warn('GET /search/code?q=SENTINEL-997-query is deprecated');
+
+    expect(logged()).not.toContain('SENTINEL-997');
+    expect(logged()).toContain('GET /search/code');
+  });
 });
