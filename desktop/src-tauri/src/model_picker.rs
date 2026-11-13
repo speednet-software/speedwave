@@ -420,7 +420,8 @@ mod tests {
         let arg = picker_settings_arg(Some(&own)).expect("the user does not list Fable 5.2");
         let parsed: serde_json::Value = serde_json::from_str(&arg).expect("valid JSON");
         assert_eq!(parsed["modelPicker"]["replaceBuiltInOptions"], false);
-        let models: Vec<&str> = picker_options(&arg)
+        let options = picker_options(&arg);
+        let models: Vec<&str> = options
             .iter()
             .map(|row| row["model"].as_str().expect("a model"))
             .collect();
