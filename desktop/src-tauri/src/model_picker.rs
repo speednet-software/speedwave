@@ -475,7 +475,7 @@ mod tests {
     #[test]
     fn ascii_json_escapes_characters_outside_the_basic_plane_as_surrogate_pairs() {
         let escaped = ascii_json(r#"{"label":"a·😀"}"#);
-        assert_eq!(escaped, r#"{"label":"a·😀"}"#);
+        assert_eq!(escaped, r#"{"label":"a\u00b7\ud83d\ude00"}"#);
         let parsed: serde_json::Value = serde_json::from_str(&escaped).expect("valid JSON");
         assert_eq!(parsed["label"], "a·😀");
     }
