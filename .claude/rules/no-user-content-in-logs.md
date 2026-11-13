@@ -24,14 +24,16 @@ paths:
 
 - Tool name, service name, category (`[READ]`, `[WRITE]`, `[DELETE]`), call id, tab id, session id.
 - Parameter names, with the length of each value, never the value: `os.createReminder(keys name:23,notes:23)`.
-- Lengths, byte counts, counts of items, booleans such as "last char is a closing bracket", file extension (only when it is a short alphanumeric token), media type.
+- Lengths, byte counts, counts of items, booleans such as "last char is a closing bracket", media type.
+- File extension only from the closed list `paste_cmd.rs::LOGGED_EXTENSIONS` (mirrored by `LOGGED_EXTENSIONS` in `desktop/src/src/app/services/file-attachment.service.ts`, guarded by `logged_extensions_match_ts_mirror`); any other extension is logged as `other`, a name without one as `none`. A truncated extension is not enough: a crafted name puts its text after the last dot.
 - Error code and error class name. Never the message.
-- Resource identifiers that diagnosis needs and that are not content: repository owner and name, issue key, pull request number, Redmine issue number, HTTP status. These stay in worker logs on purpose, because telling a 404 from a 403 for a given resource is how an integration failure gets diagnosed.
+- HTTP status. Resource identifiers that are not content (repository owner and name, issue key, pull request number, Redmine issue number) may be logged, but no log line is required to carry one: the diagnosis of an integration failure rests on the service, the tool, the error code and the time, and the user has the resource from the agent's full error message.
 - A rejection reason and the length of the rejected value (path validators: `attackType`, `reason`, `pathLength`), not the value.
 
 ## Errors
 
 - Node: log `describeError(error)` from `mcp-servers/shared/src/logger.ts`, which returns `code=<CODE> name=<Name>` and never the message. The agent still receives the full message in the tool result; only the log is reduced.
+- A worker error that reaches the hub as text gets its code from a closed set: a `code` field in the JSON text, else the first matching lead of `mcp-servers/hub/src/http-bridge.ts::TOOL_ERROR_LEADS`, else `TOOL_ERROR`. Each lead is anchored at the start of the text and yields a fixed code (`NOT_FOUND`, `PERMISSION_DENIED`, `AUTH_FAILED`, `RATE_LIMITED`, `REF_NOT_FOUND`, `NO_SUCH_TOOL`, `INVALID_PARAM`, `HTTP_<status>`) or a token of a fixed shape (`net::ERR_*`, an error class from a fixed list); a code is never copied from free text. A new lead is written from the worker's real message text (its source, or the source of the pinned package for Playwright), with a case in the `error code logged for an isError result` table of `http-bridge.test.ts`. A sandbox call to a tool the service does not have logs `[executor] unknown tool service=<service> name length=<n> code=NO_SUCH_TOOL`, only when `<service>` is a service wrapper.
 - Angular: log `err.name`, not `String(err)`, when the error came from parsing or from user-supplied data. `GlobalErrorHandler` forwards the error name and the stack frames, never the message.
 - Rust: an error text that embeds a path or a user value is logged as a fixed sentence plus size or id, not `{e}`.
 
