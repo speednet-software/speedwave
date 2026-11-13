@@ -4254,6 +4254,30 @@ describe('initializeRedmineClient', () => {
       );
     });
 
+    it('keeps the error message of a failed project lookup out of the log', async () => {
+      mockedFs.readFile.mockImplementation(async (path: any) => {
+        if (path.includes('api_key')) {
+          return 'valid-api-key-123';
+        }
+        if (path.includes('config.json')) {
+          return JSON.stringify({
+            host_url: 'https://redmine.example.com',
+            project_id: 'my-project',
+          });
+        }
+        throw new Error('File not found');
+      });
+      mockAxiosInstance.get.mockRejectedValue(new Error('SENTINEL-997-redmine'));
+
+      const client = await initializeRedmineClient();
+      await client!.getConfig();
+
+      expect(console.warn).toHaveBeenCalledWith(
+        expect.stringContaining('Could not fetch project name')
+      );
+      expect(JSON.stringify(vi.mocked(console.warn).mock.calls)).not.toContain('SENTINEL-997');
+    });
+
     it('should handle 404 from showProject gracefully', async () => {
       mockedFs.readFile.mockImplementation(async (path: any) => {
         if (path.includes('api_key')) {
@@ -4287,7 +4311,7 @@ describe('initializeRedmineClient', () => {
       );
     });
 
-    it('should handle non-Error thrown by showProject gracefully', async () => {
+    it('should handle non-Error thrown by showProject gracefully, without logging it', async () => {
       mockedFs.readFile.mockImplementation(async (path: any) => {
         if (path.includes('api_key')) {
           return 'valid-api-key-123';
@@ -4308,7 +4332,8 @@ describe('initializeRedmineClient', () => {
       expect(client).not.toBeNull();
       const cfg = await client!.getConfig();
       expect(cfg.project_name).toBeUndefined();
-      expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('string error'));
+      expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('code=UNKNOWN'));
+      expect(JSON.stringify(vi.mocked(console.warn).mock.calls)).not.toContain('string error');
     });
 
     it('should not fetch when project_id is absent and project_name is absent', async () => {

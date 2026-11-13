@@ -955,16 +955,18 @@ describe('http-bridge', () => {
       expect(result).toEqual({ ok: true });
     });
 
-    it('should log error message on failure', async () => {
+    it('should log code and name on failure, not the message', async () => {
       const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
       fetchMock.mockRejectedValue(new Error('Network failure'));
 
       await expect(callWorker('gitlab', 'test', {})).rejects.toThrow('Network failure');
       expect(consoleErrorSpy).toHaveBeenCalledWith(
-        expect.stringContaining('[http-bridge]'),
-        expect.stringContaining('Network failure')
+        expect.stringContaining(
+          '[http-bridge] callWorker(gitlab, test) failed: code=UNKNOWN name=Error'
+        )
       );
+      expect(JSON.stringify(consoleErrorSpy.mock.calls)).not.toContain('Network failure');
 
       consoleErrorSpy.mockRestore();
     });

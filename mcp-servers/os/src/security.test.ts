@@ -84,6 +84,16 @@ describe('Security', () => {
       expect(ALLOWED_COMMANDS.notes.size).toBe(7);
     });
 
+    it('logs the length of native CLI stderr, not its content', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      execFileAsyncMock.mockResolvedValue({ stdout: '{}', stderr: 'SENTINEL-997-os\n' });
+
+      await runCommand('reminders', 'list_lists');
+
+      expect(warnSpy).toHaveBeenCalledWith('[mcp-os] reminders.list_lists stderr length=15');
+      warnSpy.mockRestore();
+    });
+
     it('accepts all allowlisted reminders commands', async () => {
       execFileAsyncMock.mockResolvedValue({ stdout: '{}', stderr: '' });
       for (const cmd of ALLOWED_COMMANDS.reminders) {

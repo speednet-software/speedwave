@@ -8,7 +8,8 @@ import { getEngine } from './policy.js';
 import type { Detection } from '@speedwave/policy-engine';
 import { aggregateDetections, writePiiAudit, type DetectionBatch } from './audit-pii.js';
 import { type AllBridges, initializeAllBridges, callWorker } from './http-bridge.js';
-import { TIMEOUTS, ts } from '@speedwave/mcp-shared';
+import { format } from 'node:util';
+import { TIMEOUTS, describeError, ts } from '@speedwave/mcp-shared';
 import { addAutoReturn } from './auto-return.js';
 import {
   paginate,
@@ -144,6 +145,17 @@ interface AuditContext {
   log: (service: string, tool: string, params: unknown, denial?: AccessDenial) => void;
 }
 
+/**
+ * Parameter names with the length of each value's JSON form, never the values: `keys name:23,tags:20`.
+ * @param params - Parameters passed to the tool.
+ */
+function describeParams(params: Record<string, unknown>): string {
+  const keys = Object.entries(params).map(
+    ([name, value]) => `${name}:${JSON.stringify(value)?.length ?? 0}`
+  );
+  return keys.length > 0 ? `keys ${keys.join(',')}` : '';
+}
+
 /** Create audit context: logs each tool call; PII Tokenizer protects sensitive data first. */
 function createAuditContext(): AuditContext {
   const entries: AuditEntry[] = [];
@@ -162,7 +174,7 @@ function createAuditContext(): AuditContext {
       entries.push(entry);
       const verdict = denial ? ` outcome=denied reason=${denial.reason}` : '';
       console.log(
-        `${ts()} [${category}] ${service}.${tool}(${JSON.stringify(params ?? {})})${verdict}`
+        `${ts()} [${category}] ${service}.${tool}(${describeParams(entry.params)})${verdict}`
       );
     },
   };
@@ -172,12 +184,20 @@ function createAuditContext(): AuditContext {
  * Validate code before execution; returns an error message when a forbidden pattern is found.
  * @param code - The JavaScript code to validate.
  */
-function validateCode(code: string): { valid: boolean; error?: string } {
+function validateCode(code: string): {
+  valid: boolean;
+  error?: string;
+  pattern?: string;
+  position?: number;
+} {
   for (const pattern of FORBIDDEN_PATTERNS) {
-    if (pattern.test(code)) {
+    const position = code.search(pattern);
+    if (position >= 0) {
       return {
         valid: false,
         error: `Forbidden pattern detected: ${pattern.source}`,
+        pattern: pattern.source,
+        position,
       };
     }
   }
@@ -219,38 +239,6 @@ function tokenizeErrorText(text: string): { value: string; detections: Detection
   } catch (err) {
     console.error(`${ts()} [pii] Failed to tokenize error message; degrading to generic:`, err);
     return { value: 'tool call failed', detections: [] };
-  }
-}
-
-/** True when NODE_ENV=development or DEBUG is set. */
-function isDevelopmentMode(): boolean {
-  const nodeEnv = process.env.NODE_ENV;
-  const debug = process.env.DEBUG;
-  return nodeEnv === 'development' || Boolean(debug);
-}
-
-/**
- * Logs minimal error info in production; full stack traces in development (NODE_ENV/DEBUG).
- * @param context - Context identifier (e.g. service name).
- * @param error - The error to log.
- */
-function logErrorDebug(context: string, error: unknown): void {
-  const isDev = isDevelopmentMode();
-
-  if (error instanceof Error) {
-    const code = 'code' in error ? (error as { code?: string }).code : undefined;
-    const info = {
-      name: error.name,
-      message: error.message,
-      ...(code && { code }),
-    };
-    console.error(`${ts()} [${context}] Error:`, info);
-
-    if (isDev && error.stack) {
-      console.error(`${ts()}`, error.stack);
-    }
-  } else {
-    console.error(`${ts()} [${context}] Error:`, error);
   }
 }
 
@@ -306,9 +294,8 @@ function createToolWrappers(
       }
       return value as T;
     } catch (error) {
-      logErrorDebug(serviceName, error);
+      console.error(`${ts()} [${serviceName}] Bridge call failed: ${describeError(error)}`);
       const message = formatErrorMessage(error);
-      console.error(`${ts()} [${serviceName}] Bridge call failed:`, message);
       const { value: tokenizedMessage, detections } = tokenizeErrorText(message);
       if (detections.length > 0) {
         const tool = toolName ? `${serviceName}.${toolName}` : serviceName;
@@ -516,6 +503,9 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
 
   const validation = validateCode(code);
   if (!validation.valid) {
+    console.warn(
+      `${ts()} [executor] code rejected by pattern ${validation.pattern} at ${validation.position}`
+    );
     return {
       success: false,
       error: {
@@ -534,9 +524,12 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
   const sandboxContext: Record<string, unknown> = {
     ...tools,
     console: {
-      log: (...args: unknown[]) => console.log(`${ts()} [sandbox]`, ...args),
-      warn: (...args: unknown[]) => console.warn(`${ts()} [sandbox]`, ...args),
-      error: (...args: unknown[]) => console.error(`${ts()} [sandbox]`, ...args),
+      log: (...args: unknown[]) =>
+        console.log(`${ts()} [sandbox] log length=${format(...args).length}`),
+      warn: (...args: unknown[]) =>
+        console.warn(`${ts()} [sandbox] warn length=${format(...args).length}`),
+      error: (...args: unknown[]) =>
+        console.error(`${ts()} [sandbox] error length=${format(...args).length}`),
     },
     ...STATIC_SANDBOX_GLOBALS,
   };
@@ -547,7 +540,7 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
       ? `Code may have syntax errors: ${autoResult.parseError}. Execution may fail.`
       : undefined;
     if (syntaxWarning) {
-      console.warn(`${ts()} [executor] ${syntaxWarning}`);
+      console.warn(`${ts()} [executor] Code may have syntax errors; execution may fail`);
     }
     const transformedCode = autoResult.code;
 
@@ -592,8 +585,9 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown execution error';
 
-    console.error(`${ts()} ❌ Execution error: ${message}`);
-    console.error(`${ts()}    Code: ${code.substring(0, 200)}${code.length > 200 ? '...' : ''}`);
+    console.error(
+      `${ts()} ❌ Execution error: ${describeError(error)} (code length=${code.length})`
+    );
 
     let sanitizedMessage = message
       .replace(

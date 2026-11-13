@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ts } from './logger.js';
+import { describeError, ts } from './logger.js';
 
 describe('ts', () => {
   afterEach(() => {
@@ -46,5 +46,34 @@ describe('ts', () => {
   it('round-trips: parsing the inner part yields the same instant', () => {
     const inner = ts().slice(1, -1);
     expect(new Date(inner).getTime()).toBe(Date.parse(inner));
+  });
+});
+
+describe('describeError', () => {
+  const SENTINEL = 'SENTINEL-997-describe';
+
+  it('never carries the message', () => {
+    expect(describeError(new Error(SENTINEL))).not.toContain(SENTINEL);
+  });
+
+  it('reports a string code and the error name', () => {
+    const error = Object.assign(new TypeError(SENTINEL), { code: 'READ_FAILED' });
+    expect(describeError(error)).toBe('code=READ_FAILED name=TypeError');
+  });
+
+  it('maps a numeric status to an HTTP code', () => {
+    const error = Object.assign(new Error(SENTINEL), { status: 404 });
+    expect(describeError(error)).toBe('code=HTTP_404 name=Error');
+  });
+
+  it('drops a code or name that is not a plain token', () => {
+    const error = Object.assign(new Error('x'), { code: `bad ${SENTINEL}`, name: `n ${SENTINEL}` });
+    expect(describeError(error)).toBe('code=UNKNOWN');
+  });
+
+  it('never carries a thrown string or object', () => {
+    expect(describeError(SENTINEL)).toBe('code=UNKNOWN');
+    expect(describeError({ message: SENTINEL })).toBe('code=UNKNOWN');
+    expect(describeError(null)).toBe('code=UNKNOWN');
   });
 });

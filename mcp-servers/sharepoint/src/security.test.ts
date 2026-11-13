@@ -442,8 +442,7 @@ describe('Security: validatePath', () => {
         expect.stringContaining('Security: Path validation blocked potential attack'),
         expect.objectContaining({
           attackType: 'invalid_character',
-          attemptedPath: maliciousPath,
-          decodedPath: undefined,
+          pathLength: maliciousPath.length,
           reason: 'Path contains a colon (drive letter or Graph path syntax)',
         })
       );
@@ -461,8 +460,7 @@ describe('Security: validatePath', () => {
         expect.stringContaining('Security: Path validation blocked potential attack'),
         expect.objectContaining({
           attackType: 'invalid_character',
-          attemptedPath: maliciousPath,
-          decodedPath: 'C:\\Windows\\System32',
+          pathLength: maliciousPath.length,
           reason: 'Path contains a colon (drive letter or Graph path syntax)',
         })
       );
@@ -479,7 +477,7 @@ describe('Security: validatePath', () => {
       expect(warnSpy).toHaveBeenCalledWith(
         expect.stringContaining('Security: Path validation blocked potential attack'),
         {
-          attemptedPath: maliciousPath,
+          pathLength: maliciousPath.length,
           attackType: 'excessive_url_encoding',
           reason: 'Path is URL-encoded more than 5 times',
         }
@@ -754,7 +752,7 @@ describe('Security: validateLocalPath', () => {
         expect.stringContaining('Security: Path validation blocked potential attack'),
         expect.objectContaining({
           attackType: 'path_traversal',
-          attemptedPath: maliciousPath,
+          pathLength: maliciousPath.length,
         })
       );
     });
@@ -785,8 +783,7 @@ describe('Security: validateLocalPath', () => {
         expect.stringContaining('Security'),
         expect.objectContaining({
           attackType: 'path_traversal',
-          attemptedPath: maliciousPath,
-          decodedPath: expect.any(String),
+          pathLength: maliciousPath.length,
         })
       );
     });
@@ -801,7 +798,7 @@ describe('Security: validateLocalPath', () => {
         expect.stringContaining('Security'),
         expect.objectContaining({
           attackType: 'null_byte_injection',
-          attemptedPath: maliciousPath,
+          pathLength: maliciousPath.length,
         })
       );
     });
@@ -815,10 +812,24 @@ describe('Security: validateLocalPath', () => {
         expect.stringContaining('Security: Local path validation blocked potential attack'),
         expect.objectContaining({
           attackType: 'path_outside_allowed_directory',
-          attemptedPath: '/etc/passwd',
-          resolvedPath: '/etc/passwd',
+          pathLength: '/etc/passwd'.length,
         })
       );
+    });
+
+    it('never writes the rejected path, decoded or resolved, to the log', async () => {
+      const warnSpy = vi.spyOn(console, 'warn');
+      const sentinel = 'SENTINEL-997-sharepoint-path';
+      const rejected = [`../${sentinel}.docx`, `%2e%2e%2f${sentinel}`, `C:\\${sentinel}`];
+
+      for (const rejectedPath of rejected) {
+        await expect(client.listFiles({ path: rejectedPath })).rejects.toThrow();
+      }
+      await expect(client.uploadFile('docs/test.txt', `/etc/${sentinel}`)).rejects.toThrow();
+
+      const logged = JSON.stringify(warnSpy.mock.calls);
+      expect(warnSpy).toHaveBeenCalled();
+      expect(logged).not.toContain(sentinel);
     });
 
     it('should include attack type in all security logs', async () => {

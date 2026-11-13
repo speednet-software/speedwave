@@ -3877,13 +3877,14 @@ describe('getTag and deleteTag', () => {
       expect(mockGitlabInstance.Tags.remove).toHaveBeenCalledWith(1, 'v1.0.0');
       expect(result).toEqual({ deleted_tag: undefined });
       expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining('[GitLabClient] Failed to get tag info before deletion:'),
-        expect.objectContaining({ project: 1, tag: 'v1.0.0', error: 'Tag not found' })
+        expect.stringContaining(
+          '[GitLabClient] Failed to get tag info before deletion: project=1 code=UNKNOWN name=Error'
+        )
       );
       consoleSpy.mockRestore();
     });
 
-    it('should warn with String(error) when caught error is not an Error instance', async () => {
+    it('should not log a caught value that is not an Error instance', async () => {
       const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       mockGitlabInstance.Tags.show.mockRejectedValue('string error from api');
       mockGitlabInstance.Tags.remove.mockResolvedValue(undefined);
@@ -3892,9 +3893,11 @@ describe('getTag and deleteTag', () => {
 
       expect(result).toEqual({ deleted_tag: undefined });
       expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining('[GitLabClient] Failed to get tag info before deletion:'),
-        expect.objectContaining({ error: 'string error from api' })
+        expect.stringContaining(
+          '[GitLabClient] Failed to get tag info before deletion: project=1 code=UNKNOWN'
+        )
       );
+      expect(JSON.stringify(consoleSpy.mock.calls)).not.toContain('string error from api');
       consoleSpy.mockRestore();
     });
 

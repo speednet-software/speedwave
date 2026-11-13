@@ -296,7 +296,8 @@ describe('platform-runner', () => {
       const result = await runCommand('reminders', 'list_lists');
 
       expect(result.parsed).toEqual({ ok: true });
-      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('some warning'));
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('stderr length=12'));
+      expect(JSON.stringify(warnSpy.mock.calls)).not.toContain('some warning');
       warnSpy.mockRestore();
     });
 

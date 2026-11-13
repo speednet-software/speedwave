@@ -333,7 +333,7 @@ describe('retryAsync', () => {
       expect(warnCalls.some((msg) => msg.includes('exhausted'))).toBe(true);
     });
 
-    it('warns with error message when fn throws', async () => {
+    it('warns with the error name when fn throws', async () => {
       vi.useFakeTimers();
       vi.spyOn(Math, 'random').mockReturnValue(0);
 
@@ -354,10 +354,12 @@ describe('retryAsync', () => {
       const warnCalls = (console.warn as ReturnType<typeof vi.fn>).mock.calls.map((args) =>
         args.join(' ')
       );
-      expect(warnCalls.some((msg) => msg.includes('connection refused'))).toBe(true);
+      expect(
+        warnCalls.some((msg) => msg.includes('err-log: attempt failed: code=UNKNOWN name=Error'))
+      ).toBe(true);
     });
 
-    it('converts non-Error thrown values to string in warning', async () => {
+    it('does not log a thrown non-Error value', async () => {
       vi.useFakeTimers();
       vi.spyOn(Math, 'random').mockReturnValue(0);
 
@@ -380,7 +382,10 @@ describe('retryAsync', () => {
       const warnCalls = (console.warn as ReturnType<typeof vi.fn>).mock.calls.map((args) =>
         args.join(' ')
       );
-      expect(warnCalls.some((msg) => msg.includes('plain string failure'))).toBe(true);
+      expect(
+        warnCalls.some((msg) => msg.includes('non-error-throw: attempt failed: code=UNKNOWN'))
+      ).toBe(true);
+      expect(warnCalls.some((msg) => msg.includes('plain string failure'))).toBe(false);
     });
   });
 });

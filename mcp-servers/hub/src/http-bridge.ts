@@ -7,7 +7,13 @@ import { randomUUID } from 'crypto';
 import { buildServiceBridge, getEnabledServices } from './tool-registry.js';
 import { getAuthToken } from './auth-tokens.js';
 import { getAllServiceNames } from './service-list.js';
-import { TIMEOUTS, LATEST_PROTOCOL_VERSION, ts, validateWorkerUrl } from '@speedwave/mcp-shared';
+import {
+  TIMEOUTS,
+  LATEST_PROTOCOL_VERSION,
+  describeError,
+  ts,
+  validateWorkerUrl,
+} from '@speedwave/mcp-shared';
 import { deriveWorkerEnv } from './worker-env.js';
 
 /**
@@ -497,6 +503,29 @@ export function _clearWorkerSessionCacheForTesting(): void {
 }
 
 /**
+ * Error carrying a machine-readable `code` next to its message, so logs can name the failure without the message.
+ * @param message - Message handed to the caller unchanged.
+ * @param code - Failure code.
+ */
+function workerError(message: string, code: string): Error {
+  return Object.assign(new Error(message), { code });
+}
+
+/**
+ * Failure code a worker put into an error result (`{"code": ...}` JSON text); TOOL_ERROR when it has none.
+ * @param text - First text item of an `isError` result.
+ */
+function toolErrorCode(text: string): string {
+  let code: unknown;
+  try {
+    code = (JSON.parse(text) as { code?: unknown } | null)?.code;
+  } catch {
+    code = undefined;
+  }
+  return typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(code) ? code : 'TOOL_ERROR';
+}
+
+/**
  * Call a worker tool via HTTP bridge; `options.timeoutMs` overrides the default timeout.
  * @param service - Service name (slack, sharepoint, redmine, gitlab)
  * @param toolName - Tool name to call
@@ -514,7 +543,7 @@ export async function callWorker<T = unknown>(
   const url = getWorkerUrl(service);
 
   if (!url) {
-    throw new Error(`Unknown service: ${service}`);
+    throw workerError(`Unknown service: ${service}`, 'UNKNOWN_SERVICE');
   }
 
   const timeout = options?.timeoutMs ?? TIMEOUTS.WORKER_REQUEST_MS;
@@ -555,31 +584,37 @@ export async function callWorker<T = unknown>(
           (bodyLower.includes('session') || bodyLower.includes('not found')));
       if (looksLikeSessionIssue) {
         console.warn(
-          `${ts()} [http-bridge] ${service}: ${response.status} on tools/call (${body.slice(0, 200)}) — re-initialising session`
+          `${ts()} [http-bridge] ${service}: ${response.status} on tools/call — re-initialising session`
         );
         invalidateWorkerSession(service);
         const sessionId = await ensureWorkerSession(service, url, authToken);
         response = await attemptCall(sessionId);
       } else {
-        throw new Error(`Worker ${service} returned ${response.status}: ${body.slice(0, 200)}`);
+        throw workerError(
+          `Worker ${service} returned ${response.status}: ${body.slice(0, 200)}`,
+          `HTTP_${response.status}`
+        );
       }
     }
 
     if (!response.ok) {
-      throw new Error(`Worker ${service} returned ${response.status}: ${response.statusText}`);
+      throw workerError(
+        `Worker ${service} returned ${response.status}: ${response.statusText}`,
+        `HTTP_${response.status}`
+      );
     }
 
     const result = await parseResponse(response);
 
     if (result.error) {
-      throw new Error(`Worker ${service} error: ${result.error.message}`);
+      throw workerError(`Worker ${service} error: ${result.error.message}`, 'JSONRPC_ERROR');
     }
 
     const content = result.result?.content;
     if (content && content.length > 0) {
       if (result.result?.isError) {
         const firstText = content.find((c) => c.type === 'text')?.text ?? 'Unknown error';
-        throw new Error(firstText);
+        throw workerError(firstText, toolErrorCode(firstText));
       }
 
       const textItems = content.filter((c) => c.type === 'text' && c.text !== undefined);
@@ -602,12 +637,11 @@ export async function callWorker<T = unknown>(
     return result.result as T;
   } catch (error: unknown) {
     if (error instanceof Error && error.name === 'TimeoutError') {
-      throw new Error(`Worker ${service} timeout after ${timeout}ms`);
+      throw workerError(`Worker ${service} timeout after ${timeout}ms`, 'TIMEOUT');
     }
 
     console.error(
-      `${ts()} [http-bridge] callWorker(${service}, ${toolName}) failed:`,
-      error instanceof Error ? (error.stack ?? error.message) : JSON.stringify(error)
+      `${ts()} [http-bridge] callWorker(${service}, ${toolName}) failed: ${describeError(error)}`
     );
     throw error;
   }

@@ -14,7 +14,7 @@ import type {
 import { JSONRPCErrorCode, SUPPORTED_PROTOCOL_VERSIONS, LATEST_PROTOCOL_VERSION } from './types.js';
 import { validateJSONRPCMessage, validateToolName } from './security.js';
 import { sessionManager } from './session.js';
-import { ts } from './logger.js';
+import { describeError, ts } from './logger.js';
 
 /** Page size for tools/list pagination */
 const TOOLS_LIST_PAGE_SIZE = 100;
@@ -58,7 +58,7 @@ export class JSONRPCErrorBuilder {
    * @param error - The original error object.
    */
   static internalError(error: unknown): JSONRPCError {
-    console.error(`[JSONRPCErrorBuilder] Internal error details:`, error);
+    console.error(`${ts()} [JSONRPCErrorBuilder] Internal error: ${describeError(error)}`);
     return { code: JSONRPCErrorCode.InternalError, message: 'Internal error' };
   }
 

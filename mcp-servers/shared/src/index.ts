@@ -81,7 +81,7 @@ export type { BootWorkerOptions, NotConfiguredPolicy } from './boot.js';
 
 export { TIMEOUTS } from './timeouts.js';
 
-export { ts } from './logger.js';
+export { ts, describeError } from './logger.js';
 export { sanitize } from './sanitizer.js';
 
 export { notConfiguredMessage, withSetupGuidance } from './errors.js';
