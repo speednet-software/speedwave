@@ -111,7 +111,8 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-106](ADR-106-git-push-from-the-container-through-the-proxy.md)    | Git push from the container through the proxy: the integration token stays in the proxy, the integration creates no commits | Accepted (repository allowlist amended 2026-11-04)                                 |
 | [ADR-107](ADR-107-keep-the-computer-awake-while-work-runs.md)          | Keep the computer out of idle sleep while work runs: one counted OS assertion, a Settings switch                            | Accepted                                                                           |
 | [ADR-108](ADR-108-access-policy-in-the-hub-and-read-only-mode.md)      | Access policy in the hub and the read-only mode: one decision point, `access.json`, MDM lock                                | Accepted                                                                           |
-| [ADR-109](ADR-109-redmine-attachments-through-the-workspace-mount.md)  | Redmine attachments through the workspace mount: `/workspace:rw` for `mcp-redmine`, streamed files                          | Accepted                                                                           |
+| [ADR-109](ADR-109-jira-attachments-in-the-atlassian-worker.md)         | Jira attachments in the Atlassian worker: list, download and delete, read-write workspace mount                             | Accepted                                                                           |
+| [ADR-110](ADR-110-redmine-attachments-through-the-workspace-mount.md)  | Redmine attachments through the workspace mount: `/workspace:rw` for `mcp-redmine`, streamed files                          | Accepted                                                                           |
 
 ## Creating a New ADR
 

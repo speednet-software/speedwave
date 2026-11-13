@@ -249,7 +249,7 @@ services:
       - /tmp:noexec,nosuid,size=${MCP_ATLASSIAN_TMPFS}
     volumes:
       - ${TOKENS_DIR}/atlassian:/tokens:ro
-      - ${PROJECT_DIR}:/workspace:ro
+      - ${PROJECT_DIR}:/workspace:rw
     environment:
       - PORT=${PORT_WORKER}
     networks:

@@ -10,14 +10,15 @@ import {
   assertJiraIssueKeyAllowed,
   assertJiraProjectAllowed,
   filterByAllowlist,
-  ScopeError,
 } from '../scope.js';
 import { deriveBrowseUrl } from '../url.js';
 import type {
   AdfDoc,
   CreateIssueInput,
   JiraAttachment,
+  JiraDownloadedAttachment,
   JiraIssue,
+  JiraIssueAttachment,
   JiraIssueLink,
   JiraIssueParent,
   JiraLinkType,
@@ -26,6 +27,7 @@ import type {
   JiraUser,
   UpdateIssueInput,
 } from '../types.js';
+import { saveAttachment } from './attachment-file.js';
 import { mapTransition, mapUser } from './normalizers.js';
 
 const ISSUE_FIELDS = [
@@ -41,11 +43,14 @@ const ISSUE_FIELDS = [
   'issuelinks',
   'assignee',
   'reporter',
+  'attachment',
   'created',
   'updated',
 ] as const;
 
-const SEARCH_FIELDS = ISSUE_FIELDS.filter((field) => field !== 'description');
+const SEARCH_FIELDS = ISSUE_FIELDS.filter(
+  (field) => field !== 'description' && field !== 'attachment'
+);
 
 /**
  * With a project allowlist, upstream pages that filter to zero visible issues are skipped
@@ -66,6 +71,26 @@ export class UnknownLinkRelationError extends Error {
   ) {
     super(`Unknown link relation '${relation}'. Available: ${available.join(', ')}`);
     this.name = 'UnknownLinkRelationError';
+  }
+}
+
+type IssueWithAttachments = JiraIssue & { attachments: JiraIssueAttachment[] };
+
+/** Thrown when an attachment ID is not among the attachments of the issue the call names. */
+export class AttachmentNotFoundError extends Error {
+  /**
+   * Create the error.
+   * @param issue - The issue the caller named.
+   * @param attachmentId - The attachment ID the caller asked for.
+   * @param available - The attachment IDs the issue has.
+   */
+  constructor(
+    readonly issue: string,
+    readonly attachmentId: string,
+    readonly available: string[]
+  ) {
+    super(`Issue ${issue} has no attachment ${attachmentId}`);
+    this.name = 'AttachmentNotFoundError';
   }
 }
 
@@ -123,11 +148,8 @@ export interface JiraIssuesClient {
     issueIdOrKey: string,
     params: { filename: string; data: Buffer; contentType: string }
   ): Promise<JiraAttachment>;
-  /**
-   * Delete an attachment by its global attachment ID.
-   * @throws {ScopeError} With a Jira project allowlist — a bare ID can't be verified, fails closed.
-   */
-  deleteAttachment(attachmentId: string): Promise<void>;
+  downloadAttachment(issue: string, attachmentId: string): Promise<JiraDownloadedAttachment>;
+  deleteAttachment(issue: string, attachmentId: string): Promise<void>;
 }
 
 /**
@@ -141,12 +163,36 @@ export function createJiraIssuesClient(client: AtlassianClient): JiraIssuesClien
   const enforceFromIssueKey = (issueIdOrKey: string): void =>
     assertJiraIssueKeyAllowed(issueIdOrKey, client.jiraProjectKeys);
 
-  const fetchIssue = async (issueIdOrKey: string): Promise<JiraIssue> =>
-    mapIssue(
+  const fetchIssue = async (issueIdOrKey: string): Promise<IssueWithAttachments> => ({
+    attachments: [],
+    ...mapIssue(
       await client.get<unknown>(`/rest/api/3/issue/${encodeURIComponent(issueIdOrKey)}`, {
         fields: ISSUE_FIELDS.join(','),
       })
-    );
+    ),
+  });
+
+  const getAllowed = async (issueIdOrKey: string): Promise<IssueWithAttachments> => {
+    const issue = await fetchIssue(issueIdOrKey);
+    assertJiraProjectAllowed(issue.project, client.jiraProjectKeys);
+    return issue;
+  };
+
+  const attachmentOf = async (
+    issueIdOrKey: string,
+    attachmentId: string
+  ): Promise<JiraIssueAttachment> => {
+    const { attachments } = await getAllowed(issueIdOrKey);
+    const found = attachments.find((a) => a.id === attachmentId.trim());
+    if (!found) {
+      throw new AttachmentNotFoundError(
+        issueIdOrKey,
+        attachmentId,
+        attachments.map((a) => a.id)
+      );
+    }
+    return found;
+  };
 
   const cachedLinkTypes = async (): Promise<JiraLinkType[]> => {
     if (!linkTypes) {
@@ -223,11 +269,7 @@ export function createJiraIssuesClient(client: AtlassianClient): JiraIssuesClien
       };
     },
 
-    async get(issueIdOrKey) {
-      const issue = await fetchIssue(issueIdOrKey);
-      assertJiraProjectAllowed(issue.project, client.jiraProjectKeys);
-      return issue;
-    },
+    get: getAllowed,
 
     async create(input) {
       assertJiraProjectAllowed(input.project, client.jiraProjectKeys);
@@ -320,14 +362,25 @@ export function createJiraIssuesClient(client: AtlassianClient): JiraIssuesClien
       return mapAttachment(first);
     },
 
-    async deleteAttachment(attachmentId) {
-      if (client.jiraProjectKeys.length > 0) {
-        throw new ScopeError(
-          'Deleting attachments is not allowed while a Jira project allowlist is configured ' +
-            '(an attachment ID cannot be checked against the allowlist).'
-        );
-      }
-      await client.del<void>(`/rest/api/3/attachment/${encodeURIComponent(attachmentId)}`);
+    async downloadAttachment(issueIdOrKey, attachmentId) {
+      const attachment = await attachmentOf(issueIdOrKey, attachmentId);
+      const saved = await saveAttachment(
+        attachment.id,
+        attachment.filename,
+        await client.downloadAttachmentContent(attachment.id)
+      );
+      return {
+        id: attachment.id,
+        filename: attachment.filename,
+        mime_type: attachment.mime_type,
+        size: saved.size,
+        path: saved.path,
+      };
+    },
+
+    async deleteAttachment(issueIdOrKey, attachmentId) {
+      const attachment = await attachmentOf(issueIdOrKey, attachmentId);
+      await client.del<void>(`/rest/api/3/attachment/${encodeURIComponent(attachment.id)}`);
     },
   };
 }
@@ -414,7 +467,15 @@ function mapIssue(raw: unknown): JiraIssue {
   if (f.description !== undefined) {
     issue.description = adfToMarkdown(f.description as AdfDoc | null);
   }
+  if (Array.isArray(f.attachment)) {
+    issue.attachments = f.attachment.map(mapIssueAttachment);
+  }
   return issue;
+}
+
+function mapIssueAttachment(raw: unknown): JiraIssueAttachment {
+  const { id, filename, size, mime_type, author, created } = mapAttachment(raw);
+  return { id, filename, size, mime_type, author, created };
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

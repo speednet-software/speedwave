@@ -1,4 +1,4 @@
-# ADR-109: Redmine attachments through the workspace mount
+# ADR-110: Redmine attachments through the workspace mount
 
 > **Status:** Accepted
 > **Date:** 2026-11-12
