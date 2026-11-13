@@ -349,9 +349,9 @@ pub enum SecurityRule {
     #[strum(to_string = "ATLASSIAN_WORKSPACE_PATH_MISMATCH")]
     #[strum(props(description = "Atlassian workspace path matches expected"))]
     AtlassianWorkspacePathMismatch,
-    /// Atlassian workspace mount mode is `:ro`.
+    /// Atlassian workspace mount mode is `:rw`.
     #[strum(to_string = "ATLASSIAN_WORKSPACE_MOUNT_MODE")]
-    #[strum(props(description = "Atlassian workspace mount mode is :ro"))]
+    #[strum(props(description = "Atlassian workspace mount mode is :rw"))]
     AtlassianWorkspaceMountMode,
     /// Atlassian has no extra volumes.
     #[strum(to_string = "ATLASSIAN_NO_EXTRA_VOLUMES")]
@@ -472,8 +472,7 @@ impl SecurityRule {
         )
     }
 
-    /// Returns `true` for Atlassian-specific rules. The workspace mount is :ro here (unlike
-    /// SharePoint/Slack's :rw) — addAttachment only reads a file, never writes.
+    /// Returns `true` for Atlassian-specific rules.
     pub fn is_atlassian(self) -> bool {
         matches!(
             self,
@@ -1899,8 +1898,6 @@ impl SecurityCheck {
         )
     }
 
-    /// Validates volumes for built-in mcp-atlassian (not a plugin). Unlike SharePoint/Slack,
-    /// the workspace mount is :ro — addAttachment only reads the file, to attach it.
     fn check_builtin_atlassian_volumes(
         doc: &serde_yaml_ng::Value,
         expected_paths: &SecurityExpectedPaths,
@@ -1909,7 +1906,7 @@ impl SecurityCheck {
             doc,
             expected_paths,
             "atlassian",
-            "ro",
+            "rw",
             VolumeCheckRules::ATLASSIAN,
         )
     }
@@ -2224,9 +2221,9 @@ impl VolumeCheckRules {
             "Atlassian uses a static API token; /tokens must be :ro like every other worker.",
         workspace_path_mismatch: SecurityRule::AtlassianWorkspacePathMismatch,
         workspace_mount_mode: SecurityRule::AtlassianWorkspaceMountMode,
-        workspace_mount_mode_msg: "Atlassian workspace mount must be :ro",
-        workspace_mount_mode_rem: "addAttachment only reads files from the workspace; \
-             change the workspace volume mount to :ro.",
+        workspace_mount_mode_msg: "Atlassian workspace mount must be :rw",
+        workspace_mount_mode_rem: "downloadAttachment writes files into the workspace; \
+             change the workspace volume mount to :rw.",
         no_extra_volumes: SecurityRule::AtlassianNoExtraVolumes,
         no_extra_volumes_msg_prefix: "Atlassian service has unauthorized volume mount:",
         no_extra_volumes_rem:
@@ -2236,7 +2233,8 @@ impl VolumeCheckRules {
         missing_tokens_rem: "Atlassian must mount /tokens:ro.",
         missing_workspace: SecurityRule::AtlassianMissingWorkspaceMount,
         missing_workspace_msg: "Atlassian service is missing required /workspace mount",
-        missing_workspace_rem: "Atlassian must mount /workspace:ro (needed for addAttachment).",
+        missing_workspace_rem:
+            "Atlassian must mount /workspace:rw (needed for downloadAttachment).",
     };
 }
 

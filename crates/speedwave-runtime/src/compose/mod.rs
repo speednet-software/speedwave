@@ -9769,7 +9769,7 @@ services:
       - /tmp:noexec,nosuid,size=64m
     volumes:
       - /test/.speedwave/tokens/test/atlassian:/tokens:ro
-      - /test/project:/workspace:ro
+      - /test/project:/workspace:rw
 "#,
             user = container_user()
         );
@@ -9791,7 +9791,7 @@ services:
     }
 
     #[test]
-    fn test_security_check_atlassian_flags_rw_workspace() {
+    fn test_security_check_atlassian_flags_ro_workspace() {
         let data_dir = tempfile::tempdir().unwrap();
         let yaml = format!(
             r#"
@@ -9808,7 +9808,7 @@ services:
       - /tmp:noexec,nosuid,size=64m
     volumes:
       - /test/.speedwave/tokens/test/atlassian:/tokens:ro
-      - /test/project:/workspace:rw
+      - /test/project:/workspace:ro
 "#,
             user = container_user()
         );
@@ -9819,7 +9819,7 @@ services:
             violations
                 .iter()
                 .any(|v| v.rule == SecurityRule::AtlassianWorkspaceMountMode),
-            "Atlassian workspace mounted :rw should trigger ATLASSIAN_WORKSPACE_MOUNT_MODE"
+            "Atlassian workspace mounted :ro should trigger ATLASSIAN_WORKSPACE_MOUNT_MODE"
         );
     }
 
@@ -9841,7 +9841,7 @@ services:
       - /tmp:noexec,nosuid,size=64m
     volumes:
       - /test/.speedwave/tokens/test/atlassian:/tokens:ro
-      - /wrong/path:/workspace:ro
+      - /wrong/path:/workspace:rw
 "#,
             user = container_user()
         );
@@ -9906,7 +9906,7 @@ services:
       - /tmp:noexec,nosuid,size=64m
     volumes:
       - /test/.speedwave/tokens/test/atlassian:/tokens:ro
-      - /test/project:/workspace:ro
+      - /test/project:/workspace:rw
       - /etc/passwd:/stolen:ro
 "#,
             user = container_user()
@@ -9940,7 +9940,7 @@ services:
       - /tmp:noexec,nosuid,size=64m
     volumes:
       - /test/.speedwave/tokens/test/atlassian:/tokens:rw
-      - /test/project:/workspace:ro
+      - /test/project:/workspace:rw
 "#,
             user = container_user()
         );
@@ -9974,7 +9974,7 @@ services:
       - /tmp:noexec,nosuid,size=64m
     volumes:
       - /wrong/tokens/path:/tokens:ro
-      - /test/project:/workspace:ro
+      - /test/project:/workspace:rw
 "#,
             user = container_user()
         );
@@ -10430,7 +10430,7 @@ services:
       - /tmp:noexec,nosuid,size=64m
     volumes:
       - /home/user/.speedwave/tokens/test/atlassian:/tokens:ro
-      - /home/user/projects/test:/workspace:ro
+      - /home/user/projects/test:/workspace:rw
     environment:
       - PORT=3000
     networks:

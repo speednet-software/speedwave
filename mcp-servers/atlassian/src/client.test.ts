@@ -549,3 +549,46 @@ describe('uploadAttachment', () => {
     expect(requestMock).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('downloadAttachmentContent', () => {
+  it('GETs the content endpoint with redirect=false as a stream on the Jira host', async () => {
+    const stream = { pipe: vi.fn() };
+    requestMock.mockResolvedValueOnce({ data: stream });
+    const client = new AtlassianClient(CONFIG);
+    expect(await client.downloadAttachmentContent('20001')).toBe(stream);
+    const cfg = requestMock.mock.calls[0][0] as AxiosRequestConfig;
+    expect(cfg.method).toBe('GET');
+    expect(cfg.url).toBe('/rest/api/3/attachment/content/20001');
+    expect(cfg.params).toEqual({ redirect: false });
+    expect(cfg.responseType).toBe('stream');
+    expect(createMock.mock.calls[0][0]).toMatchObject({
+      baseURL: 'https://acme.atlassian.net',
+      maxRedirects: 0,
+    });
+  });
+
+  it('encodes the attachment ID in the URL', async () => {
+    requestMock.mockResolvedValueOnce({ data: {} });
+    await new AtlassianClient(CONFIG).downloadAttachmentContent('a/b');
+    expect(requestMock.mock.calls[0][0].url).toBe('/rest/api/3/attachment/content/a%2Fb');
+  });
+
+  it.each([303, 404, 500])('destroys the response stream of a %s answer', async (status) => {
+    const destroy = vi.fn();
+    requestMock.mockRejectedValueOnce(httpError(status, { destroy }));
+    await expect(new AtlassianClient(CONFIG).downloadAttachmentContent('1')).rejects.toBeTruthy();
+    expect(destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it('destroys the stream of an attempt that is retried', async () => {
+    vi.useFakeTimers();
+    const destroy = vi.fn();
+    requestMock
+      .mockRejectedValueOnce(httpError(503, { destroy }))
+      .mockResolvedValueOnce({ data: 'second attempt' });
+    const pending = new AtlassianClient(CONFIG).downloadAttachmentContent('1');
+    await vi.runAllTimersAsync();
+    await expect(pending).resolves.toBe('second attempt');
+    expect(destroy).toHaveBeenCalledTimes(1);
+  });
+});
