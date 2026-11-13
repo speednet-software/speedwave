@@ -1,6 +1,5 @@
 //! Collapses multi-line `ANTHROPIC_LOG=debug` blocks into single entries: [`Collator`] groups by
-//! braces, [`format_block`] summarises; same-`[log_id]` fragments merge. A line without braces that
-//! matches no known shape passes through; an unrecognised braced block is reduced to its size.
+//! braces, [`format_block`] summarises; same-`[log_id]` fragments merge; braced unknowns shrink to a size.
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -296,9 +295,7 @@ fn parse_response_fragment(line: &str) -> Option<ResponseFields> {
     })
 }
 
-/// Summarise a joined block. A block without braces that matches no known shape is returned
-/// verbatim; a braced block that matches none is reduced to its size, because its body can hold
-/// request or response content.
+/// Summarise a joined block; an unrecognised braced block is reduced to its size.
 pub fn format_block(block: &str) -> String {
     let log_id = extract_log_id(block);
 

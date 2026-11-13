@@ -1,4 +1,4 @@
-//! Time window of the diagnostics export: pure rules over text, no IO.
+//! Time window of the diagnostics export.
 
 use std::borrow::Cow;
 use std::str::FromStr;
@@ -18,13 +18,13 @@ pub enum ExportWindow {
     Days30,
 }
 
-/// Rejection of a window value outside the four accepted ones.
+/// A window value outside the four accepted ones.
 #[derive(Debug, thiserror::Error)]
 #[error("unknown export window '{0}', expected one of 2h, 24h, 7d, 30d")]
 pub struct UnknownExportWindow(String);
 
 impl ExportWindow {
-    /// The wire value, as the UI sends it.
+    /// The value the UI sends.
     pub fn as_str(self) -> &'static str {
         match self {
             ExportWindow::Hours2 => "2h",
@@ -34,7 +34,7 @@ impl ExportWindow {
         }
     }
 
-    /// The oldest instant the window keeps, counted back from `now`.
+    /// The oldest instant the window keeps.
     pub fn since(self, now: DateTime<Utc>) -> DateTime<Utc> {
         let span = match self {
             ExportWindow::Hours2 => TimeDelta::hours(2),
@@ -63,9 +63,9 @@ impl FromStr for ExportWindow {
 /// Where a line carries its timestamp.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TimestampShape {
-    /// Line starts with an RFC 3339 timestamp and any offset (`log_ts`, tauri-plugin-log format).
+    /// RFC 3339 prefix with any offset.
     Rfc3339Prefix,
-    /// `<container> | <RFC 3339 UTC>` as `compose logs --timestamps` prints it.
+    /// `<container> | <RFC 3339 UTC>` prefix.
     ContainerPrefix,
     /// JSON object with an RFC 3339 `ts` field.
     JsonlTs,
@@ -74,9 +74,9 @@ pub enum TimestampShape {
 /// What the export keeps of a source.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Retention {
-    /// Lines at or after the window start, by the timestamp in this shape.
+    /// Lines at or after the window start.
     Windowed(TimestampShape),
-    /// The last this many bytes (a source without timestamps).
+    /// The last N bytes.
     LastBytes(usize),
     /// The whole text.
     Whole,
@@ -91,8 +91,7 @@ pub fn apply(text: &str, retention: Retention, since: DateTime<Utc>) -> Cow<'_, 
     }
 }
 
-/// Keeps the lines stamped at or after `since`. A line without a stamp follows the line before it:
-/// kept if that one was kept, dropped before the first stamped line.
+/// Keeps stamped lines at or after `since`, and unstamped lines that follow a kept line.
 pub fn filter_lines(text: &str, shape: TimestampShape, since: DateTime<Utc>) -> String {
     let mut out = String::new();
     let mut keeping = false;
@@ -107,7 +106,7 @@ pub fn filter_lines(text: &str, shape: TimestampShape, since: DateTime<Utc>) -> 
     out
 }
 
-/// The last `max` bytes of `text`, starting at a line start when the cut falls inside a line.
+/// The last `max` bytes of `text`, cut at a line start.
 pub fn last_bytes(text: &str, max: usize) -> &str {
     if text.len() <= max {
         return text;
@@ -125,9 +124,7 @@ pub fn last_bytes(text: &str, max: usize) -> &str {
     }
 }
 
-/// True when a rotated file named `<base>_YYYY-MM-DD_HH-MM-SS.log` (UTC, the rotation instant,
-/// as tauri-plugin-log names it) was closed before `since`, so every line in it is older.
-/// A name without that date is never skipped.
+/// True when the rotation date in the file name is before `since`.
 pub fn rotated_file_ends_before(file_name: &str, since: DateTime<Utc>) -> bool {
     const STAMP_LEN: usize = "2026-11-13_10-00-00".len();
     let Some(stem) = file_name.strip_suffix(".log") else {

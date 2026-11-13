@@ -161,8 +161,8 @@ pub(crate) fn build_diagnostics_zip(
     Ok(())
 }
 
-/// Collects the app logs, container logs, compose config and system info of the last `window`
-/// (`2h`, `24h`, `7d` or `30d`) into a sanitized ZIP archive for support diagnostics.
+/// Collects app logs, container logs, compose config, and system info of `window` into a
+/// sanitized ZIP archive for support diagnostics.
 #[tauri::command]
 pub(crate) async fn export_diagnostics(project: String, window: String) -> Result<String, String> {
     super::check_project(&project)?;
@@ -451,7 +451,7 @@ mod tests {
         for i in 0..40_000 {
             serial.push_str(&format!("serial line {i:06} padding padding padding\n"));
         }
-        assert!(serial.len() > 256 * 1024);
+        assert!(serial.len() > speedwave_runtime::diagnostic_sources::SERIAL_LOG_EXPORT_BYTES);
 
         let input = DiagnosticsInput {
             log_dir: Some(log_dir),
@@ -521,7 +521,11 @@ mod tests {
         }
 
         let serial_out = read_zip_entry(&zip_path, "lima/serial.log").unwrap();
-        assert!(serial_out.len() <= 256 * 1024, "{}", serial_out.len());
+        assert!(
+            serial_out.len() <= speedwave_runtime::diagnostic_sources::SERIAL_LOG_EXPORT_BYTES,
+            "{}",
+            serial_out.len()
+        );
         assert!(serial_out.ends_with("serial line 039999 padding padding padding\n"));
         assert!(serial_out.starts_with("serial line "));
 
