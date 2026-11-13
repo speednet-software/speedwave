@@ -1013,6 +1013,17 @@ describe('http-bridge', () => {
         ['an Invalid path message', 'Error: Invalid path: security check failed.', 'TOOL_ERROR'],
         ['a Node invalid URL', 'TypeError: Invalid URL', 'TypeError'],
         ['a bare Invalid URL', 'Invalid URL', 'TOOL_ERROR'],
+        [
+          'undeclared parameter names with a dash, a dot and brackets',
+          'Error: Invalid issue-key, fields.summary, labels[0]. getIssue does not accept these parameters, so the call was rejected and nothing was sent.',
+          'INVALID_PARAM',
+        ],
+        ['a quoted value', "Error: Invalid color 'x'. Expected #RRGGBB", 'TOOL_ERROR'],
+        [
+          'a parenthesised rejection reason',
+          'Error: Invalid sharepoint_path (security check failed)',
+          'TOOL_ERROR',
+        ],
       ])('logs the code for %s', async (_label, text, code) => {
         const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
