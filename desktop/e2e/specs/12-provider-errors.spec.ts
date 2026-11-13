@@ -1,4 +1,9 @@
-import { leaveSettings, openSettings, requireLocalLlm } from '../helpers/llm';
+import {
+  leaveSettings,
+  openSettings,
+  requireLocalLlm,
+  waitForLocalConnectionTestOutcome,
+} from '../helpers/llm';
 import { localLlmUnreachable } from '../helpers/preflight';
 
 const OFFLINE_BASE_URL = 'http://127.0.0.1:9';
@@ -43,10 +48,7 @@ describe('Provider Error Paths', function () {
 
     const saveBtn = await $("[data-testid='settings-llm-save']");
     await saveBtn.click();
-    await browser.waitUntil(
-      async () => !(await $("[data-testid='settings-llm-discovering']").isExisting()),
-      { timeout: 40_000, timeoutMsg: 'save-triggered probe never settled' }
-    );
+    expect(await waitForLocalConnectionTestOutcome(40_000)).not.toBeNull();
     expect(await $("[data-testid='settings-llm-saved']").isExisting()).toBe(false);
 
     await leaveSettings();
@@ -64,11 +66,7 @@ describe('Provider Error Paths', function () {
     await (await $("[data-testid='settings-llm-api-key']")).setValue(local.apiKey);
     await (await $("[data-testid='settings-llm-refresh']")).click();
 
-    await browser.waitUntil(
-      async () => !(await $("[data-testid='settings-llm-discovering']").isExisting()),
-      { timeout: 40_000, timeoutMsg: 'discovery never settled' }
-    );
-    expect(await $("[data-testid='settings-llm-discovery-error']").isExisting()).toBe(false);
+    expect(await waitForLocalConnectionTestOutcome(40_000)).toBeNull();
     await browser.waitUntil(async () => await $("[data-testid='settings-llm-save']").isEnabled(), {
       timeout: 15_000,
       timeoutMsg: 'Save never enabled for a routable local card',

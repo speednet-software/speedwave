@@ -202,6 +202,29 @@ async function clickUntil(
   );
 }
 
+const LOCAL_TEST_SUCCESS = '[data-testid="settings-llm-test-success"]';
+const LOCAL_TEST_FAILURES = [
+  '[data-testid="settings-llm-discovery-error"]',
+  '[data-testid="settings-llm-messages-endpoint-warning"]',
+];
+
+export async function waitForLocalConnectionTestOutcome(timeout = 60_000): Promise<string | null> {
+  await browser.waitUntil(
+    async () => {
+      for (const outcome of [LOCAL_TEST_SUCCESS, ...LOCAL_TEST_FAILURES]) {
+        if (await $(outcome).isExisting()) return true;
+      }
+      return false;
+    },
+    { timeout, timeoutMsg: 'local connection test never settled' }
+  );
+  for (const failure of LOCAL_TEST_FAILURES) {
+    const el = await $(failure);
+    if (await el.isExisting()) return await el.getText();
+  }
+  return null;
+}
+
 export async function configureLocalProvider(baseUrl: string, apiKey: string): Promise<void> {
   const selectBtn = await $('[data-testid="settings-llm-provider-local"]');
   await selectBtn.waitForExist({ timeout: 10_000 });
@@ -216,14 +239,8 @@ export async function configureLocalProvider(baseUrl: string, apiKey: string): P
   await keyInput.setValue(apiKey);
 
   await (await $('[data-testid="settings-llm-refresh"]')).click();
-  await browser.waitUntil(
-    async () => !(await $('[data-testid="settings-llm-discovering"]').isExisting()),
-    { timeout: 60_000, timeoutMsg: 'local model discovery never settled' }
-  );
-  const localError = await $('[data-testid="settings-llm-discovery-error"]');
-  if (await localError.isExisting()) {
-    throw new Error(`local discovery failed: ${await localError.getText()}`);
-  }
+  const failure = await waitForLocalConnectionTestOutcome();
+  if (failure) throw new Error(`local connection test failed: ${failure}`);
 
   await saveProvider();
 }
