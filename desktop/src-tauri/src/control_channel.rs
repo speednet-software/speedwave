@@ -563,7 +563,7 @@ pub(crate) fn parse_context_usage(value: &serde_json::Value) -> Result<ContextUs
 
 #[cfg(test)]
 pub(crate) const FIXTURE: &str =
-    include_str!("../tests/fixtures/cc-2.1.295-control-responses.sanitized.json");
+    include_str!("../tests/fixtures/cc-2.1.322-control-responses.sanitized.json");
 
 #[cfg(test)]
 const APPLY_EFFORT_FIXTURE: &str =
@@ -1193,7 +1193,14 @@ mod tests {
         let values: Vec<&str> = info.models.iter().map(|m| m.value.as_str()).collect();
         assert_eq!(
             values,
-            vec!["default", "opus", "claude-fable-5-1[1m]", "sonnet", "haiku"]
+            vec![
+                "default",
+                "opus",
+                "claude-fable-5-1[1m]",
+                "sonnet",
+                "haiku",
+                "claude-fable-5-2"
+            ]
         );
         let resolved: Vec<Option<&str>> = info
             .models
@@ -1205,9 +1212,10 @@ mod tests {
             vec![
                 Some("claude-opus-5-5"),
                 Some("claude-opus-5-5"),
-                Some("claude-fable-5-1[1m]"),
+                Some("claude-fable-5-1"),
                 Some("claude-sonnet-5-5"),
                 Some("claude-haiku-5-5"),
+                Some("claude-fable-5-2"),
             ]
         );
         for model in &info.models {
@@ -1276,7 +1284,7 @@ mod tests {
         let SessionInfoState::Ready { info } = state else {
             panic!("expected ready, got {state:?}");
         };
-        assert_eq!(info.models.len(), 5);
+        assert_eq!(info.models.len(), 6);
     }
 
     #[test]
@@ -1300,14 +1308,14 @@ mod tests {
             assert!(usage.rate_limits_available);
             let limits = usage.rate_limits.expect("rate limits");
             let five = limits.five_hour.expect("five_hour");
-            assert_eq!(five.utilization, Some(19.0), "{run}");
-            assert!(five.resets_at.unwrap().starts_with("2026-10-11T14:19:59"));
-            assert_eq!(limits.seven_day.unwrap().utilization, Some(82.0));
+            assert_eq!(five.utilization, Some(5.0), "{run}");
+            assert!(five.resets_at.unwrap().starts_with("2026-11-13T11:00:00"));
+            assert_eq!(limits.seven_day.unwrap().utilization, Some(54.0));
             assert_eq!(limits.seven_day_opus, None);
             assert_eq!(limits.seven_day_sonnet, None);
             assert_eq!(limits.model_scoped.len(), 1);
             assert_eq!(limits.model_scoped[0].display_name, "Fable");
-            assert_eq!(limits.model_scoped[0].utilization, Some(26.0));
+            assert_eq!(limits.model_scoped[0].utilization, Some(0.0));
             let extra = limits.extra_usage.expect("extra_usage");
             assert!(!extra.is_enabled);
             assert_eq!(extra.utilization, None);
@@ -1673,7 +1681,7 @@ mod tests {
         let usage =
             parse_context_usage(&fixture()["run_A"]["get_context_usage/claude-opus-5-5[1m]"])
                 .unwrap();
-        assert_eq!(usage.model, "claude-opus-5-5[1m]");
+        assert_eq!(usage.model, "claude-opus-5-5");
         assert_eq!(usage.max_tokens, 1_000_000);
         let bare =
             parse_context_usage(&fixture()["run_A"]["get_context_usage/claude-opus-5-5"]).unwrap();
@@ -1687,11 +1695,11 @@ mod tests {
     fn context_usage_before_the_first_message_reports_the_baseline() {
         let usage = parse_context_usage(&fixture()["run_A"]["get_context_usage/initial"]).unwrap();
         assert_eq!(usage.model, "claude-opus-5-5");
-        assert_eq!(usage.total_tokens, 48_311);
+        assert_eq!(usage.total_tokens, 18_577);
         assert_eq!(usage.max_tokens, 1_000_000);
-        assert!((usage.percentage - 5.0).abs() < f64::EPSILON);
+        assert!((usage.percentage - 2.0).abs() < f64::EPSILON);
         assert_eq!(usage.categories[0].name, "System prompt");
-        assert_eq!(usage.categories[0].tokens, 1_991);
+        assert_eq!(usage.categories[0].tokens, 2_344);
     }
 
     #[test]

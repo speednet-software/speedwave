@@ -523,6 +523,7 @@ mod tests {
             ("claude-fable-5-1", "high"),
             ("claude-sonnet-5-5", "medium"),
             ("claude-haiku-5-5", "medium"),
+            ("claude-fable-5-2", "medium"),
         ] {
             let (levels, default) = effort_of(&picker, id);
             assert_eq!(levels, EFFORT_LEVELS, "{id}");
@@ -626,7 +627,13 @@ mod tests {
             let picker = picker_of(&info, plan);
             assert_eq!(
                 labels(&picker),
-                vec!["Opus 5.5", "Fable 5.1", "Sonnet 5.5", "Haiku 5.5"],
+                vec![
+                    "Opus 5.5",
+                    "Fable 5.1",
+                    "Sonnet 5.5",
+                    "Haiku 5.5",
+                    "Fable 5.2"
+                ],
                 "{run}"
             );
             let defaults: Vec<&str> = picker
@@ -649,9 +656,10 @@ mod tests {
             wire,
             vec![
                 "claude-opus-5-5",
-                "claude-fable-5-1[1m]",
+                "claude-fable-5-1",
                 "claude-sonnet-5-5",
-                "claude-haiku-5-5"
+                "claude-haiku-5-5",
+                "claude-fable-5-2"
             ]
         );
     }
