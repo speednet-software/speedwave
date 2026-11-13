@@ -264,94 +264,42 @@ pub(crate) fn ps_escape_single_quoted(s: &str) -> String {
 
 pub(crate) fn build_auth_command_for_platform(
     project: &str,
-    project_dir: &str,
     home: &std::path::Path,
     data_dir: &std::path::Path,
-    default_data_dir: Option<&std::path::Path>,
     is_windows: bool,
 ) -> String {
-    let needs_env_pin = default_data_dir.map(|d| d != data_dir).unwrap_or(false);
-    let data_dir_str = data_dir.to_string_lossy();
     let cli_path = speedwave_runtime::consts::cli_install_path_for(is_windows, home, data_dir);
 
     if is_windows {
-        let pdir = strip_windows_extended_length_prefix(project_dir);
-        let ddir = strip_windows_extended_length_prefix(&data_dir_str);
-        let cli_path = strip_windows_extended_length_prefix(&cli_path);
-        if needs_env_pin {
-            format!(
-                "$env:{} = '{}'; Set-Location '{}'; & '{}' login --project '{}'",
-                speedwave_runtime::consts::DATA_DIR_ENV,
-                ps_escape_single_quoted(ddir),
-                ps_escape_single_quoted(pdir),
-                ps_escape_single_quoted(cli_path),
-                ps_escape_single_quoted(project),
-            )
-        } else {
-            format!(
-                "Set-Location '{}'; & '{}' login --project '{}'",
-                ps_escape_single_quoted(pdir),
-                ps_escape_single_quoted(cli_path),
-                ps_escape_single_quoted(project),
-            )
-        }
-    } else if needs_env_pin {
         format!(
-            "export {}='{}' && cd '{}' && '{}' login --project '{}'",
-            speedwave_runtime::consts::DATA_DIR_ENV,
-            shell_escape_single_quoted(&data_dir_str),
-            shell_escape_single_quoted(project_dir),
-            shell_escape_single_quoted(&cli_path),
-            shell_escape_single_quoted(project),
+            "& '{}' login --project '{}'",
+            ps_escape_single_quoted(strip_windows_extended_length_prefix(&cli_path)),
+            ps_escape_single_quoted(project),
         )
     } else {
         format!(
-            "cd '{}' && '{}' login --project '{}'",
-            shell_escape_single_quoted(project_dir),
+            "'{}' login --project '{}'",
             shell_escape_single_quoted(&cli_path),
             shell_escape_single_quoted(project),
         )
     }
 }
 
-fn build_auth_command(
-    project: &str,
-    project_dir: &str,
-    home: &std::path::Path,
-    data_dir: &std::path::Path,
-    default_data_dir: Option<&std::path::Path>,
-) -> String {
-    build_auth_command_for_platform(
-        project,
-        project_dir,
-        home,
-        data_dir,
-        default_data_dir,
-        cfg!(target_os = "windows"),
-    )
+fn build_auth_command(project: &str, home: &std::path::Path, data_dir: &std::path::Path) -> String {
+    build_auth_command_for_platform(project, home, data_dir, cfg!(target_os = "windows"))
 }
 
-pub(crate) fn resolve_project_dirs(
+pub(crate) fn resolve_login_dirs(
     project: &str,
-) -> Result<
-    (
-        String,
-        std::path::PathBuf,
-        std::path::PathBuf,
-        Option<std::path::PathBuf>,
-    ),
-    String,
-> {
+) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
     let user_config = speedwave_runtime::config::load_user_config()
         .map_err(|e| format!("Failed to load config: {e}"))?;
-    let project_dir = user_config
-        .find_project(project)
-        .map(|p| p.dir.clone())
-        .ok_or_else(|| format!("project '{project}' not found in config"))?;
+    if user_config.find_project(project).is_none() {
+        return Err(format!("project '{project}' not found in config"));
+    }
     let home = dirs::home_dir().ok_or_else(|| "cannot determine home directory".to_string())?;
     let data_dir = speedwave_runtime::consts::data_dir().clone();
-    let default_data_dir = Some(home.join(speedwave_runtime::consts::DATA_DIR));
-    Ok((project_dir, home, data_dir, default_data_dir))
+    Ok((home, data_dir))
 }
 
 pub(crate) fn ensure_cli_installed() -> Result<(), String> {
@@ -376,15 +324,9 @@ pub async fn get_auth_command(project: String) -> Result<String, String> {
     check_project(&project)?;
     tokio::task::spawn_blocking(move || {
         log::info!("building auth command for project {project}");
-        let (project_dir, home, data_dir, default_data_dir) = resolve_project_dirs(&project)?;
+        let (home, data_dir) = resolve_login_dirs(&project)?;
         ensure_cli_installed()?;
-        Ok(build_auth_command(
-            &project,
-            &project_dir,
-            &home,
-            &data_dir,
-            default_data_dir.as_deref(),
-        ))
+        Ok(build_auth_command(&project, &home, &data_dir))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -983,233 +925,95 @@ mod tests {
     }
 
     #[test]
-    fn login_command_path_matches_install_path() {
+    fn login_command_runs_the_instance_cli_without_env_or_cd() {
         let home = std::path::Path::new("/Users/test");
-        let default_dd = home.join(".speedwave");
-        let custom_dd = home.join(".speedwave-dev");
-        let win_dd = std::path::Path::new("C:\\Users\\test\\.speedwave");
-        let cases: [(bool, &std::path::Path, Option<&std::path::Path>); 4] = [
-            (false, default_dd.as_path(), Some(default_dd.as_path())),
-            (false, custom_dd.as_path(), Some(default_dd.as_path())),
-            (true, win_dd, Some(win_dd)),
-            (true, win_dd, None),
-        ];
-        for (is_windows, dd, default) in cases {
-            let install = speedwave_runtime::consts::cli_install_path_for(is_windows, home, dd);
-            let cmd =
-                build_auth_command_for_platform("proj", "/proj", home, dd, default, is_windows);
-            assert!(
-                cmd.contains(&install),
-                "login command must reference install path {install}: got {cmd}"
+        for (dir, cli) in [
+            (".speedwave", "speedwave"),
+            (".speedwave-dev", "speedwave-dev"),
+        ] {
+            let cmd = build_auth_command_for_platform("myproj", home, &home.join(dir), false);
+            assert_eq!(
+                cmd,
+                format!("'/Users/test/.local/bin/{cli}' login --project 'myproj'")
             );
         }
     }
 
     #[test]
-    fn build_auth_command_default_data_dir() {
+    fn login_command_cli_resolves_its_own_data_dir() {
         let home = std::path::Path::new("/Users/test");
-        let dd = std::path::Path::new("/Users/test/.speedwave");
+        for dir in [".speedwave", ".speedwave-dev", ".speedwave-ss989"] {
+            let data_dir = home.join(dir);
+            let cmd = build_auth_command_for_platform("p", home, &data_dir, false);
+            let cli = cmd
+                .strip_prefix('\'')
+                .and_then(|rest| rest.split_once('\''))
+                .map(|(cli, _)| cli)
+                .expect("command starts with a quoted CLI path");
+            assert_eq!(
+                speedwave_runtime::consts::data_dir_from_cli_exe(
+                    false,
+                    std::path::Path::new(cli),
+                    home
+                ),
+                Some(data_dir),
+                "the CLI in {cmd} must pick its data dir without SPEEDWAVE_DATA_DIR"
+            );
+        }
+    }
+
+    #[test]
+    fn login_command_escapes_single_quotes() {
+        let home = std::path::Path::new("/Users/O'Brien");
+        let cmd =
+            build_auth_command_for_platform("weird'name", home, &home.join(".speedwave"), false);
+        assert_eq!(
+            cmd,
+            r"'/Users/O'\''Brien/.local/bin/speedwave' login --project 'weird'\''name'"
+        );
+    }
+
+    #[test]
+    fn login_command_windows_runs_the_instance_cli_without_env_or_location() {
+        let home = std::path::Path::new(r"C:\Users\test");
         let cmd = build_auth_command_for_platform(
             "myproj",
-            "/Users/test/Projects",
             home,
-            dd,
-            Some(dd),
-            false,
+            std::path::Path::new(r"C:\Users\test\.speedwave-dev"),
+            true,
         );
         assert_eq!(
             cmd,
-            "cd '/Users/test/Projects' && '/Users/test/.local/bin/speedwave' login --project 'myproj'"
-        );
-        assert!(!cmd.contains("export"));
-    }
-
-    #[test]
-    fn build_auth_command_custom_data_dir() {
-        let cmd = build_auth_command_for_platform(
-            "myproj",
-            "/Users/test/Projects",
-            std::path::Path::new("/Users/test"),
-            std::path::Path::new("/Users/test/.speedwave-dev"),
-            Some(std::path::Path::new("/Users/test/.speedwave")),
-            false,
-        );
-        assert!(cmd.starts_with(&format!(
-            "export {}=",
-            speedwave_runtime::consts::DATA_DIR_ENV
-        )));
-        assert!(cmd.contains("/Users/test/.speedwave-dev"));
-        assert!(cmd.contains("cd '/Users/test/Projects'"));
-        assert!(
-            cmd.ends_with("'/Users/test/.local/bin/speedwave-dev' login --project 'myproj'"),
-            "a dev data dir must invoke its own CLI, not the production one: {cmd}"
+            r"& 'C:\Users\test\.speedwave-dev\bin\speedwave-dev.exe' login --project 'myproj'"
         );
     }
 
     #[test]
-    fn build_auth_command_custom_data_dir_quotes_value() {
+    fn login_command_windows_strips_extended_length_prefix_issue_612() {
         let cmd = build_auth_command_for_platform(
             "p",
-            "/proj",
-            std::path::Path::new("/Users/test"),
-            std::path::Path::new("/Users/test/.speedwave-dev"),
-            Some(std::path::Path::new("/Users/test/.speedwave")),
-            false,
-        );
-        assert!(cmd.contains("='/Users/test/.speedwave-dev'"));
-    }
-
-    #[test]
-    fn build_auth_command_no_default_data_dir() {
-        let home = std::path::Path::new("/data");
-        let dd = std::path::Path::new("/data/.speedwave");
-        let cmd = build_auth_command_for_platform("p", "/projects", home, dd, None, false);
-        assert_eq!(
-            cmd,
-            "cd '/projects' && '/data/.local/bin/speedwave' login --project 'p'"
-        );
-    }
-
-    #[test]
-    fn build_auth_command_quotes_paths_with_spaces() {
-        let cmd = build_auth_command_for_platform(
-            "p",
-            "/Users/John Smith/My Projects",
-            std::path::Path::new("/Users/John Smith"),
-            std::path::Path::new("/Users/John Smith/.speedwave"),
-            Some(std::path::Path::new("/Users/John Smith/.speedwave")),
-            false,
-        );
-        assert!(cmd.contains("cd '/Users/John Smith/My Projects'"));
-    }
-
-    #[test]
-    fn build_auth_command_escapes_single_quotes_in_project_dir() {
-        let cmd = build_auth_command_for_platform(
-            "p",
-            "/Users/O'Brien/project",
-            std::path::Path::new("/Users/O'Brien"),
-            std::path::Path::new("/Users/O'Brien/.speedwave"),
-            Some(std::path::Path::new("/Users/O'Brien/.speedwave")),
-            false,
-        );
-        assert!(cmd.contains("O'\\''Brien"));
-        assert!(cmd.contains("cd '"));
-        assert!(cmd.ends_with("speedwave' login --project 'p'"));
-    }
-
-    #[test]
-    fn build_auth_command_escapes_single_quotes_in_data_dir() {
-        let cmd = build_auth_command_for_platform(
-            "p",
-            "/projects",
-            std::path::Path::new("/Users/O'Brien"),
-            std::path::Path::new("/Users/O'Brien/.speedwave-dev"),
-            Some(std::path::Path::new("/Users/O'Brien/.speedwave")),
-            false,
-        );
-        assert!(cmd.contains("export"));
-        assert!(cmd.contains("O'\\''Brien"));
-    }
-
-    #[test]
-    fn build_auth_command_quotes_paths_with_special_chars() {
-        let cmd = build_auth_command_for_platform(
-            "p",
-            "/Users/test/proj&ect",
-            std::path::Path::new("/Users/test"),
-            std::path::Path::new("/Users/test/.speedwave"),
-            Some(std::path::Path::new("/Users/test/.speedwave")),
-            false,
-        );
-        assert!(cmd.contains("cd '/Users/test/proj&ect'"));
-    }
-
-    #[test]
-    fn build_auth_command_unicode_paths() {
-        let cmd = build_auth_command(
-            "p",
-            "/Users/tëst/プロジェクト",
-            std::path::Path::new("/Users/tëst"),
-            std::path::Path::new("/Users/tëst/.speedwave"),
-            Some(std::path::Path::new("/Users/tëst/.speedwave")),
-        );
-        assert!(cmd.contains("プロジェクト"));
-    }
-
-    #[test]
-    fn build_auth_command_trailing_slash_does_not_cause_mismatch() {
-        let home = std::path::Path::new("/Users/test");
-        let dd = std::path::Path::new("/Users/test/.speedwave/");
-        let cmd = build_auth_command_for_platform(
-            "p",
-            "/projects",
-            home,
-            dd,
-            Some(std::path::Path::new("/Users/test/.speedwave")),
-            false,
-        );
-        assert!(
-            !cmd.contains("export"),
-            "trailing slash must not trigger export (Path normalizes)"
+            std::path::Path::new(r"C:\Users\test"),
+            std::path::Path::new(r"\\?\C:\Users\test\.speedwave"),
+            true,
         );
         assert_eq!(
             cmd,
-            "cd '/projects' && '/Users/test/.local/bin/speedwave' login --project 'p'"
+            r"& 'C:\Users\test\.speedwave\bin\speedwave.exe' login --project 'p'"
         );
     }
 
     #[test]
-    fn build_auth_command_ordering() {
-        let cmd = build_auth_command_for_platform(
-            "p",
-            "/proj",
-            std::path::Path::new("/data"),
-            std::path::Path::new("/data-dev"),
-            Some(std::path::Path::new("/data")),
-            false,
-        );
-        let export_pos = cmd.find("export").unwrap();
-        let cd_pos = cmd.find("cd ").unwrap();
-        let sw_pos = cmd.find("speedwave").unwrap();
-        assert!(export_pos < cd_pos);
-        assert!(cd_pos < sw_pos);
-    }
-
-    #[test]
-    fn build_auth_command_empty_project_dir() {
-        let home = std::path::Path::new("/data");
-        let dd = std::path::Path::new("/data/.speedwave");
-        let cmd = build_auth_command_for_platform("p", "", home, dd, Some(dd), false);
-        assert_eq!(
-            cmd,
-            "cd '' && '/data/.local/bin/speedwave' login --project 'p'"
-        );
-    }
-
-    #[test]
-    fn build_auth_command_includes_project_in_login_argument() {
-        let cmd = build_auth_command(
-            "specific-project-name",
-            "/proj",
-            std::path::Path::new("/data"),
-            std::path::Path::new("/data"),
-            Some(std::path::Path::new("/data")),
-        );
-        assert!(cmd.contains("--project 'specific-project-name'"));
-    }
-
-    #[test]
-    fn build_auth_command_escapes_single_quote_in_project_name() {
+    fn login_command_windows_escapes_single_quotes() {
         let cmd = build_auth_command_for_platform(
             "weird'name",
-            "/proj",
-            std::path::Path::new("/data"),
-            std::path::Path::new("/data"),
-            Some(std::path::Path::new("/data")),
-            false,
+            std::path::Path::new(r"C:\Users\O'Brien"),
+            std::path::Path::new(r"C:\Users\O'Brien\.speedwave"),
+            true,
         );
-        assert!(cmd.contains("--project 'weird'\\''name'"));
+        assert_eq!(
+            cmd,
+            r"& 'C:\Users\O''Brien\.speedwave\bin\speedwave.exe' login --project 'weird''name'"
+        );
     }
 
     #[test]
@@ -1312,198 +1116,6 @@ mod tests {
     #[test]
     fn ps_escape_unicode_preserved() {
         assert_eq!(ps_escape_single_quoted("プロジェクト"), "プロジェクト");
-    }
-
-    #[test]
-    fn build_auth_command_for_platform_windows_default_data_dir() {
-        let cmd = build_auth_command_for_platform(
-            "myproj",
-            r"C:\Users\test\Projects",
-            std::path::Path::new(r"C:\Users\test"),
-            std::path::Path::new(r"C:\Users\test\.speedwave"),
-            Some(std::path::Path::new(r"C:\Users\test\.speedwave")),
-            true,
-        );
-        assert_eq!(
-            cmd,
-            r"Set-Location 'C:\Users\test\Projects'; & 'C:\Users\test\.speedwave\bin\speedwave.exe' login --project 'myproj'"
-        );
-        assert!(!cmd.contains("&&"));
-        assert!(!cmd.contains("export"));
-        assert!(!cmd.starts_with("cd "));
-    }
-
-    #[test]
-    fn build_auth_command_for_platform_windows_custom_data_dir() {
-        let cmd = build_auth_command_for_platform(
-            "myproj",
-            r"C:\Users\test\Projects",
-            std::path::Path::new(r"C:\Users\test"),
-            std::path::Path::new(r"C:\Users\test\.speedwave-dev"),
-            Some(std::path::Path::new(r"C:\Users\test\.speedwave")),
-            true,
-        );
-        assert_eq!(
-            cmd,
-            format!(
-                "$env:{} = 'C:\\Users\\test\\.speedwave-dev'; \
-                 Set-Location 'C:\\Users\\test\\Projects'; \
-                 & 'C:\\Users\\test\\.speedwave-dev\\bin\\speedwave-dev.exe' \
-                 login --project 'myproj'",
-                speedwave_runtime::consts::DATA_DIR_ENV,
-            )
-        );
-        assert!(!cmd.contains("&&"));
-        assert!(!cmd.contains("export "));
-    }
-
-    #[test]
-    fn build_auth_command_for_platform_windows_custom_data_dir_pins_cli_path() {
-        let cmd = build_auth_command_for_platform(
-            "p",
-            r"C:\proj",
-            std::path::Path::new(r"C:\Users\test"),
-            std::path::Path::new(r"C:\Users\test\.speedwave-dev"),
-            Some(std::path::Path::new(r"C:\Users\test\.speedwave")),
-            true,
-        );
-        assert!(
-            cmd.contains(r"& 'C:\Users\test\.speedwave-dev\bin\speedwave-dev.exe'"),
-            "env-pinned PS command must invoke this instance's CLI by absolute path, got: {cmd}"
-        );
-        assert!(
-            !cmd.contains("; speedwave login"),
-            "bare `speedwave` would let PATH pick a foreign install, got: {cmd}"
-        );
-    }
-
-    #[test]
-    fn build_auth_command_for_platform_strips_extended_length_prefix_issue_612() {
-        let cmd = build_auth_command_for_platform(
-            "p",
-            r"\\?\C:\Users\NikodemDeja\testproject",
-            std::path::Path::new(r"C:\Users\test"),
-            std::path::Path::new(r"C:\Users\NikodemDeja\.speedwave"),
-            Some(std::path::Path::new(r"C:\Users\NikodemDeja\.speedwave")),
-            true,
-        );
-        assert_eq!(
-            cmd,
-            r"Set-Location 'C:\Users\NikodemDeja\testproject'; & 'C:\Users\NikodemDeja\.speedwave\bin\speedwave.exe' login --project 'p'"
-        );
-        assert!(!cmd.contains(r"\\?\"));
-        assert!(!cmd.contains(" && "));
-        assert!(!cmd.contains("export "));
-        assert!(!cmd.contains(" cd "));
-    }
-
-    #[test]
-    fn build_auth_command_for_platform_windows_escapes_single_quote_in_path() {
-        let cmd = build_auth_command_for_platform(
-            "p",
-            r"C:\Users\O'Brien\proj",
-            std::path::Path::new(r"C:\Users\test"),
-            std::path::Path::new(r"C:\Users\O'Brien\.speedwave"),
-            Some(std::path::Path::new(r"C:\Users\O'Brien\.speedwave")),
-            true,
-        );
-        assert!(cmd.contains("O''Brien"));
-        assert!(!cmd.contains("O'\\''Brien"));
-    }
-
-    #[test]
-    fn build_auth_command_for_platform_windows_unicode_path() {
-        let cmd = build_auth_command_for_platform(
-            "p",
-            r"C:\Users\test\プロジェクト",
-            std::path::Path::new(r"C:\Users\test"),
-            std::path::Path::new(r"C:\Users\test\.speedwave"),
-            Some(std::path::Path::new(r"C:\Users\test\.speedwave")),
-            true,
-        );
-        assert!(cmd.contains("プロジェクト"));
-    }
-
-    #[test]
-    fn build_auth_command_for_platform_windows_no_double_ampersand() {
-        let cmd_no_env = build_auth_command_for_platform(
-            "p",
-            r"C:\proj",
-            std::path::Path::new(r"C:\Users\test"),
-            std::path::Path::new(r"C:\.speedwave"),
-            Some(std::path::Path::new(r"C:\.speedwave")),
-            true,
-        );
-        assert!(!cmd_no_env.contains(" && "));
-
-        let cmd_with_env = build_auth_command_for_platform(
-            "p",
-            r"C:\proj",
-            std::path::Path::new(r"C:\Users\test"),
-            std::path::Path::new(r"C:\.speedwave-dev"),
-            Some(std::path::Path::new(r"C:\.speedwave")),
-            true,
-        );
-        assert!(!cmd_with_env.contains(" && "));
-    }
-
-    #[test]
-    fn build_auth_command_for_platform_windows_escapes_single_quote_in_data_dir() {
-        let cmd = build_auth_command_for_platform(
-            "p",
-            r"C:\proj",
-            std::path::Path::new(r"C:\Users\test"),
-            std::path::Path::new(r"C:\Users\O'Brien\.speedwave-dev"),
-            Some(std::path::Path::new(r"C:\Users\O'Brien\.speedwave")),
-            true,
-        );
-        assert!(cmd.contains("O''Brien"));
-        assert!(!cmd.contains("O'\\''Brien"));
-        assert!(cmd.starts_with(&format!(
-            "$env:{} = 'C:\\Users\\O''Brien\\.speedwave-dev'",
-            speedwave_runtime::consts::DATA_DIR_ENV
-        )));
-    }
-
-    #[test]
-    fn build_auth_command_for_platform_windows_strips_extended_length_prefix_in_data_dir() {
-        let cmd = build_auth_command_for_platform(
-            "p",
-            r"C:\proj",
-            std::path::Path::new(r"C:\Users\test"),
-            std::path::Path::new(r"\\?\C:\Users\test\.speedwave-dev"),
-            Some(std::path::Path::new(r"C:\Users\test\.speedwave")),
-            true,
-        );
-        assert!(!cmd.contains(r"\\?\"));
-        assert!(cmd.contains(r"$env:"));
-        assert!(cmd.contains(r"'C:\Users\test\.speedwave-dev'"));
-    }
-
-    #[test]
-    fn build_auth_command_for_platform_windows_passthrough_bare_drive() {
-        let cmd = build_auth_command_for_platform(
-            "p",
-            r"\\?\C:",
-            std::path::Path::new(r"C:\Users\test"),
-            std::path::Path::new(r"C:\.speedwave"),
-            Some(std::path::Path::new(r"C:\.speedwave")),
-            true,
-        );
-        assert!(cmd.contains(r"Set-Location '\\?\C:'"));
-    }
-
-    #[test]
-    fn build_auth_command_for_platform_windows_escapes_single_quote_in_project_name() {
-        let cmd = build_auth_command_for_platform(
-            "weird'name",
-            r"C:\proj",
-            std::path::Path::new(r"C:\Users\test"),
-            std::path::Path::new(r"C:\.speedwave"),
-            Some(std::path::Path::new(r"C:\.speedwave")),
-            true,
-        );
-        assert!(cmd.contains("--project 'weird''name'"));
     }
 
     #[test]

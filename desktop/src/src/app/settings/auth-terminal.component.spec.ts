@@ -14,9 +14,7 @@ describe('AuthTerminalComponent', () => {
   let mockTauri: MockTauriService;
   let mockLogger: ReturnType<typeof makeMockLogger>;
 
-  const SAMPLE_COMMAND = "cd '/Users/test/Projects' && speedwave login --project 'test-project'";
-  const SAMPLE_COMMAND_WITH_PREFIX =
-    "export SPEEDWAVE_DATA_DIR='/Users/test/.speedwave-dev' && cd '/Users/test/Projects' && speedwave login --project 'test-project'";
+  const SAMPLE_COMMAND = "'/Users/test/.local/bin/speedwave' login --project 'test-project'";
 
   beforeEach(async () => {
     vi.useFakeTimers();
@@ -83,19 +81,6 @@ describe('AuthTerminalComponent', () => {
     const el = (fixture.nativeElement as HTMLElement).querySelector('[data-testid="auth-command"]');
     expect(el).toBeTruthy();
     expect(el!.textContent).toContain(SAMPLE_COMMAND);
-  });
-
-  it('displays command with SPEEDWAVE_DATA_DIR prefix when present', async () => {
-    mockTauri.invokeHandler = async (cmd: string) => {
-      if (cmd === 'get_auth_status') return { oauth_authenticated: false };
-      if (cmd === 'get_auth_command') return SAMPLE_COMMAND_WITH_PREFIX;
-      return undefined;
-    };
-    fixture.detectChanges();
-    await vi.advanceTimersByTimeAsync(0);
-    fixture.detectChanges();
-    const el = (fixture.nativeElement as HTMLElement).querySelector('[data-testid="auth-command"]');
-    expect(el!.textContent).toContain('SPEEDWAVE_DATA_DIR');
   });
 
   it('sets error when get_auth_command fails on init', async () => {
@@ -257,7 +242,7 @@ describe('AuthTerminalComponent', () => {
 
   it('displays PowerShell-shaped command on Windows', async () => {
     const WIN_COMMAND =
-      "Set-Location 'C:\\Users\\test\\Projects'; speedwave login --project 'test-project'";
+      "& 'C:\\Users\\test\\.speedwave\\bin\\speedwave.exe' login --project 'test-project'";
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'get_auth_status') return { oauth_authenticated: false };
       if (cmd === 'get_auth_command') return WIN_COMMAND;
@@ -269,8 +254,7 @@ describe('AuthTerminalComponent', () => {
     fixture.detectChanges();
     const el = (fixture.nativeElement as HTMLElement).querySelector('[data-testid="auth-command"]');
     expect(el).toBeTruthy();
-    expect(el!.textContent).toContain('Set-Location');
-    expect(el!.textContent).toContain('; speedwave');
+    expect(el!.textContent).toContain("& 'C:");
     expect(el!.textContent).not.toContain('&&');
   });
 
