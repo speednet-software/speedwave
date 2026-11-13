@@ -36,10 +36,9 @@ export interface LogFilters {
   source: string;
 }
 
-/** Time window of a diagnostics export; mirrors `export_window.rs::ExportWindow`. */
+/** Time window of a diagnostics export. */
 export type ExportWindow = '2h' | '24h' | '7d' | '30d';
 
-/** Window choices of the export selector, in display order. */
 export const EXPORT_WINDOWS: readonly { value: ExportWindow; label: string }[] = [
   { value: '2h', label: '2 h' },
   { value: '24h', label: '24 h' },
@@ -47,7 +46,6 @@ export const EXPORT_WINDOWS: readonly { value: ExportWindow; label: string }[] =
   { value: '30d', label: '30 days' },
 ];
 
-/** Window the selector starts on at every visit. */
 export const DEFAULT_EXPORT_WINDOW: ExportWindow = '7d';
 
 /** How many lines to request from the backend on each fetch. */
@@ -553,9 +551,7 @@ export class LogsViewComponent implements OnInit, OnDestroy {
   readonly health = this.systemHealth.health;
   /** Whether the expandable details row is open. */
   readonly detailsOpen = signal<boolean>(false);
-  /** Time window the next diagnostics export covers. */
   readonly exportWindow = signal<ExportWindow>(DEFAULT_EXPORT_WINDOW);
-  /** Window choices rendered by the export selector. */
   protected readonly exportWindows = EXPORT_WINDOWS;
   /** True while a diagnostics export is in flight. */
   readonly diagnosticsExporting = signal<boolean>(false);
@@ -852,10 +848,6 @@ export class LogsViewComponent implements OnInit, OnDestroy {
     }
   }
 
-  /**
-   * Native `<select>` change handler of the export window; a value outside the known windows is ignored.
-   * @param event - DOM change event from the export window dropdown.
-   */
   protected onExportWindowChange(event: Event): void {
     const value = (event.target as HTMLSelectElement | null)?.value;
     const chosen = EXPORT_WINDOWS.find((w) => w.value === value);
