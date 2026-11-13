@@ -221,6 +221,23 @@ describe('FileAttachmentService', () => {
     expect(logger.warn).toHaveBeenCalledWith(`could not discard pasted file ${UPLOAD_ID}`);
   });
 
+  it.each([
+    ['report.PDF', 'pdf'],
+    ['sentinel-997-dokument.SENTINEL997EXT', 'other'],
+    ['notes.tx', 'other'],
+    ['no-extension', 'none'],
+    ['trailing.', 'none'],
+  ])('logs the extension of %s as %s', async (name, extension) => {
+    failAppend = 'failed';
+    const file = new File(['abc'], name, { type: '' });
+
+    await expect(service.stage(file, 'acme', new AbortController().signal)).rejects.toBeDefined();
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      `could not attach a pasted file (extension: ${extension}, 3 bytes)`
+    );
+  });
+
   it('never logs the file name, path or rejection text of a failed attach or discard', async () => {
     const sentinel = 'SENTINEL-997-attachment';
     tauri.invokeHandler = async (cmd) => {

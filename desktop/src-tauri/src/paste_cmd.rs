@@ -40,6 +40,14 @@ const MAX_UPLOAD_EXTENSION_CHARS: usize = 16;
 
 const FALLBACK_UPLOAD_STEM: &str = "file";
 
+const LOGGED_EXTENSIONS: [&str; 62] = [
+    "7z", "avi", "bin", "bmp", "c", "cpp", "css", "csv", "doc", "docx", "eml", "env", "gif", "go",
+    "gz", "h", "heic", "htm", "html", "ics", "ipynb", "java", "jpeg", "jpg", "js", "json", "jsx",
+    "key", "kt", "log", "m4a", "md", "mov", "mp3", "mp4", "msg", "odp", "ods", "odt", "ogg", "pdf",
+    "png", "ppt", "pptx", "py", "rs", "rtf", "sh", "sql", "svg", "swift", "tar", "tif", "tiff",
+    "toml", "ts", "tsx", "txt", "wav", "webp", "xlsx", "zip",
+];
+
 #[derive(Serialize, Debug)]
 pub struct SavedPaste {
     pub paste_id: u64,
@@ -470,14 +478,20 @@ fn sanitize_stem(stem: &str) -> String {
 fn began_upload_message(upload_id: u64, declared_bytes: u64, original_name: &str) -> String {
     format!(
         "began pasted file upload {upload_id} of {declared_bytes} bytes (extension: {})",
-        upload_extension(original_name).as_deref().unwrap_or("none")
+        logged_extension(original_name)
     )
 }
 
-fn upload_extension(original_name: &str) -> Option<String> {
-    let base = original_name.rsplit(['/', '\\']).next()?;
-    let (_, extension) = base.rsplit_once('.')?;
-    sanitize_extension(extension)
+fn logged_extension(original_name: &str) -> &'static str {
+    let base = original_name.rsplit(['/', '\\']).next().unwrap_or_default();
+    match base.rsplit_once('.') {
+        Some((_, extension)) if !extension.is_empty() => LOGGED_EXTENSIONS
+            .iter()
+            .find(|known| known.eq_ignore_ascii_case(extension))
+            .copied()
+            .unwrap_or("other"),
+        _ => "none",
+    }
 }
 
 fn sanitize_extension(extension: &str) -> Option<String> {
@@ -542,11 +556,73 @@ mod tests {
     }
 
     #[test]
-    fn began_upload_message_logs_the_sanitized_extension_of_a_dotted_name() {
+    fn began_upload_message_logs_other_for_an_extension_outside_the_list() {
+        for name in [
+            "report.SENTINEL-997-paste",
+            "sentinel-997-dokument.SENTINEL997EXT",
+            "notes.tx",
+        ] {
+            assert_eq!(
+                began_upload_message(7, 42, name),
+                "began pasted file upload 7 of 42 bytes (extension: other)",
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn began_upload_message_logs_a_listed_extension_in_lower_case() {
         assert_eq!(
-            began_upload_message(7, 42, "report.SENTINEL-997-paste"),
-            "began pasted file upload 7 of 42 bytes (extension: sentinel997paste)"
+            began_upload_message(7, 42, "report.PDF"),
+            "began pasted file upload 7 of 42 bytes (extension: pdf)"
         );
+        assert_eq!(
+            began_upload_message(7, 42, "archive.tar.gz"),
+            "began pasted file upload 7 of 42 bytes (extension: gz)"
+        );
+    }
+
+    #[test]
+    fn began_upload_message_logs_none_for_a_name_without_an_extension() {
+        for name in ["SENTINEL-997-paste", "trailing.", "C:\\dir.d\\file"] {
+            assert_eq!(
+                began_upload_message(7, 42, name),
+                "began pasted file upload 7 of 42 bytes (extension: none)",
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn logged_extensions_are_lower_case_alphanumeric_and_unique() {
+        let unique: BTreeSet<&str> = LOGGED_EXTENSIONS.iter().copied().collect();
+        assert_eq!(unique.len(), LOGGED_EXTENSIONS.len());
+        for extension in LOGGED_EXTENSIONS {
+            assert!(
+                !extension.is_empty()
+                    && extension
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
+                "{extension}"
+            );
+        }
+    }
+
+    #[test]
+    fn logged_extensions_match_ts_mirror() {
+        let ts = include_str!("../../src/src/app/services/file-attachment.service.ts");
+        let list = ts
+            .split("const LOGGED_EXTENSIONS: ReadonlySet<string> = new Set([")
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .unwrap();
+        let ts_extensions: BTreeSet<&str> = list
+            .split(',')
+            .map(|item| item.trim().trim_matches('\''))
+            .filter(|item| !item.is_empty())
+            .collect();
+        let rust_extensions: BTreeSet<&str> = LOGGED_EXTENSIONS.iter().copied().collect();
+        assert_eq!(ts_extensions, rust_extensions);
     }
 
     #[test]
