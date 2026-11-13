@@ -225,6 +225,7 @@ describe('FileAttachmentService', () => {
     ['report.PDF', 'pdf'],
     ['sentinel-997-dokument.SENTINEL997EXT', 'other'],
     ['notes.tx', 'other'],
+    ['notes.d\u043Ecx', 'other'],
     ['no-extension', 'none'],
     ['trailing.', 'none'],
   ])('logs the extension of %s as %s', async (name, extension) => {

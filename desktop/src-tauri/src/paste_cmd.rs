@@ -561,6 +561,7 @@ mod tests {
             "report.SENTINEL-997-paste",
             "sentinel-997-dokument.SENTINEL997EXT",
             "notes.tx",
+            "notes.d\u{043E}cx",
         ] {
             assert_eq!(
                 began_upload_message(7, 42, name),

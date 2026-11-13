@@ -994,6 +994,25 @@ describe('http-bridge', () => {
           'RATE_LIMITED',
         ],
         ['an Invalid word in the middle', 'Page says Invalid input here', 'TOOL_ERROR'],
+        [
+          'several parameters the tool does not declare',
+          'Error: Invalid a, b and 2 more. listIssues does not accept these parameters, so the call was rejected and nothing was sent.',
+          'INVALID_PARAM',
+        ],
+        [
+          'the atlassian not found message without an API message',
+          'Error: Atlassian resource not found. Check the key/ID and that the account has access.',
+          'NOT_FOUND',
+        ],
+        [
+          'the context7 invalid key message',
+          "Error: Invalid API key (expected prefix 'ctx7sk_'). Remove the key in Settings.",
+          'AUTH_FAILED',
+        ],
+        ['an Invalid message of another shape', 'Error: Invalid page range: [1,2]', 'TOOL_ERROR'],
+        ['an Invalid path message', 'Error: Invalid path: security check failed.', 'TOOL_ERROR'],
+        ['a Node invalid URL', 'TypeError: Invalid URL', 'TypeError'],
+        ['a bare Invalid URL', 'Invalid URL', 'TOOL_ERROR'],
       ])('logs the code for %s', async (_label, text, code) => {
         const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 

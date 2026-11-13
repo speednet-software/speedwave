@@ -512,7 +512,8 @@ const TOOL_ERROR_LEADS: readonly { pattern: RegExp; code?: string }[] = [
   { pattern: /^(?:GitHub API|Atlassian) rate limit exceeded/, code: 'RATE_LIMITED' },
   { pattern: /^Ref \S+ not found in the current page snapshot\b/, code: 'REF_NOT_FOUND' },
   { pattern: /^Tool "[^"\n]*" not found$/, code: 'NO_SUCH_TOOL' },
-  { pattern: /^Invalid [A-Za-z_]/, code: 'INVALID_PARAM' },
+  { pattern: /^Invalid API key \(expected prefix /, code: 'AUTH_FAILED' },
+  { pattern: /^Invalid [A-Za-z_][\w, ]*?(?:\.(?: |$)| \(received: )/, code: 'INVALID_PARAM' },
 ];
 
 function workerError(message: string, code: string): Error {
