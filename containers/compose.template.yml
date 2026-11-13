@@ -176,6 +176,7 @@ services:
       - /tmp:noexec,nosuid,size=${MCP_REDMINE_TMPFS}
     volumes:
       - ${TOKENS_DIR}/redmine:/tokens:ro
+      - ${PROJECT_DIR}:/workspace:rw
     environment:
       - PORT=${PORT_WORKER}
     networks:

@@ -1198,7 +1198,7 @@ mod tests {
     use super::*;
     use strum::IntoEnumIterator;
 
-    const SECURITY_RULE_COUNT: usize = 54;
+    const SECURITY_RULE_COUNT: usize = 61;
 
     fn test_bundle_manifest() -> bundle::BundleManifest {
         bundle::BundleManifest {
@@ -9752,6 +9752,242 @@ services:
     }
 
     #[test]
+    fn test_security_check_redmine_correct_mounts_pass() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-redmine:
+    image: speedwave-mcp-redmine:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/redmine:/tokens:ro
+      - /test/project:/workspace:rw
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
+        let redmine_violations: Vec<_> =
+            violations.iter().filter(|v| v.rule.is_redmine()).collect();
+        assert!(
+            redmine_violations.is_empty(),
+            "Correct Redmine mounts should not trigger violations, got: {:?}",
+            redmine_violations
+                .iter()
+                .map(|v| &v.rule)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_security_check_redmine_flags_ro_workspace() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-redmine:
+    image: speedwave-mcp-redmine:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/redmine:/tokens:ro
+      - /test/project:/workspace:ro
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::RedmineWorkspaceMountMode),
+            "Redmine workspace mounted :ro should trigger REDMINE_WORKSPACE_MOUNT_MODE"
+        );
+    }
+
+    #[test]
+    fn test_security_check_redmine_workspace_path_mismatch() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-redmine:
+    image: speedwave-mcp-redmine:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/redmine:/tokens:ro
+      - /wrong/path:/workspace:rw
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::RedmineWorkspacePathMismatch),
+            "Wrong Redmine workspace path should trigger REDMINE_WORKSPACE_PATH_MISMATCH"
+        );
+    }
+
+    #[test]
+    fn test_security_check_redmine_flags_missing_workspace_mount() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-redmine:
+    image: speedwave-mcp-redmine:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/redmine:/tokens:ro
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::RedmineMissingWorkspaceMount),
+            "a redmine service without /workspace must be flagged"
+        );
+    }
+
+    #[test]
+    fn test_security_check_redmine_flags_rw_tokens() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-redmine:
+    image: speedwave-mcp-redmine:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/redmine:/tokens:rw
+      - /test/project:/workspace:rw
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::PluginTokenMountMode
+                    && v.container == "mcp-redmine"),
+            "a :rw token mount on redmine must be flagged"
+        );
+    }
+
+    #[test]
+    fn test_security_check_redmine_flags_wrong_token_path() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-redmine:
+    image: speedwave-mcp-redmine:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /elsewhere/tokens:/tokens:ro
+      - /test/project:/workspace:rw
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::RedmineTokenPathMismatch),
+            "a redmine token mount outside the project tokens directory must be flagged"
+        );
+    }
+
+    #[test]
+    fn test_security_check_redmine_flags_unauthorized_extra_volume() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-redmine:
+    image: speedwave-mcp-redmine:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/redmine:/tokens:ro
+      - /test/project:/workspace:rw
+      - /etc/passwd:/stolen:ro
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::RedmineNoExtraVolumes),
+            "an unauthorized extra volume on redmine must be flagged"
+        );
+    }
+
+    #[test]
     fn test_security_check_atlassian_correct_mounts_pass() {
         let data_dir = tempfile::tempdir().unwrap();
         let yaml = format!(
@@ -10376,6 +10612,7 @@ services:
       - /tmp:noexec,nosuid,size=64m
     volumes:
       - /home/user/.speedwave/tokens/test/redmine:/tokens:ro
+      - /home/user/projects/test:/workspace:rw
     environment:
       - PORT=3000
     networks:
@@ -11372,6 +11609,15 @@ services:
             .filter(|r| r.to_string().starts_with("ATLASSIAN_"))
             .count();
         let atlassian_by_method = SecurityRule::iter().filter(|r| r.is_atlassian()).count();
+        let redmine_by_prefix = SecurityRule::iter()
+            .filter(|r| r.to_string().starts_with("REDMINE_"))
+            .count();
+        let redmine_by_method = SecurityRule::iter().filter(|r| r.is_redmine()).count();
+        assert_eq!(
+            redmine_by_method, redmine_by_prefix,
+            "is_redmine() count ({redmine_by_method}) differs from REDMINE-prefixed variant count \
+             ({redmine_by_prefix}); update SecurityRule::is_redmine() to include the new variant"
+        );
         assert_eq!(
             slack_by_method, slack_by_prefix,
             "is_slack() count ({slack_by_method}) differs from SLACK-prefixed variant count \

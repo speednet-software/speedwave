@@ -1,10 +1,12 @@
-/**
- * Metadata Tests - validates that all 24 Redmine tools have required metadata fields
- */
-
 import { describe, it, expect } from 'vitest';
 import { createToolDefinitions } from './index.js';
-import { Tool, META_KEYS, metaValue } from '@speedwave/mcp-shared';
+import {
+  Tool,
+  META_KEYS,
+  metaValue,
+  WORKSPACE_WRITE_ANNOTATIONS,
+  DESTRUCTIVE_ANNOTATIONS,
+} from '@speedwave/mcp-shared';
 
 const ALL_TOOLS: Tool[] = createToolDefinitions(null).map((td) => td.tool);
 
@@ -15,6 +17,9 @@ const EXPECTED_TOOL_NAMES = [
   'createIssue',
   'updateIssue',
   'commentIssue',
+  'addAttachment',
+  'downloadAttachment',
+  'deleteAttachment',
   'listTimeEntries',
   'createTimeEntry',
   'updateTimeEntry',
@@ -36,8 +41,8 @@ const EXPECTED_TOOL_NAMES = [
 ];
 
 describe('Redmine tool metadata', () => {
-  it('exports exactly 24 tools', () => {
-    expect(ALL_TOOLS).toHaveLength(24);
+  it('exports exactly 27 tools', () => {
+    expect(ALL_TOOLS).toHaveLength(27);
   });
 
   it('exports all expected tool names', () => {
@@ -173,10 +178,14 @@ const READ_ONLY_TOOL_NAMES = [
   'getConfig',
 ];
 
+const WORKSPACE_WRITE_TOOL_NAMES = ['downloadAttachment'];
+
 const CHANGING_TOOL_NAMES = [
   'createIssue',
   'updateIssue',
   'commentIssue',
+  'addAttachment',
+  'deleteAttachment',
   'createTimeEntry',
   'updateTimeEntry',
   'updateJournal',
@@ -192,13 +201,36 @@ describe('Redmine read-only access annotations', () => {
 
   it('lists every tool as either reading or changing', () => {
     expect([...tools.map((t) => t.name)].sort()).toEqual(
-      [...READ_ONLY_TOOL_NAMES, ...CHANGING_TOOL_NAMES].sort()
+      [...READ_ONLY_TOOL_NAMES, ...WORKSPACE_WRITE_TOOL_NAMES, ...CHANGING_TOOL_NAMES].sort()
     );
   });
 
-  it('marks exactly the reading tools readOnlyHint true', () => {
-    expect(names((hint) => hint === true).sort()).toEqual([...READ_ONLY_TOOL_NAMES].sort());
+  it('marks exactly the reading and workspace-writing tools readOnlyHint true', () => {
+    expect(names((hint) => hint === true).sort()).toEqual(
+      [...READ_ONLY_TOOL_NAMES, ...WORKSPACE_WRITE_TOOL_NAMES].sort()
+    );
   });
+
+  it('gives the download only the workspace-write annotations', () => {
+    expect(tools.find((t) => t.name === 'downloadAttachment')?.annotations).toEqual(
+      WORKSPACE_WRITE_ANNOTATIONS
+    );
+  });
+
+  it('marks deleteAttachment destructive and the other changing file tools not destructive', () => {
+    const hint = (name: string) => tools.find((t) => t.name === name)?.annotations;
+    expect(hint('deleteAttachment')).toEqual(DESTRUCTIVE_ANNOTATIONS);
+    expect(hint('addAttachment')?.destructiveHint).toBe(false);
+    expect(hint('createIssue')?.destructiveHint).toBe(false);
+  });
+
+  it.each(['addAttachment', 'downloadAttachment', 'deleteAttachment', 'createIssue'])(
+    'gives %s the long timeout class',
+    (name) => {
+      const meta = tools.find((t) => t.name === name)?._meta as Record<string, unknown>;
+      expect(metaValue(meta, META_KEYS.TIMEOUT_CLASS, 'timeoutClass')).toBe('long');
+    }
+  );
 
   it.each(CHANGING_TOOL_NAMES)('does not mark %s as read-only', (name) => {
     expect(tools.find((t) => t.name === name)?.annotations?.readOnlyHint).not.toBe(true);

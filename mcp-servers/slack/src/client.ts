@@ -29,6 +29,7 @@ import {
   OAuthRefreshError,
   clampPageSize,
   resolveWorkspaceFile,
+  sanitizeFilename,
   workspaceRoot,
   buildTeachingMessage,
   WorkspaceFileError,
@@ -950,16 +951,6 @@ export async function getFileContent(
 
 /** Hidden workspace subpath for downloads — keeps the project root clean (same convention as office's `.speedwave/office`). */
 const SLACK_DOWNLOAD_SUBPATH = path.join('.speedwave', 'slack');
-
-/**
- * Reduce a filename to a safe basename (no separators, no leading dots).
- * @param name - Raw filename from Slack's files.info.
- */
-function sanitizeFilename(name: string): string {
-  const base = name.split(/[\\/]/).pop() || 'file';
-  const cleaned = base.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '');
-  return cleaned || 'file';
-}
 
 /** Result of a workspace download. */
 export interface SlackDownloadedFile {
