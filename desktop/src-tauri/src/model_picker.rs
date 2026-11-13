@@ -786,6 +786,22 @@ mod tests {
     }
 
     #[test]
+    fn the_added_fable_row_and_a_server_or_alias_row_of_the_same_model_make_one_row() {
+        let info = info_of(
+            vec![
+                listed("claude-fable-5-2[1m]", None, "Fable"),
+                listed("fable", Some("claude-fable-5-2"), "Fable"),
+                listed("claude-fable-5-2", Some("claude-fable-5-2"), "Fable 5.2"),
+                listed("claude-fable-5-1[1m]", None, "Fable"),
+            ],
+            Some("Claude Team"),
+        );
+        let picker = picker_of(&info, AnthropicPlan::Team);
+        let ids: Vec<&str> = picker.rows.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["claude-fable-5-2", "claude-fable-5-1"]);
+    }
+
+    #[test]
     fn a_dated_and_a_plain_listing_of_one_model_make_one_row_on_the_catalog_id() {
         let info = info_of(
             vec![
