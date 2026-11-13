@@ -124,11 +124,12 @@ pub async fn discard_paste(paste_id: u64) -> Result<(), String> {
 fn save_blocking(project: &str, media_type: &str, bytes: &[u8]) -> Result<SavedPaste, String> {
     let project_dir = resolve_project_dir(project)?;
     let saved = save_to_dir(&project_dir, media_type, bytes)?;
-    log::info!(
-        "saved a pasted image of {} bytes ({media_type}) for project {project}",
-        bytes.len()
-    );
+    log::info!("{}", saved_image_message(project, media_type, bytes.len()));
     Ok(saved)
+}
+
+fn saved_image_message(project: &str, media_type: &str, byte_count: usize) -> String {
+    format!("saved a pasted image of {byte_count} bytes ({media_type}) for project {project}")
 }
 
 fn save_to_dir(project_dir: &Path, media_type: &str, bytes: &[u8]) -> Result<SavedPaste, String> {
@@ -199,8 +200,8 @@ fn begin_upload_in_dir(
     let file = dir.create_new_file(&part_name)?;
     let upload_id = next_paste_id();
     log::info!(
-        "began pasted file upload {upload_id} of {declared_bytes} bytes (extension: {})",
-        upload_extension(original_name).as_deref().unwrap_or("none")
+        "{}",
+        began_upload_message(upload_id, declared_bytes, original_name)
     );
     let upload = OpenUpload {
         project_dir: project_dir.to_path_buf(),
@@ -466,6 +467,13 @@ fn sanitize_stem(stem: &str) -> String {
     }
 }
 
+fn began_upload_message(upload_id: u64, declared_bytes: u64, original_name: &str) -> String {
+    format!(
+        "began pasted file upload {upload_id} of {declared_bytes} bytes (extension: {})",
+        upload_extension(original_name).as_deref().unwrap_or("none")
+    )
+}
+
 fn upload_extension(original_name: &str) -> Option<String> {
     let base = original_name.rsplit(['/', '\\']).next()?;
     let (_, extension) = base.rsplit_once('.')?;
@@ -506,6 +514,41 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
     use tauri::http::HeaderValue;
+
+    #[test]
+    fn began_upload_message_carries_no_attachment_name() {
+        for name in [
+            "SENTINEL-997-paste.txt",
+            "C:\\Users\\x\\SENTINEL-997-paste.md",
+            "/home/x/SENTINEL-997-paste/notes.rs",
+            "report.SENTINEL-997-paste",
+            "SENTINEL-997-paste",
+        ] {
+            let message = began_upload_message(7, 42, name);
+            assert!(!message.contains("SENTINEL-997"), "{message}");
+        }
+    }
+
+    #[test]
+    fn began_upload_message_keeps_id_size_and_extension() {
+        assert_eq!(
+            began_upload_message(7, 42, "SENTINEL-997-paste.TXT"),
+            "began pasted file upload 7 of 42 bytes (extension: txt)"
+        );
+        assert_eq!(
+            began_upload_message(7, 42, "SENTINEL-997-paste"),
+            "began pasted file upload 7 of 42 bytes (extension: none)"
+        );
+    }
+
+    #[test]
+    fn saved_image_message_names_size_type_and_project() {
+        let message = saved_image_message("demo", "image/png", 10);
+        assert_eq!(
+            message,
+            "saved a pasted image of 10 bytes (image/png) for project demo"
+        );
+    }
 
     #[test]
     fn extension_for_known_mimes() {
