@@ -55,7 +55,9 @@ export class FileAttachmentService {
     } catch (err) {
       this.discard(uploadId);
       if (!signal.aborted) {
-        this.logger.warn(`could not attach ${file.name}: ${rejectionText(err)}`);
+        this.logger.warn(
+          `could not attach a pasted file (extension: ${extensionOf(file.name)}, ${file.size} bytes)`
+        );
       }
       throw err;
     }
@@ -67,8 +69,8 @@ export class FileAttachmentService {
    * @param pasteId - Id from `begin_paste_upload`, `finish_paste_upload` or `save_pasted_image`.
    */
   discard(pasteId: number): void {
-    this.tauri.invoke('discard_paste', { pasteId }).catch((err: unknown) => {
-      this.logger.warn(`could not discard pasted file ${pasteId}: ${rejectionText(err)}`);
+    this.tauri.invoke('discard_paste', { pasteId }).catch(() => {
+      this.logger.warn(`could not discard pasted file ${pasteId}`);
     });
   }
 }
@@ -83,6 +85,11 @@ async function readChunk(file: File, start: number, end: number): Promise<Uint8A
   } catch (err) {
     throw new Error(`Could not read ${file.name}: ${rejectionText(err)}`, { cause: err });
   }
+}
+
+function extensionOf(name: string): string {
+  const extension = name.slice(name.lastIndexOf('.') + 1).toLowerCase();
+  return name.includes('.') && /^[a-z0-9]{1,8}$/.test(extension) ? extension : 'none';
 }
 
 function rejectionText(err: unknown): string {

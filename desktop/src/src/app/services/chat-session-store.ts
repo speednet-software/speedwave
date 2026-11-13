@@ -1661,8 +1661,8 @@ export class ChatSessionStore {
         if (finished && parseError !== null) {
           this.deps.log.warn(
             `Failed to parse tool input for "${finished.tool_name}" (${finished.tool_id}, ` +
-              `${finished.input_json.length} chars): ${previewForLog(finished.input_json)} ` +
-              `(${parseError})`
+              `${finished.input_json.length} chars, ${parseError}, ` +
+              `ends with closing bracket: ${/[}\]]$/.test(finished.input_json.trimEnd())})`
           );
         }
         break;
@@ -2485,20 +2485,12 @@ function jsonParseError(input: string): string | null {
     JSON.parse(input);
     return null;
   } catch (err) {
-    return String(err);
+    return err instanceof Error ? err.name : 'UnknownError';
   }
 }
 
 function isNoArgumentTool(streamed: string, complete: string): boolean {
   return streamed === '' && complete === '{}';
-}
-
-const TOOL_INPUT_LOG_PREVIEW_CHARS = 200;
-
-function previewForLog(input: string): string {
-  const points = Array.from(input);
-  if (points.length <= TOOL_INPUT_LOG_PREVIEW_CHARS) return input;
-  return `${points.slice(0, TOOL_INPUT_LOG_PREVIEW_CHARS).join('')}…`;
 }
 
 function findRetryAnchorIn(

@@ -1,5 +1,6 @@
 //! Collapses multi-line `ANTHROPIC_LOG=debug` blocks into single entries: [`Collator`] groups by
-//! braces, [`format_block`] summarises; same-`[log_id]` fragments merge; unknowns pass through.
+//! braces, [`format_block`] summarises; same-`[log_id]` fragments merge. A line without braces that
+//! matches no known shape passes through; an unrecognised braced block is reduced to its size.
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -104,7 +105,7 @@ impl Collator {
             if self.buffer.len() >= MAX_BUFFERED_LINES {
                 let joined = self.drain_buffer().unwrap_or_default();
                 self.depth = 0;
-                return vec![joined];
+                return vec![format_block(&joined)];
             }
             return Vec::new();
         }
@@ -240,6 +241,14 @@ static RE_POST_SUCCEEDED: LazyLock<Regex> = LazyLock::new(|| {
     re(r"\[log_([0-9a-f]+)\]\s+(\w+)\s+(\S+)\s+succeeded with status (\d+) in (\d+)ms")
 });
 
+fn without_query(url: &str) -> &str {
+    url.split(['?', '#']).next().unwrap_or_default()
+}
+
+fn captured_url(re: &Regex, text: &str) -> Option<String> {
+    re.captures(text).map(|c| without_query(&c[1]).to_string())
+}
+
 fn extract_log_id(line: &str) -> Option<String> {
     RE_LOG_ID.captures(line).map(|c| c[1].to_string())
 }
@@ -271,7 +280,7 @@ fn parse_response_fragment(line: &str) -> Option<ResponseFields> {
         return None;
     };
 
-    let url = RE_URL.captures(line).map(|c| c[1].to_string());
+    let url = captured_url(&RE_URL, line);
     let status = RE_STATUS.captures(line).map(|c| c[1].to_string());
     let duration_ms = RE_DURATION.captures(line).map(|c| c[1].to_string());
     let content_type = RE_CONTENT_TYPE.captures(line).map(|c| c[1].to_string());
@@ -287,8 +296,9 @@ fn parse_response_fragment(line: &str) -> Option<ResponseFields> {
     })
 }
 
-/// Summarise a joined block. Returns `block` verbatim if the format is
-/// unrecognised — we never drop information, only condense what we understand.
+/// Summarise a joined block. A block without braces that matches no known shape is returned
+/// verbatim; a braced block that matches none is reduced to its size, because its body can hold
+/// request or response content.
 pub fn format_block(block: &str) -> String {
     let log_id = extract_log_id(block);
 
@@ -298,7 +308,11 @@ pub fn format_block(block: &str) -> String {
     if let Some(c) = RE_POST_SUCCEEDED.captures(block) {
         return format!(
             "{} {} → {} in {}ms  [log_{}]",
-            &c[2], &c[3], &c[4], &c[5], &c[1]
+            &c[2],
+            without_query(&c[3]),
+            &c[4],
+            &c[5],
+            &c[1]
         );
     }
     if block.starts_with("response ") && block.contains("Headers {") {
@@ -306,6 +320,10 @@ pub fn format_block(block: &str) -> String {
     }
     if block.contains("response start") || block.contains("response parsed") {
         return format_response_start(block, log_id.as_deref());
+    }
+    if block.contains(['{', '}']) {
+        let tag = log_id.map(|id| format!("  [log_{id}]")).unwrap_or_default();
+        return format!("unrecognised debug block ({} bytes){tag}", block.len());
     }
 
     block.to_string()
@@ -316,10 +334,7 @@ fn format_request(block: &str, log_id: Option<&str>) -> String {
         .captures(block)
         .map(|c| c[1].to_uppercase())
         .unwrap_or_else(|| "?".into());
-    let url = RE_URL
-        .captures(block)
-        .map(|c| c[1].to_string())
-        .unwrap_or_else(|| "?".into());
+    let url = captured_url(&RE_URL, block).unwrap_or_else(|| "?".into());
     let model = RE_MODEL.captures(block).map(|c| c[1].to_string());
     let max_tokens = RE_MAX_TOKENS.captures(block).map(|c| c[1].to_string());
     let stream = RE_STREAM.captures(block).map(|c| c[1].to_string());
@@ -352,10 +367,7 @@ fn format_request(block: &str, log_id: Option<&str>) -> String {
 }
 
 fn format_response_start(block: &str, log_id: Option<&str>) -> String {
-    let url = RE_URL
-        .captures(block)
-        .map(|c| c[1].to_string())
-        .unwrap_or_else(|| "?".into());
+    let url = captured_url(&RE_URL, block).unwrap_or_else(|| "?".into());
     let status = RE_STATUS
         .captures(block)
         .map(|c| c[1].to_string())
@@ -388,7 +400,7 @@ fn format_response_full(block: &str) -> String {
         .nth(1)
         .filter(|s| s.chars().all(|c| c.is_ascii_digit()))
         .unwrap_or("?");
-    let url = block.split_whitespace().nth(2).unwrap_or("?");
+    let url = without_query(block.split_whitespace().nth(2).unwrap_or("?"));
     let content_type = RE_CONTENT_TYPE
         .captures(block)
         .map(|c| c[1].to_string())
@@ -462,7 +474,8 @@ mod tests {
         );
         assert_eq!(out.len(), 1);
         assert!(out[0].contains("post"));
-        assert!(out[0].contains("http://10.155.3.114:8888/v1/messages?beta=true"));
+        assert!(out[0].contains("http://10.155.3.114:8888/v1/messages"));
+        assert!(!out[0].contains("beta=true"));
         assert!(out[0].contains("200"));
         assert!(out[0].contains("261ms"));
         assert!(out[0].contains("log_abc123"));
@@ -592,7 +605,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_format_passes_through_verbatim() {
+    fn unknown_braced_block_is_reduced_to_its_size() {
         let mut c = Collator::new();
         let out = drive_all(
             &mut c,
@@ -603,10 +616,7 @@ mod tests {
                 "}",
             ],
         );
-        assert_eq!(out.len(), 1);
-        assert!(out[0].contains("weird new format"));
-        assert!(out[0].contains("some: value"));
-        assert!(out[0].contains("other: thing"));
+        assert_eq!(out, vec!["unrecognised debug block (51 bytes)".to_string()]);
     }
 
     #[test]
@@ -692,7 +702,9 @@ mod tests {
             }
         }
         let entries = emitted.expect("overflow must release buffered content");
-        assert!(!entries.is_empty());
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].starts_with("→ ? ?"));
+        assert!(!entries[0].contains("field_"));
         let next = c.push("RESULT: turn complete".into());
         assert_eq!(next, vec!["RESULT: turn complete".to_string()]);
     }
@@ -726,5 +738,110 @@ mod tests {
         assert!(flushed[0].contains("[log_aaa111]"));
         assert!(flushed[1].contains("[log_bbb222]"));
         assert!(flushed[2].contains("[log_ccc333]"));
+    }
+
+    const SENTINEL: &str = "SENTINEL-997-collator";
+
+    fn assert_no_sentinel(entries: &[String]) {
+        for entry in entries {
+            assert!(
+                !entry.contains("SENTINEL-997"),
+                "a known value reached the log entry: {entry}"
+            );
+        }
+    }
+
+    #[test]
+    fn request_block_with_content_in_the_body_logs_no_content() {
+        let mut c = Collator::new();
+        let out = drive_all(
+            &mut c,
+            &[
+                "[log_5e7] sending request {",
+                r#"  method: "post","#,
+                &format!(r#"  url: "http://10.0.0.1:8888/v1/messages?beta=true&q={SENTINEL}","#),
+                "  options: {",
+                "    body: {",
+                r#"      model: "claude-sonnet-4-5","#,
+                "      max_tokens: 64000,",
+                "      messages: [ [Object ...] ],",
+                &format!(r#"      note: "{SENTINEL}","#),
+                "    },",
+                "  },",
+                "}",
+            ],
+        );
+        assert_eq!(out.len(), 1);
+        assert!(out[0].contains("model=claude-sonnet-4-5"));
+        assert_no_sentinel(&out);
+    }
+
+    #[test]
+    fn response_fragments_with_content_log_no_content() {
+        let mut c = Collator::new();
+        let out = drive_all(
+            &mut c,
+            &[
+                "[log_7a1] response start {",
+                &format!(r#"  url: "http://x/v1/messages?token={SENTINEL}","#),
+                "  status: 200,",
+                "  durationMs: 12,",
+                &format!(r#"  body: "{SENTINEL}","#),
+                "}",
+                &format!("response 200 http://x/v1/messages?id={SENTINEL} Headers {{"),
+                &format!(r#"  "content-type": "text/event-stream", "x-note": "{SENTINEL}""#),
+                "}",
+            ],
+        );
+        assert!(!out.is_empty());
+        assert_no_sentinel(&out);
+    }
+
+    #[test]
+    fn post_succeeded_line_with_a_query_logs_no_query() {
+        let mut c = Collator::new();
+        let out = drive_all(
+            &mut c,
+            &[&format!(
+                "[log_aff] post http://x/v1/messages?note={SENTINEL}#{SENTINEL} succeeded with status 200 in 3ms"
+            )],
+        );
+        assert_eq!(out.len(), 1);
+        assert!(out[0].contains("http://x/v1/messages"));
+        assert_no_sentinel(&out);
+    }
+
+    #[test]
+    fn unrecognised_and_unterminated_blocks_log_no_content() {
+        let mut c = Collator::new();
+        let mut out = drive_all(
+            &mut c,
+            &[
+                "[log_e1] response error {",
+                &format!(r#"  message: "{SENTINEL}","#),
+                "}",
+                &format!(r#"{{"content":"{SENTINEL}"}}"#),
+                "[log_e2] sending request {",
+                &format!(r#"  body: "{SENTINEL}","#),
+            ],
+        );
+        out.extend(c.flush());
+        assert!(!out.is_empty());
+        assert_no_sentinel(&out);
+    }
+
+    #[test]
+    fn buffer_overflow_logs_no_content() {
+        let mut c = Collator::new();
+        c.push("[log_abc] response error {".into());
+        let mut emitted = Vec::new();
+        for _ in 0..MAX_BUFFERED_LINES + 5 {
+            emitted = c.push(format!("  field: {SENTINEL},"));
+            if !emitted.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(emitted.len(), 1);
+        assert_no_sentinel(&emitted);
     }
 }

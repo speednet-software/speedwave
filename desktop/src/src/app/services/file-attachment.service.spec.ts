@@ -162,7 +162,7 @@ describe('FileAttachmentService', () => {
     expect(commands()).toEqual(['begin_paste_upload', 'append_paste_upload', 'discard_paste']);
     expect(calls[2].args).toEqual({ pasteId: UPLOAD_ID });
     expect(logger.warn).toHaveBeenCalledWith(
-      'could not attach a.bin: failed to write x.part: No space left on device'
+      'could not attach a pasted file (extension: bin, 3 bytes)'
     );
   });
 
@@ -218,8 +218,25 @@ describe('FileAttachmentService', () => {
     await flush();
 
     expect(commands()).toEqual(['begin_paste_upload', 'append_paste_upload', 'discard_paste']);
-    expect(logger.warn).toHaveBeenCalledWith(
-      `could not discard pasted file ${UPLOAD_ID}: discard exploded`
-    );
+    expect(logger.warn).toHaveBeenCalledWith(`could not discard pasted file ${UPLOAD_ID}`);
+  });
+
+  it('never logs the file name, path or rejection text of a failed attach or discard', async () => {
+    const sentinel = 'SENTINEL-997-attachment';
+    tauri.invokeHandler = async (cmd) => {
+      calls.push({ cmd });
+      if (cmd === 'begin_paste_upload') return UPLOAD_ID;
+      if (cmd === 'append_paste_upload') {
+        throw `failed to write /workspace/.speedwave/pastes/paste-1-0001-${sentinel}.txt: disk full`;
+      }
+      throw `cannot remove ${sentinel}`;
+    };
+    const file = new File(['abc'], `${sentinel}.txt`, { type: 'text/plain' });
+
+    await expect(service.stage(file, 'acme', new AbortController().signal)).rejects.toBeDefined();
+    await flush();
+
+    expect(logger.warn).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('SENTINEL-997');
   });
 });

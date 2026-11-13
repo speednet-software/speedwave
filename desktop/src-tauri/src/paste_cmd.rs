@@ -125,9 +125,8 @@ fn save_blocking(project: &str, media_type: &str, bytes: &[u8]) -> Result<SavedP
     let project_dir = resolve_project_dir(project)?;
     let saved = save_to_dir(&project_dir, media_type, bytes)?;
     log::info!(
-        "saved a pasted image of {} bytes for project {project} as {}",
-        bytes.len(),
-        saved.container_path
+        "saved a pasted image of {} bytes ({media_type}) for project {project}",
+        bytes.len()
     );
     Ok(saved)
 }
@@ -200,8 +199,8 @@ fn begin_upload_in_dir(
     let file = dir.create_new_file(&part_name)?;
     let upload_id = next_paste_id();
     log::info!(
-        "began pasted file upload {upload_id} of {declared_bytes} bytes into {}",
-        dir.path().join(&part_name).display()
+        "began pasted file upload {upload_id} of {declared_bytes} bytes (extension: {})",
+        upload_extension(original_name).as_deref().unwrap_or("none")
     );
     let upload = OpenUpload {
         project_dir: project_dir.to_path_buf(),
@@ -239,11 +238,8 @@ fn sweep_stale_parts(dir: &PinnedDir) {
             continue;
         }
         match dir.remove_file(name) {
-            Ok(()) => log::info!(
-                "removed the stale upload part {}",
-                dir.path().join(name).display()
-            ),
-            Err(e) => log::warn!("{e}"),
+            Ok(()) => log::info!("removed a stale upload part"),
+            Err(_) => log::warn!("failed to remove a stale upload part"),
         }
     }
 }
@@ -295,9 +291,8 @@ fn finish_upload(upload_id: u64) -> Result<SavedPaste, String> {
         return Err(e);
     }
     log::info!(
-        "finished pasted file upload {upload_id} of {} bytes into {}",
-        upload.declared_bytes,
-        upload.dir.path().join(&upload.filename).display()
+        "finished pasted file upload {upload_id} of {} bytes",
+        upload.declared_bytes
     );
     stage_paste(upload_id, &upload.project_dir, &upload.filename);
     Ok(SavedPaste {
@@ -338,11 +333,8 @@ fn discard(paste_id: u64) {
     let removed =
         open_pastes_dir(&staged.project_dir).and_then(|dir| dir.remove_file(&staged.filename));
     match removed {
-        Ok(()) => log::info!("discarded the unsent attachment {}", staged.filename),
-        Err(e) => log::warn!(
-            "failed to discard the unsent attachment {}: {e}",
-            staged.filename
-        ),
+        Ok(()) => log::info!("discarded the unsent attachment {paste_id}"),
+        Err(_) => log::warn!("failed to discard the unsent attachment {paste_id}"),
     }
 }
 
@@ -352,8 +344,8 @@ fn discard_upload(upload: &mut OpenUpload) {
 }
 
 fn remove_logged(dir: &PinnedDir, name: &str) {
-    if let Err(e) = dir.remove_file(name) {
-        log::warn!("{e}");
+    if dir.remove_file(name).is_err() {
+        log::warn!("failed to remove an upload part");
     }
 }
 
@@ -472,6 +464,12 @@ fn sanitize_stem(stem: &str) -> String {
     } else {
         trimmed.to_string()
     }
+}
+
+fn upload_extension(original_name: &str) -> Option<String> {
+    let base = original_name.rsplit(['/', '\\']).next()?;
+    let (_, extension) = base.rsplit_once('.')?;
+    sanitize_extension(extension)
 }
 
 fn sanitize_extension(extension: &str) -> Option<String> {

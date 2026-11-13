@@ -936,10 +936,16 @@ impl StreamParser {
                      Check the provider server logs or try a different model."
                     .to_string()
             } else {
-                log::warn!("turn ended with an API error: {result_text}");
+                log::warn!(
+                    "turn ended with an API error ({} chars)",
+                    result_text.chars().count()
+                );
                 result_text.to_string()
             };
-            let log_message = format!("error: {error_text}");
+            let log_message = format!(
+                "error: {} chars, kind={turn_error_kind:?}",
+                error_text.chars().count()
+            );
             return (
                 Some(StreamChunk::Error {
                     content: error_text,
@@ -1135,14 +1141,19 @@ impl StreamParser {
             return (None, None);
         }
 
+        let matched_pattern = Self::ACTIONABLE_PATTERNS
+            .iter()
+            .find(|p| message.contains(**p));
         let log_entry = Some(LogEntry {
             prefix: "SYSTEM",
-            message: message.to_string(),
+            message: format!(
+                "message: {} chars, actionable pattern: {}",
+                message.chars().count(),
+                matched_pattern.unwrap_or(&"none")
+            ),
         });
 
-        let is_actionable = Self::ACTIONABLE_PATTERNS
-            .iter()
-            .any(|p| message.contains(p));
+        let is_actionable = matched_pattern.is_some();
 
         if is_actionable {
             (
@@ -2371,8 +2382,9 @@ impl ChatSession {
                     } else {
                         if let Some(reason) = &ctrl.safety_check {
                             log::warn!(
-                                "declined a {} call that Claude Code's safety check holds for approval: {reason}",
-                                ctrl.tool_name
+                                "declined a {} call that Claude Code's safety check holds for approval (reason of {} chars)",
+                                ctrl.tool_name,
+                                reason.chars().count()
                             );
                         }
                         let response = build_tool_permission_response(&ctrl);
@@ -7507,7 +7519,7 @@ mod tests {
         }
         let entry = log_entry.expect("error result must produce a log entry");
         assert_eq!(entry.prefix, "RESULT");
-        assert_eq!(entry.message, "error: Something went wrong");
+        assert_eq!(entry.message, "error: 20 chars, kind=None");
     }
     #[test]
     fn parse_result_error_with_empty_result_returns_placeholder_error() {
@@ -7535,7 +7547,10 @@ mod tests {
             let entry = log_entry
                 .unwrap_or_else(|| panic!("empty/missing error result must also log: {line}"));
             assert_eq!(entry.prefix, "RESULT");
-            assert_eq!(entry.message, format!("error: {content}"));
+            assert_eq!(
+                entry.message,
+                format!("error: {} chars, kind=None", content.chars().count())
+            );
         }
     }
 
@@ -10848,6 +10863,69 @@ mod tests {
         assert!(
             body.contains("allow_log_truncate"),
             "truncation must be gated by the caller-computed sibling check"
+        );
+    }
+
+    #[test]
+    fn stream_parser_session_log_entries_carry_no_user_content() {
+        const SENTINEL: &str = "SENTINEL-997-stream";
+        let lines = [
+            serde_json::json!({"type":"stream_event","event":{"type":"content_block_start","index":0,
+                "content_block":{"type":"tool_use","id":"toolu_S1","name":"Write","input":{"content":SENTINEL}}}}),
+            serde_json::json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,
+                "delta":{"type":"input_json_delta","partial_json":format!("{{\"file_path\":\"/tmp/{SENTINEL}\"}}")}}}),
+            serde_json::json!({"type":"stream_event","event":{"type":"content_block_stop","index":0}}),
+            serde_json::json!({"type":"stream_event","event":{"type":"content_block_delta","index":1,
+                "delta":{"type":"text_delta","text":SENTINEL}}}),
+            serde_json::json!({"type":"assistant","message":{"id":"msg_S","role":"assistant","model":"claude-opus-4-6",
+                "content":[{"type":"text","text":SENTINEL},
+                           {"type":"tool_use","id":"toolu_S1","name":"Write","input":{"command":SENTINEL}}]}}),
+            serde_json::json!({"type":"user","message":{"role":"user",
+                "content":[{"type":"tool_result","tool_use_id":"toolu_S1","content":SENTINEL}]}}),
+            serde_json::json!({"type":"user","message":{"role":"user",
+                "content":[{"type":"tool_result","tool_use_id":"toolu_S2","is_error":true,
+                            "content":[{"type":"text","text":SENTINEL}]}]}}),
+            serde_json::json!({"type":"user","message":{"id":"msg_U","role":"user",
+                "content":[{"type":"text","text":SENTINEL}]}}),
+            serde_json::json!({"type":"system","subtype":"status","message":format!("Error: {SENTINEL}")}),
+            serde_json::json!({"type":"system","subtype":"status","content":format!("Compacting {SENTINEL}")}),
+            serde_json::json!({"type":"result","is_error":true,"result":SENTINEL}),
+            serde_json::json!({"type":"result","is_error":false,"result":SENTINEL,"session_id":"sid"}),
+        ];
+        let mut parser = StreamParser::new();
+        let mut logged = Vec::new();
+        for line in &lines {
+            let (_chunks, entry) = parser.parse_line(line);
+            logged.extend(entry.map(|e| format!("{}: {}", e.prefix, e.message)));
+        }
+        assert!(
+            logged.contains(&"TOOL: start: Write (toolu_S1)".to_string()),
+            "tool metadata stays in the log: {logged:?}"
+        );
+        assert!(
+            logged.contains(&"RESULT: error: 19 chars, kind=None".to_string()),
+            "the error result is logged by size: {logged:?}"
+        );
+        for entry in &logged {
+            assert!(
+                !entry.contains("SENTINEL-997"),
+                "a known value reached the session log: {entry}"
+            );
+        }
+    }
+
+    #[test]
+    fn system_message_log_entry_names_size_and_pattern_only() {
+        let mut parser = StreamParser::new();
+        let parsed = serde_json::json!({"type":"system","message":"You hit your limit"});
+        let (chunk, entry) = parser.parse_system_message(&parsed);
+        assert!(
+            chunk.is_some(),
+            "an actionable message still reaches the UI"
+        );
+        assert_eq!(
+            entry.expect("system text is logged").message,
+            "message: 18 chars, actionable pattern: hit your limit"
         );
     }
 }
