@@ -66,6 +66,11 @@ describe('describeError', () => {
     expect(describeError(error)).toBe('code=HTTP_404 name=Error');
   });
 
+  it('keeps a browser network error code with its colons', () => {
+    const error = Object.assign(new Error(SENTINEL), { code: 'net::ERR_NAME_NOT_RESOLVED' });
+    expect(describeError(error)).toBe('code=net::ERR_NAME_NOT_RESOLVED name=Error');
+  });
+
   it('drops a code or name that is not a plain token', () => {
     const error = Object.assign(new Error('x'), { code: `bad ${SENTINEL}`, name: `n ${SENTINEL}` });
     expect(describeError(error)).toBe('code=UNKNOWN');

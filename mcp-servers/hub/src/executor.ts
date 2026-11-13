@@ -145,10 +145,6 @@ interface AuditContext {
   log: (service: string, tool: string, params: unknown, denial?: AccessDenial) => void;
 }
 
-/**
- * Parameter names with the length of each value's JSON form, never the values: `keys name:23,tags:20`.
- * @param params - Parameters passed to the tool.
- */
 function describeParams(params: Record<string, unknown>): string {
   const keys = Object.entries(params).map(
     ([name, value]) => `${name}:${JSON.stringify(value)?.length ?? 0}`

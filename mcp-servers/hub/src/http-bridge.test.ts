@@ -28,6 +28,7 @@ import {
 } from './tool-registry.js';
 import { populateRegistryWithMockTools, _resetRegistryForTesting } from './test-helpers.js';
 import * as authTokens from './auth-tokens.js';
+import { inspect } from 'node:util';
 
 describe('http-bridge', () => {
   beforeAll(() => {
@@ -838,6 +839,74 @@ describe('http-bridge', () => {
       );
     });
 
+    describe('error code logged for an isError result', () => {
+      function failWith(text: string): Promise<unknown> {
+        fetchMock.mockResolvedValue({
+          ok: true,
+          headers: new Headers({ 'content-type': 'application/json' }),
+          json: async () => ({
+            jsonrpc: '2.0',
+            id: '123',
+            result: { content: [{ type: 'text', text }], isError: true },
+          }),
+        });
+        return callWorker('gitlab', 'getPullRequest', {}).catch(() => undefined);
+      }
+
+      it.each([
+        ['a code in JSON text', '{"code":"READ_FAILED","message":"x"}', 'READ_FAILED'],
+        [
+          'a browser network error',
+          'page.goto: net::ERR_NAME_NOT_RESOLVED at x',
+          'net::ERR_NAME_NOT_RESOLVED',
+        ],
+        ['an error class name', 'TimeoutError: waiting for selector', 'TimeoutError'],
+        ['an HTTP status', 'Request failed with status code 404', 'HTTP_404'],
+        ['an HTTP status after HTTP', 'HTTP 503 upstream', 'HTTP_503'],
+        ['no recognised shape', 'PR #1 not found in acme/widgets', 'TOOL_ERROR'],
+      ])('logs the code for %s', async (_label, text, code) => {
+        const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+        await failWith(text);
+
+        expect(errorSpy).toHaveBeenCalledWith(
+          expect.stringContaining(`callWorker(gitlab, getPullRequest) failed: code=${code}`)
+        );
+      });
+
+      it('keeps the message of an unrecognised error out of every console method', async () => {
+        const spies = (['log', 'info', 'warn', 'error', 'debug'] as const).map((m) =>
+          vi.spyOn(console, m).mockImplementation(() => {})
+        );
+
+        await failWith('Error: file SENTINEL-997-bridge has no access');
+        await failWith('{"code":"SENTINEL-997-bridge"}');
+        await failWith('TimeoutError: SENTINEL-997-bridge');
+
+        expect(
+          inspect(
+            spies.map((s) => s.mock.calls),
+            { depth: 8 }
+          )
+        ).not.toContain('SENTINEL-997');
+      });
+
+      it('hands the agent the full message unchanged', async () => {
+        vi.spyOn(console, 'error').mockImplementation(() => {});
+        fetchMock.mockResolvedValue({
+          ok: true,
+          headers: new Headers({ 'content-type': 'application/json' }),
+          json: async () => ({
+            jsonrpc: '2.0',
+            id: '123',
+            result: { content: [{ type: 'text', text: 'PR #1 not found' }], isError: true },
+          }),
+        });
+
+        await expect(callWorker('gitlab', 'getPullRequest', {})).rejects.toThrow('PR #1 not found');
+      });
+    });
+
     it('should handle non-JSON text response', async () => {
       fetchMock.mockResolvedValue({
         ok: true,
@@ -966,7 +1035,7 @@ describe('http-bridge', () => {
           '[http-bridge] callWorker(gitlab, test) failed: code=UNKNOWN name=Error'
         )
       );
-      expect(JSON.stringify(consoleErrorSpy.mock.calls)).not.toContain('Network failure');
+      expect(inspect(consoleErrorSpy.mock.calls, { depth: 8 })).not.toContain('Network failure');
 
       consoleErrorSpy.mockRestore();
     });

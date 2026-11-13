@@ -24,10 +24,10 @@ export function ts(): string {
   return `[${date}T${time}.${ms}${offset}]`;
 }
 
-const SAFE_TOKEN = /^[A-Za-z0-9_.-]{1,64}$/;
+const SAFE_TOKEN = /^[A-Za-z0-9_.:-]{1,64}$/;
 
 /**
- * `code=<CODE> name=<Name>` for a log line: never the message, so no user content reaches the log.
+ * `code=<CODE> name=<Name>` for a log line, never the message.
  * @param error - The caught value.
  */
 export function describeError(error: unknown): string {

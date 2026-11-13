@@ -502,19 +502,16 @@ export function _clearWorkerSessionCacheForTesting(): void {
   workerSessionCache.clear();
 }
 
-/**
- * Error carrying a machine-readable `code` next to its message, so logs can name the failure without the message.
- * @param message - Message handed to the caller unchanged.
- * @param code - Failure code.
- */
+const TOOL_ERROR_SHAPES: readonly RegExp[] = [
+  /\bnet::ERR_[A-Z_]{1,60}\b/,
+  /\b[A-Z][A-Za-z]{0,40}Error\b/,
+];
+const HTTP_STATUS_SHAPE = /\b(?:HTTP|status(?: code)?)[ :=]{0,3}([1-5]\d{2})\b/i;
+
 function workerError(message: string, code: string): Error {
   return Object.assign(new Error(message), { code });
 }
 
-/**
- * Failure code a worker put into an error result (`{"code": ...}` JSON text); TOOL_ERROR when it has none.
- * @param text - First text item of an `isError` result.
- */
 function toolErrorCode(text: string): string {
   let code: unknown;
   try {
@@ -522,7 +519,17 @@ function toolErrorCode(text: string): string {
   } catch {
     code = undefined;
   }
-  return typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(code) ? code : 'TOOL_ERROR';
+  if (typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(code)) {
+    return code;
+  }
+  for (const shape of TOOL_ERROR_SHAPES) {
+    const match = text.match(shape);
+    if (match) {
+      return match[0];
+    }
+  }
+  const status = text.match(HTTP_STATUS_SHAPE);
+  return status ? `HTTP_${status[1]}` : 'TOOL_ERROR';
 }
 
 /**
