@@ -69,6 +69,10 @@ export type { ConnectionTestResult } from '@speedwave/mcp-shared';
 
 const MyOctokit = Octokit.plugin(throttling, retry);
 
+function withoutQuery(text: unknown): string {
+  return String(text).replace(/[?#]\S*/g, '');
+}
+
 /** Default page size cap used when no explicit limit is provided. */
 const DEFAULT_LIMIT = 100;
 /** GitHub's hard per_page maximum. */
@@ -239,6 +243,12 @@ export class GitHubClient {
     this.octokit = new MyOctokit({
       auth: config.token,
       baseUrl: config.baseUrl,
+      log: {
+        debug: () => {},
+        info: () => {},
+        warn: (message: unknown) => console.warn(withoutQuery(message)),
+        error: (message: unknown) => console.error(withoutQuery(message)),
+      },
       throttle: {
         onRateLimit: (
           retryAfter: number,
@@ -247,7 +257,7 @@ export class GitHubClient {
           retryCount: number
         ): boolean => {
           console.warn(
-            `${ts()} GitHub rate limit hit for ${options.method} ${options.url}, retrying after ${retryAfter}s (attempt ${retryCount})`
+            `${ts()} GitHub rate limit hit for ${options.method} ${withoutQuery(options.url)}, retrying after ${retryAfter}s (attempt ${retryCount})`
           );
           return retryCount < 2;
         },
@@ -258,7 +268,7 @@ export class GitHubClient {
           retryCount: number
         ): boolean => {
           console.warn(
-            `${ts()} GitHub secondary rate limit for ${options.method} ${options.url}, retrying after ${retryAfter}s (attempt ${retryCount})`
+            `${ts()} GitHub secondary rate limit for ${options.method} ${withoutQuery(options.url)}, retrying after ${retryAfter}s (attempt ${retryCount})`
           );
           return retryCount < 2;
         },
