@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from 'vitest';
+import { inspect } from 'node:util';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -24,6 +25,17 @@ import {
 import type { ToolMetadata } from './hub-types.js';
 import { loadPolicy } from './policy.js';
 import { loadAccess } from './access-config.js';
+
+const CONSOLE_METHODS = ['log', 'info', 'warn', 'error', 'debug'] as const;
+
+function spyOnConsole(): () => string {
+  const spies = CONSOLE_METHODS.map((m) => vi.spyOn(console, m).mockImplementation(() => {}));
+  return () =>
+    inspect(
+      spies.map((s) => s.mock.calls),
+      { depth: 8 }
+    );
+}
 
 describe('executor', () => {
   beforeAll(() => {
@@ -1070,16 +1082,14 @@ describe('executor', () => {
     });
 
     it('sandbox console.log routes to host console.log', async () => {
-      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const logged = spyOnConsole();
 
       const code = `console.log('test log'); return 0;`;
       const result = await executeCode({ code, timeoutMs: 5000 });
 
       expect(result.success).toBe(true);
-      expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('[sandbox] log length=8'));
-      expect(JSON.stringify(logSpy.mock.calls)).not.toContain('test log');
-
-      logSpy.mockRestore();
+      expect(logged()).toContain('[sandbox] log length=8');
+      expect(logged()).not.toContain('test log');
     });
 
     it('sandbox console.warn routes to host console.warn', async () => {

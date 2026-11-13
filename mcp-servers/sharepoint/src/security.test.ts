@@ -4,6 +4,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import { inspect } from 'node:util';
 import { SharePointClient, SharePointConfig } from './client.js';
 import { PathValidator } from './path-validator.js';
 import fsPromises from 'fs/promises';
@@ -24,6 +25,17 @@ let fetchMock: Mock;
 beforeEach(() => {
   fetchMock = vi.mocked(fetch) as unknown as Mock;
 });
+
+const CONSOLE_METHODS = ['log', 'info', 'warn', 'error', 'debug'] as const;
+
+function spyOnConsole(): () => string {
+  const spies = CONSOLE_METHODS.map((m) => vi.spyOn(console, m).mockImplementation(() => {}));
+  return () =>
+    inspect(
+      spies.map((s) => s.mock.calls),
+      { depth: 8 }
+    );
+}
 
 describe('Security: validatePath', () => {
   let client: SharePointClient;
@@ -818,7 +830,7 @@ describe('Security: validateLocalPath', () => {
     });
 
     it('never writes the rejected path, decoded or resolved, to the log', async () => {
-      const warnSpy = vi.spyOn(console, 'warn');
+      const logged = spyOnConsole();
       const sentinel = 'SENTINEL-997-sharepoint-path';
       const rejected = [`../${sentinel}.docx`, `%2e%2e%2f${sentinel}`, `C:\\${sentinel}`];
 
@@ -827,9 +839,8 @@ describe('Security: validateLocalPath', () => {
       }
       await expect(client.uploadFile('docs/test.txt', `/etc/${sentinel}`)).rejects.toThrow();
 
-      const logged = JSON.stringify(warnSpy.mock.calls);
-      expect(warnSpy).toHaveBeenCalled();
-      expect(logged).not.toContain(sentinel);
+      expect(logged()).toContain('Security: Local path validation blocked');
+      expect(logged()).not.toContain(sentinel);
     });
 
     it('should include attack type in all security logs', async () => {

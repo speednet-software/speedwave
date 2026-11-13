@@ -3,6 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { inspect } from 'node:util';
 import { withSetupGuidance } from '@speedwave/mcp-shared';
 import axios, { AxiosError } from 'axios';
 import {
@@ -26,6 +27,17 @@ const mockedAxios = vi.mocked(axios, true);
 
 vi.mock('fs/promises');
 const mockedFs = vi.mocked(fs, true);
+
+const CONSOLE_METHODS = ['log', 'info', 'warn', 'error', 'debug'] as const;
+
+function spyOnConsole(): () => string {
+  const spies = CONSOLE_METHODS.map((m) => vi.spyOn(console, m).mockImplementation(() => {}));
+  return () =>
+    inspect(
+      spies.map((s) => s.mock.calls),
+      { depth: 8 }
+    );
+}
 
 describe('RedmineClient', () => {
   let client: RedmineClient;
@@ -4268,14 +4280,13 @@ describe('initializeRedmineClient', () => {
         throw new Error('File not found');
       });
       mockAxiosInstance.get.mockRejectedValue(new Error('SENTINEL-997-redmine'));
+      const logged = spyOnConsole();
 
       const client = await initializeRedmineClient();
       await client!.getConfig();
 
-      expect(console.warn).toHaveBeenCalledWith(
-        expect.stringContaining('Could not fetch project name')
-      );
-      expect(JSON.stringify(vi.mocked(console.warn).mock.calls)).not.toContain('SENTINEL-997');
+      expect(logged()).toContain('Could not fetch project name');
+      expect(logged()).not.toContain('SENTINEL-997');
     });
 
     it('should handle 404 from showProject gracefully', async () => {
@@ -4326,14 +4337,15 @@ describe('initializeRedmineClient', () => {
       });
 
       mockAxiosInstance.get.mockRejectedValue('string error');
+      const logged = spyOnConsole();
 
       const client = await initializeRedmineClient();
 
       expect(client).not.toBeNull();
       const cfg = await client!.getConfig();
       expect(cfg.project_name).toBeUndefined();
-      expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('code=UNKNOWN'));
-      expect(JSON.stringify(vi.mocked(console.warn).mock.calls)).not.toContain('string error');
+      expect(logged()).toContain('code=UNKNOWN');
+      expect(logged()).not.toContain('string error');
     });
 
     it('should not fetch when project_id is absent and project_name is absent', async () => {

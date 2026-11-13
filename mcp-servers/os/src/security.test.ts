@@ -4,6 +4,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { inspect } from 'node:util';
 
 const { execFileAsyncMock, existsSyncMock } = vi.hoisted(() => ({
   execFileAsyncMock: vi.fn(),
@@ -33,6 +34,17 @@ import { ALLOWED_COMMANDS } from './tools/index.js';
 import { isValidISO8601, withValidation } from './tools/validation.js';
 import type { ToolResult } from './tools/validation.js';
 import { createToolDefinitions } from './tools/index.js';
+
+const CONSOLE_METHODS = ['log', 'info', 'warn', 'error', 'debug'] as const;
+
+function spyOnConsole(): () => string {
+  const spies = CONSOLE_METHODS.map((m) => vi.spyOn(console, m).mockImplementation(() => {}));
+  return () =>
+    inspect(
+      spies.map((s) => s.mock.calls),
+      { depth: 8 }
+    );
+}
 
 describe('Security', () => {
   beforeEach(() => {
@@ -85,13 +97,13 @@ describe('Security', () => {
     });
 
     it('logs the length of native CLI stderr, not its content', async () => {
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const logged = spyOnConsole();
       execFileAsyncMock.mockResolvedValue({ stdout: '{}', stderr: 'SENTINEL-997-os\n' });
 
       await runCommand('reminders', 'list_lists');
 
-      expect(warnSpy).toHaveBeenCalledWith('[mcp-os] reminders.list_lists stderr length=15');
-      warnSpy.mockRestore();
+      expect(logged()).toContain('[mcp-os] reminders.list_lists stderr length=15');
+      expect(logged()).not.toContain('SENTINEL-997');
     });
 
     it('accepts all allowlisted reminders commands', async () => {
