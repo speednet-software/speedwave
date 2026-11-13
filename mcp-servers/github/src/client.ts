@@ -40,6 +40,12 @@ import type {
 import type { ConnectionTestResult } from '@speedwave/mcp-shared';
 import { TOOL_NAMES } from './tool-names.js';
 
+const MERGE_API_VERSION = '2026-03-10';
+const MERGE_POLL_INTERVAL_MS = 2000;
+const MERGE_MAX_POLLS = 10;
+
+type MergeProgress = GitHubMergeResult & { uuid?: string };
+
 export type {
   GitHubConfig,
   GitHubRepo,
@@ -796,12 +802,12 @@ export class GitHubClient {
   }
 
   /**
-   * Requests an asynchronous merge: GitHub enqueues the PR when the base branch has a merge queue, otherwise merges it at once.
+   * Requests an asynchronous merge and waits up to 20 seconds for GitHub to decide: the PR is enqueued, merged or failed.
    * @param owner - Repository owner login
    * @param repo - Repository name
    * @param number - Pull request number
-   * @param options - Merge options
-   * @param options.merge_method - Merge strategy: "merge", "squash", or "rebase" (default "merge")
+   * @param options - Merge options, sent only when given and only valid for a direct merge (a merge queue rejects them)
+   * @param options.merge_method - Merge strategy: "merge", "squash", or "rebase"
    * @param options.commit_title - Optional commit title for the merge commit
    */
   async mergePullRequest(
@@ -811,6 +817,41 @@ export class GitHubClient {
     options: { merge_method?: 'merge' | 'squash' | 'rebase'; commit_title?: string } = {}
   ): Promise<GitHubMergeResult> {
     this.validateRequired({ owner, repo, number });
+    let result = await this.requestMerge(owner, repo, number, options);
+    for (
+      let poll = 0;
+      poll < MERGE_MAX_POLLS && result.status === 'pending' && result.uuid;
+      poll++
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, MERGE_POLL_INTERVAL_MS));
+      const res = await this.octokit.request(
+        'GET /repos/{owner}/{repo}/pulls/{pull_number}/merge-async/{uuid}',
+        {
+          owner,
+          repo,
+          pull_number: number,
+          uuid: result.uuid,
+          headers: { 'X-GitHub-Api-Version': MERGE_API_VERSION },
+          request: { retries: 0 },
+        }
+      );
+      const polled = this.mapMergeResult(res.data as Record<string, unknown>);
+      result = { ...polled, uuid: polled.uuid ?? result.uuid };
+    }
+    return {
+      status: result.status,
+      merged: result.merged,
+      sha: result.sha,
+      message: result.message,
+    };
+  }
+
+  private async requestMerge(
+    owner: string,
+    repo: string,
+    number: number,
+    options: { merge_method?: 'merge' | 'squash' | 'rebase'; commit_title?: string }
+  ): Promise<MergeProgress> {
     try {
       const res = await this.octokit.request(
         'PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge-async',
@@ -818,32 +859,40 @@ export class GitHubClient {
           owner,
           repo,
           pull_number: number,
-          merge_method: options.merge_method || 'merge',
-          commit_title: options.commit_title,
-          headers: { 'X-GitHub-Api-Version': '2026-03-10' },
+          ...(options.merge_method && { merge_method: options.merge_method }),
+          ...(options.commit_title && { commit_title: options.commit_title }),
+          headers: { 'X-GitHub-Api-Version': MERGE_API_VERSION },
           request: { retries: 0 },
         }
       );
       return this.mapMergeResult(res.data as Record<string, unknown>);
     } catch (error) {
-      if ((error as { status?: number }).status === 409) {
-        return {
-          status: 'pending',
-          merged: false,
-          message: (error as { message?: string }).message || undefined,
-        };
-      }
-      throw error;
+      const failure = error as { status?: number; message?: string; response?: { data?: unknown } };
+      if (failure.status !== 409) throw error;
+      const pending = this.mapMergeResult({
+        status: 'pending',
+        ...(failure.response?.data as Record<string, unknown> | undefined),
+      });
+      return { ...pending, message: pending.message ?? (failure.message || undefined) };
     }
   }
 
-  private mapMergeResult(data: Record<string, unknown>): GitHubMergeResult {
+  private mapMergeResult(data: Record<string, unknown>): MergeProgress {
     const status = (data.status ? String(data.status) : 'pending') as MergeStatus;
+    const details =
+      data.details && typeof data.details === 'object'
+        ? (data.details as Record<string, unknown>)
+        : {};
+    const pick = (key: string): string | undefined => {
+      const value = details[key] ?? data[key];
+      return value ? String(value) : undefined;
+    };
     return {
       status,
       merged: status === 'merged',
-      sha: data.sha ? String(data.sha) : undefined,
-      message: data.message ? String(data.message) : undefined,
+      sha: pick('sha'),
+      message: pick('message'),
+      uuid: pick('uuid'),
     };
   }
 
