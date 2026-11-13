@@ -173,12 +173,11 @@ const createPullRequestTool: Tool = {
 const mergePullRequestTool: Tool = {
   name: 'mergePullRequest',
   description:
-    'Request an asynchronous merge of a pull request. On a base branch with a merge queue the PR joins the queue (status enqueued); otherwise it merges at once (status merged). Returns without waiting: on status pending, call again to check (GitHub answers 200 when the PR is already merged or queued, 409 while the request is in progress).',
+    'Request an asynchronous merge of a pull request and wait up to 20 seconds for the result. On a base branch with a merge queue the PR joins the queue (status enqueued); otherwise it merges at once (status merged). status failed carries the reason in message. On status pending GitHub has not decided yet: call again, the call waits for the same request. Do not pass merge_method or commit_title for a merge queue, GitHub rejects them.',
   annotations: DESTRUCTIVE_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'pr', 'pull', 'request', 'merge', 'squash', 'rebase'],
-  example:
-    'await github.mergePullRequest({ owner: "octocat", repo: "hello", number: 42, merge_method: "squash" })',
+  example: 'await github.mergePullRequest({ owner: "octocat", repo: "hello", number: 42 })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -188,9 +187,14 @@ const mergePullRequestTool: Tool = {
       merge_method: {
         type: 'string',
         enum: ['merge', 'squash', 'rebase'],
-        description: 'Merge strategy (default merge)',
+        description:
+          'Merge strategy for a direct merge only; omit it when the base branch has a merge queue',
       },
-      commit_title: { type: 'string', description: 'Commit title for the merge commit' },
+      commit_title: {
+        type: 'string',
+        description:
+          'Commit title for a direct merge only; omit it when the base branch has a merge queue',
+      },
     },
     required: ['owner', 'repo', 'number'],
   },
@@ -208,15 +212,15 @@ const mergePullRequestTool: Tool = {
   },
   inputExamples: [
     {
-      description: 'Minimal: merge with the default strategy',
+      description: 'Minimal: merge, or join the merge queue when the base branch has one',
       input: { owner: 'octocat', repo: 'hello-world', number: 1 },
     },
     {
-      description: 'Partial: squash merge',
+      description: 'Partial: squash merge (direct merge only, no merge queue)',
       input: { owner: 'octocat', repo: 'hello-world', number: 1, merge_method: 'squash' },
     },
     {
-      description: 'Full: squash merge with a custom commit title',
+      description: 'Full: direct squash merge with a custom commit title (no merge queue)',
       input: {
         owner: 'octocat',
         repo: 'hello-world',
