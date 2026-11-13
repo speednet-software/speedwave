@@ -542,6 +542,14 @@ mod tests {
     }
 
     #[test]
+    fn began_upload_message_logs_the_sanitized_extension_of_a_dotted_name() {
+        assert_eq!(
+            began_upload_message(7, 42, "report.SENTINEL-997-paste"),
+            "began pasted file upload 7 of 42 bytes (extension: sentinel997paste)"
+        );
+    }
+
+    #[test]
     fn saved_image_message_names_size_type_and_project() {
         let message = saved_image_message("demo", "image/png", 10);
         assert_eq!(

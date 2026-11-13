@@ -14,7 +14,6 @@ let written: string[];
 let originalFetch: typeof globalThis.fetch;
 const savedEnv: Record<string, string | undefined> = {};
 
-/** All console output so far, one string per call, errors with stack and own properties. */
 function output(): string {
   return written.join('\n');
 }

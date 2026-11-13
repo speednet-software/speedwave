@@ -502,11 +502,15 @@ export function _clearWorkerSessionCacheForTesting(): void {
   workerSessionCache.clear();
 }
 
-const TOOL_ERROR_SHAPES: readonly RegExp[] = [
-  /\bnet::ERR_[A-Z_]{1,60}\b/,
-  /\b[A-Z][A-Za-z]{0,40}Error\b/,
+const TOOL_ERROR_LEADS: readonly { pattern: RegExp; code?: string }[] = [
+  { pattern: /^(?:[a-z]+\.[A-Za-z]+: )?(net::ERR_[A-Z_]{1,60})\b/ },
+  { pattern: /^(TimeoutError|TargetClosedError|AbortError|TypeError|RangeError|SyntaxError)\b/ },
+  { pattern: /^(?:HTTP |Request failed with status code )([1-5]\d{2})\b/, code: 'HTTP' },
+  { pattern: /^Resource not found in /, code: 'NOT_FOUND' },
+  { pattern: /^Permission denied/, code: 'PERMISSION_DENIED' },
+  { pattern: /^Authentication failed/, code: 'AUTH_FAILED' },
+  { pattern: /^GitHub API rate limit exceeded/, code: 'RATE_LIMITED' },
 ];
-const HTTP_STATUS_SHAPE = /\b(?:HTTP|status(?: code)?)[ :=]{0,3}([1-5]\d{2})\b/i;
 
 function workerError(message: string, code: string): Error {
   return Object.assign(new Error(message), { code });
@@ -522,14 +526,17 @@ function toolErrorCode(text: string): string {
   if (typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(code)) {
     return code;
   }
-  for (const shape of TOOL_ERROR_SHAPES) {
-    const match = text.match(shape);
+  const lead = text.replace(/^### Error\r?\n/, '').replace(/^Error: /, '');
+  for (const { pattern, code: fixed } of TOOL_ERROR_LEADS) {
+    const match = lead.match(pattern);
     if (match) {
-      return match[0];
+      if (fixed === 'HTTP') {
+        return `HTTP_${match[1]}`;
+      }
+      return fixed ?? match[1];
     }
   }
-  const status = text.match(HTTP_STATUS_SHAPE);
-  return status ? `HTTP_${status[1]}` : 'TOOL_ERROR';
+  return 'TOOL_ERROR';
 }
 
 /**

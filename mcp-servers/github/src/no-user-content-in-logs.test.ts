@@ -5,7 +5,7 @@ import { GitHubClient } from './client.js';
 const CONSOLE_METHODS = ['log', 'info', 'warn', 'error', 'debug'] as const;
 
 function spyOnConsole(): () => string {
-  const spies = [...CONSOLE_METHODS.map((m) => vi.spyOn(console, m).mockImplementation(() => {}))];
+  const spies = CONSOLE_METHODS.map((m) => vi.spyOn(console, m).mockImplementation(() => {}));
   return () =>
     inspect(
       spies.map((s) => s.mock.calls),

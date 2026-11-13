@@ -864,6 +864,80 @@ describe('http-bridge', () => {
         ['an HTTP status', 'Request failed with status code 404', 'HTTP_404'],
         ['an HTTP status after HTTP', 'HTTP 503 upstream', 'HTTP_503'],
         ['no recognised shape', 'PR #1 not found in acme/widgets', 'TOOL_ERROR'],
+        ['a Playwright heading and prefix', '### Error\nError: TimeoutError: x', 'TimeoutError'],
+        ['a Playwright heading', '### Error\nTargetClosedError: x', 'TargetClosedError'],
+        [
+          'a Playwright method prefix',
+          'page.goto: net::ERR_CONNECTION_REFUSED',
+          'net::ERR_CONNECTION_REFUSED',
+        ],
+        [
+          'a class-shaped token in the middle',
+          'Page says InvoiceOverdueError raised',
+          'TOOL_ERROR',
+        ],
+        ['a class name that is not in the list', 'InvoiceOverdueError: x', 'TOOL_ERROR'],
+        ['a status-shaped token in the middle', 'Order status: 200 shipped', 'TOOL_ERROR'],
+        ['an HTTP prefix of a worker', 'HTTP 500: Request failed', 'HTTP_500'],
+        ['an HTTP token in the middle', 'Page text HTTP 404 here', 'TOOL_ERROR'],
+        ['a network token in the middle', 'text net::ERR_NAME_NOT_RESOLVED', 'TOOL_ERROR'],
+        ['a JSON code that is not a code shape', '{"code":"order overdue"}', 'TOOL_ERROR'],
+        [
+          'the github not found message',
+          'Resource not found in GitHub. Check the owner/repo and that your token has access.',
+          'NOT_FOUND',
+        ],
+        [
+          'the gitlab not found message',
+          'Resource not found in GitLab. Verify the project_id/path and the ID/name argument are correct, then list valid values',
+          'NOT_FOUND',
+        ],
+        [
+          'the redmine not found message',
+          'Resource not found in Redmine: issue_id=12345. Use listIssueIds first.',
+          'NOT_FOUND',
+        ],
+        [
+          'the redmine not found message without context',
+          'Resource not found in Redmine.',
+          'NOT_FOUND',
+        ],
+        [
+          'the github permission message',
+          'Permission denied. Your GitHub token is missing a required scope.',
+          'PERMISSION_DENIED',
+        ],
+        [
+          'the gitlab permission message',
+          'Permission denied performing this GitLab operation. Your token likely lacks',
+          'PERMISSION_DENIED',
+        ],
+        [
+          'the redmine permission message',
+          'Permission denied. Your Redmine API key may not have sufficient permissions.',
+          'PERMISSION_DENIED',
+        ],
+        [
+          'the github authentication message',
+          'Authentication failed. Check your GitHub token. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+          'AUTH_FAILED',
+        ],
+        [
+          'the gitlab authentication message',
+          'Authentication failed. Check your GitLab token. Configure this integration',
+          'AUTH_FAILED',
+        ],
+        [
+          'the redmine authentication message',
+          'Authentication failed. Check your Redmine API key. Configure this integration',
+          'AUTH_FAILED',
+        ],
+        [
+          'the github rate limit message',
+          'GitHub API rate limit exceeded. Try again later.',
+          'RATE_LIMITED',
+        ],
+        ['a phrase in the middle', 'Page says: Resource not found in the archive', 'TOOL_ERROR'],
       ])('logs the code for %s', async (_label, text, code) => {
         const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
