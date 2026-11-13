@@ -37,11 +37,6 @@ pub(crate) fn plan_for(kind: LlmProviderKind, info: Option<&SessionInfo>) -> Ant
     AnthropicPlan::from_claude_code(info.and_then(|i| i.account.subscription_type.as_deref()))
 }
 
-/// The `--settings` value that adds the catalog's latest Fable to Claude Code's model list,
-/// which behind the proxy carries only the Fable row Anthropic's bootstrap names (ADR-089).
-/// Claude Code takes `modelPicker` whole from one source, so the user's own value is kept and
-/// extended; `None` leaves it in charge when it already lists that model or replaces the
-/// built-in rows.
 pub(crate) fn picker_settings_arg(user_picker: Option<&serde_json::Value>) -> Option<String> {
     let fable = catalog_entry(&resolve_model_alias("fable"))?;
     let mut picker = match user_picker.and_then(serde_json::Value::as_object) {

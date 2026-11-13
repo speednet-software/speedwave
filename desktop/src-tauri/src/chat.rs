@@ -1872,11 +1872,10 @@ impl AwaitedResult {
     }
 }
 
-/// What a spawn reads from the project's Claude Code `settings.json`.
 #[derive(Debug, Default)]
 pub struct LaunchSettings {
-    pub model_pin: Option<String>,
-    pub model_picker: Option<serde_json::Value>,
+    model_pin: Option<String>,
+    model_picker: Option<serde_json::Value>,
 }
 
 impl LaunchSettings {
