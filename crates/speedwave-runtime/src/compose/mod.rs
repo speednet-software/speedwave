@@ -4220,6 +4220,79 @@ services:
         );
     }
 
+    const DEBUG_ENV_EXCEPTIONS: &[&str] = &[];
+
+    fn services_with_debug_env(doc: &serde_yaml_ng::Value, exceptions: &[&str]) -> Vec<String> {
+        let Some(services) = doc.get("services").and_then(|s| s.as_mapping()) else {
+            return Vec::new();
+        };
+        services
+            .iter()
+            .filter_map(|(name, service)| {
+                let name = name.as_str()?;
+                let has_debug = match service.get("environment")? {
+                    serde_yaml_ng::Value::Sequence(entries) => entries
+                        .iter()
+                        .filter_map(|entry| entry.as_str())
+                        .any(|entry| entry.split('=').next() == Some("DEBUG")),
+                    serde_yaml_ng::Value::Mapping(entries) => entries.get("DEBUG").is_some(),
+                    _ => false,
+                };
+                (has_debug && !exceptions.contains(&name)).then(|| name.to_string())
+            })
+            .collect()
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn test_rendered_compose_has_no_debug_env_outside_the_exceptions() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: configured_anthropic_llm(),
+            ..Default::default()
+        };
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            tmp_project_dir(),
+            &config,
+            &all_enabled_integrations(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        assert!(
+            doc["services"].get("mcp-playwright").is_some(),
+            "the playwright worker must be rendered, or this guard checks nothing"
+        );
+        let offenders = services_with_debug_env(&doc, DEBUG_ENV_EXCEPTIONS);
+        assert!(
+            offenders.is_empty(),
+            "DEBUG= makes a service log tool arguments and results: {offenders:?}"
+        );
+    }
+
+    #[test]
+    fn test_debug_env_guard_flags_every_environment_form() {
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(
+            "services:\n  \
+               seq:\n    environment:\n      - PORT=1\n      - DEBUG=pw:mcp:*\n  \
+               map:\n    environment:\n      DEBUG: pw:mcp:*\n  \
+               bare:\n    environment:\n      - DEBUG\n  \
+               clean:\n    environment:\n      - NODE_DEBUG=x\n      - DEBUGGER=1\n  \
+               none:\n    image: x\n",
+        )
+        .unwrap();
+        assert_eq!(
+            services_with_debug_env(&doc, &[]),
+            vec!["seq", "map", "bare"]
+        );
+        assert_eq!(services_with_debug_env(&doc, &["seq", "bare"]), vec!["map"]);
+    }
+
     #[test]
     #[serial_test::parallel(host_addressing)]
     fn test_rendered_compose_contains_policy_mount_and_envs() {

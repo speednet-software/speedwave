@@ -3,6 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { inspect } from 'node:util';
 import { withSetupGuidance } from '@speedwave/mcp-shared';
 import axios, { AxiosError } from 'axios';
 import {
@@ -26,6 +27,17 @@ const mockedAxios = vi.mocked(axios, true);
 
 vi.mock('fs/promises');
 const mockedFs = vi.mocked(fs, true);
+
+const CONSOLE_METHODS = ['log', 'info', 'warn', 'error', 'debug'] as const;
+
+function spyOnConsole(): () => string {
+  const spies = CONSOLE_METHODS.map((m) => vi.spyOn(console, m).mockImplementation(() => {}));
+  return () =>
+    inspect(
+      spies.map((s) => s.mock.calls),
+      { depth: 8 }
+    );
+}
 
 describe('RedmineClient', () => {
   let client: RedmineClient;
@@ -4254,6 +4266,29 @@ describe('initializeRedmineClient', () => {
       );
     });
 
+    it('keeps the error message of a failed project lookup out of the log', async () => {
+      mockedFs.readFile.mockImplementation(async (path: any) => {
+        if (path.includes('api_key')) {
+          return 'valid-api-key-123';
+        }
+        if (path.includes('config.json')) {
+          return JSON.stringify({
+            host_url: 'https://redmine.example.com',
+            project_id: 'my-project',
+          });
+        }
+        throw new Error('File not found');
+      });
+      mockAxiosInstance.get.mockRejectedValue(new Error('SENTINEL-997-redmine'));
+      const logged = spyOnConsole();
+
+      const client = await initializeRedmineClient();
+      await client!.getConfig();
+
+      expect(logged()).toContain('Could not fetch project name');
+      expect(logged()).not.toContain('SENTINEL-997');
+    });
+
     it('should handle 404 from showProject gracefully', async () => {
       mockedFs.readFile.mockImplementation(async (path: any) => {
         if (path.includes('api_key')) {
@@ -4287,7 +4322,7 @@ describe('initializeRedmineClient', () => {
       );
     });
 
-    it('should handle non-Error thrown by showProject gracefully', async () => {
+    it('should handle non-Error thrown by showProject gracefully, without logging it', async () => {
       mockedFs.readFile.mockImplementation(async (path: any) => {
         if (path.includes('api_key')) {
           return 'valid-api-key-123';
@@ -4302,13 +4337,15 @@ describe('initializeRedmineClient', () => {
       });
 
       mockAxiosInstance.get.mockRejectedValue('string error');
+      const logged = spyOnConsole();
 
       const client = await initializeRedmineClient();
 
       expect(client).not.toBeNull();
       const cfg = await client!.getConfig();
       expect(cfg.project_name).toBeUndefined();
-      expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('string error'));
+      expect(logged()).toContain('code=UNKNOWN');
+      expect(logged()).not.toContain('string error');
     });
 
     it('should not fetch when project_id is absent and project_name is absent', async () => {

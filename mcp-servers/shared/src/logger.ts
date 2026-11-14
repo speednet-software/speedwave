@@ -23,3 +23,24 @@ export function ts(): string {
   const ms = String(d.getMilliseconds()).padStart(3, '0');
   return `[${date}T${time}.${ms}${offset}]`;
 }
+
+const SAFE_TOKEN = /^[A-Za-z0-9_.:-]{1,64}$/;
+
+/**
+ * `code=<CODE> name=<Name>` for a log line, never the message.
+ * @param error - The caught value.
+ */
+export function describeError(error: unknown): string {
+  const fields = (typeof error === 'object' && error !== null ? error : {}) as Record<
+    string,
+    unknown
+  >;
+  const code =
+    typeof fields.code === 'string' && SAFE_TOKEN.test(fields.code)
+      ? fields.code
+      : Number.isInteger(fields.status)
+        ? `HTTP_${String(fields.status)}`
+        : 'UNKNOWN';
+  const name = error instanceof Error && SAFE_TOKEN.test(error.name) ? ` name=${error.name}` : '';
+  return `code=${code}${name}`;
+}

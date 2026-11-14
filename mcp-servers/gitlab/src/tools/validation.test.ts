@@ -4,9 +4,21 @@
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { inspect } from 'node:util';
 import { withValidation } from './validation.js';
 import { GitLabClient } from '../client.js';
 import { notConfiguredMessage, jsonResult } from '@speedwave/mcp-shared';
+
+const CONSOLE_METHODS = ['log', 'info', 'warn', 'error', 'debug'] as const;
+
+function spyOnConsole(): () => string {
+  const spies = CONSOLE_METHODS.map((m) => vi.spyOn(console, m).mockImplementation(() => {}));
+  return () =>
+    inspect(
+      spies.map((s) => s.mock.calls),
+      { depth: 8 }
+    );
+}
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -70,9 +82,22 @@ describe('withValidation', () => {
       isError: true,
     });
     expect(errSpy).toHaveBeenCalledWith(
-      expect.stringContaining('Unexpected (non-GitBeaker) error'),
-      expect.any(Error)
+      expect.stringContaining('Unexpected (non-GitBeaker) error')
     );
+  });
+
+  it('keeps the message of an unexpected error out of the log', async () => {
+    const logged = spyOnConsole();
+    const client = new GitLabClient({ token: 'x', host: 'https://gitlab.example.com' });
+    const wrapped = withValidation<undefined>(client, async () => {
+      throw new Error('boom SENTINEL-997-gitlab');
+    });
+
+    const result = await wrapped(undefined);
+
+    expect(result.content[0]).toEqual({ type: 'text', text: 'Error: boom SENTINEL-997-gitlab' });
+    expect(logged()).toContain('Unexpected (non-GitBeaker) error');
+    expect(logged()).not.toContain('SENTINEL-997');
   });
 
   it('does not log GitBeaker request errors as bugs', async () => {

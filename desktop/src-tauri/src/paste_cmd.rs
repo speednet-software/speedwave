@@ -40,6 +40,14 @@ const MAX_UPLOAD_EXTENSION_CHARS: usize = 16;
 
 const FALLBACK_UPLOAD_STEM: &str = "file";
 
+const LOGGED_EXTENSIONS: [&str; 62] = [
+    "7z", "avi", "bin", "bmp", "c", "cpp", "css", "csv", "doc", "docx", "eml", "env", "gif", "go",
+    "gz", "h", "heic", "htm", "html", "ics", "ipynb", "java", "jpeg", "jpg", "js", "json", "jsx",
+    "key", "kt", "log", "m4a", "md", "mov", "mp3", "mp4", "msg", "odp", "ods", "odt", "ogg", "pdf",
+    "png", "ppt", "pptx", "py", "rs", "rtf", "sh", "sql", "svg", "swift", "tar", "tif", "tiff",
+    "toml", "ts", "tsx", "txt", "wav", "webp", "xlsx", "zip",
+];
+
 #[derive(Serialize, Debug)]
 pub struct SavedPaste {
     pub paste_id: u64,
@@ -124,12 +132,12 @@ pub async fn discard_paste(paste_id: u64) -> Result<(), String> {
 fn save_blocking(project: &str, media_type: &str, bytes: &[u8]) -> Result<SavedPaste, String> {
     let project_dir = resolve_project_dir(project)?;
     let saved = save_to_dir(&project_dir, media_type, bytes)?;
-    log::info!(
-        "saved a pasted image of {} bytes for project {project} as {}",
-        bytes.len(),
-        saved.container_path
-    );
+    log::info!("{}", saved_image_message(project, media_type, bytes.len()));
     Ok(saved)
+}
+
+fn saved_image_message(project: &str, media_type: &str, byte_count: usize) -> String {
+    format!("saved a pasted image of {byte_count} bytes ({media_type}) for project {project}")
 }
 
 fn save_to_dir(project_dir: &Path, media_type: &str, bytes: &[u8]) -> Result<SavedPaste, String> {
@@ -200,8 +208,8 @@ fn begin_upload_in_dir(
     let file = dir.create_new_file(&part_name)?;
     let upload_id = next_paste_id();
     log::info!(
-        "began pasted file upload {upload_id} of {declared_bytes} bytes into {}",
-        dir.path().join(&part_name).display()
+        "{}",
+        began_upload_message(upload_id, declared_bytes, original_name)
     );
     let upload = OpenUpload {
         project_dir: project_dir.to_path_buf(),
@@ -239,11 +247,8 @@ fn sweep_stale_parts(dir: &PinnedDir) {
             continue;
         }
         match dir.remove_file(name) {
-            Ok(()) => log::info!(
-                "removed the stale upload part {}",
-                dir.path().join(name).display()
-            ),
-            Err(e) => log::warn!("{e}"),
+            Ok(()) => log::info!("removed a stale upload part"),
+            Err(_) => log::warn!("failed to remove a stale upload part"),
         }
     }
 }
@@ -295,9 +300,8 @@ fn finish_upload(upload_id: u64) -> Result<SavedPaste, String> {
         return Err(e);
     }
     log::info!(
-        "finished pasted file upload {upload_id} of {} bytes into {}",
-        upload.declared_bytes,
-        upload.dir.path().join(&upload.filename).display()
+        "finished pasted file upload {upload_id} of {} bytes",
+        upload.declared_bytes
     );
     stage_paste(upload_id, &upload.project_dir, &upload.filename);
     Ok(SavedPaste {
@@ -338,11 +342,8 @@ fn discard(paste_id: u64) {
     let removed =
         open_pastes_dir(&staged.project_dir).and_then(|dir| dir.remove_file(&staged.filename));
     match removed {
-        Ok(()) => log::info!("discarded the unsent attachment {}", staged.filename),
-        Err(e) => log::warn!(
-            "failed to discard the unsent attachment {}: {e}",
-            staged.filename
-        ),
+        Ok(()) => log::info!("discarded the unsent attachment {paste_id}"),
+        Err(_) => log::warn!("failed to discard the unsent attachment {paste_id}"),
     }
 }
 
@@ -352,8 +353,8 @@ fn discard_upload(upload: &mut OpenUpload) {
 }
 
 fn remove_logged(dir: &PinnedDir, name: &str) {
-    if let Err(e) = dir.remove_file(name) {
-        log::warn!("{e}");
+    if dir.remove_file(name).is_err() {
+        log::warn!("failed to remove an upload part");
     }
 }
 
@@ -474,6 +475,25 @@ fn sanitize_stem(stem: &str) -> String {
     }
 }
 
+fn began_upload_message(upload_id: u64, declared_bytes: u64, original_name: &str) -> String {
+    format!(
+        "began pasted file upload {upload_id} of {declared_bytes} bytes (extension: {})",
+        logged_extension(original_name)
+    )
+}
+
+fn logged_extension(original_name: &str) -> &'static str {
+    let base = original_name.rsplit(['/', '\\']).next().unwrap_or_default();
+    match base.rsplit_once('.') {
+        Some((_, extension)) if !extension.is_empty() => LOGGED_EXTENSIONS
+            .iter()
+            .find(|known| known.eq_ignore_ascii_case(extension))
+            .copied()
+            .unwrap_or("other"),
+        _ => "none",
+    }
+}
+
 fn sanitize_extension(extension: &str) -> Option<String> {
     let extension: String = extension
         .chars()
@@ -508,6 +528,112 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
     use tauri::http::HeaderValue;
+
+    #[test]
+    fn began_upload_message_carries_no_attachment_name() {
+        for name in [
+            "SENTINEL-997-paste.txt",
+            "C:\\Users\\x\\SENTINEL-997-paste.md",
+            "/home/x/SENTINEL-997-paste/notes.rs",
+            "report.SENTINEL-997-paste",
+            "SENTINEL-997-paste",
+        ] {
+            let message = began_upload_message(7, 42, name);
+            assert!(!message.contains("SENTINEL-997"), "{message}");
+        }
+    }
+
+    #[test]
+    fn began_upload_message_keeps_id_size_and_extension() {
+        assert_eq!(
+            began_upload_message(7, 42, "SENTINEL-997-paste.TXT"),
+            "began pasted file upload 7 of 42 bytes (extension: txt)"
+        );
+        assert_eq!(
+            began_upload_message(7, 42, "SENTINEL-997-paste"),
+            "began pasted file upload 7 of 42 bytes (extension: none)"
+        );
+    }
+
+    #[test]
+    fn began_upload_message_logs_other_for_an_extension_outside_the_list() {
+        for name in [
+            "report.SENTINEL-997-paste",
+            "sentinel-997-dokument.SENTINEL997EXT",
+            "notes.tx",
+            "notes.d\u{043E}cx",
+        ] {
+            assert_eq!(
+                began_upload_message(7, 42, name),
+                "began pasted file upload 7 of 42 bytes (extension: other)",
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn began_upload_message_logs_a_listed_extension_in_lower_case() {
+        assert_eq!(
+            began_upload_message(7, 42, "report.PDF"),
+            "began pasted file upload 7 of 42 bytes (extension: pdf)"
+        );
+        assert_eq!(
+            began_upload_message(7, 42, "archive.tar.gz"),
+            "began pasted file upload 7 of 42 bytes (extension: gz)"
+        );
+    }
+
+    #[test]
+    fn began_upload_message_logs_none_for_a_name_without_an_extension() {
+        for name in ["SENTINEL-997-paste", "trailing.", "C:\\dir.d\\file"] {
+            assert_eq!(
+                began_upload_message(7, 42, name),
+                "began pasted file upload 7 of 42 bytes (extension: none)",
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn logged_extensions_are_lower_case_alphanumeric_and_unique() {
+        let unique: BTreeSet<&str> = LOGGED_EXTENSIONS.iter().copied().collect();
+        assert_eq!(unique.len(), LOGGED_EXTENSIONS.len());
+        for extension in LOGGED_EXTENSIONS {
+            assert!(
+                !extension.is_empty()
+                    && extension
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
+                "{extension}"
+            );
+        }
+    }
+
+    #[test]
+    fn logged_extensions_match_ts_mirror() {
+        let ts = include_str!("../../src/src/app/services/file-attachment.service.ts");
+        let list = ts
+            .split("const LOGGED_EXTENSIONS: ReadonlySet<string> = new Set([")
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .unwrap();
+        let ts_extensions: BTreeSet<&str> = list
+            .split(',')
+            .map(|item| item.trim().trim_matches('\''))
+            .filter(|item| !item.is_empty())
+            .collect();
+        let rust_extensions: BTreeSet<&str> = LOGGED_EXTENSIONS.iter().copied().collect();
+        assert_eq!(ts_extensions, rust_extensions);
+    }
+
+    #[test]
+    fn saved_image_message_names_size_type_and_project() {
+        let message = saved_image_message("demo", "image/png", 10);
+        assert_eq!(
+            message,
+            "saved a pasted image of 10 bytes (image/png) for project demo"
+        );
+    }
 
     #[test]
     fn extension_for_known_mimes() {

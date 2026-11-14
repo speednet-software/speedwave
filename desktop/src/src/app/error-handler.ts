@@ -26,9 +26,7 @@ export class GlobalErrorHandler implements ErrorHandler {
    * @param error - The uncaught error or rejection value.
    */
   handleError(error: unknown): void {
-    const message = error instanceof Error ? error.message : String(error);
-    const stack = error instanceof Error ? error.stack : undefined;
-    const full = stack ? `${message}\n${stack}` : message;
+    const full = describeUncaught(error);
 
     console.error(error);
 
@@ -40,4 +38,13 @@ export class GlobalErrorHandler implements ErrorHandler {
       })
       .catch(() => {});
   }
+}
+
+function describeUncaught(error: unknown): string {
+  if (!(error instanceof Error)) return `non-Error value of type ${typeof error}`;
+  const frames = (error.stack ?? '')
+    .split('\n')
+    .filter((line) => /^\s+at /.test(line))
+    .join('\n');
+  return frames ? `${error.name}\n${frames}` : error.name;
 }

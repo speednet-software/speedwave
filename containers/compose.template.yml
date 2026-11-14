@@ -305,7 +305,6 @@ services:
     shm_size: ${MCP_PLAYWRIGHT_SHM}
     environment:
       - PORT=${PORT_WORKER}
-      - DEBUG=pw:mcp:*
     networks:
       - ${NETWORK_NAME}
     deploy:

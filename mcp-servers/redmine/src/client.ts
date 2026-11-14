@@ -8,6 +8,7 @@ import fs from 'fs/promises';
 import {
   TIMEOUTS,
   ts,
+  describeError,
   withSetupGuidance,
   memoizedPromise,
   loadTokenFile,
@@ -1008,8 +1009,7 @@ export class RedmineClient {
         const project = await this.showProject(pid);
         return project.name ?? null;
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.warn(`${ts()} Could not fetch project name for "${pid}": ${msg}`);
+        console.warn(`${ts()} Could not fetch project name for "${pid}": ${describeError(err)}`);
         return null;
       }
     },

@@ -167,7 +167,7 @@ export async function runCommand(
     });
 
     if (stderr && stderr.trim()) {
-      console.warn(`[mcp-os] ${domain}.${command} stderr: ${stderr.trim()}`);
+      console.warn(`[mcp-os] ${domain}.${command} stderr length=${stderr.trim().length}`);
     }
 
     const parsed = JSON.parse(stdout);

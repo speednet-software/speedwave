@@ -17,6 +17,7 @@ pub mod consts;
 pub mod defaults;
 pub mod diagnostic_sources;
 pub mod engine_path;
+pub mod export_window;
 pub mod fs_perms;
 pub mod fs_security;
 pub mod git_allowlist;

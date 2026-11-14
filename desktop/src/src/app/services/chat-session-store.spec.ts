@@ -2242,6 +2242,31 @@ describe('ChatSessionStore', () => {
         expect(mockLogger.warn).toHaveBeenCalledTimes(1);
       });
 
+      it('ToolResult warning names tool, id, length, error type and closing bracket flag only', () => {
+        startTool(TRUNCATED);
+        result();
+        expect(mockLogger.warn).toHaveBeenCalledWith(
+          `Failed to parse tool input for "SendMessage" (t1, ${TRUNCATED.length} chars, SyntaxError, ends with closing bracket: false)`
+        );
+      });
+
+      it('ToolResult warning for an unparseable input never carries a SENTINEL-997 value', () => {
+        const sentinel = 'SENTINEL-997-TOOL-INPUT';
+        startTool(
+          `{"file_path":"/tmp/${sentinel}.env","content":"password=${sentinel}" ${sentinel}}`,
+          'Write'
+        );
+        result();
+        const logged = [
+          ...mockLogger.warn.mock.calls,
+          ...mockLogger.info.mock.calls,
+          ...mockLogger.error.mock.calls,
+          ...mockLogger.debug.mock.calls,
+        ].flat();
+        expect(mockLogger.warn).toHaveBeenCalledTimes(1);
+        expect(JSON.stringify(logged)).not.toContain('SENTINEL-997');
+      });
+
       it('ToolResult with is_error also warns once for an unparseable input', () => {
         startTool('{"command":', 'Bash');
         result(true);
@@ -2274,7 +2299,7 @@ describe('ChatSessionStore', () => {
         );
       });
 
-      it('the parse warning names the tool, id and length but bounds the echoed input', () => {
+      it('the parse warning for a long input carries its length and no part of the content', () => {
         const huge = '{"content":"' + 'x'.repeat(5000);
         startTool(huge, 'Write');
         result();
@@ -2282,18 +2307,15 @@ describe('ChatSessionStore', () => {
         expect(message).toContain('"Write"');
         expect(message).toContain('t1');
         expect(message).toContain(`${huge.length} chars`);
-        expect(message).toContain('x'.repeat(50));
-        expect(message).not.toContain('x'.repeat(1000));
+        expect(message).not.toContain('xxxxx');
       });
 
-      it('the parse warning preview never cuts a surrogate pair', () => {
-        const head = '{"content":"';
-        const input = head + 'x'.repeat(199 - head.length) + '😀' + 'y'.repeat(50);
-        startTool(input, 'Write');
+      it('the parse warning flags an input that ends with a closing bracket', () => {
+        startTool('{"to": "a"}}', 'SendMessage');
         result();
-        const message = mockLogger.warn.mock.calls[0][0] as string;
-        expect(message).toContain('😀');
-        expect(message).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+        expect(mockLogger.warn).toHaveBeenCalledWith(
+          'Failed to parse tool input for "SendMessage" (t1, 12 chars, SyntaxError, ends with closing bracket: true)'
+        );
       });
 
       it('Result finalizes a still-running tool block as Interrupted', () => {

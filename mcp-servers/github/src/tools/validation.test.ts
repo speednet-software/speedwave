@@ -3,6 +3,7 @@
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { inspect } from 'node:util';
 import { withValidation, withNumericForgiveness, withOwnerRepoForgiveness } from './validation.js';
 import { GitHubClient } from '../client.js';
 import {
@@ -28,6 +29,17 @@ function defWith(
     return jsonResult({ ok: true });
   };
   return { tool, handler };
+}
+
+const CONSOLE_METHODS = ['log', 'info', 'warn', 'error', 'debug'] as const;
+
+function spyOnConsole(): () => string {
+  const spies = CONSOLE_METHODS.map((m) => vi.spyOn(console, m).mockImplementation(() => {}));
+  return () =>
+    inspect(
+      spies.map((s) => s.mock.calls),
+      { depth: 8 }
+    );
 }
 
 afterEach(() => {
@@ -81,10 +93,21 @@ describe('withValidation', () => {
       content: [{ type: 'text', text: 'Error: boom from handler' }],
       isError: true,
     });
-    expect(errSpy).toHaveBeenCalledWith(
-      expect.stringContaining('Unexpected (non-Octokit) error'),
-      expect.any(Error)
-    );
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('Unexpected (non-Octokit) error'));
+  });
+
+  it('keeps the message of an unexpected error out of the log', async () => {
+    const logged = spyOnConsole();
+    const client = new GitHubClient({ token: 'x' });
+    const wrapped = withValidation<undefined>(client, async () => {
+      throw new Error('boom SENTINEL-997-github');
+    });
+
+    const result = await wrapped(undefined);
+
+    expect(result.content[0]).toEqual({ type: 'text', text: 'Error: boom SENTINEL-997-github' });
+    expect(logged()).toContain('Unexpected (non-Octokit) error');
+    expect(logged()).not.toContain('SENTINEL-997');
   });
 
   it('formats categorized API errors (e.g. 401) thrown by the handler without logging them', async () => {
@@ -134,10 +157,7 @@ describe('withValidation', () => {
     const result = await wrapped(undefined);
 
     expect(result.isError).toBe(true);
-    expect(errSpy).toHaveBeenCalledWith(
-      expect.stringContaining('Unexpected (non-Octokit) error'),
-      expect.any(Error)
-    );
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('Unexpected (non-Octokit) error'));
   });
 
   describe('owner/repo forgiveness (withOwnerRepoForgiveness)', () => {

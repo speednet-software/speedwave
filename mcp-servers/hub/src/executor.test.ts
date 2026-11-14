@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from 'vitest';
+import { inspect } from 'node:util';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -24,6 +25,17 @@ import {
 import type { ToolMetadata } from './hub-types.js';
 import { loadPolicy } from './policy.js';
 import { loadAccess } from './access-config.js';
+
+const CONSOLE_METHODS = ['log', 'info', 'warn', 'error', 'debug'] as const;
+
+function spyOnConsole(): () => string {
+  const spies = CONSOLE_METHODS.map((m) => vi.spyOn(console, m).mockImplementation(() => {}));
+  return () =>
+    inspect(
+      spies.map((s) => s.mock.calls),
+      { depth: 8 }
+    );
+}
 
 describe('executor', () => {
   beforeAll(() => {
@@ -1070,15 +1082,14 @@ describe('executor', () => {
     });
 
     it('sandbox console.log routes to host console.log', async () => {
-      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const logged = spyOnConsole();
 
       const code = `console.log('test log'); return 0;`;
       const result = await executeCode({ code, timeoutMs: 5000 });
 
       expect(result.success).toBe(true);
-      expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('[sandbox]'), 'test log');
-
-      logSpy.mockRestore();
+      expect(logged()).toContain('[sandbox] log length=8');
+      expect(logged()).not.toContain('test log');
     });
 
     it('sandbox console.warn routes to host console.warn', async () => {
@@ -1088,7 +1099,7 @@ describe('executor', () => {
       const result = await executeCode({ code, timeoutMs: 5000 });
 
       expect(result.success).toBe(true);
-      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('[sandbox]'), 'test warning');
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('[sandbox] warn length=12'));
 
       warnSpy.mockRestore();
     });
@@ -1100,7 +1111,7 @@ describe('executor', () => {
       const result = await executeCode({ code, timeoutMs: 5000 });
 
       expect(result.success).toBe(true);
-      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('[sandbox]'), 'test error');
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('[sandbox] error length=10'));
 
       errorSpy.mockRestore();
     });
@@ -1196,43 +1207,6 @@ describe('executor', () => {
 
       expect(result.success).toBe(false);
       expect(result.error?.message).toContain('slack: network down');
-    });
-
-    it('logErrorDebug: logs stack trace in development mode', async () => {
-      const savedNodeEnv = process.env.NODE_ENV;
-      process.env.NODE_ENV = 'development';
-
-      const bridgeError = new Error('dev mode error');
-      globalThis.fetch = vi.fn().mockRejectedValue(bridgeError) as unknown as typeof fetch;
-
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-
-      const code = `return await slack.sendChannel({ channel: 'test' });`;
-      await executeCode({ code, timeoutMs: 5000 });
-
-      const stackLogged = errorSpy.mock.calls.some((args) =>
-        args.some((a) => typeof a === 'string' && a.includes('Error: dev mode error'))
-      );
-      expect(stackLogged).toBe(true);
-
-      process.env.NODE_ENV = savedNodeEnv;
-      errorSpy.mockRestore();
-    });
-
-    it('logErrorDebug: logs non-Error objects in production mode', async () => {
-      globalThis.fetch = vi.fn().mockRejectedValue('plain string error') as unknown as typeof fetch;
-
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-
-      const code = `return await slack.sendChannel({ channel: 'test' });`;
-      await executeCode({ code, timeoutMs: 5000 });
-
-      const plainErrorLogged = errorSpy.mock.calls.some((args) =>
-        args.some((a) => a === 'plain string error')
-      );
-      expect(plainErrorLogged).toBe(true);
-
-      errorSpy.mockRestore();
     });
   });
 
@@ -1522,7 +1496,7 @@ describe('executor', () => {
 
       expect(result.success).toBe(true);
       const auditCallFound = logSpy.mock.calls.some((args) =>
-        String(args[0]).match(/\[(READ|WRITE|DELETE)\].*\(\{\}\)/)
+        String(args[0]).match(/\[(READ|WRITE|DELETE)\] slack\.listChannelIds\(\)/)
       );
       expect(auditCallFound).toBe(true);
 

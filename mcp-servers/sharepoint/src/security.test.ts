@@ -4,6 +4,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import { inspect } from 'node:util';
 import { SharePointClient, SharePointConfig } from './client.js';
 import { PathValidator } from './path-validator.js';
 import fsPromises from 'fs/promises';
@@ -24,6 +25,17 @@ let fetchMock: Mock;
 beforeEach(() => {
   fetchMock = vi.mocked(fetch) as unknown as Mock;
 });
+
+const CONSOLE_METHODS = ['log', 'info', 'warn', 'error', 'debug'] as const;
+
+function spyOnConsole(): () => string {
+  const spies = CONSOLE_METHODS.map((m) => vi.spyOn(console, m).mockImplementation(() => {}));
+  return () =>
+    inspect(
+      spies.map((s) => s.mock.calls),
+      { depth: 8 }
+    );
+}
 
 describe('Security: validatePath', () => {
   let client: SharePointClient;
@@ -442,8 +454,7 @@ describe('Security: validatePath', () => {
         expect.stringContaining('Security: Path validation blocked potential attack'),
         expect.objectContaining({
           attackType: 'invalid_character',
-          attemptedPath: maliciousPath,
-          decodedPath: undefined,
+          pathLength: maliciousPath.length,
           reason: 'Path contains a colon (drive letter or Graph path syntax)',
         })
       );
@@ -461,8 +472,7 @@ describe('Security: validatePath', () => {
         expect.stringContaining('Security: Path validation blocked potential attack'),
         expect.objectContaining({
           attackType: 'invalid_character',
-          attemptedPath: maliciousPath,
-          decodedPath: 'C:\\Windows\\System32',
+          pathLength: maliciousPath.length,
           reason: 'Path contains a colon (drive letter or Graph path syntax)',
         })
       );
@@ -479,7 +489,7 @@ describe('Security: validatePath', () => {
       expect(warnSpy).toHaveBeenCalledWith(
         expect.stringContaining('Security: Path validation blocked potential attack'),
         {
-          attemptedPath: maliciousPath,
+          pathLength: maliciousPath.length,
           attackType: 'excessive_url_encoding',
           reason: 'Path is URL-encoded more than 5 times',
         }
@@ -754,7 +764,7 @@ describe('Security: validateLocalPath', () => {
         expect.stringContaining('Security: Path validation blocked potential attack'),
         expect.objectContaining({
           attackType: 'path_traversal',
-          attemptedPath: maliciousPath,
+          pathLength: maliciousPath.length,
         })
       );
     });
@@ -785,8 +795,7 @@ describe('Security: validateLocalPath', () => {
         expect.stringContaining('Security'),
         expect.objectContaining({
           attackType: 'path_traversal',
-          attemptedPath: maliciousPath,
-          decodedPath: expect.any(String),
+          pathLength: maliciousPath.length,
         })
       );
     });
@@ -801,7 +810,7 @@ describe('Security: validateLocalPath', () => {
         expect.stringContaining('Security'),
         expect.objectContaining({
           attackType: 'null_byte_injection',
-          attemptedPath: maliciousPath,
+          pathLength: maliciousPath.length,
         })
       );
     });
@@ -815,10 +824,23 @@ describe('Security: validateLocalPath', () => {
         expect.stringContaining('Security: Local path validation blocked potential attack'),
         expect.objectContaining({
           attackType: 'path_outside_allowed_directory',
-          attemptedPath: '/etc/passwd',
-          resolvedPath: '/etc/passwd',
+          pathLength: '/etc/passwd'.length,
         })
       );
+    });
+
+    it('never writes the rejected path, decoded or resolved, to the log', async () => {
+      const logged = spyOnConsole();
+      const sentinel = 'SENTINEL-997-sharepoint-path';
+      const rejected = [`../${sentinel}.docx`, `%2e%2e%2f${sentinel}`, `C:\\${sentinel}`];
+
+      for (const rejectedPath of rejected) {
+        await expect(client.listFiles({ path: rejectedPath })).rejects.toThrow();
+      }
+      await expect(client.uploadFile('docs/test.txt', `/etc/${sentinel}`)).rejects.toThrow();
+
+      expect(logged()).toContain('Security: Local path validation blocked');
+      expect(logged()).not.toContain(sentinel);
     });
 
     it('should include attack type in all security logs', async () => {
