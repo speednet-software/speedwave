@@ -666,9 +666,10 @@ mod tests {
         let input = DiagnosticsInput {
             log_dir: Some(log_dir),
             serial_log: None,
-            container_logs: Some(
-                "web  | 2026-11-13T11:00:00.000000000Z JWT: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature123\n".into(),
-            ),
+            container_logs: Some(format!(
+                "web  | 2026-11-13T11:00:00.000000000Z JWT: {}.{}.signature123\n",
+                "eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiIxMjM0NTY3ODkwIn0"
+            )),
             mcp_os_log: None,
             compose_path: None,
             claude_session_log: None,
