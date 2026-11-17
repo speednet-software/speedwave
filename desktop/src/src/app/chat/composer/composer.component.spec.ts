@@ -365,15 +365,19 @@ describe('ComposerComponent', () => {
       expect(component.attachmentDraft().records()).toHaveLength(1);
     });
 
-    it('tells the user the session is starting, ahead of the queue hint', () => {
+    it('tells the user the session is starting and that Enter queues, ahead of the streaming hint', () => {
       const blocked = signal(true);
       fixture.componentRef.setInput('sendBlocked', blocked);
       fixture.detectChanges();
-      expect(textarea().getAttribute('placeholder')).toBe('starting session...');
+      expect(textarea().getAttribute('placeholder')).toBe(
+        'starting session... Enter queues your message'
+      );
 
       fixture.componentRef.setInput('streaming', true);
       fixture.detectChanges();
-      expect(textarea().getAttribute('placeholder')).toBe('starting session...');
+      expect(textarea().getAttribute('placeholder')).toBe(
+        'starting session... Enter queues your message'
+      );
 
       blocked.set(false);
       fixture.detectChanges();

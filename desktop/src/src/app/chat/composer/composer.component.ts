@@ -563,7 +563,7 @@ export class ComposerComponent implements AfterViewInit {
 
   /** Placeholder for the current send state. */
   effectivePlaceholder(): string {
-    if (this.sendBlocked()()) return 'starting session...';
+    if (this.sendBlocked()()) return 'starting session... Enter queues your message';
     if (this.streaming()) return 'queue next message...';
     return this.placeholder();
   }
