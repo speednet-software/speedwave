@@ -38,22 +38,24 @@ export function foldTaskPlan(calls: readonly TaskToolCall[]): readonly PlannedTa
           activeForm: todo.activeForm,
         }));
         break;
-      case 'task_create':
+      case 'task_create': {
         if (family !== 'task') {
           family = 'task';
           plan = [];
         }
-        created += 1;
+        const parsedId = createdTaskId(call.result);
+        created = Math.max(created + 1, Number(parsedId ?? 0));
         plan = [
           ...plan,
           {
-            id: createdTaskId(call.result) ?? String(created),
+            id: parsedId ?? String(created),
             subject: input.subject,
             status: 'pending',
             activeForm: input.activeForm,
           },
         ];
         break;
+      }
       case 'task_update':
         if (family !== 'task') break;
         plan =

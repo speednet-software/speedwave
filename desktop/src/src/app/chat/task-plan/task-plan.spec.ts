@@ -80,6 +80,18 @@ describe('foldTaskPlan', () => {
     ]);
   });
 
+  it('numbers an unparsed create after the highest id so far, never reusing one', () => {
+    const plan = foldTaskPlan([
+      create('A', 2),
+      create('B', null),
+      call('TaskUpdate', { taskId: '2', status: 'completed' }),
+    ]);
+    expect(plan?.map((t) => [t.id, t.subject, t.status])).toEqual([
+      ['2', 'A', 'completed'],
+      ['3', 'B', 'pending'],
+    ]);
+  });
+
   it('skips a create or an update that failed', () => {
     const plan = foldTaskPlan([
       create('A', 1),
