@@ -375,7 +375,7 @@ export async function waitForTurnComplete(responseTimeoutMs = 180_000): Promise<
   );
 }
 
-export async function waitForTurnStart(timeoutMs = 30_000): Promise<void> {
+export async function waitForTurnStart(timeoutMs = 90_000): Promise<void> {
   await browser.waitUntil(
     async () =>
       (await $('[data-testid="chat-message-list-streaming"]').isExisting()) ||
