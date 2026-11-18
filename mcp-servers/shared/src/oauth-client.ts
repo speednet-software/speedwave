@@ -72,23 +72,20 @@ export function accessTokenExpiresWithin(
 
 const REFRESH_STATUS_FILE = 'refresh_status';
 
-const SERVICE_DISPLAY_NAMES: ReadonlyMap<string, string> = new Map([
-  ['slack', 'Slack'],
-  ['sharepoint', 'SharePoint'],
-]);
+const SERVICE_NAME_FILE = 'service_name';
 
 type RefreshStatus = { state: 'reconnect_required' | 'network_error'; at: string };
 
 /**
  * Build the error for a token the host did not refresh, worded by `<tokensDir>/refresh_status`.
- * @param service - service id (display name falls back to the id)
+ * @param service - service id (the name falls back to the id when `<tokensDir>/service_name` is missing)
  * @param tokensDir - the `/tokens` directory
  */
 export async function refreshFailure(
   service: string,
   tokensDir: string
 ): Promise<OAuthRefreshError> {
-  const name = SERVICE_DISPLAY_NAMES.get(service) ?? service;
+  const name = await readServiceName(join(tokensDir, SERVICE_NAME_FILE), service);
   const status = await readRefreshStatus(join(tokensDir, REFRESH_STATUS_FILE));
   if (status?.state === 'reconnect_required') {
     return new OAuthRefreshError(
@@ -99,7 +96,7 @@ export async function refreshFailure(
   if (status?.state === 'network_error') {
     return new OAuthRefreshError(
       'network_error',
-      `${name} token expired and Speedwave could not refresh it yet (network error at ${status.at}). It retries every 10 seconds.`
+      `${name} token expired and Speedwave could not refresh it yet (network error at ${status.at}). It tries again automatically.`
     );
   }
   return new OAuthRefreshError(
@@ -121,5 +118,13 @@ async function readRefreshStatus(path: string): Promise<RefreshStatus | null> {
     return null;
   } catch {
     return null;
+  }
+}
+
+async function readServiceName(path: string, fallback: string): Promise<string> {
+  try {
+    return (await readFile(path, 'utf8')).trim() || fallback;
+  } catch {
+    return fallback;
   }
 }

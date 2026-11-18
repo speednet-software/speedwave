@@ -15,6 +15,7 @@ describe('refreshFailure', () => {
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'oauth-client-'));
+    await writeServiceName('Slack');
   });
 
   afterEach(async () => {
@@ -23,6 +24,10 @@ describe('refreshFailure', () => {
 
   async function writeStatus(content: string): Promise<void> {
     await writeFile(join(dir, 'refresh_status'), content);
+  }
+
+  async function writeServiceName(name: string): Promise<void> {
+    await writeFile(join(dir, 'service_name'), name);
   }
 
   it('asks to reconnect when the status is reconnect_required', async () => {
@@ -40,7 +45,7 @@ describe('refreshFailure', () => {
     const err = await refreshFailure('slack', dir);
     expect(err.code).toBe('network_error');
     expect(err.message).toBe(
-      'Slack token expired and Speedwave could not refresh it yet (network error at 2026-11-18T10:00:00Z). It retries every 10 seconds.'
+      'Slack token expired and Speedwave could not refresh it yet (network error at 2026-11-18T10:00:00Z). It tries again automatically.'
     );
   });
 
@@ -63,15 +68,21 @@ describe('refreshFailure', () => {
     expect(err.code).toBe('not_refreshed');
   });
 
-  it('names SharePoint by its display name', async () => {
+  it('names the service by the service_name file the host wrote', async () => {
+    await writeServiceName('GLPI Helpdesk\n');
     await writeStatus('{"state":"reconnect_required","at":"2026-11-18T10:00:00Z"}');
-    const err = await refreshFailure('sharepoint', dir);
+    const err = await refreshFailure('glpi', dir);
     expect(err.message).toBe(
-      'SharePoint sign-in expired. Reconnect SharePoint in Speedwave Desktop: Settings, Integrations, SharePoint.'
+      'GLPI Helpdesk sign-in expired. Reconnect GLPI Helpdesk in Speedwave Desktop: Settings, Integrations, GLPI Helpdesk.'
     );
   });
 
-  it('uses the service id for a service without a display name', async () => {
+  it.each([
+    ['missing', null],
+    ['empty', '  \n'],
+  ])('uses the service id when the service_name file is %s', async (_label, content) => {
+    await rm(join(dir, 'service_name'));
+    if (content !== null) await writeServiceName(content);
     const err = await refreshFailure('glpi', dir);
     expect(err.message).toBe(
       'glpi token expired and has not been refreshed yet. Speedwave refreshes it while a session of this project runs.'

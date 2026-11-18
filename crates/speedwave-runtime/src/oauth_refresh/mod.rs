@@ -1,6 +1,7 @@
 //! Host-side OAuth token refresh.
 
 mod audit;
+mod display_name;
 mod generic;
 mod http;
 mod microsoft;
@@ -14,7 +15,7 @@ mod store;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use provider::{ErrorCode, RefreshRequest, RefreshResponse};
 
@@ -65,7 +66,14 @@ where
     let spawned = std::thread::Builder::new()
         .name("oauth-refresh-once".to_string())
         .spawn(move || {
-            let _ = sender.send(refresh_project(&data_dir, &project, &call));
+            let mut holds = HashMap::new();
+            let _ = sender.send(refresh_project(
+                &data_dir,
+                &project,
+                &call,
+                &mut holds,
+                Instant::now(),
+            ));
         });
     if spawned.is_err() {
         log::warn!("failed to start the start-of-session token refresh");
@@ -116,8 +124,9 @@ fn run_session_refresher<F, G>(
     G: Fn(&ServiceRefresh),
 {
     let mut last: HashMap<String, RefreshOutcome> = HashMap::new();
+    let mut holds: HashMap<String, service::Hold> = HashMap::new();
     loop {
-        for result in refresh_project(&data_dir, project, call) {
+        for result in refresh_project(&data_dir, project, call, &mut holds, Instant::now()) {
             report(&mut last, &result, on_change);
         }
         if !matches!(
@@ -129,14 +138,22 @@ fn run_session_refresher<F, G>(
     }
 }
 
-fn refresh_project<F>(data_dir: &std::path::Path, project: &str, call: &F) -> Vec<ServiceRefresh>
+fn refresh_project<F>(
+    data_dir: &std::path::Path,
+    project: &str,
+    call: &F,
+    holds: &mut HashMap<String, service::Hold>,
+    now: Instant,
+) -> Vec<ServiceRefresh>
 where
     F: Fn(&str, &RefreshRequest<'_>) -> Result<RefreshResponse, ErrorCode>,
 {
     store::services(data_dir, project)
         .into_iter()
         .map(|service| {
-            let outcome = service::refresh_if_due(data_dir, project, &service, call);
+            display_name::write(data_dir, project, &service);
+            let hold = holds.entry(service.clone()).or_default();
+            let outcome = service::refresh_gated(data_dir, project, &service, call, hold, now);
             ServiceRefresh { service, outcome }
         })
         .collect()
@@ -208,7 +225,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_due_state(dir.path(), "slack");
         write_due_state(dir.path(), "sharepoint");
-        let results = refresh_project(dir.path(), "proj", &rotated);
+        let mut holds = HashMap::new();
+        let now = Instant::now();
+        let results = refresh_project(dir.path(), "proj", &rotated, &mut holds, now);
         let outcomes: Vec<(&str, RefreshOutcome)> = results
             .iter()
             .map(|r| (r.service.as_str(), r.outcome))
@@ -221,17 +240,17 @@ mod tests {
             ]
         );
         assert_eq!(
-            refresh_project(dir.path(), "proj", &rotated)
+            refresh_project(dir.path(), "proj", &rotated, &mut holds, now)
                 .iter()
                 .map(|r| r.outcome)
                 .collect::<Vec<_>>(),
             vec![RefreshOutcome::NotDue, RefreshOutcome::NotDue]
         );
-        assert!(refresh_project(dir.path(), "other", &rotated).is_empty());
+        assert!(refresh_project(dir.path(), "other", &rotated, &mut holds, now).is_empty());
     }
 
     #[test]
-    fn the_refresher_reports_a_reconnect_once_and_stops_when_dropped() {
+    fn the_refresher_reports_a_reconnect_once_asks_the_provider_once_and_stops_when_dropped() {
         let dir = tempfile::tempdir().unwrap();
         write_due_state(dir.path(), "slack");
         let attempts = Arc::new(AtomicUsize::new(0));
@@ -261,17 +280,15 @@ mod tests {
             })
         };
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while attempts.load(Ordering::SeqCst) < 3 && std::time::Instant::now() < deadline {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while attempts.load(Ordering::SeqCst) < 1 && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));
         }
+        std::thread::sleep(Duration::from_millis(100));
         drop(stop);
         worker.join().unwrap();
 
-        assert!(
-            attempts.load(Ordering::SeqCst) >= 3,
-            "failed refresh is retried at each check"
-        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
         assert_eq!(*reported.lock().unwrap(), vec!["slack".to_string()]);
     }
 

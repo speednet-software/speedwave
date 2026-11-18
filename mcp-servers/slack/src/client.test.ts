@@ -410,9 +410,11 @@ describe('slack client', () => {
       vi.useFakeTimers();
       const clients = presentClients();
       const status = JSON.stringify({ state: 'reconnect_required', at: '2026-11-18T10:00:00Z' });
-      readFileMock.mockImplementation(async (path: string) =>
-        path.endsWith('refresh_status') ? status : clients.tokenState.accessToken
-      );
+      readFileMock.mockImplementation(async (path: string) => {
+        if (path.endsWith('refresh_status')) return status;
+        if (path.endsWith('service_name')) return 'Slack';
+        return clients.tokenState.accessToken;
+      });
       const apiCall = vi.fn().mockRejectedValue({ data: { error: 'token_expired' } });
 
       try {
@@ -431,7 +433,9 @@ describe('slack client', () => {
       vi.useFakeTimers();
       const clients = presentClients();
       readFileMock.mockImplementation(async (path: string) => {
-        if (path.endsWith('refresh_status')) throw new Error('ENOENT');
+        if (path.endsWith('refresh_status') || path.endsWith('service_name')) {
+          throw new Error('ENOENT');
+        }
         return clients.tokenState.accessToken;
       });
       const apiCall = vi.fn().mockRejectedValue({ data: { error: 'token_expired' } });

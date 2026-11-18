@@ -57,6 +57,7 @@ const VOLATILE_CREDENTIAL_FILES: &[&str] = &[
     "access_token",
     crate::consts::SLACK_FEATURES_FILE,
     crate::consts::OAUTH_REFRESH_STATUS_FILE,
+    crate::consts::OAUTH_SERVICE_NAME_FILE,
 ];
 
 /// `writeRestrictedSecret` pattern: `<name>.tmp.<pid>.<rand>` — exclude mid-rename files.
@@ -667,6 +668,18 @@ mod credentials_digest_tests {
             env_of(&before, "mcp-slack"),
             env_of(&after, "mcp-slack"),
             "a refresh status write must not recreate the worker"
+        );
+
+        std::fs::write(
+            slack_dir.join(crate::consts::OAUTH_SERVICE_NAME_FILE),
+            "Slack",
+        )
+        .unwrap();
+        let named = apply_credentials_digests(YAML, &tokens).unwrap();
+        assert_eq!(
+            env_of(&before, "mcp-slack"),
+            env_of(&named, "mcp-slack"),
+            "a service name write must not recreate the worker"
         );
     }
 }

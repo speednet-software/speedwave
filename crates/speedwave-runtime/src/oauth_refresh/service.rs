@@ -1,4 +1,7 @@
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
+use std::time::Instant;
 
 use chrono::Utc;
 
@@ -7,12 +10,72 @@ use super::store::{self, Paths};
 use super::{audit, schedule, status, RefreshOutcome};
 use crate::fs_perms;
 
-pub(super) fn refresh_if_due<F>(
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) enum Hold {
+    #[default]
+    Ready,
+    Until {
+        at: Instant,
+        state: Option<u64>,
+        failures: u32,
+    },
+    StateChange {
+        state: Option<u64>,
+    },
+}
+
+pub(super) fn refresh_gated<F>(
     data_dir: &Path,
     project: &str,
     service: &str,
     call: &F,
+    hold: &mut Hold,
+    now: Instant,
 ) -> RefreshOutcome
+where
+    F: Fn(&str, &RefreshRequest<'_>) -> Result<RefreshResponse, ErrorCode>,
+{
+    let state = fingerprint(&Paths::new(data_dir, project, service).state);
+    let failures = match *hold {
+        Hold::StateChange { state: held } if held == state => {
+            return RefreshOutcome::ReconnectRequired;
+        }
+        Hold::Until {
+            at,
+            state: held,
+            failures,
+        } if held == state => {
+            if now < at {
+                return RefreshOutcome::NetworkError;
+            }
+            failures
+        }
+        Hold::Ready | Hold::Until { .. } | Hold::StateChange { .. } => 0,
+    };
+    let outcome = refresh_if_due(data_dir, project, service, call);
+    *hold = match outcome {
+        RefreshOutcome::ReconnectRequired => Hold::StateChange { state },
+        RefreshOutcome::NetworkError => {
+            let failures = failures.saturating_add(1);
+            Hold::Until {
+                at: now + schedule::retry_delay(failures),
+                state,
+                failures,
+            }
+        }
+        RefreshOutcome::Refreshed | RefreshOutcome::NotDue => Hold::Ready,
+    };
+    outcome
+}
+
+fn fingerprint(path: &Path) -> Option<u64> {
+    let bytes = std::fs::read(path).ok()?;
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    Some(hasher.finish())
+}
+
+fn refresh_if_due<F>(data_dir: &Path, project: &str, service: &str, call: &F) -> RefreshOutcome
 where
     F: Fn(&str, &RefreshRequest<'_>) -> Result<RefreshResponse, ErrorCode>,
 {
@@ -308,5 +371,258 @@ mod tests {
         );
         let state = store::load(&paths.state).ok().flatten().unwrap();
         assert_eq!(state.refresh_token, "new-rt");
+    }
+
+    fn failing_with(
+        code: ErrorCode,
+        calls: &AtomicUsize,
+    ) -> impl Fn(&str, &RefreshRequest<'_>) -> Result<RefreshResponse, ErrorCode> + '_ {
+        move |_: &str, _: &RefreshRequest<'_>| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err(code)
+        }
+    }
+
+    fn secs(base: Instant, n: u64) -> Instant {
+        base + Duration::from_secs(n)
+    }
+
+    fn audit_lines(paths: &Paths) -> usize {
+        std::fs::read_to_string(&paths.audit).map_or(0, |text| text.lines().count())
+    }
+
+    #[test]
+    fn a_reconnect_failure_is_not_retried_while_the_state_file_is_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path(), "proj", "slack");
+        write_state(&paths, 1);
+        let calls = AtomicUsize::new(0);
+        let call = failing_with(ErrorCode::InvalidGrant, &calls);
+        let mut hold = Hold::default();
+        let t0 = Instant::now();
+
+        for tick in 0..6 {
+            assert_eq!(
+                refresh_gated(
+                    dir.path(),
+                    "proj",
+                    "slack",
+                    &call,
+                    &mut hold,
+                    secs(t0, tick * 10)
+                ),
+                RefreshOutcome::ReconnectRequired
+            );
+        }
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(audit_lines(&paths), 1);
+        assert_eq!(status_state(&paths).as_deref(), Some("reconnect_required"));
+    }
+
+    #[test]
+    fn every_reconnect_code_waits_for_the_state_file() {
+        for code in [
+            ErrorCode::InvalidGrant,
+            ErrorCode::ScopeMismatch,
+            ErrorCode::MissingField,
+            ErrorCode::InvalidConfig,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let paths = Paths::new(dir.path(), "proj", "slack");
+            write_state(&paths, 1);
+            let calls = AtomicUsize::new(0);
+            let call = failing_with(code, &calls);
+            let mut hold = Hold::default();
+            let t0 = Instant::now();
+            for tick in 0..3 {
+                refresh_gated(
+                    dir.path(),
+                    "proj",
+                    "slack",
+                    &call,
+                    &mut hold,
+                    secs(t0, tick * 10),
+                );
+            }
+            assert_eq!(calls.load(Ordering::SeqCst), 1, "{code:?}");
+        }
+    }
+
+    #[test]
+    fn a_broken_state_file_is_judged_once_until_it_is_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path(), "proj", "slack");
+        std::fs::create_dir_all(paths.state.parent().unwrap()).unwrap();
+        std::fs::write(&paths.state, "{").unwrap();
+        let calls = AtomicUsize::new(0);
+        let call = failing_with(ErrorCode::InvalidGrant, &calls);
+        let mut hold = Hold::default();
+        let t0 = Instant::now();
+
+        for tick in 0..3 {
+            assert_eq!(
+                refresh_gated(
+                    dir.path(),
+                    "proj",
+                    "slack",
+                    &call,
+                    &mut hold,
+                    secs(t0, tick * 10)
+                ),
+                RefreshOutcome::ReconnectRequired
+            );
+        }
+        assert_eq!(audit_lines(&paths), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        write_state(&paths, 1);
+        assert_eq!(
+            refresh_gated(dir.path(), "proj", "slack", &call, &mut hold, secs(t0, 40)),
+            RefreshOutcome::ReconnectRequired
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_changed_state_file_ends_the_wait_for_a_reconnect() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path(), "proj", "slack");
+        write_state(&paths, 1);
+        let calls = AtomicUsize::new(0);
+        let rejecting = failing_with(ErrorCode::InvalidGrant, &calls);
+        let mut hold = Hold::default();
+        let t0 = Instant::now();
+        refresh_gated(dir.path(), "proj", "slack", &rejecting, &mut hold, t0);
+        refresh_gated(
+            dir.path(),
+            "proj",
+            "slack",
+            &rejecting,
+            &mut hold,
+            secs(t0, 10),
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        write_state(&paths, 2);
+        let working = |_: &str, _: &RefreshRequest<'_>| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            rotated()
+        };
+        assert_eq!(
+            refresh_gated(
+                dir.path(),
+                "proj",
+                "slack",
+                &working,
+                &mut hold,
+                secs(t0, 20)
+            ),
+            RefreshOutcome::Refreshed
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(status_state(&paths), None);
+        assert!(matches!(hold, Hold::Ready));
+    }
+
+    #[test]
+    fn a_network_failure_backs_off_from_ten_seconds_and_doubles_to_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path(), "proj", "slack");
+        write_state(&paths, 1);
+        let calls = AtomicUsize::new(0);
+        let call = failing_with(ErrorCode::Network, &calls);
+        let mut hold = Hold::default();
+        let t0 = Instant::now();
+
+        let mut now = 0;
+        for (attempt, wait) in [(1, 10), (2, 20), (3, 40), (4, 80), (5, 120), (6, 120)] {
+            assert_eq!(
+                refresh_gated(dir.path(), "proj", "slack", &call, &mut hold, secs(t0, now)),
+                RefreshOutcome::NetworkError
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), attempt);
+            assert_eq!(
+                refresh_gated(
+                    dir.path(),
+                    "proj",
+                    "slack",
+                    &call,
+                    &mut hold,
+                    secs(t0, now + wait - 1)
+                ),
+                RefreshOutcome::NetworkError
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), attempt, "held for {wait} s");
+            now += wait;
+        }
+        assert_eq!(status_state(&paths).as_deref(), Some("network_error"));
+        assert_eq!(audit_lines(&paths), 6);
+    }
+
+    #[test]
+    fn a_successful_refresh_resets_the_backoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path(), "proj", "slack");
+        write_state(&paths, 1);
+        let calls = AtomicUsize::new(0);
+        let failing = failing_with(ErrorCode::Network, &calls);
+        let mut hold = Hold::default();
+        let t0 = Instant::now();
+        refresh_gated(dir.path(), "proj", "slack", &failing, &mut hold, t0);
+        refresh_gated(
+            dir.path(),
+            "proj",
+            "slack",
+            &failing,
+            &mut hold,
+            secs(t0, 10),
+        );
+        refresh_gated(
+            dir.path(),
+            "proj",
+            "slack",
+            &failing,
+            &mut hold,
+            secs(t0, 30),
+        );
+        assert!(matches!(hold, Hold::Until { failures: 3, .. }));
+
+        let working = |_: &str, _: &RefreshRequest<'_>| rotated();
+        assert_eq!(
+            refresh_gated(
+                dir.path(),
+                "proj",
+                "slack",
+                &working,
+                &mut hold,
+                secs(t0, 70)
+            ),
+            RefreshOutcome::Refreshed
+        );
+        assert!(matches!(hold, Hold::Ready));
+    }
+
+    #[test]
+    fn a_changed_state_file_resets_the_backoff_and_retries_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path(), "proj", "slack");
+        write_state(&paths, 1);
+        let calls = AtomicUsize::new(0);
+        let call = failing_with(ErrorCode::Network, &calls);
+        let mut hold = Hold::default();
+        let t0 = Instant::now();
+        refresh_gated(dir.path(), "proj", "slack", &call, &mut hold, t0);
+        refresh_gated(dir.path(), "proj", "slack", &call, &mut hold, secs(t0, 10));
+        refresh_gated(dir.path(), "proj", "slack", &call, &mut hold, secs(t0, 30));
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+        write_state(&paths, 2);
+        refresh_gated(dir.path(), "proj", "slack", &call, &mut hold, secs(t0, 31));
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        assert!(matches!(hold, Hold::Until { failures: 1, .. }));
+
+        refresh_gated(dir.path(), "proj", "slack", &call, &mut hold, secs(t0, 41));
+        assert_eq!(calls.load(Ordering::SeqCst), 5);
     }
 }

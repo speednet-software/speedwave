@@ -84,6 +84,8 @@ pub const OAUTH_SUBDIR: &str = "oauth";
 pub const OAUTH_LOG_FILE: &str = "audit.log";
 /// Interval between expiry checks of the session token refresher.
 pub const OAUTH_REFRESH_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+/// Longest pause between two refresh attempts after a failure a later attempt can fix.
+pub const OAUTH_REFRESH_BACKOFF_MAX: std::time::Duration = std::time::Duration::from_secs(120);
 /// A token is refreshed once less than this percentage of its lifetime remains.
 pub const OAUTH_REFRESH_REMAINING_PERCENT: i64 = 25;
 /// Timeout of one token request to an identity provider.
@@ -100,6 +102,8 @@ pub const OAUTH_COMPAT_URL: &str = "http://mcp-hub:4000/oauth-compat";
 pub const OAUTH_COMPAT_BEARER: &str = "oauth-compat";
 /// Status file next to `access_token` describing the last failed refresh.
 pub const OAUTH_REFRESH_STATUS_FILE: &str = "refresh_status";
+/// File next to `access_token` holding the service display name, read by workers for refresh messages.
+pub const OAUTH_SERVICE_NAME_FILE: &str = "service_name";
 
 /// PII audit JSONL filenames under `audit::audit_dir_in()` — SSOT for the
 /// proxy/hub writers (F3/F4) and the diagnostics registry.
@@ -3193,6 +3197,43 @@ mod tests {
     fn integration_display_name_resolves_builtins_and_passes_plugin_ids_through() {
         assert_eq!(integration_display_name("slack"), "Slack");
         assert_eq!(integration_display_name("glpi"), "glpi");
+    }
+
+    fn ts_string_const<'a>(src: &'a str, name: &str) -> &'a str {
+        let re = regex::Regex::new(&format!(r#"const\s+{name}\s*=\s*['"]([^'"]+)['"]"#)).unwrap();
+        re.captures(src)
+            .unwrap_or_else(|| panic!("the TS source must declare `const {name}`"))
+            .get(1)
+            .unwrap()
+            .as_str()
+    }
+
+    #[test]
+    fn oauth_refresh_status_file_matches_ts() {
+        let src = include_str!("../../../mcp-servers/shared/src/oauth-client.ts");
+        assert_eq!(
+            ts_string_const(src, "REFRESH_STATUS_FILE"),
+            OAUTH_REFRESH_STATUS_FILE
+        );
+    }
+
+    #[test]
+    fn oauth_service_name_file_matches_ts() {
+        let src = include_str!("../../../mcp-servers/shared/src/oauth-client.ts");
+        assert_eq!(
+            ts_string_const(src, "SERVICE_NAME_FILE"),
+            OAUTH_SERVICE_NAME_FILE
+        );
+    }
+
+    #[test]
+    fn oauth_compat_url_path_matches_ts() {
+        let src = include_str!("../../../mcp-servers/hub/src/oauth-compat.ts");
+        let path = ts_string_const(src, "OAUTH_COMPAT_PATH");
+        assert_eq!(
+            OAUTH_COMPAT_URL,
+            format!("http://mcp-hub:{PORT_BASE}{path}")
+        );
     }
 
     #[test]
