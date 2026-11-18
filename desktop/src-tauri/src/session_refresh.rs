@@ -1,5 +1,3 @@
-//! Keeps the OAuth tokens of every project with running containers fresh (SPEED-1002, ADR-060).
-
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};

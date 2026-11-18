@@ -1560,10 +1560,7 @@ mod tests {
             outside_closure.matches("?;").count(),
             outside_closure
                 .matches(".map_err(kept_session_error)?;")
-                .count()
-                + outside_closure
-                    .matches(".map_err(kept_session_error)?;")
-                    .count(),
+                .count(),
             "a failure before the swap leaves the running session in place and must say so"
         );
         let after_stop = &body[body.find("old_session.stop()").unwrap()..];
