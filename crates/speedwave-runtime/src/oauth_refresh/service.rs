@@ -622,4 +622,63 @@ mod tests {
         refresh_gated(dir.path(), "proj", "slack", &call, &mut hold, secs(t0, 41));
         assert_eq!(calls.load(Ordering::SeqCst), 5);
     }
+
+    #[test]
+    fn a_network_failure_backs_off_from_ten_seconds_and_doubles_to_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path(), "proj", "slack");
+        write_state(&paths, 1);
+        let calls = AtomicUsize::new(0);
+        let call = failing_with(ErrorCode::Network, &calls);
+        let mut hold = Hold::default();
+        let t0 = Instant::now();
+
+        let mut now = 0;
+        for (attempt, wait) in [(1, 10), (2, 20), (3, 40), (4, 80), (5, 120), (6, 120)] {
+            assert_eq!(
+                refresh_gated(dir.path(), "proj", "slack", &call, &mut hold, secs(t0, now)),
+                RefreshOutcome::NetworkError
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), attempt);
+            let early = secs(t0, now + wait - 1);
+            assert_eq!(
+                refresh_gated(dir.path(), "proj", "slack", &call, &mut hold, early),
+                RefreshOutcome::NetworkError
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), attempt, "held for {wait} s");
+            now += wait;
+        }
+        refresh_gated(dir.path(), "proj", "slack", &call, &mut hold, secs(t0, now));
+        assert_eq!(calls.load(Ordering::SeqCst), 7);
+    }
+
+    #[test]
+    fn an_unreadable_state_file_keeps_the_backoff_even_after_the_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path(), "proj", "slack");
+        write_state(&paths, 1);
+        let calls = AtomicUsize::new(0);
+        let call = failing_with(ErrorCode::Network, &calls);
+        let mut hold = Hold::default();
+        let t0 = Instant::now();
+        refresh_gated(dir.path(), "proj", "slack", &call, &mut hold, t0);
+
+        std::fs::remove_file(&paths.state).unwrap();
+        std::fs::create_dir(&paths.state).unwrap();
+        for tick in [5, 10, 600] {
+            assert_eq!(
+                refresh_gated(
+                    dir.path(),
+                    "proj",
+                    "slack",
+                    &call,
+                    &mut hold,
+                    secs(t0, tick)
+                ),
+                RefreshOutcome::NetworkError
+            );
+        }
+        assert!(matches!(hold, Hold::Until { failures: 1, .. }));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
 }
