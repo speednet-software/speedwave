@@ -7940,6 +7940,19 @@ mod tests {
             started.len(),
             "every started turn ends in a result"
         );
+        let after = parse_line_all_str(
+            &mut parser,
+            r#"{"type":"system","subtype":"init","model":"m","session_id":"s"}"#,
+        );
+        assert!(
+            matches!(
+                after[1],
+                StreamChunk::TurnStarted {
+                    origin: TurnOrigin::User
+                }
+            ),
+            "a notification folded into the last turn must not mark the next one"
+        );
     }
 
     #[test]

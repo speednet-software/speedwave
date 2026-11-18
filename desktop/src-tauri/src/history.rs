@@ -3579,6 +3579,9 @@ mod tests {
                 command: String::new(),
                 argument: String::new(),
             },
+            MessageBlock::TurnOrigin {
+                origin: crate::chat::TurnOrigin::Scheduled,
+            },
             MessageBlock::ToolUse {
                 tool_id: String::new(),
                 tool_name: String::new(),
@@ -5010,21 +5013,6 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].preview, "first typed question");
         assert_eq!(list[0].message_count, 2);
-    }
-
-    #[test]
-    fn turn_origin_block_matches_ts() {
-        let json = serde_json::to_string(&MessageBlock::TurnOrigin {
-            origin: crate::chat::TurnOrigin::Scheduled,
-        })
-        .unwrap();
-        assert_eq!(json, r#"{"type":"turn_origin","origin":"scheduled"}"#);
-
-        let ts = include_str!("../../src/src/app/models/chat.ts");
-        assert!(
-            ts.contains("{ type: 'turn_origin'; origin: SelfStartedTurnOrigin }"),
-            "models/chat.ts MessageBlock must carry the turn_origin block as history sends it"
-        );
     }
 
     #[test]
