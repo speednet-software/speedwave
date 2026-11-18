@@ -1101,18 +1101,30 @@ pub fn write_policy_config_in(
     let dir = policy_config_dir_in(data_dir, project);
     crate::fs_perms::ensure_owner_only_dir(&dir)?;
     let content = serde_json::to_string_pretty(policy)?;
-    crate::fs_perms::write_restricted_file_atomic(
+    crate::fs_perms::write_restricted_file_atomic_if_changed(
         &policy_config_path_in(data_dir, project),
         &content,
-    )
+    )?;
+    Ok(())
 }
 
-/// sha256 of the rendered `policy.json`; digest change forces mcp-hub recreate
+/// sha256 of the rendered `policy.json` and `access.json`; digest change forces mcp-hub recreate
 /// (mirrors `compose/proxy.rs::proxy_state_digest_in`).
 pub(crate) fn policy_state_digest_in(data_dir: &Path, project: &str) -> String {
     use sha2::{Digest, Sha256};
-    let content = std::fs::read(policy_config_path_in(data_dir, project)).unwrap_or_default();
-    crate::bundle::bytes_to_hex(&Sha256::digest(content))
+    let mut hasher = Sha256::new();
+    hasher.update(std::fs::read(policy_config_path_in(data_dir, project)).unwrap_or_default());
+    match std::fs::read(crate::access_policy::access_config_path_in(
+        data_dir, project,
+    )) {
+        Ok(access) => {
+            hasher.update(b"\0access.json\0");
+            hasher.update(access);
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => hasher.update(b"\0access.json unreadable\0"),
+    }
+    crate::bundle::bytes_to_hex(&hasher.finalize())
 }
 
 #[cfg(test)]
@@ -2236,5 +2248,36 @@ keywords: []
         let d = policy_state_digest_in(tmp.path(), "proj");
         assert_eq!(d.len(), 64);
         assert_eq!(d, policy_state_digest_in(tmp.path(), "proj"));
+    }
+
+    #[test]
+    fn policy_state_digest_covers_access_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_policy_config_in(tmp.path(), "proj", &ResolvedPiiPolicy::default()).unwrap();
+        crate::access_policy::write_access_config_in(tmp.path(), "proj", &Default::default())
+            .unwrap();
+        let full = policy_state_digest_in(tmp.path(), "proj");
+        let access = speedwave_access_policy::AccessPolicy {
+            default: speedwave_access_policy::AccessMode::ReadOnly,
+            services: Default::default(),
+        };
+        crate::access_policy::write_access_config_in(tmp.path(), "proj", &access).unwrap();
+        assert_ne!(full, policy_state_digest_in(tmp.path(), "proj"));
+        crate::access_policy::write_access_config_in(tmp.path(), "proj", &Default::default())
+            .unwrap();
+        assert_eq!(full, policy_state_digest_in(tmp.path(), "proj"));
+    }
+
+    #[test]
+    fn policy_state_digest_tells_an_unreadable_access_json_from_a_missing_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_policy_config_in(tmp.path(), "proj", &ResolvedPiiPolicy::default()).unwrap();
+        let missing = policy_state_digest_in(tmp.path(), "proj");
+        std::fs::create_dir_all(crate::access_policy::access_config_path_in(
+            tmp.path(),
+            "proj",
+        ))
+        .unwrap();
+        assert_ne!(missing, policy_state_digest_in(tmp.path(), "proj"));
     }
 }

@@ -23,6 +23,7 @@ This worker provides **15 Redmine tools** via the Model Context Protocol:
 
 - ONLY has access to Redmine API key (mounted RO from `/tokens/api_key`)
 - No access to other service tokens (Slack, SharePoint, etc.)
+- Mounts the project directory `/workspace:rw`: the attachment tools read files from it and `downloadAttachment` writes under `/workspace/.speedwave/redmine/`
 - If compromised, only Redmine data is exposed
 
 **Token Isolation**:
@@ -129,6 +130,7 @@ Create a new issue.
 - `parent_issue_id` (number, optional): Parent issue (for subtasks)
 - `estimated_hours` (number, optional): Estimated hours
 - `fixed_version_id` (number, optional): Target version (from `listVersions`)
+- `file_paths` (string[], optional): 1 to 10 paths under `/workspace` to attach to the new issue
 
 #### 5. updateIssue
 
@@ -161,6 +163,40 @@ Add a comment to an issue.
 
 - `issue_id` (number, required): Issue ID
 - `notes` (string, required): Comment text (Textile markup)
+
+### Attachment Operations
+
+Files move between `/workspace` and Redmine as streams, so the worker's memory does not grow with the file; the only size limit is the Redmine server's. List attachment IDs with `getIssueFull` and `include: ["attachments"]`.
+
+#### addAttachment
+
+Attach 1 to 10 workspace files to an issue; the files and the optional comment are one history entry. Every path is checked before the first Redmine call.
+
+**Parameters**:
+
+- `issue_id` (number, required): Issue ID
+- `file_paths` (string[], required): 1 to 10 paths under `/workspace`
+- `notes` (string, optional): Comment saved with the files
+
+`createIssue` takes the same `file_paths` parameter.
+
+#### downloadAttachment
+
+Save an attachment of the issue to `/workspace/.speedwave/redmine/<attachment_id>-<name>` and return its path, size and type. `attachment_id` must belong to `issue_id`.
+
+**Parameters**:
+
+- `issue_id` (number, required): Issue ID
+- `attachment_id` (number, required): Attachment ID
+
+#### deleteAttachment
+
+Delete an attachment of the issue. `attachment_id` must belong to `issue_id`.
+
+**Parameters**:
+
+- `issue_id` (number, required): Issue ID
+- `attachment_id` (number, required): Attachment ID
 
 ### Time Entry Operations
 

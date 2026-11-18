@@ -1,5 +1,5 @@
 /**
- * Jira issue tools: search/CRUD, parent, components, links, transitions, assignment, current account, attachments (14).
+ * Jira issue tools: search/CRUD, parent, components, links, transitions, assignment, current account, attachments (15).
  * @module mcp-atlassian/tools/jira-issue-tools
  */
 
@@ -13,11 +13,16 @@ import {
   withDeclaredParams,
   META_KEYS,
   READ_ONLY_ANNOTATIONS,
+  WORKSPACE_WRITE_ANNOTATIONS,
   WRITE_ANNOTATIONS,
   DESTRUCTIVE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
 import { AtlassianClient } from '../client.js';
-import { createJiraIssuesClient, UnknownLinkRelationError } from '../domains/jira-issues.js';
+import {
+  AttachmentNotFoundError,
+  createJiraIssuesClient,
+  UnknownLinkRelationError,
+} from '../domains/jira-issues.js';
 import { createJiraProjectsClient } from '../domains/jira-projects.js';
 import type { AdfDoc } from '../types.js';
 import { listResult, unconfiguredDefinitions, withValidation } from './validation.js';
@@ -90,6 +95,21 @@ const searchIssueProperties = {
 const issueProperties = {
   ...searchIssueProperties,
   description: { type: 'string', description: 'Markdown' },
+  attachments: {
+    type: 'array',
+    description: 'Attachments of the issue; pass an id to downloadAttachment or deleteAttachment',
+    items: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' },
+        filename: { type: 'string' },
+        size: { type: 'number' },
+        mime_type: { type: 'string' },
+        created: { type: 'string' },
+        author: userSchema,
+      },
+    },
+  },
 };
 
 const errorProperties = { success: { type: 'boolean' }, error: { type: 'string' } };
@@ -113,6 +133,11 @@ const issueParam = (extra = '') => ({
   type: 'string',
   description: `Issue key (e.g. PROJ-123) or numeric ID.${extra}`,
 });
+
+const attachmentIdParam = {
+  type: 'string',
+  description: 'Attachment ID from the attachments of getIssue (e.g. 10475)',
+};
 
 const descriptionProperties = {
   description: {
@@ -176,7 +201,7 @@ const searchIssuesTool: Tool = {
 const getIssueTool: Tool = {
   name: 'getIssue',
   description:
-    'Get a single Jira issue by key or ID, with its Markdown description, parent, components and links (each link has an id for unlinkIssues).',
+    'Get a single Jira issue by key or ID, with its Markdown description, parent, components, links (each link has an id for unlinkIssues) and attachments (each has an id for downloadAttachment and deleteAttachment).',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['jira', 'issue', 'get', 'show', 'ticket', 'detail'],
@@ -552,22 +577,60 @@ const addAttachmentTool: Tool = {
   ],
 };
 
+const downloadAttachmentTool: Tool = {
+  name: 'downloadAttachment',
+  description:
+    'Download an attachment of a Jira issue into the project workspace at /workspace/.speedwave/jira/<attachment_id>-<name>, then open the file from there (images, PDFs, logs). Returns the path, size and MIME type, never the bytes. The attachment must belong to `issue`: take attachment_id from the attachments of getIssue. Downloading again overwrites the file.',
+  annotations: WORKSPACE_WRITE_ANNOTATIONS,
+  _meta: { [META_KEYS.DEFER_LOADING]: true, [META_KEYS.TIMEOUT_CLASS]: 'long' },
+  keywords: ['jira', 'attachment', 'download', 'save', 'file', 'screenshot', 'image', 'załącznik'],
+  example:
+    'const { issue } = await atlassian.getIssue({ issue: "PROJ-123" }); const saved = await atlassian.downloadAttachment({ issue: "PROJ-123", attachment_id: issue.attachments[0].id })',
+  inputSchema: {
+    type: 'object',
+    properties: { issue: issueParam(), attachment_id: attachmentIdParam },
+    required: ['issue', 'attachment_id'],
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      ...errorProperties,
+      id: { type: 'string' },
+      filename: { type: 'string', description: 'File name as Jira reports it' },
+      mime_type: { type: 'string' },
+      size: { type: 'number', description: 'Bytes written' },
+      path: { type: 'string', description: 'Workspace path the file was written to' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Download a screenshot listed by getIssue',
+      input: { issue: 'PROJ-123', attachment_id: '10475' },
+    },
+  ],
+};
+
 const deleteAttachmentTool: Tool = {
   name: 'deleteAttachment',
-  description: 'Delete a Jira attachment by its attachment ID (irreversible).',
+  description:
+    'Delete an attachment of a Jira issue (irreversible). The attachment must belong to `issue`: take attachment_id from the attachments of getIssue.',
   annotations: DESTRUCTIVE_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['jira', 'attachment', 'delete', 'remove', 'załącznik', 'usuń'],
-  example: 'await atlassian.deleteAttachment({ attachment_id: "10475" })',
+  example: 'await atlassian.deleteAttachment({ issue: "PROJ-123", attachment_id: "10475" })',
   inputSchema: {
     type: 'object',
-    properties: {
-      attachment_id: { type: 'string', description: 'Attachment ID (e.g. 10475)' },
-    },
-    required: ['attachment_id'],
+    properties: { issue: issueParam(), attachment_id: attachmentIdParam },
+    required: ['issue', 'attachment_id'],
   },
   outputSchema: flagOutputSchema('deleted'),
-  inputExamples: [{ description: 'Delete an attachment', input: { attachment_id: '10475' } }],
+  inputExamples: [
+    {
+      description: 'Delete an attachment of an issue',
+      input: { issue: 'PROJ-123', attachment_id: '10475' },
+    },
+  ],
 };
 
 /**
@@ -589,6 +652,7 @@ export function createJiraIssueTools(client: AtlassianClient | null): ToolDefini
     assignIssueTool,
     getMyselfTool,
     addAttachmentTool,
+    downloadAttachmentTool,
     deleteAttachmentTool,
   ];
   if (!client) return unconfiguredDefinitions(tools);
@@ -822,9 +886,32 @@ export function createJiraIssueTools(client: AtlassianClient | null): ToolDefini
       });
     }),
 
+    downloadAttachment: withValidation(client, async (_c, params) => {
+      const { issue, attachment_id } = params as { issue: string; attachment_id: string };
+      try {
+        return jsonResult({ ...(await issues.downloadAttachment(issue, attachment_id)) });
+      } catch (error) {
+        const rejection = attachmentRejection(error, attachment_id, 'nothing was saved', {
+          403: 'Jira says this account lacks permission to view the content of',
+          404: 'Jira found no visible',
+        });
+        if (rejection) return rejection;
+        throw error;
+      }
+    }),
+
     deleteAttachment: withValidation(client, async (_c, params) => {
-      const { attachment_id } = params as { attachment_id: string };
-      await issues.deleteAttachment(attachment_id);
+      const { issue, attachment_id } = params as { issue: string; attachment_id: string };
+      try {
+        await issues.deleteAttachment(issue, attachment_id);
+      } catch (error) {
+        const rejection = attachmentRejection(error, attachment_id, 'nothing was removed', {
+          403: 'Jira says this account lacks permission to delete',
+          404: 'Jira found no visible',
+        });
+        if (rejection) return rejection;
+        throw error;
+      }
       return jsonResult({ deleted: true });
     }),
   };
@@ -880,4 +967,33 @@ function jiraRejection(error: unknown): JiraRejection | undefined {
     errorMessages?: string[];
   };
   return { fields: data.errors ?? {}, messages: data.errorMessages ?? [] };
+}
+
+function attachmentRejection(
+  error: unknown,
+  attachmentId: string,
+  outcome: string,
+  statusReasons: Record<number, string>
+) {
+  if (error instanceof AttachmentNotFoundError) {
+    return teachingErrorResult({
+      paramName: 'attachment_id',
+      correctValueTool: 'getIssue',
+      nextStep: `${error.issue} has no attachment ${attachmentId}, so ${outcome}. Its attachments: ${error.available.join(', ') || 'none'}. Retry with an id from the attachments of getIssue for this issue.`,
+    });
+  }
+  const status = responseStatus(error);
+  if (status !== undefined && status >= 300 && status <= 399) {
+    return teachingErrorResult({
+      paramName: 'attachment_id',
+      nextStep: `Jira answered with a redirect for attachment ${attachmentId}, so ${outcome}. The worker does not follow redirects to another host.`,
+    });
+  }
+  const reason = status === undefined ? undefined : statusReasons[status];
+  if (reason === undefined) return undefined;
+  return teachingErrorResult({
+    paramName: 'attachment_id',
+    correctValueTool: 'getIssue',
+    nextStep: `${reason} attachment ${attachmentId}, so ${outcome}. Check the id with getIssue${status === 403 ? ' and the account permissions in that project' : ''}.`,
+  });
 }

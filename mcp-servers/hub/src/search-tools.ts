@@ -13,6 +13,8 @@ import {
 } from './tool-registry.js';
 import { sandboxGlobalName } from './service-list.js';
 import { enabledSandboxGlobals } from './executor.js';
+import { decideAccess, readOnlyNotice, readOnlyServices } from './access-policy.js';
+import { getAccessRules } from './access-config.js';
 
 /** Valid detail levels for search_tools, ascending verbosity (SSOT for schema and validation). */
 export const DETAIL_LEVELS = ['names_only', 'with_descriptions', 'full_schema'] as const;
@@ -38,6 +40,7 @@ export interface SearchToolsParams {
  * Result of a tool search operation
  */
 export interface SearchToolsResult {
+  notice?: string;
   /** Array of matching tools */
   matches: ToolSearchResult[];
   /** Total number of matches found */
@@ -230,11 +233,24 @@ export async function searchTools(params: SearchToolsParams): Promise<SearchTool
     return a.tool.name.localeCompare(b.tool.name);
   });
 
-  const results: ToolSearchResult[] = scored.map(({ service: svc, tool }) =>
-    buildSearchResult(svc, tool, detailLevel)
+  const rules = getAccessRules();
+  const results: ToolSearchResult[] = scored.map(({ service: svc, tool }) => {
+    const entry = buildSearchResult(svc, tool, detailLevel);
+    const decision = decideAccess(rules, tool);
+    if (!decision.allowed) entry.blocked = decision.reason;
+    return entry;
+  });
+
+  const notice = readOnlyNotice(
+    readOnlyServices(
+      rules,
+      SERVICE_NAMES.filter((s) => enabled.has(s) && !skipped.has(s)),
+      disabledOs
+    )
   );
 
   const result: SearchToolsResult = {
+    ...(notice && { notice }),
     matches: results,
     total: results.length,
     query,

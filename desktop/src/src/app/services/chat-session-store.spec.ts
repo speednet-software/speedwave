@@ -33,7 +33,13 @@ import { PlanUsageService } from './plan-usage.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
 import { createDeferred, type Deferred } from '../testing/deferred';
 import { makeMockLogger } from '../testing/mock-logger';
-import type { ConversationTranscript, StreamChunk, ToolUseBlock } from '../models/chat';
+import type {
+  ConversationTranscript,
+  HistoryMessageBlock,
+  HistoryToolUse,
+  StreamChunk,
+  ToolUseBlock,
+} from '../models/chat';
 import type { ModelSwitchOutcome } from '../models/claude-control';
 import { DEFAULT_CONTEXT_TOKENS } from '../models/llm';
 
@@ -2242,6 +2248,31 @@ describe('ChatSessionStore', () => {
         expect(mockLogger.warn).toHaveBeenCalledTimes(1);
       });
 
+      it('ToolResult warning names tool, id, length, error type and closing bracket flag only', () => {
+        startTool(TRUNCATED);
+        result();
+        expect(mockLogger.warn).toHaveBeenCalledWith(
+          `Failed to parse tool input for "SendMessage" (t1, ${TRUNCATED.length} chars, SyntaxError, ends with closing bracket: false)`
+        );
+      });
+
+      it('ToolResult warning for an unparseable input never carries a SENTINEL-997 value', () => {
+        const sentinel = 'SENTINEL-997-TOOL-INPUT';
+        startTool(
+          `{"file_path":"/tmp/${sentinel}.env","content":"password=${sentinel}" ${sentinel}}`,
+          'Write'
+        );
+        result();
+        const logged = [
+          ...mockLogger.warn.mock.calls,
+          ...mockLogger.info.mock.calls,
+          ...mockLogger.error.mock.calls,
+          ...mockLogger.debug.mock.calls,
+        ].flat();
+        expect(mockLogger.warn).toHaveBeenCalledTimes(1);
+        expect(JSON.stringify(logged)).not.toContain('SENTINEL-997');
+      });
+
       it('ToolResult with is_error also warns once for an unparseable input', () => {
         startTool('{"command":', 'Bash');
         result(true);
@@ -2274,7 +2305,7 @@ describe('ChatSessionStore', () => {
         );
       });
 
-      it('the parse warning names the tool, id and length but bounds the echoed input', () => {
+      it('the parse warning for a long input carries its length and no part of the content', () => {
         const huge = '{"content":"' + 'x'.repeat(5000);
         startTool(huge, 'Write');
         result();
@@ -2282,18 +2313,15 @@ describe('ChatSessionStore', () => {
         expect(message).toContain('"Write"');
         expect(message).toContain('t1');
         expect(message).toContain(`${huge.length} chars`);
-        expect(message).toContain('x'.repeat(50));
-        expect(message).not.toContain('x'.repeat(1000));
+        expect(message).not.toContain('xxxxx');
       });
 
-      it('the parse warning preview never cuts a surrogate pair', () => {
-        const head = '{"content":"';
-        const input = head + 'x'.repeat(199 - head.length) + '😀' + 'y'.repeat(50);
-        startTool(input, 'Write');
+      it('the parse warning flags an input that ends with a closing bracket', () => {
+        startTool('{"to": "a"}}', 'SendMessage');
         result();
-        const message = mockLogger.warn.mock.calls[0][0] as string;
-        expect(message).toContain('😀');
-        expect(message).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+        expect(mockLogger.warn).toHaveBeenCalledWith(
+          'Failed to parse tool input for "SendMessage" (t1, 12 chars, SyntaxError, ends with closing bracket: true)'
+        );
       });
 
       it('Result finalizes a still-running tool block as Interrupted', () => {
@@ -7220,6 +7248,308 @@ describe('ChatSessionStore', () => {
     });
   });
 
+  describe('a message queued during a session start (SPEED-919)', () => {
+    type Call = { cmd: string; args: unknown };
+    let calls: Call[];
+    let pendingStart: Deferred<void>;
+    let pendingResume: Deferred<void>;
+    let startFails: string | null;
+
+    beforeEach(async () => {
+      await TestBed.inject(ProjectStateService).init();
+      calls = [];
+      pendingStart = createDeferred<void>();
+      pendingResume = createDeferred<void>();
+      startFails = null;
+      mockTauri.invokeHandler = async (cmd: string, args?: unknown) => {
+        calls.push({ cmd, args });
+        switch (cmd) {
+          case 'start_chat':
+            await pendingStart.promise;
+            if (startFails) throw new Error(startFails);
+            return undefined;
+          case 'resume_conversation':
+            await pendingResume.promise;
+            if (startFails) throw new Error(startFails);
+            return undefined;
+          case 'get_conversation':
+            return { session_id: 'sess-resumed', messages: [] };
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'check_containers_running':
+            return true;
+          default:
+            return undefined;
+        }
+      };
+    });
+
+    function sent(): unknown[] {
+      return calls.filter((c) => c.cmd === 'send_message').map((c) => c.args);
+    }
+
+    function backendQueueCalls(): Call[] {
+      return calls.filter((c) => c.cmd === 'queue_message' || c.cmd === 'cancel_queued_message');
+    }
+
+    async function beginStart(): Promise<{ done: Promise<unknown> }> {
+      const done = store.startChatSession();
+      await vi.waitFor(() => expect(calls.map((c) => c.cmd)).toContain('start_chat'));
+      expect(store.sessionStartInFlightFromState()).toBe(true);
+      return { done };
+    }
+
+    it('holds the text in the store and sends it as a new turn once the start completes', async () => {
+      const { done: starting } = await beginStart();
+
+      const displaced = await store.queueMessage('typed while starting');
+
+      expect(displaced).toBeNull();
+      expect(store.pendingQueue?.text).toBe('typed while starting');
+      expect(store.pendingQueueFromState()?.text).toBe('typed while starting');
+      expect(sent()).toEqual([]);
+      expect(backendQueueCalls()).toEqual([]);
+
+      pendingStart.resolve();
+      await starting;
+
+      await vi.waitFor(() =>
+        expect(sent()).toEqual([
+          {
+            blocks: [{ type: 'text', text: 'typed while starting' }],
+            displayText: 'typed while starting',
+            tabId: 'test-tab-id',
+          },
+        ])
+      );
+      expect(store.pendingQueue).toBeNull();
+      expect(store.isStreaming).toBe(true);
+      expect(store.messages.at(-1)?.blocks).toEqual([
+        { type: 'text', content: 'typed while starting' },
+      ]);
+      expect(backendQueueCalls()).toEqual([]);
+    });
+
+    it('replaces an earlier text queued during the same start', async () => {
+      const { done: starting } = await beginStart();
+
+      await store.queueMessage('first thought');
+      const displaced = await store.queueMessage('second thought');
+
+      expect(displaced).toBe('first thought');
+      pendingStart.resolve();
+      await starting;
+      await vi.waitFor(() => expect(sent()).toHaveLength(1));
+      expect(sent()[0]).toMatchObject({ displayText: 'second thought' });
+    });
+
+    it('hands the text to the backend queue when a turn began before the session was ready', async () => {
+      const { done: starting } = await beginStart();
+      await store.queueMessage('after the running turn');
+
+      store.isStreaming = true;
+      pendingStart.resolve();
+      await starting;
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(sent()).toEqual([]);
+      expect(store.pendingQueue?.text).toBe('after the running turn');
+      store.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-6', session_id: 'sess-turn' },
+      });
+      await vi.waitFor(() =>
+        expect(backendQueueCalls()).toEqual([
+          {
+            cmd: 'queue_message',
+            args: { sessionId: 'sess-turn', text: 'after the running turn' },
+          },
+        ])
+      );
+      store.handleStreamChunk({
+        chunk_type: 'QueueDrained',
+        data: { session_id: 'sess-turn', text: 'after the running turn' },
+      });
+      expect(store.pendingQueue).toBeNull();
+    });
+
+    it('cancel clears the slot without a backend call and the start sends nothing', async () => {
+      const { done: starting } = await beginStart();
+      await store.queueMessage('never mind');
+
+      await store.cancelQueuedMessage();
+
+      expect(store.pendingQueue).toBeNull();
+      pendingStart.resolve();
+      await starting;
+      await new Promise((r) => setTimeout(r, 0));
+      expect(sent()).toEqual([]);
+      expect(backendQueueCalls()).toEqual([]);
+    });
+
+    it('returns the text after a failed start and drops the slot once the composer took it', async () => {
+      const { done: starting } = await beginStart();
+      await store.queueMessage('lost start');
+
+      startFails = 'chat backend crashed';
+      pendingStart.resolve();
+      await starting;
+
+      expect(store.returnedStartSlot()).toBe('lost start');
+      expect(store.pendingQueue?.text).toBe('lost start');
+      expect(sent()).toEqual([]);
+
+      store.settleReturnedStartSlot();
+
+      expect(store.returnedStartSlot()).toBeNull();
+      expect(store.pendingQueue).toBeNull();
+    });
+
+    it('returns the text after a start refused for sign-in', async () => {
+      const { done: starting } = await beginStart();
+      await store.queueMessage('needs sign-in');
+
+      startFails = 'not authenticated';
+      pendingStart.resolve();
+      await starting;
+
+      expect(store.returnedStartSlot()).toBe('needs sign-in');
+    });
+
+    it('does not send a returned slot no composer took yet with the next successful start', async () => {
+      const { done: failing } = await beginStart();
+      await store.queueMessage('returned while no composer was shown');
+      startFails = 'chat backend crashed';
+      pendingStart.resolve();
+      await failing;
+
+      startFails = null;
+      pendingStart = createDeferred<void>();
+      const { done: retry } = await beginStart();
+      pendingStart.resolve();
+      await retry;
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(sent()).toEqual([]);
+      expect(store.returnedStartSlot()).toBe('returned while no composer was shown');
+    });
+
+    it('a new text queued during the next start replaces the returned one', async () => {
+      const { done: failing } = await beginStart();
+      await store.queueMessage('older');
+      startFails = 'chat backend crashed';
+      pendingStart.resolve();
+      await failing;
+
+      startFails = null;
+      pendingStart = createDeferred<void>();
+      const { done: retry } = await beginStart();
+      const displaced = await store.queueMessage('newer');
+
+      expect(displaced).toBe('older');
+      expect(store.returnedStartSlot()).toBeNull();
+      pendingStart.resolve();
+      await retry;
+      await vi.waitFor(() => expect(sent()).toHaveLength(1));
+      expect(sent()[0]).toMatchObject({ displayText: 'newer' });
+    });
+
+    it('sends the text after a resume completes', async () => {
+      const resuming = store.resumeConversation('sess-resumed');
+      await vi.waitFor(() => expect(calls.map((c) => c.cmd)).toContain('resume_conversation'));
+      expect(store.sessionStartInFlightFromState()).toBe(true);
+
+      await store.queueMessage('continue please');
+      expect(backendQueueCalls()).toEqual([]);
+
+      pendingResume.resolve();
+      await resuming;
+
+      await vi.waitFor(() => expect(sent()).toHaveLength(1));
+      expect(sent()[0]).toMatchObject({ displayText: 'continue please' });
+      expect(store.pendingQueue).toBeNull();
+    });
+
+    it('returns the text after a failed resume', async () => {
+      const resuming = store.resumeConversation('sess-resumed');
+      await vi.waitFor(() => expect(calls.map((c) => c.cmd)).toContain('resume_conversation'));
+      await store.queueMessage('resume failed');
+
+      startFails = 'failed to spawn claude';
+      pendingResume.resolve();
+      await resuming;
+
+      expect(store.returnedStartSlot()).toBe('resume failed');
+      expect(sent()).toEqual([]);
+    });
+
+    it('does not send a returned slot with the next turn', async () => {
+      const { done: failing } = await beginStart();
+      await store.queueMessage('returned to the composer');
+      startFails = 'chat backend crashed';
+      pendingStart.resolve();
+      await failing;
+      store.settleReturnedStartSlot();
+
+      store.seedSessionId('sess-kept');
+      await store.sendMessage('typed after the failure');
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(sent()).toHaveLength(1);
+      expect(sent()[0]).toMatchObject({ displayText: 'typed after the failure' });
+      expect(backendQueueCalls()).toEqual([]);
+      expect(store.pendingQueue).toBeNull();
+    });
+
+    it('keeps the slot across a reset and sends it after the start that follows', async () => {
+      const { done: superseded } = await beginStart();
+      await store.queueMessage('survives the reset');
+
+      store.resetForNewConversation();
+      expect(store.pendingQueue?.text).toBe('survives the reset');
+      pendingStart.resolve();
+      await superseded;
+      await new Promise((r) => setTimeout(r, 0));
+      expect(sent()).toEqual([]);
+
+      pendingStart = createDeferred<void>();
+      const { done: next } = await beginStart();
+      pendingStart.resolve();
+      await next;
+
+      await vi.waitFor(() => expect(sent()).toHaveLength(1));
+      expect(sent()[0]).toMatchObject({ displayText: 'survives the reset' });
+    });
+
+    it('returns a held slot when a resume finds no active project', async () => {
+      const { done: failing } = await beginStart();
+      await store.queueMessage('no project to resume in');
+      startFails = 'chat backend crashed';
+      pendingStart.resolve();
+      await failing;
+      TestBed.inject(ProjectStateService).activeProject.set(null);
+
+      await store.resumeConversation('sess-resumed');
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(sent()).toEqual([]);
+      expect(store.returnedStartSlot()).toBe('no project to resume in');
+    });
+
+    it('queues to the backend as before when no start is in flight', async () => {
+      store.seedSessionId('sess-live');
+      store.isStreaming = true;
+
+      await store.queueMessage('mid-turn');
+
+      expect(backendQueueCalls()).toEqual([
+        { cmd: 'queue_message', args: { sessionId: 'sess-live', text: 'mid-turn' } },
+      ]);
+    });
+  });
+
   describe('state-tree signal projections', () => {
     it('initial state matches DEFAULT_STATE_TREE', () => {
       const s = store.state();
@@ -7581,22 +7911,29 @@ describe('ChatSessionStore', () => {
   });
 
   describe('mapNotLoggedInError', () => {
-    it('maps Claude Code\'s "not logged in" error to a Settings-pointing message', () => {
-      expect(mapNotLoggedInError('Not logged in · Please run /login')).toContain('Settings');
-      expect(mapNotLoggedInError('some unrelated error')).toBeNull();
+    it('maps Claude Code\'s "not logged in" error to a message for the active provider', () => {
+      expect(mapNotLoggedInError('Not logged in · Please run /login', 'anthropic_oauth')).toBe(
+        'Your claude.ai session expired. Sign in again in Settings.'
+      );
+      for (const kind of ['anthropic_api_key', 'local', 'open_router', null] as const) {
+        expect(mapNotLoggedInError('Not logged in · Please run /login', kind)).toBe(
+          'The provider rejected the credentials. Check the API key or provider settings.'
+        );
+      }
+      expect(mapNotLoggedInError('some unrelated error', 'anthropic_oauth')).toBeNull();
     });
 
     it('matches "not authenticated" wording variants', () => {
-      expect(mapNotLoggedInError('Not authenticated')).not.toBeNull();
+      expect(mapNotLoggedInError('Not authenticated', null)).not.toBeNull();
     });
 
     it('is case-insensitive', () => {
-      expect(mapNotLoggedInError('NOT LOGGED IN')).not.toBeNull();
+      expect(mapNotLoggedInError('NOT LOGGED IN', null)).not.toBeNull();
     });
 
     it('returns null for unknown errors', () => {
-      expect(mapNotLoggedInError('')).toBeNull();
-      expect(mapNotLoggedInError('rate limit exceeded')).toBeNull();
+      expect(mapNotLoggedInError('', null)).toBeNull();
+      expect(mapNotLoggedInError('rate limit exceeded', null)).toBeNull();
     });
   });
 
@@ -7652,7 +7989,7 @@ describe('ChatSessionStore', () => {
   });
 
   describe('handleStreamChunk Error — not-logged-in mapping', () => {
-    it('replaces Claude Code\'s "not logged in" error with a Settings-pointing message', () => {
+    it('replaces Claude Code\'s "not logged in" error with a provider-settings message', () => {
       store.isStreaming = true;
 
       store.handleStreamChunk({
@@ -7665,8 +8002,194 @@ describe('ChatSessionStore', () => {
       );
       expect(errBlock).toBeDefined();
       if (errBlock?.type === 'error') {
-        expect(errBlock.content).toContain('Settings');
+        expect(errBlock.content).toContain('provider settings');
       }
+    });
+  });
+
+  describe('handleStreamChunk Error — authentication failure', () => {
+    const AUTH_ERROR: StreamChunk = {
+      chunk_type: 'Error',
+      data: {
+        content: 'Failed to authenticate: OAuth session expired and could not be refreshed',
+        turn_ended: true,
+        kind: 'authentication_failed',
+      },
+    };
+    const AUTH_REQUIRED_STATUS = {
+      status: 'auth_required',
+      api_key_configured: false,
+      oauth_authenticated: false,
+      needs_anthropic_auth: true,
+      provider_configured: true,
+    };
+    const READY_STATUS = {
+      status: 'ready',
+      api_key_configured: false,
+      oauth_authenticated: true,
+      needs_anthropic_auth: true,
+      provider_configured: true,
+    };
+    let projectState: ProjectStateService;
+    let invoked: string[];
+
+    function answerWith(authStatus: object, providerKind = 'anthropic_oauth'): void {
+      invoked = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        invoked.push(cmd);
+        if (cmd === 'get_auth_status') return authStatus;
+        if (cmd === 'get_llm_config') {
+          return {
+            provider: 'anthropic',
+            model: null,
+            base_url: null,
+            default_base_url: null,
+            providers: [{ id: 'p1', kind: providerKind }],
+            active: { provider_id: 'p1' },
+          };
+        }
+        return undefined;
+      };
+    }
+
+    function lastErrorBlock(): { content: string; kind?: string } | undefined {
+      const block = store.messages[store.messages.length - 1]?.blocks.find(
+        (b) => b.type === 'error'
+      );
+      return block?.type === 'error' ? block : undefined;
+    }
+
+    beforeEach(() => {
+      projectState = TestBed.inject(ProjectStateService);
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      store.isStreaming = true;
+    });
+
+    it('re-checks the login and turns a confirmed expiry into an auth_required block', async () => {
+      answerWith(AUTH_REQUIRED_STATUS);
+      await store.refreshLlmConfigCache();
+
+      store.handleStreamChunk(AUTH_ERROR);
+      await vi.waitFor(() => expect(lastErrorBlock()?.kind).toBe('auth_required'));
+
+      expect(invoked).toContain('get_auth_status');
+      expect(projectState.status()).toBe('auth_required');
+      expect(lastErrorBlock()?.content).toBe(
+        'Your claude.ai session expired. Sign in again in Settings.'
+      );
+      expect(store.authFailed()).toBe(true);
+      expect(store.isStreaming).toBe(false);
+    });
+
+    it('shows the auth_required kind in the rendered state tree', async () => {
+      answerWith(AUTH_REQUIRED_STATUS);
+      await store.refreshLlmConfigCache();
+
+      store.handleStreamChunk(AUTH_ERROR);
+      await vi.waitFor(() => expect(store.authFailed()).toBe(true));
+      await vi.waitFor(() => expect(invoked).toContain('close_chat_tab'));
+
+      const rendered = store.messagesFromState();
+      const block = rendered[rendered.length - 1]?.blocks.find((b) => b.type === 'error');
+      expect(block).toMatchObject({ kind: 'auth_required' });
+    });
+
+    it('words the message for a provider other than claude.ai', async () => {
+      answerWith(AUTH_REQUIRED_STATUS, 'anthropic_api_key');
+      await store.refreshLlmConfigCache();
+
+      store.handleStreamChunk(AUTH_ERROR);
+      await vi.waitFor(() => expect(lastErrorBlock()?.kind).toBe('auth_required'));
+
+      expect(lastErrorBlock()?.content).toBe(
+        'The provider rejected the credentials. Check the API key or provider settings.'
+      );
+    });
+
+    it('stops the Claude Code session of the tab', async () => {
+      answerWith(AUTH_REQUIRED_STATUS);
+
+      store.handleStreamChunk(AUTH_ERROR);
+      await vi.waitFor(() => expect(invoked).toContain('close_chat_tab'));
+    });
+
+    it('keeps the chat on screen while the check runs and after it confirms the expiry', async () => {
+      answerWith(AUTH_REQUIRED_STATUS);
+      const observed: boolean[] = [];
+      projectState.onChange(() => {
+        if (projectState.status() === 'auth_required') observed.push(store.authFailed());
+      });
+
+      store.handleStreamChunk(AUTH_ERROR);
+      await vi.waitFor(() => expect(invoked).toContain('close_chat_tab'));
+
+      expect(observed).toEqual([true]);
+      expect(store.authFailed()).toBe(true);
+    });
+
+    it('lets the input back once the project is signed in again', async () => {
+      answerWith(AUTH_REQUIRED_STATUS);
+      store.handleStreamChunk(AUTH_ERROR);
+      await vi.waitFor(() => expect(store.authFailed()).toBe(true));
+      await vi.waitFor(() => expect(invoked).toContain('close_chat_tab'));
+
+      store.releaseAuthFailure();
+
+      expect(store.authFailed()).toBe(false);
+    });
+
+    it('resumes the known session once the sign-in is back', async () => {
+      answerWith(AUTH_REQUIRED_STATUS);
+      store.seedSessionId('sess-1');
+      store.handleStreamChunk(AUTH_ERROR);
+      await vi.waitFor(() => expect(invoked).toContain('close_chat_tab'));
+      invoked.length = 0;
+
+      store.releaseAuthFailure();
+
+      await vi.waitFor(() => expect(invoked).toContain('resume_conversation'));
+    });
+
+    it('does not resume when no session is known', async () => {
+      answerWith(AUTH_REQUIRED_STATUS);
+      store.handleStreamChunk(AUTH_ERROR);
+      await vi.waitFor(() => expect(invoked).toContain('close_chat_tab'));
+      invoked.length = 0;
+
+      store.releaseAuthFailure();
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(invoked).not.toContain('resume_conversation');
+    });
+
+    it('treats the error as a plain one when the login is still valid', async () => {
+      answerWith(READY_STATUS);
+
+      store.handleStreamChunk(AUTH_ERROR);
+      await vi.waitFor(() => expect(invoked).toContain('get_auth_status'));
+      await vi.waitFor(() => expect(store.authFailed()).toBe(false));
+
+      expect(projectState.status()).toBe('ready');
+      expect(lastErrorBlock()).toStrictEqual({
+        type: 'error',
+        content: 'Failed to authenticate: OAuth session expired and could not be refreshed',
+      });
+      expect(invoked).not.toContain('close_chat_tab');
+    });
+
+    it('does not re-check the login for an error without a kind', async () => {
+      answerWith(AUTH_REQUIRED_STATUS);
+
+      store.handleStreamChunk({
+        chunk_type: 'Error',
+        data: { content: 'API Error: 500', turn_ended: true },
+      });
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(invoked).not.toContain('get_auth_status');
+      expect(store.authFailed()).toBe(false);
+      expect(lastErrorBlock()).toStrictEqual({ type: 'error', content: 'API Error: 500' });
     });
   });
 
@@ -7949,8 +8472,8 @@ describe('ChatSessionStore', () => {
     });
   });
 
-  describe('toChatMessages history tool-block normalization', () => {
-    function transcriptWith(blocks: unknown[]): ConversationTranscript {
+  describe('toChatMessages history tool blocks', () => {
+    function transcriptWith(blocks: HistoryMessageBlock[]): ConversationTranscript {
       return {
         session_id: '00000000-0000-0000-0000-000000000000',
         messages: [
@@ -7958,22 +8481,74 @@ describe('ChatSessionStore', () => {
             role: 'assistant',
             content: '',
             timestamp: '2025-01-01T00:00:00Z',
-            blocks: blocks as ConversationTranscript['messages'][number]['blocks'],
+            blocks,
           },
         ],
       };
     }
 
-    it('nests a flat history tool_use into the live-chat shape (done, empty result)', () => {
+    function toolUse(overrides: Partial<HistoryToolUse>): HistoryToolUse {
+      return {
+        type: 'tool_use',
+        tool_id: 'toolu_1',
+        tool_name: 'Bash',
+        input: '{"command":"ls"}',
+        result: null,
+        is_error: false,
+        ...overrides,
+      };
+    }
+
+    it('shows the result of an answered call with its id and input', () => {
       const [msg] = toChatMessages(
-        transcriptWith([{ type: 'tool_use', tool_name: 'Bash', input_json: '{"command":"ls"}' }])
+        transcriptWith([
+          toolUse({ tool_id: 'toolu_read', tool_name: 'Read', result: 'file contents' }),
+        ])
       );
       expect(msg.blocks).toEqual([
         {
           type: 'tool_use',
           tool: {
             type: 'tool_use',
-            tool_id: '',
+            tool_id: 'toolu_read',
+            tool_name: 'Read',
+            input_json: '{"command":"ls"}',
+            status: 'done',
+            result: 'file contents',
+            result_is_error: false,
+          },
+        },
+      ]);
+    });
+
+    it('marks a call whose result is an error as errored', () => {
+      const [msg] = toChatMessages(
+        transcriptWith([toolUse({ result: 'command not found', is_error: true })])
+      );
+      expect(msg.blocks).toEqual([
+        {
+          type: 'tool_use',
+          tool: {
+            type: 'tool_use',
+            tool_id: 'toolu_1',
+            tool_name: 'Bash',
+            input_json: '{"command":"ls"}',
+            status: 'error',
+            result: 'command not found',
+            result_is_error: true,
+          },
+        },
+      ]);
+    });
+
+    it('finishes a call without a result as done with an empty result', () => {
+      const [msg] = toChatMessages(transcriptWith([toolUse({ result: null })]));
+      expect(msg.blocks).toEqual([
+        {
+          type: 'tool_use',
+          tool: {
+            type: 'tool_use',
+            tool_id: 'toolu_1',
             tool_name: 'Bash',
             input_json: '{"command":"ls"}',
             status: 'done',
@@ -7984,85 +8559,48 @@ describe('ChatSessionStore', () => {
       ]);
     });
 
-    it('merges a tool_result into the preceding tool_use', () => {
+    it('keeps the call id and the result a task plan reads from a resumed TaskCreate', () => {
       const [msg] = toChatMessages(
         transcriptWith([
-          { type: 'tool_use', tool_name: 'Read', input_json: '{"file_path":"/a.ts"}' },
-          { type: 'tool_result', content: 'file contents', is_error: false },
+          toolUse({
+            tool_id: 'toolu_task',
+            tool_name: 'TaskCreate',
+            input: '{"subject":"Write the fix"}',
+            result: 'Task #7 created successfully: Write the fix',
+          }),
         ])
       );
-      expect(msg.blocks).toHaveLength(1);
-      const block = msg.blocks[0];
-      expect(block.type).toBe('tool_use');
-      if (block.type === 'tool_use') {
-        expect(block.tool.status).toBe('done');
-        if (block.tool.status === 'done') {
-          expect(block.tool.result).toBe('file contents');
-          expect(block.tool.result_is_error).toBe(false);
-        }
-      }
+      expect(msg.blocks).toEqual([
+        {
+          type: 'tool_use',
+          tool: {
+            type: 'tool_use',
+            tool_id: 'toolu_task',
+            tool_name: 'TaskCreate',
+            input_json: '{"subject":"Write the fix"}',
+            status: 'done',
+            result: 'Task #7 created successfully: Write the fix',
+            result_is_error: false,
+          },
+        },
+      ]);
     });
 
-    it('marks the merged tool errored when tool_result.is_error is true', () => {
-      const [msg] = toChatMessages(
-        transcriptWith([
-          { type: 'tool_use', tool_name: 'Bash', input_json: '{"command":"boom"}' },
-          { type: 'tool_result', content: 'command not found', is_error: true },
-        ])
-      );
-      const block = msg.blocks[0];
-      expect(block.type).toBe('tool_use');
-      if (block.type === 'tool_use') {
-        expect(block.tool.status).toBe('error');
-        if (block.tool.status === 'error') {
-          expect(block.tool.result).toBe('command not found');
-          expect(block.tool.result_is_error).toBe(true);
-        }
-      }
-    });
-
-    it('drops an orphan tool_result with no preceding tool_use', () => {
-      const [msg] = toChatMessages(
-        transcriptWith([
-          { type: 'tool_result', content: 'orphan', is_error: false },
-          { type: 'text', content: 'after' },
-        ])
-      );
-      expect(msg.blocks).toEqual([{ type: 'text', content: 'after' }]);
-    });
-
-    it('does not merge a tool_result into a non-tool block', () => {
+    it('maps the other history blocks into the live-chat view-model', () => {
       const [msg] = toChatMessages(
         transcriptWith([
           { type: 'text', content: 'prose' },
-          { type: 'tool_result', content: 'dangling', is_error: false },
+          { type: 'thinking', content: 'hmm' },
+          { type: 'error', content: 'boom' },
+          { type: 'control_chip', command: 'model', argument: 'claude-sonnet-5' },
         ])
       );
-      expect(msg.blocks).toEqual([{ type: 'text', content: 'prose' }]);
-    });
-
-    it('passes an already-nested tool_use through unchanged', () => {
-      const nested = {
-        type: 'tool_use',
-        tool: {
-          type: 'tool_use',
-          tool_id: 't-live',
-          tool_name: 'Glob',
-          input_json: '{"pattern":"*.ts"}',
-          status: 'done',
-          result: 'a.ts',
-          result_is_error: false,
-        },
-      };
-      const [msg] = toChatMessages(transcriptWith([nested]));
-      expect(msg.blocks).toEqual([nested]);
-    });
-
-    it('normalizes a history control_chip block into the live-path chip view-model', () => {
-      const [msg] = toChatMessages(
-        transcriptWith([{ type: 'control_chip', command: 'model', argument: 'claude-sonnet-5' }])
-      );
-      expect(msg.blocks).toEqual([{ type: 'chip', command: 'model', argument: 'claude-sonnet-5' }]);
+      expect(msg.blocks).toEqual([
+        { type: 'text', content: 'prose' },
+        { type: 'thinking', content: 'hmm', collapsed: true },
+        { type: 'error', content: 'boom' },
+        { type: 'chip', command: 'model', argument: 'claude-sonnet-5' },
+      ]);
     });
   });
 

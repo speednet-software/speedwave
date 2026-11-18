@@ -83,6 +83,7 @@ export interface JiraIssue {
   links: JiraIssueLink[];
   assignee: JiraUser | null;
   reporter: JiraUser | null;
+  attachments?: JiraIssueAttachment[];
   created: string;
   updated: string;
 }
@@ -186,6 +187,18 @@ export interface JiraAttachment {
   created?: string;
   url?: string;
   author?: JiraUser | null;
+}
+
+/** An attachment as listed on an issue. */
+export type JiraIssueAttachment = Omit<JiraAttachment, 'url'>;
+
+/** Result of saving an issue attachment into the workspace. */
+export interface JiraDownloadedAttachment {
+  id: string;
+  filename: string;
+  mime_type?: string;
+  size: number;
+  path: string;
 }
 
 /** Jira Agile board, normalised. */

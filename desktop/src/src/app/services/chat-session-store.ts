@@ -34,6 +34,7 @@ import {
   contextTokensFrom,
   watchdogErrorKind,
   type ChatInput,
+  type ErrorBlockKind,
   type ChatMessage,
   type MessageBlock,
   type SessionStats,
@@ -48,6 +49,7 @@ import {
   type QueuedMessage,
   type WireContentBlock,
   type ConversationTranscript,
+  type HistoryMessageBlock,
   type StagedTranscript,
 } from '../models/chat';
 
@@ -169,15 +171,25 @@ export function mapContextOverflowError(raw: string): string | null {
   return null;
 }
 
+const SESSION_EXPIRED_MESSAGE = 'Your claude.ai session expired. Sign in again in Settings.';
+
+const CREDENTIALS_REJECTED_MESSAGE =
+  'The provider rejected the credentials. Check the API key or provider settings.';
+
 /**
  * Claude Code's own message points at `/login`, which doesn't apply here.
  * @param raw - Raw error message from the backend.
+ * @param provider - Kind of the active provider.
  */
-export function mapNotLoggedInError(raw: string): string | null {
+export function mapNotLoggedInError(raw: string, provider: LlmProviderKind | null): string | null {
   if (/not logged in/i.test(raw) || /not authenticated/i.test(raw)) {
-    return 'Not logged in. Go to Settings and choose an LLM provider.';
+    return rejectedCredentialsMessage(provider);
   }
   return null;
+}
+
+function rejectedCredentialsMessage(provider: LlmProviderKind | null): string {
+  return provider === 'anthropic_oauth' ? SESSION_EXPIRED_MESSAGE : CREDENTIALS_REJECTED_MESSAGE;
 }
 
 /**
@@ -256,9 +268,12 @@ export class ChatSessionStore {
 
   private _pendingQueue: QueuedMessage | null = null;
   private _queueAwaitingSession = false;
+  private _startSlot: QueuedMessage | null = null;
+  private readonly _returnedStartSlot = signal<string | null>(null);
+  readonly returnedStartSlot: Signal<string | null> = this._returnedStartSlot.asReadonly();
   /** Public read-only accessor for the queued slot. */
   get pendingQueue(): QueuedMessage | null {
-    return this._pendingQueue;
+    return this._pendingQueue ?? this._startSlot;
   }
 
   private readonly _pendingModelPick = signal<ModelPick | null>(null);
@@ -282,11 +297,15 @@ export class ChatSessionStore {
   readonly deferredEffort: Signal<string | null> = this._deferredEffort.asReadonly();
 
   private releasePendingPicks(): void {
-    if (this.isStreaming) return;
+    void this.takePendingPicks();
+  }
+
+  private takePendingPicks(): Promise<void> {
+    if (this.isStreaming) return Promise.resolve();
     const model = this._pendingModelPick();
     const effort = this._pendingEffort;
     this.clearPendingPicks();
-    void this.takeReleasedPicks(model, effort);
+    return this.takeReleasedPicks(model, effort);
   }
 
   private clearPendingPicks(): void {
@@ -907,6 +926,17 @@ export class ChatSessionStore {
     this.find.update((s) => ({ ...s, open: false }));
   }
 
+  private readonly _authFailure = signal<'checking' | 'confirmed' | null>(null);
+  readonly authFailed: Signal<boolean> = computed(() => this._authFailure() !== null);
+
+  /** Re-enables input once the project is signed in again. */
+  releaseAuthFailure(): void {
+    if (this._authFailure() !== 'confirmed') return;
+    this._authFailure.set(null);
+    const id = this._lastKnownSessionId;
+    if (id !== null) void this.resumeConversation(id);
+  }
+
   private readonly _sessionEnded = signal(false);
   /** Set for a background tab whose backend session ended without this store driving it (phase 3 surfaces this). */
   readonly sessionEnded: Signal<boolean> = this._sessionEnded.asReadonly();
@@ -1137,7 +1167,7 @@ export class ChatSessionStore {
         messages: this._messages,
         currentBlocks: this._currentBlocks,
         isStreaming: this.isStreaming,
-        pendingQueue: this._pendingQueue,
+        pendingQueue: this.pendingQueue,
         sessionStats: this._sessionStats(),
         model: this._model,
       })
@@ -1225,9 +1255,10 @@ export class ChatSessionStore {
           this.startingSession = false;
         }
       }
-      if (outcome === 'started') this.releasePendingPicks();
-      else if (outcome !== 'skipped' && !(keepPicksForKeptSession && sessionKept)) {
-        this.dropPendingPicks();
+      if (outcome === 'started') this.releaseForReadySession();
+      else if (outcome !== 'skipped') {
+        if (!(keepPicksForKeptSession && sessionKept)) this.dropPendingPicks();
+        this.returnStartSlot();
       }
       return { outcome, sessionKept };
     }
@@ -1387,6 +1418,7 @@ export class ChatSessionStore {
               return;
             }
             if (!sameConversation()) return;
+            this.takeStartSlot();
             await this.deps.tauri.invoke('send_message', invokeArgs);
             return;
           }
@@ -1639,8 +1671,8 @@ export class ChatSessionStore {
         if (finished && parseError !== null) {
           this.deps.log.warn(
             `Failed to parse tool input for "${finished.tool_name}" (${finished.tool_id}, ` +
-              `${finished.input_json.length} chars): ${previewForLog(finished.input_json)} ` +
-              `(${parseError})`
+              `${finished.input_json.length} chars, ${parseError}, ` +
+              `ends with closing bracket: ${/[}\]]$/.test(finished.input_json.trimEnd())})`
           );
         }
         break;
@@ -1765,7 +1797,7 @@ export class ChatSessionStore {
       case 'Error': {
         const errContent =
           mapContextOverflowError(chunk.data.content) ??
-          mapNotLoggedInError(chunk.data.content) ??
+          mapNotLoggedInError(chunk.data.content, this._activeKind) ??
           chunk.data.content;
         const watchdogKind = watchdogErrorKind(errContent);
         this._currentBlocks = [
@@ -1776,14 +1808,19 @@ export class ChatSessionStore {
             ...(watchdogKind !== undefined ? { kind: watchdogKind } : {}),
           },
         ];
-        this._messages = [
-          ...this._messages,
-          { role: 'assistant', blocks: [...this._currentBlocks], timestamp: Date.now() },
-        ];
+        const errorMessage: ChatMessage = {
+          role: 'assistant',
+          blocks: [...this._currentBlocks],
+          timestamp: Date.now(),
+        };
+        this._messages = [...this._messages, errorMessage];
         this._currentBlocks = [];
         this.isStreaming = false;
         if (chunk.data.turn_ended) this.releasePendingPicks();
         void this.refreshControlData();
+        if (chunk.data.kind === 'authentication_failed') {
+          void this.handleAuthenticationFailure(errorMessage);
+        }
         break;
       }
 
@@ -1810,6 +1847,37 @@ export class ChatSessionStore {
         return;
     }
     this.notifyChange();
+  }
+
+  private async handleAuthenticationFailure(failed: ChatMessage): Promise<void> {
+    this._authFailure.set('checking');
+    await this.deps.projectState.retryAuth();
+    if (this.deps.projectState.status() !== 'auth_required') {
+      this._authFailure.set(null);
+      return;
+    }
+    if (this._activeKind === null) await this.refreshLlmConfigCache();
+    this._authFailure.set('confirmed');
+    const authBlock: MessageBlock = {
+      type: 'error',
+      content: rejectedCredentialsMessage(this._activeKind),
+      kind: 'auth_required',
+    };
+    this._messages = this._messages.map((m) =>
+      m === failed ? { ...m, blocks: [...m.blocks.slice(0, -1), authBlock] } : m
+    );
+    this.notifyChange();
+    await this.stopBackendSession();
+  }
+
+  private async stopBackendSession(): Promise<void> {
+    try {
+      await this.deps.tauri.invoke('close_chat_tab', { tabId: this.tabId });
+    } catch (err) {
+      this.deps.log.warn(
+        `[chat-state] stopping the session after auth failure failed: ${String(err)}`
+      );
+    }
   }
 
   private forgetContextWindow(): void {
@@ -1922,6 +1990,14 @@ export class ChatSessionStore {
    */
   async queueMessage(text: string): Promise<string | null> {
     if (!text) return null;
+    if (this.sessionStartInFlightFromState() && !this.isStreaming) {
+      const displaced = this.pendingQueue?.text ?? null;
+      this._startSlot = { text, queued_at: Date.now() };
+      this._returnedStartSlot.set(null);
+      this.requestAutoScroll();
+      this.notifyChange();
+      return displaced;
+    }
     const prior = this._pendingQueue?.text ?? null;
     this._pendingQueue = { text, queued_at: Date.now() };
     this.requestAutoScroll();
@@ -1957,6 +2033,10 @@ export class ChatSessionStore {
 
   /** Cancel the queued message for the active session; no-op when empty. */
   async cancelQueuedMessage(): Promise<void> {
+    if (!this._pendingQueue && this._startSlot) {
+      this.clearStartSlot();
+      return;
+    }
     this._queueAwaitingSession = false;
     const sessionId = this._sessionStats()?.session_id;
     if (!sessionId) {
@@ -1971,6 +2051,11 @@ export class ChatSessionStore {
     }
     this._pendingQueue = null;
     this.notifyChange();
+  }
+
+  /** Drops the start slot. */
+  settleReturnedStartSlot(): void {
+    this.clearStartSlot();
   }
 
   /**
@@ -2130,6 +2215,7 @@ export class ChatSessionStore {
     }
     if (!settled) {
       this._resumeInProgress = false;
+      this.returnStartSlot();
       return;
     }
     const prior = this.captureConversationView();
@@ -2144,7 +2230,10 @@ export class ChatSessionStore {
     let outcome: StartOutcome = 'started';
     let sessionKept = false;
     try {
-      if (!project) return;
+      if (!project) {
+        this.returnStartSlot();
+        return;
+      }
 
       if (this._modelWork.size > 0) await this.modelPicksSettled();
       await this.deps.tauri.invoke('resume_conversation', {
@@ -2222,8 +2311,37 @@ export class ChatSessionStore {
       }
     }
     if (gen !== this._sessionGeneration || this._disposed || !sameProject()) return;
-    if (outcome === 'started') this.releasePendingPicks();
-    else if (!sessionKept) this.dropPendingPicks();
+    if (outcome === 'started') {
+      this.releaseForReadySession();
+      return;
+    }
+    if (!sessionKept) this.dropPendingPicks();
+    this.returnStartSlot();
+  }
+
+  private releaseForReadySession(): void {
+    const generation = this._sessionGeneration;
+    void this.takePendingPicks().finally(() => {
+      if (generation === this._sessionGeneration) this.takeStartSlot();
+    });
+  }
+
+  private takeStartSlot(): void {
+    const slot = this._startSlot;
+    if (!slot || this._returnedStartSlot() !== null || this.sessionStartInFlightFromState()) return;
+    this.clearStartSlot();
+    if (this.isStreaming) void this.queueMessage(slot.text);
+    else void this.sendMessage(slot.text);
+  }
+
+  private returnStartSlot(): void {
+    if (this._startSlot) this._returnedStartSlot.set(this._startSlot.text);
+  }
+
+  private clearStartSlot(): void {
+    this._startSlot = null;
+    this._returnedStartSlot.set(null);
+    this.notifyChange();
   }
 
   private static readonly DEFERRED_RECONCILE_BACKOFF_MS = [
@@ -2427,20 +2545,12 @@ function jsonParseError(input: string): string | null {
     JSON.parse(input);
     return null;
   } catch (err) {
-    return String(err);
+    return err instanceof Error ? err.name : 'UnknownError';
   }
 }
 
 function isNoArgumentTool(streamed: string, complete: string): boolean {
   return streamed === '' && complete === '{}';
-}
-
-const TOOL_INPUT_LOG_PREVIEW_CHARS = 200;
-
-function previewForLog(input: string): string {
-  const points = Array.from(input);
-  if (points.length <= TOOL_INPUT_LOG_PREVIEW_CHARS) return input;
-  return `${points.slice(0, TOOL_INPUT_LOG_PREVIEW_CHARS).join('')}…`;
 }
 
 function findRetryAnchorIn(
@@ -2502,17 +2612,23 @@ function completeToolBlock(
   blocks: MessageBlock[],
   data: { tool_id: string; content: string; is_error: boolean }
 ): MessageBlock[] {
-  return updateToolBlock(blocks, data.tool_id, (t) => {
-    const base = {
-      type: 'tool_use' as const,
-      tool_id: t.tool_id,
-      tool_name: t.tool_name,
-      input_json: t.input_json,
-    };
-    return data.is_error
-      ? { ...base, status: 'error', result: data.content, result_is_error: true }
-      : { ...base, status: 'done', result: data.content, result_is_error: false };
-  });
+  return updateToolBlock(blocks, data.tool_id, (t) => finishedTool(t, data.content, data.is_error));
+}
+
+function finishedTool(
+  tool: Pick<ToolUseBlock, 'tool_id' | 'tool_name' | 'input_json'>,
+  result: string,
+  isError: boolean
+): ToolUseBlock {
+  const base = {
+    type: 'tool_use' as const,
+    tool_id: tool.tool_id,
+    tool_name: tool.tool_name,
+    input_json: tool.input_json,
+  };
+  return isError
+    ? { ...base, status: 'error', result, result_is_error: true }
+    : { ...base, status: 'done', result, result_is_error: false };
 }
 
 function findLastUserIndexMissingUuid(msgs: readonly ChatMessage[]): number {
@@ -2662,9 +2778,7 @@ export function stateBlocksToMessageBlocks(blocks: readonly MessageBlockState[])
         const tool: ToolUseBlock =
           b.result === null
             ? { ...baseTool, status: 'running' }
-            : b.is_error
-              ? { ...baseTool, status: 'error', result: b.result, result_is_error: true }
-              : { ...baseTool, status: 'done', result: b.result, result_is_error: false };
+            : finishedTool(baseTool, b.result, b.is_error);
         out.push({ type: 'tool_use', tool });
         break;
       }
@@ -2680,11 +2794,11 @@ export function stateBlocksToMessageBlocks(blocks: readonly MessageBlockState[])
         });
         break;
       case 'error': {
-        const watchdogKind = watchdogErrorKind(b.content);
+        const errorKind = watchdogErrorKind(b.content) ?? authErrorBlockKind(b.content);
         out.push({
           type: 'error',
           content: b.content,
-          ...(watchdogKind !== undefined ? { kind: watchdogKind } : {}),
+          ...(errorKind !== undefined ? { kind: errorKind } : {}),
         });
         break;
       }
@@ -2708,6 +2822,12 @@ export function stateBlocksToMessageBlocks(blocks: readonly MessageBlockState[])
     }
   }
   return out;
+}
+
+function authErrorBlockKind(content: string): ErrorBlockKind | undefined {
+  return content === SESSION_EXPIRED_MESSAGE || content === CREDENTIALS_REJECTED_MESSAGE
+    ? 'auth_required'
+    : undefined;
 }
 
 function cloneQuestionItem(q: AskUserQuestionItem): AskUserQuestionItem {
@@ -2800,24 +2920,6 @@ export function historyFitsTarget(
   return historyTokens < windowTokens;
 }
 
-interface HistoryToolUseBlock {
-  type: 'tool_use';
-  tool_name: string;
-  input_json: string;
-}
-
-interface HistoryToolResultBlock {
-  type: 'tool_result';
-  content: string;
-  is_error: boolean;
-}
-
-interface HistoryControlChipBlock {
-  type: 'control_chip';
-  command: string;
-  argument: string;
-}
-
 /**
  * Maps a backend `ConversationTranscript` into the live-chat `ChatMessage[]` shape.
  * @param transcript - Backend conversation transcript to convert.
@@ -2825,13 +2927,10 @@ interface HistoryControlChipBlock {
 export function toChatMessages(transcript: ConversationTranscript): ChatMessage[] {
   return transcript.messages.map((msg) => {
     const role: 'user' | 'assistant' = msg.role === 'user' ? 'user' : 'assistant';
-    const rawBlocks =
+    const blocks: MessageBlock[] =
       msg.blocks && msg.blocks.length > 0
-        ? (msg.blocks as unknown as (
-            MessageBlock | HistoryToolUseBlock | HistoryToolResultBlock | HistoryControlChipBlock
-          )[])
-        : ([{ type: 'text' as const, content: msg.content }] as MessageBlock[]);
-    const blocks = normalizeHistoryBlocks(rawBlocks);
+        ? msg.blocks.map(historyBlockToMessageBlock)
+        : [{ type: 'text', content: msg.content }];
     const timestamp = msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now();
     const base: ChatMessage = { role, blocks, timestamp };
     if (msg.uuid) {
@@ -2847,42 +2946,28 @@ export function toChatMessages(transcript: ConversationTranscript): ChatMessage[
   });
 }
 
-function normalizeHistoryBlocks(
-  blocks: (MessageBlock | HistoryToolUseBlock | HistoryToolResultBlock | HistoryControlChipBlock)[]
-): MessageBlock[] {
-  const result: MessageBlock[] = [];
-
-  for (const block of blocks) {
-    if (block.type === 'tool_use' && !('tool' in block)) {
-      const hist = block as HistoryToolUseBlock;
-      result.push({
+function historyBlockToMessageBlock(block: HistoryMessageBlock): MessageBlock {
+  switch (block.type) {
+    case 'text':
+      return { type: 'text', content: block.content };
+    case 'thinking':
+      return { type: 'thinking', content: block.content, collapsed: true };
+    case 'error':
+      return { type: 'error', content: block.content };
+    case 'control_chip':
+      return { type: 'chip', command: block.command, argument: block.argument };
+    case 'tool_use':
+      return {
         type: 'tool_use',
-        tool: {
-          type: 'tool_use',
-          tool_id: '',
-          tool_name: hist.tool_name,
-          input_json: hist.input_json,
-          status: 'done',
-          result: '',
-          result_is_error: false,
-        },
-      });
-    } else if (block.type === 'tool_result') {
-      const hist = block as HistoryToolResultBlock;
-      const prev = result[result.length - 1];
-      if (prev?.type === 'tool_use') {
-        const base = { ...prev.tool, result: hist.content };
-        prev.tool = hist.is_error
-          ? { ...base, status: 'error' as const, result_is_error: true as const }
-          : { ...base, status: 'done' as const, result_is_error: false as const };
-      }
-    } else if (block.type === 'control_chip') {
-      const hist = block as HistoryControlChipBlock;
-      result.push({ type: 'chip', command: hist.command, argument: hist.argument });
-    } else {
-      result.push(block as MessageBlock);
-    }
+        tool: finishedTool(
+          {
+            tool_id: block.tool_id,
+            tool_name: block.tool_name,
+            input_json: block.input,
+          },
+          block.result ?? '',
+          block.is_error
+        ),
+      };
   }
-
-  return result;
 }

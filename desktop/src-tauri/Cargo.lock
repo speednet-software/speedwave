@@ -7955,6 +7955,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "speedwave-access-policy"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "speedwave-desktop"
 version = "0.0.0"
 dependencies = [
@@ -7985,6 +7993,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "serial_test",
+ "speedwave-access-policy",
  "speedwave-pii-engine",
  "speedwave-pii-ner",
  "speedwave-runtime",
@@ -8064,6 +8073,7 @@ dependencies = [
  "serde_yaml_ng",
  "sha2 0.11.0",
  "shlex 2.0.1",
+ "speedwave-access-policy",
  "speedwave-pii-engine",
  "speedwave-version",
  "strum",

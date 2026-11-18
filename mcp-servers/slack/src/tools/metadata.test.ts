@@ -7,7 +7,12 @@ import { createChannelTools } from './channel-tools.js';
 import { createDmTools } from './dm-tools.js';
 import { createFileTools } from './file-tools.js';
 import { createUserTools } from './user-tools.js';
-import { ToolDefinition, RefreshLock, META_KEYS } from '@speedwave/mcp-shared';
+import {
+  ToolDefinition,
+  RefreshLock,
+  META_KEYS,
+  WORKSPACE_WRITE_ANNOTATIONS,
+} from '@speedwave/mcp-shared';
 import type { SlackClients } from '../client.js';
 
 /** Helper: clients object representing "tokens missing" — replaces null. */
@@ -120,4 +125,45 @@ describe('identity metadata', () => {
       expect(meta[META_KEYS.CURRENT_USER_TOOL]).toBe('getCurrentUser');
     });
   }
+});
+
+const READ_ONLY_TOOL_NAMES = [
+  'getChannelMessages',
+  'getThreadMessages',
+  'listChannelIds',
+  'listDirectMessages',
+  'getFileContent',
+  'getUsers',
+  'findUsers',
+  'getCurrentUser',
+];
+
+const WORKSPACE_WRITE_TOOL_NAMES = ['downloadFile'];
+
+const CHANGING_TOOL_NAMES = ['sendChannel', 'openDirectMessage', 'uploadFile'];
+
+describe('Slack read-only access annotations', () => {
+  const tools = allTools.map((td) => td.tool);
+  const names = (predicate: (hint: unknown) => boolean) =>
+    tools.filter((t) => predicate(t.annotations?.readOnlyHint)).map((t) => t.name);
+
+  it('lists every tool as reading, writing only into the workspace, or changing', () => {
+    expect([...tools.map((t) => t.name)].sort()).toEqual(
+      [...READ_ONLY_TOOL_NAMES, ...WORKSPACE_WRITE_TOOL_NAMES, ...CHANGING_TOOL_NAMES].sort()
+    );
+  });
+
+  it('marks exactly the reading and workspace-writing tools readOnlyHint true', () => {
+    expect(names((hint) => hint === true).sort()).toEqual(
+      [...READ_ONLY_TOOL_NAMES, ...WORKSPACE_WRITE_TOOL_NAMES].sort()
+    );
+  });
+
+  it.each(WORKSPACE_WRITE_TOOL_NAMES)('marks %s with the workspace-write annotations', (name) => {
+    expect(tools.find((t) => t.name === name)?.annotations).toBe(WORKSPACE_WRITE_ANNOTATIONS);
+  });
+
+  it.each(CHANGING_TOOL_NAMES)('does not mark %s as read-only', (name) => {
+    expect(tools.find((t) => t.name === name)?.annotations?.readOnlyHint).not.toBe(true);
+  });
 });

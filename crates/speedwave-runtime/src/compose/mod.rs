@@ -302,6 +302,7 @@ pub fn render_compose_in(
         project_name,
         integrations,
         &resolved_config.git_repositories,
+        &resolved_config.access,
     );
     proxy::write_proxy_config_in(
         data_dir,
@@ -339,6 +340,7 @@ pub fn render_compose_in(
         .map_err(|e| anyhow::anyhow!("PII policy configuration is invalid: {e}"))?;
     crate::pii_key::ensure_project_key_in(data_dir, project_name)?;
     crate::pii_policy::write_policy_config_in(data_dir, project_name, pii_policy)?;
+    crate::access_policy::write_access_config_in(data_dir, project_name, &resolved_config.access)?;
     let policy_config_dir = crate::pii_policy::policy_config_dir_in(data_dir, project_name);
     yaml = yaml.replace("${POLICY_CONFIG_DIR}", &to_engine_path(&policy_config_dir)?);
     yaml = yaml.replace(
@@ -1196,7 +1198,7 @@ mod tests {
     use super::*;
     use strum::IntoEnumIterator;
 
-    const SECURITY_RULE_COUNT: usize = 54;
+    const SECURITY_RULE_COUNT: usize = 61;
 
     fn test_bundle_manifest() -> bundle::BundleManifest {
         bundle::BundleManifest {
@@ -3224,6 +3226,49 @@ services:
 
     #[test]
     #[serial_test::serial(host_addressing)]
+    fn git_transport_renders_the_composed_access_mode_of_each_forge_in_proxy_json() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: configured_anthropic_llm(),
+            access: speedwave_access_policy::AccessPolicy {
+                default: speedwave_access_policy::AccessMode::Full,
+                services: [(
+                    "github".to_string(),
+                    speedwave_access_policy::AccessMode::ReadOnly,
+                )]
+                .into(),
+            },
+            ..Default::default()
+        };
+        render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            tmp_project_dir(),
+            &config,
+            &ResolvedIntegrationsConfig {
+                github: true,
+                gitlab: true,
+                ..Default::default()
+            },
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+        let rendered: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(proxy::proxy_config_path_in(data_dir.path(), "test-project"))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(rendered["git_forges"][0]["host"], "github.com");
+        assert_eq!(rendered["git_forges"][0]["access"], "read_only");
+        assert_eq!(rendered["git_forges"][1]["host"], "gitlab.com");
+        assert!(rendered["git_forges"][1].get("access").is_none());
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_playwright_service_present() {
         let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
@@ -4175,6 +4220,79 @@ services:
         );
     }
 
+    const DEBUG_ENV_EXCEPTIONS: &[&str] = &[];
+
+    fn services_with_debug_env(doc: &serde_yaml_ng::Value, exceptions: &[&str]) -> Vec<String> {
+        let Some(services) = doc.get("services").and_then(|s| s.as_mapping()) else {
+            return Vec::new();
+        };
+        services
+            .iter()
+            .filter_map(|(name, service)| {
+                let name = name.as_str()?;
+                let has_debug = match service.get("environment")? {
+                    serde_yaml_ng::Value::Sequence(entries) => entries
+                        .iter()
+                        .filter_map(|entry| entry.as_str())
+                        .any(|entry| entry.split('=').next() == Some("DEBUG")),
+                    serde_yaml_ng::Value::Mapping(entries) => entries.get("DEBUG").is_some(),
+                    _ => false,
+                };
+                (has_debug && !exceptions.contains(&name)).then(|| name.to_string())
+            })
+            .collect()
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn test_rendered_compose_has_no_debug_env_outside_the_exceptions() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: configured_anthropic_llm(),
+            ..Default::default()
+        };
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            tmp_project_dir(),
+            &config,
+            &all_enabled_integrations(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        assert!(
+            doc["services"].get("mcp-playwright").is_some(),
+            "the playwright worker must be rendered, or this guard checks nothing"
+        );
+        let offenders = services_with_debug_env(&doc, DEBUG_ENV_EXCEPTIONS);
+        assert!(
+            offenders.is_empty(),
+            "DEBUG= makes a service log tool arguments and results: {offenders:?}"
+        );
+    }
+
+    #[test]
+    fn test_debug_env_guard_flags_every_environment_form() {
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(
+            "services:\n  \
+               seq:\n    environment:\n      - PORT=1\n      - DEBUG=pw:mcp:*\n  \
+               map:\n    environment:\n      DEBUG: pw:mcp:*\n  \
+               bare:\n    environment:\n      - DEBUG\n  \
+               clean:\n    environment:\n      - NODE_DEBUG=x\n      - DEBUGGER=1\n  \
+               none:\n    image: x\n",
+        )
+        .unwrap();
+        assert_eq!(
+            services_with_debug_env(&doc, &[]),
+            vec!["seq", "map", "bare"]
+        );
+        assert_eq!(services_with_debug_env(&doc, &["seq", "bare"]), vec!["map"]);
+    }
+
     #[test]
     #[serial_test::parallel(host_addressing)]
     fn test_rendered_compose_contains_policy_mount_and_envs() {
@@ -4228,6 +4346,87 @@ services:
             key_path.is_file(),
             "render_compose must ensure the per-project tokenization key next to policy.json"
         );
+    }
+
+    fn render_with_access(
+        data_dir: &Path,
+        access: speedwave_access_policy::AccessPolicy,
+    ) -> serde_yaml_ng::Value {
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: configured_anthropic_llm(),
+            access,
+            ..Default::default()
+        };
+        let yaml = render_compose_isolated(
+            data_dir,
+            "test-project",
+            tmp_project_dir(),
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+        serde_yaml_ng::from_str(&yaml).unwrap()
+    }
+
+    fn read_only_access() -> speedwave_access_policy::AccessPolicy {
+        speedwave_access_policy::AccessPolicy {
+            default: speedwave_access_policy::AccessMode::ReadOnly,
+            services: Default::default(),
+        }
+    }
+
+    #[test]
+    #[serial_test::parallel(host_addressing)]
+    fn test_rendered_access_json_carries_the_composed_access_policy() {
+        let data_dir = tempfile::tempdir().unwrap();
+        render_with_access(data_dir.path(), read_only_access());
+
+        let json = std::fs::read_to_string(crate::access_policy::access_config_path_in(
+            data_dir.path(),
+            "test-project",
+        ))
+        .unwrap();
+        assert_eq!(
+            json,
+            speedwave_access_policy::to_access_file(&read_only_access()).unwrap()
+        );
+    }
+
+    #[test]
+    #[serial_test::parallel(host_addressing)]
+    fn test_rendered_access_json_is_all_full_while_every_service_is_full() {
+        let data_dir = tempfile::tempdir().unwrap();
+        render_with_access(data_dir.path(), read_only_access());
+        render_with_access(data_dir.path(), Default::default());
+
+        let json = std::fs::read_to_string(crate::access_policy::access_config_path_in(
+            data_dir.path(),
+            "test-project",
+        ))
+        .unwrap();
+        assert_eq!(
+            json,
+            speedwave_access_policy::to_access_file(
+                &speedwave_access_policy::AccessPolicy::default()
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    #[serial_test::parallel(host_addressing)]
+    fn test_read_only_mode_changes_the_hub_policy_digest_so_the_hub_recreates() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let digest_of = |doc: &serde_yaml_ng::Value| {
+            find_env_value(&get_hub_env_seq(doc), "POLICY_DIGEST=").unwrap()
+        };
+        let full = digest_of(&render_with_access(data_dir.path(), Default::default()));
+        let read_only = digest_of(&render_with_access(data_dir.path(), read_only_access()));
+        assert_ne!(full, read_only);
     }
 
     #[test]
@@ -9626,14 +9825,14 @@ services:
     }
 
     #[test]
-    fn test_security_check_atlassian_correct_mounts_pass() {
+    fn test_security_check_redmine_correct_mounts_pass() {
         let data_dir = tempfile::tempdir().unwrap();
         let yaml = format!(
             r#"
 version: "3"
 services:
-  mcp-atlassian:
-    image: speedwave-mcp-atlassian:latest
+  mcp-redmine:
+    image: speedwave-mcp-redmine:latest
     user: "{user}"
     cap_drop:
       - ALL
@@ -9642,22 +9841,20 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/atlassian:/tokens:ro
-      - /test/project:/workspace:ro
+      - /test/.speedwave/tokens/test/redmine:/tokens:ro
+      - /test/project:/workspace:rw
 "#,
             user = container_user()
         );
         let paths = test_expected_paths();
         let violations =
             SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
-        let atlassian_violations: Vec<_> = violations
-            .iter()
-            .filter(|v| v.rule.is_atlassian())
-            .collect();
+        let redmine_violations: Vec<_> =
+            violations.iter().filter(|v| v.rule.is_redmine()).collect();
         assert!(
-            atlassian_violations.is_empty(),
-            "Correct Atlassian mounts should not trigger violations, got: {:?}",
-            atlassian_violations
+            redmine_violations.is_empty(),
+            "Correct Redmine mounts should not trigger violations, got: {:?}",
+            redmine_violations
                 .iter()
                 .map(|v| &v.rule)
                 .collect::<Vec<_>>()
@@ -9665,7 +9862,206 @@ services:
     }
 
     #[test]
-    fn test_security_check_atlassian_flags_rw_workspace() {
+    fn test_security_check_redmine_flags_ro_workspace() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-redmine:
+    image: speedwave-mcp-redmine:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/redmine:/tokens:ro
+      - /test/project:/workspace:ro
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::RedmineWorkspaceMountMode),
+            "Redmine workspace mounted :ro should trigger REDMINE_WORKSPACE_MOUNT_MODE"
+        );
+    }
+
+    #[test]
+    fn test_security_check_redmine_workspace_path_mismatch() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-redmine:
+    image: speedwave-mcp-redmine:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/redmine:/tokens:ro
+      - /wrong/path:/workspace:rw
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::RedmineWorkspacePathMismatch),
+            "Wrong Redmine workspace path should trigger REDMINE_WORKSPACE_PATH_MISMATCH"
+        );
+    }
+
+    #[test]
+    fn test_security_check_redmine_flags_missing_workspace_mount() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-redmine:
+    image: speedwave-mcp-redmine:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/redmine:/tokens:ro
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::RedmineMissingWorkspaceMount),
+            "a redmine service without /workspace must be flagged"
+        );
+    }
+
+    #[test]
+    fn test_security_check_redmine_flags_rw_tokens() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-redmine:
+    image: speedwave-mcp-redmine:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/redmine:/tokens:rw
+      - /test/project:/workspace:rw
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::PluginTokenMountMode
+                    && v.container == "mcp-redmine"),
+            "a :rw token mount on redmine must be flagged"
+        );
+    }
+
+    #[test]
+    fn test_security_check_redmine_flags_wrong_token_path() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-redmine:
+    image: speedwave-mcp-redmine:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /elsewhere/tokens:/tokens:ro
+      - /test/project:/workspace:rw
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::RedmineTokenPathMismatch),
+            "a redmine token mount outside the project tokens directory must be flagged"
+        );
+    }
+
+    #[test]
+    fn test_security_check_redmine_flags_unauthorized_extra_volume() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-redmine:
+    image: speedwave-mcp-redmine:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/redmine:/tokens:ro
+      - /test/project:/workspace:rw
+      - /etc/passwd:/stolen:ro
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::RedmineNoExtraVolumes),
+            "an unauthorized extra volume on redmine must be flagged"
+        );
+    }
+
+    #[test]
+    fn test_security_check_atlassian_correct_mounts_pass() {
         let data_dir = tempfile::tempdir().unwrap();
         let yaml = format!(
             r#"
@@ -9689,11 +10085,50 @@ services:
         let paths = test_expected_paths();
         let violations =
             SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
+        let atlassian_violations: Vec<_> = violations
+            .iter()
+            .filter(|v| v.rule.is_atlassian())
+            .collect();
+        assert!(
+            atlassian_violations.is_empty(),
+            "Correct Atlassian mounts should not trigger violations, got: {:?}",
+            atlassian_violations
+                .iter()
+                .map(|v| &v.rule)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_security_check_atlassian_flags_ro_workspace() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-atlassian:
+    image: speedwave-mcp-atlassian:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/atlassian:/tokens:ro
+      - /test/project:/workspace:ro
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
         assert!(
             violations
                 .iter()
                 .any(|v| v.rule == SecurityRule::AtlassianWorkspaceMountMode),
-            "Atlassian workspace mounted :rw should trigger ATLASSIAN_WORKSPACE_MOUNT_MODE"
+            "Atlassian workspace mounted :ro should trigger ATLASSIAN_WORKSPACE_MOUNT_MODE"
         );
     }
 
@@ -9715,7 +10150,7 @@ services:
       - /tmp:noexec,nosuid,size=64m
     volumes:
       - /test/.speedwave/tokens/test/atlassian:/tokens:ro
-      - /wrong/path:/workspace:ro
+      - /wrong/path:/workspace:rw
 "#,
             user = container_user()
         );
@@ -9780,7 +10215,7 @@ services:
       - /tmp:noexec,nosuid,size=64m
     volumes:
       - /test/.speedwave/tokens/test/atlassian:/tokens:ro
-      - /test/project:/workspace:ro
+      - /test/project:/workspace:rw
       - /etc/passwd:/stolen:ro
 "#,
             user = container_user()
@@ -9814,7 +10249,7 @@ services:
       - /tmp:noexec,nosuid,size=64m
     volumes:
       - /test/.speedwave/tokens/test/atlassian:/tokens:rw
-      - /test/project:/workspace:ro
+      - /test/project:/workspace:rw
 "#,
             user = container_user()
         );
@@ -9848,7 +10283,7 @@ services:
       - /tmp:noexec,nosuid,size=64m
     volumes:
       - /wrong/tokens/path:/tokens:ro
-      - /test/project:/workspace:ro
+      - /test/project:/workspace:rw
 "#,
             user = container_user()
         );
@@ -10250,6 +10685,7 @@ services:
       - /tmp:noexec,nosuid,size=64m
     volumes:
       - /home/user/.speedwave/tokens/test/redmine:/tokens:ro
+      - /home/user/projects/test:/workspace:rw
     environment:
       - PORT=3000
     networks:
@@ -10304,7 +10740,7 @@ services:
       - /tmp:noexec,nosuid,size=64m
     volumes:
       - /home/user/.speedwave/tokens/test/atlassian:/tokens:ro
-      - /home/user/projects/test:/workspace:ro
+      - /home/user/projects/test:/workspace:rw
     environment:
       - PORT=3000
     networks:
@@ -11246,6 +11682,15 @@ services:
             .filter(|r| r.to_string().starts_with("ATLASSIAN_"))
             .count();
         let atlassian_by_method = SecurityRule::iter().filter(|r| r.is_atlassian()).count();
+        let redmine_by_prefix = SecurityRule::iter()
+            .filter(|r| r.to_string().starts_with("REDMINE_"))
+            .count();
+        let redmine_by_method = SecurityRule::iter().filter(|r| r.is_redmine()).count();
+        assert_eq!(
+            redmine_by_method, redmine_by_prefix,
+            "is_redmine() count ({redmine_by_method}) differs from REDMINE-prefixed variant count \
+             ({redmine_by_prefix}); update SecurityRule::is_redmine() to include the new variant"
+        );
         assert_eq!(
             slack_by_method, slack_by_prefix,
             "is_slack() count ({slack_by_method}) differs from SLACK-prefixed variant count \

@@ -4,6 +4,7 @@
 
 import {
   withClientValidation,
+  describeError,
   ts,
   teachingErrorResult,
   normalizeNumericIdParams,
@@ -44,7 +45,9 @@ export function withValidation<T>(
       onUnexpectedError: (error) => {
         const name = error instanceof Error ? error.name : '';
         if (!name.startsWith('Gitbeaker') && !isTeachingError(error)) {
-          console.error(`${ts()} Unexpected (non-GitBeaker) error in GitLab tool handler:`, error);
+          console.error(
+            `${ts()} Unexpected (non-GitBeaker) error in GitLab tool handler: ${describeError(error)}`
+          );
         }
       },
     }

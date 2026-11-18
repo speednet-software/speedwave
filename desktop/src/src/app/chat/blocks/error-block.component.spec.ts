@@ -1,15 +1,19 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { Router } from '@angular/router';
 import { ErrorBlockComponent } from './error-block.component';
 import type { ErrorBlockKind } from '../../models/chat';
 
 describe('ErrorBlockComponent', () => {
   let component: ErrorBlockComponent;
   let fixture: ComponentFixture<ErrorBlockComponent>;
+  let navigate: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
+    navigate = vi.fn();
     await TestBed.configureTestingModule({
       imports: [ErrorBlockComponent],
+      providers: [{ provide: Router, useValue: { navigate } }],
     }).compileComponents();
 
     fixture = TestBed.createComponent(ErrorBlockComponent);
@@ -125,6 +129,18 @@ describe('ErrorBlockComponent', () => {
     ) as HTMLButtonElement | null;
     actionBtn?.click();
     expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it('state: the auth_required action opens settings', () => {
+    setInputs('auth', 'auth_required');
+    (el().querySelector('[data-testid="error-action"]') as HTMLButtonElement).click();
+    expect(navigate).toHaveBeenCalledWith(['/settings']);
+  });
+
+  it('state: other actionable variants do not navigate', () => {
+    setInputs('no project', 'no_active_project');
+    (el().querySelector('[data-testid="error-action"]') as HTMLButtonElement).click();
+    expect(navigate).not.toHaveBeenCalled();
   });
 
   it('state: passive variants do not emit on any interaction', () => {

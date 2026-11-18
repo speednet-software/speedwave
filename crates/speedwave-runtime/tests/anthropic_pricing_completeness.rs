@@ -104,6 +104,7 @@ fn million_context_variants_bill_at_standard_rates() {
 #[test]
 fn cache_hit_is_the_standard_01x_multiplier_except_documented_exceptions() {
     let exceptions = [
+        ("claude-fable-5-2", 0.025),
         ("claude-fable-5-1", 0.025),
         ("claude-opus-5-5", 0.05),
         ("claude-sonnet-5-5", 0.05),

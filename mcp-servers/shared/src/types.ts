@@ -206,6 +206,13 @@ export const READ_ONLY_ANNOTATIONS: ToolAnnotations = {
   openWorldHint: true,
 };
 
+/** Annotations for tools that write only into the project workspace; read-only mode lets them through (ADR-108). */
+export const WORKSPACE_WRITE_ANNOTATIONS: ToolAnnotations = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  openWorldHint: true,
+};
+
 /** Annotations for tools that create or update data non-destructively. */
 export const WRITE_ANNOTATIONS: ToolAnnotations = {
   readOnlyHint: false,

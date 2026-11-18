@@ -5,12 +5,13 @@ public enum CLIError: LocalizedError {
     case notFound(String)
     case ambiguous(String)
     case invalidDate(String)
+    case invalidValue(String)
 
     public var errorDescription: String? {
         switch self {
         case .missingField(let field):
             return "Missing required field: \(field)"
-        case .notFound(let msg), .ambiguous(let msg):
+        case .notFound(let msg), .ambiguous(let msg), .invalidValue(let msg):
             return msg
         case .invalidDate(let date):
             return "Invalid ISO8601 date: \(date). Expected YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS (local time), optionally with Z or ±HH:MM"

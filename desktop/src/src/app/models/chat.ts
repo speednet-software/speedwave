@@ -1,4 +1,8 @@
 import type { ClaudeContextUsage } from './claude-control';
+import type { ToolUseState } from './state-tree';
+
+/** Mirror of Rust `speedwave_runtime::stream::TurnErrorKind`. */
+export type TurnErrorKind = 'authentication_failed';
 
 /** Tagged union matching Rust StreamChunk enum (serde tagged) */
 export type StreamChunk =
@@ -34,7 +38,10 @@ export type StreamChunk =
         context_usage?: TurnUsage;
       };
     }
-  | { chunk_type: 'Error'; data: { content: string; turn_ended?: boolean } }
+  | {
+      chunk_type: 'Error';
+      data: { content: string; turn_ended?: boolean; kind?: TurnErrorKind };
+    }
   | { chunk_type: 'SystemInit'; data: { model: string; session_id?: string } }
   | {
       chunk_type: 'ControlChip';
@@ -287,12 +294,25 @@ export interface ConversationTranscript {
   messages: ConversationMessage[];
 }
 
+/** A tool call in a transcript, paired with its result; `result` is null when the call was never answered. */
+export interface HistoryToolUse extends ToolUseState {
+  type: 'tool_use';
+}
+
+/** One block of a transcript message, as `get_conversation` returns it. */
+export type HistoryMessageBlock =
+  | { type: 'text'; content: string }
+  | { type: 'thinking'; content: string }
+  | HistoryToolUse
+  | { type: 'error'; content: string }
+  | { type: 'control_chip'; command: string; argument: string };
+
 /** A single message within a conversation transcript. */
 export interface ConversationMessage {
   role: string;
   content: string;
   timestamp: string | null;
-  blocks?: MessageBlock[];
+  blocks?: HistoryMessageBlock[];
   uuid?: string;
   model?: string;
   usage?: TurnUsage;

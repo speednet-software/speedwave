@@ -176,6 +176,7 @@ services:
       - /tmp:noexec,nosuid,size=${MCP_REDMINE_TMPFS}
     volumes:
       - ${TOKENS_DIR}/redmine:/tokens:ro
+      - ${PROJECT_DIR}:/workspace:rw
     environment:
       - PORT=${PORT_WORKER}
     networks:
@@ -248,7 +249,7 @@ services:
       - /tmp:noexec,nosuid,size=${MCP_ATLASSIAN_TMPFS}
     volumes:
       - ${TOKENS_DIR}/atlassian:/tokens:ro
-      - ${PROJECT_DIR}:/workspace:ro
+      - ${PROJECT_DIR}:/workspace:rw
     environment:
       - PORT=${PORT_WORKER}
     networks:
@@ -304,7 +305,6 @@ services:
     shm_size: ${MCP_PLAYWRIGHT_SHM}
     environment:
       - PORT=${PORT_WORKER}
-      - DEBUG=pw:mcp:*
     networks:
       - ${NETWORK_NAME}
     deploy:

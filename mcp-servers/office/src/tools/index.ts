@@ -10,7 +10,7 @@ import {
   jsonResult,
   errorResult,
   READ_ONLY_ANNOTATIONS,
-  WRITE_ANNOTATIONS,
+  WORKSPACE_WRITE_ANNOTATIONS,
   META_KEYS,
   withDeclaredParams,
 } from '@speedwave/mcp-shared';
@@ -297,7 +297,7 @@ const markdownToPdfTool: Tool = {
     'Uses pandoc → HTML → WeasyPrint with print CSS (page size, margins, page breaks, monospace code). ' +
     'For an EXISTING .docx/.pptx/.xlsx use `officeToPdf` — this tool does not read Office formats. For HTML input use `htmlToPdf`. ' +
     'To embed a chart, first call `renderChart` to produce a PNG/SVG under /workspace, then reference it as `![](path)` in the markdown.',
-  annotations: WRITE_ANNOTATIONS,
+  annotations: WORKSPACE_WRITE_ANNOTATIONS,
   _meta: SHOWN_LONG,
   example:
     'await office.markdownToPdf({ input: { markdown: "# Report\\n\\nBody text" }, outName: "report.pdf" })',
@@ -326,7 +326,7 @@ const htmlToPdfTool: Tool = {
   description:
     'Render HTML (a path under /workspace, or inline `html` ≤200KB) to a PDF via WeasyPrint. Only local resources under /workspace are loaded (no remote http(s)). ' +
     'Embeds `<img>` PNG/SVG, including charts from `renderChart`. For Markdown input use `markdownToPdf`; for an existing Office file use `officeToPdf`.',
-  annotations: WRITE_ANNOTATIONS,
+  annotations: WORKSPACE_WRITE_ANNOTATIONS,
   _meta: DEFERRED_LONG,
   example: 'await office.htmlToPdf({ input: { html: "<h1>Title</h1><p>Body</p>" } })',
   keywords: ['html', 'pdf', 'render', 'weasyprint', 'export', 'convert', 'web'],
@@ -352,7 +352,7 @@ const markdownToDocxTool: Tool = {
   name: 'markdownToDocx',
   description:
     'Convert Markdown (path or inline ≤200KB) to a .docx via pandoc. For a PDF use `markdownToPdf`; for slides use `markdownToPptx`.',
-  annotations: WRITE_ANNOTATIONS,
+  annotations: WORKSPACE_WRITE_ANNOTATIONS,
   _meta: DEFERRED,
   example: 'await office.markdownToDocx({ input: { path: "/workspace/draft.md" } })',
   keywords: [
@@ -384,7 +384,7 @@ const markdownToPptxTool: Tool = {
   description:
     'Convert Markdown (path or inline ≤200KB) to a .pptx via pandoc (one slide per top-level heading). ' +
     'For a finer-grained deck with charts/images use `createPptx`. For a Word document use `markdownToDocx`.',
-  annotations: WRITE_ANNOTATIONS,
+  annotations: WORKSPACE_WRITE_ANNOTATIONS,
   _meta: DEFERRED,
   example: 'await office.markdownToPptx({ input: { markdown: "# Slide 1\\nBullet" } })',
   keywords: [
@@ -419,7 +419,7 @@ const renderChartTool: Tool = {
     'Render a chart (bar/line/pie/scatter/area) to a PNG or SVG image under /workspace, from a JSON spec. ' +
     'Embed the result into a PDF (`htmlToPdf` via `<img>`), a .docx (`createDocx` image element), or a .pptx (`createPptx` slide image). ' +
     'For a native, editable chart inside an Excel/PowerPoint file, use the `charts`/`chart` keys of `createXlsx`/`createPptx` instead.',
-  annotations: WRITE_ANNOTATIONS,
+  annotations: WORKSPACE_WRITE_ANNOTATIONS,
   _meta: DEFERRED_LONG,
   example:
     'await office.renderChart({ spec: { type: "bar", title: "Revenue 2025", data: { labels: ["Q1", "Q2"], series: [{ name: "2025", values: [100, 150] }] } } })',
@@ -459,7 +459,7 @@ const createDocxTool: Tool = {
     'Create a .docx from a structured spec: { elements: [ { type: "heading", level, text } | { type: "paragraph", text, bold?, italic? } | { type: "table", header, rows } | { type: "image", path } | { type: "pagebreak" } ] }. ' +
     'table header/rows cells must be strings — coerce numbers with String(n) before building the table (unlike createXlsx, which accepts numeric cells natively). ' +
     'Image paths must be under /workspace (this is where a `renderChart` PNG goes). To modify an existing .docx use `editDocx`. From Markdown, use `markdownToDocx`.',
-  annotations: WRITE_ANNOTATIONS,
+  annotations: WORKSPACE_WRITE_ANNOTATIONS,
   _meta: DEFERRED,
   example:
     'await office.createDocx({ spec: { elements: [{ type: "heading", level: 1, text: "Report" }, { type: "paragraph", text: "Summary" }, { type: "table", header: ["Q", "Revenue"], rows: [["Q1", "100"]] }] } })',
@@ -503,7 +503,7 @@ const editDocxTool: Tool = {
     'replace_text rewrites the whole matching paragraph as a single run — per-run formatting (bold/italic spans) elsewhere in that paragraph is not preserved. ' +
     'replace_text fails if `find` is not present anywhere in the document (no silent no-op) — text split across formatting runs may not match; use `readDocument` first to confirm the exact text. ' +
     'To create a .docx from scratch use `createDocx`.',
-  annotations: WRITE_ANNOTATIONS,
+  annotations: WORKSPACE_WRITE_ANNOTATIONS,
   _meta: DEFERRED,
   example:
     'await office.editDocx({ path: "/workspace/report.docx", ops: [{ op: "replace_text", find: "{{name}}", replace: "Acme" }] })',
@@ -539,7 +539,7 @@ const createXlsxTool: Tool = {
     'Create an .xlsx from a spec: { sheets: [ { name, rows: (string|number|null)[][], freeze?: "A2", charts?: [ { type: "bar"|"line"|"pie"|"scatter", title?, dataRange: "Sheet1!B1:B10", categoriesRange?, anchor: "E2" } ] } ] } — at least one sheet is required. ' +
     'dataRange/categoriesRange accept either "Sheet!A1:B10" or a bare "A1:B10" (defaults to the sheet the chart is added to). ' +
     'Supports native, editable Excel charts. To modify an existing workbook use `editXlsx`. To read one use `readDocument`.',
-  annotations: WRITE_ANNOTATIONS,
+  annotations: WORKSPACE_WRITE_ANNOTATIONS,
   _meta: DEFERRED,
   example:
     'await office.createXlsx({ spec: { sheets: [{ name: "Sales", rows: [["Quarter", "Revenue"], ["Q1", 100]], charts: [{ type: "bar", dataRange: "B2:B2", anchor: "D2" }] }] } })',
@@ -578,7 +578,7 @@ const editXlsxTool: Tool = {
   description:
     'Apply edits to an existing .xlsx: ops = [ { op: "set_cell", sheet, cell, value } | { op: "set_formula", sheet, cell, formula } | { op: "add_sheet", name } | { op: "add_chart", sheet, chart } ]. ' +
     'Writes a new file. A `sheet` name that does not exist in the workbook fails with the list of actual sheet names — use `readDocument` first if unsure. To create one use `createXlsx`.',
-  annotations: WRITE_ANNOTATIONS,
+  annotations: WORKSPACE_WRITE_ANNOTATIONS,
   _meta: DEFERRED,
   example:
     'await office.editXlsx({ path: "/workspace/wb.xlsx", ops: [{ op: "set_cell", sheet: "Sheet1", cell: "B2", value: 150 }] })',
@@ -616,7 +616,7 @@ const createPptxTool: Tool = {
   description:
     'Create a .pptx from a spec: { slides: [ { title?, bullets?: string[], image?: { path }, chart?: { type: "column"|"line"|"pie"|"xy"|"bubble", categories: string[], series: [{ name, values }], title? } } ] } — at least one slide is required. ' +
     'Supports native PowerPoint charts and images (e.g. a `renderChart` PNG). To modify an existing deck use `editPptx`. From Markdown, use `markdownToPptx`.',
-  annotations: WRITE_ANNOTATIONS,
+  annotations: WORKSPACE_WRITE_ANNOTATIONS,
   _meta: DEFERRED,
   example:
     'await office.createPptx({ spec: { slides: [{ title: "Q1 Results", bullets: ["Revenue up 12%"], chart: { type: "column", categories: ["Q1", "Q2"], series: [{ name: "Revenue", values: [100, 150] }] } }] } })',
@@ -651,7 +651,7 @@ const editPptxTool: Tool = {
   name: 'editPptx',
   description:
     'Apply edits to an existing .pptx: ops = [ { op: "add_slide", slide } | { op: "set_title", index, text } | { op: "delete_slide", index } ]. Writes a new file. To create one use `createPptx`.',
-  annotations: WRITE_ANNOTATIONS,
+  annotations: WORKSPACE_WRITE_ANNOTATIONS,
   _meta: DEFERRED,
   example:
     'await office.editPptx({ path: "/workspace/deck.pptx", ops: [{ op: "set_title", index: 0, text: "New Title" }] })',
@@ -688,7 +688,7 @@ const officeToPdfTool: Tool = {
     'Convert an EXISTING Office/ODF file (.docx, .xlsx, .pptx, .odt, .ods, .odp, .rtf) to PDF — a true LibreOffice render. ' +
     'Fails with a teaching error if the input is password-protected or encrypted. Verify it opens without a password first. ' +
     'For Markdown→PDF use `markdownToPdf`; for HTML→PDF use `htmlToPdf`. For other target formats use `convertOffice`.',
-  annotations: WRITE_ANNOTATIONS,
+  annotations: WORKSPACE_WRITE_ANNOTATIONS,
   _meta: DEFERRED_LONG,
   example: 'await office.officeToPdf({ path: "/workspace/deck.pptx" })',
   keywords: ['office', 'pdf', 'convert', 'docx', 'xlsx', 'pptx', 'export', 'render', 'libreoffice'],
@@ -710,7 +710,7 @@ const convertOfficeTool: Tool = {
     '.docx→{pdf,odt,txt,html,rtf}; .odt→{pdf,docx}; .pptx→{pdf,odp}; .odp→{pdf,pptx}; .xlsx→{pdf,ods,csv}; .ods→{pdf,xlsx,csv}. ' +
     'Anything outside this matrix is rejected. Fails with a teaching error if the input is password-protected or encrypted. Verify it opens without a password first. ' +
     'For .docx/.xlsx/.pptx → PDF specifically, `officeToPdf` is the simpler call.',
-  annotations: WRITE_ANNOTATIONS,
+  annotations: WORKSPACE_WRITE_ANNOTATIONS,
   _meta: DEFERRED_LONG,
   example: 'await office.convertOffice({ path: "/workspace/report.xlsx", target: "csv" })',
   keywords: [
@@ -748,7 +748,7 @@ const mergePdfTool: Tool = {
   name: 'mergePdf',
   description:
     'Concatenate two or more PDFs into one, in the given order. Accepts 2-200 input PDFs per call. To split a PDF use `splitPdf`.',
-  annotations: WRITE_ANNOTATIONS,
+  annotations: WORKSPACE_WRITE_ANNOTATIONS,
   _meta: DEFERRED,
   example: 'await office.mergePdf({ paths: ["/workspace/a.pdf", "/workspace/b.pdf"] })',
   keywords: ['pdf', 'merge', 'combine', 'join', 'concatenate', 'append'],
@@ -772,7 +772,7 @@ const splitPdfTool: Tool = {
   description:
     'Split a PDF into one output file per page range. `ranges` is a list of [start, end] (1-indexed, inclusive), e.g. [[1,3],[5,5]]. ' +
     `Accepts at most 200 ranges per call; each range end must be ≤${MAX_PDF_PAGES} (the worker's page-count cap). Each part is named \`<base>-partN.pdf\`. To merge PDFs use \`mergePdf\`.`,
-  annotations: WRITE_ANNOTATIONS,
+  annotations: WORKSPACE_WRITE_ANNOTATIONS,
   _meta: DEFERRED,
   example: 'await office.splitPdf({ path: "/workspace/big.pdf", ranges: [[1,3],[4,10]] })',
   keywords: ['pdf', 'split', 'extract', 'pages', 'range', 'separate'],
@@ -799,7 +799,7 @@ const rotatePdfTool: Tool = {
   name: 'rotatePdf',
   description:
     'Rotate the given 1-indexed pages of a PDF by 90, 180, or 270 degrees, leaving other pages unchanged.',
-  annotations: WRITE_ANNOTATIONS,
+  annotations: WORKSPACE_WRITE_ANNOTATIONS,
   _meta: DEFERRED,
   example: 'await office.rotatePdf({ path: "/workspace/scan.pdf", pages: [1,2], degrees: 90 })',
   keywords: ['pdf', 'rotate', 'orientation', 'pages', 'turn'],
@@ -819,7 +819,7 @@ const rotatePdfTool: Tool = {
 const watermarkPdfTool: Tool = {
   name: 'watermarkPdf',
   description: 'Stamp a single-page watermark PDF onto every page of a document PDF.',
-  annotations: WRITE_ANNOTATIONS,
+  annotations: WORKSPACE_WRITE_ANNOTATIONS,
   _meta: DEFERRED,
   example:
     'await office.watermarkPdf({ path: "/workspace/report.pdf", watermarkPath: "/workspace/confidential-stamp.pdf" })',
@@ -845,7 +845,7 @@ const fillPdfFormTool: Tool = {
     "Fill an AcroForm PDF's text fields from a name→value map, flattening the result by default. " +
     'Returns `flattened` (false if flatten was requested but could not be applied) and `fieldWarnings` ' +
     '(e.g. an unknown field name, or no AcroForm fields found at all) — always check both before reporting success.',
-  annotations: WRITE_ANNOTATIONS,
+  annotations: WORKSPACE_WRITE_ANNOTATIONS,
   _meta: DEFERRED,
   example:
     'await office.fillPdfForm({ path: "/workspace/form.pdf", fields: { "applicant_name": "Jane Doe" } })',

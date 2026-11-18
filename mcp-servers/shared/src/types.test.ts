@@ -8,6 +8,7 @@ import type {
 } from './types.js';
 import {
   READ_ONLY_ANNOTATIONS,
+  WORKSPACE_WRITE_ANNOTATIONS,
   WRITE_ANNOTATIONS,
   DESTRUCTIVE_ANNOTATIONS,
   isErrorLike,
@@ -398,6 +399,15 @@ describe('Annotation constants', () => {
       destructiveHint: false,
       openWorldHint: true,
     });
+  });
+
+  it('WORKSPACE_WRITE_ANNOTATIONS marks a workspace-only writer read-only for read-only mode', () => {
+    expect(WORKSPACE_WRITE_ANNOTATIONS).toEqual({
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: true,
+    });
+    expect(WORKSPACE_WRITE_ANNOTATIONS).not.toBe(READ_ONLY_ANNOTATIONS);
   });
 
   it('WRITE_ANNOTATIONS marks tool as non-read-only and non-destructive', () => {

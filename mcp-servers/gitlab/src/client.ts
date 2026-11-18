@@ -7,6 +7,7 @@ import { Gitlab } from '@gitbeaker/rest';
 import {
   loadTokenFile,
   ts,
+  describeError,
   withSetupGuidance,
   ConnectionStatusTracker,
   backgroundConnectionTest,
@@ -1494,11 +1495,9 @@ export class GitLabClient {
       };
       tagInfo = { name: tag.name, target: tag.target, message: tag.message };
     } catch (error) {
-      console.warn(`${ts()} [GitLabClient] Failed to get tag info before deletion:`, {
-        project: projectId,
-        tag: tagName,
-        error: error instanceof Error ? error.message : String(error),
-      });
+      console.warn(
+        `${ts()} [GitLabClient] Failed to get tag info before deletion: project=${projectId} ${describeError(error)}`
+      );
     }
 
     await this.gitlab.Tags.remove(projectId, tagName);

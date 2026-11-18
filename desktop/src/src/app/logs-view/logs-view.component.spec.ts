@@ -813,6 +813,132 @@ describe('LogsViewComponent — status bar layout', () => {
     expect(note?.textContent).toContain('/tmp/speedwave-diag.zip');
   });
 
+  describe('export window selector', () => {
+    const mockExport = (): void => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_all_logs') return '';
+        if (cmd === 'get_health') return MOCK_HEALTH;
+        if (cmd === 'export_diagnostics') return '/tmp/speedwave-diag.zip';
+        return undefined;
+      };
+    };
+
+    const selector = (): HTMLSelectElement =>
+      fixture.nativeElement.querySelector(
+        '[data-testid="logs-export-window"]'
+      ) as HTMLSelectElement;
+
+    const choose = (value: string): void => {
+      const el = selector();
+      el.value = value;
+      el.dispatchEvent(new Event('change'));
+      fixture.detectChanges();
+    };
+
+    const clickExport = async (): Promise<void> => {
+      (
+        fixture.nativeElement.querySelector('[data-testid="logs-export"]') as HTMLButtonElement
+      ).click();
+      await fixture.whenStable();
+      fixture.detectChanges();
+    };
+
+    it('offers 2 h, 24 h, 7 days and 30 days with 7 days selected', async () => {
+      mockExport();
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      const options = Array.from(selector().options).map((o) => [o.value, o.textContent?.trim()]);
+      expect(options).toEqual([
+        ['2h', '2 h'],
+        ['24h', '24 h'],
+        ['7d', '7 days'],
+        ['30d', '30 days'],
+      ]);
+      expect(selector().value).toBe('7d');
+      expect(component.exportWindow()).toBe('7d');
+    });
+
+    it('passes the default window to export_diagnostics', async () => {
+      mockExport();
+      await component.ngOnInit();
+      fixture.detectChanges();
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      await clickExport();
+
+      expect(invokeSpy).toHaveBeenCalledWith('export_diagnostics', {
+        project: 'demo',
+        window: '7d',
+      });
+    });
+
+    it.each(['2h', '24h', '30d'])(
+      'passes the chosen window %s to export_diagnostics',
+      async (value) => {
+        mockExport();
+        await component.ngOnInit();
+        fixture.detectChanges();
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+        choose(value);
+        await clickExport();
+
+        expect(invokeSpy).toHaveBeenCalledWith('export_diagnostics', {
+          project: 'demo',
+          window: value,
+        });
+      }
+    );
+
+    it('ignores a value outside the four windows', async () => {
+      mockExport();
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      choose('24h');
+      component['onExportWindowChange']({ target: { value: '1y' } } as unknown as Event);
+
+      expect(component.exportWindow()).toBe('24h');
+    });
+
+    it('does not remember the choice: a new visit starts on 7 days', async () => {
+      mockExport();
+      await component.ngOnInit();
+      fixture.detectChanges();
+      choose('30d');
+      await clickExport();
+      expect(component.exportWindow()).toBe('30d');
+
+      const revisit = TestBed.createComponent(LogsViewComponent);
+      expect(revisit.componentInstance.exportWindow()).toBe('7d');
+      revisit.destroy();
+    });
+
+    it('is disabled while an export is in flight', async () => {
+      const gate = createDeferred<string>();
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_all_logs') return '';
+        if (cmd === 'get_health') return MOCK_HEALTH;
+        if (cmd === 'export_diagnostics') return gate.promise;
+        return undefined;
+      };
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      (
+        fixture.nativeElement.querySelector('[data-testid="logs-export"]') as HTMLButtonElement
+      ).click();
+      fixture.detectChanges();
+      expect(selector().disabled).toBe(true);
+
+      gate.resolve('/tmp/speedwave-diag.zip');
+      await vi.waitFor(() => expect(component.diagnosticsExporting()).toBe(false));
+      fixture.detectChanges();
+      expect(selector().disabled).toBe(false);
+    });
+  });
+
   it('does not open the export dialog when the backend returns an empty path', async () => {
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'get_all_logs') return '';

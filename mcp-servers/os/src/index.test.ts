@@ -13,9 +13,9 @@ vi.mock('./platform-runner.js', () => ({
 
 describe('mcp-os integration', () => {
   describe('createToolDefinitions', () => {
-    it('returns all 42 tools', () => {
+    it('returns all 46 tools', () => {
       const tools = createToolDefinitions();
-      expect(tools).toHaveLength(42);
+      expect(tools).toHaveLength(46);
     });
 
     it('all tool names are unique', () => {
@@ -45,6 +45,10 @@ describe('mcp-os integration', () => {
       expect(names).toContain('createReminder');
       expect(names).toContain('updateReminder');
       expect(names).toContain('completeReminder');
+      expect(names).toContain('deleteReminder');
+      expect(names).toContain('createReminderList');
+      expect(names).toContain('updateReminderList');
+      expect(names).toContain('deleteReminderList');
     });
 
     it('contains all calendar tools', () => {
@@ -112,6 +116,10 @@ describe('mcp-os integration', () => {
         'createReminder',
         'updateReminder',
         'completeReminder',
+        'deleteReminder',
+        'createReminderList',
+        'updateReminderList',
+        'deleteReminderList',
         'getEvent',
         'createEvent',
         'updateEvent',

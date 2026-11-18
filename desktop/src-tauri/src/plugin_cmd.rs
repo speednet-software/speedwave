@@ -1312,6 +1312,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: Some("test-project".into()),
             selected_ide: None,
@@ -1359,6 +1360,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: Some("test-project".into()),
             selected_ide: None,
@@ -1386,6 +1388,7 @@ mod tests {
                 plugin_settings: Some(HashMap::new()),
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: Some("test-project".into()),
             selected_ide: None,
@@ -1431,6 +1434,7 @@ mod tests {
                     ])),
                     policy: None,
                     effort_pin: None,
+                    read_only: false,
                 },
                 config::ProjectUserEntry {
                     name: "proj-b".into(),
@@ -1443,6 +1447,7 @@ mod tests {
                     )])),
                     policy: None,
                     effort_pin: None,
+                    read_only: false,
                 },
             ],
             active_project: None,
@@ -1479,6 +1484,7 @@ mod tests {
                             "example-plugin".into(),
                             config::IntegrationConfig {
                                 enabled: Some(true),
+                                ..Default::default()
                             },
                         )])),
                         ..Default::default()
@@ -1486,6 +1492,7 @@ mod tests {
                     plugin_settings: None,
                     policy: None,
                     effort_pin: None,
+                    read_only: false,
                 },
                 config::ProjectUserEntry {
                     name: "proj-b".into(),
@@ -1497,12 +1504,14 @@ mod tests {
                                 "example-plugin".into(),
                                 config::IntegrationConfig {
                                     enabled: Some(true),
+                                    ..Default::default()
                                 },
                             ),
                             (
                                 "other".into(),
                                 config::IntegrationConfig {
                                     enabled: Some(false),
+                                    ..Default::default()
                                 },
                             ),
                         ])),
@@ -1511,6 +1520,7 @@ mod tests {
                     plugin_settings: None,
                     policy: None,
                     effort_pin: None,
+                    read_only: false,
                 },
             ],
             active_project: None,
@@ -1915,6 +1925,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: Some("my-project".into()),
             selected_ide: None,

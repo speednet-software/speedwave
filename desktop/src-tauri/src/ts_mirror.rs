@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::Serialize;
 
 #[expect(
@@ -73,4 +75,50 @@ pub(crate) fn serde_names<T: Serialize>(values: &[T]) -> Vec<String> {
         .collect();
     names.sort_unstable();
     names
+}
+
+pub(crate) struct TsTaggedUnion {
+    pub(crate) inline: BTreeMap<String, Vec<String>>,
+    pub(crate) named: Vec<String>,
+}
+
+pub(crate) fn ts_tagged_union(src: &'static str, name: &str) -> TsTaggedUnion {
+    let marker = format!("export type {name} =");
+    let idx = src
+        .find(&marker)
+        .unwrap_or_else(|| panic!("the TS source must declare `{marker}`"));
+    let body = src[idx + marker.len()..]
+        .split(";\n\n")
+        .next()
+        .unwrap_or("");
+    let mut union = TsTaggedUnion {
+        inline: BTreeMap::new(),
+        named: Vec::new(),
+    };
+    for member in body.lines().filter_map(|l| l.trim().strip_prefix('|')) {
+        let member = member.trim().trim_end_matches(';').trim();
+        let Some(inner) = member
+            .strip_prefix('{')
+            .and_then(|rest| rest.strip_suffix('}'))
+        else {
+            union.named.push(member.to_string());
+            continue;
+        };
+        let mut tag = None;
+        let mut fields: Vec<String> = Vec::new();
+        for field in inner.split(';').map(str::trim).filter(|f| !f.is_empty()) {
+            let (key, value) = field
+                .split_once(':')
+                .unwrap_or_else(|| panic!("a union field must read `key: type`, got `{field}`"));
+            if key.trim() == "type" {
+                tag = Some(value.trim().trim_matches('\'').to_string());
+            }
+            fields.push(key.trim().to_string());
+        }
+        fields.sort_unstable();
+        let tag =
+            tag.unwrap_or_else(|| panic!("a union member must carry a `type` tag: `{member}`"));
+        union.inline.insert(tag, fields);
+    }
+    union
 }

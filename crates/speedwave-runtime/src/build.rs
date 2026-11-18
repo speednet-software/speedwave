@@ -75,6 +75,7 @@ pub const IMAGES: &[ImageDef] = &[
         hash_inputs: &[
             "containers/Containerfile.proxy",
             "containers/proxy",
+            "crates/access-policy",
             "crates/pii-engine",
             "mcp-servers/policies/rules.yaml",
         ],

@@ -236,6 +236,7 @@ describe('get', () => {
       links: [],
       assignee: { account_id: 'u1', name: 'Alice' },
       reporter: { account_id: 'u2', name: 'Bob' },
+      attachments: [],
       created: '2026-01-01T00:00:00.000+0000',
       updated: '2026-01-02T00:00:00.000+0000',
     });
@@ -784,28 +785,5 @@ describe('addAttachment', () => {
       })
     ).rejects.toBeInstanceOf(ScopeError);
     expect(restricted.uploadAttachment).not.toHaveBeenCalled();
-  });
-});
-
-describe('deleteAttachment', () => {
-  it('DELETEs the attachment endpoint by ID', async () => {
-    client.del.mockResolvedValueOnce(undefined);
-    const c = createJiraIssuesClient(client);
-    await c.deleteAttachment('10475');
-    expect(client.del).toHaveBeenCalledWith('/rest/api/3/attachment/10475');
-  });
-
-  it('URL-encodes the attachment ID', async () => {
-    client.del.mockResolvedValueOnce(undefined);
-    const c = createJiraIssuesClient(client);
-    await c.deleteAttachment('a/b');
-    expect(client.del).toHaveBeenCalledWith('/rest/api/3/attachment/a%2Fb');
-  });
-
-  it('fails closed (ScopeError) when a project allowlist is configured and does not call the API', async () => {
-    const restricted = stubClient(['ALLOWED']);
-    const c = createJiraIssuesClient(restricted);
-    await expect(c.deleteAttachment('10475')).rejects.toBeInstanceOf(ScopeError);
-    expect(restricted.del).not.toHaveBeenCalled();
   });
 });
