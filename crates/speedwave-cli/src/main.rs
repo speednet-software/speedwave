@@ -1900,6 +1900,7 @@ mod tests {
             plugin_settings: None,
             policy: None,
             effort_pin: None,
+            read_only: false,
         });
         user_config
     }
@@ -2305,6 +2306,7 @@ mod tests {
             plugin_settings: None,
             policy: None,
             effort_pin: None,
+            read_only: false,
         }
     }
 
@@ -2350,6 +2352,7 @@ mod tests {
             plugin_settings: None,
             policy: None,
             effort_pin: None,
+            read_only: false,
         };
         let cfg = config_with(vec![proj("alpha"), cwd_project], Some("alpha"));
         assert_eq!(resolve_project_fallback(&cfg).unwrap(), "alpha");

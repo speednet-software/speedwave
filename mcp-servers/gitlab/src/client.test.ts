@@ -3,6 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
+import { inspect } from 'node:util';
 import type { GitLabConfig, GitLabClient as GitLabClientType } from './client.js';
 
 const mockLoadTokenFile = vi.fn();
@@ -69,6 +70,17 @@ interface MockGitlabEndpoints {
   Issues: { all: Mock; create: Mock; edit: Mock };
   IssueNotes: { all: Mock; create: Mock };
   ProjectLabels: { all: Mock; create: Mock };
+}
+
+const CONSOLE_METHODS = ['log', 'info', 'warn', 'error', 'debug'] as const;
+
+function spyOnConsole(): () => string {
+  const spies = CONSOLE_METHODS.map((m) => vi.spyOn(console, m).mockImplementation(() => {}));
+  return () =>
+    inspect(
+      spies.map((s) => s.mock.calls),
+      { depth: 8 }
+    );
 }
 
 describe('GitLabClient', () => {
@@ -3877,25 +3889,25 @@ describe('getTag and deleteTag', () => {
       expect(mockGitlabInstance.Tags.remove).toHaveBeenCalledWith(1, 'v1.0.0');
       expect(result).toEqual({ deleted_tag: undefined });
       expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining('[GitLabClient] Failed to get tag info before deletion:'),
-        expect.objectContaining({ project: 1, tag: 'v1.0.0', error: 'Tag not found' })
+        expect.stringContaining(
+          '[GitLabClient] Failed to get tag info before deletion: project=1 code=UNKNOWN name=Error'
+        )
       );
       consoleSpy.mockRestore();
     });
 
-    it('should warn with String(error) when caught error is not an Error instance', async () => {
-      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    it('should not log a caught value that is not an Error instance', async () => {
+      const logged = spyOnConsole();
       mockGitlabInstance.Tags.show.mockRejectedValue('string error from api');
       mockGitlabInstance.Tags.remove.mockResolvedValue(undefined);
 
       const result = await client.deleteTag(1, 'v1.0.0');
 
       expect(result).toEqual({ deleted_tag: undefined });
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining('[GitLabClient] Failed to get tag info before deletion:'),
-        expect.objectContaining({ error: 'string error from api' })
+      expect(logged()).toContain(
+        '[GitLabClient] Failed to get tag info before deletion: project=1 code=UNKNOWN'
       );
-      consoleSpy.mockRestore();
+      expect(logged()).not.toContain('string error from api');
     });
 
     it('should throw when project_id is empty', async () => {

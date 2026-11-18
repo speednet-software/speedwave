@@ -349,9 +349,9 @@ pub enum SecurityRule {
     #[strum(to_string = "ATLASSIAN_WORKSPACE_PATH_MISMATCH")]
     #[strum(props(description = "Atlassian workspace path matches expected"))]
     AtlassianWorkspacePathMismatch,
-    /// Atlassian workspace mount mode is `:ro`.
+    /// Atlassian workspace mount mode is `:rw`.
     #[strum(to_string = "ATLASSIAN_WORKSPACE_MOUNT_MODE")]
-    #[strum(props(description = "Atlassian workspace mount mode is :ro"))]
+    #[strum(props(description = "Atlassian workspace mount mode is :rw"))]
     AtlassianWorkspaceMountMode,
     /// Atlassian has no extra volumes.
     #[strum(to_string = "ATLASSIAN_NO_EXTRA_VOLUMES")]
@@ -365,6 +365,35 @@ pub enum SecurityRule {
     #[strum(to_string = "ATLASSIAN_MISSING_WORKSPACE_MOUNT")]
     #[strum(props(description = "Atlassian has /workspace mount"))]
     AtlassianMissingWorkspaceMount,
+
+    /// Redmine volumes use short-form only.
+    #[strum(to_string = "REDMINE_VOLUME_LONG_FORM")]
+    #[strum(props(description = "Redmine volumes use short-form only"))]
+    RedmineVolumeLongForm,
+    /// Redmine token path matches expected.
+    #[strum(to_string = "REDMINE_TOKEN_PATH_MISMATCH")]
+    #[strum(props(description = "Redmine token path matches expected"))]
+    RedmineTokenPathMismatch,
+    /// Redmine workspace path matches expected.
+    #[strum(to_string = "REDMINE_WORKSPACE_PATH_MISMATCH")]
+    #[strum(props(description = "Redmine workspace path matches expected"))]
+    RedmineWorkspacePathMismatch,
+    /// Redmine workspace mount mode is `:rw`.
+    #[strum(to_string = "REDMINE_WORKSPACE_MOUNT_MODE")]
+    #[strum(props(description = "Redmine workspace mount mode is :rw"))]
+    RedmineWorkspaceMountMode,
+    /// Redmine has no extra volumes.
+    #[strum(to_string = "REDMINE_NO_EXTRA_VOLUMES")]
+    #[strum(props(description = "Redmine has no extra volumes"))]
+    RedmineNoExtraVolumes,
+    /// Redmine has a `/tokens` mount.
+    #[strum(to_string = "REDMINE_MISSING_TOKENS_MOUNT")]
+    #[strum(props(description = "Redmine has /tokens mount"))]
+    RedmineMissingTokensMount,
+    /// Redmine has a `/workspace` mount.
+    #[strum(to_string = "REDMINE_MISSING_WORKSPACE_MOUNT")]
+    #[strum(props(description = "Redmine has /workspace mount"))]
+    RedmineMissingWorkspaceMount,
 
     /// Speedwave proxy mounts exactly config:ro, tokens:ro, usage:rw and the optional
     /// git token mounts, with no host network (ADR-073).
@@ -472,8 +501,7 @@ impl SecurityRule {
         )
     }
 
-    /// Returns `true` for Atlassian-specific rules. The workspace mount is :ro here (unlike
-    /// SharePoint/Slack's :rw) — addAttachment only reads a file, never writes.
+    /// Returns `true` for Atlassian-specific rules.
     pub fn is_atlassian(self) -> bool {
         matches!(
             self,
@@ -484,6 +512,20 @@ impl SecurityRule {
                 | Self::AtlassianNoExtraVolumes
                 | Self::AtlassianMissingTokensMount
                 | Self::AtlassianMissingWorkspaceMount
+        )
+    }
+
+    /// Returns `true` for Redmine-specific rules.
+    pub fn is_redmine(self) -> bool {
+        matches!(
+            self,
+            Self::RedmineVolumeLongForm
+                | Self::RedmineTokenPathMismatch
+                | Self::RedmineWorkspacePathMismatch
+                | Self::RedmineWorkspaceMountMode
+                | Self::RedmineNoExtraVolumes
+                | Self::RedmineMissingTokensMount
+                | Self::RedmineMissingWorkspaceMount
         )
     }
 
@@ -590,6 +632,7 @@ impl SecurityCheck {
             Self::check_builtin_sharepoint_volumes(&doc, expected_paths),
             Self::check_builtin_slack_volumes(&doc, expected_paths),
             Self::check_builtin_atlassian_volumes(&doc, expected_paths),
+            Self::check_builtin_redmine_volumes(&doc, expected_paths),
             Self::check_proxy_volumes(&doc, expected_paths),
             Self::check_proxy_ner_url(data_dir, project),
             Self::check_claude_managed_settings(
@@ -1899,8 +1942,6 @@ impl SecurityCheck {
         )
     }
 
-    /// Validates volumes for built-in mcp-atlassian (not a plugin). Unlike SharePoint/Slack,
-    /// the workspace mount is :ro — addAttachment only reads the file, to attach it.
     fn check_builtin_atlassian_volumes(
         doc: &serde_yaml_ng::Value,
         expected_paths: &SecurityExpectedPaths,
@@ -1909,8 +1950,21 @@ impl SecurityCheck {
             doc,
             expected_paths,
             "atlassian",
-            "ro",
+            "rw",
             VolumeCheckRules::ATLASSIAN,
+        )
+    }
+
+    fn check_builtin_redmine_volumes(
+        doc: &serde_yaml_ng::Value,
+        expected_paths: &SecurityExpectedPaths,
+    ) -> Vec<SecurityViolation> {
+        Self::check_builtin_workspace_worker_volumes(
+            doc,
+            expected_paths,
+            "redmine",
+            "rw",
+            VolumeCheckRules::REDMINE,
         )
     }
 
@@ -2224,9 +2278,9 @@ impl VolumeCheckRules {
             "Atlassian uses a static API token; /tokens must be :ro like every other worker.",
         workspace_path_mismatch: SecurityRule::AtlassianWorkspacePathMismatch,
         workspace_mount_mode: SecurityRule::AtlassianWorkspaceMountMode,
-        workspace_mount_mode_msg: "Atlassian workspace mount must be :ro",
-        workspace_mount_mode_rem: "addAttachment only reads files from the workspace; \
-             change the workspace volume mount to :ro.",
+        workspace_mount_mode_msg: "Atlassian workspace mount must be :rw",
+        workspace_mount_mode_rem: "downloadAttachment writes files into the workspace; \
+             change the workspace volume mount to :rw.",
         no_extra_volumes: SecurityRule::AtlassianNoExtraVolumes,
         no_extra_volumes_msg_prefix: "Atlassian service has unauthorized volume mount:",
         no_extra_volumes_rem:
@@ -2236,7 +2290,35 @@ impl VolumeCheckRules {
         missing_tokens_rem: "Atlassian must mount /tokens:ro.",
         missing_workspace: SecurityRule::AtlassianMissingWorkspaceMount,
         missing_workspace_msg: "Atlassian service is missing required /workspace mount",
-        missing_workspace_rem: "Atlassian must mount /workspace:ro (needed for addAttachment).",
+        missing_workspace_rem:
+            "Atlassian must mount /workspace:rw (needed for downloadAttachment).",
+    };
+    const REDMINE: Self = Self {
+        volume_long_form: SecurityRule::RedmineVolumeLongForm,
+        volume_long_form_msg: "Redmine volume uses long-form YAML mapping",
+        volume_long_form_rem: "Use short-form volume strings.",
+        token_path_mismatch: SecurityRule::RedmineTokenPathMismatch,
+        token_path_mismatch_rem:
+            "Redmine token mount must use the project-specific tokens directory.",
+        token_mount_mode: SecurityRule::PluginTokenMountMode,
+        token_mount_mode_msg: "Redmine token mount must be :ro",
+        token_mount_mode_rem:
+            "Redmine uses a static API key; /tokens must be :ro like every other worker.",
+        workspace_path_mismatch: SecurityRule::RedmineWorkspacePathMismatch,
+        workspace_mount_mode: SecurityRule::RedmineWorkspaceMountMode,
+        workspace_mount_mode_msg: "Redmine workspace mount must be :rw",
+        workspace_mount_mode_rem: "Change the Redmine workspace volume mount to :rw.",
+        no_extra_volumes: SecurityRule::RedmineNoExtraVolumes,
+        no_extra_volumes_msg_prefix: "Redmine service has unauthorized volume mount:",
+        no_extra_volumes_rem:
+            "Redmine may mount /tokens, /workspace, and the per-service oauth bearer.",
+        missing_tokens: SecurityRule::RedmineMissingTokensMount,
+        missing_tokens_msg: "Redmine service is missing required /tokens mount",
+        missing_tokens_rem: "Redmine must mount /tokens:ro.",
+        missing_workspace: SecurityRule::RedmineMissingWorkspaceMount,
+        missing_workspace_msg: "Redmine service is missing required /workspace mount",
+        missing_workspace_rem:
+            "Redmine must mount /workspace:rw (attachment uploads and downloads).",
     };
 }
 

@@ -10,6 +10,7 @@ import {
   type ToolsCallResult,
   type jsonResult,
   type textResult,
+  describeError,
 } from '@speedwave/mcp-shared';
 import { GitHubClient, isExpectedError } from '../client.js';
 
@@ -109,7 +110,9 @@ export function withValidation<T>(
     onUnexpectedError: (error) => {
       const hasOctokitStatus = typeof (error as { status?: unknown } | null)?.status === 'number';
       if (!hasOctokitStatus && !isExpectedError(error)) {
-        console.error(`${ts()} Unexpected (non-Octokit) error in GitHub tool handler:`, error);
+        console.error(
+          `${ts()} Unexpected (non-Octokit) error in GitHub tool handler: ${describeError(error)}`
+        );
       }
     },
   });

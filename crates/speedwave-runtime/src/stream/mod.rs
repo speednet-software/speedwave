@@ -2,9 +2,11 @@
 //! the Angular frontend and `chat_stream` wire types; the old JSON-Patch transport was retired.
 
 pub mod state_tree;
+pub mod turn_error;
 
 pub use state_tree::{
     AskUserOption, AskUserQuestionItem, ConversationEntry, ConversationState, EntryMeta, EntryRole,
     MessageBlock, QueuedMessage, SessionTotals, TurnUsage, UuidStatus, MAX_ASK_USER_QUESTIONS,
     MAX_ASK_USER_WIRE_BYTES,
 };
+pub use turn_error::{classify_turn_error, TurnErrorKind};

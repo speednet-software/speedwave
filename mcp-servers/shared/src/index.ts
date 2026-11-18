@@ -31,6 +31,7 @@ export {
   SUPPORTED_PROTOCOL_VERSIONS,
   LATEST_PROTOCOL_VERSION,
   READ_ONLY_ANNOTATIONS,
+  WORKSPACE_WRITE_ANNOTATIONS,
   WRITE_ANNOTATIONS,
   DESTRUCTIVE_ANNOTATIONS,
 } from './types.js';
@@ -80,7 +81,7 @@ export type { BootWorkerOptions, NotConfiguredPolicy } from './boot.js';
 
 export { TIMEOUTS } from './timeouts.js';
 
-export { ts } from './logger.js';
+export { ts, describeError } from './logger.js';
 export { sanitize } from './sanitizer.js';
 
 export { notConfiguredMessage, withSetupGuidance } from './errors.js';
@@ -150,3 +151,11 @@ export {
   WorkspaceFileError,
 } from './workspace-file.js';
 export type { WorkspaceFile, WorkspaceFileErrorKind } from './workspace-file.js';
+export {
+  MAX_WORKSPACE_FILES,
+  WorkspaceFileListError,
+  openWorkspaceFile,
+  resolveWorkspaceFileList,
+  sanitizeFilename,
+  writeWorkspaceDownload,
+} from './workspace-transfer.js';

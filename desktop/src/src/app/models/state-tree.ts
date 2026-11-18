@@ -44,6 +44,15 @@ import type { AskUserQuestionItem } from './chat';
  */
 export type AskUserQuestionStateItem = Readonly<AskUserQuestionItem>;
 
+/** Fields of a tool call; `result` is null until the call is answered. Mirrors Rust `state_tree::MessageBlock::ToolUse`. */
+export interface ToolUseState {
+  tool_id: string;
+  tool_name: string;
+  input: string;
+  result: string | null;
+  is_error: boolean;
+}
+
 /**
  * One block inside a conversation entry. Tagged union mirroring the Rust
  * `MessageBlock` serde shape (`{"kind":"text","content":"..."}`).
@@ -51,14 +60,7 @@ export type AskUserQuestionStateItem = Readonly<AskUserQuestionItem>;
 export type MessageBlockState =
   | { kind: 'text'; content: string }
   | { kind: 'thinking'; content: string }
-  | {
-      kind: 'tool_use';
-      tool_id: string;
-      tool_name: string;
-      input: string;
-      result: string | null;
-      is_error: boolean;
-    }
+  | ({ kind: 'tool_use' } & ToolUseState)
   | {
       kind: 'ask_user';
       tool_id: string;

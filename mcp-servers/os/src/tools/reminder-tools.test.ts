@@ -10,6 +10,10 @@ import {
   handleCreateReminder,
   handleUpdateReminder,
   handleCompleteReminder,
+  handleDeleteReminder,
+  handleCreateReminderList,
+  handleUpdateReminderList,
+  handleDeleteReminderList,
   createReminderTools,
 } from './reminder-tools.js';
 
@@ -441,11 +445,204 @@ describe('reminder-tools', () => {
     });
   });
 
+  describe('handleDeleteReminder', () => {
+    it('deletes reminder successfully', async () => {
+      const mockData = { status: 'deleted' };
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: mockData });
+
+      const result = await handleDeleteReminder({ id: 'r-1' });
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual(mockData);
+      expect(runCommand).toHaveBeenCalledWith('reminders', 'delete_reminder', { id: 'r-1' });
+    });
+
+    it('fails when id is empty', async () => {
+      const result = await handleDeleteReminder({ id: '' });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('EMPTY_FIELDS');
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it('propagates the CLI notFound error for an unknown id instead of a silent success', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        new Error("reminders.delete_reminder failed: Reminder with id 'nope' not found")
+      );
+
+      await expect(handleDeleteReminder({ id: 'nope' })).rejects.toThrow('not found');
+    });
+  });
+
+  describe('handleCreateReminderList', () => {
+    it('creates a list with a name and a color', async () => {
+      const mockData = { id: 'list-9', status: 'created' };
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: mockData });
+
+      const result = await handleCreateReminderList({ name: 'Home', color: '#1A2b3C' });
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual(mockData);
+      expect(runCommand).toHaveBeenCalledWith('reminders', 'create_list', {
+        name: 'Home',
+        color: '#1A2b3C',
+      });
+    });
+
+    it('creates a list without a color', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { status: 'created' } });
+
+      const result = await handleCreateReminderList({ name: 'Home' });
+
+      expect(result.success).toBe(true);
+      expect(runCommand).toHaveBeenCalledWith('reminders', 'create_list', { name: 'Home' });
+    });
+
+    it.each([
+      ['', 'EMPTY_FIELDS'],
+      ['   ', 'EMPTY_FIELDS'],
+    ])('rejects the name %j before calling the CLI', async (name, code) => {
+      const result = await handleCreateReminderList({ name });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(code);
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it.each(['red', '#fff', '#12345g', '123456', '#1234567', ' #123456'])(
+      'rejects the color %j before calling the CLI',
+      async (color) => {
+        const result = await handleCreateReminderList({ name: 'Home', color });
+
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('INVALID_FORMAT');
+        expect(runCommand).not.toHaveBeenCalled();
+      }
+    );
+
+    it('rejects a non-string color', async () => {
+      const result = await handleCreateReminderList({ name: 'Home', color: 123 as never });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('INVALID_TYPE');
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('handleUpdateReminderList', () => {
+    it('renames and recolors a list', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { status: 'updated' } });
+
+      const result = await handleUpdateReminderList({
+        list_id: 'Home',
+        name: 'House',
+        color: '#00ff00',
+      });
+
+      expect(result.success).toBe(true);
+      expect(runCommand).toHaveBeenCalledWith('reminders', 'update_list', {
+        list_id: 'Home',
+        name: 'House',
+        color: '#00ff00',
+      });
+    });
+
+    it('accepts a color change alone', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { status: 'updated' } });
+
+      const result = await handleUpdateReminderList({ list_id: 'id-1', color: '#00ff00' });
+
+      expect(result.success).toBe(true);
+    });
+
+    it('fails when list_id is empty', async () => {
+      const result = await handleUpdateReminderList({ list_id: '', name: 'x' });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('EMPTY_FIELDS');
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it('fails when the new name is blank', async () => {
+      const result = await handleUpdateReminderList({ list_id: 'id-1', name: ' ' });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('EMPTY_FIELDS');
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it('fails when neither name nor color is given', async () => {
+      const result = await handleUpdateReminderList({ list_id: 'id-1' });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('MISSING_FIELDS');
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it('rejects a malformed color', async () => {
+      const result = await handleUpdateReminderList({ list_id: 'id-1', color: 'green' });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('INVALID_FORMAT');
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it('propagates the CLI notFound error for an unknown list', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        new Error("reminders.update_list failed: Reminder list 'nope' not found")
+      );
+
+      await expect(handleUpdateReminderList({ list_id: 'nope', name: 'x' })).rejects.toThrow(
+        'not found'
+      );
+    });
+  });
+
+  describe('handleDeleteReminderList', () => {
+    it('deletes a list', async () => {
+      const mockData = { status: 'deleted', deleted_reminders: 0 };
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: mockData });
+
+      const result = await handleDeleteReminderList({ list_id: 'id-1' });
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual(mockData);
+      expect(runCommand).toHaveBeenCalledWith('reminders', 'delete_list', { list_id: 'id-1' });
+    });
+
+    it('forwards force', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { status: 'deleted' } });
+
+      await handleDeleteReminderList({ list_id: 'id-1', force: true });
+
+      expect(runCommand).toHaveBeenCalledWith('reminders', 'delete_list', {
+        list_id: 'id-1',
+        force: true,
+      });
+    });
+
+    it('fails when list_id is empty', async () => {
+      const result = await handleDeleteReminderList({ list_id: '' });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('EMPTY_FIELDS');
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it('rejects a non-boolean force', async () => {
+      const result = await handleDeleteReminderList({ list_id: 'id-1', force: 'yes' as never });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('INVALID_TYPE');
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+  });
+
   describe('createReminderTools', () => {
-    it('returns 6 tool definitions', () => {
+    it('returns 10 tool definitions', () => {
       const tools = createReminderTools();
 
-      expect(tools).toHaveLength(6);
+      expect(tools).toHaveLength(10);
       expect(tools.map((t) => t.tool.name)).toEqual([
         'listReminderLists',
         'listReminders',
@@ -453,7 +650,32 @@ describe('reminder-tools', () => {
         'createReminder',
         'updateReminder',
         'completeReminder',
+        'deleteReminder',
+        'createReminderList',
+        'updateReminderList',
+        'deleteReminderList',
       ]);
+    });
+
+    it('list tools declare their required fields and annotations', () => {
+      const byName = (n: string) => createReminderTools().find((t) => t.tool.name === n)!.tool;
+
+      expect(byName('createReminderList').inputSchema.required).toEqual(['name']);
+      expect(byName('createReminderList').annotations?.destructiveHint).toBe(false);
+      expect(byName('updateReminderList').inputSchema.required).toEqual(['list_id']);
+      expect(byName('updateReminderList').annotations?.destructiveHint).toBe(false);
+      expect(byName('deleteReminderList').inputSchema.required).toEqual(['list_id']);
+      expect(byName('deleteReminderList').annotations?.destructiveHint).toBe(true);
+      expect(byName('deleteReminderList').annotations?.readOnlyHint).toBe(false);
+    });
+
+    it('deleteReminderTool requires id and is declared destructive', () => {
+      const tools = createReminderTools();
+      const deleteTool = tools.find((t) => t.tool.name === 'deleteReminder')!;
+
+      expect(deleteTool.tool.inputSchema.required).toEqual(['id']);
+      expect(deleteTool.tool.annotations?.destructiveHint).toBe(true);
+      expect(deleteTool.tool.annotations?.readOnlyHint).toBe(false);
     });
 
     it('updateReminderTool requires only id and lets due_date be null', () => {
@@ -535,6 +757,24 @@ describe('reminder-tools', () => {
       expect(items?.properties?.completed_date).toBeDefined();
     });
 
+    it('listRemindersTool outputSchema reports total and truncated', () => {
+      const listTool = createReminderTools().find((t) => t.tool.name === 'listReminders')!;
+      const props = (listTool.tool.outputSchema as any).properties;
+      expect(props.total.type).toBe('number');
+      expect(props.truncated.type).toBe('boolean');
+    });
+
+    it('listRemindersTool inputSchema declares the filters and the sort enum', () => {
+      const listTool = createReminderTools().find((t) => t.tool.name === 'listReminders')!;
+      const props = (listTool.tool.inputSchema as any).properties;
+      expect(props.due_from.type).toBe('string');
+      expect(props.due_to.type).toBe('string');
+      expect(props.overdue.type).toBe('boolean');
+      expect(props.search.type).toBe('string');
+      expect(props.sort.enum).toEqual(['due_date', 'created', 'name']);
+      expect(props.limit.description).toContain('default 50');
+    });
+
     it('getReminderTool outputSchema includes tags', () => {
       const tools = createReminderTools();
       const getTool = tools.find((t) => t.tool.name === 'getReminder')!;
@@ -562,6 +802,63 @@ describe('reminder-tools', () => {
         const result = await handleListReminders({ show_completed: 'true' as any });
         expect(result.success).toBe(false);
         expect(result.error?.code).toBe('INVALID_TYPE');
+      });
+
+      it.each(['due_from', 'due_to'] as const)('rejects an invalid %s', async (field) => {
+        const result = await handleListReminders({ [field]: '15.06.2026' });
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('INVALID_DATE');
+        expect(runCommand).not.toHaveBeenCalled();
+      });
+
+      it('rejects overdue as string', async () => {
+        const result = await handleListReminders({ overdue: 'true' as any });
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('INVALID_TYPE');
+      });
+
+      it('rejects an empty search', async () => {
+        const result = await handleListReminders({ search: '  ' });
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('EMPTY_FIELDS');
+      });
+
+      it('rejects a search longer than the short limit', async () => {
+        const result = await handleListReminders({ search: 'a'.repeat(1001) });
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('FIELD_TOO_LONG');
+      });
+
+      it('rejects an unknown sort and names the allowed values', async () => {
+        const result = await handleListReminders({ sort: 'priority' as any });
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('INVALID_VALUE');
+        expect(JSON.stringify(result.error)).toContain('due_date, created, name');
+        expect(runCommand).not.toHaveBeenCalled();
+      });
+
+      it('rejects limit above 10000', async () => {
+        const result = await handleListReminders({ limit: 10_001 });
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('OUT_OF_RANGE');
+      });
+
+      it('passes every filter to the CLI unchanged', async () => {
+        vi.mocked(runCommand).mockResolvedValueOnce({
+          stdout: '',
+          parsed: { reminders: [], total: 0, truncated: false },
+        });
+        const params = {
+          due_from: '2026-06-15',
+          due_to: '2026-06-16T09:00:00',
+          overdue: true,
+          search: 'faktura',
+          sort: 'name' as const,
+          limit: 5,
+        };
+        const result = await handleListReminders(params);
+        expect(result.success).toBe(true);
+        expect(runCommand).toHaveBeenCalledWith('reminders', 'list_reminders', params);
       });
     });
 

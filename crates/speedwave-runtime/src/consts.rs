@@ -3130,6 +3130,7 @@ mod tests {
         let desktop = include_str!("../../../desktop/src-tauri/Cargo.toml");
         let proxy = include_str!("../../../containers/proxy/Cargo.toml");
         let pii_engine = include_str!("../../pii-engine/Cargo.toml");
+        let access_policy = include_str!("../../access-policy/Cargo.toml");
 
         let root_clippy = lint_table(root, "[workspace.lints.clippy]");
         assert!(
@@ -3165,6 +3166,16 @@ mod tests {
             lint_table(root, "[workspace.lints.rust]"),
             lint_table(pii_engine, "[lints.rust]"),
             "root [workspace.lints.rust] must equal pii-engine [lints.rust]"
+        );
+        assert_eq!(
+            root_clippy,
+            lint_table(access_policy, "[lints.clippy]"),
+            "root [workspace.lints.clippy] must equal access-policy [lints.clippy]"
+        );
+        assert_eq!(
+            lint_table(root, "[workspace.lints.rust]"),
+            lint_table(access_policy, "[lints.rust]"),
+            "root [workspace.lints.rust] must equal access-policy [lints.rust]"
         );
     }
 

@@ -4,6 +4,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import type { Readable } from 'node:stream';
 import axios, { type AxiosInstance, type AxiosRequestConfig } from 'axios';
 import {
   ts,
@@ -132,6 +133,12 @@ export class AtlassianClient {
         return res.data;
       } catch (error) {
         lastError = error;
+        if (config.responseType === 'stream') {
+          (axios.isAxiosError(error)
+            ? (error.response?.data as Readable | undefined)
+            : undefined
+          )?.destroy();
+        }
         if (attempt === MAX_RETRIES) break;
 
         const status = axios.isAxiosError(error) ? error.response?.status : undefined;
@@ -236,6 +243,23 @@ export class AtlassianClient {
         },
       },
       { retryable: false }
+    );
+  }
+
+  /**
+   * Stream an attachment's content from the Jira host.
+   * @param attachmentId - The global attachment ID.
+   */
+  downloadAttachmentContent(attachmentId: string): Promise<Readable> {
+    return this.request<Readable>(
+      {
+        method: 'GET',
+        url: `/rest/api/3/attachment/content/${encodeURIComponent(attachmentId)}`,
+        params: { redirect: false },
+        responseType: 'stream',
+        headers: { Accept: '*/*' },
+      },
+      { retryable: true }
     );
   }
 

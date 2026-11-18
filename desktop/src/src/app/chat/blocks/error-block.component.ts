@@ -1,4 +1,5 @@
-import { ChangeDetectionStrategy, Component, computed, input, output } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, inject, input, output } from '@angular/core';
+import { Router } from '@angular/router';
 import type { ErrorBlockKind } from '../../models/chat';
 
 /** Visual shape for an error block — drives which Tailwind classes get applied. */
@@ -110,6 +111,8 @@ export class ErrorBlockComponent {
   /** Parent can listen for user clicks on the inline action button. */
   readonly actioned = output<void>();
 
+  private readonly router = inject(Router);
+
   /** Resolved kind, never `undefined` — used by every downstream computed. */
   private readonly resolvedKind = computed<ErrorBlockKind>(() => this.kind() ?? 'generic');
 
@@ -162,6 +165,7 @@ export class ErrorBlockComponent {
 
   /** Forwards the user's click on the inline action button to the parent. */
   onAction(): void {
+    if (this.resolvedKind() === 'auth_required') void this.router.navigate(['/settings']);
     this.actioned.emit();
   }
 }

@@ -5,8 +5,10 @@
 import {
   Tool,
   ToolDefinition,
+  teachingToolResult,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
+  DESTRUCTIVE_ANNOTATIONS,
   META_KEYS,
 } from '@speedwave/mcp-shared';
 import {
@@ -22,17 +24,31 @@ import { runCommand } from '../platform-runner.js';
 /** Tags become `[#tag]` markers inside the notes field, so these characters would forge markers. */
 const TAG_MARKER_CHARS = { pattern: /[[\]#]/, describe: '[, ], or # characters' };
 
+const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
+
 /** Input parameters for the listReminderLists tool (no params required). */
 type ListReminderListsParams = Record<string, never>;
+
+const REMINDER_SORT_VALUES = ['due_date', 'created', 'name'] as const;
 
 /** Input parameters for the listReminders tool. */
 interface ListRemindersParams {
   /** Filter by reminder list ID. */
   list_id?: string;
-  /** Max reminders to return. */
+  /** Max reminders to return (default 50). */
   limit?: number;
   /** Include completed reminders. */
   show_completed?: boolean;
+  /** Only reminders due at or after this date (same format as `due_date`). */
+  due_from?: string;
+  /** Only reminders due at or before this date; a bare day includes that whole day. */
+  due_to?: string;
+  /** Only incomplete reminders due before now. */
+  overdue?: boolean;
+  /** Case- and diacritic-insensitive substring of the name or notes. */
+  search?: string;
+  /** Result order (default due_date). */
+  sort?: (typeof REMINDER_SORT_VALUES)[number];
 }
 
 /** Input parameters for the getReminder tool. */
@@ -83,6 +99,28 @@ interface CompleteReminderParams {
   id: string;
 }
 
+/** Input parameters for the deleteReminder tool. */
+interface DeleteReminderParams {
+  /** Reminder ID to delete. */
+  id: string;
+}
+
+interface CreateReminderListParams {
+  name: string;
+  color?: string;
+}
+
+interface UpdateReminderListParams {
+  list_id: string;
+  name?: string;
+  color?: string;
+}
+
+interface DeleteReminderListParams {
+  list_id: string;
+  force?: boolean;
+}
+
 const listReminderListsTool: Tool = {
   name: 'listReminderLists',
   description: 'List all reminder lists/groups available on this device',
@@ -124,7 +162,8 @@ const listReminderListsTool: Tool = {
 
 const listRemindersTool: Tool = {
   name: 'listReminders',
-  description: 'List reminders, optionally filtered by list',
+  description:
+    'List reminders, optionally filtered by list, due date range, overdue state or text; reports total and truncated when the limit cut the result',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
@@ -132,7 +171,8 @@ const listRemindersTool: Tool = {
     [META_KEYS.OS_CATEGORY]: 'reminders',
   },
   keywords: ['os', 'reminders', 'list', 'tasks', 'todo', 'due'],
-  example: 'const { reminders } = await os.listReminders({ show_completed: false, limit: 20 })',
+  example:
+    'const { reminders, total, truncated } = await os.listReminders({ overdue: true, sort: "due_date" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -140,16 +180,51 @@ const listRemindersTool: Tool = {
         type: 'string',
         description: 'Filter by reminder list id or its exact display name',
       },
-      limit: { type: 'number', description: 'Max reminders to return (default 20)' },
+      limit: { type: 'number', description: 'Max reminders to return (default 50)' },
       show_completed: {
         type: 'boolean',
         description: 'Include completed reminders (default false)',
+      },
+      due_from: {
+        type: 'string',
+        description:
+          'Only reminders due at or after this moment, same format as due_date (a bare day starts at local midnight). Reminders without a due date are left out when a range is given',
+      },
+      due_to: {
+        type: 'string',
+        description:
+          'Only reminders due before the end of this moment, same format as due_date (a bare day includes that whole day). Reminders without a due date are left out when a range is given',
+      },
+      overdue: {
+        type: 'boolean',
+        description:
+          'Only incomplete reminders already past due (an all-day reminder is overdue once its day is over); ignores show_completed (default false)',
+      },
+      search: {
+        type: 'string',
+        description:
+          'Substring of the name or notes, ignoring case and diacritics ("faktura" finds "Faktúra")',
+      },
+      sort: {
+        type: 'string',
+        enum: REMINDER_SORT_VALUES,
+        description:
+          'Order of the result: due_date ascending with undated last (default), created ascending, or name alphabetical',
       },
     },
   },
   outputSchema: {
     type: 'object',
     properties: {
+      total: {
+        type: 'number',
+        description: 'Number of reminders that matched, before the limit was applied',
+      },
+      truncated: {
+        type: 'boolean',
+        description:
+          'True when the limit cut the result; narrow the query instead of raising limit',
+      },
       reminders: {
         type: 'array',
         items: {
@@ -194,6 +269,14 @@ const listRemindersTool: Tool = {
     {
       description: 'Full: list from specific list with limit',
       input: { list_id: 'abc-123', show_completed: false, limit: 10 },
+    },
+    {
+      description: 'Overdue reminders matching a word, earliest due first',
+      input: { overdue: true, search: 'faktura', sort: 'due_date' },
+    },
+    {
+      description: 'Everything due in June 2026 (a bare due_to day includes that whole day)',
+      input: { due_from: '2026-06-01', due_to: '2026-06-30' },
     },
   ],
 };
@@ -461,6 +544,172 @@ const completeReminderTool: Tool = {
   ],
 };
 
+const deleteReminderTool: Tool = {
+  name: 'deleteReminder',
+  description: 'Permanently delete a reminder (there is no trash to restore it from)',
+  annotations: DESTRUCTIVE_ANNOTATIONS,
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.OS_CATEGORY]: 'reminders',
+  },
+  keywords: ['os', 'reminder', 'delete', 'remove'],
+  example: 'await os.deleteReminder({ id: "abc-123" })',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      id: {
+        type: 'string',
+        description:
+          'Reminder ID to delete (must be the exact id returned by a list/get/create call; names are not accepted)',
+      },
+    },
+    required: ['id'],
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      status: { type: 'string', description: '"deleted"' },
+    },
+  },
+  inputExamples: [
+    {
+      description: 'Delete a reminder',
+      input: { id: 'abc-123' },
+    },
+  ],
+};
+
+const colorProperty = {
+  type: 'string',
+  description: 'List color as #RRGGBB, the format listReminderLists returns',
+};
+
+const createReminderListTool: Tool = {
+  name: 'createReminderList',
+  description: 'Create a reminder list in the same account as the default list for new reminders',
+  annotations: WRITE_ANNOTATIONS,
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.OS_CATEGORY]: 'reminders',
+  },
+  keywords: ['os', 'reminders', 'list', 'create', 'new', 'group'],
+  example: 'await os.createReminderList({ name: "Home", color: "#34c759" })',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      name: { type: 'string', description: 'Name of the new list' },
+      color: colorProperty,
+    },
+    required: ['name'],
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', description: 'ID of the created list' },
+      status: { type: 'string', description: '"created"' },
+    },
+  },
+  inputExamples: [
+    {
+      description: 'Create a green list',
+      input: { name: 'Home', color: '#34c759' },
+    },
+  ],
+};
+
+const updateReminderListTool: Tool = {
+  name: 'updateReminderList',
+  description:
+    'Rename a reminder list or change its color; only the fields you pass change. Read-only lists are refused',
+  annotations: WRITE_ANNOTATIONS,
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.OS_CATEGORY]: 'reminders',
+  },
+  keywords: ['os', 'reminders', 'list', 'update', 'rename', 'color'],
+  example: 'await os.updateReminderList({ list_id: "Home", name: "House", color: "#007aff" })',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      list_id: {
+        type: 'string',
+        description: 'List to update: its ID or its exact display name',
+      },
+      name: { type: 'string', description: 'New list name' },
+      color: colorProperty,
+    },
+    required: ['list_id'],
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      status: { type: 'string', description: '"updated"' },
+    },
+  },
+  inputExamples: [
+    {
+      description: 'Rename a list',
+      input: { list_id: 'Home', name: 'House' },
+    },
+    {
+      description: 'Change the color of a list',
+      input: { list_id: 'Home', color: '#007aff' },
+    },
+  ],
+};
+
+const deleteReminderListTool: Tool = {
+  name: 'deleteReminderList',
+  description:
+    'Permanently delete a reminder list. A list that still holds reminders is refused unless force is true, which deletes the reminders with it (there is no trash)',
+  annotations: DESTRUCTIVE_ANNOTATIONS,
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.OS_CATEGORY]: 'reminders',
+  },
+  keywords: ['os', 'reminders', 'list', 'delete', 'remove'],
+  example: 'await os.deleteReminderList({ list_id: "Home" })',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      list_id: {
+        type: 'string',
+        description: 'List to delete: its ID or its exact display name',
+      },
+      force: {
+        type: 'boolean',
+        description:
+          'Delete the list although it still holds reminders; they are deleted with it. Default false',
+      },
+    },
+    required: ['list_id'],
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      status: { type: 'string', description: '"deleted"' },
+      deleted_reminders: {
+        type: 'number',
+        description: 'Number of reminders that were deleted with the list',
+      },
+    },
+  },
+  inputExamples: [
+    {
+      description: 'Delete an empty list',
+      input: { list_id: 'Home' },
+    },
+    {
+      description: 'Delete a list together with its reminders',
+      input: { list_id: 'Home', force: true },
+    },
+  ],
+};
+
 /**
  * Lists all reminder lists/groups available on this device.
  * @param _params - Unused tool input parameters.
@@ -479,11 +728,29 @@ export async function handleListReminderLists(
 export async function handleListReminders(params: ListRemindersParams): Promise<ToolResult> {
   const p = asRecord(params);
   const v = validateAll(p, {
-    booleans: ['show_completed'],
-    strings: [['list_id', MAX_LENGTHS.id, false]],
+    booleans: ['show_completed', 'overdue'],
+    strings: [
+      ['list_id', MAX_LENGTHS.id, false],
+      ['search', MAX_LENGTHS.short, false],
+    ],
     numbers: [['limit', 1, 10_000]],
+    dates: ['due_from', 'due_to'],
   });
   if (!v.valid) return v.error;
+  if (p.search !== undefined) {
+    const search = requireFields(p, ['search']);
+    if (!search.valid) return search.error;
+  }
+  if (p.sort !== undefined && !(REMINDER_SORT_VALUES as readonly unknown[]).includes(p.sort)) {
+    return teachingToolResult(
+      {
+        paramName: 'sort',
+        received: p.sort,
+        nextStep: `Pass one of ${REMINDER_SORT_VALUES.join(', ')}.`,
+      },
+      'INVALID_VALUE'
+    );
+  }
   const result = await runCommand('reminders', 'list_reminders', p);
   return { success: true, data: result.parsed };
 }
@@ -569,6 +836,98 @@ export async function handleCompleteReminder(params: CompleteReminderParams): Pr
   return { success: true, data: result.parsed };
 }
 
+/**
+ * Permanently deletes a reminder.
+ * @param params - Tool input parameters.
+ */
+export async function handleDeleteReminder(params: DeleteReminderParams): Promise<ToolResult> {
+  const p = asRecord(params);
+  const v = validateAll(p, {
+    required: ['id'],
+    strings: [['id', MAX_LENGTHS.id, false]],
+  });
+  if (!v.valid) return v.error;
+  const result = await runCommand('reminders', 'delete_reminder', p);
+  return { success: true, data: result.parsed };
+}
+
+/**
+ * Creates a reminder list.
+ * @param params - Tool input parameters.
+ */
+export async function handleCreateReminderList(
+  params: CreateReminderListParams
+): Promise<ToolResult> {
+  const p = asRecord(params);
+  const v = validateAll(p, {
+    required: ['name'],
+    strings: [
+      ['name', MAX_LENGTHS.short, false],
+      ['color', MAX_LENGTHS.short, false],
+    ],
+  });
+  if (!v.valid) return v.error;
+  const color = requireHexColor(p);
+  if (!color.valid) return color.error;
+  const result = await runCommand('reminders', 'create_list', p);
+  return { success: true, data: result.parsed };
+}
+
+/**
+ * Renames and/or recolors a reminder list; only the fields present in params change.
+ * @param params - Tool input parameters.
+ */
+export async function handleUpdateReminderList(
+  params: UpdateReminderListParams
+): Promise<ToolResult> {
+  const p = asRecord(params);
+  const v = validateAll(p, {
+    required: ['list_id'],
+    strings: [
+      ['list_id', MAX_LENGTHS.id, false],
+      ['name', MAX_LENGTHS.short, false],
+      ['color', MAX_LENGTHS.short, false],
+    ],
+  });
+  if (!v.valid) return v.error;
+  if (p.name === undefined && p.color === undefined) {
+    return teachingToolResult(
+      {
+        paramName: 'name, color',
+        received: undefined,
+        nextStep: 'Pass name, color, or both; there is nothing to change otherwise.',
+      },
+      'MISSING_FIELDS'
+    );
+  }
+  if (p.name !== undefined) {
+    const nonEmpty = requireFields(p, ['name']);
+    if (!nonEmpty.valid) return nonEmpty.error;
+  }
+  const color = requireHexColor(p);
+  if (!color.valid) return color.error;
+  const result = await runCommand('reminders', 'update_list', p);
+  return { success: true, data: result.parsed };
+}
+
+/**
+ * Deletes a reminder list; a list that still holds reminders needs force.
+ * @param params - Tool input parameters.
+ */
+export async function handleDeleteReminderList(
+  params: DeleteReminderListParams
+): Promise<ToolResult> {
+  const p = asRecord(params);
+  const v = validateAll(p, {
+    required: ['list_id'],
+    booleans: ['force'],
+    strings: [['list_id', MAX_LENGTHS.id, false]],
+  });
+  if (!v.valid) return v.error;
+  const result = await runCommand('reminders', 'delete_list', p);
+  return { success: true, data: result.parsed };
+}
+
 /** Creates tool definitions for all reminder operations. */
 export function createReminderTools(): ToolDefinition[] {
   return [
@@ -578,5 +937,29 @@ export function createReminderTools(): ToolDefinition[] {
     { tool: createReminderTool, handler: withValidation(handleCreateReminder) },
     { tool: updateReminderTool, handler: withValidation(handleUpdateReminder) },
     { tool: completeReminderTool, handler: withValidation(handleCompleteReminder) },
+    { tool: deleteReminderTool, handler: withValidation(handleDeleteReminder) },
+    { tool: createReminderListTool, handler: withValidation(handleCreateReminderList) },
+    { tool: updateReminderListTool, handler: withValidation(handleUpdateReminderList) },
+    { tool: deleteReminderListTool, handler: withValidation(handleDeleteReminderList) },
   ];
+}
+
+function requireHexColor(
+  params: Record<string, unknown>
+): { valid: true } | { valid: false; error: ToolResult } {
+  const color = params.color;
+  if (color === undefined || (typeof color === 'string' && HEX_COLOR.test(color))) {
+    return { valid: true };
+  }
+  return {
+    valid: false,
+    error: teachingToolResult(
+      {
+        paramName: 'color',
+        received: color,
+        nextStep: 'Pass color as #RRGGBB, e.g. "#34c759".',
+      },
+      'INVALID_FORMAT'
+    ),
+  };
 }

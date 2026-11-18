@@ -5,7 +5,8 @@ use crate::history;
 use crate::notifications::{notify_session_event, SessionEvent};
 use crate::pii_display::DisplayPolicy;
 use speedwave_runtime::stream::{
-    AskUserOption, AskUserQuestionItem, MAX_ASK_USER_QUESTIONS, MAX_ASK_USER_WIRE_BYTES,
+    classify_turn_error, AskUserOption, AskUserQuestionItem, TurnErrorKind, MAX_ASK_USER_QUESTIONS,
+    MAX_ASK_USER_WIRE_BYTES,
 };
 use speedwave_runtime::{claude_settings, config, consts, runtime};
 use std::collections::HashMap;
@@ -70,6 +71,8 @@ pub enum StreamChunk {
         content: String,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         turn_ended: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<TurnErrorKind>,
     },
     SystemInit {
         model: String,
@@ -131,9 +134,11 @@ pub(crate) fn sanitize_chunk(chunk: StreamChunk) -> StreamChunk {
         StreamChunk::Error {
             content,
             turn_ended,
+            kind,
         } => StreamChunk::Error {
             content: sanitize(&content),
             turn_ended,
+            kind,
         },
         StreamChunk::Result {
             result_text: Some(text),
@@ -209,9 +214,11 @@ fn detokenize_chunk(chunk: StreamChunk, policy: &DisplayPolicy) -> StreamChunk {
         StreamChunk::Error {
             content,
             turn_ended,
+            kind,
         } => StreamChunk::Error {
             content: detok(policy, &content),
             turn_ended,
+            kind,
         },
         StreamChunk::Result {
             result_text: Some(text),
@@ -337,6 +344,20 @@ pub(crate) fn is_sidechain_event(parsed: &serde_json::Value) -> bool {
     !parsed["parent_tool_use_id"].is_null() || parsed["isSidechain"].as_bool() == Some(true)
 }
 
+pub(crate) fn tool_result_text(block: &serde_json::Value) -> String {
+    if let Some(s) = block["content"].as_str() {
+        s.to_string()
+    } else if let Some(arr) = block["content"].as_array() {
+        arr.iter()
+            .filter(|b| b["type"].as_str() == Some("text"))
+            .filter_map(|b| b["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        String::new()
+    }
+}
+
 pub(crate) fn turn_usage_from_jsonl(usage: &serde_json::Value) -> Option<TurnUsage> {
     let obj = usage.as_object()?;
     let read = |k: &str| obj.get(k).and_then(serde_json::Value::as_u64).unwrap_or(0);
@@ -422,6 +443,7 @@ fn option_to_vec(
 pub struct StreamParser {
     active_blocks: HashMap<u64, (String, String)>,
     pending_assistant_uuid: Option<String>,
+    pending_turn_error_kind: Option<TurnErrorKind>,
     committed_user_uuids: std::collections::HashSet<String>,
     previous_session_usage: TurnUsage,
     last_context_usage: Option<TurnUsage>,
@@ -438,6 +460,7 @@ impl StreamParser {
         Self {
             active_blocks: HashMap::new(),
             pending_assistant_uuid: None,
+            pending_turn_error_kind: None,
             committed_user_uuids: std::collections::HashSet::new(),
             previous_session_usage: TurnUsage::default(),
             last_context_usage: None,
@@ -490,6 +513,7 @@ impl StreamParser {
                 self.capture_assistant_uuid(parsed);
                 self.capture_assistant_model(parsed);
                 self.capture_context_usage(parsed);
+                self.capture_turn_error_kind(parsed);
                 (Self::complete_tool_inputs(parsed), None)
             }
             "system" => self.parse_system_line(parsed),
@@ -535,6 +559,15 @@ impl StreamParser {
         }
         if let Some(model) = parsed["message"]["model"].as_str() {
             self.model_tracker.observe_assistant(model);
+        }
+    }
+
+    fn capture_turn_error_kind(&mut self, parsed: &serde_json::Value) {
+        if is_sidechain_event(parsed) {
+            return;
+        }
+        if let Some(kind) = parsed["error"].as_str().and_then(classify_turn_error) {
+            self.pending_turn_error_kind = Some(kind);
         }
     }
 
@@ -880,22 +913,7 @@ impl StreamParser {
             };
             let is_error = block["is_error"].as_bool().unwrap_or(false);
 
-            let result_content = if let Some(s) = block["content"].as_str() {
-                s.to_string()
-            } else if let Some(arr) = block["content"].as_array() {
-                arr.iter()
-                    .filter_map(|b| {
-                        if b["type"].as_str() == Some("text") {
-                            b["text"].as_str().map(String::from)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            } else {
-                String::new()
-            };
+            let result_content = tool_result_text(block);
 
             log_lines.push(format!("result: {} error={}", tool_use_id, is_error));
             chunks.push(StreamChunk::ToolResult {
@@ -916,6 +934,7 @@ impl StreamParser {
         parsed: &serde_json::Value,
     ) -> (Option<StreamChunk>, Option<LogEntry>) {
         let assistant_uuid = self.pending_assistant_uuid.take();
+        let turn_error_kind = self.pending_turn_error_kind.take();
 
         let is_error = parsed["is_error"].as_bool().unwrap_or(false);
 
@@ -938,14 +957,21 @@ impl StreamParser {
                      Check the provider server logs or try a different model."
                     .to_string()
             } else {
-                log::warn!("turn ended with an API error: {result_text}");
+                log::warn!(
+                    "turn ended with an API error ({} chars)",
+                    result_text.chars().count()
+                );
                 result_text.to_string()
             };
-            let log_message = format!("error: {error_text}");
+            let log_message = format!(
+                "error: {} chars, kind={turn_error_kind:?}",
+                error_text.chars().count()
+            );
             return (
                 Some(StreamChunk::Error {
                     content: error_text,
                     turn_ended: true,
+                    kind: turn_error_kind,
                 }),
                 Some(LogEntry {
                     prefix: "RESULT",
@@ -1153,20 +1179,26 @@ impl StreamParser {
             return (None, None);
         }
 
+        let matched_pattern = Self::ACTIONABLE_PATTERNS
+            .iter()
+            .find(|p| message.contains(**p));
         let log_entry = Some(LogEntry {
             prefix: "SYSTEM",
-            message: message.to_string(),
+            message: format!(
+                "message: {} chars, actionable pattern: {}",
+                message.chars().count(),
+                matched_pattern.unwrap_or(&"none")
+            ),
         });
 
-        let is_actionable = Self::ACTIONABLE_PATTERNS
-            .iter()
-            .any(|p| message.contains(p));
+        let is_actionable = matched_pattern.is_some();
 
         if is_actionable {
             (
                 Some(StreamChunk::Error {
                     content: message.to_string(),
                     turn_ended: false,
+                    kind: None,
                 }),
                 log_entry,
             )
@@ -1911,6 +1943,21 @@ impl AwaitedResult {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct LaunchSettings {
+    model_pin: Option<String>,
+    model_picker: Option<serde_json::Value>,
+}
+
+impl LaunchSettings {
+    fn read(data_dir: &std::path::Path, project: &str) -> Self {
+        Self {
+            model_pin: claude_settings::get_model_pin(data_dir, project),
+            model_picker: claude_settings::get_model_picker(data_dir, project),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct PreparedSpawn {
     pub args: Vec<String>,
@@ -2002,7 +2049,7 @@ impl ChatSession {
         resume_session_id: Option<&str>,
         resume_at_uuid: Option<&str>,
         model_override: Option<&str>,
-        model_pin: Option<&str>,
+        settings: &LaunchSettings,
     ) -> anyhow::Result<PreparedSpawn> {
         if let Some(id) = resume_session_id {
             history::validate_session_id(id)?;
@@ -2025,7 +2072,10 @@ impl ChatSession {
             .active_provider()
             .is_none_or(|entry| entry.kind.is_anthropic());
         let launch_model = if is_anthropic {
-            Some(launch_model_id(model_pin, model_override)?)
+            Some(launch_model_id(
+                settings.model_pin.as_deref(),
+                model_override,
+            )?)
         } else {
             if let Some(model) = model_override {
                 log::info!(
@@ -2037,6 +2087,14 @@ impl ChatSession {
         if let Some(model) = &launch_model {
             flags.push("--model".to_string());
             flags.push(model.clone());
+        }
+        if is_anthropic {
+            if let Some(picker) =
+                crate::model_picker::picker_settings_arg(settings.model_picker.as_ref())
+            {
+                flags.push("--settings".to_string());
+                flags.push(picker);
+            }
         }
 
         let args = build_claude_args(instance_id, resume_session_id, resume_at_uuid, &flags);
@@ -2084,10 +2142,8 @@ impl ChatSession {
         )?;
 
         let instance_id = speedwave_runtime::session::new_instance_id();
-        let model_pin = claude_settings::get_model_pin(
-            speedwave_runtime::consts::data_dir(),
-            &self.project_name,
-        );
+        let launch_settings =
+            LaunchSettings::read(speedwave_runtime::consts::data_dir(), &self.project_name);
         let PreparedSpawn { args, container } = Self::prepare_args(
             &self.project_name,
             &user_config,
@@ -2095,7 +2151,7 @@ impl ChatSession {
             resume_session_id,
             resume_at_uuid,
             model_override,
-            model_pin.as_deref(),
+            &launch_settings,
         )?;
         #[cfg(feature = "e2e")]
         let args = crate::e2e_support::with_claude_debug(args);
@@ -2337,6 +2393,7 @@ impl ChatSession {
                                         content: "Internal error: pending_requests lock poisoned"
                                             .to_string(),
                                         turn_ended: false,
+                                        kind: None,
                                     },
                                     &display_policy,
                                 );
@@ -2363,8 +2420,9 @@ impl ChatSession {
                     } else {
                         if let Some(reason) = &ctrl.safety_check {
                             log::warn!(
-                                "declined a {} call that Claude Code's safety check holds for approval: {reason}",
-                                ctrl.tool_name
+                                "declined a {} call that Claude Code's safety check holds for approval (reason of {} chars)",
+                                ctrl.tool_name,
+                                reason.chars().count()
                             );
                         }
                         let response = build_tool_permission_response(&ctrl);
@@ -2382,6 +2440,7 @@ impl ChatSession {
                                                 "Failed to write auto-approve to stdin: {e}"
                                             ),
                                             turn_ended: false,
+                                            kind: None,
                                         },
                                         &display_policy,
                                     );
@@ -2399,6 +2458,7 @@ impl ChatSession {
                                                 "Failed to flush auto-approve to stdin: {e}"
                                             ),
                                             turn_ended: false,
+                                            kind: None,
                                         },
                                         &display_policy,
                                     );
@@ -2413,6 +2473,7 @@ impl ChatSession {
                                     StreamChunk::Error {
                                         content: "Internal error: stdin lock poisoned".to_string(),
                                         turn_ended: false,
+                                        kind: None,
                                     },
                                     &display_policy,
                                 );
@@ -2480,6 +2541,7 @@ impl ChatSession {
                         StreamChunk::Error {
                             content: refusal,
                             turn_ended: false,
+                            kind: None,
                         },
                         &display_policy,
                     );
@@ -2548,6 +2610,7 @@ impl ChatSession {
                         "Claude session ended unexpectedly. Check the session log for details."
                             .to_string(),
                     turn_ended: false,
+                    kind: None,
                 };
                 emit_sanitized_chunk(&app_handle, &tab_id_for_reader, chunk, &display_policy);
                 notify_session_event(
@@ -3351,6 +3414,7 @@ mod tests {
             StreamChunk::Error {
                 content: secret.into(),
                 turn_ended: false,
+                kind: None,
             },
         ] {
             let out = format!("{:?}", sanitize_chunk(chunk));
@@ -3497,15 +3561,18 @@ mod tests {
             StreamChunk::Error {
                 content: tokenized.clone(),
                 turn_ended: true,
+                kind: Some(TurnErrorKind::AuthenticationFailed),
             },
             &policy,
         ) {
             StreamChunk::Error {
                 content,
                 turn_ended,
+                kind,
             } => {
                 assert_eq!(content, "secret@example.com");
                 assert!(turn_ended, "detokenizing must keep the turn-end marker");
+                assert_eq!(kind, Some(TurnErrorKind::AuthenticationFailed));
             }
             other => panic!("variant changed: {other:?}"),
         }
@@ -3944,6 +4011,7 @@ mod tests {
         awaited.observe(&[StreamChunk::Error {
             content: "retrying".to_string(),
             turn_ended: false,
+            kind: None,
         }]);
         assert!(
             holds_the_turn_awake(&awaited),
@@ -3960,6 +4028,7 @@ mod tests {
         awaited.observe(&[StreamChunk::Error {
             content: "overloaded".to_string(),
             turn_ended: true,
+            kind: None,
         }]);
         assert!(!holds_the_turn_awake(&awaited));
         awaited.message_written();
@@ -4000,6 +4069,7 @@ mod tests {
             turn_end_event(&[StreamChunk::Error {
                 content: "overloaded".to_string(),
                 turn_ended: true,
+                kind: None,
             }]),
             Some(SessionEvent::SessionError)
         );
@@ -4007,6 +4077,7 @@ mod tests {
             turn_end_event(&[StreamChunk::Error {
                 content: "model refused".to_string(),
                 turn_ended: false,
+                kind: None,
             }]),
             None,
             "an error that leaves the turn running is not the end of the session's work"
@@ -4036,6 +4107,7 @@ mod tests {
         awaited.observe(&[StreamChunk::Error {
             content: "boom".to_string(),
             turn_ended: false,
+            kind: None,
         }]);
         assert!(!awaited.is_awaited());
         awaited.observe(&[]);
@@ -4414,7 +4486,7 @@ mod tests {
             |status| reported = Some(status),
         )
         .expect("a live session reports its status");
-        assert!(matches!(&status, SessionInfoState::Ready { info } if info.models.len() == 5));
+        assert!(matches!(&status, SessionInfoState::Ready { info } if info.models.len() == 6));
         assert_eq!(*slot.lock().unwrap(), status);
         assert_eq!(reported, Some(status));
     }
@@ -5905,15 +5977,15 @@ mod tests {
     }
 
     const SOFT_IMPOSE_CAPTURE: &str =
-        include_str!("../tests/fixtures/cc-2.1.295-soft-impose.sanitized.ndjson");
+        include_str!("../tests/fixtures/cc-2.1.322-soft-impose.sanitized.ndjson");
     const MID_TURN_COMMAND_CAPTURE: &str =
-        include_str!("../tests/fixtures/cc-2.1.295-model-command-mid-tool-turn.sanitized.ndjson");
+        include_str!("../tests/fixtures/cc-2.1.322-model-command-mid-tool-turn.sanitized.ndjson");
     const MODEL_PICKS_CAPTURE: &str =
-        include_str!("../tests/fixtures/cc-2.1.295-model-picks.sanitized.ndjson");
+        include_str!("../tests/fixtures/cc-2.1.322-model-picks.sanitized.ndjson");
     const MODEL_PICKS_REQUESTS: &str =
-        include_str!("../tests/fixtures/cc-2.1.295-model-picks-requests.sanitized.json");
+        include_str!("../tests/fixtures/cc-2.1.322-model-picks-requests.sanitized.json");
     const SET_MODEL_CHECK: &str =
-        include_str!("../tests/fixtures/cc-2.1.295-set-model-check.sanitized.json");
+        include_str!("../tests/fixtures/cc-2.1.322-set-model-check.sanitized.json");
 
     fn set_model_check() -> serde_json::Value {
         serde_json::from_str(SET_MODEL_CHECK).unwrap()
@@ -6502,8 +6574,8 @@ mod tests {
         assert_eq!(routed_answers, 1);
         assert_eq!(
             pending.wait(std::time::Duration::from_secs(1)),
-            Ok(serde_json::Value::Null),
-            "the captured answer resolves the request"
+            Ok(serde_json::json!({ "model": ROUTED_PICK })),
+            "the captured answer resolves the request with the model Claude Code settled on"
         );
         let turn_ends: Vec<(Option<String>, Option<String>)> = emitted
             .iter()
@@ -7381,6 +7453,89 @@ mod tests {
     }
 
     #[test]
+    fn authentication_failed_assistant_error_tags_the_ending_result() {
+        let mut parser = StreamParser::new();
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"assistant","error":"authentication_failed","message":{"id":"msg_1","role":"assistant"}}"#,
+        );
+        let line = r#"{"type":"result","is_error":true,"result":"Failed to authenticate: OAuth session expired and could not be refreshed"}"#;
+        match parse_line_str(&mut parser, line).unwrap() {
+            StreamChunk::Error {
+                turn_ended, kind, ..
+            } => {
+                assert!(turn_ended);
+                assert_eq!(kind, Some(TurnErrorKind::AuthenticationFailed));
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn server_error_assistant_error_leaves_the_ending_result_untagged() {
+        let mut parser = StreamParser::new();
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"assistant","error":"server_error","message":{"id":"msg_1","role":"assistant"}}"#,
+        );
+        let line = r#"{"type":"result","is_error":true,"result":"API Error: 500"}"#;
+        match parse_line_str(&mut parser, line).unwrap() {
+            StreamChunk::Error { kind, .. } => assert_eq!(kind, None),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn turn_error_kind_does_not_leak_into_the_next_turn() {
+        let mut parser = StreamParser::new();
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"assistant","error":"authentication_failed","message":{"id":"msg_1","role":"assistant"}}"#,
+        );
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"result","is_error":false,"session_id":"abc","result":"ok"}"#,
+        );
+        let line = r#"{"type":"result","is_error":true,"result":"boom"}"#;
+        match parse_line_str(&mut parser, line).unwrap() {
+            StreamChunk::Error { kind, .. } => assert_eq!(kind, None),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sidechain_authentication_error_does_not_tag_the_main_turn() {
+        let mut parser = StreamParser::new();
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"assistant","error":"authentication_failed","parent_tool_use_id":"toolu_1","message":{"id":"msg_1","role":"assistant"}}"#,
+        );
+        let line = r#"{"type":"result","is_error":true,"result":"boom"}"#;
+        match parse_line_str(&mut parser, line).unwrap() {
+            StreamChunk::Error { kind, .. } => assert_eq!(kind, None),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_kind_is_serialized_only_when_present() {
+        let tagged = serde_json::to_value(StreamChunk::Error {
+            content: "expired".to_string(),
+            turn_ended: true,
+            kind: Some(TurnErrorKind::AuthenticationFailed),
+        })
+        .unwrap();
+        assert_eq!(tagged["data"]["kind"], "authentication_failed");
+        let plain = serde_json::to_value(StreamChunk::Error {
+            content: "boom".to_string(),
+            turn_ended: true,
+            kind: None,
+        })
+        .unwrap();
+        assert!(plain["data"].get("kind").is_none(), "{plain}");
+    }
+
+    #[test]
     fn parse_result_error_produces_error_chunk() {
         let mut parser = StreamParser::new();
         let line = r#"{"type":"result","is_error":true,"result":"Something went wrong"}"#;
@@ -7389,18 +7544,20 @@ mod tests {
             StreamChunk::Error {
                 content,
                 turn_ended,
+                kind,
             } => {
                 assert_eq!(content, "Something went wrong");
                 assert!(
                     turn_ended,
                     "an is_error result ends the turn of a live process"
                 );
+                assert_eq!(kind, None);
             }
             other => panic!("expected Error, got {other:?}"),
         }
         let entry = log_entry.expect("error result must produce a log entry");
         assert_eq!(entry.prefix, "RESULT");
-        assert_eq!(entry.message, "error: Something went wrong");
+        assert_eq!(entry.message, "error: 20 chars, kind=None");
     }
     #[test]
     fn parse_result_error_with_empty_result_returns_placeholder_error() {
@@ -7428,7 +7585,10 @@ mod tests {
             let entry = log_entry
                 .unwrap_or_else(|| panic!("empty/missing error result must also log: {line}"));
             assert_eq!(entry.prefix, "RESULT");
-            assert_eq!(entry.message, format!("error: {content}"));
+            assert_eq!(
+                entry.message,
+                format!("error: {} chars, kind=None", content.chars().count())
+            );
         }
     }
 
@@ -7611,9 +7771,11 @@ mod tests {
             StreamChunk::Error {
                 content,
                 turn_ended,
+                kind,
             } => {
                 assert!(content.contains("hit your limit"));
                 assert!(!turn_ended, "a system message may arrive mid-turn");
+                assert_eq!(kind, None);
             }
             other => panic!("expected Error, got {other:?}"),
         }
@@ -7725,7 +7887,7 @@ mod tests {
     }
 
     const SELF_STARTED_TURNS_CAPTURE: &str =
-        include_str!("../tests/fixtures/cc-2.1.295-self-started-turns.sanitized.ndjson");
+        include_str!("../tests/fixtures/cc-2.1.322-self-started-turns.sanitized.ndjson");
 
     #[test]
     fn the_self_started_turn_capture_is_of_the_pinned_claude_code() {
@@ -8590,7 +8752,7 @@ mod tests {
     }
 
     const SAFETY_CHECK_CAPTURE: &str =
-        include_str!("../tests/fixtures/cc-2.1.295-safety-check.sanitized.json");
+        include_str!("../tests/fixtures/cc-2.1.322-safety-check.sanitized.json");
 
     fn safety_check_capture() -> serde_json::Value {
         serde_json::from_str(SAFETY_CHECK_CAPTURE).unwrap()
@@ -9167,8 +9329,15 @@ mod tests {
             ui: None,
             telemetry: None,
         };
-        let result =
-            ChatSession::prepare_args("nonexistent", &user_config, "inst", None, None, None, None);
+        let result = ChatSession::prepare_args(
+            "nonexistent",
+            &user_config,
+            "inst",
+            None,
+            None,
+            None,
+            &LaunchSettings::default(),
+        );
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
@@ -9188,6 +9357,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -9201,7 +9371,7 @@ mod tests {
             Some("../../../etc/passwd"),
             None,
             None,
-            None,
+            &LaunchSettings::default(),
         );
         assert!(result.is_err());
     }
@@ -9217,6 +9387,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -9230,7 +9401,7 @@ mod tests {
             Some("550e8400-e29b-41d4-a716-446655440000"),
             Some("$(rm -rf /)"),
             None,
-            None,
+            &LaunchSettings::default(),
         );
         assert!(result.is_err(), "shell-injection uuid must be rejected");
     }
@@ -9246,14 +9417,22 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
             ui: None,
             telemetry: None,
         };
-        let result =
-            ChatSession::prepare_args("myproject", &user_config, "inst", None, None, None, None);
+        let result = ChatSession::prepare_args(
+            "myproject",
+            &user_config,
+            "inst",
+            None,
+            None,
+            None,
+            &LaunchSettings::default(),
+        );
         assert!(result.is_ok());
         let PreparedSpawn {
             args, container, ..
@@ -9277,26 +9456,41 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: Some("xhigh".to_string()),
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
             ui: None,
             telemetry: None,
         };
-        let args =
-            ChatSession::prepare_args("myproject", &user_config, "inst", None, None, None, None)
-                .unwrap()
-                .args;
+        let args = ChatSession::prepare_args(
+            "myproject",
+            &user_config,
+            "inst",
+            None,
+            None,
+            None,
+            &LaunchSettings::default(),
+        )
+        .unwrap()
+        .args;
         let effort_count = args.iter().filter(|a| *a == "--effort").count();
         assert_eq!(effort_count, 1, "exactly one --effort flag, got: {args:?}");
         let pos = args.iter().position(|a| a == "--effort").unwrap();
         assert_eq!(args[pos + 1], "xhigh");
 
         user_config.projects[0].effort_pin = Some("max".to_string());
-        let args =
-            ChatSession::prepare_args("myproject", &user_config, "inst", None, None, None, None)
-                .unwrap()
-                .args;
+        let args = ChatSession::prepare_args(
+            "myproject",
+            &user_config,
+            "inst",
+            None,
+            None,
+            None,
+            &LaunchSettings::default(),
+        )
+        .unwrap()
+        .args;
         let effort_count = args.iter().filter(|a| *a == "--effort").count();
         assert_eq!(effort_count, 1);
         let pos = args.iter().position(|a| a == "--effort").unwrap();
@@ -9315,6 +9509,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -9328,7 +9523,7 @@ mod tests {
             Some(session_id),
             None,
             None,
-            None,
+            &LaunchSettings::default(),
         )
         .unwrap();
         assert!(!spawn.args.contains(&"--effort".to_string()));
@@ -9341,7 +9536,7 @@ mod tests {
             Some(session_id),
             None,
             None,
-            None,
+            &LaunchSettings::default(),
         )
         .unwrap();
         let pos = spawn.args.iter().position(|a| a == "--effort").unwrap();
@@ -9356,7 +9551,7 @@ mod tests {
             Some(session_id),
             None,
             None,
-            None,
+            &LaunchSettings::default(),
         )
         .unwrap();
         assert!(
@@ -9380,6 +9575,7 @@ mod tests {
         let mid_turn = serde_json::to_value(StreamChunk::Error {
             content: "rate limit".to_string(),
             turn_ended: false,
+            kind: None,
         })
         .unwrap();
         assert!(mid_turn["data"].get("turn_ended").is_none(), "{mid_turn}");
@@ -9387,6 +9583,7 @@ mod tests {
         let ended = serde_json::to_value(StreamChunk::Error {
             content: "overloaded".to_string(),
             turn_ended: true,
+            kind: None,
         })
         .unwrap();
         assert_eq!(ended["data"]["turn_ended"], serde_json::Value::Bool(true));
@@ -9413,6 +9610,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -9427,7 +9625,7 @@ mod tests {
             Some(session_id),
             None,
             None,
-            None,
+            &LaunchSettings::default(),
         );
         assert!(result.is_ok());
         let args = result.unwrap().args;
@@ -9451,6 +9649,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -9466,12 +9665,19 @@ mod tests {
             Some(session_id),
             Some(uuid),
             None,
-            None,
+            &LaunchSettings::default(),
         );
         assert!(result.is_ok());
         let args = result.unwrap().args;
         assert!(args.contains(&"--resume-session-at".to_string()));
         assert!(args.contains(&uuid.to_string()));
+    }
+
+    fn pinned(model: &str) -> LaunchSettings {
+        LaunchSettings {
+            model_pin: Some(model.to_string()),
+            ..Default::default()
+        }
     }
 
     fn single_project_user_config() -> config::SpeedwaveUserConfig {
@@ -9484,6 +9690,7 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                read_only: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -9495,9 +9702,17 @@ mod tests {
     #[test]
     fn prepare_args_launches_the_default_alias_without_a_pin_or_override() {
         let user_config = single_project_user_config();
-        let args = ChatSession::prepare_args("proj", &user_config, "inst", None, None, None, None)
-            .unwrap()
-            .args;
+        let args = ChatSession::prepare_args(
+            "proj",
+            &user_config,
+            "inst",
+            None,
+            None,
+            None,
+            &LaunchSettings::default(),
+        )
+        .unwrap()
+        .args;
         let count = args.iter().filter(|a| *a == "--model").count();
         assert_eq!(count, 1, "exactly one --model flag, got: {args:?}");
         let pos = args.iter().position(|a| a == "--model").unwrap();
@@ -9514,7 +9729,7 @@ mod tests {
             None,
             None,
             None,
-            Some("claude-sonnet-4-6[1m]"),
+            &pinned("claude-sonnet-4-6[1m]"),
         )
         .unwrap()
         .args;
@@ -9534,7 +9749,7 @@ mod tests {
             None,
             None,
             Some("claude-opus-4-8"),
-            Some("claude-haiku-5-5"),
+            &pinned("claude-haiku-5-5"),
         )
         .unwrap()
         .args;
@@ -9553,7 +9768,7 @@ mod tests {
             Some("550e8400-e29b-41d4-a716-446655440000"),
             None,
             Some("claude-sonnet-5"),
-            None,
+            &LaunchSettings::default(),
         )
         .unwrap()
         .args;
@@ -9573,7 +9788,7 @@ mod tests {
                 None,
                 None,
                 Some(bad),
-                None,
+                &LaunchSettings::default(),
             );
             assert!(result.is_err(), "override {bad:?} must be rejected");
         }
@@ -9589,7 +9804,7 @@ mod tests {
             None,
             None,
             None,
-            Some("local/qwen3"),
+            &pinned("local/qwen3"),
         )
         .unwrap()
         .args;
@@ -9632,7 +9847,7 @@ mod tests {
             None,
             None,
             Some("claude-opus-4-8"),
-            Some("claude-sonnet-5"),
+            &pinned("claude-sonnet-5"),
         )
         .unwrap()
         .args;
@@ -9640,6 +9855,81 @@ mod tests {
             !args.contains(&"--model".to_string()),
             "routed spawns never take --model: {args:?}"
         );
+        assert!(
+            !args.contains(&"--settings".to_string()),
+            "routed spawns never get the Anthropic picker rows: {args:?}"
+        );
+    }
+
+    #[test]
+    fn prepare_args_adds_the_picker_settings_to_an_anthropic_spawn_once() {
+        let args = ChatSession::prepare_args(
+            "proj",
+            &single_project_user_config(),
+            "inst",
+            None,
+            None,
+            None,
+            &LaunchSettings::default(),
+        )
+        .unwrap()
+        .args;
+        assert_eq!(
+            args.iter().filter(|a| *a == "--settings").count(),
+            1,
+            "{args:?}"
+        );
+        let pos = args.iter().position(|a| a == "--settings").unwrap();
+        assert_eq!(
+            Some(&args[pos + 1]),
+            crate::model_picker::picker_settings_arg(None).as_ref()
+        );
+    }
+
+    #[test]
+    fn prepare_args_extends_the_users_own_model_picker() {
+        let own = serde_json::json!({"options": [{"model": "claude-opus-4-8"}]});
+        let args = ChatSession::prepare_args(
+            "proj",
+            &single_project_user_config(),
+            "inst",
+            None,
+            None,
+            None,
+            &LaunchSettings {
+                model_picker: Some(own.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .args;
+        let pos = args.iter().position(|a| a == "--settings").unwrap();
+        assert_eq!(
+            Some(&args[pos + 1]),
+            crate::model_picker::picker_settings_arg(Some(&own)).as_ref()
+        );
+    }
+
+    #[test]
+    fn prepare_args_passes_no_settings_when_the_users_picker_replaces_the_built_in_rows() {
+        let args = ChatSession::prepare_args(
+            "proj",
+            &single_project_user_config(),
+            "inst",
+            None,
+            None,
+            None,
+            &LaunchSettings {
+                model_picker: Some(serde_json::json!({
+                    "options": [{"model": "claude-sonnet-5-5"}],
+                    "replaceBuiltInOptions": true,
+                })),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .args;
+        assert!(!args.contains(&"--settings".to_string()), "{args:?}");
     }
 
     #[test]
@@ -10780,6 +11070,69 @@ mod tests {
         assert!(
             body.contains("allow_log_truncate"),
             "truncation must be gated by the caller-computed sibling check"
+        );
+    }
+
+    #[test]
+    fn stream_parser_session_log_entries_carry_no_user_content() {
+        const SENTINEL: &str = "SENTINEL-997-stream";
+        let lines = [
+            serde_json::json!({"type":"stream_event","event":{"type":"content_block_start","index":0,
+                "content_block":{"type":"tool_use","id":"toolu_S1","name":"Write","input":{"content":SENTINEL}}}}),
+            serde_json::json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,
+                "delta":{"type":"input_json_delta","partial_json":format!("{{\"file_path\":\"/tmp/{SENTINEL}\"}}")}}}),
+            serde_json::json!({"type":"stream_event","event":{"type":"content_block_stop","index":0}}),
+            serde_json::json!({"type":"stream_event","event":{"type":"content_block_delta","index":1,
+                "delta":{"type":"text_delta","text":SENTINEL}}}),
+            serde_json::json!({"type":"assistant","message":{"id":"msg_S","role":"assistant","model":"claude-opus-4-6",
+                "content":[{"type":"text","text":SENTINEL},
+                           {"type":"tool_use","id":"toolu_S1","name":"Write","input":{"command":SENTINEL}}]}}),
+            serde_json::json!({"type":"user","message":{"role":"user",
+                "content":[{"type":"tool_result","tool_use_id":"toolu_S1","content":SENTINEL}]}}),
+            serde_json::json!({"type":"user","message":{"role":"user",
+                "content":[{"type":"tool_result","tool_use_id":"toolu_S2","is_error":true,
+                            "content":[{"type":"text","text":SENTINEL}]}]}}),
+            serde_json::json!({"type":"user","message":{"id":"msg_U","role":"user",
+                "content":[{"type":"text","text":SENTINEL}]}}),
+            serde_json::json!({"type":"system","subtype":"status","message":format!("Error: {SENTINEL}")}),
+            serde_json::json!({"type":"system","subtype":"status","content":format!("Compacting {SENTINEL}")}),
+            serde_json::json!({"type":"result","is_error":true,"result":SENTINEL}),
+            serde_json::json!({"type":"result","is_error":false,"result":SENTINEL,"session_id":"sid"}),
+        ];
+        let mut parser = StreamParser::new();
+        let mut logged = Vec::new();
+        for line in &lines {
+            let (_chunks, entry) = parser.parse_line(line);
+            logged.extend(entry.map(|e| format!("{}: {}", e.prefix, e.message)));
+        }
+        assert!(
+            logged.contains(&"TOOL: start: Write (toolu_S1)".to_string()),
+            "tool metadata stays in the log: {logged:?}"
+        );
+        assert!(
+            logged.contains(&"RESULT: error: 19 chars, kind=None".to_string()),
+            "the error result is logged by size: {logged:?}"
+        );
+        for entry in &logged {
+            assert!(
+                !entry.contains("SENTINEL-997"),
+                "a known value reached the session log: {entry}"
+            );
+        }
+    }
+
+    #[test]
+    fn system_message_log_entry_names_size_and_pattern_only() {
+        let mut parser = StreamParser::new();
+        let parsed = serde_json::json!({"type":"system","message":"You hit your limit"});
+        let (chunk, entry) = parser.parse_system_message(&parsed);
+        assert!(
+            chunk.is_some(),
+            "an actionable message still reaches the UI"
+        );
+        assert_eq!(
+            entry.expect("system text is logged").message,
+            "message: 18 chars, actionable pattern: hit your limit"
         );
     }
 }

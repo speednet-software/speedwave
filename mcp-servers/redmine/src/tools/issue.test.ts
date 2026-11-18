@@ -1,4 +1,7 @@
-import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
+import { promises as fsp } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { notConfiguredMessage } from '@speedwave/mcp-shared';
 import { createIssueTools } from './issue-tools.js';
 import { expectEmittedKeysDeclared } from './test-helpers.js';
@@ -635,6 +638,67 @@ describe('issue-tools', () => {
       expect(mockClient.createIssue).toHaveBeenCalledWith({
         project_id: 'test-project',
         subject: 'New Issue',
+      });
+    });
+
+    describe('file_paths', () => {
+      let workspace: string;
+      let previous: string | undefined;
+
+      beforeEach(async () => {
+        workspace = await fsp.realpath(await fsp.mkdtemp(path.join(os.tmpdir(), 'redmine-issue-')));
+        previous = process.env.WORKSPACE_DIR;
+        process.env.WORKSPACE_DIR = workspace;
+        await fsp.writeFile(path.join(workspace, 'shot.png'), 'png');
+      });
+
+      afterEach(async () => {
+        if (previous === undefined) delete process.env.WORKSPACE_DIR;
+        else process.env.WORKSPACE_DIR = previous;
+        await fsp.rm(workspace, { recursive: true, force: true });
+      });
+
+      const createIssueHandler = () =>
+        createIssueTools(mockClient as unknown as RedmineClient).find(
+          (t) => t.tool.name === 'createIssue'
+        )!.handler;
+
+      it('hands the resolved files to the client instead of the raw paths', async () => {
+        mockClient.createIssue.mockResolvedValue({ id: 5 });
+
+        await createIssueHandler()({
+          project_id: 'p',
+          subject: 's',
+          file_paths: ['shot.png'],
+        });
+
+        expect(mockClient.createIssue).toHaveBeenCalledWith({
+          project_id: 'p',
+          subject: 's',
+          files: [{ path: path.join(workspace, 'shot.png'), name: 'shot.png', size: 3 }],
+        });
+      });
+
+      it('rejects a path outside the workspace before resolving the assignee or creating anything', async () => {
+        const result = await createIssueHandler()({
+          project_id: 'p',
+          subject: 's',
+          assigned_to: 'jane',
+          file_paths: ['/etc/passwd'],
+        });
+
+        expect(result.isError).toBe(true);
+        expect((result.content[0] as { text: string }).text).toContain('file_paths[0]');
+        expect(mockClient.resolveUser).not.toHaveBeenCalled();
+        expect(mockClient.createIssue).not.toHaveBeenCalled();
+      });
+
+      it('creates the issue without files when file_paths is not given', async () => {
+        mockClient.createIssue.mockResolvedValue({ id: 5 });
+
+        await createIssueHandler()({ project_id: 'p', subject: 's' });
+
+        expect(mockClient.createIssue).toHaveBeenCalledWith({ project_id: 'p', subject: 's' });
       });
     });
 

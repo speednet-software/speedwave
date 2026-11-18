@@ -1,6 +1,6 @@
 {
-  "claude_code_version": "2.1.295",
-  "captured": "2026-10-11",
+  "claude_code_version": "2.1.322",
+  "captured": "2026-11-13",
   "account_plan": "team",
   "note": "Sanitized capture of stream-json control responses. Removed: account e-mail and org name, commands, agents, pid, output-styles dir, remote-control and session-state flags, session totals, and the context detail lists (agents, skills, slash commands, memory files, MCP tools, message breakdown, grid). run_A = container env as rendered by compose; run_B = ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL unset. Each get_context_usage/<id> follows set_model/<id>; get_context_usage/initial is the state before any set_model. A set_model Claude Code rejected is stored as {\"error\": <text>}.",
   "run_A": {
@@ -30,7 +30,8 @@
           ],
           "supportsAdaptiveThinking": true,
           "supportsFastMode": true,
-          "supportsAutoMode": true
+          "supportsAutoMode": true,
+          "supportsThinkingOff": false
         },
         {
           "value": "opus",
@@ -47,11 +48,12 @@
           ],
           "supportsAdaptiveThinking": true,
           "supportsFastMode": true,
-          "supportsAutoMode": true
+          "supportsAutoMode": true,
+          "supportsThinkingOff": false
         },
         {
           "value": "claude-fable-5-1[1m]",
-          "resolvedModel": "claude-fable-5-1[1m]",
+          "resolvedModel": "claude-fable-5-1",
           "displayName": "Fable",
           "description": "Fable 5.1 · Most capable for your hardest and longest-running tasks",
           "supportsEffort": true,
@@ -63,7 +65,8 @@
             "max"
           ],
           "supportsAdaptiveThinking": true,
-          "supportsAutoMode": true
+          "supportsAutoMode": true,
+          "supportsThinkingOff": false
         },
         {
           "value": "sonnet",
@@ -79,7 +82,8 @@
             "max"
           ],
           "supportsAdaptiveThinking": true,
-          "supportsAutoMode": true
+          "supportsAutoMode": true,
+          "supportsThinkingOff": false
         },
         {
           "value": "haiku",
@@ -95,14 +99,36 @@
             "max"
           ],
           "supportsAdaptiveThinking": true,
-          "supportsAutoMode": true
+          "supportsAutoMode": true,
+          "supportsThinkingOff": false
+        },
+        {
+          "value": "claude-fable-5-2",
+          "resolvedModel": "claude-fable-5-2",
+          "displayName": "Fable 5.2",
+          "description": "Fable 5.2 · Most capable for your hardest and longest-running tasks",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsAdaptiveThinking": true,
+          "supportsFastMode": true,
+          "supportsAutoMode": true,
+          "supportsThinkingOff": false
         }
       ],
       "account": {
         "subscriptionType": "Claude Team",
         "apiProvider": "firstParty"
       },
+      "claude_code_version": "2.1.322",
       "current_permission_mode": "default",
+      "hook_on_failure_supported": true,
+      "other_hook_ask_outranks_host": true,
       "feedback_mode": {
         "kind": "post"
       },
@@ -110,7 +136,9 @@
       "fast_mode_state": "off",
       "fast_mode_disabled_reason": "sdk_opt_in_required",
       "capabilities": [
-        "ui_surface_v1"
+        "ui_surface_v1",
+        "mcp_call_result_not_for_model_v1",
+        "mcp_call_check_permissions_v1"
       ]
     },
     "get_usage": {
@@ -118,16 +146,16 @@
       "rate_limits_available": true,
       "rate_limits": {
         "five_hour": {
-          "utilization": 19,
-          "resets_at": "2026-10-11T14:19:59.748398+00:00",
+          "utilization": 5,
+          "resets_at": "2026-11-13T11:00:00.226928+00:00",
           "limit_dollars": null,
           "used_dollars": null,
           "remaining_dollars": null,
           "locked_reason": null
         },
         "seven_day": {
-          "utilization": 82,
-          "resets_at": "2026-10-12T02:59:59.748418+00:00",
+          "utilization": 54,
+          "resets_at": "2026-11-16T03:00:00.226947+00:00",
           "limit_dollars": null,
           "used_dollars": null,
           "remaining_dollars": null,
@@ -147,20 +175,26 @@
         "brass_thimble": null,
         "harbor_lantern": null,
         "wattle_ember": null,
+        "promo_credits": null,
         "amber_ladder": null,
+        "granite_teacup": null,
         "amber_cistern": null,
+        "amber_cistern_offer": null,
         "juniper_tide": null,
         "cedar_ember": null,
+        "starry_waterfall": null,
         "amber_gauge": null,
+        "pace": null,
+        "indicator": null,
         "extra_usage": {
           "is_enabled": false,
           "monthly_limit": null,
           "used_credits": null,
           "utilization": null,
-          "currency": "EUR",
-          "decimal_places": 2,
-          "disabled_reason": "out_of_credits",
-          "user_disabled": false,
+          "currency": null,
+          "decimal_places": null,
+          "disabled_reason": null,
+          "user_disabled": true,
           "spend_limit_reached": false,
           "credits_ever_enabled": true,
           "daily": null,
@@ -170,27 +204,27 @@
           {
             "kind": "session",
             "group": "session",
-            "percent": 19,
+            "percent": 5,
             "severity": "normal",
-            "resets_at": "2026-10-11T14:19:59.748398+00:00",
+            "resets_at": "2026-11-13T11:00:00.226928+00:00",
             "scope": null,
             "is_active": false
           },
           {
             "kind": "weekly_all",
             "group": "weekly",
-            "percent": 82,
-            "severity": "warning",
-            "resets_at": "2026-10-12T02:59:59.748418+00:00",
+            "percent": 54,
+            "severity": "normal",
+            "resets_at": "2026-11-16T03:00:00.226947+00:00",
             "scope": null,
             "is_active": true
           },
           {
             "kind": "weekly_scoped",
             "group": "weekly",
-            "percent": 26,
+            "percent": 0,
             "severity": "normal",
-            "resets_at": "2026-10-12T02:59:59.748633+00:00",
+            "resets_at": "2026-11-16T03:00:00.227096+00:00",
             "scope": {
               "model": {
                 "id": null,
@@ -204,14 +238,14 @@
         "spend": {
           "used": {
             "amount_minor": 0,
-            "currency": "EUR",
+            "currency": "USD",
             "exponent": 2
           },
           "limit": null,
           "percent": 0,
           "severity": "normal",
           "enabled": false,
-          "disabled_reason": "out_of_credits",
+          "disabled_reason": null,
           "cap": null,
           "balance": null,
           "auto_reload": null,
@@ -224,15 +258,15 @@
         "weekly_scoped_shares": [
           {
             "limit_index": 2,
-            "used_percent_of_weekly": 13,
+            "used_percent_of_weekly": 0,
             "allowance_percent_of_weekly": 50
           }
         ],
         "model_scoped": [
           {
             "display_name": "Fable",
-            "utilization": 26,
-            "resets_at": "2026-10-12T02:59:59.748633+00:00"
+            "utilization": 0,
+            "resets_at": "2026-11-16T03:00:00.227096+00:00"
           }
         ]
       },
@@ -241,54 +275,70 @@
     "get_context_usage/initial": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1991,
+          "tokens": 2344,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918689,
+          "tokens": 948423,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48311,
+      "totalTokens": 18577,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
+      "percentage": 2,
       "model": "claude-opus-5-5",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
@@ -309,7 +359,8 @@
           ],
           "supportsAdaptiveThinking": true,
           "supportsFastMode": true,
-          "supportsAutoMode": true
+          "supportsAutoMode": true,
+          "supportsThinkingOff": false
         },
         {
           "value": "opus",
@@ -326,11 +377,12 @@
           ],
           "supportsAdaptiveThinking": true,
           "supportsFastMode": true,
-          "supportsAutoMode": true
+          "supportsAutoMode": true,
+          "supportsThinkingOff": false
         },
         {
           "value": "claude-fable-5-1[1m]",
-          "resolvedModel": "claude-fable-5-1[1m]",
+          "resolvedModel": "claude-fable-5-1",
           "displayName": "Fable",
           "description": "Fable 5.1 · Most capable for your hardest and longest-running tasks",
           "supportsEffort": true,
@@ -342,7 +394,8 @@
             "max"
           ],
           "supportsAdaptiveThinking": true,
-          "supportsAutoMode": true
+          "supportsAutoMode": true,
+          "supportsThinkingOff": false
         },
         {
           "value": "sonnet",
@@ -358,7 +411,8 @@
             "max"
           ],
           "supportsAdaptiveThinking": true,
-          "supportsAutoMode": true
+          "supportsAutoMode": true,
+          "supportsThinkingOff": false
         },
         {
           "value": "haiku",
@@ -374,1474 +428,2268 @@
             "max"
           ],
           "supportsAdaptiveThinking": true,
-          "supportsAutoMode": true
+          "supportsAutoMode": true,
+          "supportsThinkingOff": false
+        },
+        {
+          "value": "claude-fable-5-2",
+          "resolvedModel": "claude-fable-5-2",
+          "displayName": "Fable 5.2",
+          "description": "Fable 5.2 · Most capable for your hardest and longest-running tasks",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsAdaptiveThinking": true,
+          "supportsFastMode": true,
+          "supportsAutoMode": true,
+          "supportsThinkingOff": false
         }
       ]
     },
-    "set_model/claude-fable-5-1": null,
+    "set_model/claude-fable-5-2": {
+      "model": "claude-fable-5-2"
+    },
+    "get_context_usage/claude-fable-5-2": {
+      "categories": [
+        {
+          "id": "system_prompt",
+          "name": "System prompt",
+          "tokens": 2344,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "id": "system_tools",
+          "name": "System tools",
+          "tokens": 7798,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "id": "memory_files",
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "id": "skills",
+          "name": "Skills",
+          "tokens": 4302,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "id": "autocompact_buffer",
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "id": "free_space",
+          "name": "Free space",
+          "tokens": 948423,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 18577,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 2,
+      "model": "claude-fable-5-2",
+      "mcpInstructions": [],
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-fable-5-2[1m]": {
+      "model": "claude-fable-5-2"
+    },
+    "get_context_usage/claude-fable-5-2[1m]": {
+      "categories": [
+        {
+          "id": "system_prompt",
+          "name": "System prompt",
+          "tokens": 2344,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "id": "system_tools",
+          "name": "System tools",
+          "tokens": 7798,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "id": "memory_files",
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "id": "skills",
+          "name": "Skills",
+          "tokens": 4302,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "id": "autocompact_buffer",
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "id": "free_space",
+          "name": "Free space",
+          "tokens": 948423,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 18577,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 2,
+      "model": "claude-fable-5-2",
+      "mcpInstructions": [],
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-fable-5-1": {
+      "model": "claude-fable-5-1"
+    },
     "get_context_usage/claude-fable-5-1": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1991,
+          "tokens": 2344,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918689,
+          "tokens": 948423,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48311,
+      "totalTokens": 18577,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
+      "percentage": 2,
       "model": "claude-fable-5-1",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-fable-5-1[1m]": null,
+    "set_model/claude-fable-5-1[1m]": {
+      "model": "claude-fable-5-1"
+    },
     "get_context_usage/claude-fable-5-1[1m]": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1991,
+          "tokens": 2344,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918689,
+          "tokens": 948423,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48311,
+      "totalTokens": 18577,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
-      "model": "claude-fable-5-1[1m]",
+      "percentage": 2,
+      "model": "claude-fable-5-1",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-opus-5-5": null,
+    "set_model/claude-opus-5-5": {
+      "model": "claude-opus-5-5"
+    },
     "get_context_usage/claude-opus-5-5": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1991,
+          "tokens": 2344,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918689,
+          "tokens": 948423,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48311,
+      "totalTokens": 18577,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
+      "percentage": 2,
       "model": "claude-opus-5-5",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-opus-5-5[1m]": null,
+    "set_model/claude-opus-5-5[1m]": {
+      "model": "claude-opus-5-5"
+    },
     "get_context_usage/claude-opus-5-5[1m]": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1991,
+          "tokens": 2344,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918689,
+          "tokens": 948423,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48311,
+      "totalTokens": 18577,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
-      "model": "claude-opus-5-5[1m]",
+      "percentage": 2,
+      "model": "claude-opus-5-5",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-sonnet-5-5": null,
+    "set_model/claude-sonnet-5-5": {
+      "model": "claude-sonnet-5-5"
+    },
     "get_context_usage/claude-sonnet-5-5": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1991,
+          "tokens": 2344,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918689,
+          "tokens": 948423,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48311,
+      "totalTokens": 18577,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
+      "percentage": 2,
       "model": "claude-sonnet-5-5",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-sonnet-5-5[1m]": null,
+    "set_model/claude-sonnet-5-5[1m]": {
+      "model": "claude-sonnet-5-5"
+    },
     "get_context_usage/claude-sonnet-5-5[1m]": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1991,
+          "tokens": 2344,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918689,
+          "tokens": 948423,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48311,
+      "totalTokens": 18577,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
-      "model": "claude-sonnet-5-5[1m]",
+      "percentage": 2,
+      "model": "claude-sonnet-5-5",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-sonnet-5": null,
+    "set_model/claude-sonnet-5": {
+      "model": "claude-sonnet-5"
+    },
     "get_context_usage/claude-sonnet-5": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 9141,
+          "tokens": 9454,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 47136,
+          "tokens": 13093,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 21160,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 902383,
+          "tokens": 936018,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 64617,
+      "totalTokens": 30982,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 6,
+      "percentage": 3,
       "model": "claude-sonnet-5",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-sonnet-5[1m]": null,
+    "set_model/claude-sonnet-5[1m]": {
+      "model": "claude-sonnet-5"
+    },
     "get_context_usage/claude-sonnet-5[1m]": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 9141,
+          "tokens": 9454,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 47136,
+          "tokens": 13093,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 21160,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 902383,
+          "tokens": 936018,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 64617,
+      "totalTokens": 30982,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 6,
-      "model": "claude-sonnet-5[1m]",
+      "percentage": 3,
+      "model": "claude-sonnet-5",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-haiku-5-5": null,
+    "set_model/claude-haiku-5-5": {
+      "model": "claude-haiku-5-5"
+    },
     "get_context_usage/claude-haiku-5-5": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1991,
+          "tokens": 2344,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918689,
+          "tokens": 948423,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48311,
+      "totalTokens": 18577,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
+      "percentage": 2,
       "model": "claude-haiku-5-5",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-haiku-5-5[1m]": null,
+    "set_model/claude-haiku-5-5[1m]": {
+      "model": "claude-haiku-5-5"
+    },
     "get_context_usage/claude-haiku-5-5[1m]": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1991,
+          "tokens": 2344,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918689,
+          "tokens": 948423,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48311,
+      "totalTokens": 18577,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
-      "model": "claude-haiku-5-5[1m]",
+      "percentage": 2,
+      "model": "claude-haiku-5-5",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-haiku-4-5": null,
+    "set_model/claude-haiku-4-5": {
+      "model": "claude-haiku-4-5"
+    },
     "get_context_usage/claude-haiku-4-5": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 6885,
+          "tokens": 7119,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 53619,
+          "tokens": 11184,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 18007,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 178,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 2921,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 1993,
+          "tokens": 1988,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 134404,
+          "tokens": 176610,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 65596,
+      "totalTokens": 23390,
       "maxTokens": 200000,
       "rawMaxTokens": 200000,
       "autocompactSource": "auto",
-      "percentage": 33,
+      "percentage": 12,
       "model": "claude-haiku-4-5",
+      "mcpInstructions": [],
       "autoCompactThreshold": 167000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-opus-5": null,
+    "set_model/claude-opus-5": {
+      "model": "claude-opus-5"
+    },
     "get_context_usage/claude-opus-5": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1991,
+          "tokens": 2344,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918689,
+          "tokens": 948423,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48311,
+      "totalTokens": 18577,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
+      "percentage": 2,
       "model": "claude-opus-5",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-opus-5[1m]": null,
+    "set_model/claude-opus-5[1m]": {
+      "model": "claude-opus-5"
+    },
     "get_context_usage/claude-opus-5[1m]": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1991,
+          "tokens": 2344,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918689,
+          "tokens": 948423,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48311,
+      "totalTokens": 18577,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
-      "model": "claude-opus-5[1m]",
+      "percentage": 2,
+      "model": "claude-opus-5",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-fable-5": null,
+    "set_model/claude-fable-5": {
+      "model": "claude-fable-5"
+    },
     "get_context_usage/claude-fable-5": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1991,
+          "tokens": 2344,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918689,
+          "tokens": 948423,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48311,
+      "totalTokens": 18577,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
+      "percentage": 2,
       "model": "claude-fable-5",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-fable-5[1m]": null,
+    "set_model/claude-fable-5[1m]": {
+      "model": "claude-fable-5"
+    },
     "get_context_usage/claude-fable-5[1m]": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1991,
+          "tokens": 2344,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918689,
+          "tokens": 948423,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48311,
+      "totalTokens": 18577,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
-      "model": "claude-fable-5[1m]",
+      "percentage": 2,
+      "model": "claude-fable-5",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-opus-4-8": null,
+    "set_model/claude-opus-4-8": {
+      "model": "claude-opus-4-8"
+    },
     "get_context_usage/claude-opus-4-8": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1972,
+          "tokens": 2324,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918708,
+          "tokens": 948443,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48292,
+      "totalTokens": 18557,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
+      "percentage": 2,
       "model": "claude-opus-4-8",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-opus-4-8[1m]": null,
+    "set_model/claude-opus-4-8[1m]": {
+      "model": "claude-opus-4-8"
+    },
     "get_context_usage/claude-opus-4-8[1m]": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1972,
+          "tokens": 2324,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918708,
+          "tokens": 948443,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48292,
+      "totalTokens": 18557,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
-      "model": "claude-opus-4-8[1m]",
+      "percentage": 2,
+      "model": "claude-opus-4-8",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-opus-4-7": null,
+    "set_model/claude-opus-4-7": {
+      "model": "claude-opus-4-7"
+    },
     "get_context_usage/claude-opus-4-7": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 9175,
+          "tokens": 9488,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 51405,
+          "tokens": 13093,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 24007,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 898080,
+          "tokens": 935984,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 68920,
+      "totalTokens": 31016,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 7,
+      "percentage": 3,
       "model": "claude-opus-4-7",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-opus-4-7[1m]": null,
+    "set_model/claude-opus-4-7[1m]": {
+      "model": "claude-opus-4-7"
+    },
     "get_context_usage/claude-opus-4-7[1m]": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 9175,
+          "tokens": 9488,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 51405,
+          "tokens": 13093,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 24007,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 898080,
+          "tokens": 935984,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 68920,
+      "totalTokens": 31016,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 7,
-      "model": "claude-opus-4-7[1m]",
+      "percentage": 3,
+      "model": "claude-opus-4-7",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-opus-4-6": null,
+    "set_model/claude-opus-4-6": {
+      "model": "claude-opus-4-6"
+    },
     "get_context_usage/claude-opus-4-6": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 6885,
+          "tokens": 7119,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 53619,
+          "tokens": 11184,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 18007,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 178,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 2921,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 1993,
+          "tokens": 1988,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 101404,
+          "tokens": 143610,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 65596,
+      "totalTokens": 23390,
       "maxTokens": 200000,
       "rawMaxTokens": 200000,
       "autocompactSource": "model-default",
-      "percentage": 33,
+      "percentage": 12,
       "model": "claude-opus-4-6",
+      "mcpInstructions": [],
       "autoCompactThreshold": 167000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-opus-4-6[1m]": null,
+    "set_model/claude-opus-4-6[1m]": {
+      "model": "claude-opus-4-6[1m]"
+    },
     "get_context_usage/claude-opus-4-6[1m]": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 6885,
+          "tokens": 7119,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 52452,
+          "tokens": 9941,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 18007,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 178,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 2921,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 3160,
+          "tokens": 3231,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 934404,
+          "tokens": 976610,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 65596,
+      "totalTokens": 23390,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "auto",
-      "percentage": 7,
+      "percentage": 2,
       "model": "claude-opus-4-6[1m]",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-sonnet-4-6": null,
+    "set_model/claude-sonnet-4-6": {
+      "model": "claude-sonnet-4-6"
+    },
     "get_context_usage/claude-sonnet-4-6": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 6885,
+          "tokens": 7119,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 53619,
+          "tokens": 11184,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 18007,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 178,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 2921,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 1993,
+          "tokens": 1988,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 101404,
+          "tokens": 143610,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 65596,
+      "totalTokens": 23390,
       "maxTokens": 200000,
       "rawMaxTokens": 200000,
       "autocompactSource": "model-default",
-      "percentage": 33,
+      "percentage": 12,
       "model": "claude-sonnet-4-6",
+      "mcpInstructions": [],
       "autoCompactThreshold": 167000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-sonnet-4-6[1m]": null,
+    "set_model/claude-sonnet-4-6[1m]": {
+      "model": "claude-sonnet-4-6[1m]"
+    },
     "get_context_usage/claude-sonnet-4-6[1m]": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 6885,
+          "tokens": 7119,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 52452,
+          "tokens": 9941,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 18007,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 178,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 2921,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 3160,
+          "tokens": 3231,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 934404,
+          "tokens": 976610,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 65596,
+      "totalTokens": 23390,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "auto",
-      "percentage": 7,
+      "percentage": 2,
       "model": "claude-sonnet-4-6[1m]",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/opus": null,
+    "set_model/fable": {
+      "model": "claude-fable-5-2"
+    },
+    "get_context_usage/fable": {
+      "categories": [
+        {
+          "id": "system_prompt",
+          "name": "System prompt",
+          "tokens": 2344,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "id": "system_tools",
+          "name": "System tools",
+          "tokens": 7798,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "id": "memory_files",
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "id": "skills",
+          "name": "Skills",
+          "tokens": 4302,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "id": "autocompact_buffer",
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "id": "free_space",
+          "name": "Free space",
+          "tokens": 948423,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 18577,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 2,
+      "model": "claude-fable-5-2",
+      "mcpInstructions": [],
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/fable[1m]": {
+      "model": "claude-fable-5-2"
+    },
+    "get_context_usage/fable[1m]": {
+      "categories": [
+        {
+          "id": "system_prompt",
+          "name": "System prompt",
+          "tokens": 2344,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "id": "system_tools",
+          "name": "System tools",
+          "tokens": 7798,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "id": "memory_files",
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "id": "skills",
+          "name": "Skills",
+          "tokens": 4302,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "id": "autocompact_buffer",
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "id": "free_space",
+          "name": "Free space",
+          "tokens": 948423,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 18577,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 2,
+      "model": "claude-fable-5-2",
+      "mcpInstructions": [],
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/opus": {
+      "model": "claude-opus-5-5"
+    },
     "get_context_usage/opus": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1991,
+          "tokens": 2344,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918689,
+          "tokens": 948423,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48311,
+      "totalTokens": 18577,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
+      "percentage": 2,
       "model": "claude-opus-5-5",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/sonnet": null,
+    "set_model/sonnet": {
+      "model": "claude-sonnet-5-5"
+    },
     "get_context_usage/sonnet": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1991,
+          "tokens": 2344,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918689,
+          "tokens": 948423,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48311,
+      "totalTokens": 18577,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
+      "percentage": 2,
       "model": "claude-sonnet-5-5",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/haiku": null,
+    "set_model/haiku": {
+      "model": "claude-haiku-5-5"
+    },
     "get_context_usage/haiku": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1991,
+          "tokens": 2344,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918689,
+          "tokens": 948423,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48311,
+      "totalTokens": 18577,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
+      "percentage": 2,
       "model": "claude-haiku-5-5",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/default": null,
+    "set_model/default": {
+      "model": "claude-opus-5-5"
+    },
     "get_context_usage/default": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1991,
+          "tokens": 2344,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918689,
+          "tokens": 948423,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48311,
+      "totalTokens": 18577,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
+      "percentage": 2,
       "model": "claude-opus-5-5",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     }
@@ -1873,7 +2721,8 @@
           ],
           "supportsAdaptiveThinking": true,
           "supportsFastMode": true,
-          "supportsAutoMode": true
+          "supportsAutoMode": true,
+          "supportsThinkingOff": false
         },
         {
           "value": "opus",
@@ -1890,11 +2739,12 @@
           ],
           "supportsAdaptiveThinking": true,
           "supportsFastMode": true,
-          "supportsAutoMode": true
+          "supportsAutoMode": true,
+          "supportsThinkingOff": false
         },
         {
           "value": "claude-fable-5-1[1m]",
-          "resolvedModel": "claude-fable-5-1[1m]",
+          "resolvedModel": "claude-fable-5-1",
           "displayName": "Fable",
           "description": "Fable 5.1 · Most capable for your hardest and longest-running tasks",
           "supportsEffort": true,
@@ -1906,7 +2756,8 @@
             "max"
           ],
           "supportsAdaptiveThinking": true,
-          "supportsAutoMode": true
+          "supportsAutoMode": true,
+          "supportsThinkingOff": false
         },
         {
           "value": "sonnet",
@@ -1922,7 +2773,8 @@
             "max"
           ],
           "supportsAdaptiveThinking": true,
-          "supportsAutoMode": true
+          "supportsAutoMode": true,
+          "supportsThinkingOff": false
         },
         {
           "value": "haiku",
@@ -1938,14 +2790,36 @@
             "max"
           ],
           "supportsAdaptiveThinking": true,
-          "supportsAutoMode": true
+          "supportsAutoMode": true,
+          "supportsThinkingOff": false
+        },
+        {
+          "value": "claude-fable-5-2",
+          "resolvedModel": "claude-fable-5-2",
+          "displayName": "Fable 5.2",
+          "description": "Fable 5.2 · Most capable for your hardest and longest-running tasks",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsAdaptiveThinking": true,
+          "supportsFastMode": true,
+          "supportsAutoMode": true,
+          "supportsThinkingOff": false
         }
       ],
       "account": {
         "subscriptionType": "Claude Team",
         "apiProvider": "firstParty"
       },
+      "claude_code_version": "2.1.322",
       "current_permission_mode": "default",
+      "hook_on_failure_supported": true,
+      "other_hook_ask_outranks_host": true,
       "feedback_mode": {
         "kind": "post"
       },
@@ -1953,7 +2827,9 @@
       "fast_mode_state": "off",
       "fast_mode_disabled_reason": "sdk_opt_in_required",
       "capabilities": [
-        "ui_surface_v1"
+        "ui_surface_v1",
+        "mcp_call_result_not_for_model_v1",
+        "mcp_call_check_permissions_v1"
       ]
     },
     "get_usage": {
@@ -1961,16 +2837,16 @@
       "rate_limits_available": true,
       "rate_limits": {
         "five_hour": {
-          "utilization": 19,
-          "resets_at": "2026-10-11T14:19:59.748398+00:00",
+          "utilization": 5,
+          "resets_at": "2026-11-13T11:00:00.226928+00:00",
           "limit_dollars": null,
           "used_dollars": null,
           "remaining_dollars": null,
           "locked_reason": null
         },
         "seven_day": {
-          "utilization": 82,
-          "resets_at": "2026-10-12T02:59:59.748418+00:00",
+          "utilization": 54,
+          "resets_at": "2026-11-16T03:00:00.226947+00:00",
           "limit_dollars": null,
           "used_dollars": null,
           "remaining_dollars": null,
@@ -1986,10 +2862,10 @@
           "monthly_limit": null,
           "used_credits": null,
           "utilization": null,
-          "currency": "EUR",
-          "disabled_reason": "out_of_credits",
-          "decimal_places": 2,
-          "user_disabled": false,
+          "currency": null,
+          "disabled_reason": null,
+          "decimal_places": null,
+          "user_disabled": true,
           "spend_limit_reached": false,
           "credits_ever_enabled": true,
           "daily": null,
@@ -1999,8 +2875,8 @@
           {
             "kind": "session",
             "group": "session",
-            "percent": 19,
-            "resets_at": "2026-10-11T14:19:59.748398+00:00",
+            "percent": 5,
+            "resets_at": "2026-11-13T11:00:00.226928+00:00",
             "severity": "normal",
             "is_active": false,
             "scope": null
@@ -2008,17 +2884,17 @@
           {
             "kind": "weekly_all",
             "group": "weekly",
-            "percent": 82,
-            "resets_at": "2026-10-12T02:59:59.748418+00:00",
-            "severity": "warning",
+            "percent": 54,
+            "resets_at": "2026-11-16T03:00:00.226947+00:00",
+            "severity": "normal",
             "is_active": true,
             "scope": null
           },
           {
             "kind": "weekly_scoped",
             "group": "weekly",
-            "percent": 26,
-            "resets_at": "2026-10-12T02:59:59.748633+00:00",
+            "percent": 0,
+            "resets_at": "2026-11-16T03:00:00.227096+00:00",
             "severity": "normal",
             "is_active": false,
             "scope": {
@@ -2039,22 +2915,28 @@
         "copper_kite": null,
         "brass_thimble": null,
         "harbor_lantern": null,
+        "promo_credits": null,
         "amber_ladder": null,
+        "granite_teacup": null,
         "amber_cistern": null,
+        "amber_cistern_offer": null,
         "juniper_tide": null,
         "cedar_ember": null,
+        "starry_waterfall": null,
         "amber_gauge": null,
+        "pace": null,
+        "indicator": null,
         "spend": {
           "used": {
             "amount_minor": 0,
-            "currency": "EUR",
+            "currency": "USD",
             "exponent": 2
           },
           "limit": null,
           "percent": 0,
           "severity": "normal",
           "enabled": false,
-          "disabled_reason": "out_of_credits",
+          "disabled_reason": null,
           "cap": null,
           "balance": null,
           "auto_reload": null,
@@ -2067,15 +2949,15 @@
         "weekly_scoped_shares": [
           {
             "limit_index": 2,
-            "used_percent_of_weekly": 13,
+            "used_percent_of_weekly": 0,
             "allowance_percent_of_weekly": 50
           }
         ],
         "model_scoped": [
           {
             "display_name": "Fable",
-            "utilization": 26,
-            "resets_at": "2026-10-12T02:59:59.748633+00:00"
+            "utilization": 0,
+            "resets_at": "2026-11-16T03:00:00.227096+00:00"
           }
         ]
       },
@@ -2084,54 +2966,70 @@
     "get_context_usage/initial": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1991,
+          "tokens": 2344,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918689,
+          "tokens": 948423,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48311,
+      "totalTokens": 18577,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
+      "percentage": 2,
       "model": "claude-opus-5-5",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
@@ -2152,7 +3050,8 @@
           ],
           "supportsAdaptiveThinking": true,
           "supportsFastMode": true,
-          "supportsAutoMode": true
+          "supportsAutoMode": true,
+          "supportsThinkingOff": false
         },
         {
           "value": "opus",
@@ -2169,11 +3068,12 @@
           ],
           "supportsAdaptiveThinking": true,
           "supportsFastMode": true,
-          "supportsAutoMode": true
+          "supportsAutoMode": true,
+          "supportsThinkingOff": false
         },
         {
           "value": "claude-fable-5-1[1m]",
-          "resolvedModel": "claude-fable-5-1[1m]",
+          "resolvedModel": "claude-fable-5-1",
           "displayName": "Fable",
           "description": "Fable 5.1 · Most capable for your hardest and longest-running tasks",
           "supportsEffort": true,
@@ -2185,7 +3085,8 @@
             "max"
           ],
           "supportsAdaptiveThinking": true,
-          "supportsAutoMode": true
+          "supportsAutoMode": true,
+          "supportsThinkingOff": false
         },
         {
           "value": "sonnet",
@@ -2201,7 +3102,8 @@
             "max"
           ],
           "supportsAdaptiveThinking": true,
-          "supportsAutoMode": true
+          "supportsAutoMode": true,
+          "supportsThinkingOff": false
         },
         {
           "value": "haiku",
@@ -2217,1474 +3119,2268 @@
             "max"
           ],
           "supportsAdaptiveThinking": true,
-          "supportsAutoMode": true
+          "supportsAutoMode": true,
+          "supportsThinkingOff": false
+        },
+        {
+          "value": "claude-fable-5-2",
+          "resolvedModel": "claude-fable-5-2",
+          "displayName": "Fable 5.2",
+          "description": "Fable 5.2 · Most capable for your hardest and longest-running tasks",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsAdaptiveThinking": true,
+          "supportsFastMode": true,
+          "supportsAutoMode": true,
+          "supportsThinkingOff": false
         }
       ]
     },
-    "set_model/claude-fable-5-1": null,
+    "set_model/claude-fable-5-2": {
+      "model": "claude-fable-5-2"
+    },
+    "get_context_usage/claude-fable-5-2": {
+      "categories": [
+        {
+          "id": "system_prompt",
+          "name": "System prompt",
+          "tokens": 2344,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "id": "system_tools",
+          "name": "System tools",
+          "tokens": 7798,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "id": "memory_files",
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "id": "skills",
+          "name": "Skills",
+          "tokens": 4302,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "id": "autocompact_buffer",
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "id": "free_space",
+          "name": "Free space",
+          "tokens": 948423,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 18577,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 2,
+      "model": "claude-fable-5-2",
+      "mcpInstructions": [],
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-fable-5-2[1m]": {
+      "model": "claude-fable-5-2"
+    },
+    "get_context_usage/claude-fable-5-2[1m]": {
+      "categories": [
+        {
+          "id": "system_prompt",
+          "name": "System prompt",
+          "tokens": 2344,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "id": "system_tools",
+          "name": "System tools",
+          "tokens": 7798,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "id": "memory_files",
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "id": "skills",
+          "name": "Skills",
+          "tokens": 4302,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "id": "autocompact_buffer",
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "id": "free_space",
+          "name": "Free space",
+          "tokens": 948423,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 18577,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 2,
+      "model": "claude-fable-5-2",
+      "mcpInstructions": [],
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/claude-fable-5-1": {
+      "model": "claude-fable-5-1"
+    },
     "get_context_usage/claude-fable-5-1": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1991,
+          "tokens": 2344,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918689,
+          "tokens": 948423,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48311,
+      "totalTokens": 18577,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
+      "percentage": 2,
       "model": "claude-fable-5-1",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-fable-5-1[1m]": null,
+    "set_model/claude-fable-5-1[1m]": {
+      "model": "claude-fable-5-1"
+    },
     "get_context_usage/claude-fable-5-1[1m]": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1991,
+          "tokens": 2344,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918689,
+          "tokens": 948423,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48311,
+      "totalTokens": 18577,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
-      "model": "claude-fable-5-1[1m]",
+      "percentage": 2,
+      "model": "claude-fable-5-1",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-opus-5-5": null,
+    "set_model/claude-opus-5-5": {
+      "model": "claude-opus-5-5"
+    },
     "get_context_usage/claude-opus-5-5": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1991,
+          "tokens": 2344,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918689,
+          "tokens": 948423,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48311,
+      "totalTokens": 18577,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
+      "percentage": 2,
       "model": "claude-opus-5-5",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-opus-5-5[1m]": null,
+    "set_model/claude-opus-5-5[1m]": {
+      "model": "claude-opus-5-5"
+    },
     "get_context_usage/claude-opus-5-5[1m]": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1991,
+          "tokens": 2344,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918689,
+          "tokens": 948423,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48311,
+      "totalTokens": 18577,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
-      "model": "claude-opus-5-5[1m]",
+      "percentage": 2,
+      "model": "claude-opus-5-5",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-sonnet-5-5": null,
+    "set_model/claude-sonnet-5-5": {
+      "model": "claude-sonnet-5-5"
+    },
     "get_context_usage/claude-sonnet-5-5": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1991,
+          "tokens": 2344,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918689,
+          "tokens": 948423,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48311,
+      "totalTokens": 18577,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
+      "percentage": 2,
       "model": "claude-sonnet-5-5",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-sonnet-5-5[1m]": null,
+    "set_model/claude-sonnet-5-5[1m]": {
+      "model": "claude-sonnet-5-5"
+    },
     "get_context_usage/claude-sonnet-5-5[1m]": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1991,
+          "tokens": 2344,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918689,
+          "tokens": 948423,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48311,
+      "totalTokens": 18577,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
-      "model": "claude-sonnet-5-5[1m]",
+      "percentage": 2,
+      "model": "claude-sonnet-5-5",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-sonnet-5": null,
+    "set_model/claude-sonnet-5": {
+      "model": "claude-sonnet-5"
+    },
     "get_context_usage/claude-sonnet-5": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 9141,
+          "tokens": 9454,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 47136,
+          "tokens": 13093,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 21160,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 902383,
+          "tokens": 936018,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 64617,
+      "totalTokens": 30982,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 6,
+      "percentage": 3,
       "model": "claude-sonnet-5",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-sonnet-5[1m]": null,
+    "set_model/claude-sonnet-5[1m]": {
+      "model": "claude-sonnet-5"
+    },
     "get_context_usage/claude-sonnet-5[1m]": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 9141,
+          "tokens": 9454,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 47136,
+          "tokens": 13093,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 21160,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 902383,
+          "tokens": 936018,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 64617,
+      "totalTokens": 30982,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 6,
-      "model": "claude-sonnet-5[1m]",
+      "percentage": 3,
+      "model": "claude-sonnet-5",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-haiku-5-5": null,
+    "set_model/claude-haiku-5-5": {
+      "model": "claude-haiku-5-5"
+    },
     "get_context_usage/claude-haiku-5-5": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1991,
+          "tokens": 2344,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918689,
+          "tokens": 948423,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48311,
+      "totalTokens": 18577,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
+      "percentage": 2,
       "model": "claude-haiku-5-5",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-haiku-5-5[1m]": null,
+    "set_model/claude-haiku-5-5[1m]": {
+      "model": "claude-haiku-5-5"
+    },
     "get_context_usage/claude-haiku-5-5[1m]": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1991,
+          "tokens": 2344,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918689,
+          "tokens": 948423,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48311,
+      "totalTokens": 18577,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
-      "model": "claude-haiku-5-5[1m]",
+      "percentage": 2,
+      "model": "claude-haiku-5-5",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-haiku-4-5": null,
+    "set_model/claude-haiku-4-5": {
+      "model": "claude-haiku-4-5"
+    },
     "get_context_usage/claude-haiku-4-5": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 6885,
+          "tokens": 7119,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 53619,
+          "tokens": 11184,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 18007,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 178,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 2921,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 1993,
+          "tokens": 1988,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 134404,
+          "tokens": 176610,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 65596,
+      "totalTokens": 23390,
       "maxTokens": 200000,
       "rawMaxTokens": 200000,
       "autocompactSource": "auto",
-      "percentage": 33,
+      "percentage": 12,
       "model": "claude-haiku-4-5",
+      "mcpInstructions": [],
       "autoCompactThreshold": 167000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-opus-5": null,
+    "set_model/claude-opus-5": {
+      "model": "claude-opus-5"
+    },
     "get_context_usage/claude-opus-5": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1991,
+          "tokens": 2344,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918689,
+          "tokens": 948423,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48311,
+      "totalTokens": 18577,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
+      "percentage": 2,
       "model": "claude-opus-5",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-opus-5[1m]": null,
+    "set_model/claude-opus-5[1m]": {
+      "model": "claude-opus-5"
+    },
     "get_context_usage/claude-opus-5[1m]": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1991,
+          "tokens": 2344,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918689,
+          "tokens": 948423,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48311,
+      "totalTokens": 18577,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
-      "model": "claude-opus-5[1m]",
+      "percentage": 2,
+      "model": "claude-opus-5",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-fable-5": null,
+    "set_model/claude-fable-5": {
+      "model": "claude-fable-5"
+    },
     "get_context_usage/claude-fable-5": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1991,
+          "tokens": 2344,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918689,
+          "tokens": 948423,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48311,
+      "totalTokens": 18577,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
+      "percentage": 2,
       "model": "claude-fable-5",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-fable-5[1m]": null,
+    "set_model/claude-fable-5[1m]": {
+      "model": "claude-fable-5"
+    },
     "get_context_usage/claude-fable-5[1m]": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1991,
+          "tokens": 2344,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918689,
+          "tokens": 948423,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48311,
+      "totalTokens": 18577,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
-      "model": "claude-fable-5[1m]",
+      "percentage": 2,
+      "model": "claude-fable-5",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-opus-4-8": null,
+    "set_model/claude-opus-4-8": {
+      "model": "claude-opus-4-8"
+    },
     "get_context_usage/claude-opus-4-8": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1972,
+          "tokens": 2324,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918708,
+          "tokens": 948443,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48292,
+      "totalTokens": 18557,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
+      "percentage": 2,
       "model": "claude-opus-4-8",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-opus-4-8[1m]": null,
+    "set_model/claude-opus-4-8[1m]": {
+      "model": "claude-opus-4-8"
+    },
     "get_context_usage/claude-opus-4-8[1m]": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1972,
+          "tokens": 2324,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918708,
+          "tokens": 948443,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48292,
+      "totalTokens": 18557,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
-      "model": "claude-opus-4-8[1m]",
+      "percentage": 2,
+      "model": "claude-opus-4-8",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-opus-4-7": null,
+    "set_model/claude-opus-4-7": {
+      "model": "claude-opus-4-7"
+    },
     "get_context_usage/claude-opus-4-7": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 9175,
+          "tokens": 9488,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 51405,
+          "tokens": 13093,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 24007,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 898080,
+          "tokens": 935984,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 68920,
+      "totalTokens": 31016,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 7,
+      "percentage": 3,
       "model": "claude-opus-4-7",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-opus-4-7[1m]": null,
+    "set_model/claude-opus-4-7[1m]": {
+      "model": "claude-opus-4-7"
+    },
     "get_context_usage/claude-opus-4-7[1m]": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 9175,
+          "tokens": 9488,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 51405,
+          "tokens": 13093,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 24007,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 898080,
+          "tokens": 935984,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 68920,
+      "totalTokens": 31016,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 7,
-      "model": "claude-opus-4-7[1m]",
+      "percentage": 3,
+      "model": "claude-opus-4-7",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-opus-4-6": null,
+    "set_model/claude-opus-4-6": {
+      "model": "claude-opus-4-6"
+    },
     "get_context_usage/claude-opus-4-6": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 6885,
+          "tokens": 7119,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 53619,
+          "tokens": 11184,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 18007,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 178,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 2921,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 1993,
+          "tokens": 1988,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 101404,
+          "tokens": 143610,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 65596,
+      "totalTokens": 23390,
       "maxTokens": 200000,
       "rawMaxTokens": 200000,
       "autocompactSource": "model-default",
-      "percentage": 33,
+      "percentage": 12,
       "model": "claude-opus-4-6",
+      "mcpInstructions": [],
       "autoCompactThreshold": 167000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-opus-4-6[1m]": null,
+    "set_model/claude-opus-4-6[1m]": {
+      "model": "claude-opus-4-6[1m]"
+    },
     "get_context_usage/claude-opus-4-6[1m]": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 6885,
+          "tokens": 7119,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 52452,
+          "tokens": 9941,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 18007,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 178,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 2921,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 3160,
+          "tokens": 3231,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 934404,
+          "tokens": 976610,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 65596,
+      "totalTokens": 23390,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "auto",
-      "percentage": 7,
+      "percentage": 2,
       "model": "claude-opus-4-6[1m]",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-sonnet-4-6": null,
+    "set_model/claude-sonnet-4-6": {
+      "model": "claude-sonnet-4-6"
+    },
     "get_context_usage/claude-sonnet-4-6": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 6885,
+          "tokens": 7119,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 53619,
+          "tokens": 11184,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 18007,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 178,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 2921,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 1993,
+          "tokens": 1988,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 101404,
+          "tokens": 143610,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 65596,
+      "totalTokens": 23390,
       "maxTokens": 200000,
       "rawMaxTokens": 200000,
       "autocompactSource": "model-default",
-      "percentage": 33,
+      "percentage": 12,
       "model": "claude-sonnet-4-6",
+      "mcpInstructions": [],
       "autoCompactThreshold": 167000,
       "isAutoCompactEnabled": true
     },
-    "set_model/claude-sonnet-4-6[1m]": null,
+    "set_model/claude-sonnet-4-6[1m]": {
+      "model": "claude-sonnet-4-6[1m]"
+    },
     "get_context_usage/claude-sonnet-4-6[1m]": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 6885,
+          "tokens": 7119,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 52452,
+          "tokens": 9941,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 18007,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 178,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 2921,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 3160,
+          "tokens": 3231,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 934404,
+          "tokens": 976610,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 65596,
+      "totalTokens": 23390,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "auto",
-      "percentage": 7,
+      "percentage": 2,
       "model": "claude-sonnet-4-6[1m]",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/opus": null,
+    "set_model/fable": {
+      "model": "claude-fable-5-2"
+    },
+    "get_context_usage/fable": {
+      "categories": [
+        {
+          "id": "system_prompt",
+          "name": "System prompt",
+          "tokens": 2344,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "id": "system_tools",
+          "name": "System tools",
+          "tokens": 7798,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "id": "memory_files",
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "id": "skills",
+          "name": "Skills",
+          "tokens": 4302,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "id": "autocompact_buffer",
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "id": "free_space",
+          "name": "Free space",
+          "tokens": 948423,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 18577,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 2,
+      "model": "claude-fable-5-2",
+      "mcpInstructions": [],
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/fable[1m]": {
+      "model": "claude-fable-5-2"
+    },
+    "get_context_usage/fable[1m]": {
+      "categories": [
+        {
+          "id": "system_prompt",
+          "name": "System prompt",
+          "tokens": 2344,
+          "color": "promptBorder",
+          "kind": "used"
+        },
+        {
+          "id": "system_tools",
+          "name": "System tools",
+          "tokens": 7798,
+          "color": "inactive",
+          "kind": "used"
+        },
+        {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
+          "name": "Custom agents",
+          "tokens": 238,
+          "color": "permission",
+          "kind": "used"
+        },
+        {
+          "id": "memory_files",
+          "name": "Memory files",
+          "tokens": 3895,
+          "color": "claude",
+          "kind": "used"
+        },
+        {
+          "id": "skills",
+          "name": "Skills",
+          "tokens": 4302,
+          "color": "warning",
+          "kind": "used"
+        },
+        {
+          "id": "autocompact_buffer",
+          "name": "Autocompact buffer",
+          "tokens": 33000,
+          "color": "inactive",
+          "kind": "buffer"
+        },
+        {
+          "id": "free_space",
+          "name": "Free space",
+          "tokens": 948423,
+          "color": "promptBorder",
+          "kind": "free"
+        }
+      ],
+      "totalTokens": 18577,
+      "maxTokens": 1000000,
+      "rawMaxTokens": 1000000,
+      "autocompactSource": "model-default",
+      "percentage": 2,
+      "model": "claude-fable-5-2",
+      "mcpInstructions": [],
+      "autoCompactThreshold": 967000,
+      "isAutoCompactEnabled": true
+    },
+    "set_model/opus": {
+      "model": "claude-opus-5-5"
+    },
     "get_context_usage/opus": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1991,
+          "tokens": 2344,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918689,
+          "tokens": 948423,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48311,
+      "totalTokens": 18577,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
+      "percentage": 2,
       "model": "claude-opus-5-5",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/sonnet": null,
+    "set_model/sonnet": {
+      "model": "claude-sonnet-5-5"
+    },
     "get_context_usage/sonnet": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1991,
+          "tokens": 2344,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918689,
+          "tokens": 948423,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48311,
+      "totalTokens": 18577,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
+      "percentage": 2,
       "model": "claude-sonnet-5-5",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/haiku": null,
+    "set_model/haiku": {
+      "model": "claude-haiku-5-5"
+    },
     "get_context_usage/haiku": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1991,
+          "tokens": 2344,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918689,
+          "tokens": 948423,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48311,
+      "totalTokens": 18577,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
+      "percentage": 2,
       "model": "claude-haiku-5-5",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
-    "set_model/default": null,
+    "set_model/default": {
+      "model": "claude-opus-5-5"
+    },
     "get_context_usage/default": {
       "categories": [
         {
+          "id": "system_prompt",
           "name": "System prompt",
-          "tokens": 1991,
+          "tokens": 2344,
           "color": "promptBorder",
           "kind": "used"
         },
         {
+          "id": "system_tools",
           "name": "System tools",
-          "tokens": 37980,
+          "tokens": 7798,
           "color": "inactive",
           "kind": "used"
         },
         {
+          "id": "system_tools_deferred",
+          "name": "System tools (deferred)",
+          "tokens": 20431,
+          "color": "inactive",
+          "isDeferred": true,
+          "kind": "deferred"
+        },
+        {
+          "id": "custom_agents",
           "name": "Custom agents",
           "tokens": 238,
           "color": "permission",
           "kind": "used"
         },
         {
+          "id": "memory_files",
           "name": "Memory files",
           "tokens": 3895,
           "color": "claude",
           "kind": "used"
         },
         {
+          "id": "skills",
           "name": "Skills",
-          "tokens": 4207,
+          "tokens": 4302,
           "color": "warning",
           "kind": "used"
         },
         {
+          "id": "autocompact_buffer",
           "name": "Autocompact buffer",
           "tokens": 33000,
           "color": "inactive",
           "kind": "buffer"
         },
         {
+          "id": "free_space",
           "name": "Free space",
-          "tokens": 918689,
+          "tokens": 948423,
           "color": "promptBorder",
           "kind": "free"
         }
       ],
-      "totalTokens": 48311,
+      "totalTokens": 18577,
       "maxTokens": 1000000,
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
-      "percentage": 5,
+      "percentage": 2,
       "model": "claude-opus-5-5",
+      "mcpInstructions": [],
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     }

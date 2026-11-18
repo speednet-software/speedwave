@@ -11,6 +11,7 @@ import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
 import { LoggerService } from '../../services/logger.service';
 import { GitForgeService, GitRepositoriesView } from '../../models/integration';
+import { errorText } from '../../shared/error-text';
 
 /** Repository allowlist editor of one git integration. */
 @Component({
@@ -234,8 +235,4 @@ export class GitRepositoriesComponent {
       this.projectState.requestRestartFor(project);
     }
   }
-}
-
-function errorText(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
 }

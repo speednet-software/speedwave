@@ -76,16 +76,17 @@ pub(crate) fn detokenize_transcript(
                 MessageBlock::Thinking { content } => {
                     *content = detokenize_for_display(policy, content)
                 }
-                MessageBlock::ToolResult { content, .. } => {
-                    *content = detokenize_for_display(policy, content)
-                }
+                MessageBlock::ToolUse {
+                    result: Some(result),
+                    ..
+                } => *result = detokenize_for_display(policy, result),
                 MessageBlock::Error { content } => {
                     *content = detokenize_for_display(policy, content)
                 }
                 MessageBlock::ControlChip { argument, .. } => {
                     *argument = detokenize_for_display(policy, argument)
                 }
-                MessageBlock::ToolUse { .. } | MessageBlock::TurnOrigin { .. } => {}
+                MessageBlock::ToolUse { result: None, .. } | MessageBlock::TurnOrigin { .. } => {}
             }
         }
     }
@@ -250,16 +251,15 @@ mod tests {
                     MessageBlock::Thinking {
                         content: tokenized.clone(),
                     },
-                    MessageBlock::ToolResult {
-                        content: tokenized.clone(),
-                        is_error: false,
-                    },
                     MessageBlock::Error {
                         content: tokenized.clone(),
                     },
                     MessageBlock::ToolUse {
+                        tool_id: "toolu_1".to_string(),
                         tool_name: "Read".to_string(),
-                        input_json: tokenized.clone(),
+                        input: tokenized.clone(),
+                        result: Some(tokenized.clone()),
+                        is_error: false,
                     },
                 ]),
                 timestamp: None,
@@ -274,24 +274,24 @@ mod tests {
         let msg = &transcript.messages[0];
         assert_eq!(msg.content, "jan@example.com");
         let blocks = msg.blocks.as_ref().unwrap();
-        for block in &blocks[..4] {
+        for block in &blocks[..3] {
             let content = match block {
                 MessageBlock::Text { content }
                 | MessageBlock::Thinking { content }
-                | MessageBlock::ToolResult { content, .. }
                 | MessageBlock::Error { content } => content,
-                MessageBlock::ToolUse { .. } => panic!("unexpected ToolUse in first 4"),
-                MessageBlock::ControlChip { .. } => panic!("unexpected ControlChip in first 4"),
-                MessageBlock::TurnOrigin { .. } => panic!("unexpected TurnOrigin in first 4"),
+                MessageBlock::ToolUse { .. } => panic!("unexpected ToolUse in first 3"),
+                MessageBlock::ControlChip { .. } => panic!("unexpected ControlChip in first 3"),
+                MessageBlock::TurnOrigin { .. } => panic!("unexpected TurnOrigin in first 3"),
             };
             assert_eq!(content.as_str(), "jan@example.com");
         }
-        match &blocks[4] {
-            MessageBlock::ToolUse { input_json, .. } => {
+        match &blocks[3] {
+            MessageBlock::ToolUse { input, result, .. } => {
                 assert_eq!(
-                    input_json, &tokenized,
-                    "ToolUse.input_json must be left tokenized (not display prose)"
+                    input, &tokenized,
+                    "ToolUse.input must be left tokenized (not display prose)"
                 );
+                assert_eq!(result.as_deref(), Some("jan@example.com"));
             }
             other => panic!("expected ToolUse, got {other:?}"),
         }
@@ -386,22 +386,19 @@ mod tests {
     }
 
     #[test]
-    fn tool_result_block_alias_is_unmasked_but_tool_use_input_stays() {
+    fn tool_use_result_alias_is_unmasked_but_input_stays() {
         let mut transcript = ConversationTranscript {
             session_id: "s1".to_string(),
             messages: vec![crate::history::ConversationMessage {
                 role: "assistant".to_string(),
                 content: "brandex".to_string(),
-                blocks: Some(vec![
-                    MessageBlock::ToolResult {
-                        content: "brandex done".to_string(),
-                        is_error: false,
-                    },
-                    MessageBlock::ToolUse {
-                        tool_name: "Read".to_string(),
-                        input_json: "{\"q\":\"brandex\"}".to_string(),
-                    },
-                ]),
+                blocks: Some(vec![MessageBlock::ToolUse {
+                    tool_id: "toolu_1".to_string(),
+                    tool_name: "Read".to_string(),
+                    input: "{\"q\":\"brandex\"}".to_string(),
+                    result: Some("brandex done".to_string()),
+                    is_error: false,
+                }]),
                 timestamp: None,
                 uuid: None,
                 model: None,
@@ -415,12 +412,9 @@ mod tests {
         assert_eq!(msg.content, "coca-cola");
         let blocks = msg.blocks.as_ref().unwrap();
         match &blocks[0] {
-            MessageBlock::ToolResult { content, .. } => assert_eq!(content, "coca-cola done"),
-            other => panic!("expected ToolResult, got {other:?}"),
-        }
-        match &blocks[1] {
-            MessageBlock::ToolUse { input_json, .. } => {
-                assert_eq!(input_json, "{\"q\":\"brandex\"}");
+            MessageBlock::ToolUse { input, result, .. } => {
+                assert_eq!(input, "{\"q\":\"brandex\"}");
+                assert_eq!(result.as_deref(), Some("coca-cola done"));
             }
             other => panic!("expected ToolUse, got {other:?}"),
         }

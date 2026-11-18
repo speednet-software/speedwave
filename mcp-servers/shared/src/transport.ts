@@ -10,7 +10,7 @@ import { JSONRPCHandler } from './jsonrpc.js';
 import { validateSessionId } from './security.js';
 import { sessionManager } from './session.js';
 import { createSSEStream, sendJSONResponse } from './sse.js';
-import { ts } from './logger.js';
+import { describeError, ts } from './logger.js';
 
 /**
  * Read the session ID from request headers (`Mcp-Session-Id`, falling back to
@@ -39,8 +39,7 @@ export async function handleMCPPost(
   try {
     await handleMCPPostInner(rpcHandler, req, res);
   } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    console.error(`${ts()} handleMCPPost: unhandled error: ${msg}`);
+    console.error(`${ts()} handleMCPPost: unhandled error: ${describeError(error)}`);
     if (!res.headersSent) {
       res.status(500).json({
         jsonrpc: '2.0',

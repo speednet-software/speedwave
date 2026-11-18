@@ -14,7 +14,8 @@ final class RemindersTests: XCTestCase {
 
     func testCommandListAdvertisesAllCommands() {
         for cmd in ["check_permission", "list_lists", "list_reminders",
-                    "get_reminder", "create_reminder", "update_reminder", "complete_reminder"] {
+                    "get_reminder", "create_reminder", "update_reminder", "complete_reminder", "delete_reminder",
+                    "create_list", "update_list", "delete_list"] {
             XCTAssertTrue(RemindersCLI.commandList.contains(cmd),
                           "commandList must advertise '\(cmd)'")
         }
@@ -41,15 +42,223 @@ final class RemindersTests: XCTestCase {
         XCTAssertEqual(parsed?["list_id"] as? String, "Work")
     }
 
-    func testEmptyJSONDefaultsWork() {
-        let emptyJSON = "{}"
-        let data = emptyJSON.data(using: .utf8)!
-        let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        XCTAssertNotNil(parsed)
-        let limit = parsed?["limit"] as? Int ?? 20
-        XCTAssertEqual(limit, 20)
+    func testEmptyParamsDefaultToFiftyAndDueDateSort() throws {
+        let query = try parseListQuery([:])
+        XCTAssertEqual(query.limit, 50)
+        XCTAssertEqual(query.sort, .dueDate)
+        XCTAssertFalse(query.overdue)
+        XCTAssertFalse(query.hasDueRange)
+        XCTAssertNil(query.search)
     }
 
+    private let now = parseISO8601("2026-06-15T12:00:00+02:00")!
+
+    private func reminder(
+        _ title: String, due: String? = nil, notes: String? = nil, completed: Bool = false
+    ) throws -> EKReminder {
+        let item = EKReminder(eventStore: EKEventStore())
+        item.title = title
+        item.notes = notes
+        item.isCompleted = completed
+        if let due { item.dueDateComponents = try XCTUnwrap(dueDateComponents(from: due, timeZone: warsaw)) }
+        return item
+    }
+
+    private func titles(_ query: ListQuery, _ reminders: [EKReminder]) -> [String] {
+        applyListQuery(query, to: reminders).map { $0.title ?? "" }
+    }
+
+    private func query(_ params: [String: Any]) throws -> ListQuery {
+        try parseListQuery(params, now: now, timeZone: warsaw)
+    }
+
+    func testParseListQueryReadsEveryParameter() throws {
+        let parsed = try query([
+            "limit": 5, "overdue": true, "search": "faktura", "sort": "name",
+            "due_from": "2026-06-15", "due_to": "2026-06-15",
+        ])
+        XCTAssertEqual(parsed.limit, 5)
+        XCTAssertTrue(parsed.overdue)
+        XCTAssertEqual(parsed.search, "faktura")
+        XCTAssertEqual(parsed.sort, .name)
+        XCTAssertEqual(parsed.dueFrom, parseISO8601("2026-06-14T22:00:00Z"))
+        XCTAssertEqual(parsed.dueTo, parseISO8601("2026-06-15T22:00:00Z"))
+    }
+
+    func testParseListQueryTimedDueToIsIncludedItself() throws {
+        let parsed = try query(["due_to": "2026-06-15T10:00:00"])
+        let end = try XCTUnwrap(parsed.dueTo)
+        let at = try XCTUnwrap(parseISO8601("2026-06-15T10:00:00+02:00"))
+        XCTAssertGreaterThan(end, at)
+        XCTAssertLessThan(end.timeIntervalSince(at), 0.001)
+    }
+
+    func testParseListQueryOffsetKeepsTheInstant() throws {
+        let parsed = try query(["due_from": "2026-06-15T10:00:00Z"])
+        XCTAssertEqual(parsed.dueFrom, parseISO8601("2026-06-15T10:00:00Z"))
+    }
+
+    func testParseListQueryRejectsBadDatesAndSort() {
+        for key in ["due_from", "due_to"] {
+            XCTAssertThrowsError(try query([key: "2026-02-30"])) { error in
+                guard case CLIError.invalidDate("2026-02-30") = error else { return XCTFail("unexpected \(error)") }
+            }
+        }
+        XCTAssertThrowsError(try query(["sort": "priority"])) { error in
+            guard case CLIError.invalidValue(let message) = error else { return XCTFail("unexpected \(error)") }
+            XCTAssertTrue(message.contains("priority"), message)
+        }
+    }
+
+    func testPredicateBoundsAreWidenedByADayAndOverdueEndsAtNow() throws {
+        let none = try query([:])
+        XCTAssertNil(none.predicateStart)
+        XCTAssertNil(none.predicateEnd)
+        XCTAssertEqual(try query(["due_from": "2026-06-15"]).predicateStart, parseISO8601("2026-06-13T22:00:00Z"))
+        XCTAssertEqual(try query(["due_to": "2030-01-01"]).predicateEnd, parseISO8601("2030-01-02T23:00:00Z"))
+        XCTAssertEqual(try query(["overdue": true]).predicateEnd, parseISO8601("2026-06-16T10:00:00Z"))
+        XCTAssertEqual(
+            try query(["overdue": true, "due_to": "2030-01-01"]).predicateEnd, parseISO8601("2026-06-16T10:00:00Z")
+        )
+        XCTAssertEqual(
+            try query(["overdue": true, "due_to": "2020-01-01"]).predicateEnd, parseISO8601("2020-01-02T23:00:00Z")
+        )
+    }
+
+    func testAnAllDayReminderMatchesItsOwnDayRange() throws {
+        let items = [
+            try reminder("on the day", due: "2026-06-15"),
+            try reminder("day before", due: "2026-06-14"),
+            try reminder("day after", due: "2026-06-16"),
+            try reminder("undated"),
+        ]
+        XCTAssertEqual(titles(try query(["due_from": "2026-06-15", "due_to": "2026-06-15"]), items), ["on the day"])
+    }
+
+    func testDueRangeBoundsForTimedReminders() throws {
+        let items = [
+            try reminder("early", due: "2026-06-15T08:00:00"),
+            try reminder("at end", due: "2026-06-15T10:00:00"),
+            try reminder("late", due: "2026-06-15T10:00:01"),
+        ]
+        XCTAssertEqual(titles(try query(["due_to": "2026-06-15T10:00:00"]), items), ["early", "at end"])
+        XCTAssertEqual(titles(try query(["due_from": "2026-06-15T10:00:00"]), items), ["at end", "late"])
+    }
+
+    func testNoRangeKeepsUndatedAndAnyRangeDropsThem() throws {
+        let items = [try reminder("dated", due: "2026-06-15"), try reminder("undated")]
+        XCTAssertEqual(Set(titles(try query([:]), items)), ["dated", "undated"])
+        XCTAssertEqual(titles(try query(["due_to": "2030-01-01"]), items), ["dated"])
+        XCTAssertEqual(titles(try query(["due_from": "2000-01-01"]), items), ["dated"])
+    }
+
+    func testRangeAppliesToCompletedRemindersByTheirDueDate() throws {
+        let items = [
+            try reminder("done in range", due: "2026-06-15", completed: true),
+            try reminder("done out of range", due: "2026-01-01", completed: true),
+        ]
+        XCTAssertEqual(titles(try query(["due_from": "2026-06-01", "due_to": "2026-06-30"]), items), ["done in range"])
+    }
+
+    func testOverdueKeepsOnlyIncompleteRemindersPastDue() throws {
+        let items = [
+            try reminder("timed past", due: "2026-06-15T09:00:00"),
+            try reminder("timed future", due: "2026-06-15T13:00:00"),
+            try reminder("all-day yesterday", due: "2026-06-14"),
+            try reminder("all-day today", due: "2026-06-15"),
+            try reminder("completed past", due: "2026-06-10", completed: true),
+            try reminder("undated"),
+        ]
+        XCTAssertEqual(titles(try query(["overdue": true]), items), ["all-day yesterday", "timed past"])
+    }
+
+    func testOverdueIntersectsWithTheDueRange() throws {
+        let items = [
+            try reminder("old", due: "2026-06-01"),
+            try reminder("recent", due: "2026-06-14"),
+        ]
+        XCTAssertEqual(titles(try query(["overdue": true, "due_from": "2026-06-10"]), items), ["recent"])
+    }
+
+    func testDueWindowOfAllDayReminderSpansItsLocalDay() throws {
+        let window = try XCTUnwrap(dueWindow(of: reminder("x", due: "2026-06-15"), timeZone: warsaw))
+        XCTAssertEqual(window.start, parseISO8601("2026-06-14T22:00:00Z"))
+        XCTAssertEqual(window.end, parseISO8601("2026-06-15T22:00:00Z"))
+    }
+
+    func testDueWindowOfTimedReminderIsItsMomentAndUndatedIsNil() throws {
+        let window = try XCTUnwrap(dueWindow(of: reminder("x", due: "2026-06-15T09:30:00"), timeZone: warsaw))
+        XCTAssertEqual(window.start, parseISO8601("2026-06-15T07:30:00Z"))
+        XCTAssertEqual(window.end, window.start)
+        XCTAssertNil(dueWindow(of: try reminder("x"), timeZone: warsaw))
+    }
+
+    func testSearchFoldsCaseAndDiacriticsInNameAndNotes() throws {
+        let items = [
+            try reminder("FAKTURA za maj"),
+            try reminder("Faktúra"),
+            try reminder("Zapłać", notes: "[#fin]\nfaktura od Żabki"),
+            try reminder("Other", notes: "nothing here"),
+        ]
+        XCTAssertEqual(
+            Set(titles(try query(["search": "faktura"]), items)), ["FAKTURA za maj", "Faktúra", "Zapłać"]
+        )
+        XCTAssertEqual(titles(try query(["search": "FAKTÚRA"]), items).count, 3)
+        XCTAssertEqual(titles(try query(["search": "zabki"]), items), ["Zapłać"])
+    }
+
+    func testSearchDoesNotMatchTagMarkers() throws {
+        let items = [try reminder("Pay", notes: "[#invoice]\nrent")]
+        XCTAssertEqual(titles(try query(["search": "invoice"]), items), [])
+        XCTAssertEqual(titles(try query(["search": "rent"]), items), ["Pay"])
+    }
+
+    func testDefaultSortIsDueAscendingWithUndatedLast() throws {
+        let items = [
+            try reminder("undated"),
+            try reminder("later", due: "2026-07-01T09:00:00"),
+            try reminder("all-day", due: "2026-06-20"),
+            try reminder("sooner", due: "2026-06-16T09:00:00"),
+        ]
+        XCTAssertEqual(titles(try query([:]), items), ["sooner", "all-day", "later", "undated"])
+    }
+
+    func testSortByNameIsAlphabeticalAndLocaleAware() throws {
+        let items = [try reminder("Zebra"), try reminder("Ćma"), try reminder("apple"), try reminder("Banana")]
+        XCTAssertEqual(titles(try query(["sort": "name"]), items), ["apple", "Banana", "Ćma", "Zebra"])
+    }
+
+    func testEqualKeysFallBackToNameForADeterministicOrder() throws {
+        let items = [try reminder("b", due: "2026-06-20"), try reminder("a", due: "2026-06-20")]
+        XCTAssertEqual(titles(try query([:]), items), ["a", "b"])
+    }
+
+    func testSortByCreatedIsAscendingWithMissingLast() throws {
+        let items = [try reminder("none"), try reminder("new"), try reminder("old")]
+        let created: [String: Date] = [
+            "new": Date(timeIntervalSince1970: 2_000), "old": Date(timeIntervalSince1970: 1_000),
+        ]
+        let sorted = sortReminders(items, by: .created, creationDate: { created[$0.title ?? ""] })
+        XCTAssertEqual(sorted.map { $0.title ?? "" }, ["old", "new", "none"])
+    }
+
+    func testListResponseReportsTotalAndTruncatedWhenTheLimitCuts() throws {
+        let items = [try reminder("a"), try reminder("b"), try reminder("c")]
+        let cut = listResponse(items, limit: 2)
+        XCTAssertEqual((cut["reminders"] as? [[String: Any]])?.map { $0["name"] as? String }, ["a", "b"])
+        XCTAssertEqual(cut["total"] as? Int, 3)
+        XCTAssertEqual(cut["truncated"] as? Bool, true)
+    }
+
+    func testListResponseIsNotTruncatedWhenEverythingFits() throws {
+        let items = [try reminder("a"), try reminder("b")]
+        for limit in [2, 50] {
+            let whole = listResponse(items, limit: limit)
+            XCTAssertEqual((whole["reminders"] as? [[String: Any]])?.count, 2)
+            XCTAssertEqual(whole["total"] as? Int, 2)
+            XCTAssertEqual(whole["truncated"] as? Bool, false)
+        }
+    }
 
     private func typoReminder(_ store: EKEventStore) throws -> EKReminder {
         let reminder = EKReminder(eventStore: store)
@@ -72,6 +281,121 @@ final class RemindersTests: XCTestCase {
             guard case CLIError.notFound(let message) = error else { return XCTFail("unexpected \(error)") }
             XCTAssertTrue(message.contains("speedwave-test-no-such-reminder"), message)
         }
+    }
+
+    func testDeleteReminderWithoutIdIsAMissingField() {
+        XCTAssertThrowsError(try deleteReminder(store: EKEventStore(), params: [:])) { error in
+            guard case CLIError.missingField("id") = error else { return XCTFail("unexpected \(error)") }
+        }
+    }
+
+    func testDeleteReminderWithUnknownIdIsNotFoundInsteadOfSilentSuccess() {
+        let params: [String: Any] = ["id": "speedwave-test-no-such-reminder"]
+        XCTAssertThrowsError(try deleteReminder(store: EKEventStore(), params: params)) { error in
+            guard case CLIError.notFound(let message) = error else { return XCTFail("unexpected \(error)") }
+            XCTAssertTrue(message.contains("speedwave-test-no-such-reminder"), message)
+        }
+    }
+
+    func testCreateListWithoutNameIsAMissingField() {
+        for params in [[:], ["name": ""], ["name": "  "]] as [[String: Any]] {
+            XCTAssertThrowsError(try createList(store: EKEventStore(), params: params)) { error in
+                guard case CLIError.missingField("name") = error else { return XCTFail("unexpected \(error)") }
+            }
+        }
+    }
+
+    func testCreateListWithMalformedColorIsRejectedBeforeAnythingIsSaved() {
+        let params: [String: Any] = ["name": "Home", "color": "green"]
+        XCTAssertThrowsError(try createList(store: EKEventStore(), params: params)) { error in
+            guard case CLIError.invalidValue(let message) = error else { return XCTFail("unexpected \(error)") }
+            XCTAssertTrue(message.contains("#RRGGBB"), message)
+        }
+    }
+
+    func testUpdateListWithoutListIdIsAMissingField() {
+        XCTAssertThrowsError(try updateList(store: EKEventStore(), params: ["name": "x"])) { error in
+            guard case CLIError.missingField("list_id") = error else { return XCTFail("unexpected \(error)") }
+        }
+    }
+
+    func testUpdateListWithNothingToChangeIsAMissingField() {
+        XCTAssertThrowsError(try updateList(store: EKEventStore(), params: ["list_id": "x"])) { error in
+            guard case CLIError.missingField("name or color") = error else { return XCTFail("unexpected \(error)") }
+        }
+    }
+
+    func testUpdateListWithBlankNameIsAMissingField() {
+        let params: [String: Any] = ["list_id": "x", "name": " "]
+        XCTAssertThrowsError(try updateList(store: EKEventStore(), params: params)) { error in
+            guard case CLIError.missingField("name") = error else { return XCTFail("unexpected \(error)") }
+        }
+    }
+
+    func testUpdateListWithUnknownListIsNotFound() {
+        let params: [String: Any] = ["list_id": "speedwave-test-no-such-list", "name": "x"]
+        XCTAssertThrowsError(try updateList(store: EKEventStore(), params: params)) { error in
+            guard case CLIError.notFound(let message) = error else { return XCTFail("unexpected \(error)") }
+            XCTAssertTrue(message.contains("speedwave-test-no-such-list"), message)
+        }
+    }
+
+    func testDeleteListWithoutListIdIsAMissingField() {
+        XCTAssertThrowsError(try deleteList(store: EKEventStore(), params: [:])) { error in
+            guard case CLIError.missingField("list_id") = error else { return XCTFail("unexpected \(error)") }
+        }
+    }
+
+    func testDeleteListWithUnknownListIsNotFound() {
+        let params: [String: Any] = ["list_id": "speedwave-test-no-such-list", "force": true]
+        XCTAssertThrowsError(try deleteList(store: EKEventStore(), params: params)) { error in
+            guard case CLIError.notFound(let message) = error else { return XCTFail("unexpected \(error)") }
+            XCTAssertTrue(message.contains("speedwave-test-no-such-list"), message)
+        }
+    }
+
+    func testNonEmptyListMessageGivesTheReminderCountAndNamesForce() {
+        XCTAssertEqual(
+            nonEmptyListMessage(name: "Work", reminderCount: 3),
+            "Reminder list 'Work' still holds 3 reminders. "
+                + "Pass force: true to delete the list together with its reminders; this cannot be undone"
+        )
+    }
+
+    func testNonEmptyListMessageUsesTheSingularForOneReminder() {
+        XCTAssertTrue(nonEmptyListMessage(name: "Work", reminderCount: 1).contains("holds 1 reminder."))
+    }
+
+    func testCountFetchedCountsTheReminders() throws {
+        XCTAssertEqual(try countFetched([], listName: "Work"), 0)
+        let store = EKEventStore()
+        let reminders = [EKReminder(eventStore: store), EKReminder(eventStore: store)]
+        XCTAssertEqual(try countFetched(reminders, listName: "Work"), 2)
+    }
+
+    func testCountFetchedRejectsAMissingResultNamingTheList() {
+        XCTAssertThrowsError(try countFetched(nil, listName: "Work")) { error in
+            guard case CLIError.invalidValue(let message) = error else { return XCTFail("unexpected \(error)") }
+            XCTAssertTrue(message.contains("'Work'"), message)
+        }
+    }
+
+    func testListWriteBlockerRefusesReadOnlyAndImmutableLists() {
+        let expected = "Reminder list 'Siri' is read-only and cannot be changed or deleted"
+        XCTAssertEqual(
+            listWriteBlocker(name: "Siri", allowsContentModifications: false, isImmutable: false), expected)
+        XCTAssertEqual(
+            listWriteBlocker(name: "Siri", allowsContentModifications: true, isImmutable: true), expected)
+    }
+
+    func testListWriteBlockerAllowsAWritableList() {
+        XCTAssertNil(listWriteBlocker(name: "Work", allowsContentModifications: true, isImmutable: false))
+    }
+
+    func testListColorParsesTheFormatListReminderListsReturns() throws {
+        let color = try XCTUnwrap(try listColor(["color": "#34c759"]))
+        XCTAssertEqual(hexColor(from: color), "#34c759")
+        XCTAssertNil(try listColor([:]))
     }
 
     func testApplyReminderUpdateWithOnlyNameKeepsEveryOtherField() throws {

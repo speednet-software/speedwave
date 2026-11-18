@@ -19,8 +19,8 @@ const ALL_TOOLS = [
 ];
 
 describe('OS tool metadata', () => {
-  it('registers exactly 42 tools', () => {
-    expect(ALL_TOOLS).toHaveLength(42);
+  it('registers exactly 46 tools', () => {
+    expect(ALL_TOOLS).toHaveLength(46);
   });
 
   describe.each(ALL_TOOLS.map((td) => [td.tool.name, td] as const))('%s', (_name, td) => {
@@ -74,6 +74,13 @@ describe('OS tool metadata', () => {
         true
       );
     });
+
+    it('has an os-category of a known sub-integration', () => {
+      const meta = td.tool._meta as Record<string, unknown>;
+      expect(['reminders', 'calendar', 'mail', 'notes']).toContain(
+        metaValue(meta, META_KEYS.OS_CATEGORY, 'osCategory')
+      );
+    });
   });
 
   it('all tool names are unique', () => {
@@ -86,6 +93,8 @@ describe('OS tool metadata', () => {
       'createReminder',
       'updateReminder',
       'completeReminder',
+      'createReminderList',
+      'updateReminderList',
       'createEvent',
       'updateEvent',
       'createNote',
@@ -101,6 +110,8 @@ describe('OS tool metadata', () => {
       'saveDraft',
     ];
     const deleteTools = [
+      'deleteReminder',
+      'deleteReminderList',
       'deleteEvent',
       'deleteNote',
       'sendEmail',

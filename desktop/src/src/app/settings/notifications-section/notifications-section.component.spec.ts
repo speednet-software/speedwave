@@ -93,6 +93,12 @@ describe('NotificationsSectionComponent', () => {
     expect(el.querySelector('[data-testid="open-notification-settings"]')).toBeNull();
   });
 
+  it('is a block so the page spacing applies above it', async () => {
+    const el = await render();
+
+    expect(el.classList).toContain('block');
+  });
+
   it('describes every event without naming Claude', async () => {
     const el = await render();
 

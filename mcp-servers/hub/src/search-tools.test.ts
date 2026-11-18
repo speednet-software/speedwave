@@ -9,6 +9,8 @@ import {
   buildMockToolMetadata,
 } from './test-helpers.js';
 import type { ToolMetadata } from './hub-types.js';
+import * as accessConfig from './access-config.js';
+import type { AccessRules } from './access-config.js';
 
 describe('searchTools', () => {
   const savedEnabledServices = process.env.ENABLED_SERVICES;
@@ -1329,5 +1331,101 @@ describe('searchTools sandboxGlobal', () => {
 
     expect(result.matches.some((m) => m.service === 'class')).toBe(false);
     errSpy.mockRestore();
+  });
+});
+
+describe('searchTools under read-only access rules', () => {
+  const savedEnabledServices = process.env.ENABLED_SERVICES;
+
+  function useRules(access: AccessRules): void {
+    vi.spyOn(accessConfig, 'getAccessRules').mockReturnValue(access);
+  }
+
+  beforeEach(() => {
+    _resetRegistryForTesting();
+    populateRegistryWithMockTools();
+    resetServiceCaches();
+    process.env.ENABLED_SERVICES = 'slack,redmine';
+    const registry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
+    registry['slack']['listChannelIds'].annotations = { readOnlyHint: true };
+    registry['slack']['sendChannel'].annotations = { readOnlyHint: false };
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    if (savedEnabledServices === undefined) {
+      delete process.env.ENABLED_SERVICES;
+    } else {
+      process.env.ENABLED_SERVICES = savedEnabledServices;
+    }
+    resetServiceCaches();
+  });
+
+  it('adds no notice and no markers when every service is full', async () => {
+    useRules({ default: 'full', services: {} });
+
+    const result = await searchTools({ query: 'channel', detailLevel: 'names_only' });
+
+    expect(result.notice).toBeUndefined();
+    expect(result.matches.every((m) => m.blocked === undefined)).toBe(true);
+  });
+
+  it('keeps blocked tools in the results with a read-only marker', async () => {
+    useRules({ default: 'read_only', services: {} });
+
+    const result = await searchTools({
+      query: 'channel',
+      detailLevel: 'names_only',
+      service: 'slack',
+    });
+
+    const send = result.matches.find((m) => m.tool === 'slack/sendChannel');
+    const list = result.matches.find((m) => m.tool === 'slack/listChannelIds');
+    expect(send?.blocked).toBe('read-only');
+    expect(list).toBeDefined();
+    expect(list?.blocked).toBeUndefined();
+  });
+
+  it('marks a tool without annotations as blocked', async () => {
+    useRules({ default: 'read_only', services: {} });
+
+    const result = await searchTools({
+      query: 'createIssue',
+      detailLevel: 'names_only',
+      service: 'redmine',
+    });
+
+    expect(result.matches.find((m) => m.tool === 'redmine/createIssue')?.blocked).toBe('read-only');
+  });
+
+  it('leads the result with one sentence naming every read-only service', async () => {
+    useRules({ default: 'read_only', services: {} });
+
+    const result = await searchTools({ query: '*', detailLevel: 'names_only' });
+
+    expect(Object.keys(result)[0]).toBe('notice');
+    expect(result.notice).toContain('Read-only mode is on');
+    expect(result.notice).toContain('slack, redmine');
+  });
+
+  it('names only the read-only services under a per-service mode and marks only their tools', async () => {
+    useRules({ default: 'full', services: { slack: 'read_only' } });
+
+    const result = await searchTools({ query: '*', detailLevel: 'names_only' });
+
+    expect(result.notice).toContain('slack');
+    expect(result.notice).not.toContain('redmine');
+    expect(
+      result.matches.filter((m) => m.service === 'redmine').every((m) => m.blocked === undefined)
+    ).toBe(true);
+  });
+
+  it('keeps the notice when a query matches nothing', async () => {
+    useRules({ default: 'read_only', services: {} });
+
+    const result = await searchTools({ query: 'zzzznomatch', detailLevel: 'names_only' });
+
+    expect(result.total).toBe(0);
+    expect(result.notice).toContain('Read-only mode is on');
   });
 });

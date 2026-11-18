@@ -36,6 +36,7 @@ Every change must work on **both macOS and Windows**.
 - `host-workers.md` — host-side worker/bridge rules (single supervisor, firewall, exit 137).
 - `desktop-ui.md` — Angular/Tauri UI rules (zoneless signals, Rust↔TS mirrors, CSP).
 - `logging.md` — the `log` facade, sanitizer SSOT, diagnostics registry.
+- `no-user-content-in-logs.md` — user work content never reaches a log (name, identifier, size only); sentinel tests per language, the compose `DEBUG=` guard, the export window.
 - `managed-policy-config.md` — org/MDM-forced policy: the system managed-config file, presence-is-lock, and the un-bypassable `managed-settings.json` mount.
 - `documentation.md` — ADRs (`docs/adr/`) and `.claude/rules/` are the only in-repo documentation; when a change requires an ADR or a rule update.
 - `rust-style.md` — Rust-specific conventions.
