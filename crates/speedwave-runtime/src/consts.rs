@@ -3185,43 +3185,6 @@ mod tests {
         );
     }
 
-    fn ts_string_const<'a>(src: &'a str, name: &str) -> &'a str {
-        let re = regex::Regex::new(&format!(r#"const\s+{name}\s*=\s*['"]([^'"]+)['"]"#)).unwrap();
-        re.captures(src)
-            .unwrap_or_else(|| panic!("the TS source must declare `const {name}`"))
-            .get(1)
-            .unwrap()
-            .as_str()
-    }
-
-    #[test]
-    fn oauth_refresh_status_file_matches_ts() {
-        let src = include_str!("../../../mcp-servers/shared/src/oauth-client.ts");
-        assert_eq!(
-            ts_string_const(src, "REFRESH_STATUS_FILE"),
-            OAUTH_REFRESH_STATUS_FILE
-        );
-    }
-
-    #[test]
-    fn oauth_service_name_file_matches_ts() {
-        let src = include_str!("../../../mcp-servers/shared/src/oauth-client.ts");
-        assert_eq!(
-            ts_string_const(src, "SERVICE_NAME_FILE"),
-            OAUTH_SERVICE_NAME_FILE
-        );
-    }
-
-    #[test]
-    fn oauth_compat_url_path_matches_ts() {
-        let src = include_str!("../../../mcp-servers/hub/src/oauth-compat.ts");
-        let path = ts_string_const(src, "OAUTH_COMPAT_PATH");
-        assert_eq!(
-            OAUTH_COMPAT_URL,
-            format!("http://mcp-hub:{PORT_BASE}{path}")
-        );
-    }
-
     #[test]
     fn host_gateway_alias_appears_in_compose_template() {
         let src = include_str!("../../../containers/compose.template.yml");

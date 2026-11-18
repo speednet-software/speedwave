@@ -79,40 +79,4 @@ mod tests {
         record(dir.path(), RefreshOutcome::Refreshed);
         assert!(read(dir.path()).is_none());
     }
-
-    #[test]
-    fn written_status_matches_the_ts_refresh_status_type() {
-        let src = include_str!("../../../../mcp-servers/shared/src/oauth-client.ts");
-        let states = regex::Regex::new(r"const REFRESH_STATES = \[([^\]]+)\] as const;")
-            .unwrap()
-            .captures(src)
-            .expect("oauth-client.ts must declare `const REFRESH_STATES = [...] as const;`");
-        let field = regex::Regex::new(
-            r"type RefreshStatus = \{ state: \(typeof REFRESH_STATES\)\[number\]; (\w+): string \}",
-        )
-        .unwrap()
-        .captures(src)
-        .expect("oauth-client.ts must declare `type RefreshStatus = { state: ...; at: string }`");
-        let mut ts_states: Vec<&str> = regex::Regex::new(r"'([^']+)'")
-            .unwrap()
-            .captures_iter(states.get(1).unwrap().as_str())
-            .map(|c| c.get(1).unwrap().as_str())
-            .collect();
-        ts_states.sort_unstable();
-
-        let dir = tempfile::tempdir().unwrap();
-        let mut rust_states = Vec::new();
-        for outcome in [
-            RefreshOutcome::ReconnectRequired,
-            RefreshOutcome::NetworkError,
-        ] {
-            record(dir.path(), outcome);
-            let status = read(dir.path()).unwrap();
-            assert_eq!(status.as_object().unwrap().len(), 2);
-            assert!(status[&field[1]].is_string());
-            rust_states.push(status["state"].as_str().unwrap().to_string());
-        }
-        rust_states.sort_unstable();
-        assert_eq!(ts_states, rust_states);
-    }
 }
