@@ -49,6 +49,7 @@ import {
   type QueuedMessage,
   type WireContentBlock,
   type ConversationTranscript,
+  type HistoryMessageBlock,
   type StagedTranscript,
 } from '../models/chat';
 
@@ -2915,24 +2916,6 @@ export function historyFitsTarget(
   return historyTokens < windowTokens;
 }
 
-interface HistoryToolUseBlock {
-  type: 'tool_use';
-  tool_name: string;
-  input_json: string;
-}
-
-interface HistoryToolResultBlock {
-  type: 'tool_result';
-  content: string;
-  is_error: boolean;
-}
-
-interface HistoryControlChipBlock {
-  type: 'control_chip';
-  command: string;
-  argument: string;
-}
-
 /**
  * Maps a backend `ConversationTranscript` into the live-chat `ChatMessage[]` shape.
  * @param transcript - Backend conversation transcript to convert.
@@ -2940,13 +2923,10 @@ interface HistoryControlChipBlock {
 export function toChatMessages(transcript: ConversationTranscript): ChatMessage[] {
   return transcript.messages.map((msg) => {
     const role: 'user' | 'assistant' = msg.role === 'user' ? 'user' : 'assistant';
-    const rawBlocks =
+    const blocks: MessageBlock[] =
       msg.blocks && msg.blocks.length > 0
-        ? (msg.blocks as unknown as (
-            MessageBlock | HistoryToolUseBlock | HistoryToolResultBlock | HistoryControlChipBlock
-          )[])
-        : ([{ type: 'text' as const, content: msg.content }] as MessageBlock[]);
-    const blocks = normalizeHistoryBlocks(rawBlocks);
+        ? msg.blocks.map(historyBlockToMessageBlock)
+        : [{ type: 'text', content: msg.content }];
     const timestamp = msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now();
     const base: ChatMessage = { role, blocks, timestamp };
     if (msg.uuid) {
@@ -2962,42 +2942,30 @@ export function toChatMessages(transcript: ConversationTranscript): ChatMessage[
   });
 }
 
-function normalizeHistoryBlocks(
-  blocks: (MessageBlock | HistoryToolUseBlock | HistoryToolResultBlock | HistoryControlChipBlock)[]
-): MessageBlock[] {
-  const result: MessageBlock[] = [];
-
-  for (const block of blocks) {
-    if (block.type === 'tool_use' && !('tool' in block)) {
-      const hist = block as HistoryToolUseBlock;
-      result.push({
+function historyBlockToMessageBlock(block: HistoryMessageBlock): MessageBlock {
+  switch (block.type) {
+    case 'text':
+      return { type: 'text', content: block.content };
+    case 'thinking':
+      return { type: 'thinking', content: block.content, collapsed: true };
+    case 'error':
+      return { type: 'error', content: block.content };
+    case 'control_chip':
+      return { type: 'chip', command: block.command, argument: block.argument };
+    case 'tool_use': {
+      const base = {
+        type: 'tool_use' as const,
+        tool_id: block.tool_id,
+        tool_name: block.tool_name,
+        input_json: block.input,
+      };
+      const result = block.result ?? '';
+      return {
         type: 'tool_use',
-        tool: {
-          type: 'tool_use',
-          tool_id: '',
-          tool_name: hist.tool_name,
-          input_json: hist.input_json,
-          status: 'done',
-          result: '',
-          result_is_error: false,
-        },
-      });
-    } else if (block.type === 'tool_result') {
-      const hist = block as HistoryToolResultBlock;
-      const prev = result[result.length - 1];
-      if (prev?.type === 'tool_use') {
-        const base = { ...prev.tool, result: hist.content };
-        prev.tool = hist.is_error
-          ? { ...base, status: 'error' as const, result_is_error: true as const }
-          : { ...base, status: 'done' as const, result_is_error: false as const };
-      }
-    } else if (block.type === 'control_chip') {
-      const hist = block as HistoryControlChipBlock;
-      result.push({ type: 'chip', command: hist.command, argument: hist.argument });
-    } else {
-      result.push(block as MessageBlock);
+        tool: block.is_error
+          ? { ...base, status: 'error', result, result_is_error: true }
+          : { ...base, status: 'done', result, result_is_error: false },
+      };
     }
   }
-
-  return result;
 }

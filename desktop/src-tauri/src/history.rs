@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -23,11 +24,12 @@ pub enum MessageBlock {
     Thinking { content: String },
     #[serde(rename = "tool_use")]
     ToolUse {
+        tool_id: String,
         tool_name: String,
-        input_json: String,
+        input: String,
+        result: Option<String>,
+        is_error: bool,
     },
-    #[serde(rename = "tool_result")]
-    ToolResult { content: String, is_error: bool },
     #[serde(rename = "error")]
     Error { content: String },
     #[serde(rename = "control_chip")]
@@ -403,10 +405,12 @@ fn parse_assistant_message(parsed: &serde_json::Value) -> Option<ConversationMes
             "tool_use" => {
                 if let Some(name) = block["name"].as_str() {
                     parts.push(format!("[Tool: {name}]"));
-                    let input = block["input"].to_string();
                     rich_blocks.push(MessageBlock::ToolUse {
+                        tool_id: block["id"].as_str().unwrap_or_default().to_string(),
                         tool_name: name.to_string(),
-                        input_json: input,
+                        input: block["input"].to_string(),
+                        result: None,
+                        is_error: false,
                     });
                 }
             }
@@ -480,6 +484,40 @@ fn parse_result_message(parsed: &serde_json::Value) -> Option<ConversationMessag
         model: None,
         usage: None,
     })
+}
+
+fn attach_tool_results(
+    parsed: &serde_json::Value,
+    messages: &mut [ConversationMessage],
+    calls: &HashMap<String, (usize, usize)>,
+) {
+    let Some(blocks) = parsed["message"]["content"].as_array() else {
+        return;
+    };
+    for block in blocks
+        .iter()
+        .filter(|b| b["type"].as_str() == Some("tool_result"))
+    {
+        let tool_use_id = block["tool_use_id"].as_str().unwrap_or_default();
+        let call = match calls.get(tool_use_id) {
+            Some(&(message, index)) => messages
+                .get_mut(message)
+                .and_then(|m| m.blocks.as_mut())
+                .and_then(|blocks| blocks.get_mut(index)),
+            None => None,
+        };
+        match call {
+            Some(MessageBlock::ToolUse {
+                result, is_error, ..
+            }) => {
+                *result = Some(crate::chat::tool_result_text(block));
+                *is_error = block["is_error"].as_bool().unwrap_or(false);
+            }
+            _ => log::debug!(
+                "skipping tool_result without a matching main-thread tool_use tool_use_id={tool_use_id}"
+            ),
+        }
+    }
 }
 
 fn truncate_preview(s: &str, max_chars: usize) -> String {
@@ -700,19 +738,40 @@ fn get_conversation_impl(
     const MAX_TRANSCRIPT_LINES: usize = 10_000;
     let reader = BufReader::new(file);
     let mut messages = Vec::new();
+    let mut calls: HashMap<String, (usize, usize)> = HashMap::new();
     let mut last_assistant_content: Option<String> = None;
     for line in reader.lines().take(MAX_TRANSCRIPT_LINES) {
         let line = line.map_err(|e| anyhow::anyhow!("io error reading session: {e}"))?;
+        if line.contains("\"tool_result\"") {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) {
+                attach_tool_results(&parsed, &mut messages, &calls);
+            }
+        }
         if let Some(msg) = parse_jsonl_message(&line) {
+            let tool_ids: Vec<(usize, String)> = msg
+                .blocks
+                .iter()
+                .flatten()
+                .enumerate()
+                .filter_map(|(index, block)| match block {
+                    MessageBlock::ToolUse { tool_id, .. } if !tool_id.is_empty() => {
+                        Some((index, tool_id.clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
             if msg.role == "assistant" {
                 if let Some(ref prev) = last_assistant_content {
-                    if prev.contains(&msg.content) {
+                    if tool_ids.is_empty() && prev.contains(&msg.content) {
                         continue;
                     }
                 }
                 last_assistant_content = Some(msg.content.clone());
             } else {
                 last_assistant_content = None;
+            }
+            for (index, tool_id) in tool_ids {
+                calls.insert(tool_id, (messages.len(), index));
             }
             messages.push(msg);
         }
@@ -3154,6 +3213,151 @@ mod tests {
         assert_eq!(result.messages[0].role, "user");
         assert_eq!(result.messages[1].role, "assistant");
         assert_eq!(result.messages[1].content, "I will read\n[Tool: Read]");
+    }
+
+    fn tool_uses(transcript: &ConversationTranscript) -> Vec<(String, Option<String>, bool)> {
+        transcript
+            .messages
+            .iter()
+            .flat_map(|m| m.blocks.iter().flatten())
+            .filter_map(|b| match b {
+                MessageBlock::ToolUse {
+                    tool_id,
+                    result,
+                    is_error,
+                    ..
+                } => Some((tool_id.clone(), result.clone(), *is_error)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn get_conversation_pairs_tool_results_by_id_across_messages() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"go"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_ok","name":"Read","input":{"file_path":"/a"}}]},"timestamp":"2025-01-01T00:00:01Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_bad","name":"Bash","input":{"command":"boom"}}]},"timestamp":"2025-01-01T00:00:02Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_open","name":"Bash","input":{"command":"sleep"}}]},"timestamp":"2025-01-01T00:00:03Z"}"#,
+                r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_bad","content":"command not found","is_error":true},{"type":"tool_result","tool_use_id":"toolu_ok","content":[{"type":"text","text":"line 1"},{"type":"text","text":"line 2"}]}]},"timestamp":"2025-01-01T00:00:04Z"}"#,
+                r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_subagent","content":"from a subagent"}]},"timestamp":"2025-01-01T00:00:05Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]},"timestamp":"2025-01-01T00:00:06Z"}"#,
+            ],
+        );
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+
+        assert_eq!(
+            tool_uses(&transcript),
+            vec![
+                (
+                    "toolu_ok".to_string(),
+                    Some("line 1\nline 2".to_string()),
+                    false
+                ),
+                (
+                    "toolu_bad".to_string(),
+                    Some("command not found".to_string()),
+                    true
+                ),
+                ("toolu_open".to_string(), None, false),
+            ]
+        );
+        let roles: Vec<&str> = transcript
+            .messages
+            .iter()
+            .map(|m| m.role.as_str())
+            .collect();
+        assert_eq!(
+            roles,
+            ["user", "assistant", "assistant", "assistant", "assistant"],
+            "a user message holding only tool_result blocks adds no message"
+        );
+    }
+
+    #[test]
+    fn get_conversation_keeps_a_repeated_tool_call_after_its_result() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{}}]}}"#,
+                r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"first"}]}}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_2","name":"Read","input":{}}]}}"#,
+                r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_2","content":"second"}]}}"#,
+            ],
+        );
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+
+        assert_eq!(
+            tool_uses(&transcript),
+            vec![
+                ("toolu_1".to_string(), Some("first".to_string()), false),
+                ("toolu_2".to_string(), Some("second".to_string()), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn history_tool_use_has_the_live_tool_use_fields() {
+        let history = serde_json::to_value(MessageBlock::ToolUse {
+            tool_id: "toolu_1".to_string(),
+            tool_name: "Read".to_string(),
+            input: "{}".to_string(),
+            result: None,
+            is_error: false,
+        })
+        .unwrap();
+        let live = serde_json::to_value(
+            speedwave_runtime::stream::state_tree::MessageBlock::ToolUse {
+                tool_id: "toolu_1".to_string(),
+                tool_name: "Read".to_string(),
+                input: "{}".to_string(),
+                result: None,
+                is_error: false,
+            },
+        )
+        .unwrap();
+        let fields = |value: &serde_json::Value| -> Vec<String> {
+            let mut keys: Vec<String> = value
+                .as_object()
+                .unwrap()
+                .keys()
+                .filter(|k| *k != "type" && *k != "kind")
+                .cloned()
+                .collect();
+            keys.sort_unstable();
+            keys
+        };
+        assert_eq!(fields(&history), fields(&live));
+    }
+
+    #[test]
+    fn history_tool_use_fields_match_ts_mirror() {
+        let ts = include_str!("../../src/src/app/models/chat.ts");
+        let block = MessageBlock::ToolUse {
+            tool_id: "toolu_1".to_string(),
+            tool_name: "Read".to_string(),
+            input: "{}".to_string(),
+            result: None,
+            is_error: false,
+        };
+        assert_eq!(
+            crate::ts_mirror::rust_fields(&block),
+            crate::ts_mirror::ts_interface_fields(ts, "HistoryToolUse")
+        );
     }
 
     const RESUME_TRANSCRIPT: &str =

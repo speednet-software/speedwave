@@ -293,12 +293,30 @@ export interface ConversationTranscript {
   messages: ConversationMessage[];
 }
 
+/** A tool call in a transcript, paired with its result; `result` is null when the call was never answered. */
+export interface HistoryToolUse {
+  type: 'tool_use';
+  tool_id: string;
+  tool_name: string;
+  input: string;
+  result: string | null;
+  is_error: boolean;
+}
+
+/** One block of a transcript message, as `get_conversation` returns it. */
+export type HistoryMessageBlock =
+  | { type: 'text'; content: string }
+  | { type: 'thinking'; content: string }
+  | HistoryToolUse
+  | { type: 'error'; content: string }
+  | { type: 'control_chip'; command: string; argument: string };
+
 /** A single message within a conversation transcript. */
 export interface ConversationMessage {
   role: string;
   content: string;
   timestamp: string | null;
-  blocks?: MessageBlock[];
+  blocks?: HistoryMessageBlock[];
   uuid?: string;
   model?: string;
   usage?: TurnUsage;

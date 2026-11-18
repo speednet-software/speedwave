@@ -33,7 +33,13 @@ import { PlanUsageService } from './plan-usage.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
 import { createDeferred, type Deferred } from '../testing/deferred';
 import { makeMockLogger } from '../testing/mock-logger';
-import type { ConversationTranscript, StreamChunk, ToolUseBlock } from '../models/chat';
+import type {
+  ConversationTranscript,
+  HistoryMessageBlock,
+  HistoryToolUse,
+  StreamChunk,
+  ToolUseBlock,
+} from '../models/chat';
 import type { ModelSwitchOutcome } from '../models/claude-control';
 import { DEFAULT_CONTEXT_TOKENS } from '../models/llm';
 
@@ -8466,31 +8472,83 @@ describe('ChatSessionStore', () => {
     });
   });
 
-  describe('toChatMessages history tool-block normalization', () => {
-    function transcriptWith(blocks: unknown[]): ConversationTranscript {
+  describe('toChatMessages history tool blocks', () => {
+    function transcriptWith(blocks: HistoryMessageBlock[]): ConversationTranscript {
       return {
-        session_id: '00000000-0000-0000-0000-000000000000',
+        session_id: 'abcdef01-2345-6789-abcd-ef0123456789',
         messages: [
           {
             role: 'assistant',
             content: '',
             timestamp: '2025-01-01T00:00:00Z',
-            blocks: blocks as ConversationTranscript['messages'][number]['blocks'],
+            blocks,
           },
         ],
       };
     }
 
-    it('nests a flat history tool_use into the live-chat shape (done, empty result)', () => {
+    function toolUse(overrides: Partial<HistoryToolUse>): HistoryToolUse {
+      return {
+        type: 'tool_use',
+        tool_id: 'toolu_1',
+        tool_name: 'Bash',
+        input: '{"command":"ls"}',
+        result: null,
+        is_error: false,
+        ...overrides,
+      };
+    }
+
+    it('shows the result of an answered call with its id and input', () => {
       const [msg] = toChatMessages(
-        transcriptWith([{ type: 'tool_use', tool_name: 'Bash', input_json: '{"command":"ls"}' }])
+        transcriptWith([
+          toolUse({ tool_id: 'toolu_read', tool_name: 'Read', result: 'file contents' }),
+        ])
       );
       expect(msg.blocks).toEqual([
         {
           type: 'tool_use',
           tool: {
             type: 'tool_use',
-            tool_id: '',
+            tool_id: 'toolu_read',
+            tool_name: 'Read',
+            input_json: '{"command":"ls"}',
+            status: 'done',
+            result: 'file contents',
+            result_is_error: false,
+          },
+        },
+      ]);
+    });
+
+    it('marks a call whose result is an error as errored', () => {
+      const [msg] = toChatMessages(
+        transcriptWith([toolUse({ result: 'command not found', is_error: true })])
+      );
+      expect(msg.blocks).toEqual([
+        {
+          type: 'tool_use',
+          tool: {
+            type: 'tool_use',
+            tool_id: 'toolu_1',
+            tool_name: 'Bash',
+            input_json: '{"command":"ls"}',
+            status: 'error',
+            result: 'command not found',
+            result_is_error: true,
+          },
+        },
+      ]);
+    });
+
+    it('finishes a call without a result as done with an empty result', () => {
+      const [msg] = toChatMessages(transcriptWith([toolUse({ result: null })]));
+      expect(msg.blocks).toEqual([
+        {
+          type: 'tool_use',
+          tool: {
+            type: 'tool_use',
+            tool_id: 'toolu_1',
             tool_name: 'Bash',
             input_json: '{"command":"ls"}',
             status: 'done',
@@ -8501,85 +8559,40 @@ describe('ChatSessionStore', () => {
       ]);
     });
 
-    it('merges a tool_result into the preceding tool_use', () => {
+    it('keeps the call id and the result a task plan reads from a resumed TaskCreate', () => {
       const [msg] = toChatMessages(
         transcriptWith([
-          { type: 'tool_use', tool_name: 'Read', input_json: '{"file_path":"/a.ts"}' },
-          { type: 'tool_result', content: 'file contents', is_error: false },
-        ])
-      );
-      expect(msg.blocks).toHaveLength(1);
-      const block = msg.blocks[0];
-      expect(block.type).toBe('tool_use');
-      if (block.type === 'tool_use') {
-        expect(block.tool.status).toBe('done');
-        if (block.tool.status === 'done') {
-          expect(block.tool.result).toBe('file contents');
-          expect(block.tool.result_is_error).toBe(false);
-        }
-      }
-    });
-
-    it('marks the merged tool errored when tool_result.is_error is true', () => {
-      const [msg] = toChatMessages(
-        transcriptWith([
-          { type: 'tool_use', tool_name: 'Bash', input_json: '{"command":"boom"}' },
-          { type: 'tool_result', content: 'command not found', is_error: true },
+          toolUse({
+            tool_id: 'toolu_task',
+            tool_name: 'TaskCreate',
+            input: '{"subject":"Write the fix"}',
+            result: 'Task #7 created successfully: Write the fix',
+          }),
         ])
       );
       const block = msg.blocks[0];
       expect(block.type).toBe('tool_use');
-      if (block.type === 'tool_use') {
-        expect(block.tool.status).toBe('error');
-        if (block.tool.status === 'error') {
-          expect(block.tool.result).toBe('command not found');
-          expect(block.tool.result_is_error).toBe(true);
-        }
+      if (block.type === 'tool_use' && block.tool.status === 'done') {
+        expect(block.tool.tool_id).toBe('toolu_task');
+        expect(block.tool.result).toBe('Task #7 created successfully: Write the fix');
       }
     });
 
-    it('drops an orphan tool_result with no preceding tool_use', () => {
-      const [msg] = toChatMessages(
-        transcriptWith([
-          { type: 'tool_result', content: 'orphan', is_error: false },
-          { type: 'text', content: 'after' },
-        ])
-      );
-      expect(msg.blocks).toEqual([{ type: 'text', content: 'after' }]);
-    });
-
-    it('does not merge a tool_result into a non-tool block', () => {
+    it('maps the other history blocks into the live-chat view-model', () => {
       const [msg] = toChatMessages(
         transcriptWith([
           { type: 'text', content: 'prose' },
-          { type: 'tool_result', content: 'dangling', is_error: false },
+          { type: 'thinking', content: 'hmm' },
+          { type: 'error', content: 'boom' },
+          { type: 'control_chip', command: 'model', argument: 'claude-sonnet-5' },
         ])
       );
-      expect(msg.blocks).toEqual([{ type: 'text', content: 'prose' }]);
-    });
-
-    it('passes an already-nested tool_use through unchanged', () => {
-      const nested = {
-        type: 'tool_use',
-        tool: {
-          type: 'tool_use',
-          tool_id: 't-live',
-          tool_name: 'Glob',
-          input_json: '{"pattern":"*.ts"}',
-          status: 'done',
-          result: 'a.ts',
-          result_is_error: false,
-        },
-      };
-      const [msg] = toChatMessages(transcriptWith([nested]));
-      expect(msg.blocks).toEqual([nested]);
-    });
-
-    it('normalizes a history control_chip block into the live-path chip view-model', () => {
-      const [msg] = toChatMessages(
-        transcriptWith([{ type: 'control_chip', command: 'model', argument: 'claude-sonnet-5' }])
-      );
-      expect(msg.blocks).toEqual([{ type: 'chip', command: 'model', argument: 'claude-sonnet-5' }]);
+      expect(msg.blocks).toEqual([
+        { type: 'text', content: 'prose' },
+        { type: 'thinking', content: 'hmm', collapsed: true },
+        { type: 'error', content: 'boom' },
+        { type: 'chip', command: 'model', argument: 'claude-sonnet-5' },
+      ]);
     });
   });
 
