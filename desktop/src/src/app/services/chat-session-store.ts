@@ -2616,7 +2616,7 @@ function completeToolBlock(
 }
 
 function finishedTool(
-  tool: Pick<ToolUseBlock, 'type' | 'tool_id' | 'tool_name' | 'input_json'>,
+  tool: Pick<ToolUseBlock, 'tool_id' | 'tool_name' | 'input_json'>,
   result: string,
   isError: boolean
 ): ToolUseBlock {
@@ -2961,7 +2961,6 @@ function historyBlockToMessageBlock(block: HistoryMessageBlock): MessageBlock {
         type: 'tool_use',
         tool: finishedTool(
           {
-            type: 'tool_use',
             tool_id: block.tool_id,
             tool_name: block.tool_name,
             input_json: block.input,

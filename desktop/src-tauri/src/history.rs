@@ -135,8 +135,54 @@ fn parse_jsonl_line(line: &str) -> Option<serde_json::Value> {
     }
 }
 
-fn parse_jsonl_message(line: &str) -> Option<ConversationMessage> {
-    parse_jsonl_entry(&parse_jsonl_line(line)?)
+#[derive(Default)]
+struct TranscriptDedupe {
+    last_assistant_content: Option<String>,
+    calls: HashMap<String, (usize, usize)>,
+}
+
+impl TranscriptDedupe {
+    fn admit(
+        &mut self,
+        parsed: &serde_json::Value,
+        msg: &ConversationMessage,
+        position: usize,
+    ) -> bool {
+        let tool_ids: Vec<(usize, &str)> = if crate::chat::is_sidechain_event(parsed) {
+            Vec::new()
+        } else {
+            msg.blocks
+                .iter()
+                .flatten()
+                .enumerate()
+                .filter_map(|(index, block)| match block {
+                    MessageBlock::ToolUse { tool_id, .. } if !tool_id.is_empty() => {
+                        Some((index, tool_id.as_str()))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        if msg.role == "assistant" {
+            let has_new_call = tool_ids.iter().any(|(_, id)| !self.calls.contains_key(*id));
+            let repeats_previous = self
+                .last_assistant_content
+                .as_ref()
+                .is_some_and(|prev| prev.contains(&msg.content));
+            if !has_new_call && repeats_previous {
+                return false;
+            }
+            self.last_assistant_content = Some(msg.content.clone());
+        } else {
+            self.last_assistant_content = None;
+        }
+        for (index, tool_id) in tool_ids {
+            self.calls
+                .entry(tool_id.to_string())
+                .or_insert((position, index));
+        }
+        true
+    }
 }
 
 fn parse_jsonl_entry(parsed: &serde_json::Value) -> Option<ConversationMessage> {
@@ -617,7 +663,7 @@ fn list_conversations_impl(
         let mut preview = String::new();
         let mut message_count: usize = 0;
         let mut user_message_count: usize = 0;
-        let mut last_assistant_content: Option<String> = None;
+        let mut dedupe = TranscriptDedupe::default();
         let mut titles = SessionTitles::default();
         let mut scanned_lines: usize = 0;
         let mut head_read_failed = false;
@@ -637,7 +683,10 @@ fn list_conversations_impl(
             };
             scanned_lines += 1;
             titles.record(&line);
-            if let Some(msg) = parse_jsonl_message(&line) {
+            let Some(parsed) = parse_jsonl_line(&line) else {
+                continue;
+            };
+            if let Some(msg) = parse_jsonl_entry(&parsed) {
                 let is_control_chip_user = msg.role == "user"
                     && speedwave_runtime::slash::parse_control_command(&msg.content).is_some();
                 let is_synthetic_chip_reply = msg.role == "assistant"
@@ -645,15 +694,8 @@ fn list_conversations_impl(
                 if is_control_chip_user || is_synthetic_chip_reply {
                     continue;
                 }
-                if msg.role == "assistant" {
-                    if let Some(ref prev) = last_assistant_content {
-                        if prev.contains(&msg.content) {
-                            continue;
-                        }
-                    }
-                    last_assistant_content = Some(msg.content.clone());
-                } else {
-                    last_assistant_content = None;
+                if !dedupe.admit(&parsed, &msg, message_count) {
+                    continue;
                 }
                 message_count += 1;
                 if msg.role == "user" {
@@ -744,46 +786,18 @@ fn get_conversation_impl(
 
     const MAX_TRANSCRIPT_LINES: usize = 10_000;
     let reader = BufReader::new(file);
-    let mut messages = Vec::new();
-    let mut calls: HashMap<String, (usize, usize)> = HashMap::new();
-    let mut last_assistant_content: Option<String> = None;
+    let mut messages: Vec<ConversationMessage> = Vec::new();
+    let mut dedupe = TranscriptDedupe::default();
     for line in reader.lines().take(MAX_TRANSCRIPT_LINES) {
         let line = line.map_err(|e| anyhow::anyhow!("io error reading session: {e}"))?;
         let Some(parsed) = parse_jsonl_line(&line) else {
             continue;
         };
-        attach_tool_results(&parsed, &mut messages, &calls);
+        attach_tool_results(&parsed, &mut messages, &dedupe.calls);
         if let Some(msg) = parse_jsonl_entry(&parsed) {
-            let tool_ids: Vec<(usize, String)> = if crate::chat::is_sidechain_event(&parsed) {
-                Vec::new()
-            } else {
-                msg.blocks
-                    .iter()
-                    .flatten()
-                    .enumerate()
-                    .filter_map(|(index, block)| match block {
-                        MessageBlock::ToolUse { tool_id, .. } if !tool_id.is_empty() => {
-                            Some((index, tool_id.clone()))
-                        }
-                        _ => None,
-                    })
-                    .collect()
-            };
-            let has_new_call = tool_ids.iter().any(|(_, id)| !calls.contains_key(id));
-            if msg.role == "assistant" {
-                if let Some(ref prev) = last_assistant_content {
-                    if !has_new_call && prev.contains(&msg.content) {
-                        continue;
-                    }
-                }
-                last_assistant_content = Some(msg.content.clone());
-            } else {
-                last_assistant_content = None;
+            if dedupe.admit(&parsed, &msg, messages.len()) {
+                messages.push(msg);
             }
-            for (index, tool_id) in tool_ids {
-                calls.insert(tool_id, (messages.len(), index));
-            }
-            messages.push(msg);
         }
     }
 
@@ -1211,6 +1225,10 @@ fn resume_snapshot_from_end(
 )]
 mod tests {
     use super::*;
+
+    fn parse_jsonl_message(line: &str) -> Option<ConversationMessage> {
+        parse_jsonl_entry(&parse_jsonl_line(line)?)
+    }
 
     fn setup_sessions_dir(data_dir: &Path, project: &str) -> PathBuf {
         let dir = sessions_dir_impl(data_dir, project);
@@ -3347,6 +3365,57 @@ mod tests {
     }
 
     #[test]
+    fn get_conversation_pairs_a_result_with_the_first_block_of_a_repeated_tool_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{}}]}}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"again"},{"type":"tool_use","id":"toolu_1","name":"Read","input":{}}]}}"#,
+                r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"first"}]}}"#,
+            ],
+        );
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+
+        assert_eq!(
+            tool_uses(&transcript),
+            vec![
+                ("toolu_1".to_string(), Some("first".to_string()), false),
+                ("toolu_1".to_string(), None, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn list_conversations_counts_a_repeated_tool_call_like_the_transcript() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"read twice"}}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{}}]}}"#,
+                r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"first"}]}}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_2","name":"Read","input":{}}]}}"#,
+            ],
+        );
+
+        let summaries = list_conversations_impl(tmp.path(), "proj").unwrap();
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+
+        assert_eq!(transcript.messages.len(), 3);
+        assert_eq!(summaries[0].message_count, transcript.messages.len());
+    }
+
+    #[test]
     fn get_conversation_ignores_sidechain_tool_calls_and_results() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
@@ -3453,6 +3522,57 @@ mod tests {
         expected.push("type");
         expected.sort_unstable();
         assert_eq!(crate::ts_mirror::rust_fields(&block), expected);
+    }
+
+    #[test]
+    fn history_message_block_variants_match_ts_mirror() {
+        let ts = include_str!("../../src/src/app/models/chat.ts");
+        let samples = [
+            MessageBlock::Text {
+                content: String::new(),
+            },
+            MessageBlock::Thinking {
+                content: String::new(),
+            },
+            MessageBlock::Error {
+                content: String::new(),
+            },
+            MessageBlock::ControlChip {
+                command: String::new(),
+                argument: String::new(),
+            },
+            MessageBlock::ToolUse {
+                tool_id: String::new(),
+                tool_name: String::new(),
+                input: String::new(),
+                result: None,
+                is_error: false,
+            },
+        ];
+        let union = crate::ts_mirror::ts_tagged_union(ts, "HistoryMessageBlock");
+        assert_eq!(union.named, ["HistoryToolUse"]);
+        let mut rust_tags = Vec::new();
+        for sample in &samples {
+            let json = serde_json::to_value(sample).unwrap();
+            let tag = json["type"].as_str().unwrap().to_string();
+            if tag == "tool_use" {
+                assert!(ts.contains(
+                    "export interface HistoryToolUse extends ToolUseState {\n  type: 'tool_use';"
+                ));
+            } else {
+                assert_eq!(
+                    union.inline.get(&tag),
+                    Some(&crate::ts_mirror::rust_fields(sample)),
+                    "HistoryMessageBlock member `{tag}` must carry the fields of the Rust variant"
+                );
+            }
+            rust_tags.push(tag);
+        }
+        let mut ts_tags: Vec<String> = union.inline.keys().cloned().collect();
+        ts_tags.push("tool_use".to_string());
+        ts_tags.sort_unstable();
+        rust_tags.sort_unstable();
+        assert_eq!(rust_tags, ts_tags);
     }
 
     const RESUME_TRANSCRIPT: &str =
