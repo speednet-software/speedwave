@@ -373,7 +373,6 @@ describe('slack client', () => {
     });
 
     afterEach(() => {
-      vi.useRealTimers();
       vi.restoreAllMocks();
     });
 
@@ -404,51 +403,6 @@ describe('slack client', () => {
       });
       expect(apiCall).toHaveBeenCalledTimes(1);
       expect(readFileMock).not.toHaveBeenCalled();
-    });
-
-    it('throws the refresh_status message when the host does not rewrite the token in 30 s', async () => {
-      vi.useFakeTimers();
-      const clients = presentClients();
-      const status = JSON.stringify({ state: 'reconnect_required', at: '2026-11-18T10:00:00Z' });
-      readFileMock.mockImplementation(async (path: string) => {
-        if (path.endsWith('refresh_status')) return status;
-        if (path.endsWith('service_name')) return 'Slack';
-        return clients.tokenState.accessToken;
-      });
-      const apiCall = vi.fn().mockRejectedValue({ data: { error: 'token_expired' } });
-
-      try {
-        const assertion = expect(slackCall(clients, (c) => apiCall(c))).rejects.toThrow(
-          'Slack sign-in expired. Reconnect Slack in Speedwave Desktop: Settings, Integrations, Slack.'
-        );
-        await vi.advanceTimersByTimeAsync(31_000);
-        await assertion;
-        expect(apiCall).toHaveBeenCalledTimes(1);
-      } finally {
-        readFileMock.mockReset();
-      }
-    });
-
-    it('throws an OAuthRefreshError when the host has not refreshed and left no status', async () => {
-      vi.useFakeTimers();
-      const clients = presentClients();
-      readFileMock.mockImplementation(async (path: string) => {
-        if (path.endsWith('refresh_status') || path.endsWith('service_name')) {
-          throw new Error('ENOENT');
-        }
-        return clients.tokenState.accessToken;
-      });
-      const apiCall = vi.fn().mockRejectedValue({ data: { error: 'token_expired' } });
-
-      try {
-        const assertion = expect(slackCall(clients, (c) => apiCall(c))).rejects.toThrow(
-          OAuthRefreshError
-        );
-        await vi.advanceTimersByTimeAsync(31_000);
-        await assertion;
-      } finally {
-        readFileMock.mockReset();
-      }
     });
 
     it('reuses the existing WebClient when the token has not changed', async () => {

@@ -7,18 +7,6 @@ import { join } from 'node:path';
 /** Discriminant for {@link OAuthRefreshError}. */
 export type OAuthRefreshCode = 'reconnect_required' | 'network_error' | 'not_refreshed';
 
-/** Typed error thrown when granted scopes are a strict subset of requested (re-consent trigger). */
-export class OAuthScopeMismatchError extends Error {
-  /**
-   * Construct a scope-mismatch error.
-   * @param message - human-readable scope mismatch detail
-   */
-  constructor(message: string) {
-    super(message);
-    this.name = 'OAuthScopeMismatchError';
-  }
-}
-
 /** Error for an access token the host did not refresh in time; the message tells the user what to do. */
 export class OAuthRefreshError extends Error {
   readonly code: OAuthRefreshCode;
@@ -74,7 +62,9 @@ const REFRESH_STATUS_FILE = 'refresh_status';
 
 const SERVICE_NAME_FILE = 'service_name';
 
-type RefreshStatus = { state: 'reconnect_required' | 'network_error'; at: string };
+const REFRESH_STATES = ['reconnect_required', 'network_error'] as const;
+
+type RefreshStatus = { state: (typeof REFRESH_STATES)[number]; at: string };
 
 /**
  * Build the error for a token the host did not refresh, worded by `<tokensDir>/refresh_status`.
@@ -112,10 +102,8 @@ async function readRefreshStatus(path: string): Promise<RefreshStatus | null> {
       at?: unknown;
     };
     if (typeof parsed.at !== 'string') return null;
-    if (parsed.state === 'reconnect_required' || parsed.state === 'network_error') {
-      return { state: parsed.state, at: parsed.at };
-    }
-    return null;
+    const state = REFRESH_STATES.find((known) => known === parsed.state);
+    return state ? { state, at: parsed.at } : null;
   } catch {
     return null;
   }

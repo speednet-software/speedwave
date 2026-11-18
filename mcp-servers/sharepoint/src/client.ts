@@ -16,7 +16,6 @@ import {
   withSetupGuidance,
   authedRequest,
   RefreshLock,
-  OAuthScopeMismatchError,
   PROACTIVE_REFRESH_SECONDS,
   ConnectionStatusTracker,
   memoizedPromise,
@@ -300,7 +299,6 @@ export class SharePointClient {
    * Call Graph API with shared refresh-retry (ADR-060) via {@link authedRequest}.
    * @param url - Graph API endpoint URL.
    * @param options - Fetch options (Authorization is added by the helper).
-   * @throws {OAuthScopeMismatchError} when refresh detects scope mismatch
    */
   private async callGraphAPI(url: string, options: RequestInit = {}): Promise<Response> {
     if (this.statusTracker.getStatus() === 'failed') {
@@ -347,7 +345,7 @@ export class SharePointClient {
 
   /**
    * Re-resolve the siteId for a wedged worker and rewrite `url` with the fresh id so this very
-   * call benefits; cooldown-guarded, scope-mismatch propagated.
+   * call benefits; cooldown-guarded.
    * @param url - Graph URL built from the stale siteId.
    */
   private async _retryWedgedResolve(url: string): Promise<string> {
@@ -359,7 +357,6 @@ export class SharePointClient {
       await this._resolveSiteIdMemo();
     } catch (err) {
       this._resolveRetryBlockedUntil = Date.now() + RESOLVE_RETRY_COOLDOWN_MS;
-      if (err instanceof OAuthScopeMismatchError) throw err;
       throw this._siteConnectionError();
     }
     this._resolveRetryBlockedUntil = 0;
@@ -822,7 +819,6 @@ export async function resolveCompositeSiteId(
           tokensDir,
         });
       } catch (err) {
-        if (err instanceof OAuthScopeMismatchError) throw err;
         console.warn(
           `${ts()} SharePoint site lookup: token refresh failed during init — ${err instanceof Error ? err.message : String(err)}`
         );
@@ -853,7 +849,6 @@ export async function resolveCompositeSiteId(
     }
     return { ok: true, compositeId: id };
   } catch (e) {
-    if (e instanceof OAuthScopeMismatchError) throw e;
     if (e instanceof Error && e.name === 'AbortError') {
       return {
         ok: false,

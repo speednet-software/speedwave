@@ -1140,7 +1140,7 @@ impl ReconnectWarnings {
 }
 
 fn reconnect_warning(service: &str) -> String {
-    let name = consts::integration_display_name(service);
+    let name = oauth_refresh::service_display_name(service);
     format!(
         "Warning: the {name} sign-in expired and Speedwave cannot refresh it. \
          Reconnect {name} in Speedwave Desktop: Settings, Integrations, {name}."
@@ -1477,7 +1477,8 @@ mod tests {
             "Warning: the Slack sign-in expired and Speedwave cannot refresh it. \
              Reconnect Slack in Speedwave Desktop: Settings, Integrations, Slack."
         );
-        assert!(reconnect_warning("glpi").contains("Settings, Integrations, glpi."));
+        assert!(reconnect_warning("no-such-service")
+            .contains("Settings, Integrations, no-such-service."));
     }
 
     #[test]

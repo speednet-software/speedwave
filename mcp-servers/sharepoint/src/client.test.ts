@@ -130,15 +130,6 @@ describe('SharePointClient', () => {
         })
       );
     });
-
-    it('propagates OAuthScopeMismatchError from the helper as-is so the tool layer can re-consent', async () => {
-      const { OAuthScopeMismatchError } = await import('@speedwave/mcp-shared');
-      mockAuthedRequest.mockRejectedValueOnce(
-        new OAuthScopeMismatchError('Sites.Manage.All not granted')
-      );
-
-      await expect(client.listFiles()).rejects.toThrow(/Sites\.Manage\.All not granted/);
-    });
   });
 
   describe('graphRequest', () => {
@@ -424,39 +415,6 @@ describe('SharePointClient', () => {
       }
     });
 
-    it('rethrows OAuthScopeMismatchError from the resolve retry, not the generic config error', async () => {
-      const { OAuthScopeMismatchError } = await import('@speedwave/mcp-shared');
-      client.getConfig().siteId = 'contoso.sharepoint.com:/sites/Scope:';
-      client.statusTracker.setFailed(new Error('SharePoint siteId resolve failed: 401'));
-      mockAuthedRequest.mockRejectedValueOnce(
-        new OAuthScopeMismatchError('Sites.Manage.All not granted')
-      );
-
-      await expect(client.listFiles()).rejects.toBeInstanceOf(OAuthScopeMismatchError);
-    });
-
-    it('arms the resolve cooldown on an OAuthScopeMismatchError too, throttling a tool-call burst', async () => {
-      vi.useFakeTimers();
-      try {
-        const { OAuthScopeMismatchError } = await import('@speedwave/mcp-shared');
-        client.getConfig().siteId = 'contoso.sharepoint.com:/sites/ScopeBurst:';
-        client.statusTracker.setFailed(new Error('SharePoint siteId resolve failed: 401'));
-        mockAuthedRequest.mockRejectedValue(
-          new OAuthScopeMismatchError('Sites.Manage.All not granted')
-        );
-
-        await expect(client.listFiles()).rejects.toBeInstanceOf(OAuthScopeMismatchError);
-        const resolveCallsAfterFirst = mockAuthedRequest.mock.calls.length;
-
-        await expect(client.listFiles()).rejects.toThrow(
-          /SharePoint site connection is not established/
-        );
-        expect(mockAuthedRequest.mock.calls.length).toBe(resolveCallsAfterFirst);
-      } finally {
-        vi.useRealTimers();
-      }
-    });
-
     it('does not short-circuit when statusTracker is ok', async () => {
       fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
       client.statusTracker.setOk();
@@ -551,16 +509,6 @@ describe('SharePointClient', () => {
           proactiveWithinSeconds: PROACTIVE_REFRESH_SECONDS,
         })
       );
-    });
-
-    it('does not swallow OAuthScopeMismatchError surfaced by the helper (cannot self-heal)', async () => {
-      const { OAuthScopeMismatchError } = await import('@speedwave/mcp-shared');
-      mockAuthedRequest.mockRejectedValueOnce(
-        new OAuthScopeMismatchError('Sites.Manage.All not granted')
-      );
-
-      await expect(client.listFiles()).rejects.toBeInstanceOf(OAuthScopeMismatchError);
-      expect(fetchMock).not.toHaveBeenCalled();
     });
 
     it('should merge custom headers with authorization', async () => {
@@ -2220,18 +2168,6 @@ describe('SharePointClient', () => {
       expect(result).toMatchObject({ ok: false, reason: 'not_found' });
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('non-error string failure'));
       warnSpy.mockRestore();
-    });
-
-    it('propagates OAuthScopeMismatchError instead of masking it as a network error', async () => {
-      const { OAuthScopeMismatchError } = await import('@speedwave/mcp-shared');
-      global.fetch = vi.fn() as unknown as typeof fetch;
-      mockAuthedRequest.mockRejectedValueOnce(
-        new OAuthScopeMismatchError('Sites.Manage.All not granted')
-      );
-
-      await expect(
-        resolveCompositeSiteId('contoso.sharepoint.com:/sites/X:', 'tok', { refreshOn401: true })
-      ).rejects.toBeInstanceOf(OAuthScopeMismatchError);
     });
 
     it('passes an AbortSignal to the cold-start fetch (timeout guard against hangs)', async () => {

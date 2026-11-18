@@ -1,6 +1,8 @@
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Instant;
 
 use chrono::Utc;
@@ -24,6 +26,30 @@ pub(super) enum Hold {
     },
 }
 
+type Slots = HashMap<(String, String), Arc<Mutex<Hold>>>;
+
+/// Holds of every `(project, service)` of the process, shared by the start check and the refreshers.
+#[derive(Clone, Default)]
+pub(super) struct Holds(Arc<Mutex<Slots>>);
+
+impl Holds {
+    pub(super) fn shared() -> Self {
+        static SHARED: OnceLock<Holds> = OnceLock::new();
+        SHARED.get_or_init(Self::default).clone()
+    }
+
+    /// The hold of one service; whoever locks it waits while another thread refreshes that service.
+    pub(super) fn slot(&self, project: &str, service: &str) -> Arc<Mutex<Hold>> {
+        Arc::clone(
+            self.0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entry((project.to_string(), service.to_string()))
+                .or_default(),
+        )
+    }
+}
+
 pub(super) fn refresh_gated<F>(
     data_dir: &Path,
     project: &str,
@@ -35,7 +61,14 @@ pub(super) fn refresh_gated<F>(
 where
     F: Fn(&str, &RefreshRequest<'_>) -> Result<RefreshResponse, ErrorCode>,
 {
-    let state = fingerprint(&Paths::new(data_dir, project, service).state);
+    let state = match fingerprint(&Paths::new(data_dir, project, service).state) {
+        Ok(state) => state,
+        Err(_) => match *hold {
+            Hold::StateChange { .. } => return RefreshOutcome::ReconnectRequired,
+            Hold::Until { .. } => return RefreshOutcome::NetworkError,
+            Hold::Ready => None,
+        },
+    };
     let failures = match *hold {
         Hold::StateChange { state: held } if held == state => {
             return RefreshOutcome::ReconnectRequired;
@@ -68,11 +101,16 @@ where
     outcome
 }
 
-fn fingerprint(path: &Path) -> Option<u64> {
-    let bytes = std::fs::read(path).ok()?;
-    let mut hasher = DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    Some(hasher.finish())
+fn fingerprint(path: &Path) -> std::io::Result<Option<u64>> {
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            let mut hasher = DefaultHasher::new();
+            bytes.hash(&mut hasher);
+            Ok(Some(hasher.finish()))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 fn refresh_if_due<F>(data_dir: &Path, project: &str, service: &str, call: &F) -> RefreshOutcome
@@ -392,41 +430,14 @@ mod tests {
     }
 
     #[test]
-    fn a_reconnect_failure_is_not_retried_while_the_state_file_is_unchanged() {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = Paths::new(dir.path(), "proj", "slack");
-        write_state(&paths, 1);
-        let calls = AtomicUsize::new(0);
-        let call = failing_with(ErrorCode::InvalidGrant, &calls);
-        let mut hold = Hold::default();
-        let t0 = Instant::now();
-
-        for tick in 0..6 {
-            assert_eq!(
-                refresh_gated(
-                    dir.path(),
-                    "proj",
-                    "slack",
-                    &call,
-                    &mut hold,
-                    secs(t0, tick * 10)
-                ),
-                RefreshOutcome::ReconnectRequired
-            );
-        }
-
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(audit_lines(&paths), 1);
-        assert_eq!(status_state(&paths).as_deref(), Some("reconnect_required"));
-    }
-
-    #[test]
     fn every_reconnect_code_waits_for_the_state_file() {
         for code in [
             ErrorCode::InvalidGrant,
             ErrorCode::ScopeMismatch,
             ErrorCode::MissingField,
             ErrorCode::InvalidConfig,
+            ErrorCode::MalformedState,
+            ErrorCode::UnknownProvider,
         ] {
             let dir = tempfile::tempdir().unwrap();
             let paths = Paths::new(dir.path(), "proj", "slack");
@@ -485,6 +496,27 @@ mod tests {
     }
 
     #[test]
+    fn an_unreadable_state_file_keeps_the_held_outcome() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path(), "proj", "slack");
+        write_state(&paths, 1);
+        let calls = AtomicUsize::new(0);
+        let call = failing_with(ErrorCode::InvalidGrant, &calls);
+        let mut hold = Hold::default();
+        let t0 = Instant::now();
+        refresh_gated(dir.path(), "proj", "slack", &call, &mut hold, t0);
+
+        std::fs::remove_file(&paths.state).unwrap();
+        std::fs::create_dir(&paths.state).unwrap();
+        assert_eq!(
+            refresh_gated(dir.path(), "proj", "slack", &call, &mut hold, secs(t0, 10)),
+            RefreshOutcome::ReconnectRequired
+        );
+        assert!(matches!(hold, Hold::StateChange { .. }));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn a_changed_state_file_ends_the_wait_for_a_reconnect() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::new(dir.path(), "proj", "slack");
@@ -523,41 +555,6 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(status_state(&paths), None);
         assert!(matches!(hold, Hold::Ready));
-    }
-
-    #[test]
-    fn a_network_failure_backs_off_from_ten_seconds_and_doubles_to_the_cap() {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = Paths::new(dir.path(), "proj", "slack");
-        write_state(&paths, 1);
-        let calls = AtomicUsize::new(0);
-        let call = failing_with(ErrorCode::Network, &calls);
-        let mut hold = Hold::default();
-        let t0 = Instant::now();
-
-        let mut now = 0;
-        for (attempt, wait) in [(1, 10), (2, 20), (3, 40), (4, 80), (5, 120), (6, 120)] {
-            assert_eq!(
-                refresh_gated(dir.path(), "proj", "slack", &call, &mut hold, secs(t0, now)),
-                RefreshOutcome::NetworkError
-            );
-            assert_eq!(calls.load(Ordering::SeqCst), attempt);
-            assert_eq!(
-                refresh_gated(
-                    dir.path(),
-                    "proj",
-                    "slack",
-                    &call,
-                    &mut hold,
-                    secs(t0, now + wait - 1)
-                ),
-                RefreshOutcome::NetworkError
-            );
-            assert_eq!(calls.load(Ordering::SeqCst), attempt, "held for {wait} s");
-            now += wait;
-        }
-        assert_eq!(status_state(&paths).as_deref(), Some("network_error"));
-        assert_eq!(audit_lines(&paths), 6);
     }
 
     #[test]

@@ -113,7 +113,6 @@ export type { RetryOptions } from './retry.js';
 export { writeRestrictedSecret } from './restricted-write.js';
 
 export {
-  OAuthScopeMismatchError,
   OAuthRefreshError,
   readJwtExp,
   accessTokenExpiresWithin,

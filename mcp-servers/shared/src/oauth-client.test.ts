@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   OAuthRefreshError,
-  OAuthScopeMismatchError,
   readJwtExp,
   accessTokenExpiresWithin,
   refreshFailure,
@@ -87,15 +86,6 @@ describe('refreshFailure', () => {
     expect(err.message).toBe(
       'glpi token expired and has not been refreshed yet. Speedwave refreshes it while a session of this project runs.'
     );
-  });
-});
-
-describe('OAuthScopeMismatchError', () => {
-  it('is an Error named OAuthScopeMismatchError carrying its message', () => {
-    const err = new OAuthScopeMismatchError('Sites.Manage.All not granted');
-    expect(err).toBeInstanceOf(Error);
-    expect(err.name).toBe('OAuthScopeMismatchError');
-    expect(err.message).toBe('Sites.Manage.All not granted');
   });
 });
 

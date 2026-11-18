@@ -353,7 +353,7 @@ fn content(event: SessionEvent, project: &str) -> (String, String) {
 }
 
 fn reconnect_content(project: &str, service: &str) -> (String, String) {
-    let name = speedwave_runtime::consts::integration_display_name(service);
+    let name = speedwave_runtime::oauth_refresh::service_display_name(service);
     (
         project.to_string(),
         format!("{name} sign-in expired. Reconnect it in Settings, Integrations, {name}."),

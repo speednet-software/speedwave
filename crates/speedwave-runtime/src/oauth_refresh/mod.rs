@@ -14,7 +14,7 @@ mod store;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::{mpsc, PoisonError};
 use std::time::{Duration, Instant};
 
 use provider::{ErrorCode, RefreshRequest, RefreshResponse};
@@ -43,6 +43,17 @@ pub struct ServiceRefresh {
     pub outcome: RefreshOutcome,
 }
 
+/// Handle of the background refresher; dropping it stops the thread.
+pub struct SessionRefresher {
+    _stop: mpsc::Sender<()>,
+}
+
+/// Display name of a service for messages to the user: a built-in's name, a verified plugin's
+/// name, else the service id.
+pub fn service_display_name(service: &str) -> String {
+    display_name::resolve(consts::data_dir(), service)
+}
+
 /// Refreshes the due tokens of `project`, waiting at most `timeout`.
 pub fn refresh_now_with_timeout(project: &str, timeout: Duration) -> Vec<ServiceRefresh> {
     refresh_with_timeout(
@@ -50,6 +61,7 @@ pub fn refresh_now_with_timeout(project: &str, timeout: Duration) -> Vec<Service
         project.to_string(),
         timeout,
         provider::refresh,
+        service::Holds::shared(),
     )
 }
 
@@ -58,6 +70,7 @@ fn refresh_with_timeout<F>(
     project: String,
     timeout: Duration,
     call: F,
+    holds: service::Holds,
 ) -> Vec<ServiceRefresh>
 where
     F: Fn(&str, &RefreshRequest<'_>) -> Result<RefreshResponse, ErrorCode> + Send + 'static,
@@ -66,12 +79,12 @@ where
     let spawned = std::thread::Builder::new()
         .name("oauth-refresh-once".to_string())
         .spawn(move || {
-            let mut holds = HashMap::new();
             let _ = sender.send(refresh_project(
                 &data_dir,
                 &project,
                 &call,
-                &mut holds,
+                &holds,
+                &mut HashMap::new(),
                 Instant::now(),
             ));
         });
@@ -80,11 +93,6 @@ where
         return Vec::new();
     }
     receiver.recv_timeout(timeout).unwrap_or_default()
-}
-
-/// Handle of the background refresher; dropping it stops the thread.
-pub struct SessionRefresher {
-    _stop: mpsc::Sender<()>,
 }
 
 /// Refreshes the due tokens of `project` periodically; `on_change` gets each changed outcome.
@@ -104,6 +112,7 @@ where
                 &provider::refresh,
                 &on_change,
                 &stopped,
+                &service::Holds::shared(),
             );
         });
     if spawned.is_err() {
@@ -119,14 +128,15 @@ fn run_session_refresher<F, G>(
     call: &F,
     on_change: &G,
     stopped: &mpsc::Receiver<()>,
+    holds: &service::Holds,
 ) where
     F: Fn(&str, &RefreshRequest<'_>) -> Result<RefreshResponse, ErrorCode>,
     G: Fn(&ServiceRefresh),
 {
     let mut last: HashMap<String, RefreshOutcome> = HashMap::new();
-    let mut holds: HashMap<String, service::Hold> = HashMap::new();
+    let mut names = HashMap::new();
     loop {
-        for result in refresh_project(&data_dir, project, call, &mut holds, Instant::now()) {
+        for result in refresh_project(&data_dir, project, call, holds, &mut names, Instant::now()) {
             report(&mut last, &result, on_change);
         }
         if !matches!(
@@ -142,7 +152,8 @@ fn refresh_project<F>(
     data_dir: &std::path::Path,
     project: &str,
     call: &F,
-    holds: &mut HashMap<String, service::Hold>,
+    holds: &service::Holds,
+    names: &mut HashMap<String, String>,
     now: Instant,
 ) -> Vec<ServiceRefresh>
 where
@@ -151,9 +162,10 @@ where
     store::services(data_dir, project)
         .into_iter()
         .map(|service| {
-            display_name::write(data_dir, project, &service);
-            let hold = holds.entry(service.clone()).or_default();
-            let outcome = service::refresh_gated(data_dir, project, &service, call, hold, now);
+            display_name::write(data_dir, project, &service, names);
+            let slot = holds.slot(project, &service);
+            let mut hold = slot.lock().unwrap_or_else(PoisonError::into_inner);
+            let outcome = service::refresh_gated(data_dir, project, &service, call, &mut hold, now);
             ServiceRefresh { service, outcome }
         })
         .collect()
@@ -225,9 +237,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_due_state(dir.path(), "slack");
         write_due_state(dir.path(), "sharepoint");
-        let mut holds = HashMap::new();
+        let holds = service::Holds::default();
+        let mut names = HashMap::new();
         let now = Instant::now();
-        let results = refresh_project(dir.path(), "proj", &rotated, &mut holds, now);
+        let results = refresh_project(dir.path(), "proj", &rotated, &holds, &mut names, now);
         let outcomes: Vec<(&str, RefreshOutcome)> = results
             .iter()
             .map(|r| (r.service.as_str(), r.outcome))
@@ -240,13 +253,13 @@ mod tests {
             ]
         );
         assert_eq!(
-            refresh_project(dir.path(), "proj", &rotated, &mut holds, now)
+            refresh_project(dir.path(), "proj", &rotated, &holds, &mut names, now)
                 .iter()
                 .map(|r| r.outcome)
                 .collect::<Vec<_>>(),
             vec![RefreshOutcome::NotDue, RefreshOutcome::NotDue]
         );
-        assert!(refresh_project(dir.path(), "other", &rotated, &mut holds, now).is_empty());
+        assert!(refresh_project(dir.path(), "other", &rotated, &holds, &mut names, now).is_empty());
     }
 
     #[test]
@@ -276,6 +289,7 @@ mod tests {
                     &call,
                     &on,
                     &stopped,
+                    &service::Holds::default(),
                 );
             })
         };
@@ -331,6 +345,7 @@ mod tests {
             "proj".to_string(),
             Duration::from_secs(10),
             rotated,
+            service::Holds::default(),
         );
         assert_eq!(
             results,
@@ -355,6 +370,7 @@ mod tests {
             "proj".to_string(),
             Duration::from_millis(20),
             slow,
+            service::Holds::default(),
         );
         assert!(results.is_empty());
         assert!(started.elapsed() < Duration::from_millis(250));
@@ -367,5 +383,48 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(std::fs::read_to_string(token).unwrap(), "at");
+    }
+
+    #[test]
+    fn the_start_check_and_the_refresher_share_a_refused_state() {
+        let dir = tempfile::tempdir().unwrap();
+        write_due_state(dir.path(), "slack");
+        let holds = service::Holds::default();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&calls);
+        let call = move |_: &str, _: &RefreshRequest<'_>| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Err(ErrorCode::InvalidGrant)
+        };
+
+        let started = refresh_with_timeout(
+            dir.path().to_path_buf(),
+            "proj".to_string(),
+            Duration::from_secs(10),
+            call.clone(),
+            holds.clone(),
+        );
+        assert_eq!(started[0].outcome, RefreshOutcome::ReconnectRequired);
+
+        let (stop, stopped) = mpsc::channel();
+        drop(stop);
+        let reported = Mutex::new(Vec::new());
+        run_session_refresher(
+            dir.path().to_path_buf(),
+            "proj",
+            Duration::from_millis(5),
+            &call,
+            &|refresh: &ServiceRefresh| reported.lock().unwrap().push(refresh.outcome),
+            &stopped,
+            &holds,
+        );
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *reported.lock().unwrap(),
+            vec![RefreshOutcome::ReconnectRequired]
+        );
+        let audit = store::Paths::new(dir.path(), "proj", "slack").audit;
+        assert_eq!(std::fs::read_to_string(audit).unwrap().lines().count(), 1);
     }
 }

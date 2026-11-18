@@ -535,14 +535,6 @@ pub const SLACK_FEATURES: &[SlackFeature] = &[SlackFeature {
 /// in `mcp-servers/slack/src/features.ts` (cross-read test).
 pub const SLACK_FEATURES_FILE: &str = "features.json";
 
-/// Display name of a built-in integration, or the id itself.
-pub fn integration_display_name(service_id: &str) -> &str {
-    TOGGLEABLE_MCP_SERVICES
-        .iter()
-        .find(|svc| svc.config_key == service_id)
-        .map_or(service_id, |svc| svc.display_name)
-}
-
 /// Looks up a Slack feature by id.
 pub fn find_slack_feature(id: &str) -> Option<&'static SlackFeature> {
     SLACK_FEATURES.iter().find(|f| f.id == id)
@@ -3193,12 +3185,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn integration_display_name_resolves_builtins_and_passes_plugin_ids_through() {
-        assert_eq!(integration_display_name("slack"), "Slack");
-        assert_eq!(integration_display_name("glpi"), "glpi");
-    }
-
     fn ts_string_const<'a>(src: &'a str, name: &str) -> &'a str {
         let re = regex::Regex::new(&format!(r#"const\s+{name}\s*=\s*['"]([^'"]+)['"]"#)).unwrap();
         re.captures(src)
@@ -3233,14 +3219,6 @@ mod tests {
         assert_eq!(
             OAUTH_COMPAT_URL,
             format!("http://mcp-hub:{PORT_BASE}{path}")
-        );
-    }
-
-    #[test]
-    fn oauth_compat_url_points_at_the_hub_port() {
-        assert_eq!(
-            OAUTH_COMPAT_URL,
-            format!("http://mcp-hub:{PORT_BASE}/oauth-compat")
         );
     }
 
