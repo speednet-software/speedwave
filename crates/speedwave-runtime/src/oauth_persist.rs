@@ -87,7 +87,6 @@ pub fn write_oauth_state(path: &Path, params: &OAuthStateParams) -> Result<(), S
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
-    clippy::expect_used,
     reason = "test code: panics on setup failure are acceptable"
 )]
 mod tests {

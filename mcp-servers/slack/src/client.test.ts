@@ -378,8 +378,7 @@ describe('slack client', () => {
     });
 
     it('retries with the token the host rewrote after token_expired', async () => {
-      vi.mocked(fs.readFile)
-        .mockResolvedValueOnce('xoxe.xoxp-rotated\n');
+      vi.mocked(fs.readFile).mockResolvedValueOnce('xoxe.xoxp-rotated\n');
 
       const clients = presentClients();
       const apiCall = vi
