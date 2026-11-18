@@ -1,4 +1,5 @@
 import type { ClaudeContextUsage } from './claude-control';
+import type { ToolUseState } from './state-tree';
 
 /** Mirror of Rust `speedwave_runtime::stream::TurnErrorKind`. */
 export type TurnErrorKind = 'authentication_failed';
@@ -294,13 +295,8 @@ export interface ConversationTranscript {
 }
 
 /** A tool call in a transcript, paired with its result; `result` is null when the call was never answered. */
-export interface HistoryToolUse {
+export interface HistoryToolUse extends ToolUseState {
   type: 'tool_use';
-  tool_id: string;
-  tool_name: string;
-  input: string;
-  result: string | null;
-  is_error: boolean;
 }
 
 /** One block of a transcript message, as `get_conversation` returns it. */

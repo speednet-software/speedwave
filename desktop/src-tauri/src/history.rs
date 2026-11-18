@@ -125,26 +125,32 @@ fn validate_session_id_impl(id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn parse_jsonl_message(line: &str) -> Option<ConversationMessage> {
-    let parsed: serde_json::Value = match serde_json::from_str(line) {
-        Ok(v) => v,
+fn parse_jsonl_line(line: &str) -> Option<serde_json::Value> {
+    match serde_json::from_str(line) {
+        Ok(v) => Some(v),
         Err(e) => {
             log::debug!("skipping malformed JSONL line: {e}");
-            return None;
+            None
         }
-    };
+    }
+}
 
+fn parse_jsonl_message(line: &str) -> Option<ConversationMessage> {
+    parse_jsonl_entry(&parse_jsonl_line(line)?)
+}
+
+fn parse_jsonl_entry(parsed: &serde_json::Value) -> Option<ConversationMessage> {
     let msg_type = parsed["type"].as_str().unwrap_or("");
 
     if msg_type == "user" {
-        if let Some(line) = control_command_from_synthetic_entry(&parsed) {
-            return Some(control_line_message(&parsed, line));
+        if let Some(line) = control_command_from_synthetic_entry(parsed) {
+            return Some(control_line_message(parsed, line));
         }
         let reason = if parsed["isMeta"].as_bool().unwrap_or(false) {
             Some("isMeta")
         } else if parsed["message"]["isMeta"].as_bool().unwrap_or(false) {
             Some("message.isMeta")
-        } else if is_synthetic_user_entry(&parsed) {
+        } else if is_synthetic_user_entry(parsed) {
             Some("synthetic-content")
         } else {
             None
@@ -159,9 +165,9 @@ fn parse_jsonl_message(line: &str) -> Option<ConversationMessage> {
     }
 
     match msg_type {
-        "user" => parse_user_message(&parsed),
-        "assistant" => parse_assistant_message(&parsed),
-        "result" => parse_result_message(&parsed),
+        "user" => parse_user_message(parsed),
+        "assistant" => parse_assistant_message(parsed),
+        "result" => parse_result_message(parsed),
         _ => None,
     }
 }
@@ -494,17 +500,18 @@ fn attach_tool_results(
     let Some(blocks) = parsed["message"]["content"].as_array() else {
         return;
     };
+    let main_thread = !crate::chat::is_sidechain_event(parsed);
     for block in blocks
         .iter()
         .filter(|b| b["type"].as_str() == Some("tool_result"))
     {
         let tool_use_id = block["tool_use_id"].as_str().unwrap_or_default();
         let call = match calls.get(tool_use_id) {
-            Some(&(message, index)) => messages
+            Some(&(message, index)) if main_thread => messages
                 .get_mut(message)
                 .and_then(|m| m.blocks.as_mut())
                 .and_then(|blocks| blocks.get_mut(index)),
-            None => None,
+            _ => None,
         };
         match call {
             Some(MessageBlock::ToolUse {
@@ -742,27 +749,30 @@ fn get_conversation_impl(
     let mut last_assistant_content: Option<String> = None;
     for line in reader.lines().take(MAX_TRANSCRIPT_LINES) {
         let line = line.map_err(|e| anyhow::anyhow!("io error reading session: {e}"))?;
-        if line.contains("\"tool_result\"") {
-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) {
-                attach_tool_results(&parsed, &mut messages, &calls);
-            }
-        }
-        if let Some(msg) = parse_jsonl_message(&line) {
-            let tool_ids: Vec<(usize, String)> = msg
-                .blocks
-                .iter()
-                .flatten()
-                .enumerate()
-                .filter_map(|(index, block)| match block {
-                    MessageBlock::ToolUse { tool_id, .. } if !tool_id.is_empty() => {
-                        Some((index, tool_id.clone()))
-                    }
-                    _ => None,
-                })
-                .collect();
+        let Some(parsed) = parse_jsonl_line(&line) else {
+            continue;
+        };
+        attach_tool_results(&parsed, &mut messages, &calls);
+        if let Some(msg) = parse_jsonl_entry(&parsed) {
+            let tool_ids: Vec<(usize, String)> = if crate::chat::is_sidechain_event(&parsed) {
+                Vec::new()
+            } else {
+                msg.blocks
+                    .iter()
+                    .flatten()
+                    .enumerate()
+                    .filter_map(|(index, block)| match block {
+                        MessageBlock::ToolUse { tool_id, .. } if !tool_id.is_empty() => {
+                            Some((index, tool_id.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            };
+            let has_new_call = tool_ids.iter().any(|(_, id)| !calls.contains_key(id));
             if msg.role == "assistant" {
                 if let Some(ref prev) = last_assistant_content {
-                    if tool_ids.is_empty() && prev.contains(&msg.content) {
+                    if !has_new_call && prev.contains(&msg.content) {
                         continue;
                     }
                 }
@@ -3311,6 +3321,91 @@ mod tests {
     }
 
     #[test]
+    fn get_conversation_dedups_an_assistant_entry_written_twice_with_the_same_tool_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        let call = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{}}]}}"#;
+
+        write_session(
+            &dir,
+            id,
+            &[
+                call,
+                call,
+                r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"first"}]}}"#,
+            ],
+        );
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+
+        assert_eq!(transcript.messages.len(), 1);
+        assert_eq!(
+            tool_uses(&transcript),
+            vec![("toolu_1".to_string(), Some("first".to_string()), false)]
+        );
+    }
+
+    #[test]
+    fn get_conversation_ignores_sidechain_tool_calls_and_results() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_main","name":"Task","input":{}}]}}"#,
+                r#"{"type":"assistant","isSidechain":true,"message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_side","name":"Read","input":{}}]}}"#,
+                r#"{"type":"user","isSidechain":true,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_side","content":"from a subagent"}]}}"#,
+                r#"{"type":"user","isSidechain":true,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_main","content":"forged by a subagent"}]}}"#,
+                r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_main","content":"main result"}]}}"#,
+            ],
+        );
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+
+        assert_eq!(
+            tool_uses(&transcript),
+            vec![
+                (
+                    "toolu_main".to_string(),
+                    Some("main result".to_string()),
+                    false
+                ),
+                ("toolu_side".to_string(), None, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn get_conversation_keeps_the_text_of_a_user_message_that_also_holds_a_tool_result() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{}}]}}"#,
+                r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"file body"},{"type":"text","text":"and now continue"}]}}"#,
+            ],
+        );
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+
+        assert_eq!(
+            tool_uses(&transcript),
+            vec![("toolu_1".to_string(), Some("file body".to_string()), false)]
+        );
+        assert_eq!(transcript.messages.len(), 2);
+        assert_eq!(transcript.messages[1].role, "user");
+        assert_eq!(transcript.messages[1].content, "and now continue");
+    }
+
+    #[test]
     fn history_tool_use_has_the_live_tool_use_fields() {
         let history = serde_json::to_value(MessageBlock::ToolUse {
             tool_id: "toolu_1".to_string(),
@@ -3346,7 +3441,7 @@ mod tests {
 
     #[test]
     fn history_tool_use_fields_match_ts_mirror() {
-        let ts = include_str!("../../src/src/app/models/chat.ts");
+        let ts = include_str!("../../src/src/app/models/state-tree.ts");
         let block = MessageBlock::ToolUse {
             tool_id: "toolu_1".to_string(),
             tool_name: "Read".to_string(),
@@ -3354,10 +3449,10 @@ mod tests {
             result: None,
             is_error: false,
         };
-        assert_eq!(
-            crate::ts_mirror::rust_fields(&block),
-            crate::ts_mirror::ts_interface_fields(ts, "HistoryToolUse")
-        );
+        let mut expected: Vec<&str> = crate::ts_mirror::ts_interface_fields(ts, "ToolUseState");
+        expected.push("type");
+        expected.sort_unstable();
+        assert_eq!(crate::ts_mirror::rust_fields(&block), expected);
     }
 
     const RESUME_TRANSCRIPT: &str =

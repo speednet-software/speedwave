@@ -8475,7 +8475,7 @@ describe('ChatSessionStore', () => {
   describe('toChatMessages history tool blocks', () => {
     function transcriptWith(blocks: HistoryMessageBlock[]): ConversationTranscript {
       return {
-        session_id: 'abcdef01-2345-6789-abcd-ef0123456789',
+        session_id: '00000000-0000-0000-0000-000000000000',
         messages: [
           {
             role: 'assistant',
@@ -8570,12 +8570,20 @@ describe('ChatSessionStore', () => {
           }),
         ])
       );
-      const block = msg.blocks[0];
-      expect(block.type).toBe('tool_use');
-      if (block.type === 'tool_use' && block.tool.status === 'done') {
-        expect(block.tool.tool_id).toBe('toolu_task');
-        expect(block.tool.result).toBe('Task #7 created successfully: Write the fix');
-      }
+      expect(msg.blocks).toEqual([
+        {
+          type: 'tool_use',
+          tool: {
+            type: 'tool_use',
+            tool_id: 'toolu_task',
+            tool_name: 'TaskCreate',
+            input_json: '{"subject":"Write the fix"}',
+            status: 'done',
+            result: 'Task #7 created successfully: Write the fix',
+            result_is_error: false,
+          },
+        },
+      ]);
     });
 
     it('maps the other history blocks into the live-chat view-model', () => {

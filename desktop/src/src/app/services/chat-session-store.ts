@@ -2612,17 +2612,23 @@ function completeToolBlock(
   blocks: MessageBlock[],
   data: { tool_id: string; content: string; is_error: boolean }
 ): MessageBlock[] {
-  return updateToolBlock(blocks, data.tool_id, (t) => {
-    const base = {
-      type: 'tool_use' as const,
-      tool_id: t.tool_id,
-      tool_name: t.tool_name,
-      input_json: t.input_json,
-    };
-    return data.is_error
-      ? { ...base, status: 'error', result: data.content, result_is_error: true }
-      : { ...base, status: 'done', result: data.content, result_is_error: false };
-  });
+  return updateToolBlock(blocks, data.tool_id, (t) => finishedTool(t, data.content, data.is_error));
+}
+
+function finishedTool(
+  tool: Pick<ToolUseBlock, 'type' | 'tool_id' | 'tool_name' | 'input_json'>,
+  result: string,
+  isError: boolean
+): ToolUseBlock {
+  const base = {
+    type: 'tool_use' as const,
+    tool_id: tool.tool_id,
+    tool_name: tool.tool_name,
+    input_json: tool.input_json,
+  };
+  return isError
+    ? { ...base, status: 'error', result, result_is_error: true }
+    : { ...base, status: 'done', result, result_is_error: false };
 }
 
 function findLastUserIndexMissingUuid(msgs: readonly ChatMessage[]): number {
@@ -2772,9 +2778,7 @@ export function stateBlocksToMessageBlocks(blocks: readonly MessageBlockState[])
         const tool: ToolUseBlock =
           b.result === null
             ? { ...baseTool, status: 'running' }
-            : b.is_error
-              ? { ...baseTool, status: 'error', result: b.result, result_is_error: true }
-              : { ...baseTool, status: 'done', result: b.result, result_is_error: false };
+            : finishedTool(baseTool, b.result, b.is_error);
         out.push({ type: 'tool_use', tool });
         break;
       }
@@ -2952,20 +2956,19 @@ function historyBlockToMessageBlock(block: HistoryMessageBlock): MessageBlock {
       return { type: 'error', content: block.content };
     case 'control_chip':
       return { type: 'chip', command: block.command, argument: block.argument };
-    case 'tool_use': {
-      const base = {
-        type: 'tool_use' as const,
-        tool_id: block.tool_id,
-        tool_name: block.tool_name,
-        input_json: block.input,
-      };
-      const result = block.result ?? '';
+    case 'tool_use':
       return {
         type: 'tool_use',
-        tool: block.is_error
-          ? { ...base, status: 'error', result, result_is_error: true }
-          : { ...base, status: 'done', result, result_is_error: false },
+        tool: finishedTool(
+          {
+            type: 'tool_use',
+            tool_id: block.tool_id,
+            tool_name: block.tool_name,
+            input_json: block.input,
+          },
+          block.result ?? '',
+          block.is_error
+        ),
       };
-    }
   }
 }
