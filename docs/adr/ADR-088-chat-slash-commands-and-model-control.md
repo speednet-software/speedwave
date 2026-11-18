@@ -273,7 +273,7 @@ command entry also dropped the user's
 message whenever it went through a skill or a custom command: Claude Code
 records `/yt-subs <url> question` only as the `<command-name>` /
 `<command-args>` entry (the skill body follows in a separate `isMeta` entry),
-so a resumed conversation started from the agent's answer. `parse_jsonl_message`
+so a resumed conversation started from the agent's answer. `parse_jsonl_entry`
 now rebuilds the line from every `<command-name>` entry
 (`command_line_from_synthetic_entry`): `name args`, or `name` alone without
 arguments, `/clear` and the argument-less `/model` included. The control-chip
