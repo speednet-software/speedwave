@@ -181,6 +181,42 @@ describe('authedRequest', () => {
     expect(lock.generation).toBe(1);
   });
 
+  it('retries at once when another call already adopted a newer token', async () => {
+    const lock = new RefreshLock();
+    const state = { accessToken: 'T0' };
+    loadToken.mockResolvedValue('T1');
+    const sends: string[] = [];
+    const mkSend = () =>
+      vi.fn(async (token: string) => {
+        sends.push(token);
+        return resp(token === 'T0' ? 401 : 200);
+      });
+    const [a, b] = await Promise.all([
+      authedRequest({ service: 'glpi', state, lock, send: mkSend() }),
+      authedRequest({ service: 'glpi', state, lock, send: mkSend() }),
+    ]);
+    expect(a.status).toBe(200);
+    expect(b.status).toBe(200);
+    expect(sends).toEqual(['T0', 'T0', 'T1', 'T1']);
+    expect(loadToken).toHaveBeenCalledTimes(1);
+    expect(state.accessToken).toBe('T1');
+  });
+
+  it('retries without any file read when the token changed between send and failure', async () => {
+    const state = { accessToken: 'T0' };
+    const send = vi.fn(async (token: string) => {
+      if (token === 'T0') {
+        state.accessToken = 'T1';
+        return resp(401);
+      }
+      return resp(200);
+    });
+    const out = await authedRequest({ service: 'glpi', state, lock: new RefreshLock(), send });
+    expect(out.status).toBe(200);
+    expect(send).toHaveBeenLastCalledWith('T1');
+    expect(loadToken).not.toHaveBeenCalled();
+  });
+
   it('does not bump the lock generation when the wait times out', async () => {
     loadToken.mockResolvedValue('old-token');
     const lock = new RefreshLock();
@@ -317,5 +353,27 @@ describe('authedSdkCall', () => {
     expect(a).toBe('ok');
     expect(b).toBe('ok');
     expect(loadToken).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries at once when another call already adopted a newer token', async () => {
+    const lock = new RefreshLock();
+    const state = { accessToken: 'T0' };
+    loadToken.mockResolvedValue('T1');
+    const sends: string[] = [];
+    const mkSend = () =>
+      vi.fn(async (token: string) => {
+        sends.push(token);
+        if (token === 'T0') throw authError();
+        return 'ok';
+      });
+    const [a, b] = await Promise.all([
+      authedSdkCall({ service: 'slack', state, lock, send: mkSend(), isAuthError }),
+      authedSdkCall({ service: 'slack', state, lock, send: mkSend(), isAuthError }),
+    ]);
+    expect(a).toBe('ok');
+    expect(b).toBe('ok');
+    expect(sends).toEqual(['T0', 'T0', 'T1', 'T1']);
+    expect(loadToken).toHaveBeenCalledTimes(1);
+    expect(state.accessToken).toBe('T1');
   });
 });

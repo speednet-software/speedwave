@@ -74,10 +74,10 @@ const TOKEN_POLL_INTERVAL_MS = 500;
  * Wait for the host to rewrite `/tokens/access_token` (up to `TIMEOUTS.TOKEN_REFRESH_MS`) and
  * adopt it. Mutates `state.accessToken`.
  * @param ctx - Refresh context (service id, token state, tokens dir override).
+ * @param before - the token that was rejected.
  * @throws {OAuthRefreshError} when the token is still unchanged, worded by `refresh_status`.
  */
-async function refreshInto(ctx: AuthedRefreshContext): Promise<void> {
-  const before = ctx.state.accessToken;
+async function refreshInto(ctx: AuthedRefreshContext, before: string): Promise<void> {
   const dir = tokensDirOf(ctx);
   let fresh = await loadToken(join(dir, 'access_token'));
   for (
@@ -94,10 +94,6 @@ async function refreshInto(ctx: AuthedRefreshContext): Promise<void> {
   ctx.state.accessToken = fresh;
 }
 
-/**
- * Adopt the token in `/tokens/access_token` when it differs from the one in use; never waits.
- * @param ctx - Refresh context (service id, token state, tokens dir override).
- */
 async function adoptRewrittenToken(ctx: AuthedRefreshContext): Promise<void> {
   const fresh = await loadToken(join(tokensDirOf(ctx), 'access_token'));
   if (!isUnchanged(fresh, ctx.state.accessToken)) {
@@ -105,19 +101,10 @@ async function adoptRewrittenToken(ctx: AuthedRefreshContext): Promise<void> {
   }
 }
 
-/**
- * The tokens directory of a refresh context.
- * @param ctx - Refresh context.
- */
 function tokensDirOf(ctx: AuthedRefreshContext): string {
   return ctx.tokensDir ?? process.env.TOKENS_DIR ?? '/tokens';
 }
 
-/**
- * True when a token read from the file is empty (mid-write) or equal to the one in use.
- * @param fresh - token just read from the file
- * @param before - token in use
- */
 function isUnchanged(fresh: string, before: string): boolean {
   return fresh === '' || fresh === before;
 }
@@ -148,22 +135,25 @@ export async function authedRequest(opts: AuthedRequestOptions): Promise<Respons
     }
   }
 
-  const response = await opts.send(opts.state.accessToken);
+  const sent = opts.state.accessToken;
+  const response = await opts.send(sent);
   if (!failureStatuses.includes(response.status)) return response;
 
-  await refreshOnce(opts);
+  await refreshOnce(opts, sent);
   return opts.send(opts.state.accessToken);
 }
 
 /**
- * Refresh under the lock, unless another caller refreshed while we waited.
+ * Refresh under the lock, unless another caller already replaced the rejected token.
  * @param ctx - the refresh context
+ * @param sent - the token the failed call was sent with
  */
-async function refreshOnce(ctx: AuthedRefreshContext): Promise<void> {
+async function refreshOnce(ctx: AuthedRefreshContext, sent: string): Promise<void> {
+  if (ctx.state.accessToken !== sent) return;
   const before = ctx.lock.generation;
   await ctx.lock.run(async () => {
-    if (ctx.lock.generation !== before) return;
-    await refreshInto(ctx);
+    if (ctx.lock.generation !== before || ctx.state.accessToken !== sent) return;
+    await refreshInto(ctx, sent);
     ctx.lock.generation += 1;
   });
 }
@@ -186,11 +176,12 @@ export interface AuthedSdkCallOptions<T> extends AuthedRefreshContext {
  * @throws {OAuthRefreshError} when the host did not rewrite the token within the wait.
  */
 export async function authedSdkCall<T>(opts: AuthedSdkCallOptions<T>): Promise<T> {
+  const sent = opts.state.accessToken;
   try {
-    return await opts.send(opts.state.accessToken);
+    return await opts.send(sent);
   } catch (err) {
     if (!opts.isAuthError(err)) throw err;
-    await refreshOnce(opts);
+    await refreshOnce(opts, sent);
     return opts.send(opts.state.accessToken);
   }
 }

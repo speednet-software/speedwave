@@ -1,10 +1,5 @@
-/**
- * Compatibility endpoint for plugins that vendor the old OAuth client (ADR-069): it holds a
- * `refresh` call for a while, then answers the shape that client accepts. It refreshes nothing.
- */
 import type { Request, Response } from 'express';
 
-/** Path the compat endpoint is served on. */
 export const OAUTH_COMPAT_PATH = '/oauth-compat';
 
 const DEFAULT_WAIT_MS = 15_000;
@@ -12,9 +7,7 @@ const DEFAULT_MAX_WAITING = 16;
 
 /** Tuning for {@link createOAuthCompatHandler}. */
 export interface OAuthCompatOptions {
-  /** How long a `refresh` call waits before it is answered. */
   waitMs?: number;
-  /** Concurrent waiting calls allowed; further calls get 429. */
   maxWaiting?: number;
 }
 

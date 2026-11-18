@@ -127,7 +127,10 @@ mod tests {
             .with_body(body)
             .create();
         let data = data();
-        let scopes = vec!["offline_access".to_string(), "Sites.Manage.All".to_string()];
+        let scopes = vec![
+            "offline_access".to_string(),
+            "https://graph.microsoft.com/Sites.Manage.All".to_string(),
+        ];
         request(
             &http::build_client().unwrap(),
             &format!("{}/common/oauth2/v2.0/token", server.url()),
@@ -175,7 +178,7 @@ mod tests {
     fn scope_match_is_case_insensitive_and_ignores_offline_access() {
         let out = run(
             200,
-            r#"{"access_token":"at","expires_in":3600,"scope":"sites.manage.all"}"#,
+            r#"{"access_token":"at","expires_in":3600,"scope":"https://graph.microsoft.com/sites.manage.all"}"#,
         );
         assert_eq!(out.ok().unwrap().refresh_token, None);
     }

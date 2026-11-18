@@ -2,10 +2,10 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use speedwave_runtime::oauth_refresh::{self, RefreshOutcome, SessionRefresher};
+use speedwave_runtime::oauth_refresh::{self, RefreshOutcome, ServiceRefresh, SessionRefresher};
 use speedwave_runtime::runtime::LockedRuntime;
 
 use crate::notifications;
@@ -13,7 +13,14 @@ use crate::notifications;
 const SYNC_INTERVAL: Duration = Duration::from_secs(30);
 const START_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
 
-static STOP: AtomicBool = AtomicBool::new(false);
+type Held<H> = Arc<Mutex<HashMap<String, H>>>;
+
+struct Running<H> {
+    stop: Arc<AtomicBool>,
+    held: Held<H>,
+}
+
+static SYNC: Mutex<Option<Running<SessionRefresher>>> = Mutex::new(None);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Containers {
@@ -35,52 +42,90 @@ impl ReconnectNotices {
     }
 }
 
-/// Starts the background sync: every project with running containers gets a session refresher
-/// from the moment its containers run until they stop. Call once, after setup.
 pub(crate) fn start_sync(app: tauri::AppHandle) {
-    STOP.store(false, Ordering::Relaxed);
-    std::thread::spawn(move || {
-        let mut held: HashMap<String, SessionRefresher> = HashMap::new();
-        while !STOP.load(Ordering::Relaxed) {
-            if let Some(observed) = observe_projects() {
-                reconcile(&mut held, &observed, |project| {
-                    start_refresher(&app, project)
-                });
+    ensure_started(&SYNC, |stop, held| {
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                if let Some(observed) = observe_projects() {
+                    let mut guard = held
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    reconcile(&mut *guard, &observed, |project| {
+                        start_refresher(&app, project)
+                    });
+                }
+                std::thread::sleep(SYNC_INTERVAL);
             }
-            std::thread::sleep(SYNC_INTERVAL);
-        }
-        log::info!("token refresh sync stopped");
+            log::info!("token refresh sync stopped");
+        });
     });
 }
 
-/// Stops the sync and drops its refreshers; for exit and factory reset.
 pub(crate) fn stop_sync() {
-    STOP.store(true, Ordering::Relaxed);
+    stop(&SYNC);
 }
 
-/// Refreshes the due tokens of `project` before a chat session starts; a network failure never
-/// blocks the start. Blocking, run from `spawn_blocking`.
+fn ensure_started<H>(
+    slot: &Mutex<Option<Running<H>>>,
+    run: impl FnOnce(Arc<AtomicBool>, Held<H>),
+) -> bool {
+    let mut slot = slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if slot.is_some() {
+        return false;
+    }
+    let running = Running {
+        stop: Arc::new(AtomicBool::new(false)),
+        held: Arc::new(Mutex::new(HashMap::new())),
+    };
+    run(Arc::clone(&running.stop), Arc::clone(&running.held));
+    *slot = Some(running);
+    true
+}
+
+fn stop<H>(slot: &Mutex<Option<Running<H>>>) {
+    let running = slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    if let Some(running) = running {
+        running.stop.store(true, Ordering::Relaxed);
+        running
+            .held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+}
+
 pub(crate) fn refresh_before_session(app: &tauri::AppHandle, project: &str) {
     for refreshed in oauth_refresh::refresh_now_with_timeout(project, START_REFRESH_TIMEOUT) {
-        let service = refreshed.service.as_str();
-        match refreshed.outcome {
-            RefreshOutcome::ReconnectRequired => {
-                if first_report(project, service) {
-                    notifications::notify_reconnect_required(app, project, service);
-                }
+        apply_outcome(app, project, &refreshed);
+    }
+}
+
+fn apply_outcome(app: &tauri::AppHandle, project: &str, refreshed: &ServiceRefresh) {
+    let service = refreshed.service.as_str();
+    match refreshed.outcome {
+        RefreshOutcome::ReconnectRequired => {
+            if first_report(project, service) {
+                notifications::notify_reconnect_required(app, project, service);
             }
-            RefreshOutcome::NotDue | RefreshOutcome::Refreshed => clear_report(project, service),
-            RefreshOutcome::NetworkError => {}
         }
+        RefreshOutcome::NotDue | RefreshOutcome::Refreshed => clear_report(project, service),
+        RefreshOutcome::NetworkError => {}
     }
 }
 
 fn start_refresher(app: &tauri::AppHandle, project: &str) -> SessionRefresher {
     let app = app.clone();
     let owner = project.to_string();
-    oauth_refresh::spawn_session_refresher(project, move |service| {
-        first_report(&owner, service);
-        notifications::notify_reconnect_required(&app, &owner, service);
+    oauth_refresh::spawn_session_refresher(project, move |refreshed| {
+        apply_outcome(&app, &owner, refreshed);
     })
 }
 
@@ -154,7 +199,7 @@ fn notices() -> &'static Mutex<ReconnectNotices> {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
 
     use super::*;
 
@@ -213,6 +258,37 @@ mod tests {
 
         assert_eq!(held.get("kept"), Some(&1));
         assert!(!held.contains_key("new"));
+    }
+
+    #[test]
+    fn starting_twice_runs_one_sync_until_it_is_stopped() {
+        let slot: Mutex<Option<Running<u32>>> = Mutex::new(None);
+        let runs = Cell::new(0);
+        let captured: RefCell<Option<(Arc<AtomicBool>, Held<u32>)>> = RefCell::new(None);
+
+        assert!(ensure_started(&slot, |stop, held| {
+            runs.set(runs.get() + 1);
+            held.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert("a".to_string(), 1);
+            *captured.borrow_mut() = Some((stop, held));
+        }));
+        assert!(!ensure_started(&slot, |_, _| runs.set(runs.get() + 1)));
+        assert_eq!(runs.get(), 1);
+
+        stop(&slot);
+
+        let taken = captured.take();
+        assert!(taken.is_some());
+        if let Some((stop_flag, held)) = taken {
+            assert!(stop_flag.load(Ordering::Relaxed));
+            assert!(held
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty());
+        }
+        assert!(ensure_started(&slot, |_, _| runs.set(runs.get() + 1)));
+        assert_eq!(runs.get(), 2);
     }
 
     #[test]

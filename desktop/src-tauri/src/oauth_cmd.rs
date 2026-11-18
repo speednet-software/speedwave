@@ -587,7 +587,6 @@ mod tests {
         }
     }
 
-    /// Guard: the written key set is the documented state schema.
     #[test]
     fn save_oauth_state_key_set_matches_documented_ts_schema() {
         const EXPECTED_TOP_LEVEL: &[&str] = &[

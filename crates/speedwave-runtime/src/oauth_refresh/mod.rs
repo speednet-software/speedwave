@@ -1,4 +1,4 @@
-//! Host-side OAuth token refresh run by the process that owns a session (SPEED-1002, ADR-060).
+//! Host-side OAuth token refresh.
 
 mod audit;
 mod generic;
@@ -20,31 +20,29 @@ use provider::{ErrorCode, RefreshRequest, RefreshResponse};
 
 use crate::consts;
 
-/// Result of checking one service.
+/// Result of one check.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RefreshOutcome {
-    /// The token has enough lifetime left, or no state exists.
+    /// Nothing to refresh.
     NotDue,
-    /// The token was refreshed, by this process or by another one holding the lock first.
+    /// The token was refreshed.
     Refreshed,
-    /// The provider rejected the grant; the user must sign in again.
+    /// The user must sign in again.
     ReconnectRequired,
-    /// The refresh failed for a reason that a later attempt can fix.
+    /// A later attempt can succeed.
     NetworkError,
 }
 
-/// Outcome of one service of a project.
+/// Outcome for one service.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServiceRefresh {
-    /// Service id (`slack`, `sharepoint`, plugin service id).
+    /// Service id.
     pub service: String,
-    /// What the check did.
+    /// Check result.
     pub outcome: RefreshOutcome,
 }
 
-/// Checks every OAuth service of `project` once and refreshes the due ones, waiting at most
-/// `timeout`. Blocking; returns an empty list when the time runs out (the work then finishes in
-/// the background) and never fails on a network error.
+/// Refreshes the due tokens of `project`, waiting at most `timeout`.
 pub fn refresh_now_with_timeout(project: &str, timeout: Duration) -> Vec<ServiceRefresh> {
     refresh_with_timeout(
         consts::data_dir().clone(),
@@ -76,18 +74,15 @@ where
     receiver.recv_timeout(timeout).unwrap_or_default()
 }
 
-/// Keeps checking the tokens of a project until dropped.
+/// Handle of the background refresher; dropping it stops the thread.
 pub struct SessionRefresher {
     _stop: mpsc::Sender<()>,
 }
 
-/// Starts checking every OAuth service of `project` every
-/// [`consts::OAUTH_REFRESH_CHECK_INTERVAL`] on a background thread, refreshing tokens below the
-/// threshold. `on_reconnect_required` receives the service id each time that service newly needs
-/// a sign-in; it runs on the background thread. Dropping the returned handle stops the thread.
-pub fn spawn_session_refresher<F>(project: &str, on_reconnect_required: F) -> SessionRefresher
+/// Refreshes the due tokens of `project` periodically; `on_change` gets each changed outcome.
+pub fn spawn_session_refresher<F>(project: &str, on_change: F) -> SessionRefresher
 where
-    F: Fn(&str) + Send + 'static,
+    F: Fn(&ServiceRefresh) + Send + 'static,
 {
     let (stop, stopped) = mpsc::channel();
     let project = project.to_string();
@@ -99,7 +94,7 @@ where
                 &project,
                 consts::OAUTH_REFRESH_CHECK_INTERVAL,
                 &provider::refresh,
-                &on_reconnect_required,
+                &on_change,
                 &stopped,
             );
         });
@@ -114,16 +109,16 @@ fn run_session_refresher<F, G>(
     project: &str,
     interval: Duration,
     call: &F,
-    on_reconnect_required: &G,
+    on_change: &G,
     stopped: &mpsc::Receiver<()>,
 ) where
     F: Fn(&str, &RefreshRequest<'_>) -> Result<RefreshResponse, ErrorCode>,
-    G: Fn(&str),
+    G: Fn(&ServiceRefresh),
 {
     let mut last: HashMap<String, RefreshOutcome> = HashMap::new();
     loop {
         for result in refresh_project(&data_dir, project, call) {
-            report(&mut last, result, on_reconnect_required);
+            report(&mut last, &result, on_change);
         }
         if !matches!(
             stopped.recv_timeout(interval),
@@ -147,12 +142,12 @@ where
         .collect()
 }
 
-fn report<G>(last: &mut HashMap<String, RefreshOutcome>, result: ServiceRefresh, on: &G)
+fn report<G>(last: &mut HashMap<String, RefreshOutcome>, result: &ServiceRefresh, on: &G)
 where
-    G: Fn(&str),
+    G: Fn(&ServiceRefresh),
 {
     let ServiceRefresh { service, outcome } = result;
-    if last.insert(service.clone(), outcome) == Some(outcome) {
+    if last.insert(service.clone(), *outcome) == Some(*outcome) {
         return;
     }
     match outcome {
@@ -162,10 +157,10 @@ where
         }
         RefreshOutcome::ReconnectRequired => {
             log::warn!("service {service} needs a new sign-in");
-            on(&service);
         }
         RefreshOutcome::NotDue => {}
     }
+    on(result);
 }
 
 #[cfg(test)]
@@ -252,7 +247,9 @@ mod tests {
                     attempts.fetch_add(1, Ordering::SeqCst);
                     Err(ErrorCode::InvalidGrant)
                 };
-                let on = |service: &str| reported.lock().unwrap().push(service.to_string());
+                let on = |refresh: &ServiceRefresh| {
+                    reported.lock().unwrap().push(refresh.service.clone());
+                };
                 run_session_refresher(
                     data_dir,
                     "proj",
@@ -279,9 +276,9 @@ mod tests {
     }
 
     #[test]
-    fn a_new_reconnect_is_reported_again_after_the_service_recovers() {
-        let reported = Mutex::new(Vec::<String>::new());
-        let on = |service: &str| reported.lock().unwrap().push(service.to_string());
+    fn only_changes_of_outcome_are_reported_so_a_recovery_and_a_new_failure_are_seen() {
+        let reported = Mutex::new(Vec::<RefreshOutcome>::new());
+        let on = |refresh: &ServiceRefresh| reported.lock().unwrap().push(refresh.outcome);
         let mut last = HashMap::new();
         for outcome in [
             RefreshOutcome::ReconnectRequired,
@@ -291,14 +288,21 @@ mod tests {
         ] {
             report(
                 &mut last,
-                ServiceRefresh {
+                &ServiceRefresh {
                     service: "slack".to_string(),
                     outcome,
                 },
                 &on,
             );
         }
-        assert_eq!(reported.lock().unwrap().len(), 2);
+        assert_eq!(
+            *reported.lock().unwrap(),
+            vec![
+                RefreshOutcome::ReconnectRequired,
+                RefreshOutcome::NotDue,
+                RefreshOutcome::ReconnectRequired
+            ]
+        );
     }
 
     #[test]

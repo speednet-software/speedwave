@@ -1097,8 +1097,10 @@ fn main() -> anyhow::Result<()> {
         }
     }
     let _session_refresher =
-        oauth_refresh::spawn_session_refresher(&project_name, move |service| {
-            reconnect_warnings.warn_once(service)
+        oauth_refresh::spawn_session_refresher(&project_name, move |refreshed| {
+            if refreshed.outcome == RefreshOutcome::ReconnectRequired {
+                reconnect_warnings.warn_once(&refreshed.service);
+            }
         });
 
     let instance_id = speedwave_runtime::session::new_instance_id();

@@ -82,7 +82,7 @@ pub const PER_PROJECT_LOCK_FILE: &str = "lock.json";
 pub const OAUTH_SUBDIR: &str = "oauth";
 /// Per-project audit log; refresh events are appended here (no token contents).
 pub const OAUTH_LOG_FILE: &str = "audit.log";
-/// Interval between expiry checks of the session token refresher (SPEED-1002).
+/// Interval between expiry checks of the session token refresher.
 pub const OAUTH_REFRESH_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 /// A token is refreshed once less than this percentage of its lifetime remains.
 pub const OAUTH_REFRESH_REMAINING_PERCENT: i64 = 25;
@@ -90,18 +90,15 @@ pub const OAUTH_REFRESH_REMAINING_PERCENT: i64 = 25;
 pub const OAUTH_REFRESH_HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// Largest identity-provider token response read, in bytes.
 pub const OAUTH_REFRESH_MAX_RESPONSE_BYTES: u64 = 256 * 1024;
-/// Microsoft identity platform host; the token endpoint is `<base>/<tenant>/oauth2/v2.0/token`.
+/// Microsoft identity platform host.
 pub const MICROSOFT_LOGIN_BASE_URL: &str = "https://login.microsoftonline.com";
 /// Audit log size that triggers rotation to `<file>.1`, in bytes.
 pub const OAUTH_AUDIT_MAX_BYTES: u64 = 1024 * 1024;
-/// Endpoint of the hub that answers `refresh` calls of plugins vendoring the old OAuth client
-/// (ADR-069); `<hub>:<PORT_BASE>/oauth-compat`, test-pinned to [`PORT_BASE`].
+/// Endpoint of the hub that answers `refresh` calls of plugins vendoring the old OAuth client.
 pub const OAUTH_COMPAT_URL: &str = "http://mcp-hub:4000/oauth-compat";
-/// Content of the bearer file mounted at `/secrets/oauth-auth-token-<service>` in OAuth plugin
-/// containers. The compat endpoint checks no credentials, so this is a fixed placeholder.
+/// Content of the bearer file mounted at `/secrets/oauth-auth-token-<service>`.
 pub const OAUTH_COMPAT_BEARER: &str = "oauth-compat";
-/// Status file next to `access_token` (`/tokens/refresh_status` in the container) describing the
-/// last failed refresh; machine-written, excluded from the credentials digest.
+/// Status file next to `access_token` describing the last failed refresh.
 pub const OAUTH_REFRESH_STATUS_FILE: &str = "refresh_status";
 
 /// PII audit JSONL filenames under `audit::audit_dir_in()` — SSOT for the
@@ -534,7 +531,7 @@ pub const SLACK_FEATURES: &[SlackFeature] = &[SlackFeature {
 /// in `mcp-servers/slack/src/features.ts` (cross-read test).
 pub const SLACK_FEATURES_FILE: &str = "features.json";
 
-/// Display name of a built-in integration; the id itself for anything else (plugins).
+/// Display name of a built-in integration, or the id itself.
 pub fn integration_display_name(service_id: &str) -> &str {
     TOGGLEABLE_MCP_SERVICES
         .iter()
@@ -550,7 +547,7 @@ pub fn find_slack_feature(id: &str) -> Option<&'static SlackFeature> {
 /// Slack OAuth authorize endpoint (fixed — slack.com is not instance-specific).
 pub const SLACK_OAUTH_AUTHORIZE_URL: &str = "https://slack.com/oauth/v2/authorize";
 
-/// Slack token endpoint, used by the sign-in and by the host-side refresh.
+/// Slack token endpoint.
 pub const SLACK_OAUTH_TOKEN_URL: &str = "https://slack.com/api/oauth.v2.access";
 
 /// Fixed loopback port for the Slack OAuth redirect (exact match against the
@@ -585,8 +582,7 @@ pub struct McpServiceDescriptor {
     /// True if the worker runs on its own egress-less network `{NETWORK_NAME}_{config_key}`
     /// (e.g. `office`); disabling it removes that network + the hub's attachment.
     pub egress_less: bool,
-    /// True if the integration signs in with OAuth and its token is refreshed on the host by the
-    /// process that runs the session. SSOT for OAuth-using integrations.
+    /// True if the token is refreshed on the host.
     pub uses_oauth_refresh: bool,
     /// Container resource limits (mem/cpu/tmpfs/shm) — SSOT the compose renderer
     /// reads; drift vs `compose.template.yml` is test-caught. See ADR-068.

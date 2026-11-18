@@ -17,8 +17,7 @@ pub(super) fn record(token_dir: &Path, outcome: RefreshOutcome) {
         "at": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
     })
     .to_string();
-    let written = std::fs::create_dir_all(token_dir)
-        .map_err(anyhow::Error::from)
+    let written = crate::fs_perms::ensure_owner_only_dir(token_dir)
         .and_then(|()| crate::fs_perms::write_restricted_file(&path, &body));
     if written.is_err() {
         log::warn!("failed to write the refresh status file");

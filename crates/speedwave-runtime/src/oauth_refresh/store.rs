@@ -74,9 +74,25 @@ pub(super) fn services(data_dir: &Path, project: &str) -> Vec<String> {
             name.strip_suffix(".json").map(str::to_string)
         })
         .filter(|service| plugin::is_valid_slug(service))
+        .filter(|service| {
+            is_state_file(&project_dir(data_dir, project).join(format!("{service}.json")))
+        })
         .collect();
     services.sort();
     services
+}
+
+fn is_state_file(path: &Path) -> bool {
+    if path.file_name().and_then(|n| n.to_str()) == Some(consts::PER_PROJECT_LOCK_FILE) {
+        return false;
+    }
+    let Ok(Some(text)) = fs_perms::read_regular_file_no_follow(path) else {
+        return true;
+    };
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(value) => value.get("provider").is_some(),
+        Err(_) => true,
+    }
 }
 
 pub(super) fn load(path: &Path) -> Result<Option<OAuthState>, ErrorCode> {
@@ -129,7 +145,7 @@ pub(super) fn persist(
         expires_in: response.expires_in,
     };
     write_oauth_state(&paths.state, &params).map_err(|_| ErrorCode::PersistFailed)?;
-    std::fs::create_dir_all(&paths.token_dir).map_err(|_| ErrorCode::PersistFailed)?;
+    fs_perms::ensure_owner_only_dir(&paths.token_dir).map_err(|_| ErrorCode::PersistFailed)?;
     fs_perms::write_restricted_file(&paths.access_token, &response.access_token)
         .map_err(|_| ErrorCode::PersistFailed)
 }
@@ -233,10 +249,33 @@ mod tests {
             ".bearer-map.json",
             "Bad_Name.json",
         ] {
-            std::fs::write(project.join(name), "{}").unwrap();
+            std::fs::write(project.join(name), valid_state().to_string()).unwrap();
         }
         assert_eq!(services(dir.path(), "proj"), vec!["sharepoint", "slack"]);
         assert!(services(dir.path(), "other").is_empty());
+    }
+
+    #[test]
+    fn a_stray_lock_file_or_non_state_json_is_not_a_service() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join(consts::OAUTH_SUBDIR).join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join(consts::PER_PROJECT_LOCK_FILE),
+            valid_state().to_string(),
+        )
+        .unwrap();
+        std::fs::write(project.join("other.json"), r#"{"pid":1,"port":2}"#).unwrap();
+        assert!(services(dir.path(), "proj").is_empty());
+    }
+
+    #[test]
+    fn a_broken_state_file_still_counts_as_a_service() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join(consts::OAUTH_SUBDIR).join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("slack.json"), "{not json").unwrap();
+        assert_eq!(services(dir.path(), "proj"), vec!["slack"]);
     }
 
     #[test]

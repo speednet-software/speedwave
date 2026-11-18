@@ -477,6 +477,7 @@ pub async fn add_project(
     };
     crate::ensure_mcp_os_running(&mcp_os, &app);
     crate::ensure_ide_bridge_running(&ide_bridge, &app);
+    crate::session_refresh::start_sync(app.clone());
 
     {
         let dir_clone = dir.clone();
@@ -655,6 +656,7 @@ pub async fn start_containers(
 ) -> Result<(), String> {
     crate::ensure_mcp_os_running(&mcp_os, &app);
     crate::ensure_ide_bridge_running(&ide_bridge, &app);
+    crate::session_refresh::start_sync(app.clone());
 
     tokio::task::spawn_blocking(move || {
         ensure_images_ready()?;

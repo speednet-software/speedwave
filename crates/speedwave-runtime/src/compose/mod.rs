@@ -72,7 +72,7 @@ pub use tokens::{
 pub(crate) use tokens::{init_secrets_dir_in, resolve_tokens_dir_in};
 
 pub(crate) use workers::{
-    apply_integrations_filter, apply_worker_auth_tokens_in, apply_worker_config, worker_gateway_url,
+    apply_integrations_filter, apply_worker_auth_tokens_in, apply_worker_config,
 };
 #[cfg(test)]
 use workers::{

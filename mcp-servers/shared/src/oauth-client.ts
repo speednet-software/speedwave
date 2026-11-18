@@ -108,10 +108,6 @@ export async function refreshFailure(
   );
 }
 
-/**
- * Read the host's refresh status file; `null` when absent, unreadable or not a known status.
- * @param path - path of the status file
- */
 async function readRefreshStatus(path: string): Promise<RefreshStatus | null> {
   try {
     const parsed = JSON.parse(await readFile(path, 'utf8')) as {

@@ -142,8 +142,6 @@ pub(crate) fn notify_session_event(
     );
 }
 
-/// Shows a notification that `service` of `project` needs a new sign-in, unless the master switch
-/// is off or the system withholds permission.
 pub(crate) fn notify_reconnect_required(app: &AppHandle, project: &str, service: &str) {
     let app = app.clone();
     let project = project.to_string();
