@@ -10,7 +10,7 @@ mod tests {
     const RESET_PS1: &str = include_str!("../windows/reset.ps1");
     const TAURI_CONF: &str = include_str!("../tauri.conf.json");
     const TAURI_WINDOWS_CONF: &str = include_str!("../tauri.windows.conf.json");
-    const RETIRED_DIRECTORY_RESOURCE_ROOTS: [&str; 1] = ["host_exec"];
+    const RETIRED_DIRECTORY_RESOURCE_ROOTS: [&str; 2] = ["host_exec", "oauth"];
     const INSTALLER_PS1_SOURCES: [(&str, &str); 3] = [
         ("sweep.ps1", SWEEP_PS1),
         ("firewall.ps1", FIREWALL_PS1),
