@@ -1115,18 +1115,7 @@ export class ChatSessionStore {
   readonly taskPlan: Signal<readonly PlannedTask[] | null> = computed(() =>
     foldTaskPlan(
       this._state().entries.flatMap((entry) =>
-        entry.blocks.flatMap((b) =>
-          b.kind === 'tool_use'
-            ? [
-                {
-                  tool_name: b.tool_name,
-                  input_json: b.input,
-                  result: b.result,
-                  is_error: b.is_error,
-                },
-              ]
-            : []
-        )
+        entry.blocks.flatMap((b) => (b.kind === 'tool_use' ? [b] : []))
       )
     )
   );

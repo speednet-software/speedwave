@@ -1,3 +1,4 @@
+import type { ToolUseState } from '../../models/state-tree';
 import { normalizeToolInput } from '../../models/tool-input';
 
 /** One task of the current plan. */
@@ -8,12 +9,7 @@ export interface PlannedTask {
   activeForm?: string;
 }
 
-interface TaskToolCall {
-  tool_name: string;
-  input_json: string;
-  result: string | null;
-  is_error: boolean;
-}
+type TaskToolCall = Pick<ToolUseState, 'tool_name' | 'input' | 'result' | 'is_error'>;
 
 const CREATED_TASK_ID = /#(\d+)/;
 
@@ -27,7 +23,7 @@ export function foldTaskPlan(calls: readonly TaskToolCall[]): readonly PlannedTa
   let created = 0;
   for (const call of calls) {
     if (call.is_error) continue;
-    const input = normalizeToolInput(call.tool_name, call.input_json);
+    const input = normalizeToolInput(call.tool_name, call.input);
     switch (input.kind) {
       case 'todo_write':
         family = 'todo';

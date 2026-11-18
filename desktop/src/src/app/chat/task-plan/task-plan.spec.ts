@@ -9,7 +9,7 @@ function call(
   result: string | null = '',
   is_error = false
 ): TaskToolCall {
-  return { tool_name, input_json: JSON.stringify(input), result, is_error };
+  return { tool_name, input: JSON.stringify(input), result, is_error };
 }
 
 function create(subject: string, id: number | null, activeForm?: string): TaskToolCall {
@@ -151,9 +151,7 @@ describe('foldTaskPlan', () => {
   it('has no plan for an empty TodoWrite list or malformed input', () => {
     expect(foldTaskPlan([call('TodoWrite', { todos: [] })])).toBeNull();
     expect(
-      foldTaskPlan([
-        { tool_name: 'TaskCreate', input_json: '{not json', result: '', is_error: false },
-      ])
+      foldTaskPlan([{ tool_name: 'TaskCreate', input: '{not json', result: '', is_error: false }])
     ).toBeNull();
   });
 });
