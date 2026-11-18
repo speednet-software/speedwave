@@ -355,7 +355,7 @@ export class SharePointClient {
     const staleSiteId = this.config.siteId;
     try {
       await this._resolveSiteIdMemo();
-    } catch (err) {
+    } catch {
       this._resolveRetryBlockedUntil = Date.now() + RESOLVE_RETRY_COOLDOWN_MS;
       throw this._siteConnectionError();
     }
