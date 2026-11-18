@@ -35,6 +35,7 @@ import { createDeferred, type Deferred } from '../testing/deferred';
 import { makeMockLogger } from '../testing/mock-logger';
 import type {
   ConversationTranscript,
+  MessageBlock,
   HistoryMessageBlock,
   HistoryToolUse,
   StreamChunk,
@@ -8559,33 +8560,6 @@ describe('ChatSessionStore', () => {
       ]);
     });
 
-    it('keeps the call id and the result a task plan reads from a resumed TaskCreate', () => {
-      const [msg] = toChatMessages(
-        transcriptWith([
-          toolUse({
-            tool_id: 'toolu_task',
-            tool_name: 'TaskCreate',
-            input: '{"subject":"Write the fix"}',
-            result: 'Task #7 created successfully: Write the fix',
-          }),
-        ])
-      );
-      expect(msg.blocks).toEqual([
-        {
-          type: 'tool_use',
-          tool: {
-            type: 'tool_use',
-            tool_id: 'toolu_task',
-            tool_name: 'TaskCreate',
-            input_json: '{"subject":"Write the fix"}',
-            status: 'done',
-            result: 'Task #7 created successfully: Write the fix',
-            result_is_error: false,
-          },
-        },
-      ]);
-    });
-
     it('maps the other history blocks into the live-chat view-model', () => {
       const [msg] = toChatMessages(
         transcriptWith([
@@ -9536,6 +9510,149 @@ describe('ChatSessionStore', () => {
         await new Promise((r) => setTimeout(r, 0));
 
         expect(callsAfterRestart().filter((c) => c === 'start_chat')).toHaveLength(1);
+      });
+    });
+  });
+  describe('task plan', () => {
+    function taskTool(
+      tool_id: string,
+      tool_name: string,
+      input: Record<string, unknown>,
+      result: string | null
+    ): MessageBlock {
+      const base = {
+        type: 'tool_use' as const,
+        tool_id,
+        tool_name,
+        input_json: JSON.stringify(input),
+      };
+      return {
+        type: 'tool_use',
+        tool:
+          result === null
+            ? { ...base, status: 'running' }
+            : { ...base, status: 'done', result, result_is_error: false },
+      };
+    }
+
+    it('has no plan in a conversation without task tools', () => {
+      expect(store.taskPlan()).toBeNull();
+    });
+
+    it('folds committed and streaming task calls once each', () => {
+      store.isStreaming = true;
+      store._setState({
+        messages: [
+          { role: 'user', blocks: [{ type: 'text', content: 'plan it' }], timestamp: 1 },
+          {
+            role: 'assistant',
+            blocks: [
+              taskTool(
+                'c1',
+                'TaskCreate',
+                { subject: 'Read' },
+                'Task #1 created successfully: Read'
+              ),
+              taskTool('c2', 'TaskCreate', { subject: 'Fix' }, 'Task #2 created successfully: Fix'),
+            ],
+            timestamp: 2,
+            uuid: 'msg_a1',
+            uuid_status: 'Committed',
+          },
+        ],
+        currentBlocks: [taskTool('u1', 'TaskUpdate', { taskId: '1', status: 'in_progress' }, null)],
+      });
+
+      expect(store.taskPlan()).toEqual([
+        { id: '1', subject: 'Read', status: 'in_progress', activeForm: undefined },
+        { id: '2', subject: 'Fix', status: 'pending', activeForm: undefined },
+      ]);
+    });
+
+    it('follows a new streaming call without a new message', () => {
+      store.isStreaming = true;
+      store._setState({
+        currentBlocks: [taskTool('c1', 'TaskCreate', { subject: 'Read' }, null)],
+      });
+      expect(store.taskPlan()?.map((t) => t.subject)).toEqual(['Read']);
+
+      store._setState({
+        currentBlocks: [
+          taskTool('c1', 'TaskCreate', { subject: 'Read' }, 'Task #1 created successfully: Read'),
+          taskTool('c2', 'TaskCreate', { subject: 'Fix' }, null),
+        ],
+      });
+      expect(store.taskPlan()?.map((t) => t.subject)).toEqual(['Read', 'Fix']);
+    });
+
+    describe('after a conversation is resumed', () => {
+      function historyTask(
+        tool_id: string,
+        tool_name: string,
+        input: Record<string, unknown>,
+        result: string | null
+      ): HistoryToolUse {
+        return {
+          type: 'tool_use',
+          tool_id,
+          tool_name,
+          input: JSON.stringify(input),
+          result,
+          is_error: false,
+        };
+      }
+
+      async function resumeWith(blocks: HistoryMessageBlock[]): Promise<void> {
+        mockTauri.invokeHandler = async (cmd: string) => {
+          switch (cmd) {
+            case 'get_conversation':
+              return {
+                session_id: 'sess-plan',
+                messages: [
+                  { role: 'assistant', content: '', timestamp: null, uuid: 'a-1', blocks },
+                ],
+              } satisfies ConversationTranscript;
+            case 'list_projects':
+              return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+            case 'get_bundle_reconcile_state':
+              return MOCK_BUNDLE_RECONCILE_DONE;
+            case 'check_containers_running':
+              return true;
+            default:
+              return undefined;
+          }
+        };
+        await TestBed.inject(ProjectStateService).init();
+        await store.resumeConversation('sess-plan');
+      }
+
+      it('takes task ids from the history results, so an update reaches the task it names', async () => {
+        await resumeWith([
+          historyTask(
+            'c1',
+            'TaskCreate',
+            { subject: 'Read' },
+            'Task #4 created successfully: Read'
+          ),
+          historyTask('c2', 'TaskCreate', { subject: 'Fix' }, 'Task #5 created successfully: Fix'),
+          historyTask('u1', 'TaskUpdate', { taskId: '5', status: 'completed' }, 'Updated task #5'),
+        ]);
+
+        expect(store.taskPlan()).toEqual([
+          { id: '4', subject: 'Read', status: 'pending', activeForm: undefined },
+          { id: '5', subject: 'Fix', status: 'completed', activeForm: undefined },
+        ]);
+      });
+
+      it('numbers a task by creation order when its history result is missing', async () => {
+        await resumeWith([
+          historyTask('c1', 'TaskCreate', { subject: 'Read' }, null),
+          historyTask('u1', 'TaskUpdate', { taskId: '1', status: 'completed' }, null),
+        ]);
+
+        expect(store.taskPlan()).toEqual([
+          { id: '1', subject: 'Read', status: 'completed', activeForm: undefined },
+        ]);
       });
     });
   });
