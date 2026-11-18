@@ -1621,6 +1621,25 @@ describe('ChatComponent', () => {
       expect(navigateSpy).toHaveBeenCalledWith(['/settings']);
       navigateSpy.mockRestore();
     });
+
+    it('stays on the chat with its input disabled when a turn failed to authenticate', async () => {
+      const router = TestBed.inject(Router);
+      const navigateSpy = vi.spyOn(router, 'navigate').mockResolvedValue(true);
+      projectState.status.set('ready');
+      await component.ngOnInit();
+      chatState.activeStore()['_authFailure'].set('confirmed');
+
+      projectState.status.set('auth_required');
+      projectState['notifyChange']();
+      fixture.detectChanges();
+      fixture.detectChanges();
+
+      expect(navigateSpy).not.toHaveBeenCalled();
+      expect(fixture.nativeElement.querySelector('[data-testid="chat-view"]')).toBeTruthy();
+      expect(fixture.nativeElement.querySelector('[data-testid="chat-view-blocked"]')).toBeNull();
+      expect(fixture.nativeElement.querySelector('app-composer textarea').disabled).toBe(true);
+      navigateSpy.mockRestore();
+    });
   });
 
   describe('Stop button and ESC handler', () => {

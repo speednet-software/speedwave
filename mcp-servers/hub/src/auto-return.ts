@@ -1,5 +1,5 @@
 import * as acorn from 'acorn';
-import { ts } from '@speedwave/mcp-shared';
+import { describeError, ts } from '@speedwave/mcp-shared';
 
 /**
  * Result of addAutoReturn function
@@ -51,9 +51,8 @@ export function addAutoReturn(code: string): AutoReturnResult {
   } catch (error) {
     /* c8 ignore next — acorn always throws Error instances; the String() fallback is defensive */
     const errorMsg = error instanceof Error ? error.message : String(error);
-    console.warn(`${ts()} [auto-return] Failed to parse code: ${errorMsg}`);
     console.warn(
-      `${ts()} [auto-return] Original code (first 200 chars): ${code.substring(0, 200)}`
+      `${ts()} [auto-return] Failed to parse code: ${describeError(error)} (code length=${code.length})`
     );
     return { code, parseError: errorMsg };
   }

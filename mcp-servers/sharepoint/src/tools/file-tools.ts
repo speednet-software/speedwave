@@ -7,6 +7,7 @@ import {
   ToolDefinition,
   notConfiguredMessage,
   READ_ONLY_ANNOTATIONS,
+  WORKSPACE_WRITE_ANNOTATIONS,
   WRITE_ANNOTATIONS,
   TIMEOUTS,
   META_KEYS,
@@ -166,7 +167,7 @@ const downloadFileTool: Tool = {
       local_path: { type: 'string', description: 'Destination local path (alias for localPath)' },
     },
   },
-  annotations: WRITE_ANNOTATIONS,
+  annotations: WORKSPACE_WRITE_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true, [META_KEYS.TIMEOUT_CLASS]: 'long' as const },
   keywords: ['sharepoint', 'download', 'file', 'get', 'fetch'],
   example:

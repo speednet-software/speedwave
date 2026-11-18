@@ -14,6 +14,18 @@ const DENYLIST: string[] = [
   '/workspace/.kube',
 ];
 
+function logBlocked(
+  message: string,
+  details: { attemptedPath: unknown; attackType: string; reason: string }
+): void {
+  const pathLength = typeof details.attemptedPath === 'string' ? details.attemptedPath.length : 0;
+  console.warn(`${ts()} 🔒 Security: ${message}:`, {
+    attackType: details.attackType,
+    reason: details.reason,
+    pathLength,
+  });
+}
+
 /** Validates paths against traversal, absolute paths, null bytes, and URL-encoded attacks. */
 export class PathValidator {
   /**
@@ -58,11 +70,9 @@ export class PathValidator {
     }
 
     for (const p of pathsToCheck) {
-      const decodedPath = p !== pathStr ? p : undefined;
       if (p.includes('../') || p.includes('..\\')) {
         return this.blockPath({
           attemptedPath: pathStr,
-          decodedPath,
           attackType: 'path_traversal',
           reason: 'Path contains traversal sequence (../ or ..\\)',
         });
@@ -70,7 +80,6 @@ export class PathValidator {
       if (/(^|[/\\])\.\.([/\\]|$)/.test(p)) {
         return this.blockPath({
           attemptedPath: pathStr,
-          decodedPath,
           attackType: 'path_traversal',
           reason: 'Path contains directory traversal pattern (..)',
         });
@@ -78,7 +87,6 @@ export class PathValidator {
       if (p.startsWith('/') || p.startsWith('\\')) {
         return this.blockPath({
           attemptedPath: pathStr,
-          decodedPath,
           attackType: 'absolute_path',
           reason: 'Absolute paths are not allowed',
         });
@@ -86,7 +94,6 @@ export class PathValidator {
       if (p.includes(':')) {
         return this.blockPath({
           attemptedPath: pathStr,
-          decodedPath,
           attackType: 'invalid_character',
           reason: 'Path contains a colon (drive letter or Graph path syntax)',
         });
@@ -94,7 +101,6 @@ export class PathValidator {
       if (p.indexOf('\0') !== -1) {
         return this.blockPath({
           attemptedPath: pathStr,
-          decodedPath,
           attackType: 'null_byte_injection',
           reason: 'Path contains null byte character',
         });
@@ -104,13 +110,8 @@ export class PathValidator {
     return true;
   }
 
-  private blockPath(details: {
-    attemptedPath: string;
-    decodedPath?: string;
-    attackType: string;
-    reason: string;
-  }): false {
-    console.warn(`${ts()} 🔒 Security: Path validation blocked potential attack:`, details);
+  private blockPath(details: { attemptedPath: string; attackType: string; reason: string }): false {
+    logBlocked('Path validation blocked potential attack', details);
     return false;
   }
 
@@ -121,7 +122,7 @@ export class PathValidator {
    */
   validateLocalPath(localPath: string): boolean {
     if (!localPath || typeof localPath !== 'string') {
-      console.warn(`${ts()} 🔒 Security: Local path validation blocked potential attack:`, {
+      logBlocked('Local path validation blocked potential attack', {
         attemptedPath: localPath,
         attackType: 'invalid_path_type',
         reason: 'Path is empty or not a string',
@@ -135,9 +136,8 @@ export class PathValidator {
 
     const isAllowed = resolved === allowedPrefix || resolved.startsWith(allowedPrefix + '/');
     if (!isAllowed) {
-      console.warn(`${ts()} 🔒 Security: Local path validation blocked potential attack:`, {
+      logBlocked('Local path validation blocked potential attack', {
         attemptedPath: localPath,
-        resolvedPath: resolved,
         attackType: 'path_outside_allowed_directory',
         reason: `Path must be within ${allowedPrefix}`,
       });
@@ -147,9 +147,8 @@ export class PathValidator {
     for (const denied of DENYLIST) {
       if (denied === '/workspace/.env') {
         if (resolved === denied) {
-          console.warn(`${ts()} 🔒 Security: Local path validation blocked denied path:`, {
+          logBlocked('Local path validation blocked denied path', {
             attemptedPath: localPath,
-            resolvedPath: resolved,
             attackType: 'denied_path',
             reason: `Path is on the denylist: ${denied}`,
           });
@@ -157,9 +156,8 @@ export class PathValidator {
         }
       } else {
         if (resolved === denied || resolved.startsWith(denied + '/')) {
-          console.warn(`${ts()} 🔒 Security: Local path validation blocked denied path:`, {
+          logBlocked('Local path validation blocked denied path', {
             attemptedPath: localPath,
-            resolvedPath: resolved,
             attackType: 'denied_path',
             reason: `Path is on the denylist: ${denied}`,
           });

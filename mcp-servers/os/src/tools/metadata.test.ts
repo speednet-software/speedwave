@@ -74,6 +74,13 @@ describe('OS tool metadata', () => {
         true
       );
     });
+
+    it('has an os-category of a known sub-integration', () => {
+      const meta = td.tool._meta as Record<string, unknown>;
+      expect(['reminders', 'calendar', 'mail', 'notes']).toContain(
+        metaValue(meta, META_KEYS.OS_CATEGORY, 'osCategory')
+      );
+    });
   });
 
   it('all tool names are unique', () => {

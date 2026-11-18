@@ -28,6 +28,7 @@ import {
 } from './tool-registry.js';
 import { populateRegistryWithMockTools, _resetRegistryForTesting } from './test-helpers.js';
 import * as authTokens from './auth-tokens.js';
+import { inspect } from 'node:util';
 
 describe('http-bridge', () => {
   beforeAll(() => {
@@ -838,6 +839,245 @@ describe('http-bridge', () => {
       );
     });
 
+    describe('error code logged for an isError result', () => {
+      function failWith(text: string): Promise<unknown> {
+        fetchMock.mockResolvedValue({
+          ok: true,
+          headers: new Headers({ 'content-type': 'application/json' }),
+          json: async () => ({
+            jsonrpc: '2.0',
+            id: '123',
+            result: { content: [{ type: 'text', text }], isError: true },
+          }),
+        });
+        return callWorker('gitlab', 'getPullRequest', {}).catch(() => undefined);
+      }
+
+      it.each([
+        ['a code in JSON text', '{"code":"READ_FAILED","message":"x"}', 'READ_FAILED'],
+        [
+          'a browser network error',
+          'page.goto: net::ERR_NAME_NOT_RESOLVED at x',
+          'net::ERR_NAME_NOT_RESOLVED',
+        ],
+        ['an error class name', 'TimeoutError: waiting for selector', 'TimeoutError'],
+        ['an HTTP status', 'Request failed with status code 404', 'HTTP_404'],
+        ['an HTTP status after HTTP', 'HTTP 503 upstream', 'HTTP_503'],
+        ['no recognised shape', 'PR #1 not found in acme/widgets', 'TOOL_ERROR'],
+        ['a Playwright heading and prefix', '### Error\nError: TimeoutError: x', 'TimeoutError'],
+        ['a Playwright heading', '### Error\nTargetClosedError: x', 'TargetClosedError'],
+        [
+          'a Playwright method prefix',
+          'page.goto: net::ERR_CONNECTION_REFUSED',
+          'net::ERR_CONNECTION_REFUSED',
+        ],
+        [
+          'a class-shaped token in the middle',
+          'Page says InvoiceOverdueError raised',
+          'TOOL_ERROR',
+        ],
+        ['a class name that is not in the list', 'InvoiceOverdueError: x', 'TOOL_ERROR'],
+        ['a status-shaped token in the middle', 'Order status: 200 shipped', 'TOOL_ERROR'],
+        ['an HTTP prefix of a worker', 'HTTP 500: Request failed', 'HTTP_500'],
+        ['an HTTP token in the middle', 'Page text HTTP 404 here', 'TOOL_ERROR'],
+        ['a network token in the middle', 'text net::ERR_NAME_NOT_RESOLVED', 'TOOL_ERROR'],
+        ['a JSON code that is not a code shape', '{"code":"order overdue"}', 'TOOL_ERROR'],
+        [
+          'the github not found message',
+          'Resource not found in GitHub. Check the owner/repo and that your token has access.',
+          'NOT_FOUND',
+        ],
+        [
+          'the gitlab not found message',
+          'Resource not found in GitLab. Verify the project_id/path and the ID/name argument are correct, then list valid values',
+          'NOT_FOUND',
+        ],
+        [
+          'the redmine not found message',
+          'Resource not found in Redmine: issue_id=12345. Use listIssueIds first.',
+          'NOT_FOUND',
+        ],
+        [
+          'the redmine not found message without context',
+          'Resource not found in Redmine.',
+          'NOT_FOUND',
+        ],
+        [
+          'the github permission message',
+          'Permission denied. Your GitHub token is missing a required scope.',
+          'PERMISSION_DENIED',
+        ],
+        [
+          'the gitlab permission message',
+          'Permission denied performing this GitLab operation. Your token likely lacks',
+          'PERMISSION_DENIED',
+        ],
+        [
+          'the redmine permission message',
+          'Permission denied. Your Redmine API key may not have sufficient permissions.',
+          'PERMISSION_DENIED',
+        ],
+        [
+          'the github authentication message',
+          'Authentication failed. Check your GitHub token. Configure this integration in the Speedwave Desktop app (Integrations tab).',
+          'AUTH_FAILED',
+        ],
+        [
+          'the gitlab authentication message',
+          'Authentication failed. Check your GitLab token. Configure this integration',
+          'AUTH_FAILED',
+        ],
+        [
+          'the redmine authentication message',
+          'Authentication failed. Check your Redmine API key. Configure this integration',
+          'AUTH_FAILED',
+        ],
+        [
+          'the github rate limit message',
+          'GitHub API rate limit exceeded. Try again later.',
+          'RATE_LIMITED',
+        ],
+        ['a phrase in the middle', 'Page says: Resource not found in the archive', 'TOOL_ERROR'],
+        [
+          'the Playwright navigation of a host that does not resolve',
+          '### Error\nError: browserBackend.callTool: net::ERR_NAME_NOT_RESOLVED at http://x.invalid/\n  - navigating to "http://x.invalid/", waiting until "domcontentloaded"',
+          'net::ERR_NAME_NOT_RESOLVED',
+        ],
+        [
+          'the Playwright navigation of a refused connection',
+          '### Error\nError: browserBackend.callTool: net::ERR_CONNECTION_REFUSED at http://127.0.0.1:9/',
+          'net::ERR_CONNECTION_REFUSED',
+        ],
+        [
+          'a method prefix with a space',
+          'browser Backend.callTool: net::ERR_NAME_NOT_RESOLVED',
+          'TOOL_ERROR',
+        ],
+        [
+          'the Playwright ref that is not in the snapshot',
+          '### Error\nError: Ref e42 not found in the current page snapshot. Try capturing new snapshot.',
+          'REF_NOT_FOUND',
+        ],
+        [
+          'the Playwright tool that does not exist',
+          '### Error\nTool "browser_nope" not found',
+          'NO_SUCH_TOOL',
+        ],
+        [
+          'a parameter the tool does not declare',
+          'Error: Invalid issue_key. getIssue does not accept this parameter, so the call was rejected and nothing was sent.',
+          'INVALID_PARAM',
+        ],
+        [
+          'a required parameter that is missing',
+          'Error: Invalid project_id (received: undefined). getProjectFull requires project_id, so the call was rejected and nothing was sent.',
+          'INVALID_PARAM',
+        ],
+        [
+          'the atlassian not found message',
+          'Error: Atlassian resource not found: Issue does not exist or you do not have permission to see it.',
+          'NOT_FOUND',
+        ],
+        [
+          'the atlassian permission message',
+          'Error: Atlassian permission denied. The account may lack permission for this project/space.',
+          'PERMISSION_DENIED',
+        ],
+        [
+          'the atlassian authentication message',
+          'Error: Atlassian authentication failed. Check the account email and API token.',
+          'AUTH_FAILED',
+        ],
+        [
+          'the atlassian rate limit message',
+          'Error: Atlassian rate limit exceeded. Try again shortly.',
+          'RATE_LIMITED',
+        ],
+        ['an Invalid word in the middle', 'Page says Invalid input here', 'TOOL_ERROR'],
+        [
+          'several parameters the tool does not declare',
+          'Error: Invalid a, b and 2 more. listIssues does not accept these parameters, so the call was rejected and nothing was sent.',
+          'INVALID_PARAM',
+        ],
+        [
+          'the atlassian not found message without an API message',
+          'Error: Atlassian resource not found. Check the key/ID and that the account has access.',
+          'NOT_FOUND',
+        ],
+        [
+          'the context7 invalid key message',
+          "Error: Invalid API key (expected prefix 'ctx7sk_'). Remove the key in Settings.",
+          'AUTH_FAILED',
+        ],
+        ['an Invalid message of another shape', 'Error: Invalid page range: [1,2]', 'TOOL_ERROR'],
+        ['an Invalid path message', 'Error: Invalid path: security check failed.', 'TOOL_ERROR'],
+        ['a Node invalid URL', 'TypeError: Invalid URL', 'TypeError'],
+        ['a bare Invalid URL', 'Invalid URL', 'TOOL_ERROR'],
+        [
+          'undeclared parameter names with a dash, a dot and brackets',
+          'Error: Invalid issue-key, fields.summary, labels[0]. getIssue does not accept these parameters, so the call was rejected and nothing was sent.',
+          'INVALID_PARAM',
+        ],
+        ['a quoted value', "Error: Invalid color 'x'. Expected #RRGGBB", 'TOOL_ERROR'],
+        [
+          'a parenthesised rejection reason',
+          'Error: Invalid sharepoint_path (security check failed)',
+          'TOOL_ERROR',
+        ],
+      ])('logs the code for %s', async (_label, text, code) => {
+        const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+        await failWith(text);
+
+        expect(errorSpy).toHaveBeenCalledWith(
+          expect.stringContaining(`callWorker(gitlab, getPullRequest) failed: code=${code}`)
+        );
+      });
+
+      it('keeps the message of an unrecognised error out of every console method', async () => {
+        const spies = (['log', 'info', 'warn', 'error', 'debug'] as const).map((m) =>
+          vi.spyOn(console, m).mockImplementation(() => {})
+        );
+
+        await failWith('Error: file SENTINEL-997-bridge has no access');
+        await failWith('{"code":"SENTINEL-997-bridge"}');
+        await failWith('TimeoutError: SENTINEL-997-bridge');
+        await failWith(
+          '### Error\nError: browserBackend.callTool: net::ERR_NAME_NOT_RESOLVED at http://SENTINEL-997-bridge.invalid/'
+        );
+        await failWith(
+          '### Error\nError: Ref SENTINEL-997-bridge not found in the current page snapshot.'
+        );
+        await failWith('### Error\nTool "SENTINEL-997-bridge" not found');
+        await failWith(
+          'Error: Invalid SENTINEL-997-bridge. getIssue does not accept this parameter'
+        );
+        await failWith('Error: Atlassian resource not found: SENTINEL-997-bridge');
+
+        expect(
+          inspect(
+            spies.map((s) => s.mock.calls),
+            { depth: 8 }
+          )
+        ).not.toContain('SENTINEL-997');
+      });
+
+      it('hands the agent the full message unchanged', async () => {
+        vi.spyOn(console, 'error').mockImplementation(() => {});
+        fetchMock.mockResolvedValue({
+          ok: true,
+          headers: new Headers({ 'content-type': 'application/json' }),
+          json: async () => ({
+            jsonrpc: '2.0',
+            id: '123',
+            result: { content: [{ type: 'text', text: 'PR #1 not found' }], isError: true },
+          }),
+        });
+
+        await expect(callWorker('gitlab', 'getPullRequest', {})).rejects.toThrow('PR #1 not found');
+      });
+    });
+
     it('should handle non-JSON text response', async () => {
       fetchMock.mockResolvedValue({
         ok: true,
@@ -955,16 +1195,18 @@ describe('http-bridge', () => {
       expect(result).toEqual({ ok: true });
     });
 
-    it('should log error message on failure', async () => {
+    it('should log code and name on failure, not the message', async () => {
       const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
       fetchMock.mockRejectedValue(new Error('Network failure'));
 
       await expect(callWorker('gitlab', 'test', {})).rejects.toThrow('Network failure');
       expect(consoleErrorSpy).toHaveBeenCalledWith(
-        expect.stringContaining('[http-bridge]'),
-        expect.stringContaining('Network failure')
+        expect.stringContaining(
+          '[http-bridge] callWorker(gitlab, test) failed: code=UNKNOWN name=Error'
+        )
       );
+      expect(inspect(consoleErrorSpy.mock.calls, { depth: 8 })).not.toContain('Network failure');
 
       consoleErrorSpy.mockRestore();
     });

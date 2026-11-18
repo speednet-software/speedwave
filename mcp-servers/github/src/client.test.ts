@@ -768,16 +768,30 @@ describe('GitHubClient', () => {
 
   describe('mergePullRequest', () => {
     const ROUTE = 'PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge-async';
+    const RESULT_ROUTE = 'GET /repos/{owner}/{repo}/pulls/{pull_number}/merge-async/{uuid}';
+    const pending = { status: 'pending', details: { uuid: 'u-1', message: 'Working' } };
 
-    it('calls merge-async with the default method and the pinned API version', async () => {
-      octokit.request.mockResolvedValue({ data: { status: 'enqueued', message: 'Queued' } });
+    async function runMerge(...args: Parameters<GitHubClientType['mergePullRequest']>) {
+      vi.useFakeTimers();
+      try {
+        const promise = client.mergePullRequest(...args);
+        await vi.runAllTimersAsync();
+        return await promise;
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+
+    it('sends no merge_method or commit_title when none is given', async () => {
+      octokit.request.mockResolvedValue({
+        data: { status: 'enqueued', details: { message: 'Queued' } },
+      });
       const result = await client.mergePullRequest('o', 'r', 3);
+      expect(octokit.request).toHaveBeenCalledTimes(1);
       expect(octokit.request).toHaveBeenCalledWith(ROUTE, {
         owner: 'o',
         repo: 'r',
         pull_number: 3,
-        merge_method: 'merge',
-        commit_title: undefined,
         headers: { 'X-GitHub-Api-Version': '2026-03-10' },
         request: { retries: 0 },
       });
@@ -789,8 +803,8 @@ describe('GitHubClient', () => {
       });
     });
 
-    it('honors merge_method and commit_title', async () => {
-      octokit.request.mockResolvedValue({ data: { status: 'merged', sha: 'm' } });
+    it('sends merge_method and commit_title when given', async () => {
+      octokit.request.mockResolvedValue({ data: { status: 'merged', details: { sha: 'm' } } });
       const result = await client.mergePullRequest('o', 'r', 3, {
         merge_method: 'squash',
         commit_title: 'CT',
@@ -802,11 +816,130 @@ describe('GitHubClient', () => {
       expect(result).toEqual({ status: 'merged', merged: true, sha: 'm', message: undefined });
     });
 
-    it.each(['pending', 'failed'])('passes status %s through as not merged', async (status) => {
-      octokit.request.mockResolvedValue({ data: { status } });
+    it('returns a 200 failed result with the reason without polling', async () => {
+      octokit.request.mockResolvedValue({
+        data: { status: 'failed', details: { message: 'Not mergeable' } },
+      });
       const result = await client.mergePullRequest('o', 'r', 3);
-      expect(result.status).toBe(status);
-      expect(result.merged).toBe(false);
+      expect(octokit.request).toHaveBeenCalledTimes(1);
+      expect(result).toEqual({
+        status: 'failed',
+        merged: false,
+        sha: undefined,
+        message: 'Not mergeable',
+      });
+    });
+
+    it('reads the result by uuid after a 202 and returns enqueued', async () => {
+      octokit.request
+        .mockResolvedValueOnce({ data: pending })
+        .mockResolvedValueOnce({ data: pending })
+        .mockResolvedValueOnce({ data: { status: 'enqueued', details: { message: 'Queued' } } });
+      const result = await runMerge('o', 'r', 3);
+      expect(octokit.request).toHaveBeenCalledTimes(3);
+      expect(octokit.request).toHaveBeenNthCalledWith(2, RESULT_ROUTE, {
+        owner: 'o',
+        repo: 'r',
+        pull_number: 3,
+        uuid: 'u-1',
+        headers: { 'X-GitHub-Api-Version': '2026-03-10' },
+        request: { retries: 0 },
+      });
+      expect(result).toEqual({
+        status: 'enqueued',
+        merged: false,
+        sha: undefined,
+        message: 'Queued',
+      });
+    });
+
+    it('returns failed with the GitHub message after a 202', async () => {
+      const message = 'Custom merge params are not supported when merging via a merge queue';
+      octokit.request
+        .mockResolvedValueOnce({ data: pending })
+        .mockResolvedValueOnce({ data: { status: 'failed', details: { message } } });
+      const result = await runMerge('o', 'r', 3);
+      expect(result).toEqual({ status: 'failed', merged: false, sha: undefined, message });
+    });
+
+    it('returns merged with the merge commit after a 202', async () => {
+      octokit.request
+        .mockResolvedValueOnce({ data: pending })
+        .mockResolvedValueOnce({ data: { status: 'merged', details: { sha: 'abc' } } });
+      const result = await runMerge('o', 'r', 3);
+      expect(result).toEqual({ status: 'merged', merged: true, sha: 'abc', message: undefined });
+    });
+
+    it('reads the uuid from the 409 body and waits for that request', async () => {
+      octokit.request
+        .mockRejectedValueOnce({
+          status: 409,
+          message: 'Conflict',
+          response: { data: pending },
+        })
+        .mockResolvedValueOnce({ data: { status: 'enqueued', details: { message: 'Queued' } } });
+      const result = await runMerge('o', 'r', 3);
+      expect(octokit.request).toHaveBeenNthCalledWith(
+        2,
+        RESULT_ROUTE,
+        expect.objectContaining({ uuid: 'u-1' })
+      );
+      expect(result.status).toBe('enqueued');
+    });
+
+    it('reads a top-level uuid from the 409 body and keeps polling without a uuid in the poll', async () => {
+      octokit.request
+        .mockRejectedValueOnce({ status: 409, response: { data: { uuid: 'u-2' } } })
+        .mockResolvedValueOnce({ data: { status: 'pending' } })
+        .mockResolvedValueOnce({ data: { status: 'enqueued' } });
+      const result = await runMerge('o', 'r', 3);
+      expect(octokit.request).toHaveBeenNthCalledWith(
+        3,
+        RESULT_ROUTE,
+        expect.objectContaining({ uuid: 'u-2' })
+      );
+      expect(result.status).toBe('enqueued');
+    });
+
+    it('returns pending with the GitHub message when a 409 carries no uuid', async () => {
+      octokit.request.mockRejectedValue({ status: 409, message: 'Merge in progress' });
+      const result = await client.mergePullRequest('o', 'r', 3);
+      expect(octokit.request).toHaveBeenCalledTimes(1);
+      expect(result).toEqual({
+        status: 'pending',
+        merged: false,
+        sha: undefined,
+        message: 'Merge in progress',
+      });
+    });
+
+    it('returns pending without a message when a 409 has neither body nor message', async () => {
+      octokit.request.mockRejectedValue({ status: 409 });
+      const result = await client.mergePullRequest('o', 'r', 3);
+      expect(result).toEqual({
+        status: 'pending',
+        merged: false,
+        sha: undefined,
+        message: undefined,
+      });
+    });
+
+    it('returns pending when GitHub has not decided within 20 seconds', async () => {
+      octokit.request.mockResolvedValue({ data: pending });
+      const result = await runMerge('o', 'r', 3);
+      expect(octokit.request).toHaveBeenCalledTimes(11);
+      expect(result).toEqual({
+        status: 'pending',
+        merged: false,
+        sha: undefined,
+        message: 'Working',
+      });
+    });
+
+    it('does not leak the uuid into the result', async () => {
+      octokit.request.mockResolvedValue({ data: pending });
+      const result = await runMerge('o', 'r', 3);
+      expect(result).not.toHaveProperty('uuid');
     });
 
     it('treats a response without status as pending', async () => {
@@ -820,16 +953,24 @@ describe('GitHubClient', () => {
       });
     });
 
-    it('maps 409 (request in progress) to pending with the GitHub message', async () => {
-      octokit.request.mockRejectedValue({ status: 409, message: 'Merge in progress' });
-      const result = await client.mergePullRequest('o', 'r', 3);
-      expect(result).toEqual({ status: 'pending', merged: false, message: 'Merge in progress' });
-    });
-
     it('rethrows other GitHub errors', async () => {
       const error = { status: 422, message: 'Pull Request is not mergeable' };
       octokit.request.mockRejectedValue(error);
       await expect(client.mergePullRequest('o', 'r', 3)).rejects.toBe(error);
+    });
+
+    it('rethrows an error from reading the result', async () => {
+      const error = { status: 404, message: 'Not Found' };
+      octokit.request.mockResolvedValueOnce({ data: pending }).mockRejectedValueOnce(error);
+      vi.useFakeTimers();
+      try {
+        const promise = client.mergePullRequest('o', 'r', 3);
+        const assertion = expect(promise).rejects.toBe(error);
+        await vi.runAllTimersAsync();
+        await assertion;
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('requires owner, repo and number', async () => {

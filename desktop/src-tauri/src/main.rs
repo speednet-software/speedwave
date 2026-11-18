@@ -3,6 +3,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod access_cmd;
 mod auth;
 mod auth_commands;
 mod bridges;
@@ -1180,6 +1181,10 @@ fn main() {
             containers_cmd::set_provider_model,
             containers_cmd::clear_active_llm_provider,
             containers_cmd::restart_llm_proxy,
+            access_cmd::get_access_settings,
+            access_cmd::set_read_only_mode,
+            access_cmd::get_integration_access,
+            access_cmd::set_integration_access_mode,
             pin_cmd::get_effort_pin,
             pin_cmd::set_effort_pin,
             pin_cmd::get_model_hint,

@@ -4,7 +4,7 @@
  * @module shared/retry
  */
 
-import { ts } from './logger.js';
+import { describeError, ts } from './logger.js';
 
 /** Options for {@link retryAsync}. */
 export interface RetryOptions {
@@ -62,8 +62,7 @@ async function tryCall<T>(fn: () => Promise<T | null>, label: string): Promise<T
   try {
     return await fn();
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.warn(`${ts()} ⚠️ ${label}: attempt failed with error: ${message}`);
+    console.warn(`${ts()} ⚠️ ${label}: attempt failed: ${describeError(error)}`);
     return null;
   }
 }

@@ -17,6 +17,7 @@ import {
   LoopbackFlowStart,
   IntegrationsResponse,
   IntegrationStatusEntry,
+  isGitForge,
   OAuthFlowStatus,
   OAuthProgressEvent,
   OsIntegrationStatusEntry,
@@ -24,6 +25,7 @@ import {
   SlackFeatureStatus,
 } from '../models/integration';
 import { ServiceCardComponent, SaveCredentialsEvent } from './service-card/service-card.component';
+import { IntegrationAccessComponent } from '../shared/integration-access/integration-access.component';
 import { RedmineConfigComponent } from './redmine-config/redmine-config.component';
 import { GitRepositoriesComponent } from './git-repositories/git-repositories.component';
 import { IdeBridgeComponent } from './ide-bridge/ide-bridge.component';
@@ -55,6 +57,7 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
     ServiceCardComponent,
     RedmineConfigComponent,
     GitRepositoriesComponent,
+    IntegrationAccessComponent,
     IdeBridgeComponent,
     ProjectPillComponent,
   ],
@@ -293,7 +296,7 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
                     (cancelOAuth)="handleCancelOAuth()"
                     (openVerificationUrl)="handleOpenVerificationUrl($event)"
                   />
-                  @if (activeProject && (svc.service === 'github' || svc.service === 'gitlab')) {
+                  @if (activeProject && isGitForge(svc.service)) {
                     <app-git-repositories
                       [project]="activeProject"
                       [service]="svc.service"
@@ -349,6 +352,15 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
                     </div>
                   }
                 }
+                @if (activeProject) {
+                  <div class="px-5 py-3">
+                    <app-integration-access
+                      [project]="activeProject"
+                      [service]="svc.service"
+                      [displayName]="svc.display_name"
+                    />
+                  </div>
+                }
               </div>
             }
           }
@@ -369,20 +381,31 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
             <div class="overflow-hidden rounded border border-[var(--line)]">
               <div class="divide-y divide-[var(--line)]">
                 @for (os of osIntegrations; track os.service) {
-                  <div class="flex items-center gap-3 px-4 py-2.5">
-                    <span class="mono text-[13px] text-[var(--ink)]">{{ os.display_name }}</span>
-                    <span class="mono text-[11px] text-[var(--ink-mute)]">{{
-                      os.description
-                    }}</span>
-                    <button
-                      type="button"
-                      class="toggle ml-auto"
-                      [class.on]="os.enabled"
-                      [attr.aria-pressed]="os.enabled"
-                      [attr.aria-label]="(os.enabled ? 'Disable ' : 'Enable ') + os.service"
-                      [attr.data-testid]="'integrations-os-toggle-' + os.service"
-                      (click)="onOsToggleClick(os, $event)"
-                    ></button>
+                  <div [attr.data-testid]="'integrations-os-row-' + os.service">
+                    <div class="flex items-center gap-3 px-4 py-2.5">
+                      <span class="mono text-[13px] text-[var(--ink)]">{{ os.display_name }}</span>
+                      <span class="mono text-[11px] text-[var(--ink-mute)]">{{
+                        os.description
+                      }}</span>
+                      <button
+                        type="button"
+                        class="toggle ml-auto"
+                        [class.on]="os.enabled"
+                        [attr.aria-pressed]="os.enabled"
+                        [attr.aria-label]="(os.enabled ? 'Disable ' : 'Enable ') + os.service"
+                        [attr.data-testid]="'integrations-os-toggle-' + os.service"
+                        (click)="onOsToggleClick(os, $event)"
+                      ></button>
+                    </div>
+                    @if (os.enabled && activeProject) {
+                      <div class="border-t border-[var(--line)] bg-[var(--bg-1)] px-4 py-3">
+                        <app-integration-access
+                          [project]="activeProject"
+                          [service]="os.service"
+                          [displayName]="os.display_name"
+                        />
+                      </div>
+                    }
                   </div>
                 }
               </div>
@@ -444,6 +467,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   private unsubStatusRefresher: (() => void) | null = null;
 
   readonly betaEnabled = this.beta.enabled;
+  protected readonly isGitForge = isGitForge;
 
   /** Re-fetch on beta toggle — response.services is not cached, so filter-only won't reveal beta-only services. */
   constructor() {

@@ -1,6 +1,6 @@
 # Managed (MDM/org) Policy Config
 
-Speedwave supports organization-forced policy that a user cannot bypass. Today this drives OTLP telemetry (`telemetry`) and the PII policy (`pii_policy`: `forced_policies` for policy ids); the mechanism is general — reuse it for any future org policy rather than inventing a second channel.
+Speedwave supports organization-forced policy that a user cannot bypass. Today this drives OTLP telemetry (`telemetry`), the PII policy (`pii_policy`: `forced_policies` for policy ids) and the global read-only mode (`access`: `{"read_only": true}`); the mechanism is general, reuse it for any future org policy rather than inventing a second channel.
 
 ## Where the policy lives
 
@@ -14,6 +14,10 @@ Path literals (`Speedwave`, `managed-config.json`) are consts in `consts.rs` (`M
 ## Presence is the lock
 
 There is no separate `locked` flag. Any field the MDM file sets is authoritative and the user cannot override it; to leave a field user-editable, the MDM omits it. This is because the merge always gives MDM precedence — a `locked:false` "editable default" would let the UI show an edit the runtime ignores. The merge order for a lockable value is: compiled default → user config → MDM (highest). Only MDM-set keys are re-forced over the user layer.
+
+## The `access` key (read-only mode)
+
+`access.read_only: true` forces the project's global read-only mode on for every project (ADR-108). Presence is the lock: Desktop shows the switch on and disabled with "Set by your organization", and `access_policy::set_read_only` refuses a change server-side. `read_only: false` is a load error, because the file has no way to force the mode off and a `false` would otherwise read as an editable default. Composition is in Rust (`speedwave_access_policy::compose_access_policy`: MDM, then the project's global switch, then per-service modes; the most restrictive wins; the per-service modes are the `access` field of the integration entries in the user config, which MDM does not set) and the hub receives only the result in `access.json` and the proxy in `proxy.json`. The key adds no mount and no `SecurityCheck` rule.
 
 ## Enforcement is two layers (one load-bearing), gated by a boot check
 

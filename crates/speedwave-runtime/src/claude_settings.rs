@@ -7,16 +7,23 @@ use crate::fs_perms;
 
 /// The `model` pin of the project's `settings.json`, or `None` when unset or unreadable.
 pub fn get_model_pin(data_dir: &Path, project: &str) -> Option<String> {
-    read_settings_string_key(data_dir, project, "model")
+    read_settings_key(data_dir, project, MODEL_KEY)?
+        .as_str()
+        .map(str::to_string)
 }
 
-fn read_settings_string_key(data_dir: &Path, project: &str, key: &str) -> Option<String> {
+/// The user's own `modelPicker` value, or `None` when unset or unreadable.
+pub fn get_model_picker(data_dir: &Path, project: &str) -> Option<serde_json::Value> {
+    read_settings_key(data_dir, project, "modelPicker")
+}
+
+fn read_settings_key(data_dir: &Path, project: &str, key: &str) -> Option<serde_json::Value> {
     let path = settings_path(data_dir, project);
     let contents = fs_perms::read_regular_file_no_follow(&path)
         .ok()
         .flatten()?;
-    let value: serde_json::Value = serde_json::from_str(&contents).ok()?;
-    value.get(key)?.as_str().map(str::to_string)
+    let mut value: serde_json::Value = serde_json::from_str(&contents).ok()?;
+    value.get_mut(key).map(serde_json::Value::take)
 }
 
 /// Removes the legacy `effortLevel` key and returns its string value, if any.
@@ -187,6 +194,33 @@ mod tests {
             get_model_pin(tmp.path(), "proj"),
             Some("claude-fable-5[1m]".to_string())
         );
+    }
+
+    #[test]
+    fn get_model_picker_returns_the_users_value_whole() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_settings(
+            tmp.path(),
+            "proj",
+            r#"{"model":"opus","modelPicker":{"options":[{"model":"claude-opus-4-8"}],"replaceBuiltInOptions":true}}"#,
+        );
+        assert_eq!(
+            get_model_picker(tmp.path(), "proj"),
+            Some(serde_json::json!({
+                "options": [{"model": "claude-opus-4-8"}],
+                "replaceBuiltInOptions": true,
+            }))
+        );
+    }
+
+    #[test]
+    fn get_model_picker_is_none_without_the_key_the_file_or_valid_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(get_model_picker(tmp.path(), "proj"), None);
+        write_settings(tmp.path(), "proj", r#"{"model":"opus"}"#);
+        assert_eq!(get_model_picker(tmp.path(), "proj"), None);
+        write_settings(tmp.path(), "proj", r#"{"modelPicker":"#);
+        assert_eq!(get_model_picker(tmp.path(), "proj"), None);
     }
 
     #[test]

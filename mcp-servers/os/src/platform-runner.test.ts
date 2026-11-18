@@ -3,6 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { inspect } from 'node:util';
 import path from 'node:path';
 
 const { execFileAsyncMock, existsSyncMock } = vi.hoisted(() => ({
@@ -31,6 +32,17 @@ vi.mock('node:util', async () => {
 import { resolvePaths, runCommand, buildChildEnv, SAFE_ENV_KEYS } from './platform-runner.js';
 import { BASE_SAFE_ENV_KEYS } from '@speedwave/mcp-shared';
 import { ALLOWED_COMMANDS } from './tools/index.js';
+
+const CONSOLE_METHODS = ['log', 'info', 'warn', 'error', 'debug'] as const;
+
+function spyOnConsole(): () => string {
+  const spies = CONSOLE_METHODS.map((m) => vi.spyOn(console, m).mockImplementation(() => {}));
+  return () =>
+    inspect(
+      spies.map((s) => s.mock.calls),
+      { depth: 8 }
+    );
+}
 
 describe('platform-runner', () => {
   beforeEach(() => {
@@ -290,14 +302,14 @@ describe('platform-runner', () => {
     });
 
     it('logs stderr warnings without failing', async () => {
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const logged = spyOnConsole();
       execFileAsyncMock.mockResolvedValue({ stdout: '{"ok": true}', stderr: 'some warning' });
 
       const result = await runCommand('reminders', 'list_lists');
 
       expect(result.parsed).toEqual({ ok: true });
-      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('some warning'));
-      warnSpy.mockRestore();
+      expect(logged()).toContain('stderr length=12');
+      expect(logged()).not.toContain('some warning');
     });
 
     it('passes timeout option to execFile', async () => {

@@ -22,6 +22,7 @@ import { SecuritySectionComponent } from './security-section/security-section.co
 import { UpdateSectionComponent } from './update-section/update-section.component';
 import { NotificationsSectionComponent } from './notifications-section/notifications-section.component';
 import { SleepSectionComponent } from './sleep-section/sleep-section.component';
+import { AccessSectionComponent } from './access-section/access-section.component';
 import { ProjectPillComponent } from '../project-switcher/project-pill.component';
 import { RecreateOnDirective } from '../shared/recreate-on.directive';
 import { ModalOverlayComponent } from '../shell/modal-overlay/modal-overlay.component';
@@ -79,6 +80,7 @@ const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
     UpdateSectionComponent,
     NotificationsSectionComponent,
     SleepSectionComponent,
+    AccessSectionComponent,
     ProjectPillComponent,
     RecreateOnDirective,
     ModalOverlayComponent,
@@ -196,6 +198,12 @@ const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
         </section>
 
         <app-sleep-section (errorOccurred)="error = $event" />
+
+        <app-access-section
+          *appRecreateOn="activeProject()"
+          [project]="activeProject()"
+          (errorOccurred)="error = $event"
+        />
 
         @if (beta.enabled()) {
           <app-notifications-section (errorOccurred)="error = $event" />

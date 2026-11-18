@@ -2,6 +2,7 @@
 
 export const TOOL_NAMES = {
   LIST_ISSUE_IDS: 'listIssueIds',
+  GET_ISSUE_FULL: 'getIssueFull',
   SEARCH_ISSUE_IDS: 'searchIssueIds',
   LIST_PROJECT_IDS: 'listProjectIds',
   SEARCH_PROJECT_IDS: 'searchProjectIds',

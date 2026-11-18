@@ -29,17 +29,17 @@ Isolated Jira & Confluence (Atlassian Cloud) MCP server with per-service token i
 - Optional scope allowlists: when `jira_project_keys` / `confluence_space_keys` are set, operations outside those projects/spaces are rejected
 - Non-root user in container, read-only token mount, `cap_drop: ALL`, `no-new-privileges`, read-only filesystem
 
-## Tools (40 total)
+## Tools (41 total)
 
-| Domain              | Count | Tools                                                                                                                                                                                                  |
-| ------------------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Jira: issues        | 14    | searchIssues (JQL), getIssue, createIssue, updateIssue, deleteIssue, linkIssues, unlinkIssues, listLinkTypes, getTransitions, transitionIssue, assignIssue, getMyself, addAttachment, deleteAttachment |
-| Jira: comments      | 3     | addComment, getComments, addWorklog                                                                                                                                                                    |
-| Jira: projects      | 4     | listProjects, getProject, listIssueTypes, listComponents                                                                                                                                               |
-| Jira: Agile         | 6     | listBoards, getBoard, getBoardConfiguration, listSprints, getSprint, moveIssuesToSprint                                                                                                                |
-| Confluence: spaces  | 2     | listSpaces, getSpace                                                                                                                                                                                   |
-| Confluence: pages   | 6     | searchPages (CQL), getPage, getPageByTitle, createPage, updatePage, getPageChildren                                                                                                                    |
-| Confluence: content | 5     | addPageComment, getPageComments, addPageLabels, getPageLabels, listAttachments                                                                                                                         |
+| Domain              | Count | Tools                                                                                                                                                                                                                      |
+| ------------------- | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Jira: issues        | 15    | searchIssues (JQL), getIssue, createIssue, updateIssue, deleteIssue, linkIssues, unlinkIssues, listLinkTypes, getTransitions, transitionIssue, assignIssue, getMyself, addAttachment, downloadAttachment, deleteAttachment |
+| Jira: comments      | 3     | addComment, getComments, addWorklog                                                                                                                                                                                        |
+| Jira: projects      | 4     | listProjects, getProject, listIssueTypes, listComponents                                                                                                                                                                   |
+| Jira: Agile         | 6     | listBoards, getBoard, getBoardConfiguration, listSprints, getSprint, moveIssuesToSprint                                                                                                                                    |
+| Confluence: spaces  | 2     | listSpaces, getSpace                                                                                                                                                                                                       |
+| Confluence: pages   | 6     | searchPages (CQL), getPage, getPageByTitle, createPage, updatePage, getPageChildren                                                                                                                                        |
+| Confluence: content | 5     | addPageComment, getPageComments, addPageLabels, getPageLabels, listAttachments                                                                                                                                             |
 
 Jira tools take and return snake_case names (`max_results`, `transition_id`, `account_id`). Every Jira tool is wrapped in `withDeclaredParams`: an undeclared parameter or a missing required one is rejected with a teaching error before any request is sent. Confluence tools keep camelCase and are not under the guard yet (SPEED-870).
 
@@ -51,7 +51,10 @@ Jira tools take and return snake_case names (`max_results`, `transition_id`, `ac
 - Every list tool returns `{ <items key>: [...], count }`. `getProject` and `listProjects` include each project's `components`.
 - `deleteIssue` is irreversible and fails while the issue has sub-tasks. A 403 or 404 from Jira becomes an error that says nothing was removed.
 - When `updateIssue` with `type` is refused, the error names the issue's current status and the requested type.
-- The project allowlist covers the issue a call names, `parent`, and both ends of a link.
+- `getIssue` returns `attachments` (id, filename, size, mime_type, author, created; an empty array when there are none). `searchIssues` does not.
+- `downloadAttachment({ issue, attachment_id })` streams an attachment of the issue to `/workspace/.speedwave/jira/<attachment_id>-<name>` (name reduced to a basename without separators or leading dots; a repeated download overwrites) and returns the path, size and MIME type, never the bytes. It requests `GET /rest/api/3/attachment/content/{id}?redirect=false` on the Jira host and does not follow redirects. It works in read-only mode. `deleteAttachment({ issue, attachment_id })` and `downloadAttachment` both refuse an `attachment_id` that is not among the issue's attachments, before any attachment request.
+- The worker mounts `/workspace:rw` for these downloads (ADR-109).
+- The project allowlist covers the issue a call names, `parent`, both ends of a link, and the issue of an attachment call.
 
 Confluence page bodies accept `bodyText` or raw `bodyStorage` (storage representation); `updatePage` fetches the current version automatically.
 

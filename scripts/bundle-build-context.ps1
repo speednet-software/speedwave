@@ -91,6 +91,7 @@ function Copy-Tree {
 
 Copy-Tree $containersDir "$dest\build-context\containers"
 
+Copy-Tree crates\access-policy "$dest\build-context\containers\crates\access-policy"
 Copy-Tree crates\pii-engine "$dest\build-context\containers\crates\pii-engine"
 
 New-Item -ItemType Directory -Path "$dest\build-context\containers\mcp-servers\policies" -Force | Out-Null

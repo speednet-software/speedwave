@@ -25,6 +25,7 @@ import { initializeRegistry } from './tool-registry.js';
 
 import { loadAuthTokens } from './auth-tokens.js';
 
+import { loadAccess } from './access-config.js';
 import { loadPolicy } from './policy.js';
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
@@ -51,6 +52,8 @@ async function main() {
   loadAuthTokens();
 
   loadPolicy();
+
+  loadAccess();
 
   console.log(`${ts()} 🔧 Initializing dynamic tool registry...`);
   await initializeRegistry();

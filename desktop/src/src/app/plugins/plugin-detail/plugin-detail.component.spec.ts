@@ -316,6 +316,49 @@ describe('PluginDetailComponent', () => {
     expect(desc.textContent).toContain('CRM integration for example-plugin');
   });
 
+  it('shows the Access control of an MCP plugin under its service id', async () => {
+    const { component, fixture } = setup();
+    const calls: Record<string, unknown>[] = [];
+    const base = mockTauri.invokeHandler;
+    mockTauri.invokeHandler = (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'get_integration_access') {
+        calls.push(args ?? {});
+        return Promise.resolve({ mode: 'full', global_read_only: false, global_locked: false });
+      }
+      return base(cmd, args);
+    };
+    await initAndDetect(component, fixture);
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const panel = fixture.nativeElement.querySelector('[data-testid="plugin-access"]');
+    expect(panel?.querySelector('[data-testid="integration-access"]')).not.toBeNull();
+    expect(calls).toContainEqual({ project: 'test-project', service: 'example-plugin' });
+  });
+
+  it('says next to the plugin Access control that the project setting makes it read-only', async () => {
+    const { component, fixture } = setup();
+    const base = mockTauri.invokeHandler;
+    mockTauri.invokeHandler = (cmd: string, args?: Record<string, unknown>) =>
+      cmd === 'get_integration_access'
+        ? Promise.resolve({ mode: 'full', global_read_only: true, global_locked: false })
+        : base(cmd, args);
+    await initAndDetect(component, fixture);
+    await fixture.whenStable();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    fixture.detectChanges();
+
+    const status = fixture.nativeElement.querySelector('[data-testid="integration-access-status"]');
+    expect(status?.textContent).toContain('Currently read-only, from the project setting');
+  });
+
+  it('shows no Access control for a plugin without a service id', async () => {
+    const { component, fixture } = setupWithPlugin({ service_id: null });
+    await initAndDetect(component, fixture);
+
+    expect(fixture.nativeElement.querySelector('[data-testid="plugin-access"]')).toBeNull();
+  });
+
   it('renders manifest instructions as Markdown on the dashboard', async () => {
     const { component, fixture } = setupWithPlugin({
       instructions: '## Setup\n\nGenerate a **token** first.',

@@ -32,7 +32,7 @@
     (closed)="onRestartCancel()"
   />
 }
-@if (projectState.status() === 'ready') {
+@if (projectState.status() === 'ready' || chat.sessionAuthFailed()) {
   <section
     class="relative flex h-full overflow-hidden bg-[var(--bg)]"
     data-testid="chat-view"
@@ -141,6 +141,7 @@
             #composer
             [streaming]="chat.isStreamingFromState()"
             [sendBlocked]="chat.sessionStartInFlightFromState"
+            [disabled]="chat.sessionAuthFailed()"
             [sessionAwaited]="chat.sessionAwaitedFromState()"
             [queuedText]="chat.pendingQueueFromState()?.text ?? ''"
             [model]="chat.sessionStatsFromState()?.model ?? ''"
@@ -151,12 +152,14 @@
             [contextLabel]="composerContextLabel()"
             [transcriptName]="chat.activeStore().stagedTranscript()?.name ?? ''"
             [draftText]="chat.activeStore().composerPromptDraft()"
+            [returnedText]="chat.activeStore().returnedStartSlot() ?? ''"
             [attachmentDraft]="chat.activeStore().composerAttachments"
             (submitted)="sendMessage($event)"
             (queueRequested)="onQueueRequested($event)"
             (queueCancelled)="onQueueCancelled()"
             (transcriptDetached)="chat.activeStore().unstageTranscript()"
             (draftApplied)="chat.activeStore().composerPromptDraft.set('')"
+            (returnedTextHandled)="chat.activeStore().settleReturnedStartSlot()"
             (stopRequested)="onStopClicked()"
             (modelSelected)="chat.applyModelSelection($event)"
             (effortSelected)="chat.applyEffortSelection($event)"

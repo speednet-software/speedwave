@@ -21,6 +21,7 @@ dirs = "6"
 fs2 = "0.4"
 log = { workspace = true }
 regex = "1"
+speedwave-access-policy = { path = "../access-policy" }
 speedwave-pii-engine = { path = "../pii-engine" }
 zip = { version = "9", default-features = false, features = ["deflate"] }
 ed25519-dalek = "3"

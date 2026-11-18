@@ -7,7 +7,13 @@ import { randomUUID } from 'crypto';
 import { buildServiceBridge, getEnabledServices } from './tool-registry.js';
 import { getAuthToken } from './auth-tokens.js';
 import { getAllServiceNames } from './service-list.js';
-import { TIMEOUTS, LATEST_PROTOCOL_VERSION, ts, validateWorkerUrl } from '@speedwave/mcp-shared';
+import {
+  TIMEOUTS,
+  LATEST_PROTOCOL_VERSION,
+  describeError,
+  ts,
+  validateWorkerUrl,
+} from '@speedwave/mcp-shared';
 import { deriveWorkerEnv } from './worker-env.js';
 
 /**
@@ -496,6 +502,47 @@ export function _clearWorkerSessionCacheForTesting(): void {
   workerSessionCache.clear();
 }
 
+const TOOL_ERROR_LEADS: readonly { pattern: RegExp; code?: string }[] = [
+  { pattern: /^(?:[A-Za-z]+\.[A-Za-z]+: )?(net::ERR_[A-Z_]{1,60})\b/ },
+  { pattern: /^(TimeoutError|TargetClosedError|AbortError|TypeError|RangeError|SyntaxError)\b/ },
+  { pattern: /^(?:HTTP |Request failed with status code )([1-5]\d{2})\b/, code: 'HTTP' },
+  { pattern: /^(?:Resource not found in |Atlassian resource not found\b)/, code: 'NOT_FOUND' },
+  { pattern: /^(?:Atlassian p|P)ermission denied/, code: 'PERMISSION_DENIED' },
+  { pattern: /^(?:Atlassian a|A)uthentication failed/, code: 'AUTH_FAILED' },
+  { pattern: /^(?:GitHub API|Atlassian) rate limit exceeded/, code: 'RATE_LIMITED' },
+  { pattern: /^Ref \S+ not found in the current page snapshot\b/, code: 'REF_NOT_FOUND' },
+  { pattern: /^Tool "[^"\n]*" not found$/, code: 'NO_SUCH_TOOL' },
+  { pattern: /^Invalid API key \(expected prefix /, code: 'AUTH_FAILED' },
+  { pattern: /^Invalid [A-Za-z_][\w, .\-[\]]*?(?:\.(?: |$)| \(received: )/, code: 'INVALID_PARAM' },
+];
+
+function workerError(message: string, code: string): Error {
+  return Object.assign(new Error(message), { code });
+}
+
+function toolErrorCode(text: string): string {
+  let code: unknown;
+  try {
+    code = (JSON.parse(text) as { code?: unknown } | null)?.code;
+  } catch {
+    code = undefined;
+  }
+  if (typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(code)) {
+    return code;
+  }
+  const lead = text.replace(/^### Error\r?\n/, '').replace(/^Error: /, '');
+  for (const { pattern, code: fixed } of TOOL_ERROR_LEADS) {
+    const match = lead.match(pattern);
+    if (match) {
+      if (fixed === 'HTTP') {
+        return `HTTP_${match[1]}`;
+      }
+      return fixed ?? match[1];
+    }
+  }
+  return 'TOOL_ERROR';
+}
+
 /**
  * Call a worker tool via HTTP bridge; `options.timeoutMs` overrides the default timeout.
  * @param service - Service name (slack, sharepoint, redmine, gitlab)
@@ -514,7 +561,7 @@ export async function callWorker<T = unknown>(
   const url = getWorkerUrl(service);
 
   if (!url) {
-    throw new Error(`Unknown service: ${service}`);
+    throw workerError(`Unknown service: ${service}`, 'UNKNOWN_SERVICE');
   }
 
   const timeout = options?.timeoutMs ?? TIMEOUTS.WORKER_REQUEST_MS;
@@ -555,31 +602,37 @@ export async function callWorker<T = unknown>(
           (bodyLower.includes('session') || bodyLower.includes('not found')));
       if (looksLikeSessionIssue) {
         console.warn(
-          `${ts()} [http-bridge] ${service}: ${response.status} on tools/call (${body.slice(0, 200)}) — re-initialising session`
+          `${ts()} [http-bridge] ${service}: ${response.status} on tools/call — re-initialising session`
         );
         invalidateWorkerSession(service);
         const sessionId = await ensureWorkerSession(service, url, authToken);
         response = await attemptCall(sessionId);
       } else {
-        throw new Error(`Worker ${service} returned ${response.status}: ${body.slice(0, 200)}`);
+        throw workerError(
+          `Worker ${service} returned ${response.status}: ${body.slice(0, 200)}`,
+          `HTTP_${response.status}`
+        );
       }
     }
 
     if (!response.ok) {
-      throw new Error(`Worker ${service} returned ${response.status}: ${response.statusText}`);
+      throw workerError(
+        `Worker ${service} returned ${response.status}: ${response.statusText}`,
+        `HTTP_${response.status}`
+      );
     }
 
     const result = await parseResponse(response);
 
     if (result.error) {
-      throw new Error(`Worker ${service} error: ${result.error.message}`);
+      throw workerError(`Worker ${service} error: ${result.error.message}`, 'JSONRPC_ERROR');
     }
 
     const content = result.result?.content;
     if (content && content.length > 0) {
       if (result.result?.isError) {
         const firstText = content.find((c) => c.type === 'text')?.text ?? 'Unknown error';
-        throw new Error(firstText);
+        throw workerError(firstText, toolErrorCode(firstText));
       }
 
       const textItems = content.filter((c) => c.type === 'text' && c.text !== undefined);
@@ -602,12 +655,11 @@ export async function callWorker<T = unknown>(
     return result.result as T;
   } catch (error: unknown) {
     if (error instanceof Error && error.name === 'TimeoutError') {
-      throw new Error(`Worker ${service} timeout after ${timeout}ms`);
+      throw workerError(`Worker ${service} timeout after ${timeout}ms`, 'TIMEOUT');
     }
 
     console.error(
-      `${ts()} [http-bridge] callWorker(${service}, ${toolName}) failed:`,
-      error instanceof Error ? (error.stack ?? error.message) : JSON.stringify(error)
+      `${ts()} [http-bridge] callWorker(${service}, ${toolName}) failed: ${describeError(error)}`
     );
     throw error;
   }
