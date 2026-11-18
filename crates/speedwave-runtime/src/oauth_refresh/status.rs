@@ -34,7 +34,7 @@ fn remove(path: &Path) {
 
 #[cfg(test)]
 #[expect(
-    clippy::expect_used,
+    clippy::unwrap_used,
     reason = "test code: unwrap on fixtures is the sanctioned boundary"
 )]
 mod tests {
