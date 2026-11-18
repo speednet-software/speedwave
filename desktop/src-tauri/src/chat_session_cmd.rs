@@ -7,9 +7,8 @@ use crate::control_channel::{
     SessionInfoState,
 };
 use crate::project_cmd::clear_chat_sessions;
-use crate::reconcile::SharedOauth;
 use crate::types::check_project;
-use crate::{containers_cmd, ensure_oauth_running};
+use crate::{containers_cmd, session_refresh};
 use crate::{setup_wizard, MSG_NOT_AUTHENTICATED};
 
 const MSG_SESSION_KEPT: &str = "the running chat session was kept";
@@ -18,21 +17,12 @@ fn kept_session_error(e: impl std::fmt::Display) -> String {
     format!("{MSG_SESSION_KEPT}: {e}")
 }
 
-fn failure_before_swap(session_kept: bool, e: impl std::fmt::Display) -> String {
-    if session_kept {
-        kept_session_error(e)
-    } else {
-        e.to_string()
-    }
-}
-
 fn start_session_inner(
     project: &str,
     tab_id: &str,
     resume_session_id: Option<&str>,
     model_override: Option<&str>,
     registry: SharedChatSessions,
-    oauth_arc: SharedOauth,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
     let entry = registry
@@ -47,12 +37,9 @@ fn start_session_inner(
         .check_transcript_free(tab_id, resume_session_id)
         .map_err(kept_session_error)?;
 
-    let oauth_just_started = ensure_oauth_running(&oauth_arc, project);
+    session_refresh::refresh_before_session(&app_handle, project);
 
     containers_cmd::ensure_images_ready().map_err(kept_session_error)?;
-
-    let recreated =
-        oauth_just_started && containers_cmd::recreate_project_containers_if_running(project);
 
     log::info!("acquiring compose lock");
     let rt = speedwave_runtime::runtime::detect_runtime();
@@ -64,14 +51,14 @@ fn start_session_inner(
         }
         Ok(())
     })
-    .map_err(|e| failure_before_swap(!recreated, e))?;
+    .map_err(kept_session_error)?;
 
     speedwave_runtime::session::reap_unconfirmed(&rt, &chat::claude_container_name(project))
-        .map_err(|e| failure_before_swap(!recreated, e))?;
+        .map_err(kept_session_error)?;
 
     registry
         .claim_transcript(tab_id, resume_session_id)
-        .map_err(|e| failure_before_swap(!recreated, e))?;
+        .map_err(kept_session_error)?;
 
     log::info!("extracting old session for this tab");
     let mut old_session = {
@@ -79,7 +66,7 @@ fn start_session_inner(
             .session
             .lock()
             .map_err(|e| format!("Lock poisoned: {e}"))
-            .map_err(|e| failure_before_swap(!recreated, e))?;
+            .map_err(kept_session_error)?;
         std::mem::replace(
             &mut *guard,
             ChatSession::new(project, tab_id, entry.transcript.clone()),
@@ -129,13 +116,11 @@ pub(crate) async fn start_chat(
     model: Option<String>,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, SharedChatSessions>,
-    oauth: tauri::State<'_, SharedOauth>,
 ) -> Result<(), String> {
     check_project(&project)?;
     chat_registry::validate_tab_id(&tab_id)?;
     log::info!("starting chat for project={project}");
     let registry = state.inner().clone();
-    let oauth_arc = oauth.inner().clone();
     tokio::task::spawn_blocking(move || {
         start_session_inner(
             &project,
@@ -143,7 +128,6 @@ pub(crate) async fn start_chat(
             None,
             model.as_deref(),
             registry,
-            oauth_arc,
             app_handle,
         )
     })
@@ -159,14 +143,12 @@ pub(crate) async fn resume_conversation(
     model: Option<String>,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, SharedChatSessions>,
-    oauth: tauri::State<'_, SharedOauth>,
 ) -> Result<(), String> {
     check_project(&project)?;
     crate::history::validate_session_id(&session_id).map_err(|e| e.to_string())?;
     chat_registry::validate_tab_id(&tab_id)?;
     log::info!("resuming conversation for project={project}");
     let registry = state.inner().clone();
-    let oauth_arc = oauth.inner().clone();
     tokio::task::spawn_blocking(move || {
         start_session_inner(
             &project,
@@ -174,7 +156,6 @@ pub(crate) async fn resume_conversation(
             Some(&session_id),
             model.as_deref(),
             registry,
-            oauth_arc,
             app_handle,
         )
     })
@@ -742,8 +723,8 @@ mod tests {
             .find("start_serialize")
             .expect("start_session_inner must acquire the per-tab start serializer");
         let work_pos = body
-            .find("ensure_oauth_running")
-            .expect("start_session_inner must call ensure_oauth_running");
+            .find("refresh_before_session")
+            .expect("start_session_inner must refresh the tokens before the session starts");
         assert!(guard_pos < work_pos);
     }
 
@@ -755,8 +736,8 @@ mod tests {
             .find(".prepare(tab_id, project)")
             .expect("start_session_inner must propagate the registry's tab-cap rejection");
         let work_pos = body
-            .find("ensure_oauth_running")
-            .expect("start_session_inner must call ensure_oauth_running");
+            .find("refresh_before_session")
+            .expect("start_session_inner must refresh the tokens before the session starts");
         assert!(prepare_pos < work_pos);
     }
 
@@ -780,8 +761,8 @@ mod tests {
             .find("check_transcript_free")
             .expect("start_session_inner must check the transcript for this tab");
         let work_pos = body
-            .find("ensure_oauth_running")
-            .expect("start_session_inner must call ensure_oauth_running");
+            .find("refresh_before_session")
+            .expect("start_session_inner must refresh the tokens before the session starts");
         assert!(
             check_pos < work_pos,
             "the resume dedup must reject a doubly-opened conversation before any start work"
@@ -851,17 +832,10 @@ mod tests {
         let ensure_pos = body
             .find("containers_cmd::ensure_images_ready")
             .expect("start_session_inner must call ensure_images_ready");
-        let recreate_pos = body
-            .find("recreate_project_containers_if_running")
-            .expect("start_session_inner must reach recreate_project_containers_if_running");
         let auth_pos = body
             .find("setup_wizard::check_claude_auth")
             .expect("start_session_inner must reach check_claude_auth");
 
-        assert!(
-            ensure_pos < recreate_pos,
-            "ensure_images_ready must come BEFORE recreate_project_containers_if_running"
-        );
         assert!(
             ensure_pos < auth_pos,
             "ensure_images_ready must come BEFORE check_claude_auth"
@@ -1588,7 +1562,7 @@ mod tests {
                 .matches(".map_err(kept_session_error)?;")
                 .count()
                 + outside_closure
-                    .matches(".map_err(|e| failure_before_swap(!recreated, e))?;")
+                    .matches(".map_err(kept_session_error)?;")
                     .count(),
             "a failure before the swap leaves the running session in place and must say so"
         );
@@ -1606,7 +1580,7 @@ mod tests {
             .find(concat!(
                 "speedwave_runtime::session::reap_unconfirmed(&rt,",
                 "&chat::claude_container_name(project))",
-                ".map_err(|e|failure_before_swap(!recreated,e))?;"
+                ".map_err(kept_session_error)?;"
             ))
             .expect("the start refuses while an earlier instance survives its reap");
         let swap = body
@@ -1628,7 +1602,7 @@ mod tests {
             .expect_err("the first reap fails");
 
         let refused = speedwave_runtime::session::reap_unconfirmed(&runtime, &container)
-            .map_err(|e| failure_before_swap(true, e))
+            .map_err(kept_session_error)
             .expect_err("the kept instance is still not confirmed gone");
         speedwave_runtime::session::reap_unconfirmed(&runtime, &container)
             .expect("a reap that succeeds lets the next start through");
@@ -1844,26 +1818,5 @@ mod tests {
             panic!("the stopped session of the old project cannot take the pick");
         };
         assert!(err.contains("no active session"), "{err}");
-    }
-
-    #[test]
-    fn a_failure_before_the_swap_says_kept_only_while_the_old_process_still_runs() {
-        assert!(failure_before_swap(true, "not signed in").starts_with(MSG_SESSION_KEPT));
-        assert_eq!(failure_before_swap(false, "not signed in"), "not signed in");
-    }
-
-    #[test]
-    fn a_recreate_for_a_new_oauth_worker_drops_the_kept_marker_after_it() {
-        let source = include_str!("chat_session_cmd.rs");
-        let body = extract_fn_body(source, "fn start_session_inner(");
-        let recreate = body
-            .find("let recreated =")
-            .expect("the start records whether it recreated the containers");
-        let swap = body.find("std::mem::replace(").expect("the swap");
-        let after_recreate = &body[recreate..swap];
-
-        assert!(body[recreate..].contains("recreate_project_containers_if_running(project)"));
-        assert!(!after_recreate.contains(".map_err(kept_session_error)"));
-        assert!(after_recreate.contains("failure_before_swap(!recreated, e)"));
     }
 }

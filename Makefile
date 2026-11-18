@@ -727,7 +727,7 @@ check-mcp: $(MCP_NPM_INSTALL)
 	@cd mcp-servers/policies && $(NPM) run build:wasm
 	@echo "  Building mcp-servers/policies (required by hub)..."
 	@cd mcp-servers/policies && $(NPX) tsc
-	@for ws in shared policies hub slack sharepoint redmine gitlab github atlassian office os oauth; do \
+	@for ws in shared policies hub slack sharepoint redmine gitlab github atlassian office os; do \
 		echo "  tsc --noEmit mcp-servers/$$ws"; \
 		(cd mcp-servers/$$ws && $(NPX) tsc --noEmit) || exit 1; \
 	done

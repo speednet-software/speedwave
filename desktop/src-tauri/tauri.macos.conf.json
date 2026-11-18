@@ -12,7 +12,6 @@
       "build-context/mcp-servers/": "build-context/mcp-servers/",
       "nodejs/bin/node": "nodejs/bin/node",
       "mcp-os/": "mcp-os/",
-      "oauth/": "oauth/",
       "pii-ner/": "pii-ner/",
       "cli/speedwave": "cli/speedwave",
       "reminders-cli": "reminders-cli",

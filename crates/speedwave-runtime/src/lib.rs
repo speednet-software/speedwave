@@ -32,7 +32,7 @@ pub mod mcp_os_process;
 pub mod model_id;
 pub mod native_slash;
 pub mod oauth_persist;
-pub mod oauth_process;
+pub mod oauth_refresh;
 pub mod oauth_state_migration;
 pub mod os_prereqs;
 pub mod pastes;

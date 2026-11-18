@@ -120,7 +120,6 @@ fn save_oauth_state_in(
 }
 
 /// Keeps the AADSTS trace code; drops free text (ADR-060 live-compromise).
-/// Mirror of `redactErrorDescription` in `mcp-servers/oauth/src/providers/microsoft.ts`.
 fn redact_ms_error_description(raw: &str) -> String {
     if raw.is_empty() {
         return "no description".to_string();
@@ -588,8 +587,7 @@ mod tests {
         }
     }
 
-    /// SSOT parity guard: written key set must equal
-    /// `mcp-servers/oauth/src/oauth-state.ts::assertOAuthState`.
+    /// Guard: the written key set is the documented state schema.
     #[test]
     fn save_oauth_state_key_set_matches_documented_ts_schema() {
         const EXPECTED_TOP_LEVEL: &[&str] = &[

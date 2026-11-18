@@ -22,7 +22,7 @@ export interface MCPServerAuth {
   publicPaths?: string[];
   /**
    * Optional additional bearer tokens mapped to a caller id, exposed to handlers as `res.locals.caller`
-   * (primary `token` authenticates as `""`); used by the `oauth` worker (ADR-060) to derive the caller instead of trusting a model-controlled `service` param.
+   * (primary `token` authenticates as `""`).
    */
   callerTokens?: Record<string, string>;
 }

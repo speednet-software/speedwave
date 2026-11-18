@@ -142,6 +142,15 @@ pub(crate) fn notify_session_event(
     );
 }
 
+/// Shows a notification that `service` of `project` needs a new sign-in, unless the master switch
+/// is off or the system withholds permission.
+pub(crate) fn notify_reconnect_required(app: &AppHandle, project: &str, service: &str) {
+    let app = app.clone();
+    let project = project.to_string();
+    let service = service.to_string();
+    tauri::async_runtime::spawn_blocking(move || deliver_reconnect(&app, &project, &service));
+}
+
 /// Reads the switches and the permission state for Settings; never prompts.
 #[tauri::command]
 pub async fn get_notification_settings(app: AppHandle) -> Result<NotificationSettings, String> {
@@ -258,6 +267,30 @@ fn deliver(app: &AppHandle, target: NotificationTarget, event: SessionEvent) {
     }
 }
 
+fn deliver_reconnect(app: &AppHandle, project: &str, service: &str) {
+    let cfg = match config::load_user_config() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            log::warn!("reconnect notification skipped: user config unreadable: {e:#}");
+            return;
+        }
+    };
+    if !cfg.notification_prefs().enabled {
+        return;
+    }
+    let app_id = app.config().identifier.clone();
+    let permission = platform::resolve_permission(&app_id);
+    if !may_show(permission) {
+        log::info!("reconnect notification not shown: permission {permission:?}");
+        return;
+    }
+    let (title, body) = reconnect_content(project, service);
+    let id = uuid::Uuid::new_v4().to_string();
+    if let Err(e) = platform::show(&app_id, &id, &title, &body) {
+        log::warn!("failed to show the reconnect notification: {e}");
+    }
+}
+
 fn decide(
     beta_enabled: bool,
     prefs: &NotificationPrefs,
@@ -319,6 +352,14 @@ fn content(event: SessionEvent, project: &str) -> (String, String) {
         SessionEvent::SessionError => "Something went wrong. Open the chat to see what happened.",
     };
     (project.to_string(), body.to_string())
+}
+
+fn reconnect_content(project: &str, service: &str) -> (String, String) {
+    let name = speedwave_runtime::consts::integration_display_name(service);
+    (
+        project.to_string(),
+        format!("{name} sign-in expired. Reconnect it in Settings, Integrations, {name}."),
+    )
 }
 
 fn tracked() -> &'static Mutex<TrackedNotifications> {
@@ -598,6 +639,16 @@ mod tests {
                 assert_eq!(should_notify(&p, event), event != off, "{event:?}");
             }
         }
+    }
+
+    #[test]
+    fn reconnect_content_names_the_project_and_the_integration_path() {
+        let (title, body) = reconnect_content("acme", "slack");
+        assert_eq!(title, "acme");
+        assert_eq!(
+            body,
+            "Slack sign-in expired. Reconnect it in Settings, Integrations, Slack."
+        );
     }
 
     #[test]

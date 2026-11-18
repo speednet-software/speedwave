@@ -487,7 +487,7 @@ impl SecurityRule {
     }
 
     /// Returns `true` for Slack-specific rules (ADR-071 — same volume
-    /// profile as SharePoint: /tokens:ro + /workspace:rw + oauth bearer).
+    /// profile as SharePoint: /tokens:ro + /workspace:rw).
     pub fn is_slack(self) -> bool {
         matches!(
             self,
@@ -1928,7 +1928,7 @@ impl SecurityCheck {
     }
 
     /// Validates volumes for built-in mcp-slack service (ADR-071: same
-    /// /tokens:ro + /workspace:rw + oauth-bearer profile as SharePoint).
+    /// /tokens:ro + /workspace:rw profile as SharePoint).
     fn check_builtin_slack_volumes(
         doc: &serde_yaml_ng::Value,
         expected_paths: &SecurityExpectedPaths,
@@ -1969,7 +1969,7 @@ impl SecurityCheck {
     }
 
     /// Shared check for built-in workspace workers (ADR-060): /tokens:ro,
-    /// /workspace at the given mode, per-service oauth bearer allowed, nothing else.
+    /// /workspace at the given mode, nothing else.
     fn check_builtin_workspace_worker_volumes(
         doc: &serde_yaml_ng::Value,
         expected_paths: &SecurityExpectedPaths,
@@ -1988,14 +1988,13 @@ impl SecurityCheck {
             None => return Vec::new(),
         };
 
-        let extra_allowed = vec![format!("/secrets/oauth-auth-token-{service_id}")];
         let params = VolumeCheckParams {
             container_name: name,
             expected_tokens_path: format!("{}/{service_id}", expected_paths.tokens_engine_dir()),
             expected_workspace_path: expected_paths.project_engine_path(),
             expected_token_mode: "ro",
             expected_workspace_mode,
-            extra_allowed_ro_targets: &extra_allowed,
+            extra_allowed_ro_targets: &[],
             rules,
         };
         let (violations, _) = validate_service_volume_mounts(service, &params);
@@ -2221,16 +2220,14 @@ impl VolumeCheckRules {
             "SharePoint token mount must use the project-specific tokens directory.",
         token_mount_mode: SecurityRule::PluginTokenMountMode,
         token_mount_mode_msg: "SharePoint token mount must be :ro (ADR-060)",
-        token_mount_mode_rem: "SharePoint refresh moved to the host-side `oauth` worker; \
-             /tokens must be :ro like every other worker.",
+        token_mount_mode_rem: "SharePoint /tokens must be :ro like every other worker.",
         workspace_path_mismatch: SecurityRule::SharepointWorkspacePathMismatch,
         workspace_mount_mode: SecurityRule::SharepointWorkspaceMountMode,
         workspace_mount_mode_msg: "SharePoint workspace mount must be :rw",
         workspace_mount_mode_rem: "Change the SharePoint workspace volume mount to :rw.",
         no_extra_volumes: SecurityRule::SharepointNoExtraVolumes,
         no_extra_volumes_msg_prefix: "SharePoint service has unauthorized volume mount:",
-        no_extra_volumes_rem:
-            "SharePoint may mount /tokens, /workspace, and the per-service oauth bearer.",
+        no_extra_volumes_rem: "SharePoint may mount /tokens and /workspace.",
         missing_tokens: SecurityRule::SharepointMissingTokensMount,
         missing_tokens_msg: "SharePoint service is missing required /tokens mount",
         missing_tokens_rem: "SharePoint must mount /tokens:ro.",
@@ -2248,15 +2245,14 @@ impl VolumeCheckRules {
             "Slack token mount must use the project-specific tokens directory.",
         token_mount_mode: SecurityRule::PluginTokenMountMode,
         token_mount_mode_msg: "Slack token mount must be :ro (ADR-071)",
-        token_mount_mode_rem: "Slack refresh runs in the host-side `oauth` worker; /tokens must be :ro like every other worker.",
+        token_mount_mode_rem: "Slack /tokens must be :ro like every other worker.",
         workspace_path_mismatch: SecurityRule::SlackWorkspacePathMismatch,
         workspace_mount_mode: SecurityRule::SlackWorkspaceMountMode,
         workspace_mount_mode_msg: "Slack workspace mount must be :rw",
         workspace_mount_mode_rem: "Change the Slack workspace volume mount to :rw.",
         no_extra_volumes: SecurityRule::SlackNoExtraVolumes,
         no_extra_volumes_msg_prefix: "Slack service has unauthorized volume mount:",
-        no_extra_volumes_rem:
-            "Slack may mount /tokens, /workspace, and the per-service oauth bearer.",
+        no_extra_volumes_rem: "Slack may mount /tokens and /workspace.",
         missing_tokens: SecurityRule::SlackMissingTokensMount,
         missing_tokens_msg: "Slack service is missing required /tokens mount",
         missing_tokens_rem: "Slack must mount /tokens:ro.",
@@ -2283,8 +2279,7 @@ impl VolumeCheckRules {
              change the workspace volume mount to :rw.",
         no_extra_volumes: SecurityRule::AtlassianNoExtraVolumes,
         no_extra_volumes_msg_prefix: "Atlassian service has unauthorized volume mount:",
-        no_extra_volumes_rem:
-            "Atlassian may mount /tokens, /workspace, and the per-service oauth bearer.",
+        no_extra_volumes_rem: "Atlassian may mount /tokens and /workspace.",
         missing_tokens: SecurityRule::AtlassianMissingTokensMount,
         missing_tokens_msg: "Atlassian service is missing required /tokens mount",
         missing_tokens_rem: "Atlassian must mount /tokens:ro.",
@@ -2310,8 +2305,7 @@ impl VolumeCheckRules {
         workspace_mount_mode_rem: "Change the Redmine workspace volume mount to :rw.",
         no_extra_volumes: SecurityRule::RedmineNoExtraVolumes,
         no_extra_volumes_msg_prefix: "Redmine service has unauthorized volume mount:",
-        no_extra_volumes_rem:
-            "Redmine may mount /tokens, /workspace, and the per-service oauth bearer.",
+        no_extra_volumes_rem: "Redmine may mount /tokens and /workspace.",
         missing_tokens: SecurityRule::RedmineMissingTokensMount,
         missing_tokens_msg: "Redmine service is missing required /tokens mount",
         missing_tokens_rem: "Redmine must mount /tokens:ro.",
@@ -2331,8 +2325,8 @@ struct VolumeCheckParams<'a> {
     expected_token_mode: &'a str,
     /// Expected workspace mount mode: "ro" or "rw"
     expected_workspace_mode: &'a str,
-    /// Additional read-only mount targets permitted on this service (ADR-060 OAuth
-    /// bearer). Each entry is matched as an exact `target`; the mount must be `:ro`.
+    /// Additional read-only mount targets permitted on this service (OAuth compat
+    /// bearer of a plugin). Each entry is matched as an exact `target`; the mount must be `:ro`.
     extra_allowed_ro_targets: &'a [String],
     rules: VolumeCheckRules,
 }

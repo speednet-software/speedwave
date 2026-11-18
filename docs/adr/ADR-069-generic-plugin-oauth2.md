@@ -1,6 +1,6 @@
 # ADR-069: Generic Plugin OAuth2 via the Host-Side Worker
 
-> **Status:** Accepted
+> **Status:** Accepted. The refresh side moved from the `oauth` process to the CLI or Desktop process that owns the session ([ADR-111](ADR-111-oauth-refresh-in-the-session-process.md), 2026-11-18); the client copy plugins vendor and the compat endpoint for old copies are described in "Refresh-retry in plugin workers" below.
 > **Context:** Plugins (separate `speedwave-plugins` repo) need to authenticate against third-party services from the Settings UI. The host-side `oauth` worker (ADR-060) previously hard-coded one IdP (Microsoft, `refresh_token` grant only) and the device-code initial flow was bespoke per built-in. The lead plugin (GLPI) requires **per-human attribution** — the service's audit log must show the actual user who authorized, not a shared technical account.
 
 ## Decision
@@ -35,18 +35,20 @@ A self-hosted IdP (e.g. GLPI[^8]) has no fixed `authorize_url`/`token_url` — t
 - PKCE/CSRF generation — `crates/speedwave-runtime/src/pkce.rs`.
 - On-disk OAuth-state writer (shared by SharePoint, GitHub, plugins) — `crates/speedwave-runtime/src/oauth_persist.rs`.
 - SSRF validator (shared SSOT) — `crates/speedwave-runtime/src/url_validation.rs`.
-- Generic worker provider + discriminated grant state — `mcp-servers/oauth/src/providers/generic.ts`, `mcp-servers/oauth/src/oauth-state.ts`.
+- Generic refresh provider + discriminated grant state — `crates/speedwave-runtime/src/oauth_refresh/generic.rs` and `store.rs` (moved from `mcp-servers/oauth` by ADR-111).
 - Host-side flows — `desktop/src-tauri/src/plugin_oauth_cmd.rs` (authorization_code) and the shared `oauth_flow::run_device_poll` for device-code.
-- Compose injection + worker respawn on consumer-set change — `crates/speedwave-runtime/src/compose.rs` (`oauth_consumer_service_ids`, `oauth_consumer_compose_name`), `desktop/src-tauri/src/main.rs` (`ensure_oauth_running`).
+- Compose injection of the fixed compat URL and bearer file into the containers of enabled OAuth plugins — `crates/speedwave-runtime/src/compose/mod.rs` (`apply_oauth_compat_in`). Refresh runs in `oauth_refresh::spawn_session_refresher`, started by the CLI (`crates/speedwave-cli/src/main.rs`) and Desktop (`desktop/src-tauri/src/session_refresh.rs`) (ADR-111).
 - UI — `desktop/src/src/app/shared/oauth-connect/` (shared connect component), `plugin-credentials-form`, `plugin-detail`.
 
 ## Refresh-retry in plugin workers
 
 Plugins reuse the shared `authedRequest` refresh-retry (ADR-060) by **vendoring** it — copying `oauth-authed-request.ts` plus a trimmed `oauth-client` into the plugin's own `src/server/`, the same literal-copy pattern already used for the rest of `mcp-shared` (since `@speedwave/mcp-shared` is not published to npm, a plugin cannot import it). Plugins must **not** hand-roll their own refresh loop. GLPI opts `400` into the auth-failure status set alongside the default `401`, because in our testing a GLPI 11 instance returns HTTP `400` (not `401`) for an expired token (observed instance behavior, not a documented contract).
 
+**Amendment (ADR-111, 2026-11-18).** `authedRequest` no longer calls a worker. On an auth-failure status it waits up to 30 s for the host to rewrite `/tokens/access_token`, then retries with the new token. A copy of the older client (today `glpi`) still calls `WORKER_OAUTH_URL` with the bearer from `/secrets/oauth-auth-token-<service>`, so compose writes a fixed `WORKER_OAUTH_URL` and bearer file into the containers of enabled plugins with an `oauth` block, and `mcp-hub` answers that call at `POST /oauth-compat` after about 15 s with `{"expiresIn": 0, "grantedScopes": []}`. The endpoint refreshes nothing and checks no credentials; the old client then re-reads the token file the host rewrote. It stays until a minimum plugin version mechanism exists.
+
 ## Security surface
 
-Manifest-declared URLs are dialed by the host, so every endpoint goes through the shared SSRF validator (https-only, no private/loopback) at install and again on each worker refresh — a signed plugin is **not** exempt.[^6] The worker hardens the data-driven token request (timeout, no redirect-following, content-type + body-size cap) and redacts IdP `error_description` free text. The `:ro`-everywhere token-mount invariant (ADR-060) is preserved: plugin OAuth secrets never enter `/tokens`.
+Manifest-declared URLs are dialed by the host, so every endpoint goes through the shared SSRF validator (https-only, no private/loopback) at install and again on each refresh — a signed plugin is **not** exempt.[^6] The worker hardens the data-driven token request (timeout, no redirect-following, content-type + body-size cap) and redacts IdP `error_description` free text. The `:ro`-everywhere token-mount invariant (ADR-060) is preserved: plugin OAuth secrets never enter `/tokens`.
 
 ## Rejected alternatives
 

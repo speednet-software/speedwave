@@ -1,15 +1,12 @@
 /**
- * SSOT reactive refresh-retry every OAuth consumer shares: refresh once and retry on an
- * auth-failure status. See ADR-060 (host refresh), ADR-069 (plugins).
+ * SSOT reactive refresh-retry every OAuth consumer shares: wait for the host to rewrite
+ * `/tokens/access_token` and retry on an auth-failure status. See ADR-069 (plugins).
  */
 import { join } from 'node:path';
 import { loadToken } from './security.js';
 import { ts } from './logger.js';
-import {
-  refreshAccessToken,
-  accessTokenExpiresWithin,
-  OAuthScopeMismatchError,
-} from './oauth-client.js';
+import { TIMEOUTS } from './timeouts.js';
+import { accessTokenExpiresWithin, refreshFailure } from './oauth-client.js';
 
 /** RFC 6750 status for a stale token; GLPI also misuses 400, so it's opt-in. */
 const DEFAULT_AUTH_FAILURE_STATUSES = [401];
@@ -48,7 +45,7 @@ export interface AuthedTokenState {
 
 /** Common refresh context shared by {@link authedRequest} and {@link authedSdkCall}. */
 export interface AuthedRefreshContext {
-  /** Service id for the oauth worker (e.g. `sharepoint`, `slack`). */
+  /** Service id (e.g. `sharepoint`, `slack`); names the service in refresh failure messages. */
   readonly service: string;
   /** Mutable token holder; `accessToken` is updated after a refresh. */
   readonly state: AuthedTokenState;
@@ -71,41 +68,64 @@ export interface AuthedRequestOptions extends AuthedRefreshContext {
   readonly authFailureStatuses?: readonly number[];
 }
 
-/** Brief re-poll for the rewritten token; covers documented virtiofs lag. */
-const STALE_READ_POLL_ATTEMPTS = 5;
-const STALE_READ_POLL_DELAY_MS = 100;
+const TOKEN_POLL_INTERVAL_MS = 500;
 
 /**
- * Refresh the caller's token via the oauth worker, then re-read the fresh value written
- * into `/tokens/access_token`. Mutates `state.accessToken`.
+ * Wait for the host to rewrite `/tokens/access_token` (up to `TIMEOUTS.TOKEN_REFRESH_MS`) and
+ * adopt it. Mutates `state.accessToken`.
  * @param ctx - Refresh context (service id, token state, tokens dir override).
+ * @throws {OAuthRefreshError} when the token is still unchanged, worded by `refresh_status`.
  */
 async function refreshInto(ctx: AuthedRefreshContext): Promise<void> {
   const before = ctx.state.accessToken;
-  const outcome = await refreshAccessToken({ service: ctx.service });
-  const dir = ctx.tokensDir ?? process.env.TOKENS_DIR ?? '/tokens';
+  const dir = tokensDirOf(ctx);
   let fresh = await loadToken(join(dir, 'access_token'));
-  if (!outcome.rateLimited) {
-    for (let i = 0; i < STALE_READ_POLL_ATTEMPTS && fresh === before; i += 1) {
-      await new Promise((r) => setTimeout(r, STALE_READ_POLL_DELAY_MS));
-      fresh = await loadToken(join(dir, 'access_token'));
-    }
-    if (fresh === before) {
-      console.warn(
-        `${ts()} ${ctx.service}: access_token unchanged after refresh — possible stale mount read`
-      );
-    }
+  for (
+    let waited = 0;
+    isUnchanged(fresh, before) && waited < TIMEOUTS.TOKEN_REFRESH_MS;
+    waited += TOKEN_POLL_INTERVAL_MS
+  ) {
+    await new Promise((r) => setTimeout(r, TOKEN_POLL_INTERVAL_MS));
+    fresh = await loadToken(join(dir, 'access_token'));
   }
-  if (!fresh) {
-    throw new Error('oauth worker reported success but access_token was not written');
+  if (isUnchanged(fresh, before)) {
+    throw await refreshFailure(ctx.service, dir);
   }
   ctx.state.accessToken = fresh;
 }
 
 /**
+ * Adopt the token in `/tokens/access_token` when it differs from the one in use; never waits.
+ * @param ctx - Refresh context (service id, token state, tokens dir override).
+ */
+async function adoptRewrittenToken(ctx: AuthedRefreshContext): Promise<void> {
+  const fresh = await loadToken(join(tokensDirOf(ctx), 'access_token'));
+  if (!isUnchanged(fresh, ctx.state.accessToken)) {
+    ctx.state.accessToken = fresh;
+  }
+}
+
+/**
+ * The tokens directory of a refresh context.
+ * @param ctx - Refresh context.
+ */
+function tokensDirOf(ctx: AuthedRefreshContext): string {
+  return ctx.tokensDir ?? process.env.TOKENS_DIR ?? '/tokens';
+}
+
+/**
+ * True when a token read from the file is empty (mid-write) or equal to the one in use.
+ * @param fresh - token just read from the file
+ * @param before - token in use
+ */
+function isUnchanged(fresh: string, before: string): boolean {
+  return fresh === '' || fresh === before;
+}
+
+/**
  * Execute an authenticated request with shared refresh-retry semantics.
  * @param opts - Request options (service, token state, lock, send callback, retry thresholds).
- * @throws \@{OAuthScopeMismatchError} when the IdP needs re-consent
+ * @throws {OAuthRefreshError} when the host did not rewrite the token within the wait.
  */
 export async function authedRequest(opts: AuthedRequestOptions): Promise<Response> {
   const failureStatuses = opts.authFailureStatuses ?? DEFAULT_AUTH_FAILURE_STATUSES;
@@ -120,11 +140,10 @@ export async function authedRequest(opts: AuthedRequestOptions): Promise<Respons
     accessTokenExpiresWithin(opts.state.accessToken, opts.proactiveWithinSeconds)
   ) {
     try {
-      await refreshOnce(opts);
+      await adoptRewrittenToken(opts);
     } catch (err) {
-      if (err instanceof OAuthScopeMismatchError) throw err;
       console.warn(
-        `${ts()} ${opts.service}: proactive refresh failed, falling through to reactive path: ${err instanceof Error ? err.message : String(err)}`
+        `${ts()} ${opts.service}: reading the rewritten token failed, falling through to reactive path: ${err instanceof Error ? err.message : String(err)}`
       );
     }
   }
@@ -162,9 +181,9 @@ export interface AuthedSdkCallOptions<T> extends AuthedRefreshContext {
 
 /**
  * SDK sibling of {@link authedRequest} for clients throwing typed errors (e.g. `@slack/web-api`):
- * refresh once on auth error and retry.
+ * wait for the rewritten token on auth error and retry.
  * @param opts - Call options (service, token state, lock, send callback, isAuthError predicate).
- * @throws \@{OAuthScopeMismatchError} on re-consent needed.
+ * @throws {OAuthRefreshError} when the host did not rewrite the token within the wait.
  */
 export async function authedSdkCall<T>(opts: AuthedSdkCallOptions<T>): Promise<T> {
   try {

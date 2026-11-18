@@ -1,5 +1,5 @@
 //! Unified lock-file schema for every host MCP worker manager: a single `lock.json` blob replacing
-//! the legacy 3-file layout. mcp-os has pre-PR3 users so it migrates; oauth doesn't need to.
+//! the legacy 3-file layout. mcp-os has pre-PR3 users so it migrates.
 
 use std::path::Path;
 
@@ -13,8 +13,6 @@ use crate::fs_perms::write_restricted_file;
 pub enum LockService {
     /// The mcp-os host process.
     McpOs,
-    /// The OAuth host process.
-    Oauth,
     /// The in-process PII NER detector service of the Desktop app (ADR-096).
     PiiNer,
 }
@@ -24,7 +22,6 @@ impl LockService {
     pub fn tag(self) -> &'static str {
         match self {
             LockService::McpOs => "mcp-os",
-            LockService::Oauth => "oauth",
             LockService::PiiNer => "pii-ner",
         }
     }
@@ -186,7 +183,6 @@ mod tests {
     #[test]
     fn lockservice_tags_are_stable() {
         assert_eq!(LockService::McpOs.tag(), "mcp-os");
-        assert_eq!(LockService::Oauth.tag(), "oauth");
         assert_eq!(LockService::PiiNer.tag(), "pii-ner");
     }
 
@@ -215,7 +211,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("lock.json");
         write(&path, &fixture()).unwrap();
-        assert!(read(&path, LockService::Oauth).is_none());
+        assert!(read(&path, LockService::PiiNer).is_none());
     }
 
     #[test]
@@ -250,10 +246,10 @@ mod tests {
         std::fs::write(dir.path().join("pid"), "12345").unwrap();
         std::fs::write(dir.path().join("auth-token"), "uuid-token").unwrap();
 
-        let lock = migrate_legacy(dir.path(), LockService::Oauth, "port", "pid", "auth-token")
+        let lock = migrate_legacy(dir.path(), LockService::PiiNer, "port", "pid", "auth-token")
             .expect("3 legacy files must produce a lock");
 
-        assert_eq!(lock.service, "oauth");
+        assert_eq!(lock.service, "pii-ner");
         assert_eq!(lock.port, 60123);
         assert_eq!(lock.pid, 12345);
         assert_eq!(lock.auth_token, "uuid-token");
@@ -270,17 +266,17 @@ mod tests {
         std::fs::write(dir.path().join("pid"), "12345").unwrap();
         std::fs::write(dir.path().join("auth-token"), "uuid-token").unwrap();
 
-        let first = migrate_legacy(dir.path(), LockService::Oauth, "port", "pid", "auth-token")
+        let first = migrate_legacy(dir.path(), LockService::PiiNer, "port", "pid", "auth-token")
             .expect("first call must migrate");
         assert_eq!(first.port, 60123);
 
-        let second = migrate_legacy(dir.path(), LockService::Oauth, "port", "pid", "auth-token");
+        let second = migrate_legacy(dir.path(), LockService::PiiNer, "port", "pid", "auth-token");
         assert!(
             second.is_none(),
             "second call must short-circuit (legacy already migrated)"
         );
 
-        let on_disk = read(&dir.path().join("lock.json"), LockService::Oauth)
+        let on_disk = read(&dir.path().join("lock.json"), LockService::PiiNer)
             .expect("lock.json must still be readable");
         assert_eq!(on_disk, first);
     }
@@ -308,7 +304,7 @@ mod tests {
         std::fs::write(dir.path().join("port"), "60123").unwrap();
         std::fs::write(dir.path().join("pid"), "12345").unwrap();
 
-        let result = migrate_legacy(dir.path(), LockService::Oauth, "port", "pid", "auth-token");
+        let result = migrate_legacy(dir.path(), LockService::PiiNer, "port", "pid", "auth-token");
         assert!(
             result.is_none(),
             "partial legacy state must not produce a lock"
@@ -320,7 +316,7 @@ mod tests {
     #[test]
     fn migrate_returns_none_when_no_files_present() {
         let dir = tempfile::tempdir().unwrap();
-        let result = migrate_legacy(dir.path(), LockService::Oauth, "port", "pid", "auth-token");
+        let result = migrate_legacy(dir.path(), LockService::PiiNer, "port", "pid", "auth-token");
         assert!(result.is_none());
     }
 
@@ -331,7 +327,7 @@ mod tests {
         std::fs::write(dir.path().join("pid"), "12345").unwrap();
         std::fs::write(dir.path().join("auth-token"), "x").unwrap();
 
-        let result = migrate_legacy(dir.path(), LockService::Oauth, "port", "pid", "auth-token");
+        let result = migrate_legacy(dir.path(), LockService::PiiNer, "port", "pid", "auth-token");
         assert!(result.is_none(), "port 0 must reject migration");
     }
 
@@ -344,7 +340,7 @@ mod tests {
         std::fs::write(dir.join("port"), port_bytes).unwrap();
         std::fs::write(dir.join("pid"), pid_bytes).unwrap();
         std::fs::write(dir.join("auth-token"), token_bytes).unwrap();
-        migrate_legacy(dir, LockService::Oauth, "port", "pid", "auth-token")
+        migrate_legacy(dir, LockService::PiiNer, "port", "pid", "auth-token")
     }
 
     #[test]
@@ -488,24 +484,24 @@ mod tests {
         }
     }
 
-    /// End-to-end: legacy → migrate → read-back for the Oauth service.
-    /// Per-project oauth uses `port`/`pid`/`auth-token` filenames.
+    /// End-to-end: legacy → migrate → read-back for the PiiNer service.
+    /// Per-project locks use `port`/`pid`/`auth-token` filenames.
     #[test]
-    fn end_to_end_migration_oauth_legacy_to_lock_json() {
+    fn end_to_end_migration_pii_ner_legacy_to_lock_json() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("port"), "55001").unwrap();
         std::fs::write(dir.path().join("pid"), "2002").unwrap();
-        std::fs::write(dir.path().join("auth-token"), "oauth-secret").unwrap();
+        std::fs::write(dir.path().join("auth-token"), "pii-secret").unwrap();
 
-        let migrated = migrate_legacy(dir.path(), LockService::Oauth, "port", "pid", "auth-token")
+        let migrated = migrate_legacy(dir.path(), LockService::PiiNer, "port", "pid", "auth-token")
             .expect("3 legacy files must produce a lock");
 
-        let from_disk = read(&dir.path().join("lock.json"), LockService::Oauth)
-            .expect("lock.json must be readable as Oauth");
+        let from_disk = read(&dir.path().join("lock.json"), LockService::PiiNer)
+            .expect("lock.json must be readable as PiiNer");
         assert_eq!(from_disk, migrated);
-        assert_eq!(from_disk.service, "oauth");
+        assert_eq!(from_disk.service, "pii-ner");
         assert_eq!(from_disk.port, 55001);
-        assert_eq!(from_disk.auth_token, "oauth-secret");
+        assert_eq!(from_disk.auth_token, "pii-secret");
 
         assert!(read(&dir.path().join("lock.json"), LockService::McpOs).is_none());
     }
@@ -520,14 +516,14 @@ mod tests {
         std::fs::write(dir.path().join("auth-token"), "tok").unwrap();
 
         let first =
-            migrate_legacy(dir.path(), LockService::Oauth, "port", "pid", "auth-token").unwrap();
+            migrate_legacy(dir.path(), LockService::PiiNer, "port", "pid", "auth-token").unwrap();
 
-        let from_disk = read(&dir.path().join("lock.json"), LockService::Oauth).unwrap();
+        let from_disk = read(&dir.path().join("lock.json"), LockService::PiiNer).unwrap();
         assert_eq!(from_disk, first);
 
-        let second = migrate_legacy(dir.path(), LockService::Oauth, "port", "pid", "auth-token");
+        let second = migrate_legacy(dir.path(), LockService::PiiNer, "port", "pid", "auth-token");
         assert!(second.is_none(), "no legacy left to migrate");
-        let after_second = read(&dir.path().join("lock.json"), LockService::Oauth).unwrap();
+        let after_second = read(&dir.path().join("lock.json"), LockService::PiiNer).unwrap();
         assert_eq!(after_second, first, "lock.json untouched by second call");
     }
 
@@ -564,11 +560,11 @@ mod tests {
 
         std::fs::write(dir.path().join("port"), "2222").unwrap();
         std::fs::write(dir.path().join("pid"), "2").unwrap();
-        std::fs::write(dir.path().join("auth-token"), "oauth-tok").unwrap();
+        std::fs::write(dir.path().join("auth-token"), "pii-tok").unwrap();
 
         let migrated =
-            migrate_legacy(dir.path(), LockService::Oauth, "port", "pid", "auth-token").unwrap();
-        assert_eq!(migrated.service, "oauth");
+            migrate_legacy(dir.path(), LockService::PiiNer, "port", "pid", "auth-token").unwrap();
+        assert_eq!(migrated.service, "pii-ner");
         assert_eq!(migrated.port, 2222);
 
         assert!(read(&dir.path().join("lock.json"), LockService::McpOs).is_none());
@@ -580,7 +576,7 @@ mod tests {
     fn migrate_result_service_tag_matches_request() {
         for (service, expected_tag) in [
             (LockService::McpOs, "mcp-os"),
-            (LockService::Oauth, "oauth"),
+            (LockService::PiiNer, "pii-ner"),
         ] {
             let dir = tempfile::tempdir().unwrap();
             std::fs::write(dir.path().join("port"), "10000").unwrap();

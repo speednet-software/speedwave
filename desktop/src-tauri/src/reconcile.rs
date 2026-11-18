@@ -6,7 +6,6 @@ use speedwave_runtime::compose::{
     HostBridgeRegistration, HostBridgesInfo, RenderedUrlState,
 };
 use speedwave_runtime::mcp_os_process;
-use speedwave_runtime::oauth_process::OauthProcess;
 use speedwave_runtime::{build, bundle, config, plugin};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -55,9 +54,6 @@ pub(crate) fn current_bridges_info() -> HostBridgesInfo {
 pub(crate) type SharedMcpOs =
     Arc<Mutex<Option<crate::mirror_relay::RelayedWorker<mcp_os_process::McpOsProcess>>>>;
 
-pub(crate) type SharedOauth =
-    Arc<Mutex<HashMap<String, crate::mirror_relay::RelayedWorker<OauthProcess>>>>;
-
 pub(crate) type SharedAutoCheckHandle = Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>;
 
 #[derive(Clone)]
@@ -67,31 +63,7 @@ pub(crate) struct ExitCleanupContext {
     pub(crate) mcp_os: SharedMcpOs,
     /// In-process PII NER detector service (ADR-096) — stopped + lock removed on exit.
     pub(crate) pii_ner: crate::pii_ner_service::SharedPiiNer,
-    /// Per-project `oauth` workers (ADR-060) — stopped + files cleaned on exit.
-    pub(crate) oauth: SharedOauth,
     pub(crate) auto_check_handle: SharedAutoCheckHandle,
-}
-
-fn teardown_worker_for_project<I: crate::mirror_relay::RelayWorkerInner>(
-    map: &Arc<Mutex<HashMap<String, crate::mirror_relay::RelayedWorker<I>>>>,
-    project: &str,
-    label: &str,
-) {
-    let proc = match map.lock() {
-        Ok(mut map) => map.remove(project),
-        Err(e) => {
-            log::warn!("map mutex poisoned during {label}[{project}] teardown: {e}");
-            return;
-        }
-    };
-    if let Some(proc) = proc {
-        log::info!("tearing down {label}[{project}] worker");
-        stop_worker(&format!("{label}[{project}]"), proc);
-    }
-}
-
-pub(crate) fn teardown_oauth_for_project(oauth: &SharedOauth, project: &str) {
-    teardown_worker_for_project(oauth, project, "oauth");
 }
 
 const RECONCILE_IDLE: u8 = 0;
@@ -1007,14 +979,13 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
     crate::keep_awake::release_on_exit();
 
     crate::WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
-    crate::OAUTH_WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+    crate::session_refresh::stop_sync();
     crate::containers_cmd::drain_pending_teardowns();
 
     let ide_bridge = ctx.ide_bridge.clone();
     let plugin_bridges = ctx.plugin_bridges.clone();
     let mcp_os = ctx.mcp_os.clone();
     let pii_ner = ctx.pii_ner.clone();
-    let oauth = ctx.oauth.clone();
     let auto_check = ctx.auto_check_handle.clone();
 
     let handle = std::thread::spawn(move || {
@@ -1065,14 +1036,6 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
                 }
             }
             Err(e) => log::warn!("mcp-os cleanup skipped, mutex poisoned: {e}"),
-        }
-        match oauth.lock() {
-            Ok(mut map) => {
-                for (project, proc) in map.drain() {
-                    stop_worker(&format!("oauth[{project}]"), proc);
-                }
-            }
-            Err(e) => log::warn!("oauth cleanup skipped, map mutex poisoned: {e}"),
         }
         match auto_check.lock() {
             Ok(mut guard) => {
@@ -1298,13 +1261,6 @@ mod tests {
         );
     }
     use serial_test::serial;
-
-    #[test]
-    fn teardown_oauth_for_project_is_noop_when_absent() {
-        let map: SharedOauth = SharedOauth::default();
-        teardown_oauth_for_project(&map, "ghost");
-        assert!(map.lock().unwrap().is_empty());
-    }
 
     #[test]
     fn restore_one_project_wraps_full_sequence_in_transaction() {
@@ -2817,7 +2773,6 @@ mod tests {
             ide_bridge: SharedIdeBridge::default(),
             plugin_bridges: SharedPluginBridges::default(),
             mcp_os: SharedMcpOs::default(),
-            oauth: SharedOauth::default(),
             auto_check_handle: SharedAutoCheckHandle::default(),
             pii_ner: crate::pii_ner_service::SharedPiiNer::default(),
         };

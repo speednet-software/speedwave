@@ -417,7 +417,7 @@ EOF
 
 @test "host bundles install exactly the versions in the committed mcp-servers lockfile" {
     local DEST="$SHARED_DEST" bundle
-    for bundle in mcp-os oauth; do
+    for bundle in mcp-os; do
         cmp "$BATS_TEST_DIRNAME/../../mcp-servers/package-lock.json" "$DEST/$bundle/shared/package-lock.json"
         assert_installed_versions_match_lock "$DEST/$bundle/shared/node_modules" "$BATS_TEST_DIRNAME/../../mcp-servers/package-lock.json"
         [ ! -e "$DEST/$bundle/.npm-ci" ]
@@ -606,7 +606,7 @@ EOF
 }
 
 @test "bundle script --ci builds a clean scratch copy and leaves a concurrent run on the real tree intact" {
-    local d ws workspaces=(os shared oauth) dist_dirs=()
+    local d ws workspaces=(os shared) dist_dirs=()
     for ws in "${workspaces[@]}"; do dist_dirs+=("$REAL_MCP_SERVERS/$ws/dist"); done
     for d in "${dist_dirs[@]}"; do [ -d "$d" ]; done
     local hidden_lock="$REAL_MCP_SERVERS/node_modules/.package-lock.json"

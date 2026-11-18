@@ -217,22 +217,6 @@ pub fn cancel_plugin_oauth() {
     FLOW_STATE.cancel();
 }
 
-/// Delete a plugin's host-side OAuth state, seed, and access token. The worker `forget` tool
-/// derives service from a bearer the supervisor lacks, so the host clears the files directly.
-#[tauri::command]
-pub fn forget_plugin_oauth(project: String, slug: String) -> Result<(), String> {
-    check_project(&project)?;
-    FLOW_STATE.cancel();
-    crate::plugin_cmd::remove_oauth_offmount(&project, &slug)?;
-    let access = access_token_path(&project, &slug)?;
-    if let Err(e) = std::fs::remove_file(&access) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            return Err(format!("failed to remove {}: {e}", access.display()));
-        }
-    }
-    Ok(())
-}
-
 /// Reads the pre-auth seed (`oauth/<project>/<slug>.seed.json`).
 fn read_oauth_seed(project: &str, slug: &str) -> Result<HashMap<String, String>, String> {
     let path = speedwave_runtime::plugin::oauth_seed_file(project, slug);
@@ -362,8 +346,8 @@ fn persist_state(
     )
 }
 
-/// providerData map the worker's generic refresh reads — contract is `GenericProviderData` in
-/// `mcp-servers/oauth/src/providers/generic.ts`; `token_url` is the RESOLVED absolute URL.
+/// providerData map the host-side generic refresh reads (`oauth_refresh::generic`); `token_url` is
+/// the RESOLVED absolute URL.
 fn build_provider_data(
     oauth: &PluginOAuthSpec,
     token_url: &str,

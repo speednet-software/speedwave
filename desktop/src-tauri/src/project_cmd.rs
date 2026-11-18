@@ -1,5 +1,4 @@
 use crate::chat_registry::SharedChatSessions;
-use crate::reconcile;
 use crate::types::{check_project, ProjectEntry, ProjectList};
 use crate::{containers_cmd, integrations_cmd};
 use speedwave_runtime::config;
@@ -67,9 +66,6 @@ pub(crate) async fn switch_project(
 
     let prev_clone = previous.clone();
     let new_clone = name.clone();
-    use tauri::Manager;
-    let oauth_arc = app.state::<reconcile::SharedOauth>().inner().clone();
-    let oauth_for_teardown = oauth_arc.clone();
     let switch_task = tokio::task::spawn_blocking(move || {
         if let Err(e) = containers_cmd::ensure_images_ready() {
             return SwitchResult::failed(e, None);
@@ -86,7 +82,6 @@ pub(crate) async fn switch_project(
             if let Err(sanitized) = integrations_cmd::ensure_project_images_built(rt, proj) {
                 return Err(format!("Image build failed: {sanitized}"));
             }
-            crate::ensure_oauth_running(&oauth_arc, proj);
             use crate::types::IntoAnyhow;
             rt.transaction(proj, |rt| -> anyhow::Result<()> {
                 containers_cmd::render_and_save_compose(proj).into_anyhow()?;
@@ -122,7 +117,6 @@ pub(crate) async fn switch_project(
     }
 
     if let Some(prev) = pending_teardown {
-        reconcile::teardown_oauth_for_project(&oauth_for_teardown, &prev);
         spawn_background_teardown(prev);
     }
     crate::pii_ner_service::stop_unless_active_wants();
@@ -302,26 +296,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn switch_eager_starts_host_workers_before_render() {
-        let source = include_str!("project_cmd.rs");
-        let switch_fn = source
-            .split("pub(crate) async fn switch_project(")
-            .nth(1)
-            .expect("switch_project must exist");
-        let body = switch_fn.split("\nmod tests").next().unwrap_or(switch_fn);
-        let oauth_pos = body
-            .find("ensure_oauth_running")
-            .expect("switch must eager-start oauth");
-        let render_pos = body
-            .find("render_and_save_compose")
-            .expect("switch must render compose");
-        assert!(
-            oauth_pos < render_pos,
-            "host workers must start before compose render"
-        );
-    }
-
     #[tokio::test]
     async fn concurrent_switch_is_rejected_while_lock_held() {
         let guard = PROJECT_TRANSITION_LOCK.lock().await;
@@ -356,26 +330,6 @@ mod tests {
                 "{signature} must tear the new project down when its switch task does not finish"
             );
         }
-    }
-
-    #[test]
-    fn switch_retires_previous_host_workers_only_after_success() {
-        let source = include_str!("project_cmd.rs");
-        let switch_fn = source
-            .split("pub(crate) async fn switch_project(")
-            .nth(1)
-            .expect("switch_project must exist");
-        let body = switch_fn.split("\nmod tests").next().unwrap_or(switch_fn);
-        let success_marker = body
-            .find("pending_teardown {")
-            .expect("success-path teardown block must exist");
-        let prev_oauth = body
-            .rfind("teardown_oauth_for_project")
-            .expect("oauth teardown must exist");
-        assert!(
-            prev_oauth > success_marker,
-            "previous-project worker teardown must live in the success path"
-        );
     }
 
     #[test]

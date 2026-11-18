@@ -28,7 +28,7 @@ import { splitPath } from './path-utils.js';
 
 /**
  * SharePoint worker runtime config. Post-ADR-060 the worker holds only the mount-resident state
- * (`accessToken` + `siteId`); refresh is delegated to the host-side `oauth` worker.
+ * (`accessToken` + `siteId`); the host rewrites the token file on refresh.
  */
 export interface SharePointConfig {
   siteId: string;

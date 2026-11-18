@@ -82,13 +82,8 @@ impl<I: RelayWorkerInner> RelayedWorker<I> {
         self.inner.port()
     }
 
-    /// The wrapped worker (spec access etc.).
-    pub(crate) fn inner(&self) -> &I {
-        &self.inner
-    }
-
     /// Re-ensures this worker's guest relay (idempotent, fire-and-forget).
-    pub(crate) fn ensure_relay(&self) {
+    fn ensure_relay(&self) {
         ensure_relay_for_port(self.inner.port());
     }
 
@@ -115,17 +110,6 @@ impl<I: RelayWorkerInner> RelayedWorker<I> {
         self.inner.cleanup_files();
     }
 
-    /// Stop + cleanup, deferring the relay decision to the returned guard — a
-    /// replacement reusing the port adopts the relay instead of racing it.
-    pub(crate) fn stop_for_replacement(mut self, label: &str) -> RetiredRelay {
-        let port = self.inner.port();
-        if let Err(e) = self.inner.stop() {
-            log::warn!("{label} stop error: {e}");
-        }
-        self.inner.cleanup_files();
-        RetiredRelay { port: Some(port) }
-    }
-
     /// Respawns the worker, swapping the relay: the old one is dropped only when the
     /// port changed (an ephemeral-port reuse keeps it), the new one is always ensured.
     pub(crate) fn respawn(&mut self) -> anyhow::Result<u16> {
@@ -136,30 +120,6 @@ impl<I: RelayWorkerInner> RelayedWorker<I> {
         }
         ensure_relay_for_port(new_port);
         Ok(new_port)
-    }
-}
-
-/// Relay of a worker stopped for replacement: dropping it tears the relay down (async)
-/// unless the replacement adopted the same port via [`RetiredRelay::adopt_port`].
-pub(crate) struct RetiredRelay {
-    port: Option<u16>,
-}
-
-impl RetiredRelay {
-    /// Keeps the relay when the replacement reuses the retired worker's port —
-    /// tearing it down then would race the fresh ensure (ADR-080).
-    pub(crate) fn adopt_port(&mut self, new_port: u16) {
-        if self.port == Some(new_port) {
-            self.port = None;
-        }
-    }
-}
-
-impl Drop for RetiredRelay {
-    fn drop(&mut self) {
-        if let Some(port) = self.port.take() {
-            remove_relay_for_port_async(port);
-        }
     }
 }
 
@@ -751,57 +711,6 @@ mod tests {
             calls_for_port(1201),
             vec![RelayOp::Ensure, RelayOp::Ensure, RelayOp::Remove],
             "dropping the guard tears the relay down synchronously"
-        );
-    }
-
-    #[test]
-    fn stop_for_replacement_defers_relay_teardown_to_guard_drop() {
-        let inner = FakeInner::new(1101);
-        let stopped = inner.stopped.clone();
-        let cleaned = inner.cleaned.clone();
-        let worker = RelayedWorker::new(inner);
-        let retired = worker.stop_for_replacement("test[worker]");
-        assert!(stopped.get(), "stop_for_replacement must stop the worker");
-        assert!(
-            cleaned.get(),
-            "stop_for_replacement must clean lock/token files"
-        );
-        assert_eq!(
-            calls_for_port(1101),
-            vec![RelayOp::Ensure],
-            "teardown must be deferred until the guard drops"
-        );
-        drop(retired);
-        assert_eq!(
-            calls_for_port(1101),
-            vec![RelayOp::Ensure, RelayOp::RemoveAsync],
-            "an unadopted retired relay is torn down on drop"
-        );
-    }
-
-    #[test]
-    fn retired_relay_adopted_by_port_reuse_is_kept() {
-        let worker = RelayedWorker::new(FakeInner::new(1111));
-        let mut retired = worker.stop_for_replacement("test[worker]");
-        retired.adopt_port(1111);
-        drop(retired);
-        assert_eq!(
-            calls_for_port(1111),
-            vec![RelayOp::Ensure],
-            "a port-reusing replacement adopts the relay — no teardown"
-        );
-    }
-
-    #[test]
-    fn retired_relay_with_different_replacement_port_is_torn_down() {
-        let worker = RelayedWorker::new(FakeInner::new(1121));
-        let mut retired = worker.stop_for_replacement("test[worker]");
-        retired.adopt_port(1122);
-        drop(retired);
-        assert_eq!(
-            calls_for_port(1121),
-            vec![RelayOp::Ensure, RelayOp::RemoveAsync],
-            "a port-changing replacement must not adopt the old relay"
         );
     }
 

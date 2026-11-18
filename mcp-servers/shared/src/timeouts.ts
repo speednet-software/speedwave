@@ -40,7 +40,7 @@ export const TIMEOUTS = {
   /** Single API call (Graph, Redmine, etc.) - fixed 30s */
   API_CALL_MS: 30_000,
 
-  /** OAuth token refresh - fixed 30s */
+  /** Wait for the host to rewrite an expired OAuth access token - fixed 30s */
   TOKEN_REFRESH_MS: 30_000,
 
   /** Worker health check - fixed 5s */

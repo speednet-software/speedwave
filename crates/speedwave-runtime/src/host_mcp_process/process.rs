@@ -1,5 +1,5 @@
 //! Generic [`HostMcpProcess<S>`] — SSOT spawn/stop/respawn/cleanup lifecycle shared by host MCP
-//! worker managers (mcp-os, oauth) via a [`WorkerSpec`] impl per manager.
+//! worker managers (mcp-os) via a [`WorkerSpec`] impl per manager.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -32,17 +32,15 @@ pub trait WorkerSpec: Send + 'static {
     fn apply_env(&self, cmd: &mut Command, ctx: &SpawnContext);
 
     /// Hook invoked after `state_dir` creation and stale-PID cleanup, before the Node spawn.
-    /// Worker writes disk state here (oauth bearer map + per-service bearer files).
+    /// Worker writes disk state here.
     fn pre_spawn(&self, _ctx: &SpawnContext) -> anyhow::Result<()> {
         Ok(())
     }
 
-    /// Liveness probe variant. mcp_os does pid+TCP via `is_mcp_os_alive_in`; oauth is 3-attempt
-    /// TCP with backoff (retries matter — ADR-060).
+    /// Liveness probe variant. mcp_os does pid+TCP via `is_mcp_os_alive_in`.
     fn probe(&self) -> LivenessProbe;
 
-    /// Extra files removed alongside `lock.json` on [`HostMcpProcess::cleanup_files`]. Per-service
-    /// bearer files and `oauth.json` are NOT in this list — they survive supervisor respawn.
+    /// Extra files removed alongside `lock.json` on [`HostMcpProcess::cleanup_files`].
     fn extra_cleanup_files(&self, _ctx: &SpawnContext) -> Vec<PathBuf> {
         Vec::new()
     }
@@ -53,8 +51,7 @@ pub trait WorkerSpec: Send + 'static {
 pub enum LivenessProbe {
     /// Single TCP connect to `127.0.0.1:port`.
     TcpSingle,
-    /// `attempts` TCP connects with `backoff` between them. oauth
-    /// uses {3, 100 ms} to absorb transient stalls.
+    /// `attempts` TCP connects with `backoff` between them.
     TcpRetry {
         /// Number of connect attempts.
         attempts: u32,
@@ -97,7 +94,7 @@ pub struct SpawnContext<'a> {
     pub data_dir: &'a Path,
 }
 
-/// Generic host MCP worker process manager. The real managers (mcp_os, oauth) are type aliases
+/// Generic host MCP worker process manager. The real manager (mcp_os) is a type alias
 /// over this struct with a concrete `WorkerSpec`.
 pub struct HostMcpProcess<S: WorkerSpec> {
     pub(crate) spec: S,
@@ -401,7 +398,7 @@ mod tests {
             auth_token: "tok",
             data_dir: tmp.path(),
         };
-        let spec = FakeSpec::new(LockService::Oauth, "fake");
+        let spec = FakeSpec::new(LockService::PiiNer, "fake");
         assert!(spec.extra_cleanup_files(&ctx).is_empty());
     }
 
@@ -417,13 +414,13 @@ mod tests {
             auth_token: "tok",
             data_dir: tmp.path(),
         };
-        let spec = FakeSpec::new(LockService::Oauth, "fake");
+        let spec = FakeSpec::new(LockService::PiiNer, "fake");
         assert!(spec.pre_spawn(&ctx).is_ok());
     }
 
     #[test]
     fn fake_spec_records_hook_order() {
-        let spec = FakeSpec::new(LockService::Oauth, "fake");
+        let spec = FakeSpec::new(LockService::PiiNer, "fake");
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join("lock.json");
         let log_path = tmp.path().join("log");
@@ -472,7 +469,7 @@ mod tests {
             auth_token: "abc",
             data_dir: tmp.path(),
         };
-        let spec = FakeSpec::new(LockService::Oauth, "fake");
+        let spec = FakeSpec::new(LockService::PiiNer, "fake");
         spec.apply_env(&mut cmd, &ctx);
 
         let envs: std::collections::HashMap<_, _> = cmd

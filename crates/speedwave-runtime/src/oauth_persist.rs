@@ -201,27 +201,6 @@ mod tests {
     }
 
     #[test]
-    fn max_expires_in_matches_oauth_tools_ts() {
-        let src = include_str!("../../../mcp-servers/oauth/src/tools.ts");
-        let re = regex::Regex::new(r"const\s+MAX_EXPIRES_IN_SECONDS\s*=\s*([^;]+);").unwrap();
-        let expr = re
-            .captures(src)
-            .expect("tools.ts must declare MAX_EXPIRES_IN_SECONDS")[1]
-            .split("//")
-            .next()
-            .unwrap()
-            .replace(char::is_whitespace, "");
-        let ts_value: u64 = expr
-            .split('*')
-            .map(|n| n.parse::<u64>().expect("numeric factor"))
-            .product();
-        assert_eq!(
-            ts_value, MAX_EXPIRES_IN_SECS,
-            "TS MAX_EXPIRES_IN_SECONDS must equal Rust MAX_EXPIRES_IN_SECS"
-        );
-    }
-
-    #[test]
     fn rejects_zero_expires_in() {
         let tmp = tempfile::tempdir().unwrap();
         let err =

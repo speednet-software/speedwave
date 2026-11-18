@@ -1,6 +1,6 @@
 # ADR-009: Per-Project Isolation Preserved
 
-> **Status:** Accepted — but the SharePoint `:rw` token-mount exception this ADR documented was retired. Refresh moved to a host-side `oauth` worker; SharePoint now mounts `/tokens:ro` like every other built-in worker (see [ADR-060](ADR-060-host-side-oauth-refresh-worker.md)). The proxy token mounts are amended by [ADR-106](ADR-106-git-push-from-the-container-through-the-proxy.md).
+> **Status:** Accepted — but the SharePoint `:rw` token-mount exception this ADR documented was retired. Refresh moved to the host (first a per-project `oauth` worker, then, per [ADR-111](ADR-111-oauth-refresh-in-the-session-process.md), the CLI or Desktop process that owns the session); SharePoint now mounts `/tokens:ro` like every other built-in worker (see [ADR-060](ADR-060-host-side-oauth-refresh-worker.md)). The proxy token mounts are amended by [ADR-106](ADR-106-git-push-from-the-container-through-the-proxy.md).
 > **Context:** Carry the v1 per-project isolation model forward unchanged.
 
 ## Decision
@@ -20,7 +20,7 @@ Each MCP worker mounts **only its own** service credentials at `/tokens`, and ev
 
 The per-project proxy is the one other holder: besides `tokens/<project>/llm` it mounts `tokens/<project>/github` and `tokens/<project>/gitlab` at `/git-tokens/<service>:ro` when that integration is enabled, for the git transport of [ADR-106](ADR-106-git-push-from-the-container-through-the-proxy.md).
 
-When this ADR was first written, SharePoint was the single exception: it mounted `/tokens:rw` so the worker could write refreshed Microsoft OAuth `access_token` / `refresh_token` back to disk. That exception was removed. Token refresh now runs in a host-side `oauth` worker (a per-project Node process outside any container) that holds `refresh_token` / `client_id` / `tenant_id` and exposes `refresh` / `forget`; the SharePoint container only reads `access_token` through a `:ro` mount. SharePoint's `token-manager.ts` no longer writes tokens — it just records refresh-side errors for the worker's health endpoint.
+When this ADR was first written, SharePoint was the single exception: it mounted `/tokens:rw` so the worker could write refreshed Microsoft OAuth `access_token` / `refresh_token` back to disk. That exception was removed. Token refresh now runs on the host, outside any container: first in a per-project `oauth` Node worker (ADR-060), since ADR-111 in the CLI or Desktop process that owns the session. The host holds `refresh_token` / `client_id` / `tenant_id`; the SharePoint container only reads `access_token` through a `:ro` mount. SharePoint's `token-manager.ts` no longer writes tokens — it just records refresh-side errors for the worker's health endpoint.
 
 ## Where it lives in code
 

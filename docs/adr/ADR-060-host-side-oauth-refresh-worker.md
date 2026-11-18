@@ -1,6 +1,6 @@
 # ADR-060: Host-Side OAuth Refresh Worker (`oauth`)
 
-> **Status:** Accepted
+> **Status:** Superseded in part by [ADR-111](ADR-111-oauth-refresh-in-the-session-process.md) (2026-11-18): the host `oauth` process, its `refresh`/`forget` tools, the bearer map and the Desktop-only spawner are gone; refresh runs in the CLI or Desktop process that owns the session. The `:ro` token mount, the off-mount state file and the audit log of this ADR remain in force. The text below is the original decision.
 > **Context:** SharePoint was the only worker mounting `/tokens:rw` (the lone exception to the `:ro` invariant, per ADR-009) so it could refresh its own OAuth token in-container. That `:rw` mount widened the blast radius of a worker compromise and made every `/tokens` read a refresh-token leak risk.
 
 ## Decision

@@ -34,10 +34,6 @@ vi.mock('@speedwave/mcp-shared', async (importOriginal) => {
   return {
     ...actual,
     loadToken: vi.fn(),
-    refreshAccessToken: vi.fn().mockResolvedValue({
-      expiresIn: 3600,
-      grantedScopes: ['https://graph.microsoft.com/Sites.Manage.All'],
-    }),
     authedRequest: vi.fn(),
     ts: () => '[00:00:00]',
   };
@@ -46,9 +42,8 @@ vi.mock('@speedwave/mcp-shared', async (importOriginal) => {
 const mockFs = vi.mocked(fs);
 const mockCreateWriteStream = vi.mocked(createWriteStream);
 const mockPipeline = vi.mocked(pipeline);
-const { loadToken, refreshAccessToken, authedRequest } = await import('@speedwave/mcp-shared');
+const { loadToken, authedRequest } = await import('@speedwave/mcp-shared');
 const mockLoadToken = vi.mocked(loadToken);
-const mockOauthRefresh = vi.mocked(refreshAccessToken);
 const mockAuthedRequest = vi.mocked(authedRequest);
 
 const mockConfig: SharePointConfig = {
@@ -80,10 +75,6 @@ describe('SharePointClient', () => {
     global.fetch = fetchMock as typeof fetch;
 
     mockLoadToken.mockResolvedValue('refreshed-access-token');
-    mockOauthRefresh.mockResolvedValue({
-      expiresIn: 3600,
-      grantedScopes: ['https://graph.microsoft.com/Sites.Manage.All'],
-    });
     mockAuthedRequest.mockImplementation((opts) => opts.send(opts.state.accessToken));
 
     client = new SharePointClient({ ...mockConfig }, mockTokensDir);
@@ -126,7 +117,7 @@ describe('SharePointClient', () => {
     });
   });
 
-  describe('auth delegation (host-side oauth worker, ADR-060)', () => {
+  describe('auth delegation (host rewrites the token file)', () => {
     it('delegates the Graph call to authedRequest with the sharepoint service + proactive window', async () => {
       fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
 
@@ -2307,7 +2298,7 @@ describe('SharePointClient', () => {
       });
       expect(result).toMatchObject({ ok: false, reason: 'not_found' });
       expect(fetchMock).toHaveBeenCalledTimes(1);
-      expect(mockOauthRefresh).not.toHaveBeenCalled();
+      expect(mockAuthedRequest).not.toHaveBeenCalled();
     });
 
     it('rejects URL site_id without making a network call (defence in depth)', async () => {
