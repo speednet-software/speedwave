@@ -333,6 +333,20 @@ pub(crate) fn is_sidechain_event(parsed: &serde_json::Value) -> bool {
     !parsed["parent_tool_use_id"].is_null() || parsed["isSidechain"].as_bool() == Some(true)
 }
 
+pub(crate) fn tool_result_text(block: &serde_json::Value) -> String {
+    if let Some(s) = block["content"].as_str() {
+        s.to_string()
+    } else if let Some(arr) = block["content"].as_array() {
+        arr.iter()
+            .filter(|b| b["type"].as_str() == Some("text"))
+            .filter_map(|b| b["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        String::new()
+    }
+}
+
 pub(crate) fn turn_usage_from_jsonl(usage: &serde_json::Value) -> Option<TurnUsage> {
     let obj = usage.as_object()?;
     let read = |k: &str| obj.get(k).and_then(serde_json::Value::as_u64).unwrap_or(0);
@@ -877,22 +891,7 @@ impl StreamParser {
             };
             let is_error = block["is_error"].as_bool().unwrap_or(false);
 
-            let result_content = if let Some(s) = block["content"].as_str() {
-                s.to_string()
-            } else if let Some(arr) = block["content"].as_array() {
-                arr.iter()
-                    .filter_map(|b| {
-                        if b["type"].as_str() == Some("text") {
-                            b["text"].as_str().map(String::from)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            } else {
-                String::new()
-            };
+            let result_content = tool_result_text(block);
 
             log_lines.push(format!("result: {} error={}", tool_use_id, is_error));
             chunks.push(StreamChunk::ToolResult {
