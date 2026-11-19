@@ -1,6 +1,46 @@
 import type { NormalizedToolInput } from './chat';
 
-const META_NAME = /export\s+const\s+meta\s*=\s*\{[^}]*?\bname\s*:\s*(['"])(.*?)\1/s;
+const META_START = /export\s+const\s+meta\s*=\s*\{/;
+const META_NAME_AT = /name\s*:\s*(['"])(.*?)\1/sy;
+const QUOTES = new Set(['"', "'", '`']);
+
+function metaName(script: string): string | undefined {
+  const start = META_START.exec(script);
+  if (!start) {
+    return undefined;
+  }
+  let depth = 1;
+  for (let i = start.index + start[0].length; i < script.length && depth > 0; i++) {
+    const ch = script[i];
+    if (QUOTES.has(ch)) {
+      i = closingQuote(script, i);
+    } else if (ch === '{') {
+      depth++;
+    } else if (ch === '}') {
+      depth--;
+    } else if (depth === 1 && ch === 'n' && !/\w/.test(script[i - 1] ?? '')) {
+      META_NAME_AT.lastIndex = i;
+      const found = META_NAME_AT.exec(script);
+      if (found) {
+        return found[2];
+      }
+    }
+  }
+  return undefined;
+}
+
+function closingQuote(script: string, open: number): number {
+  const quote = script[open];
+  let i = open + 1;
+  while (i < script.length && script[i] !== quote) {
+    i += script[i] === '\\' ? 2 : 1;
+  }
+  return i;
+}
+
+function usableString(value: string | undefined): boolean {
+  return value !== undefined && value.trim() !== '';
+}
 
 function optionalString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
@@ -23,16 +63,13 @@ function normalizeWorkflow(parsed: Record<string, unknown>): NormalizedToolInput
   const scriptPath = optionalString(parsed['scriptPath']);
   const resumeFromRunId = optionalString(parsed['resumeFromRunId']);
   const args = workflowArgs(parsed['args']);
-  const recognized = [name, description, script, scriptPath, resumeFromRunId].some(
-    (v) => v !== undefined
-  );
-  if (!recognized && args.length === 0) {
+  if (![name, script, scriptPath].some(usableString)) {
     return undefined;
   }
-  const metaName = script === undefined ? undefined : META_NAME.exec(script)?.[2];
+  const scriptName = script === undefined ? undefined : metaName(script);
   return {
     kind: 'workflow',
-    title: name || metaName || 'workflow',
+    title: name || scriptName || 'workflow',
     description,
     args,
     script,

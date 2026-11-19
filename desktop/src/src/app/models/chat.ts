@@ -1,6 +1,6 @@
 import type { ClaudeContextUsage } from './claude-control';
 import type { ToolUseState } from './state-tree';
-import type { SlashCommand } from '../chat/slash/slash.service';
+import type { SlashCommand } from './slash';
 
 /** Mirror of Rust `speedwave_runtime::stream::TurnErrorKind`. */
 export type TurnErrorKind = 'authentication_failed';

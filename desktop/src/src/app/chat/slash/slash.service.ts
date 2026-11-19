@@ -2,6 +2,7 @@ import { DestroyRef, Injectable, computed, inject, signal } from '@angular/core'
 import { TauriService } from '../../services/tauri.service';
 import { LoggerService } from '../../services/logger.service';
 import { ProjectStateService } from '../../services/project-state.service';
+import type { SlashCommand } from '../../models/slash';
 
 /**
  * True when `text` trimmed is `/` (slash-menu trigger). Mirrors Rust SSOT `speedwave_runtime::slash::is_bare_slash`.
@@ -33,20 +34,8 @@ export function isControlShaped(text: string): boolean {
   return CONTROL_COMMAND_RE.test(text.trim());
 }
 
-/** Classification of a slash-menu entry, used by the UI to render the badge. */
-export type SlashKind = 'Builtin' | 'Skill' | 'Command' | 'Plugin' | 'Agent';
-
 /** Indicates whether the discovery came from Claude Code or could not run. */
 export type DiscoverySource = 'Init' | 'Unavailable';
-
-/** One entry in the slash popover, mirrored from Rust `SlashCommand`. */
-export interface SlashCommand {
-  readonly name: string;
-  readonly description: string | null;
-  readonly argument_hint: string | null;
-  readonly kind: SlashKind;
-  readonly plugin: string | null;
-}
 
 /** Full discovery result, mirrored from Rust `SlashDiscovery`. */
 export interface SlashDiscovery {

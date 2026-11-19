@@ -11,7 +11,8 @@ import {
 } from '@angular/core';
 import { A11yModule } from '@angular/cdk/a11y';
 import { CdkListbox, CdkOption, type ListboxValueChangeEvent } from '@angular/cdk/listbox';
-import { SlashService, type SlashCommand } from './slash.service';
+import { SlashService } from './slash.service';
+import type { SlashCommand } from '../../models/slash';
 import { TooltipDirective } from '../../shared/tooltip.directive';
 
 /**

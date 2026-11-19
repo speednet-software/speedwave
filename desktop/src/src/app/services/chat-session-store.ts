@@ -1959,6 +1959,7 @@ export class ChatSessionStore {
     this._sessionGeneration += 1;
     this.startingSession = false;
     this.dropPendingPicks();
+    this.deps.slash.clearSession(this.tabId);
     this._sessionEnded.set(false);
     this.restoreConversationView(emptyConversationView());
   }

@@ -3180,6 +3180,19 @@ describe('ChatSessionStore', () => {
       expect(slash.commands()).toEqual(initList);
     });
 
+    it('drops the list when a new conversation starts', () => {
+      const slash = TestBed.inject(SlashService);
+      slash.setActiveSession('test-tab-id');
+      store.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-6', slash_commands: initList },
+      });
+
+      store.resetForNewConversation();
+
+      expect(slash.commands()).toEqual([]);
+    });
+
     it('drops the list when the tab is disposed', () => {
       const slash = TestBed.inject(SlashService);
       slash.setActiveSession('test-tab-id');

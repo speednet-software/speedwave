@@ -7,9 +7,9 @@ import {
   isBareSlash,
   isBlankOrSlashOnly,
   isControlShaped,
-  type SlashCommand,
   type SlashDiscovery,
 } from './slash.service';
+import type { SlashCommand } from '../../models/slash';
 import { TauriService } from '../../services/tauri.service';
 import { LoggerService } from '../../services/logger.service';
 import { ProjectStateService, type AuthStatusResponse } from '../../services/project-state.service';

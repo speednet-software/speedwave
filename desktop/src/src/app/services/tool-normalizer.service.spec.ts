@@ -196,6 +196,27 @@ describe('ToolNormalizerService', () => {
       expect(service.normalize('Workflow', json)).toEqual({ kind: 'generic', raw_json: json });
     });
 
+    it('takes the title from meta when args precede the name', () => {
+      const script = "export const meta = { args: { a: { b: '}' } }, name: 'x' };";
+      const result = service.normalize('Workflow', JSON.stringify({ script }));
+      expect(result).toMatchObject({ kind: 'workflow', title: 'x' });
+    });
+
+    it('ignores a name nested inside meta', () => {
+      const script = "export const meta = { args: { name: 'inner' } };";
+      const result = service.normalize('Workflow', JSON.stringify({ script }));
+      expect(result).toMatchObject({ kind: 'workflow', title: 'workflow' });
+    });
+
+    it.each([
+      '{"description":"d"}',
+      '{"args":{"a":1}}',
+      '{"resumeFromRunId":"run-1"}',
+      '{"name":"","script":" ","scriptPath":""}',
+    ])('falls back to generic without a usable name, script or scriptPath: %s', (json) => {
+      expect(service.normalize('Workflow', json)).toEqual({ kind: 'generic', raw_json: json });
+    });
+
     it('falls back to generic for an empty object', () => {
       expect(service.normalize('Workflow', '{}')).toEqual({ kind: 'generic', raw_json: '{}' });
     });

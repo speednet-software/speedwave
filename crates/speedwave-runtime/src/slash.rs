@@ -111,18 +111,40 @@ pub fn discover_slash_commands(
     discover_slash_commands_with_timeout(runtime, project, DISCOVERY_TIMEOUT)
 }
 
-/// Commands for one live session, from its `system/init` event. Names the
-/// session reports are shown even without a file on disk; hidden native
-/// commands and `user-invocable: false` entries are dropped. `None` when
-/// `init` is not an init event with a `slash_commands` list.
-pub fn session_init_commands(
-    init: &serde_json::Value,
-    project: &ProjectHandle,
-    data_dir: &Path,
-) -> Option<Vec<SlashCommand>> {
-    init.get("slash_commands")?.as_array()?;
-    let raw = parse_init_value(init)?;
-    Some(enrich_and_filter(raw, project, data_dir, UnlistedNames::Keep).commands)
+/// A live session's project, data dir and plugin lookup roots, resolved once.
+#[derive(Debug, Clone)]
+pub struct SessionSlash {
+    project: ProjectHandle,
+    data_dir: PathBuf,
+    resource_dirs: Vec<PathBuf>,
+}
+
+impl SessionSlash {
+    /// Resolves the lookup roots once, so each `system/init` of the session skips plugin verification.
+    pub fn new(project: ProjectHandle, data_dir: impl Into<PathBuf>) -> Self {
+        let data_dir = data_dir.into();
+        let resource_dirs = linked_resource_dirs(&data_dir, &project.enabled_plugins);
+        Self {
+            project,
+            data_dir,
+            resource_dirs,
+        }
+    }
+
+    /// Commands for one `system/init` event, `None` without a `slash_commands` list; hidden natives and `user-invocable: false` are dropped.
+    pub fn init_commands(&self, init: &serde_json::Value) -> Option<Vec<SlashCommand>> {
+        let raw = parse_init_value(init, true)?;
+        Some(
+            enrich_with_dirs(
+                raw,
+                &self.project,
+                &self.data_dir,
+                &self.resource_dirs,
+                UnlistedNames::Keep,
+            )
+            .commands,
+        )
+    }
 }
 
 fn discover_slash_commands_with_timeout(
@@ -389,10 +411,10 @@ fn parse_init_line(line: &str) -> Option<RawDiscovery> {
         return None;
     }
     let value: serde_json::Value = serde_json::from_str(trimmed).ok()?;
-    parse_init_value(&value)
+    parse_init_value(&value, false)
 }
 
-fn parse_init_value(value: &serde_json::Value) -> Option<RawDiscovery> {
+fn parse_init_value(value: &serde_json::Value, require_commands: bool) -> Option<RawDiscovery> {
     let obj = value.as_object()?;
     if obj.get("type")?.as_str()? != "system" {
         return None;
@@ -401,15 +423,17 @@ fn parse_init_value(value: &serde_json::Value) -> Option<RawDiscovery> {
         return None;
     }
 
-    let slash_commands = obj
+    let slash_commands: Option<Vec<String>> = obj
         .get("slash_commands")
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
                 .filter_map(|v| v.as_str().map(str::to_string))
                 .collect()
-        })
-        .unwrap_or_default();
+        });
+    if require_commands && slash_commands.is_none() {
+        return None;
+    }
 
     let plugins = obj
         .get("plugins")
@@ -437,7 +461,7 @@ fn parse_init_value(value: &serde_json::Value) -> Option<RawDiscovery> {
         .unwrap_or_default();
 
     Some(RawDiscovery {
-        slash_commands,
+        slash_commands: slash_commands.unwrap_or_default(),
         plugins,
         agents,
     })
@@ -614,8 +638,18 @@ fn enrich_and_filter(
     data_dir: &Path,
     unlisted: UnlistedNames,
 ) -> SlashDiscovery {
-    let project_dir = project.dir.as_path();
     let resource_dirs = linked_resource_dirs(data_dir, &project.enabled_plugins);
+    enrich_with_dirs(raw, project, data_dir, &resource_dirs, unlisted)
+}
+
+fn enrich_with_dirs(
+    raw: RawDiscovery,
+    project: &ProjectHandle,
+    data_dir: &Path,
+    resource_dirs: &[PathBuf],
+    unlisted: UnlistedNames,
+) -> SlashDiscovery {
+    let project_dir = project.dir.as_path();
     let personal_dir = crate::claude_home::claude_config_dir(data_dir, &project.name);
     let mut commands: Vec<SlashCommand> = Vec::new();
 
@@ -662,7 +696,7 @@ fn enrich_and_filter(
             clean_name,
             plugin.as_deref(),
             project_dir,
-            if unprefixed { &resource_dirs } else { &[] },
+            if unprefixed { resource_dirs } else { &[] },
             unprefixed.then_some(personal_dir.as_path()),
             &raw.plugins,
         );
@@ -2189,8 +2223,9 @@ mod tests {
             "plugins": [{"name": "redmine", "path": "/opt/plugins/redmine"}],
             "agents": ["code-review"],
         });
-        let commands =
-            session_init_commands(&init, &test_project(tmp.path()), data_tmp.path()).unwrap();
+        let commands = SessionSlash::new(test_project(tmp.path()), data_tmp.path())
+            .init_commands(&init)
+            .unwrap();
         let by_name: HashMap<&str, &SlashCommand> =
             commands.iter().map(|c| (c.name.as_str(), c)).collect();
         assert_eq!(by_name["clear"].kind, SlashKind::Builtin);
@@ -2204,8 +2239,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let data_tmp = tempfile::tempdir().unwrap();
         let init = session_init(&["simplify", "loop"], &[]);
-        let commands =
-            session_init_commands(&init, &test_project(tmp.path()), data_tmp.path()).unwrap();
+        let commands = SessionSlash::new(test_project(tmp.path()), data_tmp.path())
+            .init_commands(&init)
+            .unwrap();
         assert_eq!(init_names(&commands), vec!["loop", "simplify"]);
         assert!(commands.iter().all(|c| c.kind == SlashKind::Command));
         assert!(commands.iter().all(|c| c.description.is_none()));
@@ -2223,8 +2259,9 @@ mod tests {
         .unwrap();
         let data_tmp = tempfile::tempdir().unwrap();
         let init = session_init(&["my-skill"], &[]);
-        let commands =
-            session_init_commands(&init, &test_project(tmp.path()), data_tmp.path()).unwrap();
+        let commands = SessionSlash::new(test_project(tmp.path()), data_tmp.path())
+            .init_commands(&init)
+            .unwrap();
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].kind, SlashKind::Skill);
         assert_eq!(commands[0].description.as_deref(), Some("does a thing"));
@@ -2235,8 +2272,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let data_tmp = tempfile::tempdir().unwrap();
         let init = session_init(&["clear", "doctor", "config", "mcp"], &[]);
-        let commands =
-            session_init_commands(&init, &test_project(tmp.path()), data_tmp.path()).unwrap();
+        let commands = SessionSlash::new(test_project(tmp.path()), data_tmp.path())
+            .init_commands(&init)
+            .unwrap();
         assert_eq!(init_names(&commands), vec!["clear"]);
     }
 
@@ -2252,8 +2290,9 @@ mod tests {
         .unwrap();
         let data_tmp = tempfile::tempdir().unwrap();
         let init = session_init(&["model-only", "simplify"], &[]);
-        let commands =
-            session_init_commands(&init, &test_project(tmp.path()), data_tmp.path()).unwrap();
+        let commands = SessionSlash::new(test_project(tmp.path()), data_tmp.path())
+            .init_commands(&init)
+            .unwrap();
         assert_eq!(init_names(&commands), vec!["simplify"]);
     }
 
@@ -2262,7 +2301,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let data_tmp = tempfile::tempdir().unwrap();
         let bare = serde_json::json!({"type": "system", "subtype": "init"});
-        assert!(session_init_commands(&bare, &test_project(tmp.path()), data_tmp.path()).is_none());
+        assert!(SessionSlash::new(test_project(tmp.path()), data_tmp.path())
+            .init_commands(&bare)
+            .is_none());
     }
 
     #[test]
@@ -2270,9 +2311,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let data_tmp = tempfile::tempdir().unwrap();
         let other = serde_json::json!({"type": "system", "subtype": "task_started", "slash_commands": ["x"]});
-        assert!(
-            session_init_commands(&other, &test_project(tmp.path()), data_tmp.path()).is_none()
-        );
+        assert!(SessionSlash::new(test_project(tmp.path()), data_tmp.path())
+            .init_commands(&other)
+            .is_none());
     }
 
     #[test]
@@ -2280,8 +2321,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let data_tmp = tempfile::tempdir().unwrap();
         let init = session_init(&[], &[]);
-        let commands =
-            session_init_commands(&init, &test_project(tmp.path()), data_tmp.path()).unwrap();
+        let commands = SessionSlash::new(test_project(tmp.path()), data_tmp.path())
+            .init_commands(&init)
+            .unwrap();
         assert!(commands.is_empty());
     }
 

@@ -475,7 +475,7 @@ pub struct StreamParser {
     model_tracker: crate::session_model::SessionModelTracker,
     seen_unknown_types: std::collections::HashSet<String>,
     next_turn_origin: Option<TurnOrigin>,
-    slash_project: Option<speedwave_runtime::slash::ProjectHandle>,
+    slash_session: Option<speedwave_runtime::slash::SessionSlash>,
 }
 
 const MAX_TRACKED_UNKNOWN_TYPES: usize = 32;
@@ -494,15 +494,17 @@ impl StreamParser {
             model_tracker: crate::session_model::SessionModelTracker::default(),
             seen_unknown_types: std::collections::HashSet::new(),
             next_turn_origin: None,
-            slash_project: None,
+            slash_session: None,
         }
     }
 
     pub(crate) fn set_slash_project(
         &mut self,
         project: Option<speedwave_runtime::slash::ProjectHandle>,
+        data_dir: &std::path::Path,
     ) {
-        self.slash_project = project;
+        self.slash_session =
+            project.map(|project| speedwave_runtime::slash::SessionSlash::new(project, data_dir));
     }
 
     pub fn restore_session_snapshot(
@@ -1183,13 +1185,10 @@ impl StreamParser {
                 .as_str()
                 .filter(|s| !s.is_empty())
                 .map(String::from);
-            let slash_commands = self.slash_project.as_ref().and_then(|project| {
-                speedwave_runtime::slash::session_init_commands(
-                    parsed,
-                    project,
-                    consts::data_dir().as_path(),
-                )
-            });
+            let slash_commands = self
+                .slash_session
+                .as_ref()
+                .and_then(|session| session.init_commands(parsed));
             if let Some(model) = parsed["model"].as_str() {
                 if !model.is_empty() {
                     self.model_tracker.observe_init(model);
@@ -2366,8 +2365,8 @@ impl ChatSession {
             crate::pii_display::load_display_policy(consts::data_dir(), &self.project_name);
 
         let slash_project = crate::slash_cmd::project_handle(&self.project_name)
-            .inspect_err(|e| {
-                log::warn!("slash project for '{}' unavailable: {e}", self.project_name)
+            .inspect_err(|_| {
+                log::warn!("slash project for '{}' unavailable", self.project_name)
             })
             .ok();
 
@@ -2383,7 +2382,7 @@ impl ChatSession {
 
         let h = std::thread::spawn(move || {
             let mut parser = StreamParser::new();
-            parser.set_slash_project(slash_project);
+            parser.set_slash_project(slash_project, consts::data_dir());
             if let Some(seed) = resume_seed {
                 parser.restore_resume_snapshot(seed);
             }
@@ -8351,11 +8350,15 @@ mod tests {
     #[test]
     fn parse_system_init_carries_the_session_slash_commands() {
         let project_dir = tempfile::tempdir().unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
         let mut parser = StreamParser::new();
-        parser.set_slash_project(Some(speedwave_runtime::slash::ProjectHandle::new(
-            "acme",
-            project_dir.path(),
-        )));
+        parser.set_slash_project(
+            Some(speedwave_runtime::slash::ProjectHandle::new(
+                "acme",
+                project_dir.path(),
+            )),
+            data_dir.path(),
+        );
         let (chunk, _) =
             parser.parse_system_message(&init_line_with_commands(&["clear", "doctor", "simplify"]));
         let commands = system_init_commands(chunk.unwrap()).expect("init list");
@@ -8373,11 +8376,15 @@ mod tests {
     #[test]
     fn parse_system_init_without_a_slash_commands_key_carries_no_list() {
         let project_dir = tempfile::tempdir().unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
         let mut parser = StreamParser::new();
-        parser.set_slash_project(Some(speedwave_runtime::slash::ProjectHandle::new(
-            "acme",
-            project_dir.path(),
-        )));
+        parser.set_slash_project(
+            Some(speedwave_runtime::slash::ProjectHandle::new(
+                "acme",
+                project_dir.path(),
+            )),
+            data_dir.path(),
+        );
         let (chunk, _) = parser.parse_system_message(&serde_json::json!({
             "type": "system",
             "subtype": "init",
@@ -8390,11 +8397,15 @@ mod tests {
     #[test]
     fn parse_system_init_keeps_the_list_when_the_model_is_missing() {
         let project_dir = tempfile::tempdir().unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
         let mut parser = StreamParser::new();
-        parser.set_slash_project(Some(speedwave_runtime::slash::ProjectHandle::new(
-            "acme",
-            project_dir.path(),
-        )));
+        parser.set_slash_project(
+            Some(speedwave_runtime::slash::ProjectHandle::new(
+                "acme",
+                project_dir.path(),
+            )),
+            data_dir.path(),
+        );
         let (chunk, _) = parser.parse_system_message(&serde_json::json!({
             "type": "system",
             "subtype": "init",
@@ -8455,7 +8466,7 @@ mod tests {
 
     #[test]
     fn slash_command_fields_match_ts_mirror() {
-        let ts = include_str!("../../src/src/app/chat/slash/slash.service.ts");
+        let ts = include_str!("../../src/src/app/models/slash.ts");
         let mut ts_fields: Vec<&str> = crate::ts_mirror::ts_interface_fields(ts, "SlashCommand")
             .into_iter()
             .map(|field| field.trim_start_matches("readonly "))
