@@ -86,7 +86,7 @@ pub(crate) fn detokenize_transcript(
                 MessageBlock::ControlChip { argument, .. } => {
                     *argument = detokenize_for_display(policy, argument)
                 }
-                MessageBlock::ToolUse { result: None, .. } => {}
+                MessageBlock::ToolUse { result: None, .. } | MessageBlock::TurnOrigin { .. } => {}
             }
         }
     }
@@ -281,6 +281,7 @@ mod tests {
                 | MessageBlock::Error { content } => content,
                 MessageBlock::ToolUse { .. } => panic!("unexpected ToolUse in first 3"),
                 MessageBlock::ControlChip { .. } => panic!("unexpected ControlChip in first 3"),
+                MessageBlock::TurnOrigin { .. } => panic!("unexpected TurnOrigin in first 3"),
             };
             assert_eq!(content.as_str(), "jan@example.com");
         }

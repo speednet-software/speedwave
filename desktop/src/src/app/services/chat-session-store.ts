@@ -1343,19 +1343,7 @@ export class ChatSessionStore {
     }
     const isControlSend = chatInput.attachments.length === 0 && isControlShaped(chatInput.text);
     if (isControlSend) this.recordTypedModelCommand(chatInput.text);
-    if (!isControlSend) {
-      this._messages = [
-        ...this._messages,
-        {
-          role: 'user',
-          blocks: displayBlocks,
-          timestamp: Date.now(),
-        },
-      ];
-    }
-    this.isStreaming = true;
-    this._turnId += 1;
-    this._currentBlocks = [];
+    this.openTurn(isControlSend ? null : displayBlocks);
     this.requestAutoScroll();
     this.notifyChange();
 
@@ -1834,22 +1822,17 @@ export class ChatSessionStore {
         break;
       }
 
+      case 'TurnStarted':
+        if (chunk.data.origin === 'user' || this.isStreaming) return;
+        this.openTurn([{ type: 'turn_origin', origin: chunk.data.origin }]);
+        break;
+
       case 'QueueDrained': {
         this._pendingQueue = null;
         this._queueAwaitingSession = false;
-        if (!isControlShaped(chunk.data.text)) {
-          this._messages = [
-            ...this._messages,
-            {
-              role: 'user',
-              blocks: [{ type: 'text', content: chunk.data.text }],
-              timestamp: Date.now(),
-            },
-          ];
-        }
-        this.isStreaming = true;
-        this._turnId += 1;
-        this._currentBlocks = [];
+        this.openTurn(
+          isControlShaped(chunk.data.text) ? null : [{ type: 'text', content: chunk.data.text }]
+        );
         break;
       }
 
@@ -1888,6 +1871,18 @@ export class ChatSessionStore {
         `[chat-state] stopping the session after auth failure failed: ${String(err)}`
       );
     }
+  }
+
+  private openTurn(userBlocks: MessageBlock[] | null): void {
+    if (userBlocks) {
+      this._messages = [
+        ...this._messages,
+        { role: 'user', blocks: userBlocks, timestamp: Date.now() },
+      ];
+    }
+    this.isStreaming = true;
+    this._turnId += 1;
+    this._currentBlocks = [];
   }
 
   private forgetContextWindow(): void {
@@ -2589,6 +2584,7 @@ function findRetryAnchorIn(
     if (m.uuid_status !== undefined && m.uuid_status !== committedTag) return null;
     const firstBlock = m.blocks?.[0];
     if (firstBlock?.type === 'chip' || firstBlock?.kind === 'chip') return null;
+    if (firstBlock?.type === 'turn_origin' || firstBlock?.kind === 'turn_origin') return null;
     return { userUuid: m.uuid, lastAssistantIdx, userIdx: i };
   }
   return null;
@@ -2821,6 +2817,9 @@ export function stateBlocksToMessageBlocks(blocks: readonly MessageBlockState[])
       case 'chip':
         out.push({ type: 'chip', command: b.command, argument: b.argument });
         break;
+      case 'turn_origin':
+        out.push({ type: 'turn_origin', origin: b.origin });
+        break;
       default: {
         const unknownKind = (b as { kind: string }).kind;
         pluginLogWarn(
@@ -2899,6 +2898,9 @@ export function messageBlocksToState(blocks: readonly MessageBlock[]): MessageBl
       case 'chip':
         out.push({ kind: 'chip', command: b.command, argument: b.argument });
         break;
+      case 'turn_origin':
+        out.push({ kind: 'turn_origin', origin: b.origin });
+        break;
     }
   }
   return out;
@@ -2966,6 +2968,8 @@ function historyBlockToMessageBlock(block: HistoryMessageBlock): MessageBlock {
       return { type: 'error', content: block.content };
     case 'control_chip':
       return { type: 'chip', command: block.command, argument: block.argument };
+    case 'turn_origin':
+      return { type: 'turn_origin', origin: block.origin };
     case 'tool_use':
       return {
         type: 'tool_use',
