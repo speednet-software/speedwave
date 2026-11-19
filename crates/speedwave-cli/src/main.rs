@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod paste_watcher;
+mod release_signature;
 mod terminal_restore;
 
 const START_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -196,6 +197,7 @@ fn parse_action(args: &[String]) -> Result<CliAction, String> {
 
 const REPO_OWNER: &str = "speednet-software";
 const REPO_NAME: &str = "speedwave";
+const MAX_SIGNATURE_BYTES: u64 = 4096;
 const UPDATE_CHECK_INTERVAL_SECS: u64 =
     speedwave_runtime::consts::UPDATE_CHECK_INTERVAL_HOURS as u64 * 3600;
 
@@ -335,13 +337,32 @@ fn run_self_update() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let status = self_update::backends::github::Update::configure()
+    let mut updater = self_update::backends::github::Update::configure();
+    updater
         .repo_owner(REPO_OWNER)
         .repo_name(REPO_NAME)
         .bin_name(consts::CLI_BINARY)
         .show_download_progress(true)
         .current_version(current)
         .release_tag(&target_tag)
+        .asset_matcher(|assets| {
+            release_signature::archive_asset(assets, self_update::get_target())
+        });
+
+    let release = updater.build()?.get_release_version(&target_tag)?;
+    let signature = fetch_release_signature(release.assets())?;
+    let signed_version = target_tag.trim_start_matches('v').to_string();
+
+    let status = updater
+        .verify_archive(move |archive: &std::path::Path| {
+            release_signature::verify_archive(
+                archive,
+                &signature,
+                release_signature::UPDATER_PUBKEY,
+                &signed_version,
+            )
+            .map_err(|e| self_update::Error::archive_verification_rejected(format!("{e:#}")))
+        })
         .build()?
         .update()?;
 
@@ -378,6 +399,28 @@ fn run_self_update() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn fetch_release_signature(assets: &[self_update::update::ReleaseAsset]) -> anyhow::Result<String> {
+    let target = self_update::get_target();
+    let archive = release_signature::archive_asset(assets, target)
+        .ok_or_else(|| anyhow::anyhow!("The release has no CLI archive for {target}."))?;
+    let signature_asset =
+        release_signature::signature_asset(assets, &archive).ok_or_else(|| {
+            anyhow::anyhow!(
+                "The release has no signature for {}; refusing to install an unsigned archive.",
+                archive.name()
+            )
+        })?;
+
+    let mut body = Vec::new();
+    self_update::Download::from_url(signature_asset.download_url())
+        .request_header("Accept", "application/octet-stream")
+        .max_download_size(MAX_SIGNATURE_BYTES)
+        .download_to(&mut body)
+        .map_err(|e| anyhow::anyhow!("Failed to download {}: {e}", signature_asset.name()))?;
+    String::from_utf8(body)
+        .map_err(|_| anyhow::anyhow!("{} is not valid UTF-8.", signature_asset.name()))
 }
 
 fn target_release_tag(channel: UpdateChannel) -> anyhow::Result<String> {
