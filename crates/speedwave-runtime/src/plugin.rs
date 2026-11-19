@@ -382,7 +382,7 @@ pub struct PluginInstallProgress {
 }
 
 /// Outcome returned by [`install_plugin`]: distinguishes a fully-installed plugin from one whose
-/// image build deferred to the next launch (`.image_pending` marker remains).
+/// image build deferred to the next launch (the `plugin-state/<slug>/image_pending` marker remains).
 #[derive(Debug, Clone)]
 pub enum InstallOutcome {
     /// Fully installed and image built.
@@ -1404,7 +1404,7 @@ pub fn peek_plugin_manifest(zip_path: &Path) -> anyhow::Result<PluginManifestSum
 }
 
 /// Installs a plugin from a ZIP into `~/.speedwave/plugins/<slug>/`: verify signature, validate
-/// manifest, `.image_pending` marker; `InstalledPendingBuild` retries via [`ensure_plugin_images`].
+/// manifest, `plugin-state/<slug>/image_pending` marker; `InstalledPendingBuild` retries via [`ensure_plugin_images`].
 pub fn install_plugin(
     zip_path: &Path,
     runtime: Option<&crate::runtime::LockedRuntime>,
@@ -2096,7 +2096,7 @@ pub(crate) fn audit_all_in_dir(plugins_dir: &Path) -> Result<(), Vec<(String, St
     }
 }
 
-/// Ensures plugin images exist for enabled service IDs: pending-build pass (`.image_pending`,
+/// Ensures plugin images exist for enabled service IDs: pending-build pass (`image_pending` marker,
 /// errors propagate) then rebuild missing images (errors accumulate); fixes image loss after reset.
 pub fn ensure_plugin_images(
     runtime: &crate::runtime::LockedRuntime,
@@ -2218,7 +2218,7 @@ fn usable_fallback_tag(
         .find(|t| runtime.image_exists(t).unwrap_or(false))
 }
 
-/// Builds pending plugin images (`.image_pending`). `Some(list)` builds only listed `service_id`s
+/// Builds pending plugin images (`image_pending` marker). `Some(list)` builds only listed `service_id`s
 /// (resource-only plugins yield `sid = ""`, never matching, skipped); `None` builds all (tests).
 fn build_pending_from_dir(
     runtime: &crate::runtime::LockedRuntime,

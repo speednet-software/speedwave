@@ -5151,24 +5151,23 @@ mod tests {
     #[test]
     fn test_config_writers_use_durable_helper() {
         let source = include_str!("config.rs");
-        for func in ["fn save_user_config_to("] {
-            let start = source.find(func).expect("function must exist");
-            let body = &source[start..];
-            let end = ["\npub fn ", "\nfn ", "\npub(crate) fn ", "\n#[cfg(test)]"]
-                .iter()
-                .filter_map(|marker| body[1..].find(marker).map(|i| i + 1))
-                .min()
-                .unwrap_or(body.len());
-            let body = &body[..end];
-            assert!(
-                body.contains("write_restricted_file_atomic"),
-                "{func} must use the durable write_restricted_file_atomic helper"
-            );
-            assert!(
-                !body.contains("std::fs::rename("),
-                "{func} must not hand-roll write+rename (use the durable helper)"
-            );
-        }
+        let func = "fn save_user_config_to(";
+        let start = source.find(func).expect("function must exist");
+        let body = &source[start..];
+        let end = ["\npub fn ", "\nfn ", "\npub(crate) fn ", "\n#[cfg(test)]"]
+            .iter()
+            .filter_map(|marker| body[1..].find(marker).map(|i| i + 1))
+            .min()
+            .unwrap_or(body.len());
+        let body = &body[..end];
+        assert!(
+            body.contains("write_restricted_file_atomic"),
+            "{func} must use the durable write_restricted_file_atomic helper"
+        );
+        assert!(
+            !body.contains("std::fs::rename("),
+            "{func} must not hand-roll write+rename (use the durable helper)"
+        );
     }
 
     #[cfg(unix)]

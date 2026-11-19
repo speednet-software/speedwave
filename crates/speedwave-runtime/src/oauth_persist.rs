@@ -277,7 +277,7 @@ mod tests {
         assert_eq!(
             got, expected,
             "IDENTITY_KEYS drifted from the OAuthStateProviderData descriptors in consts.rs, \
-             update IDENTITY_KEYS here AND OAUTH_IDENTITY_KEYS in desktop integrations_cmd.rs"
+             update IDENTITY_KEYS or the descriptors"
         );
     }
 
