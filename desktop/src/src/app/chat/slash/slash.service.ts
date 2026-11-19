@@ -64,11 +64,23 @@ export class SlashService {
   private readonly tauri = inject(TauriService);
   private readonly log = inject(LoggerService);
 
-  readonly commands = signal<readonly SlashCommand[]>([]);
+  private readonly discovered = signal<readonly SlashCommand[]>([]);
+  private readonly sessionLists = signal<ReadonlyMap<string, readonly SlashCommand[]>>(new Map());
+  private readonly activeSession = signal<string | null>(null);
+  private readonly sessionList = computed(() => {
+    const key = this.activeSession();
+    return key === null ? undefined : this.sessionLists().get(key);
+  });
+
+  readonly commands = computed<readonly SlashCommand[]>(
+    () => this.sessionList() ?? this.discovered()
+  );
   readonly discovering = signal<boolean>(false);
   readonly source = signal<DiscoverySource | null>(null);
   readonly error = signal<string | null>(null);
-  readonly unavailable = computed(() => this.source() === 'Unavailable');
+  readonly unavailable = computed(
+    () => this.source() === 'Unavailable' && this.sessionList() === undefined
+  );
   readonly unavailableReason = signal<string | null>(null);
 
   readonly isLoadingEmpty = computed(() => this.discovering() && this.commands().length === 0);
@@ -87,6 +99,35 @@ export class SlashService {
   }
 
   /**
+   * Chooses the session whose init list the picker shows.
+   * @param sessionKey - Chat tab id, or null when no session is shown.
+   */
+  setActiveSession(sessionKey: string | null): void {
+    this.activeSession.set(sessionKey);
+  }
+
+  /**
+   * Stores the list a session's init reported, replacing the one from its earlier init.
+   * @param sessionKey - Chat tab id the init came from.
+   * @param commands - Commands the init reported, already filtered.
+   */
+  setSessionCommands(sessionKey: string, commands: readonly SlashCommand[]): void {
+    this.sessionLists.update((lists) => new Map(lists).set(sessionKey, commands));
+  }
+
+  /**
+   * Drops a session's init list so the picker falls back to discovery.
+   * @param sessionKey - Chat tab id whose list to drop.
+   */
+  clearSession(sessionKey: string): void {
+    this.sessionLists.update((lists) => {
+      const next = new Map(lists);
+      next.delete(sessionKey);
+      return next;
+    });
+  }
+
+  /**
    * Fetches the slash-command list and updates the signals; never throws.
    * A concurrent call for the SAME project while one is already in flight
    * is a no-op that awaits the same result. A call for a DIFFERENT project
@@ -96,7 +137,7 @@ export class SlashService {
    */
   async refresh(projectId: string): Promise<void> {
     if (!projectId) {
-      this.commands.set([]);
+      this.discovered.set([]);
       this.source.set(null);
       this.unavailableReason.set(null);
       this.error.set(null);
@@ -123,7 +164,7 @@ export class SlashService {
         projectId,
       });
       if (this.inFlightProjectId !== projectId) return;
-      this.commands.set(result.commands);
+      this.discovered.set(result.commands);
       this.source.set(result.source);
       this.unavailableReason.set(result.reason ?? null);
     } catch (err) {

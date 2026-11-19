@@ -82,6 +82,8 @@ pub enum StreamChunk {
         model: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        slash_commands: Option<Vec<speedwave_runtime::slash::SlashCommand>>,
     },
     RateLimit {
         status: String,
@@ -473,6 +475,7 @@ pub struct StreamParser {
     model_tracker: crate::session_model::SessionModelTracker,
     seen_unknown_types: std::collections::HashSet<String>,
     next_turn_origin: Option<TurnOrigin>,
+    slash_project: Option<speedwave_runtime::slash::ProjectHandle>,
 }
 
 const MAX_TRACKED_UNKNOWN_TYPES: usize = 32;
@@ -491,7 +494,15 @@ impl StreamParser {
             model_tracker: crate::session_model::SessionModelTracker::default(),
             seen_unknown_types: std::collections::HashSet::new(),
             next_turn_origin: None,
+            slash_project: None,
         }
+    }
+
+    pub(crate) fn set_slash_project(
+        &mut self,
+        project: Option<speedwave_runtime::slash::ProjectHandle>,
+    ) {
+        self.slash_project = project;
     }
 
     pub fn restore_session_snapshot(
@@ -1172,6 +1183,13 @@ impl StreamParser {
                 .as_str()
                 .filter(|s| !s.is_empty())
                 .map(String::from);
+            let slash_commands = self.slash_project.as_ref().and_then(|project| {
+                speedwave_runtime::slash::session_init_commands(
+                    parsed,
+                    project,
+                    consts::data_dir().as_path(),
+                )
+            });
             if let Some(model) = parsed["model"].as_str() {
                 if !model.is_empty() {
                     self.model_tracker.observe_init(model);
@@ -1183,6 +1201,7 @@ impl StreamParser {
                         Some(StreamChunk::SystemInit {
                             model: model.to_string(),
                             session_id,
+                            slash_commands,
                         }),
                         log_entry,
                     );
@@ -1193,6 +1212,7 @@ impl StreamParser {
                     Some(StreamChunk::SystemInit {
                         model: String::new(),
                         session_id,
+                        slash_commands,
                     }),
                     Some(LogEntry {
                         prefix: "SYSTEM",
@@ -2345,6 +2365,12 @@ impl ChatSession {
         let display_policy =
             crate::pii_display::load_display_policy(consts::data_dir(), &self.project_name);
 
+        let slash_project = crate::slash_cmd::project_handle(&self.project_name)
+            .inspect_err(|e| {
+                log::warn!("slash project for '{}' unavailable: {e}", self.project_name)
+            })
+            .ok();
+
         let resume_seed = resume_session_id.and_then(|id| {
             match history::compute_resume_snapshot(&self.project_name, id) {
                 Ok(s) => Some(s),
@@ -2357,6 +2383,7 @@ impl ChatSession {
 
         let h = std::thread::spawn(move || {
             let mut parser = StreamParser::new();
+            parser.set_slash_project(slash_project);
             if let Some(seed) = resume_seed {
                 parser.restore_resume_snapshot(seed);
             }
@@ -5394,6 +5421,7 @@ mod tests {
         vec![StreamChunk::SystemInit {
             model: model.to_string(),
             session_id: Some("sess-1".to_string()),
+            slash_commands: None,
         }]
     }
 
@@ -7999,7 +8027,9 @@ mod tests {
         let line = r#"{"type":"system","subtype":"init","model":"claude-opus-4-6"}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
-            StreamChunk::SystemInit { model, session_id } => {
+            StreamChunk::SystemInit {
+                model, session_id, ..
+            } => {
                 assert_eq!(model, "claude-opus-4-6");
                 assert!(session_id.is_none());
             }
@@ -8013,7 +8043,9 @@ mod tests {
         let line = r#"{"type":"system","subtype":"init","model":"claude-opus-4-6","session_id":"abc","tools":["Read","Write"],"mcp_servers":[],"message":""}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
-            StreamChunk::SystemInit { model, session_id } => {
+            StreamChunk::SystemInit {
+                model, session_id, ..
+            } => {
                 assert_eq!(model, "claude-opus-4-6");
                 assert_eq!(session_id.as_deref(), Some("abc"));
             }
@@ -8027,7 +8059,9 @@ mod tests {
         let line = r#"{"type":"system","subtype":"init","session_id":"abc"}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
-            StreamChunk::SystemInit { model, session_id } => {
+            StreamChunk::SystemInit {
+                model, session_id, ..
+            } => {
                 assert_eq!(model, "");
                 assert_eq!(session_id.as_deref(), Some("abc"));
             }
@@ -8263,6 +8297,7 @@ mod tests {
         let chunk = StreamChunk::SystemInit {
             model: "test".to_string(),
             session_id: None,
+            slash_commands: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         assert_eq!(
@@ -8271,7 +8306,9 @@ mod tests {
         );
         let deserialized: StreamChunk = serde_json::from_str(&json).unwrap();
         match deserialized {
-            StreamChunk::SystemInit { model, session_id } => {
+            StreamChunk::SystemInit {
+                model, session_id, ..
+            } => {
                 assert_eq!(model, "test");
                 assert!(session_id.is_none());
             }
@@ -8281,12 +8318,157 @@ mod tests {
         let chunk = StreamChunk::SystemInit {
             model: "test".to_string(),
             session_id: Some("abc".to_string()),
+            slash_commands: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         assert_eq!(
             json,
             r#"{"chunk_type":"SystemInit","data":{"model":"test","session_id":"abc"}}"#
         );
+    }
+
+    fn init_line_with_commands(commands: &[&str]) -> serde_json::Value {
+        serde_json::json!({
+            "type": "system",
+            "subtype": "init",
+            "session_id": "abc",
+            "model": "claude-opus-4-6",
+            "slash_commands": commands,
+            "plugins": [],
+            "agents": [],
+        })
+    }
+
+    fn system_init_commands(
+        chunk: StreamChunk,
+    ) -> Option<Vec<speedwave_runtime::slash::SlashCommand>> {
+        match chunk {
+            StreamChunk::SystemInit { slash_commands, .. } => slash_commands,
+            other => panic!("expected SystemInit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_system_init_carries_the_session_slash_commands() {
+        let project_dir = tempfile::tempdir().unwrap();
+        let mut parser = StreamParser::new();
+        parser.set_slash_project(Some(speedwave_runtime::slash::ProjectHandle::new(
+            "acme",
+            project_dir.path(),
+        )));
+        let (chunk, _) =
+            parser.parse_system_message(&init_line_with_commands(&["clear", "doctor", "simplify"]));
+        let commands = system_init_commands(chunk.unwrap()).expect("init list");
+        let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["clear", "simplify"]);
+    }
+
+    #[test]
+    fn parse_system_init_without_a_slash_project_carries_no_list() {
+        let mut parser = StreamParser::new();
+        let (chunk, _) = parser.parse_system_message(&init_line_with_commands(&["clear"]));
+        assert!(system_init_commands(chunk.unwrap()).is_none());
+    }
+
+    #[test]
+    fn parse_system_init_without_a_slash_commands_key_carries_no_list() {
+        let project_dir = tempfile::tempdir().unwrap();
+        let mut parser = StreamParser::new();
+        parser.set_slash_project(Some(speedwave_runtime::slash::ProjectHandle::new(
+            "acme",
+            project_dir.path(),
+        )));
+        let (chunk, _) = parser.parse_system_message(&serde_json::json!({
+            "type": "system",
+            "subtype": "init",
+            "session_id": "abc",
+            "model": "claude-opus-4-6",
+        }));
+        assert!(system_init_commands(chunk.unwrap()).is_none());
+    }
+
+    #[test]
+    fn parse_system_init_keeps_the_list_when_the_model_is_missing() {
+        let project_dir = tempfile::tempdir().unwrap();
+        let mut parser = StreamParser::new();
+        parser.set_slash_project(Some(speedwave_runtime::slash::ProjectHandle::new(
+            "acme",
+            project_dir.path(),
+        )));
+        let (chunk, _) = parser.parse_system_message(&serde_json::json!({
+            "type": "system",
+            "subtype": "init",
+            "session_id": "abc",
+            "slash_commands": ["simplify"],
+        }));
+        let commands = system_init_commands(chunk.unwrap()).expect("init list");
+        assert_eq!(commands.len(), 1);
+    }
+
+    #[test]
+    fn stream_chunk_system_init_slash_commands_round_trip() {
+        let chunk = StreamChunk::SystemInit {
+            model: "test".to_string(),
+            session_id: None,
+            slash_commands: Some(vec![speedwave_runtime::slash::SlashCommand {
+                name: "simplify".to_string(),
+                description: None,
+                argument_hint: None,
+                kind: speedwave_runtime::slash::SlashKind::Command,
+                plugin: None,
+            }]),
+        };
+        let json = serde_json::to_value(&chunk).unwrap();
+        assert_eq!(json["data"]["slash_commands"][0]["name"], "simplify");
+        let back: StreamChunk = serde_json::from_value(json).unwrap();
+        assert_eq!(system_init_commands(back).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn system_init_chunk_fields_match_ts_mirror() {
+        let ts = include_str!("../../src/src/app/models/chat.ts");
+        let marker = "chunk_type: 'SystemInit';";
+        let idx = ts
+            .find(marker)
+            .expect("chat.ts must declare the SystemInit arm");
+        let arm = &ts[idx..ts[idx..].find("\n  |").map_or(ts.len(), |end| idx + end)];
+        let chunk = StreamChunk::SystemInit {
+            model: "m".to_string(),
+            session_id: Some("s".to_string()),
+            slash_commands: Some(Vec::new()),
+        };
+        let json = serde_json::to_value(&chunk).unwrap();
+        let mut rust: Vec<&str> = json["data"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        rust.sort_unstable();
+        for field in rust {
+            assert!(
+                arm.contains(&format!("{field}?: ")) || arm.contains(&format!("{field}: ")),
+                "the TS SystemInit arm must declare `{field}`: {arm}"
+            );
+        }
+    }
+
+    #[test]
+    fn slash_command_fields_match_ts_mirror() {
+        let ts = include_str!("../../src/src/app/chat/slash/slash.service.ts");
+        let mut ts_fields: Vec<&str> = crate::ts_mirror::ts_interface_fields(ts, "SlashCommand")
+            .into_iter()
+            .map(|field| field.trim_start_matches("readonly "))
+            .collect();
+        ts_fields.sort_unstable();
+        let sample = speedwave_runtime::slash::SlashCommand {
+            name: "x".to_string(),
+            description: None,
+            argument_hint: None,
+            kind: speedwave_runtime::slash::SlashKind::Command,
+            plugin: None,
+        };
+        assert_eq!(crate::ts_mirror::rust_fields(&sample), ts_fields);
     }
 
     #[test]

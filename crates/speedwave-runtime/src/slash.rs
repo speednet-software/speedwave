@@ -111,6 +111,20 @@ pub fn discover_slash_commands(
     discover_slash_commands_with_timeout(runtime, project, DISCOVERY_TIMEOUT)
 }
 
+/// Commands for one live session, from its `system/init` event. Names the
+/// session reports are shown even without a file on disk; hidden native
+/// commands and `user-invocable: false` entries are dropped. `None` when
+/// `init` is not an init event with a `slash_commands` list.
+pub fn session_init_commands(
+    init: &serde_json::Value,
+    project: &ProjectHandle,
+    data_dir: &Path,
+) -> Option<Vec<SlashCommand>> {
+    init.get("slash_commands")?.as_array()?;
+    let raw = parse_init_value(init)?;
+    Some(enrich_and_filter(raw, project, data_dir, UnlistedNames::Keep).commands)
+}
+
 fn discover_slash_commands_with_timeout(
     runtime: &crate::runtime::LockedRuntime,
     project: &ProjectHandle,
@@ -128,7 +142,12 @@ fn discover_slash_commands_with_timeout(
 
     match outcome {
         Ok(raw) => {
-            let discovery = enrich_and_filter(raw, project, consts::data_dir().as_path());
+            let discovery = enrich_and_filter(
+                raw,
+                project,
+                consts::data_dir().as_path(),
+                UnlistedNames::Drop,
+            );
             cache_put(&project.name, generation, discovery.clone());
             Ok(discovery)
         }
@@ -370,6 +389,10 @@ fn parse_init_line(line: &str) -> Option<RawDiscovery> {
         return None;
     }
     let value: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    parse_init_value(&value)
+}
+
+fn parse_init_value(value: &serde_json::Value) -> Option<RawDiscovery> {
     let obj = value.as_object()?;
     if obj.get("type")?.as_str()? != "system" {
         return None;
@@ -579,10 +602,17 @@ fn linked_resource_dirs(data_dir: &Path, enabled_plugins: &[String]) -> Vec<Path
     .collect()
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UnlistedNames {
+    Drop,
+    Keep,
+}
+
 fn enrich_and_filter(
     raw: RawDiscovery,
     project: &ProjectHandle,
     data_dir: &Path,
+    unlisted: UnlistedNames,
 ) -> SlashDiscovery {
     let project_dir = project.dir.as_path();
     let resource_dirs = linked_resource_dirs(data_dir, &project.enabled_plugins);
@@ -653,6 +683,8 @@ fn enrich_and_filter(
                 SlashKind::Command
             };
             (fm, kind)
+        } else if unlisted == UnlistedNames::Keep {
+            (frontmatter, kind)
         } else {
             continue;
         };
@@ -1198,7 +1230,12 @@ mod tests {
             plugins: vec![],
             agents: vec!["code-review".into()],
         };
-        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
+        let d = enrich_and_filter(
+            raw,
+            &test_project(tmp.path()),
+            data_tmp.path(),
+            UnlistedNames::Drop,
+        );
         let names: Vec<&str> = d.commands.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(
             names,
@@ -1230,7 +1267,12 @@ mod tests {
             ..RawDiscovery::default()
         };
         let data_tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
+        let d = enrich_and_filter(
+            raw,
+            &test_project(tmp.path()),
+            data_tmp.path(),
+            UnlistedNames::Drop,
+        );
         let names: Vec<&str> = d.commands.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, vec!["visible"]);
     }
@@ -1251,7 +1293,12 @@ mod tests {
             ..RawDiscovery::default()
         };
         let data_tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
+        let d = enrich_and_filter(
+            raw,
+            &test_project(tmp.path()),
+            data_tmp.path(),
+            UnlistedNames::Drop,
+        );
         assert_eq!(d.commands.len(), 1);
         assert_eq!(d.commands[0].name, "user-only");
         assert_eq!(d.commands[0].description.as_deref(), Some("user only"));
@@ -1273,7 +1320,12 @@ mod tests {
             ..RawDiscovery::default()
         };
         let data_tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
+        let d = enrich_and_filter(
+            raw,
+            &test_project(tmp.path()),
+            data_tmp.path(),
+            UnlistedNames::Drop,
+        );
         assert_eq!(d.commands.len(), 1);
         assert_eq!(d.commands[0].description.as_deref(), Some("from project"));
     }
@@ -1294,7 +1346,12 @@ mod tests {
             ..RawDiscovery::default()
         };
         let data_tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
+        let d = enrich_and_filter(
+            raw,
+            &test_project(tmp.path()),
+            data_tmp.path(),
+            UnlistedNames::Drop,
+        );
         assert_eq!(d.commands.len(), 1);
         assert_eq!(d.commands[0].name, "model");
         assert_eq!(d.commands[0].kind, SlashKind::Builtin);
@@ -1313,7 +1370,12 @@ mod tests {
             ..RawDiscovery::default()
         };
         let data_tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
+        let d = enrich_and_filter(
+            raw,
+            &test_project(tmp.path()),
+            data_tmp.path(),
+            UnlistedNames::Drop,
+        );
         assert_eq!(d.commands.len(), 1);
         assert_eq!(
             d.commands[0].description.as_deref(),
@@ -1337,7 +1399,12 @@ mod tests {
             ..RawDiscovery::default()
         };
         let data_tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
+        let d = enrich_and_filter(
+            raw,
+            &test_project(tmp.path()),
+            data_tmp.path(),
+            UnlistedNames::Drop,
+        );
         assert!(
             d.commands.is_empty(),
             "expected 'model' to be hidden by on-disk user-invocable: false, got {:?}",
@@ -1361,7 +1428,12 @@ mod tests {
             }],
             agents: vec!["code-review".into()],
         };
-        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
+        let d = enrich_and_filter(
+            raw,
+            &test_project(tmp.path()),
+            data_tmp.path(),
+            UnlistedNames::Drop,
+        );
         let by_name: HashMap<&str, &SlashCommand> =
             d.commands.iter().map(|c| (c.name.as_str(), c)).collect();
 
@@ -1380,7 +1452,12 @@ mod tests {
         };
         let tmp = tempfile::tempdir().unwrap();
         let data_tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
+        let d = enrich_and_filter(
+            raw,
+            &test_project(tmp.path()),
+            data_tmp.path(),
+            UnlistedNames::Drop,
+        );
         assert_eq!(d.commands.len(), 1);
     }
 
@@ -2019,7 +2096,12 @@ mod tests {
             agents: vec![],
         };
         let data_tmp = tempfile::tempdir().unwrap();
-        let discovery = enrich_and_filter(raw, &test_project(&project), data_tmp.path());
+        let discovery = enrich_and_filter(
+            raw,
+            &test_project(&project),
+            data_tmp.path(),
+            UnlistedNames::Drop,
+        );
         assert_eq!(discovery.commands.len(), 1);
         assert_eq!(discovery.commands[0].kind, SlashKind::Skill);
     }
@@ -2032,7 +2114,12 @@ mod tests {
         };
         let tmp = tempfile::tempdir().unwrap();
         let data_tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
+        let d = enrich_and_filter(
+            raw,
+            &test_project(tmp.path()),
+            data_tmp.path(),
+            UnlistedNames::Drop,
+        );
         assert_eq!(d.commands.len(), 1);
         assert_eq!(d.commands[0].kind, SlashKind::Builtin);
         assert!(!d.commands[0]
@@ -2050,7 +2137,12 @@ mod tests {
         };
         let tmp = tempfile::tempdir().unwrap();
         let data_tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
+        let d = enrich_and_filter(
+            raw,
+            &test_project(tmp.path()),
+            data_tmp.path(),
+            UnlistedNames::Drop,
+        );
         assert!(d.commands.is_empty());
     }
 
@@ -2062,8 +2154,135 @@ mod tests {
         };
         let tmp = tempfile::tempdir().unwrap();
         let data_tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
+        let d = enrich_and_filter(
+            raw,
+            &test_project(tmp.path()),
+            data_tmp.path(),
+            UnlistedNames::Drop,
+        );
         assert!(d.commands.is_empty());
+    }
+
+    fn session_init(slash_commands: &[&str], agents: &[&str]) -> serde_json::Value {
+        serde_json::json!({
+            "type": "system",
+            "subtype": "init",
+            "session_id": "s-1",
+            "slash_commands": slash_commands,
+            "plugins": [],
+            "agents": agents,
+        })
+    }
+
+    fn init_names(commands: &[SlashCommand]) -> Vec<&str> {
+        commands.iter().map(|c| c.name.as_str()).collect()
+    }
+
+    #[test]
+    fn session_init_commands_reads_commands_plugins_and_agents() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_tmp = tempfile::tempdir().unwrap();
+        let init = serde_json::json!({
+            "type": "system",
+            "subtype": "init",
+            "slash_commands": ["clear", "redmine:ticket"],
+            "plugins": [{"name": "redmine", "path": "/opt/plugins/redmine"}],
+            "agents": ["code-review"],
+        });
+        let commands =
+            session_init_commands(&init, &test_project(tmp.path()), data_tmp.path()).unwrap();
+        let by_name: HashMap<&str, &SlashCommand> =
+            commands.iter().map(|c| (c.name.as_str(), c)).collect();
+        assert_eq!(by_name["clear"].kind, SlashKind::Builtin);
+        assert_eq!(by_name["redmine:ticket"].kind, SlashKind::Plugin);
+        assert_eq!(by_name["redmine:ticket"].plugin.as_deref(), Some("redmine"));
+        assert_eq!(by_name["code-review"].kind, SlashKind::Agent);
+    }
+
+    #[test]
+    fn session_init_commands_keeps_a_built_in_name_without_a_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_tmp = tempfile::tempdir().unwrap();
+        let init = session_init(&["simplify", "loop"], &[]);
+        let commands =
+            session_init_commands(&init, &test_project(tmp.path()), data_tmp.path()).unwrap();
+        assert_eq!(init_names(&commands), vec!["loop", "simplify"]);
+        assert!(commands.iter().all(|c| c.kind == SlashKind::Command));
+        assert!(commands.iter().all(|c| c.description.is_none()));
+    }
+
+    #[test]
+    fn session_init_commands_describes_a_name_found_on_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join(".claude/skills/my-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: does a thing\n---\nbody\n",
+        )
+        .unwrap();
+        let data_tmp = tempfile::tempdir().unwrap();
+        let init = session_init(&["my-skill"], &[]);
+        let commands =
+            session_init_commands(&init, &test_project(tmp.path()), data_tmp.path()).unwrap();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].kind, SlashKind::Skill);
+        assert_eq!(commands[0].description.as_deref(), Some("does a thing"));
+    }
+
+    #[test]
+    fn session_init_commands_drops_hidden_natives() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_tmp = tempfile::tempdir().unwrap();
+        let init = session_init(&["clear", "doctor", "config", "mcp"], &[]);
+        let commands =
+            session_init_commands(&init, &test_project(tmp.path()), data_tmp.path()).unwrap();
+        assert_eq!(init_names(&commands), vec!["clear"]);
+    }
+
+    #[test]
+    fn session_init_commands_drops_user_invocable_false() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join(".claude/skills/model-only");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nuser-invocable: false\ndescription: model-only\n---\nbody\n",
+        )
+        .unwrap();
+        let data_tmp = tempfile::tempdir().unwrap();
+        let init = session_init(&["model-only", "simplify"], &[]);
+        let commands =
+            session_init_commands(&init, &test_project(tmp.path()), data_tmp.path()).unwrap();
+        assert_eq!(init_names(&commands), vec!["simplify"]);
+    }
+
+    #[test]
+    fn session_init_commands_is_none_without_a_slash_commands_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_tmp = tempfile::tempdir().unwrap();
+        let bare = serde_json::json!({"type": "system", "subtype": "init"});
+        assert!(session_init_commands(&bare, &test_project(tmp.path()), data_tmp.path()).is_none());
+    }
+
+    #[test]
+    fn session_init_commands_is_none_for_a_non_init_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_tmp = tempfile::tempdir().unwrap();
+        let other = serde_json::json!({"type": "system", "subtype": "task_started", "slash_commands": ["x"]});
+        assert!(
+            session_init_commands(&other, &test_project(tmp.path()), data_tmp.path()).is_none()
+        );
+    }
+
+    #[test]
+    fn session_init_commands_keeps_an_empty_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_tmp = tempfile::tempdir().unwrap();
+        let init = session_init(&[], &[]);
+        let commands =
+            session_init_commands(&init, &test_project(tmp.path()), data_tmp.path()).unwrap();
+        assert!(commands.is_empty());
     }
 
     #[test]
@@ -2078,7 +2297,12 @@ mod tests {
         };
         let tmp = tempfile::tempdir().unwrap();
         let data_tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
+        let d = enrich_and_filter(
+            raw,
+            &test_project(tmp.path()),
+            data_tmp.path(),
+            UnlistedNames::Drop,
+        );
         let names: Vec<&str> = d.commands.iter().map(|c| c.name.as_str()).collect();
         assert!(names.contains(&"redmine:ticket"));
         assert!(names.contains(&"my-agent"));
@@ -2106,7 +2330,12 @@ mod tests {
             ..RawDiscovery::default()
         };
         let tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
+        let d = enrich_and_filter(
+            raw,
+            &test_project(tmp.path()),
+            data_tmp.path(),
+            UnlistedNames::Drop,
+        );
         assert!(d.commands.is_empty());
     }
 
@@ -2128,7 +2357,12 @@ mod tests {
             ..RawDiscovery::default()
         };
         let tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
+        let d = enrich_and_filter(
+            raw,
+            &test_project(tmp.path()),
+            data_tmp.path(),
+            UnlistedNames::Drop,
+        );
         assert_eq!(d.commands.len(), 1);
         assert_eq!(d.commands[0].kind, SlashKind::Skill);
         assert_eq!(d.commands[0].description.as_deref(), Some("redmine skill"));
@@ -2195,6 +2429,7 @@ mod tests {
             discover_names(&["glpi-operations"]),
             &with_plugins(tmp.path(), &["glpi"]),
             data_tmp.path(),
+            UnlistedNames::Drop,
         );
 
         assert_eq!(d.commands.len(), 1, "got {:?}", d.commands);
@@ -2220,6 +2455,7 @@ mod tests {
             discover_names(&["presale"]),
             &with_plugins(tmp.path(), &["presale"]),
             data_tmp.path(),
+            UnlistedNames::Drop,
         );
 
         assert_eq!(d.commands.len(), 1, "got {:?}", d.commands);
@@ -2247,6 +2483,7 @@ mod tests {
             discover_names(&["presale-add"]),
             &with_plugins(tmp.path(), &["presale"]),
             data_tmp.path(),
+            UnlistedNames::Drop,
         );
 
         assert!(d.commands.is_empty(), "got {:?}", d.commands);
@@ -2268,6 +2505,7 @@ mod tests {
             discover_names(&["glpi-operations"]),
             &with_plugins(tmp.path(), &["presale"]),
             data_tmp.path(),
+            UnlistedNames::Drop,
         );
 
         assert!(d.commands.is_empty(), "got {:?}", d.commands);
@@ -2294,6 +2532,7 @@ mod tests {
             discover_names(&["shared"]),
             &test_project(tmp.path()),
             data_tmp.path(),
+            UnlistedNames::Drop,
         );
 
         assert_eq!(d.commands.len(), 1, "got {:?}", d.commands);
@@ -2321,6 +2560,7 @@ mod tests {
             discover_names(&["shared"]),
             &with_plugins(tmp.path(), &["extra"]),
             data_tmp.path(),
+            UnlistedNames::Drop,
         );
 
         assert_eq!(d.commands.len(), 1, "got {:?}", d.commands);
@@ -2345,6 +2585,7 @@ mod tests {
             discover_names(&["shared"]),
             &with_plugins(tmp.path(), &["alpha", "zeta"]),
             data_tmp.path(),
+            UnlistedNames::Drop,
         );
 
         assert_eq!(d.commands.len(), 1, "got {:?}", d.commands);
@@ -2377,7 +2618,12 @@ mod tests {
         };
         let tmp = tempfile::tempdir().unwrap();
 
-        let d = enrich_and_filter(raw, &with_plugins(tmp.path(), &["extra"]), data_tmp.path());
+        let d = enrich_and_filter(
+            raw,
+            &with_plugins(tmp.path(), &["extra"]),
+            data_tmp.path(),
+            UnlistedNames::Drop,
+        );
 
         assert_eq!(d.commands.len(), 1, "got {:?}", d.commands);
         assert_eq!(d.commands[0].name, "superpowers:review");
@@ -2400,6 +2646,7 @@ mod tests {
             discover_names(&["my-own"]),
             &test_project(tmp.path()),
             data_tmp.path(),
+            UnlistedNames::Drop,
         );
 
         assert_eq!(d.commands.len(), 1, "got {:?}", d.commands);
@@ -2432,6 +2679,7 @@ mod tests {
             discover_names(&["shared"]),
             &with_plugins(tmp.path(), &["extra"]),
             data_tmp.path(),
+            UnlistedNames::Drop,
         );
 
         assert_eq!(d.commands.len(), 1, "got {:?}", d.commands);
@@ -2448,6 +2696,7 @@ mod tests {
             discover_names(&["theirs"]),
             &test_project(tmp.path()),
             data_tmp.path(),
+            UnlistedNames::Drop,
         );
 
         assert!(d.commands.is_empty(), "got {:?}", d.commands);
@@ -2471,6 +2720,7 @@ mod tests {
             discover_names(&["linked-only"]),
             &test_project(tmp.path()),
             data_tmp.path(),
+            UnlistedNames::Drop,
         );
 
         assert!(d.commands.is_empty(), "got {:?}", d.commands);
@@ -2501,6 +2751,7 @@ mod tests {
             discover_names(&["unsigned-skill"]),
             &with_plugins(tmp.path(), &["unsigned"]),
             data_tmp.path(),
+            UnlistedNames::Drop,
         );
 
         assert!(d.commands.is_empty(), "got {:?}", d.commands);
@@ -2519,6 +2770,7 @@ mod tests {
             discover_names(&["../outside"]),
             &test_project(tmp.path()),
             data_tmp.path(),
+            UnlistedNames::Drop,
         );
 
         assert!(d.commands.is_empty(), "got {:?}", d.commands);
@@ -2541,6 +2793,7 @@ mod tests {
             discover_names(&["long"]),
             &test_project(tmp.path()),
             data_tmp.path(),
+            UnlistedNames::Drop,
         );
 
         assert_eq!(d.commands.len(), 1, "got {:?}", d.commands);
