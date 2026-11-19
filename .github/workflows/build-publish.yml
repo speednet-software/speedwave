@@ -274,13 +274,24 @@ jobs:
           Compress-Archive -Path "desktop/src-tauri/cli/speedwave.exe" -DestinationPath $archiveName
           "ARCHIVE_NAME=$archiveName" | Out-File -FilePath $env:GITHUB_ENV -Append
 
+      - name: Sign CLI archive
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          npx --prefix desktop/src tauri signer sign --app-version "$VERSION" "$ARCHIVE_NAME"
+          test -s "$ARCHIVE_NAME.sig"
+
       - name: Upload CLI to release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GH_AUTOMATION_PAT }}
           TAG_NAME: ${{ inputs.tag }}
           REPO: ${{ github.repository }}
-        run: gh release upload "$TAG_NAME" "$ARCHIVE_NAME" --repo "$REPO" --clobber
+        run: gh release upload "$TAG_NAME" "$ARCHIVE_NAME" "$ARCHIVE_NAME.sig" --repo "$REPO" --clobber
 
       - name: Clean the cargo target directory before the cache is saved
         if: matrix.platform == 'windows-latest' && (github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/release/'))

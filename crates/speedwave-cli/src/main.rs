@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod paste_watcher;
+mod release_signature;
 mod terminal_restore;
 
 const START_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -196,6 +197,8 @@ fn parse_action(args: &[String]) -> Result<CliAction, String> {
 
 const REPO_OWNER: &str = "speednet-software";
 const REPO_NAME: &str = "speedwave";
+const GITHUB_API_URL: &str = "https://api.github.com";
+const MAX_SIGNATURE_BYTES: u64 = 4096;
 const UPDATE_CHECK_INTERVAL_SECS: u64 =
     speedwave_runtime::consts::UPDATE_CHECK_INTERVAL_HOURS as u64 * 3600;
 
@@ -335,15 +338,13 @@ fn run_self_update() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let status = self_update::backends::github::Update::configure()
-        .repo_owner(REPO_OWNER)
-        .repo_name(REPO_NAME)
-        .bin_name(consts::CLI_BINARY)
-        .show_download_progress(true)
-        .current_version(current)
-        .release_tag(&target_tag)
-        .build()?
-        .update()?;
+    let status = install_verified_release(
+        GITHUB_API_URL,
+        &exe_path,
+        &target_tag,
+        release_signature::UPDATER_PUBKEY,
+        false,
+    )?;
 
     write_update_cache(&UpdateCheckCache {
         last_check: now_secs(),
@@ -378,6 +379,65 @@ fn run_self_update() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn install_verified_release(
+    api_base_url: &str,
+    install_path: &std::path::Path,
+    tag: &str,
+    pubkey: &str,
+    no_confirm: bool,
+) -> anyhow::Result<self_update::VersionStatus> {
+    let mut updater = self_update::backends::github::Update::configure();
+    updater
+        .api_base_url(api_base_url)
+        .repo_owner(REPO_OWNER)
+        .repo_name(REPO_NAME)
+        .bin_name(consts::CLI_BINARY)
+        .bin_install_path(install_path)
+        .no_confirm(no_confirm)
+        .show_download_progress(true)
+        .current_version(env!("SPEEDWAVE_VERSION"))
+        .release_tag(tag)
+        .asset_matcher(|assets| {
+            release_signature::archive_asset(assets, self_update::get_target())
+        });
+
+    let release = updater.build()?.get_release_version(tag)?;
+    let signature = fetch_release_signature(release.assets())?;
+    let signed_version = tag.trim_start_matches('v').to_string();
+    let pubkey = pubkey.to_string();
+
+    let status = updater
+        .verify_archive(move |archive: &std::path::Path| {
+            release_signature::verify_archive(archive, &signature, &pubkey, &signed_version)
+                .map_err(|e| self_update::Error::archive_verification_rejected(format!("{e:#}")))
+        })
+        .build()?
+        .update()?;
+    Ok(status)
+}
+
+fn fetch_release_signature(assets: &[self_update::update::ReleaseAsset]) -> anyhow::Result<String> {
+    let target = self_update::get_target();
+    let archive = release_signature::archive_asset(assets, target)
+        .ok_or_else(|| anyhow::anyhow!("The release has no CLI archive for {target}."))?;
+    let signature_asset =
+        release_signature::signature_asset(assets, &archive).ok_or_else(|| {
+            anyhow::anyhow!(
+                "The release has no signature for {}; refusing to install an unsigned archive.",
+                archive.name()
+            )
+        })?;
+
+    let mut body = Vec::new();
+    self_update::Download::from_url(signature_asset.download_url())
+        .request_header("Accept", "application/octet-stream")
+        .max_download_size(MAX_SIGNATURE_BYTES)
+        .download_to(&mut body)
+        .map_err(|e| anyhow::anyhow!("Failed to download {}: {e}", signature_asset.name()))?;
+    String::from_utf8(body)
+        .map_err(|_| anyhow::anyhow!("{} is not valid UTF-8.", signature_asset.name()))
 }
 
 fn target_release_tag(channel: UpdateChannel) -> anyhow::Result<String> {
@@ -1211,6 +1271,26 @@ fn resolve_project_fallback(user_config: &config::SpeedwaveUserConfig) -> anyhow
 )]
 mod tests {
     use super::*;
+
+    const FIXTURE_PUBKEY: &str = include_str!("../test-fixtures/release-signature/public-key.txt");
+    const FIXTURE_OTHER_PUBKEY: &str =
+        include_str!("../test-fixtures/release-signature/other-public-key.txt");
+    const FIXTURE_TAG: &str = "v1.2.3";
+    const FIXTURE_BINARY: &[u8] = b"#!/bin/sh\necho speedwave-test-binary\n";
+    const INSTALLED_BINARY: &[u8] = b"installed binary";
+
+    #[cfg(not(windows))]
+    const FIXTURE_ARCHIVE: &[u8] =
+        include_bytes!("../test-fixtures/release-signature/archive.tar.gz");
+    #[cfg(not(windows))]
+    const FIXTURE_SIGNATURE: &str =
+        include_str!("../test-fixtures/release-signature/archive.tar.gz.sig");
+    #[cfg(windows)]
+    const FIXTURE_ARCHIVE: &[u8] =
+        include_bytes!("../test-fixtures/release-signature/archive-windows.tar.gz");
+    #[cfg(windows)]
+    const FIXTURE_SIGNATURE: &str =
+        include_str!("../test-fixtures/release-signature/archive-windows.tar.gz.sig");
 
     #[test]
     fn cli_bare_run_syncs_resources_when_images_rebuilt() {
@@ -2134,52 +2214,6 @@ mod tests {
     }
 
     #[test]
-    fn run_self_update_resolves_target_tag_before_building() {
-        let source = include_str!("main.rs");
-        let fn_body = extract_fn_body(source, "fn run_self_update(");
-        let channel_read = fn_body
-            .find("read_update_channel()")
-            .expect("run_self_update must read the installation channel");
-        let tag_resolution = fn_body
-            .find("target_release_tag(")
-            .expect("run_self_update must resolve a target release tag");
-        let release_tag_call = fn_body
-            .find(".release_tag(")
-            .expect("run_self_update must pass release_tag to self_update");
-        let build_call = fn_body
-            .find(".build()?")
-            .expect("run_self_update must call .build()");
-        assert!(
-            channel_read < tag_resolution,
-            "the channel must be read before resolving a tag"
-        );
-        assert!(
-            tag_resolution < release_tag_call,
-            "the resolved tag must be passed to release_tag"
-        );
-        assert!(
-            release_tag_call < build_call,
-            "release_tag must be set before build()"
-        );
-    }
-
-    #[test]
-    fn run_self_update_blocks_downgrade_before_configuring_self_update() {
-        let source = include_str!("main.rs");
-        let fn_body = extract_fn_body(source, "fn run_self_update(");
-        let newer_check = fn_body
-            .find("tag_is_newer_than(")
-            .expect("run_self_update must gate on tag_is_newer_than before installing");
-        let configure_call = fn_body
-            .find("self_update::backends::github::Update::configure()")
-            .expect("run_self_update must configure self_update");
-        assert!(
-            newer_check < configure_call,
-            "the no-downgrade check must run before self_update is configured"
-        );
-    }
-
-    #[test]
     fn tag_is_newer_than_reports_a_higher_version_tag_as_newer() {
         assert!(tag_is_newer_than("0.21.0", "v0.22.0+41").unwrap());
     }
@@ -2874,32 +2908,6 @@ mod tests {
     }
 
     #[test]
-    fn test_self_update_captures_exe_before_update() {
-        let source = include_str!("main.rs");
-        let fn_body = extract_fn_body(source, "fn run_self_update(");
-
-        let exe_capture = fn_body
-            .find("current_exe()")
-            .expect("run_self_update must call current_exe()");
-        let update_call = fn_body
-            .find(".update()")
-            .expect("run_self_update must call .update()");
-        let rebuild_call = fn_body
-            .find("run_rebuild(")
-            .expect("run_self_update must call run_rebuild()");
-
-        assert!(
-            exe_capture < update_call,
-            "current_exe() must be captured BEFORE .update() call \
-             (Linux /proc/self/exe points to deleted inode after rename)"
-        );
-        assert!(
-            update_call < rebuild_call,
-            "run_rebuild must be called AFTER .update()"
-        );
-    }
-
-    #[test]
     fn test_self_update_does_not_propagate_rebuild_error() {
         let source = include_str!("main.rs");
         let fn_body = extract_fn_body(source, "fn run_self_update(");
@@ -3086,5 +3094,118 @@ mod tests {
                  or a concurrent config writer can lose this update"
             );
         }
+    }
+
+    fn install_from_mock_release(
+        archive: &[u8],
+        signature: Option<&str>,
+        pubkey: &str,
+    ) -> (anyhow::Result<self_update::VersionStatus>, Vec<u8>) {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir
+            .path()
+            .join(format!("speedwave{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&destination, INSTALLED_BINARY).unwrap();
+        let mut server = mockito::Server::new();
+        let _mocks = mock_release(&mut server, archive, signature);
+
+        let result =
+            install_verified_release(&server.url(), &destination, FIXTURE_TAG, pubkey, true);
+        (result, std::fs::read(&destination).unwrap())
+    }
+
+    fn mock_release(
+        server: &mut mockito::ServerGuard,
+        archive: &[u8],
+        signature: Option<&str>,
+    ) -> Vec<mockito::Mock> {
+        let archive_name = format!(
+            "speedwave-{FIXTURE_TAG}-{}.tar.gz",
+            self_update::get_target()
+        );
+        let mut assets = Vec::new();
+        let mut mocks = Vec::new();
+        if let Some(signature) = signature {
+            assets.push(serde_json::json!({
+                "name": format!("{archive_name}.sig"),
+                "url": format!("{}/assets/signature", server.url()),
+            }));
+            mocks.push(
+                server
+                    .mock("GET", "/assets/signature")
+                    .match_header("accept", "application/octet-stream")
+                    .with_status(200)
+                    .with_body(signature)
+                    .create(),
+            );
+        }
+        assets.push(serde_json::json!({
+            "name": archive_name,
+            "url": format!("{}/assets/archive", server.url()),
+        }));
+        mocks.push(
+            server
+                .mock("GET", "/assets/archive")
+                .match_header("accept", "application/octet-stream")
+                .with_status(200)
+                .with_body(archive)
+                .create(),
+        );
+        let release = serde_json::json!({
+            "tag_name": FIXTURE_TAG,
+            "created_at": "2026-01-01T00:00:00Z",
+            "name": FIXTURE_TAG,
+            "assets": assets,
+        });
+        let tag_path = format!("/repos/{REPO_OWNER}/{REPO_NAME}/releases/tags/{FIXTURE_TAG}");
+        mocks.push(
+            server
+                .mock("GET", tag_path.as_str())
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(release.to_string())
+                .create(),
+        );
+        mocks
+    }
+
+    #[test]
+    fn install_verified_release_replaces_the_binary_with_a_correctly_signed_archive() {
+        let (result, destination) =
+            install_from_mock_release(FIXTURE_ARCHIVE, Some(FIXTURE_SIGNATURE), FIXTURE_PUBKEY);
+        assert!(result.unwrap().is_updated());
+        assert_eq!(destination, FIXTURE_BINARY);
+    }
+
+    #[test]
+    fn install_verified_release_keeps_the_binary_when_the_archive_changed_after_signing() {
+        let mut tampered = FIXTURE_ARCHIVE.to_vec();
+        tampered.push(0);
+        let (result, destination) =
+            install_from_mock_release(&tampered, Some(FIXTURE_SIGNATURE), FIXTURE_PUBKEY);
+        let err = format!("{:#}", result.err().unwrap());
+        assert!(err.contains("does not match its signature"), "{err}");
+        assert_eq!(destination, INSTALLED_BINARY);
+    }
+
+    #[test]
+    fn install_verified_release_keeps_the_binary_when_the_signature_is_from_another_key() {
+        let (result, destination) = install_from_mock_release(
+            FIXTURE_ARCHIVE,
+            Some(FIXTURE_SIGNATURE),
+            FIXTURE_OTHER_PUBKEY,
+        );
+        let err = format!("{:#}", result.err().unwrap());
+        assert!(err.contains("different key"), "{err}");
+        assert_eq!(destination, INSTALLED_BINARY);
+    }
+
+    #[test]
+    fn install_verified_release_keeps_the_binary_when_the_release_has_no_signature() {
+        let (result, destination) =
+            install_from_mock_release(FIXTURE_ARCHIVE, None, FIXTURE_PUBKEY);
+        let err = format!("{:#}", result.err().unwrap());
+        assert!(err.contains("no signature"), "{err}");
+        assert_eq!(destination, INSTALLED_BINARY);
     }
 }
