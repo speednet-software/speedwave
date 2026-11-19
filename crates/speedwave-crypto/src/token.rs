@@ -3,6 +3,7 @@ use crate::hex;
 use crate::key::Key;
 use hkdf::Hkdf;
 use sha2::Sha256;
+use zeroize::Zeroizing;
 
 const INFO_PREFIX: &[u8] = b"speedwave-token-v1";
 
@@ -18,10 +19,10 @@ pub fn derive_token(
         push_length_prefixed(&mut info, part.as_bytes())?;
     }
     let hkdf = Hkdf::<Sha256>::new(None, key.as_bytes());
-    let mut okm = [0u8; 32];
-    hkdf.expand(&info, &mut okm)
+    let mut okm = Zeroizing::new([0u8; 32]);
+    hkdf.expand(&info, okm.as_mut_slice())
         .map_err(|_| CryptoError::Crypto)?;
-    Ok(hex::encode(&okm))
+    Ok(hex::encode(okm.as_slice()))
 }
 
 fn push_length_prefixed(info: &mut Vec<u8>, part: &[u8]) -> Result<(), CryptoError> {

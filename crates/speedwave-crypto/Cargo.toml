@@ -2,7 +2,7 @@
 name = "speedwave-crypto"
 version = "0.0.0"
 edition = "2021"
-description = "AI platform connecting Claude Code with external services"
+description = "AES-SIV and HKDF primitives for Speedwave"
 authors = ["Speednet"]
 license = "Apache-2.0"
 repository = "https://github.com/speednet-software/speedwave"

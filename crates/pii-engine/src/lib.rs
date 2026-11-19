@@ -21,4 +21,4 @@ pub use scan::{
     DetectionAction, DetokenizeError, ExternalScanOutcome, ExternalScanReport, ExternalSpan,
     ScanError, ScanOutcome, StringLeaf, TOKEN_SPAN_RE,
 };
-pub use speedwave_crypto::{CryptoError as SivError, Key as EngineKey};
+pub use speedwave_crypto::Key as EngineKey;

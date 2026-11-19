@@ -1,6 +1,7 @@
 use crate::error::CryptoError;
 use crate::key::Key;
 use std::iter;
+use zeroize::Zeroizing;
 
 const NONCE_LEN: usize = 16;
 const TAG_LEN: usize = 16;
@@ -42,8 +43,12 @@ pub fn seal_with_nonce(
     Ok(blob)
 }
 
-/// Opens a blob from `seal_with_nonce` under the same key and `aad`.
-pub fn open_with_nonce(key: &Key, aad: &[&[u8]], blob: &[u8]) -> Result<Vec<u8>, CryptoError> {
+/// Opens a blob from `seal_with_nonce` under the same key and `aad`; the plaintext is wiped on drop.
+pub fn open_with_nonce(
+    key: &Key,
+    aad: &[&[u8]],
+    blob: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
     if blob.len() < NONCE_LEN + TAG_LEN {
         return Err(CryptoError::Crypto);
     }
@@ -51,6 +56,7 @@ pub fn open_with_nonce(key: &Key, aad: &[&[u8]], blob: &[u8]) -> Result<Vec<u8>,
     let mut cipher = key.siv_cipher();
     cipher
         .decrypt(headers(aad, nonce), ciphertext)
+        .map(Zeroizing::new)
         .map_err(|_| CryptoError::Crypto)
 }
 
@@ -71,6 +77,10 @@ mod tests {
 
     fn test_key() -> Key {
         Key::from_bytes([7u8; 32])
+    }
+
+    fn open_err(key: &Key, aad: &[&[u8]], blob: &[u8]) -> CryptoError {
+        open_with_nonce(key, aad, blob).err().unwrap()
     }
 
     #[test]
@@ -163,7 +173,10 @@ mod tests {
         let aad: [&[u8]; 3] = [b"demo", b"slack", b"token"];
         let blob = seal_with_nonce(&key, &aad, &[3u8; 16], b"secret").unwrap();
         assert_eq!(&blob[..16], &[3u8; 16]);
-        assert_eq!(open_with_nonce(&key, &aad, &blob).unwrap(), b"secret");
+        assert_eq!(
+            open_with_nonce(&key, &aad, &blob).unwrap().as_slice(),
+            b"secret"
+        );
     }
 
     #[test]
@@ -178,7 +191,7 @@ mod tests {
         let key = test_key();
         let blob = seal_with_nonce(&key, &[], &[9u8; 16], b"").unwrap();
         assert_eq!(blob.len(), 32);
-        assert_eq!(open_with_nonce(&key, &[], &blob).unwrap(), b"");
+        assert_eq!(open_with_nonce(&key, &[], &blob).unwrap().as_slice(), b"");
     }
 
     #[test]
@@ -205,8 +218,8 @@ mod tests {
         let key = test_key();
         let blob = seal_with_nonce(&key, &[b"demo", b"slack"], &[5u8; 16], b"secret").unwrap();
         assert_eq!(
-            open_with_nonce(&key, &[b"demo", b"github"], &blob),
-            Err(CryptoError::Crypto)
+            open_err(&key, &[b"demo", b"github"], &blob),
+            CryptoError::Crypto
         );
     }
 
@@ -214,39 +227,27 @@ mod tests {
     fn open_with_a_different_component_split_fails() {
         let key = test_key();
         let blob = seal_with_nonce(&key, &[b"ab", b"c"], &[5u8; 16], b"secret").unwrap();
-        assert_eq!(
-            open_with_nonce(&key, &[b"a", b"bc"], &blob),
-            Err(CryptoError::Crypto)
-        );
-        assert_eq!(
-            open_with_nonce(&key, &[b"abc"], &blob),
-            Err(CryptoError::Crypto)
-        );
+        assert_eq!(open_err(&key, &[b"a", b"bc"], &blob), CryptoError::Crypto);
+        assert_eq!(open_err(&key, &[b"abc"], &blob), CryptoError::Crypto);
     }
 
     #[test]
     fn open_with_a_different_number_of_components_fails() {
         let key = test_key();
         let blob = seal_with_nonce(&key, &[b"demo", b"slack"], &[5u8; 16], b"secret").unwrap();
+        assert_eq!(open_err(&key, &[b"demo"], &blob), CryptoError::Crypto);
         assert_eq!(
-            open_with_nonce(&key, &[b"demo"], &blob),
-            Err(CryptoError::Crypto)
+            open_err(&key, &[b"demo", b"slack", b""], &blob),
+            CryptoError::Crypto
         );
-        assert_eq!(
-            open_with_nonce(&key, &[b"demo", b"slack", b""], &blob),
-            Err(CryptoError::Crypto)
-        );
-        assert_eq!(open_with_nonce(&key, &[], &blob), Err(CryptoError::Crypto));
+        assert_eq!(open_err(&key, &[], &blob), CryptoError::Crypto);
     }
 
     #[test]
     fn open_with_the_wrong_key_fails() {
         let blob = seal_with_nonce(&test_key(), &[b"demo"], &[5u8; 16], b"secret").unwrap();
         let other = Key::from_bytes([8u8; 32]);
-        assert_eq!(
-            open_with_nonce(&other, &[b"demo"], &blob),
-            Err(CryptoError::Crypto)
-        );
+        assert_eq!(open_err(&other, &[b"demo"], &blob), CryptoError::Crypto);
     }
 
     #[test]
@@ -257,8 +258,8 @@ mod tests {
             let mut tampered = blob.clone();
             tampered[index] ^= 0x01;
             assert_eq!(
-                open_with_nonce(&key, &[b"demo"], &tampered),
-                Err(CryptoError::Crypto),
+                open_err(&key, &[b"demo"], &tampered),
+                CryptoError::Crypto,
                 "byte {index}"
             );
         }
@@ -270,8 +271,8 @@ mod tests {
         let blob = seal_with_nonce(&key, &[b"demo"], &[5u8; 16], b"secret").unwrap();
         for len in [0usize, 1, 15, 16, 31, blob.len() - 1] {
             assert_eq!(
-                open_with_nonce(&key, &[b"demo"], &blob[..len]),
-                Err(CryptoError::Crypto),
+                open_err(&key, &[b"demo"], &blob[..len]),
+                CryptoError::Crypto,
                 "length {len}"
             );
         }

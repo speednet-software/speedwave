@@ -16,7 +16,7 @@ impl Key {
     /// length or non-hex mismatch without carrying key material in the error.
     pub fn from_hex(s: &str) -> Result<Self, CryptoError> {
         let trimmed = s.trim();
-        if trimmed.len() != 64 {
+        if trimmed.len() != 64 || !trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(CryptoError::Encoding);
         }
         let mut bytes = [0u8; 32];
@@ -84,5 +84,7 @@ mod tests {
     fn from_hex_rejects_non_hex_characters() {
         let bad = format!("{}zz", "a".repeat(62));
         assert!(matches!(Key::from_hex(&bad), Err(CryptoError::Encoding)));
+        let signed = format!("+a{}", "a".repeat(62));
+        assert!(matches!(Key::from_hex(&signed), Err(CryptoError::Encoding)));
     }
 }
