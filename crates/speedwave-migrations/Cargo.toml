@@ -1,0 +1,21 @@
+[package]
+name = "speedwave-migrations"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Startup migrations of the Speedwave data directory"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+speedwave-runtime = { path = "../speedwave-runtime" }
+log = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

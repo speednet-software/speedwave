@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 speedwave-runtime = { path = "../speedwave-runtime" }
+speedwave-migrations = { path = "../speedwave-migrations" }
 anyhow = { workspace = true }
 strum = { version = "0.28", features = ["derive"] }
 serde = { workspace = true }

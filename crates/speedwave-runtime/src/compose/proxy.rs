@@ -334,31 +334,6 @@ pub(crate) fn proxy_state_digest_in(data_dir: &Path, project: &str) -> String {
     crate::bundle::bytes_to_hex(&hasher.finalize())
 }
 
-pub(crate) fn migrate_legacy_local_key_in(data_dir: &Path, project: &str, llm: &LlmConfig) {
-    let has_local_entry = llm
-        .providers
-        .iter()
-        .any(|p| p.id == "local" && p.kind == LlmProviderKind::Local);
-    if !has_local_entry {
-        return;
-    }
-    let Ok(target) = super::tokens::llm_provider_key_path_in(data_dir, project, "local") else {
-        return;
-    };
-    if target.exists() {
-        return;
-    }
-    let Some(value) = super::llm::read_local_llm_token_opt_in(data_dir, project, "api_key") else {
-        log::debug!("no legacy local-llm api_key to migrate (missing or unreadable)");
-        return;
-    };
-    if let Err(e) = write_llm_provider_key_in(data_dir, project, "local", &value) {
-        log::warn!("legacy local key migration failed: {e}");
-    } else {
-        log::info!("migrated legacy local-llm api_key into the llm token namespace");
-    }
-}
-
 /// Validates + persists one provider's API key in the llm token namespace:
 /// strips `Bearer `, rejects control chars and empty values (ADR-040).
 pub fn write_llm_provider_key_in(
@@ -1156,125 +1131,6 @@ mod tests {
     }
 
     #[test]
-    fn migrate_legacy_local_key_copies_and_does_not_clobber() {
-        let dir = tempfile::tempdir().unwrap();
-        let legacy_dir =
-            super::super::ensure_token_dir_in(dir.path(), "proj", "local-llm").unwrap();
-        std::fs::write(legacy_dir.join("api_key"), "sk-legacy-token\n").unwrap();
-
-        let llm = LlmConfig {
-            providers: vec![LlmProviderEntry {
-                has_api_key: true,
-                base_url: Some("http://host.docker.internal:9000".into()),
-                ..entry("local", LlmProviderKind::Local)
-            }],
-            ..Default::default()
-        };
-        migrate_legacy_local_key_in(dir.path(), "proj", &llm);
-
-        let target =
-            super::super::tokens::llm_provider_key_path_in(dir.path(), "proj", "local").unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&target).unwrap(),
-            "sk-legacy-token",
-            "legacy key must be copied (trimmed) into the llm namespace"
-        );
-
-        std::fs::write(&target, "sk-new-token").unwrap();
-        migrate_legacy_local_key_in(dir.path(), "proj", &llm);
-        assert_eq!(std::fs::read_to_string(&target).unwrap(), "sk-new-token");
-    }
-
-    #[test]
-    fn migrate_legacy_local_key_runs_when_flag_is_false() {
-        let dir = tempfile::tempdir().unwrap();
-        let legacy_dir =
-            super::super::ensure_token_dir_in(dir.path(), "proj", "local-llm").unwrap();
-        std::fs::write(legacy_dir.join("api_key"), "sk-legacy\n").unwrap();
-
-        let llm = LlmConfig {
-            providers: vec![LlmProviderEntry {
-                has_api_key: false,
-                base_url: Some("http://host.docker.internal:9000".into()),
-                ..entry("local", LlmProviderKind::Local)
-            }],
-            ..Default::default()
-        };
-
-        migrate_legacy_local_key_in(dir.path(), "proj", &llm);
-
-        let target =
-            super::super::tokens::llm_provider_key_path_in(dir.path(), "proj", "local").unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&target).unwrap(),
-            "sk-legacy",
-            "migration must copy the legacy key based on file existence, not has_api_key"
-        );
-    }
-
-    #[test]
-    fn migrate_legacy_local_key_noop_without_legacy_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let llm = LlmConfig {
-            providers: vec![LlmProviderEntry {
-                has_api_key: false,
-                ..entry("local", LlmProviderKind::Local)
-            }],
-            ..Default::default()
-        };
-        migrate_legacy_local_key_in(dir.path(), "proj", &llm);
-        let target =
-            super::super::tokens::llm_provider_key_path_in(dir.path(), "proj", "local").unwrap();
-        assert!(!target.exists(), "no legacy file → no target key written");
-    }
-
-    #[test]
-    fn migrate_legacy_local_key_skipped_without_local_entry() {
-        let dir = tempfile::tempdir().unwrap();
-        let legacy_dir =
-            super::super::ensure_token_dir_in(dir.path(), "proj", "local-llm").unwrap();
-        std::fs::write(legacy_dir.join("api_key"), "sk-legacy\n").unwrap();
-        let llm = LlmConfig {
-            providers: vec![entry("anthropic", LlmProviderKind::AnthropicOauth)],
-            ..Default::default()
-        };
-        migrate_legacy_local_key_in(dir.path(), "proj", &llm);
-        let target =
-            super::super::tokens::llm_provider_key_path_in(dir.path(), "proj", "local").unwrap();
-        assert!(!target.exists(), "no local entry → migration must not run");
-    }
-
-    #[test]
-    fn migrate_then_sync_yields_has_api_key_true() {
-        let dir = tempfile::tempdir().unwrap();
-        let legacy_dir =
-            super::super::ensure_token_dir_in(dir.path(), "proj", "local-llm").unwrap();
-        std::fs::write(legacy_dir.join("api_key"), "sk-legacy\n").unwrap();
-
-        let mut llm = LlmConfig {
-            providers: vec![LlmProviderEntry {
-                has_api_key: false,
-                base_url: Some("http://host.docker.internal:9000".into()),
-                ..entry("local", LlmProviderKind::Local)
-            }],
-            ..Default::default()
-        };
-
-        migrate_legacy_local_key_in(dir.path(), "proj", &llm);
-        llm.sync_has_api_key_from_disk_in(dir.path(), "proj");
-
-        assert!(
-            llm.providers[0].has_api_key,
-            "after migrate→sync the flag must be true (key now on the new path)"
-        );
-        let rendered = render_proxy_config(&llm);
-        assert!(
-            !rendered.contains("\"auth\":\"none\"") && !rendered.contains("\"auth\": \"none\""),
-            "a keyed local provider must not render auth:none after migration"
-        );
-    }
-
-    #[test]
     fn write_key_validates_and_strips_bearer() {
         let dir = tempfile::tempdir().unwrap();
         let path =
@@ -1403,36 +1259,6 @@ mod tests {
             std::fs::read_to_string(&target).unwrap(),
             "sk-rotated",
             "write_proxy_config_in must not touch an existing key in the new namespace"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn migrate_legacy_local_key_noop_when_legacy_file_unreadable() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let legacy_dir =
-            super::super::ensure_token_dir_in(dir.path(), "proj", "local-llm").unwrap();
-        let legacy_file = legacy_dir.join("api_key");
-        std::fs::write(&legacy_file, "sk-secret\n").unwrap();
-        std::fs::set_permissions(&legacy_file, std::fs::Permissions::from_mode(0o000)).unwrap();
-
-        let llm = LlmConfig {
-            providers: vec![LlmProviderEntry {
-                has_api_key: false,
-                ..entry("local", LlmProviderKind::Local)
-            }],
-            ..Default::default()
-        };
-        migrate_legacy_local_key_in(dir.path(), "proj", &llm);
-
-        let _ = std::fs::set_permissions(&legacy_file, std::fs::Permissions::from_mode(0o600));
-
-        let target =
-            super::super::tokens::llm_provider_key_path_in(dir.path(), "proj", "local").unwrap();
-        assert!(
-            !target.exists(),
-            "no target key must be written when the legacy file is unreadable"
         );
     }
 

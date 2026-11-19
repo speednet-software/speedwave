@@ -6116,10 +6116,21 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "speedwave-migrations",
  "speedwave-runtime",
  "speedwave-version",
  "strum",
  "tempfile",
+]
+
+[[package]]
+name = "speedwave-migrations"
+version = "0.0.0"
+dependencies = [
+ "log",
+ "speedwave-runtime",
+ "tempfile",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

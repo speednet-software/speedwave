@@ -382,7 +382,7 @@ pub struct PluginInstallProgress {
 }
 
 /// Outcome returned by [`install_plugin`]: distinguishes a fully-installed plugin from one whose
-/// image build deferred to the next launch (`.image_pending` marker remains).
+/// image build deferred to the next launch (the `plugin-state/<slug>/image_pending` marker remains).
 #[derive(Debug, Clone)]
 pub enum InstallOutcome {
     /// Fully installed and image built.
@@ -496,11 +496,9 @@ fn image_pending_marker_for(plugins_dir: &Path, slug: &str) -> PathBuf {
     plugin_state_dir_for(plugins_dir, slug).join("image_pending")
 }
 
-/// Returns true if the plugin has a pending image build, looking in both
-/// the new state directory and the legacy in-tree location.
-fn has_pending_image_build_for(plugins_dir: &Path, plugin_dir: &Path, slug: &str) -> bool {
+/// Returns true if the plugin has a pending image build.
+fn has_pending_image_build_for(plugins_dir: &Path, slug: &str) -> bool {
     image_pending_marker_for(plugins_dir, slug).exists()
-        || plugin_dir.join(".image_pending").exists()
 }
 
 /// Marks the plugin's image build as pending. Always writes to the new state directory
@@ -512,11 +510,9 @@ fn mark_image_pending_for(plugins_dir: &Path, slug: &str) -> anyhow::Result<()> 
     Ok(())
 }
 
-/// Clears the pending marker for `slug`, in both the state directory and
-/// the legacy in-tree location. Best-effort — a missing marker is fine.
-fn clear_image_pending_for(plugins_dir: &Path, plugin_dir: &Path, slug: &str) {
+/// Clears the pending marker for `slug`. Best-effort — a missing marker is fine.
+fn clear_image_pending_for(plugins_dir: &Path, slug: &str) {
     let _ = std::fs::remove_file(image_pending_marker_for(plugins_dir, slug));
-    let _ = std::fs::remove_file(plugin_dir.join(".image_pending"));
 }
 
 /// Marker under `plugin-state/<slug>/` holding the previously-built image tag
@@ -571,87 +567,6 @@ pub(crate) fn write_image_fallback_tag_for(
 /// content-addressed image turns out to be present after all.
 fn clear_image_rebuild_pending_for(plugins_dir: &Path, slug: &str) {
     let _ = std::fs::remove_file(image_rebuild_pending_marker_for(plugins_dir, slug));
-}
-
-/// Moves a legacy marker into the plugin-state dir. Returns `true` only
-/// on a clean relocation.
-fn relocate_legacy_marker(slug: &str, legacy: &Path, target: &Path) -> bool {
-    if std::fs::rename(legacy, target).is_ok() {
-        return true;
-    }
-    #[cfg(windows)]
-    {
-        log::warn!(
-            "plugin '{slug}': cannot move .image_pending across filesystems on Windows \
-             (link count unknown); leaving legacy marker — audit will refuse this plugin"
-        );
-        false
-    }
-    #[cfg(not(windows))]
-    {
-        if let Err(e) = std::fs::write(target, b"") {
-            log::warn!(
-                "plugin '{slug}': failed to write replacement marker {}: {e}",
-                target.display()
-            );
-            return false;
-        }
-        if let Err(e) = std::fs::remove_file(legacy) {
-            log::warn!(
-                "plugin '{slug}': wrote replacement marker but failed to remove legacy {}: {e}; \
-                 audit will refuse this plugin on next load",
-                legacy.display()
-            );
-            return false;
-        }
-        true
-    }
-}
-
-/// Migrates the legacy in-tree `.image_pending` marker out of the signed plugin tree (idempotent,
-/// root-level regular files only, not symlinks). Run before `audit_all`/`list_verified_*`.
-fn migrate_legacy_image_pending(plugins_dir: &Path, plugin_dir: &Path, slug: &str) {
-    let legacy = plugin_dir.join(".image_pending");
-    let Ok(meta) = std::fs::symlink_metadata(&legacy) else {
-        return;
-    };
-    if !meta.file_type().is_file() {
-        log::warn!(
-            "plugin '{}': legacy .image_pending is not a regular file ({:?}); leaving untouched",
-            slug,
-            meta.file_type()
-        );
-        return;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if meta.nlink() > 1 {
-            log::warn!(
-                "plugin '{}': legacy .image_pending has nlink={} (hardlink); leaving untouched",
-                slug,
-                meta.nlink()
-            );
-            return;
-        }
-    }
-    let target_dir = plugin_state_dir_for(plugins_dir, slug);
-    if let Err(e) = std::fs::create_dir_all(&target_dir) {
-        log::warn!(
-            "plugin '{}': failed to create plugin-state dir {}: {e}",
-            slug,
-            target_dir.display()
-        );
-        return;
-    }
-    let target = target_dir.join("image_pending");
-    if relocate_legacy_marker(slug, &legacy, &target) {
-        log::info!(
-            "plugin '{}': migrated legacy .image_pending to {}",
-            slug,
-            target.display()
-        );
-    }
 }
 
 /// Returns `~/.speedwave/tokens/<project>/<service_id>/`
@@ -1489,7 +1404,7 @@ pub fn peek_plugin_manifest(zip_path: &Path) -> anyhow::Result<PluginManifestSum
 }
 
 /// Installs a plugin from a ZIP into `~/.speedwave/plugins/<slug>/`: verify signature, validate
-/// manifest, `.image_pending` marker; `InstalledPendingBuild` retries via [`ensure_plugin_images`].
+/// manifest, `plugin-state/<slug>/image_pending` marker; `InstalledPendingBuild` retries via [`ensure_plugin_images`].
 pub fn install_plugin(
     zip_path: &Path,
     runtime: Option<&crate::runtime::LockedRuntime>,
@@ -1924,20 +1839,14 @@ pub(crate) fn list_verified_from_dir(plugins_dir: &Path) -> anyhow::Result<Vec<V
             continue;
         }
         let plugin_dir = entry.path();
-        let vp = verify_one_plugin_dir(plugins_dir, &plugin_dir, &dir_name)?;
+        let vp = verify_one_plugin_dir(&plugin_dir, &dir_name)?;
         out.push(vp);
     }
     Ok(out)
 }
 
-/// Verifies one plugin dir (signature, manifest parse, dir/slug equality, `validate_manifest`);
-/// also idempotently migrates a legacy in-tree `.image_pending` marker before the digest.
-fn verify_one_plugin_dir(
-    plugins_dir: &Path,
-    plugin_dir: &Path,
-    dir_name: &str,
-) -> anyhow::Result<VerifiedPlugin> {
-    migrate_legacy_image_pending(plugins_dir, plugin_dir, dir_name);
+/// Verifies one plugin dir (signature, manifest parse, dir/slug equality, `validate_manifest`).
+fn verify_one_plugin_dir(plugin_dir: &Path, dir_name: &str) -> anyhow::Result<VerifiedPlugin> {
     signing::verify_plugin_signature(plugin_dir)
         .map_err(|e| anyhow::anyhow!("plugin '{dir_name}': signature verification failed: {e}"))?;
     let manifest_path = plugin_dir.join("plugin.json");
@@ -2176,7 +2085,7 @@ pub(crate) fn audit_all_in_dir(plugins_dir: &Path) -> Result<(), Vec<(String, St
             continue;
         }
         let plugin_dir = entry.path();
-        if let Err(e) = verify_one_plugin_dir(plugins_dir, &plugin_dir, &dir_name) {
+        if let Err(e) = verify_one_plugin_dir(&plugin_dir, &dir_name) {
             failures.push((dir_name, crate::log_sanitizer::sanitize(&e.to_string())));
         }
     }
@@ -2187,7 +2096,7 @@ pub(crate) fn audit_all_in_dir(plugins_dir: &Path) -> Result<(), Vec<(String, St
     }
 }
 
-/// Ensures plugin images exist for enabled service IDs: pending-build pass (`.image_pending`,
+/// Ensures plugin images exist for enabled service IDs: pending-build pass (`image_pending` marker,
 /// errors propagate) then rebuild missing images (errors accumulate); fixes image loss after reset.
 pub fn ensure_plugin_images(
     runtime: &crate::runtime::LockedRuntime,
@@ -2309,7 +2218,7 @@ fn usable_fallback_tag(
         .find(|t| runtime.image_exists(t).unwrap_or(false))
 }
 
-/// Builds pending plugin images (`.image_pending`). `Some(list)` builds only listed `service_id`s
+/// Builds pending plugin images (`image_pending` marker). `Some(list)` builds only listed `service_id`s
 /// (resource-only plugins yield `sid = ""`, never matching, skipped); `None` builds all (tests).
 fn build_pending_from_dir(
     runtime: &crate::runtime::LockedRuntime,
@@ -2331,7 +2240,7 @@ fn build_pending_from_dir(
             continue;
         }
         let plugin_dir = entry.path();
-        if !has_pending_image_build_for(plugins_dir, &plugin_dir, &slug) {
+        if !has_pending_image_build_for(plugins_dir, &slug) {
             continue;
         }
         let manifest_path = plugin_dir.join("plugin.json");
@@ -2389,9 +2298,6 @@ fn build_single_plugin_image_locked(
     manifest: &PluginManifest,
     plugin_dir: &Path,
 ) -> anyhow::Result<()> {
-    if let Some(plugins_dir) = plugin_dir.parent() {
-        migrate_legacy_image_pending(plugins_dir, plugin_dir, &manifest.slug);
-    }
     signing::verify_plugin_signature(plugin_dir).map_err(|e| {
         anyhow::anyhow!(
             "refusing to build image for plugin '{}': {e}",
@@ -2422,7 +2328,7 @@ fn build_single_plugin_image_locked(
         &plugin_legacy_image_tag(manifest),
     );
     if let Some(plugins_dir) = plugin_dir.parent() {
-        clear_image_pending_for(plugins_dir, plugin_dir, &manifest.slug);
+        clear_image_pending_for(plugins_dir, &manifest.slug);
         clear_image_rebuild_pending_for(plugins_dir, &manifest.slug);
     } else {
         log::warn!(
@@ -4012,37 +3918,17 @@ mod tests {
         assert_eq!(state, tmp.path().join("plugin-state"));
     }
 
-    /// Legacy plugins carry an `.image_pending` marker inside the signed tree.
-    /// `has_pending_image_build_for` must honour either location during the migration window.
     #[test]
-    fn test_has_pending_image_build_honours_legacy_in_tree_marker() {
+    fn test_clear_image_pending_for_removes_the_state_marker() {
         let tmp = tempfile::tempdir().unwrap();
         let plugins = tmp.path().join("plugins");
-        let plugin_dir = plugins.join("legacy-slug");
-        std::fs::create_dir_all(&plugin_dir).unwrap();
-        std::fs::write(plugin_dir.join(".image_pending"), b"").unwrap();
+        std::fs::create_dir_all(&plugins).unwrap();
+        mark_image_pending_for(&plugins, "marked").unwrap();
+        assert!(has_pending_image_build_for(&plugins, "marked"));
 
-        assert!(
-            has_pending_image_build_for(&plugins, &plugin_dir, "legacy-slug"),
-            "legacy in-tree marker must still trigger pending build"
-        );
-    }
+        clear_image_pending_for(&plugins, "marked");
 
-    /// Successful build clears markers in both places, so a plugin that
-    /// migrates from legacy to new layout doesn't loop on the old marker.
-    #[test]
-    fn test_clear_image_pending_for_removes_both_locations() {
-        let tmp = tempfile::tempdir().unwrap();
-        let plugins = tmp.path().join("plugins");
-        let plugin_dir = plugins.join("dual-marker");
-        std::fs::create_dir_all(&plugin_dir).unwrap();
-        std::fs::write(plugin_dir.join(".image_pending"), b"").unwrap();
-        mark_image_pending_for(&plugins, "dual-marker").unwrap();
-
-        clear_image_pending_for(&plugins, &plugin_dir, "dual-marker");
-
-        assert!(!plugin_dir.join(".image_pending").exists());
-        assert!(!image_pending_marker_for(&plugins, "dual-marker").exists());
+        assert!(!has_pending_image_build_for(&plugins, "marked"));
     }
 
     /// Helper: synthesises a plugin dir where directory name and `slug` deliberately differ, to
@@ -4477,98 +4363,6 @@ mod tests {
             leftovers.is_empty(),
             "after successful install/reinstall, no transient dirs should remain: {leftovers:?}"
         );
-    }
-
-    /// Legacy `.image_pending` inside the signed tree shifts the digest once signature is a
-    /// runtime invariant. Sign, drop marker, migrate, re-verify — no-op migration fails. No bypass.
-    #[test]
-    fn test_migration_restores_verifiable_tree() {
-        use crate::signing::{generate_keypair, sign_plugin, verify_plugin_signature_with_key};
-        let tmp = tempfile::tempdir().unwrap();
-        let plugins = tmp.path().join("plugins");
-        let plugin_dir = plugins.join("legacy-mcp");
-        std::fs::create_dir_all(&plugin_dir).unwrap();
-        std::fs::write(
-            plugin_dir.join("plugin.json"),
-            r#"{"name":"x","slug":"legacy-mcp","version":"1.0.0","description":"x"}"#,
-        )
-        .unwrap();
-
-        let (priv_key, pub_key) = generate_keypair();
-        sign_plugin(&plugin_dir, &priv_key).unwrap();
-        let pub_key: [u8; 32] = pub_key.try_into().unwrap();
-
-        std::fs::write(plugin_dir.join(".image_pending"), b"").unwrap();
-        verify_plugin_signature_with_key(&plugin_dir, &pub_key).expect_err(
-            "sanity: legacy marker must break verification, else the test proves nothing",
-        );
-
-        migrate_legacy_image_pending(&plugins, &plugin_dir, "legacy-mcp");
-
-        verify_plugin_signature_with_key(&plugin_dir, &pub_key)
-            .expect("migration must restore a tree that verifies against the original key");
-        assert!(!plugin_dir.join(".image_pending").exists());
-        assert!(image_pending_marker_for(&plugins, "legacy-mcp").exists());
-    }
-
-    /// Wires the migration test through `audit_all_in_dir` to pin the caller chain — a regression
-    /// short-circuiting `verify_one_plugin_dir` before migration lets the legacy marker survive.
-    #[test]
-    fn test_audit_calls_migration() {
-        let _g = UnsignedBypassGuard::new();
-        let tmp = tempfile::tempdir().unwrap();
-        let plugins = tmp.path().join("plugins");
-        let plugin_dir = plugins.join("legacy-mcp");
-        std::fs::create_dir_all(&plugin_dir).unwrap();
-        std::fs::write(
-            plugin_dir.join("plugin.json"),
-            r#"{"name":"x","slug":"legacy-mcp","version":"1.0.0","description":"x"}"#,
-        )
-        .unwrap();
-        std::fs::write(plugin_dir.join(".image_pending"), b"").unwrap();
-
-        let _ = audit_all_in_dir(&plugins);
-
-        assert!(!plugin_dir.join(".image_pending").exists());
-        assert!(image_pending_marker_for(&plugins, "legacy-mcp").exists());
-    }
-
-    /// Migration must refuse a non-regular-file `.image_pending` — a symlink could target a host
-    /// secret; following it would copy that content into `plugin-state/`. Leave it and fail loudly.
-    #[cfg(unix)]
-    #[test]
-    fn test_migrate_rejects_symlinked_image_pending() {
-        let tmp = tempfile::tempdir().unwrap();
-        let plugins = tmp.path().join("plugins");
-        let plugin_dir = plugins.join("evil-legacy");
-        std::fs::create_dir_all(&plugin_dir).unwrap();
-        std::os::unix::fs::symlink("/etc/passwd", plugin_dir.join(".image_pending")).unwrap();
-
-        migrate_legacy_image_pending(&plugins, &plugin_dir, "evil-legacy");
-
-        assert!(plugin_dir.join(".image_pending").is_symlink());
-        assert!(!image_pending_marker_for(&plugins, "evil-legacy").exists());
-    }
-
-    /// A hardlinked `.image_pending` (`nlink > 1`) must not be relocated: an attacker pre-creating
-    /// it as a hardlink would otherwise get a free `rename` out of the plugin tree.
-    #[cfg(unix)]
-    #[test]
-    fn test_migrate_rejects_hardlinked_image_pending() {
-        let tmp = tempfile::tempdir().unwrap();
-        let plugins = tmp.path().join("plugins");
-        let plugin_dir = plugins.join("evil-legacy");
-        std::fs::create_dir_all(&plugin_dir).unwrap();
-        let decoy = tmp.path().join("decoy.txt");
-        std::fs::write(&decoy, b"do not touch").unwrap();
-        let marker = plugin_dir.join(".image_pending");
-        std::fs::hard_link(&decoy, &marker).unwrap();
-
-        migrate_legacy_image_pending(&plugins, &plugin_dir, "evil-legacy");
-
-        assert!(marker.exists());
-        assert_eq!(std::fs::read(&decoy).unwrap(), b"do not touch");
-        assert!(!image_pending_marker_for(&plugins, "evil-legacy").exists());
     }
 
     /// Two threads racing to install the same slug must not corrupt the destination tree —
@@ -7487,16 +7281,16 @@ mod tests {
     #[test]
     fn test_build_pending_accumulates_parse_errors() {
         let tmp = tempfile::tempdir().unwrap();
-        let plugins_dir = tmp.path();
+        let plugins_dir = tmp.path().join("plugins");
 
         let bad_dir = plugins_dir.join("bad-json");
         std::fs::create_dir_all(&bad_dir).unwrap();
-        std::fs::write(bad_dir.join(".image_pending"), "").unwrap();
+        mark_image_pending_for(&plugins_dir, "bad-json").unwrap();
         std::fs::write(bad_dir.join("plugin.json"), "NOT VALID JSON").unwrap();
 
         let missing_fields_dir = plugins_dir.join("missing-fields");
         std::fs::create_dir_all(&missing_fields_dir).unwrap();
-        std::fs::write(missing_fields_dir.join(".image_pending"), "").unwrap();
+        mark_image_pending_for(&plugins_dir, "missing-fields").unwrap();
         std::fs::write(
             missing_fields_dir.join("plugin.json"),
             r#"{"only_one_field": true}"#,
@@ -7504,7 +7298,7 @@ mod tests {
         .unwrap();
 
         let rt = failing_build_runtime();
-        let result = build_pending_from_dir(&rt, None, plugins_dir);
+        let result = build_pending_from_dir(&rt, None, &plugins_dir);
 
         assert!(
             result.is_err(),
@@ -7529,11 +7323,11 @@ mod tests {
     fn test_build_pending_accumulates_build_errors() {
         let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
-        let plugins_dir = tmp.path();
+        let plugins_dir = tmp.path().join("plugins");
 
         let valid_dir = plugins_dir.join("valid-plugin");
         std::fs::create_dir_all(&valid_dir).unwrap();
-        std::fs::write(valid_dir.join(".image_pending"), "").unwrap();
+        mark_image_pending_for(&plugins_dir, "valid-plugin").unwrap();
         std::fs::write(
             valid_dir.join("plugin.json"),
             r#"{
@@ -7549,7 +7343,7 @@ mod tests {
         std::fs::write(valid_dir.join("Containerfile"), "FROM scratch").unwrap();
 
         let rt = failing_build_runtime();
-        let result = build_pending_from_dir(&rt, None, plugins_dir);
+        let result = build_pending_from_dir(&rt, None, &plugins_dir);
 
         assert!(result.is_err(), "should return error when build fails");
         let err_msg = result.unwrap_err().to_string();
@@ -7567,16 +7361,16 @@ mod tests {
     fn test_build_pending_mixed_parse_and_build_errors() {
         let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
-        let plugins_dir = tmp.path();
+        let plugins_dir = tmp.path().join("plugins");
 
         let bad_dir = plugins_dir.join("broken-manifest");
         std::fs::create_dir_all(&bad_dir).unwrap();
-        std::fs::write(bad_dir.join(".image_pending"), "").unwrap();
+        mark_image_pending_for(&plugins_dir, "broken-manifest").unwrap();
         std::fs::write(bad_dir.join("plugin.json"), "{invalid").unwrap();
 
         let good_dir = plugins_dir.join("buildable");
         std::fs::create_dir_all(&good_dir).unwrap();
-        std::fs::write(good_dir.join(".image_pending"), "").unwrap();
+        mark_image_pending_for(&plugins_dir, "buildable").unwrap();
         std::fs::write(
             good_dir.join("plugin.json"),
             r#"{
@@ -7592,7 +7386,7 @@ mod tests {
         std::fs::write(good_dir.join("Containerfile"), "FROM scratch").unwrap();
 
         let rt = failing_build_runtime();
-        let result = build_pending_from_dir(&rt, None, plugins_dir);
+        let result = build_pending_from_dir(&rt, None, &plugins_dir);
 
         assert!(result.is_err(), "should accumulate both error types");
         let err_msg = result.unwrap_err().to_string();
@@ -7609,17 +7403,17 @@ mod tests {
     #[test]
     fn test_build_pending_skips_dirs_without_marker() {
         let tmp = tempfile::tempdir().unwrap();
-        let plugins_dir = tmp.path();
+        let plugins_dir = tmp.path().join("plugins");
 
         let no_marker_dir = plugins_dir.join("no-marker");
         std::fs::create_dir_all(&no_marker_dir).unwrap();
         std::fs::write(no_marker_dir.join("plugin.json"), "INVALID").unwrap();
 
         let rt = failing_build_runtime();
-        let result = build_pending_from_dir(&rt, None, plugins_dir);
+        let result = build_pending_from_dir(&rt, None, &plugins_dir);
         assert!(
             result.is_ok(),
-            "plugins without .image_pending should be skipped, not cause errors"
+            "plugins without a pending marker should be skipped, not cause errors"
         );
     }
 
@@ -8285,11 +8079,12 @@ mod tests {
     fn test_ensure_plugin_images_also_builds_pending_for_enabled() {
         let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
-        make_mcp_plugin_dir(tmp.path(), "example-plugin", "1.4.6");
-        std::fs::write(tmp.path().join("example-plugin").join(".image_pending"), "").unwrap();
+        let plugins = tmp.path().join("plugins");
+        make_mcp_plugin_dir(&plugins, "example-plugin", "1.4.6");
+        mark_image_pending_for(&plugins, "example-plugin").unwrap();
 
         let (rt, handle) = tracking_runtime(&[]);
-        ensure_plugin_images_from_dir(&rt, &["example-plugin"], tmp.path()).unwrap();
+        ensure_plugin_images_from_dir(&rt, &["example-plugin"], &plugins).unwrap();
 
         assert_eq!(
             handle.build_call_count(),
@@ -8457,13 +8252,14 @@ mod tests {
     fn test_ensure_plugin_images_pending_marker_cleared_after_build() {
         let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
-        make_mcp_plugin_dir(tmp.path(), "example-plugin", "1.0.0");
-        let pending = tmp.path().join("example-plugin").join(".image_pending");
-        std::fs::write(&pending, "").unwrap();
+        let plugins = tmp.path().join("plugins");
+        make_mcp_plugin_dir(&plugins, "example-plugin", "1.0.0");
+        mark_image_pending_for(&plugins, "example-plugin").unwrap();
+        let pending = image_pending_marker_for(&plugins, "example-plugin");
         assert!(pending.exists(), "marker should exist before build");
 
         let (rt, _handle) = tracking_runtime(&[]);
-        ensure_plugin_images_from_dir(&rt, &["example-plugin"], tmp.path()).unwrap();
+        ensure_plugin_images_from_dir(&rt, &["example-plugin"], &plugins).unwrap();
 
         assert!(
             !pending.exists(),

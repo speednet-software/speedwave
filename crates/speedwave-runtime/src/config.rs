@@ -2,7 +2,6 @@
 
 use crate::defaults;
 use crate::git_allowlist::GitForgeService;
-use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use speedwave_access_policy::AccessMode;
 use std::collections::BTreeMap;
@@ -380,35 +379,6 @@ fn quarantine_foreign_anthropic_models(llm: &mut LlmConfig) {
         if active.model != routed {
             active.model = routed;
         }
-    }
-}
-
-fn anthropic_model_to_carry(llm: &LlmConfig) -> Option<String> {
-    match llm.active_provider() {
-        Some(entry) if entry.kind.is_anthropic() => llm.effective_active_model(),
-        _ => llm
-            .providers
-            .iter()
-            .filter(|entry| entry.kind.is_anthropic())
-            .find_map(|entry| {
-                entry
-                    .model
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|m| !m.is_empty())
-            })
-            .map(str::to_string),
-    }
-}
-
-fn carry_anthropic_model_to_pin(data_dir: &Path, project: &str, model: &str) {
-    match crate::claude_settings::set_model_pin(data_dir, project, model, &[]) {
-        Ok(()) => log::info!(
-            "llm config: moved the Anthropic model {model} of project {project} to its settings.json model pin"
-        ),
-        Err(e) => log::error!(
-            "llm config: cleared the Anthropic model {model} of project {project} from config.json but could not pin it in settings.json: {e}"
-        ),
     }
 }
 
@@ -1907,8 +1877,6 @@ pub(crate) fn resolve_project_config_in_with_managed(
     );
     apply_repo_model_suggestion(&mut llm, repo_model_suggestion);
 
-    crate::compose::migrate_legacy_local_key_in(data_dir, project_name, &llm);
-
     llm.sync_has_api_key_from_disk_in(data_dir, project_name);
 
     let mut flags: Vec<String> = defaults::DEFAULT_FLAGS
@@ -2152,48 +2120,6 @@ where
     with_config_lock_in(crate::consts::data_dir(), f)
 }
 
-/// One-shot self-heal: migrate every project's LLM config and persist if
-/// changed. Idempotent once all are at [`LLM_SCHEMA_VERSION`]; under the config lock.
-pub fn heal_llm_config_on_disk() -> anyhow::Result<()> {
-    heal_llm_config_in(crate::consts::data_dir())
-}
-
-/// Testable variant of [`heal_llm_config_on_disk`] with an explicit data dir.
-pub fn heal_llm_config_in(data_dir: &Path) -> anyhow::Result<()> {
-    with_config_lock_in(data_dir, || {
-        let config_path = data_dir.join("config.json");
-        let mut config = load_user_config_from(&config_path)?;
-        let mut changed = false;
-        let mut carried = Vec::new();
-        for project in &mut config.projects {
-            let evidence = AnthropicEvidence::detect_in(data_dir, &project.name);
-            let has_llm = project.claude.as_ref().is_some_and(|c| c.llm.is_some());
-            if has_llm {
-                if let Some(llm) = project.claude.as_mut().and_then(|c| c.llm.as_mut()) {
-                    changed |= migrate_llm(llm, evidence);
-                    if let Some(model) = anthropic_model_to_carry(llm) {
-                        carried.push((project.name.clone(), model));
-                    }
-                    changed |= llm.clear_anthropic_models();
-                }
-            } else if evidence != AnthropicEvidence::None {
-                let mut llm = LlmConfig::default();
-                migrate_llm(&mut llm, evidence);
-                project.claude.get_or_insert_with(Default::default).llm = Some(llm);
-                changed = true;
-            }
-        }
-        if changed {
-            save_user_config_to(&config, &config_path)?;
-            log::info!("llm config: healed on-disk config to schema v{LLM_SCHEMA_VERSION}");
-        }
-        for (project, model) in carried {
-            carry_anthropic_model_to_pin(data_dir, &project, &model);
-        }
-        Ok(())
-    })
-}
-
 fn merge_env(base: &mut HashMap<String, String>, overlay: Option<HashMap<String, String>>) {
     if let Some(overlay) = overlay {
         for (key, value) in overlay {
@@ -2268,37 +2194,6 @@ fn merge_llm_repo(base: &mut LlmConfig, overlay: &LlmConfig) {
     if overlay.model.is_some() {
         base.model.clone_from(&overlay.model);
     }
-}
-
-/// Removes the obsolete `log_level` field from `<data_dir>/config.json`;
-/// `Ok(true)` = removed. Unknown fields preserved (operates on `Value`).
-pub fn migrate_drop_log_level_in(data_dir: &Path) -> anyhow::Result<bool> {
-    with_config_lock_in(data_dir, || {
-        let path = data_dir.join("config.json");
-        let Ok(raw) = std::fs::read_to_string(&path) else {
-            return Ok(false);
-        };
-        let mut value: serde_json::Value = serde_json::from_str(&raw)
-            .with_context(|| format!("config migration: {} is not valid JSON", path.display()))?;
-        let obj = value.as_object_mut().ok_or_else(|| {
-            anyhow::anyhow!(
-                "config migration: {} root is not a JSON object",
-                path.display()
-            )
-        })?;
-        if obj.remove("log_level").is_none() {
-            return Ok(false);
-        }
-        let content = serde_json::to_string_pretty(&value)?;
-        crate::fs_perms::write_restricted_file_atomic(&path, &content).with_context(|| {
-            format!(
-                "config migration: durable write of {} failed",
-                path.display()
-            )
-        })?;
-        log::info!("config migration: removed obsolete log_level field");
-        Ok(true)
-    })
 }
 
 #[cfg(test)]
@@ -4565,352 +4460,6 @@ mod tests {
     }
 
     #[test]
-    fn test_heal_llm_config_on_disk_clears_foreign_model() {
-        let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("config.json");
-        let config = SpeedwaveUserConfig {
-            projects: vec![ProjectUserEntry {
-                name: "speedwave".into(),
-                dir: "/x".into(),
-                claude: Some(ClaudeOverrides {
-                    env: None,
-                    settings: None,
-                    llm: Some(LlmConfig {
-                        schema_version: Some(2),
-                        providers: vec![LlmProviderEntry {
-                            id: "anthropic".into(),
-                            kind: LlmProviderKind::AnthropicOauth,
-                            base_url: None,
-                            model: Some("nex-agi/nex-n2-pro:free".into()),
-                            has_api_key: false,
-                            context_tokens: None,
-                            has_custom_headers: false,
-                        }],
-                        active: Some(LlmActive {
-                            provider_id: "anthropic".into(),
-                            model: Some("nex-agi/nex-n2-pro:free".into()),
-                        }),
-                        ..Default::default()
-                    }),
-                }),
-                integrations: None,
-                plugin_settings: None,
-                policy: None,
-                effort_pin: None,
-                read_only: false,
-            }],
-            ..Default::default()
-        };
-        save_user_config_to(&config, &config_path).unwrap();
-
-        heal_llm_config_in(dir.path()).unwrap();
-        let healed = load_user_config_from(&config_path).unwrap();
-        let llm = healed.projects[0]
-            .claude
-            .as_ref()
-            .unwrap()
-            .llm
-            .as_ref()
-            .unwrap();
-        assert_eq!(llm.schema_version, Some(LLM_SCHEMA_VERSION));
-        assert_eq!(llm.providers[0].model, None);
-        assert_eq!(llm.active.as_ref().unwrap().model, None);
-
-        let after_first = std::fs::read_to_string(&config_path).unwrap();
-        heal_llm_config_in(dir.path()).unwrap();
-        assert_eq!(after_first, std::fs::read_to_string(&config_path).unwrap());
-    }
-
-    #[test]
-    fn test_heal_llm_config_on_disk_clears_anthropic_model() {
-        let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("config.json");
-        let config = SpeedwaveUserConfig {
-            projects: vec![ProjectUserEntry {
-                name: "speedwave".into(),
-                dir: "/x".into(),
-                claude: Some(ClaudeOverrides {
-                    env: None,
-                    settings: None,
-                    llm: Some(LlmConfig {
-                        schema_version: Some(LLM_SCHEMA_VERSION),
-                        providers: vec![LlmProviderEntry {
-                            id: "anthropic".into(),
-                            kind: LlmProviderKind::AnthropicOauth,
-                            base_url: None,
-                            model: Some("claude-haiku-4-5".into()),
-                            has_api_key: false,
-                            context_tokens: None,
-                            has_custom_headers: false,
-                        }],
-                        active: Some(LlmActive {
-                            provider_id: "anthropic".into(),
-                            model: Some("claude-haiku-4-5".into()),
-                        }),
-                        ..Default::default()
-                    }),
-                }),
-                integrations: None,
-                plugin_settings: None,
-                policy: None,
-                effort_pin: None,
-                read_only: false,
-            }],
-            ..Default::default()
-        };
-        save_user_config_to(&config, &config_path).unwrap();
-
-        heal_llm_config_in(dir.path()).unwrap();
-
-        let on_disk = std::fs::read_to_string(&config_path).unwrap();
-        assert!(
-            !on_disk.contains("claude-haiku-4-5"),
-            "healed file on disk must not carry the cleared model"
-        );
-        let healed = load_user_config_from(&config_path).unwrap();
-        let llm = healed.projects[0]
-            .claude
-            .as_ref()
-            .unwrap()
-            .llm
-            .as_ref()
-            .unwrap();
-        assert_eq!(llm.providers[0].model, None);
-        assert_eq!(llm.active.as_ref().unwrap().model, None);
-    }
-
-    fn write_user_config_json(dir: &Path, llm: serde_json::Value) -> std::path::PathBuf {
-        let config_path = dir.join("config.json");
-        let config = serde_json::json!({
-            "projects": [{ "name": "proj", "dir": "/x", "claude": { "llm": llm } }]
-        });
-        std::fs::write(&config_path, config.to_string()).unwrap();
-        config_path
-    }
-
-    fn healed_llm(config_path: &Path) -> LlmConfig {
-        load_user_config_from(config_path).unwrap().projects[0]
-            .claude
-            .as_ref()
-            .unwrap()
-            .llm
-            .clone()
-            .unwrap()
-    }
-
-    fn project_settings_path(dir: &Path) -> std::path::PathBuf {
-        crate::claude_home::claude_config_dir(dir, "proj").join("settings.json")
-    }
-
-    fn anthropic_llm_with_model(model: &str) -> serde_json::Value {
-        serde_json::json!({
-            "provider": "anthropic",
-            "model": model,
-            "context_tokens": 1_000_000,
-            "schema_version": LLM_SCHEMA_VERSION,
-            "providers": [
-                {
-                    "id": "anthropic",
-                    "kind": "anthropic_oauth",
-                    "model": model,
-                    "context_tokens": 1_000_000,
-                    "has_api_key": false,
-                    "has_custom_headers": false
-                },
-                {
-                    "id": "local",
-                    "kind": "local",
-                    "base_url": "https://llm.example/",
-                    "model": "gemma-4-26b-a4b",
-                    "has_api_key": true,
-                    "has_custom_headers": false
-                }
-            ],
-            "active": { "provider_id": "anthropic", "model": model }
-        })
-    }
-
-    #[test]
-    fn heal_moves_the_anthropic_model_of_a_0_18_config_into_the_settings_json_pin() {
-        let dir = tempfile::tempdir().unwrap();
-        let config_path =
-            write_user_config_json(dir.path(), anthropic_llm_with_model("claude-fable-5"));
-
-        heal_llm_config_in(dir.path()).unwrap();
-
-        assert_eq!(
-            crate::claude_settings::get_model_pin(dir.path(), "proj").as_deref(),
-            Some("claude-fable-5")
-        );
-        let llm = healed_llm(&config_path);
-        assert_eq!(llm.providers[0].model, None);
-        assert_eq!(llm.active.as_ref().unwrap().model, None);
-        assert_eq!(llm.model, None);
-        assert_eq!(llm.providers[1].model.as_deref(), Some("gemma-4-26b-a4b"));
-
-        let config_after_first = std::fs::read_to_string(&config_path).unwrap();
-        let settings_after_first =
-            std::fs::read_to_string(project_settings_path(dir.path())).unwrap();
-        heal_llm_config_in(dir.path()).unwrap();
-        assert_eq!(
-            config_after_first,
-            std::fs::read_to_string(&config_path).unwrap()
-        );
-        assert_eq!(
-            settings_after_first,
-            std::fs::read_to_string(project_settings_path(dir.path())).unwrap()
-        );
-    }
-
-    #[test]
-    fn heal_overwrites_an_older_pin_with_the_model_0_18_sessions_ran_on_and_keeps_other_keys() {
-        let dir = tempfile::tempdir().unwrap();
-        let config_path =
-            write_user_config_json(dir.path(), anthropic_llm_with_model("claude-sonnet-4-6"));
-        let settings = project_settings_path(dir.path());
-        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
-        std::fs::write(
-            &settings,
-            r#"{"model":"claude-opus-5","hooks":{"PreToolUse":[]}}"#,
-        )
-        .unwrap();
-
-        heal_llm_config_in(dir.path()).unwrap();
-
-        let value: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
-        assert_eq!(
-            value,
-            serde_json::json!({"model":"claude-sonnet-4-6","hooks":{"PreToolUse":[]}})
-        );
-        assert_eq!(healed_llm(&config_path).providers[0].model, None);
-    }
-
-    #[test]
-    fn heal_carries_the_model_of_an_inactive_anthropic_entry_and_leaves_the_active_local_one() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut llm = anthropic_llm_with_model(" claude-opus-4-8 ");
-        llm["provider"] = serde_json::json!("local");
-        llm["model"] = serde_json::json!("gemma-4-26b-a4b");
-        llm["active"] = serde_json::json!({ "provider_id": "local", "model": "gemma-4-26b-a4b" });
-        let config_path = write_user_config_json(dir.path(), llm);
-
-        heal_llm_config_in(dir.path()).unwrap();
-
-        assert_eq!(
-            crate::claude_settings::get_model_pin(dir.path(), "proj").as_deref(),
-            Some("claude-opus-4-8")
-        );
-        let llm = healed_llm(&config_path);
-        assert_eq!(llm.providers[0].model, None);
-        assert_eq!(
-            llm.effective_active_model().as_deref(),
-            Some("gemma-4-26b-a4b")
-        );
-    }
-
-    #[test]
-    fn heal_drops_an_anthropic_model_the_pin_cannot_hold_without_writing_settings() {
-        let dir = tempfile::tempdir().unwrap();
-        let config_path =
-            write_user_config_json(dir.path(), anthropic_llm_with_model("claude-mystery-9"));
-
-        heal_llm_config_in(dir.path()).unwrap();
-
-        assert!(!project_settings_path(dir.path()).exists());
-        let llm = healed_llm(&config_path);
-        assert_eq!(llm.providers[0].model, None);
-        assert_eq!(llm.active.as_ref().unwrap().model, None);
-    }
-
-    #[test]
-    fn heal_without_an_anthropic_model_writes_no_settings_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut llm = anthropic_llm_with_model("claude-fable-5");
-        llm["model"] = serde_json::Value::Null;
-        llm["providers"][0]["model"] = serde_json::Value::Null;
-        llm["active"]["model"] = serde_json::Value::Null;
-        write_user_config_json(dir.path(), llm);
-
-        heal_llm_config_in(dir.path()).unwrap();
-
-        assert!(!crate::claude_home::claude_home_dir(dir.path(), "proj").exists());
-    }
-
-    #[test]
-    fn heal_carries_nothing_when_the_active_anthropic_entry_ran_on_the_account_default() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut llm = anthropic_llm_with_model("claude-fable-5");
-        llm["model"] = serde_json::Value::Null;
-        llm["providers"][0]["model"] = serde_json::Value::Null;
-        llm["active"]["model"] = serde_json::Value::Null;
-        llm["providers"][1] = serde_json::json!({
-            "id": "anthropic-key",
-            "kind": "anthropic_api_key",
-            "model": "claude-opus-4-8",
-            "has_api_key": true,
-            "has_custom_headers": false
-        });
-        let config_path = write_user_config_json(dir.path(), llm);
-
-        heal_llm_config_in(dir.path()).unwrap();
-
-        assert!(!crate::claude_home::claude_home_dir(dir.path(), "proj").exists());
-        assert_eq!(healed_llm(&config_path).providers[1].model, None);
-    }
-
-    #[test]
-    fn heal_clears_the_config_model_even_when_the_pin_cannot_be_written() {
-        let dir = tempfile::tempdir().unwrap();
-        let config_path =
-            write_user_config_json(dir.path(), anthropic_llm_with_model("claude-fable-5"));
-        let settings = project_settings_path(dir.path());
-        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
-        std::fs::write(&settings, "not json").unwrap();
-
-        heal_llm_config_in(dir.path()).unwrap();
-
-        assert_eq!(std::fs::read_to_string(&settings).unwrap(), "not json");
-        let llm = healed_llm(&config_path);
-        assert_eq!(llm.providers[0].model, None);
-        assert_eq!(llm.active.as_ref().unwrap().model, None);
-
-        std::fs::write(&settings, r#"{"model":"claude-opus-5[1m]"}"#).unwrap();
-        heal_llm_config_in(dir.path()).unwrap();
-        assert_eq!(
-            crate::claude_settings::get_model_pin(dir.path(), "proj").as_deref(),
-            Some("claude-opus-5[1m]"),
-            "a later start must never carry the old model over a pin picked since"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn heal_writes_no_pin_when_the_config_cannot_be_saved() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let config_path =
-            write_user_config_json(dir.path(), anthropic_llm_with_model("claude-fable-5"));
-        let settings = project_settings_path(dir.path());
-        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
-        std::fs::write(&settings, "{}").unwrap();
-        std::fs::write(dir.path().join("config.lock"), "").unwrap();
-        let before = std::fs::read_to_string(&config_path).unwrap();
-        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
-
-        let result = heal_llm_config_in(dir.path());
-
-        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(
-            result.is_err(),
-            "the config save must fail in a read-only data dir"
-        );
-        assert_eq!(std::fs::read_to_string(&settings).unwrap(), "{}");
-        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), before);
-    }
-
-    #[test]
     fn migrate_llm_fabricates_anthropic_for_unset_provider_with_oauth_evidence() {
         let mut llm = LlmConfig::default();
         assert!(migrate_llm(&mut llm, AnthropicEvidence::Oauth));
@@ -5003,54 +4552,6 @@ mod tests {
             AnthropicEvidence::ApiKey,
             "api key beats oauth"
         );
-    }
-
-    #[test]
-    fn heal_fabricates_llm_for_credentialed_blockless_project() {
-        let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("config.json");
-        let proj = |name: &str, project_dir: &str| ProjectUserEntry {
-            name: name.into(),
-            dir: project_dir.into(),
-            claude: None,
-            integrations: None,
-            plugin_settings: None,
-            policy: None,
-            effort_pin: None,
-            read_only: false,
-        };
-        let config = SpeedwaveUserConfig {
-            projects: vec![proj("with-creds", "/x"), proj("fresh", "/y")],
-            ..Default::default()
-        };
-        save_user_config_to(&config, &config_path).unwrap();
-        let home = dir
-            .path()
-            .join(crate::consts::CLAUDE_HOME_SUBDIR)
-            .join("with-creds")
-            .join(".claude");
-        std::fs::create_dir_all(&home).unwrap();
-        std::fs::write(home.join(".credentials.json"), "{}").unwrap();
-
-        heal_llm_config_in(dir.path()).unwrap();
-        let healed = load_user_config_from(&config_path).unwrap();
-        let llm = healed.projects[0]
-            .claude
-            .as_ref()
-            .expect("claude block fabricated")
-            .llm
-            .as_ref()
-            .expect("llm block fabricated");
-        assert!(!llm.is_unconfigured());
-        assert_eq!(llm.active_provider().unwrap().id, ANTHROPIC_PROVIDER_ID);
-        assert!(
-            healed.projects[1].claude.is_none(),
-            "credential-less project untouched"
-        );
-
-        let after_first = std::fs::read_to_string(&config_path).unwrap();
-        heal_llm_config_in(dir.path()).unwrap();
-        assert_eq!(after_first, std::fs::read_to_string(&config_path).unwrap());
     }
 
     #[test]
@@ -5185,70 +4686,6 @@ mod tests {
         apply_repo_model_suggestion(&mut llm, Some("claude-opus-4-6".into()));
         assert!(llm.is_unconfigured());
         assert_eq!(llm.model, None);
-    }
-
-    #[test]
-    fn test_heal_llm_config_in_skips_and_preserves() {
-        let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("config.json");
-        let clean_llm = |id: &str, model: Option<&str>| LlmConfig {
-            schema_version: Some(LLM_SCHEMA_VERSION),
-            providers: vec![LlmProviderEntry {
-                id: id.into(),
-                kind: LlmProviderKind::OpenRouter,
-                base_url: None,
-                model: model.map(str::to_string),
-                has_api_key: true,
-                context_tokens: None,
-                has_custom_headers: false,
-            }],
-            active: Some(LlmActive {
-                provider_id: id.into(),
-                model: model.map(str::to_string),
-            }),
-            ..Default::default()
-        };
-        let proj = |name: &str, llm: Option<LlmConfig>| ProjectUserEntry {
-            name: name.into(),
-            dir: "/x".into(),
-            claude: llm.map(|l| ClaudeOverrides {
-                env: None,
-                settings: None,
-                llm: Some(l),
-            }),
-            integrations: None,
-            plugin_settings: None,
-            policy: None,
-            effort_pin: None,
-            read_only: false,
-        };
-        let config = SpeedwaveUserConfig {
-            projects: vec![
-                proj("no-claude", None),
-                proj("clean", Some(clean_llm("openrouter", Some("z-ai/glm-5.2")))),
-            ],
-            ..Default::default()
-        };
-        save_user_config_to(&config, &config_path).unwrap();
-
-        heal_llm_config_in(dir.path()).unwrap();
-        let steady = std::fs::read_to_string(&config_path).unwrap();
-        heal_llm_config_in(dir.path()).unwrap();
-        assert_eq!(
-            steady,
-            std::fs::read_to_string(&config_path).unwrap(),
-            "a settled config must not be rewritten on subsequent heals"
-        );
-        let healed = load_user_config_from(&config_path).unwrap();
-        let or = healed.projects[1]
-            .claude
-            .as_ref()
-            .unwrap()
-            .llm
-            .as_ref()
-            .unwrap();
-        assert_eq!(or.providers[0].model.as_deref(), Some("z-ai/glm-5.2"));
-        assert!(healed.projects[0].claude.is_none());
     }
 
     #[test]
@@ -5714,24 +5151,23 @@ mod tests {
     #[test]
     fn test_config_writers_use_durable_helper() {
         let source = include_str!("config.rs");
-        for func in ["fn save_user_config_to(", "fn migrate_drop_log_level_in("] {
-            let start = source.find(func).expect("function must exist");
-            let body = &source[start..];
-            let end = ["\npub fn ", "\nfn ", "\npub(crate) fn ", "\n#[cfg(test)]"]
-                .iter()
-                .filter_map(|marker| body[1..].find(marker).map(|i| i + 1))
-                .min()
-                .unwrap_or(body.len());
-            let body = &body[..end];
-            assert!(
-                body.contains("write_restricted_file_atomic"),
-                "{func} must use the durable write_restricted_file_atomic helper"
-            );
-            assert!(
-                !body.contains("std::fs::rename("),
-                "{func} must not hand-roll write+rename (use the durable helper)"
-            );
-        }
+        let func = "fn save_user_config_to(";
+        let start = source.find(func).expect("function must exist");
+        let body = &source[start..];
+        let end = ["\npub fn ", "\nfn ", "\npub(crate) fn ", "\n#[cfg(test)]"]
+            .iter()
+            .filter_map(|marker| body[1..].find(marker).map(|i| i + 1))
+            .min()
+            .unwrap_or(body.len());
+        let body = &body[..end];
+        assert!(
+            body.contains("write_restricted_file_atomic"),
+            "{func} must use the durable write_restricted_file_atomic helper"
+        );
+        assert!(
+            !body.contains("std::fs::rename("),
+            "{func} must not hand-roll write+rename (use the durable helper)"
+        );
     }
 
     #[cfg(unix)]
@@ -7612,162 +7048,9 @@ mod tests {
         assert_eq!(r.is_os_service_enabled("unknown"), None);
         assert_eq!(r.is_os_service_enabled("slack"), None);
     }
-
-    #[test]
-    fn migrate_drop_log_level_removes_field_and_preserves_unknown() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("config.json");
-        std::fs::write(
-            &path,
-            r#"{"projects":[],"active_project":null,"log_level":"trace","__future_field__":"x"}"#,
-        )
-        .unwrap();
-
-        let changed = super::migrate_drop_log_level_in(tmp.path()).unwrap();
-        assert!(changed);
-
-        let after: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        let obj = after.as_object().unwrap();
-        assert!(!obj.contains_key("log_level"));
-        assert_eq!(obj.get("__future_field__"), Some(&serde_json::json!("x")));
-    }
-
-    #[test]
-    fn migrate_drop_log_level_noop_when_field_absent() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("config.json");
-        let original = r#"{"projects":[],"active_project":null}"#;
-        std::fs::write(&path, original).unwrap();
-
-        let changed = super::migrate_drop_log_level_in(tmp.path()).unwrap();
-        assert!(!changed);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
-    }
-
-    #[test]
-    fn migrate_drop_log_level_is_idempotent() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("config.json");
-        std::fs::write(&path, r#"{"projects":[],"log_level":"trace"}"#).unwrap();
-
-        assert!(super::migrate_drop_log_level_in(tmp.path()).unwrap());
-        let after_first = std::fs::read_to_string(&path).unwrap();
-        assert!(!after_first.contains("log_level"));
-
-        assert!(!super::migrate_drop_log_level_in(tmp.path()).unwrap());
-        let after_second = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(
-            after_first, after_second,
-            "second call must not rewrite the file"
-        );
-    }
-
-    #[test]
-    fn migrate_drop_log_level_noop_when_file_missing() {
-        let tmp = tempfile::tempdir().unwrap();
-        let changed = super::migrate_drop_log_level_in(tmp.path()).unwrap();
-        assert!(!changed);
-        assert!(!tmp.path().join("config.json").exists());
-    }
-
-    #[test]
-    fn migrate_drop_log_level_errs_on_malformed_json() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("config.json");
-        std::fs::write(&path, "{ not valid json").unwrap();
-
-        let err = super::migrate_drop_log_level_in(tmp.path()).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("not valid JSON"),
-            "expected JSON-parse error, got: {err:#}"
-        );
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not valid json");
-    }
-
-    #[test]
-    fn migrate_drop_log_level_errs_when_root_is_not_object() {
-        for original in [
-            r#"["unexpected","array","root"]"#,
-            "null",
-            "42",
-            r#""just a string""#,
-            "true",
-        ] {
-            let tmp = tempfile::tempdir().unwrap();
-            let path = tmp.path().join("config.json");
-            std::fs::write(&path, original).unwrap();
-
-            let err = super::migrate_drop_log_level_in(tmp.path()).unwrap_err();
-            assert!(
-                format!("{err:#}").contains("not a JSON object"),
-                "expected root-shape error for {original:?}, got: {err:#}"
-            );
-            assert_eq!(
-                std::fs::read_to_string(&path).unwrap(),
-                original,
-                "file must be untouched for {original:?}"
-            );
-            assert!(
-                !path.with_extension("json.tmp").exists(),
-                "no orphan tmp for {original:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn migrate_drop_log_level_cleans_orphan_tmp_on_rename_failure() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("config.json");
-        std::fs::write(&path, r#"{"projects":[],"log_level":"trace"}"#).unwrap();
-        assert!(super::migrate_drop_log_level_in(tmp.path()).unwrap());
-        let tmp_path = path.with_extension("json.tmp");
-        assert!(
-            !tmp_path.exists(),
-            "tmp file must not survive a successful rename"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn migrate_drop_log_level_on_readonly_dir_leaves_file_untouched() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("config.json");
-        let original = r#"{"projects":[],"log_level":"trace"}"#;
-        std::fs::write(&path, original).unwrap();
-
-        let mut perms = std::fs::metadata(tmp.path()).unwrap().permissions();
-        perms.set_mode(0o555);
-        std::fs::set_permissions(tmp.path(), perms).unwrap();
-
-        let result = super::migrate_drop_log_level_in(tmp.path());
-
-        let mut restore = std::fs::metadata(tmp.path()).unwrap().permissions();
-        restore.set_mode(0o755);
-        std::fs::set_permissions(tmp.path(), restore).unwrap();
-
-        match result {
-            Err(_) => {}
-            Ok(false) => {}
-            Ok(true) => {
-                let after = std::fs::read_to_string(&path).unwrap();
-                assert!(
-                    after.contains("log_level"),
-                    "migration claimed success on read-only dir but field actually removed: {after}"
-                );
-            }
-        }
-    }
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "test fixtures assert on setup that must not silently fail"
-)]
 mod plugin_order_tests {
     use super::*;
 
@@ -7785,76 +7068,5 @@ mod plugin_order_tests {
                 "order must be deterministic — env values feed config-hash"
             );
         }
-    }
-
-    #[test]
-    fn resolve_migrates_legacy_local_key_then_syncs_flag_true() {
-        let data_dir = tempfile::tempdir().unwrap();
-        let project = "proj";
-
-        let legacy_dir = data_dir
-            .path()
-            .join("tokens")
-            .join(project)
-            .join("local-llm");
-        std::fs::create_dir_all(&legacy_dir).unwrap();
-        std::fs::write(legacy_dir.join("api_key"), "sk-legacy\n").unwrap();
-
-        let llm = LlmConfig {
-            provider: Some("local".to_string()),
-            base_url: Some("http://host.docker.internal:9000".to_string()),
-            model: Some("qwen".to_string()),
-            has_api_key: true,
-            ..Default::default()
-        };
-        let user_config = SpeedwaveUserConfig {
-            projects: vec![ProjectUserEntry {
-                name: project.to_string(),
-                dir: data_dir.path().to_string_lossy().to_string(),
-                claude: Some(ClaudeOverrides {
-                    env: None,
-                    settings: None,
-                    llm: Some(llm),
-                }),
-                integrations: None,
-                plugin_settings: None,
-                policy: None,
-                effort_pin: None,
-                read_only: false,
-            }],
-            active_project: None,
-            selected_ide: None,
-            ui: None,
-            telemetry: None,
-        };
-
-        let (resolved, _) = resolve_project_config_in_for_test(
-            data_dir.path(),
-            data_dir.path(),
-            &user_config,
-            project,
-        );
-
-        let local = resolved
-            .llm
-            .providers
-            .iter()
-            .find(|p| p.id == "local")
-            .expect("a local provider entry must exist after migration");
-        assert!(
-            local.has_api_key,
-            "after resolve the legacy key must be migrated and has_api_key true \
-             (regression: migrate must run before the disk-sync)"
-        );
-        let new_key = data_dir
-            .path()
-            .join("tokens")
-            .join(project)
-            .join("llm")
-            .join("local_api_key");
-        assert!(
-            new_key.exists(),
-            "the legacy key must be copied to the new llm token path"
-        );
     }
 }

@@ -575,11 +575,16 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(0);
     }
 
-    maybe_print_update_hint();
-
-    if let Err(e) = config::heal_llm_config_on_disk() {
-        log::warn!("llm config heal failed: {}", redact_err(&e));
+    match speedwave_migrations::run_all(consts::data_dir()) {
+        Ok(report) if report.failed.is_empty() => log::debug!("migrations: {report}"),
+        Ok(report) => log::warn!("migrations: {report}"),
+        Err(e) => {
+            err!("Startup migrations failed: {}", redact_err(&e));
+            std::process::exit(1);
+        }
     }
+
+    maybe_print_update_hint();
 
     if !skip_plugin_audit(&action) {
         if let Err(failures) = speedwave_runtime::plugin::audit_all() {
@@ -921,13 +926,6 @@ fn main() -> anyhow::Result<()> {
 
     let (resolved, integrations) =
         config::resolve_project_config(&project_dir, &user_config, &project_name);
-
-    let cleaned = speedwave_runtime::legacy_token_cleanup::run_legacy_token_cleanup_at_startup();
-    if cleaned > 0 {
-        log::info!("legacy token cleanup sanitised {cleaned} project(s)");
-    }
-
-    let _ = speedwave_runtime::oauth_state_migration::run_oauth_state_migration_at_startup();
 
     let host_bridges = compose::host_bridges_from_disk();
 
@@ -2211,18 +2209,6 @@ mod tests {
     }
 
     #[test]
-    fn main_heals_llm_config_before_project_actions() {
-        let source = include_str!("main.rs");
-        let heal = source
-            .find("heal_llm_config_on_disk")
-            .expect("CLI must persist the LLM schema migration");
-        let audit = source
-            .find("plugin::audit_all")
-            .expect("plugin audit anchor");
-        assert!(heal < audit, "heal must run before project actions");
-    }
-
-    #[test]
     fn select_anthropic_in_noop_when_project_not_found() {
         let mut user_config = config::SpeedwaveUserConfig::default();
         assert!(!select_anthropic_in(
@@ -2265,28 +2251,6 @@ mod tests {
         assert!(
             !select_anthropic_in(&mut user_config, "proj", config::AnthropicEvidence::None),
             "already-active anthropic must not report a change"
-        );
-    }
-
-    #[test]
-    fn oauth_state_migration_runs_after_cleanup_and_before_render() {
-        let source = include_str!("main.rs");
-        let cleanup_idx = source
-            .find("run_legacy_token_cleanup_at_startup()")
-            .expect("the CLI must call run_legacy_token_cleanup_at_startup in main()");
-        let migration_idx = source
-            .find("run_oauth_state_migration_at_startup()")
-            .expect("the CLI must call run_oauth_state_migration_at_startup in main()");
-        let render_idx = source
-            .find("compose::render_compose(")
-            .expect("the CLI must call render_compose in main()");
-        assert!(
-            cleanup_idx < migration_idx,
-            "oauth_state_migration must run after legacy_token_cleanup"
-        );
-        assert!(
-            migration_idx < render_idx,
-            "oauth_state_migration must run before render_compose"
         );
     }
 

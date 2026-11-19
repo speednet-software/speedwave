@@ -51,12 +51,6 @@ pub const PORT_WORKER: u16 = 3000;
 /// mcp-os bind-mount token file (hub mounts `/secrets/os-auth-token:ro`).
 /// Dual-written by `mcp_os_process::spawn` so the container sees a token-only file.
 pub const MCP_OS_AUTH_TOKEN_FILE: &str = "mcp-os-auth-token";
-/// Legacy `mcp-os` port file. **Migration-only** — pre-lock.json builds (≤ 0.10)
-/// wrote this; `mcp_os_process::spawn` folds it into the lock then removes it.
-pub const MCP_OS_LEGACY_PORT_FILE: &str = "mcp-os-port";
-/// Legacy `mcp-os` PID file. **Migration-only** — see
-/// [`MCP_OS_LEGACY_PORT_FILE`].
-pub const MCP_OS_LEGACY_PID_FILE: &str = "mcp-os-pid";
 /// Single-file lock for the mcp-os singleton in `data_dir` — carries `{service,
 /// pid, port, authToken, transport}`; SSOT for compose port injection + watchdog.
 pub const MCP_OS_LOCK_FILE: &str = "mcp-os.lock.json";

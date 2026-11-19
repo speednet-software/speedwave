@@ -469,6 +469,8 @@ fn main() {
         }
     }));
 
+    let migrations = speedwave_migrations::run_all(speedwave_runtime::consts::data_dir());
+
     let setup_started = setup_wizard::SetupState::load().runtime_ready;
 
     if let Ok(exe) = std::env::current_exe() {
@@ -644,13 +646,21 @@ fn main() {
         .setup(move |app| {
             log::set_max_level(log::LevelFilter::Trace);
             logging_cmd::init_bundle_identifier(app.config().identifier.clone());
-            if let Err(e) = speedwave_runtime::config::migrate_drop_log_level_in(
-                speedwave_runtime::consts::data_dir(),
-            ) {
-                log::warn!("config migration failed: {e:#}");
-            }
-            if let Err(e) = speedwave_runtime::config::heal_llm_config_on_disk() {
-                log::warn!("LLM config heal failed: {e:#}");
+            match &migrations {
+                Ok(report) if report.failed.is_empty() => log::debug!("migrations: {report}"),
+                Ok(report) => log::warn!("migrations: {report}"),
+                Err(e) => {
+                    log::error!("startup migrations failed: the migrations lock could not be taken");
+                    let body = format!(
+                        "Speedwave could not update its data directory.\n\n{e}\n\n\
+                         Close other Speedwave windows and start the app again."
+                    );
+                    show_audit_failure_dialog_and_exit(
+                        app.handle(),
+                        "Startup migrations failed",
+                        body,
+                    );
+                }
             }
 
             notifications::install(app.handle());
@@ -691,15 +701,6 @@ fn main() {
             }
 
             if setup_started {
-                let cleaned =
-                    speedwave_runtime::legacy_token_cleanup::run_legacy_token_cleanup_at_startup();
-                if cleaned > 0 {
-                    log::info!("legacy token cleanup sanitised {cleaned} project(s)");
-                }
-
-                let _ =
-                    speedwave_runtime::oauth_state_migration::run_oauth_state_migration_at_startup();
-
                 init_and_start_ide_bridge(&ide_bridge, app.handle());
 
                 crate::bridges::plugin_bridge_manager::init_and_start(

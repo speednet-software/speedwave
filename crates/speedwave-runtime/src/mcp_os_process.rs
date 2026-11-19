@@ -62,15 +62,6 @@ impl McpOsProcess {
     /// Test-only entry point; lets tests redirect lock + audit log to
     /// a temp directory without poking the global `data_dir()` OnceLock.
     pub(crate) fn spawn_with_data_dir(script_path: &str, data_dir: &Path) -> anyhow::Result<Self> {
-        let _ = lock::migrate_legacy_with_target(
-            data_dir,
-            LockService::McpOs,
-            consts::MCP_OS_LOCK_FILE,
-            consts::MCP_OS_LEGACY_PORT_FILE,
-            consts::MCP_OS_LEGACY_PID_FILE,
-            consts::MCP_OS_AUTH_TOKEN_FILE,
-        );
-
         HostMcpProcess::spawn_with_spec(
             McpOsSpec,
             data_dir,
@@ -288,63 +279,8 @@ mod tests {
         proc.stop().unwrap();
     }
 
-    /// Migration e2e: a legacy 3-file layout is collapsed into `lock.json`
-    /// when the singleton spawns.
-    #[cfg(unix)]
-    #[test]
-    #[serial_test::parallel(host_addressing)]
-    #[serial(env)]
-    #[expect(
-        clippy::expect_used,
-        reason = "test code: panics on setup failure are acceptable"
-    )]
-    fn spawn_migrates_legacy_three_file_layout() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("mcp-os-port"), "54321").unwrap();
-        std::fs::write(tmp.path().join("mcp-os-pid"), "1").unwrap();
-        std::fs::write(tmp.path().join("mcp-os-auth-token"), "legacy-token").unwrap();
-
-        let script = write_fake_worker(tmp.path(), "fake.js");
-        // SSOT-allow: test fixture spawn
-        let node_ok = Command::new("node")
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if !node_ok {
-            return;
-        }
-
-        let res = McpOsProcess::spawn_with_data_dir(&script.to_string_lossy(), tmp.path());
-        if let Ok(mut proc) = res {
-            let lock_path = tmp.path().join(consts::MCP_OS_LOCK_FILE);
-            assert!(lock_path.exists(), "lock.json must exist after spawn");
-            let lock = lock::read(&lock_path, LockService::McpOs)
-                .expect("lock.json must parse with service McpOs");
-            assert!(lock.port > 0, "lock.json port must be assigned");
-            assert!(
-                !tmp.path().join("mcp-os-port").exists(),
-                "legacy port removed"
-            );
-            assert!(
-                !tmp.path().join("mcp-os-pid").exists(),
-                "legacy pid removed"
-            );
-            assert!(
-                !tmp.path().join("mcp-os-auth-token").exists()
-                    || std::fs::read_to_string(tmp.path().join("mcp-os-auth-token"))
-                        .map(|s| s != "legacy-token")
-                        .unwrap_or(true),
-                "legacy auth-token file replaced by fresh standalone mount (dual-write)"
-            );
-            proc.stop().unwrap();
-        }
-    }
-
-    /// Upgrade-path e2e: migration against the *real* bundled mcp-os worker.
-    /// Gated behind `mcp-os-bundle-e2e` (run via `make test-mcp-os-bundle`).
+    /// Spawn against the *real* bundled mcp-os worker. Gated behind `mcp-os-bundle-e2e`
+    /// (run via `make test-mcp-os-bundle`).
     #[cfg(all(unix, feature = "mcp-os-bundle-e2e"))]
     #[test]
     #[serial_test::parallel(host_addressing)]
@@ -353,7 +289,7 @@ mod tests {
         clippy::expect_used,
         reason = "test code: panics on setup failure are acceptable"
     )]
-    fn upgrade_path_with_real_bundled_mcp_os() {
+    fn spawn_with_real_bundled_mcp_os() {
         let script = "../../desktop/src-tauri/mcp-os/os/dist/index.js";
         assert!(
             std::path::Path::new(script).exists(),
@@ -361,14 +297,6 @@ mod tests {
              (it stages the worker before enabling the mcp-os-bundle-e2e feature)"
         );
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("mcp-os-port"), "12345").unwrap();
-        std::fs::write(tmp.path().join("mcp-os-pid"), "1").unwrap();
-        std::fs::write(
-            tmp.path().join("mcp-os-auth-token"),
-            "deadbeef-aaaa-bbbb-cccc-1234567890ab",
-        )
-        .unwrap();
-
         let mut proc = McpOsProcess::spawn_with_data_dir(script, tmp.path())
             .expect("real bundled mcp-os must spawn");
         let lock = lock::read(
@@ -377,8 +305,6 @@ mod tests {
         )
         .expect("lock.json must parse");
         assert!(lock.port > 0);
-        assert!(!tmp.path().join("mcp-os-port").exists(), "legacy port gone");
-        assert!(!tmp.path().join("mcp-os-pid").exists(), "legacy pid gone");
 
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], lock.port));
         std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(2))
