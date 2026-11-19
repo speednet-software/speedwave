@@ -2489,6 +2489,70 @@ describe('ChatSessionStore', () => {
       expect(sentIds).toContain('msg_2');
     });
 
+    it('sends every response of a turn with tools to get_conversation_cost', async () => {
+      TestBed.inject(ProjectStateService).activeProject.set('proj');
+      let sentIds: string[] = [];
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      spy.mockImplementation(async (cmd: string, args?: unknown) => {
+        if (cmd === 'get_usage_for_response') return { cost_usd: 0.1, cost_source: 'catalog' };
+        if (cmd === 'get_conversation_cost') {
+          sentIds = (args as { responseIds: string[] }).responseIds;
+          return 0.3;
+        }
+        return undefined;
+      });
+      store.handleStreamChunk({ chunk_type: 'Text', data: { content: 'a' } });
+      store.handleStreamChunk({
+        chunk_type: 'Result',
+        data: {
+          session_id: 'abc',
+          assistant_uuid: 'msg_3',
+          response_ids: ['msg_1', 'msg_2', 'msg_3'],
+          total_cost: 0.3,
+        },
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      expect([...sentIds].sort()).toEqual(['msg_1', 'msg_2', 'msg_3']);
+      expect(store.messages.at(-1)?.meta?.response_ids).toEqual(['msg_1', 'msg_2', 'msg_3']);
+    });
+
+    it('a resumed turn counts every response of that turn in get_conversation_cost', async () => {
+      TestBed.inject(ProjectStateService).activeProject.set('proj');
+      let sentIds: string[] = [];
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      spy.mockImplementation(async (cmd: string, args?: unknown) => {
+        if (cmd === 'get_usage_for_response') return { cost_usd: 0.1, cost_source: 'catalog' };
+        if (cmd === 'get_conversation_cost') {
+          sentIds = (args as { responseIds: string[] }).responseIds;
+          return 0.4;
+        }
+        return undefined;
+      });
+      store.loadMessages(
+        toChatMessages({
+          session_id: 'abc',
+          messages: [
+            { role: 'user', content: 'go', timestamp: null, uuid: 'u1' },
+            {
+              role: 'assistant',
+              content: 'done',
+              timestamp: null,
+              blocks: [{ type: 'text', content: 'done' }],
+              uuid: 'msg_b',
+              response_ids: ['msg_a', 'msg_b'],
+            },
+          ],
+        })
+      );
+      store.handleStreamChunk({ chunk_type: 'Text', data: { content: 'c' } });
+      store.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', assistant_uuid: 'msg_c', total_cost: 0.4 },
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      expect([...sentIds].sort()).toEqual(['msg_a', 'msg_b', 'msg_c']);
+    });
+
     it('lagging proxy append (get_usage_for_response null) keeps live CC and skips get_conversation_cost', async () => {
       TestBed.inject(ProjectStateService).activeProject.set('proj');
       const spy = vi.spyOn(mockTauri, 'invoke');
@@ -8466,6 +8530,25 @@ describe('ChatSessionStore', () => {
       const [msg] = toChatMessages(transcript);
       expect(msg.meta?.model).toBe('claude-opus-4-8');
       expect(msg.meta?.usage).toBeUndefined();
+    });
+
+    it('maps the response ids of a folded turn into ChatMessage.meta', () => {
+      const transcript: ConversationTranscript = {
+        session_id: 's1',
+        messages: [
+          {
+            role: 'assistant',
+            content: 'done',
+            timestamp: '2025-01-01T00:00:00Z',
+            blocks: [{ type: 'text', content: 'done' }],
+            uuid: 'msg_2',
+            response_ids: ['msg_1', 'msg_2'],
+          },
+        ],
+      };
+      const [msg] = toChatMessages(transcript);
+      expect(msg.uuid).toBe('msg_2');
+      expect(msg.meta?.response_ids).toEqual(['msg_1', 'msg_2']);
     });
 
     it('leaves meta undefined when neither model nor usage present', () => {

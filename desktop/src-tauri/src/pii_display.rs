@@ -266,6 +266,7 @@ mod tests {
                 uuid: None,
                 model: None,
                 usage: None,
+                response_ids: None,
             }],
         };
 
@@ -310,6 +311,7 @@ mod tests {
                 uuid: None,
                 model: None,
                 usage: None,
+                response_ids: None,
             }],
         };
         detokenize_transcript(&mut transcript, &DisplayPolicy::default());
@@ -403,6 +405,7 @@ mod tests {
                 uuid: None,
                 model: None,
                 usage: None,
+                response_ids: None,
             }],
         };
 

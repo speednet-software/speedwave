@@ -36,6 +36,7 @@ export type StreamChunk =
         turn_cost?: number;
         model?: string;
         context_usage?: TurnUsage;
+        response_ids?: string[];
       };
     }
   | {
@@ -160,6 +161,7 @@ export interface EntryMeta {
   model?: string;
   usage?: TurnUsage;
   cost?: number;
+  response_ids?: string[];
 }
 
 /**
@@ -335,6 +337,7 @@ export interface ConversationMessage {
   uuid?: string;
   model?: string;
   usage?: TurnUsage;
+  response_ids?: string[];
 }
 
 /** Text segment of a wire user message. */

@@ -61,6 +61,8 @@ pub enum StreamChunk {
         model: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         context_usage: Option<TurnUsage>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        response_ids: Vec<String>,
     },
     AskUserQuestion {
         tool_id: String,
@@ -151,6 +153,7 @@ pub(crate) fn sanitize_chunk(chunk: StreamChunk) -> StreamChunk {
             turn_cost,
             model,
             context_usage,
+            response_ids,
         } => StreamChunk::Result {
             result_text: Some(sanitize(&text)),
             session_id,
@@ -162,6 +165,7 @@ pub(crate) fn sanitize_chunk(chunk: StreamChunk) -> StreamChunk {
             turn_cost,
             model,
             context_usage,
+            response_ids,
         },
         StreamChunk::QueueDrained { session_id, text } => StreamChunk::QueueDrained {
             session_id,
@@ -231,6 +235,7 @@ fn detokenize_chunk(chunk: StreamChunk, policy: &DisplayPolicy) -> StreamChunk {
             turn_cost,
             model,
             context_usage,
+            response_ids,
         } => StreamChunk::Result {
             result_text: Some(detok(policy, &text)),
             session_id,
@@ -242,6 +247,7 @@ fn detokenize_chunk(chunk: StreamChunk, policy: &DisplayPolicy) -> StreamChunk {
             turn_cost,
             model,
             context_usage,
+            response_ids,
         },
         StreamChunk::QueueDrained { session_id, text } => StreamChunk::QueueDrained {
             session_id,
@@ -443,6 +449,7 @@ fn option_to_vec(
 pub struct StreamParser {
     active_blocks: HashMap<u64, (String, String)>,
     pending_assistant_uuid: Option<String>,
+    pending_response_ids: Vec<String>,
     pending_turn_error_kind: Option<TurnErrorKind>,
     committed_user_uuids: std::collections::HashSet<String>,
     previous_session_usage: TurnUsage,
@@ -460,6 +467,7 @@ impl StreamParser {
         Self {
             active_blocks: HashMap::new(),
             pending_assistant_uuid: None,
+            pending_response_ids: Vec::new(),
             pending_turn_error_kind: None,
             committed_user_uuids: std::collections::HashSet::new(),
             previous_session_usage: TurnUsage::default(),
@@ -549,6 +557,11 @@ impl StreamParser {
         if let Some(id) = parsed["message"]["id"].as_str() {
             if !id.is_empty() {
                 self.pending_assistant_uuid = Some(id.to_string());
+                if !is_sidechain_event(parsed)
+                    && !self.pending_response_ids.iter().any(|seen| seen == id)
+                {
+                    self.pending_response_ids.push(id.to_string());
+                }
             }
         }
     }
@@ -612,6 +625,7 @@ impl StreamParser {
     pub fn new_session(&mut self) {
         self.reset();
         self.pending_assistant_uuid = None;
+        self.pending_response_ids.clear();
         self.previous_session_usage = TurnUsage::default();
         self.last_context_usage = None;
         self.previous_session_cost = None;
@@ -934,6 +948,7 @@ impl StreamParser {
         parsed: &serde_json::Value,
     ) -> (Option<StreamChunk>, Option<LogEntry>) {
         let assistant_uuid = self.pending_assistant_uuid.take();
+        let response_ids = std::mem::take(&mut self.pending_response_ids);
         let turn_error_kind = self.pending_turn_error_kind.take();
 
         let is_error = parsed["is_error"].as_bool().unwrap_or(false);
@@ -1060,6 +1075,7 @@ impl StreamParser {
                 turn_cost,
                 model,
                 context_usage: self.last_context_usage,
+                response_ids,
             }),
             log_entry,
         )
@@ -3446,6 +3462,7 @@ mod tests {
             turn_cost: None,
             model: None,
             context_usage: None,
+            response_ids: Vec::new(),
         };
         let out = format!("{:?}", sanitize_chunk(chunk));
         assert!(!out.contains("secretsecretsecretsecret"), "leaked: {out}");
@@ -3597,6 +3614,7 @@ mod tests {
             turn_cost: None,
             model: None,
             context_usage: None,
+            response_ids: Vec::new(),
         };
         match detokenize_chunk(result_chunk, &policy) {
             StreamChunk::Result { result_text, .. } => {
@@ -3973,6 +3991,7 @@ mod tests {
             turn_cost: None,
             model: None,
             context_usage: None,
+            response_ids: Vec::new(),
         }
     }
 
@@ -5121,6 +5140,7 @@ mod tests {
             turn_cost: None,
             model: None,
             context_usage: None,
+            response_ids: Vec::new(),
         };
         let serialized = serde_json::to_string(&original).unwrap();
         let deserialized: StreamChunk = serde_json::from_str(&serialized).unwrap();
@@ -7657,6 +7677,71 @@ mod tests {
             }
             other => panic!("expected Result, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn result_lists_every_main_thread_response_of_the_turn_once() {
+        let mut parser = StreamParser::new();
+        for line in [
+            r#"{"type":"assistant","message":{"id":"msg_1","role":"assistant","content":[]}}"#,
+            r#"{"type":"assistant","message":{"id":"msg_1","role":"assistant","content":[]}}"#,
+            r#"{"type":"assistant","parent_tool_use_id":"toolu_task","message":{"id":"msg_sub","role":"assistant","content":[]}}"#,
+            r#"{"type":"assistant","message":{"id":"msg_2","role":"assistant","content":[]}}"#,
+        ] {
+            parse_line_str(&mut parser, line);
+        }
+        let result = r#"{"type":"result","session_id":"s1","total_cost_usd":0.01,"is_error":false,"result":""}"#;
+        match parse_line_str(&mut parser, result).unwrap() {
+            StreamChunk::Result {
+                response_ids,
+                assistant_uuid,
+                ..
+            } => {
+                assert_eq!(response_ids, ["msg_1", "msg_2"]);
+                assert_eq!(assistant_uuid.as_deref(), Some("msg_2"));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"assistant","message":{"id":"msg_3","role":"assistant","content":[]}}"#,
+        );
+        match parse_line_str(&mut parser, result).unwrap() {
+            StreamChunk::Result { response_ids, .. } => assert_eq!(response_ids, ["msg_3"]),
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn response_ids_do_not_leak_past_an_error_result() {
+        let mut parser = StreamParser::new();
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"assistant","message":{"id":"msg_err","role":"assistant","content":[]}}"#,
+        );
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"result","is_error":true,"result":"something broke"}"#,
+        );
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"assistant","message":{"id":"msg_next","role":"assistant","content":[]}}"#,
+        );
+        let result = r#"{"type":"result","session_id":"s1","total_cost_usd":0.01,"is_error":false,"result":""}"#;
+        match parse_line_str(&mut parser, result).unwrap() {
+            StreamChunk::Result { response_ids, .. } => assert_eq!(response_ids, ["msg_next"]),
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_result_without_responses_leaves_response_ids_off_the_wire() {
+        let mut parser = StreamParser::new();
+        let result = r#"{"type":"result","session_id":"s1","total_cost_usd":0.01,"is_error":false,"result":""}"#;
+        let chunk = parse_line_str(&mut parser, result).unwrap();
+        let json = serde_json::to_value(&chunk).unwrap();
+        assert!(json["data"].get("response_ids").is_none(), "{json}");
     }
 
     #[test]
@@ -10202,6 +10287,7 @@ mod tests {
             turn_cost: None,
             model: None,
             context_usage: None,
+            response_ids: Vec::new(),
         };
         let json = serde_json::to_string(&chunk).unwrap();
         assert!(
@@ -10235,6 +10321,7 @@ mod tests {
             turn_cost: None,
             model: None,
             context_usage: None,
+            response_ids: Vec::new(),
         };
         let json = serde_json::to_string(&chunk).unwrap();
         assert!(
@@ -10395,6 +10482,7 @@ mod tests {
                 cache_read_tokens: 4,
                 cache_write_tokens: 5,
             }),
+            response_ids: Vec::new(),
         };
         let json = serde_json::to_string(&chunk).unwrap();
         assert!(

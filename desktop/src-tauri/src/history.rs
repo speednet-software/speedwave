@@ -51,6 +51,8 @@ pub struct ConversationMessage {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<crate::chat::TurnUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_ids: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -324,6 +326,7 @@ fn turn_origin_message(
         uuid: parsed["uuid"].as_str().map(String::from),
         model: None,
         usage: None,
+        response_ids: None,
     }
 }
 
@@ -397,6 +400,7 @@ fn command_line_message(parsed: &serde_json::Value, line: String) -> Conversatio
         uuid: parsed["uuid"].as_str().map(String::from),
         model: None,
         usage: None,
+        response_ids: None,
     }
 }
 
@@ -420,6 +424,7 @@ fn parse_user_message(parsed: &serde_json::Value) -> Option<ConversationMessage>
             uuid,
             model: None,
             usage: None,
+            response_ids: None,
         });
     }
 
@@ -457,6 +462,7 @@ fn parse_user_message(parsed: &serde_json::Value) -> Option<ConversationMessage>
             uuid,
             model: None,
             usage: None,
+            response_ids: None,
         });
     }
 
@@ -467,18 +473,16 @@ fn parse_assistant_message(parsed: &serde_json::Value) -> Option<ConversationMes
     let message = &parsed["message"];
     let content = &message["content"];
     let timestamp = parsed["timestamp"].as_str().map(String::from);
-    let uuid = parsed["uuid"].as_str().map(String::from);
+    let line_uuid = parsed["uuid"].as_str().map(String::from);
 
     let raw_blocks = content.as_array()?;
 
-    let mut parts = Vec::new();
     let mut rich_blocks = Vec::new();
     for block in raw_blocks {
         let block_type = block["type"].as_str().unwrap_or("");
         match block_type {
             "text" => {
                 if let Some(t) = block["text"].as_str() {
-                    parts.push(t.to_string());
                     rich_blocks.push(MessageBlock::Text {
                         content: t.to_string(),
                     });
@@ -493,7 +497,6 @@ fn parse_assistant_message(parsed: &serde_json::Value) -> Option<ConversationMes
             }
             "tool_use" => {
                 if let Some(name) = block["name"].as_str() {
-                    parts.push(format!("[Tool: {name}]"));
                     rich_blocks.push(MessageBlock::ToolUse {
                         tool_id: block["id"].as_str().unwrap_or_default().to_string(),
                         tool_name: name.to_string(),
@@ -507,34 +510,54 @@ fn parse_assistant_message(parsed: &serde_json::Value) -> Option<ConversationMes
         }
     }
 
-    if parts.is_empty() && rich_blocks.is_empty() {
+    if rich_blocks.is_empty() {
         return None;
     }
 
-    let flat_content = if parts.is_empty() {
-        "[thinking]".to_string()
-    } else {
-        parts.join("\n")
-    };
-
     let model = message["model"].as_str().map(String::from);
-    let usage = if crate::chat::is_sidechain_event(parsed) {
-        None
+    let main_thread = !crate::chat::is_sidechain_event(parsed);
+    let response_id = message["id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .map(String::from);
+    let (uuid, response_ids, usage) = if main_thread {
+        (
+            response_id.clone().or(line_uuid),
+            Some(response_id.into_iter().collect::<Vec<_>>()),
+            message
+                .get("usage")
+                .and_then(crate::chat::turn_usage_from_jsonl),
+        )
     } else {
-        message
-            .get("usage")
-            .and_then(crate::chat::turn_usage_from_jsonl)
+        (line_uuid, None, None)
     };
 
     Some(ConversationMessage {
         role: "assistant".to_string(),
-        content: flat_content,
+        content: assistant_flat_content(&rich_blocks),
         blocks: Some(rich_blocks),
         timestamp,
         uuid,
         model,
         usage,
+        response_ids,
     })
+}
+
+fn assistant_flat_content(blocks: &[MessageBlock]) -> String {
+    let parts: Vec<String> = blocks
+        .iter()
+        .filter_map(|block| match block {
+            MessageBlock::Text { content } => Some(content.clone()),
+            MessageBlock::ToolUse { tool_name, .. } => Some(format!("[Tool: {tool_name}]")),
+            _ => None,
+        })
+        .collect();
+    if parts.is_empty() {
+        "[thinking]".to_string()
+    } else {
+        parts.join("\n")
+    }
 }
 
 fn parse_result_message(parsed: &serde_json::Value) -> Option<ConversationMessage> {
@@ -559,6 +582,7 @@ fn parse_result_message(parsed: &serde_json::Value) -> Option<ConversationMessag
             uuid: uuid.clone(),
             model: None,
             usage: None,
+            response_ids: None,
         });
     }
 
@@ -572,6 +596,7 @@ fn parse_result_message(parsed: &serde_json::Value) -> Option<ConversationMessag
         uuid,
         model: None,
         usage: None,
+        response_ids: None,
     })
 }
 
@@ -646,6 +671,54 @@ fn fold_history_control_chips(messages: &mut Vec<ConversationMessage>) {
     }
 }
 
+fn fold_assistant_turns(messages: &mut Vec<ConversationMessage>) {
+    let mut folded: Vec<ConversationMessage> = Vec::with_capacity(messages.len());
+    for message in messages.drain(..) {
+        match folded.last_mut() {
+            Some(turn) if joins_turn(turn, &message) => absorb_response(turn, message),
+            _ => folded.push(message),
+        }
+    }
+    *messages = folded;
+}
+
+fn is_turn_response(message: &ConversationMessage) -> bool {
+    message.role == "assistant" && message.response_ids.is_some()
+}
+
+fn joins_turn(previous: &ConversationMessage, next: &ConversationMessage) -> bool {
+    is_turn_response(previous) && is_turn_response(next)
+}
+
+fn absorb_response(turn: &mut ConversationMessage, next: ConversationMessage) {
+    let ids = turn.response_ids.get_or_insert_with(Vec::new);
+    let next_ids = next.response_ids.unwrap_or_default();
+    let seen = !next_ids.is_empty() && next_ids.iter().all(|id| ids.contains(id));
+    for id in next_ids {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    if !seen {
+        turn.usage = match (turn.usage, next.usage) {
+            (Some(a), Some(b)) => Some(crate::chat::TurnUsage {
+                input_tokens: a.input_tokens + b.input_tokens,
+                output_tokens: a.output_tokens + b.output_tokens,
+                cache_read_tokens: a.cache_read_tokens + b.cache_read_tokens,
+                cache_write_tokens: a.cache_write_tokens + b.cache_write_tokens,
+            }),
+            (a, b) => a.or(b),
+        };
+    }
+    turn.blocks
+        .get_or_insert_with(Vec::new)
+        .extend(next.blocks.unwrap_or_default());
+    turn.content = assistant_flat_content(turn.blocks.as_deref().unwrap_or_default());
+    turn.timestamp = next.timestamp.or(turn.timestamp.take());
+    turn.uuid = next.uuid.or(turn.uuid.take());
+    turn.model = next.model.or(turn.model.take());
+}
+
 pub fn list_conversations(project: &str) -> anyhow::Result<Vec<ConversationSummary>> {
     list_conversations_impl(consts::data_dir(), project)
 }
@@ -700,6 +773,7 @@ fn list_conversations_impl(
         let mut preview = String::new();
         let mut message_count: usize = 0;
         let mut user_message_count: usize = 0;
+        let mut last_was_turn_response = false;
         let mut dedupe = TranscriptDedupe::default();
         let mut titles = SessionTitles::default();
         let mut scanned_lines: usize = 0;
@@ -728,13 +802,21 @@ fn list_conversations_impl(
                     && speedwave_runtime::slash::parse_control_command(&msg.content).is_some();
                 let is_synthetic_chip_reply = msg.role == "assistant"
                     && msg.model.as_deref() == Some(crate::session_model::SYNTHETIC_MODEL);
-                if is_control_chip_user || is_synthetic_chip_reply || is_turn_origin_message(&msg) {
+                if is_control_chip_user || is_turn_origin_message(&msg) {
+                    last_was_turn_response = false;
+                    continue;
+                }
+                if is_synthetic_chip_reply {
                     continue;
                 }
                 if !dedupe.admit(&parsed, &msg, message_count) {
                     continue;
                 }
-                message_count += 1;
+                let joins_previous = last_was_turn_response && is_turn_response(&msg);
+                last_was_turn_response = is_turn_response(&msg);
+                if !joins_previous {
+                    message_count += 1;
+                }
                 if msg.role == "user" {
                     user_message_count += 1;
                 }
@@ -846,6 +928,7 @@ fn get_conversation_impl(
     }
 
     fold_history_control_chips(&mut messages);
+    fold_assistant_turns(&mut messages);
 
     Ok(ConversationTranscript {
         session_id: session_id.to_string(),
@@ -1300,6 +1383,7 @@ mod tests {
             uuid: Some(uuid.to_string()),
             model: None,
             usage: None,
+            response_ids: None,
         }
     }
 
@@ -1314,6 +1398,7 @@ mod tests {
             uuid: None,
             model: model.map(str::to_string),
             usage: None,
+            response_ids: None,
         }
     }
 
@@ -1408,6 +1493,7 @@ mod tests {
             uuid: Some("u1".to_string()),
             model: None,
             usage: None,
+            response_ids: None,
         }];
         fold_history_control_chips(&mut messages);
         assert!(matches!(
@@ -2239,7 +2325,7 @@ mod tests {
             .position(|s| s == "/model openrouter/openai/gpt-4o-mini")
             .expect("the switch is rebuilt as a /model chip");
         assert_eq!(shapes.iter().filter(|s| s.starts_with("/model")).count(), 1);
-        assert_eq!(shapes[chip - 1], "stub reply", "{shapes:?}");
+        assert_eq!(shapes[chip - 1], "[Tool: Read]\nstub reply", "{shapes:?}");
         assert_eq!(shapes[chip + 1], "Second message.", "{shapes:?}");
         assert_eq!(
             shapes.first().map(String::as_str),
@@ -3445,9 +3531,230 @@ mod tests {
             .collect();
         assert_eq!(
             roles,
-            ["user", "assistant", "assistant", "assistant", "assistant"],
-            "a user message holding only tool_result blocks adds no message"
+            ["user", "assistant"],
+            "a user message holding only tool_result blocks adds no message, and the calls of one turn fold into one"
         );
+    }
+
+    const TURN_OF_THREE_RESPONSES: [&str; 9] = [
+        r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"go"},"timestamp":"2026-11-19T10:00:00Z"}"#,
+        r#"{"type":"assistant","uuid":"l1","message":{"id":"msg_1","role":"assistant","model":"claude-a","content":[{"type":"thinking","thinking":"plan"}],"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":100,"cache_creation_input_tokens":20}},"timestamp":"2026-11-19T10:00:01Z"}"#,
+        r#"{"type":"assistant","uuid":"l2","message":{"id":"msg_1","role":"assistant","model":"claude-a","content":[{"type":"tool_use","id":"toolu_a","name":"Bash","input":{"command":"echo ok"}}],"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":100,"cache_creation_input_tokens":20}},"timestamp":"2026-11-19T10:00:02Z"}"#,
+        r#"{"type":"user","uuid":"l3","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_a","content":"ok"}]},"timestamp":"2026-11-19T10:00:03Z"}"#,
+        r#"{"type":"assistant","uuid":"l4","message":{"id":"msg_2","role":"assistant","model":"claude-b","content":[{"type":"tool_use","id":"toolu_b","name":"Read","input":{"file_path":"/a"}}],"usage":{"input_tokens":12,"output_tokens":6,"cache_read_input_tokens":110,"cache_creation_input_tokens":0}},"timestamp":"2026-11-19T10:00:04Z"}"#,
+        r#"{"type":"user","uuid":"l5","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_b","content":"body","is_error":true}]},"timestamp":"2026-11-19T10:00:05Z"}"#,
+        r#"{"type":"assistant","uuid":"l6","message":{"id":"msg_3","role":"assistant","model":"claude-c","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":15,"output_tokens":7,"cache_read_input_tokens":120,"cache_creation_input_tokens":0}},"timestamp":"2026-11-19T10:00:06Z"}"#,
+        r#"{"type":"user","uuid":"u2","message":{"role":"user","content":"next"},"timestamp":"2026-11-19T10:01:00Z"}"#,
+        r#"{"type":"assistant","uuid":"l7","message":{"id":"msg_4","role":"assistant","model":"claude-c","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}},"timestamp":"2026-11-19T10:01:01Z"}"#,
+    ];
+
+    fn block_kinds(msg: &ConversationMessage) -> Vec<&'static str> {
+        msg.blocks
+            .iter()
+            .flatten()
+            .map(|b| match b {
+                MessageBlock::Text { .. } => "text",
+                MessageBlock::Thinking { .. } => "thinking",
+                MessageBlock::ToolUse { .. } => "tool_use",
+                MessageBlock::Error { .. } => "error",
+                MessageBlock::ControlChip { .. } => "control_chip",
+                MessageBlock::TurnOrigin { .. } => "turn_origin",
+            })
+            .collect()
+    }
+
+    #[test]
+    fn get_conversation_folds_the_responses_of_one_turn_into_one_assistant_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        write_session(&dir, id, &TURN_OF_THREE_RESPONSES);
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+
+        let roles: Vec<&str> = transcript
+            .messages
+            .iter()
+            .map(|m| m.role.as_str())
+            .collect();
+        assert_eq!(roles, ["user", "assistant", "user", "assistant"]);
+        let turn = &transcript.messages[1];
+        assert_eq!(
+            block_kinds(turn),
+            ["thinking", "tool_use", "tool_use", "text"]
+        );
+        assert_eq!(turn.content, "[Tool: Bash]\n[Tool: Read]\ndone");
+        assert_eq!(
+            tool_uses(&transcript),
+            vec![
+                ("toolu_a".to_string(), Some("ok".to_string()), false),
+                ("toolu_b".to_string(), Some("body".to_string()), true),
+            ]
+        );
+        assert_eq!(turn.timestamp.as_deref(), Some("2026-11-19T10:00:06Z"));
+    }
+
+    #[test]
+    fn a_folded_turn_counts_the_usage_of_each_response_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        write_session(&dir, id, &TURN_OF_THREE_RESPONSES);
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+
+        assert_eq!(
+            transcript.messages[1].usage,
+            Some(crate::chat::TurnUsage {
+                input_tokens: 37,
+                output_tokens: 18,
+                cache_read_tokens: 330,
+                cache_write_tokens: 20,
+            })
+        );
+        assert_eq!(transcript.messages[1].model.as_deref(), Some("claude-c"));
+    }
+
+    #[test]
+    fn a_folded_turn_is_identified_by_its_last_response_and_lists_every_response() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        write_session(&dir, id, &TURN_OF_THREE_RESPONSES);
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+
+        let turn = &transcript.messages[1];
+        assert_eq!(turn.uuid.as_deref(), Some("msg_3"));
+        assert_eq!(
+            turn.response_ids,
+            Some(vec![
+                "msg_1".to_string(),
+                "msg_2".to_string(),
+                "msg_3".to_string()
+            ])
+        );
+        let next = &transcript.messages[3];
+        assert_eq!(next.uuid.as_deref(), Some("msg_4"));
+        assert_eq!(next.response_ids, Some(vec!["msg_4".to_string()]));
+        assert_eq!(transcript.messages[0].uuid.as_deref(), Some("u1"));
+        assert_eq!(transcript.messages[0].response_ids, None);
+        assert_eq!(transcript.messages[2].uuid.as_deref(), Some("u2"));
+    }
+
+    #[test]
+    fn a_sidechain_line_between_two_responses_stays_a_message_of_its_own() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"go"}}"#,
+                r#"{"type":"assistant","uuid":"l1","message":{"id":"msg_1","role":"assistant","content":[{"type":"text","text":"first"}]}}"#,
+                r#"{"type":"assistant","uuid":"s1","isSidechain":true,"message":{"id":"msg_s","role":"assistant","content":[{"type":"text","text":"subagent"}]}}"#,
+                r#"{"type":"assistant","uuid":"l2","message":{"id":"msg_2","role":"assistant","content":[{"type":"text","text":"second"}]}}"#,
+            ],
+        );
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+
+        let rows: Vec<(&str, Option<&str>)> = transcript
+            .messages
+            .iter()
+            .map(|m| (m.content.as_str(), m.uuid.as_deref()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("go", Some("u1")),
+                ("first", Some("msg_1")),
+                ("subagent", Some("s1")),
+                ("second", Some("msg_2")),
+            ]
+        );
+        assert_eq!(transcript.messages[2].response_ids, None);
+    }
+
+    #[test]
+    fn an_error_result_line_after_a_response_stays_a_message_of_its_own() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"go"}}"#,
+                r#"{"type":"assistant","uuid":"l1","message":{"id":"msg_1","role":"assistant","content":[{"type":"text","text":"partial"}]}}"#,
+                r#"{"type":"result","is_error":true,"result":"API error"}"#,
+            ],
+        );
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+
+        assert_eq!(transcript.messages.len(), 3);
+        assert_eq!(block_kinds(&transcript.messages[2]), ["error"]);
+    }
+
+    #[test]
+    fn list_conversations_counts_a_folded_turn_like_the_transcript() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        write_session(&dir, id, &TURN_OF_THREE_RESPONSES);
+
+        let summaries = list_conversations_impl(tmp.path(), "proj").unwrap();
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+
+        assert_eq!(transcript.messages.len(), 4);
+        assert_eq!(summaries[0].message_count, transcript.messages.len());
+    }
+
+    #[test]
+    fn parse_assistant_message_takes_the_message_id_as_its_uuid_and_response() {
+        let line = r#"{"type":"assistant","uuid":"line-uuid","message":{"id":"msg_9","role":"assistant","content":[{"type":"text","text":"ok"}]}}"#;
+        let msg = parse_jsonl_message(line).unwrap();
+        assert_eq!(msg.uuid.as_deref(), Some("msg_9"));
+        assert_eq!(msg.response_ids, Some(vec!["msg_9".to_string()]));
+    }
+
+    #[test]
+    fn parse_assistant_message_without_a_message_id_keeps_its_line_uuid() {
+        let line = r#"{"type":"assistant","uuid":"line-uuid","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}"#;
+        let msg = parse_jsonl_message(line).unwrap();
+        assert_eq!(msg.uuid.as_deref(), Some("line-uuid"));
+        assert_eq!(msg.response_ids, Some(Vec::new()));
+    }
+
+    #[test]
+    fn parse_assistant_message_on_a_sidechain_line_lists_no_response() {
+        let line = r#"{"type":"assistant","uuid":"line-uuid","isSidechain":true,"message":{"id":"msg_9","role":"assistant","content":[{"type":"text","text":"ok"}]}}"#;
+        let msg = parse_jsonl_message(line).unwrap();
+        assert_eq!(msg.uuid.as_deref(), Some("line-uuid"));
+        assert_eq!(msg.response_ids, None);
+    }
+
+    #[test]
+    fn conversation_message_fields_match_ts_mirror() {
+        let ts = include_str!("../../src/src/app/models/chat.ts");
+        let message = ConversationMessage {
+            role: "assistant".to_string(),
+            content: String::new(),
+            blocks: Some(Vec::new()),
+            timestamp: None,
+            uuid: Some("msg_1".to_string()),
+            model: Some("claude-a".to_string()),
+            usage: Some(crate::chat::TurnUsage::default()),
+            response_ids: Some(vec!["msg_1".to_string()]),
+        };
+        let ts_fields: Vec<&str> =
+            crate::ts_mirror::ts_interface_fields(ts, "ConversationMessage")
+                .into_iter()
+                .map(|f| f.trim_end_matches('?'))
+                .collect();
+        assert_eq!(crate::ts_mirror::rust_fields(&message), ts_fields);
     }
 
     #[test]
@@ -3551,7 +3858,7 @@ mod tests {
         let summaries = list_conversations_impl(tmp.path(), "proj").unwrap();
         let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
 
-        assert_eq!(transcript.messages.len(), 3);
+        assert_eq!(transcript.messages.len(), 2);
         assert_eq!(summaries[0].message_count, transcript.messages.len());
     }
 
