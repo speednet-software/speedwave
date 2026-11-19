@@ -6120,6 +6120,7 @@ dependencies = [
  "image",
  "log",
  "minisign-verify",
+ "mockito",
  "self_update",
  "semver",
  "serde",
