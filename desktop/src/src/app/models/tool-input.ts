@@ -1,5 +1,46 @@
 import type { NormalizedToolInput } from './chat';
 
+const META_NAME = /export\s+const\s+meta\s*=\s*\{[^}]*?\bname\s*:\s*(['"])(.*?)\1/s;
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined;
+}
+
+function workflowArgs(value: unknown): Array<{ key: string; value: string }> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return [];
+  }
+  return Object.entries(value).map(([key, v]) => ({
+    key,
+    value: typeof v === 'string' ? v : (JSON.stringify(v) ?? String(v)),
+  }));
+}
+
+function normalizeWorkflow(parsed: Record<string, unknown>): NormalizedToolInput | undefined {
+  const name = optionalString(parsed['name']);
+  const description = optionalString(parsed['description']);
+  const script = optionalString(parsed['script']);
+  const scriptPath = optionalString(parsed['scriptPath']);
+  const resumeFromRunId = optionalString(parsed['resumeFromRunId']);
+  const args = workflowArgs(parsed['args']);
+  const recognized = [name, description, script, scriptPath, resumeFromRunId].some(
+    (v) => v !== undefined
+  );
+  if (!recognized && args.length === 0) {
+    return undefined;
+  }
+  const metaName = script === undefined ? undefined : META_NAME.exec(script)?.[2];
+  return {
+    kind: 'workflow',
+    title: name || metaName || 'workflow',
+    description,
+    args,
+    script,
+    scriptPath,
+    resumeFromRunId,
+  };
+}
+
 /**
  * Parses raw tool input JSON into a typed display model by tool name.
  * @param toolName - The Claude tool name (e.g. "Bash", "TaskCreate").
@@ -73,6 +114,8 @@ export function normalizeToolInput(toolName: string, inputJson: string): Normali
           kind: 'agent',
           description: parsed.description ?? '',
         };
+      case 'Workflow':
+        return normalizeWorkflow(parsed) ?? { kind: 'generic', raw_json: inputJson };
       default:
         return { kind: 'generic', raw_json: inputJson };
     }

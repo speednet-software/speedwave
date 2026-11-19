@@ -183,6 +183,50 @@ $ {{ asBash(normalized()).command }}</pre>
                 {{ asAgent(normalized()).description }}
               </div>
             }
+            @case ('workflow') {
+              @if (asWorkflow(normalized()).description) {
+                <div
+                  data-testid="workflow-description"
+                  class="mono text-[11.5px] text-[var(--ink-dim)]"
+                >
+                  {{ asWorkflow(normalized()).description }}
+                </div>
+              }
+              @if (asWorkflow(normalized()).args.length > 0) {
+                <ul class="mono mt-1 list-none space-y-0.5 text-[11.5px]">
+                  @for (arg of asWorkflow(normalized()).args; track arg.key) {
+                    <li data-testid="workflow-arg">
+                      <span class="text-[var(--ink-mute)]">{{ arg.key }}:</span>
+                      {{ ' ' }}<span class="text-[var(--teal)]">{{ arg.value }}</span>
+                    </li>
+                  }
+                </ul>
+              }
+              @if (asWorkflow(normalized()).scriptPath) {
+                <div data-testid="workflow-script-path" class="mono mt-1 text-[11.5px]">
+                  <span class="text-[var(--ink-mute)]">script:</span>
+                  <span class="text-[var(--teal)]">{{ asWorkflow(normalized()).scriptPath }}</span>
+                </div>
+              }
+              @if (asWorkflow(normalized()).resumeFromRunId) {
+                <div data-testid="workflow-resume" class="mono mt-1 text-[11.5px]">
+                  <span class="text-[var(--ink-mute)]">resume from:</span>
+                  <span class="text-[var(--teal)]">{{
+                    asWorkflow(normalized()).resumeFromRunId
+                  }}</span>
+                </div>
+              }
+              @if (asWorkflow(normalized()).script) {
+                <details data-testid="workflow-script" class="mt-2">
+                  <summary class="mono cursor-pointer text-[11px] text-[var(--ink-mute)]">
+                    script
+                  </summary>
+                  <pre
+                    class="mono mt-1 overflow-x-auto rounded border border-[var(--line)] bg-[var(--bg-1)] p-3 text-[11.5px] leading-[1.5] text-[var(--ink-dim)]"
+                    >{{ asWorkflow(normalized()).script }}</pre>
+                </details>
+              }
+            }
             @case ('task_create') {
               <div data-testid="task-description" class="mono text-[11.5px] text-[var(--ink-dim)]">
                 {{ asTaskCreate(normalized()).description }}
@@ -325,6 +369,8 @@ export class ToolBlockComponent {
         return n.url;
       case 'agent':
         return n.description;
+      case 'workflow':
+        return n.title;
       case 'todo_write':
         return `${n.todos.length} ${n.todos.length === 1 ? 'task' : 'tasks'}`;
       case 'task_create':
@@ -450,6 +496,14 @@ export class ToolBlockComponent {
    */
   asAgent(n: NormalizedToolInput): Extract<NormalizedToolInput, { kind: 'agent' }> {
     return n as Extract<NormalizedToolInput, { kind: 'agent' }>;
+  }
+
+  /**
+   * Narrows the normalized input to the workflow variant for template usage.
+   * @param n - Normalized input to narrow.
+   */
+  asWorkflow(n: NormalizedToolInput): Extract<NormalizedToolInput, { kind: 'workflow' }> {
+    return n as Extract<NormalizedToolInput, { kind: 'workflow' }>;
   }
 
   /**
