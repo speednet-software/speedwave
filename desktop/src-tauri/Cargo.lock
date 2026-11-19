@@ -7994,6 +7994,7 @@ dependencies = [
  "serde_with",
  "serial_test",
  "speedwave-access-policy",
+ "speedwave-migrations",
  "speedwave-pii-engine",
  "speedwave-pii-ner",
  "speedwave-runtime",
@@ -8016,6 +8017,15 @@ dependencies = [
  "windows",
  "windows-sys 0.61.2",
  "zip 9.1.3",
+]
+
+[[package]]
+name = "speedwave-migrations"
+version = "0.0.0"
+dependencies = [
+ "log",
+ "speedwave-runtime",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
