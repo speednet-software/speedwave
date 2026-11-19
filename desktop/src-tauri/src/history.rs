@@ -3779,11 +3779,10 @@ mod tests {
             usage: Some(crate::chat::TurnUsage::default()),
             response_ids: Some(vec!["msg_1".to_string()]),
         };
-        let ts_fields: Vec<&str> =
-            crate::ts_mirror::ts_interface_fields(ts, "ConversationMessage")
-                .into_iter()
-                .map(|f| f.trim_end_matches('?'))
-                .collect();
+        let ts_fields: Vec<&str> = crate::ts_mirror::ts_interface_fields(ts, "ConversationMessage")
+            .into_iter()
+            .map(|f| f.trim_end_matches('?'))
+            .collect();
         assert_eq!(crate::ts_mirror::rust_fields(&message), ts_fields);
     }
 
