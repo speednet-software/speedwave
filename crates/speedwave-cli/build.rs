@@ -17,10 +17,6 @@ fn main() {
     emit_updater_pubkey(&repo_root.join(TAURI_CONF));
 }
 
-#[expect(
-    clippy::print_stdout,
-    reason = "build.rs: cargo reads build directives from stdout by convention"
-)]
 fn emit_updater_pubkey(conf_path: &Path) {
     let pubkey = read_updater_pubkey(conf_path);
     println!("cargo:rustc-env=SPEEDWAVE_UPDATER_PUBKEY={pubkey}");
