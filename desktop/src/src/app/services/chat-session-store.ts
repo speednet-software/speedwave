@@ -1810,6 +1810,9 @@ export class ChatSessionStore {
           role: 'assistant',
           blocks: [...this._currentBlocks],
           timestamp: Date.now(),
+          ...(chunk.data.response_ids?.length
+            ? { meta: { response_ids: chunk.data.response_ids } }
+            : {}),
         };
         this._messages = [...this._messages, errorMessage];
         this._currentBlocks = [];

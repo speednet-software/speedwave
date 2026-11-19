@@ -2516,6 +2516,33 @@ describe('ChatSessionStore', () => {
       expect(store.messages.at(-1)?.meta?.response_ids).toEqual(['msg_1', 'msg_2', 'msg_3']);
     });
 
+    it('a turn that ended in an error still counts its responses in get_conversation_cost', async () => {
+      TestBed.inject(ProjectStateService).activeProject.set('proj');
+      let sentIds: string[] = [];
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      spy.mockImplementation(async (cmd: string, args?: unknown) => {
+        if (cmd === 'get_usage_for_response') return { cost_usd: 0.1, cost_source: 'catalog' };
+        if (cmd === 'get_conversation_cost') {
+          sentIds = (args as { responseIds: string[] }).responseIds;
+          return 0.2;
+        }
+        return undefined;
+      });
+      store.handleStreamChunk({ chunk_type: 'Text', data: { content: 'a' } });
+      store.handleStreamChunk({
+        chunk_type: 'Error',
+        data: { content: 'overloaded', turn_ended: true, response_ids: ['msg_e'] },
+      });
+      expect(store.messages.at(-1)?.meta?.response_ids).toEqual(['msg_e']);
+      store.handleStreamChunk({ chunk_type: 'Text', data: { content: 'b' } });
+      store.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', assistant_uuid: 'msg_n', total_cost: 0.2 },
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      expect([...sentIds].sort()).toEqual(['msg_e', 'msg_n']);
+    });
+
     it('a resumed turn counts every response of that turn in get_conversation_cost', async () => {
       TestBed.inject(ProjectStateService).activeProject.set('proj');
       let sentIds: string[] = [];

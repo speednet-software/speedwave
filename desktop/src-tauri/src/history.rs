@@ -671,54 +671,6 @@ fn fold_history_control_chips(messages: &mut Vec<ConversationMessage>) {
     }
 }
 
-fn fold_assistant_turns(messages: &mut Vec<ConversationMessage>) {
-    let mut folded: Vec<ConversationMessage> = Vec::with_capacity(messages.len());
-    for message in messages.drain(..) {
-        match folded.last_mut() {
-            Some(turn) if joins_turn(turn, &message) => absorb_response(turn, message),
-            _ => folded.push(message),
-        }
-    }
-    *messages = folded;
-}
-
-fn is_turn_response(message: &ConversationMessage) -> bool {
-    message.role == "assistant" && message.response_ids.is_some()
-}
-
-fn joins_turn(previous: &ConversationMessage, next: &ConversationMessage) -> bool {
-    is_turn_response(previous) && is_turn_response(next)
-}
-
-fn absorb_response(turn: &mut ConversationMessage, next: ConversationMessage) {
-    let ids = turn.response_ids.get_or_insert_with(Vec::new);
-    let next_ids = next.response_ids.unwrap_or_default();
-    let seen = !next_ids.is_empty() && next_ids.iter().all(|id| ids.contains(id));
-    for id in next_ids {
-        if !ids.contains(&id) {
-            ids.push(id);
-        }
-    }
-    if !seen {
-        turn.usage = match (turn.usage, next.usage) {
-            (Some(a), Some(b)) => Some(crate::chat::TurnUsage {
-                input_tokens: a.input_tokens + b.input_tokens,
-                output_tokens: a.output_tokens + b.output_tokens,
-                cache_read_tokens: a.cache_read_tokens + b.cache_read_tokens,
-                cache_write_tokens: a.cache_write_tokens + b.cache_write_tokens,
-            }),
-            (a, b) => a.or(b),
-        };
-    }
-    turn.blocks
-        .get_or_insert_with(Vec::new)
-        .extend(next.blocks.unwrap_or_default());
-    turn.content = assistant_flat_content(turn.blocks.as_deref().unwrap_or_default());
-    turn.timestamp = next.timestamp.or(turn.timestamp.take());
-    turn.uuid = next.uuid.or(turn.uuid.take());
-    turn.model = next.model.or(turn.model.take());
-}
-
 pub fn list_conversations(project: &str) -> anyhow::Result<Vec<ConversationSummary>> {
     list_conversations_impl(consts::data_dir(), project)
 }
@@ -773,7 +725,7 @@ fn list_conversations_impl(
         let mut preview = String::new();
         let mut message_count: usize = 0;
         let mut user_message_count: usize = 0;
-        let mut last_was_turn_response = false;
+        let mut previous: Option<ConversationMessage> = None;
         let mut dedupe = TranscriptDedupe::default();
         let mut titles = SessionTitles::default();
         let mut scanned_lines: usize = 0;
@@ -803,7 +755,7 @@ fn list_conversations_impl(
                 let is_synthetic_chip_reply = msg.role == "assistant"
                     && msg.model.as_deref() == Some(crate::session_model::SYNTHETIC_MODEL);
                 if is_control_chip_user || is_turn_origin_message(&msg) {
-                    last_was_turn_response = false;
+                    previous = None;
                     continue;
                 }
                 if is_synthetic_chip_reply {
@@ -812,9 +764,7 @@ fn list_conversations_impl(
                 if !dedupe.admit(&parsed, &msg, message_count) {
                     continue;
                 }
-                let joins_previous = last_was_turn_response && is_turn_response(&msg);
-                last_was_turn_response = is_turn_response(&msg);
-                if !joins_previous {
+                if !previous.as_ref().is_some_and(|p| joins_turn(p, &msg)) {
                     message_count += 1;
                 }
                 if msg.role == "user" {
@@ -826,6 +776,7 @@ fn list_conversations_impl(
                 if preview.is_empty() && msg.role == "user" {
                     preview = truncate_preview(&msg.content, LABEL_MAX_CHARS);
                 }
+                previous = Some(msg);
             }
         }
 
@@ -934,6 +885,53 @@ fn get_conversation_impl(
         session_id: session_id.to_string(),
         messages,
     })
+}
+
+fn fold_assistant_turns(messages: &mut Vec<ConversationMessage>) {
+    let mut folded: Vec<ConversationMessage> = Vec::with_capacity(messages.len());
+    for message in messages.drain(..) {
+        match folded.last_mut() {
+            Some(turn) if joins_turn(turn, &message) => absorb_response(turn, message),
+            _ => folded.push(message),
+        }
+    }
+    *messages = folded;
+}
+
+fn joins_turn(previous: &ConversationMessage, next: &ConversationMessage) -> bool {
+    is_turn_response(previous) && is_turn_response(next)
+}
+
+fn is_turn_response(message: &ConversationMessage) -> bool {
+    message.role == "assistant" && message.response_ids.is_some()
+}
+
+fn absorb_response(turn: &mut ConversationMessage, next: ConversationMessage) {
+    let turn_ids = turn.response_ids.get_or_insert_with(Vec::new);
+    let next_ids = next.response_ids.unwrap_or_default();
+    let already_counted = if next_ids.is_empty() {
+        turn.usage.is_some()
+    } else {
+        next_ids.iter().all(|id| turn_ids.contains(id))
+    };
+    for id in next_ids {
+        if !turn_ids.contains(&id) {
+            turn_ids.push(id);
+        }
+    }
+    if !already_counted {
+        turn.usage = match (turn.usage, next.usage) {
+            (Some(counted), Some(added)) => Some(counted.plus(added)),
+            (counted, added) => counted.or(added),
+        };
+    }
+    turn.blocks
+        .get_or_insert_with(Vec::new)
+        .extend(next.blocks.unwrap_or_default());
+    turn.content = assistant_flat_content(turn.blocks.as_deref().unwrap_or_default());
+    turn.timestamp = next.timestamp.or(turn.timestamp.take());
+    turn.uuid = next.uuid.or(turn.uuid.take());
+    turn.model = next.model.or(turn.model.take());
 }
 
 pub fn get_project_memory(project: &str) -> anyhow::Result<String> {
@@ -3696,6 +3694,38 @@ mod tests {
 
         assert_eq!(transcript.messages.len(), 3);
         assert_eq!(block_kinds(&transcript.messages[2]), ["error"]);
+    }
+
+    #[test]
+    fn a_turn_of_lines_without_a_message_id_counts_usage_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"go"}}"#,
+                r#"{"type":"assistant","uuid":"l1","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_a","name":"Bash","input":{}}],"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#,
+                r#"{"type":"assistant","uuid":"l2","message":{"role":"assistant","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#,
+            ],
+        );
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+
+        assert_eq!(transcript.messages.len(), 2);
+        let turn = &transcript.messages[1];
+        assert_eq!(
+            turn.usage,
+            Some(crate::chat::TurnUsage {
+                input_tokens: 10,
+                output_tokens: 5,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            })
+        );
+        assert_eq!(turn.uuid.as_deref(), Some("l2"));
+        assert_eq!(turn.response_ids, Some(Vec::new()));
     }
 
     #[test]

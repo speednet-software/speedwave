@@ -41,7 +41,12 @@ export type StreamChunk =
     }
   | {
       chunk_type: 'Error';
-      data: { content: string; turn_ended?: boolean; kind?: TurnErrorKind };
+      data: {
+        content: string;
+        turn_ended?: boolean;
+        kind?: TurnErrorKind;
+        response_ids?: string[];
+      };
     }
   | { chunk_type: 'SystemInit'; data: { model: string; session_id?: string } }
   | {
