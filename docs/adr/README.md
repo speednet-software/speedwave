@@ -114,6 +114,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-109](ADR-109-jira-attachments-in-the-atlassian-worker.md)         | Jira attachments in the Atlassian worker: list, download and delete, read-write workspace mount                             | Accepted                                                                           |
 | [ADR-110](ADR-110-redmine-attachments-through-the-workspace-mount.md)  | Redmine attachments through the workspace mount: `/workspace:rw` for `mcp-redmine`, streamed files                          | Accepted                                                                           |
 | [ADR-111](ADR-111-oauth-refresh-in-the-session-process.md)             | OAuth refresh in the process that owns the session                                                                          | Accepted                                                                           |
+| [ADR-112](ADR-112-startup-migrations-in-one-crate.md)                  | Startup migrations of the data directory in one crate (`speedwave-migrations`)                                              | Accepted                                                                           |
 
 ## Creating a New ADR
 
