@@ -4,6 +4,10 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+/// Top-level keys lifted into `providerData` — SSOT for the IdP identity keys, pinned to the
+/// descriptor SSOT by `identity_keys_match_oauth_state_provider_data_descriptors`.
+pub const IDENTITY_KEYS: &[&str] = &["clientId", "tenantId"];
+
 /// RFC 3339 UTC timestamp (millis) from unix epoch millis.
 pub fn iso8601_from_unix_ms(unix_ms: u64) -> String {
     let secs = (unix_ms / 1000) as i64;
@@ -84,10 +88,6 @@ pub fn write_oauth_state(path: &Path, params: &OAuthStateParams) -> Result<(), S
     crate::fs_perms::write_restricted_file(path, &body).map_err(|e| e.to_string())
 }
 
-/// Top-level keys lifted into `providerData` — SSOT for the IdP identity keys, pinned to the
-/// descriptor SSOT by `identity_keys_match_oauth_state_provider_data_descriptors`.
-pub const IDENTITY_KEYS: &[&str] = &["clientId", "tenantId"];
-
 /// snake_case descriptor key → camelCase property name in `oauth.json`.
 /// SSOT for the mapping; the Desktop oauth-state paths delegate here.
 pub fn oauth_json_key_for(key: &str) -> &str {
@@ -110,7 +110,7 @@ pub fn oauth_json_key_for(key: &str) -> &str {
 }
 
 /// Heal legacy ADR-060 layout in place: ensure `providerData` is a plain object,
-/// lifting [`IDENTITY_KEYS`] strings into it. SSOT for startup + Desktop save.
+/// lifting [`IDENTITY_KEYS`] strings into it. Called by the Desktop save path.
 pub fn ensure_provider_data_object(obj: &mut serde_json::Map<String, serde_json::Value>) {
     if obj.get("providerData").is_some_and(|v| v.is_object()) {
         return;

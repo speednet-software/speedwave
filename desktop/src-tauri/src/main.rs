@@ -647,9 +647,10 @@ fn main() {
             log::set_max_level(log::LevelFilter::Trace);
             logging_cmd::init_bundle_identifier(app.config().identifier.clone());
             match &migrations {
-                Ok(report) => log::info!("migrations: {report}"),
+                Ok(report) if report.failed.is_empty() => log::debug!("migrations: {report}"),
+                Ok(report) => log::warn!("migrations: {report}"),
                 Err(e) => {
-                    log::error!("startup migrations failed: {e}");
+                    log::error!("startup migrations failed: the migrations lock could not be taken");
                     let body = format!(
                         "Speedwave could not update its data directory.\n\n{e}\n\n\
                          Close other Speedwave windows and start the app again."

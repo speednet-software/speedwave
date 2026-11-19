@@ -576,7 +576,8 @@ fn main() -> anyhow::Result<()> {
     }
 
     match speedwave_migrations::run_all(consts::data_dir()) {
-        Ok(report) => log::info!("migrations: {report}"),
+        Ok(report) if report.failed.is_empty() => log::debug!("migrations: {report}"),
+        Ok(report) => log::warn!("migrations: {report}"),
         Err(e) => {
             err!("Startup migrations failed: {}", redact_err(&e));
             std::process::exit(1);

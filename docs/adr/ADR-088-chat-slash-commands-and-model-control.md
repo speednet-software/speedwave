@@ -1218,7 +1218,7 @@ amendment of decision 5).
 before clearing it).** Decision 7 was written while an Anthropic pick was
 session-scoped, so clearing the stored value lost nothing. Since SPEED-539
 the pick has a persistent home, the `settings.json` `model` key, but the
-one-time self-heal (`config.rs::heal_llm_config_in`, removed by SPEED-1013) still only cleared the
+one-time self-heal (`config.rs::heal_llm_config_in`) still only cleared the
 stored model. The 0.18.1 renderer injected that model as `ANTHROPIC_MODEL`
 and 0.18.1 had no `settings.json` pin, so an upgrade to 0.19.0 reset every
 project whose Anthropic model had been chosen in Settings to the account

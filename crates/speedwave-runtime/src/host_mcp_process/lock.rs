@@ -92,8 +92,7 @@ pub fn write(path: &Path, lock: &LockFile) -> anyhow::Result<()> {
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "test-only module: unwraps/expects assert setup succeeded"
+    reason = "test-only module: unwraps assert setup succeeded"
 )]
 mod tests {
     use super::*;

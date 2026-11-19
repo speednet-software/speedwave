@@ -36,7 +36,7 @@ Live compromise is **not** mitigated by isolation alone. An attacker with RCE in
 
 State lives at `~/.speedwave/oauth/<project>/<service>.json` (mode 0o600, parent 0o700), never mounted into any container. Each file carries `provider`, `providerData` (IdP-specific keys — for Microsoft `clientId` + `tenantId`), `scopes`, `grantedScopes`, `refreshToken`, `expiresAt`, `lastRefreshAt`. A bearer → service map and an append-only audit log (rotated past ~1 MiB, one historical copy) sit alongside it in the same per-project directory. The whole tree is enumerated by the file-security check, so a world-readable mode regression is caught by `speedwave check` and auto-fixed on startup.
 
-A startup migration (`crates/speedwave-runtime/src/oauth_state_migration.rs`, removed by SPEED-1013; Desktop's save path still uses `oauth_persist.rs::ensure_provider_data_object`) nested any legacy top-level `clientId`/`tenantId` under `providerData` — shape-only, idempotent, secrets are never fabricated or moved. The re-authorize banner is computed regardless of `configured` so a file too damaged to migrate still surfaces a recovery path.
+A startup migration (`crates/speedwave-runtime/src/oauth_state_migration.rs`, also reused by Desktop's in-process repair) nests any legacy top-level `clientId`/`tenantId` under `providerData` — shape-only, idempotent, secrets are never fabricated or moved. The re-authorize banner is computed regardless of `configured` so a file too damaged to migrate still surfaces a recovery path.
 
 ## Shared refresh-retry helper
 

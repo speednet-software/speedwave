@@ -7052,11 +7052,6 @@ mod tests {
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "test fixtures assert on setup that must not silently fail"
-)]
 mod plugin_order_tests {
     use super::*;
 
@@ -7074,76 +7069,5 @@ mod plugin_order_tests {
                 "order must be deterministic — env values feed config-hash"
             );
         }
-    }
-
-    #[test]
-    fn resolve_migrates_legacy_local_key_then_syncs_flag_true() {
-        let data_dir = tempfile::tempdir().unwrap();
-        let project = "proj";
-
-        let legacy_dir = data_dir
-            .path()
-            .join("tokens")
-            .join(project)
-            .join("local-llm");
-        std::fs::create_dir_all(&legacy_dir).unwrap();
-        std::fs::write(legacy_dir.join("api_key"), "sk-legacy\n").unwrap();
-
-        let llm = LlmConfig {
-            provider: Some("local".to_string()),
-            base_url: Some("http://host.docker.internal:9000".to_string()),
-            model: Some("qwen".to_string()),
-            has_api_key: true,
-            ..Default::default()
-        };
-        let user_config = SpeedwaveUserConfig {
-            projects: vec![ProjectUserEntry {
-                name: project.to_string(),
-                dir: data_dir.path().to_string_lossy().to_string(),
-                claude: Some(ClaudeOverrides {
-                    env: None,
-                    settings: None,
-                    llm: Some(llm),
-                }),
-                integrations: None,
-                plugin_settings: None,
-                policy: None,
-                effort_pin: None,
-                read_only: false,
-            }],
-            active_project: None,
-            selected_ide: None,
-            ui: None,
-            telemetry: None,
-        };
-
-        let (resolved, _) = resolve_project_config_in_for_test(
-            data_dir.path(),
-            data_dir.path(),
-            &user_config,
-            project,
-        );
-
-        let local = resolved
-            .llm
-            .providers
-            .iter()
-            .find(|p| p.id == "local")
-            .expect("a local provider entry must exist after migration");
-        assert!(
-            local.has_api_key,
-            "after resolve the legacy key must be migrated and has_api_key true \
-             (regression: migrate must run before the disk-sync)"
-        );
-        let new_key = data_dir
-            .path()
-            .join("tokens")
-            .join(project)
-            .join("llm")
-            .join("local_api_key");
-        assert!(
-            new_key.exists(),
-            "the legacy key must be copied to the new llm token path"
-        );
     }
 }

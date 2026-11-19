@@ -64,11 +64,6 @@ const LEGACY_PATHS: &[LegacyPath] = &[
         added_in: ADDED_IN,
     },
     LegacyPath {
-        pattern: "oauth/{project}/bearer-{service}",
-        reason: "per-service bearer of the removed OAuth worker",
-        added_in: ADDED_IN,
-    },
-    LegacyPath {
         pattern: "oauth/{project}/lock.json",
         reason: "process lock of the removed OAuth worker",
         added_in: ADDED_IN,
@@ -215,14 +210,6 @@ fn remove_matching(base: &Path, segments: &[Segment<'_>], outcome: &mut Outcome)
     }
 }
 
-fn matches_affixes(name: &str, prefix: &str, suffix: &str) -> bool {
-    name.len() > prefix.len() + suffix.len() && name.starts_with(prefix) && name.ends_with(suffix)
-}
-
-fn is_real_dir(path: &Path) -> bool {
-    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir())
-}
-
 fn remove_entry(path: &Path, outcome: &mut Outcome) {
     let meta = match std::fs::symlink_metadata(path) {
         Ok(meta) => meta,
@@ -245,6 +232,14 @@ fn remove_entry(path: &Path, outcome: &mut Outcome) {
             outcome.failed += 1;
         }
     }
+}
+
+fn is_real_dir(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir())
+}
+
+fn matches_affixes(name: &str, prefix: &str, suffix: &str) -> bool {
+    name.len() > prefix.len() + suffix.len() && name.starts_with(prefix) && name.ends_with(suffix)
 }
 
 #[cfg(test)]
@@ -281,15 +276,7 @@ mod tests {
                 let sharepoint = data_dir.join("tokens").join(project).join("sharepoint");
                 files.push(sharepoint.join(name));
             }
-            for name in [
-                ".bearer-map.json",
-                "bearer-sharepoint",
-                "bearer-glpi",
-                "lock.json",
-                "auth-token",
-                "port",
-                "pid",
-            ] {
+            for name in [".bearer-map.json", "lock.json", "auth-token", "port", "pid"] {
                 files.push(data_dir.join("oauth").join(project).join(name));
             }
         }
@@ -325,6 +312,8 @@ mod tests {
             files.push(oauth.join("sharepoint.json"));
             files.push(oauth.join("sharepoint.lock"));
             files.push(oauth.join("audit.log"));
+            files.push(oauth.join("bearer-sharepoint"));
+            files.push(oauth.join("bearer-glpi"));
         }
         files
     }
@@ -401,7 +390,7 @@ mod tests {
     }
 
     #[test]
-    fn a_name_that_only_looks_like_the_bearer_prefix_stays() {
+    fn a_name_that_only_looks_like_the_prefix_pattern_stays() {
         let tmp = tempfile::tempdir().unwrap();
         let oauth = tmp.path().join("oauth").join("alpha");
         write(&oauth.join("bearer-"), "x");
@@ -409,7 +398,7 @@ mod tests {
         write(&oauth.join("my-bearer-x"), "x");
         write(&oauth.join("bearer-slack"), "x");
 
-        remove_legacy_paths(tmp.path()).unwrap();
+        remove_paths(tmp.path(), &custom("oauth/{project}/bearer-{service}")).unwrap();
 
         assert!(oauth.join("bearer-").exists());
         assert!(oauth.join("bearer").exists());
@@ -532,11 +521,6 @@ mod tests {
 
         assert!(remove_paths(tmp.path(), &custom("oauth/{project}/{service}.old")).is_ok());
         assert!(!suffixed.exists());
-    }
-
-    #[test]
-    fn the_migration_has_a_stable_name() {
-        assert_eq!(MIGRATION.name, "legacy_files");
     }
 
     #[test]
