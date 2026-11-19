@@ -115,6 +115,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-110](ADR-110-redmine-attachments-through-the-workspace-mount.md)  | Redmine attachments through the workspace mount: `/workspace:rw` for `mcp-redmine`, streamed files                          | Accepted                                                                           |
 | [ADR-111](ADR-111-oauth-refresh-in-the-session-process.md)             | OAuth refresh in the process that owns the session                                                                          | Accepted                                                                           |
 | [ADR-113](ADR-113-startup-migrations-in-one-crate.md)                  | Startup migrations of the data directory in one crate (`speedwave-migrations`)                                              | Accepted                                                                           |
+| [ADR-114](ADR-114-cryptography-in-one-leaf-crate.md)                   | Cryptography in one leaf crate (`speedwave-crypto`)                                                                         | Accepted                                                                           |
 
 ## Creating a New ADR
 

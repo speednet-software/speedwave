@@ -77,6 +77,7 @@ pub const IMAGES: &[ImageDef] = &[
             "containers/proxy",
             "crates/access-policy",
             "crates/pii-engine",
+            "crates/speedwave-crypto",
             "mcp-servers/policies/rules.yaml",
         ],
     },

@@ -470,6 +470,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
+name = "hkdf"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4aaa26c720c68b866f2c96ef5c1264b3e6f473fe5d4ce61cd44bbe913e553018"
+dependencies = [
+ "hmac",
+]
+
+[[package]]
+name = "hmac"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6303bc9732ae41b04cb554b844a762b4115a61bfaa81e3e83050991eeb56863f"
+dependencies = [
+ "digest",
+]
+
+[[package]]
 name = "http"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1308,16 +1326,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "speedwave-pii-engine"
+name = "speedwave-crypto"
 version = "0.0.0"
 dependencies = [
  "aes-siv",
+ "hkdf",
+ "sha2",
+ "zeroize",
+]
+
+[[package]]
+name = "speedwave-pii-engine"
+version = "0.0.0"
+dependencies = [
  "base64 0.23.1",
  "regex",
  "serde",
  "serde_json",
  "serde_yaml_ng",
- "zeroize",
+ "speedwave-crypto",
 ]
 
 [[package]]

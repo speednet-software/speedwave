@@ -1,9 +1,10 @@
 //! Scanning, tokenization, and fail-closed detokenization
 //! (TS counterpart: `mcp-servers/policies/src/tokenizer.ts`).
 
+use crate::payload::{decode_payload, encode_payload};
 use crate::policy::{is_valid_rule_id, CompiledKeyword, CompiledPolicy};
-use crate::siv::{decode_payload, encode_payload, open, seal, EngineKey};
 use regex::Regex;
+use speedwave_crypto::{open_deterministic, seal_deterministic, Key as EngineKey};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::LazyLock;
@@ -237,7 +238,7 @@ pub fn incomplete_token_span_start(text: &str) -> Option<usize> {
 
 /// Builds the verbatim token span for a sealed value in the given category.
 fn build_token(key: &EngineKey, category: &str, value: &str) -> Result<String, ScanError> {
-    let ciphertext = seal(key, category, value.as_bytes())
+    let ciphertext = seal_deterministic(key, category, value.as_bytes())
         .map_err(|_| ScanError::SealFailed(category.to_string()))?;
     Ok(format!(
         "[{category}:TOKEN_{}]",
@@ -637,7 +638,7 @@ fn parse_token_span(span: &str) -> Option<(&str, &str)> {
 fn resolve_span(key: &EngineKey, span: &str) -> Option<String> {
     let (category, payload) = parse_token_span(span)?;
     let ciphertext = decode_payload(payload).ok()?;
-    let plaintext_bytes = open(key, category, &ciphertext).ok()?;
+    let plaintext_bytes = open_deterministic(key, category, &ciphertext).ok()?;
     String::from_utf8(plaintext_bytes).ok()
 }
 
@@ -977,8 +978,9 @@ fn map_json_strings(value: &mut serde_json::Value, transform: &dyn Fn(&str) -> S
 )]
 mod tests {
     use super::*;
+    use crate::payload::encode_payload as siv_encode_payload;
     use crate::policy::compile_policy_v3;
-    use crate::siv::{encode_payload as siv_encode_payload, seal as siv_seal};
+    use speedwave_crypto::seal_deterministic as siv_seal;
 
     fn test_key() -> EngineKey {
         EngineKey::from_bytes([9u8; 32])

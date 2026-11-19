@@ -3131,6 +3131,7 @@ mod tests {
         let proxy = include_str!("../../../containers/proxy/Cargo.toml");
         let pii_engine = include_str!("../../pii-engine/Cargo.toml");
         let access_policy = include_str!("../../access-policy/Cargo.toml");
+        let crypto = include_str!("../../speedwave-crypto/Cargo.toml");
 
         let root_clippy = lint_table(root, "[workspace.lints.clippy]");
         assert!(
@@ -3176,6 +3177,16 @@ mod tests {
             lint_table(root, "[workspace.lints.rust]"),
             lint_table(access_policy, "[lints.rust]"),
             "root [workspace.lints.rust] must equal access-policy [lints.rust]"
+        );
+        assert_eq!(
+            root_clippy,
+            lint_table(crypto, "[lints.clippy]"),
+            "root [workspace.lints.clippy] must equal speedwave-crypto [lints.clippy]"
+        );
+        assert_eq!(
+            lint_table(root, "[workspace.lints.rust]"),
+            lint_table(crypto, "[lints.rust]"),
+            "root [workspace.lints.rust] must equal speedwave-crypto [lints.rust]"
         );
     }
 
