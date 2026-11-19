@@ -498,7 +498,7 @@ impl StreamParser {
         }
     }
 
-    pub(crate) fn set_slash_project(
+    fn set_slash_project(
         &mut self,
         project: Option<speedwave_runtime::slash::ProjectHandle>,
         data_dir: &std::path::Path,
@@ -2365,9 +2365,7 @@ impl ChatSession {
             crate::pii_display::load_display_policy(consts::data_dir(), &self.project_name);
 
         let slash_project = crate::slash_cmd::project_handle(&self.project_name)
-            .inspect_err(|_| {
-                log::warn!("slash project for '{}' unavailable", self.project_name)
-            })
+            .inspect_err(|_| log::warn!("slash project for '{}' unavailable", self.project_name))
             .ok();
 
         let resume_seed = resume_session_id.and_then(|id| {

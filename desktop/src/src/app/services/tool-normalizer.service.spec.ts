@@ -173,6 +173,14 @@ describe('ToolNormalizerService', () => {
       expect(result).toMatchObject({ kind: 'workflow', title: 'saved' });
     });
 
+    it('ignores a blank name and takes the title from meta', () => {
+      const result = service.normalize(
+        'Workflow',
+        JSON.stringify({ name: '  ', script: "export const meta = { name: 'm' }" })
+      );
+      expect(result).toMatchObject({ kind: 'workflow', title: 'm' });
+    });
+
     it('falls back to the literal workflow title', () => {
       const result = service.normalize('Workflow', '{"script":"run()"}');
       expect(result).toMatchObject({ kind: 'workflow', title: 'workflow', script: 'run()' });

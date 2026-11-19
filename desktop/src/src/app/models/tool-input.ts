@@ -69,7 +69,7 @@ function normalizeWorkflow(parsed: Record<string, unknown>): NormalizedToolInput
   const scriptName = script === undefined ? undefined : metaName(script);
   return {
     kind: 'workflow',
-    title: name || scriptName || 'workflow',
+    title: (usableString(name) ? name : scriptName) || 'workflow',
     description,
     args,
     script,
