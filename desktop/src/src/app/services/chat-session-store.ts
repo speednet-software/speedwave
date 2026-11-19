@@ -1810,6 +1810,9 @@ export class ChatSessionStore {
           role: 'assistant',
           blocks: [...this._currentBlocks],
           timestamp: Date.now(),
+          ...(chunk.data.response_ids?.length
+            ? { meta: { response_ids: chunk.data.response_ids } }
+            : {}),
         };
         this._messages = [...this._messages, errorMessage];
         this._currentBlocks = [];
@@ -2396,7 +2399,8 @@ export class ChatSessionStore {
   private conversationResponseIds(latestUuid: string): string[] {
     const ids = new Set<string>();
     for (const m of this._messages) {
-      if (m.role === 'assistant' && m.uuid) ids.add(m.uuid);
+      if (m.role !== 'assistant') continue;
+      for (const id of m.meta?.response_ids ?? (m.uuid ? [m.uuid] : [])) ids.add(id);
     }
     ids.add(latestUuid);
     return [...ids];
@@ -2595,18 +2599,21 @@ function buildEntryMeta(
     turn_usage?: TurnUsage;
     turn_cost?: number;
     model?: string;
+    response_ids?: string[];
   },
   resolvedModel: string | undefined,
   suppressCost = false
 ): EntryMeta | undefined {
   const { turn_usage, turn_cost } = data;
   const model = data.model ?? resolvedModel;
-  if (!turn_usage && !model && turn_cost === undefined) {
+  const responseIds = data.response_ids?.length ? data.response_ids : undefined;
+  if (!turn_usage && !model && turn_cost === undefined && !responseIds) {
     return undefined;
   }
   const meta: EntryMeta = {};
   if (model) meta.model = model;
   if (turn_usage) meta.usage = turn_usage;
+  if (responseIds) meta.response_ids = responseIds;
 
   if (!suppressCost && turn_cost !== undefined && Number.isFinite(turn_cost)) {
     meta.cost = turn_cost;
@@ -2691,6 +2698,7 @@ export function buildStateTreeFromLegacy(src: LegacyStateSnapshot): Conversation
             model: m.meta.model,
             usage: m.meta.usage,
             cost: m.meta.cost,
+            response_ids: m.meta.response_ids,
           }
         : null,
       edited_at: m.edited_at ?? null,
@@ -2949,10 +2957,11 @@ export function toChatMessages(transcript: ConversationTranscript): ChatMessage[
       base.uuid = msg.uuid;
       base.uuid_status = 'Committed';
     }
-    if (msg.model !== undefined || msg.usage !== undefined) {
+    if (msg.model !== undefined || msg.usage !== undefined || msg.response_ids?.length) {
       base.meta = {};
       if (msg.model !== undefined) base.meta.model = msg.model;
       if (msg.usage !== undefined) base.meta.usage = msg.usage;
+      if (msg.response_ids?.length) base.meta.response_ids = msg.response_ids;
     }
     return base;
   });

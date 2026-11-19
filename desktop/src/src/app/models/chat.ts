@@ -36,11 +36,17 @@ export type StreamChunk =
         turn_cost?: number;
         model?: string;
         context_usage?: TurnUsage;
+        response_ids?: string[];
       };
     }
   | {
       chunk_type: 'Error';
-      data: { content: string; turn_ended?: boolean; kind?: TurnErrorKind };
+      data: {
+        content: string;
+        turn_ended?: boolean;
+        kind?: TurnErrorKind;
+        response_ids?: string[];
+      };
     }
   | { chunk_type: 'SystemInit'; data: { model: string; session_id?: string } }
   | {
@@ -160,6 +166,7 @@ export interface EntryMeta {
   model?: string;
   usage?: TurnUsage;
   cost?: number;
+  response_ids?: string[];
 }
 
 /**
@@ -335,6 +342,7 @@ export interface ConversationMessage {
   uuid?: string;
   model?: string;
   usage?: TurnUsage;
+  response_ids?: string[];
 }
 
 /** Text segment of a wire user message. */

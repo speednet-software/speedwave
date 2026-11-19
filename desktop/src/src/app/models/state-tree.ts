@@ -35,6 +35,7 @@ export interface EntryMetaState {
   model?: string;
   usage?: TurnUsageState;
   cost?: number;
+  response_ids?: string[];
 }
 
 import type { AskUserQuestionItem } from './chat';

@@ -61,6 +61,8 @@ pub enum StreamChunk {
         model: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         context_usage: Option<TurnUsage>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        response_ids: Vec<String>,
     },
     AskUserQuestion {
         tool_id: String,
@@ -73,6 +75,8 @@ pub enum StreamChunk {
         turn_ended: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         kind: Option<TurnErrorKind>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        response_ids: Vec<String>,
     },
     SystemInit {
         model: String,
@@ -135,10 +139,12 @@ pub(crate) fn sanitize_chunk(chunk: StreamChunk) -> StreamChunk {
             content,
             turn_ended,
             kind,
+            response_ids,
         } => StreamChunk::Error {
             content: sanitize(&content),
             turn_ended,
             kind,
+            response_ids,
         },
         StreamChunk::Result {
             result_text: Some(text),
@@ -151,6 +157,7 @@ pub(crate) fn sanitize_chunk(chunk: StreamChunk) -> StreamChunk {
             turn_cost,
             model,
             context_usage,
+            response_ids,
         } => StreamChunk::Result {
             result_text: Some(sanitize(&text)),
             session_id,
@@ -162,6 +169,7 @@ pub(crate) fn sanitize_chunk(chunk: StreamChunk) -> StreamChunk {
             turn_cost,
             model,
             context_usage,
+            response_ids,
         },
         StreamChunk::QueueDrained { session_id, text } => StreamChunk::QueueDrained {
             session_id,
@@ -215,10 +223,12 @@ fn detokenize_chunk(chunk: StreamChunk, policy: &DisplayPolicy) -> StreamChunk {
             content,
             turn_ended,
             kind,
+            response_ids,
         } => StreamChunk::Error {
             content: detok(policy, &content),
             turn_ended,
             kind,
+            response_ids,
         },
         StreamChunk::Result {
             result_text: Some(text),
@@ -231,6 +241,7 @@ fn detokenize_chunk(chunk: StreamChunk, policy: &DisplayPolicy) -> StreamChunk {
             turn_cost,
             model,
             context_usage,
+            response_ids,
         } => StreamChunk::Result {
             result_text: Some(detok(policy, &text)),
             session_id,
@@ -242,6 +253,7 @@ fn detokenize_chunk(chunk: StreamChunk, policy: &DisplayPolicy) -> StreamChunk {
             turn_cost,
             model,
             context_usage,
+            response_ids,
         },
         StreamChunk::QueueDrained { session_id, text } => StreamChunk::QueueDrained {
             session_id,
@@ -316,6 +328,15 @@ impl TurnUsage {
             output_tokens: usage.output_tokens,
             cache_read_tokens: usage.cache_read_tokens.unwrap_or(0),
             cache_write_tokens: usage.cache_write_tokens.unwrap_or(0),
+        }
+    }
+
+    pub fn plus(self, other: Self) -> Self {
+        Self {
+            input_tokens: self.input_tokens + other.input_tokens,
+            output_tokens: self.output_tokens + other.output_tokens,
+            cache_read_tokens: self.cache_read_tokens + other.cache_read_tokens,
+            cache_write_tokens: self.cache_write_tokens + other.cache_write_tokens,
         }
     }
 
@@ -443,6 +464,7 @@ fn option_to_vec(
 pub struct StreamParser {
     active_blocks: HashMap<u64, (String, String)>,
     pending_assistant_uuid: Option<String>,
+    pending_response_ids: Vec<String>,
     pending_turn_error_kind: Option<TurnErrorKind>,
     committed_user_uuids: std::collections::HashSet<String>,
     previous_session_usage: TurnUsage,
@@ -460,6 +482,7 @@ impl StreamParser {
         Self {
             active_blocks: HashMap::new(),
             pending_assistant_uuid: None,
+            pending_response_ids: Vec::new(),
             pending_turn_error_kind: None,
             committed_user_uuids: std::collections::HashSet::new(),
             previous_session_usage: TurnUsage::default(),
@@ -546,10 +569,15 @@ impl StreamParser {
     }
 
     fn capture_assistant_uuid(&mut self, parsed: &serde_json::Value) {
-        if let Some(id) = parsed["message"]["id"].as_str() {
-            if !id.is_empty() {
-                self.pending_assistant_uuid = Some(id.to_string());
-            }
+        if is_sidechain_event(parsed) {
+            return;
+        }
+        let Some(id) = parsed["message"]["id"].as_str().filter(|id| !id.is_empty()) else {
+            return;
+        };
+        self.pending_assistant_uuid = Some(id.to_string());
+        if !self.pending_response_ids.iter().any(|known| known == id) {
+            self.pending_response_ids.push(id.to_string());
         }
     }
 
@@ -612,6 +640,7 @@ impl StreamParser {
     pub fn new_session(&mut self) {
         self.reset();
         self.pending_assistant_uuid = None;
+        self.pending_response_ids.clear();
         self.previous_session_usage = TurnUsage::default();
         self.last_context_usage = None;
         self.previous_session_cost = None;
@@ -934,6 +963,7 @@ impl StreamParser {
         parsed: &serde_json::Value,
     ) -> (Option<StreamChunk>, Option<LogEntry>) {
         let assistant_uuid = self.pending_assistant_uuid.take();
+        let response_ids = std::mem::take(&mut self.pending_response_ids);
         let turn_error_kind = self.pending_turn_error_kind.take();
 
         let is_error = parsed["is_error"].as_bool().unwrap_or(false);
@@ -972,6 +1002,7 @@ impl StreamParser {
                     content: error_text,
                     turn_ended: true,
                     kind: turn_error_kind,
+                    response_ids,
                 }),
                 Some(LogEntry {
                     prefix: "RESULT",
@@ -1060,6 +1091,7 @@ impl StreamParser {
                 turn_cost,
                 model,
                 context_usage: self.last_context_usage,
+                response_ids,
             }),
             log_entry,
         )
@@ -1199,6 +1231,7 @@ impl StreamParser {
                     content: message.to_string(),
                     turn_ended: false,
                     kind: None,
+                    response_ids: Vec::new(),
                 }),
                 log_entry,
             )
@@ -2394,6 +2427,7 @@ impl ChatSession {
                                             .to_string(),
                                         turn_ended: false,
                                         kind: None,
+                                        response_ids: Vec::new(),
                                     },
                                     &display_policy,
                                 );
@@ -2441,6 +2475,7 @@ impl ChatSession {
                                             ),
                                             turn_ended: false,
                                             kind: None,
+                                            response_ids: Vec::new(),
                                         },
                                         &display_policy,
                                     );
@@ -2459,6 +2494,7 @@ impl ChatSession {
                                             ),
                                             turn_ended: false,
                                             kind: None,
+                                            response_ids: Vec::new(),
                                         },
                                         &display_policy,
                                     );
@@ -2474,6 +2510,7 @@ impl ChatSession {
                                         content: "Internal error: stdin lock poisoned".to_string(),
                                         turn_ended: false,
                                         kind: None,
+                                        response_ids: Vec::new(),
                                     },
                                     &display_policy,
                                 );
@@ -2542,6 +2579,7 @@ impl ChatSession {
                             content: refusal,
                             turn_ended: false,
                             kind: None,
+                            response_ids: Vec::new(),
                         },
                         &display_policy,
                     );
@@ -2611,6 +2649,7 @@ impl ChatSession {
                             .to_string(),
                     turn_ended: false,
                     kind: None,
+                    response_ids: Vec::new(),
                 };
                 emit_sanitized_chunk(&app_handle, &tab_id_for_reader, chunk, &display_policy);
                 notify_session_event(
@@ -3415,6 +3454,7 @@ mod tests {
                 content: secret.into(),
                 turn_ended: false,
                 kind: None,
+                response_ids: Vec::new(),
             },
         ] {
             let out = format!("{:?}", sanitize_chunk(chunk));
@@ -3446,6 +3486,7 @@ mod tests {
             turn_cost: None,
             model: None,
             context_usage: None,
+            response_ids: Vec::new(),
         };
         let out = format!("{:?}", sanitize_chunk(chunk));
         assert!(!out.contains("secretsecretsecretsecret"), "leaked: {out}");
@@ -3562,6 +3603,7 @@ mod tests {
                 content: tokenized.clone(),
                 turn_ended: true,
                 kind: Some(TurnErrorKind::AuthenticationFailed),
+                response_ids: Vec::new(),
             },
             &policy,
         ) {
@@ -3569,6 +3611,7 @@ mod tests {
                 content,
                 turn_ended,
                 kind,
+                ..
             } => {
                 assert_eq!(content, "secret@example.com");
                 assert!(turn_ended, "detokenizing must keep the turn-end marker");
@@ -3597,6 +3640,7 @@ mod tests {
             turn_cost: None,
             model: None,
             context_usage: None,
+            response_ids: Vec::new(),
         };
         match detokenize_chunk(result_chunk, &policy) {
             StreamChunk::Result { result_text, .. } => {
@@ -3973,6 +4017,7 @@ mod tests {
             turn_cost: None,
             model: None,
             context_usage: None,
+            response_ids: Vec::new(),
         }
     }
 
@@ -4012,6 +4057,7 @@ mod tests {
             content: "retrying".to_string(),
             turn_ended: false,
             kind: None,
+            response_ids: Vec::new(),
         }]);
         assert!(
             holds_the_turn_awake(&awaited),
@@ -4029,6 +4075,7 @@ mod tests {
             content: "overloaded".to_string(),
             turn_ended: true,
             kind: None,
+            response_ids: Vec::new(),
         }]);
         assert!(!holds_the_turn_awake(&awaited));
         awaited.message_written();
@@ -4070,6 +4117,7 @@ mod tests {
                 content: "overloaded".to_string(),
                 turn_ended: true,
                 kind: None,
+                response_ids: Vec::new(),
             }]),
             Some(SessionEvent::SessionError)
         );
@@ -4078,6 +4126,7 @@ mod tests {
                 content: "model refused".to_string(),
                 turn_ended: false,
                 kind: None,
+                response_ids: Vec::new(),
             }]),
             None,
             "an error that leaves the turn running is not the end of the session's work"
@@ -4108,6 +4157,7 @@ mod tests {
             content: "boom".to_string(),
             turn_ended: false,
             kind: None,
+            response_ids: Vec::new(),
         }]);
         assert!(!awaited.is_awaited());
         awaited.observe(&[]);
@@ -5121,6 +5171,7 @@ mod tests {
             turn_cost: None,
             model: None,
             context_usage: None,
+            response_ids: Vec::new(),
         };
         let serialized = serde_json::to_string(&original).unwrap();
         let deserialized: StreamChunk = serde_json::from_str(&serialized).unwrap();
@@ -7523,6 +7574,7 @@ mod tests {
             content: "expired".to_string(),
             turn_ended: true,
             kind: Some(TurnErrorKind::AuthenticationFailed),
+            response_ids: Vec::new(),
         })
         .unwrap();
         assert_eq!(tagged["data"]["kind"], "authentication_failed");
@@ -7530,6 +7582,7 @@ mod tests {
             content: "boom".to_string(),
             turn_ended: true,
             kind: None,
+            response_ids: Vec::new(),
         })
         .unwrap();
         assert!(plain["data"].get("kind").is_none(), "{plain}");
@@ -7545,6 +7598,7 @@ mod tests {
                 content,
                 turn_ended,
                 kind,
+                ..
             } => {
                 assert_eq!(content, "Something went wrong");
                 assert!(
@@ -7660,6 +7714,133 @@ mod tests {
     }
 
     #[test]
+    fn result_lists_every_main_thread_response_of_the_turn_once() {
+        let mut parser = StreamParser::new();
+        for line in [
+            r#"{"type":"assistant","message":{"id":"msg_1","role":"assistant","content":[]}}"#,
+            r#"{"type":"assistant","message":{"id":"msg_1","role":"assistant","content":[]}}"#,
+            r#"{"type":"assistant","parent_tool_use_id":"toolu_task","message":{"id":"msg_sub","role":"assistant","content":[]}}"#,
+            r#"{"type":"assistant","message":{"id":"msg_2","role":"assistant","content":[]}}"#,
+        ] {
+            parse_line_str(&mut parser, line);
+        }
+        let result = r#"{"type":"result","session_id":"s1","total_cost_usd":0.01,"is_error":false,"result":""}"#;
+        match parse_line_str(&mut parser, result).unwrap() {
+            StreamChunk::Result {
+                response_ids,
+                assistant_uuid,
+                ..
+            } => {
+                assert_eq!(response_ids, ["msg_1", "msg_2"]);
+                assert_eq!(assistant_uuid.as_deref(), Some("msg_2"));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"assistant","message":{"id":"msg_3","role":"assistant","content":[]}}"#,
+        );
+        match parse_line_str(&mut parser, result).unwrap() {
+            StreamChunk::Result { response_ids, .. } => assert_eq!(response_ids, ["msg_3"]),
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_error_result_carries_the_responses_of_its_turn_and_hands_none_on() {
+        let mut parser = StreamParser::new();
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"assistant","message":{"id":"msg_err","role":"assistant","content":[]}}"#,
+        );
+        match parse_line_str(
+            &mut parser,
+            r#"{"type":"result","is_error":true,"result":"something broke"}"#,
+        )
+        .unwrap()
+        {
+            StreamChunk::Error {
+                response_ids,
+                turn_ended,
+                ..
+            } => {
+                assert!(turn_ended);
+                assert_eq!(response_ids, ["msg_err"]);
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"assistant","message":{"id":"msg_next","role":"assistant","content":[]}}"#,
+        );
+        let result = r#"{"type":"result","session_id":"s1","total_cost_usd":0.01,"is_error":false,"result":""}"#;
+        match parse_line_str(&mut parser, result).unwrap() {
+            StreamChunk::Result { response_ids, .. } => assert_eq!(response_ids, ["msg_next"]),
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_sidechain_line_sets_neither_the_assistant_uuid_nor_a_response_id() {
+        let mut parser = StreamParser::new();
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"assistant","message":{"id":"msg_main","role":"assistant","content":[]}}"#,
+        );
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"assistant","isSidechain":true,"message":{"id":"msg_sub","role":"assistant","content":[]}}"#,
+        );
+        let result = r#"{"type":"result","session_id":"s1","total_cost_usd":0.01,"is_error":false,"result":""}"#;
+        match parse_line_str(&mut parser, result).unwrap() {
+            StreamChunk::Result {
+                response_ids,
+                assistant_uuid,
+                ..
+            } => {
+                assert_eq!(response_ids, ["msg_main"]);
+                assert_eq!(assistant_uuid.as_deref(), Some("msg_main"));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn turn_usage_plus_adds_every_field() {
+        let a = TurnUsage {
+            input_tokens: 1,
+            output_tokens: 2,
+            cache_read_tokens: 3,
+            cache_write_tokens: 4,
+        };
+        let b = TurnUsage {
+            input_tokens: 10,
+            output_tokens: 20,
+            cache_read_tokens: 30,
+            cache_write_tokens: 40,
+        };
+        assert_eq!(
+            a.plus(b),
+            TurnUsage {
+                input_tokens: 11,
+                output_tokens: 22,
+                cache_read_tokens: 33,
+                cache_write_tokens: 44,
+            }
+        );
+    }
+
+    #[test]
+    fn a_result_without_responses_leaves_response_ids_off_the_wire() {
+        let mut parser = StreamParser::new();
+        let result = r#"{"type":"result","session_id":"s1","total_cost_usd":0.01,"is_error":false,"result":""}"#;
+        let chunk = parse_line_str(&mut parser, result).unwrap();
+        let json = serde_json::to_value(&chunk).unwrap();
+        assert!(json["data"].get("response_ids").is_none(), "{json}");
+    }
+
+    #[test]
     fn assistant_uuid_does_not_leak_into_error_result() {
         let mut parser = StreamParser::new();
         let assistant =
@@ -7772,6 +7953,7 @@ mod tests {
                 content,
                 turn_ended,
                 kind,
+                ..
             } => {
                 assert!(content.contains("hit your limit"));
                 assert!(!turn_ended, "a system message may arrive mid-turn");
@@ -9589,6 +9771,7 @@ mod tests {
             content: "rate limit".to_string(),
             turn_ended: false,
             kind: None,
+            response_ids: Vec::new(),
         })
         .unwrap();
         assert!(mid_turn["data"].get("turn_ended").is_none(), "{mid_turn}");
@@ -9597,6 +9780,7 @@ mod tests {
             content: "overloaded".to_string(),
             turn_ended: true,
             kind: None,
+            response_ids: Vec::new(),
         })
         .unwrap();
         assert_eq!(ended["data"]["turn_ended"], serde_json::Value::Bool(true));
@@ -10202,6 +10386,7 @@ mod tests {
             turn_cost: None,
             model: None,
             context_usage: None,
+            response_ids: Vec::new(),
         };
         let json = serde_json::to_string(&chunk).unwrap();
         assert!(
@@ -10235,6 +10420,7 @@ mod tests {
             turn_cost: None,
             model: None,
             context_usage: None,
+            response_ids: Vec::new(),
         };
         let json = serde_json::to_string(&chunk).unwrap();
         assert!(
@@ -10395,6 +10581,7 @@ mod tests {
                 cache_read_tokens: 4,
                 cache_write_tokens: 5,
             }),
+            response_ids: Vec::new(),
         };
         let json = serde_json::to_string(&chunk).unwrap();
         assert!(
