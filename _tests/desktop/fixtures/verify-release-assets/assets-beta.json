@@ -8,5 +8,7 @@
   {"name": "Speedwave_0.21.0+115_x64_en-US.msi"},
   {"name": "Speedwave_0.21.0+115_x64_en-US.msi.sig"},
   {"name": "speedwave-v0.21.0+115-aarch64-apple-darwin.tar.gz"},
-  {"name": "speedwave-v0.21.0+115-x86_64-pc-windows-msvc.zip"}
+  {"name": "speedwave-v0.21.0+115-aarch64-apple-darwin.tar.gz.sig"},
+  {"name": "speedwave-v0.21.0+115-x86_64-pc-windows-msvc.zip"},
+  {"name": "speedwave-v0.21.0+115-x86_64-pc-windows-msvc.zip.sig"}
 ]

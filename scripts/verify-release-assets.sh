@@ -17,13 +17,13 @@ SIGNED_ASSETS=(
   "Speedwave_${V}_macOS_Apple_Silicon.app.tar.gz"
   "Speedwave_${V}_x64-setup.exe"
   "Speedwave_${V}_x64_en-US.msi"
+  "speedwave-v${V}-aarch64-apple-darwin.tar.gz"
+  "speedwave-v${V}-x86_64-pc-windows-msvc.zip"
 )
 
 UNSIGNED_ASSETS=(
   "latest.json"
   "Speedwave_${V}_macOS_Apple_Silicon.dmg"
-  "speedwave-v${V}-aarch64-apple-darwin.tar.gz"
-  "speedwave-v${V}-x86_64-pc-windows-msvc.zip"
 )
 
 fail() {
