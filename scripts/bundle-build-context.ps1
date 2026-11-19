@@ -60,7 +60,7 @@ try {
 Acquire-Lock $lockDir | Out-Null
 Acquire-Lock $wasmLockDir | Out-Null
 
-Remove-Item -Recurse -Force "$dest\build-context","$dest\mcp-os","$dest\oauth" -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force "$dest\build-context","$dest\mcp-os" -ErrorAction SilentlyContinue
 
 bash 'crates/pii-engine-wasm/build-wasm.sh' $wasmPkgDir
 if ($LASTEXITCODE -ne 0) {
@@ -181,7 +181,6 @@ function Stage-Host-Worker {
 }
 
 Stage-Host-Worker -worker os -bundle mcp-os
-Stage-Host-Worker -worker oauth -bundle oauth
 
 Write-Host "Build context bundled into $dest"
 

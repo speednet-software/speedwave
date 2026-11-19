@@ -72,7 +72,7 @@ pub use tokens::{
 pub(crate) use tokens::{init_secrets_dir_in, resolve_tokens_dir_in};
 
 pub(crate) use workers::{
-    apply_integrations_filter, apply_worker_auth_tokens_in, apply_worker_config, worker_gateway_url,
+    apply_integrations_filter, apply_worker_auth_tokens_in, apply_worker_config,
 };
 #[cfg(test)]
 use workers::{
@@ -422,7 +422,13 @@ pub fn render_compose_in(
 
     yaml = apply_mcp_os_config_in(data_dir, &yaml)?;
 
-    yaml = apply_oauth_config_in(data_dir, &yaml, project_name)?;
+    yaml = apply_oauth_compat_in(
+        data_dir,
+        &yaml,
+        project_name,
+        integrations,
+        &plugin_manifests,
+    )?;
 
     yaml = apply_worker_auth_tokens_in(
         data_dir,
@@ -440,37 +446,15 @@ pub fn render_compose_in(
 
     ensure_data_dir_mount_sources(data_dir, &yaml)?;
 
-    for w in host_worker_warnings(
-        data_dir,
-        project_name,
-        &yaml,
-        integrations,
-        &plugin_manifests,
-    ) {
+    for w in host_worker_warnings(data_dir, project_name, &yaml) {
         log::warn!("{w}");
     }
 
     Ok(yaml)
 }
 
-fn host_worker_warnings(
-    data_dir: &Path,
-    project: &str,
-    yaml: &str,
-    integrations: &ResolvedIntegrationsConfig,
-    manifests: &[crate::plugin::PluginManifest],
-) -> Vec<String> {
+fn host_worker_warnings(data_dir: &Path, project: &str, yaml: &str) -> Vec<String> {
     let mut out = Vec::new();
-    if !yaml.contains("WORKER_OAUTH_URL") {
-        let consumers = oauth_consumer_service_ids(integrations, manifests);
-        if !consumers.is_empty() {
-            out.push(format!(
-                "'{project}' uses OAuth integrations ({}) but the refresh worker is not \
-                 running — tokens will expire until Speedwave Desktop is started",
-                consumers.join(", ")
-            ));
-        }
-    }
     if !yaml.contains("WORKER_OS_URL") && data_dir.join(consts::MCP_OS_AUTH_TOKEN_FILE).exists() {
         out.push(format!(
             "mcp-os is not running — OS integrations (mail/calendar) are unavailable \
@@ -883,103 +867,44 @@ fn apply_mcp_os_config_with_path(
     )
 }
 
-fn apply_oauth_config_in(
+fn apply_oauth_compat_in(
     data_dir: &std::path::Path,
     yaml: &str,
     project: &str,
+    integrations: &crate::config::ResolvedIntegrationsConfig,
+    manifests: &[PluginManifest],
 ) -> anyhow::Result<String> {
-    let state_dir = crate::oauth_process::oauth_project_dir(data_dir, project);
-    let lock_path = state_dir.join(consts::PER_PROJECT_LOCK_FILE);
-    let bearer_map_path = state_dir.join(consts::OAUTH_BEARER_MAP_FILE);
-    apply_oauth_config_with_paths(yaml, &state_dir, &lock_path, &bearer_map_path)
-}
-
-fn apply_oauth_config_with_paths(
-    yaml: &str,
-    state_dir: &std::path::Path,
-    lock_path: &std::path::Path,
-    bearer_map_path: &std::path::Path,
-) -> anyhow::Result<String> {
-    let lock = match crate::host_mcp_process::lock::read(
-        lock_path,
-        crate::host_mcp_process::lock::LockService::Oauth,
-    ) {
-        Some(l) if crate::host_mcp_process::probe::is_pid_alive(l.pid) => l,
-        _ => return Ok(yaml.to_string()),
-    };
-    let port = lock.port;
-    let bearer_map = match read_oauth_bearer_map(bearer_map_path) {
-        Some(m) => m,
-        None => return Ok(yaml.to_string()),
-    };
-    if bearer_map.is_empty() {
+    let service_ids: Vec<&str> = manifests
+        .iter()
+        .filter(|m| m.oauth.is_some() && integrations.is_plugin_enabled(m.config_key()))
+        .filter_map(|m| m.service_id.as_deref())
+        .collect();
+    if service_ids.is_empty() {
         return Ok(yaml.to_string());
     }
-    let url = worker_gateway_url(port);
 
+    let oauth_root = data_dir.join(consts::OAUTH_SUBDIR);
+    let state_dir = oauth_root.join(project);
+    crate::fs_perms::ensure_owner_only_dir(&oauth_root)?;
+    crate::fs_perms::ensure_owner_only_dir(&state_dir)?;
     let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
-
-    for (bearer, service_id) in &bearer_map {
-        let compose_service = oauth_consumer_compose_name(service_id);
+    for service_id in service_ids {
+        let compose_service = plugin::derive_compose_name(service_id);
         let bearer_file = state_dir.join(format!("bearer-{service_id}"));
-        if !bearer_file.exists() {
-            if let Err(e) = crate::fs_perms::write_restricted_file(&bearer_file, bearer) {
-                log::warn!("failed to write per-service oauth bearer for '{service_id}': {e}");
-                continue;
-            }
-        }
-        ensure_host_gateway_extra_host(&mut doc, &compose_service)?;
-        inject_env_into(&mut doc, &compose_service, "WORKER_OAUTH_URL", &url);
+        crate::fs_perms::write_restricted_file(&bearer_file, consts::OAUTH_COMPAT_BEARER)?;
+        inject_env_into(
+            &mut doc,
+            &compose_service,
+            "WORKER_OAUTH_URL",
+            consts::OAUTH_COMPAT_URL,
+        );
         let mount = format!(
             "{}:/secrets/oauth-auth-token-{service_id}:ro",
             to_engine_path(&bearer_file)?
         );
         add_service_volume(&mut doc, &compose_service, &mount)?;
     }
-
     Ok(serde_yaml_ng::to_string(&doc)?)
-}
-
-/// Resolves an OAuth consumer's compose service name (built-in: descriptor `compose_name`;
-/// plugin: `mcp-<slug>`). SSOT shared by the spawn-side consumer list and compose injection.
-pub fn oauth_consumer_compose_name(service_id: &str) -> String {
-    consts::TOGGLEABLE_MCP_SERVICES
-        .iter()
-        .find(|d| d.config_key == service_id)
-        .map(|d| d.compose_name.to_string())
-        .unwrap_or_else(|| crate::plugin::derive_compose_name(service_id))
-}
-
-/// OAuth consumer service ids for a project: built-ins with `uses_oauth_refresh`
-/// plus plugins declaring `oauth`. SSOT for the spawn consumer list + bearer-map.
-pub fn oauth_consumer_service_ids(
-    resolved: &crate::config::ResolvedIntegrationsConfig,
-    enabled_plugins: &[crate::plugin::PluginManifest],
-) -> Vec<String> {
-    let mut out: Vec<String> = consts::TOGGLEABLE_MCP_SERVICES
-        .iter()
-        .filter(|d| {
-            d.uses_oauth_refresh && resolved.is_service_enabled(d.config_key).unwrap_or(false)
-        })
-        .map(|d| d.config_key.to_string())
-        .collect();
-    for m in enabled_plugins {
-        if m.oauth.is_some() {
-            let sid = m.config_key();
-            if resolved.is_plugin_enabled(sid) {
-                out.push(sid.to_string());
-            }
-        }
-    }
-    out
-}
-
-fn read_oauth_bearer_map(
-    path: &std::path::Path,
-) -> Option<std::collections::BTreeMap<String, String>> {
-    let content = std::fs::read_to_string(path).ok()?;
-    let map: std::collections::BTreeMap<String, String> = serde_json::from_str(&content).ok()?;
-    Some(map)
 }
 
 /// Returns the unprivileged `user:` (UID:GID) for compose services. Both platforms
@@ -6070,53 +5995,6 @@ services:
 
     #[test]
     #[serial_test::serial(host_addressing)]
-    fn apply_oauth_config_adds_host_gateway_to_each_consumer() {
-        let tmp = tempfile::tempdir().unwrap();
-        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
-        write_live_oauth_lock(&lock_path, 4090);
-        let bearer_map_path = tmp.path().join("bearer-map.json");
-        std::fs::write(
-            &bearer_map_path,
-            r#"{"bearer-sharepoint-secret":"sharepoint"}"#,
-        )
-        .unwrap();
-
-        let yaml = render_substituted_template();
-        let result =
-            apply_oauth_config_with_paths(&yaml, tmp.path(), &lock_path, &bearer_map_path).unwrap();
-
-        let entries = extra_hosts_for(&result, "mcp-sharepoint");
-        assert_eq!(
-            count_canonical_entries(&entries),
-            1,
-            "mcp-sharepoint must have exactly 1 host.docker.internal entry, got: {entries:?}"
-        );
-    }
-
-    #[test]
-    #[serial_test::serial(host_addressing)]
-    fn apply_oauth_config_errors_when_consumer_service_absent() {
-        let tmp = tempfile::tempdir().unwrap();
-        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
-        write_live_oauth_lock(&lock_path, 4090);
-        let bearer_map_path = tmp.path().join("bearer-map.json");
-        std::fs::write(
-            &bearer_map_path,
-            r#"{"bearer-sharepoint-secret":"sharepoint"}"#,
-        )
-        .unwrap();
-
-        let malformed_doc = "services:\n  claude:\n    image: test\n  mcp-hub:\n    image: hub\n";
-        let result =
-            apply_oauth_config_with_paths(malformed_doc, tmp.path(), &lock_path, &bearer_map_path);
-        assert!(
-            result.is_err(),
-            "missing oauth-consumer service must be an error, not a silent no-op"
-        );
-    }
-
-    #[test]
-    #[serial_test::serial(host_addressing)]
     fn ensure_host_gateway_extra_host_is_idempotent() {
         let mut doc: serde_yaml_ng::Value =
             serde_yaml_ng::from_str(&render_substituted_template()).unwrap();
@@ -6808,357 +6686,86 @@ services:
         assert!(!has_mcp_os, "MCP_OS_* must NOT be in claude container env");
     }
 
-    const VALID_COMPOSE_WITH_SHAREPOINT: &str = r#"
-version: "3"
+    const COMPOSE_WITH_OAUTH_PLUGIN: &str = r#"
 services:
   mcp-hub:
     image: speedwave-mcp-hub:latest
-    environment:
-      - PORT=4000
-  mcp-sharepoint:
-    image: speedwave-mcp-sharepoint:latest
-    environment:
-      - PORT=3000
-    volumes:
-      - /test/.speedwave/tokens/test/sharepoint:/tokens:ro
-      - /test/project:/workspace:rw
-"#;
-
-    const VALID_COMPOSE_WITH_MULTIPLE_WORKERS: &str = r#"
-version: "3"
-services:
-  mcp-hub:
-    image: speedwave-mcp-hub:latest
-    environment:
-      - PORT=4000
-  mcp-sharepoint:
-    image: speedwave-mcp-sharepoint:latest
-    environment:
-      - PORT=3000
-    volumes:
-      - /test/.speedwave/tokens/test/sharepoint:/tokens:ro
-      - /test/project:/workspace:rw
   mcp-slack:
     image: speedwave-mcp-slack:latest
     environment:
-      - PORT=3001
-    volumes:
-      - /test/.speedwave/tokens/test/slack:/tokens:ro
-      - /test/project:/workspace:rw
-  mcp-redmine:
-    image: speedwave-mcp-redmine:latest
-    environment:
-      - PORT=3002
-    volumes:
-      - /test/.speedwave/tokens/test/redmine:/tokens:ro
-      - /test/project:/workspace:rw
-"#;
-
-    fn write_live_oauth_lock(lock_path: &std::path::Path, port: u16) {
-        crate::host_mcp_process::lock::write(
-            lock_path,
-            &crate::host_mcp_process::lock::LockFile::new(
-                crate::host_mcp_process::lock::LockService::Oauth,
-                std::process::id(),
-                port,
-                "supervisor".into(),
-            ),
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn test_oauth_config_skipped_when_port_missing() {
-        let tmp = tempfile::tempdir().unwrap();
-        let result = apply_oauth_config_with_paths(
-            VALID_COMPOSE_WITH_SHAREPOINT,
-            tmp.path(),
-            &tmp.path().join("no-port"),
-            &tmp.path().join(".bearer-map.json"),
-        )
-        .unwrap();
-        assert_eq!(
-            result, VALID_COMPOSE_WITH_SHAREPOINT,
-            "yaml unchanged when oauth worker is not running"
-        );
-    }
-
-    #[test]
-    fn test_oauth_config_skipped_when_bearer_map_missing() {
-        let tmp = tempfile::tempdir().unwrap();
-        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
-        write_live_oauth_lock(&lock_path, 49300);
-        let result = apply_oauth_config_with_paths(
-            VALID_COMPOSE_WITH_SHAREPOINT,
-            tmp.path(),
-            &lock_path,
-            &tmp.path().join("no-bearer-map.json"),
-        )
-        .unwrap();
-        assert_eq!(
-            result, VALID_COMPOSE_WITH_SHAREPOINT,
-            "yaml unchanged when bearer-map is missing"
-        );
-    }
-
-    #[test]
-    fn test_oauth_config_skipped_when_bearer_map_empty() {
-        let tmp = tempfile::tempdir().unwrap();
-        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
-        write_live_oauth_lock(&lock_path, 49300);
-        let bearer_map_path = tmp.path().join(".bearer-map.json");
-        std::fs::write(&bearer_map_path, "{}").unwrap();
-        let result = apply_oauth_config_with_paths(
-            VALID_COMPOSE_WITH_SHAREPOINT,
-            tmp.path(),
-            &lock_path,
-            &bearer_map_path,
-        )
-        .unwrap();
-        assert_eq!(
-            result, VALID_COMPOSE_WITH_SHAREPOINT,
-            "yaml unchanged when no consumer bearers are provisioned"
-        );
-    }
-
-    #[test]
-    #[serial_test::serial(host_addressing)]
-    fn test_oauth_config_injects_url_and_bearer_into_sharepoint_only() {
-        let _guard = super::pin_direct_addressing(consts::LIMA_VZ_HOST_IP);
-        let tmp = tempfile::tempdir().unwrap();
-        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
-        write_live_oauth_lock(&lock_path, 49301);
-        let bearer_map_path = tmp.path().join(".bearer-map.json");
-        std::fs::write(&bearer_map_path, r#"{"bearer-sp-uuid": "sharepoint"}"#).unwrap();
-
-        let result = apply_oauth_config_with_paths(
-            VALID_COMPOSE_WITH_SHAREPOINT,
-            tmp.path(),
-            &lock_path,
-            &bearer_map_path,
-        )
-        .unwrap();
-
-        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
-        let services = doc.get("services").unwrap();
-
-        let sp_env = service_env(&doc, "mcp-sharepoint");
-        let oauth_url = find_env_value(&sp_env, "WORKER_OAUTH_URL=")
-            .expect("WORKER_OAUTH_URL must be injected into mcp-sharepoint");
-        assert!(
-            oauth_url.ends_with(":49301"),
-            "URL must use port: {oauth_url}"
-        );
-        assert!(!oauth_url.contains("0.0.0.0"));
-
-        let sp_vols: Vec<String> = services
-            .get("mcp-sharepoint")
-            .and_then(|s| s.get("volumes"))
-            .and_then(|v| v.as_sequence())
-            .map(|seq| {
-                seq.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        assert!(
-            sp_vols
-                .iter()
-                .any(|v| v.contains(":/secrets/oauth-auth-token-sharepoint:ro")),
-            "per-service oauth bearer must be mounted into mcp-sharepoint, got: {sp_vols:?}"
-        );
-
-        let hub_env = get_hub_env_seq(&doc);
-        assert!(
-            find_env_value(&hub_env, "WORKER_OAUTH_URL=").is_none(),
-            "WORKER_OAUTH_URL must NOT be injected into mcp-hub"
-        );
-        let hub_vols: Vec<String> = services
-            .get("mcp-hub")
-            .and_then(|s| s.get("volumes"))
-            .and_then(|v| v.as_sequence())
-            .map(|seq| {
-                seq.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        assert!(
-            !hub_vols.iter().any(|v| v.contains("oauth-auth-token")),
-            "oauth bearer must NOT be mounted into mcp-hub, got: {hub_vols:?}"
-        );
-    }
-
-    #[test]
-    #[serial_test::parallel(host_addressing)]
-    fn test_oauth_config_injects_into_plugin_consumer() {
-        let compose = r#"
-services:
-  mcp-hub:
-    image: speedwave-mcp-hub:latest
+      - PORT=3000
   mcp-glpi:
     image: speedwave-mcp-glpi:latest
     environment:
-      - PORT=3001
+      - PORT=3000
     volumes:
       - /test/.speedwave/tokens/test/glpi:/tokens:ro
 "#;
-        let tmp = tempfile::tempdir().unwrap();
-        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
-        write_live_oauth_lock(&lock_path, 49305);
-        let bearer_map_path = tmp.path().join(".bearer-map.json");
-        std::fs::write(&bearer_map_path, r#"{"bearer-glpi-uuid": "glpi"}"#).unwrap();
 
-        let result =
-            apply_oauth_config_with_paths(compose, tmp.path(), &lock_path, &bearer_map_path)
-                .unwrap();
-        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
-
-        let env = service_env(&doc, "mcp-glpi");
-        assert!(
-            find_env_value(&env, "WORKER_OAUTH_URL=").is_some(),
-            "plugin consumer must get WORKER_OAUTH_URL"
-        );
-        let vols: Vec<String> = doc
-            .get("services")
-            .and_then(|s| s.get("mcp-glpi"))
-            .and_then(|s| s.get("volumes"))
-            .and_then(|v| v.as_sequence())
-            .map(|seq| {
-                seq.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        assert!(
-            vols.iter()
-                .any(|v| v.contains(":/secrets/oauth-auth-token-glpi:ro")),
-            "plugin consumer must get its bearer mount, got: {vols:?}"
-        );
-    }
-
-    #[test]
-    fn oauth_consumer_compose_name_resolves_builtin_and_plugin() {
-        assert_eq!(oauth_consumer_compose_name("sharepoint"), "mcp-sharepoint");
-        assert_eq!(oauth_consumer_compose_name("glpi"), "mcp-glpi");
-    }
-
-    fn oauth_plugin_manifest(slug: &str) -> crate::plugin::PluginManifest {
-        let json = format!(
-            r#"{{
-                "name": "{slug}", "service_id": "{slug}", "slug": "{slug}",
-                "version": "1.0.0", "description": "d",
-                "auth_fields": [{{"key":"client_id","label":"id","field_type":"text","placeholder":"","is_secret":false,"oauth_flow":true}}],
-                "oauth": {{"grant_type":"authorization_code","token_url":"https://idp/token","authorize_url":"https://idp/authorize","client_id_field":"client_id"}}
-            }}"#
-        );
-        serde_json::from_str(&json).unwrap()
-    }
-
-    #[test]
-    fn oauth_consumer_service_ids_includes_builtins_and_enabled_oauth_plugins() {
+    fn oauth_plugin_enabled() -> crate::config::ResolvedIntegrationsConfig {
         let mut resolved = crate::config::ResolvedIntegrationsConfig {
-            sharepoint: true,
             slack: true,
             ..Default::default()
         };
         resolved.plugins.insert("glpi".to_string(), true);
-        resolved.plugins.insert("disabled-plug".to_string(), false);
+        resolved
+    }
 
-        let plugins = vec![
-            oauth_plugin_manifest("glpi"),
-            oauth_plugin_manifest("disabled-plug"),
-        ];
-        let ids = oauth_consumer_service_ids(&resolved, &plugins);
-        assert!(ids.contains(&"sharepoint".to_string()), "built-in included");
-        assert!(
-            ids.contains(&"slack".to_string()),
-            "slack included when enabled (ADR-071)"
-        );
-
-        let mut resolved_off = resolved.clone();
-        resolved_off.slack = false;
-        let ids_off = oauth_consumer_service_ids(&resolved_off, &plugins);
-        assert!(!ids_off.contains(&"slack".to_string()));
-        assert!(ids_off.contains(&"sharepoint".to_string()));
-        assert!(
-            ids.contains(&"glpi".to_string()),
-            "enabled oauth plugin included"
-        );
-        assert!(
-            !ids.contains(&"disabled-plug".to_string()),
-            "disabled plugin excluded"
-        );
+    fn service_volumes(doc: &serde_yaml_ng::Value, service: &str) -> Vec<String> {
+        doc["services"][service]["volumes"]
+            .as_sequence()
+            .map(|seq| {
+                seq.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     #[test]
-    fn oauth_consumer_service_ids_excludes_plugin_without_oauth() {
-        let mut resolved = crate::config::ResolvedIntegrationsConfig::default();
-        resolved.plugins.insert("plain".to_string(), true);
-        let plain: crate::plugin::PluginManifest = serde_json::from_str(
-            r#"{"name":"plain","service_id":"plain","slug":"plain","version":"1.0.0","description":"d"}"#,
-        )
-        .unwrap();
-        let ids = oauth_consumer_service_ids(&resolved, &[plain]);
-        assert!(ids.is_empty(), "plugin without oauth is not a consumer");
-    }
-
-    #[test]
-    fn host_worker_warnings_fire_only_when_workers_absent_and_needed() {
+    fn oauth_plugin_gets_fixed_compat_url_and_bearer_mount() {
         let tmp = tempfile::tempdir().unwrap();
-        let resolved = crate::config::ResolvedIntegrationsConfig {
-            sharepoint: true,
-            ..Default::default()
-        };
-        let w = host_worker_warnings(tmp.path(), "p", "services: {}", &resolved, &[]);
-        assert_eq!(w.len(), 1);
-        assert!(w[0].contains("sharepoint") && w[0].contains("refresh worker"));
-
-        let w = host_worker_warnings(tmp.path(), "p", "WORKER_OAUTH_URL=x", &resolved, &[]);
-        assert!(w.is_empty());
-
-        let none = crate::config::ResolvedIntegrationsConfig::default();
-        assert!(host_worker_warnings(tmp.path(), "p", "services: {}", &none, &[]).is_empty());
-    }
-
-    #[test]
-    fn host_worker_warnings_mcp_os_gated_on_token_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let none = crate::config::ResolvedIntegrationsConfig::default();
-        assert!(host_worker_warnings(tmp.path(), "p", "services: {}", &none, &[]).is_empty());
-        std::fs::write(tmp.path().join(consts::MCP_OS_AUTH_TOKEN_FILE), "t").unwrap();
-        let w = host_worker_warnings(tmp.path(), "p", "services: {}", &none, &[]);
-        assert_eq!(w.len(), 1);
-        assert!(w[0].contains("mcp-os"));
-        let w = host_worker_warnings(tmp.path(), "p", "WORKER_OS_URL=x", &none, &[]);
-        assert!(w.is_empty());
-    }
-
-    #[test]
-    #[serial_test::parallel(host_addressing)]
-    fn test_oauth_config_writes_per_service_bearer_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
-        write_live_oauth_lock(&lock_path, 49301);
-        let bearer_map_path = tmp.path().join(".bearer-map.json");
-        std::fs::write(&bearer_map_path, r#"{"bearer-x": "sharepoint"}"#).unwrap();
-
-        apply_oauth_config_with_paths(
-            VALID_COMPOSE_WITH_SHAREPOINT,
+        let result = apply_oauth_compat_in(
             tmp.path(),
-            &lock_path,
-            &bearer_map_path,
+            COMPOSE_WITH_OAUTH_PLUGIN,
+            "test",
+            &oauth_plugin_enabled(),
+            &[oauth_plugin_manifest("glpi")],
+        )
+        .unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
+
+        let env = service_env(&doc, "mcp-glpi");
+        assert_eq!(
+            find_env_value(&env, "WORKER_OAUTH_URL="),
+            Some(consts::OAUTH_COMPAT_URL.to_string())
+        );
+        assert!(service_volumes(&doc, "mcp-glpi")
+            .iter()
+            .any(|v| v.ends_with(":/secrets/oauth-auth-token-glpi:ro")));
+    }
+
+    #[test]
+    fn oauth_compat_bearer_file_holds_the_fixed_placeholder_owner_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().join(consts::OAUTH_SUBDIR).join("test");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(state_dir.join("bearer-glpi"), "random-from-an-old-version").unwrap();
+
+        apply_oauth_compat_in(
+            tmp.path(),
+            COMPOSE_WITH_OAUTH_PLUGIN,
+            "test",
+            &oauth_plugin_enabled(),
+            &[oauth_plugin_manifest("glpi")],
         )
         .unwrap();
 
-        let bearer_file = tmp.path().join("bearer-sharepoint");
-        assert!(
-            bearer_file.exists(),
-            "per-service bearer file must be written"
+        let bearer_file = state_dir.join("bearer-glpi");
+        assert_eq!(
+            std::fs::read_to_string(&bearer_file).unwrap(),
+            consts::OAUTH_COMPAT_BEARER
         );
-        let content = std::fs::read_to_string(&bearer_file).unwrap();
-        assert_eq!(content, "bearer-x");
-
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -7172,149 +6779,115 @@ services:
     }
 
     #[test]
-    #[serial_test::serial(host_addressing)]
-    fn test_oauth_config_injects_url_and_bearer_into_slack_consumer() {
-        let _guard = super::pin_direct_addressing(consts::LIMA_VZ_HOST_IP);
+    fn oauth_compat_skips_builtins_plugins_without_oauth_and_disabled_plugins() {
         let tmp = tempfile::tempdir().unwrap();
-        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
-        write_live_oauth_lock(&lock_path, 49302);
-        let bearer_map_path = tmp.path().join(".bearer-map.json");
-        std::fs::write(
-            &bearer_map_path,
-            r#"{"bearer-sl-uuid": "slack", "bearer-sp-uuid": "sharepoint"}"#,
+        let plain: crate::plugin::PluginManifest = serde_json::from_str(
+            r#"{"name":"plain","service_id":"plain","slug":"plain","version":"1.0.0","description":"d"}"#,
         )
         .unwrap();
+        let mut resolved = oauth_plugin_enabled();
+        resolved.plugins.insert("plain".to_string(), true);
+        resolved.plugins.insert("off".to_string(), false);
 
-        let result = apply_oauth_config_with_paths(
-            VALID_COMPOSE_WITH_MULTIPLE_WORKERS,
+        let result = apply_oauth_compat_in(
             tmp.path(),
-            &lock_path,
-            &bearer_map_path,
+            COMPOSE_WITH_OAUTH_PLUGIN,
+            "test",
+            &resolved,
+            &[plain, oauth_plugin_manifest("off")],
         )
         .unwrap();
 
-        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
-        let services = doc.get("services").unwrap();
-
-        let slack_env = service_env(&doc, "mcp-slack");
-        let oauth_url = find_env_value(&slack_env, "WORKER_OAUTH_URL=")
-            .expect("WORKER_OAUTH_URL must be injected into mcp-slack");
-        assert!(
-            oauth_url.ends_with(":49302"),
-            "URL must use port: {oauth_url}"
-        );
-
-        let slack_vols: Vec<String> = services
-            .get("mcp-slack")
-            .and_then(|s| s.get("volumes"))
-            .and_then(|v| v.as_sequence())
-            .map(|seq| {
-                seq.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        assert!(
-            slack_vols
-                .iter()
-                .any(|v| v.contains(":/secrets/oauth-auth-token-slack:ro")),
-            "per-service oauth bearer must be mounted into mcp-slack, got: {slack_vols:?}"
-        );
-
-        let rm_env = service_env(&doc, "mcp-redmine");
-        assert!(find_env_value(&rm_env, "WORKER_OAUTH_URL=").is_none());
+        assert_eq!(result, COMPOSE_WITH_OAUTH_PLUGIN);
     }
 
     #[test]
-    #[serial_test::parallel(host_addressing)]
-    fn test_oauth_config_does_not_inject_into_unprovisioned_services() {
+    fn oauth_compat_leaves_builtin_workers_without_url_and_bearer() {
         let tmp = tempfile::tempdir().unwrap();
-        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
-        write_live_oauth_lock(&lock_path, 49301);
-        let bearer_map_path = tmp.path().join(".bearer-map.json");
-        std::fs::write(&bearer_map_path, r#"{"bearer-sp": "sharepoint"}"#).unwrap();
-
-        let result = apply_oauth_config_with_paths(
-            VALID_COMPOSE_WITH_MULTIPLE_WORKERS,
+        let result = apply_oauth_compat_in(
             tmp.path(),
-            &lock_path,
-            &bearer_map_path,
+            COMPOSE_WITH_OAUTH_PLUGIN,
+            "test",
+            &oauth_plugin_enabled(),
+            &[oauth_plugin_manifest("glpi")],
         )
         .unwrap();
-
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
 
-        let sp_env = service_env(&doc, "mcp-sharepoint");
-        assert!(
-            find_env_value(&sp_env, "WORKER_OAUTH_URL=").is_some(),
-            "WORKER_OAUTH_URL must be injected into mcp-sharepoint"
-        );
-
-        for non_oauth_service in &["mcp-slack", "mcp-redmine", "mcp-hub"] {
-            let env = service_env(&doc, non_oauth_service);
-            assert!(
-                find_env_value(&env, "WORKER_OAUTH_URL=").is_none(),
-                "{non_oauth_service}: WORKER_OAUTH_URL must NOT be injected, env={env:?}"
-            );
-
-            let vols: Vec<String> = doc
-                .get("services")
-                .and_then(|s| s.get(non_oauth_service))
-                .and_then(|s| s.get("volumes"))
-                .and_then(|v| v.as_sequence())
-                .map(|seq| {
-                    seq.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-            assert!(
-                !vols.iter().any(|v| v.contains("oauth-auth-token")),
-                "{non_oauth_service}: oauth bearer must NOT be mounted, vols={vols:?}"
-            );
+        for service in ["mcp-slack", "mcp-hub"] {
+            assert!(find_env_value(&service_env(&doc, service), "WORKER_OAUTH_URL=").is_none());
+            assert!(!service_volumes(&doc, service)
+                .iter()
+                .any(|v| v.contains("oauth-auth-token")));
         }
     }
 
     #[test]
-    fn test_oauth_config_skipped_when_worker_pid_is_dead() {
-        // SSOT-allow: test fixture spawn
-        let mut child = std::process::Command::new("true")
-            .spawn()
-            .or_else(|_| {
-                std::process::Command::new("cmd")
-                    .args(["/C", "exit"])
-                    .spawn()
-            })
-            .expect("spawn a trivially-exiting child");
-        let dead_pid = child.id();
-        child.wait().expect("reap child");
-
+    fn oauth_compat_render_ignores_leftovers_of_the_removed_host_process() {
         let tmp = tempfile::tempdir().unwrap();
-        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
-        crate::host_mcp_process::lock::write(
-            &lock_path,
-            &crate::host_mcp_process::lock::LockFile::new(
-                crate::host_mcp_process::lock::LockService::Oauth,
-                dead_pid,
-                49301,
-                "supervisor".into(),
+        let render = || {
+            apply_oauth_compat_in(
+                tmp.path(),
+                COMPOSE_WITH_OAUTH_PLUGIN,
+                "test",
+                &oauth_plugin_enabled(),
+                &[oauth_plugin_manifest("glpi")],
+            )
+            .unwrap()
+        };
+        let before = render();
+
+        let state_dir = tmp.path().join(consts::OAUTH_SUBDIR).join("test");
+        std::fs::write(
+            state_dir.join(consts::PER_PROJECT_LOCK_FILE),
+            format!(
+                r#"{{"service":"oauth","pid":{},"port":49301,"authToken":"t","transport":"http"}}"#,
+                std::process::id()
             ),
         )
         .unwrap();
-        let bearer_map_path = tmp.path().join(".bearer-map.json");
-        std::fs::write(&bearer_map_path, r#"{"bearer-sp": "sharepoint"}"#).unwrap();
+        std::fs::write(state_dir.join(".bearer-map.json"), r#"{"b":"glpi"}"#).unwrap();
 
-        let result = apply_oauth_config_with_paths(
-            VALID_COMPOSE_WITH_SHAREPOINT,
+        assert_eq!(render(), before);
+    }
+
+    #[test]
+    fn oauth_compat_errors_when_the_plugin_service_is_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = apply_oauth_compat_in(
             tmp.path(),
-            &lock_path,
-            &bearer_map_path,
-        )
-        .unwrap();
-        assert_eq!(
-            result, VALID_COMPOSE_WITH_SHAREPOINT,
-            "stale lock with a dead PID must be treated as absent — no injection"
+            "services:\n  mcp-hub:\n    image: hub\n",
+            "test",
+            &oauth_plugin_enabled(),
+            &[oauth_plugin_manifest("glpi")],
         );
+        assert!(
+            result.is_err(),
+            "a missing plugin service must be an error, not a silent no-op"
+        );
+    }
+    fn oauth_plugin_manifest(slug: &str) -> crate::plugin::PluginManifest {
+        let json = format!(
+            r#"{{
+                "name": "{slug}", "service_id": "{slug}", "slug": "{slug}",
+                "version": "1.0.0", "description": "d",
+                "auth_fields": [{{"key":"client_id","label":"id","field_type":"text","placeholder":"","is_secret":false,"oauth_flow":true}}],
+                "oauth": {{"grant_type":"authorization_code","token_url":"https://idp/token","authorize_url":"https://idp/authorize","client_id_field":"client_id"}}
+            }}"#
+        );
+        serde_json::from_str(&json).unwrap()
+    }
+
+    #[test]
+    fn host_worker_warnings_mcp_os_gated_on_token_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(host_worker_warnings(tmp.path(), "p", "services: {}").is_empty());
+        std::fs::write(tmp.path().join(consts::MCP_OS_AUTH_TOKEN_FILE), "t").unwrap();
+        let w = host_worker_warnings(tmp.path(), "p", "services: {}");
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("mcp-os"));
+        let w = host_worker_warnings(tmp.path(), "p", "WORKER_OS_URL=x");
+        assert!(w.is_empty());
     }
 
     fn service_env(doc: &serde_yaml_ng::Value, service_name: &str) -> Vec<String> {
@@ -7337,11 +6910,11 @@ services:
         let lock_path = tmp.path().join("lock.json");
         lock::write(
             &lock_path,
-            &LockFile::new(LockService::Oauth, 12345, 49215, "tok".into()),
+            &LockFile::new(LockService::PiiNer, 12345, 49215, "tok".into()),
         )
         .unwrap();
 
-        assert_eq!(read_lock_port(&lock_path, LockService::Oauth), Some(49215));
+        assert_eq!(read_lock_port(&lock_path, LockService::PiiNer), Some(49215));
     }
 
     #[test]
@@ -7350,7 +6923,7 @@ services:
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join("lock.json");
 
-        assert_eq!(read_lock_port(&lock_path, LockService::Oauth), None);
+        assert_eq!(read_lock_port(&lock_path, LockService::PiiNer), None);
     }
 
     #[test]
@@ -7360,7 +6933,7 @@ services:
         let lock_path = tmp.path().join("lock.json");
         lock::write(
             &lock_path,
-            &LockFile::new(LockService::Oauth, 12345, 49215, "tok".into()),
+            &LockFile::new(LockService::PiiNer, 12345, 49215, "tok".into()),
         )
         .unwrap();
 
@@ -9681,7 +9254,7 @@ services:
     }
 
     #[test]
-    fn test_security_check_sharepoint_with_oauth_bearer_mount_passes() {
+    fn test_security_check_sharepoint_with_oauth_bearer_mount_is_rejected() {
         let data_dir = tempfile::tempdir().unwrap();
         let yaml = format!(
             r#"
@@ -9711,14 +9284,15 @@ services:
             .filter(|v| v.rule.is_sharepoint())
             .collect();
         assert!(
-            sp_violations.is_empty(),
-            "post-ADR-060 SharePoint compose (with oauth bearer mount) must pass: {:?}",
-            sp_violations.iter().map(|v| &v.rule).collect::<Vec<_>>()
+            sp_violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::SharepointNoExtraVolumes),
+            "a built-in worker has no oauth bearer: the mount must violate SharepointNoExtraVolumes"
         );
     }
 
     #[test]
-    fn test_security_check_slack_with_workspace_and_bearer_passes() {
+    fn test_security_check_slack_with_tokens_and_workspace_passes() {
         let data_dir = tempfile::tempdir().unwrap();
         let yaml = format!(
             r#"
@@ -9736,7 +9310,6 @@ services:
     volumes:
       - /test/.speedwave/tokens/test/slack:/tokens:ro
       - /test/project:/workspace:rw
-      - /test/.speedwave/oauth/test/bearer-slack:/secrets/oauth-auth-token-slack:ro
 "#,
             user = container_user()
         );
@@ -10295,40 +9868,6 @@ services:
                 .iter()
                 .any(|v| v.rule == SecurityRule::AtlassianTokenPathMismatch),
             "Wrong Atlassian token path should trigger ATLASSIAN_TOKEN_PATH_MISMATCH"
-        );
-    }
-
-    #[test]
-    fn test_security_check_sharepoint_oauth_bearer_must_be_ro() {
-        let data_dir = tempfile::tempdir().unwrap();
-        let yaml = format!(
-            r#"
-version: "3"
-services:
-  mcp-sharepoint:
-    image: speedwave-mcp-sharepoint:latest
-    user: "{user}"
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    tmpfs:
-      - /tmp:noexec,nosuid,size=64m
-    volumes:
-      - /test/.speedwave/tokens/test/sharepoint:/tokens:ro
-      - /test/project:/workspace:rw
-      - /test/x:/secrets/oauth-auth-token-sharepoint:rw
-"#,
-            user = container_user()
-        );
-        let paths = test_expected_paths();
-        let violations =
-            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
-        assert!(
-            violations
-                .iter()
-                .any(|v| v.rule == SecurityRule::SharepointNoExtraVolumes),
-            "oauth bearer mount with :rw must violate SharepointNoExtraVolumes"
         );
     }
 

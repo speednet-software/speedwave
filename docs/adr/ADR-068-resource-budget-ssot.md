@@ -32,7 +32,7 @@ The adaptive formula made sense in March 2026 with four light workers (~1.5 GiB 
 ## Outside the SSOT (by design, not gaps)
 
 - **Per-plugin actual mem/cpu** come from the signed `plugin.json` in the sibling `speedwave-plugins` repo; this repo owns only the default + cap envelope (`PLUGIN_DEFAULT_*` / `PLUGIN_*_MAX`), never the value.
-- **Host processes** (mcp-os, host_exec, oauth, ide-bridge) have no mem/cpu limits — they are light host-side Node processes (ADR-010), bounded by the host OS, not by Speedwave.
+- **Host processes** (mcp-os, host_exec, ide-bridge; the `oauth` process of ADR-060 was removed by ADR-111) have no mem/cpu limits — they are light host-side Node processes (ADR-010), bounded by the host OS, not by Speedwave.
 - **WSL2 VM CPU/RAM** — user-owned `.wslconfig`, intentionally unmanaged (decision 4).
 - **Lima/VZ does not return ballooned memory to macOS** until VM restart[^9] — the reason the VM ceiling must be sized conservatively rather than relying on reclaim. (WSL2 reclaims via `autoMemoryReclaim`, default `dropCache`[^6], but its `gradual` mode is rejected: it blocks the container daemon under systemd[^10], which is exactly our setup.)
 

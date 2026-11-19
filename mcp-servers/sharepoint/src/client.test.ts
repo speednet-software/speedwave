@@ -34,10 +34,6 @@ vi.mock('@speedwave/mcp-shared', async (importOriginal) => {
   return {
     ...actual,
     loadToken: vi.fn(),
-    refreshAccessToken: vi.fn().mockResolvedValue({
-      expiresIn: 3600,
-      grantedScopes: ['https://graph.microsoft.com/Sites.Manage.All'],
-    }),
     authedRequest: vi.fn(),
     ts: () => '[00:00:00]',
   };
@@ -46,9 +42,8 @@ vi.mock('@speedwave/mcp-shared', async (importOriginal) => {
 const mockFs = vi.mocked(fs);
 const mockCreateWriteStream = vi.mocked(createWriteStream);
 const mockPipeline = vi.mocked(pipeline);
-const { loadToken, refreshAccessToken, authedRequest } = await import('@speedwave/mcp-shared');
+const { loadToken, authedRequest } = await import('@speedwave/mcp-shared');
 const mockLoadToken = vi.mocked(loadToken);
-const mockOauthRefresh = vi.mocked(refreshAccessToken);
 const mockAuthedRequest = vi.mocked(authedRequest);
 
 const mockConfig: SharePointConfig = {
@@ -80,10 +75,6 @@ describe('SharePointClient', () => {
     global.fetch = fetchMock as typeof fetch;
 
     mockLoadToken.mockResolvedValue('refreshed-access-token');
-    mockOauthRefresh.mockResolvedValue({
-      expiresIn: 3600,
-      grantedScopes: ['https://graph.microsoft.com/Sites.Manage.All'],
-    });
     mockAuthedRequest.mockImplementation((opts) => opts.send(opts.state.accessToken));
 
     client = new SharePointClient({ ...mockConfig }, mockTokensDir);
@@ -126,7 +117,7 @@ describe('SharePointClient', () => {
     });
   });
 
-  describe('auth delegation (host-side oauth worker, ADR-060)', () => {
+  describe('auth delegation (host rewrites the token file)', () => {
     it('delegates the Graph call to authedRequest with the sharepoint service + proactive window', async () => {
       fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
 
@@ -138,15 +129,6 @@ describe('SharePointClient', () => {
           proactiveWithinSeconds: expect.any(Number),
         })
       );
-    });
-
-    it('propagates OAuthScopeMismatchError from the helper as-is so the tool layer can re-consent', async () => {
-      const { OAuthScopeMismatchError } = await import('@speedwave/mcp-shared');
-      mockAuthedRequest.mockRejectedValueOnce(
-        new OAuthScopeMismatchError('Sites.Manage.All not granted')
-      );
-
-      await expect(client.listFiles()).rejects.toThrow(/Sites\.Manage\.All not granted/);
     });
   });
 
@@ -433,39 +415,6 @@ describe('SharePointClient', () => {
       }
     });
 
-    it('rethrows OAuthScopeMismatchError from the resolve retry, not the generic config error', async () => {
-      const { OAuthScopeMismatchError } = await import('@speedwave/mcp-shared');
-      client.getConfig().siteId = 'contoso.sharepoint.com:/sites/Scope:';
-      client.statusTracker.setFailed(new Error('SharePoint siteId resolve failed: 401'));
-      mockAuthedRequest.mockRejectedValueOnce(
-        new OAuthScopeMismatchError('Sites.Manage.All not granted')
-      );
-
-      await expect(client.listFiles()).rejects.toBeInstanceOf(OAuthScopeMismatchError);
-    });
-
-    it('arms the resolve cooldown on an OAuthScopeMismatchError too, throttling a tool-call burst', async () => {
-      vi.useFakeTimers();
-      try {
-        const { OAuthScopeMismatchError } = await import('@speedwave/mcp-shared');
-        client.getConfig().siteId = 'contoso.sharepoint.com:/sites/ScopeBurst:';
-        client.statusTracker.setFailed(new Error('SharePoint siteId resolve failed: 401'));
-        mockAuthedRequest.mockRejectedValue(
-          new OAuthScopeMismatchError('Sites.Manage.All not granted')
-        );
-
-        await expect(client.listFiles()).rejects.toBeInstanceOf(OAuthScopeMismatchError);
-        const resolveCallsAfterFirst = mockAuthedRequest.mock.calls.length;
-
-        await expect(client.listFiles()).rejects.toThrow(
-          /SharePoint site connection is not established/
-        );
-        expect(mockAuthedRequest.mock.calls.length).toBe(resolveCallsAfterFirst);
-      } finally {
-        vi.useRealTimers();
-      }
-    });
-
     it('does not short-circuit when statusTracker is ok', async () => {
       fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
       client.statusTracker.setOk();
@@ -560,16 +509,6 @@ describe('SharePointClient', () => {
           proactiveWithinSeconds: PROACTIVE_REFRESH_SECONDS,
         })
       );
-    });
-
-    it('does not swallow OAuthScopeMismatchError surfaced by the helper (cannot self-heal)', async () => {
-      const { OAuthScopeMismatchError } = await import('@speedwave/mcp-shared');
-      mockAuthedRequest.mockRejectedValueOnce(
-        new OAuthScopeMismatchError('Sites.Manage.All not granted')
-      );
-
-      await expect(client.listFiles()).rejects.toBeInstanceOf(OAuthScopeMismatchError);
-      expect(fetchMock).not.toHaveBeenCalled();
     });
 
     it('should merge custom headers with authorization', async () => {
@@ -2231,18 +2170,6 @@ describe('SharePointClient', () => {
       warnSpy.mockRestore();
     });
 
-    it('propagates OAuthScopeMismatchError instead of masking it as a network error', async () => {
-      const { OAuthScopeMismatchError } = await import('@speedwave/mcp-shared');
-      global.fetch = vi.fn() as unknown as typeof fetch;
-      mockAuthedRequest.mockRejectedValueOnce(
-        new OAuthScopeMismatchError('Sites.Manage.All not granted')
-      );
-
-      await expect(
-        resolveCompositeSiteId('contoso.sharepoint.com:/sites/X:', 'tok', { refreshOn401: true })
-      ).rejects.toBeInstanceOf(OAuthScopeMismatchError);
-    });
-
     it('passes an AbortSignal to the cold-start fetch (timeout guard against hangs)', async () => {
       const fetchMock = vi.fn().mockResolvedValueOnce({
         ok: true,
@@ -2307,7 +2234,7 @@ describe('SharePointClient', () => {
       });
       expect(result).toMatchObject({ ok: false, reason: 'not_found' });
       expect(fetchMock).toHaveBeenCalledTimes(1);
-      expect(mockOauthRefresh).not.toHaveBeenCalled();
+      expect(mockAuthedRequest).not.toHaveBeenCalled();
     });
 
     it('rejects URL site_id without making a network call (defence in depth)', async () => {

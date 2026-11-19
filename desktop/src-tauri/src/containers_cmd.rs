@@ -1,6 +1,6 @@
 use speedwave_runtime::config;
 
-use crate::reconcile::{SharedIdeBridge, SharedMcpOs, SharedOauth};
+use crate::reconcile::{SharedIdeBridge, SharedMcpOs};
 use crate::setup_wizard;
 use crate::types::{
     check_project, CustomPolicyDto, LlmConfigResponse, LlmConfigUpdate, PiiRuleInfo,
@@ -477,8 +477,7 @@ pub async fn add_project(
     };
     crate::ensure_mcp_os_running(&mcp_os, &app);
     crate::ensure_ide_bridge_running(&ide_bridge, &app);
-    use tauri::Manager;
-    let oauth_arc = app.state::<SharedOauth>().inner().clone();
+    crate::session_refresh::start_sync(app.clone());
 
     {
         let dir_clone = dir.clone();
@@ -534,7 +533,6 @@ pub async fn add_project(
                 log::info!("'{proj}' has no LLM provider — skipping container start");
                 return Ok(());
             }
-            crate::ensure_oauth_running(&oauth_arc, proj);
             crate::pii_ner_service::start_if_active_wants();
             log::info!("starting containers for project={proj}");
             setup_wizard::start_containers(proj).map_err(|e| {
@@ -658,13 +656,11 @@ pub async fn start_containers(
 ) -> Result<(), String> {
     crate::ensure_mcp_os_running(&mcp_os, &app);
     crate::ensure_ide_bridge_running(&ide_bridge, &app);
-    use tauri::Manager;
-    let oauth_arc = app.state::<SharedOauth>().inner().clone();
+    crate::session_refresh::start_sync(app.clone());
 
     tokio::task::spawn_blocking(move || {
         ensure_images_ready()?;
         check_project(&project)?;
-        crate::ensure_oauth_running(&oauth_arc, &project);
         crate::pii_ner_service::sync_with_active_project();
         if let Ok(cfg) = speedwave_runtime::config::load_user_config() {
             if let Some(p) = cfg.find_project(&project) {
@@ -739,56 +735,6 @@ pub async fn check_containers_running(project: String) -> Result<bool, String> {
     .map_err(|e| e.to_string())?
 }
 
-pub(crate) fn recreate_project_containers_if_running(project: &str) -> bool {
-    let active = speedwave_runtime::config::load_user_config()
-        .ok()
-        .and_then(|c| c.active_project);
-    if active.as_deref() != Some(project) {
-        log::debug!("'{project}' is not the active project — skipping recreate");
-        return false;
-    }
-    if let Err(e) = ensure_images_ready() {
-        log::warn!("images not ready for '{project}' — skipping recreate: {e}");
-        return false;
-    }
-    let rt = speedwave_runtime::runtime::detect_runtime();
-    if !rt.is_available() {
-        log::debug!("runtime not available — skipping recreate");
-        return false;
-    }
-    let running = match rt.compose_ps(project) {
-        Ok(c) => !c.is_empty(),
-        Err(e) => {
-            log::debug!("compose_ps failed ({e}) — skipping recreate");
-            return false;
-        }
-    };
-    if !running {
-        log::debug!("'{project}' not running — skipping recreate");
-        return false;
-    }
-    if let Err(sanitized) = crate::integrations_cmd::ensure_project_images_built(&rt, project) {
-        log::warn!("pre-build failed for '{project}' — skipping recreate: {sanitized}");
-        return false;
-    }
-    use crate::types::IntoAnyhow;
-    let result = rt.transaction(project, |rt| -> anyhow::Result<()> {
-        render_and_save_compose(project).into_anyhow()?;
-        speedwave_runtime::runtime::compose_validate_with_retry(rt, project)?;
-        rt.compose_up_recreate(project)?;
-        Ok(())
-    });
-    match result {
-        Ok(()) => {
-            log::info!("recreated containers for '{project}' so the hub re-discovers");
-        }
-        Err(e) => {
-            log::warn!("failed to recreate containers for '{project}': {e}");
-        }
-    }
-    true
-}
-
 #[tauri::command]
 pub async fn recreate_project_containers(project: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
@@ -833,13 +779,11 @@ pub async fn factory_reset(
     app: tauri::AppHandle,
     ide_bridge: tauri::State<'_, SharedIdeBridge>,
     mcp_os: tauri::State<'_, SharedMcpOs>,
-    oauth: tauri::State<'_, SharedOauth>,
     clipboard: tauri::State<'_, crate::clipboard_bridge::SharedClipboardBridge>,
 ) -> Result<(), String> {
     speedwave_runtime::runtime::begin_engine_teardown();
     crate::WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
-
-    crate::OAUTH_WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+    crate::session_refresh::stop_sync();
 
     if let Ok(mut guard) = ide_bridge.lock() {
         if let Some(mut bridge) = guard.take() {
@@ -853,15 +797,6 @@ pub async fn factory_reset(
         if let Some(mut proc) = guard.take() {
             if let Err(e) = proc.stop() {
                 log::warn!("failed to stop mcp-os during factory reset: {e}");
-            }
-            proc.cleanup_files();
-        }
-    }
-
-    if let Ok(mut map) = oauth.lock() {
-        for (project, mut proc) in map.drain() {
-            if let Err(e) = proc.stop() {
-                log::warn!("oauth worker for '{project}' stop error during factory reset: {e}");
             }
             proc.cleanup_files();
         }
@@ -5231,33 +5166,6 @@ mod tests {
     }
 
     #[test]
-    fn start_containers_eager_starts_host_workers_before_compose() {
-        for cmd in [
-            "pub async fn start_containers(",
-            "pub async fn add_project(",
-        ] {
-            let source = include_str!("containers_cmd.rs");
-            let fn_start = source.find(cmd).expect("command function must exist");
-            let fn_body = &source[fn_start..];
-            let next_fn = fn_body[1..]
-                .find("\npub ")
-                .map(|i| i + 1)
-                .unwrap_or(fn_body.len());
-            let fn_body = &fn_body[..next_fn];
-            let oauth = fn_body
-                .find("ensure_oauth_running(")
-                .unwrap_or_else(|| panic!("{cmd} must call ensure_oauth_running"));
-            let compose_start = fn_body
-                .find("setup_wizard::start_containers(")
-                .unwrap_or_else(|| panic!("{cmd} must call setup_wizard::start_containers"));
-            assert!(
-                oauth < compose_start,
-                "{cmd}: host workers must start before setup_wizard::start_containers"
-            );
-        }
-    }
-
-    #[test]
     fn validate_api_key_accepts_normal_value() {
         let r = super::validate_api_key("sk-test-abcdef0123").unwrap();
         assert_eq!(r, "sk-test-abcdef0123");
@@ -5523,45 +5431,6 @@ mod tests {
             "runtime project removal must not run after compose_down failure"
         );
         assert!(handles.removed_networks().is_empty());
-    }
-
-    #[test]
-    fn recreate_guard_checks_active_project_before_anything_else() {
-        let source = include_str!("containers_cmd.rs");
-        let fn_body = extract_fn_body_braced(
-            source,
-            "pub(crate) fn recreate_project_containers_if_running(",
-        );
-        let active_pos = fn_body
-            .find("active_project")
-            .expect("must read active_project from config");
-        let images_pos = fn_body
-            .find("ensure_images_ready")
-            .expect("readiness gate must exist");
-        assert!(
-            active_pos < images_pos,
-            "active-project guard must come before any side-effecting step"
-        );
-    }
-
-    #[test]
-    fn recreate_project_containers_if_running_waits_for_image_readiness() {
-        let source = include_str!("containers_cmd.rs");
-        let fn_body = extract_fn_body_braced(
-            source,
-            "pub(crate) fn recreate_project_containers_if_running(",
-        );
-
-        let ensure_pos = fn_body
-            .find("ensure_images_ready(")
-            .expect("recreate_project_containers_if_running must call ensure_images_ready");
-        let up_pos = fn_body
-            .find("compose_up_recreate(")
-            .expect("compose_up_recreate must exist in recreate_project_containers_if_running");
-        assert!(
-            ensure_pos < up_pos,
-            "ensure_images_ready must come BEFORE compose_up_recreate"
-        );
     }
 
     #[test]
@@ -5937,13 +5806,11 @@ mod tests {
         let body = &src[src
             .find("pub async fn factory_reset")
             .expect("factory_reset fn")..];
-        let oauth_stop = body.find("oauth.lock()").expect("oauth stop call");
         let clipboard_stop = body.find("clipboard.lock()").expect("clipboard stop call");
         let drain = body.find("drain_pending_teardowns();").expect("drain call");
         let wipe = body
             .find("starting factory reset wipe")
             .expect("wipe log line");
-        assert!(oauth_stop < wipe, "oauth workers must stop before the wipe");
         assert!(
             clipboard_stop < wipe,
             "clipboard bridge must stop before the wipe"

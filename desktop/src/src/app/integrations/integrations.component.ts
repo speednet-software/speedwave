@@ -782,7 +782,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
 
   /**
    * Every built-in worker mounts /tokens read-only (ADR-060: OAuth refresh
-   * moved to the host-side oauth worker, so no worker needs :rw).
+   * runs on the host, so no worker needs :rw).
    * @param svc - the integration status entry
    */
   mountFor(svc: IntegrationStatusEntry): string {

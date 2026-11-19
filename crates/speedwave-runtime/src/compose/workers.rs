@@ -53,7 +53,12 @@ fn apply_credentials_digests(yaml: &str, tokens_root: &std::path::Path) -> anyho
 /// Machine-written files in a token dir that must NOT trigger recreate: `access_token` is rotated by
 /// every OAuth refresh, the Slack features file is rewritten by Desktop at every sign-in.
 /// Contract (ADR-060/071): add here any new machine-written file in the token mount.
-const VOLATILE_CREDENTIAL_FILES: &[&str] = &["access_token", crate::consts::SLACK_FEATURES_FILE];
+const VOLATILE_CREDENTIAL_FILES: &[&str] = &[
+    "access_token",
+    crate::consts::SLACK_FEATURES_FILE,
+    crate::consts::OAUTH_REFRESH_STATUS_FILE,
+    crate::consts::OAUTH_SERVICE_NAME_FILE,
+];
 
 /// `writeRestrictedSecret` pattern: `<name>.tmp.<pid>.<rand>` — exclude mid-rename files.
 fn is_write_in_progress(name: &std::ffi::OsStr) -> bool {
@@ -640,6 +645,41 @@ mod credentials_digest_tests {
             env_of(&before, "mcp-slack"),
             env_of(&after, "mcp-slack"),
             "enabling a Slack feature must not recreate the worker"
+        );
+    }
+
+    #[test]
+    fn refresh_status_file_does_not_change_digest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tokens = tmp.path().join("tokens");
+        let slack_dir = tokens.join("slack");
+        std::fs::create_dir_all(&slack_dir).unwrap();
+        std::fs::write(slack_dir.join("bot_token"), "secret-A").unwrap();
+        let before = apply_credentials_digests(YAML, &tokens).unwrap();
+
+        std::fs::write(
+            slack_dir.join(crate::consts::OAUTH_REFRESH_STATUS_FILE),
+            r#"{"state":"network_error","at":"2026-11-18T10:00:00Z"}"#,
+        )
+        .unwrap();
+
+        let after = apply_credentials_digests(YAML, &tokens).unwrap();
+        assert_eq!(
+            env_of(&before, "mcp-slack"),
+            env_of(&after, "mcp-slack"),
+            "a refresh status write must not recreate the worker"
+        );
+
+        std::fs::write(
+            slack_dir.join(crate::consts::OAUTH_SERVICE_NAME_FILE),
+            "Slack",
+        )
+        .unwrap();
+        let named = apply_credentials_digests(YAML, &tokens).unwrap();
+        assert_eq!(
+            env_of(&before, "mcp-slack"),
+            env_of(&named, "mcp-slack"),
+            "a service name write must not recreate the worker"
         );
     }
 }

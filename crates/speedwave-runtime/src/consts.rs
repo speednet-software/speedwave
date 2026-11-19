@@ -77,25 +77,33 @@ pub const PII_NER_AUTH_HEADER: &str = "x-speedwave-pii-ner-auth";
 /// port injection + watchdog (supersedes the split `port`/`pid`/`auth-token` files).
 pub const PER_PROJECT_LOCK_FILE: &str = "lock.json";
 
-/// TCP connection probe timeout used by host-process liveness checks
-/// (oauth_process). SSOT — see ADR-060.
-pub const PORT_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
-/// TCP probe attempts where respawn is expensive (oauth: every respawn rotates
-/// the port + recreates consumers). Single-shot probes elsewhere are unaffected.
-pub const PORT_PROBE_ATTEMPTS: u8 = 3;
-/// Backoff between TCP probe attempts.
-pub const PORT_PROBE_BACKOFF: std::time::Duration = std::time::Duration::from_millis(200);
-
-/// Subdirectory under the data dir holding per-project `oauth` worker state.
-/// SSOT — do not hard-code `"oauth"` at call sites. See ADR-060.
+/// Subdirectory under the data dir holding per-project OAuth state.
+/// SSOT: do not hard-code `"oauth"` at call sites.
 pub const OAUTH_SUBDIR: &str = "oauth";
-/// Per-project bearer-token → service map (`0o600`). Lets the oauth worker derive
-/// `service` from the bearer instead of a model-controlled param.
-pub const OAUTH_BEARER_MAP_FILE: &str = ".bearer-map.json";
-/// Per-project audit log; refresh / forget events are appended here (no token contents).
+/// Per-project audit log; refresh events are appended here (no token contents).
 pub const OAUTH_LOG_FILE: &str = "audit.log";
-/// Mode for the per-project oauth state directory (owner-only).
-pub const OAUTH_PROJECT_DIR_MODE: u32 = 0o700;
+/// Interval between expiry checks of the session token refresher.
+pub const OAUTH_REFRESH_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+/// Longest pause between two refresh attempts after a failure a later attempt can fix.
+pub const OAUTH_REFRESH_BACKOFF_MAX: std::time::Duration = std::time::Duration::from_secs(120);
+/// A token is refreshed once less than this percentage of its lifetime remains.
+pub const OAUTH_REFRESH_REMAINING_PERCENT: i64 = 25;
+/// Timeout of one token request to an identity provider.
+pub const OAUTH_REFRESH_HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Largest identity-provider token response read, in bytes.
+pub const OAUTH_REFRESH_MAX_RESPONSE_BYTES: u64 = 256 * 1024;
+/// Microsoft identity platform host.
+pub const MICROSOFT_LOGIN_BASE_URL: &str = "https://login.microsoftonline.com";
+/// Audit log size that triggers rotation to `<file>.1`, in bytes.
+pub const OAUTH_AUDIT_MAX_BYTES: u64 = 1024 * 1024;
+/// Endpoint of the hub that answers `refresh` calls of plugins vendoring the old OAuth client.
+pub const OAUTH_COMPAT_URL: &str = "http://mcp-hub:4000/oauth-compat";
+/// Content of the bearer file mounted at `/secrets/oauth-auth-token-<service>`.
+pub const OAUTH_COMPAT_BEARER: &str = "oauth-compat";
+/// Status file next to `access_token` describing the last failed refresh.
+pub const OAUTH_REFRESH_STATUS_FILE: &str = "refresh_status";
+/// File next to `access_token` holding the service display name, read by workers for refresh messages.
+pub const OAUTH_SERVICE_NAME_FILE: &str = "service_name";
 
 /// PII audit JSONL filenames under `audit::audit_dir_in()` — SSOT for the
 /// proxy/hub writers (F3/F4) and the diagnostics registry.
@@ -535,8 +543,7 @@ pub fn find_slack_feature(id: &str) -> Option<&'static SlackFeature> {
 /// Slack OAuth authorize endpoint (fixed — slack.com is not instance-specific).
 pub const SLACK_OAUTH_AUTHORIZE_URL: &str = "https://slack.com/oauth/v2/authorize";
 
-/// Slack token endpoint. Mirrored by `SLACK_TOKEN_URL` in
-/// `mcp-servers/oauth/src/providers/slack.ts` (the refresh side).
+/// Slack token endpoint.
 pub const SLACK_OAUTH_TOKEN_URL: &str = "https://slack.com/api/oauth.v2.access";
 
 /// Fixed loopback port for the Slack OAuth redirect (exact match against the
@@ -571,8 +578,7 @@ pub struct McpServiceDescriptor {
     /// True if the worker runs on its own egress-less network `{NETWORK_NAME}_{config_key}`
     /// (e.g. `office`); disabling it removes that network + the hub's attachment.
     pub egress_less: bool,
-    /// True if the worker uses the host-side `oauth` worker (ADR-060): compose injects
-    /// `WORKER_OAUTH_URL` + a per-service bearer mount. SSOT for OAuth-using integrations.
+    /// True if the token is refreshed on the host.
     pub uses_oauth_refresh: bool,
     /// Container resource limits (mem/cpu/tmpfs/shm) — SSOT the compose renderer
     /// reads; drift vs `compose.template.yml` is test-caught. See ADR-068.
@@ -3180,45 +3186,12 @@ mod tests {
     }
 
     #[test]
-    fn slack_token_url_matches_oauth_worker_provider_ts() {
-        let src = include_str!("../../../mcp-servers/oauth/src/providers/slack.ts");
-        let re = regex::Regex::new(r#"const\s+SLACK_TOKEN_URL\s*=\s*['"]([^'"]+)['"]"#).unwrap();
-        let cap = re.captures(src).expect(
-            "mcp-servers/oauth/src/providers/slack.ts must declare `const SLACK_TOKEN_URL`",
-        );
-        assert_eq!(
-            &cap[1], SLACK_OAUTH_TOKEN_URL,
-            "TS SLACK_TOKEN_URL must match Rust consts::SLACK_OAUTH_TOKEN_URL"
-        );
-    }
-
-    #[test]
     fn host_gateway_alias_appears_in_compose_template() {
         let src = include_str!("../../../containers/compose.template.yml");
         let expected = format!(r#"- "{HOST_GATEWAY_ALIAS}:${{HOST_GATEWAY}}""#);
         assert!(
             src.lines().any(|l| l.trim() == expected),
             "compose.template.yml must contain '{expected}' in extra_hosts"
-        );
-    }
-
-    #[test]
-    fn plugin_slug_pattern_matches_oauth_state_ts() {
-        let plugin_src = include_str!("../../../crates/speedwave-runtime/src/plugin.rs");
-        let slug_re = regex::Regex::new(r#"const SLUG_PATTERN: &str = r"([^"]+)";"#).unwrap();
-        let rust_pattern = &slug_re
-            .captures(plugin_src)
-            .expect("plugin.rs must declare `const SLUG_PATTERN`")[1];
-
-        let ts_src = include_str!("../../../mcp-servers/oauth/src/oauth-state.ts");
-        let ts_re = regex::Regex::new(r"const SERVICE_SLUG_RE = /(.+?)/;").unwrap();
-        let ts_pattern = &ts_re
-            .captures(ts_src)
-            .expect("oauth-state.ts must declare `const SERVICE_SLUG_RE`")[1];
-
-        assert_eq!(
-            ts_pattern, rust_pattern,
-            "oauth-state.ts SERVICE_SLUG_RE must mirror plugin.rs SLUG_PATTERN"
         );
     }
 

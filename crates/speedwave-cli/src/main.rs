@@ -4,6 +4,7 @@ use speedwave_runtime::compose::{self, SecurityCheck, SecurityRule};
 use speedwave_runtime::config;
 use speedwave_runtime::consts;
 use speedwave_runtime::engine_path;
+use speedwave_runtime::oauth_refresh::{self, RefreshOutcome};
 use speedwave_runtime::plugin;
 use speedwave_runtime::runtime::{detect_runtime, ensure_exec_healthy};
 use speedwave_runtime::update;
@@ -11,11 +12,15 @@ use speedwave_runtime::update_channel::{self, UpdateChannel};
 use speedwave_runtime::validation;
 use strum::IntoEnumIterator;
 
+use std::collections::HashSet;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod paste_watcher;
 mod terminal_restore;
+
+const START_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn sanitize_output_line(line: &str) -> String {
     speedwave_runtime::log_sanitizer::sanitize(line)
@@ -1084,6 +1089,20 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
+    let reconnect_warnings = ReconnectWarnings::default();
+    let started = oauth_refresh::refresh_now_with_timeout(&project_name, START_REFRESH_TIMEOUT);
+    for refreshed in started {
+        if refreshed.outcome == RefreshOutcome::ReconnectRequired {
+            reconnect_warnings.warn_once(&refreshed.service);
+        }
+    }
+    let _session_refresher =
+        oauth_refresh::spawn_session_refresher(&project_name, move |refreshed| {
+            if refreshed.outcome == RefreshOutcome::ReconnectRequired {
+                reconnect_warnings.warn_once(&refreshed.service);
+            }
+        });
+
     let instance_id = speedwave_runtime::session::new_instance_id();
     let mut tail = vec![consts::CLAUDE_BINARY.to_string()];
     tail.extend(resolved.flags.iter().cloned());
@@ -1100,6 +1119,32 @@ fn main() -> anyhow::Result<()> {
     }
     let code = status.code().unwrap_or(if is_oom { 137 } else { 1 });
     std::process::exit(code);
+}
+
+#[derive(Clone, Default)]
+struct ReconnectWarnings(Arc<Mutex<HashSet<String>>>);
+
+impl ReconnectWarnings {
+    fn warn_once(&self, service: &str) {
+        if self.first_report(service) {
+            err!("{}", reconnect_warning(service));
+        }
+    }
+
+    fn first_report(&self, service: &str) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(service.to_string())
+    }
+}
+
+fn reconnect_warning(service: &str) -> String {
+    let name = oauth_refresh::service_display_name(service);
+    format!(
+        "Warning: the {name} sign-in expired and Speedwave cannot refresh it. \
+         Reconnect {name} in Speedwave Desktop: Settings, Integrations, {name}."
+    )
 }
 
 fn stamped_exec_argv(instance_id: &str, tail: Vec<String>) -> Vec<String> {
@@ -1406,11 +1451,7 @@ mod tests {
     #[test]
     fn cli_does_not_spawn_host_workers() {
         let source = include_str!("main.rs");
-        let forbidden = [
-            (concat!("maybe_", "spawn_oauth_worker"), "oauth"),
-            (concat!("OauthProcess::", "spawn"), "oauth"),
-            (concat!("McpOsProcess::", "spawn"), "mcp-os"),
-        ];
+        let forbidden = [(concat!("McpOsProcess::", "spawn"), "mcp-os")];
         for (needle, worker) in forbidden {
             assert!(
                 !source.contains(needle),
@@ -1419,6 +1460,25 @@ mod tests {
                  the Claude exec with exit 137 (ADR-068)"
             );
         }
+    }
+
+    #[test]
+    fn reconnect_warning_is_reported_once_per_service() {
+        let warnings = ReconnectWarnings::default();
+        assert!(warnings.first_report("slack"));
+        assert!(!warnings.first_report("slack"));
+        assert!(warnings.first_report("sharepoint"));
+    }
+
+    #[test]
+    fn reconnect_warning_names_the_service_and_the_desktop_path() {
+        assert_eq!(
+            reconnect_warning("slack"),
+            "Warning: the Slack sign-in expired and Speedwave cannot refresh it. \
+             Reconnect Slack in Speedwave Desktop: Settings, Integrations, Slack."
+        );
+        assert!(reconnect_warning("no-such-service")
+            .contains("Settings, Integrations, no-such-service."));
     }
 
     #[test]

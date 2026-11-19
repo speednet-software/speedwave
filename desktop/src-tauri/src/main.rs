@@ -58,6 +58,7 @@ mod reconcile;
 mod redmine_api_cmd;
 mod retry_cmd;
 mod session_model;
+mod session_refresh;
 mod setup_wizard;
 mod slack_features;
 mod slack_oauth_cmd;
@@ -86,8 +87,7 @@ use tauri::tray::TrayIconBuilder;
 use tauri::Manager;
 
 use reconcile::{
-    ExitCleanupContext, SharedAutoCheckHandle, SharedIdeBridge, SharedMcpOs, SharedOauth,
-    SharedPluginBridges,
+    ExitCleanupContext, SharedAutoCheckHandle, SharedIdeBridge, SharedMcpOs, SharedPluginBridges,
 };
 
 pub(crate) use project_cmd::{clear_chat_sessions, rollback_and_emit_failed};
@@ -144,9 +144,6 @@ fn blocked_navigation_origin(url: &url::Url) -> String {
 }
 
 static WATCHDOG_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-static OAUTH_WATCHDOG_STOP: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
 
 pub(crate) const MSG_NOT_AUTHENTICATED: &str =
     "Claude is not authenticated. Please authenticate first.";
@@ -409,214 +406,6 @@ fn ensure_mcp_os_running(mcp_os: &SharedMcpOs, app_handle: &tauri::AppHandle) {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum OauthReconcile {
-    NoChange,
-    Respawn { clear_bearer_map: bool },
-}
-
-pub(crate) fn oauth_reconcile_action(current: &[String], desired: &[String]) -> OauthReconcile {
-    if current == desired {
-        OauthReconcile::NoChange
-    } else {
-        OauthReconcile::Respawn {
-            clear_bearer_map: desired.is_empty(),
-        }
-    }
-}
-
-pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bool {
-    let mut map = match oauth_arc.lock() {
-        Ok(g) => g,
-        Err(e) => {
-            log::error!("oauth worker map mutex poisoned: {e}");
-            return false;
-        }
-    };
-    let user_config = match config::load_user_config() {
-        Ok(c) => c,
-        Err(e) => {
-            log::warn!("cannot load user config: {e}");
-            return false;
-        }
-    };
-    let project_dir = match user_config.find_project(project) {
-        Some(p) => std::path::PathBuf::from(&p.dir),
-        None => {
-            log::warn!("unknown project '{project}'");
-            return false;
-        }
-    };
-    let resolved = config::resolve_integrations(&project_dir, &user_config, project);
-
-    let installed = speedwave_runtime::plugin::list_installed_plugins().unwrap_or_default();
-    let mut oauth_consumers =
-        speedwave_runtime::compose::oauth_consumer_service_ids(&resolved, &installed);
-    oauth_consumers.sort();
-
-    let mut retired_relay: Option<crate::mirror_relay::RetiredRelay> = None;
-
-    if let Some(running) = map.get(project) {
-        let mut current: Vec<String> = running.inner().spec().consumers().to_vec();
-        current.sort();
-        match oauth_reconcile_action(&current, &oauth_consumers) {
-            OauthReconcile::NoChange => {
-                running.ensure_relay();
-                return false;
-            }
-            OauthReconcile::Respawn { clear_bearer_map } => {
-                log::info!(
-                    "oauth worker for '{project}' consumer set changed ({current:?} -> {oauth_consumers:?}); respawning"
-                );
-                if let Some(proc) = map.remove(project) {
-                    retired_relay = Some(proc.stop_for_replacement(&format!("oauth[{project}]")));
-                }
-                if clear_bearer_map {
-                    let dir = speedwave_runtime::oauth_process::oauth_project_dir(
-                        speedwave_runtime::consts::data_dir(),
-                        project,
-                    );
-                    let _ = std::fs::remove_file(
-                        dir.join(speedwave_runtime::consts::OAUTH_BEARER_MAP_FILE),
-                    );
-                }
-            }
-        }
-    }
-
-    if oauth_consumers.is_empty() {
-        log::debug!(
-            "no oauth-consuming integration enabled for '{project}' — not spawning oauth worker"
-        );
-        return false;
-    }
-    let consumer_refs: Vec<&str> = oauth_consumers.iter().map(String::as_str).collect();
-
-    firewall::ensure_firewall_rule();
-
-    let script = match speedwave_runtime::build::resolve_oauth_script() {
-        Some(s) => s.to_string_lossy().to_string(),
-        None => {
-            log::warn!(
-                "oauth worker script not found — \
-                 OAuth refresh will be unavailable for '{project}'"
-            );
-            return false;
-        }
-    };
-    match speedwave_runtime::oauth_process::OauthProcess::spawn_in(
-        project,
-        &script,
-        speedwave_runtime::consts::data_dir(),
-        &consumer_refs,
-    ) {
-        Ok(proc) => {
-            let worker = crate::mirror_relay::RelayedWorker::new(proc);
-            let port = worker.port();
-            log::info!("oauth worker for '{project}' started (port {port})");
-            if let Some(retired) = retired_relay.as_mut() {
-                retired.adopt_port(port);
-            }
-            map.insert(project.to_string(), worker);
-            drop(map);
-            OAUTH_WATCHDOG_STOP.store(false, Ordering::Relaxed);
-            true
-        }
-        Err(e) => {
-            log::error!("oauth worker for '{project}' spawn failed: {e}");
-            false
-        }
-    }
-}
-
-fn sweep_per_project_workers<P>(
-    workers: &mut std::collections::HashMap<String, P>,
-    log_prefix: &str,
-) -> Vec<String>
-where
-    P: WatchdogWorker,
-{
-    let mut respawned = Vec::new();
-    let names: Vec<String> = workers.keys().cloned().collect();
-    for name in names {
-        let Some(proc) = workers.get_mut(&name) else {
-            continue;
-        };
-        if proc.is_alive() {
-            continue;
-        }
-        log::warn!("{log_prefix} worker for '{name}' unhealthy — respawning");
-        match proc.respawn() {
-            Ok(new_port) => {
-                log::info!("{log_prefix} respawned '{name}' (port {new_port})");
-                respawned.push(name);
-            }
-            Err(e) => {
-                log::error!("{log_prefix} respawn for '{name}' failed: {e}");
-            }
-        }
-    }
-    respawned
-}
-
-pub(crate) trait WatchdogWorker {
-    fn is_alive(&self) -> bool;
-    fn respawn(&mut self) -> anyhow::Result<u16>;
-}
-
-impl<I: mirror_relay::RelayWorkerInner> WatchdogWorker for mirror_relay::RelayedWorker<I> {
-    fn is_alive(&self) -> bool {
-        mirror_relay::RelayedWorker::is_alive(self)
-    }
-    fn respawn(&mut self) -> anyhow::Result<u16> {
-        mirror_relay::RelayedWorker::respawn(self)
-    }
-}
-
-fn start_per_project_watchdog<P>(
-    workers: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, P>>>,
-    stop_flag: &'static std::sync::atomic::AtomicBool,
-    log_prefix: &'static str,
-) where
-    P: WatchdogWorker + Send + 'static,
-{
-    std::thread::spawn(move || {
-        use std::time::Duration;
-        const CHECK_INTERVAL: Duration = Duration::from_secs(30);
-        loop {
-            std::thread::sleep(CHECK_INTERVAL);
-            if stop_flag.load(Ordering::Relaxed) {
-                break;
-            }
-            let respawned = {
-                let mut map = match workers.lock() {
-                    Ok(g) => g,
-                    Err(e) => {
-                        log::error!("{log_prefix} worker map mutex poisoned: {e}");
-                        break;
-                    }
-                };
-                sweep_per_project_workers(&mut map, log_prefix)
-            };
-            for name in respawned {
-                let n = name.clone();
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    containers_cmd::recreate_project_containers_if_running(&n);
-                }));
-                if let Err(payload) = result {
-                    let msg = speedwave_runtime::log_sanitizer::panic_payload_to_string(&*payload);
-                    log::error!("{log_prefix} recreate panicked for '{name}': {msg}");
-                }
-            }
-        }
-        log::info!("{log_prefix} stopped");
-    });
-}
-
-fn start_oauth_watchdog(oauth_arc: SharedOauth) {
-    start_per_project_watchdog(oauth_arc, &OAUTH_WATCHDOG_STOP, "oauth watchdog");
-}
-
 fn show_audit_failure_dialog_and_exit(app: &tauri::AppHandle, title: &str, body: String) -> ! {
     use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
     let _ = app
@@ -714,7 +503,6 @@ fn main() {
         Arc::new(Mutex::new(std::collections::HashMap::new()));
     let mcp_os: SharedMcpOs = Arc::new(Mutex::new(None));
     let pii_ner: pii_ner_service::SharedPiiNer = Arc::new(Mutex::new(None));
-    let oauth: SharedOauth = Arc::new(Mutex::new(std::collections::HashMap::new()));
     let auto_check_handle: SharedAutoCheckHandle = Arc::new(Mutex::new(None));
 
     reconcile::set_global_plugin_bridges(plugin_bridges.clone());
@@ -729,7 +517,6 @@ fn main() {
         plugin_bridges: plugin_bridges.clone(),
         mcp_os: mcp_os.clone(),
         pii_ner: pii_ner.clone(),
-        oauth: oauth.clone(),
         auto_check_handle: auto_check_handle.clone(),
     };
     let cleanup_ctx_window = cleanup_ctx.clone();
@@ -847,7 +634,6 @@ fn main() {
         .manage(clipboard_bridge_slot.clone())
         .manage(plugin_bridges.clone())
         .manage(mcp_os.clone())
-        .manage(oauth.clone())
         .manage(queue_service.clone())
         .manage(transcript_store.clone())
         .manage(model_store.clone())
@@ -942,10 +728,9 @@ fn main() {
 
                 start_mcp_os_watchdog(mcp_os.clone(), app.handle().clone());
 
-                OAUTH_WATCHDOG_STOP.store(false, Ordering::Relaxed);
-                start_oauth_watchdog(oauth.clone());
+                session_refresh::start_sync(app.handle().clone());
             } else {
-                log::info!("setup not started, deferring IDE Bridge / mcp-os / oauth / link_cli until setup completes");
+                log::info!("setup not started, deferring IDE Bridge / mcp-os / token refresh / link_cli until setup completes");
             }
 
             let handle = updater::spawn_auto_check(app.handle().clone());
@@ -1301,7 +1086,6 @@ fn main() {
             slack_oauth_cmd::start_slack_oauth,
             slack_oauth_cmd::cancel_slack_oauth,
             slack_features::get_slack_features,
-            plugin_oauth_cmd::forget_plugin_oauth,
             redmine_api_cmd::validate_redmine_credentials,
             redmine_api_cmd::fetch_redmine_enumerations,
             plugin_cmd::get_plugins,
@@ -1409,10 +1193,6 @@ fn main() {
 )]
 mod tests {
     use super::*;
-
-    fn v(items: &[&str]) -> Vec<String> {
-        items.iter().map(|s| s.to_string()).collect()
-    }
 
     #[test]
     fn is_own_origin_allows_app_and_dev_origins() {
@@ -1540,44 +1320,6 @@ mod tests {
     }
 
     #[test]
-    fn oauth_reconcile_no_change_when_sets_equal() {
-        assert_eq!(
-            oauth_reconcile_action(&v(&["a", "b"]), &v(&["a", "b"])),
-            OauthReconcile::NoChange
-        );
-    }
-
-    #[test]
-    fn oauth_reconcile_respawn_when_set_grows() {
-        assert_eq!(
-            oauth_reconcile_action(&v(&["a"]), &v(&["a", "b"])),
-            OauthReconcile::Respawn {
-                clear_bearer_map: false
-            }
-        );
-    }
-
-    #[test]
-    fn oauth_reconcile_respawn_when_set_shrinks_but_nonempty() {
-        assert_eq!(
-            oauth_reconcile_action(&v(&["a", "b"]), &v(&["a"])),
-            OauthReconcile::Respawn {
-                clear_bearer_map: false
-            }
-        );
-    }
-
-    #[test]
-    fn oauth_reconcile_clears_bearer_map_when_set_emptied() {
-        assert_eq!(
-            oauth_reconcile_action(&v(&["a"]), &[]),
-            OauthReconcile::Respawn {
-                clear_bearer_map: true
-            }
-        );
-    }
-
-    #[test]
     fn plugin_bridge_credentials_response_wire_format() {
         let resp = PluginBridgeCredentialsResponse {
             slug: "example-plugin".into(),
@@ -1655,85 +1397,6 @@ mod tests {
             1,
             "exactly one bullet for one failure"
         );
-    }
-
-    struct FakeWorker {
-        alive: bool,
-        respawn_result: Result<u16, String>,
-        respawn_calls: std::cell::Cell<u32>,
-    }
-    impl FakeWorker {
-        fn new(alive: bool, respawn_result: Result<u16, String>) -> Self {
-            Self {
-                alive,
-                respawn_result,
-                respawn_calls: std::cell::Cell::new(0),
-            }
-        }
-    }
-    impl WatchdogWorker for FakeWorker {
-        fn is_alive(&self) -> bool {
-            self.alive
-        }
-        fn respawn(&mut self) -> anyhow::Result<u16> {
-            self.respawn_calls.set(self.respawn_calls.get() + 1);
-            match &self.respawn_result {
-                Ok(p) => {
-                    self.alive = true;
-                    Ok(*p)
-                }
-                Err(e) => Err(anyhow::anyhow!(e.clone())),
-            }
-        }
-    }
-
-    #[test]
-    fn sweep_per_project_workers_empty_map_returns_empty() {
-        let mut map: std::collections::HashMap<String, FakeWorker> = Default::default();
-        assert!(sweep_per_project_workers(&mut map, "test").is_empty());
-    }
-
-    #[test]
-    fn sweep_per_project_workers_skips_alive_workers() {
-        let mut map = std::collections::HashMap::new();
-        map.insert("p".to_string(), FakeWorker::new(true, Ok(9999)));
-        let respawned = sweep_per_project_workers(&mut map, "test");
-        assert!(respawned.is_empty(), "alive worker must not be respawned");
-        assert_eq!(map["p"].respawn_calls.get(), 0);
-    }
-
-    #[test]
-    fn sweep_per_project_workers_collects_all_unhealthy_in_one_pass() {
-        let mut map = std::collections::HashMap::new();
-        map.insert("a".to_string(), FakeWorker::new(false, Ok(1111)));
-        map.insert("b".to_string(), FakeWorker::new(false, Ok(2222)));
-        let mut names = sweep_per_project_workers(&mut map, "test");
-        names.sort();
-        assert_eq!(names, vec!["a".to_string(), "b".to_string()]);
-    }
-
-    #[test]
-    fn sweep_per_project_workers_failed_respawn_excluded_from_respawned() {
-        let mut map = std::collections::HashMap::new();
-        map.insert(
-            "bad".to_string(),
-            FakeWorker::new(false, Err("spawn failed".into())),
-        );
-        map.insert("good".to_string(), FakeWorker::new(false, Ok(3333)));
-        let respawned = sweep_per_project_workers(&mut map, "test");
-        assert_eq!(respawned, vec!["good".to_string()]);
-        assert_eq!(map["bad"].respawn_calls.get(), 1);
-    }
-
-    #[test]
-    fn sweep_per_project_workers_mixed_alive_and_dead() {
-        let mut map = std::collections::HashMap::new();
-        map.insert("alive".to_string(), FakeWorker::new(true, Ok(0)));
-        map.insert("dead".to_string(), FakeWorker::new(false, Ok(4444)));
-        let respawned = sweep_per_project_workers(&mut map, "test");
-        assert_eq!(respawned, vec!["dead".to_string()]);
-        assert_eq!(map["alive"].respawn_calls.get(), 0);
-        assert_eq!(map["dead"].respawn_calls.get(), 1);
     }
 
     #[test]
