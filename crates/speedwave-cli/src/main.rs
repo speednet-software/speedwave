@@ -1272,6 +1272,26 @@ fn resolve_project_fallback(user_config: &config::SpeedwaveUserConfig) -> anyhow
 mod tests {
     use super::*;
 
+    const FIXTURE_PUBKEY: &str = include_str!("../test-fixtures/release-signature/public-key.txt");
+    const FIXTURE_OTHER_PUBKEY: &str =
+        include_str!("../test-fixtures/release-signature/other-public-key.txt");
+    const FIXTURE_TAG: &str = "v1.2.3";
+    const FIXTURE_BINARY: &[u8] = b"#!/bin/sh\necho speedwave-test-binary\n";
+    const INSTALLED_BINARY: &[u8] = b"installed binary";
+
+    #[cfg(not(windows))]
+    const FIXTURE_ARCHIVE: &[u8] =
+        include_bytes!("../test-fixtures/release-signature/archive.tar.gz");
+    #[cfg(not(windows))]
+    const FIXTURE_SIGNATURE: &str =
+        include_str!("../test-fixtures/release-signature/archive.tar.gz.sig");
+    #[cfg(windows)]
+    const FIXTURE_ARCHIVE: &[u8] =
+        include_bytes!("../test-fixtures/release-signature/archive-windows.tar.gz");
+    #[cfg(windows)]
+    const FIXTURE_SIGNATURE: &str =
+        include_str!("../test-fixtures/release-signature/archive-windows.tar.gz.sig");
+
     #[test]
     fn cli_bare_run_syncs_resources_when_images_rebuilt() {
         let source = include_str!("main.rs");
@@ -3076,25 +3096,23 @@ mod tests {
         }
     }
 
-    const FIXTURE_PUBKEY: &str = include_str!("../test-fixtures/release-signature/public-key.txt");
-    const FIXTURE_OTHER_PUBKEY: &str =
-        include_str!("../test-fixtures/release-signature/other-public-key.txt");
-    const FIXTURE_TAG: &str = "v1.2.3";
-    const FIXTURE_BINARY: &[u8] = b"#!/bin/sh\necho speedwave-test-binary\n";
-    const INSTALLED_BINARY: &[u8] = b"installed binary";
+    fn install_from_mock_release(
+        archive: &[u8],
+        signature: Option<&str>,
+        pubkey: &str,
+    ) -> (anyhow::Result<self_update::VersionStatus>, Vec<u8>) {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir
+            .path()
+            .join(format!("speedwave{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&destination, INSTALLED_BINARY).unwrap();
+        let mut server = mockito::Server::new();
+        let _mocks = mock_release(&mut server, archive, signature);
 
-    #[cfg(not(windows))]
-    const FIXTURE_ARCHIVE: &[u8] =
-        include_bytes!("../test-fixtures/release-signature/archive.tar.gz");
-    #[cfg(not(windows))]
-    const FIXTURE_SIGNATURE: &str =
-        include_str!("../test-fixtures/release-signature/archive.tar.gz.sig");
-    #[cfg(windows)]
-    const FIXTURE_ARCHIVE: &[u8] =
-        include_bytes!("../test-fixtures/release-signature/archive-windows.tar.gz");
-    #[cfg(windows)]
-    const FIXTURE_SIGNATURE: &str =
-        include_str!("../test-fixtures/release-signature/archive-windows.tar.gz.sig");
+        let result =
+            install_verified_release(&server.url(), &destination, FIXTURE_TAG, pubkey, true);
+        (result, std::fs::read(&destination).unwrap())
+    }
 
     fn mock_release(
         server: &mut mockito::ServerGuard,
@@ -3149,24 +3167,6 @@ mod tests {
                 .create(),
         );
         mocks
-    }
-
-    fn install_from_mock_release(
-        archive: &[u8],
-        signature: Option<&str>,
-        pubkey: &str,
-    ) -> (anyhow::Result<self_update::VersionStatus>, Vec<u8>) {
-        let dir = tempfile::tempdir().unwrap();
-        let destination = dir
-            .path()
-            .join(format!("speedwave{}", std::env::consts::EXE_SUFFIX));
-        std::fs::write(&destination, INSTALLED_BINARY).unwrap();
-        let mut server = mockito::Server::new();
-        let _mocks = mock_release(&mut server, archive, signature);
-
-        let result =
-            install_verified_release(&server.url(), &destination, FIXTURE_TAG, pubkey, true);
-        (result, std::fs::read(&destination).unwrap())
     }
 
     #[test]
