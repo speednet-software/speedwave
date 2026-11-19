@@ -1,4 +1,4 @@
-# ADR-112: Startup migrations of the data directory in one crate
+# ADR-113: Startup migrations of the data directory in one crate
 
 > **Status:** Accepted
 > **Date:** 2026-11-19
