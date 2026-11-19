@@ -11,11 +11,7 @@ pub mod stale;
 
 pub use drain::{drain_and_read_port, parse_port_line};
 pub use env_policy::{apply_child_env, CurrentProcessEnv, EnvSource, WINDOWS_SYSTEM_ENV_VARS};
-#[cfg(test)]
-pub use lock::migrate_legacy;
-pub use lock::{
-    migrate_legacy_with_target, read as read_lock, write as write_lock, LockFile, LockService,
-};
+pub use lock::{read as read_lock, write as write_lock, LockFile, LockService};
 pub use probe::{is_pid_alive, probe_tcp};
 #[cfg(test)]
 pub(crate) use process::KILL_STALE_LOG_MARKER;

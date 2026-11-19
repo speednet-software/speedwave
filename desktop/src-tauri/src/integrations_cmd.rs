@@ -495,7 +495,7 @@ pub(crate) fn is_service_configured_in(
 /// snake_case descriptor key → camelCase property name used in oauth.json.
 /// Delegates to the runtime SSOT so the mapping lives in one place.
 fn snake_to_oauth_json_key(key: &str) -> &str {
-    speedwave_runtime::oauth_state_migration::oauth_json_key_for(key)
+    speedwave_runtime::oauth_persist::oauth_json_key_for(key)
 }
 
 fn get_oauth_field<'a>(
@@ -1056,7 +1056,7 @@ fn merge_oauth_state_json_in(
     let obj = state
         .as_object_mut()
         .ok_or_else(|| "oauth state must be a JSON object".to_string())?;
-    speedwave_runtime::oauth_state_migration::ensure_provider_data_object(obj);
+    speedwave_runtime::oauth_persist::ensure_provider_data_object(obj);
     for (key, (storage, value)) in fields {
         let prop = snake_to_oauth_json_key(key).to_string();
         match storage {
@@ -1404,8 +1404,7 @@ mod tests {
         got.sort_unstable();
         got.dedup();
 
-        let mut expected: Vec<&str> =
-            speedwave_runtime::oauth_state_migration::IDENTITY_KEYS.to_vec();
+        let mut expected: Vec<&str> = speedwave_runtime::oauth_persist::IDENTITY_KEYS.to_vec();
         expected.sort_unstable();
 
         assert_eq!(

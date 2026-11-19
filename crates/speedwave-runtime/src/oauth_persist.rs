@@ -84,6 +84,49 @@ pub fn write_oauth_state(path: &Path, params: &OAuthStateParams) -> Result<(), S
     crate::fs_perms::write_restricted_file(path, &body).map_err(|e| e.to_string())
 }
 
+/// Top-level keys lifted into `providerData` — SSOT for the IdP identity keys, pinned to the
+/// descriptor SSOT by `identity_keys_match_oauth_state_provider_data_descriptors`.
+pub const IDENTITY_KEYS: &[&str] = &["clientId", "tenantId"];
+
+/// snake_case descriptor key → camelCase property name in `oauth.json`.
+/// SSOT for the mapping; the Desktop oauth-state paths delegate here.
+pub fn oauth_json_key_for(key: &str) -> &str {
+    match key {
+        "client_id" => "clientId",
+        "tenant_id" => "tenantId",
+        "refresh_token" => "refreshToken",
+        other => {
+            debug_assert!(
+                !other.contains('_'),
+                "oauth_json_key_for: unknown snake_case key — add an arm",
+            );
+            #[cfg(not(debug_assertions))]
+            if other.contains('_') {
+                log::warn!("unknown snake_case oauth state key — add a mapping arm");
+            }
+            other
+        }
+    }
+}
+
+/// Heal legacy ADR-060 layout in place: ensure `providerData` is a plain object,
+/// lifting [`IDENTITY_KEYS`] strings into it. SSOT for startup + Desktop save.
+pub fn ensure_provider_data_object(obj: &mut serde_json::Map<String, serde_json::Value>) {
+    if obj.get("providerData").is_some_and(|v| v.is_object()) {
+        return;
+    }
+    let mut provider_data = serde_json::Map::new();
+    for &key in IDENTITY_KEYS {
+        if let Some(serde_json::Value::String(s)) = obj.remove(key) {
+            provider_data.insert(key.to_string(), serde_json::Value::String(s));
+        }
+    }
+    obj.insert(
+        "providerData".to_string(),
+        serde_json::Value::Object(provider_data),
+    );
+}
+
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
@@ -215,5 +258,78 @@ mod tests {
         let json = read_json(&path);
         let exp = json["expiresAt"].as_str().unwrap();
         assert!(exp.ends_with('Z') && exp.starts_with("20"), "got: {exp}");
+    }
+
+    #[test]
+    fn identity_keys_match_oauth_state_provider_data_descriptors() {
+        let mut expected: Vec<String> = crate::consts::TOGGLEABLE_MCP_SERVICES
+            .iter()
+            .flat_map(|svc| svc.auth_fields.iter())
+            .filter(|f| f.storage == crate::consts::FieldStorage::OAuthStateProviderData)
+            .map(|f| oauth_json_key_for(f.key).to_string())
+            .collect();
+        expected.sort();
+        expected.dedup();
+
+        let mut got: Vec<String> = IDENTITY_KEYS.iter().map(|s| s.to_string()).collect();
+        got.sort();
+
+        assert_eq!(
+            got, expected,
+            "IDENTITY_KEYS drifted from the OAuthStateProviderData descriptors in consts.rs, \
+             update IDENTITY_KEYS here AND OAUTH_IDENTITY_KEYS in desktop integrations_cmd.rs"
+        );
+    }
+
+    #[test]
+    fn oauth_json_key_for_maps_snake_case_and_passes_camel_case_through() {
+        assert_eq!(oauth_json_key_for("client_id"), "clientId");
+        assert_eq!(oauth_json_key_for("tenant_id"), "tenantId");
+        assert_eq!(oauth_json_key_for("refresh_token"), "refreshToken");
+        assert_eq!(oauth_json_key_for("tokenUrl"), "tokenUrl");
+    }
+
+    #[test]
+    fn ensure_provider_data_object_lifts_top_level_identity() {
+        let mut obj = serde_json::Map::new();
+        obj.insert("clientId".into(), "cid".into());
+        obj.insert("tenantId".into(), "tid".into());
+        obj.insert("refreshToken".into(), "r".into());
+        ensure_provider_data_object(&mut obj);
+        assert_eq!(obj["providerData"]["clientId"], "cid");
+        assert_eq!(obj["providerData"]["tenantId"], "tid");
+        assert!(obj.get("clientId").is_none());
+        assert!(obj.get("tenantId").is_none());
+        assert_eq!(obj["refreshToken"], "r");
+    }
+
+    #[test]
+    fn ensure_provider_data_object_keeps_an_existing_object() {
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "providerData".into(),
+            serde_json::json!({"clientId": "kept"}),
+        );
+        obj.insert("tenantId".into(), "top".into());
+        ensure_provider_data_object(&mut obj);
+        assert_eq!(obj["providerData"]["clientId"], "kept");
+        assert!(obj["providerData"].get("tenantId").is_none());
+        assert_eq!(obj["tenantId"], "top");
+    }
+
+    #[test]
+    fn ensure_provider_data_object_replaces_a_non_object_value() {
+        let mut obj = serde_json::Map::new();
+        obj.insert("providerData".into(), serde_json::Value::Null);
+        obj.insert("clientId".into(), "cid".into());
+        ensure_provider_data_object(&mut obj);
+        assert_eq!(obj["providerData"]["clientId"], "cid");
+    }
+
+    #[test]
+    fn ensure_provider_data_object_creates_an_empty_object_without_identity() {
+        let mut obj = serde_json::Map::new();
+        ensure_provider_data_object(&mut obj);
+        assert!(obj["providerData"].as_object().unwrap().is_empty());
     }
 }

@@ -573,87 +573,6 @@ fn clear_image_rebuild_pending_for(plugins_dir: &Path, slug: &str) {
     let _ = std::fs::remove_file(image_rebuild_pending_marker_for(plugins_dir, slug));
 }
 
-/// Moves a legacy marker into the plugin-state dir. Returns `true` only
-/// on a clean relocation.
-fn relocate_legacy_marker(slug: &str, legacy: &Path, target: &Path) -> bool {
-    if std::fs::rename(legacy, target).is_ok() {
-        return true;
-    }
-    #[cfg(windows)]
-    {
-        log::warn!(
-            "plugin '{slug}': cannot move .image_pending across filesystems on Windows \
-             (link count unknown); leaving legacy marker — audit will refuse this plugin"
-        );
-        false
-    }
-    #[cfg(not(windows))]
-    {
-        if let Err(e) = std::fs::write(target, b"") {
-            log::warn!(
-                "plugin '{slug}': failed to write replacement marker {}: {e}",
-                target.display()
-            );
-            return false;
-        }
-        if let Err(e) = std::fs::remove_file(legacy) {
-            log::warn!(
-                "plugin '{slug}': wrote replacement marker but failed to remove legacy {}: {e}; \
-                 audit will refuse this plugin on next load",
-                legacy.display()
-            );
-            return false;
-        }
-        true
-    }
-}
-
-/// Migrates the legacy in-tree `.image_pending` marker out of the signed plugin tree (idempotent,
-/// root-level regular files only, not symlinks). Run before `audit_all`/`list_verified_*`.
-fn migrate_legacy_image_pending(plugins_dir: &Path, plugin_dir: &Path, slug: &str) {
-    let legacy = plugin_dir.join(".image_pending");
-    let Ok(meta) = std::fs::symlink_metadata(&legacy) else {
-        return;
-    };
-    if !meta.file_type().is_file() {
-        log::warn!(
-            "plugin '{}': legacy .image_pending is not a regular file ({:?}); leaving untouched",
-            slug,
-            meta.file_type()
-        );
-        return;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if meta.nlink() > 1 {
-            log::warn!(
-                "plugin '{}': legacy .image_pending has nlink={} (hardlink); leaving untouched",
-                slug,
-                meta.nlink()
-            );
-            return;
-        }
-    }
-    let target_dir = plugin_state_dir_for(plugins_dir, slug);
-    if let Err(e) = std::fs::create_dir_all(&target_dir) {
-        log::warn!(
-            "plugin '{}': failed to create plugin-state dir {}: {e}",
-            slug,
-            target_dir.display()
-        );
-        return;
-    }
-    let target = target_dir.join("image_pending");
-    if relocate_legacy_marker(slug, &legacy, &target) {
-        log::info!(
-            "plugin '{}': migrated legacy .image_pending to {}",
-            slug,
-            target.display()
-        );
-    }
-}
-
 /// Returns `~/.speedwave/tokens/<project>/<service_id>/`
 pub fn token_dir(project: &str, service_id: &str) -> anyhow::Result<PathBuf> {
     Ok(token_dir_in(consts::data_dir(), project, service_id))
@@ -1924,20 +1843,14 @@ pub(crate) fn list_verified_from_dir(plugins_dir: &Path) -> anyhow::Result<Vec<V
             continue;
         }
         let plugin_dir = entry.path();
-        let vp = verify_one_plugin_dir(plugins_dir, &plugin_dir, &dir_name)?;
+        let vp = verify_one_plugin_dir(&plugin_dir, &dir_name)?;
         out.push(vp);
     }
     Ok(out)
 }
 
-/// Verifies one plugin dir (signature, manifest parse, dir/slug equality, `validate_manifest`);
-/// also idempotently migrates a legacy in-tree `.image_pending` marker before the digest.
-fn verify_one_plugin_dir(
-    plugins_dir: &Path,
-    plugin_dir: &Path,
-    dir_name: &str,
-) -> anyhow::Result<VerifiedPlugin> {
-    migrate_legacy_image_pending(plugins_dir, plugin_dir, dir_name);
+/// Verifies one plugin dir (signature, manifest parse, dir/slug equality, `validate_manifest`).
+fn verify_one_plugin_dir(plugin_dir: &Path, dir_name: &str) -> anyhow::Result<VerifiedPlugin> {
     signing::verify_plugin_signature(plugin_dir)
         .map_err(|e| anyhow::anyhow!("plugin '{dir_name}': signature verification failed: {e}"))?;
     let manifest_path = plugin_dir.join("plugin.json");
@@ -2176,7 +2089,7 @@ pub(crate) fn audit_all_in_dir(plugins_dir: &Path) -> Result<(), Vec<(String, St
             continue;
         }
         let plugin_dir = entry.path();
-        if let Err(e) = verify_one_plugin_dir(plugins_dir, &plugin_dir, &dir_name) {
+        if let Err(e) = verify_one_plugin_dir(&plugin_dir, &dir_name) {
             failures.push((dir_name, crate::log_sanitizer::sanitize(&e.to_string())));
         }
     }
@@ -2389,9 +2302,6 @@ fn build_single_plugin_image_locked(
     manifest: &PluginManifest,
     plugin_dir: &Path,
 ) -> anyhow::Result<()> {
-    if let Some(plugins_dir) = plugin_dir.parent() {
-        migrate_legacy_image_pending(plugins_dir, plugin_dir, &manifest.slug);
-    }
     signing::verify_plugin_signature(plugin_dir).map_err(|e| {
         anyhow::anyhow!(
             "refusing to build image for plugin '{}': {e}",
@@ -4477,98 +4387,6 @@ mod tests {
             leftovers.is_empty(),
             "after successful install/reinstall, no transient dirs should remain: {leftovers:?}"
         );
-    }
-
-    /// Legacy `.image_pending` inside the signed tree shifts the digest once signature is a
-    /// runtime invariant. Sign, drop marker, migrate, re-verify — no-op migration fails. No bypass.
-    #[test]
-    fn test_migration_restores_verifiable_tree() {
-        use crate::signing::{generate_keypair, sign_plugin, verify_plugin_signature_with_key};
-        let tmp = tempfile::tempdir().unwrap();
-        let plugins = tmp.path().join("plugins");
-        let plugin_dir = plugins.join("legacy-mcp");
-        std::fs::create_dir_all(&plugin_dir).unwrap();
-        std::fs::write(
-            plugin_dir.join("plugin.json"),
-            r#"{"name":"x","slug":"legacy-mcp","version":"1.0.0","description":"x"}"#,
-        )
-        .unwrap();
-
-        let (priv_key, pub_key) = generate_keypair();
-        sign_plugin(&plugin_dir, &priv_key).unwrap();
-        let pub_key: [u8; 32] = pub_key.try_into().unwrap();
-
-        std::fs::write(plugin_dir.join(".image_pending"), b"").unwrap();
-        verify_plugin_signature_with_key(&plugin_dir, &pub_key).expect_err(
-            "sanity: legacy marker must break verification, else the test proves nothing",
-        );
-
-        migrate_legacy_image_pending(&plugins, &plugin_dir, "legacy-mcp");
-
-        verify_plugin_signature_with_key(&plugin_dir, &pub_key)
-            .expect("migration must restore a tree that verifies against the original key");
-        assert!(!plugin_dir.join(".image_pending").exists());
-        assert!(image_pending_marker_for(&plugins, "legacy-mcp").exists());
-    }
-
-    /// Wires the migration test through `audit_all_in_dir` to pin the caller chain — a regression
-    /// short-circuiting `verify_one_plugin_dir` before migration lets the legacy marker survive.
-    #[test]
-    fn test_audit_calls_migration() {
-        let _g = UnsignedBypassGuard::new();
-        let tmp = tempfile::tempdir().unwrap();
-        let plugins = tmp.path().join("plugins");
-        let plugin_dir = plugins.join("legacy-mcp");
-        std::fs::create_dir_all(&plugin_dir).unwrap();
-        std::fs::write(
-            plugin_dir.join("plugin.json"),
-            r#"{"name":"x","slug":"legacy-mcp","version":"1.0.0","description":"x"}"#,
-        )
-        .unwrap();
-        std::fs::write(plugin_dir.join(".image_pending"), b"").unwrap();
-
-        let _ = audit_all_in_dir(&plugins);
-
-        assert!(!plugin_dir.join(".image_pending").exists());
-        assert!(image_pending_marker_for(&plugins, "legacy-mcp").exists());
-    }
-
-    /// Migration must refuse a non-regular-file `.image_pending` — a symlink could target a host
-    /// secret; following it would copy that content into `plugin-state/`. Leave it and fail loudly.
-    #[cfg(unix)]
-    #[test]
-    fn test_migrate_rejects_symlinked_image_pending() {
-        let tmp = tempfile::tempdir().unwrap();
-        let plugins = tmp.path().join("plugins");
-        let plugin_dir = plugins.join("evil-legacy");
-        std::fs::create_dir_all(&plugin_dir).unwrap();
-        std::os::unix::fs::symlink("/etc/passwd", plugin_dir.join(".image_pending")).unwrap();
-
-        migrate_legacy_image_pending(&plugins, &plugin_dir, "evil-legacy");
-
-        assert!(plugin_dir.join(".image_pending").is_symlink());
-        assert!(!image_pending_marker_for(&plugins, "evil-legacy").exists());
-    }
-
-    /// A hardlinked `.image_pending` (`nlink > 1`) must not be relocated: an attacker pre-creating
-    /// it as a hardlink would otherwise get a free `rename` out of the plugin tree.
-    #[cfg(unix)]
-    #[test]
-    fn test_migrate_rejects_hardlinked_image_pending() {
-        let tmp = tempfile::tempdir().unwrap();
-        let plugins = tmp.path().join("plugins");
-        let plugin_dir = plugins.join("evil-legacy");
-        std::fs::create_dir_all(&plugin_dir).unwrap();
-        let decoy = tmp.path().join("decoy.txt");
-        std::fs::write(&decoy, b"do not touch").unwrap();
-        let marker = plugin_dir.join(".image_pending");
-        std::fs::hard_link(&decoy, &marker).unwrap();
-
-        migrate_legacy_image_pending(&plugins, &plugin_dir, "evil-legacy");
-
-        assert!(marker.exists());
-        assert_eq!(std::fs::read(&decoy).unwrap(), b"do not touch");
-        assert!(!image_pending_marker_for(&plugins, "evil-legacy").exists());
     }
 
     /// Two threads racing to install the same slug must not corrupt the destination tree —

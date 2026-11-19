@@ -429,9 +429,9 @@ test-transcription: guard-not-prod-data-dir
 test-mcp-os-bundle: build-mcp guard-not-prod-data-dir
 	@echo "🧪 Staging the real mcp-os worker bundle..."
 	@bash scripts/bundle-build-context.sh
-	@echo "🧪 Running the mcp-os upgrade-path test against the bundled worker..."
-	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime --features mcp-os-bundle-e2e upgrade_path_with_real_bundled_mcp_os)
-	@echo "✅ mcp-os bundle upgrade-path test passed"
+	@echo "🧪 Running the mcp-os spawn test against the bundled worker..."
+	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime --features mcp-os-bundle-e2e spawn_with_real_bundled_mcp_os)
+	@echo "✅ mcp-os bundle spawn test passed"
 
 test-cli: guard-not-prod-data-dir
 	@echo "🧪 Testing CLI..."

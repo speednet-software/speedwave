@@ -21,7 +21,6 @@ mod security_check;
 mod tokens;
 mod workers;
 
-pub(crate) use proxy::migrate_legacy_local_key_in;
 pub use proxy::{
     proxy_config_dir_in, proxy_config_path_in, remove_llm_provider_key_in, render_proxy_config,
     spw_key_env_name, write_llm_provider_key_in, PROXY_BASE_URL, PROXY_CALLER_AUTH_HEADER,
