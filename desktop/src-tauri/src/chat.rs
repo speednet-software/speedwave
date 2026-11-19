@@ -109,6 +109,12 @@ pub enum StreamChunk {
     TurnStarted {
         origin: TurnOrigin,
     },
+    SubagentActivity {
+        parent_tool_id: String,
+        tool_id: String,
+        tool_name: String,
+        input_json: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -539,6 +545,7 @@ impl StreamParser {
         let msg_type = parsed["type"].as_str().unwrap_or("");
 
         match msg_type {
+            "stream_event" if is_sidechain_event(parsed) => (Vec::new(), None),
             "stream_event" => option_to_vec(self.parse_stream_event(&parsed["event"])),
             "user" => self.parse_user_message(parsed),
             "result" => {
@@ -550,7 +557,7 @@ impl StreamParser {
                 self.capture_assistant_model(parsed);
                 self.capture_context_usage(parsed);
                 self.capture_turn_error_kind(parsed);
-                (Self::complete_tool_inputs(parsed), None)
+                (Self::assistant_tool_chunks(parsed), None)
             }
             "system" => self.parse_system_line(parsed),
             "rate_limit_event" => option_to_vec(Self::parse_rate_limit_event(parsed)),
@@ -621,6 +628,41 @@ impl StreamParser {
                 self.last_context_usage = Some(u);
             }
         }
+    }
+
+    fn assistant_tool_chunks(parsed: &serde_json::Value) -> Vec<StreamChunk> {
+        match parsed["parent_tool_use_id"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+        {
+            Some(parent) => Self::subagent_activities(parsed, parent),
+            None => Self::complete_tool_inputs(parsed),
+        }
+    }
+
+    fn subagent_activities(parsed: &serde_json::Value, parent: &str) -> Vec<StreamChunk> {
+        let Some(blocks) = parsed["message"]["content"].as_array() else {
+            return Vec::new();
+        };
+        blocks
+            .iter()
+            .filter(|b| b["type"].as_str() == Some("tool_use"))
+            .filter_map(|b| {
+                let id = b["id"].as_str().filter(|s| !s.is_empty())?;
+                let name = b["name"].as_str().filter(|s| !s.is_empty())?;
+                let input = &b["input"];
+                Some(StreamChunk::SubagentActivity {
+                    parent_tool_id: parent.to_string(),
+                    tool_id: id.to_string(),
+                    tool_name: name.to_string(),
+                    input_json: if input.is_object() {
+                        input.to_string()
+                    } else {
+                        "{}".to_string()
+                    },
+                })
+            })
+            .collect()
     }
 
     fn complete_tool_inputs(parsed: &serde_json::Value) -> Vec<StreamChunk> {
@@ -6948,10 +6990,20 @@ mod tests {
             "\"toolu_parent\"",
             r#"{"type":"tool_use","id":"toolu_sub","name":"Read","input":{"file_path":"/x"}}"#,
         );
-        assert!(
-            parse_line_all_str(&mut parser, &sidechain).is_empty(),
-            "subagent tools have no frontend block"
-        );
+        match parse_line_all_str(&mut parser, &sidechain).as_slice() {
+            [StreamChunk::SubagentActivity {
+                parent_tool_id,
+                tool_id,
+                tool_name,
+                input_json,
+            }] => {
+                assert_eq!(parent_tool_id, "toolu_parent");
+                assert_eq!(tool_id, "toolu_sub");
+                assert_eq!(tool_name, "Read");
+                assert_eq!(input_json, r#"{"file_path":"/x"}"#);
+            }
+            other => panic!("expected one SubagentActivity, got {other:?}"),
+        }
 
         let ask = assistant_tool_use_line(
             "null",
@@ -6967,6 +7019,104 @@ mod tests {
             r#"{"type":"tool_use","name":"Read","input":{"a":1}},{"type":"tool_use","id":"","name":"Read","input":{"a":1}},{"type":"tool_use","id":"toolu_noinput","name":"Read"},{"type":"tool_use","id":"toolu_str","name":"Read","input":"not an object"}"#,
         );
         assert!(parse_line_all_str(&mut parser, &malformed).is_empty());
+    }
+
+    #[test]
+    fn sidechain_assistant_line_emits_one_activity_per_tool_use_block() {
+        let mut parser = StreamParser::new();
+        let line = assistant_tool_use_line(
+            "\"toolu_parent\"",
+            r#"{"type":"text","text":"x"},{"type":"tool_use","id":"toolu_a","name":"Read","input":{"file_path":"/a"}},{"type":"tool_use","id":"toolu_b","name":"Bash","input":"odd"},{"type":"tool_use","name":"Read","input":{}}"#,
+        );
+        let chunks = parse_line_all_str(&mut parser, &line);
+        let got: Vec<(&str, &str, &str, &str)> = chunks
+            .iter()
+            .map(|c| match c {
+                StreamChunk::SubagentActivity {
+                    parent_tool_id,
+                    tool_id,
+                    tool_name,
+                    input_json,
+                } => (
+                    parent_tool_id.as_str(),
+                    tool_id.as_str(),
+                    tool_name.as_str(),
+                    input_json.as_str(),
+                ),
+                other => panic!("expected SubagentActivity, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("toolu_parent", "toolu_a", "Read", r#"{"file_path":"/a"}"#),
+                ("toolu_parent", "toolu_b", "Bash", "{}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn sidechain_flag_without_parent_id_emits_no_activity() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"assistant","isSidechain":true,"message":{"id":"m","content":[{"type":"tool_use","id":"toolu_a","name":"Read","input":{}}]}}"#;
+        assert!(parse_line_all_str(&mut parser, line).is_empty());
+    }
+
+    #[test]
+    fn sidechain_stream_events_do_not_reach_the_parent_turn() {
+        let mut parser = StreamParser::new();
+        let tool_start = TOOL_START_LINE.replacen(
+            r#"{"type":"stream_event","#,
+            r#"{"type":"stream_event","parent_tool_use_id":"toolu_parent","#,
+            1,
+        );
+        assert!(parse_line_all_str(&mut parser, &tool_start).is_empty());
+        assert!(parser.active_blocks.is_empty());
+        let text = r#"{"type":"stream_event","parent_tool_use_id":"toolu_parent","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}}"#;
+        assert!(parse_line_all_str(&mut parser, text).is_empty());
+    }
+
+    #[test]
+    fn sidechain_activity_leaves_context_and_model_untouched() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"assistant","parent_tool_use_id":"toolu_parent","message":{"id":"m","model":"claude-haiku-4-5","content":[{"type":"tool_use","id":"toolu_a","name":"Read","input":{}}],"usage":{"input_tokens":9,"output_tokens":9}}}"#;
+        parse_line_all_str(&mut parser, line);
+        assert!(parser.last_context_usage.is_none());
+    }
+
+    #[test]
+    fn subagent_activity_variant_matches_ts_mirror() {
+        let ts = include_str!("../../src/src/app/models/chat.ts");
+        let chunk = StreamChunk::SubagentActivity {
+            parent_tool_id: "p".into(),
+            tool_id: "t".into(),
+            tool_name: "Read".into(),
+            input_json: "{}".into(),
+        };
+        let v = serde_json::to_value(&chunk).unwrap();
+        assert_eq!(v["chunk_type"], "SubagentActivity");
+        let mut keys: Vec<&str> = v["data"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["input_json", "parent_tool_id", "tool_id", "tool_name"]
+        );
+        let marker = "chunk_type: 'SubagentActivity';";
+        let start = ts
+            .find(marker)
+            .expect("models/chat.ts must declare SubagentActivity");
+        let body = &ts[start..start + ts[start..].find("};").unwrap()];
+        for key in keys {
+            assert!(
+                body.contains(&format!("{key}: string")),
+                "SubagentActivity.{key} missing in models/chat.ts"
+            );
+        }
     }
 
     #[test]

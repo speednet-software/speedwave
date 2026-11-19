@@ -2061,6 +2061,20 @@ describe('ChatSessionStore', () => {
       }
     });
 
+    it('leaves the blocks untouched on a SubagentActivity chunk', () => {
+      store.handleStreamChunk({
+        chunk_type: 'ToolStart',
+        data: { tool_id: 'p1', tool_name: 'Agent' },
+      });
+      const before = store.currentBlocks;
+      store.handleStreamChunk({
+        chunk_type: 'SubagentActivity',
+        data: { parent_tool_id: 'p1', tool_id: 's1', tool_name: 'Read', input_json: '{}' },
+      });
+
+      expect(store.currentBlocks).toBe(before);
+    });
+
     it('handles ToolInputDelta chunk', () => {
       store.handleStreamChunk({
         chunk_type: 'ToolStart',

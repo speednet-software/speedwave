@@ -69,7 +69,11 @@ export type StreamChunk =
       chunk_type: 'QueueDrained';
       data: { session_id: string; text: string };
     }
-  | { chunk_type: 'TurnStarted'; data: { origin: TurnOrigin } };
+  | { chunk_type: 'TurnStarted'; data: { origin: TurnOrigin } }
+  | {
+      chunk_type: 'SubagentActivity';
+      data: { parent_tool_id: string; tool_id: string; tool_name: string; input_json: string };
+    };
 
 /** What started a Claude Code turn. */
 export type TurnOrigin = 'user' | 'scheduled' | 'task_notification';
