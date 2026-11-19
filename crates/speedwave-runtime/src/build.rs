@@ -454,18 +454,6 @@ fn resolve_mcp_os_script_with_home(home: Option<PathBuf>) -> Option<std::path::P
     resolve_worker_script_inner("mcp-os", &["mcp-os", "os", "dist", "index.js"], home, dev)
 }
 
-/// Resolves the `oauth` worker `index.js` (bundle → CARGO source → marker).
-/// Mirrors [`resolve_mcp_os_script`]; ADR-060.
-pub fn resolve_oauth_script() -> Option<std::path::PathBuf> {
-    let dev = repo_dev_path("mcp-servers/oauth/dist/index.js");
-    resolve_worker_script_inner(
-        "oauth",
-        &["oauth", "oauth", "dist", "index.js"],
-        crate::consts::data_dir().parent().map(|p| p.to_path_buf()),
-        dev,
-    )
-}
-
 /// Resolves the PII NER model artifact directory (`manifest.json`, weights, tokenizer; ADR-095):
 /// bundle, then the dev-tree output of `make prepare-pii-ner-model`, then the resources marker.
 pub fn resolve_pii_ner_artifact_dir() -> Option<PathBuf> {

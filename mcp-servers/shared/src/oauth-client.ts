@@ -1,49 +1,24 @@
 /**
- * Worker → oauth-worker client (ADR-060). `WORKER_OAUTH_URL` = base URL; bearer path defaults to `/secrets/oauth-auth-token-<service>`.
+ * OAuth token helpers for workers: refresh failure messages from the host's `refresh_status` file, and JWT expiry checks.
  */
 import { readFile } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
-import { TIMEOUTS } from './timeouts.js';
+import { join } from 'node:path';
 
 /** Discriminant for {@link OAuthRefreshError}. */
-export type OAuthRefreshCode =
-  | 'not_configured'
-  | 'no_bearer'
-  | 'timeout'
-  | 'worker_unreachable'
-  | 'http'
-  | 'unauthorized'
-  | 'jsonrpc'
-  | 'malformed'
-  | 'tool_error';
+export type OAuthRefreshCode = 'reconnect_required' | 'network_error' | 'not_refreshed';
 
-/** Typed error thrown when granted scopes are a strict subset of requested (re-consent trigger). */
-export class OAuthScopeMismatchError extends Error {
-  /**
-   * Construct a scope-mismatch error.
-   * @param message - human-readable scope mismatch detail
-   */
-  constructor(message: string) {
-    super(message);
-    this.name = 'OAuthScopeMismatchError';
-  }
-}
-
-/** Generic error for refresh failures other than scope mismatch. */
+/** Error for an access token the host did not refresh in time; the message tells the user what to do. */
 export class OAuthRefreshError extends Error {
   readonly code: OAuthRefreshCode;
-  readonly httpStatus?: number;
   /**
    * Construct a refresh error.
    * @param code - machine-readable code (drives caller branching)
    * @param message - human-readable error message
-   * @param httpStatus - optional HTTP status when the failure was an HTTP response
    */
-  constructor(code: OAuthRefreshCode, message: string, httpStatus?: number) {
+  constructor(code: OAuthRefreshCode, message: string) {
     super(message);
     this.name = 'OAuthRefreshError';
     this.code = code;
-    this.httpStatus = httpStatus;
   }
 }
 
@@ -83,145 +58,61 @@ export function accessTokenExpiresWithin(
   return exp * 1000 - nowMs < seconds * 1000;
 }
 
-/**
- * Options for {@link refreshAccessToken}.
- */
-export interface OAuthRefreshOptions {
-  /** Caller's service id (used to resolve the bearer path; never sent on the wire). */
-  service: string;
-  /** Override the bearer path. Default `/secrets/oauth-auth-token-<service>`. */
-  bearerPath?: string;
-  /** Override the worker URL env var. Default `WORKER_OAUTH_URL`. */
-  workerUrl?: string;
-  /** Override `fetch` for tests. */
-  fetchImpl?: typeof fetch;
-}
+const REFRESH_STATUS_FILE = 'refresh_status';
 
-interface MCPToolsCallResponse {
-  jsonrpc: '2.0';
-  id: string | number;
-  result?: {
-    content: Array<{ type: string; text?: string }>;
-    isError?: boolean;
-  };
-  error?: { code: number; message: string };
-}
+const SERVICE_NAME_FILE = 'service_name';
+
+const REFRESH_STATES = ['reconnect_required', 'network_error'] as const;
+
+type RefreshStatus = { state: (typeof REFRESH_STATES)[number]; at: string };
 
 /**
- * Refresh the caller's access token by calling the oauth worker. Retries once on 401.
- * @param options - refresh options (service id, bearer path override, worker URL override, fetch override)
- * @throws {OAuthScopeMismatchError} if the granted scopes are insufficient; {@link OAuthRefreshError} for any other failure.
+ * Build the error for a token the host did not refresh, worded by `<tokensDir>/refresh_status`.
+ * @param service - service id (the name falls back to the id when `<tokensDir>/service_name` is missing)
+ * @param tokensDir - the `/tokens` directory
  */
-export async function refreshAccessToken(
-  options: OAuthRefreshOptions
-): Promise<{ expiresIn: number; grantedScopes: string[]; rateLimited?: boolean }> {
-  const workerUrl = process.env[options.workerUrl ?? 'WORKER_OAUTH_URL'];
-  if (!workerUrl) {
-    throw new OAuthRefreshError(
-      'not_configured',
-      `${options.workerUrl ?? 'WORKER_OAUTH_URL'} env var is not set; oauth worker is not enabled for this project`
+export async function refreshFailure(
+  service: string,
+  tokensDir: string
+): Promise<OAuthRefreshError> {
+  const name = await readServiceName(join(tokensDir, SERVICE_NAME_FILE), service);
+  const status = await readRefreshStatus(join(tokensDir, REFRESH_STATUS_FILE));
+  if (status?.state === 'reconnect_required') {
+    return new OAuthRefreshError(
+      'reconnect_required',
+      `${name} sign-in expired. Reconnect ${name} in Speedwave Desktop: Settings, Integrations, ${name}.`
     );
   }
-  const bearerPath = options.bearerPath ?? `/secrets/oauth-auth-token-${options.service}`;
+  if (status?.state === 'network_error') {
+    return new OAuthRefreshError(
+      'network_error',
+      `${name} token expired and Speedwave could not refresh it yet (network error at ${status.at}). It tries again automatically.`
+    );
+  }
+  return new OAuthRefreshError(
+    'not_refreshed',
+    `${name} token expired and has not been refreshed yet. Speedwave refreshes it while a session of this project runs.`
+  );
+}
 
-  const fetchImpl = options.fetchImpl ?? fetch;
-
-  const callOnce = async (): Promise<MCPToolsCallResponse> => {
-    const bearer = (await readFile(bearerPath, 'utf8')).trim();
-    if (!bearer) {
-      throw new OAuthRefreshError(
-        'no_bearer',
-        `bearer file ${bearerPath} is empty; oauth worker did not provision this consumer`
-      );
-    }
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), TIMEOUTS.TOKEN_REFRESH_MS);
-    let response: Response;
-    try {
-      response = await fetchImpl(workerUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${bearer}`,
-        },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          id: randomUUID(),
-          method: 'tools/call',
-          params: { name: 'refresh', arguments: {} },
-        }),
-        signal: controller.signal,
-      });
-    } catch (err) {
-      if (err instanceof Error && err.name === 'AbortError') {
-        console.warn(`oauth worker timeout at ${workerUrl}`);
-        const secs = TIMEOUTS.TOKEN_REFRESH_MS / 1000;
-        throw new OAuthRefreshError(
-          'timeout',
-          `oauth worker did not respond within ${secs}s. Restart the project from Speedwave Desktop.`
-        );
-      }
-      const detail = err instanceof Error ? err.message : String(err);
-      console.warn(`oauth worker unreachable at ${workerUrl}: ${detail}`);
-      throw new OAuthRefreshError(
-        'worker_unreachable',
-        `cannot reach oauth worker: ${detail}. Restart the project from Speedwave Desktop.`
-      );
-    } finally {
-      clearTimeout(timeoutId);
-    }
-    if (response.status === 401) {
-      throw new OAuthRefreshError('unauthorized', 'oauth worker returned 401', 401);
-    }
-    if (!response.ok) {
-      throw new OAuthRefreshError(
-        'http',
-        `oauth worker HTTP ${response.status}: ${response.statusText}`
-      );
-    }
-    return (await response.json()) as MCPToolsCallResponse;
-  };
-
-  let body: MCPToolsCallResponse;
+async function readRefreshStatus(path: string): Promise<RefreshStatus | null> {
   try {
-    body = await callOnce();
-  } catch (err) {
-    if (err instanceof OAuthRefreshError && err.httpStatus === 401) {
-      body = await callOnce();
-    } else {
-      throw err;
-    }
-  }
-
-  if (body.error) {
-    throw new OAuthRefreshError('jsonrpc', `${body.error.code}: ${body.error.message}`);
-  }
-  if (!body.result) {
-    throw new OAuthRefreshError('malformed', 'oauth worker returned neither result nor error');
-  }
-
-  const text = body.result.content?.[0]?.text ?? '';
-  if (body.result.isError) {
-    if (text.startsWith('Error: scope_mismatch')) {
-      throw new OAuthScopeMismatchError(text);
-    }
-    throw new OAuthRefreshError('tool_error', text);
-  }
-
-  let payload: { expiresIn?: unknown; grantedScopes?: unknown; rateLimited?: unknown };
-  try {
-    payload = JSON.parse(text) as { expiresIn?: unknown; grantedScopes?: unknown };
+    const parsed = JSON.parse(await readFile(path, 'utf8')) as {
+      state?: unknown;
+      at?: unknown;
+    };
+    if (typeof parsed.at !== 'string') return null;
+    const state = REFRESH_STATES.find((known) => known === parsed.state);
+    return state ? { state, at: parsed.at } : null;
   } catch {
-    throw new OAuthRefreshError('malformed', `unparseable oauth response: ${text}`);
+    return null;
   }
-  const expiresIn = payload.expiresIn;
-  const grantedScopes = payload.grantedScopes;
-  if (typeof expiresIn !== 'number' || !Array.isArray(grantedScopes)) {
-    throw new OAuthRefreshError('malformed', `unexpected oauth response shape: ${text}`);
+}
+
+async function readServiceName(path: string, fallback: string): Promise<string> {
+  try {
+    return (await readFile(path, 'utf8')).trim() || fallback;
+  } catch {
+    return fallback;
   }
-  return {
-    expiresIn,
-    grantedScopes: grantedScopes.map((s) => String(s)),
-    rateLimited: payload.rateLimited === true,
-  };
 }

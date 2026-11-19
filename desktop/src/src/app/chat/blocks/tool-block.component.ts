@@ -10,6 +10,7 @@ import type { NormalizedToolInput, ToolUseBlock } from '../../models/chat';
 import { ToolNormalizerService } from '../../services/tool-normalizer.service';
 import { DiffViewComponent } from './diff-view.component';
 import { SpinIconComponent } from '../../shared/spin-icon.component';
+import { taskStatusColor, taskStatusGlyph } from '../task-plan/task-status';
 
 /** Semantic status → timeline border color class. */
 const STATUS_BORDER: Readonly<Record<ToolUseBlock['status'], string>> = Object.freeze({
@@ -122,8 +123,8 @@ $ {{ asBash(normalized()).command }}</pre>
                      positional tracking is fine because the tool always
                      re-renders the full list on each invocation. -->
                 @for (todo of asTodoWrite(normalized()).todos; track $index) {
-                  <li [class]="todoColor(todo.status)">
-                    {{ todoGlyph(todo.status) }}
+                  <li [class]="taskStatusColor(todo.status)">
+                    {{ taskStatusGlyph(todo.status) }}
                     {{
                       todo.status === 'in_progress' && todo.activeForm
                         ? todo.activeForm
@@ -182,6 +183,14 @@ $ {{ asBash(normalized()).command }}</pre>
                 {{ asAgent(normalized()).description }}
               </div>
             }
+            @case ('task_create') {
+              <div data-testid="task-description" class="mono text-[11.5px] text-[var(--ink-dim)]">
+                {{ asTaskCreate(normalized()).description }}
+              </div>
+            }
+            @case ('task_update') {}
+            @case ('task_list') {}
+            @case ('task_get') {}
             @default {
               <pre
                 data-testid="code-block"
@@ -318,6 +327,15 @@ export class ToolBlockComponent {
         return n.description;
       case 'todo_write':
         return `${n.todos.length} ${n.todos.length === 1 ? 'task' : 'tasks'}`;
+      case 'task_create':
+        return n.subject;
+      case 'task_update': {
+        const change = n.status ?? n.subject;
+        return change === undefined ? `#${n.task_id}` : `#${n.task_id} → ${change}`;
+      }
+      case 'task_get':
+        return `#${n.task_id}`;
+      case 'task_list':
       case 'generic':
         return '';
     }
@@ -359,39 +377,8 @@ export class ToolBlockComponent {
       : 'border-[var(--line)] bg-[var(--bg-1)] text-[var(--ink-dim)]'
   );
 
-  /**
-   * Glyph for a TodoWrite item's status cell.
-   * @param status - The todo item's status string (e.g. "completed", "in_progress").
-   */
-  todoGlyph(status: string): string {
-    switch (status) {
-      case 'completed':
-        return '✓';
-      case 'in_progress':
-        return '▸';
-      case 'cancelled':
-        return '⊘';
-      default:
-        return '○';
-    }
-  }
-
-  /**
-   * Tailwind color class for a TodoWrite item keyed by status.
-   * @param status - The todo item's status string.
-   */
-  todoColor(status: string): string {
-    switch (status) {
-      case 'completed':
-        return 'text-[var(--green)]';
-      case 'in_progress':
-        return 'text-[var(--accent)]';
-      case 'cancelled':
-        return 'text-[var(--ink-mute)] line-through';
-      default:
-        return 'text-[var(--ink-mute)]';
-    }
-  }
+  protected readonly taskStatusGlyph = taskStatusGlyph;
+  protected readonly taskStatusColor = taskStatusColor;
 
   /**
    * Narrows the normalized input to the bash variant for template usage.
@@ -471,6 +458,14 @@ export class ToolBlockComponent {
    */
   asTodoWrite(n: NormalizedToolInput): Extract<NormalizedToolInput, { kind: 'todo_write' }> {
     return n as Extract<NormalizedToolInput, { kind: 'todo_write' }>;
+  }
+
+  /**
+   * Narrows the normalized input to the task_create variant for template usage.
+   * @param n - Normalized input to narrow.
+   */
+  asTaskCreate(n: NormalizedToolInput): Extract<NormalizedToolInput, { kind: 'task_create' }> {
+    return n as Extract<NormalizedToolInput, { kind: 'task_create' }>;
   }
 
   /**

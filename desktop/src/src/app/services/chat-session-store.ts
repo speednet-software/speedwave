@@ -28,6 +28,7 @@ import {
   type ConversationStateTree,
   type MessageBlockState,
 } from '../models/state-tree';
+import { foldTaskPlan, type PlannedTask } from '../chat/task-plan/task-plan';
 import {
   chatInputFromText,
   chatInputToBlocks,
@@ -899,6 +900,7 @@ export class ChatSessionStore {
   readonly autoScrollRequested: Signal<number> = this._autoScrollRequested.asReadonly();
   /** Per-tab plan-mode flag restored when a background tab is reactivated, or on a nav-rail remount. */
   readonly composerPlanMode = signal(false);
+  readonly taskPlanExpanded = signal(false);
   /** Per-tab staged image attachments (SPEED-785) — a paste/drop resolves into this instance regardless of which tab's composer is active when it finishes. */
   readonly composerAttachments = new ComposerAttachments();
   private readonly _stagedTranscript = signal<StagedTranscript | null>(null);
@@ -1108,6 +1110,14 @@ export class ChatSessionStore {
 
   readonly pendingQueueFromState: Signal<QueuedMessage | null> = computed(
     () => this._state().pending_queue
+  );
+
+  readonly taskPlan: Signal<readonly PlannedTask[] | null> = computed(() =>
+    foldTaskPlan(
+      this._state().entries.flatMap((entry) =>
+        entry.blocks.flatMap((b) => (b.kind === 'tool_use' ? [b] : []))
+      )
+    )
   );
 
   /**

@@ -284,8 +284,8 @@ pub struct PluginManifest {
     /// desktop-side app. Desktop spawns one `HostBridge`; worker gets URL/token via env (ADR-063).
     #[serde(default)]
     pub host_bridge: Option<HostBridgeManifest>,
-    /// Optional OAuth2 declaration. Drives host-side authorization + refresh
-    /// via the `oauth` worker; secrets stay off-mount. See ADR-069.
+    /// Optional OAuth2 declaration. Drives host-side authorization and refresh; secrets stay
+    /// off-mount. See ADR-069.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth: Option<PluginOAuthSpec>,
 }

@@ -95,20 +95,12 @@ describe('slack client', () => {
       }
     });
 
-    it('maps an invalid_grant refresh failure to reconnect guidance', () => {
-      const error = new OAuthRefreshError('tool_error', 'invalid_grant: token_revoked');
-      const message = formatSlackError(error);
-      expect(message).toBe(
-        withSetupGuidance(
-          'Slack sign-in expired. Reconnect Slack in Speedwave Desktop (Integrations → Slack).'
-        )
+    it('returns the refresh failure message as is', () => {
+      const error = new OAuthRefreshError(
+        'reconnect_required',
+        'Slack sign-in expired. Reconnect Slack in Speedwave Desktop: Settings, Integrations, Slack.'
       );
-    });
-
-    it('surfaces other refresh failures with their detail', () => {
-      const error = new OAuthRefreshError('worker_unreachable', 'cannot reach oauth worker');
-      const message = formatSlackError(error);
-      expect(message).toBe('Slack token refresh failed: cannot reach oauth worker');
+      expect(formatSlackError(error)).toBe(error.message);
     });
 
     it('formats permission errors', () => {
@@ -378,41 +370,14 @@ describe('slack client', () => {
     beforeEach(() => {
       vi.clearAllMocks();
       vi.spyOn(console, 'warn').mockImplementation(() => {});
-      process.env.WORKER_OAUTH_URL = 'http://oauth.test/mcp';
     });
 
     afterEach(() => {
-      delete process.env.WORKER_OAUTH_URL;
-      vi.unstubAllGlobals();
       vi.restoreAllMocks();
     });
 
-    /** Stubs the oauth worker JSON-RPC refresh round-trip as a success. */
-    function stubOauthWorkerSuccess(): void {
-      vi.stubGlobal(
-        'fetch',
-        vi.fn().mockResolvedValue({
-          ok: true,
-          status: 200,
-          statusText: 'OK',
-          json: async () => ({
-            jsonrpc: '2.0',
-            id: '1',
-            result: {
-              content: [
-                { type: 'text', text: JSON.stringify({ expiresIn: 43200, grantedScopes: [] }) },
-              ],
-            },
-          }),
-        })
-      );
-    }
-
-    it('refreshes once on token_expired and retries with the rotated token', async () => {
-      stubOauthWorkerSuccess();
-      vi.mocked(fs.readFile)
-        .mockResolvedValueOnce('bearer-uuid')
-        .mockResolvedValueOnce('xoxe.xoxp-rotated\n');
+    it('retries with the token the host rewrote after token_expired', async () => {
+      vi.mocked(fs.readFile).mockResolvedValueOnce('xoxe.xoxp-rotated\n');
 
       const clients = presentClients();
       const apiCall = vi
@@ -429,9 +394,7 @@ describe('slack client', () => {
       expect(clients.user.token).toBe('xoxe.xoxp-rotated');
     });
 
-    it('does not refresh on a terminal token_revoked error', async () => {
-      const fetchSpy = vi.fn();
-      vi.stubGlobal('fetch', fetchSpy);
+    it('does not read the token file on a terminal token_revoked error', async () => {
       const clients = presentClients();
       const apiCall = vi.fn().mockRejectedValue({ data: { error: 'token_revoked' } });
 
@@ -439,16 +402,7 @@ describe('slack client', () => {
         data: { error: 'token_revoked' },
       });
       expect(apiCall).toHaveBeenCalledTimes(1);
-      expect(fetchSpy).not.toHaveBeenCalled();
-    });
-
-    it('propagates a refresh failure without retrying the call', async () => {
-      delete process.env.WORKER_OAUTH_URL;
-      const clients = presentClients();
-      const apiCall = vi.fn().mockRejectedValue({ data: { error: 'token_expired' } });
-
-      await expect(slackCall(clients, (c) => apiCall(c))).rejects.toThrow(OAuthRefreshError);
-      expect(apiCall).toHaveBeenCalledTimes(1);
+      expect(readFileMock).not.toHaveBeenCalled();
     });
 
     it('reuses the existing WebClient when the token has not changed', async () => {

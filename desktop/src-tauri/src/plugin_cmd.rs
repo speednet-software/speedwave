@@ -447,7 +447,7 @@ pub fn remove_plugin(slug: String) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn remove_oauth_offmount(project: &str, service_id: &str) -> Result<(), String> {
+fn remove_oauth_offmount(project: &str, service_id: &str) -> Result<(), String> {
     remove_oauth_offmount_in(speedwave_runtime::consts::data_dir(), project, service_id)
 }
 

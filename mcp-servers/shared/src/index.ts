@@ -113,14 +113,12 @@ export type { RetryOptions } from './retry.js';
 export { writeRestrictedSecret } from './restricted-write.js';
 
 export {
-  refreshAccessToken,
-  OAuthScopeMismatchError,
   OAuthRefreshError,
   readJwtExp,
   accessTokenExpiresWithin,
   PROACTIVE_REFRESH_SECONDS,
 } from './oauth-client.js';
-export type { OAuthRefreshOptions, OAuthRefreshCode } from './oauth-client.js';
+export type { OAuthRefreshCode } from './oauth-client.js';
 
 export { authedRequest, authedSdkCall, RefreshLock } from './oauth-authed-request.js';
 export type {

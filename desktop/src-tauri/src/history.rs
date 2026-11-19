@@ -194,18 +194,18 @@ fn parse_jsonl_entry(parsed: &serde_json::Value) -> Option<ConversationMessage> 
         if let Some(origin) = self_started_turn_origin(parsed) {
             return Some(turn_origin_message(parsed, origin));
         }
-        if let Some(line) = control_command_from_synthetic_entry(parsed) {
-            return Some(control_line_message(parsed, line));
-        }
-        let reason = if parsed["isMeta"].as_bool().unwrap_or(false) {
+        let meta_reason = if parsed["isMeta"].as_bool().unwrap_or(false) {
             Some("isMeta")
         } else if parsed["message"]["isMeta"].as_bool().unwrap_or(false) {
             Some("message.isMeta")
-        } else if is_synthetic_user_entry(parsed) {
-            Some("synthetic-content")
         } else {
             None
         };
+        if let Some(line) = command_line_from_synthetic_entry(parsed, meta_reason.is_some()) {
+            return Some(command_line_message(parsed, line));
+        }
+        let reason =
+            meta_reason.or_else(|| is_synthetic_user_entry(parsed).then_some("synthetic-content"));
         if let Some(reason) = reason {
             log::debug!(
                 "skipping synthetic user JSONL entry reason={reason} uuid={}",
@@ -352,7 +352,7 @@ fn text_is_synthetic(s: &str) -> bool {
         || trimmed.starts_with("Commands are in the form `/command [args]`")
 }
 
-fn control_command_from_synthetic_entry(parsed: &serde_json::Value) -> Option<String> {
+fn command_line_from_synthetic_entry(parsed: &serde_json::Value, is_meta: bool) -> Option<String> {
     let content = &parsed["message"]["content"];
     let text = match content.as_str() {
         Some(s) => s.to_string(),
@@ -368,11 +368,17 @@ fn control_command_from_synthetic_entry(parsed: &serde_json::Value) -> Option<St
         return None;
     }
     let name = tag_body(&text, "command-name")?.trim();
+    if name.is_empty() {
+        return None;
+    }
     let args = tag_body(&text, "command-args").unwrap_or("").trim();
-    let line = format!("{name} {args}");
-    speedwave_runtime::slash::parse_control_command(&line)
-        .is_some()
-        .then_some(line)
+    let line = if args.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name} {args}")
+    };
+    let is_control = speedwave_runtime::slash::parse_control_command(&line).is_some();
+    (is_control || !is_meta).then_some(line)
 }
 
 fn tag_body<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
@@ -382,7 +388,7 @@ fn tag_body<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
     Some(&text[start..end])
 }
 
-fn control_line_message(parsed: &serde_json::Value, line: String) -> ConversationMessage {
+fn command_line_message(parsed: &serde_json::Value, line: String) -> ConversationMessage {
     ConversationMessage {
         role: "user".to_string(),
         content: line.clone(),
@@ -2271,7 +2277,7 @@ mod tests {
     }
 
     #[test]
-    fn get_conversation_drops_synthetic_command_entries_that_are_not_control_commands() {
+    fn get_conversation_restores_non_control_command_entries_as_typed_lines() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
@@ -2283,13 +2289,109 @@ mod tests {
                 r#"{"type":"user","message":{"role":"user","content":"<command-name>/clear</command-name>\n<command-message>clear</command-message>\n<command-args></command-args>"},"timestamp":"2025-01-01T00:00:00Z"}"#,
                 r#"{"type":"user","message":{"role":"user","content":"<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args></command-args>"},"timestamp":"2025-01-01T00:00:01Z"}"#,
                 r#"{"type":"user","message":{"role":"user","content":"<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args>claude-sonnet-5 extra</command-args>"},"timestamp":"2025-01-01T00:00:02Z"}"#,
-                r#"{"type":"user","uuid":"u2","message":{"role":"user","content":"real question"},"timestamp":"2025-01-01T00:00:03Z"}"#,
+                r#"{"type":"user","message":{"role":"user","content":"<command-name>/compact</command-name>\n<command-message>compact</command-message>\n<command-args>   </command-args>"},"timestamp":"2025-01-01T00:00:03Z"}"#,
+                r#"{"type":"user","uuid":"u2","message":{"role":"user","content":"real question"},"timestamp":"2025-01-01T00:00:04Z"}"#,
             ],
         );
 
         let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
-        assert_eq!(transcript.messages.len(), 1);
-        assert_eq!(transcript.messages[0].content, "real question");
+        let contents: Vec<&str> = transcript
+            .messages
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect();
+        assert_eq!(
+            contents,
+            [
+                "/clear",
+                "/model",
+                "/model claude-sonnet-5 extra",
+                "/compact",
+                "real question"
+            ]
+        );
+        assert!(
+            transcript.messages.iter().all(|m| m.role == "user"
+                && !m
+                    .blocks
+                    .iter()
+                    .flatten()
+                    .any(|b| matches!(b, MessageBlock::ControlChip { .. }))),
+            "a command line that is not a control command must stay a plain user message"
+        );
+    }
+
+    #[test]
+    fn get_conversation_restores_a_skill_command_with_its_arguments_in_place() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"first question"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","model":"claude-sonnet-5","content":[{"type":"text","text":"first answer"}]},"timestamp":"2025-01-01T00:00:01Z"}"#,
+                r#"{"type":"user","uuid":"u2","message":{"role":"user","content":"<command-message>yt-subs</command-message>\n<command-name>/yt-subs</command-name>\n<command-args>https://www.youtube.com/watch?v=kspZP5BgkEU o czym to jest? zażółć</command-args>"},"timestamp":"2025-01-01T00:00:02Z"}"#,
+                r#"{"type":"user","uuid":"u3","isMeta":true,"message":{"role":"user","content":[{"type":"text","text":"Base directory for this skill: /home/speedwave/.claude/skills/yt-subs\n\nFetch the subtitles."}]},"timestamp":"2025-01-01T00:00:02Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","model":"claude-sonnet-5","content":[{"type":"text","text":"the video is about X"}]},"timestamp":"2025-01-01T00:00:03Z"}"#,
+            ],
+        );
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+        let contents: Vec<&str> = transcript
+            .messages
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect();
+        assert_eq!(
+            contents,
+            [
+                "first question",
+                "first answer",
+                "/yt-subs https://www.youtube.com/watch?v=kspZP5BgkEU o czym to jest? zażółć",
+                "the video is about X"
+            ]
+        );
+        let restored = &transcript.messages[2];
+        assert_eq!(restored.role, "user");
+        assert_eq!(restored.uuid.as_deref(), Some("u2"));
+        assert_eq!(restored.timestamp.as_deref(), Some("2025-01-01T00:00:02Z"));
+        match restored.blocks.as_deref() {
+            Some([MessageBlock::Text { content }]) => assert_eq!(content, &restored.content),
+            _ => panic!("expected a single text block"),
+        }
+    }
+
+    #[test]
+    fn parse_jsonl_message_drops_a_non_control_command_entry_marked_meta() {
+        for line in [
+            r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"<command-name>/clear</command-name>\n<command-args></command-args>"}}"#,
+            r#"{"type":"user","message":{"role":"user","isMeta":true,"content":"<command-name>/yt-subs</command-name>\n<command-args>question</command-args>"}}"#,
+        ] {
+            assert!(parse_jsonl_message(line).is_none(), "{line}");
+        }
+    }
+
+    #[test]
+    fn parse_jsonl_message_drops_a_command_entry_with_an_empty_name() {
+        let line = r#"{"type":"user","message":{"role":"user","content":"<command-name> </command-name>\n<command-args>question</command-args>"}}"#;
+        assert!(parse_jsonl_message(line).is_none());
+    }
+
+    #[test]
+    fn parse_jsonl_message_still_drops_local_command_output() {
+        for tag in [
+            "local-command-stdout",
+            "local-command-stderr",
+            "command-result",
+        ] {
+            let line = format!(
+                r#"{{"type":"user","message":{{"role":"user","content":"<{tag}>output</{tag}>"}}}}"#
+            );
+            assert!(parse_jsonl_message(&line).is_none(), "{tag}");
+        }
     }
 
     #[test]
@@ -2357,7 +2459,7 @@ mod tests {
     }
 
     #[test]
-    fn list_conversations_skips_slash_command_markers() {
+    fn list_conversations_previews_a_restored_command_line_and_skips_its_output() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
@@ -2375,8 +2477,8 @@ mod tests {
 
         let result = list_conversations_impl(tmp.path(), "proj").unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].preview, "real question");
-        assert_eq!(result[0].message_count, 2);
+        assert_eq!(result[0].preview, "/clear");
+        assert_eq!(result[0].message_count, 3);
     }
 
     #[test]
@@ -5013,6 +5115,53 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].preview, "first typed question");
         assert_eq!(list[0].message_count, 2);
+    }
+
+    const SKILL_COMMAND_LINE: &str = r#"{"type":"user","uuid":"u-skill","message":{"role":"user","content":"<command-name>/review</command-name>\n<command-message>review</command-message>\n<command-args>the branch</command-args>"},"timestamp":"2026-11-06T17:20:00Z"}"#;
+
+    #[test]
+    fn a_restored_command_line_and_a_turn_origin_row_keep_their_order_and_counts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        write_session(
+            &dir,
+            id,
+            &[
+                SKILL_COMMAND_LINE,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"REVIEWED"}]},"timestamp":"2026-11-06T17:20:05Z"}"#,
+                SCHEDULED_TURN_LINE,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"CRONFIRED"}]},"timestamp":"2026-11-06T17:28:01Z"}"#,
+            ],
+        );
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+        let rows: Vec<(String, Option<crate::chat::TurnOrigin>, String)> = transcript
+            .messages
+            .iter()
+            .map(|m| (m.role.clone(), turn_origin_of(m), m.content.clone()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("user".into(), None, "/review the branch".into()),
+                ("assistant".into(), None, "REVIEWED".into()),
+                (
+                    "user".into(),
+                    Some(crate::chat::TurnOrigin::Scheduled),
+                    String::new()
+                ),
+                ("assistant".into(), None, "CRONFIRED".into()),
+            ]
+        );
+
+        let list = list_conversations_impl(tmp.path(), "proj").unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].preview, "/review the branch");
+        assert_eq!(
+            list[0].message_count, 3,
+            "the command line counts, the turn-origin row does not"
+        );
     }
 
     #[test]

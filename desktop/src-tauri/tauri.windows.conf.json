@@ -13,7 +13,6 @@
       "build-context/mcp-servers/": "build-context/mcp-servers/",
       "nodejs/node.exe": "nodejs/node.exe",
       "mcp-os/": "mcp-os/",
-      "oauth/": "oauth/",
       "pii-ner/": "pii-ner/",
       "cli/speedwave.exe": "cli/speedwave.exe",
       "vulkan-1.dll": "vulkan-1.dll",

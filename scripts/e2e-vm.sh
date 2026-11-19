@@ -23,7 +23,6 @@ E2E_RSYNC_EXCLUDES=(
     'desktop/src-tauri/wsl'
     'desktop/src-tauri/cli'
     'desktop/src-tauri/mcp-os'
-    'desktop/src-tauri/oauth'
     'desktop/src-tauri/pii-ner'
     'desktop/src-tauri/vulkan-1.dll'
     'desktop/src-tauri/THIRD-PARTY-LICENSES'

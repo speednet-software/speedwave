@@ -1,5 +1,5 @@
 /**
- * Isolated Slack client for mcp-slack worker (@module slack/client): only accesses the Slack user access token (`/tokens/access_token`, RO), refreshed by the host-side oauth worker (ADR-060/071). All calls run as the signed-in user.
+ * Isolated Slack client for mcp-slack worker (@module slack/client): only accesses the Slack user access token (`/tokens/access_token`, RO), rewritten by the host (ADR-071). All calls run as the signed-in user.
  * Error convention: `initializeSlackClients` returns a `_tokensStatus:'missing'` container on config failures (never throws); instance methods throw on API failures.
  */
 
@@ -123,7 +123,7 @@ export interface SlackCurrentUser extends SlackUser {
 }
 
 /**
- * Initialize the Slack client from `access_token` in /tokens/ (written at sign-in by Desktop, refreshed by the host-side oauth worker).
+ * Initialize the Slack client from `access_token` in /tokens/ (written at sign-in by Desktop, rewritten by the host on refresh).
  * Returns a `'missing'` container (never throws) when absent — graceful degradation so the server starts unconfigured. DO NOT change to throw.
  */
 export async function initializeSlackClients(): Promise<SlackClients> {
@@ -288,12 +288,7 @@ const SLACK_ERROR_MESSAGES: Readonly<Record<string, string>> = Object.freeze({
  */
 export function formatSlackError(error: unknown): string {
   if (error instanceof OAuthRefreshError) {
-    if (error.message.includes('invalid_grant')) {
-      return withSetupGuidance(
-        'Slack sign-in expired. Reconnect Slack in Speedwave Desktop (Integrations → Slack).'
-      );
-    }
-    return `Slack token refresh failed: ${error.message}`;
+    return error.message;
   }
 
   const e = error as { message?: string; data?: { error?: string }; error?: string };

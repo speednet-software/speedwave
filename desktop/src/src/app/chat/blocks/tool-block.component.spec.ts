@@ -627,5 +627,62 @@ describe('ToolBlockComponent', () => {
       setTool(makeTool({ tool_name: 'Unknown', input_json: '{}' }));
       expect(component.headerSummary()).toBe('');
     });
+
+    it('shows the subject of a TaskCreate row', () => {
+      setTool(makeTool({ tool_name: 'TaskCreate', input_json: '{"subject":"Write the fold"}' }));
+      expect(component.headerSummary()).toBe('Write the fold');
+    });
+
+    it('shows the id and new status of a TaskUpdate row', () => {
+      setTool(
+        makeTool({ tool_name: 'TaskUpdate', input_json: '{"taskId":"3","status":"completed"}' })
+      );
+      expect(component.headerSummary()).toBe('#3 → completed');
+    });
+
+    it('shows the id and new subject of a TaskUpdate row without a status', () => {
+      setTool(makeTool({ tool_name: 'TaskUpdate', input_json: '{"taskId":"3","subject":"Ship"}' }));
+      expect(component.headerSummary()).toBe('#3 → Ship');
+    });
+
+    it('shows the id of a TaskGet row and nothing for TaskList', () => {
+      setTool(makeTool({ tool_name: 'TaskGet', input_json: '{"taskId":"2"}' }));
+      expect(component.headerSummary()).toBe('#2');
+
+      setTool(makeTool({ tool_name: 'TaskList', input_json: '{}' }));
+      expect(component.headerSummary()).toBe('');
+    });
+  });
+
+  describe('task tool body', () => {
+    it('shows a TaskCreate description instead of raw JSON', () => {
+      setTool(
+        makeTool({
+          tool_name: 'TaskCreate',
+          input_json: '{"subject":"Write the fold","description":"Pure function over tool calls"}',
+        })
+      );
+      component.toggleCollapsed();
+      fixture.detectChanges();
+      const el = fixture.nativeElement as HTMLElement;
+      expect(el.querySelector('[data-testid="task-description"]')?.textContent?.trim()).toBe(
+        'Pure function over tool calls'
+      );
+      expect(el.querySelector('[data-testid="code-block"]')).toBeNull();
+    });
+
+    it('renders no raw JSON for TaskUpdate, TaskList and TaskGet', () => {
+      for (const [tool_name, input_json] of [
+        ['TaskUpdate', '{"taskId":"1","status":"completed"}'],
+        ['TaskList', '{}'],
+        ['TaskGet', '{"taskId":"1"}'],
+      ]) {
+        setTool(makeTool({ tool_id: tool_name, tool_name, input_json }));
+        component.toggleCollapsed();
+        fixture.detectChanges();
+        const el = fixture.nativeElement as HTMLElement;
+        expect(el.querySelector('[data-testid="code-block"]'), tool_name).toBeNull();
+      }
+    });
   });
 });

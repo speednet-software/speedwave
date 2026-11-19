@@ -26,6 +26,7 @@ import { initializeRegistry } from './tool-registry.js';
 import { loadAuthTokens } from './auth-tokens.js';
 
 import { loadAccess } from './access-config.js';
+import { OAUTH_COMPAT_PATH, createOAuthCompatHandler, OAuthCompatOptions } from './oauth-compat.js';
 import { loadPolicy } from './policy.js';
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
@@ -86,6 +87,7 @@ async function main() {
     console.log(`${ts()}    POST /              - MCP protocol endpoint`);
     console.log(`${ts()}    DELETE /            - Session termination`);
     console.log(`${ts()}    GET  /health        - Health check`);
+    console.log(`${ts()}    POST ${OAUTH_COMPAT_PATH}  - OAuth compat wait for old plugins`);
     console.log(`${ts()} 🛠️  Meta-tools:`);
     registrations.forEach(({ tool }, i) => console.log(`${ts()}    ${i + 1}. ${tool.name}`));
   });
@@ -138,8 +140,12 @@ export function createSessionRateLimiter() {
 /**
  * Create the Hub Express app with MCP transport endpoints.
  * @param rpcHandler - JSON-RPC handler to process incoming requests
+ * @param oauthCompat - wait and concurrency limits of the OAuth compat endpoint
  */
-export function createHubApp(rpcHandler: JSONRPCHandler): Express {
+export function createHubApp(
+  rpcHandler: JSONRPCHandler,
+  oauthCompat: OAuthCompatOptions = {}
+): Express {
   const app = express();
 
   app.disable('x-powered-by');
@@ -149,6 +155,8 @@ export function createHubApp(rpcHandler: JSONRPCHandler): Express {
   app.get('/health', (_req: Request, res: Response) => {
     res.json({ status: 'ok' });
   });
+
+  app.post(OAUTH_COMPAT_PATH, createOAuthCompatHandler(oauthCompat));
 
   app.use(createSessionRateLimiter());
 

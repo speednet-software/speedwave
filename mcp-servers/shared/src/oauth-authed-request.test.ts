@@ -1,20 +1,13 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { join } from 'node:path';
 
-const refreshAccessToken = vi.fn();
 const loadToken = vi.fn();
 const accessTokenExpiresWithin = vi.fn();
-
-class OAuthScopeMismatchError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'OAuthScopeMismatchError';
-  }
-}
+const refreshFailure = vi.fn();
 
 vi.mock('./oauth-client.js', () => ({
-  refreshAccessToken: (...a: unknown[]) => refreshAccessToken(...a),
   accessTokenExpiresWithin: (...a: unknown[]) => accessTokenExpiresWithin(...a),
-  OAuthScopeMismatchError,
+  refreshFailure: (...a: unknown[]) => refreshFailure(...a),
 }));
 vi.mock('./security.js', () => ({
   loadToken: (...a: unknown[]) => loadToken(...a),
@@ -28,31 +21,38 @@ function resp(status: number): Response {
 
 describe('authedRequest', () => {
   beforeEach(() => {
-    refreshAccessToken.mockReset();
+    vi.useFakeTimers();
     loadToken.mockReset();
     accessTokenExpiresWithin.mockReset();
+    refreshFailure.mockReset();
     accessTokenExpiresWithin.mockReturnValue(false);
-    refreshAccessToken.mockResolvedValue({ expiresIn: 3600, grantedScopes: [] });
     loadToken.mockResolvedValue('fresh-token');
+    refreshFailure.mockResolvedValue(new Error('status message'));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    delete process.env.TOKENS_DIR;
   });
 
   function baseOpts(send: (t: string) => Promise<Response>) {
     return { service: 'glpi', state: { accessToken: 'old-token' }, lock: new RefreshLock(), send };
   }
 
-  it('returns a 200 without refreshing', async () => {
+  it('returns a 200 without reading the token file', async () => {
     const send = vi.fn().mockResolvedValue(resp(200));
     const out = await authedRequest(baseOpts(send));
     expect(out.status).toBe(200);
     expect(send).toHaveBeenCalledTimes(1);
-    expect(refreshAccessToken).not.toHaveBeenCalled();
+    expect(loadToken).not.toHaveBeenCalled();
   });
 
-  it('refreshes and retries once on 401', async () => {
+  it('retries once with the rewritten token on 401', async () => {
     const send = vi.fn().mockResolvedValueOnce(resp(401)).mockResolvedValueOnce(resp(200));
     const out = await authedRequest(baseOpts(send));
     expect(out.status).toBe(200);
-    expect(refreshAccessToken).toHaveBeenCalledTimes(1);
+    expect(loadToken).toHaveBeenCalledTimes(1);
     expect(send).toHaveBeenNthCalledWith(1, 'old-token');
     expect(send).toHaveBeenNthCalledWith(2, 'fresh-token');
   });
@@ -62,131 +62,30 @@ describe('authedRequest', () => {
     const out = await authedRequest(baseOpts(send));
     expect(out.status).toBe(400);
     expect(send).toHaveBeenCalledTimes(1);
-    expect(refreshAccessToken).not.toHaveBeenCalled();
+    expect(loadToken).not.toHaveBeenCalled();
   });
 
-  it('refreshes and retries on 400 when authFailureStatuses includes it', async () => {
+  it('retries on 400 when authFailureStatuses includes it', async () => {
     const send = vi.fn().mockResolvedValueOnce(resp(400)).mockResolvedValueOnce(resp(200));
     const out = await authedRequest({ ...baseOpts(send), authFailureStatuses: [400, 401] });
     expect(out.status).toBe(200);
-    expect(refreshAccessToken).toHaveBeenCalledTimes(1);
     expect(send).toHaveBeenNthCalledWith(2, 'fresh-token');
   });
 
-  it('does NOT refresh on a 5xx (server error)', async () => {
-    const send = vi.fn().mockResolvedValue(resp(503));
-    const out = await authedRequest(baseOpts(send));
-    expect(out.status).toBe(503);
-    expect(send).toHaveBeenCalledTimes(1);
-    expect(refreshAccessToken).not.toHaveBeenCalled();
-  });
-
-  it('does NOT refresh on a 403 or 404', async () => {
-    for (const status of [403, 404]) {
-      refreshAccessToken.mockClear();
+  it('does NOT refresh on a 5xx, 403 or 404', async () => {
+    for (const status of [503, 403, 404]) {
       const send = vi.fn().mockResolvedValue(resp(status));
       const out = await authedRequest(baseOpts(send));
       expect(out.status).toBe(status);
-      expect(refreshAccessToken).not.toHaveBeenCalled();
     }
+    expect(loadToken).not.toHaveBeenCalled();
   });
 
-  it('retries exactly once — a persistent 401 is returned, not looped', async () => {
+  it('retries exactly once: a persistent 401 is returned, not looped', async () => {
     const send = vi.fn().mockResolvedValue(resp(401));
     const out = await authedRequest(baseOpts(send));
     expect(out.status).toBe(401);
     expect(send).toHaveBeenCalledTimes(2);
-    expect(refreshAccessToken).toHaveBeenCalledTimes(1);
-  });
-
-  it('proactively refreshes when the token is near expiry', async () => {
-    accessTokenExpiresWithin.mockReturnValue(true);
-    const send = vi.fn().mockResolvedValue(resp(200));
-    const out = await authedRequest({ ...baseOpts(send), proactiveWithinSeconds: 120 });
-    expect(out.status).toBe(200);
-    expect(refreshAccessToken).toHaveBeenCalledTimes(1);
-    expect(send).toHaveBeenCalledTimes(1);
-    expect(send).toHaveBeenCalledWith('fresh-token');
-  });
-
-  it('falls through to the request when a proactive refresh fails', async () => {
-    accessTokenExpiresWithin.mockReturnValue(true);
-    refreshAccessToken.mockRejectedValue(new Error('worker_unreachable'));
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const send = vi.fn().mockResolvedValue(resp(200));
-    const out = await authedRequest({ ...baseOpts(send), proactiveWithinSeconds: 120 });
-    expect(out.status).toBe(200);
-    expect(send).toHaveBeenCalledWith('old-token');
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('proactive refresh failed'));
-    warn.mockRestore();
-  });
-
-  it('propagates a scope mismatch from proactive refresh without sending', async () => {
-    accessTokenExpiresWithin.mockReturnValue(true);
-    refreshAccessToken.mockRejectedValue(new OAuthScopeMismatchError('scope missing'));
-    const send = vi.fn();
-    await expect(
-      authedRequest({ ...baseOpts(send), proactiveWithinSeconds: 120 })
-    ).rejects.toBeInstanceOf(OAuthScopeMismatchError);
-    expect(send).not.toHaveBeenCalled();
-  });
-
-  it('updates state.accessToken after a refresh', async () => {
-    const opts = baseOpts(
-      vi.fn().mockResolvedValueOnce(resp(401)).mockResolvedValueOnce(resp(200))
-    );
-    await authedRequest(opts);
-    expect(opts.state.accessToken).toBe('fresh-token');
-  });
-
-  it('serializes concurrent refreshes — two parallel 401s refresh once', async () => {
-    const lock = new RefreshLock();
-    const state = { accessToken: 'old-token' };
-    let refreshes = 0;
-    refreshAccessToken.mockImplementation(async () => {
-      refreshes += 1;
-      return { expiresIn: 3600, grantedScopes: [] };
-    });
-    const mkSend = () => vi.fn().mockResolvedValueOnce(resp(401)).mockResolvedValueOnce(resp(200));
-    const [a, b] = await Promise.all([
-      authedRequest({ service: 'glpi', state, lock, send: mkSend() }),
-      authedRequest({ service: 'glpi', state, lock, send: mkSend() }),
-    ]);
-    expect(a.status).toBe(200);
-    expect(b.status).toBe(200);
-    expect(refreshes).toBe(1);
-  });
-
-  it('single-flights via generation even when the new token equals the old', async () => {
-    const lock = new RefreshLock();
-    const state = { accessToken: 'same-token' };
-    loadToken.mockResolvedValue('same-token');
-    let refreshes = 0;
-    refreshAccessToken.mockImplementation(async () => {
-      refreshes += 1;
-      return { expiresIn: 3600, grantedScopes: [] };
-    });
-    const mkSend = () => vi.fn().mockResolvedValueOnce(resp(401)).mockResolvedValueOnce(resp(200));
-    await Promise.all([
-      authedRequest({ service: 'glpi', state, lock, send: mkSend() }),
-      authedRequest({ service: 'glpi', state, lock, send: mkSend() }),
-    ]);
-    expect(refreshes).toBe(1);
-  });
-
-  it('does NOT proactively refresh when the token is not near expiry', async () => {
-    accessTokenExpiresWithin.mockReturnValue(false);
-    const send = vi.fn().mockResolvedValue(resp(200));
-    await authedRequest({ ...baseOpts(send), proactiveWithinSeconds: 120 });
-    expect(refreshAccessToken).not.toHaveBeenCalled();
-  });
-
-  it('refreshes reactively after a proactive refresh when the server still 401s', async () => {
-    accessTokenExpiresWithin.mockReturnValue(true);
-    const send = vi.fn().mockResolvedValueOnce(resp(401)).mockResolvedValueOnce(resp(200));
-    const out = await authedRequest({ ...baseOpts(send), proactiveWithinSeconds: 120 });
-    expect(out.status).toBe(200);
-    expect(refreshAccessToken).toHaveBeenCalledTimes(2);
   });
 
   it('rejects authFailureStatuses containing a status below 400', async () => {
@@ -196,47 +95,197 @@ describe('authedRequest', () => {
     ).rejects.toThrow(/>= 400/);
   });
 
-  it('propagates a refresh failure on 401', async () => {
-    refreshAccessToken.mockRejectedValue(new Error('worker_unreachable'));
-    const send = vi.fn().mockResolvedValue(resp(401));
-    await expect(authedRequest(baseOpts(send))).rejects.toThrow('worker_unreachable');
+  it('updates state.accessToken from the rewritten token', async () => {
+    const opts = baseOpts(
+      vi.fn().mockResolvedValueOnce(resp(401)).mockResolvedValueOnce(resp(200))
+    );
+    await authedRequest(opts);
+    expect(opts.state.accessToken).toBe('fresh-token');
   });
 
-  it('throws when the worker reports success but writes no access_token', async () => {
-    loadToken.mockResolvedValue('');
-    const send = vi.fn().mockResolvedValue(resp(401));
-    await expect(authedRequest(baseOpts(send))).rejects.toThrow(/access_token was not written/);
-  });
-
-  it('skips the stale-read poll when the worker reports a rate-limited noop', async () => {
-    refreshAccessToken.mockResolvedValue({ expiresIn: 600, grantedScopes: [], rateLimited: true });
-    loadToken.mockResolvedValue('old-token');
+  it('reads access_token from the tokensDir override', async () => {
     const send = vi.fn().mockResolvedValueOnce(resp(401)).mockResolvedValueOnce(resp(200));
-    const out = await authedRequest(baseOpts(send));
-    expect(out.status).toBe(200);
-    expect(loadToken).toHaveBeenCalledTimes(1);
+    await authedRequest({ ...baseOpts(send), tokensDir: '/custom/tokens' });
+    expect(loadToken).toHaveBeenCalledWith(join('/custom/tokens', 'access_token'));
   });
 
-  it('re-polls a stale read after a real refresh until the new token appears', async () => {
+  it('reads access_token from TOKENS_DIR when no override is given', async () => {
+    process.env.TOKENS_DIR = '/env/tokens';
+    const send = vi.fn().mockResolvedValueOnce(resp(401)).mockResolvedValueOnce(resp(200));
+    await authedRequest(baseOpts(send));
+    expect(loadToken).toHaveBeenCalledWith(join('/env/tokens', 'access_token'));
+  });
+
+  it('polls the file until the host writes a new token, then retries', async () => {
     loadToken
       .mockResolvedValueOnce('old-token')
       .mockResolvedValueOnce('old-token')
       .mockResolvedValue('fresh-token');
     const send = vi.fn().mockResolvedValueOnce(resp(401)).mockResolvedValueOnce(resp(200));
     const opts = baseOpts(send);
-    const out = await authedRequest(opts);
+    const pending = authedRequest(opts);
+    await vi.advanceTimersByTimeAsync(2000);
+    const out = await pending;
     expect(out.status).toBe(200);
     expect(opts.state.accessToken).toBe('fresh-token');
     expect(loadToken).toHaveBeenCalledTimes(3);
+    expect(send).toHaveBeenNthCalledWith(2, 'fresh-token');
+  });
+
+  it('treats an empty file as unchanged while the host is writing', async () => {
+    loadToken.mockResolvedValueOnce('').mockResolvedValue('fresh-token');
+    const send = vi.fn().mockResolvedValueOnce(resp(401)).mockResolvedValueOnce(resp(200));
+    const pending = authedRequest(baseOpts(send));
+    await vi.advanceTimersByTimeAsync(2000);
+    await pending;
+    expect(send).toHaveBeenNthCalledWith(2, 'fresh-token');
+  });
+
+  it('gives up after 30 s with the refresh_status message and does not retry the call', async () => {
+    const failure = new Error('Slack sign-in expired.');
+    refreshFailure.mockResolvedValue(failure);
+    loadToken.mockResolvedValue('old-token');
+    const send = vi.fn().mockResolvedValue(resp(401));
+    let settled = false;
+    const pending = authedRequest({ ...baseOpts(send), tokensDir: '/t' });
+    const assertion = expect(pending).rejects.toBe(failure);
+    pending.catch(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(29_000);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(2000);
+    await assertion;
+    expect(settled).toBe(true);
+    expect(refreshFailure).toHaveBeenCalledWith('glpi', '/t');
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it('propagates a token file read error', async () => {
+    loadToken.mockRejectedValue(new Error('Token file not found'));
+    const send = vi.fn().mockResolvedValue(resp(401));
+    await expect(authedRequest(baseOpts(send))).rejects.toThrow('Token file not found');
+  });
+
+  it('serializes concurrent refreshes: two parallel 401s read the file once', async () => {
+    const lock = new RefreshLock();
+    const state = { accessToken: 'old-token' };
+    const mkSend = () => vi.fn().mockResolvedValueOnce(resp(401)).mockResolvedValueOnce(resp(200));
+    const [a, b] = await Promise.all([
+      authedRequest({ service: 'glpi', state, lock, send: mkSend() }),
+      authedRequest({ service: 'glpi', state, lock, send: mkSend() }),
+    ]);
+    expect(a.status).toBe(200);
+    expect(b.status).toBe(200);
+    expect(loadToken).toHaveBeenCalledTimes(1);
+    expect(lock.generation).toBe(1);
+  });
+
+  it('retries at once when another call already adopted a newer token', async () => {
+    const lock = new RefreshLock();
+    const state = { accessToken: 'T0' };
+    loadToken.mockResolvedValue('T1');
+    const sends: string[] = [];
+    const mkSend = () =>
+      vi.fn(async (token: string) => {
+        sends.push(token);
+        return resp(token === 'T0' ? 401 : 200);
+      });
+    const [a, b] = await Promise.all([
+      authedRequest({ service: 'glpi', state, lock, send: mkSend() }),
+      authedRequest({ service: 'glpi', state, lock, send: mkSend() }),
+    ]);
+    expect(a.status).toBe(200);
+    expect(b.status).toBe(200);
+    expect(sends).toEqual(['T0', 'T0', 'T1', 'T1']);
+    expect(loadToken).toHaveBeenCalledTimes(1);
+    expect(state.accessToken).toBe('T1');
+  });
+
+  it('retries without any file read when the token changed between send and failure', async () => {
+    const state = { accessToken: 'T0' };
+    const send = vi.fn(async (token: string) => {
+      if (token === 'T0') {
+        state.accessToken = 'T1';
+        return resp(401);
+      }
+      return resp(200);
+    });
+    const out = await authedRequest({ service: 'glpi', state, lock: new RefreshLock(), send });
+    expect(out.status).toBe(200);
+    expect(send).toHaveBeenLastCalledWith('T1');
+    expect(loadToken).not.toHaveBeenCalled();
+  });
+
+  it('does not bump the lock generation when the wait times out', async () => {
+    loadToken.mockResolvedValue('old-token');
+    const lock = new RefreshLock();
+    const send = vi.fn().mockResolvedValue(resp(401));
+    const assertion = expect(
+      authedRequest({ service: 'glpi', state: { accessToken: 'old-token' }, lock, send })
+    ).rejects.toBeInstanceOf(Error);
+    await vi.advanceTimersByTimeAsync(31_000);
+    await assertion;
+    expect(lock.generation).toBe(0);
+  });
+
+  it('does NOT read the file proactively when the token is not near expiry', async () => {
+    const send = vi.fn().mockResolvedValue(resp(200));
+    await authedRequest({ ...baseOpts(send), proactiveWithinSeconds: 120 });
+    expect(loadToken).not.toHaveBeenCalled();
+  });
+
+  it('adopts a rewritten token before sending when the token is near expiry', async () => {
+    accessTokenExpiresWithin.mockReturnValue(true);
+    const send = vi.fn().mockResolvedValue(resp(200));
+    const out = await authedRequest({ ...baseOpts(send), proactiveWithinSeconds: 120 });
+    expect(out.status).toBe(200);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith('fresh-token');
+  });
+
+  it('sends with the current token without waiting when near expiry and the file is unchanged', async () => {
+    accessTokenExpiresWithin.mockReturnValue(true);
+    loadToken.mockResolvedValue('old-token');
+    const send = vi.fn().mockResolvedValue(resp(200));
+    const out = await authedRequest({ ...baseOpts(send), proactiveWithinSeconds: 120 });
+    expect(out.status).toBe(200);
+    expect(send).toHaveBeenCalledWith('old-token');
+    expect(loadToken).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls through to the request when reading the file proactively fails', async () => {
+    accessTokenExpiresWithin.mockReturnValue(true);
+    loadToken.mockRejectedValue(new Error('Token file not found'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const send = vi.fn().mockResolvedValue(resp(200));
+    const out = await authedRequest({ ...baseOpts(send), proactiveWithinSeconds: 120 });
+    expect(out.status).toBe(200);
+    expect(send).toHaveBeenCalledWith('old-token');
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Token file not found'));
+  });
+
+  it('warns with the stringified value when the proactive read throws a non-Error', async () => {
+    accessTokenExpiresWithin.mockReturnValue(true);
+    loadToken.mockRejectedValue('boom');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const send = vi.fn().mockResolvedValue(resp(200));
+    await authedRequest({ ...baseOpts(send), proactiveWithinSeconds: 120 });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('boom'));
   });
 });
 
 describe('authedSdkCall', () => {
   beforeEach(() => {
-    refreshAccessToken.mockReset();
+    vi.useFakeTimers();
     loadToken.mockReset();
-    refreshAccessToken.mockResolvedValue({ expiresIn: 3600, grantedScopes: [] });
+    refreshFailure.mockReset();
     loadToken.mockResolvedValue('fresh-token');
+    refreshFailure.mockResolvedValue(new Error('status message'));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   const authError = () => Object.assign(new Error('platform error'), { auth: true });
@@ -252,53 +301,50 @@ describe('authedSdkCall', () => {
     };
   }
 
-  it('returns the result without refreshing on success', async () => {
+  it('returns the result without reading the token file on success', async () => {
     const send = vi.fn().mockResolvedValue({ ok: true });
     const out = await authedSdkCall(sdkOpts(send));
     expect(out).toEqual({ ok: true });
     expect(send).toHaveBeenCalledTimes(1);
-    expect(refreshAccessToken).not.toHaveBeenCalled();
+    expect(loadToken).not.toHaveBeenCalled();
   });
 
-  it('refreshes and retries once on an auth error', async () => {
+  it('retries once with the rewritten token on an auth error', async () => {
     const send = vi.fn().mockRejectedValueOnce(authError()).mockResolvedValueOnce('retried');
     const opts = sdkOpts(send);
     const out = await authedSdkCall(opts);
     expect(out).toBe('retried');
-    expect(refreshAccessToken).toHaveBeenCalledTimes(1);
     expect(send).toHaveBeenNthCalledWith(1, 'old-token');
     expect(send).toHaveBeenNthCalledWith(2, 'fresh-token');
     expect(opts.state.accessToken).toBe('fresh-token');
   });
 
-  it('rethrows non-auth errors without refreshing', async () => {
+  it('rethrows non-auth errors without reading the token file', async () => {
     const send = vi.fn().mockRejectedValue(new Error('channel_not_found'));
     await expect(authedSdkCall(sdkOpts(send))).rejects.toThrow('channel_not_found');
-    expect(refreshAccessToken).not.toHaveBeenCalled();
+    expect(loadToken).not.toHaveBeenCalled();
   });
 
-  it('propagates a persistent auth error after one refresh', async () => {
+  it('propagates a persistent auth error after one retry', async () => {
     const send = vi.fn().mockRejectedValue(authError());
     await expect(authedSdkCall(sdkOpts(send))).rejects.toThrow('platform error');
-    expect(refreshAccessToken).toHaveBeenCalledTimes(1);
     expect(send).toHaveBeenCalledTimes(2);
   });
 
-  it('propagates a refresh failure', async () => {
-    refreshAccessToken.mockRejectedValue(new Error('invalid_grant: token_revoked'));
+  it('throws the refresh_status error when the token stays unchanged for 30 s', async () => {
+    const failure = new Error('Slack token expired and has not been refreshed yet.');
+    refreshFailure.mockResolvedValue(failure);
+    loadToken.mockResolvedValue('old-token');
     const send = vi.fn().mockRejectedValue(authError());
-    await expect(authedSdkCall(sdkOpts(send))).rejects.toThrow('invalid_grant');
+    const assertion = expect(authedSdkCall(sdkOpts(send))).rejects.toBe(failure);
+    await vi.advanceTimersByTimeAsync(31_000);
+    await assertion;
     expect(send).toHaveBeenCalledTimes(1);
   });
 
-  it('serializes concurrent refreshes — two parallel auth failures refresh once', async () => {
+  it('serializes concurrent refreshes: two parallel auth failures read the file once', async () => {
     const lock = new RefreshLock();
     const state = { accessToken: 'old-token' };
-    let refreshes = 0;
-    refreshAccessToken.mockImplementation(async () => {
-      refreshes += 1;
-      return { expiresIn: 3600, grantedScopes: [] };
-    });
     const mkSend = () => vi.fn().mockRejectedValueOnce(authError()).mockResolvedValueOnce('ok');
     const [a, b] = await Promise.all([
       authedSdkCall({ service: 'slack', state, lock, send: mkSend(), isAuthError }),
@@ -306,6 +352,28 @@ describe('authedSdkCall', () => {
     ]);
     expect(a).toBe('ok');
     expect(b).toBe('ok');
-    expect(refreshes).toBe(1);
+    expect(loadToken).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries at once when another call already adopted a newer token', async () => {
+    const lock = new RefreshLock();
+    const state = { accessToken: 'T0' };
+    loadToken.mockResolvedValue('T1');
+    const sends: string[] = [];
+    const mkSend = () =>
+      vi.fn(async (token: string) => {
+        sends.push(token);
+        if (token === 'T0') throw authError();
+        return 'ok';
+      });
+    const [a, b] = await Promise.all([
+      authedSdkCall({ service: 'slack', state, lock, send: mkSend(), isAuthError }),
+      authedSdkCall({ service: 'slack', state, lock, send: mkSend(), isAuthError }),
+    ]);
+    expect(a).toBe('ok');
+    expect(b).toBe('ok');
+    expect(sends).toEqual(['T0', 'T0', 'T1', 'T1']);
+    expect(loadToken).toHaveBeenCalledTimes(1);
+    expect(state.accessToken).toBe('T1');
   });
 });

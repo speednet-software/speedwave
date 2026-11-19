@@ -27,7 +27,7 @@ source "$REPO_ROOT/scripts/mkdir-lock.sh"
 acquire_lock "$LOCK_DIR"
 acquire_lock "$WASM_LOCK_DIR"
 
-rm -rf "$DEST/build-context" "$DEST/mcp-os" "$DEST/oauth"
+rm -rf "$DEST/build-context" "$DEST/mcp-os"
 
 if ! bash "$REPO_ROOT/crates/pii-engine-wasm/build-wasm.sh" "$WASM_PKG_DIR"; then
   echo "ERROR: failed to build the PII engine wasm artifact (crates/pii-engine-wasm)." >&2
@@ -101,8 +101,7 @@ done
 if [[ "${1:-}" == "--ci" ]]; then
   (cd "$MCP_SERVERS_DIR" && npm ci \
     && npm run build --workspace=shared \
-    && npm run build --workspace=os \
-    && npm run build --workspace=oauth)
+    && npm run build --workspace=os)
 fi
 
 stage_host_worker() {
@@ -124,4 +123,3 @@ stage_host_worker() {
 }
 
 stage_host_worker os mcp-os
-stage_host_worker oauth oauth
