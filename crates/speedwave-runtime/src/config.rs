@@ -1092,7 +1092,7 @@ pub struct ManagedManagementConfig {
     pub name: Option<String>,
     /// Endpoint answering the management status contract, called with the gateway's headers.
     pub status_url: Option<String>,
-    /// The provider's console, linked from the status view.
+    /// The provider's console; carried in the status view, not linked in the UI yet.
     pub console_url: Option<String>,
 }
 
