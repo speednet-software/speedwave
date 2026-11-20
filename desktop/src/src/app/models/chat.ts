@@ -73,7 +73,14 @@ export type StreamChunk =
   | {
       chunk_type: 'SubagentActivity';
       data: { parent_tool_id: string; tool_id: string; tool_name: string; input_json: string };
+    }
+  | {
+      chunk_type: 'SubagentStatus';
+      data: { tool_id: string; status: SubagentState; summary: string };
     };
+
+/** Mirror of Rust `chat.rs::SubagentState`: where a subagent stands, from the `task_*` lines. */
+export type SubagentState = 'running' | 'completed' | 'error' | 'stopped';
 
 /** What started a Claude Code turn. */
 export type TurnOrigin = 'user' | 'scheduled' | 'task_notification';

@@ -115,6 +115,31 @@ pub enum StreamChunk {
         tool_name: String,
         input_json: String,
     },
+    SubagentStatus {
+        tool_id: String,
+        status: SubagentState,
+        summary: String,
+    },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentState {
+    Running,
+    Completed,
+    Error,
+    Stopped,
+}
+
+impl SubagentState {
+    fn from_task_status(status: &str) -> Self {
+        match status {
+            "running" | "pending" => Self::Running,
+            "failed" | "error" => Self::Error,
+            "stopped" | "killed" | "cancelled" => Self::Stopped,
+            _ => Self::Completed,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,6 +207,15 @@ pub(crate) fn sanitize_chunk(chunk: StreamChunk) -> StreamChunk {
         StreamChunk::QueueDrained { session_id, text } => StreamChunk::QueueDrained {
             session_id,
             text: sanitize(&text),
+        },
+        StreamChunk::SubagentStatus {
+            tool_id,
+            status,
+            summary,
+        } => StreamChunk::SubagentStatus {
+            tool_id,
+            status,
+            summary: sanitize(&summary),
         },
         StreamChunk::AskUserQuestion {
             tool_id,
@@ -266,6 +300,15 @@ fn detokenize_chunk(chunk: StreamChunk, policy: &DisplayPolicy) -> StreamChunk {
         StreamChunk::QueueDrained { session_id, text } => StreamChunk::QueueDrained {
             session_id,
             text: detok(policy, &text),
+        },
+        StreamChunk::SubagentStatus {
+            tool_id,
+            status,
+            summary,
+        } => StreamChunk::SubagentStatus {
+            tool_id,
+            status,
+            summary: detok(policy, &summary),
         },
         StreamChunk::AskUserQuestion {
             tool_id,
@@ -481,6 +524,7 @@ pub struct StreamParser {
     model_tracker: crate::session_model::SessionModelTracker,
     seen_unknown_types: std::collections::HashSet<String>,
     next_turn_origin: Option<TurnOrigin>,
+    subagent_tasks: HashMap<String, String>,
     slash_session: Option<speedwave_runtime::slash::SessionSlash>,
 }
 
@@ -500,6 +544,7 @@ impl StreamParser {
             model_tracker: crate::session_model::SessionModelTracker::default(),
             seen_unknown_types: std::collections::HashSet::new(),
             next_turn_origin: None,
+            subagent_tasks: HashMap::new(),
             slash_session: None,
         }
     }
@@ -547,6 +592,7 @@ impl StreamParser {
         match msg_type {
             "stream_event" if is_sidechain_event(parsed) => (Vec::new(), None),
             "stream_event" => option_to_vec(self.parse_stream_event(&parsed["event"])),
+            "user" if is_sidechain_event(parsed) => (Vec::new(), None),
             "user" => self.parse_user_message(parsed),
             "result" => {
                 self.next_turn_origin = None;
@@ -1210,12 +1256,52 @@ impl StreamParser {
             self.next_turn_origin = Some(TurnOrigin::TaskNotification);
         }
         let (mut chunks, log) = option_to_vec(self.parse_system_message(parsed));
+        chunks.extend(self.subagent_status_chunk(parsed));
         if subtype == Some("init") {
             chunks.push(StreamChunk::TurnStarted {
                 origin: self.next_turn_origin.take().unwrap_or(TurnOrigin::User),
             });
         }
         (chunks, log)
+    }
+
+    fn subagent_status_chunk(&mut self, parsed: &serde_json::Value) -> Option<StreamChunk> {
+        let task_id = parsed["task_id"].as_str().filter(|s| !s.is_empty())?;
+        match parsed["subtype"].as_str()? {
+            "task_started" => {
+                if parsed["task_type"].as_str() != Some("local_agent") {
+                    return None;
+                }
+                let tool_id = parsed["tool_use_id"].as_str().filter(|s| !s.is_empty())?;
+                self.subagent_tasks
+                    .insert(task_id.to_string(), tool_id.to_string());
+                Some(StreamChunk::SubagentStatus {
+                    tool_id: tool_id.to_string(),
+                    status: SubagentState::Running,
+                    summary: String::new(),
+                })
+            }
+            "task_updated" => {
+                let tool_id = self.subagent_tasks.get(task_id)?.clone();
+                let status = parsed["patch"]["status"].as_str()?;
+                Some(StreamChunk::SubagentStatus {
+                    tool_id,
+                    status: SubagentState::from_task_status(status),
+                    summary: String::new(),
+                })
+            }
+            "task_notification" => {
+                let tool_id = self.subagent_tasks.remove(task_id)?;
+                Some(StreamChunk::SubagentStatus {
+                    tool_id,
+                    status: parsed["status"]
+                        .as_str()
+                        .map_or(SubagentState::Completed, SubagentState::from_task_status),
+                    summary: parsed["summary"].as_str().unwrap_or_default().to_string(),
+                })
+            }
+            _ => None,
+        }
     }
 
     fn parse_system_message(
@@ -7117,6 +7203,236 @@ mod tests {
                 "SubagentActivity.{key} missing in models/chat.ts"
             );
         }
+    }
+
+    const SUBAGENT_CAPTURE: &str =
+        include_str!("../tests/fixtures/cc-2.1.322-subagent.sanitized.ndjson");
+
+    #[test]
+    fn the_subagent_capture_is_of_the_pinned_claude_code() {
+        let versions: Vec<String> = capture_lines(SUBAGENT_CAPTURE)
+            .iter()
+            .filter(|l| l["type"] == "system" && l["subtype"] == "init")
+            .map(|l| l["claude_code_version"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(versions.len(), 5);
+        assert!(
+            versions
+                .iter()
+                .all(|v| v == speedwave_runtime::defaults::CLAUDE_VERSION),
+            "re-capture the subagent streams from Claude Code {} (got {versions:?})",
+            speedwave_runtime::defaults::CLAUDE_VERSION
+        );
+    }
+
+    fn subagent_capture_chunks() -> Vec<StreamChunk> {
+        let mut parser = StreamParser::new();
+        capture_lines(SUBAGENT_CAPTURE)
+            .iter()
+            .flat_map(|l| parser.parse_line(l).0)
+            .collect()
+    }
+
+    #[test]
+    fn the_capture_carries_each_subagent_tool_call_under_its_parent() {
+        let calls: Vec<(String, String, String, String)> = subagent_capture_chunks()
+            .into_iter()
+            .filter_map(|c| match c {
+                StreamChunk::SubagentActivity {
+                    parent_tool_id,
+                    tool_id,
+                    tool_name,
+                    input_json,
+                } => Some((parent_tool_id, tool_id, tool_name, input_json)),
+                _ => None,
+            })
+            .collect();
+        let bash = r#"{"command":"echo sub-ok","description":"Print sub-ok"}"#;
+        assert_eq!(
+            calls,
+            [
+                ("toolu_stub_1", "toolu_stub_2", "Bash", bash),
+                ("toolu_stub_5", "toolu_stub_6", "Bash", bash),
+            ]
+            .map(|(a, b, c, d)| (
+                a.to_string(),
+                b.to_string(),
+                c.to_string(),
+                d.to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn the_capture_reports_the_status_of_both_agents_and_not_of_the_workflow() {
+        let statuses: Vec<(String, SubagentState, String)> = subagent_capture_chunks()
+            .into_iter()
+            .filter_map(|c| match c {
+                StreamChunk::SubagentStatus {
+                    tool_id,
+                    status,
+                    summary,
+                } => Some((tool_id, status, summary)),
+                _ => None,
+            })
+            .collect();
+        let done = |tool: &str| {
+            [
+                (tool.to_string(), SubagentState::Running, String::new()),
+                (tool.to_string(), SubagentState::Completed, String::new()),
+                (
+                    tool.to_string(),
+                    SubagentState::Completed,
+                    "sub done".to_string(),
+                ),
+            ]
+        };
+        let expected: Vec<_> = done("toolu_stub_1")
+            .into_iter()
+            .chain(done("toolu_stub_5"))
+            .collect();
+        assert_eq!(statuses, expected);
+    }
+
+    #[test]
+    fn the_capture_shows_only_main_thread_tool_blocks_and_results() {
+        let chunks = subagent_capture_chunks();
+        let started: Vec<&str> = chunks
+            .iter()
+            .filter_map(|c| match c {
+                StreamChunk::ToolStart { tool_name, .. } => Some(tool_name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(started, ["Agent", "Agent", "Workflow"]);
+        let results: Vec<&str> = chunks
+            .iter()
+            .filter_map(|c| match c {
+                StreamChunk::ToolResult { tool_id, .. } => Some(tool_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(results, ["toolu_stub_1", "toolu_stub_5", "toolu_stub_10"]);
+    }
+
+    fn status_line(extra: &str) -> String {
+        format!(r#"{{"type":"system","task_id":"t1",{extra}}}"#)
+    }
+
+    #[test]
+    fn an_agent_task_ends_with_the_status_of_its_notification() {
+        let cases = [
+            ("failed", SubagentState::Error),
+            ("stopped", SubagentState::Stopped),
+            ("completed", SubagentState::Completed),
+            ("some-future-status", SubagentState::Completed),
+        ];
+        for (status, expected) in cases {
+            let mut parser = StreamParser::new();
+            let started = status_line(
+                r#""subtype":"task_started","task_type":"local_agent","tool_use_id":"toolu_a""#,
+            );
+            parse_line_all_str(&mut parser, &started);
+            let ended = status_line(&format!(
+                r#""subtype":"task_notification","status":"{status}","summary":"s""#
+            ));
+            match parse_line_all_str(&mut parser, &ended).as_slice() {
+                [StreamChunk::SubagentStatus {
+                    tool_id,
+                    status,
+                    summary,
+                }] => {
+                    assert_eq!(tool_id, "toolu_a");
+                    assert_eq!(*status, expected);
+                    assert_eq!(summary, "s");
+                }
+                other => panic!("expected one SubagentStatus for {status}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_task_update_moves_a_known_agent_task_and_ignores_the_rest() {
+        let mut parser = StreamParser::new();
+        let update = status_line(r#""subtype":"task_updated","patch":{"status":"killed"}"#);
+        assert!(
+            parse_line_all_str(&mut parser, &update).is_empty(),
+            "an update of an unknown task has no tool to point at"
+        );
+        let started = status_line(
+            r#""subtype":"task_started","task_type":"local_agent","tool_use_id":"toolu_a""#,
+        );
+        parse_line_all_str(&mut parser, &started);
+        match parse_line_all_str(&mut parser, &update).as_slice() {
+            [StreamChunk::SubagentStatus { status, .. }] => {
+                assert_eq!(*status, SubagentState::Stopped)
+            }
+            other => panic!("expected one SubagentStatus, got {other:?}"),
+        }
+        let no_status = status_line(r#""subtype":"task_updated","patch":{"end_time":1}"#);
+        assert!(parse_line_all_str(&mut parser, &no_status).is_empty());
+    }
+
+    #[test]
+    fn a_task_that_is_not_an_agent_reports_no_status() {
+        let mut parser = StreamParser::new();
+        let started = status_line(
+            r#""subtype":"task_started","task_type":"local_workflow","tool_use_id":"toolu_w""#,
+        );
+        assert!(parse_line_all_str(&mut parser, &started).is_empty());
+        let ended = status_line(r#""subtype":"task_notification","status":"completed""#);
+        assert!(parse_line_all_str(&mut parser, &ended).is_empty());
+        let bare = r#"{"type":"system","subtype":"task_started"}"#;
+        assert!(parse_line_all_str(&mut parser, bare).is_empty());
+    }
+
+    #[test]
+    fn a_sidechain_tool_result_does_not_answer_a_main_thread_call() {
+        let mut parser = StreamParser::new();
+        let forged = r#"{"type":"user","parent_tool_use_id":"toolu_parent","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_parent","content":"forged"}]}}"#;
+        assert!(parse_line_all_str(&mut parser, forged).is_empty());
+    }
+
+    #[test]
+    fn subagent_status_variant_matches_ts_mirror() {
+        let ts = include_str!("../../src/src/app/models/chat.ts");
+        let chunk = StreamChunk::SubagentStatus {
+            tool_id: "t".into(),
+            status: SubagentState::Running,
+            summary: String::new(),
+        };
+        let v = serde_json::to_value(&chunk).unwrap();
+        assert_eq!(v["chunk_type"], "SubagentStatus");
+        let mut keys: Vec<&str> = v["data"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["status", "summary", "tool_id"]);
+        let marker = "chunk_type: 'SubagentStatus';";
+        let start = ts
+            .find(marker)
+            .expect("models/chat.ts must declare SubagentStatus");
+        let body = &ts[start..start + ts[start..].find("};").unwrap()];
+        assert!(body.contains("tool_id: string"));
+        assert!(body.contains("summary: string"));
+        assert!(body.contains("status: SubagentState"));
+        let wire: Vec<String> = [
+            SubagentState::Running,
+            SubagentState::Completed,
+            SubagentState::Error,
+            SubagentState::Stopped,
+        ]
+        .iter()
+        .map(|s| format!("'{}'", serde_json::to_value(s).unwrap().as_str().unwrap()))
+        .collect();
+        let mirror = format!("export type SubagentState = {};", wire.join(" | "));
+        assert!(
+            ts.contains(&mirror),
+            "models/chat.ts must declare `{mirror}`"
+        );
     }
 
     #[test]
