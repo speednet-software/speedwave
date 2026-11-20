@@ -4216,9 +4216,9 @@ services:
         use crate::host_mcp_process::lock::{self, LockFile, LockService};
         let planted = PlantedSecrets {
             values: Vec::new(),
-            anthropic_key: "SENTINEL-anthropic-api-key-0001",
+            anthropic_key: "SENTINEL-anthropic-api-key-0001", // gitleaks:allow
             caller_token: "SENTINEL-caller-token-0002",
-            pii_key: "SENTINEL-pii-key-0003",
+            pii_key: "SENTINEL-pii-key-0003", // gitleaks:allow
             os_token: "SENTINEL-os-token-0004",
             ner_token: "SENTINEL-ner-token-0005",
         };

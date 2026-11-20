@@ -49,5 +49,5 @@ desktop/src/src/app/meeting-transcription/recording-controls/recording-controls.
 
 .claude/rules/architecture.md:generic-api-key:7
 
-931aa4dd39c1e730a532c34ca0c9ddc008338281:crates/speedwave-runtime/src/compose/mod.rs:generic-api-key:4211
-931aa4dd39c1e730a532c34ca0c9ddc008338281:crates/speedwave-runtime/src/compose/mod.rs:generic-api-key:4213
+crates/speedwave-runtime/src/compose/mod.rs:generic-api-key:4211
+crates/speedwave-runtime/src/compose/mod.rs:generic-api-key:4213
