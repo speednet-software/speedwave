@@ -3430,10 +3430,11 @@ services:
             .map(|seq| seq.iter().filter_map(|v| v.as_str()).collect())
             .unwrap_or_default();
         assert!(
-            volumes
-                .iter()
-                .all(|v| v.ends_with(":/run/speedwave/auth:ro")),
-            "mcp-playwright may mount only its auth slot; got: {volumes:?}"
+            !volumes.is_empty()
+                && volumes
+                    .iter()
+                    .all(|v| v.ends_with(":/run/speedwave/auth:ro")),
+            "mcp-playwright must mount its auth slot and nothing else; got: {volumes:?}"
         );
     }
 
