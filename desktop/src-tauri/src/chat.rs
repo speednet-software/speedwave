@@ -132,12 +132,13 @@ pub enum SubagentState {
 }
 
 impl SubagentState {
-    fn from_task_status(status: &str) -> Self {
+    fn from_task_status(status: &str) -> Option<Self> {
         match status {
-            "running" | "pending" => Self::Running,
-            "failed" | "error" => Self::Error,
-            "stopped" | "killed" | "cancelled" => Self::Stopped,
-            _ => Self::Completed,
+            "running" | "pending" => Some(Self::Running),
+            "completed" => Some(Self::Completed),
+            "failed" | "error" => Some(Self::Error),
+            "stopped" | "killed" | "cancelled" => Some(Self::Stopped),
+            _ => None,
         }
     }
 }
@@ -1301,10 +1302,10 @@ impl StreamParser {
             }
             "task_updated" => {
                 let tool_id = self.subagent_tasks.get(task_id)?.clone();
-                let status = parsed["patch"]["status"].as_str()?;
+                let status = SubagentState::from_task_status(parsed["patch"]["status"].as_str()?)?;
                 Some(StreamChunk::SubagentStatus {
                     tool_id,
-                    status: SubagentState::from_task_status(status),
+                    status,
                     summary: String::new(),
                 })
             }
@@ -1314,7 +1315,8 @@ impl StreamParser {
                     tool_id,
                     status: parsed["status"]
                         .as_str()
-                        .map_or(SubagentState::Completed, SubagentState::from_task_status),
+                        .and_then(SubagentState::from_task_status)
+                        .unwrap_or(SubagentState::Completed),
                     summary: parsed["summary"].as_str().unwrap_or_default().to_string(),
                 })
             }
@@ -7389,6 +7391,11 @@ mod tests {
         }
         let no_status = status_line(r#""subtype":"task_updated","patch":{"end_time":1}"#);
         assert!(parse_line_all_str(&mut parser, &no_status).is_empty());
+        let unknown = status_line(r#""subtype":"task_updated","patch":{"status":"paused"}"#);
+        assert!(
+            parse_line_all_str(&mut parser, &unknown).is_empty(),
+            "an unknown status in an update is not a final status"
+        );
     }
 
     #[test]

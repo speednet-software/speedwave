@@ -638,32 +638,75 @@ fn attach_tool_results(
     }
 }
 
-fn attach_subagent_calls(
-    parsed: &serde_json::Value,
-    messages: &mut [ConversationMessage],
-    calls: &HashMap<String, (usize, usize)>,
-) {
-    if parsed["type"].as_str() != Some("assistant") {
-        return;
-    }
-    let parent = parsed["parent_tool_use_id"]
-        .as_str()
-        .filter(|id| !id.is_empty())
-        .unwrap_or_default();
-    let block = match calls.get(parent) {
-        Some(&(message, index)) => messages
-            .get_mut(message)
-            .and_then(|m| m.blocks.as_mut())
-            .and_then(|blocks| blocks.get_mut(index)),
-        None => None,
+const MAX_TRANSCRIPT_LINES: usize = 10_000;
+
+fn read_subagent_calls(session_dir: &Path) -> HashMap<String, Vec<crate::chat::SubagentCall>> {
+    let mut by_parent: HashMap<String, Vec<crate::chat::SubagentCall>> = HashMap::new();
+    let Ok(entries) = fs::read_dir(session_dir.join("subagents")) else {
+        return by_parent;
     };
-    match block {
-        Some(MessageBlock::ToolUse { activities, .. }) => {
-            activities.extend(crate::chat::subagent_calls(parsed));
+    let mut metas: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".meta.json"))
+        })
+        .collect();
+    metas.sort();
+    for meta_path in metas {
+        let parent = fs::read_to_string(&meta_path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .and_then(|meta| meta["toolUseId"].as_str().map(String::from))
+            .filter(|id| !id.is_empty());
+        let Some(parent) = parent else {
+            continue;
+        };
+        let transcript = meta_path.with_file_name(
+            meta_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .replace(".meta.json", ".jsonl"),
+        );
+        let Ok(file) = fs::File::open(&transcript) else {
+            log::debug!(
+                "subagent has no transcript file next to {}",
+                meta_path.display()
+            );
+            continue;
+        };
+        let calls = BufReader::new(file)
+            .lines()
+            .take(MAX_TRANSCRIPT_LINES)
+            .map_while(Result::ok)
+            .filter_map(|line| parse_jsonl_line(&line))
+            .filter(|parsed| parsed["type"].as_str() == Some("assistant"))
+            .flat_map(|parsed| crate::chat::subagent_calls(&parsed));
+        by_parent.entry(parent).or_default().extend(calls);
+    }
+    by_parent
+}
+
+fn attach_subagent_calls(
+    messages: &mut [ConversationMessage],
+    mut by_parent: HashMap<String, Vec<crate::chat::SubagentCall>>,
+) {
+    for message in messages {
+        for block in message.blocks.iter_mut().flatten() {
+            if let MessageBlock::ToolUse {
+                tool_id,
+                activities,
+                ..
+            } = block
+            {
+                if let Some(calls) = by_parent.remove(tool_id.as_str()) {
+                    *activities = calls;
+                }
+            }
         }
-        _ => log::debug!(
-            "skipping sidechain line without a matching main-thread tool_use parent_tool_use_id={parent}"
-        ),
     }
 }
 
@@ -896,7 +939,6 @@ fn get_conversation_impl(
     let file = fs::File::open(&path)
         .map_err(|e| anyhow::anyhow!("cannot read session {session_id}: {e}"))?;
 
-    const MAX_TRANSCRIPT_LINES: usize = 10_000;
     let reader = BufReader::new(file);
     let mut messages: Vec<ConversationMessage> = Vec::new();
     let mut dedupe = TranscriptDedupe::default();
@@ -907,7 +949,6 @@ fn get_conversation_impl(
         };
         attach_tool_results(&parsed, &mut messages, &dedupe.calls);
         if crate::chat::is_sidechain_event(&parsed) {
-            attach_subagent_calls(&parsed, &mut messages, &dedupe.calls);
             continue;
         }
         if let Some(msg) = parse_jsonl_entry(&parsed) {
@@ -919,6 +960,10 @@ fn get_conversation_impl(
 
     fold_history_control_chips(&mut messages);
     fold_assistant_turns(&mut messages);
+    attach_subagent_calls(
+        &mut messages,
+        read_subagent_calls(&sessions_dir_impl(data_dir, project).join(session_id)),
+    );
 
     Ok(ConversationTranscript {
         session_id: session_id.to_string(),
@@ -3955,15 +4000,33 @@ mod tests {
         );
     }
 
-    const SUBAGENT_TRANSCRIPT: [&str; 7] = [
+    const MAIN_TRANSCRIPT: [&str; 4] = [
         r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"delegate"}}"#,
         r#"{"type":"assistant","uuid":"a1","message":{"id":"msg_1","role":"assistant","content":[{"type":"tool_use","id":"toolu_agent","name":"Agent","input":{"description":"d"}}]}}"#,
-        r#"{"type":"user","parent_tool_use_id":"toolu_agent","message":{"role":"user","content":[{"type":"text","text":"the subagent prompt"}]}}"#,
-        r#"{"type":"assistant","parent_tool_use_id":"toolu_agent","message":{"id":"msg_s1","role":"assistant","content":[{"type":"text","text":"subagent text"},{"type":"tool_use","id":"toolu_sub","name":"Bash","input":{"command":"ls"}}]}}"#,
-        r#"{"type":"user","parent_tool_use_id":"toolu_agent","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_sub","content":"out"}]}}"#,
         r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_agent","content":"done"}]}}"#,
         r#"{"type":"assistant","uuid":"a2","message":{"id":"msg_2","role":"assistant","content":[{"type":"text","text":"all done"}]}}"#,
     ];
+
+    const SUBAGENT_FILE: [&str; 5] = [
+        r#"{"type":"user","isSidechain":true,"agentId":"a1","message":{"role":"user","content":"the subagent prompt"}}"#,
+        r#"{"type":"attachment","isSidechain":true,"agentId":"a1"}"#,
+        r#"{"type":"assistant","isSidechain":true,"agentId":"a1","message":{"id":"msg_s1","role":"assistant","content":[{"type":"text","text":"subagent text"},{"type":"tool_use","id":"toolu_sub","name":"Bash","input":{"command":"ls"}}]}}"#,
+        r#"{"type":"user","isSidechain":true,"agentId":"a1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_sub","content":"out"}]}}"#,
+        r#"{"type":"assistant","isSidechain":true,"agentId":"a1","message":{"id":"msg_s2","role":"assistant","content":[{"type":"text","text":"sub done"}]}}"#,
+    ];
+
+    fn write_subagent(dir: &Path, session_id: &str, agent: &str, meta: &str, lines: &[&str]) {
+        let subagents = dir.join(session_id).join("subagents");
+        fs::create_dir_all(&subagents).unwrap();
+        fs::write(subagents.join(format!("agent-{agent}.meta.json")), meta).unwrap();
+        fs::write(
+            subagents.join(format!("agent-{agent}.jsonl")),
+            lines.join("\n"),
+        )
+        .unwrap();
+    }
+
+    const SUBAGENT_META: &str = r#"{"agentType":"general-purpose","description":"d","toolUseId":"toolu_agent","spawnDepth":1,"requestShape":"foreground"}"#;
 
     fn agent_activities(transcript: &ConversationTranscript) -> Vec<crate::chat::SubagentCall> {
         transcript
@@ -3982,11 +4045,12 @@ mod tests {
     }
 
     #[test]
-    fn get_conversation_groups_the_tool_calls_of_a_subagent_under_its_parent() {
+    fn get_conversation_puts_the_tool_calls_of_a_subagent_under_its_parent() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
-        write_session(&dir, id, &SUBAGENT_TRANSCRIPT);
+        write_session(&dir, id, &MAIN_TRANSCRIPT);
+        write_subagent(&dir, id, "a1", SUBAGENT_META, &SUBAGENT_FILE);
 
         let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
 
@@ -4012,19 +4076,28 @@ mod tests {
     }
 
     #[test]
-    fn a_sidechain_call_without_a_main_thread_parent_is_dropped() {
+    fn a_subagent_file_without_a_known_parent_adds_no_activity() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
-        write_session(
+        write_session(&dir, id, &MAIN_TRANSCRIPT);
+        write_subagent(
             &dir,
             id,
-            &[
-                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_agent","name":"Agent","input":{}}]}}"#,
-                r#"{"type":"assistant","isSidechain":true,"message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_a","name":"Read","input":{}}]}}"#,
-                r#"{"type":"assistant","parent_tool_use_id":"toolu_unknown","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_b","name":"Read","input":{}}]}}"#,
-            ],
+            "a1",
+            r#"{"toolUseId":"toolu_unknown"}"#,
+            &SUBAGENT_FILE,
         );
+        write_subagent(
+            &dir,
+            id,
+            "a2",
+            r#"{"agentType":"general-purpose"}"#,
+            &SUBAGENT_FILE,
+        );
+        write_subagent(&dir, id, "a3", "not json", &SUBAGENT_FILE);
+        let orphan = dir.join(id).join("subagents").join("agent-a4.meta.json");
+        fs::write(orphan, SUBAGENT_META).unwrap();
 
         let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
 
@@ -4033,15 +4106,32 @@ mod tests {
     }
 
     #[test]
-    fn the_summary_counts_the_same_messages_as_the_transcript_with_a_subagent() {
+    fn a_session_without_subagent_files_has_no_activities() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
-        write_session(&dir, id, &SUBAGENT_TRANSCRIPT);
+        write_session(&dir, id, &MAIN_TRANSCRIPT);
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+
+        assert!(agent_activities(&transcript).is_empty());
+    }
+
+    #[test]
+    fn a_sidechain_line_in_the_main_transcript_is_not_a_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        let mut lines: Vec<&str> = MAIN_TRANSCRIPT[..2].to_vec();
+        lines.extend(SUBAGENT_FILE);
+        lines.extend(&MAIN_TRANSCRIPT[2..]);
+        write_session(&dir, id, &lines);
 
         let summaries = list_conversations_impl(tmp.path(), "proj").unwrap();
         let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
 
+        assert_eq!(transcript.messages.len(), 2);
+        assert_eq!(block_kinds(&transcript.messages[1]), ["tool_use", "text"]);
         assert_eq!(summaries[0].message_count, transcript.messages.len());
         assert_eq!(summaries[0].preview, "delegate");
     }
