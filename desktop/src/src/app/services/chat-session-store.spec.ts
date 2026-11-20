@@ -8697,6 +8697,7 @@ describe('ChatSessionStore', () => {
         input: '{"command":"ls"}',
         result: null,
         is_error: false,
+        activities: [],
         ...overrides,
       };
     }
@@ -9810,6 +9811,7 @@ describe('ChatSessionStore', () => {
           input: JSON.stringify(input),
           result,
           is_error: false,
+          activities: [],
         };
       }
 

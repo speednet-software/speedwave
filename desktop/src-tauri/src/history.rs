@@ -29,6 +29,8 @@ pub enum MessageBlock {
         input: String,
         result: Option<String>,
         is_error: bool,
+        #[serde(default)]
+        activities: Vec<crate::chat::SubagentCall>,
     },
     #[serde(rename = "error")]
     Error { content: String },
@@ -503,6 +505,7 @@ fn parse_assistant_message(parsed: &serde_json::Value) -> Option<ConversationMes
                         input: block["input"].to_string(),
                         result: None,
                         is_error: false,
+                        activities: Vec::new(),
                     });
                 }
             }
@@ -635,6 +638,35 @@ fn attach_tool_results(
     }
 }
 
+fn attach_subagent_calls(
+    parsed: &serde_json::Value,
+    messages: &mut [ConversationMessage],
+    calls: &HashMap<String, (usize, usize)>,
+) {
+    if parsed["type"].as_str() != Some("assistant") {
+        return;
+    }
+    let parent = parsed["parent_tool_use_id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .unwrap_or_default();
+    let block = match calls.get(parent) {
+        Some(&(message, index)) => messages
+            .get_mut(message)
+            .and_then(|m| m.blocks.as_mut())
+            .and_then(|blocks| blocks.get_mut(index)),
+        None => None,
+    };
+    match block {
+        Some(MessageBlock::ToolUse { activities, .. }) => {
+            activities.extend(crate::chat::subagent_calls(parsed));
+        }
+        _ => log::debug!(
+            "skipping sidechain line without a matching main-thread tool_use parent_tool_use_id={parent}"
+        ),
+    }
+}
+
 fn truncate_preview(s: &str, max_chars: usize) -> String {
     let char_count = s.chars().count();
     if char_count <= max_chars {
@@ -749,6 +781,9 @@ fn list_conversations_impl(
             let Some(parsed) = parse_jsonl_line(&line) else {
                 continue;
             };
+            if crate::chat::is_sidechain_event(&parsed) {
+                continue;
+            }
             if let Some(msg) = parse_jsonl_entry(&parsed) {
                 let is_control_chip_user = msg.role == "user"
                     && speedwave_runtime::slash::parse_control_command(&msg.content).is_some();
@@ -871,6 +906,10 @@ fn get_conversation_impl(
             continue;
         };
         attach_tool_results(&parsed, &mut messages, &dedupe.calls);
+        if crate::chat::is_sidechain_event(&parsed) {
+            attach_subagent_calls(&parsed, &mut messages, &dedupe.calls);
+            continue;
+        }
         if let Some(msg) = parse_jsonl_entry(&parsed) {
             if dedupe.admit(&parsed, &msg, messages.len()) {
                 messages.push(msg);
@@ -3641,7 +3680,7 @@ mod tests {
     }
 
     #[test]
-    fn a_sidechain_line_between_two_responses_stays_a_message_of_its_own() {
+    fn a_sidechain_line_between_two_responses_leaves_the_turn_whole() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
@@ -3663,16 +3702,11 @@ mod tests {
             .iter()
             .map(|m| (m.content.as_str(), m.uuid.as_deref()))
             .collect();
+        assert_eq!(rows, [("go", Some("u1")), ("first\nsecond", Some("msg_2"))]);
         assert_eq!(
-            rows,
-            [
-                ("go", Some("u1")),
-                ("first", Some("msg_1")),
-                ("subagent", Some("s1")),
-                ("second", Some("msg_2")),
-            ]
+            transcript.messages[1].response_ids,
+            Some(vec!["msg_1".to_string(), "msg_2".to_string()])
         );
-        assert_eq!(transcript.messages[2].response_ids, None);
     }
 
     #[test]
@@ -3892,7 +3926,7 @@ mod tests {
     }
 
     #[test]
-    fn get_conversation_ignores_sidechain_tool_calls_and_results() {
+    fn get_conversation_ignores_sidechain_tool_results() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
@@ -3901,8 +3935,8 @@ mod tests {
             &dir,
             id,
             &[
-                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_main","name":"Task","input":{}}]}}"#,
-                r#"{"type":"assistant","isSidechain":true,"message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_side","name":"Read","input":{}}]}}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_main","name":"Agent","input":{}}]}}"#,
+                r#"{"type":"assistant","parent_tool_use_id":"toolu_main","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_side","name":"Read","input":{}}]}}"#,
                 r#"{"type":"user","isSidechain":true,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_side","content":"from a subagent"}]}}"#,
                 r#"{"type":"user","isSidechain":true,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_main","content":"forged by a subagent"}]}}"#,
                 r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_main","content":"main result"}]}}"#,
@@ -3913,14 +3947,116 @@ mod tests {
 
         assert_eq!(
             tool_uses(&transcript),
-            vec![
-                (
-                    "toolu_main".to_string(),
-                    Some("main result".to_string()),
-                    false
-                ),
-                ("toolu_side".to_string(), None, false),
-            ]
+            vec![(
+                "toolu_main".to_string(),
+                Some("main result".to_string()),
+                false
+            )]
+        );
+    }
+
+    const SUBAGENT_TRANSCRIPT: [&str; 7] = [
+        r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"delegate"}}"#,
+        r#"{"type":"assistant","uuid":"a1","message":{"id":"msg_1","role":"assistant","content":[{"type":"tool_use","id":"toolu_agent","name":"Agent","input":{"description":"d"}}]}}"#,
+        r#"{"type":"user","parent_tool_use_id":"toolu_agent","message":{"role":"user","content":[{"type":"text","text":"the subagent prompt"}]}}"#,
+        r#"{"type":"assistant","parent_tool_use_id":"toolu_agent","message":{"id":"msg_s1","role":"assistant","content":[{"type":"text","text":"subagent text"},{"type":"tool_use","id":"toolu_sub","name":"Bash","input":{"command":"ls"}}]}}"#,
+        r#"{"type":"user","parent_tool_use_id":"toolu_agent","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_sub","content":"out"}]}}"#,
+        r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_agent","content":"done"}]}}"#,
+        r#"{"type":"assistant","uuid":"a2","message":{"id":"msg_2","role":"assistant","content":[{"type":"text","text":"all done"}]}}"#,
+    ];
+
+    fn agent_activities(transcript: &ConversationTranscript) -> Vec<crate::chat::SubagentCall> {
+        transcript
+            .messages
+            .iter()
+            .flat_map(|m| m.blocks.iter().flatten())
+            .find_map(|b| match b {
+                MessageBlock::ToolUse {
+                    tool_name,
+                    activities,
+                    ..
+                } if tool_name == "Agent" => Some(activities.clone()),
+                _ => None,
+            })
+            .expect("the transcript holds an Agent call")
+    }
+
+    #[test]
+    fn get_conversation_groups_the_tool_calls_of_a_subagent_under_its_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        write_session(&dir, id, &SUBAGENT_TRANSCRIPT);
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+
+        let roles: Vec<&str> = transcript
+            .messages
+            .iter()
+            .map(|m| m.role.as_str())
+            .collect();
+        assert_eq!(roles, ["user", "assistant"]);
+        assert_eq!(block_kinds(&transcript.messages[1]), ["tool_use", "text"]);
+        assert_eq!(
+            tool_uses(&transcript),
+            vec![("toolu_agent".to_string(), Some("done".to_string()), false)]
+        );
+        assert_eq!(
+            agent_activities(&transcript),
+            vec![crate::chat::SubagentCall {
+                tool_id: "toolu_sub".to_string(),
+                tool_name: "Bash".to_string(),
+                input_json: r#"{"command":"ls"}"#.to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_sidechain_call_without_a_main_thread_parent_is_dropped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_agent","name":"Agent","input":{}}]}}"#,
+                r#"{"type":"assistant","isSidechain":true,"message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_a","name":"Read","input":{}}]}}"#,
+                r#"{"type":"assistant","parent_tool_use_id":"toolu_unknown","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_b","name":"Read","input":{}}]}}"#,
+            ],
+        );
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+
+        assert!(agent_activities(&transcript).is_empty());
+        assert_eq!(tool_uses(&transcript).len(), 1);
+    }
+
+    #[test]
+    fn the_summary_counts_the_same_messages_as_the_transcript_with_a_subagent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        write_session(&dir, id, &SUBAGENT_TRANSCRIPT);
+
+        let summaries = list_conversations_impl(tmp.path(), "proj").unwrap();
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+
+        assert_eq!(summaries[0].message_count, transcript.messages.len());
+        assert_eq!(summaries[0].preview, "delegate");
+    }
+
+    #[test]
+    fn subagent_call_fields_match_ts_mirror() {
+        let ts = include_str!("../../src/src/app/models/chat.ts");
+        let call = crate::chat::SubagentCall {
+            tool_id: String::new(),
+            tool_name: String::new(),
+            input_json: String::new(),
+        };
+        assert_eq!(
+            crate::ts_mirror::rust_fields(&call),
+            crate::ts_mirror::ts_interface_fields(ts, "SubagentCall")
         );
     }
 
@@ -3958,6 +4094,7 @@ mod tests {
             input: "{}".to_string(),
             result: None,
             is_error: false,
+            activities: Vec::new(),
         })
         .unwrap();
         let live = serde_json::to_value(
@@ -3975,7 +4112,7 @@ mod tests {
                 .as_object()
                 .unwrap()
                 .keys()
-                .filter(|k| *k != "type" && *k != "kind")
+                .filter(|k| *k != "type" && *k != "kind" && *k != "activities")
                 .cloned()
                 .collect();
             keys.sort_unstable();
@@ -3993,11 +4130,18 @@ mod tests {
             input: "{}".to_string(),
             result: None,
             is_error: false,
+            activities: Vec::new(),
         };
         let mut expected: Vec<&str> = crate::ts_mirror::ts_interface_fields(ts, "ToolUseState");
         expected.push("type");
+        expected.push("activities");
         expected.sort_unstable();
         assert_eq!(crate::ts_mirror::rust_fields(&block), expected);
+        assert!(
+            include_str!("../../src/src/app/models/chat.ts")
+                .contains("  activities: readonly SubagentCall[];"),
+            "HistoryToolUse must declare the activities of a subagent call"
+        );
     }
 
     #[test]
@@ -4026,6 +4170,7 @@ mod tests {
                 input: String::new(),
                 result: None,
                 is_error: false,
+                activities: Vec::new(),
             },
         ];
         let union = crate::ts_mirror::ts_tagged_union(ts, "HistoryMessageBlock");

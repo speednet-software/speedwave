@@ -343,9 +343,17 @@ export interface ConversationTranscript {
   messages: ConversationMessage[];
 }
 
+/** A tool call a subagent made. Mirror of Rust `chat.rs::SubagentCall`; same fields as the live `SubagentActivity` chunk. */
+export interface SubagentCall {
+  tool_id: string;
+  tool_name: string;
+  input_json: string;
+}
+
 /** A tool call in a transcript, paired with its result; `result` is null when the call was never answered. */
 export interface HistoryToolUse extends ToolUseState {
   type: 'tool_use';
+  activities: readonly SubagentCall[];
 }
 
 /** One block of a transcript message, as `get_conversation` returns it. */

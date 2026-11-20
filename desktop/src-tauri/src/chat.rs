@@ -412,6 +412,37 @@ pub(crate) const USAGE_CACHE_WRITE_TOKENS: &str = "cache_creation_input_tokens";
 pub(crate) const USAGE_CACHE_READ_TOKENS_LEGACY: &str = "cache_read_tokens";
 pub(crate) const USAGE_CACHE_WRITE_TOKENS_LEGACY: &str = "cache_write_tokens";
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SubagentCall {
+    pub tool_id: String,
+    pub tool_name: String,
+    pub input_json: String,
+}
+
+pub(crate) fn subagent_calls(parsed: &serde_json::Value) -> Vec<SubagentCall> {
+    let Some(blocks) = parsed["message"]["content"].as_array() else {
+        return Vec::new();
+    };
+    blocks
+        .iter()
+        .filter(|b| b["type"].as_str() == Some("tool_use"))
+        .filter_map(|b| {
+            let tool_id = b["id"].as_str().filter(|s| !s.is_empty())?;
+            let tool_name = b["name"].as_str().filter(|s| !s.is_empty())?;
+            let input = &b["input"];
+            Some(SubagentCall {
+                tool_id: tool_id.to_string(),
+                tool_name: tool_name.to_string(),
+                input_json: if input.is_object() {
+                    input.to_string()
+                } else {
+                    "{}".to_string()
+                },
+            })
+        })
+        .collect()
+}
+
 pub(crate) fn is_sidechain_event(parsed: &serde_json::Value) -> bool {
     !parsed["parent_tool_use_id"].is_null() || parsed["isSidechain"].as_bool() == Some(true)
 }
@@ -687,26 +718,13 @@ impl StreamParser {
     }
 
     fn subagent_activities(parsed: &serde_json::Value, parent: &str) -> Vec<StreamChunk> {
-        let Some(blocks) = parsed["message"]["content"].as_array() else {
-            return Vec::new();
-        };
-        blocks
-            .iter()
-            .filter(|b| b["type"].as_str() == Some("tool_use"))
-            .filter_map(|b| {
-                let id = b["id"].as_str().filter(|s| !s.is_empty())?;
-                let name = b["name"].as_str().filter(|s| !s.is_empty())?;
-                let input = &b["input"];
-                Some(StreamChunk::SubagentActivity {
-                    parent_tool_id: parent.to_string(),
-                    tool_id: id.to_string(),
-                    tool_name: name.to_string(),
-                    input_json: if input.is_object() {
-                        input.to_string()
-                    } else {
-                        "{}".to_string()
-                    },
-                })
+        subagent_calls(parsed)
+            .into_iter()
+            .map(|call| StreamChunk::SubagentActivity {
+                parent_tool_id: parent.to_string(),
+                tool_id: call.tool_id,
+                tool_name: call.tool_name,
+                input_json: call.input_json,
             })
             .collect()
     }
