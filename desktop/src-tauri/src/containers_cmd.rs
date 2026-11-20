@@ -1991,6 +1991,7 @@ pub fn set_llm_provider_key(
         key.as_deref(),
         project.as_deref(),
     )
+    .map(|active| crate::integrations_cmd::restage_container_secrets(&active))
 }
 
 fn set_llm_provider_key_in(
@@ -1998,7 +1999,7 @@ fn set_llm_provider_key_in(
     provider_id: &str,
     key: Option<&str>,
     project: Option<&str>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     log::info!(
         "setting LLM provider key provider_id={provider_id} action={}",
         if key.is_some_and(|k| !k.trim().is_empty()) {
@@ -2047,7 +2048,7 @@ fn set_llm_provider_key_in(
             }
         }
         config::save_user_config_to(&user_config, &config_path)?;
-        Ok(())
+        Ok(active)
     })
     .map_err(|e: anyhow::Error| e.to_string())
 }
@@ -3037,8 +3038,10 @@ mod tests {
     fn a_provider_key_for_the_active_project_is_written_and_flagged() {
         let tmp = seeded_config_tempdir_with_local_model("llama");
 
-        set_llm_provider_key_in(tmp.path(), "local", Some("sk-local"), Some("alpha")).unwrap();
+        let changed =
+            set_llm_provider_key_in(tmp.path(), "local", Some("sk-local"), Some("alpha")).unwrap();
 
+        assert_eq!(changed, "alpha");
         let path =
             speedwave_runtime::compose::llm_provider_key_path_in(tmp.path(), "alpha", "local")
                 .unwrap();
