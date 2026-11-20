@@ -841,13 +841,17 @@ impl SecurityCheck {
                     .iter()
                     .any(|pattern| upper.contains(pattern))
                     && !allowed.iter().any(|a| upper == *a);
-                if matches_pattern || forbidden_names.contains(&upper.as_str()) {
+                let delivered_by_slot = forbidden_names.contains(&upper.as_str());
+                if matches_pattern || delivered_by_slot {
                     violations.push(SecurityViolation {
                         container: "claude".into(),
                         rule: SecurityRule::NoTokensClaude,
                         message: format!("env contains forbidden variable: {}", var_name),
-                        remediation:
-                            "Claude container must have zero service tokens. Remove from compose.",
+                        remediation: if delivered_by_slot {
+                            "This variable comes from 'claude.env' in the user config or the repo config; remove it there. Speedwave delivers it through the secrets slot."
+                        } else {
+                            "Claude container must have zero service tokens. Remove from compose."
+                        },
                     });
                 }
             }

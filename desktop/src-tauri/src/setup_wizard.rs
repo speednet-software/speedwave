@@ -3306,6 +3306,7 @@ services:
     user: "1000:1000"
     volumes:
       - /test/project:/workspace:rw
+      - /run/speedwave-secrets/test/claude/secrets:/run/speedwave/secrets:ro
     environment:
       - CLAUDE_VERSION=1.0.3
 networks:

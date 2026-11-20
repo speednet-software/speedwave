@@ -125,6 +125,20 @@ impl WslRuntime {
         self.runner.run("wsl.exe", &full)
     }
 
+    /// Builds the `wsl.exe` invocation of `vm_exec`, with `-u root` when `root` is set (the
+    /// same argv shape as `run_in_distro`).
+    fn vm_exec_command(&self, cmd: &str, args: &[&str], root: bool) -> Command {
+        let argv: Vec<&str> = std::iter::once(cmd).chain(args.iter().copied()).collect();
+        let remote_cmd = super::shell_quote_argv(&argv);
+        let mut command = crate::binary::system_command("wsl.exe");
+        command.args(["-d", self.distro()]);
+        if root {
+            command.args(["-u", "root"]);
+        }
+        command.args(["--", "sh", "-c", &remote_cmd]);
+        command
+    }
+
     /// Flushes the stale CNI iptables chains / bridges in `targets`, as root in the
     /// distro. Best-effort; see [`super::cni_cleanup_command`].
     fn cleanup_stale_cni(&self, targets: &super::CniTargets) -> anyhow::Result<()> {
@@ -571,12 +585,7 @@ impl ContainerRuntime for WslRuntime {
         stdin: &[u8],
         timeout: std::time::Duration,
     ) -> anyhow::Result<super::VmExecOutput> {
-        let distro = self.distro();
-        let argv: Vec<&str> = std::iter::once(cmd).chain(args.iter().copied()).collect();
-        let remote_cmd = super::shell_quote_argv(&argv);
-        let mut command = crate::binary::system_command("wsl.exe");
-        command.args(["-d", distro, "--", "sh", "-c", &remote_cmd]);
-        super::vm_exec_run(command, stdin, timeout)
+        super::vm_exec_run(self.vm_exec_command(cmd, args, false), stdin, timeout)
     }
 
     fn vm_exec_as_root(
@@ -586,7 +595,7 @@ impl ContainerRuntime for WslRuntime {
         stdin: &[u8],
         timeout: std::time::Duration,
     ) -> anyhow::Result<super::VmExecOutput> {
-        self.vm_exec(cmd, args, stdin, timeout)
+        super::vm_exec_run(self.vm_exec_command(cmd, args, true), stdin, timeout)
     }
 
     fn is_available(&self) -> bool {
@@ -939,6 +948,30 @@ mod tests {
         );
         let rt = WslRuntime::with_runner(Box::new(runner));
         assert!(rt.is_available());
+    }
+
+    #[test]
+    fn vm_exec_as_root_runs_as_root_and_vm_exec_does_not() {
+        let rt = WslRuntime::with_runner(Box::new(MockRunner::new()));
+        let args_of = |root: bool| -> Vec<String> {
+            rt.vm_exec_command("true", &[], root)
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        let root = args_of(true);
+        let user = args_of(false);
+        assert_eq!(
+            root[..4],
+            [
+                "-d".to_string(),
+                rt.distro().to_string(),
+                "-u".into(),
+                "root".into()
+            ]
+        );
+        assert!(!user.contains(&"-u".to_string()), "got: {user:?}");
+        assert_eq!(root[4..], user[2..]);
     }
 
     #[test]

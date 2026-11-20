@@ -2180,6 +2180,9 @@ mod tests {
             ..Default::default()
         };
         config::save_user_config_to(&config, &data_dir.join("config.json")).unwrap();
+        let secrets = data_dir.join("secrets").join("acme");
+        std::fs::create_dir_all(&secrets).unwrap();
+        std::fs::write(secrets.join("anthropic_api_key"), "sk-ant-test").unwrap();
         speedwave_runtime::runtime::mock_runtime::MockRuntimeBuilder::new()
             .with_is_available(available)
             .with_vm_exec_as_root_exit(exit, "")

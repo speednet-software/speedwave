@@ -291,17 +291,6 @@ impl LockedRuntime {
         self.inner.vm_exec(cmd, args, stdin, timeout)
     }
 
-    /// Runs a command inside the VM as root with stdin and a timeout.
-    pub fn vm_exec_as_root(
-        &self,
-        cmd: &str,
-        args: &[&str],
-        stdin: &[u8],
-        timeout: std::time::Duration,
-    ) -> anyhow::Result<super::VmExecOutput> {
-        self.inner.vm_exec_as_root(cmd, args, stdin, timeout)
-    }
-
     /// Rewrites the project's secrets in the VM tmpfs from the host sources (under the
     /// per-project lock), for callers that change credentials while containers run.
     pub fn stage_project_secrets(&self, project: &str) -> anyhow::Result<()> {
@@ -310,7 +299,7 @@ impl LockedRuntime {
 
     /// Writes one file into a slot of the project's secrets tmpfs (under the per-project lock)
     /// without touching any other file.
-    pub fn put_secret_file(
+    pub(crate) fn put_secret_file(
         &self,
         project: &str,
         slot: &crate::secrets_tmpfs::Slot,
@@ -487,6 +476,9 @@ mod tests {
             ..Default::default()
         };
         crate::config::save_user_config_to(&config, &data_dir.path().join("config.json")).unwrap();
+        let secrets = data_dir.path().join("secrets").join(project);
+        std::fs::create_dir_all(&secrets).unwrap();
+        std::fs::write(secrets.join("anthropic_api_key"), "sk-ant-test").unwrap();
         let (rt, handles) = builder.with_data_dir(data_dir.path()).build();
         (rt.with_secret_staging(), handles, data_dir)
     }
@@ -527,7 +519,10 @@ mod tests {
         for call in calls.iter() {
             assert_eq!(call.cmd, "sh");
             assert_eq!(call.args[0], "-c");
-            assert_eq!(call.args.last().unwrap(), crate::secrets_tmpfs::VM_ROOT);
+            assert_eq!(
+                call.args.last().unwrap(),
+                crate::secrets_tmpfs::layout::VM_ROOT
+            );
             assert!(call.stdin.starts_with(b"sync acme\n"));
         }
     }

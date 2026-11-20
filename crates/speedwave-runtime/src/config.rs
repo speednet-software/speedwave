@@ -2156,6 +2156,8 @@ fn merge_env(base: &mut HashMap<String, String>, overlay: Option<HashMap<String,
 
 const REPO_ENV_DENY_ANTHROPIC: &[&str] = &[
     "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_API_KEY",
+    "SPEEDWAVE_GIT_PROXY_AUTH",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_CUSTOM_HEADERS",
     "CLAUDE_CODE_ATTRIBUTION_HEADER",
@@ -4986,6 +4988,8 @@ mod tests {
                 "Anthropic key {k} must be denied"
             );
         }
+        assert!(repo_env_key_is_denied("anthropic_api_key"));
+        assert!(repo_env_key_is_denied("SPEEDWAVE_GIT_PROXY_AUTH"));
         assert!(repo_env_key_is_denied(crate::telemetry_env::ENABLE_KEY));
         for f in crate::telemetry_env::TelemetryField::ALL {
             if let Some(k) = crate::telemetry_env::env_key_for(*f) {

@@ -3,7 +3,7 @@
 use std::fmt;
 
 /// Root of the dedicated secrets tmpfs inside the VM.
-pub const VM_ROOT: &str = "/run/speedwave-secrets";
+pub(crate) const VM_ROOT: &str = "/run/speedwave-secrets";
 
 pub(crate) const PURPOSE_TOKENS: &str = "tokens";
 pub(crate) const PURPOSE_AUTH: &str = "auth";
@@ -17,7 +17,7 @@ pub(crate) fn purpose_git_tokens(kind_key: &str) -> String {
 
 /// One tmpfs directory of one container: `<VM_ROOT>/<project>/<service>/<purpose>`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Slot {
+pub(crate) struct Slot {
     service: String,
     purpose: String,
 }
@@ -33,7 +33,7 @@ impl Slot {
     }
 
     /// Absolute directory of this slot inside the VM.
-    pub fn vm_dir(&self, project: &str) -> String {
+    pub(crate) fn vm_dir(&self, project: &str) -> String {
         format!("{VM_ROOT}/{project}/{}/{}", self.service, self.purpose)
     }
 
