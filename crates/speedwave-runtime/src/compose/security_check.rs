@@ -848,7 +848,7 @@ impl SecurityCheck {
                         rule: SecurityRule::NoTokensClaude,
                         message: format!("env contains forbidden variable: {}", var_name),
                         remediation: if delivered_by_slot {
-                            "This variable comes from 'claude.env' in the user config or the repo config; remove it there. Speedwave delivers it through the secrets slot."
+                            "This variable comes from 'claude.env' in the user config; remove it there. Speedwave delivers it through the secrets slot."
                         } else {
                             "Claude container must have zero service tokens. Remove from compose."
                         },

@@ -125,8 +125,6 @@ impl WslRuntime {
         self.runner.run("wsl.exe", &full)
     }
 
-    /// Builds the `wsl.exe` invocation of `vm_exec`, with `-u root` when `root` is set (the
-    /// same argv shape as `run_in_distro`).
     fn vm_exec_command(&self, cmd: &str, args: &[&str], root: bool) -> Command {
         let argv: Vec<&str> = std::iter::once(cmd).chain(args.iter().copied()).collect();
         let remote_cmd = super::shell_quote_argv(&argv);
