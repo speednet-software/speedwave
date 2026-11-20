@@ -5,6 +5,7 @@ import { ToolNormalizerService } from '../../services/tool-normalizer.service';
 import { LoggerService } from '../../services/logger.service';
 import { makeMockLogger } from '../../testing/mock-logger';
 import type { ToolUseBlock } from '../../models/chat';
+import type { AgentView } from '../agents/agents';
 
 describe('ToolBlockComponent', () => {
   let component: ToolBlockComponent;
@@ -747,6 +748,113 @@ describe('ToolBlockComponent', () => {
         const el = fixture.nativeElement as HTMLElement;
         expect(el.querySelector('[data-testid="code-block"]'), tool_name).toBeNull();
       }
+    });
+  });
+  describe('subagent', () => {
+    function view(overrides: Partial<AgentView> = {}): AgentView {
+      return {
+        id: 'a1',
+        label: 'Explore code',
+        type: 'Explore',
+        background: false,
+        status: 'running',
+        toolCount: 2,
+        lastActivity: 'Bash $ make test',
+        result: null,
+        ...overrides,
+      };
+    }
+
+    function open(
+      tool: Record<string, unknown>,
+      agent: AgentView | null,
+      collapsed = false
+    ): HTMLElement {
+      setTool(
+        makeTool({
+          tool_name: 'Agent',
+          input_json: '{"description":"Explore code","subagent_type":"Explore"}',
+          ...tool,
+        })
+      );
+      fixture.componentRef.setInput('agent', agent);
+      fixture.detectChanges();
+      if (!collapsed) component.toggleCollapsed();
+      fixture.detectChanges();
+      return fixture.nativeElement as HTMLElement;
+    }
+
+    function q(el: HTMLElement, id: string): string | undefined {
+      return el.querySelector(`[data-testid="${id}"]`)?.textContent?.replace(/\s+/g, ' ').trim();
+    }
+
+    it('shows a badge, the type and the label in the header, for Agent and for Task', () => {
+      for (const tool_name of ['Agent', 'Task']) {
+        const el = open({ tool_name, status: 'running' }, view(), true);
+        expect(q(el, 'tool-name'), tool_name).toBe('Agent');
+        expect(q(el, 'agent-type'), tool_name).toBe('Explore');
+        expect(q(el, 'tool-summary'), tool_name).toBe('Explore code');
+        expect(el.querySelector('[data-testid="code-block"]'), tool_name).toBeNull();
+      }
+    });
+
+    it('shows the tool count and the status in the header', () => {
+      const el = open({ status: 'running' }, view(), true);
+      expect(q(el, 'tool-meta')).toBe('2 tools · running');
+      expect(el.querySelector('app-spin-icon')).not.toBeNull();
+    });
+
+    it('keeps a background agent running after its launch result', () => {
+      const el = open(
+        { status: 'done', result: 'Async agent launched' },
+        view({ background: true }),
+        true
+      );
+      expect(q(el, 'tool-meta')).toBe('2 tools · running');
+      expect(el.querySelector('app-spin-icon')).not.toBeNull();
+    });
+
+    it('shows the final status of the agent over the state of the call', () => {
+      const done = open({ status: 'done', result: 'r' }, view({ status: 'completed' }), true);
+      expect(q(done, 'tool-status')).toBe('✓');
+      expect(q(done, 'tool-meta')).toBe('2 tools · completed');
+      const failed = open({ status: 'done', result: 'r' }, view({ status: 'error' }), true);
+      expect(q(failed, 'tool-status')).toBe('✗');
+      const stopped = open({ status: 'done', result: 'r' }, view({ status: 'stopped' }), true);
+      expect(q(stopped, 'tool-status')).toBe('⊘');
+    });
+
+    it('lists the status, the tool count and the last activity when expanded', () => {
+      const el = open({ status: 'running' }, view({ background: true }));
+      expect(q(el, 'agent-description')).toBe('Explore code');
+      expect(q(el, 'agent-status')).toBe('running');
+      expect(q(el, 'agent-tool-count')).toBe('2 tools');
+      expect(q(el, 'agent-background')).toBe('background');
+      expect(q(el, 'agent-last-activity')).toBe('Bash $ make test');
+    });
+
+    it('shows the result of the agent once it finished, not the launch result', () => {
+      const el = open(
+        { status: 'done', result: 'Async agent launched' },
+        view({ status: 'completed', result: 'all quiet' })
+      );
+      expect(q(el, 'result-content')).toBe('all quiet');
+    });
+
+    it('shows no result while the agent runs', () => {
+      const el = open(
+        { status: 'done', result: 'Async agent launched' },
+        view({ background: true })
+      );
+      expect(el.querySelector('[data-testid="tool-result"]')).toBeNull();
+    });
+
+    it('renders an agent call without a session view from the call alone', () => {
+      const el = open({ status: 'done', result: 'report' }, null);
+      expect(q(el, 'tool-name')).toBe('Agent');
+      expect(q(el, 'tool-meta')).toBeUndefined();
+      expect(q(el, 'result-content')).toBe('report');
+      expect(el.querySelector('[data-testid="agent-facts"]')).toBeNull();
     });
   });
 });

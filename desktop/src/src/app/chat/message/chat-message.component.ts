@@ -1,5 +1,6 @@
 import { ChangeDetectionStrategy, Component, computed, input, output } from '@angular/core';
 import type { ChatMessage, MessageBlock } from '../../models/chat';
+import { NO_AGENT_VIEWS, type AgentView } from '../agents/agents';
 import { TextBlockComponent } from '../blocks/text-block.component';
 import { ThinkingBlockComponent } from '../blocks/thinking-block.component';
 import { ToolBlockComponent } from '../blocks/tool-block.component';
@@ -48,7 +49,10 @@ import { MessageMetadataComponent } from './message-metadata.component';
                 />
               }
               @case ('tool_use') {
-                <app-tool-block [tool]="asToolBlock(block).tool" />
+                <app-tool-block
+                  [tool]="asToolBlock(block).tool"
+                  [agent]="agents().get(asToolBlock(block).tool.tool_id) ?? null"
+                />
               }
               @case ('ask_user') {
                 <app-ask-user-block
@@ -97,6 +101,7 @@ export class ChatMessageComponent {
   readonly isLast = input(false);
   readonly entry = input<ChatMessage | undefined>(undefined);
   readonly precedingEdited = input(false);
+  readonly agents = input<ReadonlyMap<string, AgentView>>(NO_AGENT_VIEWS);
   readonly questionAnswered = output<{ toolId: string; questionIdx: number; value: string }>();
   readonly permissionDecided = output<{
     blockIndex: number;

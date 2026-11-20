@@ -274,7 +274,7 @@ export type NormalizedToolInput =
   | { kind: 'task_get'; task_id: string }
   | { kind: 'web_search'; query: string }
   | { kind: 'web_fetch'; url: string }
-  | { kind: 'agent'; description: string }
+  | { kind: 'agent'; description: string; subagent_type?: string; run_in_background?: boolean }
   | {
       kind: 'workflow';
       title: string;

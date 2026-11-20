@@ -258,6 +258,28 @@ describe('ToolNormalizerService', () => {
     expect(result).toEqual({ kind: 'agent', description: 'search code' });
   });
 
+  it('normalizes Task like Agent, with its type and background flag', () => {
+    const input = JSON.stringify({
+      description: 'search code',
+      subagent_type: 'Explore',
+      run_in_background: true,
+      prompt: 'find it',
+    });
+    const expected = {
+      kind: 'agent',
+      description: 'search code',
+      subagent_type: 'Explore',
+      run_in_background: true,
+    };
+    expect(service.normalize('Task', input)).toEqual(expected);
+    expect(service.normalize('Agent', input)).toEqual(expected);
+  });
+
+  it('leaves the background flag unset unless it is true', () => {
+    const result = service.normalize('Agent', '{"run_in_background":false,"subagent_type":3}');
+    expect(result).toEqual({ kind: 'agent', description: '' });
+  });
+
   it('returns generic for unknown tool', () => {
     const json = '{"custom":"data"}';
     const result = service.normalize('UnknownTool', json);
