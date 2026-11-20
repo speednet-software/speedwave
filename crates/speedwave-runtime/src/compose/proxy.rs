@@ -128,6 +128,19 @@ pub(super) fn project_proxy_config_in(
     Ok(ProjectProxyConfig { git_forges, config })
 }
 
+pub(crate) fn enabled_git_forge_kinds_in(
+    data_dir: &Path,
+    project: &str,
+    integrations: &ResolvedIntegrationsConfig,
+    repositories: &GitRepositoryLists,
+    access: &AccessPolicy,
+) -> Vec<GitForgeService> {
+    git_forges_in(data_dir, project, integrations, repositories, access)
+        .into_iter()
+        .map(|forge| forge.kind)
+        .collect()
+}
+
 pub(super) fn git_forges_in(
     data_dir: &Path,
     project: &str,
@@ -294,9 +307,6 @@ pub(crate) fn render_proxy_config_full(
     .unwrap_or_else(|_| r#"{"routes":[]}"#.into())
 }
 
-/// Renders the config in memory: `proxy.json` never exists on the host, its content is staged
-/// into the proxy's tmpfs slot. `ner` is rendered only when `pii_ner_enabled` and the detector's
-/// lock names a live process.
 fn render_proxy_config_in(
     data_dir: &Path,
     project: &str,

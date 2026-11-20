@@ -32,38 +32,8 @@ fn sync_payload(
     run_frame(runtime, project, &frame::encode_sync(project, payload)?)
 }
 
-pub(crate) struct ProjectSettings {
-    pub(crate) resolved_config: crate::config::ResolvedClaudeConfig,
-    pub(crate) integrations: crate::config::ResolvedIntegrationsConfig,
-    pub(crate) plugin_manifests: Vec<crate::plugin::PluginManifest>,
-}
-
-pub(crate) fn load_project_settings(
-    data_dir: &Path,
-    project: &str,
-) -> anyhow::Result<ProjectSettings> {
-    let user_config = crate::config::load_user_config_from(&data_dir.join("config.json"))?;
-    let entry = user_config.require_project(project)?;
-    let (resolved_config, integrations) = crate::config::resolve_project_config_in(
-        data_dir,
-        Path::new(&entry.dir),
-        &user_config,
-        project,
-    );
-    let plugin_manifests: Vec<crate::plugin::PluginManifest> =
-        crate::plugin::list_verified_from_dir(&crate::plugin::plugins_base_dir_in(data_dir))?
-            .iter()
-            .map(|verified| verified.manifest().clone())
-            .collect();
-    Ok(ProjectSettings {
-        resolved_config,
-        integrations,
-        plugin_manifests,
-    })
-}
-
 fn collect_payload(data_dir: &Path, project: &str) -> anyhow::Result<ProjectPayload> {
-    let settings = load_project_settings(data_dir, project)?;
+    let settings = crate::config::load_project_settings(data_dir, project)?;
     crate::compose::secret_payload::collect_project_payload_in(
         data_dir,
         project,

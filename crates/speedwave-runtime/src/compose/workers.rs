@@ -376,8 +376,6 @@ pub(super) fn running_mcp_os_in(data_dir: &std::path::Path) -> Option<(u16, Stri
     )
 }
 
-/// Port and bearer of a host worker whose lock names a live process and whose token file holds a
-/// value; `None` on any failure, treated as not running.
 fn running_host_worker(
     label: &str,
     token_mount_path: &std::path::Path,

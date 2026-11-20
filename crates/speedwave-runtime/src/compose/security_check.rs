@@ -139,6 +139,21 @@ fn short_form_targets_area(entry: &str, area: &str) -> bool {
         .any(|t| is_mount_area_target(&normalize_mount_target(t), area))
 }
 
+fn service_env_names(service: &serde_yaml_ng::Value) -> Vec<String> {
+    match service.get("environment") {
+        Some(serde_yaml_ng::Value::Sequence(seq)) => seq
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(|entry| entry.split('=').next().unwrap_or("").to_string())
+            .collect(),
+        Some(serde_yaml_ng::Value::Mapping(map)) => map
+            .keys()
+            .filter_map(|key| key.as_str().map(str::to_string))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// Collects a service's env values for `key`, from sequence and map env forms.
 fn service_env_values(service: &serde_yaml_ng::Value, key: &str) -> Vec<String> {
     let Some(env) = service.get("environment") else {
@@ -230,6 +245,11 @@ pub enum SecurityRule {
     #[strum(to_string = "CONTAINER_USER")]
     #[strum(props(description = "All containers use correct platform user"))]
     ContainerUser,
+
+    /// Built-in services carry no worker bearer in env.
+    #[strum(to_string = "NO_TOKENS_WORKERS")]
+    #[strum(props(description = "Built-in services carry no MCP_<SVC>_AUTH_TOKEN env"))]
+    NoTokensWorkers,
 
     /// Plugin containers are not privileged.
     #[strum(to_string = "PLUGIN_NO_PRIVILEGED")]
@@ -627,6 +647,7 @@ impl SecurityCheck {
             Self::check_tmpfs_noexec(&doc),
             Self::check_no_tokens_in_claude(&doc),
             Self::check_no_tokens_in_hub(&doc),
+            Self::check_no_bearer_env_on_builtin_services(&doc, plugin_manifests),
             Self::check_ports_localhost_only(&doc),
             Self::check_claude_no_socket(&doc),
             Self::check_no_external_llm_keys_claude(&doc),
@@ -801,38 +822,67 @@ impl SecurityCheck {
         };
 
         if let Some((_name, service)) = services.iter().find(|(n, _)| n == "claude") {
-            if let Some(env_seq) = service.get("environment").and_then(|v| v.as_sequence()) {
-                let forbidden_patterns = ["TOKEN", "KEY", "SECRET"];
-                let allowed = [
-                    "ANTHROPIC_AUTH_TOKEN",
-                    "ANTHROPIC_API_KEY",
-                    "CLAUDE_CODE_OAUTH_TOKEN",
-                    "DISABLE_AUTOUPDATER",
-                    "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
-                ];
+            let forbidden_patterns = ["TOKEN", "KEY", "SECRET"];
+            let forbidden_names = [
+                "ANTHROPIC_API_KEY",
+                "ANTHROPIC_AUTH_TOKEN",
+                "ANTHROPIC_CUSTOM_HEADERS",
+                "SPEEDWAVE_GIT_PROXY_AUTH",
+            ];
+            let allowed = [
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                "DISABLE_AUTOUPDATER",
+                "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+            ];
 
-                for item in env_seq {
-                    if let Some(env_str) = item.as_str() {
-                        let var_name = env_str.split('=').next().unwrap_or("");
-                        let upper = var_name.to_uppercase();
+            for var_name in service_env_names(service) {
+                let upper = var_name.to_uppercase();
+                let matches_pattern = forbidden_patterns
+                    .iter()
+                    .any(|pattern| upper.contains(pattern))
+                    && !allowed.iter().any(|a| upper == *a);
+                if matches_pattern || forbidden_names.contains(&upper.as_str()) {
+                    violations.push(SecurityViolation {
+                        container: "claude".into(),
+                        rule: SecurityRule::NoTokensClaude,
+                        message: format!("env contains forbidden variable: {}", var_name),
+                        remediation:
+                            "Claude container must have zero service tokens. Remove from compose.",
+                    });
+                }
+            }
+        }
+        violations
+    }
 
-                        if forbidden_patterns
-                            .iter()
-                            .any(|pattern| upper.contains(pattern))
-                            && !allowed.iter().any(|a| upper == *a)
-                        {
-                            violations.push(SecurityViolation {
-                                container: "claude".into(),
-                                rule: SecurityRule::NoTokensClaude,
-                                message: format!(
-                                    "env contains forbidden variable: {}",
-                                    var_name
-                                ),
-                                remediation:
-                                    "Claude container must have zero service tokens. Remove from compose.",
-                            });
-                        }
-                    }
+    fn check_no_bearer_env_on_builtin_services(
+        doc: &serde_yaml_ng::Value,
+        plugin_manifests: &[PluginManifest],
+    ) -> Vec<SecurityViolation> {
+        let mut violations = Vec::new();
+        let Some(services) = get_services(doc) else {
+            return violations;
+        };
+        for (name, service) in services {
+            let is_installed_plugin = plugin_manifests.iter().any(|manifest| {
+                manifest
+                    .service_id
+                    .as_deref()
+                    .is_some_and(|sid| plugin::derive_compose_name(sid) == name)
+            });
+            if is_installed_plugin {
+                continue;
+            }
+            for var_name in service_env_names(service) {
+                let upper = var_name.to_uppercase();
+                if upper.starts_with("MCP_") && upper.ends_with("_AUTH_TOKEN") {
+                    violations.push(SecurityViolation {
+                        container: name.clone(),
+                        rule: SecurityRule::NoTokensWorkers,
+                        message: format!("env contains a worker bearer: {var_name}"),
+                        remediation:
+                            "Built-in services read the bearer from '<ENV>_FILE' pointing into the auth slot, never from env.",
+                    });
                 }
             }
         }
@@ -1257,9 +1307,16 @@ impl SecurityCheck {
             } else {
                 Vec::new()
             };
+            let expected_tokens_path = match expected_tokens_source(&name, project) {
+                Ok(path) => path,
+                Err(e) => {
+                    violations.push(unresolvable_slot(&name, &e));
+                    continue;
+                }
+            };
             let params = VolumeCheckParams {
                 container_name: &name,
-                expected_tokens_path: expected_tokens_source(&name, project),
+                expected_tokens_path,
                 expected_auth_path: None,
                 expected_workspace_path: expected_paths.project_engine_path(),
                 expected_token_mode,
@@ -1581,8 +1638,6 @@ impl SecurityCheck {
         violations
     }
 
-    /// The resolved PII policy mount on mcp-hub is presence-mandatory: exactly the
-    /// hub's `policy` slot at `/policy:ro`, no other `/policy*` target, env pinned.
     fn check_hub_policy_mount(doc: &serde_yaml_ng::Value, project: &str) -> Vec<SecurityViolation> {
         let mut violations = Self::check_mount_area_profile(
             doc,
@@ -1600,7 +1655,6 @@ impl SecurityCheck {
         violations
     }
 
-    /// The hub's bridge bearers arrive through exactly its `secrets` slot at `/secrets:ro`.
     fn check_hub_secrets_mount(
         doc: &serde_yaml_ng::Value,
         project: &str,
@@ -1615,9 +1669,6 @@ impl SecurityCheck {
         )
     }
 
-    /// The detector URL rendered for the proxy must point at the host gateway alias over plain
-    /// http with no path: the only legitimate reader of request text outside the proxy is the
-    /// host detector.
     fn check_proxy_ner_url(doc: &serde_yaml_ng::Value) -> Vec<SecurityViolation> {
         let Some(services) = get_services(doc) else {
             return Vec::new();
@@ -1637,8 +1688,6 @@ impl SecurityCheck {
             .collect()
     }
 
-    /// Mirrors [`Self::check_hub_policy_mount`] for the proxy service (same
-    /// target, mode, and env pin, from the proxy's own `policy` slot).
     fn check_proxy_policy_mount(
         doc: &serde_yaml_ng::Value,
         project: &str,
@@ -1659,9 +1708,6 @@ impl SecurityCheck {
         violations
     }
 
-    /// Every mount sourced from the secrets tmpfs root, in either volume form, must be one of the
-    /// slots `expected_slot_mounts` lists for its container, from the project's own tree, at the
-    /// slot's target and `:ro`.
     fn check_secret_slot_mounts(
         doc: &serde_yaml_ng::Value,
         project: &str,
@@ -1672,10 +1718,16 @@ impl SecurityCheck {
         };
         for (name, service) in services {
             let allowed: Vec<(String, String)> =
-                expected_slot_mounts(&name, is_plugin_service(service))
-                    .into_iter()
-                    .map(|mount| (mount.source(project), mount.target))
-                    .collect();
+                match expected_slot_mounts(&name, is_plugin_service(service)) {
+                    Ok(mounts) => mounts
+                        .into_iter()
+                        .map(|mount| (mount.source(project), mount.target))
+                        .collect(),
+                    Err(e) => {
+                        violations.push(unresolvable_slot(&name, &e));
+                        continue;
+                    }
+                };
             let Some(vols) = service.get("volumes").and_then(|v| v.as_sequence()) else {
                 continue;
             };
@@ -2089,10 +2141,15 @@ impl SecurityCheck {
             None => return Vec::new(),
         };
 
+        let (expected_tokens_path, expected_auth_path) =
+            match expected_worker_sources(name, project) {
+                Ok((tokens, auth)) => (tokens, Some(auth)),
+                Err(e) => return vec![unresolvable_slot(name, &e)],
+            };
         let params = VolumeCheckParams {
             container_name: name,
-            expected_tokens_path: expected_tokens_source(name, project),
-            expected_auth_path: worker_auth_mount(name).ok().map(|m| m.source(project)),
+            expected_tokens_path,
+            expected_auth_path,
             expected_workspace_path: expected_paths.project_engine_path(),
             expected_token_mode: "ro",
             expected_workspace_mode,
@@ -2422,7 +2479,6 @@ impl VolumeCheckRules {
 struct VolumeCheckParams<'a> {
     container_name: &'a str,
     expected_tokens_path: String,
-    /// Source of the optional `/run/speedwave/auth` slot of a built-in worker.
     expected_auth_path: Option<String>,
     expected_workspace_path: &'a str,
     /// Expected token mount mode: "ro" or "rw"
@@ -2435,10 +2491,24 @@ struct VolumeCheckParams<'a> {
     rules: VolumeCheckRules,
 }
 
-fn expected_tokens_source(compose_name: &str, project: &str) -> String {
-    worker_tokens_mount(compose_name)
-        .map(|mount| mount.source(project))
-        .unwrap_or_default()
+fn expected_tokens_source(compose_name: &str, project: &str) -> anyhow::Result<String> {
+    Ok(worker_tokens_mount(compose_name)?.source(project))
+}
+
+fn expected_worker_sources(compose_name: &str, project: &str) -> anyhow::Result<(String, String)> {
+    Ok((
+        expected_tokens_source(compose_name, project)?,
+        worker_auth_mount(compose_name)?.source(project),
+    ))
+}
+
+fn unresolvable_slot(container: &str, error: &anyhow::Error) -> SecurityViolation {
+    SecurityViolation {
+        container: container.to_string(),
+        rule: SecurityRule::SecretSlotMount,
+        message: format!("the secrets slots of this container cannot be resolved: {error:#}"),
+        remediation: "Use a compose service name that is a valid secrets slot component.",
+    }
 }
 
 /// Validates volume mounts on one service; returns violations plus the actual

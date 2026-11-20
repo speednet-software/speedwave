@@ -1,6 +1,3 @@
-//! Secrets tmpfs slots of every container and where each is mounted. Shared by the renderer and
-//! the payload collector so the mounts of `compose.yml` and the files staged into the VM agree.
-
 use crate::config::ResolvedIntegrationsConfig;
 use crate::consts::{self, McpServiceDescriptor};
 use crate::git_allowlist::GitForgeService;
@@ -30,8 +27,8 @@ pub(super) const CLAUDE_GIT_PROXY_AUTH_FILE: &str = "git-proxy-auth";
 
 pub(super) const OS_AUTH_TOKEN_FILE_NAME: &str = "os-auth-token";
 
-pub(super) struct SlotMount {
-    pub(super) slot: Slot,
+pub(crate) struct SlotMount {
+    pub(crate) slot: Slot,
     pub(super) target: String,
 }
 
@@ -60,7 +57,7 @@ pub(super) fn is_under_secrets_root(source: &str) -> bool {
     source == VM_ROOT || source.starts_with(&format!("{VM_ROOT}/"))
 }
 
-pub(super) fn worker_tokens_mount(compose_name: &str) -> anyhow::Result<SlotMount> {
+pub(crate) fn worker_tokens_mount(compose_name: &str) -> anyhow::Result<SlotMount> {
     SlotMount::new(compose_name, PURPOSE_TOKENS, WORKER_TOKENS_TARGET)
 }
 
@@ -88,7 +85,7 @@ pub(super) fn proxy_policy_mount() -> anyhow::Result<SlotMount> {
     SlotMount::new(PROXY_SERVICE, PURPOSE_POLICY, POLICY_TARGET)
 }
 
-pub(super) fn proxy_git_mount(kind: GitForgeService) -> anyhow::Result<SlotMount> {
+pub(crate) fn proxy_git_mount(kind: GitForgeService) -> anyhow::Result<SlotMount> {
     SlotMount::new(
         PROXY_SERVICE,
         &purpose_git_tokens(kind.config_key()),
@@ -100,24 +97,24 @@ pub(super) fn claude_secrets_mount() -> anyhow::Result<SlotMount> {
     SlotMount::new(CLAUDE_SERVICE, PURPOSE_SECRETS, CLAUDE_SECRETS_TARGET)
 }
 
-pub(super) fn builtin_worker_has_tokens(svc: &McpServiceDescriptor) -> bool {
+pub(crate) fn builtin_worker_has_tokens(svc: &McpServiceDescriptor) -> bool {
     !svc.credential_files.is_empty()
 }
 
-pub(super) fn enabled_builtin_workers<'a>(
-    integrations: &'a ResolvedIntegrationsConfig,
-) -> impl Iterator<Item = &'static McpServiceDescriptor> + 'a {
+pub(crate) fn enabled_builtin_workers(
+    integrations: &ResolvedIntegrationsConfig,
+) -> impl Iterator<Item = &'static McpServiceDescriptor> + '_ {
     consts::TOGGLEABLE_MCP_SERVICES
         .iter()
-        .filter(|svc| integrations.is_service_enabled(svc.config_key) == Some(true))
+        .filter(move |svc| integrations.is_service_enabled(svc.config_key) == Some(true))
 }
 
-pub(super) struct PluginWorker<'a> {
-    pub(super) service_id: &'a str,
-    pub(super) compose_name: String,
+pub(crate) struct PluginWorker<'a> {
+    pub(crate) service_id: &'a str,
+    pub(crate) compose_name: String,
 }
 
-pub(super) fn enabled_plugin_workers<'a>(
+pub(crate) fn enabled_plugin_workers<'a>(
     integrations: &'a ResolvedIntegrationsConfig,
     manifests: &'a [PluginManifest],
 ) -> impl Iterator<Item = PluginWorker<'a>> + 'a {
@@ -131,7 +128,10 @@ pub(super) fn enabled_plugin_workers<'a>(
         })
 }
 
-pub(super) fn expected_slot_mounts(service: &str, is_plugin: bool) -> Vec<SlotMount> {
+pub(super) fn expected_slot_mounts(
+    service: &str,
+    is_plugin: bool,
+) -> anyhow::Result<Vec<SlotMount>> {
     let mounts = match service {
         CLAUDE_SERVICE => vec![claude_secrets_mount()],
         HUB_SERVICE => vec![hub_secrets_mount(), hub_policy_mount()],
@@ -144,18 +144,21 @@ pub(super) fn expected_slot_mounts(service: &str, is_plugin: bool) -> Vec<SlotMo
         .chain(GitForgeService::ALL.into_iter().map(proxy_git_mount))
         .collect(),
         _ if is_plugin => vec![worker_tokens_mount(service)],
-        _ if is_builtin_worker(service) => {
-            vec![worker_tokens_mount(service), worker_auth_mount(service)]
-        }
-        _ => Vec::new(),
+        _ => match builtin_worker(service) {
+            Some(svc) if builtin_worker_has_tokens(svc) => {
+                vec![worker_tokens_mount(service), worker_auth_mount(service)]
+            }
+            Some(_) => vec![worker_auth_mount(service)],
+            None => Vec::new(),
+        },
     };
-    mounts.into_iter().filter_map(Result::ok).collect()
+    mounts.into_iter().collect()
 }
 
-fn is_builtin_worker(compose_name: &str) -> bool {
+fn builtin_worker(compose_name: &str) -> Option<&'static McpServiceDescriptor> {
     consts::TOGGLEABLE_MCP_SERVICES
         .iter()
-        .any(|svc| svc.compose_name == compose_name)
+        .find(|svc| svc.compose_name == compose_name)
 }
 
 #[cfg(test)]
@@ -183,7 +186,7 @@ mod tests {
 
     #[test]
     fn a_worker_expects_only_its_own_tokens_and_auth_slots() {
-        let mounts = expected_slot_mounts("mcp-slack", false);
+        let mounts = expected_slot_mounts("mcp-slack", false).unwrap();
         let sources: Vec<String> = mounts.iter().map(|m| m.source("p")).collect();
         assert_eq!(
             sources,
@@ -195,15 +198,31 @@ mod tests {
     }
 
     #[test]
+    fn a_worker_without_credentials_expects_only_its_auth_slot() {
+        for name in ["mcp-office", "mcp-playwright"] {
+            let mounts = expected_slot_mounts(name, false).unwrap();
+            assert_eq!(mounts.len(), 1, "{name}");
+            assert_eq!(mounts[0].target, "/run/speedwave/auth", "{name}");
+        }
+    }
+
+    #[test]
     fn a_plugin_worker_expects_only_its_tokens_slot() {
-        let mounts = expected_slot_mounts("mcp-example", true);
+        let mounts = expected_slot_mounts("mcp-example", true).unwrap();
         assert_eq!(mounts.len(), 1);
         assert_eq!(mounts[0].target, "/tokens");
     }
 
     #[test]
     fn an_unknown_service_expects_no_slot() {
-        assert!(expected_slot_mounts("mcp-unknown", false).is_empty());
+        assert!(expected_slot_mounts("mcp-unknown", false)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn a_service_name_that_is_no_slot_component_is_an_error() {
+        assert!(expected_slot_mounts("Not Valid", true).is_err());
     }
 
     #[test]

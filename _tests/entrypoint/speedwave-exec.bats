@@ -1,5 +1,7 @@
 #!/usr/bin/env bats
 
+bats_require_minimum_version 1.5.0
+
 EXEC="$BATS_TEST_DIRNAME/../../containers/speedwave-exec.sh"
 ENTRYPOINT="$BATS_TEST_DIRNAME/../../containers/entrypoint.sh"
 LIBRARY="$BATS_TEST_DIRNAME/../../containers/speedwave-secret-env.sh"

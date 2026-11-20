@@ -18,11 +18,12 @@ mod plugins;
 mod proxy;
 mod quoting;
 pub(crate) mod secret_payload;
-mod secret_slots;
+pub(crate) mod secret_slots;
 mod security_check;
 mod tokens;
 mod workers;
 
+pub(crate) use proxy::enabled_git_forge_kinds_in;
 pub use proxy::{
     proxy_config_dir_in, remove_llm_provider_key_in, render_proxy_config, spw_key_env_name,
     write_llm_provider_key_in, PROXY_BASE_URL, PROXY_CALLER_AUTH_HEADER, PROXY_PORT,
@@ -1070,7 +1071,7 @@ mod tests {
     use super::*;
     use strum::IntoEnumIterator;
 
-    const SECURITY_RULE_COUNT: usize = 62;
+    const SECURITY_RULE_COUNT: usize = 63;
 
     fn test_bundle_manifest() -> bundle::BundleManifest {
         bundle::BundleManifest {
@@ -5122,7 +5123,50 @@ services:
     }
 
     #[test]
-    fn test_security_check_anthropic_api_key_allowed() {
+    fn test_security_check_claude_secret_env_is_forbidden() {
+        let data_dir = tempfile::tempdir().unwrap();
+        for env in [
+            "ANTHROPIC_API_KEY=sk-ant-12345",
+            "ANTHROPIC_AUTH_TOKEN=sk-no-key-required",
+            "ANTHROPIC_CUSTOM_HEADERS=x-speedwave-proxy-auth: t",
+            "SPEEDWAVE_GIT_PROXY_AUTH=t",
+        ] {
+            let yaml = format!(
+                r#"
+version: "3"
+services:
+  claude:
+    image: speedwave-claude:latest
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=512m
+    environment:
+      - CLAUDE_VERSION=1.0.3
+      - {env}
+"#
+            );
+            let violations = SecurityCheck::run_with_data_dir(
+                &yaml,
+                "test",
+                &[],
+                &test_expected_paths(),
+                data_dir.path(),
+            );
+            assert!(
+                violations
+                    .iter()
+                    .any(|v| v.rule == SecurityRule::NoTokensClaude),
+                "{env} must be forbidden in the claude env"
+            );
+        }
+    }
+
+    #[test]
+    fn test_security_check_claude_secret_env_in_mapping_form_is_forbidden() {
         let data_dir = tempfile::tempdir().unwrap();
         let yaml = r#"
 version: "3"
@@ -5137,8 +5181,8 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=512m
     environment:
-      - CLAUDE_VERSION=1.0.3
-      - ANTHROPIC_API_KEY=sk-ant-12345
+      CLAUDE_VERSION: "1.0.3"
+      ANTHROPIC_API_KEY: sk-ant-12345
 "#;
         let violations = SecurityCheck::run_with_data_dir(
             yaml,
@@ -5147,12 +5191,40 @@ services:
             &test_expected_paths(),
             data_dir.path(),
         );
-        assert!(
-            !violations
-                .iter()
-                .any(|v| v.rule == SecurityRule::NoTokensClaude),
-            "ANTHROPIC_API_KEY in claude container should be allowed"
+        assert!(violations
+            .iter()
+            .any(|v| v.rule == SecurityRule::NoTokensClaude));
+    }
+
+    #[test]
+    fn test_security_check_worker_bearer_env_is_forbidden_on_builtin_workers() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = r#"
+version: "3"
+services:
+  mcp-slack:
+    image: speedwave-mcp-slack:latest
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    environment:
+      - PORT=4001
+      - MCP_SLACK_AUTH_TOKEN=550e8400-e29b-41d4-a716-446655440000
+"#;
+        let violations = SecurityCheck::run_with_data_dir(
+            yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
         );
+        assert!(violations
+            .iter()
+            .any(|v| v.rule == SecurityRule::NoTokensWorkers && v.container == "mcp-slack"));
     }
 
     #[test]
@@ -6266,26 +6338,6 @@ services:
              check_no_tokens_in_hub, got: {:?}",
             violations.iter().map(|v| &v.message).collect::<Vec<_>>()
         );
-    }
-
-    #[test]
-    fn the_template_mounts_the_hub_slots_that_the_renderer_and_the_security_check_expect() {
-        let yaml = COMPOSE_TEMPLATE.replace(
-            "${SECRETS_VM_DIR}",
-            &secret_slots::project_secrets_root("p"),
-        );
-        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
-        let volumes = get_hub_volumes(&doc);
-        for mount in [
-            secret_slots::hub_secrets_mount().unwrap(),
-            secret_slots::hub_policy_mount().unwrap(),
-        ] {
-            assert!(
-                volumes.contains(&mount.entry("p")),
-                "template hub volumes must hold {}, got {volumes:?}",
-                mount.entry("p")
-            );
-        }
     }
 
     fn render_substituted_template() -> String {
@@ -9580,7 +9632,7 @@ services:
             Path::new("/nonexistent/plugins/test-svc"),
             "proj",
             "net",
-            std::path::Path::new("/tokens/proj"),
+            "/tokens/proj",
             tmp_project_dir(),
         )
         .unwrap();

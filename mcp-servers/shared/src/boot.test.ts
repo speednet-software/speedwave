@@ -132,6 +132,9 @@ describe('bootWorker', () => {
       process.env.MCP_TEST_AUTH_TOKEN = 'from-env';
       await boot();
       expect(servedToken()).toBe('from-env');
+      const warned = warnSpy.mock.calls.flat().join(' ');
+      expect(warned).toContain('MCP_TEST_AUTH_TOKEN_FILE');
+      expect(warned).not.toContain(join(dir, 'missing'));
     });
 
     it('exits when the file is empty and no env value exists', async () => {

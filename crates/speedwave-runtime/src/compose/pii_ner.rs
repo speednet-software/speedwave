@@ -102,8 +102,6 @@ impl std::fmt::Debug for NerRenderConfig {
     }
 }
 
-/// Env marker on the proxy service carrying the rendered detector URL, so Desktop can tell
-/// from `compose.yml` alone whether the proxy targets the live detector.
 pub(super) const NER_URL_ENV: &str = "SPW_NER_URL";
 
 pub(super) fn live_ner_config_in(data_dir: &Path, enabled: bool) -> Option<NerRenderConfig> {

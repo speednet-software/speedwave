@@ -1,6 +1,3 @@
-//! Collects the files staged into the secrets tmpfs of one project. Reads the host files and
-//! decides which slots exist through the same helpers the renderer mounts them with.
-
 use super::secret_slots::{
     builtin_worker_has_tokens, claude_secrets_mount, enabled_builtin_workers,
     enabled_plugin_workers, hub_policy_mount, hub_secrets_mount, proxy_config_mount,
@@ -13,10 +10,7 @@ use super::{llm, proxy, workers};
 use crate::config::{ResolvedClaudeConfig, ResolvedIntegrationsConfig};
 use crate::consts;
 use crate::plugin::PluginManifest;
-use crate::secrets_tmpfs::layout::{
-    validate_file_name, ProjectPayload, SecretFile, Slot, SlotFiles,
-};
-use crate::secrets_tmpfs::stage::{self, ProjectSettings};
+use crate::secrets_tmpfs::layout::{validate_file_name, ProjectPayload, SecretFile, SlotFiles};
 use std::path::Path;
 
 pub(crate) fn collect_project_payload_in(
@@ -108,50 +102,6 @@ pub(crate) fn collect_project_payload_in(
     ));
 
     Ok(ProjectPayload { slots })
-}
-
-pub(crate) struct ServiceTokenSlots {
-    pub(crate) worker: Option<Slot>,
-    pub(crate) git: Vec<Slot>,
-}
-
-pub(crate) fn service_token_slots_in(
-    data_dir: &Path,
-    project: &str,
-    service: &str,
-) -> anyhow::Result<ServiceTokenSlots> {
-    let settings = stage::load_project_settings(data_dir, project)?;
-    let worker = worker_tokens_slot_of(&settings, service)?;
-    let mut git = Vec::new();
-    for forge in proxy::git_forges_in(
-        data_dir,
-        project,
-        &settings.integrations,
-        &settings.resolved_config.git_repositories,
-        &settings.resolved_config.access,
-    ) {
-        if forge.kind.config_key() == service {
-            git.push(proxy_git_mount(forge.kind)?.slot);
-        }
-    }
-    Ok(ServiceTokenSlots { worker, git })
-}
-
-fn worker_tokens_slot_of(
-    settings: &ProjectSettings,
-    service: &str,
-) -> anyhow::Result<Option<Slot>> {
-    let builtin = enabled_builtin_workers(&settings.integrations)
-        .find(|svc| svc.config_key == service && builtin_worker_has_tokens(svc))
-        .map(|svc| svc.compose_name.to_string());
-    let compose_name = builtin.or_else(|| {
-        enabled_plugin_workers(&settings.integrations, &settings.plugin_manifests)
-            .find(|worker| worker.service_id == service)
-            .map(|worker| worker.compose_name)
-    });
-    compose_name
-        .map(|name| worker_tokens_mount(&name).map(|mount| mount.slot))
-        .transpose()
 }
 
 fn worker_tokens_slot(mount: SlotMount, host_dir: &Path) -> anyhow::Result<SlotFiles> {

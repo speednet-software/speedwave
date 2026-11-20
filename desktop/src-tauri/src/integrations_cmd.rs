@@ -1233,8 +1233,8 @@ fn restage_secrets(rt: &speedwave_runtime::runtime::LockedRuntime, project: &str
     if !rt.is_available() {
         return;
     }
-    if rt.stage_project_secrets(project).is_err() {
-        log::warn!("could not update the container secrets of project {project}");
+    if let Err(e) = rt.stage_project_secrets(project) {
+        log::warn!("could not update the container secrets of project {project}: {e:#}");
     }
 }
 

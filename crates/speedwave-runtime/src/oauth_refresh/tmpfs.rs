@@ -5,9 +5,14 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use super::status::Status;
 use super::store::{self, Paths};
 use super::RefreshOutcome;
-use crate::compose::secret_payload::service_token_slots_in;
+use crate::compose::secret_slots::{
+    builtin_worker_has_tokens, enabled_builtin_workers, enabled_plugin_workers, proxy_git_mount,
+    worker_tokens_mount,
+};
+use crate::config::ProjectSettings;
 use crate::consts;
 use crate::runtime::LockedRuntime;
+use crate::secrets_tmpfs::layout::Slot;
 
 #[derive(Clone, Copy)]
 pub(super) struct Target<'a> {
@@ -34,16 +39,24 @@ impl Pending {
     }
 }
 
-#[derive(Default)]
 struct Entry {
-    status: Option<Status>,
+    status: Status,
     pending: Pending,
     warned: bool,
 }
 
+impl Default for Entry {
+    fn default() -> Self {
+        Self {
+            status: Status::Clear,
+            pending: Pending::default(),
+            warned: false,
+        }
+    }
+}
+
 type Entries = HashMap<(String, String), Arc<Mutex<Entry>>>;
 
-/// What the process still has to put into the secrets tmpfs of every `(project, service)`.
 #[derive(Clone, Default)]
 pub(super) struct Publications(Arc<Mutex<Entries>>);
 
@@ -57,8 +70,7 @@ impl Publications {
         let entry = self.entry(target.project, service);
         let mut entry = entry.lock().unwrap_or_else(PoisonError::into_inner);
         if !entry.pending.is_empty() && !containers_running(target) {
-            entry.pending = Pending::default();
-            entry.warned = false;
+            *entry = Entry::default();
         }
         entry.record(change);
         if !entry.pending.is_empty() {
@@ -83,8 +95,8 @@ impl Entry {
             self.pending.token = true;
         }
         let status = Status::of(change.outcome);
-        if self.status != Some(status) {
-            self.status = Some(status);
+        if self.status != status {
+            self.status = status;
             self.pending.status = Some(status.file_content());
         }
         if change.name.is_some() {
@@ -93,11 +105,13 @@ impl Entry {
     }
 
     fn flush(&mut self, target: Target<'_>, service: &str) {
-        let failed = self.write_pending(target, service).is_err();
-        if failed && !self.warned {
-            log::warn!("could not update the container secrets of service {service}");
+        let result = self.write_pending(target, service);
+        if let Err(e) = &result {
+            if !self.warned {
+                log::warn!("could not update the container secrets of service {service}: {e:#}");
+            }
         }
-        self.warned = failed;
+        self.warned = result.is_err();
     }
 
     fn write_pending(&mut self, target: Target<'_>, service: &str) -> anyhow::Result<()> {
@@ -143,11 +157,55 @@ impl Entry {
     }
 }
 
+struct ServiceTokenSlots {
+    worker: Option<Slot>,
+    git: Vec<Slot>,
+}
+
+fn service_token_slots_in(
+    data_dir: &Path,
+    project: &str,
+    service: &str,
+) -> anyhow::Result<ServiceTokenSlots> {
+    let settings = crate::config::load_project_settings(data_dir, project)?;
+    let worker = worker_tokens_slot_of(&settings, service)?;
+    let mut git = Vec::new();
+    for kind in crate::compose::enabled_git_forge_kinds_in(
+        data_dir,
+        project,
+        &settings.integrations,
+        &settings.resolved_config.git_repositories,
+        &settings.resolved_config.access,
+    ) {
+        if kind.config_key() == service {
+            git.push(proxy_git_mount(kind)?.slot);
+        }
+    }
+    Ok(ServiceTokenSlots { worker, git })
+}
+
+fn worker_tokens_slot_of(
+    settings: &ProjectSettings,
+    service: &str,
+) -> anyhow::Result<Option<Slot>> {
+    let builtin = enabled_builtin_workers(&settings.integrations)
+        .find(|svc| svc.config_key == service && builtin_worker_has_tokens(svc))
+        .map(|svc| svc.compose_name.to_string());
+    let compose_name = builtin.or_else(|| {
+        enabled_plugin_workers(&settings.integrations, &settings.plugin_manifests)
+            .find(|worker| worker.service_id == service)
+            .map(|worker| worker.compose_name)
+    });
+    compose_name
+        .map(|name| worker_tokens_mount(&name).map(|mount| mount.slot))
+        .transpose()
+}
+
 fn containers_running(target: Target<'_>) -> bool {
-    target
-        .runtime
-        .compose_ps(target.project)
-        .is_ok_and(|containers| !containers.is_empty())
+    match target.runtime.compose_ps(target.project) {
+        Ok(containers) => !containers.is_empty(),
+        Err(_) => true,
+    }
 }
 
 #[cfg(test)]
@@ -285,18 +343,11 @@ mod tests {
 
         assert_eq!(
             puts(&handles),
-            vec![
-                (
-                    "mcp-slack/tokens".to_string(),
-                    "access_token".to_string(),
-                    "new-at".to_string()
-                ),
-                (
-                    "mcp-slack/tokens".to_string(),
-                    "refresh_status".to_string(),
-                    String::new()
-                ),
-            ]
+            vec![(
+                "mcp-slack/tokens".to_string(),
+                "access_token".to_string(),
+                "new-at".to_string()
+            ),]
         );
     }
 
@@ -339,7 +390,7 @@ mod tests {
 
         assert_eq!(
             statuses(&handles),
-            ["", "network_error", "reconnect_required", ""]
+            ["network_error", "reconnect_required", ""]
         );
         let host_dir = Paths::new(data_dir.path(), "proj", "slack").token_dir;
         assert!(!host_dir.join(consts::OAUTH_REFRESH_STATUS_FILE).exists());
@@ -377,7 +428,7 @@ mod tests {
             .into_iter()
             .map(|(_, name, _)| name)
             .collect();
-        assert_eq!(names, ["access_token", "refresh_status"]);
+        assert_eq!(names, ["access_token"]);
 
         publish(
             &publications,
@@ -385,7 +436,7 @@ mod tests {
             data_dir.path(),
             RefreshOutcome::NotDue,
         );
-        assert_eq!(working_handles.vm_exec_calls.lock().unwrap().len(), 2);
+        assert_eq!(working_handles.vm_exec_calls.lock().unwrap().len(), 1);
     }
 
     #[test]
@@ -425,6 +476,91 @@ mod tests {
             RefreshOutcome::NotDue,
         );
         assert!(puts(&working_handles).is_empty());
+    }
+
+    #[test]
+    fn the_first_check_of_a_process_that_is_not_due_writes_nothing() {
+        let data_dir = data_dir_with_project();
+        let (runtime, handles) = running_runtime(0);
+
+        publish(
+            &Publications::default(),
+            &runtime,
+            data_dir.path(),
+            RefreshOutcome::NotDue,
+        );
+
+        assert!(handles.vm_exec_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_transient_compose_ps_error_keeps_the_pending_work() {
+        let data_dir = data_dir_with_project();
+        write_access_token(data_dir.path(), "slack", "new-at");
+        let publications = Publications::default();
+        let (failing, _) = running_runtime(1);
+        let (unknown, _) = MockRuntimeBuilder::new()
+            .with_ps_error("transient")
+            .with_vm_exec_as_root_exit(1, "")
+            .build();
+        let (working, working_handles) = running_runtime(0);
+
+        publish(
+            &publications,
+            &failing,
+            data_dir.path(),
+            RefreshOutcome::Refreshed,
+        );
+        publish(
+            &publications,
+            &unknown,
+            data_dir.path(),
+            RefreshOutcome::NotDue,
+        );
+        publish(
+            &publications,
+            &working,
+            data_dir.path(),
+            RefreshOutcome::NotDue,
+        );
+
+        let names: Vec<String> = puts(&working_handles)
+            .into_iter()
+            .map(|(_, name, _)| name)
+            .collect();
+        assert_eq!(names, ["access_token"]);
+    }
+
+    #[test]
+    fn the_status_is_put_again_after_the_containers_stopped_and_dropped_the_pending_work() {
+        let data_dir = data_dir_with_project();
+        let publications = Publications::default();
+        let (failing, _) = running_runtime(1);
+        let (stopped, _) = MockRuntimeBuilder::new()
+            .with_vm_exec_as_root_exit(1, "")
+            .build();
+        let (working, working_handles) = running_runtime(0);
+
+        publish(
+            &publications,
+            &failing,
+            data_dir.path(),
+            RefreshOutcome::NetworkError,
+        );
+        publish(
+            &publications,
+            &stopped,
+            data_dir.path(),
+            RefreshOutcome::NetworkError,
+        );
+        publish(
+            &publications,
+            &working,
+            data_dir.path(),
+            RefreshOutcome::NetworkError,
+        );
+
+        assert_eq!(statuses(&working_handles), ["network_error"]);
     }
 
     #[test]

@@ -1748,6 +1748,32 @@ pub(crate) fn resolve_project_config_in(
     )
 }
 
+pub(crate) struct ProjectSettings {
+    pub(crate) resolved_config: ResolvedClaudeConfig,
+    pub(crate) integrations: ResolvedIntegrationsConfig,
+    pub(crate) plugin_manifests: Vec<crate::plugin::PluginManifest>,
+}
+
+pub(crate) fn load_project_settings(
+    data_dir: &Path,
+    project: &str,
+) -> anyhow::Result<ProjectSettings> {
+    let user_config = load_user_config_from(&data_dir.join("config.json"))?;
+    let entry = user_config.require_project(project)?;
+    let (resolved_config, integrations) =
+        resolve_project_config_in(data_dir, Path::new(&entry.dir), &user_config, project);
+    let plugin_manifests: Vec<crate::plugin::PluginManifest> =
+        crate::plugin::list_verified_from_dir(&crate::plugin::plugins_base_dir_in(data_dir))?
+            .iter()
+            .map(|verified| verified.manifest().clone())
+            .collect();
+    Ok(ProjectSettings {
+        resolved_config,
+        integrations,
+        plugin_manifests,
+    })
+}
+
 pub(crate) fn resolve_project_config_in_with_load(
     data_dir: &Path,
     project_dir: &Path,

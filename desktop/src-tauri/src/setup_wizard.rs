@@ -342,7 +342,7 @@ pub(crate) fn project_needs_anthropic_auth(
 
 fn auth_status_exec_argv() -> Vec<String> {
     vec![
-        "env".to_string(),
+        consts::SPEEDWAVE_EXEC_WRAPPER.to_string(),
         format!("{}=1", consts::CLAUDE_DISABLE_NONESSENTIAL_TRAFFIC_ENV),
         format!("https_proxy={}", consts::CLAUDE_OFFLINE_HTTPS_PROXY),
         format!("HTTPS_PROXY={}", consts::CLAUDE_OFFLINE_HTTPS_PROXY),
@@ -1033,7 +1033,7 @@ mod tests {
         assert_eq!(
             auth_status_exec_argv(),
             vec![
-                "env",
+                "/usr/local/bin/speedwave-exec",
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
                 "https_proxy=http://127.0.0.1:1",
                 "HTTPS_PROXY=http://127.0.0.1:1",
@@ -1091,7 +1091,10 @@ mod tests {
     #[test]
     fn auth_status_argv_puts_the_env_assignments_before_the_binary() {
         let argv = auth_status_exec_argv();
-        assert_eq!(argv.first().map(String::as_str), Some("env"));
+        assert_eq!(
+            argv.first().map(String::as_str),
+            Some(consts::SPEEDWAVE_EXEC_WRAPPER)
+        );
 
         let binary_pos = argv
             .iter()

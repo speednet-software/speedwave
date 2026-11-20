@@ -44,7 +44,8 @@ export interface BootWorkerOptions<C> {
 }
 
 function readAuthToken(authTokenEnv: string): string | undefined {
-  const tokenFile = process.env[`${authTokenEnv}_FILE`];
+  const fileEnv = `${authTokenEnv}_FILE`;
+  const tokenFile = process.env[fileEnv];
   if (tokenFile) {
     try {
       const fromFile = readFileSync(tokenFile, 'utf8').trim();
@@ -52,7 +53,7 @@ function readAuthToken(authTokenEnv: string): string | undefined {
         return fromFile;
       }
     } catch {
-      return process.env[authTokenEnv] || undefined;
+      console.warn(`${ts()} ${fileEnv} is set but the file it names cannot be read`);
     }
   }
   return process.env[authTokenEnv] || undefined;
