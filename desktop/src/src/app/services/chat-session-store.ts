@@ -10,7 +10,11 @@ import { LoggerService } from './logger.service';
 import { DEFAULT_ALIAS } from './model-picker.service';
 import type { ClaudeContextUsage, ModelSwitchOutcome } from '../models/claude-control';
 import type { ChatSessionEventKind } from '../models/notifications';
-import { isBlankOrSlashOnly, isControlShaped } from '../chat/slash/slash.service';
+import {
+  isBlankOrSlashOnly,
+  isControlShaped,
+  type SlashService,
+} from '../chat/slash/slash.service';
 import { ComposerAttachments } from '../chat/composer/composer-attachments';
 import { DEFAULT_FIND_STATE, escapeRegExp, type ChatFindState } from '../chat/find/chat-find';
 import {
@@ -237,6 +241,7 @@ export interface ChatStoreDeps {
   planUsage: PlanUsageService;
   clipboard: Clipboard;
   log: LoggerService;
+  slash: SlashService;
   /** Ensures the (service-owned, single per project) stream listener is set up. */
   ensureListeners: () => Promise<void>;
 }
@@ -1696,6 +1701,9 @@ export class ChatSessionStore {
           this.seedSessionId(chunk.data.session_id);
           void this.flushDeferredQueue(chunk.data.session_id);
         }
+        if (chunk.data.slash_commands) {
+          this.deps.slash.setSessionCommands(this.tabId, chunk.data.slash_commands);
+        }
         break;
 
       case 'ControlChip': {
@@ -1951,6 +1959,7 @@ export class ChatSessionStore {
     this._sessionGeneration += 1;
     this.startingSession = false;
     this.dropPendingPicks();
+    this.deps.slash.clearSession(this.tabId);
     this._sessionEnded.set(false);
     this.restoreConversationView(emptyConversationView());
   }
@@ -2480,6 +2489,7 @@ export class ChatSessionStore {
     this._launchedFor = null;
     this.dropPendingPicks();
     this.setResumeDecider(null);
+    this.deps.slash.clearSession(this.tabId);
     this.composerAttachments.dispose();
   }
 }

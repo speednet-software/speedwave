@@ -324,6 +324,70 @@ describe('ToolBlockComponent', () => {
       );
     });
 
+    describe('Workflow', () => {
+      function openWorkflow(input: Record<string, unknown>, extra: Record<string, unknown> = {}) {
+        setTool(makeTool({ tool_name: 'Workflow', input_json: JSON.stringify(input), ...extra }));
+        fixture.detectChanges();
+        component.toggleCollapsed();
+        fixture.detectChanges();
+        return fixture.nativeElement as HTMLElement;
+      }
+
+      it('shows name in the header and args as a list', () => {
+        const el = openWorkflow({
+          name: 'release',
+          description: 'Ship it',
+          args: { env: 'prod', retries: 3 },
+        });
+        expect(el.querySelector('[data-testid="tool-summary"]')?.textContent?.trim()).toBe(
+          'release'
+        );
+        expect(el.querySelector('[data-testid="workflow-description"]')?.textContent).toContain(
+          'Ship it'
+        );
+        const items = Array.from(el.querySelectorAll('[data-testid="workflow-arg"]')).map((e) =>
+          e.textContent?.replace(/\s+/g, ' ').trim()
+        );
+        expect(items).toEqual(['env: prod', 'retries: 3']);
+      });
+
+      it('takes the header from meta in the script and collapses the script', () => {
+        const el = openWorkflow({ script: "export const meta = { name: 'from-meta' }\nrun()" });
+        expect(el.querySelector('[data-testid="tool-summary"]')?.textContent?.trim()).toBe(
+          'from-meta'
+        );
+        const details = el.querySelector('[data-testid="workflow-script"]') as HTMLDetailsElement;
+        expect(details.tagName).toBe('DETAILS');
+        expect(details.open).toBe(false);
+        expect(details.textContent).toContain('run()');
+      });
+
+      it('uses the literal workflow header without a name or meta', () => {
+        const el = openWorkflow({ scriptPath: 'wf/a.js' });
+        expect(el.querySelector('[data-testid="tool-summary"]')?.textContent?.trim()).toBe(
+          'workflow'
+        );
+        expect(el.querySelector('[data-testid="workflow-script-path"]')?.textContent).toContain(
+          'wf/a.js'
+        );
+      });
+
+      it('shows the result text', () => {
+        const el = openWorkflow({ name: 'release' }, { result: 'started task t-1' });
+        expect(el.querySelector('[data-testid="result-content"]')?.textContent).toContain(
+          'started task t-1'
+        );
+      });
+
+      it('renders the generic block for an unknown input shape', () => {
+        const el = openWorkflow({ other: 'shape' });
+        expect(el.querySelector('[data-testid="code-block"]')?.textContent).toContain(
+          '{"other":"shape"}'
+        );
+        expect(el.querySelector('[data-testid="tool-summary"]')).toBeNull();
+      });
+    });
+
     it('falls back to generic code-block for unknown tools', () => {
       setTool(makeTool({ tool_name: 'CustomTool', input_json: '{"custom":"data"}' }));
       fixture.detectChanges();

@@ -15,6 +15,7 @@ import {
 import { ProjectStateService } from './project-state.service';
 import { TauriService } from './tauri.service';
 import { LoggerService } from './logger.service';
+import { SlashService } from '../chat/slash/slash.service';
 import { PlanUsageService } from './plan-usage.service';
 import { BetaService } from './beta.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
@@ -406,6 +407,31 @@ describe('ChatStateService', () => {
 
         expect(store1.currentBlocks).toEqual([{ type: 'text', content: 'to tab1' }]);
         expect(store2.currentBlocks).toEqual([{ type: 'text', content: 'to tab2' }]);
+      });
+
+      it('shows the init slash list of the active tab in the picker', async () => {
+        await service.init();
+        const tab1 = service.activeTabId();
+        const tab2 = await service.openTab();
+        const slash = TestBed.inject(SlashService);
+        const list = (name: string) => [
+          { name, description: null, argument_hint: null, kind: 'Command' as const, plugin: null },
+        ];
+
+        mockTauri.dispatchEvent('chat_stream', {
+          tab_id: tab1,
+          chunk_type: 'SystemInit',
+          data: { model: 'm', slash_commands: list('one') },
+        });
+        mockTauri.dispatchEvent('chat_stream', {
+          tab_id: tab2,
+          chunk_type: 'SystemInit',
+          data: { model: 'm', slash_commands: list('two') },
+        });
+
+        expect(slash.commands()).toEqual(list('two'));
+        service.activateTab(tab1);
+        expect(slash.commands()).toEqual(list('one'));
       });
 
       it('streams two tabs concurrently with no cross-talk', async () => {

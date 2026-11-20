@@ -9,6 +9,7 @@ import {
   isControlShaped,
   type SlashDiscovery,
 } from './slash.service';
+import type { SlashCommand } from '../../models/slash';
 import { TauriService } from '../../services/tauri.service';
 import { LoggerService } from '../../services/logger.service';
 import { ProjectStateService, type AuthStatusResponse } from '../../services/project-state.service';
@@ -215,6 +216,111 @@ describe('SlashService', () => {
 
     expect(service.unavailable()).toBe(false);
     expect(service.source()).toBe('Init');
+  });
+
+  describe('list source', () => {
+    const cmd = (name: string): SlashCommand => ({
+      name,
+      description: null,
+      argument_hint: null,
+      kind: 'Command',
+      plugin: null,
+    });
+    const names = (): string[] => service.commands().map((c) => c.name);
+
+    async function discover(...found: string[]): Promise<void> {
+      tauri.invokeMock.mockResolvedValueOnce({
+        commands: found.map(cmd),
+        source: 'Init',
+      } as SlashDiscovery);
+      await service.refresh('acme');
+    }
+
+    it('shows the discovery list before any session init', async () => {
+      service.setActiveSession('tab-1');
+      await discover('from-discovery');
+
+      expect(names()).toEqual(['from-discovery']);
+    });
+
+    it('shows the init list of the active session after its init', async () => {
+      await discover('from-discovery');
+      service.setActiveSession('tab-1');
+
+      service.setSessionCommands('tab-1', [cmd('simplify'), cmd('loop')]);
+
+      expect(names()).toEqual(['simplify', 'loop']);
+    });
+
+    it('keeps the init list when a discovery refresh finishes afterwards', async () => {
+      service.setActiveSession('tab-1');
+      service.setSessionCommands('tab-1', [cmd('simplify')]);
+
+      await discover('from-discovery');
+
+      expect(names()).toEqual(['simplify']);
+    });
+
+    it('replaces the list at the next init of the same session', () => {
+      service.setActiveSession('tab-1');
+      service.setSessionCommands('tab-1', [cmd('old')]);
+
+      service.setSessionCommands('tab-1', [cmd('old'), cmd('added-mid-work')]);
+
+      expect(names()).toEqual(['old', 'added-mid-work']);
+    });
+
+    it('shows an empty init list as empty instead of falling back to discovery', async () => {
+      await discover('from-discovery');
+      service.setActiveSession('tab-1');
+
+      service.setSessionCommands('tab-1', []);
+
+      expect(names()).toEqual([]);
+    });
+
+    it('ignores the init list of a session that is not active', async () => {
+      await discover('from-discovery');
+      service.setActiveSession('tab-1');
+
+      service.setSessionCommands('tab-2', [cmd('other')]);
+
+      expect(names()).toEqual(['from-discovery']);
+    });
+
+    it('follows the active session when the user switches tabs', () => {
+      service.setSessionCommands('tab-1', [cmd('one')]);
+      service.setSessionCommands('tab-2', [cmd('two')]);
+
+      service.setActiveSession('tab-1');
+      expect(names()).toEqual(['one']);
+      service.setActiveSession('tab-2');
+      expect(names()).toEqual(['two']);
+    });
+
+    it('falls back to discovery once the session list is cleared', async () => {
+      await discover('from-discovery');
+      service.setActiveSession('tab-1');
+      service.setSessionCommands('tab-1', [cmd('simplify')]);
+
+      service.clearSession('tab-1');
+
+      expect(names()).toEqual(['from-discovery']);
+    });
+
+    it('is not unavailable while the active session has an init list', async () => {
+      tauri.invokeMock.mockResolvedValueOnce({
+        commands: [],
+        source: 'Unavailable',
+      } as SlashDiscovery);
+      await service.refresh('acme');
+      service.setActiveSession('tab-1');
+      expect(service.unavailable()).toBe(true);
+
+      service.setSessionCommands('tab-1', [cmd('simplify')]);
+
+      expect(service.unavailable()).toBe(false);
+    });
   });
 
   it('refresh() sets source=null and error on backend failure without throwing', async () => {

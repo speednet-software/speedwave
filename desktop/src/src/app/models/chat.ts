@@ -1,5 +1,6 @@
 import type { ClaudeContextUsage } from './claude-control';
 import type { ToolUseState } from './state-tree';
+import type { SlashCommand } from './slash';
 
 /** Mirror of Rust `speedwave_runtime::stream::TurnErrorKind`. */
 export type TurnErrorKind = 'authentication_failed';
@@ -48,7 +49,10 @@ export type StreamChunk =
         response_ids?: string[];
       };
     }
-  | { chunk_type: 'SystemInit'; data: { model: string; session_id?: string } }
+  | {
+      chunk_type: 'SystemInit';
+      data: { model: string; session_id?: string; slash_commands?: readonly SlashCommand[] };
+    }
   | {
       chunk_type: 'ControlChip';
       data: { command: string; argument: string; uuid?: string };
@@ -260,6 +264,15 @@ export type NormalizedToolInput =
   | { kind: 'web_search'; query: string }
   | { kind: 'web_fetch'; url: string }
   | { kind: 'agent'; description: string }
+  | {
+      kind: 'workflow';
+      title: string;
+      description?: string;
+      args: Array<{ key: string; value: string }>;
+      script?: string;
+      scriptPath?: string;
+      resumeFromRunId?: string;
+    }
   | { kind: 'generic'; raw_json: string };
 
 /** Retry-anchor UUID commit state for a ChatMessage (ADR-046). */

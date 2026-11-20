@@ -1,5 +1,83 @@
 import type { NormalizedToolInput } from './chat';
 
+const META_START = /export\s+const\s+meta\s*=\s*\{/;
+const META_NAME_AT = /name\s*:\s*(['"])(.*?)\1/sy;
+const QUOTES = new Set(['"', "'", '`']);
+
+function metaName(script: string): string | undefined {
+  const start = META_START.exec(script);
+  if (!start) {
+    return undefined;
+  }
+  let depth = 1;
+  for (let i = start.index + start[0].length; i < script.length && depth > 0; i++) {
+    const ch = script[i];
+    if (QUOTES.has(ch)) {
+      i = closingQuote(script, i);
+    } else if (ch === '{') {
+      depth++;
+    } else if (ch === '}') {
+      depth--;
+    } else if (depth === 1 && ch === 'n' && !/\w/.test(script[i - 1] ?? '')) {
+      META_NAME_AT.lastIndex = i;
+      const found = META_NAME_AT.exec(script);
+      if (found) {
+        return found[2];
+      }
+    }
+  }
+  return undefined;
+}
+
+function closingQuote(script: string, open: number): number {
+  const quote = script[open];
+  let i = open + 1;
+  while (i < script.length && script[i] !== quote) {
+    i += script[i] === '\\' ? 2 : 1;
+  }
+  return i;
+}
+
+function usableString(value: string | undefined): boolean {
+  return value !== undefined && value.trim() !== '';
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined;
+}
+
+function workflowArgs(value: unknown): Array<{ key: string; value: string }> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return [];
+  }
+  return Object.entries(value).map(([key, v]) => ({
+    key,
+    value: typeof v === 'string' ? v : (JSON.stringify(v) ?? String(v)),
+  }));
+}
+
+function normalizeWorkflow(parsed: Record<string, unknown>): NormalizedToolInput | undefined {
+  const name = optionalString(parsed['name']);
+  const description = optionalString(parsed['description']);
+  const script = optionalString(parsed['script']);
+  const scriptPath = optionalString(parsed['scriptPath']);
+  const resumeFromRunId = optionalString(parsed['resumeFromRunId']);
+  const args = workflowArgs(parsed['args']);
+  if (![name, script, scriptPath].some(usableString)) {
+    return undefined;
+  }
+  const scriptName = script === undefined ? undefined : metaName(script);
+  return {
+    kind: 'workflow',
+    title: (usableString(name) ? name : scriptName) || 'workflow',
+    description,
+    args,
+    script,
+    scriptPath,
+    resumeFromRunId,
+  };
+}
+
 /**
  * Parses raw tool input JSON into a typed display model by tool name.
  * @param toolName - The Claude tool name (e.g. "Bash", "TaskCreate").
@@ -73,6 +151,8 @@ export function normalizeToolInput(toolName: string, inputJson: string): Normali
           kind: 'agent',
           description: parsed.description ?? '',
         };
+      case 'Workflow':
+        return normalizeWorkflow(parsed) ?? { kind: 'generic', raw_json: inputJson };
       default:
         return { kind: 'generic', raw_json: inputJson };
     }

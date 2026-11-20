@@ -28,6 +28,7 @@ import { TauriService } from './tauri.service';
 import { AnthropicModelsService } from './anthropic-models.service';
 import { ClaudeControlService } from './claude-control.service';
 import { LoggerService } from './logger.service';
+import { SlashService } from '../chat/slash/slash.service';
 import { makeStagedImage } from '../testing/attachments';
 import { PlanUsageService } from './plan-usage.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
@@ -104,6 +105,7 @@ describe('ChatSessionStore', () => {
       planUsage: TestBed.inject(PlanUsageService),
       clipboard: TestBed.inject(Clipboard),
       log: mockLogger,
+      slash: TestBed.inject(SlashService),
       ensureListeners: () => Promise.resolve(),
     };
     store = new ChatSessionStore('test-tab-id', deps);
@@ -3139,6 +3141,69 @@ describe('ChatSessionStore', () => {
       });
 
       expect(store.sessionStats?.model).toBeUndefined();
+    });
+  });
+
+  describe('SystemInit slash commands', () => {
+    const initList = [
+      {
+        name: 'simplify',
+        description: null,
+        argument_hint: null,
+        kind: 'Command' as const,
+        plugin: null,
+      },
+    ];
+
+    it('hands the init list to the slash service under its tab id', () => {
+      const slash = TestBed.inject(SlashService);
+      slash.setActiveSession('test-tab-id');
+
+      store.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-6', slash_commands: initList },
+      });
+
+      expect(slash.commands()).toEqual(initList);
+    });
+
+    it('keeps the earlier list when an init carries none', () => {
+      const slash = TestBed.inject(SlashService);
+      slash.setActiveSession('test-tab-id');
+      store.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-6', slash_commands: initList },
+      });
+
+      store.handleStreamChunk({ chunk_type: 'SystemInit', data: { model: 'claude-opus-4-6' } });
+
+      expect(slash.commands()).toEqual(initList);
+    });
+
+    it('drops the list when a new conversation starts', () => {
+      const slash = TestBed.inject(SlashService);
+      slash.setActiveSession('test-tab-id');
+      store.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-6', slash_commands: initList },
+      });
+
+      store.resetForNewConversation();
+
+      expect(slash.commands()).toEqual([]);
+    });
+
+    it('drops the list when the tab is disposed', () => {
+      const slash = TestBed.inject(SlashService);
+      slash.setActiveSession('test-tab-id');
+      store.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-6', slash_commands: initList },
+      });
+
+      store.dispose();
+
+      expect(slash.commands()).toEqual([]);
     });
   });
 
