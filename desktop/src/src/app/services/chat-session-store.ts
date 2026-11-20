@@ -34,6 +34,16 @@ import {
 } from '../models/state-tree';
 import { foldTaskPlan, type PlannedTask } from '../chat/task-plan/task-plan';
 import {
+  NO_AGENT_RUNS,
+  agentRunsFromTranscript,
+  foldAgents,
+  sameAgents,
+  withAgentActivity,
+  withAgentStatus,
+  type AgentRuns,
+  type AgentView,
+} from '../chat/agents/agents';
+import {
   chatInputFromText,
   chatInputToBlocks,
   contextTokensFrom,
@@ -66,6 +76,7 @@ interface StartResult {
 }
 
 interface ConversationView extends LegacyStateSnapshot {
+  subagentRuns: AgentRuns;
   totalOutputTokens: number;
   contextWindowSize: number | null;
   contextSnapshot: ClaudeContextUsage | null;
@@ -87,6 +98,7 @@ function emptyConversationView(): ConversationView {
     pendingQueue: null,
     sessionStats: null,
     model: '',
+    subagentRuns: NO_AGENT_RUNS,
     totalOutputTokens: 0,
     contextWindowSize: null,
     contextSnapshot: null,
@@ -906,6 +918,8 @@ export class ChatSessionStore {
   /** Per-tab plan-mode flag restored when a background tab is reactivated, or on a nav-rail remount. */
   readonly composerPlanMode = signal(false);
   readonly taskPlanExpanded = signal(false);
+  readonly agentPanelExpanded = signal(false);
+  private readonly _subagentRuns = signal<AgentRuns>(NO_AGENT_RUNS);
   /** Per-tab staged image attachments (SPEED-785) — a paste/drop resolves into this instance regardless of which tab's composer is active when it finishes. */
   readonly composerAttachments = new ComposerAttachments();
   private readonly _stagedTranscript = signal<StagedTranscript | null>(null);
@@ -1117,12 +1131,36 @@ export class ChatSessionStore {
     () => this._state().pending_queue
   );
 
-  readonly taskPlan: Signal<readonly PlannedTask[] | null> = computed(() =>
-    foldTaskPlan(
-      this._state().entries.flatMap((entry) =>
-        entry.blocks.flatMap((b) => (b.kind === 'tool_use' ? [b] : []))
-      )
+  private readonly toolCalls = computed(() =>
+    this._state().entries.flatMap((entry) =>
+      entry.blocks.flatMap((b) => (b.kind === 'tool_use' ? [b] : []))
     )
+  );
+
+  readonly taskPlan: Signal<readonly PlannedTask[] | null> = computed(() =>
+    foldTaskPlan(this.toolCalls())
+  );
+
+  private readonly agentViews: Signal<readonly AgentView[]> = computed(
+    () => foldAgents(this.toolCalls(), this._subagentRuns()),
+    { equal: sameAgents }
+  );
+
+  readonly agentsById: Signal<ReadonlyMap<string, AgentView>> = computed(
+    () => new Map(this.agentViews().map((a) => [a.id, a]))
+  );
+
+  readonly agentPanel: Signal<readonly AgentView[]> = computed(
+    () => {
+      if (this._sessionEnded()) return [];
+      const inTurn = new Set(
+        this.currentBlocksFromState().flatMap((b) =>
+          b.type === 'tool_use' ? [b.tool.tool_id] : []
+        )
+      );
+      return this.agentViews().filter((a) => a.status === 'running' || inTurn.has(a.id));
+    },
+    { equal: sameAgents }
   );
 
   /**
@@ -1838,6 +1876,20 @@ export class ChatSessionStore {
         this.openTurn([{ type: 'turn_origin', origin: chunk.data.origin }]);
         break;
 
+      case 'SubagentActivity': {
+        const { parent_tool_id, tool_id, tool_name, input_json } = chunk.data;
+        this._subagentRuns.update((runs) =>
+          withAgentActivity(runs, parent_tool_id, { tool_id, tool_name, input_json })
+        );
+        return;
+      }
+
+      case 'SubagentStatus': {
+        const { tool_id, status, summary } = chunk.data;
+        this._subagentRuns.update((runs) => withAgentStatus(runs, tool_id, status, summary));
+        return;
+      }
+
       case 'QueueDrained': {
         this._pendingQueue = null;
         this._queueAwaitingSession = false;
@@ -1905,6 +1957,7 @@ export class ChatSessionStore {
 
   private captureConversationView(): ConversationView {
     return {
+      subagentRuns: this._subagentRuns(),
       messages: this._messages,
       currentBlocks: this._currentBlocks,
       isStreaming: this.isStreaming,
@@ -1929,6 +1982,7 @@ export class ChatSessionStore {
   }
 
   private restoreConversationView(view: ConversationView): void {
+    this._subagentRuns.set(view.subagentRuns);
     this._messages = [...view.messages];
     this._currentBlocks = [...view.currentBlocks];
     this.isStreaming = view.isStreaming;
@@ -2269,6 +2323,9 @@ export class ChatSessionStore {
       if (gen !== this._sessionGeneration || !sameProject()) return;
       if (transcript) {
         this.loadMessages(toChatMessages(transcript));
+        this._subagentRuns.update(
+          (live) => new Map([...agentRunsFromTranscript(transcript), ...live])
+        );
       } else {
         this.loadMessages([
           {

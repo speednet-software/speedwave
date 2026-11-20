@@ -147,9 +147,12 @@ export function normalizeToolInput(toolName: string, inputJson: string): Normali
       case 'WebFetch':
         return { kind: 'web_fetch', url: parsed.url ?? '' };
       case 'Agent':
+      case 'Task':
         return {
           kind: 'agent',
           description: parsed.description ?? '',
+          subagent_type: optionalString(parsed.subagent_type),
+          run_in_background: parsed.run_in_background === true ? true : undefined,
         };
       case 'Workflow':
         return normalizeWorkflow(parsed) ?? { kind: 'generic', raw_json: inputJson };

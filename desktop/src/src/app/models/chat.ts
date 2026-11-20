@@ -69,7 +69,18 @@ export type StreamChunk =
       chunk_type: 'QueueDrained';
       data: { session_id: string; text: string };
     }
-  | { chunk_type: 'TurnStarted'; data: { origin: TurnOrigin } };
+  | { chunk_type: 'TurnStarted'; data: { origin: TurnOrigin } }
+  | {
+      chunk_type: 'SubagentActivity';
+      data: { parent_tool_id: string; tool_id: string; tool_name: string; input_json: string };
+    }
+  | {
+      chunk_type: 'SubagentStatus';
+      data: { tool_id: string; status: SubagentState; summary: string };
+    };
+
+/** Mirror of Rust `chat.rs::SubagentState`. */
+export type SubagentState = 'running' | 'completed' | 'error' | 'stopped';
 
 /** What started a Claude Code turn. */
 export type TurnOrigin = 'user' | 'scheduled' | 'task_notification';
@@ -263,7 +274,7 @@ export type NormalizedToolInput =
   | { kind: 'task_get'; task_id: string }
   | { kind: 'web_search'; query: string }
   | { kind: 'web_fetch'; url: string }
-  | { kind: 'agent'; description: string }
+  | { kind: 'agent'; description: string; subagent_type?: string; run_in_background?: boolean }
   | {
       kind: 'workflow';
       title: string;
@@ -332,9 +343,17 @@ export interface ConversationTranscript {
   messages: ConversationMessage[];
 }
 
+/** A tool call a subagent made. Mirror of Rust `chat.rs::SubagentCall`. */
+export interface SubagentCall {
+  tool_id: string;
+  tool_name: string;
+  input_json: string;
+}
+
 /** A tool call in a transcript, paired with its result; `result` is null when the call was never answered. */
 export interface HistoryToolUse extends ToolUseState {
   type: 'tool_use';
+  activities: readonly SubagentCall[];
 }
 
 /** One block of a transcript message, as `get_conversation` returns it. */

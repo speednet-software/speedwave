@@ -11,6 +11,8 @@ import { ToolNormalizerService } from '../../services/tool-normalizer.service';
 import { DiffViewComponent } from './diff-view.component';
 import { SpinIconComponent } from '../../shared/spin-icon.component';
 import { taskStatusColor, taskStatusGlyph } from '../task-plan/task-status';
+import { agentStatusWord, isStoppedResult, toolCountLabel, type AgentView } from '../agents/agents';
+import { toolSummary } from './tool-summary';
 
 /** Semantic status → timeline border color class. */
 const STATUS_BORDER: Readonly<Record<ToolUseBlock['status'], string>> = Object.freeze({
@@ -52,12 +54,23 @@ const STATUS_INK: Readonly<Record<ToolUseBlock['status'], string>> = Object.free
         (click)="toggleCollapsed()"
       >
         <span [class]="statusInkClass()" class="inline-flex items-center gap-1.5">
-          @if (tool().status === 'running' && !isStopped()) {
+          @if (displayStatus() === 'running' && !isStopped()) {
             <app-spin-icon testId="tool-status" />
           } @else {
             <span data-testid="tool-status" aria-hidden="true">{{ statusGlyph() }}</span>
           }
-          <span data-testid="tool-name">{{ tool().tool_name }}</span>
+          @if (normalized().kind === 'agent') {
+            <span
+              data-testid="tool-name"
+              class="rounded border border-current px-1 text-[10px] uppercase tracking-widest"
+              >Agent</span
+            >
+          } @else {
+            <span data-testid="tool-name">{{ tool().tool_name }}</span>
+          }
+          @if (agentType()) {
+            <span data-testid="agent-type" class="text-[var(--ink-mute)]">{{ agentType() }}</span>
+          }
         </span>
         @if (headerSummary()) {
           <span data-testid="tool-summary" class="truncate text-[var(--ink-dim)]">
@@ -182,6 +195,26 @@ $ {{ asBash(normalized()).command }}</pre>
               <div data-testid="agent-description" class="mono text-[11.5px] text-[var(--ink-dim)]">
                 {{ asAgent(normalized()).description }}
               </div>
+              @if (agent(); as view) {
+                <div
+                  data-testid="agent-facts"
+                  class="mono mt-1 flex flex-wrap items-center gap-2 text-[11px] text-[var(--ink-mute)]"
+                >
+                  <span data-testid="agent-status">{{ statusWord(view.status) }}</span>
+                  <span data-testid="agent-tool-count">{{ toolCountLabel(view.toolCount) }}</span>
+                  @if (view.background) {
+                    <span data-testid="agent-background">background</span>
+                  }
+                </div>
+                @if (view.lastActivity) {
+                  <div
+                    data-testid="agent-last-activity"
+                    class="mono mt-1 truncate text-[11.5px] text-[var(--ink-dim)]"
+                  >
+                    {{ view.lastActivity }}
+                  </div>
+                }
+              }
             }
             @case ('workflow') {
               @if (asWorkflow(normalized()).description) {
@@ -271,6 +304,7 @@ $ {{ asBash(normalized()).command }}</pre>
 })
 export class ToolBlockComponent {
   readonly tool = input.required<ToolUseBlock>();
+  readonly agent = input<AgentView | null>(null);
 
   private readonly normalizer = inject(ToolNormalizerService);
   private readonly cdr = inject(ChangeDetectorRef);
@@ -313,26 +347,43 @@ export class ToolBlockComponent {
     this.cdr.markForCheck();
   }
 
+  readonly displayStatus = computed<ToolUseBlock['status']>(() => {
+    const view = this.agent();
+    if (!view) return this.tool().status;
+    switch (view.status) {
+      case 'running':
+        return 'running';
+      case 'completed':
+        return 'done';
+      case 'error':
+      case 'stopped':
+        return 'error';
+    }
+  });
+
+  readonly agentType = computed<string>(() => {
+    const n = this.normalized();
+    return n.kind === 'agent' ? (n.subagent_type ?? '') : '';
+  });
+
   /** Tailwind border-color class for the timeline left rail, keyed by tool status. */
   readonly borderClass = computed<string>(() => {
     if (this.isStopped()) return 'border-[var(--ink-mute)]/50';
-    return STATUS_BORDER[this.tool().status];
+    return STATUS_BORDER[this.displayStatus()];
   });
 
   /** Tailwind text-color class for the status glyph + tool name in the header. */
   readonly statusInkClass = computed<string>(() => {
     if (this.isStopped()) return 'text-[var(--ink-mute)]';
-    return STATUS_INK[this.tool().status];
+    return STATUS_INK[this.displayStatus()];
   });
 
   /** A tool is "stopped" when its error result mentions a user cancel (opacity cue). */
   readonly isStopped = computed<boolean>(() => {
+    const view = this.agent();
+    if (view) return view.status === 'stopped';
     const t = this.tool();
-    if (t.status !== 'error') {
-      return false;
-    }
-    const marker = t.result.toLowerCase();
-    return marker.includes('stopped') || marker.includes('interrupted');
+    return t.status === 'error' && isStoppedResult(t.result);
   });
 
   /** Header glyph for non-running statuses; the running variant is an inline spin SVG in the template, so this computed never returns a placeholder for it. */
@@ -340,7 +391,7 @@ export class ToolBlockComponent {
     if (this.isStopped()) {
       return '⊘';
     }
-    switch (this.tool().status) {
+    switch (this.displayStatus()) {
       case 'running':
         return '';
       case 'done':
@@ -351,44 +402,14 @@ export class ToolBlockComponent {
   });
 
   /** Returns a one-line human summary shown inline after the tool name. */
-  readonly headerSummary = computed<string>(() => {
-    const n = this.normalized();
-    switch (n.kind) {
-      case 'bash':
-        return `$ ${n.command}`;
-      case 'read':
-      case 'write':
-      case 'edit':
-        return n.file_path;
-      case 'glob':
-      case 'grep':
-        return n.pattern;
-      case 'web_search':
-        return n.query;
-      case 'web_fetch':
-        return n.url;
-      case 'agent':
-        return n.description;
-      case 'workflow':
-        return n.title;
-      case 'todo_write':
-        return `${n.todos.length} ${n.todos.length === 1 ? 'task' : 'tasks'}`;
-      case 'task_create':
-        return n.subject;
-      case 'task_update': {
-        const change = n.status ?? n.subject;
-        return change === undefined ? `#${n.task_id}` : `#${n.task_id} → ${change}`;
-      }
-      case 'task_get':
-        return `#${n.task_id}`;
-      case 'task_list':
-      case 'generic':
-        return '';
-    }
-  });
+  readonly headerSummary = computed<string>(() => toolSummary(this.normalized()));
 
   /** Returns right-aligned metadata shown on the header (running, stopped). */
   readonly headerMeta = computed<string>(() => {
+    const view = this.agent();
+    if (view) {
+      return `${toolCountLabel(view.toolCount)} · ${agentStatusWord(view.status)}`;
+    }
     if (this.tool().status === 'running') {
       return 'running';
     }
@@ -398,23 +419,26 @@ export class ToolBlockComponent {
     return '';
   });
 
-  /** True when the tool has finished AND emitted a non-empty result string. */
-  readonly hasResult = computed<boolean>(() => {
+  private readonly resultView = computed<{ text: string; isError: boolean } | null>(() => {
+    const view = this.agent();
+    if (view) {
+      return view.status === 'running' || !view.result
+        ? null
+        : { text: view.result, isError: view.status === 'error' };
+    }
     const t = this.tool();
-    return t.status !== 'running' && t.result.length > 0;
+    if (t.status === 'running' || t.result.length === 0) return null;
+    return { text: t.result, isError: t.status === 'error' && t.result_is_error === true };
   });
+
+  /** True when the tool has finished AND emitted a non-empty result string. */
+  readonly hasResult = computed<boolean>(() => this.resultView() !== null);
 
   /** True when the tool ended in error and the runtime flagged the result as an error payload. */
-  readonly resultIsError = computed<boolean>(() => {
-    const t = this.tool();
-    return t.status === 'error' && t.result_is_error === true;
-  });
+  readonly resultIsError = computed<boolean>(() => this.resultView()?.isError === true);
 
   /** Text shown in the result pane — blank while running so we don't echo a stale value. */
-  readonly resultText = computed<string>(() => {
-    const t = this.tool();
-    return t.status === 'running' ? '' : t.result;
-  });
+  readonly resultText = computed<string>(() => this.resultView()?.text ?? '');
 
   /** Tailwind classes for the result pane — swap border/bg/text on error without slash-class bindings. */
   readonly resultPaneClass = computed<string>(() =>
@@ -425,6 +449,8 @@ export class ToolBlockComponent {
 
   protected readonly taskStatusGlyph = taskStatusGlyph;
   protected readonly taskStatusColor = taskStatusColor;
+  protected readonly statusWord = agentStatusWord;
+  protected readonly toolCountLabel = toolCountLabel;
 
   /**
    * Narrows the normalized input to the bash variant for template usage.

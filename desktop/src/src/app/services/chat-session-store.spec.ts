@@ -35,11 +35,13 @@ import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-ta
 import { createDeferred, type Deferred } from '../testing/deferred';
 import { makeMockLogger } from '../testing/mock-logger';
 import type {
+  ChatMessage,
   ConversationTranscript,
   MessageBlock,
   HistoryMessageBlock,
   HistoryToolUse,
   StreamChunk,
+  SubagentState,
   ToolUseBlock,
 } from '../models/chat';
 import type { ModelSwitchOutcome } from '../models/claude-control';
@@ -2059,6 +2061,20 @@ describe('ChatSessionStore', () => {
         expect(block.tool.tool_name).toBe('Read');
         expect(block.tool.status).toBe('running');
       }
+    });
+
+    it('leaves the blocks untouched on a SubagentActivity chunk', () => {
+      store.handleStreamChunk({
+        chunk_type: 'ToolStart',
+        data: { tool_id: 'p1', tool_name: 'Agent' },
+      });
+      const before = store.currentBlocks;
+      store.handleStreamChunk({
+        chunk_type: 'SubagentActivity',
+        data: { parent_tool_id: 'p1', tool_id: 's1', tool_name: 'Read', input_json: '{}' },
+      });
+
+      expect(store.currentBlocks).toBe(before);
     });
 
     it('handles ToolInputDelta chunk', () => {
@@ -4878,6 +4894,7 @@ describe('ChatSessionStore', () => {
           },
           pendingEffort: { level: 'max', project: 'test', mark: 0, request: 1 },
           confirmedModel: 'claude-sonnet-5',
+          subagentRuns: new Map([['a1', { activities: [], state: 'running', summary: '' }]]),
         };
 
         internals.restoreConversationView(view);
@@ -8683,6 +8700,7 @@ describe('ChatSessionStore', () => {
         input: '{"command":"ls"}',
         result: null,
         is_error: false,
+        activities: [],
         ...overrides,
       };
     }
@@ -9796,6 +9814,7 @@ describe('ChatSessionStore', () => {
           input: JSON.stringify(input),
           result,
           is_error: false,
+          activities: [],
         };
       }
 
@@ -9851,6 +9870,245 @@ describe('ChatSessionStore', () => {
           { id: '1', subject: 'Read', status: 'completed', activeForm: undefined },
         ]);
       });
+    });
+  });
+  describe('subagents', () => {
+    function agentTool(
+      tool_id: string,
+      input: Record<string, unknown>,
+      result: string | null,
+      tool_name = 'Agent'
+    ): MessageBlock {
+      const base = {
+        type: 'tool_use' as const,
+        tool_id,
+        tool_name,
+        input_json: JSON.stringify(input),
+      };
+      return {
+        type: 'tool_use',
+        tool:
+          result === null
+            ? { ...base, status: 'running' }
+            : { ...base, status: 'done', result, result_is_error: false },
+      };
+    }
+
+    function activity(parent: string, tool_id: string, command: string): void {
+      store.handleStreamChunk({
+        chunk_type: 'SubagentActivity',
+        data: {
+          parent_tool_id: parent,
+          tool_id,
+          tool_name: 'Bash',
+          input_json: JSON.stringify({ command }),
+        },
+      });
+    }
+
+    function status(tool_id: string, state: SubagentState, summary = ''): void {
+      store.handleStreamChunk({
+        chunk_type: 'SubagentStatus',
+        data: { tool_id, status: state, summary },
+      });
+    }
+
+    function committed(blocks: MessageBlock[]): ChatMessage[] {
+      return [
+        { role: 'user', blocks: [{ type: 'text', content: 'go' }], timestamp: 1 },
+        { role: 'assistant', blocks, timestamp: 2, uuid: 'msg_a1', uuid_status: 'Committed' },
+      ];
+    }
+
+    it('has no agents and no panel without a subagent call', () => {
+      store._setState({ currentBlocks: [agentTool('b1', {}, null, 'Bash')] });
+      expect(store.agentsById().size).toBe(0);
+      expect(store.agentPanel()).toEqual([]);
+    });
+
+    it('shows a foreground agent running until its call is answered, whichever tool name it has', () => {
+      store.isStreaming = true;
+      store._setState({
+        currentBlocks: [
+          agentTool('a1', { description: 'Explore', subagent_type: 'Explore' }, null),
+          agentTool('a2', { description: 'Review' }, 'ok', 'Task'),
+        ],
+      });
+      expect(store.agentPanel().map((a) => [a.id, a.label, a.type, a.status])).toEqual([
+        ['a1', 'Explore', 'Explore', 'running'],
+        ['a2', 'Review', null, 'completed'],
+      ]);
+    });
+
+    it('counts the tool calls of each agent and names the last one in the format of a tool header', () => {
+      store.isStreaming = true;
+      store._setState({
+        currentBlocks: [agentTool('a1', { description: 'One' }, null)],
+      });
+      activity('a1', 's1', 'ls');
+      activity('a1', 's2', 'make test');
+      activity('a1', 's2', 'make test');
+
+      const agent = store.agentsById().get('a1');
+      expect(agent?.toolCount).toBe(2);
+      expect(agent?.lastActivity).toBe('Bash $ make test');
+    });
+
+    it('keeps a background agent running after its launch result, and ends it on its final status', () => {
+      store._setState({
+        messages: committed([
+          agentTool(
+            'a1',
+            { description: 'Watch', run_in_background: true },
+            'Async agent launched'
+          ),
+        ]),
+      });
+      status('a1', 'running');
+      expect(store.agentsById().get('a1')?.status).toBe('running');
+
+      status('a1', 'completed', 'all quiet');
+      expect(store.agentsById().get('a1')).toMatchObject({
+        status: 'completed',
+        result: 'all quiet',
+      });
+    });
+
+    it('keeps a running background agent of an earlier turn in the panel and nothing else', () => {
+      store._setState({
+        messages: committed([
+          agentTool(
+            'a1',
+            { description: 'Watch', run_in_background: true },
+            'Async agent launched'
+          ),
+          agentTool('a2', { description: 'Done one' }, 'ok'),
+        ]),
+      });
+      status('a1', 'running');
+      status('a2', 'completed');
+
+      expect(store.agentPanel().map((a) => a.id)).toEqual(['a1']);
+    });
+
+    it('lists a finished agent while its turn streams and drops it when the turn is committed', () => {
+      store.isStreaming = true;
+      store._setState({
+        currentBlocks: [agentTool('a1', { description: 'Quick' }, 'ok')],
+      });
+      status('a1', 'completed', 'quick done');
+      expect(store.agentPanel().map((a) => [a.id, a.status])).toEqual([['a1', 'completed']]);
+
+      store._setState({
+        messages: committed([agentTool('a1', { description: 'Quick' }, 'ok')]),
+        currentBlocks: [],
+      });
+      expect(store.agentPanel()).toEqual([]);
+      expect(store.agentsById().get('a1')?.status).toBe('completed');
+    });
+
+    it('shows parallel agents one by one with their own status', () => {
+      store.isStreaming = true;
+      store._setState({
+        currentBlocks: [
+          agentTool('a1', { description: 'One' }, null),
+          agentTool('a2', { description: 'Two' }, null),
+          agentTool('a3', { description: 'Three' }, null),
+        ],
+      });
+      status('a1', 'running');
+      status('a2', 'error', 'boom');
+      status('a3', 'stopped');
+
+      expect(store.agentPanel().map((a) => [a.id, a.status])).toEqual([
+        ['a1', 'running'],
+        ['a2', 'error'],
+        ['a3', 'stopped'],
+      ]);
+    });
+
+    it('leaves the blocks alone when a subagent chunk arrives', () => {
+      store._setState({ currentBlocks: [agentTool('a1', {}, null)] });
+      const before = store.currentBlocks;
+      activity('a1', 's1', 'ls');
+      status('a1', 'running');
+      expect(store.currentBlocks).toBe(before);
+    });
+
+    it('has no panel once the session ended', () => {
+      store._setState({
+        messages: committed([
+          agentTool(
+            'a1',
+            { description: 'Watch', run_in_background: true },
+            'Async agent launched'
+          ),
+        ]),
+      });
+      status('a1', 'running');
+      expect(store.agentPanel()).toHaveLength(1);
+
+      store.markSessionEnded();
+      expect(store.agentPanel()).toEqual([]);
+    });
+
+    it('forgets the agents of a conversation when a new one starts', () => {
+      store._setState({ messages: committed([agentTool('a1', { description: 'One' }, 'ok')]) });
+      activity('a1', 's1', 'ls');
+      expect(store.agentsById().get('a1')?.toolCount).toBe(1);
+
+      store.resetForNewConversation();
+      store._setState({ messages: committed([agentTool('a1', { description: 'One' }, 'ok')]) });
+      expect(store.agentsById().get('a1')?.toolCount).toBe(0);
+    });
+
+    it('takes the tool calls of a resumed agent from the transcript, with no status of its own', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'get_conversation':
+            return {
+              session_id: 'sess-agent',
+              messages: [
+                {
+                  role: 'assistant',
+                  content: '',
+                  timestamp: null,
+                  uuid: 'a-1',
+                  blocks: [
+                    {
+                      type: 'tool_use',
+                      tool_id: 'a1',
+                      tool_name: 'Agent',
+                      input: '{"description":"Watch","run_in_background":true}',
+                      result: 'Async agent launched',
+                      is_error: false,
+                      activities: [
+                        { tool_id: 's1', tool_name: 'Bash', input_json: '{"command":"ls"}' },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            } satisfies ConversationTranscript;
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'check_containers_running':
+            return true;
+          default:
+            return undefined;
+        }
+      };
+      await TestBed.inject(ProjectStateService).init();
+      await store.resumeConversation('sess-agent');
+
+      expect(store.agentsById().get('a1')).toMatchObject({
+        status: 'completed',
+        toolCount: 1,
+        lastActivity: 'Bash $ ls',
+      });
+      expect(store.agentPanel()).toEqual([]);
     });
   });
 });
