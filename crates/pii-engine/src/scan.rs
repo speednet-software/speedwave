@@ -1,9 +1,10 @@
 //! Scanning, tokenization, and fail-closed detokenization
 //! (TS counterpart: `mcp-servers/policies/src/tokenizer.ts`).
 
+use crate::payload::{decode_payload, encode_payload};
 use crate::policy::{is_valid_rule_id, CompiledKeyword, CompiledPolicy};
-use crate::siv::{decode_payload, encode_payload, open, seal, EngineKey};
 use regex::Regex;
+use speedwave_crypto::{open_deterministic, seal_deterministic, Key as EngineKey};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::LazyLock;
@@ -237,7 +238,7 @@ pub fn incomplete_token_span_start(text: &str) -> Option<usize> {
 
 /// Builds the verbatim token span for a sealed value in the given category.
 fn build_token(key: &EngineKey, category: &str, value: &str) -> Result<String, ScanError> {
-    let ciphertext = seal(key, category, value.as_bytes())
+    let ciphertext = seal_deterministic(key, category, value.as_bytes())
         .map_err(|_| ScanError::SealFailed(category.to_string()))?;
     Ok(format!(
         "[{category}:TOKEN_{}]",
@@ -637,7 +638,7 @@ fn parse_token_span(span: &str) -> Option<(&str, &str)> {
 fn resolve_span(key: &EngineKey, span: &str) -> Option<String> {
     let (category, payload) = parse_token_span(span)?;
     let ciphertext = decode_payload(payload).ok()?;
-    let plaintext_bytes = open(key, category, &ciphertext).ok()?;
+    let plaintext_bytes = open_deterministic(key, category, &ciphertext).ok()?;
     String::from_utf8(plaintext_bytes).ok()
 }
 
@@ -978,7 +979,6 @@ fn map_json_strings(value: &mut serde_json::Value, transform: &dyn Fn(&str) -> S
 mod tests {
     use super::*;
     use crate::policy::compile_policy_v3;
-    use crate::siv::{encode_payload as siv_encode_payload, seal as siv_seal};
 
     fn test_key() -> EngineKey {
         EngineKey::from_bytes([9u8; 32])
@@ -1109,12 +1109,9 @@ mod tests {
     #[test]
     fn same_value_different_category_is_a_different_token() {
         let key = test_key();
-        let email_ct = siv_seal(&key, "EMAIL", b"same-value").expect("seal succeeds");
-        let custom_ct = siv_seal(&key, "CUSTOM", b"same-value").expect("seal succeeds");
-        assert_ne!(
-            siv_encode_payload(&email_ct),
-            siv_encode_payload(&custom_ct)
-        );
+        let email_ct = seal_deterministic(&key, "EMAIL", b"same-value").expect("seal succeeds");
+        let custom_ct = seal_deterministic(&key, "CUSTOM", b"same-value").expect("seal succeeds");
+        assert_ne!(encode_payload(&email_ct), encode_payload(&custom_ct));
     }
 
     #[test]
@@ -1360,8 +1357,8 @@ mod tests {
         let flipped = String::from_utf8(bytes).expect("still valid utf8");
         assert!(detokenize_text(&key, &flipped).is_err());
 
-        let pesel_ct = siv_seal(&key, "PESEL", b"44051401359").expect("seal succeeds");
-        let mismatched = format!("[EMAIL:TOKEN_{}]", siv_encode_payload(&pesel_ct));
+        let pesel_ct = seal_deterministic(&key, "PESEL", b"44051401359").expect("seal succeeds");
+        let mismatched = format!("[EMAIL:TOKEN_{}]", encode_payload(&pesel_ct));
         assert!(detokenize_text(&key, &mismatched).is_err());
 
         let non_base64 = "[EMAIL:TOKEN_A]";
@@ -1380,8 +1377,8 @@ mod tests {
             "plain text, nothing to see"
         );
 
-        let email_ct = siv_seal(&key, "EMAIL", b"whatever").expect("seal succeeds");
-        let unknown_category = format!("[FOO:TOKEN_{}]", siv_encode_payload(&email_ct));
+        let email_ct = seal_deterministic(&key, "EMAIL", b"whatever").expect("seal succeeds");
+        let unknown_category = format!("[FOO:TOKEN_{}]", encode_payload(&email_ct));
         assert!(detokenize_text(&key, &unknown_category).is_err());
     }
 
@@ -1406,11 +1403,12 @@ mod tests {
     #[test]
     fn detokenize_text_two_tokens_first_valid_second_corrupted_rejects_all_or_nothing() {
         let key = test_key();
-        let first_valid_ct = siv_seal(&key, "EMAIL", b"first@example.com").expect("seal succeeds");
-        let first_token = format!("[EMAIL:TOKEN_{}]", siv_encode_payload(&first_valid_ct));
+        let first_valid_ct =
+            seal_deterministic(&key, "EMAIL", b"first@example.com").expect("seal succeeds");
+        let first_token = format!("[EMAIL:TOKEN_{}]", encode_payload(&first_valid_ct));
         let second_valid_ct =
-            siv_seal(&key, "EMAIL", b"second@example.com").expect("seal succeeds");
-        let mut second_bytes = siv_encode_payload(&second_valid_ct).into_bytes();
+            seal_deterministic(&key, "EMAIL", b"second@example.com").expect("seal succeeds");
+        let mut second_bytes = encode_payload(&second_valid_ct).into_bytes();
         second_bytes[0] = if second_bytes[0] == b'A' { b'B' } else { b'A' };
         let second_token = format!(
             "[EMAIL:TOKEN_{}]",
@@ -1425,10 +1423,12 @@ mod tests {
     #[test]
     fn detokenize_json_two_fields_first_valid_token_second_corrupted_keeps_input_unchanged() {
         let key = test_key();
-        let first_valid_ct = siv_seal(&key, "EMAIL", b"user@example.com").expect("seal succeeds");
-        let first_token = format!("[EMAIL:TOKEN_{}]", siv_encode_payload(&first_valid_ct));
-        let second_valid_ct = siv_seal(&key, "EMAIL", b"other@example.com").expect("seal succeeds");
-        let mut second_bytes = siv_encode_payload(&second_valid_ct).into_bytes();
+        let first_valid_ct =
+            seal_deterministic(&key, "EMAIL", b"user@example.com").expect("seal succeeds");
+        let first_token = format!("[EMAIL:TOKEN_{}]", encode_payload(&first_valid_ct));
+        let second_valid_ct =
+            seal_deterministic(&key, "EMAIL", b"other@example.com").expect("seal succeeds");
+        let mut second_bytes = encode_payload(&second_valid_ct).into_bytes();
         second_bytes[0] = if second_bytes[0] == b'A' { b'B' } else { b'A' };
         let second_token = format!(
             "[EMAIL:TOKEN_{}]",
@@ -1449,13 +1449,13 @@ mod tests {
     #[test]
     fn lossy_resolves_valid_spans_and_keeps_unresolvable_ones_verbatim() {
         let key = test_key();
-        let valid_ct = siv_seal(
+        let valid_ct = seal_deterministic(
             &key,
             "EMAIL",
             b"[EMAIL:TOKEN_S6Vqu7yWuqrhbwHUuU7GAsi0M6emGFXCiEHbo9lIVsjNvw]",
         )
         .expect("seal succeeds");
-        let valid_token = format!("[EMAIL:TOKEN_{}]", siv_encode_payload(&valid_ct));
+        let valid_token = format!("[EMAIL:TOKEN_{}]", encode_payload(&valid_ct));
         let text = format!("real {valid_token} fake [EMAIL:TOKEN_XYZ] end");
 
         let displayed = detokenize_text_lossy(&key, &text);
@@ -1465,20 +1465,20 @@ mod tests {
     #[test]
     fn lossy_keeps_flipped_bit_span_verbatim_and_resolves_its_valid_neighbor() {
         let key = test_key();
-        let first_ct = siv_seal(
+        let first_ct = seal_deterministic(
             &key,
             "EMAIL",
             b"[EMAIL:TOKEN_kbmxDYUcxYCV0v9lHDfVDX9TG9ORSU9lHqsxWmye9BUq]",
         )
         .expect("seal succeeds");
-        let first_token = format!("[EMAIL:TOKEN_{}]", siv_encode_payload(&first_ct));
-        let second_ct = siv_seal(
+        let first_token = format!("[EMAIL:TOKEN_{}]", encode_payload(&first_ct));
+        let second_ct = seal_deterministic(
             &key,
             "EMAIL",
             b"[EMAIL:TOKEN_2q2xCFkxOI2vLuJ3S4NCA33olsxh1jieUqzYqAkzGpU8pg]",
         )
         .expect("seal succeeds");
-        let mut second_bytes = siv_encode_payload(&second_ct).into_bytes();
+        let mut second_bytes = encode_payload(&second_ct).into_bytes();
         second_bytes[0] = if second_bytes[0] == b'A' { b'B' } else { b'A' };
         let second_token = format!(
             "[EMAIL:TOKEN_{}]",
@@ -1499,13 +1499,13 @@ mod tests {
     fn lossy_with_wrong_key_leaves_every_span_verbatim() {
         let key = test_key();
         let other_key = EngineKey::from_bytes([7u8; 32]);
-        let ct = siv_seal(
+        let ct = seal_deterministic(
             &key,
             "EMAIL",
             b"[EMAIL:TOKEN_Yl4h9nJRt3THY3zoNklqXVIcCq3zKA2rrPO4mCUW6uWm]",
         )
         .expect("seal succeeds");
-        let token = format!("[EMAIL:TOKEN_{}]", siv_encode_payload(&ct));
+        let token = format!("[EMAIL:TOKEN_{}]", encode_payload(&ct));
 
         assert_eq!(detokenize_text_lossy(&other_key, &token), token);
     }
@@ -1513,8 +1513,8 @@ mod tests {
     #[test]
     fn lossy_unknown_category_span_stays_verbatim() {
         let key = test_key();
-        let ct = siv_seal(&key, "EMAIL", b"whatever").expect("seal succeeds");
-        let span = format!("[FOO:TOKEN_{}]", siv_encode_payload(&ct));
+        let ct = seal_deterministic(&key, "EMAIL", b"whatever").expect("seal succeeds");
+        let span = format!("[FOO:TOKEN_{}]", encode_payload(&ct));
 
         assert_eq!(detokenize_text_lossy(&key, &span), span);
     }
@@ -1607,8 +1607,9 @@ mod tests {
     #[test]
     fn preserving_tokens_never_touches_a_token_spans_ciphertext() {
         let key = test_key();
-        let ciphertext = siv_seal(&key, "EMAIL", b"alias@example.com").expect("seal succeeds");
-        let token = format!("[EMAIL:TOKEN_{}]", siv_encode_payload(&ciphertext));
+        let ciphertext =
+            seal_deterministic(&key, "EMAIL", b"alias@example.com").expect("seal succeeds");
+        let token = format!("[EMAIL:TOKEN_{}]", encode_payload(&ciphertext));
         let text = format!("Brandex sent from {token}");
 
         let result = unalias_text_preserving_tokens(&text, "Coca-Cola", "Brandex", true);
@@ -1663,8 +1664,8 @@ mod tests {
     #[test]
     fn unalias_json_never_touches_a_token_spans_ciphertext() {
         let key = test_key();
-        let ciphertext = siv_seal(&key, "EMAIL", b"x@y.z").expect("seal succeeds");
-        let token = format!("[EMAIL:TOKEN_{}]", siv_encode_payload(&ciphertext));
+        let ciphertext = seal_deterministic(&key, "EMAIL", b"x@y.z").expect("seal succeeds");
+        let token = format!("[EMAIL:TOKEN_{}]", encode_payload(&ciphertext));
         let keyword = test_keyword("Coca-Cola", "Brandex", true);
         let mut value = serde_json::json!({"msg": format!("Brandex sent {token}")});
 
@@ -1738,8 +1739,9 @@ mod tests {
     #[test]
     fn detokenize_text_with_renders_plaintext_only() {
         let key = test_key();
-        let ciphertext = siv_seal(&key, "EMAIL", b"a\"quoted\"@example.com").expect("seal ok");
-        let token = format!("[EMAIL:TOKEN_{}]", siv_encode_payload(&ciphertext));
+        let ciphertext =
+            seal_deterministic(&key, "EMAIL", b"a\"quoted\"@example.com").expect("seal ok");
+        let token = format!("[EMAIL:TOKEN_{}]", encode_payload(&ciphertext));
         let text = format!("Email: {token} end");
 
         let result = detokenize_text_with(&key, &text, &|p| json_escape(p)).expect("detokenizes");
@@ -1775,8 +1777,8 @@ mod tests {
     #[test]
     fn unalias_with_still_skips_token_spans() {
         let key = test_key();
-        let ciphertext = siv_seal(&key, "EMAIL", b"x@y.z").expect("seal ok");
-        let token = format!("[EMAIL:TOKEN_{}]", siv_encode_payload(&ciphertext));
+        let ciphertext = seal_deterministic(&key, "EMAIL", b"x@y.z").expect("seal ok");
+        let token = format!("[EMAIL:TOKEN_{}]", encode_payload(&ciphertext));
         let text = format!("Brandex {token}");
 
         let result =

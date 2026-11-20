@@ -5,6 +5,7 @@ members = [
     "crates/speedwave-version",
     "crates/speedwave-migrations",
     "crates/access-policy",
+    "crates/speedwave-crypto",
     "crates/pii-engine",
     "crates/pii-engine-wasm",
     "crates/pii-ner",

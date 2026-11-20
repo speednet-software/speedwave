@@ -1,10 +1,10 @@
-//! PII tokenization engine core: deterministic AES-SIV seal/open plus
-//! base64url payload encoding, shared by the hub, proxy, and CLI.
+//! PII tokenization engine core: scanning, deterministic tokens and detokenization,
+//! shared by the hub, proxy, and CLI.
 
 pub mod patterns;
+mod payload;
 pub mod policy;
 pub mod scan;
-pub mod siv;
 mod validators;
 
 pub use patterns::validator_by_name;
@@ -21,4 +21,4 @@ pub use scan::{
     DetectionAction, DetokenizeError, ExternalScanOutcome, ExternalScanReport, ExternalSpan,
     ScanError, ScanOutcome, StringLeaf, TOKEN_SPAN_RE,
 };
-pub use siv::{EngineKey, SivError};
+pub use speedwave_crypto::Key as EngineKey;
