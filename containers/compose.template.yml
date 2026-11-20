@@ -23,6 +23,7 @@ services:
       - ${RESOURCES_DIR}:/speedwave/resources:ro
       - ${IDE_LOCK_DIR}:/home/speedwave/.claude/ide:ro
       - ${PROXY_USAGE_DIR}:/usage:ro
+      - ${SECRETS_VM_DIR}/claude/secrets:/run/speedwave/secrets:ro
     environment:
       - CLAUDE_VERSION=${CLAUDE_VERSION}
       - MCP_HUB_PORT=${PORT_HUB}
@@ -43,7 +44,7 @@ services:
   proxy:
     image: ${IMAGE_PROXY}
     pull_policy: never
-    restart: unless-stopped
+    restart: "no"
     container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_proxy
     environment:
       - SPW_CONFIG_DIGEST=${PROXY_CONFIG_DIGEST}
@@ -61,10 +62,10 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=${PROXY_TMPFS}
     volumes:
-      - ${PROXY_CONFIG_DIR}:/config:ro
-      - ${TOKENS_DIR}/llm:/tokens:ro
+      - ${SECRETS_VM_DIR}/proxy/config:/config:ro
+      - ${SECRETS_VM_DIR}/proxy/tokens:/tokens:ro
       - ${PROXY_USAGE_DIR}:/usage:rw
-      - ${POLICY_CONFIG_DIR}:/policy:ro
+      - ${SECRETS_VM_DIR}/proxy/policy:/policy:ro
       - ${AUDIT_DIR}:/audit:rw
     networks:
       - ${NETWORK_NAME}
@@ -87,7 +88,8 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=${MCP_HUB_TMPFS}
     volumes:
-      - ${POLICY_CONFIG_DIR}:/policy:ro
+      - ${SECRETS_VM_DIR}/mcp-hub/secrets:/secrets:ro
+      - ${SECRETS_VM_DIR}/mcp-hub/policy:/policy:ro
       - ${AUDIT_DIR}:/audit:rw
     environment:
       - PORT=${PORT_HUB}
@@ -125,7 +127,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=${MCP_SLACK_TMPFS}
     volumes:
-      - ${TOKENS_DIR}/slack:/tokens:ro
+      - ${SECRETS_VM_DIR}/mcp-slack/tokens:/tokens:ro
       - ${PROJECT_DIR}:/workspace:rw
     environment:
       - PORT=${PORT_WORKER}
@@ -150,7 +152,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=${MCP_SHAREPOINT_TMPFS}
     volumes:
-      - ${TOKENS_DIR}/sharepoint:/tokens:ro
+      - ${SECRETS_VM_DIR}/mcp-sharepoint/tokens:/tokens:ro
       - ${PROJECT_DIR}:/workspace:rw
     environment:
       - PORT=${PORT_WORKER}
@@ -175,7 +177,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=${MCP_REDMINE_TMPFS}
     volumes:
-      - ${TOKENS_DIR}/redmine:/tokens:ro
+      - ${SECRETS_VM_DIR}/mcp-redmine/tokens:/tokens:ro
       - ${PROJECT_DIR}:/workspace:rw
     environment:
       - PORT=${PORT_WORKER}
@@ -200,7 +202,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=${MCP_GITLAB_TMPFS}
     volumes:
-      - ${TOKENS_DIR}/gitlab:/tokens:ro
+      - ${SECRETS_VM_DIR}/mcp-gitlab/tokens:/tokens:ro
     environment:
       - PORT=${PORT_WORKER}
     networks:
@@ -224,7 +226,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=${MCP_GITHUB_TMPFS}
     volumes:
-      - ${TOKENS_DIR}/github:/tokens:ro
+      - ${SECRETS_VM_DIR}/mcp-github/tokens:/tokens:ro
     environment:
       - PORT=${PORT_WORKER}
     networks:
@@ -248,7 +250,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=${MCP_ATLASSIAN_TMPFS}
     volumes:
-      - ${TOKENS_DIR}/atlassian:/tokens:ro
+      - ${SECRETS_VM_DIR}/mcp-atlassian/tokens:/tokens:ro
       - ${PROJECT_DIR}:/workspace:rw
     environment:
       - PORT=${PORT_WORKER}
@@ -326,7 +328,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=${MCP_CONTEXT7_TMPFS}
     volumes:
-      - ${TOKENS_DIR}/context7:/tokens:ro
+      - ${SECRETS_VM_DIR}/mcp-context7/tokens:/tokens:ro
     environment:
       - PORT=${PORT_WORKER}
     networks:

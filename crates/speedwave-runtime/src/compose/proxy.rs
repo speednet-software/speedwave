@@ -1,4 +1,7 @@
-use crate::config::{GitRepositoryLists, LlmConfig, LlmProviderKind, ResolvedIntegrationsConfig};
+use crate::config::{
+    GitRepositoryLists, LlmConfig, LlmProviderKind, ResolvedClaudeConfig,
+    ResolvedIntegrationsConfig,
+};
 use crate::git_allowlist::{enforced_entries, forge_host_in, GitForgeService};
 use serde::Serialize;
 use speedwave_access_policy::{AccessMode, AccessPolicy};
@@ -92,6 +95,39 @@ impl GitForge {
     }
 }
 
+pub(super) struct RenderedProxyConfig {
+    pub(super) content: String,
+    pub(super) ner_url: Option<String>,
+}
+
+pub(super) struct ProjectProxyConfig {
+    pub(super) git_forges: Vec<GitForge>,
+    pub(super) config: RenderedProxyConfig,
+}
+
+pub(super) fn project_proxy_config_in(
+    data_dir: &Path,
+    project: &str,
+    resolved_config: &ResolvedClaudeConfig,
+    integrations: &ResolvedIntegrationsConfig,
+) -> anyhow::Result<ProjectProxyConfig> {
+    let git_forges = git_forges_in(
+        data_dir,
+        project,
+        integrations,
+        &resolved_config.git_repositories,
+        &resolved_config.access,
+    );
+    let config = render_proxy_config_in(
+        data_dir,
+        project,
+        &resolved_config.llm,
+        resolved_config.pii_ner_enabled,
+        &git_forges,
+    )?;
+    Ok(ProjectProxyConfig { git_forges, config })
+}
+
 pub(super) fn git_forges_in(
     data_dir: &Path,
     project: &str,
@@ -134,14 +170,9 @@ pub fn spw_key_env_name(provider_id: &str) -> String {
     )
 }
 
-/// Per-project proxy config dir: `<data_dir>/proxy/<project>/`.
+/// Per-project proxy state dir: `<data_dir>/proxy/<project>/`, holding the caller token.
 pub fn proxy_config_dir_in(data_dir: &Path, project: &str) -> PathBuf {
     data_dir.join("proxy").join(project)
-}
-
-/// Path of the rendered config: `<data_dir>/proxy/<project>/proxy.json`.
-pub fn proxy_config_path_in(data_dir: &Path, project: &str) -> PathBuf {
-    proxy_config_dir_in(data_dir, project).join("proxy.json")
 }
 
 /// Header carrying the per-project caller secret; mirror of the proxy's
@@ -171,7 +202,7 @@ pub fn ensure_caller_token_in(data_dir: &Path, project: &str) -> anyhow::Result<
 }
 
 /// Renders the proxy routing config (a `routes` array consumed by the forwarder
-/// `containers/proxy/src/router.rs`). Pure; `write_proxy_config_in` persists it.
+/// `containers/proxy/src/router.rs`). Pure.
 pub fn render_proxy_config(llm: &LlmConfig) -> String {
     render_proxy_config_with(llm, None)
 }
@@ -263,56 +294,33 @@ pub(crate) fn render_proxy_config_full(
     .unwrap_or_else(|_| r#"{"routes":[]}"#.into())
 }
 
-/// Renders + atomically persists the config (0600 + fsync) under `<data_dir>/proxy/<project>/`.
-/// `ner` is rendered only when `pii_ner_enabled` and the detector's lock names a live process.
-pub(crate) fn write_proxy_config_in(
+/// Renders the config in memory: `proxy.json` never exists on the host, its content is staged
+/// into the proxy's tmpfs slot. `ner` is rendered only when `pii_ner_enabled` and the detector's
+/// lock names a live process.
+fn render_proxy_config_in(
     data_dir: &Path,
     project: &str,
     llm: &LlmConfig,
     pii_ner_enabled: bool,
     git_forges: &[GitForge],
-) -> anyhow::Result<PathBuf> {
+) -> anyhow::Result<RenderedProxyConfig> {
     crate::validation::validate_project_name(project)?;
-    let path = proxy_config_path_in(data_dir, project);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-        crate::fs_perms::ensure_owner_only_dir(parent)?;
-    }
     let token = ensure_caller_token_in(data_dir, project)?;
-    let ner = pii_ner_enabled
-        .then(|| super::pii_ner::live_service_in(data_dir))
-        .flatten()
-        .map(|live| {
-            log::info!(
-                "rendering proxy.json with the host PII NER detector on port {}",
-                live.port
-            );
-            super::pii_ner::ner_render_config(&live)
-        });
+    let ner = super::pii_ner::live_ner_config_in(data_dir, pii_ner_enabled);
     let content = render_proxy_config_full(llm, Some(&token), ner.as_ref(), git_forges);
-    crate::fs_perms::write_restricted_file_atomic_if_changed(&path, &content)?;
-    Ok(path)
+    Ok(RenderedProxyConfig {
+        content,
+        ner_url: ner.map(|ner| ner.url().to_string()),
+    })
 }
 
-pub(crate) fn proxy_state_digest_in(data_dir: &Path, project: &str) -> String {
+pub(super) fn proxy_state_digest_in(content: &str, data_dir: &Path, project: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
-    let config_dir = proxy_config_dir_in(data_dir, project);
-    let mut rendered: Vec<PathBuf> = std::fs::read_dir(&config_dir)
-        .map(|dir| {
-            dir.filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| p.is_file())
-                .collect()
-        })
-        .unwrap_or_default();
-    rendered.sort();
-    for path in rendered {
-        hasher.update(path.file_name().unwrap_or_default().as_encoded_bytes());
-        hasher.update(b"\0");
-        hasher.update(std::fs::read(&path).unwrap_or_default());
-        hasher.update(b"\0");
-    }
+    hasher.update(super::secret_slots::PROXY_CONFIG_FILE.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(content.as_bytes());
+    hasher.update(b"\0");
     let tokens_dir = data_dir.join("tokens").join(project).join("llm");
     let mut entries: Vec<(std::ffi::OsString, Vec<u8>)> = std::fs::read_dir(&tokens_dir)
         .map(|dir| {
@@ -459,31 +467,75 @@ mod tests {
         }
     }
 
+    fn rendered_content(dir: &Path, llm: &LlmConfig, forges: &[GitForge]) -> String {
+        render_proxy_config_in(dir, "proj", llm, true, forges)
+            .unwrap()
+            .content
+    }
+
     #[test]
-    fn write_proxy_config_embeds_the_caller_token() {
+    fn render_proxy_config_embeds_the_caller_token() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = full_provider_mix();
-        write_proxy_config_in(dir.path(), "proj", &cfg, true, &[]).unwrap();
-        let written = std::fs::read_to_string(proxy_config_path_in(dir.path(), "proj")).unwrap();
+        let rendered = rendered_content(dir.path(), &cfg, &[]);
         let token = ensure_caller_token_in(dir.path(), "proj").unwrap();
         assert!(
-            written.contains(&format!(r#""caller_token":"{token}""#)),
-            "written proxy.json must carry the caller token"
+            rendered.contains(&format!(r#""caller_token":"{token}""#)),
+            "rendered proxy config must carry the caller token"
         );
     }
 
     #[test]
-    fn write_proxy_config_renders_ner_only_for_a_live_detector() {
+    fn render_proxy_config_writes_no_proxy_json_and_keeps_the_caller_token_file_owner_only() {
+        fn files_named(dir: &Path, name: &str, found: &mut Vec<PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    files_named(&path, name, found);
+                } else if path.file_name().is_some_and(|n| n == name) {
+                    found.push(path);
+                }
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let llm = LlmConfig {
+            providers: vec![entry("anthropic", LlmProviderKind::AnthropicOauth)],
+            ..Default::default()
+        };
+        let rendered = rendered_content(dir.path(), &llm, &[]);
+        assert!(!rendered.is_empty());
+
+        let mut proxy_jsons = Vec::new();
+        files_named(dir.path(), "proxy.json", &mut proxy_jsons);
+        assert!(proxy_jsons.is_empty(), "found {proxy_jsons:?}");
+
+        let token_path = caller_token_path_in(dir.path(), "proj");
+        assert!(token_path.is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&token_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "caller token must be owner-only");
+        }
+    }
+
+    #[test]
+    fn render_proxy_config_rejects_an_invalid_project_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = render_proxy_config_in(dir.path(), "../evil", &full_provider_mix(), true, &[]);
+        assert!(result.is_err());
+        assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn render_proxy_config_renders_ner_only_for_a_live_detector() {
         use crate::host_mcp_process::lock::{self, LockFile, LockService};
         let dir = tempfile::tempdir().unwrap();
         let cfg = full_provider_mix();
-        write_proxy_config_in(dir.path(), "proj", &cfg, true, &[]).unwrap();
-        let written = std::fs::read_to_string(proxy_config_path_in(dir.path(), "proj")).unwrap();
-        assert!(!written.contains(r#""ner":"#));
-        assert_eq!(
-            super::super::pii_ner::ner_url_state(&written, None),
-            super::super::workers::RenderedUrlState::Absent
-        );
+        let rendered = render_proxy_config_in(dir.path(), "proj", &cfg, true, &[]).unwrap();
+        assert!(!rendered.content.contains(r#""ner":"#));
+        assert_eq!(rendered.ner_url, None);
 
         let lock = LockFile::new(
             LockService::PiiNer,
@@ -492,9 +544,8 @@ mod tests {
             "ner-tok".into(),
         );
         lock::write(&dir.path().join(crate::consts::PII_NER_LOCK_FILE), &lock).unwrap();
-        write_proxy_config_in(dir.path(), "proj", &cfg, true, &[]).unwrap();
-        let written = std::fs::read_to_string(proxy_config_path_in(dir.path(), "proj")).unwrap();
-        let doc: serde_json::Value = serde_json::from_str(&written).unwrap();
+        let rendered = render_proxy_config_in(dir.path(), "proj", &cfg, true, &[]).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&rendered.content).unwrap();
         assert_eq!(doc["ner"]["token"], "ner-tok");
         assert_eq!(doc["ner"]["min_confidence"], 0.6);
         assert_eq!(
@@ -502,14 +553,16 @@ mod tests {
             super::super::pii_ner::DEFAULT_NER_LABELS.len()
         );
         assert_eq!(
-            super::super::pii_ner::ner_url_state(&written, Some(50444)),
-            super::super::workers::RenderedUrlState::Current
+            rendered.ner_url.as_deref(),
+            doc["ner"]["url"].as_str(),
+            "the returned ner url must be the one inside the content"
         );
-        assert!(written.contains(r#""caller_token":"#));
+        assert!(rendered.ner_url.is_some());
+        assert!(rendered.content.contains(r#""caller_token":"#));
     }
 
     #[test]
-    fn write_proxy_config_omits_ner_when_the_project_disables_it() {
+    fn render_proxy_config_omits_ner_when_the_project_disables_it() {
         use crate::host_mcp_process::lock::{self, LockFile, LockService};
         let dir = tempfile::tempdir().unwrap();
         let cfg = full_provider_mix();
@@ -521,13 +574,11 @@ mod tests {
         );
         lock::write(&dir.path().join(crate::consts::PII_NER_LOCK_FILE), &lock).unwrap();
 
-        write_proxy_config_in(dir.path(), "proj", &cfg, false, &[]).unwrap();
-        let written = std::fs::read_to_string(proxy_config_path_in(dir.path(), "proj")).unwrap();
-        assert!(!written.contains(r#""ner":"#));
+        let rendered = render_proxy_config_in(dir.path(), "proj", &cfg, false, &[]).unwrap();
+        assert!(!rendered.content.contains(r#""ner":"#));
         assert_eq!(
-            super::super::pii_ner::ner_url_state(&written, None),
-            super::super::workers::RenderedUrlState::Absent,
-            "a disabled project must reconcile against no detector, not the live one"
+            rendered.ner_url, None,
+            "a disabled project must render no detector even while one is live"
         );
     }
 
@@ -1004,8 +1055,8 @@ mod tests {
                 &GitRepositoryLists::default(),
                 access,
             );
-            write_proxy_config_in(dir.path(), "proj", &full_provider_mix(), true, &forges).unwrap();
-            proxy_state_digest_in(dir.path(), "proj")
+            let content = rendered_content(dir.path(), &full_provider_mix(), &forges);
+            proxy_state_digest_in(&content, dir.path(), "proj")
         };
         let full = digest_with(&composed(false, false, &[]));
         let read_only = digest_with(&composed(false, true, &[]));
@@ -1092,7 +1143,7 @@ mod tests {
     }
 
     #[test]
-    fn write_proxy_config_persists_git_forges() {
+    fn render_proxy_config_carries_git_forges() {
         let dir = tempfile::tempdir().unwrap();
         let forges = git_forges_in(
             dir.path(),
@@ -1104,30 +1155,11 @@ mod tests {
             &GitRepositoryLists::default(),
             &AccessPolicy::default(),
         );
-        write_proxy_config_in(dir.path(), "proj", &full_provider_mix(), true, &forges).unwrap();
-        let written = std::fs::read_to_string(proxy_config_path_in(dir.path(), "proj")).unwrap();
+        let rendered = rendered_content(dir.path(), &full_provider_mix(), &forges);
         assert!(
-            written.contains(r#""git_forges":[{"host":"github.com""#),
-            "{written}"
+            rendered.contains(r#""git_forges":[{"host":"github.com""#),
+            "{rendered}"
         );
-    }
-
-    #[test]
-    fn write_config_creates_restricted_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let llm = LlmConfig {
-            providers: vec![entry("anthropic", LlmProviderKind::AnthropicOauth)],
-            ..Default::default()
-        };
-        let path = write_proxy_config_in(dir.path(), "proj", &llm, true, &[]).unwrap();
-        assert!(path.is_file());
-        assert!(path.ends_with("proxy/proj/proxy.json"));
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o600, "config must be owner-only");
-        }
     }
 
     #[test]
@@ -1161,24 +1193,26 @@ mod tests {
             providers: vec![entry("local", LlmProviderKind::Local)],
             ..Default::default()
         };
-        write_proxy_config_in(dir.path(), "proj", &llm, true, &[]).unwrap();
+        let content = rendered_content(dir.path(), &llm, &[]);
 
-        let d1 = proxy_state_digest_in(dir.path(), "proj");
+        let d1 = proxy_state_digest_in(&content, dir.path(), "proj");
         assert_eq!(d1.len(), 64);
         assert!(d1.chars().all(|c| c.is_ascii_hexdigit()));
-        assert_eq!(d1, proxy_state_digest_in(dir.path(), "proj"));
+        assert_eq!(d1, proxy_state_digest_in(&content, dir.path(), "proj"));
 
         write_llm_provider_key_in(dir.path(), "proj", "openrouter", "sk-or-v1-abc").unwrap();
-        let d2 = proxy_state_digest_in(dir.path(), "proj");
+        let d2 = proxy_state_digest_in(&content, dir.path(), "proj");
         assert_ne!(d1, d2);
         assert!(!d2.contains("sk-or-v1-abc"));
 
         write_llm_provider_key_in(dir.path(), "proj", "openrouter", "sk-or-v1-xyz").unwrap();
-        let d3 = proxy_state_digest_in(dir.path(), "proj");
+        let d3 = proxy_state_digest_in(&content, dir.path(), "proj");
         assert_ne!(d2, d3, "same-length key rotation must change the digest");
 
         remove_llm_provider_key_in(dir.path(), "proj", "openrouter").unwrap();
-        assert_ne!(d3, proxy_state_digest_in(dir.path(), "proj"));
+        let d4 = proxy_state_digest_in(&content, dir.path(), "proj");
+        assert_ne!(d3, d4);
+        assert_eq!(d1, d4, "removing the key restores the original digest");
 
         let llm2 = LlmConfig {
             providers: vec![LlmProviderEntry {
@@ -1187,23 +1221,24 @@ mod tests {
             }],
             ..Default::default()
         };
-        write_proxy_config_in(dir.path(), "proj", &llm2, true, &[]).unwrap();
-        assert_ne!(d1, proxy_state_digest_in(dir.path(), "proj"));
+        let content2 = rendered_content(dir.path(), &llm2, &[]);
+        assert_ne!(content, content2);
+        assert_ne!(d1, proxy_state_digest_in(&content2, dir.path(), "proj"));
     }
 
     #[test]
-    fn state_digest_covers_proxy_json() {
+    fn state_digest_covers_the_rendered_content() {
         let dir = tempfile::tempdir().unwrap();
         let llm = LlmConfig {
             providers: vec![entry("local", LlmProviderKind::Local)],
             ..Default::default()
         };
-        write_proxy_config_in(dir.path(), "proj", &llm, true, &[]).unwrap();
-        let d1 = proxy_state_digest_in(dir.path(), "proj");
-
-        let proxy_json = proxy_config_path_in(dir.path(), "proj");
-        std::fs::write(&proxy_json, r#"{"routes":[]}"#).unwrap();
-        assert_ne!(d1, proxy_state_digest_in(dir.path(), "proj"));
+        let content = rendered_content(dir.path(), &llm, &[]);
+        let d1 = proxy_state_digest_in(&content, dir.path(), "proj");
+        assert_ne!(
+            d1,
+            proxy_state_digest_in(r#"{"routes":[]}"#, dir.path(), "proj")
+        );
     }
 
     #[test]
@@ -1221,8 +1256,8 @@ mod tests {
                 &lists(entries, &[]),
                 &AccessPolicy::default(),
             );
-            write_proxy_config_in(dir.path(), "proj", &full_provider_mix(), true, &forges).unwrap();
-            proxy_state_digest_in(dir.path(), "proj")
+            let content = rendered_content(dir.path(), &full_provider_mix(), &forges);
+            proxy_state_digest_in(&content, dir.path(), "proj")
         };
         let empty = digest_with(&[]);
         let one = digest_with(&["owner/repo"]);
@@ -1233,15 +1268,17 @@ mod tests {
     }
 
     #[test]
-    fn state_digest_handles_missing_config_and_tokens() {
+    fn state_digest_handles_a_missing_tokens_dir() {
         let dir = tempfile::tempdir().unwrap();
-        let d = proxy_state_digest_in(dir.path(), "proj");
+        let content = r#"{"routes":[]}"#;
+        let d = proxy_state_digest_in(content, dir.path(), "proj");
         assert_eq!(d.len(), 64);
-        assert_eq!(d, proxy_state_digest_in(dir.path(), "proj"));
+        assert_eq!(d, proxy_state_digest_in(content, dir.path(), "proj"));
+        assert_ne!(d, proxy_state_digest_in("{}", dir.path(), "proj"));
     }
 
     #[test]
-    fn write_proxy_config_does_not_overwrite_existing_llm_key() {
+    fn render_proxy_config_does_not_overwrite_existing_llm_key() {
         let dir = tempfile::tempdir().unwrap();
         let llm = LlmConfig {
             providers: vec![LlmProviderEntry {
@@ -1252,18 +1289,18 @@ mod tests {
             ..Default::default()
         };
         write_llm_provider_key_in(dir.path(), "proj", "local", "sk-rotated").unwrap();
-        write_proxy_config_in(dir.path(), "proj", &llm, true, &[]).unwrap();
+        rendered_content(dir.path(), &llm, &[]);
         let target =
             super::super::tokens::llm_provider_key_path_in(dir.path(), "proj", "local").unwrap();
         assert_eq!(
             std::fs::read_to_string(&target).unwrap(),
             "sk-rotated",
-            "write_proxy_config_in must not touch an existing key in the new namespace"
+            "render_proxy_config_in must not touch an existing key in the new namespace"
         );
     }
 
     #[test]
-    fn write_renders_bearer_when_has_api_key_set() {
+    fn render_renders_bearer_when_has_api_key_set() {
         let dir = tempfile::tempdir().unwrap();
         let llm = LlmConfig {
             providers: vec![LlmProviderEntry {
@@ -1275,8 +1312,7 @@ mod tests {
             ..LlmConfig::default()
         };
         write_llm_provider_key_in(dir.path(), "proj", "local", "sk-real").unwrap();
-        let path = write_proxy_config_in(dir.path(), "proj", &llm, true, &[]).unwrap();
-        let rendered = std::fs::read_to_string(&path).unwrap();
+        let rendered = rendered_content(dir.path(), &llm, &[]);
         assert!(
             rendered.contains(r#""swap_env":"SPW_KEY_LOCAL""#),
             "local route must use bearer when has_api_key is set: {rendered}"

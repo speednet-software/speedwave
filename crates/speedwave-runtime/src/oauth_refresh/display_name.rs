@@ -8,21 +8,23 @@ pub(super) fn write(
     project: &str,
     service: &str,
     names: &mut HashMap<String, String>,
-) {
+) -> Option<String> {
     let token_dir = plugin::token_dir_in(data_dir, project, service);
     if !token_dir.is_dir() {
-        return;
+        return None;
     }
     let path = token_dir.join(consts::OAUTH_SERVICE_NAME_FILE);
     let name = names
         .entry(service.to_string())
         .or_insert_with(|| resolve(data_dir, service));
     if std::fs::read_to_string(&path).is_ok_and(|current| current == *name) {
-        return;
+        return None;
     }
     if fs_perms::write_restricted_file(&path, name).is_err() {
         log::warn!("failed to write the service name file");
+        return None;
     }
+    Some(name.clone())
 }
 
 pub(super) fn resolve(data_dir: &Path, service: &str) -> String {
@@ -151,6 +153,19 @@ mod tests {
             name_of(dir.path(), "glpi").as_deref(),
             Some("GLPI Helpdesk")
         );
+    }
+
+    #[test]
+    fn a_written_name_is_returned_once_and_an_unchanged_file_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        create_token_dir(dir.path(), "slack");
+        let mut names = HashMap::new();
+        assert_eq!(
+            write(dir.path(), "proj", "slack", &mut names).as_deref(),
+            Some("Slack")
+        );
+        assert_eq!(write(dir.path(), "proj", "slack", &mut names), None);
+        assert_eq!(write(dir.path(), "proj", "mystery", &mut names), None);
     }
 
     #[test]

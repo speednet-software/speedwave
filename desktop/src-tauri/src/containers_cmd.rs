@@ -333,10 +333,9 @@ pub(crate) fn render_and_save_compose(project: &str) -> Result<(), String> {
         log::warn!("Failed to list installed plugins: {e}");
         Vec::new()
     });
-    let expected_paths =
-        speedwave_runtime::compose::SecurityExpectedPaths::compute(project, &project_dir)
-            .map_err(|e| e.to_string())?
-            .with_telemetry_locked(resolved.telemetry.any_locked);
+    let expected_paths = speedwave_runtime::compose::SecurityExpectedPaths::compute(&project_dir)
+        .map_err(|e| e.to_string())?
+        .with_telemetry_locked(resolved.telemetry.any_locked);
     let prereq_violations = speedwave_runtime::os_prereqs::check_os_prereqs();
     if !prereq_violations.is_empty() {
         return Err(format!(

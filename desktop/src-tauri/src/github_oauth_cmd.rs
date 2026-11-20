@@ -127,6 +127,7 @@ impl DeviceCodeProvider for GithubProvider {
                 if let Err(e) = save_credential_file(&svc_dir, "token", &tokens.access_token) {
                     return emit_error(format!("Failed to save token: {e}"));
                 }
+                crate::integrations_cmd::restage_container_secrets(&self.project);
                 PollStep::Emit {
                     status: ProgressStatus::Success,
                     message: "Authentication successful".to_string(),

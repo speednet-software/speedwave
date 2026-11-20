@@ -3,6 +3,7 @@
  * @module shared/boot
  */
 
+import { readFileSync } from 'node:fs';
 import { createMCPServer, type MCPServerOptions } from './server.js';
 import { ts } from './logger.js';
 import { notConfiguredMessage } from './errors.js';
@@ -21,7 +22,10 @@ export interface BootWorkerOptions<C> {
   defaultPort?: string;
   /** Display name for "not configured" messages (e.g. `GitHub`). Defaults to `serverName`. */
   displayName?: string;
-  /** Env var holding the required Bearer token. When unset, no auth gate is applied. */
+  /**
+   * Env var holding the required Bearer token, or whose `_FILE` sibling names a file holding it
+   * (the file wins). When unset, no auth gate is applied.
+   */
   authTokenEnv?: string;
   /** Bind host. Containers pass `'0.0.0.0'`; host-side workers omit it. */
   host?: string;
@@ -37,6 +41,21 @@ export interface BootWorkerOptions<C> {
   makeTools: (client: C | null) => MCPServerOptions['tools'];
   /** Build the health check from the (possibly null) client. Omit for none. */
   makeHealthCheck?: (client: C | null, configured: boolean) => MCPServerOptions['healthCheck'];
+}
+
+function readAuthToken(authTokenEnv: string): string | undefined {
+  const tokenFile = process.env[`${authTokenEnv}_FILE`];
+  if (tokenFile) {
+    try {
+      const fromFile = readFileSync(tokenFile, 'utf8').trim();
+      if (fromFile) {
+        return fromFile;
+      }
+    } catch {
+      return process.env[authTokenEnv] || undefined;
+    }
+  }
+  return process.env[authTokenEnv] || undefined;
 }
 
 /**
@@ -69,10 +88,10 @@ export async function bootWorker<C>(opts: BootWorkerOptions<C>): Promise<number>
 
   let authToken: string | undefined;
   if (authTokenEnv) {
-    authToken = process.env[authTokenEnv];
+    authToken = readAuthToken(authTokenEnv);
     if (!authToken) {
       console.error(
-        `${ts()} FATAL: ${authTokenEnv} is required. ` +
+        `${ts()} FATAL: ${authTokenEnv} is required (or a non-empty file named by ${authTokenEnv}_FILE). ` +
           `${serverName} must not run without authentication.`
       );
       process.exit(1);

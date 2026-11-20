@@ -579,6 +579,16 @@ impl ContainerRuntime for WslRuntime {
         super::vm_exec_run(command, stdin, timeout)
     }
 
+    fn vm_exec_as_root(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        stdin: &[u8],
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<super::VmExecOutput> {
+        self.vm_exec(cmd, args, stdin, timeout)
+    }
+
     fn is_available(&self) -> bool {
         let distro = self.distro();
         self.list_distributions()

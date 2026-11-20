@@ -1,6 +1,7 @@
 //! Plugin compose injection: generates MCP service definitions for enabled plugins, wires
 //! `WORKER_<PLUGIN>_URL` into the hub, mounts claude-resources, injects host-bridge vars (ADR-063).
 
+use super::secret_slots::worker_tokens_mount;
 use super::{
     add_claude_env_var, add_claude_volume, add_service_env_var, ensure_host_gateway_extra_host,
     ensure_resources_dir_safe, inject_worker_env, HostBridgesInfo,
@@ -17,7 +18,6 @@ pub(crate) struct ApplyPluginsCtx<'a> {
     pub project_dir: &'a str,
     pub integrations: &'a ResolvedIntegrationsConfig,
     pub network_name: &'a str,
-    pub tokens_dir: &'a std::path::Path,
     pub bridges: &'a HostBridgesInfo,
 }
 
@@ -33,7 +33,6 @@ pub(crate) fn apply_plugins_from_verified(
         project_dir,
         integrations,
         network_name,
-        tokens_dir,
         bridges,
     } = *ctx;
     if plugins.is_empty() {
@@ -61,16 +60,16 @@ pub(crate) fn apply_plugins_from_verified(
         ));
 
         if let Some(sid) = service_id {
+            let compose_name = plugin::derive_compose_name(sid);
             let service_value = plugin::generate_plugin_service(
                 manifest,
                 vp.tree_digest_hex(),
                 plugin_dir,
                 project_name,
                 network_name,
-                tokens_dir,
+                &worker_tokens_mount(&compose_name)?.source(project_name),
                 project_dir,
             )?;
-            let compose_name = plugin::derive_compose_name(sid);
             if let Some(services) = doc.get_mut("services").and_then(|v| v.as_mapping_mut()) {
                 let key = serde_yaml_ng::Value::String(compose_name.clone());
                 if services.contains_key(&key) {

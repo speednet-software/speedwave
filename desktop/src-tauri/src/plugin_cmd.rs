@@ -538,7 +538,9 @@ pub fn save_plugin_credentials(
     log::info!("saving plugin credentials for project={project} slug={slug}");
 
     let manifest = require_verified_with_manifest(&slug)?;
-    save_plugin_credentials_in(consts::data_dir(), &project, &manifest, &credentials)
+    save_plugin_credentials_in(consts::data_dir(), &project, &manifest, &credentials)?;
+    crate::integrations_cmd::restage_container_secrets(&project);
+    Ok(())
 }
 
 fn save_plugin_credentials_in(
@@ -633,7 +635,9 @@ pub fn plugin_save_settings(
     .map_err(|e| e.to_string())?;
 
     let sid = manifest.service_id.as_deref().unwrap_or(&slug);
-    plugin::write_settings_file(&project, sid, &settings).map_err(|e| e.to_string())
+    plugin::write_settings_file(&project, sid, &settings).map_err(|e| e.to_string())?;
+    crate::integrations_cmd::restage_container_secrets(&project);
+    Ok(())
 }
 
 fn require_verified(slug: &str) -> Result<(), String> {
@@ -734,7 +738,9 @@ pub fn delete_plugin_credentials(project: String, slug: String) -> Result<(), St
         }
         Ok(())
     })
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    crate::integrations_cmd::restage_container_secrets(&project);
+    Ok(())
 }
 
 #[tauri::command]
@@ -758,7 +764,9 @@ pub fn delete_plugin_credential_field(
     validate_credential_field(&key, "")?;
 
     let svc_dir = token_dir_for(&project, sid)?;
-    remove_credential_file_guarded(&svc_dir, &key)
+    remove_credential_file_guarded(&svc_dir, &key)?;
+    crate::integrations_cmd::restage_container_secrets(&project);
+    Ok(())
 }
 
 fn remove_credential_file_guarded(svc_dir: &std::path::Path, key: &str) -> Result<(), String> {

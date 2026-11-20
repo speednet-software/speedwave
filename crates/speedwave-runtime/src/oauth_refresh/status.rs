@@ -1,34 +1,34 @@
-use std::path::Path;
-
 use chrono::{SecondsFormat, Utc};
 
 use super::RefreshOutcome;
-use crate::consts;
 
-pub(super) fn record(token_dir: &Path, outcome: RefreshOutcome) {
-    let path = token_dir.join(consts::OAUTH_REFRESH_STATUS_FILE);
-    let state = match outcome {
-        RefreshOutcome::ReconnectRequired => "reconnect_required",
-        RefreshOutcome::NetworkError => "network_error",
-        RefreshOutcome::Refreshed | RefreshOutcome::NotDue => return remove(&path),
-    };
-    let body = serde_json::json!({
-        "state": state,
-        "at": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-    })
-    .to_string();
-    let written = crate::fs_perms::ensure_owner_only_dir(token_dir)
-        .and_then(|()| crate::fs_perms::write_restricted_file(&path, &body));
-    if written.is_err() {
-        log::warn!("failed to write the refresh status file");
-    }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Status {
+    Clear,
+    ReconnectRequired,
+    NetworkError,
 }
 
-fn remove(path: &Path) {
-    match std::fs::remove_file(path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => log::warn!("failed to remove the refresh status file"),
+impl Status {
+    pub(super) fn of(outcome: RefreshOutcome) -> Self {
+        match outcome {
+            RefreshOutcome::ReconnectRequired => Self::ReconnectRequired,
+            RefreshOutcome::NetworkError => Self::NetworkError,
+            RefreshOutcome::Refreshed | RefreshOutcome::NotDue => Self::Clear,
+        }
+    }
+
+    pub(super) fn file_content(self) -> String {
+        let state = match self {
+            Self::Clear => return String::new(),
+            Self::ReconnectRequired => "reconnect_required",
+            Self::NetworkError => "network_error",
+        };
+        serde_json::json!({
+            "state": state,
+            "at": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        })
+        .to_string()
     }
 }
 
@@ -40,42 +40,25 @@ fn remove(path: &Path) {
 mod tests {
     use super::*;
 
-    fn read(dir: &Path) -> Option<serde_json::Value> {
-        let text = std::fs::read_to_string(dir.join(consts::OAUTH_REFRESH_STATUS_FILE)).ok()?;
-        serde_json::from_str(&text).ok()
+    #[test]
+    fn failures_carry_their_state_and_a_timestamp() {
+        for (outcome, state) in [
+            (RefreshOutcome::ReconnectRequired, "reconnect_required"),
+            (RefreshOutcome::NetworkError, "network_error"),
+        ] {
+            let content = Status::of(outcome).file_content();
+            let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+            assert_eq!(json["state"], state);
+            let at = json["at"].as_str().unwrap();
+            assert!(chrono::DateTime::parse_from_rfc3339(at).is_ok(), "{at}");
+        }
     }
 
     #[test]
-    fn failures_write_their_state_and_a_timestamp() {
-        let dir = tempfile::tempdir().unwrap();
-        let token_dir = dir.path().join("tokens").join("slack");
-        record(&token_dir, RefreshOutcome::ReconnectRequired);
-        let status = read(&token_dir).unwrap();
-        assert_eq!(status["state"], "reconnect_required");
-        let at = status["at"].as_str().unwrap();
-        assert!(chrono::DateTime::parse_from_rfc3339(at).is_ok(), "{at}");
-
-        record(&token_dir, RefreshOutcome::NetworkError);
-        assert_eq!(read(&token_dir).unwrap()["state"], "network_error");
-    }
-
-    #[test]
-    fn success_or_a_fresh_token_removes_the_file() {
-        let dir = tempfile::tempdir().unwrap();
-        record(dir.path(), RefreshOutcome::NetworkError);
-        assert!(read(dir.path()).is_some());
-        record(dir.path(), RefreshOutcome::Refreshed);
-        assert!(read(dir.path()).is_none());
-
-        record(dir.path(), RefreshOutcome::ReconnectRequired);
-        record(dir.path(), RefreshOutcome::NotDue);
-        assert!(read(dir.path()).is_none());
-    }
-
-    #[test]
-    fn removing_a_missing_file_is_silent() {
-        let dir = tempfile::tempdir().unwrap();
-        record(dir.path(), RefreshOutcome::Refreshed);
-        assert!(read(dir.path()).is_none());
+    fn success_or_a_fresh_token_clears_the_status() {
+        for outcome in [RefreshOutcome::Refreshed, RefreshOutcome::NotDue] {
+            assert_eq!(Status::of(outcome), Status::Clear);
+        }
+        assert_eq!(Status::Clear.file_content(), "");
     }
 }

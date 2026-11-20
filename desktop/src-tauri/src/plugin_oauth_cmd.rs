@@ -202,6 +202,7 @@ pub async fn start_plugin_oauth(
             oauth_flow::emit_terminal(&app, &FLOW_STATE, ProgressStatus::Error, &e, &request_id);
             return;
         }
+        crate::integrations_cmd::restage_container_secrets(&project);
         if let Err(e) = crate::plugin_cmd::set_plugin_enabled_in_config(&project, &slug, true) {
             log::warn!("oauth[{slug}]: authorized but auto-enable failed: {e}");
         }

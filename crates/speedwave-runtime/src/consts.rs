@@ -111,6 +111,9 @@ pub const CLAUDE_SESSION_LOG_FILE: &str = "claude-session.log";
 pub const ENTRYPOINT_LOG_FILE: &str = ".speedwave-entrypoint.log";
 /// Path to the Claude Code binary inside the container.
 pub const CLAUDE_BINARY: &str = "/usr/local/bin/claude";
+/// Path inside the container to the wrapper that loads the claude secret files into the
+/// environment and then runs `env` with its arguments (`containers/speedwave-exec.sh`).
+pub const SPEEDWAVE_EXEC_WRAPPER: &str = "/usr/local/bin/speedwave-exec";
 /// Claude Code env switch that turns off background prefetches, telemetry and update checks.
 pub const CLAUDE_DISABLE_NONESSENTIAL_TRAFFIC_ENV: &str =
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC";
@@ -3399,7 +3402,7 @@ mod tests {
         assert!(
             spec_src.contains(&format!("{token_suffix}`")),
             "19-dirty-state-self-heal.spec.ts serviceTokenPath() must keep the '{token_suffix}' \
-             filename suffix from workers::ensure_worker_auth_token; rename it there too"
+             filename suffix from workers::worker_bearer_file_name; rename it there too"
         );
     }
 

@@ -255,7 +255,7 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
         log::warn!("Failed to list installed plugins: {e}");
         Vec::new()
     });
-    let expected_paths = compose::SecurityExpectedPaths::compute(project, project_dir)?
+    let expected_paths = compose::SecurityExpectedPaths::compute(project_dir)?
         .with_telemetry_locked(resolved.telemetry.any_locked);
     speedwave_runtime::fs_security::ensure_data_dir_permissions(project)?;
     let violations = compose::SecurityCheck::run(&yaml, project, &manifests, &expected_paths);
@@ -3225,10 +3225,7 @@ services:
     environment:
       - CLAUDE_VERSION=1.0.3
 "#;
-        let expected_paths = compose::SecurityExpectedPaths::from_raw(
-            "/test/project",
-            "/test/.speedwave/tokens/test",
-        );
+        let expected_paths = compose::SecurityExpectedPaths::from_raw("/test/project");
         let violations = compose::SecurityCheck::run(yaml, "test", &[], &expected_paths);
         assert!(
             violations
@@ -3277,10 +3274,7 @@ services:
       - CLAUDE_VERSION=1.0.3
 "#;
 
-        let expected_paths = compose::SecurityExpectedPaths::from_raw(
-            "/test/project",
-            "/test/.speedwave/tokens/test",
-        );
+        let expected_paths = compose::SecurityExpectedPaths::from_raw("/test/project");
         let violations = compose::SecurityCheck::run(yaml, "test-ordering", &[], &expected_paths);
         assert!(!violations.is_empty(), "Should detect violations");
 
@@ -3315,10 +3309,7 @@ networks:
   speedwave_test_network:
     driver: bridge
 "#;
-        let expected_paths = compose::SecurityExpectedPaths::from_raw(
-            "/test/project",
-            "/test/.speedwave/tokens/test",
-        );
+        let expected_paths = compose::SecurityExpectedPaths::from_raw("/test/project");
         let violations: Vec<_> = compose::SecurityCheck::run(yaml, "test", &[], &expected_paths)
             .into_iter()
             .filter(|v| v.rule != compose::SecurityRule::FileSecurityViolation)

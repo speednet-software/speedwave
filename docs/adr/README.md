@@ -116,6 +116,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-111](ADR-111-oauth-refresh-in-the-session-process.md)             | OAuth refresh in the process that owns the session                                                                          | Accepted                                                                           |
 | [ADR-113](ADR-113-startup-migrations-in-one-crate.md)                  | Startup migrations of the data directory in one crate (`speedwave-migrations`)                                              | Accepted                                                                           |
 | [ADR-114](ADR-114-cryptography-in-one-leaf-crate.md)                   | Cryptography in one leaf crate (`speedwave-crypto`)                                                                         | Accepted                                                                           |
+| [ADR-115](ADR-115-container-secrets-in-a-vm-tmpfs.md)                  | Container secrets in a VM tmpfs: slots per container, written through stdin before every start, files instead of env        | Accepted                                                                           |
 
 ## Creating a New ADR
 
