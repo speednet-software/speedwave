@@ -8,7 +8,7 @@ use super::provider::{ErrorCode, GrantType, RefreshResponse};
 use crate::oauth_persist::{write_oauth_state, OAuthStateParams};
 use crate::{consts, fs_perms, plugin};
 
-const ACCESS_TOKEN_FILE: &str = "access_token";
+pub(super) const ACCESS_TOKEN_FILE: &str = "access_token";
 
 pub(super) struct Paths {
     pub(super) state: PathBuf,

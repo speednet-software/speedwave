@@ -78,6 +78,7 @@ pub async fn save_api_key(project: String, api_key: String) -> Result<bool, Stri
             .and_then(|()| {
                 record_anthropic_key_in(speedwave_runtime::consts::data_dir(), &project, true)
             })
+            .inspect(|_| crate::integrations_cmd::restage_container_secrets(&project))
             .map_err(|e| {
                 log::error!("failed to save API key: {e}");
                 e.to_string()
@@ -96,6 +97,7 @@ pub async fn delete_api_key(project: String) -> Result<bool, String> {
             .and_then(|()| {
                 record_anthropic_key_in(speedwave_runtime::consts::data_dir(), &project, false)
             })
+            .inspect(|_| crate::integrations_cmd::restage_container_secrets(&project))
             .map_err(|e| {
                 log::error!("failed to delete API key: {e}");
                 e.to_string()

@@ -9,7 +9,7 @@ use chrono::Utc;
 
 use super::provider::{ErrorCode, RefreshRequest, RefreshResponse};
 use super::store::{self, Paths};
-use super::{audit, schedule, status, RefreshOutcome};
+use super::{audit, schedule, RefreshOutcome};
 use crate::fs_perms;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -126,7 +126,6 @@ where
         Err(_) => true,
     };
     if !due {
-        status::record(&paths.token_dir, RefreshOutcome::NotDue);
         return RefreshOutcome::NotDue;
     }
     match fs_perms::with_file_lock_in(&paths.lock, || {
@@ -150,7 +149,6 @@ where
         Err(code) => return failed(paths, project, service, code),
     };
     if !schedule::needs_refresh(Utc::now(), state.last_refresh_at, state.expires_at) {
-        status::record(&paths.token_dir, RefreshOutcome::NotDue);
         return RefreshOutcome::NotDue;
     }
 
@@ -169,19 +167,16 @@ where
     }
 
     audit::record(&paths.audit, project, service, Ok(()));
-    status::record(&paths.token_dir, RefreshOutcome::Refreshed);
     RefreshOutcome::Refreshed
 }
 
 fn failed(paths: &Paths, project: &str, service: &str, code: ErrorCode) -> RefreshOutcome {
     audit::record(&paths.audit, project, service, Err(code));
-    let outcome = if code.needs_reconnect() {
+    if code.needs_reconnect() {
         RefreshOutcome::ReconnectRequired
     } else {
         RefreshOutcome::NetworkError
-    };
-    status::record(&paths.token_dir, outcome);
-    outcome
+    }
 }
 
 #[cfg(test)]
@@ -196,7 +191,6 @@ mod tests {
     use chrono::SecondsFormat;
 
     use super::*;
-    use crate::consts;
 
     fn write_state(paths: &Paths, hours_left: i64) {
         let now = Utc::now();
@@ -222,13 +216,6 @@ mod tests {
             expires_in: 43_200,
             granted_scopes: vec!["chat:write".to_string()],
         })
-    }
-
-    fn status_state(paths: &Paths) -> Option<String> {
-        let text = std::fs::read_to_string(paths.token_dir.join(consts::OAUTH_REFRESH_STATUS_FILE))
-            .ok()?;
-        let json: serde_json::Value = serde_json::from_str(&text).ok()?;
-        json["state"].as_str().map(str::to_string)
     }
 
     #[test]
@@ -264,12 +251,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::new(dir.path(), "proj", "slack");
         write_state(&paths, 2);
-        std::fs::create_dir_all(&paths.token_dir).unwrap();
-        std::fs::write(
-            paths.token_dir.join(consts::OAUTH_REFRESH_STATUS_FILE),
-            r#"{"state":"network_error","at":"2026-11-18T09:00:00.000Z"}"#,
-        )
-        .unwrap();
         let call = |provider: &str, request: &RefreshRequest<'_>| {
             assert_eq!(provider, "slack");
             assert_eq!(request.refresh_token, "old-rt");
@@ -288,7 +269,6 @@ mod tests {
             std::fs::read_to_string(paths.token_dir.join("access_token")).unwrap(),
             "new-at"
         );
-        assert_eq!(status_state(&paths), None);
         let audit = std::fs::read_to_string(&paths.audit).unwrap();
         assert!(audit.contains(" service=slack action=refresh outcome=ok"));
         assert_eq!(
@@ -321,7 +301,6 @@ mod tests {
             RefreshOutcome::ReconnectRequired
         );
 
-        assert_eq!(status_state(&paths).as_deref(), Some("reconnect_required"));
         let state = store::load(&paths.state).ok().flatten().unwrap();
         assert_eq!(state.refresh_token, "old-rt");
         assert!(!paths.token_dir.join("access_token").exists());
@@ -340,14 +319,12 @@ mod tests {
             refresh_if_due(dir.path(), "proj", "slack", &failing),
             RefreshOutcome::NetworkError
         );
-        assert_eq!(status_state(&paths).as_deref(), Some("network_error"));
 
         let working = |_: &str, _: &RefreshRequest<'_>| rotated();
         assert_eq!(
             refresh_if_due(dir.path(), "proj", "slack", &working),
             RefreshOutcome::Refreshed
         );
-        assert_eq!(status_state(&paths), None);
     }
 
     #[test]
@@ -361,25 +338,6 @@ mod tests {
             refresh_if_due(dir.path(), "proj", "slack", &call),
             RefreshOutcome::ReconnectRequired
         );
-    }
-
-    #[test]
-    fn a_fresh_token_clears_a_stale_failure_status() {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = Paths::new(dir.path(), "proj", "slack");
-        write_state(&paths, 10);
-        std::fs::create_dir_all(&paths.token_dir).unwrap();
-        std::fs::write(
-            paths.token_dir.join(consts::OAUTH_REFRESH_STATUS_FILE),
-            r#"{"state":"reconnect_required","at":"2026-11-18T09:00:00.000Z"}"#,
-        )
-        .unwrap();
-        let call = |_: &str, _: &RefreshRequest<'_>| rotated();
-        assert_eq!(
-            refresh_if_due(dir.path(), "proj", "slack", &call),
-            RefreshOutcome::NotDue
-        );
-        assert_eq!(status_state(&paths), None);
     }
 
     #[test]
@@ -553,7 +511,6 @@ mod tests {
             RefreshOutcome::Refreshed
         );
         assert_eq!(calls.load(Ordering::SeqCst), 2);
-        assert_eq!(status_state(&paths), None);
         assert!(matches!(hold, Hold::Ready));
     }
 

@@ -17,14 +17,16 @@ mod pii_ner;
 mod plugins;
 mod proxy;
 mod quoting;
+pub(crate) mod secret_payload;
+pub(crate) mod secret_slots;
 mod security_check;
 mod tokens;
 mod workers;
 
+pub(crate) use proxy::enabled_git_forge_kinds_in;
 pub use proxy::{
-    proxy_config_dir_in, proxy_config_path_in, remove_llm_provider_key_in, render_proxy_config,
-    spw_key_env_name, write_llm_provider_key_in, PROXY_BASE_URL, PROXY_CALLER_AUTH_HEADER,
-    PROXY_PORT,
+    proxy_config_dir_in, remove_llm_provider_key_in, render_proxy_config, spw_key_env_name,
+    write_llm_provider_key_in, PROXY_BASE_URL, PROXY_CALLER_AUTH_HEADER, PROXY_PORT,
 };
 
 pub use pii_ner::{
@@ -248,7 +250,6 @@ pub fn render_compose_in(
     }
     #[cfg(target_os = "windows")]
     invalidate_host_addressing_cache();
-    let tokens_dir = resolve_tokens_dir_in(data_dir, project_name);
     let claude_home = crate::claude_home::claude_home_dir(data_dir, project_name);
     let resources_dir = data_dir.join("claude-resources");
     let network_name = networks::project_network_name(project_name);
@@ -268,7 +269,10 @@ pub fn render_compose_in(
     yaml = yaml.replace("${PROJECT_DIR}", &str_to_engine_path(project_dir)?);
     yaml = yaml.replace("${CLAUDE_HOME}", &to_engine_path(&claude_home)?);
     yaml = yaml.replace("${RESOURCES_DIR}", &to_engine_path(&resources_dir)?);
-    yaml = yaml.replace("${TOKENS_DIR}", &to_engine_path(&tokens_dir)?);
+    yaml = yaml.replace(
+        "${SECRETS_VM_DIR}",
+        &secret_slots::project_secrets_root(project_name),
+    );
     yaml = yaml.replace("${NETWORK_NAME}", &network_name);
     yaml = yaml.replace("${CLAUDE_VERSION}", defaults::CLAUDE_VERSION);
     yaml = yaml.replace("${BUNDLED_PLUGINS}", &defaults::BUNDLED_PLUGINS.join(","));
@@ -296,41 +300,22 @@ pub fn render_compose_in(
     })?;
     yaml = yaml.replace("${IDE_LOCK_DIR}", &to_engine_path(&ide_lock_dir)?);
 
-    let git_forges = proxy::git_forges_in(
-        data_dir,
-        project_name,
-        integrations,
-        &resolved_config.git_repositories,
-        &resolved_config.access,
-    );
-    proxy::write_proxy_config_in(
-        data_dir,
-        project_name,
-        &resolved_config.llm,
-        resolved_config.pii_ner_enabled,
-        &git_forges,
-    )?;
-    let proxy_config_dir = proxy::proxy_config_dir_in(data_dir, project_name);
-    std::fs::create_dir_all(&proxy_config_dir)?;
+    let proxy::ProjectProxyConfig {
+        git_forges,
+        config: proxy_config,
+    } = proxy::project_proxy_config_in(data_dir, project_name, resolved_config, integrations)?;
     let proxy_usage_dir = data_dir.join("usage").join(project_name).join("proxy");
     std::fs::create_dir_all(&proxy_usage_dir)?;
-    crate::fs_perms::set_owner_only_dir(&proxy_config_dir).map_err(|e| {
-        anyhow::anyhow!(
-            "failed to set owner-only perms on {}: {e}",
-            proxy_config_dir.display()
-        )
-    })?;
     crate::fs_perms::set_owner_only_dir(&proxy_usage_dir).map_err(|e| {
         anyhow::anyhow!(
             "failed to set owner-only perms on {}: {e}",
             proxy_usage_dir.display()
         )
     })?;
-    yaml = yaml.replace("${PROXY_CONFIG_DIR}", &to_engine_path(&proxy_config_dir)?);
     yaml = yaml.replace("${PROXY_USAGE_DIR}", &to_engine_path(&proxy_usage_dir)?);
     yaml = yaml.replace(
         "${PROXY_CONFIG_DIGEST}",
-        &proxy::proxy_state_digest_in(data_dir, project_name),
+        &proxy::proxy_state_digest_in(&proxy_config.content, data_dir, project_name),
     );
 
     let pii_policy = resolved_config
@@ -340,8 +325,6 @@ pub fn render_compose_in(
     crate::pii_key::ensure_project_key_in(data_dir, project_name)?;
     crate::pii_policy::write_policy_config_in(data_dir, project_name, pii_policy)?;
     crate::access_policy::write_access_config_in(data_dir, project_name, &resolved_config.access)?;
-    let policy_config_dir = crate::pii_policy::policy_config_dir_in(data_dir, project_name);
-    yaml = yaml.replace("${POLICY_CONFIG_DIR}", &to_engine_path(&policy_config_dir)?);
     yaml = yaml.replace(
         "${POLICY_CONFIG_DIGEST}",
         &crate::pii_policy::policy_state_digest_in(data_dir, project_name),
@@ -381,7 +364,8 @@ pub fn render_compose_in(
 
     yaml = apply_llm_config_in(data_dir, &yaml, &resolved_config.llm, project_name)?;
 
-    yaml = apply_git_transport_in(data_dir, &yaml, project_name, &tokens_dir, &git_forges)?;
+    yaml = apply_git_transport_in(&yaml, project_name, &git_forges)?;
+    yaml = pii_ner::apply_ner_url_env(&yaml, proxy_config.ner_url.as_deref())?;
 
     if let Some(rt) = runtime {
         let enabled_ids = integrations.enabled_plugin_service_ids();
@@ -395,7 +379,6 @@ pub fn render_compose_in(
             project_dir,
             integrations,
             network_name: &network_name,
-            tokens_dir: &tokens_dir,
             bridges,
         },
         &verified_plugins,
@@ -404,18 +387,7 @@ pub fn render_compose_in(
     let host_tz = crate::tz::detect_host_timezone();
     yaml = inject_host_timezone(&yaml, &host_tz)?;
 
-    let anthropic_active = match resolved_config.llm.active_provider() {
-        Some(entry) => entry.kind.is_anthropic(),
-        None => {
-            resolved_config
-                .llm
-                .provider
-                .as_deref()
-                .unwrap_or("anthropic")
-                == "anthropic"
-        }
-    };
-    if anthropic_active {
+    if llm::anthropic_provider_active(&resolved_config.llm) {
         yaml = apply_auth_config_in(&yaml, project_name, data_dir)?;
     }
 
@@ -790,22 +762,10 @@ pub(crate) fn apply_auth_config_in(
     project: &str,
     data_dir: &std::path::Path,
 ) -> anyhow::Result<String> {
-    let key_path = data_dir
-        .join("secrets")
-        .join(project)
-        .join("anthropic_api_key");
-
-    if !key_path.exists() {
+    if llm::anthropic_api_key_in(data_dir, project)?.is_none() {
         return Ok(yaml.to_string());
     }
-
-    let api_key = std::fs::read_to_string(&key_path)?.trim().to_string();
-    if api_key.is_empty() {
-        return Ok(yaml.to_string());
-    }
-
     let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
-    add_claude_env_var(&mut doc, "ANTHROPIC_API_KEY", &api_key);
     workers::remove_env_from(&mut doc, "claude", llm::ATTRIBUTION_HEADER_ENV);
     Ok(serde_yaml_ng::to_string(&doc)?)
 }
@@ -845,8 +805,7 @@ pub(crate) fn add_service_env_var(
 }
 
 fn apply_mcp_os_config_in(data_dir: &std::path::Path, yaml: &str) -> anyhow::Result<String> {
-    let lock_path = data_dir.join(consts::MCP_OS_LOCK_FILE);
-    let token_mount_path = data_dir.join(consts::MCP_OS_AUTH_TOKEN_FILE);
+    let (token_mount_path, lock_path) = workers::mcp_os_paths_in(data_dir);
     apply_mcp_os_config_with_path(yaml, &token_mount_path, &lock_path)
 }
 
@@ -862,7 +821,6 @@ fn apply_mcp_os_config_with_path(
         lock_path,
         crate::host_mcp_process::lock::LockService::McpOs,
         "WORKER_OS_URL",
-        "os-auth-token",
     )
 }
 
@@ -1021,10 +979,6 @@ pub(crate) fn add_claude_volume(doc: &mut serde_yaml_ng::Value, mount: &str) -> 
     Ok(())
 }
 
-pub(crate) fn add_hub_volume(doc: &mut serde_yaml_ng::Value, mount: &str) -> anyhow::Result<()> {
-    add_service_volume(doc, "mcp-hub", mount)
-}
-
 pub(crate) fn ensure_host_gateway_extra_host(
     doc: &mut serde_yaml_ng::Value,
     service: &str,
@@ -1081,10 +1035,8 @@ fn add_service_volume(
 }
 
 fn apply_git_transport_in(
-    data_dir: &Path,
     yaml: &str,
     project: &str,
-    tokens_dir: &Path,
     git_forges: &[proxy::GitForge],
 ) -> anyhow::Result<String> {
     if git_forges.is_empty() {
@@ -1092,9 +1044,8 @@ fn apply_git_transport_in(
     }
     let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
     for forge in git_forges {
-        let source = to_engine_path(&tokens_dir.join(forge.kind.config_key()))?;
-        let mount = format!("{source}:{}:ro", forge.kind.token_mount_target());
-        add_service_volume(&mut doc, "proxy", &mount)?;
+        let mount = secret_slots::proxy_git_mount(forge.kind)?.entry(project);
+        add_service_volume(&mut doc, secret_slots::PROXY_SERVICE, &mount)?;
     }
     let hosts: Vec<&str> = git_forges.iter().map(|f| f.host.as_str()).collect();
     add_claude_env_var(&mut doc, "SPEEDWAVE_GIT_HOSTS", &hosts.join(","));
@@ -1103,8 +1054,6 @@ fn apply_git_transport_in(
         "SPEEDWAVE_GIT_PROXY_URL",
         &format!("{PROXY_BASE_URL}/git"),
     );
-    let caller_token = proxy::ensure_caller_token_in(data_dir, project)?;
-    add_claude_env_var(&mut doc, "SPEEDWAVE_GIT_PROXY_AUTH", &caller_token);
     Ok(serde_yaml_ng::to_string(&doc)?)
 }
 
@@ -1122,7 +1071,7 @@ mod tests {
     use super::*;
     use strum::IntoEnumIterator;
 
-    const SECURITY_RULE_COUNT: usize = 61;
+    const SECURITY_RULE_COUNT: usize = 63;
 
     fn test_bundle_manifest() -> bundle::BundleManifest {
         bundle::BundleManifest {
@@ -1160,6 +1109,42 @@ mod tests {
                 bundle_manifest: &test_bundle_manifest(),
             },
         )
+    }
+
+    fn collect_payload(
+        data_dir: &Path,
+        project: &str,
+        resolved: &ResolvedClaudeConfig,
+        integrations: &ResolvedIntegrationsConfig,
+    ) -> crate::secrets_tmpfs::layout::ProjectPayload {
+        secret_payload::collect_project_payload_in(data_dir, project, resolved, integrations, &[])
+            .expect("payload collection must succeed")
+    }
+
+    fn payload_slot_files<'a>(
+        payload: &'a crate::secrets_tmpfs::layout::ProjectPayload,
+        service: &str,
+        purpose: &str,
+        project: &str,
+    ) -> Option<&'a crate::secrets_tmpfs::layout::SlotFiles> {
+        let dir = crate::secrets_tmpfs::layout::Slot::new(service, purpose)
+            .unwrap()
+            .vm_dir(project);
+        payload.slots.iter().find(|s| s.slot.vm_dir(project) == dir)
+    }
+
+    fn payload_file_text(
+        payload: &crate::secrets_tmpfs::layout::ProjectPayload,
+        service: &str,
+        purpose: &str,
+        project: &str,
+        name: &str,
+    ) -> Option<String> {
+        payload_slot_files(payload, service, purpose, project)?
+            .files
+            .iter()
+            .find(|f| f.name == name)
+            .map(|f| String::from_utf8(f.content.clone()).unwrap())
     }
 
     fn resolved_with_telemetry(
@@ -1359,23 +1344,38 @@ mod tests {
         let env_seq = doc["services"]["claude"]["environment"]
             .as_sequence()
             .expect("claude.environment must be a sequence");
-        let header_entry = env_seq
-            .iter()
-            .filter_map(|v| v.as_str())
-            .find(|s| s.starts_with("ANTHROPIC_CUSTOM_HEADERS="))
-            .expect("ANTHROPIC_CUSTOM_HEADERS entry present");
         assert!(
-            !header_entry.contains('\n'),
-            "header env var must be a single line, got: {header_entry:?}"
+            !env_seq
+                .iter()
+                .filter_map(|v| v.as_str())
+                .any(|s| s.starts_with("ANTHROPIC_CUSTOM_HEADERS=")),
+            "custom headers must not be rendered into the compose env"
         );
-        assert!(header_entry.contains("X-Tenant-ID: foo"));
-        assert!(header_entry.contains("X-Subscription-ID: bar"));
         assert!(
-            !yaml.contains("ANTHROPIC_CUSTOM_HEADERS=\n")
-                && !yaml.contains("- |-")
-                && !yaml.contains("- |\n"),
-            "headers env var must render as a single-line plain scalar, not \
-             a block literal (would break nerdctl-compose)"
+            !yaml.contains("X-Tenant-ID") && !yaml.contains("sk-test-key"),
+            "no header or key value may reach compose.yml"
+        );
+
+        let payload = collect_payload(data_dir.path(), &project, &resolved, &integrations);
+        let headers = payload_file_text(
+            &payload,
+            "claude",
+            "secrets",
+            &project,
+            "anthropic-custom-headers",
+        )
+        .expect("custom headers file staged for claude");
+        assert_eq!(headers, "X-Tenant-ID: foo, X-Subscription-ID: bar");
+        assert_eq!(
+            payload_file_text(
+                &payload,
+                "claude",
+                "secrets",
+                &project,
+                "anthropic-auth-token"
+            )
+            .as_deref(),
+            Some("sk-test-key")
         );
 
         let _ = std::fs::remove_file(tokens_dir.join("api_key"));
@@ -1415,11 +1415,6 @@ mod tests {
         assert!(
             nested.is_dir(),
             "render_compose must pre-create {nested:?} host-side"
-        );
-        let llm_tokens = data_dir.path().join("tokens").join(&project).join("llm");
-        assert!(
-            llm_tokens.is_dir(),
-            "render_compose must pre-create the proxy token mount source"
         );
         assert!(data_dir.path().join("claude-resources").is_dir());
     }
@@ -1627,9 +1622,17 @@ mod tests {
         )
         .expect("render must succeed");
 
+        assert!(!yaml.contains("ANTHROPIC_API_KEY"));
+        let payload = collect_payload(
+            data_dir.path(),
+            &project,
+            &resolved,
+            &ResolvedIntegrationsConfig::default(),
+        );
         assert!(
-            !yaml.contains("ANTHROPIC_API_KEY"),
-            "stale Anthropic key must not be injected while OpenRouter is active"
+            payload_file_text(&payload, "claude", "secrets", &project, "anthropic-api-key")
+                .is_none(),
+            "stale Anthropic key must not be staged while OpenRouter is active"
         );
         let _ = std::fs::remove_file(secrets.join("anthropic_api_key"));
     }
@@ -1755,13 +1758,29 @@ mod tests {
         )
         .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
-        let header_entry = doc["services"]["claude"]["environment"]
-            .as_sequence()
-            .unwrap()
-            .iter()
-            .filter_map(|v| v.as_str())
-            .find(|s| s.starts_with("ANTHROPIC_CUSTOM_HEADERS="))
-            .expect("header entry present");
+        assert!(
+            !doc["services"]["claude"]["environment"]
+                .as_sequence()
+                .unwrap()
+                .iter()
+                .filter_map(|v| v.as_str())
+                .any(|s| s.starts_with("ANTHROPIC_CUSTOM_HEADERS=")),
+            "custom headers must not be rendered into the compose env"
+        );
+        let payload = collect_payload(
+            data_dir.path(),
+            &project,
+            &resolved,
+            &ResolvedIntegrationsConfig::default(),
+        );
+        let header_entry = payload_file_text(
+            &payload,
+            "claude",
+            "secrets",
+            &project,
+            "anthropic-custom-headers",
+        )
+        .expect("header file present");
         assert!(header_entry.contains("X-Tenant-ID"));
         assert!(header_entry.contains("X-Other"));
         assert!(
@@ -1839,16 +1858,23 @@ mod tests {
 
     fn with_hub_policy_and_audit_mounts(yaml: &str, data_dir: &Path, project: &str) -> String {
         let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
-        let policy_dir = crate::pii_policy::policy_config_dir_in(data_dir, project);
-        add_hub_volume(
+        add_service_volume(
             &mut doc,
-            &format!("{}:/policy:ro", to_engine_path(&policy_dir).unwrap()),
+            "mcp-hub",
+            &secret_slots::hub_secrets_mount().unwrap().entry(project),
+        )
+        .unwrap();
+        add_service_volume(
+            &mut doc,
+            "mcp-hub",
+            &secret_slots::hub_policy_mount().unwrap().entry(project),
         )
         .unwrap();
         inject_env_into(&mut doc, "mcp-hub", "POLICY_FILE", "/policy/policy.json");
         let audit_dir = crate::audit::audit_dir_in(data_dir, project);
-        add_hub_volume(
+        add_service_volume(
             &mut doc,
+            "mcp-hub",
             &format!("{}:/audit:rw", to_engine_path(&audit_dir).unwrap()),
         )
         .unwrap();
@@ -1873,6 +1899,7 @@ services:
       - /home/user/.speedwave/claude-home/test:/home/speedwave:rw
       - /test/project:/workspace:rw
       - /home/user/.speedwave/claude-resources:/speedwave/resources:ro
+      - /run/speedwave-secrets/test/claude/secrets:/run/speedwave/secrets:ro
     environment:
       - CLAUDE_VERSION=1.0.3
       - DISABLE_AUTOUPDATER=1
@@ -1917,7 +1944,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/slack:/tokens:ro
+      - /run/speedwave-secrets/test/mcp-slack/tokens:/tokens:ro
       - /test/project:/workspace:rw
     environment:
       - PORT=3000
@@ -1971,7 +1998,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /home/user/.speedwave/tokens/test/context7:/tokens:ro
+      - /run/speedwave-secrets/test/mcp-context7/tokens:/tokens:ro
     environment:
       - PORT=3000
     networks:
@@ -2793,13 +2820,11 @@ services:
             yaml.contains("CLAUDE_CODE_MAX_CONTEXT_TOKENS=131072"),
             "window pin must be rendered for the gate to be exercised: {yaml}"
         );
-        let tokens_dir =
-            to_engine_path(&data_dir.path().join("tokens").join("test-project")).unwrap();
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test-project",
             &[],
-            &SecurityExpectedPaths::from_raw(tmp_project_dir(), &tokens_dir),
+            &SecurityExpectedPaths::from_raw(tmp_project_dir()),
             data_dir.path(),
         );
         assert!(
@@ -3079,17 +3104,44 @@ services:
             ..Default::default()
         };
         let (data_dir, doc) = render_git_transport(&integrations, None);
-        let tokens = to_engine_path(&data_dir.path().join("tokens/test-project")).unwrap();
         let volumes = service_strings(&doc, "proxy", "volumes");
-        assert!(volumes.contains(&format!("{tokens}/github:/git-tokens/github:ro")));
-        assert!(volumes.contains(&format!("{tokens}/gitlab:/git-tokens/gitlab:ro")));
-        assert!(data_dir.path().join("tokens/test-project/github").is_dir());
+        assert!(volumes.contains(
+            &"/run/speedwave-secrets/test-project/proxy/git-github:/git-tokens/github:ro"
+                .to_string()
+        ));
+        assert!(volumes.contains(
+            &"/run/speedwave-secrets/test-project/proxy/git-gitlab:/git-tokens/gitlab:ro"
+                .to_string()
+        ));
 
         let caller_token = proxy::ensure_caller_token_in(data_dir.path(), "test-project").unwrap();
         let env = service_strings(&doc, "claude", "environment");
         assert!(env.iter().any(|e| e.starts_with("SPEEDWAVE_GIT_HOSTS=")));
         assert!(env.contains(&"SPEEDWAVE_GIT_PROXY_URL=http://proxy:4000/git".to_string()));
-        assert!(env.contains(&format!("SPEEDWAVE_GIT_PROXY_AUTH={caller_token}")));
+        assert!(
+            !env.iter()
+                .any(|e| e.starts_with("SPEEDWAVE_GIT_PROXY_AUTH")),
+            "the caller secret reaches claude through its secrets slot, never env"
+        );
+
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: configured_anthropic_llm(),
+            ..Default::default()
+        };
+        let payload = collect_payload(data_dir.path(), "test-project", &config, &integrations);
+        assert_eq!(
+            payload_file_text(
+                &payload,
+                "claude",
+                "secrets",
+                "test-project",
+                "git-proxy-auth"
+            )
+            .as_deref(),
+            Some(caller_token.as_str())
+        );
     }
 
     #[test]
@@ -3111,7 +3163,7 @@ services:
 
     #[test]
     #[serial_test::serial(host_addressing)]
-    fn git_transport_lists_the_configured_repositories_per_forge_in_proxy_json() {
+    fn git_transport_lists_the_configured_repositories_per_forge_in_the_proxy_config() {
         let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -3123,22 +3175,23 @@ services:
             },
             ..Default::default()
         };
+        let integrations = ResolvedIntegrationsConfig {
+            github: true,
+            ..Default::default()
+        };
         render_compose_isolated(
             data_dir.path(),
             "test-project",
             tmp_project_dir(),
             &config,
-            &ResolvedIntegrationsConfig {
-                github: true,
-                ..Default::default()
-            },
+            &integrations,
             None,
             &HostBridgesInfo::default(),
         )
         .unwrap();
+        let payload = collect_payload(data_dir.path(), "test-project", &config, &integrations);
         let rendered: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(proxy::proxy_config_path_in(data_dir.path(), "test-project"))
-                .unwrap(),
+            &payload_file_text(&payload, "proxy", "config", "test-project", "proxy.json").unwrap(),
         )
         .unwrap();
         assert_eq!(rendered["git_forges"].as_array().unwrap().len(), 1);
@@ -3150,7 +3203,7 @@ services:
 
     #[test]
     #[serial_test::serial(host_addressing)]
-    fn git_transport_renders_the_composed_access_mode_of_each_forge_in_proxy_json() {
+    fn git_transport_renders_the_composed_access_mode_of_each_forge_in_the_proxy_config() {
         let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -3166,23 +3219,24 @@ services:
             },
             ..Default::default()
         };
+        let integrations = ResolvedIntegrationsConfig {
+            github: true,
+            gitlab: true,
+            ..Default::default()
+        };
         render_compose_isolated(
             data_dir.path(),
             "test-project",
             tmp_project_dir(),
             &config,
-            &ResolvedIntegrationsConfig {
-                github: true,
-                gitlab: true,
-                ..Default::default()
-            },
+            &integrations,
             None,
             &HostBridgesInfo::default(),
         )
         .unwrap();
+        let payload = collect_payload(data_dir.path(), "test-project", &config, &integrations);
         let rendered: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(proxy::proxy_config_path_in(data_dir.path(), "test-project"))
-                .unwrap(),
+            &payload_file_text(&payload, "proxy", "config", "test-project", "proxy.json").unwrap(),
         )
         .unwrap();
         assert_eq!(rendered["git_forges"][0]["host"], "github.com");
@@ -3370,10 +3424,17 @@ services:
             .and_then(|s| s.get("mcp-playwright"))
             .expect("mcp-playwright must be present");
 
+        let volumes: Vec<&str> = pw
+            .get("volumes")
+            .and_then(|v| v.as_sequence())
+            .map(|seq| seq.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
         assert!(
-            pw.get("volumes").is_none(),
-            "mcp-playwright must not declare any volumes; got: {:?}",
-            pw.get("volumes")
+            !volumes.is_empty()
+                && volumes
+                    .iter()
+                    .all(|v| v.ends_with(":/run/speedwave/auth:ro")),
+            "mcp-playwright must mount its auth slot and nothing else; got: {volumes:?}"
         );
     }
 
@@ -3507,9 +3568,10 @@ services:
             .and_then(|v| v.as_sequence())
             .expect("mcp-github must mount its token dir");
         assert!(
-            volumes.iter().filter_map(|v| v.as_str()).any(|v| {
-                v.ends_with("/test-project/github:/tokens:ro") || v.ends_with("github:/tokens:ro")
-            }),
+            volumes
+                .iter()
+                .filter_map(|v| v.as_str())
+                .any(|v| v.ends_with("/test-project/mcp-github/tokens:/tokens:ro")),
             "mcp-github must mount github tokens read-only; got: {volumes:?}"
         );
         let gh_block = serde_yaml_ng::to_string(gh).unwrap();
@@ -3821,14 +3883,14 @@ services:
             oauth: None,
         };
 
-        let tokens_dir = std::path::Path::new("/home/user/.speedwave/tokens/test-project");
+        let tokens_source = "/run/speedwave-secrets/test-project/mcp-legacy/tokens";
         let service = generate_plugin_service(
             &manifest,
             "f00ddeadbeefcafe0123456789abcdef",
             std::path::Path::new("/nonexistent/plugins/legacy"),
             "test-project",
             "speedwave_test-project_network",
-            tokens_dir,
+            tokens_source,
             tmp_project_dir(),
         )
         .unwrap();
@@ -4086,13 +4148,11 @@ services:
             &HostBridgesInfo::default(),
         )
         .unwrap();
-        let tokens_dir =
-            to_engine_path(&data_dir.path().join("tokens").join("test-project")).unwrap();
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test-project",
             &[],
-            &SecurityExpectedPaths::from_raw(tmp_project_dir(), &tokens_dir),
+            &SecurityExpectedPaths::from_raw(tmp_project_dir()),
             data_dir.path(),
         );
         assert!(
@@ -4125,13 +4185,11 @@ services:
             &HostBridgesInfo::default(),
         )
         .unwrap();
-        let tokens_dir =
-            to_engine_path(&data_dir.path().join("tokens").join("test-project")).unwrap();
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test-project",
             &[],
-            &SecurityExpectedPaths::from_raw(tmp_project_dir(), &tokens_dir),
+            &SecurityExpectedPaths::from_raw(tmp_project_dir()),
             data_dir.path(),
         );
         assert!(
@@ -4142,6 +4200,409 @@ services:
                 .map(|v| format!("{}", v))
                 .collect::<Vec<_>>()
         );
+    }
+
+    const SECRETS_PROJECT: &str = "secrets-project";
+
+    struct PlantedSecrets {
+        values: Vec<String>,
+        anthropic_key: &'static str,
+        caller_token: &'static str,
+        pii_key: &'static str,
+        os_token: &'static str,
+        ner_token: &'static str,
+    }
+
+    fn plant_secrets(data_dir: &Path) -> PlantedSecrets {
+        use crate::host_mcp_process::lock::{self, LockFile, LockService};
+        let planted = PlantedSecrets {
+            values: Vec::new(),
+            anthropic_key: "SENTINEL-anthropic-api-key-0001", // gitleaks:allow
+            caller_token: "SENTINEL-caller-token-0002",
+            pii_key: "SENTINEL-pii-key-0003", // gitleaks:allow
+            os_token: "SENTINEL-os-token-0004",
+            ner_token: "SENTINEL-ner-token-0005",
+        };
+        let mut values: Vec<String> = [
+            planted.anthropic_key,
+            planted.caller_token,
+            planted.pii_key,
+            planted.os_token,
+            planted.ner_token,
+        ]
+        .iter()
+        .map(|v| v.to_string())
+        .collect();
+
+        let secrets = data_dir.join("secrets").join(SECRETS_PROJECT);
+        std::fs::create_dir_all(&secrets).unwrap();
+        std::fs::write(secrets.join("anthropic_api_key"), planted.anthropic_key).unwrap();
+        for svc in consts::TOGGLEABLE_MCP_SERVICES {
+            let bearer = format!("SENTINEL-bearer-{}", svc.config_key);
+            std::fs::write(
+                secrets.join(format!("{}-auth-token", svc.config_key)),
+                &bearer,
+            )
+            .unwrap();
+            values.push(bearer);
+        }
+        let tokens = data_dir.join("tokens").join(SECRETS_PROJECT);
+        for svc in consts::TOGGLEABLE_MCP_SERVICES {
+            if svc.credential_files.is_empty() {
+                continue;
+            }
+            let dir = tokens.join(svc.config_key);
+            std::fs::create_dir_all(&dir).unwrap();
+            let value = format!("SENTINEL-credential-{}", svc.config_key);
+            std::fs::write(dir.join("access_token"), &value).unwrap();
+            values.push(value);
+        }
+        let proxy_dir = data_dir.join("proxy").join(SECRETS_PROJECT);
+        std::fs::create_dir_all(&proxy_dir).unwrap();
+        std::fs::write(proxy_dir.join("caller-token"), planted.caller_token).unwrap();
+        let policy_dir = data_dir.join("policies").join(SECRETS_PROJECT);
+        std::fs::create_dir_all(&policy_dir).unwrap();
+        std::fs::write(policy_dir.join("key"), planted.pii_key).unwrap();
+        std::fs::write(
+            data_dir.join(consts::MCP_OS_AUTH_TOKEN_FILE),
+            planted.os_token,
+        )
+        .unwrap();
+        lock::write(
+            &data_dir.join(consts::MCP_OS_LOCK_FILE),
+            &LockFile::new(
+                LockService::McpOs,
+                std::process::id(),
+                54321,
+                planted.os_token.into(),
+            ),
+        )
+        .unwrap();
+        lock::write(
+            &data_dir.join(consts::PII_NER_LOCK_FILE),
+            &LockFile::new(
+                LockService::PiiNer,
+                std::process::id(),
+                54322,
+                planted.ner_token.into(),
+            ),
+        )
+        .unwrap();
+        PlantedSecrets { values, ..planted }
+    }
+
+    fn api_key_config() -> ResolvedClaudeConfig {
+        let llm = LlmConfig {
+            schema_version: Some(crate::config::LLM_SCHEMA_VERSION),
+            providers: vec![crate::config::LlmProviderEntry {
+                id: "anthropic".to_string(),
+                kind: crate::config::LlmProviderKind::AnthropicApiKey,
+                base_url: None,
+                model: None,
+                has_api_key: true,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            active: Some(crate::config::LlmActive {
+                provider_id: "anthropic".to_string(),
+                model: None,
+            }),
+            proxy_enabled: Some(true),
+            ..Default::default()
+        };
+        ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm,
+            pii_ner_enabled: true,
+            ..Default::default()
+        }
+    }
+
+    fn render_secrets_project(
+        data_dir: &Path,
+        config: &ResolvedClaudeConfig,
+        integrations: &ResolvedIntegrationsConfig,
+    ) -> String {
+        render_compose_isolated(
+            data_dir,
+            SECRETS_PROJECT,
+            tmp_project_dir(),
+            config,
+            integrations,
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn a_full_render_carries_no_secret_value() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let planted = plant_secrets(data_dir.path());
+        let integrations = all_enabled_integrations();
+
+        let yaml = render_secrets_project(data_dir.path(), &api_key_config(), &integrations);
+
+        assert!(
+            yaml.contains("SPW_NER_URL="),
+            "the render must exercise the detector, or its token is not covered"
+        );
+        for value in &planted.values {
+            assert!(!yaml.contains(value), "compose.yml carries {value}");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn a_direct_local_render_carries_no_token_or_header_value() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let tokens_dir =
+            ensure_token_dir_in(data_dir.path(), SECRETS_PROJECT, "local-llm").unwrap();
+        std::fs::write(tokens_dir.join("api_key"), "SENTINEL-local-llm-token-0006").unwrap();
+        std::fs::write(
+            tokens_dir.join("custom_headers"),
+            "X-Tenant: SENTINEL-local-header-0007\n",
+        )
+        .unwrap();
+        let mut llm = LlmConfig {
+            provider: Some("local".to_string()),
+            model: Some("qwen3".to_string()),
+            base_url: Some("http://host.docker.internal:9000".to_string()),
+            has_api_key: true,
+            has_custom_headers: true,
+            ..Default::default()
+        };
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm,
+            ..Default::default()
+        };
+        let integrations = ResolvedIntegrationsConfig::default();
+
+        let yaml = render_secrets_project(data_dir.path(), &config, &integrations);
+
+        assert!(!yaml.contains("SENTINEL-local-llm-token-0006"));
+        assert!(!yaml.contains("SENTINEL-local-header-0007"));
+        let payload = collect_payload(data_dir.path(), SECRETS_PROJECT, &config, &integrations);
+        assert_eq!(
+            payload_file_text(
+                &payload,
+                "claude",
+                "secrets",
+                SECRETS_PROJECT,
+                "anthropic-auth-token"
+            )
+            .as_deref(),
+            Some("SENTINEL-local-llm-token-0006")
+        );
+        assert_eq!(
+            payload_file_text(
+                &payload,
+                "claude",
+                "secrets",
+                SECRETS_PROJECT,
+                "anthropic-custom-headers"
+            )
+            .as_deref(),
+            Some("X-Tenant: SENTINEL-local-header-0007")
+        );
+    }
+
+    fn rendered_secret_mount_sources(yaml: &str) -> Vec<(String, String)> {
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut sources = Vec::new();
+        for (name, service) in get_services(&doc).unwrap() {
+            for vol in service
+                .get("volumes")
+                .and_then(|v| v.as_sequence())
+                .into_iter()
+                .flatten()
+            {
+                let source = vol.as_str().unwrap().split(':').next().unwrap().to_string();
+                if secret_slots::is_under_secrets_root(&source) {
+                    sources.push((name.clone(), source));
+                }
+            }
+        }
+        sources
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn every_rendered_secret_mount_has_a_staged_slot_and_every_slot_a_mount() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let planted = plant_secrets(data_dir.path());
+        let integrations = all_enabled_integrations();
+        let config = api_key_config();
+
+        let yaml = render_secrets_project(data_dir.path(), &config, &integrations);
+        let payload = collect_payload(data_dir.path(), SECRETS_PROJECT, &config, &integrations);
+
+        let slot_dirs: Vec<String> = payload
+            .slots
+            .iter()
+            .map(|s| s.slot.vm_dir(SECRETS_PROJECT))
+            .collect();
+        let mounted = rendered_secret_mount_sources(&yaml);
+        for (service, source) in &mounted {
+            assert!(
+                slot_dirs.contains(source),
+                "{service} mounts {source}, which no staged slot backs"
+            );
+        }
+        for dir in &slot_dirs {
+            assert!(
+                mounted.iter().any(|(_, source)| source == dir),
+                "slot {dir} is staged but no container mounts it"
+            );
+        }
+
+        let text = |service: &str, purpose: &str, name: &str| {
+            payload_file_text(&payload, service, purpose, SECRETS_PROJECT, name)
+        };
+        for svc in consts::TOGGLEABLE_MCP_SERVICES {
+            let bearer = format!("SENTINEL-bearer-{}", svc.config_key);
+            assert_eq!(
+                text(svc.compose_name, "auth", "token").as_deref(),
+                Some(bearer.as_str())
+            );
+            assert_eq!(
+                text(
+                    "mcp-hub",
+                    "secrets",
+                    &format!("{}-auth-token", svc.config_key)
+                )
+                .as_deref(),
+                Some(bearer.as_str())
+            );
+            if !svc.credential_files.is_empty() {
+                assert_eq!(
+                    text(svc.compose_name, "tokens", "access_token").as_deref(),
+                    Some(format!("SENTINEL-credential-{}", svc.config_key).as_str())
+                );
+            }
+        }
+        assert_eq!(
+            text("mcp-hub", "secrets", "os-auth-token").as_deref(),
+            Some(planted.os_token)
+        );
+        assert_eq!(
+            text("claude", "secrets", "anthropic-api-key").as_deref(),
+            Some(planted.anthropic_key)
+        );
+        assert_eq!(
+            text("claude", "secrets", "git-proxy-auth").as_deref(),
+            Some(planted.caller_token)
+        );
+        assert_eq!(
+            text("claude", "secrets", "anthropic-custom-headers").as_deref(),
+            Some(format!("x-speedwave-proxy-auth: {}", planted.caller_token).as_str())
+        );
+        assert_eq!(
+            text("mcp-hub", "policy", "key").as_deref(),
+            Some(planted.pii_key)
+        );
+        assert_eq!(
+            text("proxy", "policy", "key").as_deref(),
+            Some(planted.pii_key)
+        );
+        let proxy_config = text("proxy", "config", "proxy.json").unwrap();
+        assert!(proxy_config.contains(planted.caller_token));
+        assert!(proxy_config.contains(planted.ner_token));
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn tokens_slots_keep_the_refresh_status_and_skip_its_host_copy() {
+        let data_dir = tempfile::tempdir().unwrap();
+        plant_secrets(data_dir.path());
+        let slack_tokens = data_dir
+            .path()
+            .join("tokens")
+            .join(SECRETS_PROJECT)
+            .join("slack");
+        std::fs::write(slack_tokens.join("refresh_status"), "stale-host-copy").unwrap();
+        std::fs::write(slack_tokens.join("access_token.tmp.1.abc"), "half-written").unwrap();
+        let integrations = ResolvedIntegrationsConfig {
+            slack: true,
+            ..Default::default()
+        };
+
+        let payload = collect_payload(
+            data_dir.path(),
+            SECRETS_PROJECT,
+            &api_key_config(),
+            &integrations,
+        );
+        let slot = payload_slot_files(&payload, "mcp-slack", "tokens", SECRETS_PROJECT).unwrap();
+
+        assert_eq!(slot.keep, ["refresh_status"]);
+        let names: Vec<&str> = slot.files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["access_token"]);
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn a_plugin_worker_gets_its_tokens_slot_and_a_bearer_for_the_hub() {
+        let data_dir = tempfile::tempdir().unwrap();
+        plant_secrets(data_dir.path());
+        let plugin_tokens = data_dir
+            .path()
+            .join("tokens")
+            .join(SECRETS_PROJECT)
+            .join("example-plugin");
+        std::fs::create_dir_all(&plugin_tokens).unwrap();
+        std::fs::write(plugin_tokens.join("_settings.json"), "{}").unwrap();
+        std::fs::write(plugin_tokens.join("api_key"), "SENTINEL-plugin-key").unwrap();
+        let mut integrations = ResolvedIntegrationsConfig::default();
+        integrations
+            .plugins
+            .insert("example-plugin".to_string(), true);
+        let manifest = test_example_plugin_manifest(plugin::TokenMount::ReadOnly);
+
+        let payload = secret_payload::collect_project_payload_in(
+            data_dir.path(),
+            SECRETS_PROJECT,
+            &api_key_config(),
+            &integrations,
+            &[manifest],
+        )
+        .unwrap();
+
+        let slot =
+            payload_slot_files(&payload, "mcp-example-plugin", "tokens", SECRETS_PROJECT).unwrap();
+        let names: Vec<&str> = slot.files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["_settings.json", "api_key"]);
+        assert!(
+            payload_slot_files(&payload, "mcp-example-plugin", "auth", SECRETS_PROJECT).is_none(),
+            "a plugin worker has no auth slot"
+        );
+        assert!(payload_file_text(
+            &payload,
+            "mcp-hub",
+            "secrets",
+            SECRETS_PROJECT,
+            "example-plugin-auth-token"
+        )
+        .is_some());
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn a_collector_rejects_an_invalid_project_name() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let result = secret_payload::collect_project_payload_in(
+            data_dir.path(),
+            "../evil",
+            &api_key_config(),
+            &ResolvedIntegrationsConfig::default(),
+            &[],
+        );
+        assert!(result.is_err());
     }
 
     const DEBUG_ENV_EXCEPTIONS: &[&str] = &[];
@@ -4240,16 +4701,11 @@ services:
 
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
         let volumes = get_hub_volumes(&doc);
-        let expected_source = to_engine_path(&crate::pii_policy::policy_config_dir_in(
-            data_dir.path(),
-            "test-project",
-        ))
-        .unwrap();
         assert!(
-            volumes
-                .iter()
-                .any(|v| v == &format!("{expected_source}:/policy:ro")),
-            "hub must mount the rendered policy dir at /policy:ro, volumes: {volumes:?}"
+            volumes.contains(
+                &"/run/speedwave-secrets/test-project/mcp-hub/policy:/policy:ro".to_string()
+            ),
+            "hub must mount its policy slot at /policy:ro, volumes: {volumes:?}"
         );
 
         let env = get_hub_env_seq(&doc);
@@ -4675,7 +5131,50 @@ services:
     }
 
     #[test]
-    fn test_security_check_anthropic_api_key_allowed() {
+    fn test_security_check_claude_secret_env_is_forbidden() {
+        let data_dir = tempfile::tempdir().unwrap();
+        for env in [
+            "ANTHROPIC_API_KEY=sk-ant-12345",
+            "ANTHROPIC_AUTH_TOKEN=sk-no-key-required",
+            "ANTHROPIC_CUSTOM_HEADERS=x-speedwave-proxy-auth: t",
+            "SPEEDWAVE_GIT_PROXY_AUTH=t",
+        ] {
+            let yaml = format!(
+                r#"
+version: "3"
+services:
+  claude:
+    image: speedwave-claude:latest
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=512m
+    environment:
+      - CLAUDE_VERSION=1.0.3
+      - "{env}"
+"#
+            );
+            let violations = SecurityCheck::run_with_data_dir(
+                &yaml,
+                "test",
+                &[],
+                &test_expected_paths(),
+                data_dir.path(),
+            );
+            assert!(
+                violations
+                    .iter()
+                    .any(|v| v.rule == SecurityRule::NoTokensClaude),
+                "{env} must be forbidden in the claude env"
+            );
+        }
+    }
+
+    #[test]
+    fn test_security_check_claude_secret_env_in_mapping_form_is_forbidden() {
         let data_dir = tempfile::tempdir().unwrap();
         let yaml = r#"
 version: "3"
@@ -4690,8 +5189,8 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=512m
     environment:
-      - CLAUDE_VERSION=1.0.3
-      - ANTHROPIC_API_KEY=sk-ant-12345
+      CLAUDE_VERSION: "1.0.3"
+      ANTHROPIC_API_KEY: sk-ant-12345
 "#;
         let violations = SecurityCheck::run_with_data_dir(
             yaml,
@@ -4700,12 +5199,40 @@ services:
             &test_expected_paths(),
             data_dir.path(),
         );
-        assert!(
-            !violations
-                .iter()
-                .any(|v| v.rule == SecurityRule::NoTokensClaude),
-            "ANTHROPIC_API_KEY in claude container should be allowed"
+        assert!(violations
+            .iter()
+            .any(|v| v.rule == SecurityRule::NoTokensClaude));
+    }
+
+    #[test]
+    fn test_security_check_worker_bearer_env_is_forbidden_on_builtin_workers() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = r#"
+version: "3"
+services:
+  mcp-slack:
+    image: speedwave-mcp-slack:latest
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    environment:
+      - PORT=4001
+      - MCP_SLACK_AUTH_TOKEN=550e8400-e29b-41d4-a716-446655440000
+"#;
+        let violations = SecurityCheck::run_with_data_dir(
+            yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
         );
+        assert!(violations
+            .iter()
+            .any(|v| v.rule == SecurityRule::NoTokensWorkers && v.container == "mcp-slack"));
     }
 
     #[test]
@@ -4882,6 +5409,20 @@ services:
                     || e.starts_with("ANTHROPIC_API_KEY=")),
             "oauth sessions must carry no auth env (it disables OAuth): {env:?}"
         );
+        let payload = collect_payload(
+            data_dir.path(),
+            "test-project",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+        );
+        let claude_files = payload_slot_files(&payload, "claude", "secrets", "test-project")
+            .expect("claude secrets slot");
+        let names: Vec<&str> = claude_files.files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["anthropic-custom-headers"],
+            "oauth sessions stage no auth file, only the proxy caller header"
+        );
         for (key, value) in crate::defaults::anthropic_default_models_env() {
             let pin = format!("{key}={value}");
             assert!(
@@ -4947,18 +5488,29 @@ services:
             "deprecated ANTHROPIC_SMALL_FAST_MODEL must not be injected: {env:?}"
         );
         assert!(
-            env.iter()
-                .any(|e| e == "ANTHROPIC_AUTH_TOKEN=sk-no-key-required"),
-            "dummy bearer expected: {env:?}"
+            !env.iter().any(|e| e.starts_with("ANTHROPIC_AUTH_TOKEN=")),
+            "the bearer reaches claude through its secrets slot: {env:?}"
         );
-        let proxy_cfg = std::fs::read_to_string(
-            data_dir
-                .path()
-                .join("proxy")
-                .join("test-project")
-                .join("proxy.json"),
-        )
-        .unwrap();
+        let payload = collect_payload(
+            data_dir.path(),
+            "test-project",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+        );
+        assert_eq!(
+            payload_file_text(
+                &payload,
+                "claude",
+                "secrets",
+                "test-project",
+                "anthropic-auth-token"
+            )
+            .as_deref(),
+            Some("sk-no-key-required"),
+            "dummy bearer expected"
+        );
+        let proxy_cfg =
+            payload_file_text(&payload, "proxy", "config", "test-project", "proxy.json").unwrap();
         assert!(
             proxy_cfg.contains(r#""prefix":"local""#),
             "route must exist for the provider: {proxy_cfg}"
@@ -5208,9 +5760,27 @@ services:
             "custom-header setups must use the direct path: {env:?}"
         );
         assert!(
-            env.iter()
+            !env.iter()
                 .any(|e| e.starts_with("ANTHROPIC_CUSTOM_HEADERS=")),
-            "custom headers must be injected on the direct path: {env:?}"
+            "custom headers reach claude through its secrets slot: {env:?}"
+        );
+        let payload = collect_payload(
+            data_dir.path(),
+            "test-project",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+        );
+        assert_eq!(
+            payload_file_text(
+                &payload,
+                "claude",
+                "secrets",
+                "test-project",
+                "anthropic-custom-headers"
+            )
+            .as_deref(),
+            Some("X-Test: 1"),
+            "custom headers must be staged on the direct path"
         );
     }
 
@@ -5294,8 +5864,8 @@ services:
         );
         assert_eq!(
             svc.get("restart").and_then(|r| r.as_str()),
-            Some("unless-stopped"),
-            "proxy must restart unless-stopped"
+            Some("no"),
+            "the proxy must not be restarted by the engine: a restart would lose its tmpfs-backed config"
         );
         let env: Vec<&str> = svc
             .get("environment")
@@ -5318,14 +5888,12 @@ services:
             .filter_map(|v| v.as_str())
             .collect();
         assert!(
-            volumes.iter().any(|v| v.ends_with(":/config:ro")),
-            "config mount must be ro, got {volumes:?}"
+            volumes.contains(&"/run/speedwave-secrets/test-project/proxy/config:/config:ro"),
+            "config mount must be the proxy config slot, ro, got {volumes:?}"
         );
         assert!(
-            volumes
-                .iter()
-                .any(|v| v.contains("/llm:/tokens") && v.ends_with(":ro")),
-            "tokens mount must be the llm namespace, ro, got {volumes:?}"
+            volumes.contains(&"/run/speedwave-secrets/test-project/proxy/tokens:/tokens:ro"),
+            "tokens mount must be the proxy tokens slot, ro, got {volumes:?}"
         );
         assert!(
             volumes.iter().any(|v| v.ends_with(":/usage:rw")),
@@ -5334,7 +5902,7 @@ services:
 
         assert!(
             data_dir.path().join("proxy").join("test-project").is_dir(),
-            "proxy config dir must be created"
+            "proxy state dir must be created"
         );
         assert!(
             data_dir
@@ -5431,9 +5999,26 @@ services:
             "Ollama must set {expected_ollama} (no /v1), got: {env:?}"
         );
         assert!(
-            env.iter()
-                .any(|e| e == "ANTHROPIC_AUTH_TOKEN=sk-no-key-required"),
-            "Ollama must set dummy auth token"
+            !env.iter().any(|e| e.starts_with("ANTHROPIC_AUTH_TOKEN=")),
+            "the Ollama token reaches claude through its secrets slot: {env:?}"
+        );
+        let payload = collect_payload(
+            data_dir.path(),
+            "test-project",
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+        );
+        assert_eq!(
+            payload_file_text(
+                &payload,
+                "claude",
+                "secrets",
+                "test-project",
+                "anthropic-auth-token"
+            )
+            .as_deref(),
+            Some("sk-no-key-required"),
+            "Ollama must stage the dummy auth token"
         );
         assert!(
             env.iter().any(|e| e == "ANTHROPIC_MODEL=llama3.3"),
@@ -5760,16 +6345,6 @@ services:
             "template hub env (incl. POLICY_FILE/POLICY_DIGEST) must pass \
              check_no_tokens_in_hub, got: {:?}",
             violations.iter().map(|v| &v.message).collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn hub_policy_volume_appears_in_compose_template() {
-        assert!(
-            COMPOSE_TEMPLATE
-                .lines()
-                .any(|l| l.trim() == "- ${POLICY_CONFIG_DIR}:/policy:ro"),
-            "compose.template.yml must mount ${{POLICY_CONFIG_DIR}} at /policy:ro on mcp-hub"
         );
     }
 
@@ -6538,14 +7113,9 @@ services:
             result
         );
 
-        let expected_mount = format!(
-            "{}:/secrets/os-auth-token:ro",
-            to_engine_path(&token_path).unwrap()
-        );
         assert!(
-            result.contains(&expected_mount),
-            "Token file must be mounted into hub.\nExpected: {}\nGot:\n{}",
-            expected_mount,
+            !result.contains("os-auth-token"),
+            "the bearer reaches the hub through its secrets slot, never a file mount.\nGot:\n{}",
             result
         );
     }
@@ -6623,27 +7193,6 @@ services:
     }
 
     #[test]
-    fn test_mcp_os_config_mounts_token_file_into_hub() {
-        let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
-        add_hub_volume(
-            &mut doc,
-            "/home/user/.speedwave/mcp-os-auth-token:/secrets/os-auth-token:ro",
-        )
-        .unwrap();
-
-        let hub = doc.get("services").unwrap().get("mcp-hub").unwrap();
-        let vols = hub.get("volumes").unwrap().as_sequence().unwrap();
-        let has_token_mount = vols.iter().any(|v| {
-            v.as_str()
-                .is_some_and(|s| s.contains("/secrets/os-auth-token:ro"))
-        });
-        assert!(
-            has_token_mount,
-            "Token file should be mounted into mcp-hub as /secrets/os-auth-token:ro"
-        );
-    }
-
-    #[test]
     fn test_mcp_os_config_skipped_when_token_is_directory() {
         let tmp = tempfile::tempdir().unwrap();
         let token_path = tmp.path().join("mcp-os-auth-token");
@@ -6698,7 +7247,7 @@ services:
     environment:
       - PORT=3000
     volumes:
-      - /test/.speedwave/tokens/test/glpi:/tokens:ro
+      - /run/speedwave-secrets/test/mcp-glpi/tokens:/tokens:ro
 "#;
 
     fn oauth_plugin_enabled() -> crate::config::ResolvedIntegrationsConfig {
@@ -7123,9 +7672,14 @@ services:
     }
 
     #[test]
-    fn test_add_hub_volume_creates_volumes_key() {
+    fn test_add_service_volume_creates_volumes_key() {
         let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
-        add_hub_volume(&mut doc, "/tmp/test-token:/secrets/os-auth-token:ro").unwrap();
+        add_service_volume(
+            &mut doc,
+            "mcp-hub",
+            "/tmp/test-token:/secrets/os-auth-token:ro",
+        )
+        .unwrap();
 
         let hub = doc.get("services").unwrap().get("mcp-hub").unwrap();
         let vols = hub.get("volumes").unwrap().as_sequence().unwrap();
@@ -7137,10 +7691,14 @@ services:
     }
 
     #[test]
-    fn add_hub_volume_errors_when_hub_service_absent() {
+    fn add_service_volume_errors_when_the_service_is_absent() {
         let mut doc: serde_yaml_ng::Value =
             serde_yaml_ng::from_str("services:\n  claude:\n    image: test\n").unwrap();
-        let result = add_hub_volume(&mut doc, "/tmp/test-token:/secrets/os-auth-token:ro");
+        let result = add_service_volume(
+            &mut doc,
+            "mcp-hub",
+            "/tmp/test-token:/secrets/os-auth-token:ro",
+        );
         assert!(
             result.is_err(),
             "a missing mcp-hub service must hard-fail, not silently drop the mount"
@@ -7148,10 +7706,14 @@ services:
     }
 
     #[test]
-    fn add_hub_volume_errors_when_hub_is_not_a_mapping() {
+    fn add_service_volume_errors_when_the_service_is_not_a_mapping() {
         let mut doc: serde_yaml_ng::Value =
             serde_yaml_ng::from_str("services:\n  mcp-hub: not-a-mapping\n").unwrap();
-        let result = add_hub_volume(&mut doc, "/tmp/test-token:/secrets/os-auth-token:ro");
+        let result = add_service_volume(
+            &mut doc,
+            "mcp-hub",
+            "/tmp/test-token:/secrets/os-auth-token:ro",
+        );
         assert!(
             result.is_err(),
             "a malformed mcp-hub service must hard-fail, not silently drop the mount"
@@ -8428,7 +8990,7 @@ services:
     }
 
     fn test_expected_paths() -> SecurityExpectedPaths {
-        SecurityExpectedPaths::from_raw("/test/project", "/test/.speedwave/tokens/test")
+        SecurityExpectedPaths::from_raw("/test/project")
     }
 
     fn proxy_yaml(volumes: &str, extra: &str) -> String {
@@ -8458,8 +9020,8 @@ services:
     fn test_security_proxy_canonical_mounts_pass() {
         let data_dir = tempfile::tempdir().unwrap();
         let yaml = proxy_yaml(
-            "      - /test/.speedwave/proxy/test:/config:ro\n      \
-             - /test/.speedwave/tokens/test/llm:/tokens:ro\n      \
+            "      - /run/speedwave-secrets/test/proxy/config:/config:ro\n      \
+             - /run/speedwave-secrets/test/proxy/tokens:/tokens:ro\n      \
              - /test/.speedwave/usage/test/proxy:/usage:rw",
             "",
         );
@@ -8482,8 +9044,8 @@ services:
     fn test_security_proxy_rejects_writable_tokens_and_extra_mounts() {
         let data_dir = tempfile::tempdir().unwrap();
         let yaml = proxy_yaml(
-            "      - /test/.speedwave/proxy/test:/config:ro\n      \
-             - /test/.speedwave/tokens/test/llm:/tokens:rw\n      \
+            "      - /run/speedwave-secrets/test/proxy/config:/config:ro\n      \
+             - /run/speedwave-secrets/test/proxy/tokens:/tokens:rw\n      \
              - /test/.speedwave/usage/test/proxy:/usage:rw\n      \
              - /test/project:/workspace:rw",
             "",
@@ -8513,7 +9075,7 @@ services:
     fn test_security_proxy_rejects_foreign_tokens_namespace_and_host_network() {
         let data_dir = tempfile::tempdir().unwrap();
         let yaml = proxy_yaml(
-            "      - /test/.speedwave/proxy/test:/config:ro\n      \
+            "      - /run/speedwave-secrets/test/proxy/config:/config:ro\n      \
              - /test/.speedwave/tokens/test:/tokens:ro\n      \
              - /test/.speedwave/usage/test/proxy:/usage:rw",
             "    network_mode: host",
@@ -8530,7 +9092,7 @@ services:
             .filter(|v| v.rule == SecurityRule::SpeedwaveProxyVolumes)
             .collect();
         assert!(
-            proxy.iter().any(|v| v.message.contains("llm namespace")),
+            proxy.iter().any(|v| v.message.contains("llm token slot")),
             "whole-tokens-dir mount must be flagged: {proxy:?}"
         );
         assert!(
@@ -8555,8 +9117,8 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/proxy/test:/config:ro
-      - /test/.speedwave/tokens/test/llm:/tokens:rw
+      - /run/speedwave-secrets/test/proxy/config:/config:ro
+      - /run/speedwave-secrets/test/proxy/tokens:/tokens:rw
       - /test/.speedwave/usage/test/proxy:/usage:rw
 "#,
             user = container_user(),
@@ -8602,9 +9164,7 @@ services:
             &HostBridgesInfo::default(),
         )
         .unwrap();
-        let tokens_dir =
-            to_engine_path(&data_dir.path().join("tokens").join("test-project")).unwrap();
-        let expected = SecurityExpectedPaths::from_raw(tmp_project_dir(), &tokens_dir);
+        let expected = SecurityExpectedPaths::from_raw(tmp_project_dir());
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test-project",
@@ -8637,7 +9197,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/example-plugin:/tokens:{token_mode}
+      - /run/speedwave-secrets/test/mcp-example-plugin/tokens:/tokens:{token_mode}
       - /test/project:/workspace:rw
     labels:
       speedwave.plugin-service: "true"
@@ -8662,7 +9222,7 @@ services:
     security_opt:
       - no-new-privileges:true
     volumes:
-      - /test/.speedwave/tokens/test/example-plugin:/tokens:ro
+      - /run/speedwave-secrets/test/mcp-example-plugin/tokens:/tokens:ro
       - /test/project:/workspace:rw
       - /etc/passwd:/etc/passwd:ro
     labels:
@@ -8722,7 +9282,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/example-plugin:/tokens:ro
+      - /run/speedwave-secrets/test/mcp-example-plugin/tokens:/tokens:ro
       - /test/project:/workspace:rw
       - /test/.speedwave/oauth/test/bearer-example-plugin:/secrets/oauth-auth-token-example-plugin:ro
     labels:
@@ -8835,7 +9395,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/example-plugin:/tokens:ro
+      - /run/speedwave-secrets/test/mcp-example-plugin/tokens:/tokens:ro
       - /etc:/workspace:rw
     labels:
       speedwave.plugin-service: "true"
@@ -8875,7 +9435,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/example-plugin:/tokens:ro
+      - /run/speedwave-secrets/test/mcp-example-plugin/tokens:/tokens:ro
       - /test/project:/workspace:ro
     labels:
       speedwave.plugin-service: "true"
@@ -9022,14 +9582,16 @@ services:
             oauth: None,
         };
 
-        let tokens_dir = std::path::PathBuf::from("/home/user/.speedwave/tokens/test");
+        let tokens_source = secret_slots::worker_tokens_mount("mcp-example-plugin")
+            .unwrap()
+            .source("test");
         let service_value = plugin::generate_plugin_service(
             &manifest,
             "f00ddeadbeefcafe0123456789abcdef",
             Path::new("/nonexistent/plugins/example-plugin"),
             "test",
             "speedwave_test_network",
-            &tokens_dir,
+            &tokens_source,
             tmp_project_dir(),
         )
         .unwrap();
@@ -9078,7 +9640,7 @@ services:
             Path::new("/nonexistent/plugins/test-svc"),
             "proj",
             "net",
-            std::path::Path::new("/tokens/proj"),
+            "/tokens/proj",
             tmp_project_dir(),
         )
         .unwrap();
@@ -9166,22 +9728,24 @@ services:
             oauth: None,
         };
 
-        let tokens_dir = std::path::PathBuf::from("/home/user/.speedwave/tokens/myproject");
+        let tokens_source = secret_slots::worker_tokens_mount("mcp-example-plugin")
+            .unwrap()
+            .source("myproject");
         let service_value = plugin::generate_plugin_service(
             &manifest,
             "f00ddeadbeefcafe0123456789abcdef",
             Path::new("/nonexistent/plugins/example-plugin"),
             "myproject",
             "speedwave_myproject_network",
-            &tokens_dir,
+            &tokens_source,
             tmp_project_dir(),
         )
         .unwrap();
 
         let yaml = serde_yaml_ng::to_string(&service_value).unwrap();
         assert!(
-            yaml.contains("/home/user/.speedwave/tokens/myproject/example-plugin:/tokens:ro"),
-            "Token mount should be <tokens_dir>/<service_id>:/tokens:<mode>. Got:\n{}",
+            yaml.contains(&format!("{tokens_source}:/tokens:ro")),
+            "Token mount should be the plugin's tokens slot at /tokens:<mode>. Got:\n{}",
             yaml
         );
     }
@@ -9233,7 +9797,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/sharepoint:/tokens:ro
+      - /run/speedwave-secrets/test/mcp-sharepoint/tokens:/tokens:ro
       - /test/project:/workspace:rw
 "#,
             user = container_user()
@@ -9269,7 +9833,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/sharepoint:/tokens:ro
+      - /run/speedwave-secrets/test/mcp-sharepoint/tokens:/tokens:ro
       - /test/project:/workspace:rw
       - /test/.speedwave/oauth/test/bearer-sharepoint:/secrets/oauth-auth-token-sharepoint:ro
 "#,
@@ -9307,7 +9871,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/slack:/tokens:ro
+      - /run/speedwave-secrets/test/mcp-slack/tokens:/tokens:ro
       - /test/project:/workspace:rw
 "#,
             user = container_user()
@@ -9340,7 +9904,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/slack:/tokens:rw
+      - /run/speedwave-secrets/test/mcp-slack/tokens:/tokens:rw
 "#,
             user = container_user()
         );
@@ -9379,7 +9943,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/slack:/tokens:ro
+      - /run/speedwave-secrets/test/mcp-slack/tokens:/tokens:ro
       - /test/project:/workspace:rw
       - /etc/passwd:/stolen:ro
 "#,
@@ -9413,7 +9977,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/redmine:/tokens:ro
+      - /run/speedwave-secrets/test/mcp-redmine/tokens:/tokens:ro
       - /test/project:/workspace:rw
 "#,
             user = container_user()
@@ -9450,7 +10014,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/redmine:/tokens:ro
+      - /run/speedwave-secrets/test/mcp-redmine/tokens:/tokens:ro
       - /test/project:/workspace:ro
 "#,
             user = container_user()
@@ -9483,7 +10047,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/redmine:/tokens:ro
+      - /run/speedwave-secrets/test/mcp-redmine/tokens:/tokens:ro
       - /wrong/path:/workspace:rw
 "#,
             user = container_user()
@@ -9516,7 +10080,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/redmine:/tokens:ro
+      - /run/speedwave-secrets/test/mcp-redmine/tokens:/tokens:ro
 "#,
             user = container_user()
         );
@@ -9548,7 +10112,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/redmine:/tokens:rw
+      - /run/speedwave-secrets/test/mcp-redmine/tokens:/tokens:rw
       - /test/project:/workspace:rw
 "#,
             user = container_user()
@@ -9615,7 +10179,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/redmine:/tokens:ro
+      - /run/speedwave-secrets/test/mcp-redmine/tokens:/tokens:ro
       - /test/project:/workspace:rw
       - /etc/passwd:/stolen:ro
 "#,
@@ -9649,7 +10213,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/atlassian:/tokens:ro
+      - /run/speedwave-secrets/test/mcp-atlassian/tokens:/tokens:ro
       - /test/project:/workspace:rw
 "#,
             user = container_user()
@@ -9688,7 +10252,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/atlassian:/tokens:ro
+      - /run/speedwave-secrets/test/mcp-atlassian/tokens:/tokens:ro
       - /test/project:/workspace:ro
 "#,
             user = container_user()
@@ -9721,7 +10285,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/atlassian:/tokens:ro
+      - /run/speedwave-secrets/test/mcp-atlassian/tokens:/tokens:ro
       - /wrong/path:/workspace:rw
 "#,
             user = container_user()
@@ -9754,7 +10318,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/atlassian:/tokens:ro
+      - /run/speedwave-secrets/test/mcp-atlassian/tokens:/tokens:ro
 "#,
             user = container_user()
         );
@@ -9786,7 +10350,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/atlassian:/tokens:ro
+      - /run/speedwave-secrets/test/mcp-atlassian/tokens:/tokens:ro
       - /test/project:/workspace:rw
       - /etc/passwd:/stolen:ro
 "#,
@@ -9820,7 +10384,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/atlassian:/tokens:rw
+      - /run/speedwave-secrets/test/mcp-atlassian/tokens:/tokens:rw
       - /test/project:/workspace:rw
 "#,
             user = container_user()
@@ -9887,7 +10451,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/sharepoint:/tokens:ro
+      - /run/speedwave-secrets/test/mcp-sharepoint/tokens:/tokens:ro
       - /test/project:/workspace:rw
       - /test/x:/secrets/oauth-auth-token-evil:ro
 "#,
@@ -9921,7 +10485,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/sharepoint:/tokens:rw
+      - /run/speedwave-secrets/test/mcp-sharepoint/tokens:/tokens:rw
       - /test/project:/workspace:rw
 "#,
             user = container_user()
@@ -9955,7 +10519,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/sharepoint:/tokens:ro
+      - /run/speedwave-secrets/test/mcp-sharepoint/tokens:/tokens:ro
 "#,
             user = container_user()
         );
@@ -9987,7 +10551,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/sharepoint:/tokens:ro
+      - /run/speedwave-secrets/test/mcp-sharepoint/tokens:/tokens:ro
       - /wrong/path:/workspace:rw
 "#,
             user = container_user()
@@ -10020,7 +10584,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /test/.speedwave/tokens/test/sharepoint:/tokens:ro
+      - /run/speedwave-secrets/test/mcp-sharepoint/tokens:/tokens:ro
       - /test/project:/workspace:ro
 "#,
             user = container_user()
@@ -10140,6 +10704,7 @@ services:
       - /home/user/.speedwave/claude-home/test:/home/speedwave:rw
       - /home/user/projects/test:/workspace:rw
       - /home/user/.speedwave/claude-resources:/speedwave/resources:ro
+      - /run/speedwave-secrets/test/claude/secrets:/run/speedwave/secrets:ro
     environment:
       - CLAUDE_VERSION=1.0.3
       - DISABLE_AUTOUPDATER=1
@@ -10184,7 +10749,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /home/user/.speedwave/tokens/test/slack:/tokens:ro
+      - /run/speedwave-secrets/test/mcp-slack/tokens:/tokens:ro
       - /home/user/projects/test:/workspace:rw
     environment:
       - PORT=3000
@@ -10203,7 +10768,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /home/user/.speedwave/tokens/test/sharepoint:/tokens:ro
+      - /run/speedwave-secrets/test/mcp-sharepoint/tokens:/tokens:ro
       - /home/user/projects/test:/workspace:rw
     environment:
       - PORT=3000
@@ -10222,7 +10787,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /home/user/.speedwave/tokens/test/redmine:/tokens:ro
+      - /run/speedwave-secrets/test/mcp-redmine/tokens:/tokens:ro
       - /home/user/projects/test:/workspace:rw
     environment:
       - PORT=3000
@@ -10241,7 +10806,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /home/user/.speedwave/tokens/test/gitlab:/tokens:ro
+      - /run/speedwave-secrets/test/mcp-gitlab/tokens:/tokens:ro
     environment:
       - PORT=3000
     networks:
@@ -10259,7 +10824,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /home/user/.speedwave/tokens/test/github:/tokens:ro
+      - /run/speedwave-secrets/test/mcp-github/tokens:/tokens:ro
     environment:
       - PORT=3000
     networks:
@@ -10277,7 +10842,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /home/user/.speedwave/tokens/test/atlassian:/tokens:ro
+      - /run/speedwave-secrets/test/mcp-atlassian/tokens:/tokens:ro
       - /home/user/projects/test:/workspace:rw
     environment:
       - PORT=3000
@@ -10331,7 +10896,7 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     volumes:
-      - /home/user/.speedwave/tokens/test/context7:/tokens:ro
+      - /run/speedwave-secrets/test/mcp-context7/tokens:/tokens:ro
     environment:
       - PORT=3000
     networks:
@@ -10386,13 +10951,27 @@ networks:
             .unwrap_or_default()
     }
 
+    fn get_service_volumes(doc: &serde_yaml_ng::Value, service: &str) -> Vec<String> {
+        doc.get("services")
+            .and_then(|s| s.get(service))
+            .and_then(|h| h.get("volumes"))
+            .and_then(|v| v.as_sequence())
+            .map(|seq| {
+                seq.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     #[test]
-    fn test_worker_auth_tokens_injected_into_enabled_workers() {
+    fn test_worker_auth_token_files_are_named_in_the_env_of_enabled_workers() {
         let tmp = tempfile::tempdir().unwrap();
         let integrations = all_enabled_integrations();
 
         let result = apply_worker_auth_tokens_with_dir(
             VALID_COMPOSE_ALL_WORKERS,
+            "test",
             tmp.path(),
             &integrations,
             &[],
@@ -10401,13 +10980,22 @@ networks:
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
 
         for svc in consts::TOGGLEABLE_MCP_SERVICES {
-            let env_key = format!("MCP_{}_AUTH_TOKEN", svc.config_key.to_uppercase());
+            let env_key = format!("MCP_{}_AUTH_TOKEN_FILE", svc.config_key.to_uppercase());
             let env = get_service_env_seq(&doc, svc.compose_name);
             assert!(
-                env.iter().any(|e| e.starts_with(&format!("{}=", env_key))),
-                "worker '{}' should have {} env var",
+                env.contains(&format!("{env_key}=/run/speedwave/auth/token")),
+                "worker '{}' should name its bearer file in {}, env={:?}",
                 svc.compose_name,
-                env_key
+                env_key,
+                env
+            );
+            assert!(
+                !env.iter().any(|e| e.starts_with(&format!(
+                    "MCP_{}_AUTH_TOKEN=",
+                    svc.config_key.to_uppercase()
+                ))),
+                "worker '{}' must not carry the bearer value in env",
+                svc.compose_name
             );
         }
     }
@@ -10426,6 +11014,7 @@ networks:
 
         let result = apply_worker_auth_tokens_with_dir(
             VALID_COMPOSE_ALL_WORKERS,
+            "test",
             tmp.path(),
             &integrations,
             &[],
@@ -10434,62 +11023,80 @@ networks:
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
 
         for svc in consts::TOGGLEABLE_MCP_SERVICES {
-            let env_key = format!("MCP_{}_AUTH_TOKEN", svc.config_key.to_uppercase());
+            let env_prefix = format!("MCP_{}_AUTH_TOKEN", svc.config_key.to_uppercase());
             let env = get_service_env_seq(&doc, svc.compose_name);
             assert!(
-                !env.iter().any(|e| e.starts_with(&format!("{}=", env_key))),
+                !env.iter().any(|e| e.starts_with(&env_prefix)),
                 "disabled worker '{}' should NOT have {} env var",
                 svc.compose_name,
-                env_key
+                env_prefix
+            );
+            assert!(
+                !get_service_volumes(&doc, svc.compose_name)
+                    .iter()
+                    .any(|v| v.contains(":/run/speedwave/auth")),
+                "disabled worker '{}' should NOT mount an auth slot",
+                svc.compose_name
             );
         }
-
-        let volumes = get_hub_volumes(&doc);
         assert!(
-            !volumes
+            !get_hub_volumes(&doc)
                 .iter()
-                .any(|v| v.contains("/secrets/") && v.contains("-auth-token")),
-            "hub should have no auth token mounts for disabled workers"
+                .any(|v| v.contains("-auth-token")),
+            "hub gets its bearers through its secrets slot, never per-file mounts"
         );
     }
 
     #[test]
-    fn test_worker_auth_tokens_mounted_into_hub() {
+    fn test_worker_auth_slot_is_mounted_read_only_into_each_enabled_builtin_worker() {
         let tmp = tempfile::tempdir().unwrap();
         let integrations = all_enabled_integrations();
 
         let result = apply_worker_auth_tokens_with_dir(
             VALID_COMPOSE_ALL_WORKERS,
+            "test",
             tmp.path(),
             &integrations,
             &[],
         )
         .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
-        let volumes = get_hub_volumes(&doc);
 
         for svc in consts::TOGGLEABLE_MCP_SERVICES {
-            let expected_mount = format!("/secrets/{}-auth-token:ro", svc.config_key);
+            let expected = format!(
+                "/run/speedwave-secrets/test/{}/auth:/run/speedwave/auth:ro",
+                svc.compose_name
+            );
             assert!(
-                volumes.iter().any(|v| v.ends_with(&expected_mount)),
-                "hub should have mount for {} (looking for suffix '{}')",
-                svc.config_key,
-                expected_mount
+                get_service_volumes(&doc, svc.compose_name).contains(&expected),
+                "worker '{}' should mount its own auth slot '{}'",
+                svc.compose_name,
+                expected
             );
         }
+        assert!(
+            get_hub_volumes(&doc).is_empty(),
+            "the hub mounts nothing per worker: {:?}",
+            get_hub_volumes(&doc)
+        );
     }
 
     #[test]
-    fn test_worker_auth_tokens_errors_when_hub_service_absent() {
+    fn test_worker_auth_tokens_error_when_an_enabled_worker_service_is_absent() {
         let tmp = tempfile::tempdir().unwrap();
         let integrations = all_enabled_integrations();
-        let malformed_doc = "services:\n  mcp-slack:\n    image: slack\n";
+        let malformed_doc = "services:\n  mcp-hub:\n    image: hub\n";
 
-        let result =
-            apply_worker_auth_tokens_with_dir(malformed_doc, tmp.path(), &integrations, &[]);
+        let result = apply_worker_auth_tokens_with_dir(
+            malformed_doc,
+            "test",
+            tmp.path(),
+            &integrations,
+            &[],
+        );
         assert!(
             result.is_err(),
-            "missing mcp-hub service must be an error, not a silent no-op"
+            "a missing worker service must be an error, not a silent no-op"
         );
     }
 
@@ -10500,6 +11107,7 @@ networks:
 
         let result = apply_worker_auth_tokens_with_dir(
             VALID_COMPOSE_ALL_WORKERS,
+            "test",
             tmp.path(),
             &integrations,
             &[],
@@ -10522,6 +11130,7 @@ networks:
 
         apply_worker_auth_tokens_with_dir(
             VALID_COMPOSE_ALL_WORKERS,
+            "test",
             tmp.path(),
             &integrations,
             &[],
@@ -10547,6 +11156,7 @@ networks:
 
         apply_worker_auth_tokens_with_dir(
             VALID_COMPOSE_ALL_WORKERS,
+            "test",
             tmp.path(),
             &integrations,
             &[],
@@ -10563,6 +11173,7 @@ networks:
 
         apply_worker_auth_tokens_with_dir(
             VALID_COMPOSE_ALL_WORKERS,
+            "test",
             tmp.path(),
             &integrations,
             &[],
@@ -10593,6 +11204,7 @@ networks:
 
         apply_worker_auth_tokens_with_dir(
             VALID_COMPOSE_ALL_WORKERS,
+            "test",
             tmp.path(),
             &integrations,
             &[],
@@ -10609,6 +11221,7 @@ networks:
 
         let result = apply_worker_auth_tokens_with_dir(
             VALID_COMPOSE_ALL_WORKERS,
+            "test",
             tmp.path(),
             &integrations,
             &[],
@@ -10630,7 +11243,7 @@ networks:
     }
 
     #[test]
-    fn test_worker_auth_tokens_use_engine_path() {
+    fn test_worker_auth_mount_points_into_the_project_slot_of_the_worker() {
         let tmp = tempfile::tempdir().unwrap();
         let integrations = ResolvedIntegrationsConfig {
             slack: true,
@@ -10639,23 +11252,20 @@ networks:
 
         let result = apply_worker_auth_tokens_with_dir(
             VALID_COMPOSE_ALL_WORKERS,
+            "test",
             tmp.path(),
             &integrations,
             &[],
         )
         .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
-        let volumes = get_hub_volumes(&doc);
 
-        let token_path = tmp.path().join("slack-auth-token");
-        let expected_host = to_engine_path(&token_path).unwrap();
         assert!(
-            volumes
-                .iter()
-                .any(|v| v.starts_with(&expected_host)
-                    && v.ends_with("/secrets/slack-auth-token:ro")),
-            "hub mount should use to_engine_path(), volumes: {:?}",
-            volumes
+            get_service_volumes(&doc, "mcp-slack").contains(
+                &"/run/speedwave-secrets/test/mcp-slack/auth:/run/speedwave/auth:ro".to_string()
+            ),
+            "volumes: {:?}",
+            get_service_volumes(&doc, "mcp-slack")
         );
     }
 
@@ -10674,7 +11284,8 @@ networks:
                 &networks::project_network_name("test"),
             );
         let result =
-            apply_worker_auth_tokens_with_dir(&yaml, tmp.path(), &integrations, &[]).unwrap();
+            apply_worker_auth_tokens_with_dir(&yaml, "test", tmp.path(), &integrations, &[])
+                .unwrap();
 
         let data_tmp = tempfile::tempdir().unwrap();
         let result = with_hub_policy_and_audit_mounts(&result, data_tmp.path(), "test");
@@ -10682,10 +11293,7 @@ networks:
             &result,
             "test",
             &[],
-            &SecurityExpectedPaths::from_raw(
-                "/home/user/projects/test",
-                "/home/user/.speedwave/tokens/test",
-            ),
+            &SecurityExpectedPaths::from_raw("/home/user/projects/test"),
             data_tmp.path(),
         );
         assert!(
@@ -10710,6 +11318,7 @@ networks:
 
         let result = apply_worker_auth_tokens_with_dir(
             VALID_COMPOSE_ALL_WORKERS,
+            "test",
             tmp.path(),
             &integrations,
             &[],
@@ -10719,18 +11328,24 @@ networks:
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
         let env = get_service_env_seq(&doc, "mcp-slack");
         assert!(
-            env.iter().any(|e| e.starts_with("MCP_SLACK_AUTH_TOKEN=")),
-            "should generate new token even when existing path is a directory"
+            env.iter()
+                .any(|e| e.starts_with("MCP_SLACK_AUTH_TOKEN_FILE=")),
+            "the worker must name its bearer file"
+        );
+        let token_path = tmp.path().join("slack-auth-token");
+        assert!(
+            token_path.is_file(),
+            "a regular token file must replace the directory"
+        );
+        assert!(
+            uuid::Uuid::parse_str(std::fs::read_to_string(&token_path).unwrap().trim()).is_ok()
         );
     }
 
     #[cfg(unix)]
-    fn assert_fresh_uuid_token(env: &[String], sentinel: &str) -> String {
-        let entry = env
-            .iter()
-            .find(|e| e.starts_with("MCP_SLACK_AUTH_TOKEN="))
-            .expect("MCP_SLACK_AUTH_TOKEN must be present in env");
-        let value = entry.strip_prefix("MCP_SLACK_AUTH_TOKEN=").unwrap();
+    fn assert_fresh_uuid_token(token_path: &Path, sentinel: &str) -> String {
+        let value = std::fs::read_to_string(token_path).unwrap();
+        let value = value.trim();
         assert!(
             uuid::Uuid::parse_str(value).is_ok(),
             "token must be a valid UUID, got: '{}'",
@@ -10758,17 +11373,16 @@ networks:
         std::fs::write(&target, SENTINEL).unwrap();
         std::os::unix::fs::symlink(&target, tmp.path().join("slack-auth-token")).unwrap();
 
-        let result = apply_worker_auth_tokens_with_dir(
+        apply_worker_auth_tokens_with_dir(
             VALID_COMPOSE_ALL_WORKERS,
+            "test",
             tmp.path(),
             &integrations,
             &[],
         )
         .unwrap();
 
-        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
-        let env = get_service_env_seq(&doc, "mcp-slack");
-        assert_fresh_uuid_token(&env, SENTINEL);
+        assert_fresh_uuid_token(&tmp.path().join("slack-auth-token"), SENTINEL);
 
         let token_path = tmp.path().join("slack-auth-token");
         assert!(token_path.is_file(), "token should be a regular file");
@@ -10799,6 +11413,7 @@ networks:
 
         apply_worker_auth_tokens_with_dir(
             VALID_COMPOSE_ALL_WORKERS,
+            "test",
             tmp.path(),
             &integrations,
             &[],
@@ -10833,17 +11448,16 @@ networks:
         std::fs::write(&target, PLANTED_UUID).unwrap();
         std::os::unix::fs::symlink(&target, tmp.path().join("slack-auth-token")).unwrap();
 
-        let result = apply_worker_auth_tokens_with_dir(
+        apply_worker_auth_tokens_with_dir(
             VALID_COMPOSE_ALL_WORKERS,
+            "test",
             tmp.path(),
             &integrations,
             &[],
         )
         .unwrap();
 
-        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
-        let env = get_service_env_seq(&doc, "mcp-slack");
-        assert_fresh_uuid_token(&env, PLANTED_UUID);
+        assert_fresh_uuid_token(&tmp.path().join("slack-auth-token"), PLANTED_UUID);
     }
 
     #[cfg(unix)]
@@ -10862,8 +11476,9 @@ networks:
         std::os::unix::fs::symlink(&file_c, &link_b).unwrap();
         std::os::unix::fs::symlink(&link_b, tmp.path().join("slack-auth-token")).unwrap();
 
-        let result = apply_worker_auth_tokens_with_dir(
+        apply_worker_auth_tokens_with_dir(
             VALID_COMPOSE_ALL_WORKERS,
+            "test",
             tmp.path(),
             &integrations,
             &[],
@@ -10877,67 +11492,35 @@ networks:
             "token should not be a symlink after chain cleanup"
         );
 
-        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
-        let env = get_service_env_seq(&doc, "mcp-slack");
-        assert_fresh_uuid_token(&env, SENTINEL);
+        assert_fresh_uuid_token(&tmp.path().join("slack-auth-token"), SENTINEL);
     }
 
     #[test]
-    fn test_worker_auth_token_trims_whitespace_and_preserves_legacy_format() {
+    fn test_worker_bearer_is_trimmed_and_kept_when_the_file_holds_a_legacy_value() {
         const KNOWN_UUID: &str = "550e8400-e29b-41d4-a716-446655440000";
         let tmp = tempfile::tempdir().unwrap();
-        let integrations = ResolvedIntegrationsConfig {
-            slack: true,
-            ..Default::default()
-        };
 
         let token_path = tmp.path().join("slack-auth-token");
-        let raw_content = "  550e8400-e29b-41d4-a716-446655440000\n  \n";
-        std::fs::write(&token_path, raw_content).unwrap();
+        std::fs::write(&token_path, "  550e8400-e29b-41d4-a716-446655440000\n  \n").unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
 
-        let result = apply_worker_auth_tokens_with_dir(
-            VALID_COMPOSE_ALL_WORKERS,
-            tmp.path(),
-            &integrations,
-            &[],
-        )
-        .unwrap();
+        let token = workers::read_or_create_worker_bearer(tmp.path(), "slack").unwrap();
 
-        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
-        let env = get_service_env_seq(&doc, "mcp-slack");
-        let token_entry = env
-            .iter()
-            .find(|e| e.starts_with("MCP_SLACK_AUTH_TOKEN="))
-            .expect("should have MCP_SLACK_AUTH_TOKEN env var");
-        let token_value = token_entry.strip_prefix("MCP_SLACK_AUTH_TOKEN=").unwrap();
+        assert_eq!(token, KNOWN_UUID);
         assert_eq!(
-            token_value, KNOWN_UUID,
-            "token should be trimmed UUID, got: '{}'",
-            token_value
-        );
-
-        let disk_content = std::fs::read_to_string(&token_path).unwrap();
-        assert_eq!(
-            disk_content.trim(),
+            std::fs::read_to_string(&token_path).unwrap().trim(),
             KNOWN_UUID,
-            "on-disk file should contain the same UUID as the env-var, got: '{}'",
-            disk_content
+            "the file keeps the same value"
         );
     }
 
     #[test]
-    fn test_worker_auth_token_empty_file_generates_fresh_uuid() {
+    fn test_worker_bearer_empty_file_generates_fresh_uuid() {
         let tmp = tempfile::tempdir().unwrap();
-        let integrations = ResolvedIntegrationsConfig {
-            slack: true,
-            ..Default::default()
-        };
-
         let token_path = tmp.path().join("slack-auth-token");
         std::fs::write(&token_path, "   \n").unwrap();
         #[cfg(unix)]
@@ -10946,32 +11529,11 @@ networks:
             std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
 
-        let result = apply_worker_auth_tokens_with_dir(
-            VALID_COMPOSE_ALL_WORKERS,
-            tmp.path(),
-            &integrations,
-            &[],
-        )
-        .unwrap();
+        let token = workers::read_or_create_worker_bearer(tmp.path(), "slack").unwrap();
 
-        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
-        let env = get_service_env_seq(&doc, "mcp-slack");
-        let token_entry = env
-            .iter()
-            .find(|e| e.starts_with("MCP_SLACK_AUTH_TOKEN="))
-            .expect("should have MCP_SLACK_AUTH_TOKEN");
-        let token_value = token_entry.strip_prefix("MCP_SLACK_AUTH_TOKEN=").unwrap();
-        assert!(
-            uuid::Uuid::parse_str(token_value).is_ok(),
-            "empty-file branch should generate a valid UUID, got: '{}'",
-            token_value
-        );
+        assert!(uuid::Uuid::parse_str(&token).is_ok(), "got: '{token}'");
         let disk = std::fs::read_to_string(&token_path).unwrap();
-        assert!(
-            uuid::Uuid::parse_str(disk.trim()).is_ok(),
-            "on-disk token should be a valid UUID, got: '{}'",
-            disk
-        );
+        assert_eq!(disk.trim(), token);
     }
 
     #[test]
@@ -10981,6 +11543,7 @@ networks:
 
         apply_worker_auth_tokens_with_dir(
             VALID_COMPOSE_ALL_WORKERS,
+            "test",
             tmp.path(),
             &integrations,
             &[],
@@ -11044,6 +11607,7 @@ networks:
 
         let result = apply_worker_auth_tokens_with_dir(
             &compose_with_plugin,
+            "test",
             &secrets_dir,
             &integrations,
             &plugins,
@@ -11059,14 +11623,16 @@ networks:
             env
         );
 
-        let volumes = get_hub_volumes(&doc);
         assert!(
-            volumes
-                .iter()
-                .any(|v| v.contains("/secrets/example-plugin-auth-token:ro")),
-            "hub should mount plugin auth token, volumes={:?}",
-            volumes
+            !env.iter().any(|e| e.contains("_AUTH_TOKEN_FILE=")),
+            "a plugin worker keeps the bearer value contract, env={:?}",
+            env
         );
+        assert!(
+            get_service_volumes(&doc, "mcp-example-plugin").is_empty(),
+            "a plugin worker gets no auth slot"
+        );
+        assert!(get_hub_volumes(&doc).is_empty());
 
         assert!(secrets_dir.join("example-plugin-auth-token").exists());
     }
@@ -11108,7 +11674,7 @@ services:
       - /tmp:noexec,nosuid,size=64m
     read_only: true
     volumes:
-      - /test/.speedwave/tokens/test/test-plugin:/tokens:ro
+      - /run/speedwave-secrets/test/mcp-test-plugin/tokens:/tokens:ro
       - /test/project:/workspace:rw
     labels:
       speedwave.plugin-service: "true"
@@ -11172,7 +11738,7 @@ services:
     security_opt:
       - no-new-privileges:true
     volumes:
-      - /test/.speedwave/tokens/test/sharepoint:/tokens:ro
+      - /run/speedwave-secrets/test/mcp-sharepoint/tokens:/tokens:ro
       - /test/project:/workspace:rw
       - /etc/passwd:/etc/passwd:ro
 "#,
@@ -11972,8 +12538,17 @@ services:
         write_api_key_in(tmp.path(), "test", "sk-ant-api-1234");
 
         let result = apply_auth_config_in(auth_test_yaml(), "test", tmp.path()).unwrap();
-        let has_api_key = result.contains("ANTHROPIC_API_KEY=sk-ant-api-1234");
-        assert!(has_api_key, "API key must be injected when stored");
+        assert!(
+            !result.contains("sk-ant-api-1234") && !result.contains("ANTHROPIC_API_KEY"),
+            "the stored key never reaches the rendered env: {result}"
+        );
+        assert_eq!(
+            llm::anthropic_api_key_in(tmp.path(), "test")
+                .unwrap()
+                .as_deref(),
+            Some("sk-ant-api-1234"),
+            "the stored key is the one staged for claude"
+        );
     }
 
     #[test]
@@ -11990,7 +12565,7 @@ services:
 "#;
 
         let result = apply_auth_config_in(yaml, "test", tmp.path()).unwrap();
-        assert!(result.contains("ANTHROPIC_API_KEY=sk-ant-api-1234"));
+        assert!(!result.contains("sk-ant-api-1234"));
         assert!(
             !result.contains("CLAUDE_CODE_ATTRIBUTION_HEADER"),
             "a container billed by an API key must send the attribution block: {result}"
@@ -12017,8 +12592,8 @@ services:
     fn apply_auth_config_in_neither_present() {
         let tmp = tempfile::tempdir().unwrap();
         let result = apply_auth_config_in(auth_test_yaml(), "test", tmp.path()).unwrap();
-        let has_api_key = result.contains("ANTHROPIC_API_KEY=");
-        assert!(!has_api_key);
+        assert!(!result.contains("ANTHROPIC_API_KEY="));
+        assert_eq!(llm::anthropic_api_key_in(tmp.path(), "test").unwrap(), None);
     }
 
     #[test]
@@ -12026,8 +12601,8 @@ services:
         let tmp = tempfile::tempdir().unwrap();
         write_api_key_in(tmp.path(), "test", "");
         let result = apply_auth_config_in(auth_test_yaml(), "test", tmp.path()).unwrap();
-        let has_api_key = result.contains("ANTHROPIC_API_KEY=");
-        assert!(!has_api_key);
+        assert!(!result.contains("ANTHROPIC_API_KEY="));
+        assert_eq!(llm::anthropic_api_key_in(tmp.path(), "test").unwrap(), None);
     }
 
     #[test]
@@ -12165,7 +12740,6 @@ services:
             project_dir: "/tmp/proj",
             integrations: &integrations,
             network_name: "net",
-            tokens_dir: tmp.path(),
             bridges: &Default::default(),
         };
         let out = apply_plugins_from_verified(VALID_COMPOSE, &ctx, &[vp]).unwrap();
@@ -12189,7 +12763,6 @@ services:
             project_dir: "/tmp/proj",
             integrations: &integrations,
             network_name: "net",
-            tokens_dir: tmp.path(),
             bridges: &Default::default(),
         };
         let out = apply_plugins_from_verified(VALID_COMPOSE, &ctx, &[vp]).unwrap();
@@ -12243,7 +12816,6 @@ services:
             project_dir: "/tmp/proj",
             integrations: &integrations,
             network_name: "net",
-            tokens_dir: tmp.path(),
             bridges: &Default::default(),
         };
         let err = apply_plugins_from_verified(VALID_COMPOSE, &ctx, &[vp])
@@ -12523,7 +13095,6 @@ services:
                 project_dir: tmp_project_dir(),
                 integrations: &cfg,
                 network_name: "test-net",
-                tokens_dir: tmp.path(),
                 bridges: &super::HostBridgesInfo::default(),
             },
             &[vp],
@@ -12558,7 +13129,6 @@ services:
                 project_dir: tmp_project_dir(),
                 integrations: &cfg,
                 network_name: "test-net",
-                tokens_dir: tmp.path(),
                 bridges: &super::HostBridgesInfo::default(),
             },
             &[vp],
@@ -12584,7 +13154,6 @@ services:
                 project_dir: tmp_project_dir(),
                 integrations: &cfg,
                 network_name: "test-net",
-                tokens_dir: tmp.path(),
                 bridges: &super::HostBridgesInfo::default(),
             },
             &[vp],
@@ -12687,7 +13256,6 @@ services:
             project_dir: "/test/project",
             integrations: &cfg,
             network_name: "test-net",
-            tokens_dir: Path::new("/test/.speedwave/tokens/test"),
             bridges: &HostBridgesInfo::default(),
         };
         let base = with_hub_policy_and_audit_mounts(&valid_compose_yaml(), data_dir, "test");
@@ -12822,7 +13390,6 @@ services:
                 project_dir: tmp_project_dir(),
                 integrations: &cfg,
                 network_name: "test-net",
-                tokens_dir: tmp.path(),
                 bridges,
             },
             &[vp],
@@ -13022,14 +13589,19 @@ services:
         };
         crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
         llm.proxy_enabled = Some(false);
+        let wiring = llm::claude_llm_env_in(data_dir.path(), &llm, "test-project").unwrap();
         let rendered =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
         let env = get_claude_env(&rendered);
 
+        assert_eq!(
+            wiring.auth_token.as_deref(),
+            Some("sk-no-key-required"),
+            "Expected the dummy token to be staged as a secret"
+        );
         assert!(
-            env.iter()
-                .any(|e| e == "ANTHROPIC_AUTH_TOKEN=sk-no-key-required"),
-            "Expected dummy token, got env: {env:?}"
+            !env.iter().any(|e| e.starts_with("ANTHROPIC_AUTH_TOKEN=")),
+            "the token is never rendered into env, got env: {env:?}"
         );
         assert!(
             env.iter()
@@ -13196,7 +13768,6 @@ services:
                 project_dir: tmp_project_dir(),
                 integrations: &cfg,
                 network_name: "test-net",
-                tokens_dir: tmp.path(),
                 bridges: &bridges,
             },
             &[vp],
@@ -13240,7 +13811,6 @@ services:
                 project_dir: tmp_project_dir(),
                 integrations: &cfg,
                 network_name: "test-net",
-                tokens_dir: tmp.path(),
                 bridges: &bridges,
             },
             &[vp],
@@ -13283,15 +13853,15 @@ services:
         };
         crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
         llm.proxy_enabled = Some(false);
+        let wiring = llm::claude_llm_env_in(data_dir.path(), &llm, &project).unwrap();
         let rendered =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, &project).unwrap();
         let env = get_claude_env(&rendered);
 
-        assert!(
-            env.iter()
-                .any(|e| e == "ANTHROPIC_AUTH_TOKEN=sk-no-key-required"),
-            "Orphaned token file MUST NOT leak when has_api_key=false. \
-             Got env: {env:?}"
+        assert_eq!(
+            wiring.auth_token.as_deref(),
+            Some("sk-no-key-required"),
+            "Orphaned token file MUST NOT leak when has_api_key=false"
         );
         assert!(
             !env.iter().any(|e| e.contains("leaked-secret-from-crash")),
@@ -13325,20 +13895,22 @@ services:
         crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
         let rendered =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, &project).unwrap();
+        let wiring = llm::claude_llm_env_in(data_dir.path(), &llm, &project).unwrap();
 
         let env = get_claude_env(&rendered);
-        let entry = env
-            .iter()
-            .find(|e| e.starts_with("ANTHROPIC_CUSTOM_HEADERS="))
-            .unwrap_or_else(|| panic!("ANTHROPIC_CUSTOM_HEADERS not injected: {env:?}"));
-        let value = entry
-            .strip_prefix("ANTHROPIC_CUSTOM_HEADERS=")
-            .expect("env entry must start with prefix");
+        assert!(
+            !env.iter()
+                .any(|e| e.starts_with("ANTHROPIC_CUSTOM_HEADERS=")),
+            "custom headers are staged as a secret file, never rendered: {env:?}"
+        );
+        let value = wiring
+            .custom_headers
+            .as_deref()
+            .expect("custom headers must be staged");
 
         assert!(
             !value.contains('\n'),
-            "ANTHROPIC_CUSTOM_HEADERS must be a single line (nerdctl-compose \
-             rejects block literals inside an environment: sequence), got: {value:?}"
+            "the headers file holds the single-line flattened form, got: {value:?}"
         );
         for header in multiline.split('\n') {
             assert!(

@@ -1,17 +1,19 @@
 //! Host-side worker + built-in MCP worker wiring: per-worker Bearer auth tokens, the integrations
 //! filter (drop disabled services + their hub env), and the URL to reach a host-side worker.
 
+use super::secret_slots::{
+    enabled_builtin_workers, enabled_plugin_workers, worker_auth_mount, WORKER_AUTH_FILE,
+    WORKER_AUTH_TARGET,
+};
 use super::{
-    add_hub_volume, add_service_env_var, ensure_host_gateway_extra_host, init_secrets_dir_in,
+    add_service_env_var, add_service_volume, ensure_host_gateway_extra_host, init_secrets_dir_in,
     inject_env_into, inject_worker_env,
 };
 use crate::config::ResolvedIntegrationsConfig;
 use crate::consts;
-use crate::engine_path::to_engine_path;
 use crate::plugin;
 
-/// Generates per-worker Bearer tokens (UUID v4): `MCP_<SERVICE>_AUTH_TOKEN` on the worker, a
-/// `/secrets/<service>-auth-token:ro` mount (`check_no_tokens_in_hub`), `SPW_CREDENTIALS_DIGEST`.
+/// `SPW_CREDENTIALS_DIGEST` of every worker that has user-entered credential files.
 pub(crate) fn apply_credentials_digests_in(
     data_dir: &std::path::Path,
     yaml: &str,
@@ -61,7 +63,7 @@ const VOLATILE_CREDENTIAL_FILES: &[&str] = &[
 ];
 
 /// `writeRestrictedSecret` pattern: `<name>.tmp.<pid>.<rand>` — exclude mid-rename files.
-fn is_write_in_progress(name: &std::ffi::OsStr) -> bool {
+pub(super) fn is_write_in_progress(name: &std::ffi::OsStr) -> bool {
     name.to_string_lossy().contains(".tmp.")
 }
 
@@ -121,19 +123,33 @@ pub(crate) fn apply_worker_auth_tokens_in(
     installed_plugins: &[plugin::PluginManifest],
 ) -> anyhow::Result<String> {
     let secrets_dir = init_secrets_dir_in(data_dir, project_name)?;
-    apply_worker_auth_tokens_with_dir(yaml, &secrets_dir, integrations, installed_plugins)
+    apply_worker_auth_tokens_with_dir(
+        yaml,
+        project_name,
+        &secrets_dir,
+        integrations,
+        installed_plugins,
+    )
 }
 
-/// Reads or generates one worker's Bearer auth token, writes it atomically at 0o600,
-/// injects the env var into the worker, and mounts the token file into the hub.
-fn ensure_worker_auth_token(
-    doc: &mut serde_yaml_ng::Value,
+pub(super) fn worker_bearer_env_name(token_key: &str) -> String {
+    format!(
+        "MCP_{}_AUTH_TOKEN",
+        token_key.to_uppercase().replace('-', "_")
+    )
+}
+
+pub(super) fn worker_bearer_file_name(token_key: &str) -> String {
+    format!("{token_key}-auth-token")
+}
+
+/// Reads or generates one worker's Bearer auth token (UUID v4) in `secrets_dir`, written
+/// atomically at 0o600.
+pub(super) fn read_or_create_worker_bearer(
     secrets_dir: &std::path::Path,
     token_key: &str,
-    compose_name: &str,
-    env_key: &str,
-) -> anyhow::Result<()> {
-    let token_file_name = format!("{token_key}-auth-token");
+) -> anyhow::Result<String> {
+    let token_file_name = worker_bearer_file_name(token_key);
     let token_path = secrets_dir.join(&token_file_name);
 
     let token = if !token_path.is_symlink() && token_path.is_file() {
@@ -173,58 +189,42 @@ fn ensure_worker_auth_token(
     };
 
     crate::fs_perms::write_restricted_file_atomic(&token_path, &token)?;
-
-    add_service_env_var(doc, compose_name, env_key, &token)?;
-
-    add_hub_volume(
-        doc,
-        &format!(
-            "{}:/secrets/{}:ro",
-            to_engine_path(&token_path)?,
-            token_file_name
-        ),
-    )?;
-
-    Ok(())
+    Ok(token)
 }
 
 /// Testable version: accepts explicit secrets directory and plugin list.
 pub(crate) fn apply_worker_auth_tokens_with_dir(
     yaml: &str,
+    project: &str,
     secrets_dir: &std::path::Path,
     integrations: &ResolvedIntegrationsConfig,
     installed_plugins: &[plugin::PluginManifest],
 ) -> anyhow::Result<String> {
     let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
 
-    for svc in consts::TOGGLEABLE_MCP_SERVICES {
-        if !integrations
-            .is_service_enabled(svc.config_key)
-            .unwrap_or(false)
-        {
-            continue;
-        }
-        let env_key = format!("MCP_{}_AUTH_TOKEN", svc.config_key.to_uppercase());
-        ensure_worker_auth_token(
+    for svc in enabled_builtin_workers(integrations) {
+        read_or_create_worker_bearer(secrets_dir, svc.config_key)?;
+        add_service_env_var(
             &mut doc,
-            secrets_dir,
-            svc.config_key,
             svc.compose_name,
-            &env_key,
+            &format!("{}_FILE", worker_bearer_env_name(svc.config_key)),
+            &format!("{WORKER_AUTH_TARGET}/{WORKER_AUTH_FILE}"),
+        )?;
+        add_service_volume(
+            &mut doc,
+            svc.compose_name,
+            &worker_auth_mount(svc.compose_name)?.entry(project),
         )?;
     }
 
-    for manifest in installed_plugins {
-        let sid = match manifest.service_id.as_deref() {
-            Some(s) => s,
-            None => continue,
-        };
-        if !integrations.is_plugin_enabled(sid) {
-            continue;
-        }
-        let compose_name = plugin::derive_compose_name(sid);
-        let env_key = format!("MCP_{}_AUTH_TOKEN", sid.to_uppercase().replace('-', "_"));
-        ensure_worker_auth_token(&mut doc, secrets_dir, sid, &compose_name, &env_key)?;
+    for worker in enabled_plugin_workers(integrations, installed_plugins) {
+        let token = read_or_create_worker_bearer(secrets_dir, worker.service_id)?;
+        add_service_env_var(
+            &mut doc,
+            &worker.compose_name,
+            &worker_bearer_env_name(worker.service_id),
+            &token,
+        )?;
     }
 
     Ok(serde_yaml_ng::to_string(&doc)?)
@@ -357,8 +357,49 @@ pub(crate) fn remove_env_from(doc: &mut serde_yaml_ng::Value, service: &str, env
     });
 }
 
-/// Inject `<env_var>=<gateway-url>` + mount `<token_mount_path>:/secrets/<secret_name>:ro`
-/// into the hub iff `lock.json`+token file are readable; no-op/absent-treated on any failure.
+pub(super) fn mcp_os_paths_in(
+    data_dir: &std::path::Path,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    (
+        data_dir.join(consts::MCP_OS_AUTH_TOKEN_FILE),
+        data_dir.join(consts::MCP_OS_LOCK_FILE),
+    )
+}
+
+pub(super) fn running_mcp_os_in(data_dir: &std::path::Path) -> Option<(u16, String)> {
+    let (token_path, lock_path) = mcp_os_paths_in(data_dir);
+    running_host_worker(
+        "mcp-os",
+        &token_path,
+        &lock_path,
+        crate::host_mcp_process::lock::LockService::McpOs,
+    )
+}
+
+fn running_host_worker(
+    label: &str,
+    token_mount_path: &std::path::Path,
+    lock_path: &std::path::Path,
+    service: crate::host_mcp_process::lock::LockService,
+) -> Option<(u16, String)> {
+    let port = match crate::host_mcp_process::lock::read(lock_path, service) {
+        Some(l) if crate::host_mcp_process::probe::is_pid_alive(l.pid) => l.port,
+        _ => return None,
+    };
+    let token = match std::fs::read_to_string(token_mount_path) {
+        Ok(s) => s.trim().to_string(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            log::debug!("{label} token mount read failed ({e}); treating as not running");
+            return None;
+        }
+    };
+    (!token.is_empty()).then_some((port, token))
+}
+
+/// Inject `<env_var>=<gateway-url>` and the host gateway entry into the hub iff `lock.json` names a
+/// live process and the token file holds a value; the bearer itself reaches the hub through its
+/// `secrets` slot.
 pub(crate) fn apply_worker_config(
     yaml: &str,
     label: &str,
@@ -366,35 +407,18 @@ pub(crate) fn apply_worker_config(
     lock_path: &std::path::Path,
     service: crate::host_mcp_process::lock::LockService,
     env_var: &str,
-    secret_name: &str,
 ) -> anyhow::Result<String> {
-    let port = match crate::host_mcp_process::lock::read(lock_path, service) {
-        Some(l) if crate::host_mcp_process::probe::is_pid_alive(l.pid) => l.port,
-        _ => return Ok(yaml.to_string()),
-    };
-    let token = match std::fs::read_to_string(token_mount_path) {
-        Ok(s) => s.trim().to_string(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(yaml.to_string()),
-        Err(e) => {
-            log::debug!("{label} token mount read failed ({e}); treating as not running");
-            return Ok(yaml.to_string());
-        }
-    };
-    if token.is_empty() {
+    let Some((port, _)) = running_host_worker(label, token_mount_path, lock_path, service) else {
         return Ok(yaml.to_string());
-    }
+    };
     let url = worker_gateway_url(port);
 
     let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
+    if doc.get("services").and_then(|s| s.get("mcp-hub")).is_none() {
+        anyhow::bail!("compose has no 'mcp-hub' service to wire the {label} worker into");
+    }
     ensure_host_gateway_extra_host(&mut doc, "mcp-hub")?;
     inject_worker_env(&mut doc, env_var, &url);
-    add_hub_volume(
-        &mut doc,
-        &format!(
-            "{}:/secrets/{secret_name}:ro",
-            to_engine_path(token_mount_path)?
-        ),
-    )?;
     Ok(serde_yaml_ng::to_string(&doc)?)
 }
 
@@ -438,17 +462,21 @@ pub fn worker_os_url_state(yaml: &str, current_port: u16) -> RenderedUrlState {
         }
     };
     let expected = worker_gateway_url(current_port);
-    match hub_env_value(&doc, "WORKER_OS_URL") {
+    match service_env_value(&doc, "mcp-hub", "WORKER_OS_URL") {
         None => RenderedUrlState::Absent,
         Some(value) if value == expected => RenderedUrlState::Current,
         Some(_) => RenderedUrlState::Stale,
     }
 }
 
-/// Value of `<env_name>=<value>` in the `mcp-hub` `environment` sequence, if present.
-fn hub_env_value(doc: &serde_yaml_ng::Value, env_name: &str) -> Option<String> {
+/// Value of `<env_name>=<value>` in the `environment` sequence of `service`, if present.
+pub(super) fn service_env_value(
+    doc: &serde_yaml_ng::Value,
+    service: &str,
+    env_name: &str,
+) -> Option<String> {
     doc.get("services")?
-        .get("mcp-hub")?
+        .get(service)?
         .get("environment")?
         .as_sequence()?
         .iter()

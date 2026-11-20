@@ -3,12 +3,50 @@ use crate::config::{LlmConfig, LlmProviderKind};
 use crate::consts;
 use std::path::Path;
 
+const NO_KEY_REQUIRED_TOKEN: &str = "sk-no-key-required";
+
+pub(super) struct ClaudeLlmEnv {
+    pub(super) plain: std::collections::HashMap<String, String>,
+    pub(super) auth_token: Option<String>,
+    pub(super) custom_headers: Option<String>,
+}
+
 pub(crate) fn apply_llm_config_in(
     data_dir: &Path,
     yaml: &str,
     llm: &LlmConfig,
     project: &str,
 ) -> anyhow::Result<String> {
+    inject_claude_env(yaml, &claude_llm_env_in(data_dir, llm, project)?.plain)
+}
+
+pub(super) fn anthropic_provider_active(llm: &LlmConfig) -> bool {
+    match llm.active_provider() {
+        Some(entry) => entry.kind.is_anthropic(),
+        None => llm.provider.as_deref().unwrap_or("anthropic") == "anthropic",
+    }
+}
+
+pub(super) fn anthropic_api_key_in(
+    data_dir: &Path,
+    project: &str,
+) -> anyhow::Result<Option<String>> {
+    let key_path = data_dir
+        .join("secrets")
+        .join(project)
+        .join("anthropic_api_key");
+    if !key_path.exists() {
+        return Ok(None);
+    }
+    let api_key = std::fs::read_to_string(&key_path)?.trim().to_string();
+    Ok((!api_key.is_empty()).then_some(api_key))
+}
+
+pub(super) fn claude_llm_env_in(
+    data_dir: &Path,
+    llm: &LlmConfig,
+    project: &str,
+) -> anyhow::Result<ClaudeLlmEnv> {
     if llm.is_logged_out() {
         anyhow::bail!(
             "No LLM provider selected. Run `speedwave login` to use your Anthropic \
@@ -25,7 +63,7 @@ pub(crate) fn apply_llm_config_in(
             let needs_direct = entry.kind == LlmProviderKind::Local && entry.has_custom_headers;
             if !needs_direct {
                 let caller_token = super::proxy::ensure_caller_token_in(data_dir, project)?;
-                return apply_llm_config_proxy(yaml, llm, &caller_token);
+                return proxy_llm_env(llm, &caller_token);
             }
             log::info!("custom headers configured — using the direct (non-proxy) path");
         }
@@ -38,24 +76,21 @@ pub(crate) fn apply_llm_config_in(
             );
         }
     }
-    apply_llm_config_legacy_in(data_dir, yaml, llm, project)
+    legacy_llm_env_in(data_dir, llm, project)
 }
 
-fn apply_llm_config_proxy(
-    yaml: &str,
-    llm: &LlmConfig,
-    caller_token: &str,
-) -> anyhow::Result<String> {
+fn proxy_llm_env(llm: &LlmConfig, caller_token: &str) -> anyhow::Result<ClaudeLlmEnv> {
     let entry = llm
         .active_provider()
         .ok_or_else(|| anyhow::anyhow!("proxy path requires an active provider"))?;
     let model = llm.effective_active_model().unwrap_or_default();
 
     let mut extra_env = std::collections::HashMap::new();
-    extra_env.insert(
-        "ANTHROPIC_CUSTOM_HEADERS".to_string(),
-        format!("{}: {caller_token}", super::proxy::PROXY_CALLER_AUTH_HEADER),
-    );
+    let mut auth_token = None;
+    let custom_headers = Some(format!(
+        "{}: {caller_token}",
+        super::proxy::PROXY_CALLER_AUTH_HEADER
+    ));
     match entry.kind {
         LlmProviderKind::AnthropicOauth | LlmProviderKind::AnthropicApiKey => {
             extra_env.extend(crate::defaults::anthropic_default_models_env());
@@ -77,10 +112,7 @@ fn apply_llm_config_proxy(
                 "ANTHROPIC_BASE_URL".to_string(),
                 super::PROXY_BASE_URL.to_string(),
             );
-            extra_env.insert(
-                "ANTHROPIC_AUTH_TOKEN".to_string(),
-                "sk-no-key-required".to_string(),
-            );
+            auth_token = Some(NO_KEY_REQUIRED_TOKEN.to_string());
             for key in [
                 "ANTHROPIC_MODEL",
                 "ANTHROPIC_DEFAULT_OPUS_MODEL",
@@ -120,7 +152,11 @@ fn apply_llm_config_proxy(
     if !keeps_attribution_block(entry.kind, &model) {
         extra_env.insert(ATTRIBUTION_HEADER_ENV.to_string(), "0".to_string());
     }
-    inject_claude_env(yaml, &extra_env)
+    Ok(ClaudeLlmEnv {
+        plain: extra_env,
+        auth_token,
+        custom_headers,
+    })
 }
 
 pub(crate) const ATTRIBUTION_HEADER_ENV: &str = "CLAUDE_CODE_ATTRIBUTION_HEADER";
@@ -136,12 +172,11 @@ fn keeps_attribution_block(kind: LlmProviderKind, model: &str) -> bool {
     }
 }
 
-fn apply_llm_config_legacy_in(
+fn legacy_llm_env_in(
     data_dir: &Path,
-    yaml: &str,
     llm: &LlmConfig,
     project: &str,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<ClaudeLlmEnv> {
     let provider = llm.provider.as_deref().unwrap_or("anthropic");
     if !crate::config::LOCAL_PROVIDERS.contains(&provider) && provider != "anthropic" {
         anyhow::bail!(
@@ -150,10 +185,11 @@ fn apply_llm_config_legacy_in(
         );
     }
     match provider {
-        "anthropic" => {
-            let extra_env = crate::defaults::anthropic_default_models_env();
-            inject_claude_env(yaml, &extra_env)
-        }
+        "anthropic" => Ok(ClaudeLlmEnv {
+            plain: crate::defaults::anthropic_default_models_env(),
+            auth_token: None,
+            custom_headers: None,
+        }),
         local if crate::config::LOCAL_PROVIDERS.contains(&local) => {
             let base_url = llm
                 .base_url
@@ -170,19 +206,17 @@ fn apply_llm_config_legacy_in(
                 )
             })?;
 
-            const DUMMY_TOKEN: &str = "sk-no-key-required";
             let auth_token = if llm.has_api_key {
                 read_local_llm_token_opt_in(data_dir, project, "api_key").unwrap_or_else(|| {
                     log::warn!("local-llm api_key flagged but unreadable — using dummy");
-                    DUMMY_TOKEN.to_string()
+                    NO_KEY_REQUIRED_TOKEN.to_string()
                 })
             } else {
-                DUMMY_TOKEN.to_string()
+                NO_KEY_REQUIRED_TOKEN.to_string()
             };
 
             let mut extra_env = std::collections::HashMap::from([
                 ("ANTHROPIC_BASE_URL".to_string(), base_url),
-                ("ANTHROPIC_AUTH_TOKEN".to_string(), auth_token),
                 ("ANTHROPIC_MODEL".to_string(), model.to_string()),
                 (
                     "ANTHROPIC_CUSTOM_MODEL_OPTION".to_string(),
@@ -205,6 +239,7 @@ fn apply_llm_config_legacy_in(
                 extra_env.insert(ATTRIBUTION_HEADER_ENV.to_string(), "0".to_string());
             }
 
+            let mut custom_headers = None;
             if llm.has_custom_headers {
                 if let Some(headers) =
                     read_local_llm_token_opt_in(data_dir, project, "custom_headers")
@@ -222,12 +257,16 @@ fn apply_llm_config_legacy_in(
                         .collect::<Vec<_>>()
                         .join(", ");
                     if !flattened.is_empty() {
-                        extra_env.insert("ANTHROPIC_CUSTOM_HEADERS".to_string(), flattened);
+                        custom_headers = Some(flattened);
                     }
                 }
             }
 
-            inject_claude_env(yaml, &extra_env)
+            Ok(ClaudeLlmEnv {
+                plain: extra_env,
+                auth_token: Some(auth_token),
+                custom_headers,
+            })
         }
         _ => unreachable!("provider validated by early guard"),
     }
@@ -375,6 +414,23 @@ pub fn validate_base_url(raw: &str) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    fn rendered_proxy_env(
+        yaml: &str,
+        llm: &crate::config::LlmConfig,
+        caller_token: &str,
+    ) -> anyhow::Result<String> {
+        inject_claude_env(yaml, &proxy_llm_env(llm, caller_token)?.plain)
+    }
+
+    fn rendered_legacy_env(
+        data_dir: &Path,
+        yaml: &str,
+        llm: &crate::config::LlmConfig,
+        project: &str,
+    ) -> anyhow::Result<String> {
+        inject_claude_env(yaml, &legacy_llm_env_in(data_dir, llm, project)?.plain)
+    }
+
     fn proxy_cfg(
         id: &str,
         kind: crate::config::LlmProviderKind,
@@ -419,8 +475,7 @@ mod tests {
                 "claude-sonnet-4-6",
             ),
         ] {
-            let rendered =
-                apply_llm_config_proxy(CLAUDE_ENV_YAML, &cfg, "test-caller-token").unwrap();
+            let rendered = rendered_proxy_env(CLAUDE_ENV_YAML, &cfg, "test-caller-token").unwrap();
             for line in rendered.lines() {
                 let t = line.trim().trim_start_matches('-').trim().trim_matches('"');
                 if let Some((key, _)) = t.split_once('=') {
@@ -457,7 +512,7 @@ mod tests {
             crate::config::LlmProviderKind::Local,
             crate::config::LlmProviderKind::OpenRouter,
         ] {
-            let rendered = apply_llm_config_proxy(
+            let rendered = rendered_proxy_env(
                 CLAUDE_ENV_YAML,
                 &routed_cfg(kind, Some(131_072)),
                 "test-caller-token",
@@ -476,7 +531,7 @@ mod tests {
 
     #[test]
     fn routed_provider_without_window_disables_unknown_model_enforcement() {
-        let rendered = apply_llm_config_proxy(
+        let rendered = rendered_proxy_env(
             CLAUDE_ENV_YAML,
             &routed_cfg(crate::config::LlmProviderKind::Local, None),
             "test-caller-token",
@@ -511,7 +566,7 @@ mod tests {
             proxy_enabled: Some(true),
             ..Default::default()
         };
-        let rendered = apply_llm_config_proxy(CLAUDE_ENV_YAML, &cfg, "test-caller-token").unwrap();
+        let rendered = rendered_proxy_env(CLAUDE_ENV_YAML, &cfg, "test-caller-token").unwrap();
         assert!(!rendered.contains("CLAUDE_CODE_MAX_CONTEXT_TOKENS"));
         assert!(!rendered.contains("CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT"));
     }
@@ -550,7 +605,7 @@ mod tests {
                 proxy_enabled: Some(true),
                 ..Default::default()
             };
-            let rendered = apply_llm_config_proxy(
+            let rendered = rendered_proxy_env(
                 "services:\n  claude:\n    environment: []\n",
                 &cfg,
                 "test-caller-token",
@@ -696,7 +751,7 @@ mod tests {
             base_url: Some("http://host.docker.internal:9999".to_string()),
             ..Default::default()
         };
-        let err = apply_llm_config_legacy_in(
+        let err = rendered_legacy_env(
             tmp.path(),
             "services:\n  claude:\n    environment: []\n",
             &llm,
@@ -719,7 +774,7 @@ mod tests {
             base_url: Some("http://host.docker.internal:9999".to_string()),
             ..Default::default()
         };
-        let err = apply_llm_config_legacy_in(
+        let err = rendered_legacy_env(
             tmp.path(),
             "services:\n  claude:\n    environment: []\n",
             &llm,
@@ -745,7 +800,7 @@ mod tests {
             model: Some("qwen2.5-coder".to_string()),
             ..Default::default()
         };
-        let rendered = apply_llm_config_legacy_in(
+        let rendered = rendered_legacy_env(
             tmp.path(),
             "services:\n  claude:\n    environment: []\n",
             &llm,
@@ -770,7 +825,7 @@ mod tests {
             model: Some("deepseek-r1".to_string()),
             ..Default::default()
         };
-        let rendered = apply_llm_config_legacy_in(
+        let rendered = rendered_legacy_env(
             tmp.path(),
             "services:\n  claude:\n    environment: []\n",
             &llm,
@@ -795,7 +850,7 @@ mod tests {
             model: Some("deepseek-r1".to_string()),
             ..Default::default()
         };
-        let rendered = apply_llm_config_legacy_in(
+        let rendered = rendered_legacy_env(
             tmp.path(),
             "services:\n  claude:\n    environment: []\n",
             &llm,
@@ -816,7 +871,7 @@ mod tests {
             model: Some("qwen2.5-coder".to_string()),
             ..Default::default()
         };
-        let rendered = apply_llm_config_legacy_in(
+        let rendered = rendered_legacy_env(
             tmp.path(),
             "services:\n  claude:\n    environment: []\n",
             &llm,
@@ -837,7 +892,7 @@ mod tests {
             model: Some("llama3.3".to_string()),
             ..Default::default()
         };
-        let rendered = apply_llm_config_legacy_in(
+        let rendered = rendered_legacy_env(
             tmp.path(),
             "services:\n  claude:\n    environment: []\n",
             &llm,
@@ -869,7 +924,7 @@ mod tests {
             (AnthropicOauth, None, "claude-opus-5-5", true),
         ];
         for (kind, base_url, model, disabled) in cases {
-            let rendered = apply_llm_config_proxy(
+            let rendered = rendered_proxy_env(
                 CLAUDE_ENV_YAML,
                 &proxy_cfg("prov", kind, base_url, model),
                 "test-caller-token",
@@ -893,8 +948,7 @@ mod tests {
                 model: Some(model.to_string()),
                 ..Default::default()
             };
-            let rendered =
-                apply_llm_config_legacy_in(tmp.path(), CLAUDE_ENV_YAML, &llm, "proj").unwrap();
+            let rendered = rendered_legacy_env(tmp.path(), CLAUDE_ENV_YAML, &llm, "proj").unwrap();
             assert_eq!(
                 rendered.contains("CLAUDE_CODE_ATTRIBUTION_HEADER=0"),
                 disabled,

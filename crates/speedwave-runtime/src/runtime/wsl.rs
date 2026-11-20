@@ -46,6 +46,9 @@ const WSL_NO_DISTRIBUTIONS_CODE: &str = "WSL_E_DEFAULT_DISTRO_NOT_FOUND";
 const WSL_NO_DISTRIBUTIONS_MESSAGE: &str = "has no installed distributions";
 
 #[cfg(any(target_os = "windows", test))]
+const ROOT_SCRIPT_FILE_PREFIX: &str = "/run/speedwave-vm-exec";
+
+#[cfg(any(target_os = "windows", test))]
 fn lists_no_distributions(err: &anyhow::Error) -> bool {
     let msg = err.to_string();
     msg.contains(WSL_NO_DISTRIBUTIONS_CODE) || msg.contains(WSL_NO_DISTRIBUTIONS_MESSAGE)
@@ -123,6 +126,23 @@ impl WslRuntime {
         }
         full.extend(["--", "sh", "-c", &remote_cmd]);
         self.runner.run("wsl.exe", &full)
+    }
+
+    fn vm_exec_command(&self, cmd: &str, args: &[&str], root: bool) -> Command {
+        let argv: Vec<&str> = std::iter::once(cmd).chain(args.iter().copied()).collect();
+        let remote_cmd = match (root, argv.as_slice()) {
+            (true, ["sh", "-c", script, _, script_args @ ..]) => {
+                base64_script_file_command(script, script_args)
+            }
+            _ => super::shell_quote_argv(&argv),
+        };
+        let mut command = crate::binary::system_command("wsl.exe");
+        command.args(["-d", self.distro()]);
+        if root {
+            command.args(["-u", "root"]);
+        }
+        command.args(["--", "sh", "-c", &remote_cmd]);
+        command
     }
 
     /// Flushes the stale CNI iptables chains / bridges in `targets`, as root in the
@@ -571,12 +591,17 @@ impl ContainerRuntime for WslRuntime {
         stdin: &[u8],
         timeout: std::time::Duration,
     ) -> anyhow::Result<super::VmExecOutput> {
-        let distro = self.distro();
-        let argv: Vec<&str> = std::iter::once(cmd).chain(args.iter().copied()).collect();
-        let remote_cmd = super::shell_quote_argv(&argv);
-        let mut command = crate::binary::system_command("wsl.exe");
-        command.args(["-d", distro, "--", "sh", "-c", &remote_cmd]);
-        super::vm_exec_run(command, stdin, timeout)
+        super::vm_exec_run(self.vm_exec_command(cmd, args, false), stdin, timeout)
+    }
+
+    fn vm_exec_as_root(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        stdin: &[u8],
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<super::VmExecOutput> {
+        super::vm_exec_run(self.vm_exec_command(cmd, args, true), stdin, timeout)
     }
 
     fn is_available(&self) -> bool {
@@ -911,6 +936,25 @@ impl WslRuntime {
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn base64_script_file_command(script: &str, script_args: &[&str]) -> String {
+    use base64::Engine;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_SCRIPT: AtomicU64 = AtomicU64::new(0);
+    let b64 = base64::engine::general_purpose::STANDARD.encode(script);
+    let file = format!(
+        "{ROOT_SCRIPT_FILE_PREFIX}-{}-{}.sh",
+        std::process::id(),
+        NEXT_SCRIPT.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut run = vec!["sh", file.as_str()];
+    run.extend_from_slice(script_args);
+    format!(
+        "trap 'rm -f {file}' EXIT; echo {b64} | base64 -d > {file} && {}",
+        super::shell_quote_argv(&run)
+    )
+}
+
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
@@ -929,6 +973,98 @@ mod tests {
         );
         let rt = WslRuntime::with_runner(Box::new(runner));
         assert!(rt.is_available());
+    }
+
+    #[test]
+    fn vm_exec_as_root_runs_as_root_and_vm_exec_does_not() {
+        let rt = WslRuntime::with_runner(Box::new(MockRunner::new()));
+        let args_of = |root: bool| -> Vec<String> {
+            rt.vm_exec_command("true", &[], root)
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        let root = args_of(true);
+        let user = args_of(false);
+        assert_eq!(
+            root[..4],
+            [
+                "-d".to_string(),
+                rt.distro().to_string(),
+                "-u".into(),
+                "root".into()
+            ]
+        );
+        assert!(!user.contains(&"-u".to_string()), "got: {user:?}");
+        assert_eq!(root[4..], user[2..]);
+    }
+
+    fn root_script_remote(rt: &WslRuntime, script: &str) -> String {
+        rt.vm_exec_command("sh", &["-c", script, "sh", "/run/speedwave"], true)
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .last()
+            .unwrap()
+    }
+
+    #[test]
+    fn vm_exec_as_root_script_goes_through_a_file_so_stdin_stays_free() {
+        use base64::Engine;
+        let rt = WslRuntime::with_runner(Box::new(MockRunner::new()));
+        let script = "root=$1\nid=${1%%/*}\necho $$ \"$root\" 'x'\n";
+        let remote = root_script_remote(&rt, script);
+        assert!(!remote.contains('$'), "got: {remote}");
+        assert!(!remote.contains("| sh"), "got: {remote}");
+        let b64 = remote
+            .split("echo ")
+            .nth(1)
+            .and_then(|r| r.split(" | base64 -d").next())
+            .unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .unwrap();
+        assert_eq!(String::from_utf8(decoded).unwrap(), script);
+        let file = remote
+            .split("> ")
+            .nth(1)
+            .and_then(|r| r.split(' ').next())
+            .unwrap();
+        assert!(file.starts_with("/run/speedwave-vm-exec-"), "got: {remote}");
+        assert!(
+            remote.ends_with(&format!("&& sh {file} /run/speedwave")),
+            "got: {remote}"
+        );
+        assert!(
+            remote.starts_with(&format!("trap 'rm -f {file}' EXIT; ")),
+            "got: {remote}"
+        );
+    }
+
+    #[test]
+    fn vm_exec_as_root_scripts_use_distinct_files() {
+        let rt = WslRuntime::with_runner(Box::new(MockRunner::new()));
+        let file_of = |remote: &str| {
+            remote
+                .split("> ")
+                .nth(1)
+                .and_then(|r| r.split(' ').next())
+                .unwrap()
+                .to_string()
+        };
+        let first = file_of(&root_script_remote(&rt, "true\n"));
+        let second = file_of(&root_script_remote(&rt, "true\n"));
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn vm_exec_as_root_other_commands_keep_plain_quoting() {
+        let rt = WslRuntime::with_runner(Box::new(MockRunner::new()));
+        let args: Vec<String> = rt
+            .vm_exec_command("true", &[], true)
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args.last().unwrap(), "true");
     }
 
     #[test]

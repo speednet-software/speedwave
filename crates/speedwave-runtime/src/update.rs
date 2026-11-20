@@ -360,7 +360,7 @@ pub fn update_containers(
         log::warn!("Failed to list installed plugins for security check: {e}");
         Vec::new()
     });
-    let expected_paths = compose::SecurityExpectedPaths::compute(project, &project_dir)?
+    let expected_paths = compose::SecurityExpectedPaths::compute(&project_dir)?
         .with_telemetry_locked(resolved.telemetry.any_locked);
     let violations = SecurityCheck::run(&compose_yml, project, &manifests, &expected_paths);
     if !violations.is_empty() {
@@ -489,7 +489,7 @@ pub fn rollback_containers(
         let project_path = std::path::PathBuf::from(&project_dir);
         config::resolve_project_config(&project_path, &user_config, project)
     };
-    let expected_paths = compose::SecurityExpectedPaths::compute(project, &project_dir)?
+    let expected_paths = compose::SecurityExpectedPaths::compute(&project_dir)?
         .with_telemetry_locked(resolved.telemetry.any_locked);
     let snapshot_violations = SecurityCheck::run(
         &snapshot.compose_yml,
@@ -772,7 +772,7 @@ mod tests {
             &snapshot.compose_yml,
             "test",
             &snapshot.plugin_manifests,
-            &compose::SecurityExpectedPaths::from_raw("/test", "/test/tokens"),
+            &compose::SecurityExpectedPaths::from_raw("/test"),
             tmp.path(),
         );
         assert!(
@@ -785,8 +785,8 @@ mod tests {
     fn test_rollback_stale_snapshot_without_mount_fails_when_policy_locks_telemetry() {
         let stale_snapshot_yaml = "services:\n  claude:\n    volumes: []\n";
         let tmp = tempfile::tempdir().unwrap();
-        let expected_paths = compose::SecurityExpectedPaths::from_raw("/test", "/test/tokens")
-            .with_telemetry_locked(true);
+        let expected_paths =
+            compose::SecurityExpectedPaths::from_raw("/test").with_telemetry_locked(true);
         let violations = compose::SecurityCheck::run_with_data_dir(
             stale_snapshot_yaml,
             "test",
@@ -1182,7 +1182,7 @@ mod tests {
     #[test]
     fn choose_rollback_forward_fixes_a_snapshot_with_a_compose_created_office_network() {
         let tmp = tempfile::tempdir().unwrap();
-        let expected = compose::SecurityExpectedPaths::from_raw("/project", "/tokens");
+        let expected = compose::SecurityExpectedPaths::from_raw("/project");
         let check = |yaml: &str| -> Vec<compose::SecurityViolation> {
             SecurityCheck::run_with_data_dir(yaml, "acme", &[], &expected, tmp.path())
                 .into_iter()

@@ -178,6 +178,7 @@ pub async fn start_slack_oauth(
                 &request_id,
             ),
             FlowEnd::Done => {
+                crate::integrations_cmd::restage_container_secrets(&project);
                 FLOW_STATE.clear_if_current(&request_id);
                 oauth_flow::emit_progress(
                     &app,

@@ -79,6 +79,8 @@ if ! grep -q '\.local/bin' "${HOME}/.bashrc" 2>/dev/null; then
     echo 'export PATH="$HOME/.local/bin:$PATH"' >> "${HOME}/.bashrc"
 fi
 
+. /usr/local/bin/speedwave-secret-env.sh && speedwave_export_secrets || echo "WARNING: speedwave-secret-env failed" >&2
+
 /usr/local/bin/git-transport.sh || echo "WARNING: git-transport.sh failed" >&2
 
 mkdir -p "${HOME}/.claude"

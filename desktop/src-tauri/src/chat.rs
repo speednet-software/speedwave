@@ -8307,7 +8307,7 @@ mod tests {
     #[test]
     fn build_claude_args_prepends_instance_env_marker() {
         let args = build_claude_args("my-instance-42", None, None, &[]);
-        assert_eq!(args[0], "env");
+        assert_eq!(args[0], consts::SPEEDWAVE_EXEC_WRAPPER);
         assert_eq!(args[1], "SPW_SESSION_INSTANCE_ID=my-instance-42");
         assert_eq!(args[2], consts::CLAUDE_BINARY);
     }

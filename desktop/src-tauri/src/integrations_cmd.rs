@@ -964,10 +964,12 @@ pub fn save_integration_credentials(
     std::fs::create_dir_all(&svc_dir).map_err(|e| e.to_string())?;
 
     if service == "redmine" {
-        return save_redmine_credentials(&svc_dir, &credentials, allowed);
+        save_redmine_credentials(&svc_dir, &credentials, allowed)?;
+    } else {
+        save_with_field_storage(&project, &service, &svc_dir, &credentials)?;
     }
-
-    save_with_field_storage(&project, &service, &svc_dir, &credentials)
+    restage_container_secrets(&project);
+    Ok(())
 }
 
 /// Generic per-field routing of UI credentials by `FieldStorage` tier. Partitions `credentials`
@@ -1153,6 +1155,7 @@ pub fn save_redmine_mappings(
     let json = serde_json::to_string_pretty(&config_obj).map_err(|e| e.to_string())?;
     speedwave_runtime::fs_perms::write_restricted_file(&config_path, &json)
         .map_err(|e| e.to_string())?;
+    restage_container_secrets(&project);
 
     Ok(())
 }
@@ -1210,7 +1213,29 @@ pub fn delete_integration_credentials(project: String, service: String) -> Resul
         .map_err(|e| e.to_string())?;
     }
 
+    restage_container_secrets(&project);
     Ok(())
+}
+
+pub(crate) fn restage_container_secrets(project: &str) {
+    let project = project.to_string();
+    let spawned = std::thread::Builder::new()
+        .name("restage-secrets".to_string())
+        .spawn(move || {
+            restage_secrets(&speedwave_runtime::runtime::detect_runtime(), &project);
+        });
+    if spawned.is_err() {
+        log::warn!("failed to start the container secrets update");
+    }
+}
+
+fn restage_secrets(rt: &speedwave_runtime::runtime::LockedRuntime, project: &str) {
+    if !rt.is_available() {
+        return;
+    }
+    if let Err(e) = rt.stage_project_secrets(project) {
+        log::warn!("could not update the container secrets of project {project}: {e:#}");
+    }
 }
 
 /// Builds missing worker images for `project`. Returns sanitized error on failure.
@@ -2131,6 +2156,70 @@ mod tests {
             !svc_dir.join("config.json").exists(),
             "config.json should not be written when only secret fields are saved"
         );
+    }
+
+    fn restage_runtime(
+        available: bool,
+        exit: i32,
+        data_dir: &std::path::Path,
+    ) -> (
+        speedwave_runtime::runtime::LockedRuntime,
+        speedwave_runtime::runtime::mock_runtime::MockHandles,
+    ) {
+        let config = config::SpeedwaveUserConfig {
+            projects: vec![config::ProjectUserEntry {
+                name: "acme".to_string(),
+                dir: data_dir.join("project").to_string_lossy().into_owned(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+                policy: None,
+                effort_pin: None,
+                read_only: false,
+            }],
+            ..Default::default()
+        };
+        config::save_user_config_to(&config, &data_dir.join("config.json")).unwrap();
+        let secrets = data_dir.join("secrets").join("acme");
+        std::fs::create_dir_all(&secrets).unwrap();
+        std::fs::write(secrets.join("anthropic_api_key"), "sk-ant-test").unwrap();
+        speedwave_runtime::runtime::mock_runtime::MockRuntimeBuilder::new()
+            .with_is_available(available)
+            .with_vm_exec_as_root_exit(exit, "")
+            .with_data_dir(data_dir)
+            .build()
+    }
+
+    #[test]
+    fn restaging_skips_an_engine_that_is_not_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let (rt, handles) = restage_runtime(false, 0, dir.path());
+
+        restage_secrets(&rt, "acme");
+
+        assert!(handles.vm_exec_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn restaging_a_running_engine_syncs_the_project_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let (rt, handles) = restage_runtime(true, 0, dir.path());
+
+        restage_secrets(&rt, "acme");
+
+        let calls = handles.vm_exec_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].stdin.starts_with(b"sync acme\n"));
+    }
+
+    #[test]
+    fn a_failed_restage_is_swallowed_after_one_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        let (rt, handles) = restage_runtime(true, 1, dir.path());
+
+        restage_secrets(&rt, "acme");
+
+        assert_eq!(handles.vm_exec_calls.lock().unwrap().len(), 1);
     }
 
     // -- restart_integration_containers structural tests --

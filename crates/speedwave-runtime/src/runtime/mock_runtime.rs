@@ -88,6 +88,8 @@ pub struct VmExecCall {
     pub cmd: String,
     /// Command args.
     pub args: Vec<String>,
+    /// Bytes written to the command's stdin.
+    pub stdin: Vec<u8>,
 }
 
 impl MockHandles {
@@ -189,6 +191,7 @@ pub struct MockRuntimeBuilder {
     validate_script: Arc<Mutex<Vec<Result<(), String>>>>,
     validate_default: Result<(), String>,
     vm_exec_responses: HashMap<String, anyhow::Result<VmExecOutput>>,
+    vm_exec_as_root_exit: (i32, String),
     reset_vm_result: Result<(), String>,
     stop_vm_result: Result<(), String>,
     restart_engine_result: Result<(), String>,
@@ -267,6 +270,7 @@ impl MockRuntimeBuilder {
             validate_script: Arc::new(Mutex::new(Vec::new())),
             validate_default: Ok(()),
             vm_exec_responses: HashMap::new(),
+            vm_exec_as_root_exit: (0, String::new()),
             reset_vm_result: Ok(()),
             stop_vm_result: Ok(()),
             restart_engine_result: Ok(()),
@@ -472,6 +476,12 @@ impl MockRuntimeBuilder {
         self.stop_vm_result = Err(msg.to_string());
         self
     }
+    /// Makes every `vm_exec_as_root` call exit with `code` and print `stderr` (the call is still
+    /// recorded in `vm_exec_calls`); the default is exit code 0 with empty output.
+    pub fn with_vm_exec_as_root_exit(mut self, code: i32, stderr: &str) -> Self {
+        self.vm_exec_as_root_exit = (code, stderr.to_string());
+        self
+    }
     /// Makes the runtime read project compose files under `data_dir` instead of the empty
     /// temporary data dir the mock owns by default.
     pub fn with_data_dir(mut self, data_dir: &std::path::Path) -> Self {
@@ -549,6 +559,7 @@ impl MockRuntimeBuilder {
             validate_script: self.validate_script,
             validate_default: self.validate_default,
             vm_exec_responses: self.vm_exec_responses,
+            vm_exec_as_root_exit: self.vm_exec_as_root_exit,
             reset_vm_result: self.reset_vm_result,
             stop_vm_result: self.stop_vm_result,
             restart_engine_result: self.restart_engine_result,
@@ -602,6 +613,7 @@ struct MockRuntime {
     validate_script: Arc<Mutex<Vec<Result<(), String>>>>,
     validate_default: Result<(), String>,
     vm_exec_responses: HashMap<String, anyhow::Result<VmExecOutput>>,
+    vm_exec_as_root_exit: (i32, String),
     reset_vm_result: Result<(), String>,
     stop_vm_result: Result<(), String>,
     restart_engine_result: Result<(), String>,
@@ -990,12 +1002,13 @@ impl ContainerRuntime for MockRuntime {
         &self,
         cmd: &str,
         args: &[&str],
-        _stdin: &[u8],
+        stdin: &[u8],
         _timeout: std::time::Duration,
     ) -> anyhow::Result<VmExecOutput> {
         self.handles.vm_exec_calls.lock().unwrap().push(VmExecCall {
             cmd: cmd.to_string(),
             args: args.iter().map(|s| s.to_string()).collect(),
+            stdin: stdin.to_vec(),
         });
         let key = format!("{} {}", cmd, args.join(" "));
         match self.vm_exec_responses.get(&key) {
@@ -1008,6 +1021,36 @@ impl ContainerRuntime for MockRuntime {
             None => anyhow::bail!("mock vm_exec: no response configured for '{key}'"),
         }
     }
+
+    fn vm_exec_as_root(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        stdin: &[u8],
+        _timeout: std::time::Duration,
+    ) -> anyhow::Result<VmExecOutput> {
+        self.handles.vm_exec_calls.lock().unwrap().push(VmExecCall {
+            cmd: cmd.to_string(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+            stdin: stdin.to_vec(),
+        });
+        let (code, stderr) = &self.vm_exec_as_root_exit;
+        Ok(VmExecOutput {
+            status: exit_status(*code),
+            stdout: Vec::new(),
+            stderr: stderr.clone().into_bytes(),
+        })
+    }
+}
+
+#[cfg(unix)]
+fn exit_status(code: i32) -> std::process::ExitStatus {
+    std::os::unix::process::ExitStatusExt::from_raw(code << 8)
+}
+
+#[cfg(windows)]
+fn exit_status(code: i32) -> std::process::ExitStatus {
+    std::os::windows::process::ExitStatusExt::from_raw(code as u32)
 }
 
 #[cfg(test)]

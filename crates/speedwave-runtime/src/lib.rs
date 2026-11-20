@@ -44,6 +44,7 @@ pub mod prompts;
 pub mod provision;
 pub mod resources;
 pub mod runtime;
+pub(crate) mod secrets_tmpfs;
 pub mod session;
 pub mod signing;
 pub mod slash;
