@@ -817,7 +817,7 @@ describe('ToolBlockComponent', () => {
     it('shows the final status of the agent over the state of the call', () => {
       const done = open({ status: 'done', result: 'r' }, view({ status: 'completed' }), true);
       expect(q(done, 'tool-status')).toBe('✓');
-      expect(q(done, 'tool-meta')).toBe('2 tools · completed');
+      expect(q(done, 'tool-meta')).toBe('2 tools · done');
       const failed = open({ status: 'done', result: 'r' }, view({ status: 'error' }), true);
       expect(q(failed, 'tool-status')).toBe('✗');
       const stopped = open({ status: 'done', result: 'r' }, view({ status: 'stopped' }), true);

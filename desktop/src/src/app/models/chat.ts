@@ -79,7 +79,7 @@ export type StreamChunk =
       data: { tool_id: string; status: SubagentState; summary: string };
     };
 
-/** Mirror of Rust `chat.rs::SubagentState`: where a subagent stands, from the `task_*` lines. */
+/** Mirror of Rust `chat.rs::SubagentState`. */
 export type SubagentState = 'running' | 'completed' | 'error' | 'stopped';
 
 /** What started a Claude Code turn. */
@@ -343,7 +343,7 @@ export interface ConversationTranscript {
   messages: ConversationMessage[];
 }
 
-/** A tool call a subagent made. Mirror of Rust `chat.rs::SubagentCall`; same fields as the live `SubagentActivity` chunk. */
+/** A tool call a subagent made. Mirror of Rust `chat.rs::SubagentCall`. */
 export interface SubagentCall {
   tool_id: string;
   tool_name: string;

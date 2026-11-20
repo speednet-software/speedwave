@@ -5,6 +5,7 @@ import {
   agentRunsFromTranscript,
   agentStatusGlyph,
   foldAgents,
+  isStoppedResult,
   sameAgents,
   withAgentActivity,
   withAgentStatus,
@@ -84,6 +85,28 @@ describe('foldAgents', () => {
     expect(
       foldAgents([call], runs({ a1: { state: 'completed', summary: 'all quiet' } }))[0]
     ).toMatchObject({ status: 'completed', result: 'all quiet' });
+  });
+
+  it('calls an interrupted foreground agent stopped, and any other error failed', () => {
+    const [interrupted, stopped, failed] = foldAgents(
+      [
+        agentCall('a1', {}, 'Interrupted', 'Agent', true),
+        agentCall('a2', {}, 'Stopped by the user', 'Agent', true),
+        agentCall('a3', {}, 'boom', 'Agent', true),
+      ],
+      NO_AGENT_RUNS
+    );
+    expect([interrupted.status, stopped.status, failed.status]).toEqual([
+      'stopped',
+      'stopped',
+      'error',
+    ]);
+  });
+
+  it('shows the report of a background agent only once it arrives, not its launch result', () => {
+    const call = agentCall('a1', { run_in_background: true }, 'Async agent launched');
+    expect(foldAgents([call], NO_AGENT_RUNS)[0].result).toBeNull();
+    expect(foldAgents([call], runs({ a1: { summary: 'all quiet' } }))[0].result).toBe('all quiet');
   });
 
   it('shows the status the session reported over the state of the call', () => {
@@ -188,6 +211,16 @@ describe('agent runs', () => {
     const result = agentRunsFromTranscript(transcript);
     expect([...result.keys()]).toEqual(['a1']);
     expect(result.get('a1')).toEqual({ activities: [bash('s1', 'ls')], state: null, summary: '' });
+  });
+});
+
+describe('isStoppedResult', () => {
+  it('matches stopped and interrupted results in any case', () => {
+    expect(['Interrupted', 'Stopped by user', 'boom'].map(isStoppedResult)).toEqual([
+      true,
+      true,
+      false,
+    ]);
   });
 });
 

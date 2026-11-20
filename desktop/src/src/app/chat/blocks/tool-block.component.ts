@@ -11,7 +11,7 @@ import { ToolNormalizerService } from '../../services/tool-normalizer.service';
 import { DiffViewComponent } from './diff-view.component';
 import { SpinIconComponent } from '../../shared/spin-icon.component';
 import { taskStatusColor, taskStatusGlyph } from '../task-plan/task-status';
-import type { AgentView } from '../agents/agents';
+import { agentStatusWord, isStoppedResult, toolCountLabel, type AgentView } from '../agents/agents';
 import { toolSummary } from './tool-summary';
 
 /** Semantic status → timeline border color class. */
@@ -200,10 +200,8 @@ $ {{ asBash(normalized()).command }}</pre>
                   data-testid="agent-facts"
                   class="mono mt-1 flex flex-wrap items-center gap-2 text-[11px] text-[var(--ink-mute)]"
                 >
-                  <span data-testid="agent-status">{{ view.status }}</span>
-                  <span data-testid="agent-tool-count"
-                    >{{ view.toolCount }} {{ view.toolCount === 1 ? 'tool' : 'tools' }}</span
-                  >
+                  <span data-testid="agent-status">{{ statusWord(view.status) }}</span>
+                  <span data-testid="agent-tool-count">{{ toolCountLabel(view.toolCount) }}</span>
                   @if (view.background) {
                     <span data-testid="agent-background">background</span>
                   }
@@ -385,11 +383,7 @@ export class ToolBlockComponent {
     const view = this.agent();
     if (view) return view.status === 'stopped';
     const t = this.tool();
-    if (t.status !== 'error') {
-      return false;
-    }
-    const marker = t.result.toLowerCase();
-    return marker.includes('stopped') || marker.includes('interrupted');
+    return t.status === 'error' && isStoppedResult(t.result);
   });
 
   /** Header glyph for non-running statuses; the running variant is an inline spin SVG in the template, so this computed never returns a placeholder for it. */
@@ -414,8 +408,7 @@ export class ToolBlockComponent {
   readonly headerMeta = computed<string>(() => {
     const view = this.agent();
     if (view) {
-      const tools = `${view.toolCount} ${view.toolCount === 1 ? 'tool' : 'tools'}`;
-      return `${tools} · ${view.status}`;
+      return `${toolCountLabel(view.toolCount)} · ${agentStatusWord(view.status)}`;
     }
     if (this.tool().status === 'running') {
       return 'running';
@@ -456,6 +449,8 @@ export class ToolBlockComponent {
 
   protected readonly taskStatusGlyph = taskStatusGlyph;
   protected readonly taskStatusColor = taskStatusColor;
+  protected readonly statusWord = agentStatusWord;
+  protected readonly toolCountLabel = toolCountLabel;
 
   /**
    * Narrows the normalized input to the bash variant for template usage.

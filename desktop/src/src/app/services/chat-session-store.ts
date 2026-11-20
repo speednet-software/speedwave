@@ -2323,7 +2323,9 @@ export class ChatSessionStore {
       if (gen !== this._sessionGeneration || !sameProject()) return;
       if (transcript) {
         this.loadMessages(toChatMessages(transcript));
-        this._subagentRuns.set(agentRunsFromTranscript(transcript));
+        this._subagentRuns.update(
+          (live) => new Map([...agentRunsFromTranscript(transcript), ...live])
+        );
       } else {
         this.loadMessages([
           {

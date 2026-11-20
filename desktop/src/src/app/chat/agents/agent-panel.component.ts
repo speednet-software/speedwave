@@ -1,13 +1,14 @@
 import { ChangeDetectionStrategy, Component, computed, input, output } from '@angular/core';
 import type { SubagentState } from '../../models/chat';
-import { agentStatusColor, agentStatusGlyph, type AgentView } from './agents';
+import {
+  agentStatusColor,
+  agentStatusGlyph,
+  agentStatusWord,
+  toolCountLabel,
+  type AgentView,
+} from './agents';
 
-const SUMMARY_PARTS: ReadonlyArray<readonly [SubagentState, string]> = [
-  ['running', 'running'],
-  ['completed', 'done'],
-  ['error', 'failed'],
-  ['stopped', 'stopped'],
-];
+const SUMMARY_ORDER: readonly SubagentState[] = ['running', 'completed', 'error', 'stopped'];
 
 /** Pinned view of the subagents at work or just finished, above the composer. */
 @Component({
@@ -27,7 +28,7 @@ const SUMMARY_PARTS: ReadonlyArray<readonly [SubagentState, string]> = [
           class="flex w-full items-center gap-2 text-left"
           (click)="expandedChange.emit(!expanded())"
         >
-          <span data-testid="agent-panel-summary" class="text-[var(--ink-dim)]">
+          <span data-testid="agent-panel-summary" aria-live="polite" class="text-[var(--ink-dim)]">
             {{ summary() }}
           </span>
           <span aria-hidden="true" class="ml-auto text-[var(--ink-mute)]">{{
@@ -49,8 +50,7 @@ const SUMMARY_PARTS: ReadonlyArray<readonly [SubagentState, string]> = [
                   <span
                     data-testid="agent-panel-meta"
                     class="ml-auto shrink-0 text-[var(--ink-mute)]"
-                    >{{ agent.status }} · {{ agent.toolCount }}
-                    {{ agent.toolCount === 1 ? 'tool' : 'tools' }}</span
+                    >{{ statusWord(agent.status) }} · {{ toolCountLabel(agent.toolCount) }}</span
                   >
                 </div>
                 @if (agent.lastActivity) {
@@ -79,13 +79,15 @@ export class AgentPanelComponent {
 
   protected readonly summary = computed(() => {
     const agents = this.agents();
-    const parts = SUMMARY_PARTS.flatMap(([status, word]) => {
+    const parts = SUMMARY_ORDER.flatMap((status) => {
       const count = agents.filter((a) => a.status === status).length;
-      return count > 0 ? [`${count} ${word}`] : [];
+      return count > 0 ? [`${count} ${agentStatusWord(status)}`] : [];
     });
     return `Agents ${parts.join(', ')}`;
   });
 
   protected readonly statusGlyph = agentStatusGlyph;
   protected readonly statusColor = agentStatusColor;
+  protected readonly statusWord = agentStatusWord;
+  protected readonly toolCountLabel = toolCountLabel;
 }

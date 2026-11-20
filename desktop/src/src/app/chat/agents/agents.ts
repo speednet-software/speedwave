@@ -3,14 +3,14 @@ import type { ToolUseState } from '../../models/state-tree';
 import { normalizeToolInput } from '../../models/tool-input';
 import { toolSummary } from '../blocks/tool-summary';
 
-/** What the live session knows about one subagent beyond its tool block: its tool calls and its task status. */
+/** What the session knows about one subagent beyond its tool block. */
 export interface AgentRun {
   activities: readonly SubagentCall[];
   state: SubagentState | null;
   summary: string;
 }
 
-/** Subagent runs keyed by the tool-use id of the `Agent` or `Task` call that started them. */
+/** Subagent runs keyed by the tool-use id of the call that started them. */
 export type AgentRuns = ReadonlyMap<string, AgentRun>;
 
 /** One subagent as the transcript block and the agent panel show it. */
@@ -34,7 +34,7 @@ export const NO_AGENT_RUNS: AgentRuns = new Map();
 export const NO_AGENT_VIEWS: ReadonlyMap<string, AgentView> = new Map();
 
 /**
- * Adds a tool call a subagent made to its run; a call already recorded is ignored.
+ * Adds a tool call a subagent made to its run.
  * @param runs - Current runs.
  * @param parentToolId - Tool-use id of the subagent's own call.
  * @param call - The tool call the subagent made.
@@ -50,11 +50,11 @@ export function withAgentActivity(
 }
 
 /**
- * Records the status of a subagent; a final status is not taken back by a later `running`.
+ * Records the status of a subagent.
  * @param runs - Current runs.
  * @param toolId - Tool-use id of the subagent's own call.
  * @param state - The status the session reported.
- * @param summary - The agent's result text; empty keeps the one already known.
+ * @param summary - The agent's result text.
  */
 export function withAgentStatus(
   runs: AgentRuns,
@@ -68,7 +68,7 @@ export function withAgentStatus(
 }
 
 /**
- * Subagent runs a resumed transcript carries: the tool calls, no status.
+ * Subagent runs a resumed transcript carries.
  * @param transcript - The transcript `get_conversation` returned.
  */
 export function agentRunsFromTranscript(transcript: ConversationTranscript): AgentRuns {
@@ -83,11 +83,21 @@ export function agentRunsFromTranscript(transcript: ConversationTranscript): Age
   return runs;
 }
 
+/**
+ * Whether a tool result is the one a stopped or interrupted call ends with.
+ * @param result - The result text of the call.
+ */
+export function isStoppedResult(result: string): boolean {
+  const text = result.toLowerCase();
+  return text.includes('stopped') || text.includes('interrupted');
+}
+
 function statusOf(call: AgentCall, run: AgentRun, background: boolean): SubagentState {
   if (run.state !== null && run.state !== 'running') return run.state;
   if (run.state === 'running' && background) return 'running';
   if (call.result === null) return 'running';
-  return call.is_error ? 'error' : 'completed';
+  if (!call.is_error) return 'completed';
+  return isStoppedResult(call.result) ? 'stopped' : 'error';
 }
 
 function describeActivity(call: SubagentCall): string {
@@ -95,8 +105,7 @@ function describeActivity(call: SubagentCall): string {
 }
 
 /**
- * Folds the session's tool calls and subagent runs into the agents of the session, in call order.
- * A background agent that reported running stays running until its final status arrives.
+ * Folds the session's tool calls and subagent runs into its agents.
  * @param calls - Tool calls in transcript order.
  * @param runs - What the session reported about each subagent.
  */
@@ -116,14 +125,14 @@ export function foldAgents(calls: readonly AgentCall[], runs: AgentRuns): readon
       status: statusOf(call, run, background),
       toolCount: run.activities.length,
       lastActivity: last ? describeActivity(last) : '',
-      result: run.summary || call.result,
+      result: run.summary || (background ? null : call.result),
     });
   }
   return agents;
 }
 
 /**
- * Whether two agent lists show the same thing, so a recomputed list does not redraw the chat.
+ * Whether two agent lists show the same thing.
  * @param a - Previous list.
  * @param b - Recomputed list.
  */
@@ -144,6 +153,31 @@ export function sameAgents(a: readonly AgentView[], b: readonly AgentView[]): bo
       );
     })
   );
+}
+
+/**
+ * Word for an agent's status in the panel and the block header.
+ * @param status - The agent's status.
+ */
+export function agentStatusWord(status: SubagentState): string {
+  switch (status) {
+    case 'running':
+      return 'running';
+    case 'completed':
+      return 'done';
+    case 'error':
+      return 'failed';
+    case 'stopped':
+      return 'stopped';
+  }
+}
+
+/**
+ * Count of tool calls as a label.
+ * @param count - Number of tool calls.
+ */
+export function toolCountLabel(count: number): string {
+  return `${count} ${count === 1 ? 'tool' : 'tools'}`;
 }
 
 /**

@@ -508,6 +508,54 @@ describe('ChatStateService', () => {
       });
     });
 
+    describe('subagent chunks', () => {
+      it('reach the store of a tab whose turn already ended, so a background agent can finish', async () => {
+        await service.init();
+        const tab = service.activeTabId();
+        const store = service.tabs().get(tab)!;
+        store.isStreaming = false;
+
+        mockTauri.dispatchEvent('chat_stream', {
+          tab_id: tab,
+          chunk_type: 'SubagentActivity',
+          data: { parent_tool_id: 'a1', tool_id: 's1', tool_name: 'Bash', input_json: '{}' },
+        });
+        mockTauri.dispatchEvent('chat_stream', {
+          tab_id: tab,
+          chunk_type: 'SubagentStatus',
+          data: { tool_id: 'a1', status: 'completed', summary: 'done' },
+        });
+
+        store._setState({
+          messages: [
+            {
+              role: 'assistant',
+              blocks: [
+                {
+                  type: 'tool_use',
+                  tool: {
+                    type: 'tool_use',
+                    tool_id: 'a1',
+                    tool_name: 'Agent',
+                    input_json: '{"run_in_background":true}',
+                    status: 'done',
+                    result: 'Async agent launched',
+                    result_is_error: false,
+                  },
+                },
+              ],
+              timestamp: 1,
+            },
+          ],
+        });
+        expect(store.agentsById().get('a1')).toMatchObject({
+          status: 'completed',
+          toolCount: 1,
+          result: 'done',
+        });
+      });
+    });
+
     describe('openTab', () => {
       it('creates additional tabs up to MAX_CHAT_TABS and throws beyond the cap', async () => {
         expect(service.tabs().size).toBe(1);

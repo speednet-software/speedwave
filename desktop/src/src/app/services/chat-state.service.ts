@@ -820,7 +820,9 @@ export class ChatStateService {
           chunk.chunk_type === 'SystemInit' ||
           chunk.chunk_type === 'RateLimit' ||
           chunk.chunk_type === 'QueueDrained' ||
-          chunk.chunk_type === 'TurnStarted'
+          chunk.chunk_type === 'TurnStarted' ||
+          chunk.chunk_type === 'SubagentActivity' ||
+          chunk.chunk_type === 'SubagentStatus'
         ) {
           store.handleStreamChunk(chunk);
           return;

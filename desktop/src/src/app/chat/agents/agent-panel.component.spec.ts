@@ -102,7 +102,7 @@ describe('AgentPanelComponent', () => {
           ?.textContent?.replace(/\s+/g, ' ')
           .trim()
       )
-    ).toEqual(['running · 2 tools', 'running · 1 tool', 'completed · 3 tools']);
+    ).toEqual(['running · 2 tools', 'running · 1 tool', 'done · 3 tools']);
     expect(
       items[0].querySelector('[data-testid="agent-panel-activity"]')?.textContent?.trim()
     ).toBe('Bash $ make test');
