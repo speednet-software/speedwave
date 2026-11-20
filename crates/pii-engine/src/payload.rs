@@ -17,6 +17,7 @@ pub(crate) fn decode_payload(s: &str) -> Result<Vec<u8>, CryptoError> {
 )]
 mod tests {
     use super::*;
+    use speedwave_crypto::{seal_deterministic, Key};
 
     #[test]
     fn payload_roundtrips_and_rejects_invalid_base64() {
@@ -27,5 +28,25 @@ mod tests {
         assert!(!encoded.contains('+'));
         assert!(!encoded.contains('/'));
         assert_eq!(decode_payload("nie-base64!@#"), Err(CryptoError::Encoding));
+    }
+
+    #[test]
+    fn token_payload_matches_frozen_vectors() {
+        let key = Key::from_bytes([7u8; 32]);
+        for (category, value, expected) in [
+            (
+                "EMAIL",
+                "alice@example.com",
+                "DwxnusR1yFfnSg-V-AwbwfYXbo0kqSIEksBkkIpf7v6C",
+            ),
+            (
+                "PHONE_PL",
+                "+48123456789",
+                "I6m9-JFyYryQqVPHSC88wAjJwzFgHTEuVkVLdg",
+            ),
+        ] {
+            let sealed = seal_deterministic(&key, category, value.as_bytes()).unwrap();
+            assert_eq!(encode_payload(&sealed), expected, "category {category}");
+        }
     }
 }
