@@ -127,7 +127,12 @@ impl WslRuntime {
 
     fn vm_exec_command(&self, cmd: &str, args: &[&str], root: bool) -> Command {
         let argv: Vec<&str> = std::iter::once(cmd).chain(args.iter().copied()).collect();
-        let remote_cmd = super::shell_quote_argv(&argv);
+        let remote_cmd = match (root, argv.as_slice()) {
+            (true, ["sh", "-c", script, _, script_args @ ..]) => {
+                base64_script_file_command(script, script_args)
+            }
+            _ => super::shell_quote_argv(&argv),
+        };
         let mut command = crate::binary::system_command("wsl.exe");
         command.args(["-d", self.distro()]);
         if root {
@@ -928,6 +933,20 @@ impl WslRuntime {
     }
 }
 
+const ROOT_SCRIPT_FILE: &str = "/run/speedwave-vm-exec.sh";
+
+fn base64_script_file_command(script: &str, script_args: &[&str]) -> String {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(script);
+    let tmp = format!("{ROOT_SCRIPT_FILE}.tmp");
+    let mut run = vec!["sh", ROOT_SCRIPT_FILE];
+    run.extend_from_slice(script_args);
+    format!(
+        "echo {b64} | base64 -d > {tmp} && mv -f {tmp} {ROOT_SCRIPT_FILE} && {}",
+        super::shell_quote_argv(&run)
+    )
+}
+
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
@@ -970,6 +989,44 @@ mod tests {
         );
         assert!(!user.contains(&"-u".to_string()), "got: {user:?}");
         assert_eq!(root[4..], user[2..]);
+    }
+
+    #[test]
+    fn vm_exec_as_root_script_goes_through_a_file_so_stdin_stays_free() {
+        use base64::Engine;
+        let rt = WslRuntime::with_runner(Box::new(MockRunner::new()));
+        let script = "root=$1\nid=${1%%/*}\necho $$ \"$root\" 'x'\n";
+        let args: Vec<String> = rt
+            .vm_exec_command("sh", &["-c", script, "sh", "/run/speedwave"], true)
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let remote = args.last().unwrap();
+        assert!(!remote.contains('$'), "got: {remote}");
+        assert!(!remote.contains("| sh"), "got: {remote}");
+        let b64 = remote
+            .strip_prefix("echo ")
+            .and_then(|r| r.split(" | base64 -d").next())
+            .unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .unwrap();
+        assert_eq!(String::from_utf8(decoded).unwrap(), script);
+        assert!(
+            remote.ends_with("&& sh /run/speedwave-vm-exec.sh /run/speedwave"),
+            "got: {remote}"
+        );
+    }
+
+    #[test]
+    fn vm_exec_as_root_other_commands_keep_plain_quoting() {
+        let rt = WslRuntime::with_runner(Box::new(MockRunner::new()));
+        let args: Vec<String> = rt
+            .vm_exec_command("true", &[], true)
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args.last().unwrap(), "true");
     }
 
     #[test]
