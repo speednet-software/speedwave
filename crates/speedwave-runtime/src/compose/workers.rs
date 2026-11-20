@@ -414,6 +414,9 @@ pub(crate) fn apply_worker_config(
     let url = worker_gateway_url(port);
 
     let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
+    if doc.get("services").and_then(|s| s.get("mcp-hub")).is_none() {
+        anyhow::bail!("compose has no 'mcp-hub' service to wire the {label} worker into");
+    }
     ensure_host_gateway_extra_host(&mut doc, "mcp-hub")?;
     inject_worker_env(&mut doc, env_var, &url);
     Ok(serde_yaml_ng::to_string(&doc)?)

@@ -3424,10 +3424,16 @@ services:
             .and_then(|s| s.get("mcp-playwright"))
             .expect("mcp-playwright must be present");
 
+        let volumes: Vec<&str> = pw
+            .get("volumes")
+            .and_then(|v| v.as_sequence())
+            .map(|seq| seq.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
         assert!(
-            pw.get("volumes").is_none(),
-            "mcp-playwright must not declare any volumes; got: {:?}",
-            pw.get("volumes")
+            volumes
+                .iter()
+                .all(|v| v.ends_with(":/run/speedwave/auth:ro")),
+            "mcp-playwright may mount only its auth slot; got: {volumes:?}"
         );
     }
 
@@ -3561,9 +3567,10 @@ services:
             .and_then(|v| v.as_sequence())
             .expect("mcp-github must mount its token dir");
         assert!(
-            volumes.iter().filter_map(|v| v.as_str()).any(|v| {
-                v.ends_with("/test-project/github:/tokens:ro") || v.ends_with("github:/tokens:ro")
-            }),
+            volumes
+                .iter()
+                .filter_map(|v| v.as_str())
+                .any(|v| v.ends_with("/test-project/mcp-github/tokens:/tokens:ro")),
             "mcp-github must mount github tokens read-only; got: {volumes:?}"
         );
         let gh_block = serde_yaml_ng::to_string(gh).unwrap();
@@ -5146,7 +5153,7 @@ services:
       - /tmp:noexec,nosuid,size=512m
     environment:
       - CLAUDE_VERSION=1.0.3
-      - {env}
+      - "{env}"
 "#
             );
             let violations = SecurityCheck::run_with_data_dir(
