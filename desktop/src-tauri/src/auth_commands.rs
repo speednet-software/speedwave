@@ -73,38 +73,62 @@ pub async fn save_api_key(project: String, api_key: String) -> Result<bool, Stri
         return Err("API key too long".to_string());
     }
     tokio::task::spawn_blocking(move || {
-        log::info!("saving API key for project {project}");
-        auth::save_api_key(&project, &api_key)
-            .and_then(|()| {
-                record_anthropic_key_in(speedwave_runtime::consts::data_dir(), &project, true)
-            })
-            .inspect(|_| crate::integrations_cmd::restage_container_secrets(&project))
-            .map_err(|e| {
-                log::error!("failed to save API key: {e}");
-                e.to_string()
-            })
+        save_api_key_then(
+            speedwave_runtime::consts::data_dir(),
+            &project,
+            &api_key,
+            crate::integrations_cmd::restage_container_secrets_now,
+        )
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+fn save_api_key_then(
+    data_dir: &std::path::Path,
+    project: &str,
+    api_key: &str,
+    restage: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<bool, String> {
+    log::info!("saving API key for project {project}");
+    let needs_restart = auth::save_api_key(project, api_key)
+        .and_then(|()| record_anthropic_key_in(data_dir, project, true))
+        .map_err(|e| {
+            log::error!("failed to save API key: {e}");
+            e.to_string()
+        })?;
+    restage(project)?;
+    Ok(needs_restart)
 }
 
 #[tauri::command]
 pub async fn delete_api_key(project: String) -> Result<bool, String> {
     check_project(&project)?;
     tokio::task::spawn_blocking(move || {
-        log::info!("deleting API key for project {project}");
-        auth::delete_api_key(&project)
-            .and_then(|()| {
-                record_anthropic_key_in(speedwave_runtime::consts::data_dir(), &project, false)
-            })
-            .inspect(|_| crate::integrations_cmd::restage_container_secrets(&project))
-            .map_err(|e| {
-                log::error!("failed to delete API key: {e}");
-                e.to_string()
-            })
+        delete_api_key_then(
+            speedwave_runtime::consts::data_dir(),
+            &project,
+            crate::integrations_cmd::restage_container_secrets_now,
+        )
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+fn delete_api_key_then(
+    data_dir: &std::path::Path,
+    project: &str,
+    restage: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<bool, String> {
+    log::info!("deleting API key for project {project}");
+    let needs_restart = auth::delete_api_key(project)
+        .and_then(|()| record_anthropic_key_in(data_dir, project, false))
+        .map_err(|e| {
+            log::error!("failed to delete API key: {e}");
+            e.to_string()
+        })?;
+    restage(project)?;
+    Ok(needs_restart)
 }
 
 fn record_anthropic_key_in(
@@ -1200,6 +1224,116 @@ mod tests {
         llm: &speedwave_runtime::config::LlmConfig,
     ) -> &speedwave_runtime::config::LlmProviderEntry {
         llm.providers.iter().find(|p| p.id == "anthropic").unwrap()
+    }
+
+    struct RemoveSecrets(String);
+
+    impl Drop for RemoveSecrets {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(
+                speedwave_runtime::consts::data_dir()
+                    .join("secrets")
+                    .join(&self.0),
+            );
+        }
+    }
+
+    fn data_dir_with_project(name: &str) -> (tempfile::TempDir, RemoveSecrets) {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = serde_json::json!({
+            "projects": [{ "name": name, "dir": "/tmp/proj" }],
+            "active_project": name
+        });
+        std::fs::write(tmp.path().join("config.json"), config.to_string()).unwrap();
+        (tmp, RemoveSecrets(name.to_string()))
+    }
+
+    fn unique_project(prefix: &str) -> String {
+        format!(
+            "{prefix}-{}",
+            std::time::SystemTime::UNIX_EPOCH
+                .elapsed()
+                .unwrap()
+                .subsec_nanos()
+        )
+    }
+
+    #[test]
+    fn saving_a_key_restages_the_project_after_the_key_is_written() {
+        let project = unique_project("save-restage");
+        let (tmp, _cleanup) = data_dir_with_project(&project);
+        let restaged = std::cell::RefCell::new(Vec::new());
+
+        let result = save_api_key_then(tmp.path(), &project, "sk-ant-test", |p| {
+            restaged
+                .borrow_mut()
+                .push((p.to_string(), auth::has_api_key(p)));
+            Ok(())
+        });
+
+        assert_eq!(result, Ok(true));
+        assert_eq!(*restaged.borrow(), vec![(project, true)]);
+    }
+
+    #[test]
+    fn a_failed_restage_after_saving_a_key_is_returned_to_the_ui() {
+        let project = unique_project("save-restage-fail");
+        let (tmp, _cleanup) = data_dir_with_project(&project);
+
+        let result = save_api_key_then(tmp.path(), &project, "sk-ant-test", |_| {
+            Err("engine did not answer".to_string())
+        });
+
+        assert_eq!(result, Err("engine did not answer".to_string()));
+        assert!(auth::has_api_key(&project));
+    }
+
+    #[test]
+    fn a_key_that_could_not_be_saved_is_not_restaged() {
+        let project = unique_project("save-no-restage");
+        let (tmp, _cleanup) = data_dir_with_project("another-project");
+        let restaged = std::cell::Cell::new(false);
+
+        let result = save_api_key_then(tmp.path(), &project, "sk-ant-test", |_| {
+            restaged.set(true);
+            Ok(())
+        });
+        let _cleanup_unlisted = RemoveSecrets(project);
+
+        assert!(result.is_err());
+        assert!(!restaged.get());
+    }
+
+    #[test]
+    fn deleting_a_key_restages_the_project_after_the_key_is_removed() {
+        let project = unique_project("delete-restage");
+        let (tmp, _cleanup) = data_dir_with_project(&project);
+        auth::save_api_key(&project, "sk-ant-test").unwrap();
+        let restaged = std::cell::RefCell::new(Vec::new());
+
+        let result = delete_api_key_then(tmp.path(), &project, |p| {
+            restaged
+                .borrow_mut()
+                .push((p.to_string(), auth::has_api_key(p)));
+            Ok(())
+        });
+
+        assert!(result.is_ok());
+        assert_eq!(*restaged.borrow(), vec![(project, false)]);
+    }
+
+    #[test]
+    fn a_failed_restage_after_deleting_a_key_is_returned_to_the_ui() {
+        let project = unique_project("delete-restage-fail");
+        let (tmp, _cleanup) = data_dir_with_project(&project);
+        auth::save_api_key(&project, "sk-ant-test").unwrap();
+
+        let result = delete_api_key_then(tmp.path(), &project, |_| {
+            Err("engine did not answer".to_string())
+        });
+
+        assert_eq!(result, Err("engine did not answer".to_string()));
+        assert!(!auth::has_api_key(&project));
     }
 
     #[test]

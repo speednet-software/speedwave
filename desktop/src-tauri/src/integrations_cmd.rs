@@ -1222,20 +1222,31 @@ pub(crate) fn restage_container_secrets(project: &str) {
     let spawned = std::thread::Builder::new()
         .name("restage-secrets".to_string())
         .spawn(move || {
-            restage_secrets(&speedwave_runtime::runtime::detect_runtime(), &project);
+            let _ = restage_secrets(&speedwave_runtime::runtime::detect_runtime(), &project);
         });
     if spawned.is_err() {
         log::warn!("failed to start the container secrets update");
     }
 }
 
-fn restage_secrets(rt: &speedwave_runtime::runtime::LockedRuntime, project: &str) {
+pub(crate) fn restage_container_secrets_now(project: &str) -> Result<(), String> {
+    restage_secrets(&speedwave_runtime::runtime::detect_runtime(), project)
+}
+
+fn restage_secrets(
+    rt: &speedwave_runtime::runtime::LockedRuntime,
+    project: &str,
+) -> Result<(), String> {
     if !rt.is_available() {
-        return;
+        return Ok(());
     }
-    if let Err(e) = rt.stage_project_secrets(project) {
+    rt.stage_project_secrets(project).map_err(|e| {
         log::warn!("could not update the container secrets of project {project}: {e:#}");
-    }
+        format!(
+            "The key is saved on this computer, but the running containers still hold the old one: {}",
+            speedwave_runtime::build::user_facing_engine_error(&e)
+        )
+    })
 }
 
 /// Builds missing worker images for `project`. Returns sanitized error on failure.
@@ -2195,7 +2206,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (rt, handles) = restage_runtime(false, 0, dir.path());
 
-        restage_secrets(&rt, "acme");
+        restage_secrets(&rt, "acme").unwrap();
 
         assert!(handles.vm_exec_calls.lock().unwrap().is_empty());
     }
@@ -2205,7 +2216,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (rt, handles) = restage_runtime(true, 0, dir.path());
 
-        restage_secrets(&rt, "acme");
+        restage_secrets(&rt, "acme").unwrap();
 
         let calls = handles.vm_exec_calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
@@ -2213,12 +2224,13 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_restage_is_swallowed_after_one_attempt() {
+    fn a_failed_restage_is_reported_after_one_attempt() {
         let dir = tempfile::tempdir().unwrap();
         let (rt, handles) = restage_runtime(true, 1, dir.path());
 
-        restage_secrets(&rt, "acme");
+        let err = restage_secrets(&rt, "acme").unwrap_err();
 
+        assert!(err.contains("still hold the old one"), "{err}");
         assert_eq!(handles.vm_exec_calls.lock().unwrap().len(), 1);
     }
 

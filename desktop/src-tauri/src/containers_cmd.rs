@@ -1980,18 +1980,33 @@ fn ensure_saving_for_active_project(active: &str, expected: Option<&str>) -> any
 }
 
 #[tauri::command]
-pub fn set_llm_provider_key(
+pub async fn set_llm_provider_key(
     provider_id: String,
     key: Option<String>,
     project: Option<String>,
 ) -> Result<(), String> {
-    set_llm_provider_key_in(
-        speedwave_runtime::consts::data_dir(),
-        &provider_id,
-        key.as_deref(),
-        project.as_deref(),
-    )
-    .map(|active| crate::integrations_cmd::restage_container_secrets(&active))
+    tokio::task::spawn_blocking(move || {
+        set_llm_provider_key_then(
+            speedwave_runtime::consts::data_dir(),
+            &provider_id,
+            key.as_deref(),
+            project.as_deref(),
+            crate::integrations_cmd::restage_container_secrets_now,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn set_llm_provider_key_then(
+    data_dir: &std::path::Path,
+    provider_id: &str,
+    key: Option<&str>,
+    project: Option<&str>,
+    restage: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<(), String> {
+    let active = set_llm_provider_key_in(data_dir, provider_id, key, project)?;
+    restage(&active)
 }
 
 fn set_llm_provider_key_in(
@@ -3032,6 +3047,53 @@ mod tests {
                     .unwrap();
             assert!(!path.exists(), "{project} must not get the key");
         }
+    }
+
+    #[test]
+    fn a_saved_provider_key_restages_the_active_project_after_the_write() {
+        let tmp = seeded_config_tempdir_with_local_model("llama");
+        let restaged = std::cell::RefCell::new(Vec::new());
+
+        set_llm_provider_key_then(tmp.path(), "local", Some("sk-local"), Some("alpha"), |p| {
+            let key_path =
+                speedwave_runtime::compose::llm_provider_key_path_in(tmp.path(), p, "local")
+                    .unwrap();
+            restaged
+                .borrow_mut()
+                .push((p.to_string(), key_path.exists()));
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(*restaged.borrow(), vec![("alpha".to_string(), true)]);
+    }
+
+    #[test]
+    fn a_failed_restage_after_a_provider_key_change_is_returned_to_the_ui() {
+        let tmp = seeded_config_tempdir_with_local_model("llama");
+
+        let err = set_llm_provider_key_then(tmp.path(), "local", Some("sk-local"), None, |_| {
+            Err("engine did not answer".to_string())
+        })
+        .unwrap_err();
+
+        assert_eq!(err, "engine did not answer");
+    }
+
+    #[test]
+    fn a_refused_provider_key_change_is_not_restaged() {
+        let tmp = seeded_config_tempdir_with_local_model("llama");
+        let restaged = std::cell::Cell::new(false);
+
+        let err =
+            set_llm_provider_key_then(tmp.path(), "local", Some("sk-local"), Some("beta"), |_| {
+                restaged.set(true);
+                Ok(())
+            })
+            .unwrap_err();
+
+        assert!(err.contains("not 'beta'"), "{err}");
+        assert!(!restaged.get());
     }
 
     #[test]
