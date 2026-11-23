@@ -3395,7 +3395,7 @@ services:
 
     #[test]
     #[serial_test::serial(host_addressing)]
-    fn test_render_compose_playwright_no_token_mount() {
+    fn test_render_compose_playwright_mounts_only_its_auth_slot() {
         let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
@@ -3429,12 +3429,14 @@ services:
             .and_then(|v| v.as_sequence())
             .map(|seq| seq.iter().filter_map(|v| v.as_str()).collect())
             .unwrap_or_default();
-        assert!(
-            !volumes.is_empty()
-                && volumes
-                    .iter()
-                    .all(|v| v.ends_with(":/run/speedwave/auth:ro")),
-            "mcp-playwright must mount its auth slot and nothing else; got: {volumes:?}"
+        let slot = format!(
+            "{}/test-project/mcp-playwright/auth:/run/speedwave/auth:ro",
+            crate::secrets_tmpfs::layout::VM_ROOT
+        );
+        assert_eq!(
+            volumes,
+            vec![slot.as_str()],
+            "mcp-playwright must mount its auth slot and nothing else"
         );
     }
 

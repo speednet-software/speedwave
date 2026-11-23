@@ -950,7 +950,7 @@ fn base64_script_file_command(script: &str, script_args: &[&str]) -> String {
     let mut run = vec!["sh", file.as_str()];
     run.extend_from_slice(script_args);
     format!(
-        "trap 'rm -f {file}' EXIT; echo {b64} | base64 -d > {file} && {}",
+        "trap 'rm -f {file}' EXIT INT TERM HUP; echo {b64} | base64 -d > {file} && {}",
         super::shell_quote_argv(&run)
     )
 }
@@ -1035,7 +1035,7 @@ mod tests {
             "got: {remote}"
         );
         assert!(
-            remote.starts_with(&format!("trap 'rm -f {file}' EXIT; ")),
+            remote.starts_with(&format!("trap 'rm -f {file}' EXIT INT TERM HUP; ")),
             "got: {remote}"
         );
     }
