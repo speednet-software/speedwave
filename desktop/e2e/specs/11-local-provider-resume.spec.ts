@@ -18,7 +18,7 @@ import {
   requireOpenrouterModel,
   useCheapOpenRouterModel,
   storedProviderModel,
-  isUnpriced,
+  staysUnpriced,
   modelRowsUnpriced,
 } from '../helpers/llm';
 import { MEMORY_ANSWER, MEMORY_RECALL_PROMPT } from '../helpers/memory-fact';
@@ -86,8 +86,11 @@ describe('Local Provider + Resume', function () {
   });
 
   it('does not price a local model in the chat footer', async function () {
-    this.timeout(30_000);
-    expect(await isUnpriced('[data-testid="session-stats"]')).toBe(true);
+    this.timeout(240_000);
+    await openChat();
+    await startNewConversation();
+    await sendMessageAndWait('Reply with the single word: ok.');
+    expect(await staysUnpriced('[data-testid="session-stats"]')).toBe(true);
     expect(await $('[data-testid="meta-cost"]').isExisting()).toBe(false);
   });
 
