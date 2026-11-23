@@ -10,7 +10,7 @@ permissions:
 jobs:
   e2e-macos:
     concurrency:
-      group: rig-macos
+      group: ${{ github.ref_name == 'probe/e2e-probe' && 'probe-guard-rig-macos' || 'rig-macos' }}
       cancel-in-progress: false
     runs-on: [self-hosted, macOS, ARM64]
     environment: e2e
@@ -42,7 +42,7 @@ jobs:
 
   e2e-windows:
     concurrency:
-      group: rig-windows
+      group: ${{ github.ref_name == 'probe/e2e-probe' && 'probe-guard-rig-windows' || 'rig-windows' }}
       cancel-in-progress: false
     runs-on: [self-hosted, Windows, X64]
     environment: e2e
