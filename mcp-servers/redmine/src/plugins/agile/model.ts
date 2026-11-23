@@ -54,14 +54,6 @@ const SPRINT_KEYS = [
   'spent_hours',
 ] as const;
 
-function codeOf(words: readonly string[], word: string, field: string): number {
-  const code = words.indexOf(word);
-  if (code < 0) {
-    throw new Error(`Unknown ${field} "${word}". Allowed values: ${words.join(', ')}.`);
-  }
-  return code;
-}
-
 /**
  * Integer code of a sprint status word.
  * @param word - open, active or closed.
@@ -76,15 +68,6 @@ export function statusCode(word: string): number {
  */
 export function sharingCode(word: string): number {
   return codeOf(SPRINT_SHARINGS, word, 'sharing');
-}
-
-function wordOf(words: readonly string[], value: unknown): string {
-  return typeof value === 'number' ? words[value] : String(value);
-}
-
-function unwrap(raw: unknown, key: string): Raw {
-  const body = (raw ?? {}) as Raw;
-  return (body[key] ?? body) as Raw;
 }
 
 /**
@@ -136,4 +119,21 @@ export function parseAgileData(raw: unknown): AgileData {
     position: (body.position as number | null | undefined) ?? null,
     color: (body.color as string | null | undefined) ?? null,
   };
+}
+
+function codeOf(words: readonly string[], word: string, field: string): number {
+  const code = words.indexOf(word);
+  if (code < 0) {
+    throw new Error(`Unknown ${field} "${word}". Allowed values: ${words.join(', ')}.`);
+  }
+  return code;
+}
+
+function wordOf(words: readonly string[], value: unknown): string {
+  return typeof value === 'number' ? (words[value] ?? String(value)) : String(value);
+}
+
+function unwrap(raw: unknown, key: string): Raw {
+  const body = (raw ?? {}) as Raw;
+  return (body[key] ?? body) as Raw;
 }

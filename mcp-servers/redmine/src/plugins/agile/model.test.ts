@@ -49,6 +49,13 @@ describe('agile model', () => {
     });
   });
 
+  it('keeps an unknown numeric status or sharing code as its number', () => {
+    expect(parseSprint({ id: 3, name: 'S', status: 7, sharing: 9 })).toMatchObject({
+      status: '7',
+      sharing: '9',
+    });
+  });
+
   it('keeps totals and issues of a single sprint, and omits absent status and sharing', () => {
     const issues = [{ id: 1, subject: 'a', story_points: 3, done_ratio: 0 }];
     expect(parseSprint({ id: 3, story_points: 8, done_ratio: 50, issues })).toEqual({

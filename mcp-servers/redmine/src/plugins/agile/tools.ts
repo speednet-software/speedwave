@@ -6,6 +6,7 @@ import {
   errorResult,
   notConfiguredMessage,
   teachingErrorResult,
+  clampPageSize,
   normalizeNumericIdParams,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
@@ -20,7 +21,7 @@ import { AgileApi, type SprintFields, type SprintFilters } from './api.js';
 import { SPRINT_SHARINGS, SPRINT_STATUSES } from './model.js';
 
 /** What the agile tools need from the client. */
-export interface AgileClient {
+interface AgileClient {
   pluginHost(): PluginHost;
 }
 
@@ -29,7 +30,7 @@ const DEFER = { [META_KEYS.DEFER_LOADING]: true };
 const projectIdProperty = {
   type: ['string', 'number'],
   description:
-    'Project ID or identifier, from listProjectIds; defaults to the configured project. If this integration is scoped to a single project, another project fails with a scope error',
+    'Project ID or identifier, from listProjectIds; defaults to the configured project. If this integration is scoped to a single project, a project ID outside that scope is rejected; the sprint_id itself is not checked against the project',
 };
 const sprintIdProperty = { type: 'number', description: 'Sprint ID, from listAgileSprints' };
 const statusProperty = {
@@ -57,10 +58,17 @@ const sprintSchema = {
     },
     name: { type: 'string' },
     description: { type: 'string' },
-    status: { type: 'string', enum: [...SPRINT_STATUSES] },
+    status: {
+      type: 'string',
+      description: 'open, active or closed; an unknown numeric code comes back as a string',
+    },
     start_date: { type: 'string', description: 'YYYY-MM-DD' },
     end_date: { type: 'string', description: 'YYYY-MM-DD' },
-    sharing: { type: 'string', enum: [...SPRINT_SHARINGS] },
+    sharing: {
+      type: 'string',
+      description:
+        'none, descendants, hierarchy, tree or system; an unknown numeric code comes back as a string',
+    },
     story_points: {
       type: 'number',
       description: 'Sum over the visible issues (single sprint only)',
@@ -103,7 +111,7 @@ const listAgileSprintsTool: Tool = {
         type: 'boolean',
         description: 'Include sprints shared from other projects',
       },
-      limit: { type: 'number', description: 'Maximum results (Redmine default 25)' },
+      limit: { type: 'number', description: 'Maximum results (default 25, at most 100)' },
       offset: { type: 'number', description: 'Pagination offset (default 0)' },
     },
   },
@@ -320,33 +328,6 @@ const TOOLS = [
   deleteAgileSprintTool,
 ];
 
-const noProject = (project_id: unknown): ToolsCallResult =>
-  teachingErrorResult({
-    paramName: 'project_id',
-    received: project_id as string | number | undefined,
-    correctValueTool: TOOL_NAMES.LIST_PROJECT_IDS,
-    nextStep: 'No default project is configured, so pass project_id explicitly.',
-  });
-
-type ProjectCall = (api: AgileApi, project: string, p: Record<string, unknown>) => Promise<unknown>;
-
-function projectHandler(client: AgileClient, call: ProjectCall) {
-  return async (params: Record<string, unknown>): Promise<ToolsCallResult> => {
-    const api = new AgileApi(client.pluginHost());
-    const project_id = params.project_id as string | number | undefined;
-    return withRedmineErrors(project_id === undefined ? undefined : { project_id }, async () => {
-      const project = await api.resolveProject(project_id);
-      if (!project) return noProject(project_id);
-      return jsonResult(await call(api, project, params));
-    });
-  };
-}
-
-function sprintFields(p: Record<string, unknown>): SprintFields {
-  const { name, description, start_date, end_date, status, sharing } = p as SprintFields;
-  return { name, description, start_date, end_date, status, sharing };
-}
-
 /**
  * Tool definitions of the RedmineUP Agile plugin: sprints and the agile data of an issue.
  * @param client - Redmine client, or null when the integration is not configured.
@@ -358,19 +339,23 @@ export function createAgileTools(client: AgileClient | null): ToolDefinition[] {
   }
 
   const handlers: Record<string, ToolDefinition['handler']> = {
-    listAgileSprints: projectHandler(client, (api, project, p) => {
-      const filters = { ...p };
-      delete filters.project_id;
-      return api.listSprints(project, filters as SprintFilters);
-    }),
+    listAgileSprints: projectHandler(
+      client,
+      (api, project, p) => api.listSprints(project, sprintListFilters(p)),
+      wordsError
+    ),
     getAgileSprint: projectHandler(client, (api, project, p) =>
       api.getSprint(project, p.sprint_id as number, p.include_issues === true)
     ),
-    createAgileSprint: projectHandler(client, (api, project, p) =>
-      api.createSprint(project, sprintFields(p))
+    createAgileSprint: projectHandler(
+      client,
+      (api, project, p) => api.createSprint(project, sprintFields(p)),
+      wordsError
     ),
-    updateAgileSprint: projectHandler(client, (api, project, p) =>
-      api.updateSprint(project, p.sprint_id as number, sprintFields(p))
+    updateAgileSprint: projectHandler(
+      client,
+      (api, project, p) => api.updateSprint(project, p.sprint_id as number, sprintFields(p)),
+      updateError
     ),
     deleteAgileSprint: projectHandler(client, async (api, project, p) => {
       await api.deleteSprint(project, p.sprint_id as number);
@@ -412,4 +397,70 @@ export function createAgileTools(client: AgileClient | null): ToolDefinition[] {
   };
 
   return TOOLS.map((tool) => ({ tool, handler: handlers[tool.name] }));
+}
+
+type ProjectCall = (api: AgileApi, project: string, p: Record<string, unknown>) => Promise<unknown>;
+type ParamCheck = (p: Record<string, unknown>) => ToolsCallResult | undefined;
+
+function projectHandler(client: AgileClient, call: ProjectCall, check?: ParamCheck) {
+  return async (params: Record<string, unknown>): Promise<ToolsCallResult> => {
+    const invalid = check?.(params);
+    if (invalid) return invalid;
+    const api = new AgileApi(client.pluginHost());
+    const project_id = params.project_id as string | number | undefined;
+    return withRedmineErrors(project_id === undefined ? undefined : { project_id }, async () => {
+      const project = await api.resolveProject(project_id);
+      if (!project) return noProject(project_id);
+      return jsonResult(await call(api, project, params));
+    });
+  };
+}
+
+function noProject(project_id: unknown): ToolsCallResult {
+  return teachingErrorResult({
+    paramName: 'project_id',
+    received: project_id as string | number | undefined,
+    correctValueTool: TOOL_NAMES.LIST_PROJECT_IDS,
+    nextStep: 'No default project is configured, so pass project_id explicitly.',
+  });
+}
+
+function sprintListFilters(p: Record<string, unknown>): SprintFilters {
+  const filters: Record<string, unknown> = { ...p, limit: clampPageSize(p.limit, 25, 100) };
+  delete filters.project_id;
+  return filters as SprintFilters;
+}
+
+function sprintFields(p: Record<string, unknown>): SprintFields {
+  const { name, description, start_date, end_date, status, sharing } = p as SprintFields;
+  return { name, description, start_date, end_date, status, sharing };
+}
+
+function wordsError(p: Record<string, unknown>): ToolsCallResult | undefined {
+  for (const [paramName, words] of [
+    ['status', SPRINT_STATUSES],
+    ['sharing', SPRINT_SHARINGS],
+  ] as const) {
+    const value = p[paramName];
+    if (value !== undefined && !(words as readonly unknown[]).includes(value)) {
+      return teachingErrorResult({
+        paramName,
+        received: value as string,
+        nextStep: `Use one of: ${words.join(', ')}. Nothing was sent to Redmine.`,
+      });
+    }
+  }
+  return undefined;
+}
+
+function updateError(p: Record<string, unknown>): ToolsCallResult | undefined {
+  const invalid = wordsError(p);
+  if (invalid) return invalid;
+  if (Object.values(sprintFields(p)).every((value) => value === undefined)) {
+    return teachingErrorResult({
+      paramName: 'name, description, start_date, end_date, status or sharing',
+      nextStep: `Pass at least one field to change on sprint ${String(p.sprint_id)}; nothing was sent to Redmine.`,
+    });
+  }
+  return undefined;
 }

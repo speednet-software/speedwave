@@ -5,7 +5,6 @@ import { ProjectScopeError, type PluginHost } from '../../client.js';
 import { createToolDefinitions } from '../../tools/index.js';
 import { expectEmittedKeysDeclared } from '../../tools/test-helpers.js';
 import { createAgileTools } from './tools.js';
-import { AGILE_UNAVAILABLE_MESSAGE } from './api.js';
 
 const textOf = (result: ToolsCallResult): string => (result.content[0] as { text: string }).text;
 
@@ -64,6 +63,7 @@ describe('agile tools', () => {
 
     expect(host.get).toHaveBeenCalledWith('/projects/scoped/agile_sprints.json', {
       status: 'open',
+      limit: 25,
     });
     expect(emitted.total_count).toBe(1);
   });
@@ -74,6 +74,7 @@ describe('agile tools', () => {
     expect(host.ensureProjectInScope).toHaveBeenCalledWith('other');
     expect(host.get).toHaveBeenCalledWith('/projects/other/agile_sprints.json', {
       include_shared: 1,
+      limit: 25,
     });
   });
 
@@ -128,7 +129,7 @@ describe('agile tools', () => {
   it('updateAgileSprint with no field is an error and sends nothing', async () => {
     const result = await call('updateAgileSprint', { sprint_id: 2 });
     expect(result.isError).toBe(true);
-    expect(textOf(result)).toContain('Nothing to update');
+    expect(textOf(result)).toContain('Pass at least one field to change on sprint 2');
     expect(host.put).not.toHaveBeenCalled();
   });
 
@@ -200,7 +201,7 @@ describe('agile tools', () => {
     );
     const result = await call('listAgileSprints', {});
     expect(result.isError).toBe(true);
-    expect(textOf(result)).toContain(AGILE_UNAVAILABLE_MESSAGE);
+    expect(textOf(result)).toContain('The RedmineUP Agile plugin is not available for this project');
   });
 
   it('passes the Redmine 422 message on', async () => {
@@ -220,7 +221,30 @@ describe('agile tools', () => {
   it('rejects an unknown status word before any request', async () => {
     const result = await call('createAgileSprint', { name: 'n', status: 'paused' });
     expect(result.isError).toBe(true);
-    expect(textOf(result)).toContain('Unknown status "paused"');
+    expect(textOf(result)).toContain('Use one of: open, active, closed');
     expect(host.post).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unknown sharing or status word before any request', async () => {
+    const sharing = await call('createAgileSprint', { name: 'n', sharing: 'all' });
+    expect(textOf(sharing)).toContain('Use one of: none, descendants, hierarchy, tree, system');
+    const update = await call('updateAgileSprint', { sprint_id: 2, status: 'paused' });
+    expect(textOf(update)).toContain('Use one of: open, active, closed');
+    const list = await call('listAgileSprints', { status: 'Active' });
+    expect(textOf(list)).toContain('Use one of: open, active, closed');
+    expect(host.get).not.toHaveBeenCalled();
+    expect(host.post).not.toHaveBeenCalled();
+    expect(host.put).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [undefined, 25],
+    [0, 25],
+    [500, 100],
+    [10.7, 10],
+  ])('listAgileSprints clamps limit %s to %s', async (limit, sent) => {
+    host.get.mockResolvedValue({ sprints: [] });
+    await call('listAgileSprints', { limit });
+    expect(host.get.mock.calls[0][1]).toMatchObject({ limit: sent });
   });
 });

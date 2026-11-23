@@ -13,7 +13,7 @@ import {
   type SprintStatus,
 } from './model.js';
 
-export const AGILE_UNAVAILABLE_MESSAGE =
+const AGILE_UNAVAILABLE_MESSAGE =
   'Redmine answered 403 or 404 for an agile endpoint. The RedmineUP Agile plugin is not available for this project: the plugin may be missing, the Agile module disabled, the permission absent, or the plugin variant has no sprints. A wrong sprint or issue ID gives the same answer.';
 
 /** Sprint fields, status and sharing as words. */
@@ -35,36 +35,6 @@ export interface SprintFilters {
   include_shared?: boolean;
   limit?: number;
   offset?: number;
-}
-
-async function agileCall<T>(call: () => Promise<T>): Promise<T> {
-  try {
-    return await call();
-  } catch (error) {
-    const status = axios.isAxiosError(error) ? error.response?.status : undefined;
-    if (status === 403 || status === 404) {
-      throw new Error(AGILE_UNAVAILABLE_MESSAGE);
-    }
-    throw error;
-  }
-}
-
-function sprintWithId(body: unknown): AgileSprint {
-  const sprint = parseSprint(body);
-  if (sprint.id === undefined) {
-    throw new Error(
-      'Redmine answered without a sprint id, so the response is not the documented sprint shape. The write may have gone through: list the sprints to check.'
-    );
-  }
-  return sprint;
-}
-
-function sprintBody(fields: SprintFields): { agile_sprint: Record<string, unknown> } {
-  const { status, sharing, ...rest } = fields;
-  const body: Record<string, unknown> = { ...rest };
-  if (status !== undefined) body.status = statusCode(status);
-  if (sharing !== undefined) body.sharing = sharingCode(sharing);
-  return { agile_sprint: body };
 }
 
 /** HTTP adapter over the RedmineUP Agile REST API. */
@@ -140,18 +110,17 @@ export class AgileApi {
     sprintId: number,
     fields: SprintFields
   ): Promise<AgileSprint> {
-    if (Object.values(fields).every((value) => value === undefined)) {
-      throw new Error(
-        `Nothing to update on sprint ${sprintId}: no field was given, so no request was sent to Redmine. Pass at least one field.`
-      );
-    }
     await agileCall(() =>
       this.host.put(
         `/projects/${pathSegment(project)}/agile_sprints/${pathSegment(sprintId)}.json`,
         sprintBody(fields)
       )
     );
-    return this.getSprint(project, sprintId, false);
+    try {
+      return await this.getSprint(project, sprintId, false);
+    } catch (error) {
+      throw new Error(readBackFailure(`sprint ${sprintId}`, error));
+    }
   }
 
   /**
@@ -194,7 +163,11 @@ export class AgileApi {
     await this.host.put(`/issues/${pathSegment(issueId)}.json`, {
       issue: { agile_data_attributes: attributes },
     });
-    return this.readAgileData(issueId);
+    try {
+      return await this.readAgileData(issueId);
+    } catch (error) {
+      throw new Error(readBackFailure(`issue ${issueId}`, error));
+    }
   }
 
   private async readAgileData(issueId: number): Promise<AgileData> {
@@ -203,4 +176,39 @@ export class AgileApi {
     );
     return parseAgileData(body);
   }
+}
+
+async function agileCall<T>(call: () => Promise<T>): Promise<T> {
+  try {
+    return await call();
+  } catch (error) {
+    const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+    if (status === 403 || status === 404) {
+      throw new Error(AGILE_UNAVAILABLE_MESSAGE);
+    }
+    throw error;
+  }
+}
+
+function sprintWithId(body: unknown): AgileSprint {
+  const sprint = parseSprint(body);
+  if (sprint.id === undefined) {
+    throw new Error(
+      'Redmine answered without a sprint id, so the response is not the documented sprint shape. The write may have gone through: list the sprints to check.'
+    );
+  }
+  return sprint;
+}
+
+function sprintBody(fields: SprintFields): { agile_sprint: Record<string, unknown> } {
+  const { status, sharing, ...rest } = fields;
+  const body: Record<string, unknown> = { ...rest };
+  if (status !== undefined) body.status = statusCode(status);
+  if (sharing !== undefined) body.sharing = sharingCode(sharing);
+  return { agile_sprint: body };
+}
+
+function readBackFailure(target: string, error: unknown): string {
+  const cause = error instanceof Error ? error.message : String(error);
+  return `The write to ${target} was sent, but reading it back failed: ${cause} Check the ${target} before sending it again.`;
 }

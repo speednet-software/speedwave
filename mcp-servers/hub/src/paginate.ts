@@ -129,6 +129,7 @@ export const ITEM_KEYS = [
   'issues',
   'time_entries',
   'versions',
+  'sprints',
   'projects',
   'merge_requests',
   'pipelines',

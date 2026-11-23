@@ -174,6 +174,15 @@ describe('paginate', () => {
       expect(mockFetcher).toHaveBeenCalledTimes(1);
     });
 
+    it('reads a { sprints, total_count } list as one page', async () => {
+      const sprints = [{ id: 1 }, { id: 2 }];
+      const mockFetcher = vi.fn().mockResolvedValue({ sprints, total_count: 2 });
+
+      const all = await collectPages(paginate<{ id: number }>(mockFetcher));
+
+      expect(all).toEqual(sprints);
+    });
+
     it('reads an unpaginated { versions, total_count } list as one page', async () => {
       const versions = [{ id: 87 }, { id: 88 }];
       const mockFetcher = vi.fn().mockResolvedValue({ versions, total_count: 2 });

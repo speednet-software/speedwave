@@ -1,7 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { AxiosError } from 'axios';
 import { ProjectScopeError, type PluginHost } from '../../client.js';
-import { AgileApi, AGILE_UNAVAILABLE_MESSAGE } from './api.js';
+import { AgileApi } from './api.js';
+
+const AGILE_UNAVAILABLE = 'The RedmineUP Agile plugin is not available for this project';
 
 const httpError = (status: number, data: unknown = {}) =>
   new AxiosError('failed', String(status), undefined, undefined, {
@@ -148,11 +150,6 @@ describe('AgileApi', () => {
       expect(host.get).toHaveBeenCalledWith('/projects/p/agile_sprints/3.json', undefined);
       expect(sprint).toEqual({ id: 3, name: 'New', status: 'closed' });
     });
-
-    it('refuses an update with no fields and sends nothing', async () => {
-      await expect(api.updateSprint('p', 3, {})).rejects.toThrow('Nothing to update on sprint 3');
-      expect(host.put).not.toHaveBeenCalled();
-    });
   });
 
   it('refuses a sprint answer without an id', async () => {
@@ -215,16 +212,34 @@ describe('AgileApi', () => {
     });
   });
 
+  it('names the write as sent when the read-back after setIssueAgileData fails', async () => {
+    host.put.mockResolvedValue('');
+    host.get.mockRejectedValue(httpError(403));
+    const result = api.setIssueAgileData(580, { story_points: 2 });
+    await expect(result).rejects.toThrow('The write to issue 580 was sent');
+    await expect(result).rejects.toThrow(AGILE_UNAVAILABLE);
+    host.get.mockRejectedValue('boom');
+    await expect(api.setIssueAgileData(580, { story_points: 2 })).rejects.toThrow('boom');
+  });
+
+  it('names the write as sent when the read-back after updateSprint fails', async () => {
+    host.put.mockResolvedValue('');
+    host.get.mockRejectedValue(httpError(500));
+    await expect(api.updateSprint('p', 3, { name: 'n' })).rejects.toThrow(
+      'The write to sprint 3 was sent'
+    );
+  });
+
   describe('errors', () => {
     it.each([403, 404])('turns %i from an agile endpoint into one message', async (status) => {
       host.get.mockRejectedValue(httpError(status));
-      await expect(api.listSprints('p', {})).rejects.toThrow(AGILE_UNAVAILABLE_MESSAGE);
+      await expect(api.listSprints('p', {})).rejects.toThrow(AGILE_UNAVAILABLE);
       host.put.mockRejectedValue(httpError(status));
       await expect(api.updateSprint('p', 1, { name: 'n' })).rejects.toThrow(
-        AGILE_UNAVAILABLE_MESSAGE
+        AGILE_UNAVAILABLE
       );
       host.delete.mockRejectedValue(httpError(status));
-      await expect(api.deleteSprint('p', 1)).rejects.toThrow(AGILE_UNAVAILABLE_MESSAGE);
+      await expect(api.deleteSprint('p', 1)).rejects.toThrow(AGILE_UNAVAILABLE);
     });
 
     it('leaves the core issue endpoint errors alone', async () => {
