@@ -15,6 +15,7 @@ import { createUserTools } from './user-tools.js';
 import { createProjectTools } from './project-tools.js';
 import { createRelationTools } from './relation-tools.js';
 import { createConfigTools } from './config-tools.js';
+import { createAgileTools } from '../plugins/agile/tools.js';
 
 function withNumericIds(tool: Tool, handler: ToolHandler): ToolHandler {
   const ids = Object.entries(tool.inputSchema.properties)
@@ -65,6 +66,7 @@ export function createToolDefinitions(client: RedmineClient | null): ToolDefinit
     ...createProjectTools(client),
     ...createRelationTools(client),
     ...createConfigTools(client),
+    ...createAgileTools(client),
   ].map(({ tool, handler }) => ({
     tool,
     handler: withDeclaredParams(tool, withoutAliasConflicts(tool, withNumericIds(tool, handler))),

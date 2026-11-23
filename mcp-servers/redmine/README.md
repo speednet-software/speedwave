@@ -357,6 +357,23 @@ configured project may be named by its numeric ID or its identifier.
 
 **Returns**: `{ versions: [{ id, project, name, description, status, due_date, sharing, wiki_page_title, custom_fields, created_on, updated_on }], total_count }`
 
+### Agile Operations
+
+Tools of the RedmineUP Agile plugin (code in `src/plugins/agile/`). A 403 or 404
+from the plugin gives one message: the plugin is not available for the project
+(missing, Agile module off, no permission, or a variant without sprints), or an
+ID is wrong. All seven are deferred. `project_id` defaults to the configured
+project; if scoped to a single project, another project fails with a scope error.
+
+- `listAgileSprints({ project_id?, status?, name?, from?, to?, include_shared?, limit?, offset? })` returns `{ sprints: [{ id, name, description, status, start_date, end_date, sharing }], total_count, offset, limit }`.
+- `getAgileSprint({ project_id?, sprint_id, include_issues? })` returns the sprint with `story_points`, `done_ratio`, hours and, on request, `issues`.
+- `getIssueAgileData({ issue_id })` returns `{ agile_sprint_id, story_points, position, color }`.
+- `setIssueAgileData({ issue_id, agile_sprint_id?, story_points? })` writes and returns the agile data read back; `agile_sprint_id: null` unlinks the issue. RedmineUP documents only the sprint assignment, so compare `story_points` in the result with the request.
+- `createAgileSprint({ project_id?, name, start_date, end_date, status?, sharing?, description? })` and `updateAgileSprint({ project_id?, sprint_id, ... })` need the Manage sprints permission; update returns the sprint read back. `status` is `open`, `active` or `closed`; `sharing` is `none`, `descendants`, `hierarchy`, `tree` or `system`; the tools send the integer codes Redmine's write endpoints take.
+- `deleteAgileSprint({ project_id?, sprint_id })` deletes the sprint; its issues stay and lose only the assignment.
+
+The read tools work in read-only mode; the four write tools are blocked there.
+
 ### Relation Operations
 
 #### listRelations, createRelation, deleteRelation

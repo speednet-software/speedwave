@@ -1,4 +1,4 @@
-/** Isolated Redmine MCP server, per-service token isolation, 24 tools across issue/time entry/journal/user/project/relation/config. */
+/** Isolated Redmine MCP server, per-service token isolation, 34 tools across issue/time entry/journal/user/project/relation/config/agile. */
 
 import { bootWorker, ts } from '@speedwave/mcp-shared';
 import { initializeRedmineClient, type RedmineClient } from './client.js';

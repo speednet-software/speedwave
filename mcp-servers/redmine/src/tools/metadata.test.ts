@@ -5,6 +5,7 @@ import {
   META_KEYS,
   metaValue,
   WORKSPACE_WRITE_ANNOTATIONS,
+  WRITE_ANNOTATIONS,
   DESTRUCTIVE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
 
@@ -38,11 +39,18 @@ const EXPECTED_TOOL_NAMES = [
   'deleteRelation',
   'getMappings',
   'getConfig',
+  'listAgileSprints',
+  'getAgileSprint',
+  'getIssueAgileData',
+  'setIssueAgileData',
+  'createAgileSprint',
+  'updateAgileSprint',
+  'deleteAgileSprint',
 ];
 
 describe('Redmine tool metadata', () => {
-  it('exports exactly 27 tools', () => {
-    expect(ALL_TOOLS).toHaveLength(27);
+  it('exports exactly 34 tools', () => {
+    expect(ALL_TOOLS).toHaveLength(34);
   });
 
   it('exports all expected tool names', () => {
@@ -176,6 +184,9 @@ const READ_ONLY_TOOL_NAMES = [
   'listRelations',
   'getMappings',
   'getConfig',
+  'listAgileSprints',
+  'getAgileSprint',
+  'getIssueAgileData',
 ];
 
 const WORKSPACE_WRITE_TOOL_NAMES = ['downloadAttachment'];
@@ -192,6 +203,10 @@ const CHANGING_TOOL_NAMES = [
   'deleteJournal',
   'createRelation',
   'deleteRelation',
+  'setIssueAgileData',
+  'createAgileSprint',
+  'updateAgileSprint',
+  'deleteAgileSprint',
 ];
 
 describe('Redmine read-only access annotations', () => {
@@ -222,6 +237,14 @@ describe('Redmine read-only access annotations', () => {
     expect(hint('deleteAttachment')).toEqual(DESTRUCTIVE_ANNOTATIONS);
     expect(hint('addAttachment')?.destructiveHint).toBe(false);
     expect(hint('createIssue')?.destructiveHint).toBe(false);
+  });
+
+  it('marks deleteAgileSprint destructive and the other agile writes not destructive', () => {
+    const hint = (name: string) => tools.find((t) => t.name === name)?.annotations;
+    expect(hint('deleteAgileSprint')).toEqual(DESTRUCTIVE_ANNOTATIONS);
+    for (const name of ['setIssueAgileData', 'createAgileSprint', 'updateAgileSprint']) {
+      expect(hint(name)).toEqual(WRITE_ANNOTATIONS);
+    }
   });
 
   it.each(['addAttachment', 'downloadAttachment', 'deleteAttachment', 'createIssue'])(

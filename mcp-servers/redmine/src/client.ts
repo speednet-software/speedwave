@@ -835,7 +835,11 @@ function sanitizeTextile(textile: string): string {
   return result;
 }
 
-function pathSegment(value: string | number): string {
+/**
+ * Encode a value as one URL path segment, rejecting empty and dot segments.
+ * @param value - Identifier to encode.
+ */
+export function pathSegment(value: string | number): string {
   const segment = encodeURIComponent(String(value));
   if (segment === '' || segment === '.' || segment === '..') {
     throw new Error(
@@ -843,6 +847,24 @@ function pathSegment(value: string | number): string {
     );
   }
   return segment;
+}
+
+/** The part of the client a plugin module may use: authenticated requests and the project scope checks. */
+export interface PluginHost {
+  /** GET a path and return the response body. */
+  get(path: string, params?: Record<string, unknown>): Promise<unknown>;
+  /** POST a JSON body to a path and return the response body. */
+  post(path: string, body: unknown): Promise<unknown>;
+  /** PUT a JSON body to a path and return the response body. */
+  put(path: string, body: unknown): Promise<unknown>;
+  /** DELETE a path. */
+  delete(path: string): Promise<void>;
+  /** The configured project, or null when unscoped. */
+  getProjectScope(): string | null;
+  /** Throw ProjectScopeError when the project is not the configured one. */
+  ensureProjectInScope(projectId: string | number): Promise<void>;
+  /** Throw ProjectScopeError when the issue is outside the configured project. */
+  ensureIssueInScope(issueId: number): Promise<void>;
 }
 
 /** Attempted resource identifier(s) surfaced in an error message, e.g. `{ issue_id: 12345 }`. */
@@ -1665,13 +1687,38 @@ export class RedmineClient {
     projectId: string | number
   ): Promise<{ versions: RedmineVersion[]; total_count: number }> {
     const target = String(projectId);
+    await this.ensureProjectInScope(target);
+    const response = await this.client.get(`/projects/${pathSegment(target)}/versions.json`);
+    const versions = (response.data.versions ?? []) as RedmineVersion[];
+    return { versions, total_count: response.data.total_count ?? versions.length };
+  }
+
+  /**
+   * Validate that a project is the configured one, named by its identifier or numeric ID.
+   * @param projectId - Project ID or identifier.
+   * @throws {ProjectScopeError} When projectId names a project other than the configured one.
+   */
+  async ensureProjectInScope(projectId: string | number): Promise<void> {
+    const target = String(projectId);
     const scope = this.getProjectScope();
     if (scope && target !== scope && !(await this._namesScopedProject(scope, target))) {
       throw new ProjectScopeError(scope, target);
     }
-    const response = await this.client.get(`/projects/${pathSegment(target)}/versions.json`);
-    const versions = (response.data.versions ?? []) as RedmineVersion[];
-    return { versions, total_count: response.data.total_count ?? versions.length };
+  }
+
+  /** The narrow interface plugin modules under `plugins/` use instead of the whole client. */
+  pluginHost(): PluginHost {
+    return {
+      get: async (path, params) => (await this.client.get(path, { params })).data,
+      post: async (path, body) => (await this.client.post(path, body)).data,
+      put: async (path, body) => (await this.client.put(path, body)).data,
+      delete: async (path) => {
+        await this.client.delete(path);
+      },
+      getProjectScope: () => this.getProjectScope(),
+      ensureProjectInScope: (projectId) => this.ensureProjectInScope(projectId),
+      ensureIssueInScope: (issueId) => this._ensureIssueInScope(issueId),
+    };
   }
 
   private async _namesScopedProject(scope: string, target: string): Promise<boolean> {
