@@ -155,6 +155,11 @@ describe('AgileApi', () => {
     });
   });
 
+  it('refuses a sprint answer without an id', async () => {
+    host.post.mockResolvedValue({ unexpected: {} });
+    await expect(api.createSprint('p', { name: 'S' })).rejects.toThrow('without a sprint id');
+  });
+
   it('deletes a sprint', async () => {
     await api.deleteSprint('p', 3);
     expect(host.delete).toHaveBeenCalledWith('/projects/p/agile_sprints/3.json');
@@ -215,11 +220,17 @@ describe('AgileApi', () => {
       host.get.mockRejectedValue(httpError(status));
       await expect(api.listSprints('p', {})).rejects.toThrow(AGILE_UNAVAILABLE_MESSAGE);
       host.put.mockRejectedValue(httpError(status));
-      await expect(api.setIssueAgileData(1, { story_points: 1 })).rejects.toThrow(
+      await expect(api.updateSprint('p', 1, { name: 'n' })).rejects.toThrow(
         AGILE_UNAVAILABLE_MESSAGE
       );
       host.delete.mockRejectedValue(httpError(status));
       await expect(api.deleteSprint('p', 1)).rejects.toThrow(AGILE_UNAVAILABLE_MESSAGE);
+    });
+
+    it('leaves the core issue endpoint errors alone', async () => {
+      const error = httpError(403);
+      host.put.mockRejectedValue(error);
+      await expect(api.setIssueAgileData(1, { story_points: 1 })).rejects.toBe(error);
     });
 
     it('passes a 422 through unchanged for the Redmine message', async () => {

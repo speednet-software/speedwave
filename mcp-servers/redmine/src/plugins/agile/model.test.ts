@@ -30,7 +30,14 @@ describe('agile model', () => {
         start_date: '2026-12-01',
         extra: 1,
       })
-    ).toEqual({ id: 3, name: 'S1', status: 'active', sharing: 'none', start_date: '2026-12-01' });
+    ).toEqual({
+      id: 3,
+      project_id: 9,
+      name: 'S1',
+      status: 'active',
+      sharing: 'none',
+      start_date: '2026-12-01',
+    });
   });
 
   it('unwraps an agile_sprint wrapper and turns numeric codes into words', () => {

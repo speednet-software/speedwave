@@ -6,6 +6,7 @@ import {
   errorResult,
   notConfiguredMessage,
   teachingErrorResult,
+  normalizeNumericIdParams,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
   DESTRUCTIVE_ANNOTATIONS,
@@ -20,7 +21,6 @@ import { SPRINT_SHARINGS, SPRINT_STATUSES } from './model.js';
 
 /** What the agile tools need from the client. */
 export interface AgileClient {
-  /** The narrow interface to the client. */
   pluginHost(): PluginHost;
 }
 
@@ -156,7 +156,7 @@ const getIssueAgileDataTool: Tool = {
   inputSchema: {
     type: 'object',
     properties: {
-      issue_id: { type: 'number', description: 'Issue ID — from listIssueIds or searchIssueIds' },
+      issue_id: { type: 'number', description: 'Issue ID from listIssueIds or searchIssueIds' },
     },
     required: ['issue_id'],
   },
@@ -176,7 +176,7 @@ if (data.story_points !== 5) throw new Error('story_points was not saved')`,
   inputSchema: {
     type: 'object',
     properties: {
-      issue_id: { type: 'number', description: 'Issue ID — from listIssueIds or searchIssueIds' },
+      issue_id: { type: 'number', description: 'Issue ID from listIssueIds or searchIssueIds' },
       agile_sprint_id: {
         type: ['number', 'null'],
         description: 'Sprint ID from listAgileSprints, or null to unlink the issue from its sprint',
@@ -379,7 +379,12 @@ export function createAgileTools(client: AgileClient | null): ToolDefinition[] {
         )
       ),
     setIssueAgileData: async (params) => {
-      const { issue_id, agile_sprint_id, story_points } = params as {
+      const checked = normalizeNumericIdParams(
+        params,
+        params.agile_sprint_id === null ? [] : ['agile_sprint_id']
+      );
+      if (!checked.ok) return teachingErrorResult(checked.error);
+      const { issue_id, agile_sprint_id, story_points } = checked.value as {
         issue_id: number;
         agile_sprint_id?: number | null;
         story_points?: number;

@@ -49,6 +49,16 @@ async function agileCall<T>(call: () => Promise<T>): Promise<T> {
   }
 }
 
+function sprintWithId(body: unknown): AgileSprint {
+  const sprint = parseSprint(body);
+  if (sprint.id === undefined) {
+    throw new Error(
+      'Redmine answered without a sprint id, so the response is not the documented sprint shape. The write may have gone through: list the sprints to check.'
+    );
+  }
+  return sprint;
+}
+
 function sprintBody(fields: SprintFields): { agile_sprint: Record<string, unknown> } {
   const { status, sharing, ...rest } = fields;
   const body: Record<string, unknown> = { ...rest };
@@ -68,7 +78,6 @@ export class AgileApi {
   /**
    * Resolve the project a call targets and check it against the configured scope.
    * @param projectId - Caller-given project, or undefined for the configured one.
-   * @returns The project to use, or null when none is configured or given.
    */
   async resolveProject(projectId?: string | number): Promise<string | null> {
     const target = projectId || this.host.getProjectScope();
@@ -105,7 +114,7 @@ export class AgileApi {
         params
       )
     );
-    return parseSprint(body);
+    return sprintWithId(body);
   }
 
   /**
@@ -117,7 +126,7 @@ export class AgileApi {
     const body = await agileCall(() =>
       this.host.post(`/projects/${pathSegment(project)}/agile_sprints.json`, sprintBody(fields))
     );
-    return parseSprint(body);
+    return sprintWithId(body);
   }
 
   /**
@@ -182,11 +191,9 @@ export class AgileApi {
     const attributes: Record<string, unknown> = {};
     if (data.agile_sprint_id !== undefined) attributes.agile_sprint_id = data.agile_sprint_id;
     if (data.story_points !== undefined) attributes.story_points = data.story_points;
-    await agileCall(() =>
-      this.host.put(`/issues/${pathSegment(issueId)}.json`, {
-        issue: { agile_data_attributes: attributes },
-      })
-    );
+    await this.host.put(`/issues/${pathSegment(issueId)}.json`, {
+      issue: { agile_data_attributes: attributes },
+    });
     return this.readAgileData(issueId);
   }
 

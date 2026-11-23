@@ -9,6 +9,7 @@ export type SprintSharing = (typeof SPRINT_SHARINGS)[number];
 /** A sprint as the tools return it. */
 export interface AgileSprint {
   id: number;
+  project_id?: number;
   name: string;
   description?: string;
   status?: SprintStatus;
@@ -42,6 +43,7 @@ type Raw = Record<string, unknown>;
 
 const SPRINT_KEYS = [
   'id',
+  'project_id',
   'name',
   'description',
   'start_date',
@@ -52,12 +54,6 @@ const SPRINT_KEYS = [
   'spent_hours',
 ] as const;
 
-/**
- * Turn a status or sharing word into the integer code Redmine's write endpoints take.
- * @param words - The allowed words, in code order.
- * @param word - The word to convert.
- * @param field - Field name for the error message.
- */
 function codeOf(words: readonly string[], word: string, field: string): number {
   const code = words.indexOf(word);
   if (code < 0) {
@@ -92,7 +88,7 @@ function unwrap(raw: unknown, key: string): Raw {
 }
 
 /**
- * Parse one sprint as Redmine returns it, with or without an `agile_sprint` wrapper; status and sharing come out as words.
+ * Parse one sprint as Redmine returns it.
  * @param raw - Response body or one element of a sprint list.
  */
 export function parseSprint(raw: unknown): AgileSprint {
@@ -129,7 +125,7 @@ export function parseSprintList(
 }
 
 /**
- * Parse the body of `agile_data.json`; absent fields come out as null.
+ * Parse the body of `agile_data.json`.
  * @param raw - Response body.
  */
 export function parseAgileData(raw: unknown): AgileData {

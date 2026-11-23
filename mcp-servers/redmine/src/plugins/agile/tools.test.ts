@@ -178,6 +178,16 @@ describe('agile tools', () => {
     expect(host.put).toHaveBeenCalledTimes(1);
   });
 
+  it.each(['Sprint 12', -1, 1.5, 0])(
+    'rejects agile_sprint_id %s before any request',
+    async (value) => {
+      const result = await call('setIssueAgileData', { issue_id: 580, agile_sprint_id: value });
+      expect(result.isError).toBe(true);
+      expect(textOf(result)).toContain('agile_sprint_id');
+      expect(host.put).not.toHaveBeenCalled();
+    }
+  );
+
   it('gives the one agile message for a 403 from the plugin', async () => {
     host.get.mockRejectedValue(
       new AxiosError('f', '403', undefined, undefined, {
