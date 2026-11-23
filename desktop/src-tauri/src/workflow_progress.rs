@@ -125,6 +125,7 @@ fn close_running(agents: &mut [WorkflowAgent], workflow: TaskState) -> bool {
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "test assertions may unwrap freely")]
 mod tests {
     use super::*;
     use serde_json::json;
