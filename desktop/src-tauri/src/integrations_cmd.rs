@@ -1243,7 +1243,7 @@ fn restage_secrets(
     rt.stage_project_secrets(project).map_err(|e| {
         log::warn!("could not update the container secrets of project {project}: {e:#}");
         format!(
-            "The key is saved on this computer, but the running containers still hold the old one: {}",
+            "The change is saved on this computer, but the running containers could not be updated ({}). Restart the project to apply it.",
             speedwave_runtime::build::user_facing_engine_error(&e)
         )
     })
@@ -2230,7 +2230,7 @@ mod tests {
 
         let err = restage_secrets(&rt, "acme").unwrap_err();
 
-        assert!(err.contains("still hold the old one"), "{err}");
+        assert!(err.contains("could not be updated"), "{err}");
         assert_eq!(handles.vm_exec_calls.lock().unwrap().len(), 1);
     }
 

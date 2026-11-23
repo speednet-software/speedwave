@@ -1289,7 +1289,7 @@ mod tests {
     }
 
     #[test]
-    fn a_key_that_could_not_be_saved_is_not_restaged() {
+    fn a_key_that_could_not_be_recorded_in_the_config_is_not_restaged() {
         let project = unique_project("save-no-restage");
         let (tmp, _cleanup) = data_dir_with_project("another-project");
         let restaged = std::cell::Cell::new(false);
