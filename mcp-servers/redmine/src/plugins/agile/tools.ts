@@ -51,6 +51,10 @@ const sprintSchema = {
   type: 'object',
   properties: {
     id: { type: 'number' },
+    project_id: {
+      type: 'number',
+      description: 'Owning project; differs from project_id for a shared sprint',
+    },
     name: { type: 'string' },
     description: { type: 'string' },
     status: { type: 'string', enum: [...SPRINT_STATUSES] },
@@ -82,7 +86,7 @@ const agileDataSchema = {
 const listAgileSprintsTool: Tool = {
   name: 'listAgileSprints',
   description:
-    'List the sprints of a project (RedmineUP Agile plugin), with optional filters. Status and sharing are words. Fails with one message when the plugin is not available for the project (missing plugin, Agile module off, no permission, or a variant without sprints).',
+    'List the sprints of a project (RedmineUP Agile plugin), with optional filters. Status and sharing are words; the status filter takes the same words (not verified against a live instance). Fails with one message when the plugin is not available for the project (missing plugin, Agile module off, no permission, or a variant without sprints).',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: DEFER,
   keywords: ['redmine', 'agile', 'sprint', 'sprints', 'scrum', 'board', 'list', 'iteration'],
