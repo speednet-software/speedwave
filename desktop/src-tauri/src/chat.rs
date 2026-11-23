@@ -2537,7 +2537,7 @@ impl ChatSession {
                 .and_then(speedwave_runtime::log_file::open_log_file);
             let reader = BufReader::new(stdout);
             let mut http_collator = speedwave_runtime::http_debug_collator::Collator::new();
-            for line in reader.lines() {
+            for line in lines_until_stopped(reader, stopping_for_reader.clone()) {
                 let line = match line {
                     Ok(l) => l,
                     Err(e) => {
@@ -3224,6 +3224,15 @@ impl Drop for ChatSession {
     fn drop(&mut self) {
         self.stop().ok();
     }
+}
+
+fn lines_until_stopped<R: BufRead>(
+    reader: R,
+    stopping: Arc<std::sync::atomic::AtomicBool>,
+) -> impl Iterator<Item = std::io::Result<String>> {
+    reader
+        .lines()
+        .take_while(move |_| !stopping.load(std::sync::atomic::Ordering::SeqCst))
 }
 
 fn drain_queued_message(
@@ -4547,6 +4556,40 @@ mod tests {
                 "{name}: a write that never reached Claude Code must not keep the computer awake"
             );
         }
+    }
+
+    #[test]
+    fn a_running_session_reads_every_stdout_line() {
+        let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let lines: Vec<String> =
+            lines_until_stopped(std::io::Cursor::new("one\ntwo\nthree\n"), stopping)
+                .map(Result::unwrap)
+                .collect();
+        assert_eq!(lines, ["one", "two", "three"]);
+    }
+
+    #[test]
+    fn a_stopped_session_forwards_no_line_its_process_writes_afterwards() {
+        let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut lines = lines_until_stopped(
+            std::io::Cursor::new(
+                "{\"type\":\"assistant\"}\n{\"type\":\"control_response\"}\n{\"type\":\"result\"}\n",
+            ),
+            stopping.clone(),
+        );
+        assert_eq!(lines.next().unwrap().unwrap(), "{\"type\":\"assistant\"}");
+        stopping.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(lines.next().is_none());
+        assert!(lines.next().is_none());
+    }
+
+    #[test]
+    fn a_session_stopped_before_its_first_line_forwards_nothing() {
+        let stopping = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        assert_eq!(
+            lines_until_stopped(std::io::Cursor::new("late\n"), stopping).count(),
+            0
+        );
     }
 
     #[test]

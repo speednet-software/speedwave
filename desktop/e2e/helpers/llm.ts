@@ -478,7 +478,12 @@ export async function waitForFooterToReconcile(
   return resolved;
 }
 
-export async function isUnpriced(selector: string): Promise<boolean> {
+export async function staysUnpriced(selector: string, windowMs = 15_000): Promise<boolean> {
+  const deadline = Date.now() + windowMs;
+  while (Date.now() < deadline) {
+    if ((await readUsd(selector)) !== null) return false;
+    await browser.pause(1_000);
+  }
   return (await readUsd(selector)) === null;
 }
 
