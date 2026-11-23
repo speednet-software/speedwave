@@ -6,6 +6,14 @@ import { LoggerService } from '../../services/logger.service';
 import { makeMockLogger } from '../../testing/mock-logger';
 import type { ToolUseBlock } from '../../models/chat';
 import type { AgentView } from '../agents/agents';
+import {
+  NO_WORKFLOW_RUNS,
+  foldWorkflows,
+  withWorkflowProgress,
+  withWorkflowStatus,
+  type WorkflowView,
+} from '../agents/workflows';
+import type { WorkflowAgent, WorkflowPhase } from '../../models/chat';
 
 describe('ToolBlockComponent', () => {
   let component: ToolBlockComponent;
@@ -855,6 +863,182 @@ describe('ToolBlockComponent', () => {
       expect(q(el, 'tool-meta')).toBeUndefined();
       expect(q(el, 'result-content')).toBe('report');
       expect(el.querySelector('[data-testid="agent-facts"]')).toBeNull();
+    });
+  });
+  describe('workflow progress', () => {
+    const PHASES: WorkflowPhase[] = [
+      { index: 1, title: 'Prepare' },
+      { index: 2, title: 'Finish' },
+    ];
+    const AGENTS: WorkflowAgent[] = [
+      {
+        label: 'agent-a',
+        phase_index: 1,
+        state: 'completed',
+        last_tool_name: 'Bash',
+        last_tool_summary: 'echo REC-WFA-ok',
+        tool_calls: 1,
+        duration_ms: 8157,
+        result_preview: 'agent done',
+      },
+      {
+        label: 'agent-b',
+        phase_index: 1,
+        state: 'completed',
+        last_tool_name: 'Bash',
+        last_tool_summary: 'echo REC-WFB-ok',
+        tool_calls: 1,
+        duration_ms: 8085,
+        result_preview: 'agent done',
+      },
+      { label: 'agent-c', phase_index: 2, state: 'error', tool_calls: 0, duration_ms: 23 },
+    ];
+
+    function workflowView(
+      status: Parameters<typeof withWorkflowStatus>[2],
+      agents: WorkflowAgent[] = AGENTS
+    ): WorkflowView {
+      const runs = withWorkflowStatus(
+        withWorkflowProgress(NO_WORKFLOW_RUNS, 'w1', PHASES, agents),
+        'w1',
+        status
+      );
+      return foldWorkflows(
+        [{ tool_id: 'w1', tool_name: 'Workflow', result: 'launched', is_error: false }],
+        runs
+      ).get('w1')!;
+    }
+
+    function render(workflow: WorkflowView | null): HTMLElement {
+      setTool(
+        makeTool({
+          tool_name: 'Workflow',
+          input_json: JSON.stringify({ name: 'rec-wf2' }),
+          result: 'Workflow launched in background',
+        })
+      );
+      fixture.componentRef.setInput('workflow', workflow);
+      fixture.detectChanges();
+      return fixture.nativeElement as HTMLElement;
+    }
+
+    function q(el: Element, id: string): string | undefined {
+      return el.querySelector(`[data-testid="${id}"]`)?.textContent?.replace(/\s+/g, ' ').trim();
+    }
+
+    function qa(el: Element, id: string): string[] {
+      return Array.from(el.querySelectorAll(`[data-testid="${id}"]`)).map(
+        (e) => e.textContent?.replace(/\s+/g, ' ').trim() ?? ''
+      );
+    }
+
+    it('shows the status and the phase counter in the header of a finished workflow', () => {
+      const el = render(workflowView('completed'));
+      expect(q(el, 'tool-meta')).toBe('phase 2/2 · done');
+      expect(q(el, 'tool-name')).toBe('Workflow');
+      expect(q(el, 'tool-status')).toBe('✓');
+    });
+
+    it('lists the phases in order with their agents, tools, counts and durations', () => {
+      const el = render(workflowView('completed'));
+      component.toggleCollapsed();
+      fixture.detectChanges();
+
+      expect(qa(el, 'workflow-phase-title')).toEqual(['1. Prepare', '2. Finish']);
+      const phases = Array.from(el.querySelectorAll('[data-testid="workflow-phase"]'));
+      expect(qa(phases[0], 'workflow-agent-label')).toEqual(['agent-a', 'agent-b']);
+      expect(qa(phases[0], 'workflow-agent-meta')).toEqual([
+        'done · 1 tool · 8.2s',
+        'done · 1 tool · 8.1s',
+      ]);
+      expect(qa(phases[0], 'workflow-agent-tool')).toEqual([
+        'Bash echo REC-WFA-ok',
+        'Bash echo REC-WFB-ok',
+      ]);
+      expect(qa(phases[0], 'workflow-agent-result')).toEqual(['agent done', 'agent done']);
+      expect(qa(phases[1], 'workflow-agent-label')).toEqual(['agent-c']);
+      expect(qa(phases[1], 'workflow-agent-meta')).toEqual(['failed · 0 tools · 23ms']);
+      expect(phases[1].querySelector('[data-testid="workflow-agent-tool"]')).toBeNull();
+      expect(phases[1].querySelector('[data-testid="workflow-agent-result"]')).toBeNull();
+      expect(
+        phases[1].querySelector('[data-testid="workflow-agent"]')?.getAttribute('data-status')
+      ).toBe('error');
+    });
+
+    it('is expanded while the workflow runs and collapsed after it ends', () => {
+      const running = workflowView('running', [
+        { ...AGENTS[0], state: 'running', result_preview: 'partial' },
+      ]);
+      const el = render(running);
+      expect(el.querySelector('[data-testid="tool-body"]')).not.toBeNull();
+      expect(q(el, 'tool-meta')).toBe('phase 1/2 · running');
+      expect(qa(el, 'workflow-agent-result')).toEqual([]);
+
+      fixture.componentRef.setInput('workflow', workflowView('completed'));
+      fixture.detectChanges();
+      expect(el.querySelector('[data-testid="tool-body"]')).toBeNull();
+    });
+
+    it('keeps the choice of the user over the status', () => {
+      const el = render(workflowView('running', [{ ...AGENTS[0], state: 'running' }]));
+      component.toggleCollapsed();
+      fixture.detectChanges();
+      expect(el.querySelector('[data-testid="tool-body"]')).toBeNull();
+
+      fixture.componentRef.setInput('workflow', workflowView('completed'));
+      fixture.detectChanges();
+      expect(el.querySelector('[data-testid="tool-body"]')).toBeNull();
+    });
+
+    it('updates the block when a later snapshot arrives', () => {
+      const el = render(workflowView('running', [{ ...AGENTS[0], state: 'running' }]));
+      expect(qa(el, 'workflow-agent-meta')).toEqual(['running · 1 tool · 8.2s']);
+
+      fixture.componentRef.setInput('workflow', workflowView('completed'));
+      fixture.detectChanges();
+      component.toggleCollapsed();
+      fixture.detectChanges();
+      expect(qa(el, 'workflow-agent-meta')).toHaveLength(3);
+      expect(q(el, 'tool-meta')).toBe('phase 2/2 · done');
+    });
+
+    it('shows a failed workflow as an error and a stopped one as stopped', () => {
+      const failed = render(workflowView('error'));
+      expect(q(failed, 'tool-meta')).toBe('phase 2/2 · failed');
+      expect(q(failed, 'tool-status')).toBe('✗');
+
+      fixture.componentRef.setInput('workflow', workflowView('stopped'));
+      fixture.detectChanges();
+      expect(q(failed, 'tool-meta')).toBe('phase 2/2 · stopped');
+      expect(q(failed, 'tool-status')).toBe('⊘');
+    });
+
+    it('renders text from the snapshot as text, never as markup', () => {
+      const el = render(
+        workflowView('completed', [
+          {
+            ...AGENTS[0],
+            label: '<img src=x data-testid="pwn">',
+            last_tool_summary: '<b>bold</b>',
+            result_preview: '<script>alert(1)</script>',
+          },
+        ])
+      );
+      component.toggleCollapsed();
+      fixture.detectChanges();
+      expect(el.querySelector('[data-testid="pwn"]')).toBeNull();
+      expect(el.querySelector('[data-testid="workflow-agent"] b')).toBeNull();
+      expect(el.querySelector('[data-testid="workflow-agent"] script')).toBeNull();
+      expect(q(el, 'workflow-agent-label')).toBe('<img src=x data-testid="pwn">');
+      expect(q(el, 'workflow-agent-result')).toBe('<script>alert(1)</script>');
+    });
+
+    it('renders a workflow without a snapshot from the call alone', () => {
+      const el = render(null);
+      expect(q(el, 'tool-meta')).toBeUndefined();
+      component.toggleCollapsed();
+      fixture.detectChanges();
+      expect(el.querySelector('[data-testid="workflow-phases"]')).toBeNull();
     });
   });
 });

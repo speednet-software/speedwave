@@ -1,6 +1,7 @@
 import { ChangeDetectionStrategy, Component, computed, input, output } from '@angular/core';
 import type { ChatMessage, MessageBlock } from '../../models/chat';
 import { NO_AGENT_VIEWS, type AgentView } from '../agents/agents';
+import { NO_WORKFLOW_VIEWS, type WorkflowView } from '../agents/workflows';
 import { TextBlockComponent } from '../blocks/text-block.component';
 import { ThinkingBlockComponent } from '../blocks/thinking-block.component';
 import { ToolBlockComponent } from '../blocks/tool-block.component';
@@ -52,6 +53,7 @@ import { MessageMetadataComponent } from './message-metadata.component';
                 <app-tool-block
                   [tool]="asToolBlock(block).tool"
                   [agent]="agents().get(asToolBlock(block).tool.tool_id) ?? null"
+                  [workflow]="workflows().get(asToolBlock(block).tool.tool_id) ?? null"
                 />
               }
               @case ('ask_user') {
@@ -102,6 +104,7 @@ export class ChatMessageComponent {
   readonly entry = input<ChatMessage | undefined>(undefined);
   readonly precedingEdited = input(false);
   readonly agents = input<ReadonlyMap<string, AgentView>>(NO_AGENT_VIEWS);
+  readonly workflows = input<ReadonlyMap<string, WorkflowView>>(NO_WORKFLOW_VIEWS);
   readonly questionAnswered = output<{ toolId: string; questionIdx: number; value: string }>();
   readonly permissionDecided = output<{
     blockIndex: number;

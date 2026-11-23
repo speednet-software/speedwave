@@ -18,6 +18,7 @@ import {
 } from '@angular/core';
 import type { ChatMessage, MessageBlock } from '../../models/chat';
 import { NO_AGENT_VIEWS, type AgentView } from '../agents/agents';
+import { NO_WORKFLOW_VIEWS, type WorkflowView } from '../agents/workflows';
 import { ChatMessageComponent } from '../message/chat-message.component';
 import { SpinIconComponent } from '../../shared/spin-icon.component';
 import { IconComponent } from '../../shared/icon.component';
@@ -63,6 +64,7 @@ const SCROLL_BOTTOM_THRESHOLD_PX = 16;
             [entry]="msg"
             [precedingEdited]="isPrecedingUserEdited(i)"
             [agents]="agents()"
+            [workflows]="workflows()"
             (questionAnswered)="questionAnswered.emit($event)"
           />
         }
@@ -73,6 +75,7 @@ const SCROLL_BOTTOM_THRESHOLD_PX = 16;
             role="assistant"
             [streaming]="true"
             [agents]="agents()"
+            [workflows]="workflows()"
             (questionAnswered)="questionAnswered.emit($event)"
           />
         } @else if (showAwaitingCaret()) {
@@ -118,6 +121,7 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges, On
   readonly messages = input.required<readonly ChatMessage[]>();
   readonly currentBlocks = input<readonly MessageBlock[]>([]);
   readonly agents = input<ReadonlyMap<string, AgentView>>(NO_AGENT_VIEWS);
+  readonly workflows = input<ReadonlyMap<string, WorkflowView>>(NO_WORKFLOW_VIEWS);
   readonly isStreaming = input(false);
   /** Shows a centered spinner while a resumed transcript is being fetched. */
   readonly loadingTranscript = input(false);

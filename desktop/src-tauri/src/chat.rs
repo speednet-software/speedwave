@@ -4,6 +4,7 @@ use crate::control_channel::{
 use crate::history;
 use crate::notifications::{notify_session_event, SessionEvent};
 use crate::pii_display::DisplayPolicy;
+use crate::workflow_progress::{self, WorkflowAgent, WorkflowPhase, WorkflowTracker};
 use speedwave_runtime::stream::{
     classify_turn_error, AskUserOption, AskUserQuestionItem, TurnErrorKind, MAX_ASK_USER_QUESTIONS,
     MAX_ASK_USER_WIRE_BYTES,
@@ -115,23 +116,28 @@ pub enum StreamChunk {
         tool_name: String,
         input_json: String,
     },
-    SubagentStatus {
+    TaskStatus {
         tool_id: String,
-        status: SubagentState,
+        status: TaskState,
         summary: String,
+    },
+    WorkflowProgress {
+        tool_id: String,
+        phases: Vec<WorkflowPhase>,
+        agents: Vec<WorkflowAgent>,
     },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum SubagentState {
+pub enum TaskState {
     Running,
     Completed,
     Error,
     Stopped,
 }
 
-impl SubagentState {
+impl TaskState {
     fn from_task_status(status: &str) -> Option<Self> {
         match status {
             "running" | "pending" => Some(Self::Running),
@@ -209,15 +215,35 @@ pub(crate) fn sanitize_chunk(chunk: StreamChunk) -> StreamChunk {
             session_id,
             text: sanitize(&text),
         },
-        StreamChunk::SubagentStatus {
+        StreamChunk::TaskStatus {
             tool_id,
             status,
             summary,
-        } => StreamChunk::SubagentStatus {
+        } => StreamChunk::TaskStatus {
             tool_id,
             status,
             summary: sanitize(&summary),
         },
+        StreamChunk::WorkflowProgress {
+            tool_id,
+            mut phases,
+            mut agents,
+        } => {
+            for phase in &mut phases {
+                phase.title = sanitize(&phase.title);
+            }
+            for agent in &mut agents {
+                agent.label = sanitize(&agent.label);
+                agent.last_tool_name = agent.last_tool_name.as_deref().map(sanitize);
+                agent.last_tool_summary = agent.last_tool_summary.as_deref().map(sanitize);
+                agent.result_preview = agent.result_preview.as_deref().map(sanitize);
+            }
+            StreamChunk::WorkflowProgress {
+                tool_id,
+                phases,
+                agents,
+            }
+        }
         StreamChunk::AskUserQuestion {
             tool_id,
             mut questions,
@@ -302,15 +328,36 @@ fn detokenize_chunk(chunk: StreamChunk, policy: &DisplayPolicy) -> StreamChunk {
             session_id,
             text: detok(policy, &text),
         },
-        StreamChunk::SubagentStatus {
+        StreamChunk::TaskStatus {
             tool_id,
             status,
             summary,
-        } => StreamChunk::SubagentStatus {
+        } => StreamChunk::TaskStatus {
             tool_id,
             status,
             summary: detok(policy, &summary),
         },
+        StreamChunk::WorkflowProgress {
+            tool_id,
+            mut phases,
+            mut agents,
+        } => {
+            for phase in &mut phases {
+                phase.title = detok(policy, &phase.title);
+            }
+            for agent in &mut agents {
+                agent.label = detok(policy, &agent.label);
+                agent.last_tool_name = agent.last_tool_name.as_deref().map(|t| detok(policy, t));
+                agent.last_tool_summary =
+                    agent.last_tool_summary.as_deref().map(|t| detok(policy, t));
+                agent.result_preview = agent.result_preview.as_deref().map(|t| detok(policy, t));
+            }
+            StreamChunk::WorkflowProgress {
+                tool_id,
+                phases,
+                agents,
+            }
+        }
         StreamChunk::AskUserQuestion {
             tool_id,
             mut questions,
@@ -544,6 +591,16 @@ fn option_to_vec(
     (chunk.map(|c| vec![c]).unwrap_or_default(), log)
 }
 
+struct TrackedTask {
+    tool_id: String,
+    kind: TaskKind,
+}
+
+enum TaskKind {
+    Agent,
+    Workflow(WorkflowTracker),
+}
+
 pub struct StreamParser {
     active_blocks: HashMap<u64, (String, String)>,
     pending_assistant_uuid: Option<String>,
@@ -556,7 +613,7 @@ pub struct StreamParser {
     model_tracker: crate::session_model::SessionModelTracker,
     seen_unknown_types: std::collections::HashSet<String>,
     next_turn_origin: Option<TurnOrigin>,
-    subagent_tasks: HashMap<String, String>,
+    tracked_tasks: HashMap<String, TrackedTask>,
     slash_session: Option<speedwave_runtime::slash::SessionSlash>,
 }
 
@@ -576,7 +633,7 @@ impl StreamParser {
             model_tracker: crate::session_model::SessionModelTracker::default(),
             seen_unknown_types: std::collections::HashSet::new(),
             next_turn_origin: None,
-            subagent_tasks: HashMap::new(),
+            tracked_tasks: HashMap::new(),
             slash_session: None,
         }
     }
@@ -1275,7 +1332,7 @@ impl StreamParser {
             self.next_turn_origin = Some(TurnOrigin::TaskNotification);
         }
         let (mut chunks, log) = option_to_vec(self.parse_system_message(parsed));
-        chunks.extend(self.subagent_status_chunk(parsed));
+        chunks.extend(self.task_chunks(parsed));
         if subtype == Some("init") {
             chunks.push(StreamChunk::TurnStarted {
                 origin: self.next_turn_origin.take().unwrap_or(TurnOrigin::User),
@@ -1284,44 +1341,97 @@ impl StreamParser {
         (chunks, log)
     }
 
-    fn subagent_status_chunk(&mut self, parsed: &serde_json::Value) -> Option<StreamChunk> {
-        let task_id = parsed["task_id"].as_str().filter(|s| !s.is_empty())?;
-        match parsed["subtype"].as_str()? {
-            "task_started" => {
-                if parsed["task_type"].as_str() != Some("local_agent") {
-                    return None;
+    fn task_chunks(&mut self, parsed: &serde_json::Value) -> Vec<StreamChunk> {
+        let Some(task_id) = parsed["task_id"].as_str().filter(|s| !s.is_empty()) else {
+            return Vec::new();
+        };
+        match parsed["subtype"].as_str() {
+            Some("task_started") => self.task_started(task_id, parsed),
+            Some("task_updated") => {
+                let status = parsed["patch"]["status"]
+                    .as_str()
+                    .and_then(TaskState::from_task_status);
+                match status {
+                    Some(status) => self.task_ended(task_id, status, String::new(), false),
+                    None => Vec::new(),
                 }
-                let tool_id = parsed["tool_use_id"].as_str().filter(|s| !s.is_empty())?;
-                self.subagent_tasks
-                    .insert(task_id.to_string(), tool_id.to_string());
-                Some(StreamChunk::SubagentStatus {
-                    tool_id: tool_id.to_string(),
-                    status: SubagentState::Running,
-                    summary: String::new(),
-                })
             }
-            "task_updated" => {
-                let tool_id = self.subagent_tasks.get(task_id)?.clone();
-                let status = SubagentState::from_task_status(parsed["patch"]["status"].as_str()?)?;
-                Some(StreamChunk::SubagentStatus {
-                    tool_id,
-                    status,
-                    summary: String::new(),
-                })
+            Some("task_notification") => {
+                let status = parsed["status"]
+                    .as_str()
+                    .and_then(TaskState::from_task_status)
+                    .unwrap_or(TaskState::Completed);
+                let summary = parsed["summary"].as_str().unwrap_or_default().to_string();
+                self.task_ended(task_id, status, summary, true)
             }
-            "task_notification" => {
-                let tool_id = self.subagent_tasks.remove(task_id)?;
-                Some(StreamChunk::SubagentStatus {
-                    tool_id,
-                    status: parsed["status"]
-                        .as_str()
-                        .and_then(SubagentState::from_task_status)
-                        .unwrap_or(SubagentState::Completed),
-                    summary: parsed["summary"].as_str().unwrap_or_default().to_string(),
-                })
-            }
-            _ => None,
+            Some("task_progress") => self.task_progress(task_id, parsed),
+            _ => Vec::new(),
         }
+    }
+
+    fn task_started(&mut self, task_id: &str, parsed: &serde_json::Value) -> Vec<StreamChunk> {
+        let kind = match parsed["task_type"].as_str() {
+            Some("local_agent") => TaskKind::Agent,
+            Some("local_workflow") => TaskKind::Workflow(WorkflowTracker::default()),
+            _ => return Vec::new(),
+        };
+        let Some(tool_id) = parsed["tool_use_id"].as_str().filter(|s| !s.is_empty()) else {
+            return Vec::new();
+        };
+        self.tracked_tasks.insert(
+            task_id.to_string(),
+            TrackedTask {
+                tool_id: tool_id.to_string(),
+                kind,
+            },
+        );
+        vec![StreamChunk::TaskStatus {
+            tool_id: tool_id.to_string(),
+            status: TaskState::Running,
+            summary: String::new(),
+        }]
+    }
+
+    fn task_ended(
+        &mut self,
+        task_id: &str,
+        status: TaskState,
+        summary: String,
+        forget: bool,
+    ) -> Vec<StreamChunk> {
+        let Some(task) = self.tracked_tasks.get_mut(task_id) else {
+            return Vec::new();
+        };
+        let tool_id = task.tool_id.clone();
+        let mut chunks = vec![StreamChunk::TaskStatus {
+            tool_id: tool_id.clone(),
+            status,
+            summary,
+        }];
+        if let TaskKind::Workflow(workflow) = &mut task.kind {
+            if workflow.finish(status) {
+                chunks.push(workflow.chunk(&tool_id));
+            }
+        }
+        if forget {
+            self.tracked_tasks.remove(task_id);
+        }
+        chunks
+    }
+
+    fn task_progress(&mut self, task_id: &str, parsed: &serde_json::Value) -> Vec<StreamChunk> {
+        let Some(TrackedTask {
+            tool_id,
+            kind: TaskKind::Workflow(workflow),
+        }) = self.tracked_tasks.get_mut(task_id)
+        else {
+            return Vec::new();
+        };
+        let Some((phases, agents)) = workflow_progress::parse(parsed) else {
+            return Vec::new();
+        };
+        workflow.replace(phases, agents);
+        vec![workflow.chunk(tool_id)]
     }
 
     fn parse_system_message(
@@ -3654,6 +3764,98 @@ mod tests {
         assert!(!out.contains("abcdefabcdefabcdefabcdef"), "leaked: {out}");
     }
 
+    fn workflow_chunk_with(text: &str) -> StreamChunk {
+        StreamChunk::WorkflowProgress {
+            tool_id: "toolu_w".into(),
+            phases: vec![WorkflowPhase {
+                index: 1,
+                title: text.into(),
+            }],
+            agents: vec![WorkflowAgent {
+                label: text.into(),
+                phase_index: 1,
+                state: TaskState::Running,
+                last_tool_name: Some(text.into()),
+                last_tool_summary: Some(text.into()),
+                tool_calls: 2,
+                duration_ms: 30,
+                result_preview: Some(text.into()),
+            }],
+        }
+    }
+
+    fn workflow_texts(chunk: StreamChunk) -> Vec<String> {
+        match chunk {
+            StreamChunk::WorkflowProgress {
+                tool_id,
+                phases,
+                agents,
+            } => {
+                assert_eq!(tool_id, "toolu_w");
+                assert_eq!(agents[0].tool_calls, 2);
+                assert_eq!(agents[0].duration_ms, 30);
+                assert_eq!(agents[0].state, TaskState::Running);
+                let a = &agents[0];
+                vec![
+                    phases[0].title.clone(),
+                    a.label.clone(),
+                    a.last_tool_name.clone().unwrap(),
+                    a.last_tool_summary.clone().unwrap(),
+                    a.result_preview.clone().unwrap(),
+                ]
+            }
+            other => panic!("variant changed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sanitize_chunk_redacts_every_text_field_of_workflow_progress() {
+        let texts = workflow_texts(sanitize_chunk(workflow_chunk_with(
+            "token=sk-ant-secretsecretsecretsecret done",
+        )));
+        assert_eq!(texts.len(), 5);
+        for text in texts {
+            assert!(!text.contains("secretsecretsecretsecret"), "leaked: {text}");
+        }
+    }
+
+    #[test]
+    fn sanitize_chunk_keeps_an_absent_workflow_option_absent() {
+        let chunk = StreamChunk::WorkflowProgress {
+            tool_id: "t".into(),
+            phases: Vec::new(),
+            agents: vec![WorkflowAgent {
+                label: "a".into(),
+                phase_index: 0,
+                state: TaskState::Running,
+                last_tool_name: None,
+                last_tool_summary: None,
+                tool_calls: 0,
+                duration_ms: 0,
+                result_preview: None,
+            }],
+        };
+        match sanitize_chunk(chunk) {
+            StreamChunk::WorkflowProgress { agents, .. } => {
+                assert!(agents[0].last_tool_name.is_none());
+                assert!(agents[0].last_tool_summary.is_none());
+                assert!(agents[0].result_preview.is_none());
+            }
+            other => panic!("variant changed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sanitize_chunk_redacts_the_task_status_summary() {
+        let chunk = StreamChunk::TaskStatus {
+            tool_id: "t".into(),
+            status: TaskState::Completed,
+            summary: "token=sk-ant-secretsecretsecretsecret done".into(),
+        };
+        let out = format!("{:?}", sanitize_chunk(chunk));
+        assert!(!out.contains("secretsecretsecretsecret"), "leaked: {out}");
+    }
+
     #[test]
     fn sanitize_chunk_redacts_result_text() {
         let chunk = StreamChunk::Result {
@@ -3837,6 +4039,41 @@ mod tests {
         match detokenize_chunk(queue_chunk, &policy) {
             StreamChunk::QueueDrained { text, .. } => {
                 assert_eq!(text, "reach me at jan@example.com");
+            }
+            other => panic!("variant changed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detokenize_chunk_resolves_every_text_field_of_workflow_progress() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = detok_test_key(tmp.path(), "proj");
+        let tokenized = tokenize_for_test(&key, "reach me at jan@example.com");
+        assert!(tokenized.contains("TOKEN_"), "fixture must tokenize");
+        let policy = key_policy(key);
+        let texts = workflow_texts(detokenize_chunk(workflow_chunk_with(&tokenized), &policy));
+        assert_eq!(texts.len(), 5);
+        for text in texts {
+            assert_eq!(text, "reach me at jan@example.com");
+        }
+    }
+
+    #[test]
+    fn detokenize_chunk_resolves_the_task_status_summary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = detok_test_key(tmp.path(), "proj");
+        let tokenized = tokenize_for_test(&key, "reach me at jan@example.com");
+        let chunk = StreamChunk::TaskStatus {
+            tool_id: "t".into(),
+            status: TaskState::Completed,
+            summary: tokenized,
+        };
+        match detokenize_chunk(chunk, &key_policy(key)) {
+            StreamChunk::TaskStatus {
+                status, summary, ..
+            } => {
+                assert_eq!(status, TaskState::Completed);
+                assert_eq!(summary, "reach me at jan@example.com");
             }
             other => panic!("variant changed: {other:?}"),
         }
@@ -7288,6 +7525,135 @@ mod tests {
         );
     }
 
+    const WORKFLOW_CAPTURE: &str =
+        include_str!("../tests/fixtures/cc-2.1.322-workflow.sanitized.ndjson");
+
+    #[test]
+    fn the_workflow_capture_is_of_the_pinned_claude_code() {
+        let versions: Vec<String> = capture_lines(WORKFLOW_CAPTURE)
+            .iter()
+            .filter(|l| l["type"] == "system" && l["subtype"] == "init")
+            .map(|l| l["claude_code_version"].as_str().unwrap().to_string())
+            .collect();
+        assert!(!versions.is_empty());
+        assert!(
+            versions
+                .iter()
+                .all(|v| v == speedwave_runtime::defaults::CLAUDE_VERSION),
+            "re-capture the workflow stream from Claude Code {} (got {versions:?})",
+            speedwave_runtime::defaults::CLAUDE_VERSION
+        );
+    }
+
+    fn workflow_capture_chunks() -> Vec<StreamChunk> {
+        let mut parser = StreamParser::new();
+        capture_lines(WORKFLOW_CAPTURE)
+            .iter()
+            .flat_map(|l| parser.parse_line(l).0)
+            .collect()
+    }
+
+    #[test]
+    fn the_workflow_capture_reports_the_workflow_task_status() {
+        let statuses: Vec<(String, TaskState, String)> = workflow_capture_chunks()
+            .into_iter()
+            .filter_map(|c| match c {
+                StreamChunk::TaskStatus {
+                    tool_id,
+                    status,
+                    summary,
+                } => Some((tool_id, status, summary)),
+                _ => None,
+            })
+            .collect();
+        let tool = "toolu_stub_1".to_string();
+        assert_eq!(
+            statuses,
+            [
+                (tool.clone(), TaskState::Running, String::new()),
+                (tool.clone(), TaskState::Completed, String::new()),
+                (
+                    tool,
+                    TaskState::Completed,
+                    "Dynamic workflow \"Recording workflow, 2 phases\" completed".to_string()
+                ),
+            ]
+        );
+    }
+
+    fn workflow_capture_snapshots() -> Vec<(Vec<WorkflowPhase>, Vec<WorkflowAgent>)> {
+        workflow_capture_chunks()
+            .into_iter()
+            .filter_map(|c| match c {
+                StreamChunk::WorkflowProgress {
+                    tool_id,
+                    phases,
+                    agents,
+                } => {
+                    assert_eq!(tool_id, "toolu_stub_1");
+                    Some((phases, agents))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_workflow_capture_ends_with_two_phases_and_three_agents() {
+        let snapshots = workflow_capture_snapshots();
+        let (phases, agents) = snapshots.last().unwrap();
+        let titles: Vec<(u32, &str)> = phases.iter().map(|p| (p.index, p.title.as_str())).collect();
+        assert_eq!(titles, [(1, "Prepare"), (2, "Finish")]);
+        let agents: Vec<(&str, u32, TaskState)> = agents
+            .iter()
+            .map(|a| (a.label.as_str(), a.phase_index, a.state))
+            .collect();
+        assert_eq!(
+            agents,
+            [
+                ("agent-a", 1, TaskState::Completed),
+                ("agent-b", 1, TaskState::Completed),
+                ("agent-c", 2, TaskState::Error),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_workflow_capture_progresses_from_running_to_done() {
+        let snapshots = workflow_capture_snapshots();
+        assert_eq!(snapshots.len(), 5, "a line without the array emits nothing");
+        let first = &snapshots[0].1;
+        assert!(first.iter().all(|a| a.state == TaskState::Running));
+        let tool = &snapshots[1].1[0];
+        assert_eq!(tool.last_tool_name.as_deref(), Some("Bash"));
+        assert_eq!(tool.last_tool_summary.as_deref(), Some("echo REC-WFA-ok"));
+        assert_eq!(tool.tool_calls, 1);
+        let done = &snapshots[2].1[0];
+        assert_eq!(done.state, TaskState::Completed);
+        assert_eq!(done.result_preview.as_deref(), Some("agent done"));
+        assert_eq!(done.duration_ms, 8157);
+    }
+
+    #[test]
+    fn the_workflow_capture_closes_nothing_because_every_agent_has_ended() {
+        let chunks = workflow_capture_chunks();
+        let after_status = chunks
+            .iter()
+            .position(|c| {
+                matches!(
+                    c,
+                    StreamChunk::TaskStatus {
+                        status: TaskState::Completed,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        assert!(chunks[after_status..]
+            .iter()
+            .all(|c| !matches!(c, StreamChunk::WorkflowProgress { .. })));
+    }
+
     fn subagent_capture_chunks() -> Vec<StreamChunk> {
         let mut parser = StreamParser::new();
         capture_lines(SUBAGENT_CAPTURE)
@@ -7327,11 +7693,11 @@ mod tests {
     }
 
     #[test]
-    fn the_capture_reports_the_status_of_both_agents_and_not_of_the_workflow() {
-        let statuses: Vec<(String, SubagentState, String)> = subagent_capture_chunks()
+    fn the_capture_reports_the_status_of_both_agents_and_of_the_workflow() {
+        let statuses: Vec<(String, TaskState, String)> = subagent_capture_chunks()
             .into_iter()
             .filter_map(|c| match c {
-                StreamChunk::SubagentStatus {
+                StreamChunk::TaskStatus {
                     tool_id,
                     status,
                     summary,
@@ -7341,20 +7707,37 @@ mod tests {
             .collect();
         let done = |tool: &str| {
             [
-                (tool.to_string(), SubagentState::Running, String::new()),
-                (tool.to_string(), SubagentState::Completed, String::new()),
+                (tool.to_string(), TaskState::Running, String::new()),
+                (tool.to_string(), TaskState::Completed, String::new()),
                 (
                     tool.to_string(),
-                    SubagentState::Completed,
+                    TaskState::Completed,
                     "sub done".to_string(),
                 ),
             ]
         };
+        let workflow = statuses
+            .iter()
+            .filter(|(tool, _, _)| tool == "toolu_stub_10")
+            .map(|(_, status, _)| *status)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            workflow,
+            [
+                TaskState::Running,
+                TaskState::Completed,
+                TaskState::Completed
+            ]
+        );
+        let agents: Vec<_> = statuses
+            .into_iter()
+            .filter(|(tool, _, _)| tool != "toolu_stub_10")
+            .collect();
         let expected: Vec<_> = done("toolu_stub_1")
             .into_iter()
             .chain(done("toolu_stub_5"))
             .collect();
-        assert_eq!(statuses, expected);
+        assert_eq!(agents, expected);
     }
 
     #[test]
@@ -7385,10 +7768,10 @@ mod tests {
     #[test]
     fn an_agent_task_ends_with_the_status_of_its_notification() {
         let cases = [
-            ("failed", SubagentState::Error),
-            ("stopped", SubagentState::Stopped),
-            ("completed", SubagentState::Completed),
-            ("some-future-status", SubagentState::Completed),
+            ("failed", TaskState::Error),
+            ("stopped", TaskState::Stopped),
+            ("completed", TaskState::Completed),
+            ("some-future-status", TaskState::Completed),
         ];
         for (status, expected) in cases {
             let mut parser = StreamParser::new();
@@ -7400,7 +7783,7 @@ mod tests {
                 r#""subtype":"task_notification","status":"{status}","summary":"s""#
             ));
             match parse_line_all_str(&mut parser, &ended).as_slice() {
-                [StreamChunk::SubagentStatus {
+                [StreamChunk::TaskStatus {
                     tool_id,
                     status,
                     summary,
@@ -7409,13 +7792,13 @@ mod tests {
                     assert_eq!(*status, expected);
                     assert_eq!(summary, "s");
                 }
-                other => panic!("expected one SubagentStatus for {status}, got {other:?}"),
+                other => panic!("expected one TaskStatus for {status}, got {other:?}"),
             }
         }
     }
 
     #[test]
-    fn a_task_update_moves_a_known_agent_task_and_ignores_the_rest() {
+    fn a_task_update_moves_a_known_task_and_ignores_the_rest() {
         let mut parser = StreamParser::new();
         let update = status_line(r#""subtype":"task_updated","patch":{"status":"killed"}"#);
         assert!(
@@ -7427,10 +7810,10 @@ mod tests {
         );
         parse_line_all_str(&mut parser, &started);
         match parse_line_all_str(&mut parser, &update).as_slice() {
-            [StreamChunk::SubagentStatus { status, .. }] => {
-                assert_eq!(*status, SubagentState::Stopped)
+            [StreamChunk::TaskStatus { status, .. }] => {
+                assert_eq!(*status, TaskState::Stopped)
             }
-            other => panic!("expected one SubagentStatus, got {other:?}"),
+            other => panic!("expected one TaskStatus, got {other:?}"),
         }
         let no_status = status_line(r#""subtype":"task_updated","patch":{"end_time":1}"#);
         assert!(parse_line_all_str(&mut parser, &no_status).is_empty());
@@ -7442,16 +7825,161 @@ mod tests {
     }
 
     #[test]
-    fn a_task_that_is_not_an_agent_reports_no_status() {
+    fn a_task_of_another_type_produces_no_events() {
         let mut parser = StreamParser::new();
         let started = status_line(
-            r#""subtype":"task_started","task_type":"local_workflow","tool_use_id":"toolu_w""#,
+            r#""subtype":"task_started","task_type":"local_bash","tool_use_id":"toolu_b""#,
         );
         assert!(parse_line_all_str(&mut parser, &started).is_empty());
+        let progress = status_line(r#""subtype":"task_progress","workflow_progress":[]"#);
+        assert!(parse_line_all_str(&mut parser, &progress).is_empty());
+        let updated = status_line(r#""subtype":"task_updated","patch":{"status":"completed"}"#);
+        assert!(parse_line_all_str(&mut parser, &updated).is_empty());
         let ended = status_line(r#""subtype":"task_notification","status":"completed""#);
         assert!(parse_line_all_str(&mut parser, &ended).is_empty());
         let bare = r#"{"type":"system","subtype":"task_started"}"#;
         assert!(parse_line_all_str(&mut parser, bare).is_empty());
+    }
+
+    fn workflow_line(extra: &str) -> String {
+        status_line(&format!(r#""tool_use_id":"toolu_w",{extra}"#))
+    }
+
+    fn start_workflow(parser: &mut StreamParser) {
+        let started = workflow_line(r#""subtype":"task_started","task_type":"local_workflow""#);
+        match parse_line_all_str(parser, &started).as_slice() {
+            [StreamChunk::TaskStatus {
+                tool_id, status, ..
+            }] => {
+                assert_eq!(tool_id, "toolu_w");
+                assert_eq!(*status, TaskState::Running);
+            }
+            other => panic!("expected one TaskStatus, got {other:?}"),
+        }
+    }
+
+    fn progress_line(states: &[&str]) -> String {
+        let agents: Vec<String> = states
+            .iter()
+            .enumerate()
+            .map(|(i, state)| {
+                format!(
+                    r#"{{"type":"workflow_agent","label":"a{i}","phaseIndex":1,"state":"{state}"}}"#
+                )
+            })
+            .collect();
+        workflow_line(&format!(
+            r#""subtype":"task_progress","workflow_progress":[{{"type":"workflow_phase","index":1,"title":"P"}},{}]"#,
+            agents.join(",")
+        ))
+    }
+
+    fn agent_states(chunk: &StreamChunk) -> Vec<TaskState> {
+        match chunk {
+            StreamChunk::WorkflowProgress { agents, .. } => {
+                agents.iter().map(|a| a.state).collect()
+            }
+            other => panic!("expected WorkflowProgress, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_progress_line_replaces_the_whole_snapshot() {
+        let mut parser = StreamParser::new();
+        start_workflow(&mut parser);
+        let first = parse_line_all_str(&mut parser, &progress_line(&["start", "start"]));
+        assert_eq!(
+            agent_states(&first[0]),
+            [TaskState::Running, TaskState::Running]
+        );
+        let second = parse_line_all_str(&mut parser, &progress_line(&["done"]));
+        assert_eq!(second.len(), 1);
+        assert_eq!(agent_states(&second[0]), [TaskState::Completed]);
+    }
+
+    #[test]
+    fn a_progress_line_without_the_array_or_of_an_unknown_task_emits_nothing() {
+        let mut parser = StreamParser::new();
+        let unknown = progress_line(&["start"]);
+        assert!(parse_line_all_str(&mut parser, &unknown).is_empty());
+        start_workflow(&mut parser);
+        let plain = workflow_line(r#""subtype":"task_progress","description":"x""#);
+        assert!(parse_line_all_str(&mut parser, &plain).is_empty());
+    }
+
+    #[test]
+    fn a_progress_line_of_an_agent_task_emits_nothing() {
+        let mut parser = StreamParser::new();
+        let started = workflow_line(r#""subtype":"task_started","task_type":"local_agent""#);
+        parse_line_all_str(&mut parser, &started);
+        assert!(parse_line_all_str(&mut parser, &progress_line(&["start"])).is_empty());
+    }
+
+    #[test]
+    fn a_completed_workflow_completes_its_running_agents_once() {
+        let mut parser = StreamParser::new();
+        start_workflow(&mut parser);
+        parse_line_all_str(&mut parser, &progress_line(&["progress", "done"]));
+        let updated = workflow_line(r#""subtype":"task_updated","patch":{"status":"completed"}"#);
+        match parse_line_all_str(&mut parser, &updated).as_slice() {
+            [StreamChunk::TaskStatus { status, .. }, closed] => {
+                assert_eq!(*status, TaskState::Completed);
+                assert_eq!(
+                    agent_states(closed),
+                    [TaskState::Completed, TaskState::Completed]
+                );
+            }
+            other => panic!("expected TaskStatus then WorkflowProgress, got {other:?}"),
+        }
+        let notified =
+            workflow_line(r#""subtype":"task_notification","status":"completed","summary":"done""#);
+        match parse_line_all_str(&mut parser, &notified).as_slice() {
+            [StreamChunk::TaskStatus { summary, .. }] => assert_eq!(summary, "done"),
+            other => panic!("expected only a TaskStatus, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_workflow_that_did_not_complete_stops_its_running_agents() {
+        for (status, wire) in [("failed", "error"), ("stopped", "stop"), ("killed", "kill")] {
+            let mut parser = StreamParser::new();
+            start_workflow(&mut parser);
+            parse_line_all_str(&mut parser, &progress_line(&["progress", wire]));
+            let notified = workflow_line(&format!(
+                r#""subtype":"task_notification","status":"{status}","summary":"s""#
+            ));
+            match parse_line_all_str(&mut parser, &notified).as_slice() {
+                [StreamChunk::TaskStatus { status: ended, .. }, closed] => {
+                    assert_ne!(*ended, TaskState::Completed);
+                    let expected = if wire == "error" {
+                        TaskState::Error
+                    } else {
+                        TaskState::Stopped
+                    };
+                    assert_eq!(agent_states(closed), [TaskState::Stopped, expected]);
+                }
+                other => panic!("expected TaskStatus then WorkflowProgress, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_workflow_ending_with_nothing_running_emits_only_its_status() {
+        let mut parser = StreamParser::new();
+        start_workflow(&mut parser);
+        parse_line_all_str(&mut parser, &progress_line(&["done"]));
+        let notified = workflow_line(r#""subtype":"task_notification","status":"completed""#);
+        assert_eq!(parse_line_all_str(&mut parser, &notified).len(), 1);
+    }
+
+    #[test]
+    fn a_snapshot_after_the_workflow_update_is_closed() {
+        let mut parser = StreamParser::new();
+        start_workflow(&mut parser);
+        let updated = workflow_line(r#""subtype":"task_updated","patch":{"status":"killed"}"#);
+        assert_eq!(parse_line_all_str(&mut parser, &updated).len(), 1);
+        let late = parse_line_all_str(&mut parser, &progress_line(&["progress"]));
+        assert_eq!(agent_states(&late[0]), [TaskState::Stopped]);
     }
 
     #[test]
@@ -7462,15 +7990,15 @@ mod tests {
     }
 
     #[test]
-    fn subagent_status_variant_matches_ts_mirror() {
+    fn task_status_variant_matches_ts_mirror() {
         let ts = include_str!("../../src/src/app/models/chat.ts");
-        let chunk = StreamChunk::SubagentStatus {
+        let chunk = StreamChunk::TaskStatus {
             tool_id: "t".into(),
-            status: SubagentState::Running,
+            status: TaskState::Running,
             summary: String::new(),
         };
         let v = serde_json::to_value(&chunk).unwrap();
-        assert_eq!(v["chunk_type"], "SubagentStatus");
+        assert_eq!(v["chunk_type"], "TaskStatus");
         let mut keys: Vec<&str> = v["data"]
             .as_object()
             .unwrap()
@@ -7479,27 +8007,71 @@ mod tests {
             .collect();
         keys.sort_unstable();
         assert_eq!(keys, ["status", "summary", "tool_id"]);
-        let marker = "chunk_type: 'SubagentStatus';";
+        let marker = "chunk_type: 'TaskStatus';";
         let start = ts
             .find(marker)
-            .expect("models/chat.ts must declare SubagentStatus");
+            .expect("models/chat.ts must declare TaskStatus");
         let body = &ts[start..start + ts[start..].find("};").unwrap()];
         assert!(body.contains("tool_id: string"));
         assert!(body.contains("summary: string"));
-        assert!(body.contains("status: SubagentState"));
+        assert!(body.contains("status: TaskState"));
         let wire: Vec<String> = [
-            SubagentState::Running,
-            SubagentState::Completed,
-            SubagentState::Error,
-            SubagentState::Stopped,
+            TaskState::Running,
+            TaskState::Completed,
+            TaskState::Error,
+            TaskState::Stopped,
         ]
         .iter()
         .map(|s| format!("'{}'", serde_json::to_value(s).unwrap().as_str().unwrap()))
         .collect();
-        let mirror = format!("export type SubagentState = {};", wire.join(" | "));
+        let mirror = format!("export type TaskState = {};", wire.join(" | "));
         assert!(
             ts.contains(&mirror),
             "models/chat.ts must declare `{mirror}`"
+        );
+    }
+
+    #[test]
+    fn workflow_progress_variant_matches_ts_mirror() {
+        let ts: &'static str = include_str!("../../src/src/app/models/chat.ts");
+        let chunk = workflow_chunk_with("t");
+        let v = serde_json::to_value(&chunk).unwrap();
+        assert_eq!(v["chunk_type"], "WorkflowProgress");
+        let mut keys: Vec<&str> = v["data"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["agents", "phases", "tool_id"]);
+        let marker = "chunk_type: 'WorkflowProgress';";
+        let start = ts
+            .find(marker)
+            .expect("models/chat.ts must declare WorkflowProgress");
+        let body = &ts[start..start + ts[start..].find("};").unwrap()];
+        assert!(body.contains("tool_id: string"));
+        assert!(body.contains("phases: WorkflowPhase[]"));
+        assert!(body.contains("agents: WorkflowAgent[]"));
+
+        let phase = crate::ts_mirror::rust_fields(&v["data"]["phases"][0]);
+        let ts_phase = crate::ts_mirror::ts_interface_fields(ts, "WorkflowPhase");
+        assert_eq!(phase, ts_phase);
+
+        let agent = crate::ts_mirror::rust_fields(&v["data"]["agents"][0]);
+        let mut ts_agent: Vec<&str> = crate::ts_mirror::ts_interface_fields(ts, "WorkflowAgent")
+            .into_iter()
+            .map(|f| f.trim_end_matches('?'))
+            .collect();
+        ts_agent.sort_unstable();
+        assert_eq!(agent, ts_agent);
+        let optional: Vec<&str> = crate::ts_mirror::ts_interface_fields(ts, "WorkflowAgent")
+            .into_iter()
+            .filter(|f| f.ends_with('?'))
+            .collect();
+        assert_eq!(
+            optional,
+            ["last_tool_name?", "last_tool_summary?", "result_preview?"]
         );
     }
 

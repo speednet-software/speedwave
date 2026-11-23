@@ -74,6 +74,7 @@ mod update_commands;
 mod updater;
 mod url_validation;
 mod window;
+mod workflow_progress;
 
 use types::check_project;
 

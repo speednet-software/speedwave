@@ -11,7 +11,15 @@ import { ToolNormalizerService } from '../../services/tool-normalizer.service';
 import { DiffViewComponent } from './diff-view.component';
 import { SpinIconComponent } from '../../shared/spin-icon.component';
 import { taskStatusColor, taskStatusGlyph } from '../task-plan/task-status';
-import { agentStatusWord, isStoppedResult, toolCountLabel, type AgentView } from '../agents/agents';
+import {
+  agentStatusColor,
+  agentStatusGlyph,
+  agentStatusWord,
+  isStoppedResult,
+  toolCountLabel,
+  type AgentView,
+} from '../agents/agents';
+import type { WorkflowView } from '../agents/workflows';
 import { toolSummary } from './tool-summary';
 
 /** Semantic status → timeline border color class. */
@@ -217,6 +225,54 @@ $ {{ asBash(normalized()).command }}</pre>
               }
             }
             @case ('workflow') {
+              @if (workflow(); as run) {
+                <div data-testid="workflow-phases" class="mono mb-2 space-y-2 text-[11.5px]">
+                  @for (phase of run.phases; track phase.index) {
+                    <section data-testid="workflow-phase" [attr.data-phase]="phase.index">
+                      <div data-testid="workflow-phase-title" class="text-[var(--ink-dim)]">
+                        {{ phase.index }}. {{ phase.title }}
+                      </div>
+                      <ul class="mt-1 list-none space-y-1 pl-3">
+                        @for (agent of phase.agents; track $index) {
+                          <li data-testid="workflow-agent" [attr.data-status]="agent.state">
+                            <div
+                              class="flex items-baseline gap-2"
+                              [class]="agentColor(agent.state)"
+                            >
+                              <span aria-hidden="true">{{ agentGlyph(agent.state) }}</span>
+                              <span data-testid="workflow-agent-label" class="truncate">{{
+                                agent.label
+                              }}</span>
+                              <span
+                                data-testid="workflow-agent-meta"
+                                class="ml-auto shrink-0 text-[var(--ink-mute)]"
+                                >{{ statusWord(agent.state) }} ·
+                                {{ toolCountLabel(agent.toolCount) }} · {{ agent.duration }}</span
+                              >
+                            </div>
+                            @if (agent.lastTool) {
+                              <div
+                                data-testid="workflow-agent-tool"
+                                class="truncate pl-4 text-[var(--ink-mute)]"
+                              >
+                                {{ agent.lastTool }}
+                              </div>
+                            }
+                            @if (agent.result) {
+                              <div
+                                data-testid="workflow-agent-result"
+                                class="truncate pl-4 text-[var(--ink-dim)]"
+                              >
+                                {{ agent.result }}
+                              </div>
+                            }
+                          </li>
+                        }
+                      </ul>
+                    </section>
+                  }
+                </div>
+              }
               @if (asWorkflow(normalized()).description) {
                 <div
                   data-testid="workflow-description"
@@ -305,6 +361,7 @@ $ {{ asBash(normalized()).command }}</pre>
 export class ToolBlockComponent {
   readonly tool = input.required<ToolUseBlock>();
   readonly agent = input<AgentView | null>(null);
+  readonly workflow = input<WorkflowView | null>(null);
 
   private readonly normalizer = inject(ToolNormalizerService);
   private readonly cdr = inject(ChangeDetectorRef);
@@ -337,7 +394,7 @@ export class ToolBlockComponent {
     if (override !== undefined) {
       return override;
     }
-    return true;
+    return this.workflow()?.status !== 'running';
   }
 
   /** Toggles this tool's collapsed state; the override survives status changes. */
@@ -347,10 +404,12 @@ export class ToolBlockComponent {
     this.cdr.markForCheck();
   }
 
+  private readonly taskState = computed(() => this.agent()?.status ?? this.workflow()?.status);
+
   readonly displayStatus = computed<ToolUseBlock['status']>(() => {
-    const view = this.agent();
-    if (!view) return this.tool().status;
-    switch (view.status) {
+    const state = this.taskState();
+    if (state === undefined) return this.tool().status;
+    switch (state) {
       case 'running':
         return 'running';
       case 'completed':
@@ -380,8 +439,8 @@ export class ToolBlockComponent {
 
   /** A tool is "stopped" when its error result mentions a user cancel (opacity cue). */
   readonly isStopped = computed<boolean>(() => {
-    const view = this.agent();
-    if (view) return view.status === 'stopped';
+    const state = this.taskState();
+    if (state !== undefined) return state === 'stopped';
     const t = this.tool();
     return t.status === 'error' && isStoppedResult(t.result);
   });
@@ -409,6 +468,10 @@ export class ToolBlockComponent {
     const view = this.agent();
     if (view) {
       return `${toolCountLabel(view.toolCount)} · ${agentStatusWord(view.status)}`;
+    }
+    const workflow = this.workflow();
+    if (workflow) {
+      return [workflow.phaseCounter, agentStatusWord(workflow.status)].filter(Boolean).join(' · ');
     }
     if (this.tool().status === 'running') {
       return 'running';
@@ -450,6 +513,8 @@ export class ToolBlockComponent {
   protected readonly taskStatusGlyph = taskStatusGlyph;
   protected readonly taskStatusColor = taskStatusColor;
   protected readonly statusWord = agentStatusWord;
+  protected readonly agentGlyph = agentStatusGlyph;
+  protected readonly agentColor = agentStatusColor;
   protected readonly toolCountLabel = toolCountLabel;
 
   /**

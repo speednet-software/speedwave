@@ -1,4 +1,4 @@
-import type { ConversationTranscript, SubagentCall, SubagentState } from '../../models/chat';
+import type { ConversationTranscript, SubagentCall, TaskState } from '../../models/chat';
 import type { ToolUseState } from '../../models/state-tree';
 import { normalizeToolInput } from '../../models/tool-input';
 import { toolSummary } from '../blocks/tool-summary';
@@ -6,7 +6,7 @@ import { toolSummary } from '../blocks/tool-summary';
 /** What the session knows about one subagent beyond its tool block. */
 export interface AgentRun {
   activities: readonly SubagentCall[];
-  state: SubagentState | null;
+  state: TaskState | null;
   summary: string;
 }
 
@@ -19,7 +19,7 @@ export interface AgentView {
   label: string;
   type: string | null;
   background: boolean;
-  status: SubagentState;
+  status: TaskState;
   toolCount: number;
   lastActivity: string;
   result: string | null;
@@ -59,7 +59,7 @@ export function withAgentActivity(
 export function withAgentStatus(
   runs: AgentRuns,
   toolId: string,
-  state: SubagentState,
+  state: TaskState,
   summary: string
 ): AgentRuns {
   const run = runs.get(toolId) ?? NO_RUN;
@@ -92,7 +92,7 @@ export function isStoppedResult(result: string): boolean {
   return text.includes('stopped') || text.includes('interrupted');
 }
 
-function statusOf(call: AgentCall, run: AgentRun, background: boolean): SubagentState {
+function statusOf(call: AgentCall, run: AgentRun, background: boolean): TaskState {
   if (run.state !== null && run.state !== 'running') return run.state;
   if (run.state === 'running' && background) return 'running';
   if (call.result === null) return 'running';
@@ -159,7 +159,7 @@ export function sameAgents(a: readonly AgentView[], b: readonly AgentView[]): bo
  * Word for an agent's status in the panel and the block header.
  * @param status - The agent's status.
  */
-export function agentStatusWord(status: SubagentState): string {
+export function agentStatusWord(status: TaskState): string {
   switch (status) {
     case 'running':
       return 'running';
@@ -184,7 +184,7 @@ export function toolCountLabel(count: number): string {
  * Glyph for an agent's status.
  * @param status - The agent's status.
  */
-export function agentStatusGlyph(status: SubagentState): string {
+export function agentStatusGlyph(status: TaskState): string {
   switch (status) {
     case 'running':
       return '▸';
@@ -201,7 +201,7 @@ export function agentStatusGlyph(status: SubagentState): string {
  * Tailwind color class for an agent's status.
  * @param status - The agent's status.
  */
-export function agentStatusColor(status: SubagentState): string {
+export function agentStatusColor(status: TaskState): string {
   switch (status) {
     case 'running':
       return 'text-[var(--accent)]';

@@ -822,7 +822,8 @@ export class ChatStateService {
           chunk.chunk_type === 'QueueDrained' ||
           chunk.chunk_type === 'TurnStarted' ||
           chunk.chunk_type === 'SubagentActivity' ||
-          chunk.chunk_type === 'SubagentStatus'
+          chunk.chunk_type === 'TaskStatus' ||
+          chunk.chunk_type === 'WorkflowProgress'
         ) {
           store.handleStreamChunk(chunk);
           return;

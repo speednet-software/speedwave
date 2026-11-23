@@ -1,5 +1,5 @@
 import { ChangeDetectionStrategy, Component, computed, input, output } from '@angular/core';
-import type { SubagentState } from '../../models/chat';
+import type { TaskState } from '../../models/chat';
 import {
   agentStatusColor,
   agentStatusGlyph,
@@ -8,7 +8,7 @@ import {
   type AgentView,
 } from './agents';
 
-const SUMMARY_ORDER: readonly SubagentState[] = ['running', 'completed', 'error', 'stopped'];
+const SUMMARY_ORDER: readonly TaskState[] = ['running', 'completed', 'error', 'stopped'];
 
 /** Pinned view of the subagents at work or just finished, above the composer. */
 @Component({
