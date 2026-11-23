@@ -22,8 +22,8 @@ Always run steps 1–2 before guessing a tool name or parameter. The live schema
 - `os.listReminderLists()`: list all reminder lists (no params).
 - `os.listReminders({ list_id?, limit?, show_completed?, due_from?, due_to?, overdue?, search?, sort? })`: list reminders, incomplete by default; returns `{ reminders, total, truncated }`.
 - `os.getReminder({ id })`: fetch a single reminder by ID.
-- `os.createReminder({ name, list_id?, due_date?, priority?, notes?, tags? })`: create a reminder.
-- `os.updateReminder({ id, name?, list_id?, due_date?, priority?, notes?, tags?, completed? })`: change an existing reminder in place; only the fields you pass change.
+- `os.createReminder({ name, list_id?, due_date?, priority?, notes?, tags?, alarms? })`: create a reminder.
+- `os.updateReminder({ id, name?, list_id?, due_date?, priority?, notes?, tags?, completed?, alarms? })`: change an existing reminder in place; only the fields you pass change.
 - `os.completeReminder({ id })`: mark a reminder as completed.
 - `os.deleteReminder({ id })`: permanently delete a reminder. EventKit has no trash, so a deleted reminder cannot be restored.
 - `os.createReminderList({ name, color? })`: create a list in the same account as the default list for new reminders. `color` is `#RRGGBB`.
@@ -46,6 +46,9 @@ Always run steps 1–2 before guessing a tool name or parameter. The live schema
 - **List colors use `#RRGGBB`**, the same format `listReminderLists` returns. Other formats (`#fff`, color names) are rejected.
 - **Read-only lists cannot be changed.** `updateReminderList` and `deleteReminderList` return an error for lists that do not allow modifications (for example some subscribed or shared lists); do not retry, tell the user.
 - **`deleteReminderList` deletes every reminder in the list when `force: true`**, completed ones included. Never pass `force: true` before the user has seen the reminder count from the refusal and confirmed.
+- **`alarms` is an array; each element has exactly one of three variants.** `{ at: "2026-06-15T08:30:00" }` is an absolute time (local time, parsed like `due_date`). `{ offset_minutes: -30 }` fires 30 minutes before the due date (negative is before, so the reminder needs a due date). `{ location: { name: "Biuro", latitude: 52.23, longitude: 21.01, radius_m: 100, on: "arrive" } }` fires on arriving at or leaving (`"leave"`) a place; `radius_m` is optional (omitted uses the system default radius). `listReminders` and `getReminder` return `alarms` in the same format.
+- **Location alarms need coordinates; addresses are not geocoded.** If the user names a place without coordinates, ask for them or get them from another source; do not guess. Location alarms fail with a readable error on lists whose account has no location support (for example some Exchange or CalDAV accounts); iCloud and on-this-Mac lists work.
+- **`alarms` on `updateReminder` replaces all current alarms.** Pass `null` or `[]` to remove every alarm; omit it to keep them. Email and procedure alarms, alarm sounds and early reminders are not supported. Alarms the API does not read (email, procedure, and location alarms without coordinates such as car connect/disconnect triggers) are not returned and are removed by any `alarms` replace, so warn the user before replacing alarms on a reminder created in Reminders.app.
 - **No recurrence-rule (RRULE) support** in the current API. If the user asks to create a repeating reminder, inform them this is not supported and offer to create a one-time reminder instead.
 - **iCloud-synced lists work** because the system sync layer handles it: the API sees all lists the device has, regardless of backend.
 - **macOS TCC permission is pre-validated by Speedwave Settings.** If this integration is enabled, assume access is granted; do not ask the user to check permissions.
