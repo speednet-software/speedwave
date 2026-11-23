@@ -1230,7 +1230,20 @@ pub(crate) fn restage_container_secrets(project: &str) {
 }
 
 pub(crate) fn restage_container_secrets_now(project: &str) -> Result<(), String> {
+    if project_has_no_llm_provider_in(speedwave_runtime::consts::data_dir(), project) {
+        return Ok(());
+    }
     restage_secrets(&speedwave_runtime::runtime::detect_runtime(), project)
+}
+
+fn project_has_no_llm_provider_in(data_dir: &std::path::Path, project: &str) -> bool {
+    speedwave_runtime::config::load_user_config_from(&data_dir.join("config.json"))
+        .ok()
+        .and_then(|config| config.find_project(project).cloned())
+        .and_then(|entry| entry.claude)
+        .and_then(|claude| claude.llm)
+        .unwrap_or_default()
+        .is_unconfigured()
 }
 
 fn restage_secrets(
@@ -2199,6 +2212,35 @@ mod tests {
             .with_vm_exec_as_root_exit(exit, "")
             .with_data_dir(data_dir)
             .build()
+    }
+
+    fn data_dir_with_llm(llm: Option<serde_json::Value>) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let mut project = serde_json::json!({ "name": "acme", "dir": "/tmp/acme" });
+        if let Some(llm) = llm {
+            project["claude"] = serde_json::json!({ "llm": llm });
+        }
+        let config = serde_json::json!({ "projects": [project], "active_project": "acme" });
+        std::fs::write(dir.path().join("config.json"), config.to_string()).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_project_without_an_llm_section_has_no_provider() {
+        let dir = data_dir_with_llm(None);
+
+        assert!(project_has_no_llm_provider_in(dir.path(), "acme"));
+    }
+
+    #[test]
+    fn a_project_with_an_active_provider_has_one() {
+        let dir = data_dir_with_llm(Some(serde_json::json!({
+            "schema_version": 3,
+            "providers": [{ "id": "anthropic", "kind": "anthropic_oauth" }],
+            "active": { "provider_id": "anthropic" }
+        })));
+
+        assert!(!project_has_no_llm_provider_in(dir.path(), "acme"));
     }
 
     #[test]
