@@ -201,7 +201,9 @@ describe('agile tools', () => {
     );
     const result = await call('listAgileSprints', {});
     expect(result.isError).toBe(true);
-    expect(textOf(result)).toContain('The RedmineUP Agile plugin is not available for this project');
+    expect(textOf(result)).toContain(
+      'The RedmineUP Agile plugin is not available for this project'
+    );
   });
 
   it('passes the Redmine 422 message on', async () => {

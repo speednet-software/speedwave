@@ -235,9 +235,7 @@ describe('AgileApi', () => {
       host.get.mockRejectedValue(httpError(status));
       await expect(api.listSprints('p', {})).rejects.toThrow(AGILE_UNAVAILABLE);
       host.put.mockRejectedValue(httpError(status));
-      await expect(api.updateSprint('p', 1, { name: 'n' })).rejects.toThrow(
-        AGILE_UNAVAILABLE
-      );
+      await expect(api.updateSprint('p', 1, { name: 'n' })).rejects.toThrow(AGILE_UNAVAILABLE);
       host.delete.mockRejectedValue(httpError(status));
       await expect(api.deleteSprint('p', 1)).rejects.toThrow(AGILE_UNAVAILABLE);
     });
