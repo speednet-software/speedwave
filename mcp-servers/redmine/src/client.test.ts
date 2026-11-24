@@ -3207,6 +3207,15 @@ describe('RedmineClient', () => {
     });
 
     describe('updateIssue() scoping', () => {
+      it('sends no request at all for an empty payload', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+
+        await expect(scopedClient.updateIssue(1, {})).rejects.toThrow('Nothing to update');
+
+        expect(mockAxiosInstance.get).not.toHaveBeenCalled();
+        expect(mockAxiosInstance.put).not.toHaveBeenCalled();
+      });
+
       it('should validate issue scope before PUT when scoped', async () => {
         const scopedClient = new RedmineClient(config, scopedProjectConfig);
         setupScopedGetMock();

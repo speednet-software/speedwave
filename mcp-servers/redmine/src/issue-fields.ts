@@ -1,4 +1,5 @@
 import { sanitizeTextile } from './textile.js';
+import { TOOL_NAMES } from './tool-names.js';
 
 type FieldType = 'string' | 'date' | 'textile' | 'number' | 'boolean' | 'ids' | 'custom_fields';
 
@@ -15,6 +16,7 @@ interface IssueField {
   update: boolean;
   required?: boolean;
   clearable?: boolean;
+  requires?: string;
   bounds?: { min: number; max?: number; integer?: boolean };
   alias?: { name: string; description: string };
   filter?: { name: string; syntax: FilterSyntax; type?: string | string[]; description: string };
@@ -115,8 +117,7 @@ const ISSUE_FIELDS: readonly IssueField[] = [
   {
     name: 'category_id',
     type: 'number',
-    description:
-      "Category ID, from listCategories; must belong to the issue's project. A category with a default assignee sets the assignee when none is given",
+    description: `Category ID, from ${TOOL_NAMES.LIST_CATEGORIES}; must belong to the issue's project. A category with a default assignee sets the assignee when none is given`,
     create: true,
     update: true,
     clearable: true,
@@ -124,16 +125,15 @@ const ISSUE_FIELDS: readonly IssueField[] = [
       name: 'category_id',
       syntax: 'value',
       type: ['number', 'string'],
-      description:
-        'Category filter, ID from listCategories, or Redmine filter syntax: "5|6" (any of), "!5" (not), "!*" (no category), "*" (any), ev / !ev / cf for history. Needs project_id or a configured project',
+      description: `Category filter, ID from ${TOOL_NAMES.LIST_CATEGORIES}, or Redmine filter syntax: "5|6" (any of), "!5" (not), "!*" (no category), "*" (any), ev / !ev / cf for history. Needs project_id or a configured project`,
     },
     read: 'category.id',
   },
   {
     name: 'fixed_version_id',
     type: 'number',
-    description: 'Target version ID, obtained from listVersions',
-    updateDescription: 'Target version ID, obtained from listVersions; only an open version',
+    description: `Target version ID, obtained from ${TOOL_NAMES.LIST_VERSIONS}`,
+    updateDescription: `Target version ID, obtained from ${TOOL_NAMES.LIST_VERSIONS}; only an open version`,
     create: true,
     update: true,
     clearable: true,
@@ -141,7 +141,7 @@ const ISSUE_FIELDS: readonly IssueField[] = [
       name: 'fixed_version_id',
       syntax: 'value',
       type: 'number',
-      description: 'Target version ID, obtained from listVersions; add status: "*" for closed ones',
+      description: `Target version ID, obtained from ${TOOL_NAMES.LIST_VERSIONS}; add status: "*" for closed ones`,
     },
     read: 'fixed_version.id',
   },
@@ -223,7 +223,8 @@ const ISSUE_FIELDS: readonly IssueField[] = [
     filter: {
       name: 'is_private',
       syntax: 'expression',
-      description: 'Redmine filter expression: 1 for private issues, 0 for public ones',
+      description:
+        'Redmine filter expression, a string: "1" for private issues, "0" for public ones',
     },
     read: 'is_private',
   },
@@ -267,6 +268,7 @@ const ISSUE_FIELDS: readonly IssueField[] = [
   {
     name: 'private_notes',
     type: 'boolean',
+    requires: 'notes',
     description: 'Make the notes of this update private, visible only to users who may see them',
     create: false,
     update: true,
@@ -278,8 +280,7 @@ type IssueWriteMode = 'create' | 'update';
 /** The `issue` object sent to Redmine. */
 export type IssueWrite = Record<string, unknown>;
 
-/** A payload, or the field that cannot be sent and why. */
-export type IssueWriteResult =
+type IssueWriteResult =
   { ok: true; payload: IssueWrite } | { ok: false; paramName: string; problem: string };
 
 /**
@@ -324,15 +325,10 @@ export function issueFilterProblem(
   options: Record<string, unknown>
 ): { paramName: string; problem: string } | undefined {
   for (const { filter } of ISSUE_FIELDS) {
-    if (filter?.syntax !== 'map') continue;
-    const value = options[filter.name];
-    if (value === undefined || value === null || value === '' || isCustomFieldFilter(value)) {
-      continue;
-    }
-    return {
-      paramName: filter.name,
-      problem: `${filter.name} must be an object mapping a custom field ID (digits) to a filter expression string, e.g. { "1": "2.4" }.`,
-    };
+    const value = filter && options[filter.name];
+    if (!filter || value === undefined) continue;
+    const problem = filterValueProblem(filter, value);
+    if (problem) return { paramName: filter.name, problem };
   }
   return undefined;
 }
@@ -376,6 +372,13 @@ export function buildIssuePayload(
     if (value === undefined) continue;
     const problem = valueProblem(field, value);
     if (problem) return { ok: false, paramName: field.name, problem };
+    if (field.requires && params[field.requires] === undefined) {
+      return {
+        ok: false,
+        paramName: field.name,
+        problem: `${field.name} needs ${field.requires}: it only applies to the ${field.requires} of this update. Pass both, or omit ${field.name}.`,
+      };
+    }
     payload[field.name] = payloadValue(field, value);
   }
   return { ok: true, payload };
@@ -420,17 +423,6 @@ export function issueReadIncludes(payload: IssueWrite): string[] {
   return ISSUE_FIELDS.filter((f) => f.include && f.name in payload).map((f) => f.include!);
 }
 
-function isCustomFieldFilter(value: unknown): boolean {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    !Array.isArray(value) &&
-    Object.entries(value).every(
-      ([id, expression]) => /^\d+$/.test(id) && typeof expression === 'string'
-    )
-  );
-}
-
 function fieldSchema(field: IssueField, mode: IssueWriteMode): Record<string, unknown> {
   const description =
     mode === 'update' && field.updateDescription ? field.updateDescription : field.description;
@@ -471,6 +463,34 @@ function typeSchema(type: FieldType): { type: string; [key: string]: unknown } {
         },
       };
   }
+}
+
+function filterValueProblem(
+  filter: NonNullable<IssueField['filter']>,
+  value: unknown
+): string | undefined {
+  const name = filter.name;
+  if (value === null || value === '') {
+    return `${name} must not be empty; omit it to apply no filter.`;
+  }
+  if (filter.syntax === 'map' && !isCustomFieldFilter(value)) {
+    return `${name} must be an object mapping a custom field ID (digits) to a filter expression string, e.g. { "1": "2.4" }.`;
+  }
+  if (filter.syntax === 'expression' && typeof value !== 'string') {
+    return `${name} must be a Redmine filter expression string, e.g. "1".`;
+  }
+  return undefined;
+}
+
+function isCustomFieldFilter(value: unknown): boolean {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.entries(value).every(
+      ([id, expression]) => /^\d+$/.test(id) && typeof expression === 'string'
+    )
+  );
 }
 
 function unresolvedAliasProblem(field: IssueField, value: unknown): string | undefined {
@@ -555,8 +575,21 @@ function customFieldsProblem(value: unknown): string | undefined {
     if (item.value === '') {
       return `custom_fields item ${item.id}: empty string is not a value; pass value: null to clear it.`;
     }
+    if (!isCustomFieldValue(item.value)) {
+      return `custom_fields item ${item.id}: value must be a string, a number, an array of non-empty strings or numbers, or null.`;
+    }
   }
   return undefined;
+}
+
+function isCustomFieldValue(value: unknown): boolean {
+  const scalar = (v: unknown) => (typeof v === 'string' && v !== '') || typeof v === 'number';
+  return (
+    value === null ||
+    typeof value === 'string' ||
+    typeof value === 'number' ||
+    (Array.isArray(value) && value.every(scalar))
+  );
 }
 
 function payloadValue(field: IssueField, value: unknown): unknown {

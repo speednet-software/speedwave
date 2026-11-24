@@ -212,12 +212,22 @@ describe('Redmine declared-parameter guard', () => {
     });
 
     it.each([
-      [
-        'createIssue',
-        { project_id: 'p', subject: 's', tracker_id: null },
-        'tracker_id cannot be cleared',
-      ],
-      ['updateIssue', { issue_id: 5, category_id: '' }, 'category_id: empty string is not a value'],
+      ['createIssue', { project_id: 'x', subject: 's', assigned_to: 'jane', assigned_to_id: null }],
+      ['updateIssue', { issue_id: 5, assigned_to: 'jane', assigned_to_id: null }],
+    ])('%s treats assigned_to_id: null as given next to assigned_to', async (name, params) => {
+      const client = createMockClient();
+
+      const result = await handlerFor(client, name)(params);
+
+      expect(client.resolveUser).not.toHaveBeenCalled();
+      expect(client.createIssue).not.toHaveBeenCalled();
+      expect(client.updateIssue).not.toHaveBeenCalled();
+      expect(textOf(result)).toContain('takes either assigned_to (a name) or assigned_to_id');
+    });
+
+    it.each([
+      ['createIssue', { project_id: 'p', subject: 's', tracker_id: null }, 'Invalid tracker_id.'],
+      ['updateIssue', { issue_id: 5, category_id: '' }, 'Invalid category_id.'],
     ])(
       'leaves an empty ID of %s to the field table, whose message names the field',
       async (name, params, expected) => {
@@ -228,6 +238,7 @@ describe('Redmine declared-parameter guard', () => {
         expect(client.createIssue).not.toHaveBeenCalled();
         expect(client.updateIssue).not.toHaveBeenCalled();
         expect(textOf(result)).toContain(expected);
+        expect(textOf(result)).toContain('rejected the call and sent nothing');
       }
     );
 

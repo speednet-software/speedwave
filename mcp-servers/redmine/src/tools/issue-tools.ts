@@ -616,11 +616,17 @@ function rejected(
 
 function writeResult(issue: object, payload: Record<string, unknown>) {
   const ignored = ignoredFields(payload, issue);
+  const customFields = ignored.filter((name) => name.startsWith('custom_fields.'));
+  const others = ignored.filter((name) => !customFields.includes(name));
+  const reasons = [
+    others.length > 0 &&
+      `Redmine did not apply ${others.join(', ')}: no permission, the field is disabled for the tracker, or it is derived from status or subtasks.`,
+    customFields.length > 0 &&
+      `Redmine did not apply ${customFields.join(', ')}: the custom field is not enabled for this project or tracker, or the user may not edit it.`,
+  ].filter(Boolean);
   return jsonResult({
     ...issue,
     ignored_fields: ignored,
-    ...(ignored.length > 0 && {
-      message: `Redmine did not apply ${ignored.join(', ')}: no permission, the field is disabled for the tracker, or it is derived from status or subtasks.`,
-    }),
+    ...(reasons.length > 0 && { message: reasons.join(' ') }),
   });
 }

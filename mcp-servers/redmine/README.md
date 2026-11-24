@@ -148,7 +148,7 @@ Create a new issue.
 - `watcher_user_ids` (number[], optional): Users to add as watchers (Redmine accepts them only on create)
 - `file_paths` (string[], optional): 1 to 10 paths under `/workspace` to attach to the new issue
 
-Returns the whole issue as Redmine holds it after the write, plus `ignored_fields`: the sent fields the issue does not hold (no permission, a field disabled for the tracker, or a value derived from status or subtasks), with a `message` when it is not empty. Custom fields are listed as `custom_fields.<id>`; `notes`, `private_notes` and `project_id` are not verified.
+Returns the whole issue as Redmine holds it after the write, plus `ignored_fields`: the sent fields the issue does not hold (no permission, a field disabled for the tracker, or a value derived from status or subtasks; for a custom field, one not enabled for the project or tracker or not editable by the user), with a `message` when it is not empty. Custom fields are listed as `custom_fields.<id>`; `notes`, `private_notes` and `project_id` are not verified.
 
 Empty values follow one rule on every write field: omitted means unchanged, `null` clears a clearable field (its schema type includes `null`; a text field is sent as `""`), `null` on another field is an error, and `''` is an error. Values are type-checked before sending: dates are real `YYYY-MM-DD` dates, `done_ratio` is a whole number from 0 to 100, `estimated_hours` is not negative, `is_private` and `private_notes` are booleans. An error names the field and nothing reaches Redmine.
 

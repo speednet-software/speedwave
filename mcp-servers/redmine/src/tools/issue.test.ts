@@ -1163,8 +1163,8 @@ describe('issue-tools', () => {
     });
 
     it.each([
-      ['createIssue', { project_id: 'x', subject: '' }, 'subject: empty string is not a value'],
-      ['updateIssue', { issue_id: 1, subject: null }, 'subject cannot be cleared'],
+      ['createIssue', { project_id: 'x', subject: '' }, 'Invalid subject.'],
+      ['updateIssue', { issue_id: 1, subject: null }, 'Invalid subject.'],
     ])(
       '%s rejects an invalid value naming the field and the tool',
       async (name, params, expected) => {
@@ -1207,6 +1207,23 @@ describe('issue-tools', () => {
         assigned_to_id: 42,
         tracker_id: 2,
       });
+    });
+
+    it('gives a custom field that did not apply its own reason in the message', async () => {
+      mockClient.updateIssue.mockResolvedValue({ ...issueAfter, done_ratio: 20 });
+
+      const result = await toolOf('updateIssue').handler({
+        issue_id: 1,
+        done_ratio: 50,
+        custom_fields: [{ id: 9, value: 'x' }],
+      });
+
+      const emitted = JSON.parse(textOf(result));
+      expect(emitted.ignored_fields).toEqual(['done_ratio', 'custom_fields.9']);
+      expect(emitted.message).toContain('Redmine did not apply done_ratio: no permission');
+      expect(emitted.message).toContain(
+        'Redmine did not apply custom_fields.9: the custom field is not enabled for this project or tracker, or the user may not edit it.'
+      );
     });
 
     it('updates dates and progress and returns the whole issue after the write', async () => {

@@ -68,7 +68,9 @@ function withoutAliasConflicts(tool: Tool, handler: ToolHandler): ToolHandler {
   const pairs = [...declared]
     .filter((name) => !name.endsWith('_id') && declared.has(`${name}_id`))
     .map((name) => [name, `${name}_id`] as const);
-  const given = (value: unknown) => value !== undefined && value !== null && value !== '';
+  const nullIsGiven = TABLE_VALIDATED_TOOLS.has(tool.name);
+  const given = (value: unknown) =>
+    value !== undefined && value !== '' && (value !== null || nullIsGiven);
   return async (params, ...rest) => {
     const conflict = pairs.find(([name, idName]) => given(params[name]) && given(params[idName]));
     if (conflict) {

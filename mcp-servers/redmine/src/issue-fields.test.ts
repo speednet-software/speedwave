@@ -114,6 +114,12 @@ describe('buildIssuePayload', () => {
     ['an object', '<object data="bad.swf"></object>clean', 'clean'],
     ['an embed', '<embed src="evil.swf">text', 'text'],
     ['a form', '<form action="evil"><input type="submit"></form>Safe', 'Safe'],
+    [
+      'a data: URI in plain text',
+      '"Click":data:text/html,<img onerror="alert(1)"> Safe text',
+      '"Click":text/html,<img> Safe text',
+    ],
+    ['a tag that is neither dangerous nor safe', '<svg onload="x"><g>hi</g></svg>ok', 'hiok'],
     ['mixed-case tags', '<SCRIPT>alert()</SCRIPT><iFrAmE></iFrAmE>safe', 'safe'],
     ['a javascript: scheme', 'Link: javascript:alert("xss") safe', 'Link: alert("xss") safe'],
     [
@@ -219,6 +225,10 @@ describe('buildIssuePayload', () => {
     ['an item with a non-positive id', [{ id: 0, value: 'x' }]],
     ['an item without value', [{ id: 1 }]],
     ['an item with an empty string value', [{ id: 1, value: '' }]],
+    ['an item with an object value', [{ id: 1, value: { a: 1 } }]],
+    ['an item with a boolean value', [{ id: 1, value: true }]],
+    ['an item with an empty string inside an array', [{ id: 1, value: ['a', ''] }]],
+    ['an item with an object inside an array', [{ id: 1, value: [{ a: 1 }] }]],
   ])('rejects custom_fields that is %s and names it', (_label, custom_fields) => {
     const problem = problemOf({ custom_fields }, 'update');
     expect(problem.paramName).toBe('custom_fields');
@@ -272,6 +282,22 @@ describe('buildIssuePayload', () => {
       watcher_user_ids: [],
     });
     expect(payloadOf({ done_ratio: 100 }, 'update')).toEqual({ done_ratio: 100 });
+  });
+
+  it('names the custom field id and does not echo its value', () => {
+    const problem = problemOf({ custom_fields: [{ id: 4, value: { secret: 'x' } }] }, 'update');
+    expect(problem.problem).toContain('item 4');
+    expect(problem.problem).not.toContain('secret');
+  });
+
+  it('rejects private_notes without notes, naming both, and accepts them together', () => {
+    const problem = problemOf({ private_notes: true }, 'update');
+    expect(problem.paramName).toBe('private_notes');
+    expect(problem.problem).toContain('notes');
+    expect(payloadOf({ notes: 'n', private_notes: false }, 'update')).toEqual({
+      notes: 'n',
+      private_notes: false,
+    });
   });
 
   it('tells how to clear a custom field when its value is an empty string', () => {
@@ -552,6 +578,13 @@ describe('ignoredFields', () => {
     ).toEqual([]);
   });
 
+  it('treats a read-back without custom_fields as holding none', () => {
+    expect(ignoredFields({ custom_fields: [{ id: 1, value: 'x' }] }, {})).toEqual([
+      'custom_fields.1',
+    ]);
+    expect(ignoredFields({ custom_fields: [{ id: 1, value: '' }] }, {})).toEqual([]);
+  });
+
   it('reads a custom field list with a number sent as a string value', () => {
     expect(
       ignoredFields(
@@ -587,11 +620,43 @@ describe('issueFilterProblem', () => {
     expect(problem?.problem).toContain('custom field ID');
   });
 
-  it('accepts a map of digit keys to expressions and an omitted, null or empty cf', () => {
+  it('accepts a map of digit keys to expressions and omitted filters', () => {
     expect(issueFilterProblem({ cf: { '1': '2.4', '12': '!*' } })).toBeUndefined();
-    for (const cf of [undefined, null, '']) {
-      expect(issueFilterProblem({ cf })).toBeUndefined();
-    }
+    expect(issueFilterProblem({ cf: undefined, due_date: undefined })).toBeUndefined();
+  });
+
+  it.each([
+    ['cf', null],
+    ['cf', ''],
+    ['due_date', ''],
+    ['done_ratio', null],
+    ['tracker_id', ''],
+    ['category_id', ''],
+  ])('rejects an empty %s instead of dropping it silently', (name, value) => {
+    const problem = issueFilterProblem({ [name]: value });
+    expect(problem?.paramName).toBe(name);
+    expect(problem?.problem).toContain('must not be empty');
+  });
+
+  it.each([
+    ['is_private', true],
+    ['is_private', 0],
+    ['done_ratio', 50],
+    ['watcher_id', 1739],
+    ['start_date', ['2026-11-24']],
+  ])('rejects %s given as %j, which is not an expression string', (name, value) => {
+    expect(issueFilterProblem({ [name]: value })?.paramName).toBe(name);
+  });
+
+  it('accepts expression strings and ID filters', () => {
+    expect(
+      issueFilterProblem({
+        is_private: '1',
+        due_date: '<=2026-11-30',
+        tracker_id: 3,
+        status_id: '*',
+      })
+    ).toBeUndefined();
   });
 });
 

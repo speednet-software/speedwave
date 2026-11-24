@@ -1076,18 +1076,18 @@ export class RedmineClient {
    * @param payload - Fields to change.
    */
   async updateIssue(issueId: number, payload: IssueWrite): Promise<RedmineIssue> {
+    if (Object.keys(payload).length === 0) {
+      throw new Error(
+        `Nothing to update on issue ${issueId}: no field was given, so no request was sent to Redmine. Pass at least one field.`
+      );
+    }
+
     await this._ensureIssueInScope(issueId);
     if (typeof payload.project_id === 'string') {
       this._enforceProjectId(payload.project_id);
     }
     if (typeof payload.parent_issue_id === 'number') {
       await this._ensureIssueInScope(payload.parent_issue_id);
-    }
-
-    if (Object.keys(payload).length === 0) {
-      throw new Error(
-        `Nothing to update on issue ${issueId}: no field was given, so no request was sent to Redmine. Pass at least one field.`
-      );
     }
 
     await this.client.put(`/issues/${pathSegment(issueId)}.json`, { issue: payload });
