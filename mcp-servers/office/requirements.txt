@@ -1364,9 +1364,9 @@ pyparsing==3.3.3 \
     --hash=sha256:928ae7e20211f3b6f3915a72f06a0cfd29ab9d24279dd6346b6b1a7146397d36 \
     --hash=sha256:ece8c00a69cf01b45d0b1dedabb469c90d8caf996d4fda40f147627a122849a4
     # via matplotlib
-pypdf==7.0.0 \
-    --hash=sha256:061aa78dec270854c912dde80c6bc060486fa955399d643da27ea30afeb6571b \
-    --hash=sha256:112a2c7cbabefd8dfe498f7a13977e575e762d58cdb0d832acb8886922602c6f
+pypdf==7.1.1 \
+    --hash=sha256:04c5680d4b4cfa04ab505b09393fc949860c34a4dad6565284d11a2f5c3ce8b1 \
+    --hash=sha256:2eff4e2fc5fb22a6d6711e6f1166cdc9ab5765d90cd0d77dfea3f4aa91a27b1d
     # via -r requirements.in
 pypdfium2==5.14.0 \
     --hash=sha256:09b99c8f0cb427eb17fec13c0862ed598bba34b4843df153f70fff806a2820bc \
