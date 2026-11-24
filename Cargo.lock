@@ -6238,6 +6238,7 @@ dependencies = [
  "sha2 0.11.0",
  "shlex 2.0.1",
  "speedwave-access-policy",
+ "speedwave-crypto",
  "speedwave-pii-engine",
  "speedwave-version",
  "strum",
@@ -6252,6 +6253,7 @@ dependencies = [
  "whisper-rs",
  "whisper-rs-sys",
  "windows-sys 0.61.2",
+ "zeroize",
  "zip 9.1.3",
 ]
 
