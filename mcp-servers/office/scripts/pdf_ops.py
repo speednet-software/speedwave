@@ -115,8 +115,7 @@ def _watermark(src: str, watermark: str, output: str) -> None:
     reader = _open_reader(src)
     writer = PdfWriter()
     for page in reader.pages:
-        page.merge_page(stamp)
-        writer.add_page(page)
+        writer.add_page(page).merge_page(stamp)
     _write_pdf(writer, output)
     ok(path=output, pages=len(writer.pages))
 

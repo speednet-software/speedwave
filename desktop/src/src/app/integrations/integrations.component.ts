@@ -107,8 +107,8 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
             </div>
             @for (entry of osIntegrationsAutoDisabled; track entry.service) {
               <div class="mb-1">
-                <span class="mono uppercase tracking-wider">{{ entry.service }}</span
-                >: {{ entry.reason }}
+                <span class="mono uppercase tracking-wider">{{ entry.service }}</span>:
+                {{ entry.reason }}
               </div>
             }
             <button
