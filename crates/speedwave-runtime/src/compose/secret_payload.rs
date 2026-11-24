@@ -22,8 +22,6 @@ const PII_SERVICE: &str = "pii";
 const PII_KEY_FIELD: &str = "key";
 const LLM_KEY_FIELD_SUFFIX: &str = "_api_key";
 
-/// Secret fields of one integration and how they reach its worker: delivered fields are copied
-/// from the secret store into the tokens slot, host-only fields never leave the host.
 pub(super) struct WorkerCredentials {
     service: String,
     delivered: Vec<String>,
@@ -73,8 +71,6 @@ impl WorkerCredentials {
         }
     }
 
-    /// Non-secret files of `tokens_dir` plus the delivered secrets, sorted by name. `Ok(None)` when
-    /// a secret of the integration cannot be read: it then gets no credential files at all.
     pub(super) fn files(
         &self,
         project: &str,

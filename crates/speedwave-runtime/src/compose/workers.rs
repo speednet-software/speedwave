@@ -180,8 +180,6 @@ pub(super) fn worker_bearer_file_name(token_key: &str) -> String {
     format!("{token_key}-auth-token")
 }
 
-/// One worker's Bearer auth token, derived from the install key; never stored. Plugin workers get
-/// it as compose env, built-in workers through their `auth` slot.
 pub(super) fn derived_worker_bearer(
     store: &SecretStore,
     project: &str,

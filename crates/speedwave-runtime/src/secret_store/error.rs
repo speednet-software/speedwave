@@ -25,7 +25,6 @@ pub enum SecretStoreError {
     Io(String),
 }
 
-/// User-facing text for a secret that cannot be read; it names the service only.
 pub(crate) fn unreadable_secret_message(name: &SecretName) -> String {
     let label = match name.service() {
         "llm" => "provider key",

@@ -84,7 +84,6 @@ impl SecretStore {
         self.key_or_create(&mut guard).map(|_| ())
     }
 
-    /// Derives a stable token from the install key (HKDF), creating the key on first use.
     pub(crate) fn derive_token(
         &self,
         purpose: &str,
@@ -178,7 +177,6 @@ impl SecretStore {
         self.path_of(name).is_file()
     }
 
-    /// Path of the encrypted file of one secret.
     pub(crate) fn file_path(&self, name: &SecretName) -> PathBuf {
         self.path_of(name)
     }

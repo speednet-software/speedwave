@@ -100,8 +100,6 @@ fn write_temp_key(temp: &Path, bytes: &[u8; KEY_LEN]) -> Result<(), SecretStoreE
     file.write_all(hex.as_bytes())
         .and_then(|()| file.flush())
         .map_err(|e| io_failure("write key file", &e))?;
-    file.sync_all()
-        .map_err(|e| io_failure("sync key file", &e))?;
     crate::fs_perms::fsync_file_durable(&file).map_err(|e| io_failure("sync key file", &e))
 }
 

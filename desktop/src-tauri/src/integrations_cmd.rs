@@ -315,8 +315,6 @@ fn save_redmine_credentials(
     Ok(())
 }
 
-/// Writes secret credentials of one service to the secret store; an empty value removes the
-/// secret, as an empty file meant "not configured" before.
 fn write_secret_fields(
     data_dir: &std::path::Path,
     project: &str,
@@ -1239,8 +1237,6 @@ fn remove_credential_files(svc_dir: &std::path::Path, files: &[&str]) -> Result<
     Ok(())
 }
 
-/// Deletes every stored secret of a service (its secret fields and the OAuth client secret) and
-/// then its plain credential files and OAuth state JSON. Missing items are fine.
 fn remove_integration_credentials_in(
     data_dir: &std::path::Path,
     project: &str,

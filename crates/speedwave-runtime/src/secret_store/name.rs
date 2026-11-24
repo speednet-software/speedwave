@@ -69,7 +69,6 @@ impl SecretName {
         Self::integration(project, "pii", "key")
     }
 
-    /// Parses `<service>.<field>.enc` of a project directory back into a name; strict.
     pub(crate) fn from_file_name(project: &str, file_name: &str) -> Option<Self> {
         let stem = file_name.strip_suffix(ENCRYPTED_SUFFIX)?;
         let (service, field) = stem.split_once('.')?;

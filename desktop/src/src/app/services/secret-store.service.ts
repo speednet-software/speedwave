@@ -24,28 +24,20 @@ export class SecretStoreService {
   private readonly resettingState = signal(false);
   private readonly resetErrorState = signal<string | null>(null);
 
-  /** Last status reported by the backend; `null` until the first valid answer. */
   readonly status: Signal<SecretStoreStatus | null> = this.statusState.asReadonly();
-  /** Store state; `ready` while no status is known so a missing backend never blocks the UI. */
   readonly state: Signal<SecretStoreState> = computed(() => this.statusState()?.state ?? 'ready');
-  /** Whether the store state blocks the app behind the recovery dialog. */
   readonly blocking: Signal<boolean> = computed(() => this.state() !== 'ready');
-  /** Integrations that lost their key, grouped by project. */
   readonly affectedProjects: Signal<SecretStoreProjectGroup[]> = computed(() =>
     groupByProject(this.statusState()?.integrations ?? [])
   );
-  /** Number of unexpected plaintext files found in the secrets directory. */
   readonly plaintextCount: Signal<number> = computed(() => this.statusState()?.plaintextCount ?? 0);
-  /** Unreadable-integration and failed-migration messages that the user has not dismissed yet. */
   readonly notices: Signal<string[]> = computed(() => {
     const status = this.statusState();
     return [...(status?.unreadable ?? []), ...(status?.migrationNotices ?? [])].filter(
       (message) => !this.dismissedState().includes(message)
     );
   });
-  /** Whether a key reset is running. */
   readonly resetting: Signal<boolean> = this.resettingState.asReadonly();
-  /** Message of the last failed key reset, `null` otherwise. */
   readonly resetError: Signal<string | null> = this.resetErrorState.asReadonly();
 
   /** Loads the status once at startup. */

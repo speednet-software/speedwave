@@ -157,8 +157,9 @@ fn reset_in(
     let state = evaluate(data_dir);
     if state == SecretStoreState::KeyMissing {
         let remaining = undiscardable_count(data_dir).map_err(|e| e.to_string())?;
+        let entries = if remaining == 1 { "entry" } else { "entries" };
         return Err(format!(
-            "{remaining} entries in the secrets directory could not be removed automatically. Remove them by hand and try again."
+            "{remaining} {entries} in the secrets directory could not be removed automatically. Remove them by hand and try again."
         ));
     }
     Ok(status_of(
@@ -477,7 +478,7 @@ mod tests {
 
         let err = reset_in(tmp.path(), true, None, &[]).unwrap_err();
 
-        assert!(err.starts_with("1 entries in the secrets directory"));
+        assert!(err.starts_with("1 entry in the secrets directory could not be removed"));
         assert!(outside.path().join("other.enc").exists());
     }
 
@@ -501,14 +502,11 @@ mod tests {
         let secrets = tmp.path().join("secrets");
         std::fs::create_dir_all(&secrets).unwrap();
         std::fs::set_permissions(&secrets, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let readable = std::fs::read_dir(&secrets).is_ok();
 
         let state = evaluate(tmp.path());
         std::fs::set_permissions(&secrets, std::fs::Permissions::from_mode(0o700)).unwrap();
 
-        if !readable {
-            assert_eq!(state, SecretStoreState::StoreUnavailable);
-        }
+        assert_eq!(state, SecretStoreState::StoreUnavailable);
     }
 
     #[test]

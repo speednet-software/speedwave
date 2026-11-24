@@ -383,7 +383,6 @@ fn remove_plugin_data_in(
     remove_oauth_offmount_in(data_dir, project, service_id)
 }
 
-/// Deletes the stored secrets of a plugin service, then its OAuth state and seed files.
 fn remove_oauth_offmount_in(
     data_dir: &std::path::Path,
     project: &str,
@@ -634,8 +633,6 @@ pub fn delete_plugin_credentials(project: String, slug: String) -> Result<(), St
     Ok(())
 }
 
-/// Removes the credential token files, every stored secret and the OAuth state and seed of a
-/// plugin service in one project.
 fn delete_plugin_credentials_in(
     data_dir: &std::path::Path,
     project: &str,

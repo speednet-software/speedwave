@@ -135,7 +135,6 @@ async fn openrouter_costs_for(
         .collect()
 }
 
-/// The stored OpenRouter key of a project; `None` when it is missing or cannot be read.
 fn read_openrouter_key(data_dir: &std::path::Path, project: &str) -> Option<String> {
     let name = SecretName::llm_provider_key(project, "openrouter").ok()?;
     let value = SecretStore::open(data_dir).ok()?.read(&name).ok()??;

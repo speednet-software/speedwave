@@ -191,7 +191,6 @@ pub fn spw_key_env_name(provider_id: &str) -> String {
 /// `CALLER_AUTH_HEADER` in `containers/proxy/src/main.rs`.
 pub const PROXY_CALLER_AUTH_HEADER: &str = "x-speedwave-proxy-auth";
 
-/// Per-project caller secret, derived from the install key; it is never stored.
 pub(crate) fn caller_token_in(data_dir: &Path, project: &str) -> anyhow::Result<String> {
     crate::validation::validate_project_name(project)?;
     let store = SecretStore::open(data_dir)?;

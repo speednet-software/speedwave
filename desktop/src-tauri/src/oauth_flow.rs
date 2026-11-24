@@ -335,7 +335,6 @@ pub(crate) async fn run_device_code_poll<P: DeviceCodeProvider>(poll: DeviceCode
     }
 }
 
-/// Seals one secret credential of a service into the secret store.
 pub(crate) fn save_secret_credential(
     data_dir: &std::path::Path,
     project: &str,
