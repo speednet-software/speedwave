@@ -2262,9 +2262,9 @@ describe('GitLabClient', () => {
       const result = await client.getTree(1);
 
       expect(mockGitlabInstance.Repositories.allRepositoryTrees).toHaveBeenCalledWith(1, {
-        path: undefined,
-        ref: undefined,
-        recursive: undefined,
+        pagination: 'keyset',
+        orderBy: 'path',
+        sort: 'asc',
         perPage: 100,
         maxPages: 1,
       });
@@ -2285,6 +2285,9 @@ describe('GitLabClient', () => {
         path: 'src',
         ref: 'develop',
         recursive: true,
+        pagination: 'keyset',
+        orderBy: 'path',
+        sort: 'asc',
         perPage: 50,
         maxPages: 1,
       });

@@ -379,13 +379,13 @@ export class GitLabClient {
   ): Promise<GitLabProject[]> {
     const limit = clampPageSize(options.limit, 20, 100);
     const projects = await this.gitlab.Projects.all({
-      search: options.search,
+      ...(options.search !== undefined && { search: options.search }),
       perPage: limit,
       page: options.page || 1,
       pagination: 'offset' as const,
-      owned: options.owned,
-      membership: options.membership,
-      archived: options.archived,
+      ...(options.owned !== undefined && { owned: options.owned }),
+      ...(options.membership !== undefined && { membership: options.membership }),
+      ...(options.archived !== undefined && { archived: options.archived }),
     });
 
     const limited = projects.slice(0, limit);
@@ -787,7 +787,7 @@ export class GitLabClient {
   ): Promise<unknown[]> {
     const limit = clampPageSize(options.limit, 20, 100);
     const branches = await this.gitlab.Branches.all(projectId, {
-      search: options.search,
+      ...(options.search !== undefined && { search: options.search }),
       perPage: limit,
       maxPages: 1,
     });
@@ -970,9 +970,12 @@ export class GitLabClient {
   ): Promise<unknown[]> {
     const limit = clampPageSize(options.limit, 100, 100);
     const tree = await this.gitlab.Repositories.allRepositoryTrees(projectId, {
-      path: options.path,
-      ref: options.ref,
-      recursive: options.recursive,
+      ...(options.path !== undefined && { path: options.path }),
+      ...(options.ref !== undefined && { ref: options.ref }),
+      ...(options.recursive !== undefined && { recursive: options.recursive }),
+      pagination: 'keyset',
+      orderBy: 'path',
+      sort: 'asc',
       perPage: limit,
       maxPages: 1,
     });
@@ -1256,7 +1259,7 @@ export class GitLabClient {
   ): Promise<unknown[]> {
     const limit = clampPageSize(options.limit, 50, 100);
     const labels = await this.gitlab.ProjectLabels.all(projectId, {
-      search: options.search,
+      ...(options.search !== undefined && { search: options.search }),
       perPage: limit,
       maxPages: 1,
     });
@@ -1305,20 +1308,21 @@ export class GitLabClient {
     this.validateRequired({ project_id: projectId });
     const limit = clampPageSize(options.limit, 5, 100);
     const pipelines = await this.gitlab.Pipelines.all(projectId, {
-      status: options.status as
-        | 'created'
-        | 'waiting_for_resource'
-        | 'preparing'
-        | 'pending'
-        | 'running'
-        | 'success'
-        | 'failed'
-        | 'canceled'
-        | 'skipped'
-        | 'manual'
-        | 'scheduled'
-        | undefined,
-      ref: options.ref,
+      ...(options.status !== undefined && {
+        status: options.status as
+          | 'created'
+          | 'waiting_for_resource'
+          | 'preparing'
+          | 'pending'
+          | 'running'
+          | 'success'
+          | 'failed'
+          | 'canceled'
+          | 'skipped'
+          | 'manual'
+          | 'scheduled',
+      }),
+      ...(options.ref !== undefined && { ref: options.ref }),
       perPage: limit,
       page: options.page || 1,
       maxPages: 1,
@@ -1436,7 +1440,7 @@ export class GitLabClient {
     this.validateRequired({ project_id: projectId });
     const limit = clampPageSize(options.limit, 20, 100);
     const tags = await this.gitlab.Tags.all(projectId, {
-      search: options.search,
+      ...(options.search !== undefined && { search: options.search }),
       perPage: limit,
       maxPages: 1,
     });

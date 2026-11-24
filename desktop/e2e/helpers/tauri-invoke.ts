@@ -4,18 +4,20 @@ export async function invokeCommand<T>(
   cmd: string,
   args?: Record<string, unknown>
 ): Promise<InvokeResult<T>> {
-  return browser.executeAsync<InvokeResult<T>, [string, Record<string, unknown> | null]>(
-    (command, commandArgs, done) => {
-      (
-        window as unknown as {
-          __TAURI_INTERNALS__: {
-            invoke: (cmd: string, args?: Record<string, unknown>) => Promise<T>;
-          };
-        }
-      ).__TAURI_INTERNALS__
-        .invoke(command, commandArgs ?? undefined)
-        .then((value) => done({ ok: true, value }))
-        .catch((e: unknown) => done({ ok: false, reason: String(e) }));
+  return browser.execute(
+    async (command: string, commandArgs: Record<string, unknown> | null) => {
+      try {
+        const value = await (
+          window as unknown as {
+            __TAURI_INTERNALS__: {
+              invoke: (cmd: string, args?: Record<string, unknown>) => Promise<T>;
+            };
+          }
+        ).__TAURI_INTERNALS__.invoke(command, commandArgs ?? undefined);
+        return { ok: true, value } as InvokeResult<T>;
+      } catch (e: unknown) {
+        return { ok: false, reason: String(e) } as InvokeResult<T>;
+      }
     },
     cmd,
     args ?? null
