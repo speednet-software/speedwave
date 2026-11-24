@@ -75,6 +75,20 @@ impl SecretStore {
         self.key_or_create(&mut guard).map(|_| ())
     }
 
+    /// Derives a stable token from the install key (HKDF), creating the key on first use.
+    pub fn derive_token(
+        &self,
+        purpose: &str,
+        project: &str,
+        service: &str,
+    ) -> Result<Zeroizing<String>, SecretStoreError> {
+        let mut guard = self.lock_key();
+        let key = self.key_or_create(&mut guard)?;
+        speedwave_crypto::derive_token(key, purpose, project, service)
+            .map(Zeroizing::new)
+            .map_err(|_| operation_failure("derive token"))
+    }
+
     /// Decrypts one secret; `Ok(None)` when it was never written.
     pub fn read(&self, name: &SecretName) -> Result<Option<Zeroizing<String>>, SecretStoreError> {
         let line = match std::fs::read_to_string(self.path_of(name)) {
@@ -739,5 +753,38 @@ mod tests {
         assert_eq!(mode(&tmp.path().join("secrets").join("demo")), 0o700);
         assert_eq!(mode(&tmp.path().join("secrets")), 0o700);
         assert_eq!(mode(&key_path(tmp.path())), 0o600);
+    }
+    #[test]
+    fn derived_tokens_are_stable_per_install_and_differ_per_scope() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = SecretStore::open(tmp.path()).unwrap();
+        let token = first.derive_token("bearer", "demo", "slack").unwrap();
+        let second = SecretStore::open(tmp.path()).unwrap();
+
+        assert_eq!(
+            second.derive_token("bearer", "demo", "slack").unwrap(),
+            token
+        );
+        assert_ne!(
+            second.derive_token("bearer", "demo", "github").unwrap(),
+            token
+        );
+        assert_eq!(token.len(), 64);
+        assert!(key_path(tmp.path()).is_file());
+    }
+
+    #[test]
+    fn a_derived_token_needs_the_key_when_secrets_exist_without_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SecretStore::open(tmp.path()).unwrap();
+        store.write(&name("slack", "token"), "v").unwrap();
+        std::fs::remove_file(key_path(tmp.path())).unwrap();
+
+        let reopened = SecretStore::open_with(
+            tmp.path(),
+            Box::new(FileKeySource::new(key_path(tmp.path()))),
+        );
+
+        assert!(matches!(reopened, Err(SecretStoreError::KeyMissing)));
     }
 }
