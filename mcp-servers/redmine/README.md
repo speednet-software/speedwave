@@ -82,6 +82,8 @@ List issue IDs with optional filters.
 - `fixed_version_id` (number, optional): Filter by target version (from `listVersions`)
 - `category_id` (number or string, optional): Filter by category (from `listCategories`), passed to Redmine unchanged: `5`, `"5|6"` (any of), `"!5"` (not), `"!*"` (no category), `"*"` (any), history operators `ev`, `!ev`, `cf`. Redmine skips this filter on a query without a project, so the call fails before any request unless `project_id` or the integration Project ID is set
 - `parent_id` (number, optional): Filter by parent issue
+- `start_date`, `due_date`, `done_ratio`, `is_private`, `watcher_id` (string, optional): Redmine filter expression passed unchanged, e.g. `"<=2026-11-30"`, `"<=99"`, `"><2026-11-01|2026-11-30"`, `"me"`
+- `cf` (object, optional): Custom field filters, a map of custom field ID to a Redmine filter expression, sent as `cf_<id>`, e.g. `{ "1": "2.4" }`; keys must be digits and values strings, otherwise the call is rejected
 - `limit` (number, optional): Max results (1-100, default 25)
 - `offset` (number, optional): Pagination offset (default 0)
 
@@ -108,7 +110,9 @@ are absent while unset.
 **Parameters**:
 
 - `issue_id` (number, required): Issue ID
-- `include` (array, optional): journals, attachments, relations, children, watchers, changesets, allowed_statuses
+- `include` (array, optional): `journals` (comments with `private_notes`, `details`, `created_on`, `updated_on`), `attachments`, `relations`, `children`, `watchers` (users set with `watcher_user_ids`), `changesets`, `allowed_statuses`
+
+Custom fields come back as `{ id, name, value, multiple }`.
 
 #### 3. searchIssueIds
 
@@ -137,31 +141,45 @@ Create a new issue.
 - `estimated_hours` (number, optional): Estimated hours
 - `fixed_version_id` (number, optional): Target version (from `listVersions`)
 - `category_id` (number, optional): Category (from `listCategories`) of the issue's project; a category with a default assignee sets the assignee when none is given
+- `start_date`, `due_date` (string, optional): `YYYY-MM-DD`
+- `done_ratio` (number, optional): Percent done, 0 to 100
+- `is_private` (boolean, optional): Private issue
+- `custom_fields` (array, optional): `[{ id, value }]`; `value` is an array for a multiple field
+- `watcher_user_ids` (number[], optional): Users to add as watchers (Redmine accepts them only on create)
 - `file_paths` (string[], optional): 1 to 10 paths under `/workspace` to attach to the new issue
+
+Returns the whole issue as Redmine holds it after the write, plus `ignored_fields`: the sent fields the issue does not hold (no permission, a field disabled for the tracker, or a value derived from status or subtasks; for a custom field, one not enabled for the project or tracker or not editable by the user), with a `message` when it is not empty. Custom fields are listed as `custom_fields.<id>`; `notes`, `private_notes` and `project_id` are not verified.
+
+Empty values follow one rule on every write field: omitted means unchanged, `null` clears a clearable field (its schema type includes `null`; a text field is sent as `""`), `null` on another field is an error, and `''` is an error. Values are type-checked before sending: dates are real `YYYY-MM-DD` dates, `done_ratio` is a whole number from 0 to 100, `estimated_hours` is not negative, `is_private` and `private_notes` are booleans. An error names the field and nothing reaches Redmine.
 
 #### 5. updateIssue
 
-Update an existing issue. Returns `id`, `subject`, `project`, `tracker`, `status`,
-`priority`, `assigned_to`, `fixed_version`, `category` (`null` when none),
-`parent`, and `estimated_hours` as the issue holds them after the update, so every changed field can be checked. A call
-whose fields are all empty fails instead of sending an empty update.
+Update an existing issue. Returns the whole issue as Redmine holds it after the update
+plus `ignored_fields` (see `createIssue`), so every changed field can be checked. A call
+with no field fails instead of sending an empty update. Empty values follow the rule of
+`createIssue`.
 
 **Parameters**:
 
 - `issue_id` (number, required): Issue ID to update
 - `project_id` (string, optional): Move the issue to another project
 - `subject` (string, optional): New subject
-- `description` (string, optional): New description (Textile markup)
+- `description` (string or null, optional): New description (Textile markup); `null` clears it
 - `tracker_id` / `tracker` (number / string, optional): New tracker, by ID or mapped name
 - `status_id` / `status` (number / string, optional): New status, by ID or mapped name
 - `priority_id` / `priority` (number / string, optional): New priority, by ID or mapped name
-- `assigned_to_id` (number, optional): New assigned user ID
+- `assigned_to_id` (number or null, optional): New assigned user ID; `null` unassigns
 - `assigned_to` (string, optional): Assignee name, or `'me'` to assign to the current authenticated user (resolved via `resolveUser`)
-- `parent_issue_id` (number, optional): New parent issue (must be in the configured project when scoped)
-- `estimated_hours` (number, optional): New estimated hours
-- `fixed_version_id` (number, optional): New target version, an open one from `listVersions`
+- `parent_issue_id` (number or null, optional): New parent issue (must be in the configured project when scoped); `null` detaches it
+- `estimated_hours` (number or null, optional): New estimated hours; `null` clears them
+- `fixed_version_id` (number or null, optional): New target version, an open one from `listVersions`; `null` clears it
 - `category_id` (number or null, optional): New category from `listCategories`; `null` clears it
+- `start_date`, `due_date` (string or null, optional): `YYYY-MM-DD`; `null` clears it
+- `done_ratio` (number, optional): Percent done, 0 to 100
+- `is_private` (boolean, optional): Private issue
+- `custom_fields` (array, optional): `[{ id, value }]`; `value: null` clears that field
 - `notes` (string, optional): Update notes/comment (Textile markup)
+- `private_notes` (boolean, optional): Make the notes of this update private
 
 #### 6. commentIssue
 

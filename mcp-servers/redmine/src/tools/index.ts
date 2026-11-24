@@ -16,11 +16,24 @@ import { createProjectTools } from './project-tools.js';
 import { createRelationTools } from './relation-tools.js';
 import { createConfigTools } from './config-tools.js';
 import { createCategoryTools } from './category-tools.js';
+import { TOOL_NAMES } from '../tool-names.js';
+
+const TABLE_VALIDATED_TOOLS: ReadonlySet<string> = new Set([
+  TOOL_NAMES.CREATE_ISSUE,
+  TOOL_NAMES.UPDATE_ISSUE,
+]);
+
+const isEmptyValue = (value: unknown) => value === null || value === '';
 
 function withNumericIds(tool: Tool, handler: ToolHandler): ToolHandler {
   const { ids, nullable } = numericIdParams(tool);
   return async (params, ...rest) => {
-    const checked = ids.filter((name) => !(nullable.has(name) && params[name] === null));
+    const tableOwned = TABLE_VALIDATED_TOOLS.has(tool.name);
+    const checked = ids.filter(
+      (name) =>
+        !(nullable.has(name) && params[name] === null) &&
+        !(tableOwned && isEmptyValue(params[name]))
+    );
     const normalized = normalizeNumericIdParams(params, checked);
     if (!normalized.ok) {
       const { paramName, nextStep } = normalized.error;
@@ -55,7 +68,9 @@ function withoutAliasConflicts(tool: Tool, handler: ToolHandler): ToolHandler {
   const pairs = [...declared]
     .filter((name) => !name.endsWith('_id') && declared.has(`${name}_id`))
     .map((name) => [name, `${name}_id`] as const);
-  const given = (value: unknown) => value !== undefined && value !== null && value !== '';
+  const nullIsGiven = TABLE_VALIDATED_TOOLS.has(tool.name);
+  const given = (value: unknown) =>
+    value !== undefined && value !== '' && (value !== null || nullIsGiven);
   return async (params, ...rest) => {
     const conflict = pairs.find(([name, idName]) => given(params[name]) && given(params[idName]));
     if (conflict) {

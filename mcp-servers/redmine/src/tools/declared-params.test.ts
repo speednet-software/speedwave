@@ -63,10 +63,7 @@ describe('Redmine declared-parameter guard', () => {
     const result = await updateIssue({ issue_id: 83432, fixed_version_id: 87 });
 
     expect(result.isError).toBeUndefined();
-    expect(client.updateIssue).toHaveBeenCalledWith(83432, {
-      issue_id: 83432,
-      fixed_version_id: 87,
-    });
+    expect(client.updateIssue).toHaveBeenCalledWith(83432, { fixed_version_id: 87 });
   });
 
   it('rejects parent_id on createIssue and names parent_issue_id as accepted', async () => {
@@ -104,10 +101,7 @@ describe('Redmine declared-parameter guard', () => {
     await handlerFor(client, 'updateIssue')({ issue_id: 83432, assigned_to: 1454 });
 
     expect(client.resolveUser).toHaveBeenCalledWith(1454);
-    expect(client.updateIssue).toHaveBeenCalledWith(83432, {
-      issue_id: 83432,
-      assigned_to_id: 1454,
-    });
+    expect(client.updateIssue).toHaveBeenCalledWith(83432, { assigned_to_id: 1454 });
   });
 
   it('rejects resolveUser without an identifier instead of listing every user', async () => {
@@ -173,18 +167,6 @@ describe('Redmine declared-parameter guard', () => {
       expect(client.listIssues).not.toHaveBeenCalled();
       expect(textOf(result)).toContain('takes either status (a name) or status_id (an ID)');
     });
-
-    it('accepts one form with the other left empty', async () => {
-      const client = createMockClient();
-
-      await handlerFor(client, 'updateIssue')({ issue_id: 83432, tracker: '', tracker_id: 2 });
-
-      expect(client.updateIssue).toHaveBeenCalledWith(83432, {
-        issue_id: 83432,
-        tracker: '',
-        tracker_id: 2,
-      });
-    });
   });
 
   describe('numeric IDs', () => {
@@ -229,8 +211,56 @@ describe('Redmine declared-parameter guard', () => {
       expect(client.deleteJournal).toHaveBeenCalledWith(5, 67890);
     });
 
-    it.each([null, 0, -3, 4.5, 'NaN'])(
-      'rejects fixed_version_id %j, which would otherwise clear or corrupt the version',
+    it.each([
+      ['createIssue', { project_id: 'x', subject: 's', assigned_to: 'jane', assigned_to_id: null }],
+      ['updateIssue', { issue_id: 5, assigned_to: 'jane', assigned_to_id: null }],
+    ])('%s treats assigned_to_id: null as given next to assigned_to', async (name, params) => {
+      const client = createMockClient();
+
+      const result = await handlerFor(client, name)(params);
+
+      expect(client.resolveUser).not.toHaveBeenCalled();
+      expect(client.createIssue).not.toHaveBeenCalled();
+      expect(client.updateIssue).not.toHaveBeenCalled();
+      expect(textOf(result)).toContain('takes either assigned_to (a name) or assigned_to_id');
+    });
+
+    it.each([
+      ['createIssue', { project_id: 'p', subject: 's', tracker_id: null }, 'Invalid tracker_id.'],
+      ['updateIssue', { issue_id: 5, category_id: '' }, 'Invalid category_id.'],
+    ])(
+      'leaves an empty ID of %s to the field table, whose message names the field',
+      async (name, params, expected) => {
+        const client = createMockClient();
+
+        const result = await handlerFor(client, name)(params);
+
+        expect(client.createIssue).not.toHaveBeenCalled();
+        expect(client.updateIssue).not.toHaveBeenCalled();
+        expect(textOf(result)).toContain(expected);
+        expect(textOf(result)).toContain('rejected the call and sent nothing');
+      }
+    );
+
+    it('still rejects an empty ID filter of listIssueIds as a bad number', async () => {
+      const client = { ...createMockClient(), listIssues: vi.fn() };
+
+      const result = await handlerFor(client, 'listIssueIds')({ tracker_id: '' });
+
+      expect(client.listIssues).not.toHaveBeenCalled();
+      expect(textOf(result)).toContain('Invalid tracker_id');
+    });
+
+    it('lets null through for a clearable ID instead of rejecting it as a bad number', async () => {
+      const client = createMockClient();
+
+      await handlerFor(client, 'updateIssue')({ issue_id: 83432, fixed_version_id: null });
+
+      expect(client.updateIssue).toHaveBeenCalledWith(83432, { fixed_version_id: null });
+    });
+
+    it.each([0, -3, 4.5, 'NaN'])(
+      'rejects fixed_version_id %j, which would otherwise corrupt the version',
       async (value) => {
         const client = createMockClient();
 
@@ -256,10 +286,7 @@ describe('Redmine declared-parameter guard', () => {
       )({ issue_id: 83432, category_id: null });
 
       expect(result.isError).toBeUndefined();
-      expect(client.updateIssue).toHaveBeenCalledWith(83432, {
-        issue_id: 83432,
-        category_id: null,
-      });
+      expect(client.updateIssue).toHaveBeenCalledWith(83432, { category_id: null });
     });
 
     it('lets updateCategory clear the default assignee with a null assigned_to_id', async () => {
@@ -321,7 +348,7 @@ describe('Redmine declared-parameter guard', () => {
 
       await handlerFor(client, 'updateIssue')({ issue_id: 5, category_id: '7' });
 
-      expect(client.updateIssue).toHaveBeenCalledWith(5, { issue_id: 5, category_id: 7 });
+      expect(client.updateIssue).toHaveBeenCalledWith(5, { category_id: 7 });
     });
 
     it('rejects a path-traversal category_id on deleteCategory before the client', async () => {
