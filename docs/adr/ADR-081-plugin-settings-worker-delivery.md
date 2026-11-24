@@ -17,7 +17,7 @@ So `settings_schema` was a UI-only feature: a worker could not read the values a
 
 ## Decision
 
-The validated settings JSON is materialised to the worker as a file `/tokens/_settings.json`, alongside the `auth_fields` credential files, in the plugin's existing per-project token directory. There is no new mount and no new env channel.
+The validated settings JSON is materialised to the worker as a file `/tokens/_settings.json`, alongside the `auth_fields` credential files, in the plugin's existing per-project token directory. There is no new mount and no new env channel.  *Amended by [ADR-116](ADR-116-secret-store.md) (2026-11-24): the `auth_fields` that are secrets are encrypted in the store and reach `/tokens` through the tmpfs slot; `_settings.json` stays a plain file because it holds no secrets.*
 
 - **Filename SSOT:** `consts::PLUGIN_SETTINGS_FILE` (`_settings.json`), mirrored in `mcp-servers/shared/src/security.ts` and pinned by the Rust cross-read test `plugin_settings_file_matches_mcp_shared_ts`.
 - **Writer:** `plugin::write_settings_file` (runtime crate) writes `<data_dir>/tokens/<project>/<service_id>/_settings.json` owner-only (0o600, fsync-before-rename via `fs_perms`). Desktop's `plugin_save_settings` calls it after the schema validation and the config write succeed.

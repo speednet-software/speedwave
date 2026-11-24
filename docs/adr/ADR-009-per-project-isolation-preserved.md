@@ -10,7 +10,7 @@ Each project gets its own isolated container network and its own dedicated token
 ## Why
 
 - Per-project network (`speedwave_<project>_network`) keeps one project's containers off another project's wire — built by `render_compose()` from the network name `{compose_prefix}_{project}_network`.
-- Per-project tokens directory (`~/.speedwave/tokens/<project>/`) means each project's service credentials live in their own tree; a worker only ever sees its own service's subdirectory.
+- Per-project tokens directory (`~/.speedwave/tokens/<project>/`) means each project's service credentials live in their own tree; a worker only ever sees its own service's subdirectory.  *Amended by [ADR-116](ADR-116-secret-store.md) (2026-11-24): credential values in that tree are no longer plaintext files; secrets are encrypted files under `secrets/<project>/` and reach the worker only through its tmpfs slot (ADR-115), while non-secret fields stay plain files in the token directory.*
 - The VM isolation layer (Lima + Apple VZ on macOS[^1], WSL2 + Hyper-V on Windows[^2]) adds a kernel-level hypervisor boundary beneath the container hardening. Linux as a host platform was dropped — see [ADR-059](ADR-059-drop-linux-support.md).
 - OWASP container hardening (`cap_drop: ALL`, `no-new-privileges`, `read_only`) remains unchanged on both platforms.[^3]
 

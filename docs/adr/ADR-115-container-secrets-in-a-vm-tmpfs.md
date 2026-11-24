@@ -3,6 +3,7 @@
 > **Status:** Accepted
 > **Date:** 2026-11-20
 > **Context:** SPEED-1015, a step of SPEED-579 (secrets at rest). Containers read credentials from host directories mounted through virtiofs (macOS) or `/mnt/c` (Windows), and some credentials were container env.
+> **Amendment (2026-11-24, [ADR-116](ADR-116-secret-store.md)):** The host plaintext credential files this ADR names as slot sources are gone. A slot is now built from the non-secret files on disk plus secret values read from the encrypted secret store, and the worker bearers and the proxy caller token are derived from the install key and written only to the tmpfs. Slot file names and the container side are unchanged.
 
 ## Context
 
@@ -22,7 +23,7 @@ Before this change a credential reached a container in one of two ways. Token di
 - `proxy` has `restart: "no"` (`containers/compose.template.yml`). The engine could restart it on its own after a VM boot, with an empty tmpfs and no write before it; with no restart policy a crashed proxy stays down until the next project start, and requests through it fail until then. The restart option values come from the nerdctl command reference[^2].
 - The tmpfs lives in the VM's memory and is lost when it is unmounted[^1], which a VM restart does, so every start writes it again. Nothing relies on the contents surviving.
 - Installed plugin workers keep `MCP_<SID>_AUTH_TOKEN` as plain env, because their code lives in the sibling repo `speedwave-plugins` and was not changed. That bearer still lands in `compose.yml` and in the container description. Closing it needs a plugin-side `<ENV>_FILE` reader first.
-- The host files stay the source of truth. A credential changed on the host while containers run reaches the slot only through `put_secret_file` or `stage_project_secrets`, or at the next start.
+- The host files stay the source of truth (since ADR-116: the secret store plus the non-secret files). A credential changed on the host while containers run reaches the slot only through `put_secret_file` or `stage_project_secrets`, or at the next start.
 - tmpfs pages can be swapped out under memory pressure[^1]; the VM's swap and host hibernation are out of scope here, and this change does not claim that a secret never reaches a disk.
 - A failed write (no `sudo`, a full tmpfs, a bad file name) now stops the start with the VM's stderr as the error.
 
