@@ -1719,7 +1719,7 @@ impl Default for ResolvedClaudeConfig {
     }
 }
 
-/// reading the repo config file only once.
+/// Resolves a project's config layers, reading the repo config file once.
 pub fn resolve_project_config(
     project_dir: &Path,
     user_config: &SpeedwaveUserConfig,
@@ -1733,6 +1733,7 @@ pub fn resolve_project_config(
     )
 }
 
+/// [`resolve_project_config`] under an explicit data dir.
 pub fn resolve_project_config_in(
     data_dir: &Path,
     project_dir: &Path,

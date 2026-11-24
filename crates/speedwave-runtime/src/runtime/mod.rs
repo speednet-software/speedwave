@@ -165,7 +165,6 @@ pub(crate) trait ContainerRuntime: Send + Sync {
         anyhow::bail!("vm_exec not implemented for this runtime");
     }
 
-    /// Like [`ContainerRuntime::vm_exec`], with root privileges inside the VM.
     fn vm_exec_as_root(
         &self,
         cmd: &str,

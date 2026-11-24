@@ -1,8 +1,4 @@
-//! Slot layout and payload types of the secrets tmpfs; pure data, no IO.
-
 use std::fmt;
-
-/// Root of the dedicated secrets tmpfs inside the VM.
 pub(crate) const VM_ROOT: &str = "/run/speedwave-secrets";
 
 pub(crate) const PURPOSE_TOKENS: &str = "tokens";
@@ -14,8 +10,6 @@ pub(crate) const PURPOSE_POLICY: &str = "policy";
 pub(crate) fn purpose_git_tokens(kind_key: &str) -> String {
     format!("git-{kind_key}")
 }
-
-/// One tmpfs directory of one container: `<VM_ROOT>/<project>/<service>/<purpose>`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Slot {
     service: String,
@@ -31,8 +25,6 @@ impl Slot {
             purpose: purpose.to_string(),
         })
     }
-
-    /// Absolute directory of this slot inside the VM.
     pub(crate) fn vm_dir(&self, project: &str) -> String {
         format!("{VM_ROOT}/{project}/{}/{}", self.service, self.purpose)
     }

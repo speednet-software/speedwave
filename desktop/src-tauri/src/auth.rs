@@ -1,16 +1,13 @@
 use speedwave_runtime::{compose, validation};
 use std::path::{Path, PathBuf};
 
-/// Path to the API key file for a project.
 fn api_key_path_in(data_dir: &Path, project: &str) -> anyhow::Result<PathBuf> {
     validation::validate_project_name(project)?;
     let secrets_dir = compose::init_secrets_dir_in(data_dir, project)?;
     Ok(secrets_dir.join("anthropic_api_key"))
 }
 
-/// Saves an Anthropic API key for a project at `~/.speedwave/secrets/<project>/anthropic_api_key`.
-/// Unix: created with mode 0o600 atomically (no TOCTOU window). Windows: default user-private ACLs.
-pub fn save_api_key_in(data_dir: &Path, project: &str, api_key: &str) -> anyhow::Result<()> {
+pub(crate) fn save_api_key_in(data_dir: &Path, project: &str, api_key: &str) -> anyhow::Result<()> {
     let path = api_key_path_in(data_dir, project)?;
 
     #[cfg(unix)]
@@ -34,8 +31,7 @@ pub fn save_api_key_in(data_dir: &Path, project: &str, api_key: &str) -> anyhow:
     Ok(())
 }
 
-/// Deletes the stored API key for a project.
-pub fn delete_api_key_in(data_dir: &Path, project: &str) -> anyhow::Result<()> {
+pub(crate) fn delete_api_key_in(data_dir: &Path, project: &str) -> anyhow::Result<()> {
     let path = api_key_path_in(data_dir, project)?;
     if path.exists() {
         std::fs::remove_file(&path)?;
@@ -43,8 +39,7 @@ pub fn delete_api_key_in(data_dir: &Path, project: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Checks whether an API key file exists for a project.
-pub fn has_api_key_in(data_dir: &Path, project: &str) -> bool {
+pub(crate) fn has_api_key_in(data_dir: &Path, project: &str) -> bool {
     api_key_path_in(data_dir, project)
         .map(|p| p.exists())
         .unwrap_or(false)

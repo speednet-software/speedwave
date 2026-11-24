@@ -297,8 +297,6 @@ impl LockedRuntime {
         with_acquired(project, || self.stage_secrets(project))
     }
 
-    /// Writes one file into a slot of the project's secrets tmpfs (under the per-project lock)
-    /// without touching any other file.
     pub(crate) fn put_secret_file(
         &self,
         project: &str,
