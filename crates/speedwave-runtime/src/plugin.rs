@@ -184,6 +184,29 @@ pub enum OAuthAuthStyle {
     Body,
 }
 
+/// Host of the loopback redirect URI in the `authorization_code` flow. Defaults to `127.0.0.1`
+/// (RFC 8252 §7.3); `localhost` is for IdPs that refuse an IP literal (Entra ID). See ADR-069.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OAuthRedirectHost {
+    /// `http://127.0.0.1:<port>/callback`.
+    #[default]
+    #[serde(rename = "127.0.0.1")]
+    Loopback,
+    /// `http://localhost:<port>/callback`, served on both `127.0.0.1` and `::1`.
+    #[serde(rename = "localhost")]
+    Localhost,
+}
+
+impl OAuthRedirectHost {
+    /// Wire string, matching the serde names; also the host of the redirect URI.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OAuthRedirectHost::Loopback => "127.0.0.1",
+            OAuthRedirectHost::Localhost => "localhost",
+        }
+    }
+}
+
 /// OAuth2 declaration in `plugin.json`. Drives the host-side `generic` provider
 /// and the `start_plugin_oauth` flow. See ADR-069.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -226,6 +249,9 @@ pub struct PluginOAuthSpec {
     /// `None` picks an ephemeral port (RFC 8252 §7.3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redirect_port: Option<u16>,
+    /// Host of the loopback redirect URI.
+    #[serde(default)]
+    pub redirect_host: OAuthRedirectHost,
 }
 
 /// Parsed `plugin.json` manifest (contract surface — see CLAUDE.md).
@@ -5800,6 +5826,7 @@ mod tests {
             client_id_field: "client_id".to_string(),
             client_secret_field: Some("client_secret".to_string()),
             redirect_port: None,
+            redirect_host: OAuthRedirectHost::Loopback,
         }
     }
 
@@ -6202,6 +6229,81 @@ mod tests {
         assert_eq!(spec.auth_style, OAuthAuthStyle::Basic);
         assert!(spec.client_secret_field.is_none());
         assert!(spec.redirect_port.is_none());
+        assert_eq!(spec.redirect_host, OAuthRedirectHost::Loopback);
+    }
+
+    fn spec_with_redirect_host(value: serde_json::Value) -> serde_json::Result<PluginOAuthSpec> {
+        serde_json::from_value(serde_json::json!({
+            "grant_type": "authorization_code",
+            "token_url": "https://idp.example.com/token",
+            "authorize_url": "https://idp.example.com/authorize",
+            "client_id_field": "client_id",
+            "redirect_host": value,
+        }))
+    }
+
+    #[test]
+    fn redirect_host_parses_both_hosts() {
+        let loopback = spec_with_redirect_host(serde_json::json!("127.0.0.1")).unwrap();
+        assert_eq!(loopback.redirect_host, OAuthRedirectHost::Loopback);
+        let localhost = spec_with_redirect_host(serde_json::json!("localhost")).unwrap();
+        assert_eq!(localhost.redirect_host, OAuthRedirectHost::Localhost);
+    }
+
+    #[test]
+    fn redirect_host_rejects_other_values() {
+        for bad in [
+            serde_json::json!(""),
+            serde_json::json!("LOCALHOST"),
+            serde_json::json!("::1"),
+            serde_json::json!("[::1]"),
+            serde_json::json!("0.0.0.0"),
+            serde_json::json!("evil.example.com"),
+            serde_json::json!("localhost\u{0}"),
+            serde_json::json!("l".repeat(10_000)),
+            serde_json::json!(null),
+            serde_json::json!(1),
+            serde_json::json!(["localhost"]),
+        ] {
+            assert!(
+                spec_with_redirect_host(bad.clone()).is_err(),
+                "redirect_host {bad} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn redirect_host_as_str_matches_its_wire_name() {
+        for host in [OAuthRedirectHost::Loopback, OAuthRedirectHost::Localhost] {
+            assert_eq!(
+                serde_json::to_value(host).unwrap(),
+                serde_json::json!(host.as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn validate_oauth_spec_accepts_localhost_redirect_with_and_without_port() {
+        let mut spec = valid_oauth_spec();
+        spec.redirect_host = OAuthRedirectHost::Localhost;
+        assert!(validate_oauth_spec(Some(&spec), &oauth_auth_fields()).is_ok());
+        spec.redirect_port = Some(47821);
+        assert!(validate_oauth_spec(Some(&spec), &oauth_auth_fields()).is_ok());
+    }
+
+    #[test]
+    fn manifest_with_unknown_redirect_host_does_not_parse() {
+        let json = r#"{
+            "name": "P", "slug": "p", "version": "1.0.0", "description": "d",
+            "auth_fields": [{"key": "client_id", "label": "C", "field_type": "text",
+                             "placeholder": "", "is_secret": false, "oauth_flow": true}],
+            "oauth": {"grant_type": "authorization_code",
+                      "token_url": "https://idp.example.com/token",
+                      "authorize_url": "https://idp.example.com/authorize",
+                      "client_id_field": "client_id", "redirect_host": "::1"}
+        }"#;
+        let err = serde_json::from_str::<PluginManifest>(json).unwrap_err();
+        assert!(err.to_string().contains("unknown variant"), "{err}");
     }
 
     #[test]

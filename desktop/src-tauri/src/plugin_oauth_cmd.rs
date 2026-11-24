@@ -1,5 +1,7 @@
 use crate::oauth_flow::{self, FlowRegistry, ProgressStatus};
-use crate::oauth_loopback::{build_authorize_url, wait_for_callback, CallbackFailure};
+use crate::oauth_loopback::{
+    bind_callback_listeners, build_authorize_url, redirect_uri, wait_for_callback, CallbackFailure,
+};
 use crate::types::check_project;
 use serde::Deserialize;
 use speedwave_runtime::plugin::{OAuthAuthStyle, OAuthGrantType, PluginOAuthSpec};
@@ -81,22 +83,14 @@ pub async fn start_plugin_oauth(
     let pkce = speedwave_runtime::pkce::generate_pkce();
     let state = speedwave_runtime::pkce::generate_state();
 
-    let bind_port = oauth.redirect_port.unwrap_or(0);
-    // SSOT-allow: browser-side OAuth redirect URI is 127.0.0.1, not the container-reach host_bind_address (WSL adapter IP on Windows). See ADR-069.
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", bind_port))
+    let port = oauth.redirect_port.unwrap_or(0);
+    let listeners = bind_callback_listeners(oauth.redirect_host, port)
         .await
         .map_err(|e| {
             FLOW_STATE.clear_if_current(&request_id);
             format!("failed to bind loopback callback server: {e}")
         })?;
-    let local_port = listener
-        .local_addr()
-        .map_err(|e| {
-            FLOW_STATE.clear_if_current(&request_id);
-            e.to_string()
-        })?
-        .port();
-    let redirect_uri = format!("http://127.0.0.1:{local_port}/callback");
+    let redirect_uri = redirect_uri(oauth.redirect_host, listeners.port);
 
     let auth_redirect = build_authorize_url(
         &authorize_url,
@@ -126,7 +120,14 @@ pub async fn start_plugin_oauth(
             log::warn!("could not open browser automatically: {e}");
         }
 
-        let code = match wait_for_callback(&listener, None, &state, &cancel).await {
+        let code = match wait_for_callback(
+            &listeners.primary,
+            listeners.secondary.as_ref(),
+            &state,
+            &cancel,
+        )
+        .await
+        {
             Ok(c) => c,
             Err(CallbackFailure::Cancelled) => {
                 oauth_flow::emit_terminal(
@@ -411,6 +412,7 @@ mod tests {
             client_id_field: "client_id".to_string(),
             client_secret_field: Some("client_secret".to_string()),
             redirect_port: None,
+            redirect_host: speedwave_runtime::plugin::OAuthRedirectHost::Loopback,
         }
     }
 
