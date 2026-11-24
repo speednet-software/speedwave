@@ -36,7 +36,8 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 COPY --from=python-src /usr/local/bin/python3.13 /usr/local/bin/python3.13
 COPY --from=python-src /usr/local/lib/libpython3.13.so.1.0 /usr/local/lib/libpython3.13.so.1.0
 COPY --from=python-src /usr/local/lib/python3.13 /usr/local/lib/python3.13
-RUN ldconfig
+RUN ldconfig \
+    && /usr/local/bin/python3.13 -m compileall -q /usr/local/lib/python3.13
 
 COPY office/requirements.txt /tmp/requirements.txt
 RUN /usr/local/bin/python3.13 -m venv /opt/office-venv \
