@@ -1,4 +1,5 @@
 use std::fmt;
+
 pub(crate) const VM_ROOT: &str = "/run/speedwave-secrets";
 
 pub(crate) const PURPOSE_TOKENS: &str = "tokens";
@@ -10,6 +11,7 @@ pub(crate) const PURPOSE_POLICY: &str = "policy";
 pub(crate) fn purpose_git_tokens(kind_key: &str) -> String {
     format!("git-{kind_key}")
 }
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Slot {
     service: String,
@@ -25,6 +27,7 @@ impl Slot {
             purpose: purpose.to_string(),
         })
     }
+
     pub(crate) fn vm_dir(&self, project: &str) -> String {
         format!("{VM_ROOT}/{project}/{}/{}", self.service, self.purpose)
     }
