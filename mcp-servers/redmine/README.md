@@ -8,12 +8,17 @@ Isolated Redmine MCP server with per-service token isolation for Speedwave.
 **Port**: 3003 (internal Docker network)  
 **Protocol**: MCP 2025-03-26 (Streamable HTTP)
 
-This worker provides **15 Redmine tools** via the Model Context Protocol:
+This worker provides **32 Redmine tools** via the Model Context Protocol:
 
 - 6 issue operations (list, show, search, create, update, comment)
+- 3 attachment operations (add, download, delete)
 - 3 time entry operations (list, create, update)
 - 3 journal operations (list, update, delete)
-- 3 user operations (list, resolve, getMappings)
+- 3 user operations (list, resolve, current user)
+- 4 project operations (list, show, search, versions)
+- 5 category operations (list, show, create, update, delete)
+- 3 relation operations (list, create, delete)
+- 2 configuration operations (mappings, config)
 
 ## Architecture
 
@@ -75,6 +80,7 @@ List issue IDs with optional filters.
 - `tracker_id` (number, optional): Filter by tracker
 - `priority_id` (number, optional): Filter by priority
 - `fixed_version_id` (number, optional): Filter by target version (from `listVersions`)
+- `category_id` (number or string, optional): Filter by category (from `listCategories`), passed to Redmine unchanged: `5`, `"5|6"` (any of), `"!5"` (not), `"!*"` (no category), `"*"` (any), history operators `ev`, `!ev`, `cf`. Redmine skips this filter on a query without a project, so the call fails before any request unless `project_id` or the integration Project ID is set
 - `parent_id` (number, optional): Filter by parent issue
 - `limit` (number, optional): Max results (1-100, default 25)
 - `offset` (number, optional): Pagination offset (default 0)
@@ -130,13 +136,14 @@ Create a new issue.
 - `parent_issue_id` (number, optional): Parent issue (for subtasks)
 - `estimated_hours` (number, optional): Estimated hours
 - `fixed_version_id` (number, optional): Target version (from `listVersions`)
+- `category_id` (number, optional): Category (from `listCategories`) of the issue's project; a category with a default assignee sets the assignee when none is given
 - `file_paths` (string[], optional): 1 to 10 paths under `/workspace` to attach to the new issue
 
 #### 5. updateIssue
 
 Update an existing issue. Returns `id`, `subject`, `project`, `tracker`, `status`,
-`priority`, `assigned_to`, `fixed_version`, `parent`, and `estimated_hours` as the
-issue holds them after the update, so every changed field can be checked. A call
+`priority`, `assigned_to`, `fixed_version`, `category` (`null` when none),
+`parent`, and `estimated_hours` as the issue holds them after the update, so every changed field can be checked. A call
 whose fields are all empty fails instead of sending an empty update.
 
 **Parameters**:
@@ -153,6 +160,7 @@ whose fields are all empty fails instead of sending an empty update.
 - `parent_issue_id` (number, optional): New parent issue (must be in the configured project when scoped)
 - `estimated_hours` (number, optional): New estimated hours
 - `fixed_version_id` (number, optional): New target version, an open one from `listVersions`
+- `category_id` (number or null, optional): New category from `listCategories`; `null` clears it
 - `notes` (string, optional): Update notes/comment (Textile markup)
 
 #### 6. commentIssue
@@ -356,6 +364,53 @@ configured project may be named by its numeric ID or its identifier.
 - `project_id` (string or number, optional): Project ID or identifier; defaults to the configured project
 
 **Returns**: `{ versions: [{ id, project, name, description, status, due_date, sharing, wiki_page_title, custom_fields, created_on, updated_on }], total_count }`
+
+### Category Operations
+
+Issue categories belong to one project and are addressed by ID. `listCategories` and `createCategory` take a `project_id` (default: the configured project; another project fails with a scope error when scoped). `getCategory`, `updateCategory` and `deleteCategory` take only the category ID and do not check its project against the configured one. Creating, changing and deleting need the Redmine permission "Manage issue categories" (`manage_categories`) in the project; a 403 says so.
+
+#### listCategories
+
+**Parameters**: `project_id` (string or number, optional)
+
+**Returns**: `{ categories: [{ id, project, name, assigned_to }], total_count }`; `assigned_to` is the default assignee and absent when none is set.
+
+#### getCategory
+
+**Parameters**: `category_id` (number, required)
+
+**Returns**: `{ id, project, name, assigned_to }`
+
+#### createCategory
+
+**Parameters**:
+
+- `project_id` (string or number, optional): defaults to the configured project
+- `name` (string, required): unique within the project
+- `assigned_to_id` (number, optional): default assignee for issues in the category
+
+**Returns**: the created category.
+
+#### updateCategory
+
+**Parameters**:
+
+- `category_id` (number, required)
+- `name` (string, optional)
+- `assigned_to_id` (number or null, optional): `null` clears the default assignee
+
+At least one of `name` and `assigned_to_id` is required. **Returns**: `{ success: true }`
+
+#### deleteCategory
+
+Irreversible. Issues in the category lose their category unless `reassign_to_id` names another category of the same project.
+
+**Parameters**:
+
+- `category_id` (number, required)
+- `reassign_to_id` (number, optional)
+
+**Returns**: `{ success: true }`
 
 ### Relation Operations
 
