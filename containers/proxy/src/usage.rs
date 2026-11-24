@@ -137,20 +137,18 @@ pub fn sniff(frame: &Value, acc: &mut UsageAcc) {
                 }
             }
         }
-        "error" => {
-            if acc.in_band_error.is_none() {
-                let err = frame.get("error");
-                let field = |name: &str| {
-                    err.and_then(|e| e.get(name))
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown")
-                        .to_string()
-                };
-                acc.in_band_error = Some(InBandError {
-                    kind: field("type"),
-                    message: field("message"),
-                });
-            }
+        "error" if acc.in_band_error.is_none() => {
+            let err = frame.get("error");
+            let field = |name: &str| {
+                err.and_then(|e| e.get(name))
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string()
+            };
+            acc.in_band_error = Some(InBandError {
+                kind: field("type"),
+                message: field("message"),
+            });
         }
         _ => {}
     }
