@@ -15,6 +15,8 @@ COPY office/tsconfig.json ./office/
 RUN npm run build --workspace=office
 RUN npm prune --omit=dev --workspace=office --ignore-scripts
 
+FROM python:3.13-slim-bookworm@sha256:a5a7017efc5969e00ae2b91c8eb0631049a569652aa4ffc4501769049ae45c72 AS python-src
+
 FROM node:24-bookworm-slim@sha256:2c87ef9bd3c6a3bd4b472b4bec2ce9d16354b0c574f736c476489d09f560a203
 WORKDIR /app
 
@@ -22,14 +24,22 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
       libreoffice-writer libreoffice-calc libreoffice-impress \
       poppler-utils \
       pandoc \
-      python3 python3-pip python3-venv \
       libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz-subset0 \
       fonts-liberation fonts-dejavu-core \
       curl ca-certificates tzdata \
+      libssl3 libffi8 libbz2-1.0 liblzma5 libsqlite3-0 libuuid1 zlib1g \
     && rm -rf /var/lib/apt/lists/*
 
+# Python 3.13 for the venv comes from the official python image (bookworm, same glibc as this
+# base), not from apt: bookworm's python3 is 3.11.2 and soupsieve 4.x needs >=3.11.5.
+# lock-office.sh --python-version must match this minor version.
+COPY --from=python-src /usr/local/bin/python3.13 /usr/local/bin/python3.13
+COPY --from=python-src /usr/local/lib/libpython3.13.so.1.0 /usr/local/lib/libpython3.13.so.1.0
+COPY --from=python-src /usr/local/lib/python3.13 /usr/local/lib/python3.13
+RUN ldconfig
+
 COPY office/requirements.txt /tmp/requirements.txt
-RUN python3 -m venv /opt/office-venv \
+RUN /usr/local/bin/python3.13 -m venv /opt/office-venv \
     && /opt/office-venv/bin/pip install --no-cache-dir --require-hashes --no-deps -r /tmp/requirements.txt \
     && rm /tmp/requirements.txt
 

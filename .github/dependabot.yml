@@ -110,6 +110,7 @@ updates:
       - /mcp-servers/sharepoint
       - /mcp-servers/redmine
       - /mcp-servers/gitlab
+      - /mcp-servers/office
     patterns: ['*']
     multi-ecosystem-group: dependencies
     cooldown:
@@ -117,3 +118,5 @@ updates:
     ignore:
       - dependency-name: 'node'
         versions: ['>=25']
+      - dependency-name: 'python'
+        versions: ['>=3.14']
