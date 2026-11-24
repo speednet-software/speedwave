@@ -100,7 +100,7 @@ runs:
 
     - name: Rust cache
       if: inputs.rust-cache-workspaces != ''
-      uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
       with:
         workspaces: ${{ inputs.rust-cache-workspaces }}
         shared-key: ${{ inputs.rust-cache-shared-key }}

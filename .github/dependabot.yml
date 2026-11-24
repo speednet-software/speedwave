@@ -7,6 +7,8 @@ multi-ecosystem-groups:
       cronjob: '0 6 * * 1'
       timezone: Europe/Warsaw
     target-branch: dev
+    commit-message:
+      prefix: 'chore(deps)'
     labels:
       - dependencies
 
@@ -30,6 +32,10 @@ updates:
         versions: ['>=0.53']
       - dependency-name: 'rand'
         versions: ['>=0.9']
+      - dependency-name: 'burn'
+        versions: ['>=0.22']
+      - dependency-name: 'parking_lot'
+        versions: ['>=0.13']
 
   - package-ecosystem: npm
     directory: /
@@ -93,6 +99,8 @@ updates:
     ignore:
       - dependency-name: 'typescript'
         versions: ['>=6']
+      - dependency-name: '@wdio/*'
+        versions: ['>=10']
 
   - package-ecosystem: github-actions
     directories:
