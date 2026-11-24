@@ -226,6 +226,7 @@ pub fn build_images() -> anyhow::Result<()> {
 }
 
 pub fn start_containers(project: &str) -> anyhow::Result<()> {
+    crate::secret_store_cmd::ensure_ready_for_start().map_err(anyhow::Error::msg)?;
     if crate::containers_cmd::project_llm_is_unconfigured(project).map_err(anyhow::Error::msg)? {
         log::info!("project '{project}' has no LLM provider — skipping container start");
         return defer_container_start_gated(project, true);

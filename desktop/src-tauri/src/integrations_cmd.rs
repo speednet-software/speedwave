@@ -1480,6 +1480,7 @@ pub async fn restart_integration_containers(
     just_enabled: Option<String>,
 ) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
+        crate::secret_store_cmd::ensure_ready_for_start()?;
         crate::containers_cmd::ensure_images_ready()?;
         check_project(&project)?;
         if let Ok(cfg) = speedwave_runtime::config::load_user_config() {

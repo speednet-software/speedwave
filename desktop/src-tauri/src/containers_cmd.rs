@@ -308,6 +308,7 @@ pub(crate) fn project_llm_is_unconfigured_in(
 }
 
 pub(crate) fn render_and_save_compose(project: &str) -> Result<(), String> {
+    crate::secret_store_cmd::ensure_ready_for_start()?;
     crate::pii_ner_service::start_if_active_wants();
     let user_config = config::load_user_config().map_err(|e| e.to_string())?;
     let project_dir = user_config
@@ -659,6 +660,7 @@ pub async fn start_containers(
     crate::session_refresh::start_sync(app.clone());
 
     tokio::task::spawn_blocking(move || {
+        crate::secret_store_cmd::ensure_ready_for_start()?;
         ensure_images_ready()?;
         check_project(&project)?;
         crate::pii_ner_service::sync_with_active_project();
