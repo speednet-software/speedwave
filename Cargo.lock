@@ -6165,6 +6165,7 @@ name = "speedwave-migrations"
 version = "0.0.0"
 dependencies = [
  "log",
+ "serde_json",
  "speedwave-runtime",
  "tempfile",
  "thiserror 2.0.21",

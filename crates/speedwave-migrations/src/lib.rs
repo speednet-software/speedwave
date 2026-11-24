@@ -2,6 +2,7 @@
 //! first on every start, before anything reads the config or a secret.
 
 mod legacy_files;
+mod secrets_at_rest;
 
 use std::path::Path;
 
@@ -9,7 +10,7 @@ use speedwave_runtime::fs_perms::with_file_lock_in;
 
 const LOCK_FILE: &str = "migrations.lock";
 
-const MIGRATIONS: &[Migration] = &[legacy_files::MIGRATION];
+const MIGRATIONS: &[Migration] = &[secrets_at_rest::MIGRATION, legacy_files::MIGRATION];
 
 struct Migration {
     name: &'static str,
@@ -93,7 +94,7 @@ mod tests {
 
         let report = run_all(tmp.path()).unwrap();
 
-        assert_eq!(report.executed, vec!["legacy_files"]);
+        assert_eq!(report.executed, vec!["secrets_at_rest", "legacy_files"]);
         assert!(report.failed.is_empty());
         assert!(!legacy.exists());
         assert!(!format!("{report:?}").contains("SECRET-VALUE"));
@@ -129,7 +130,7 @@ mod tests {
 
         let report = run_all(tmp.path()).unwrap();
 
-        assert_eq!(report.executed, vec!["legacy_files"]);
+        assert_eq!(report.executed, vec!["secrets_at_rest", "legacy_files"]);
         assert!(!tmp.path().join("mcp-os-pid").exists());
     }
 
@@ -226,7 +227,7 @@ mod tests {
             released.load(Ordering::SeqCst),
             "run_all returned while another holder still owned the lock"
         );
-        assert_eq!(report.executed, vec!["legacy_files"]);
+        assert_eq!(report.executed, vec!["secrets_at_rest", "legacy_files"]);
         assert!(!legacy.exists());
         holder.join().unwrap();
     }
@@ -255,7 +256,7 @@ mod tests {
 
         for handle in handles {
             let report = handle.join().unwrap().unwrap();
-            assert_eq!(report.executed, vec!["legacy_files"]);
+            assert_eq!(report.executed, vec!["secrets_at_rest", "legacy_files"]);
             assert!(report.failed.is_empty());
         }
         for project in ["alpha", "beta", "gamma"] {
