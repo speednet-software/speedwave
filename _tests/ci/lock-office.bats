@@ -43,7 +43,7 @@ EOT
   [ "$status" -eq 0 ]
   grep -q "^python3 -m venv $SPEEDWAVE_TOOL_CACHE/uv-$UV_VERSION" "$CALLS"
   grep -q "^pip install .* uv==$UV_VERSION" "$CALLS"
-  grep -q "^uv pip compile --generate-hashes --python-version 3.11 --python-platform linux --output-file=requirements.txt requirements.in in $REPO/mcp-servers/office" "$CALLS"
+  grep -q "^uv pip compile --generate-hashes --python-version 3.13 --python-platform linux --output-file=requirements.txt requirements.in in $REPO/mcp-servers/office" "$CALLS"
   grep -q "^numpy==2.2.2 --hash" "$REPO/mcp-servers/office/requirements.txt"
 }
 

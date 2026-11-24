@@ -471,7 +471,7 @@ test-os: build-mcp
 	@echo "✅ OS MCP server tests passed"
 
 test-mcp-office-py:
-	@PY=$$(command -v python3.12 || command -v python3.11 || command -v python3); \
+	@PY=$$(command -v python3.13 || command -v python3.12 || command -v python3); \
 	VENV="$${TMPDIR:-/tmp}/office-test-venv-$$$$"; \
 	echo "  building office Python test venv ($$PY) at $$VENV..."; \
 	"$$PY" -m venv --clear "$$VENV"; \
