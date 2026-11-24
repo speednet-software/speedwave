@@ -11534,6 +11534,7 @@ networks:
         );
     }
 
+    #[test]
     fn test_worker_auth_tokens_are_derived_64_hex_and_distinct_per_service() {
         let tmp = tempfile::tempdir().unwrap();
         let store = crate::secret_store::SecretStore::open(tmp.path()).unwrap();
@@ -11553,6 +11554,7 @@ networks:
         }
     }
 
+    #[test]
     fn test_worker_auth_tokens_persist_across_renders() {
         let tmp = tempfile::tempdir().unwrap();
         let bearers = |project: &str| -> Vec<String> {
