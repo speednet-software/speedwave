@@ -57,6 +57,7 @@ mod queue_cmd;
 mod reconcile;
 mod redmine_api_cmd;
 mod retry_cmd;
+mod secret_store_cmd;
 mod session_model;
 mod session_refresh;
 mod setup_wizard;
@@ -470,6 +471,8 @@ fn main() {
     }));
 
     let migrations = speedwave_migrations::run_all(speedwave_runtime::consts::data_dir());
+    let secret_store_health =
+        secret_store_cmd::SecretStoreHealth::open(speedwave_runtime::consts::data_dir());
 
     let setup_started = setup_wizard::SetupState::load().runtime_ready;
 
@@ -632,6 +635,7 @@ fn main() {
             }
         }))
         .manage(chat_sessions)
+        .manage(secret_store_health)
         .manage(ide_bridge.clone())
         .manage(clipboard_bridge_slot.clone())
         .manage(plugin_bridges.clone())
@@ -967,6 +971,8 @@ fn main() {
             containers_cmd::set_provider_model,
             containers_cmd::clear_active_llm_provider,
             containers_cmd::restart_llm_proxy,
+            secret_store_cmd::get_secret_store_status,
+            secret_store_cmd::reset_secret_store,
             access_cmd::get_access_settings,
             access_cmd::set_read_only_mode,
             access_cmd::get_integration_access,

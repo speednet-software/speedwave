@@ -11,8 +11,8 @@ use super::key_source::{FileKeySource, KeySource};
 use super::layout::{self, LOCK_SUFFIX};
 use super::name::{SecretName, ENCRYPTED_SUFFIX};
 
-const SECRETS_DIR: &str = "secrets";
-const KEY_FILE: &str = "secret-store.key";
+pub(super) const SECRETS_DIR: &str = "secrets";
+pub(super) const KEY_FILE: &str = "secret-store.key";
 
 /// Encrypted secret files of every project, sealed under one install key.
 pub struct SecretStore {
