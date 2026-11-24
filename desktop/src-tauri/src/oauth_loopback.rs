@@ -19,6 +19,33 @@ impl CallbackListeners {
     }
 }
 
+/// Why the callback wait ended without an authorization code. Cancellation is distinct so the UI
+/// shows a quiet `cancelled` terminal, not a red `error` (mirrors device-code's `Cancelled`).
+#[derive(Debug)]
+pub(crate) enum CallbackFailure {
+    Cancelled,
+    TimedOut,
+    /// The provider redirected back with an `error` (or without a code); `provider_error` is the
+    /// provider's `error` code when it sent one.
+    Denied {
+        provider_error: Option<String>,
+        message: String,
+    },
+    Error(String),
+}
+
+impl CallbackFailure {
+    /// Display text of a failure that ends the flow.
+    pub(crate) fn message(&self) -> &str {
+        match self {
+            CallbackFailure::Cancelled => "OAuth flow cancelled",
+            CallbackFailure::TimedOut => "OAuth flow timed out",
+            CallbackFailure::Denied { message, .. } => message,
+            CallbackFailure::Error(message) => message,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq)]
 enum Ipv6BindFailure {
     PortTaken,
