@@ -353,7 +353,6 @@ pub(crate) fn save_secret_credential(
         .map_err(|e| e.to_string())
 }
 
-/// Atomic 0o600 write of a single non-secret credential into `svc_dir/<file_name>`.
 pub(crate) fn save_credential_file(
     svc_dir: &std::path::Path,
     file_name: &str,

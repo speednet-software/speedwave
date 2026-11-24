@@ -48,9 +48,7 @@ const MAX_EXPIRES_IN_SECS: u64 = 10 * 365 * 24 * 60 * 60;
 const CLIENT_SECRET_KEY: &str = "clientSecret";
 const ACCESS_TOKEN_FIELD: &str = "access_token";
 
-/// Writes the secrets of one OAuth service to the store (refresh token, client secret, access
-/// token) and then its plain state JSON (0o600, atomic) last, so a failure before the JSON leaves a
-/// stale `expiresAt` and the next check refreshes again. Rejects a zero `expires_in`; clamps a huge one.
+/// Writes the secrets of one OAuth service to the store, then its plain state JSON.
 pub fn write_oauth_state(
     data_dir: &Path,
     project: &str,

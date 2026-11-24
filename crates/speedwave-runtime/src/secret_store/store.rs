@@ -60,8 +60,7 @@ impl SecretStore {
         )
     }
 
-    /// Opens the store of `data_dir` with a custom key source; fails closed when the key is
-    /// missing but encrypted secrets may exist.
+    /// Opens the store of `data_dir` with a custom key source.
     pub fn open_with(
         data_dir: &Path,
         source: Box<dyn KeySource>,
@@ -818,7 +817,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_layout_ignores_pending_migration_plaintext_names() {
+    fn verify_layout_ignores_the_legacy_plaintext_names() {
         let tmp = tempfile::tempdir().unwrap();
         let store = SecretStore::open(tmp.path()).unwrap();
         store.write(&name("slack", "token"), "v").unwrap();

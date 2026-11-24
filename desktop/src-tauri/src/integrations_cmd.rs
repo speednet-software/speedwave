@@ -184,8 +184,6 @@ fn redmine_config_json_fields() -> Vec<&'static str> {
         .unwrap_or_default()
 }
 
-/// True when any of `files` holds a value: a secret field by the existence of its encrypted file
-/// (nothing is decrypted), any other by a non-empty file under the service token directory.
 fn has_any_credential_file(
     data_dir: &std::path::Path,
     project: &str,
@@ -255,8 +253,6 @@ fn read_redmine_current_values(
     (current_values, mappings)
 }
 
-/// Saves Redmine credentials: secret fields go to the secret store, config fields (host_url,
-/// project_id) into config.json. Every field is validated before anything is written.
 fn save_redmine_credentials(
     data_dir: &std::path::Path,
     project: &str,
@@ -1043,8 +1039,6 @@ pub fn save_integration_credentials(
     Ok(())
 }
 
-/// Generic per-field routing of UI credentials: secret fields go to the secret store, other
-/// worker-mounted fields to token files (0o600) and OAuth-state fields into the state JSON merge.
 fn save_with_field_storage(
     data_dir: &std::path::Path,
     project: &str,
@@ -1097,9 +1091,6 @@ fn save_with_field_storage(
     Ok(())
 }
 
-/// Read-modify-write merge of the non-secret fields into `oauth/<project>/<service>.json`.
-/// `provider` is derived from the descriptor; IdP-specific fields land under `providerData`, rest
-/// top-level (ADR-060). A secret field is refused: the state JSON never holds one. 0o600 kept.
 fn merge_oauth_state_json_in(
     data_dir: &std::path::Path,
     project: &str,
@@ -2981,7 +2972,6 @@ mod tests {
         ));
     }
 
-    /// Writes a minimal slack oauth.json (metadata only).
     fn write_slack_oauth_state(home: &std::path::Path, project: &str) {
         let data_dir = home.join(speedwave_runtime::consts::DATA_DIR);
         let path = speedwave_runtime::plugin::oauth_state_file_in(&data_dir, project, "slack");

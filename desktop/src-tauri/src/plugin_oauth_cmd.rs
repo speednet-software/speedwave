@@ -299,9 +299,6 @@ async fn exchange_code(
         .map_err(|e| format!("malformed token response: {e}"))
 }
 
-/// Writes the full OAuthState (provider=generic) via the runtime SSOT: the refresh token, the access
-/// token and the client secret of `provider_data` go to the secret store, the metadata to the
-/// off-mount state file.
 fn persist_state(
     data_dir: &std::path::Path,
     project: &str,
@@ -343,8 +340,6 @@ fn persist_state(
     )
 }
 
-/// providerData map the host-side generic refresh reads (`oauth_refresh::generic`); `token_url` is
-/// the RESOLVED absolute URL. `clientSecret` is moved to the secret store when the state is written.
 fn build_provider_data(
     oauth: &PluginOAuthSpec,
     token_url: &str,

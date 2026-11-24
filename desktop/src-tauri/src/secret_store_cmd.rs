@@ -5,25 +5,11 @@ use speedwave_migrations::MigrationReport;
 use speedwave_runtime::compose::unreadable_integration_messages;
 use speedwave_runtime::config;
 use speedwave_runtime::secret_store::{
-    discard_secrets_without_key, encrypted_integrations, undiscardable_count, SecretStore,
-    SecretStoreError,
+    discard_secrets_without_key, encrypted_integrations, secret_store_state, undiscardable_count,
+    SecretStoreState,
 };
 
-const KEY_MISSING_REFUSAL: &str =
-    "The secret store key is missing. Complete the secret store recovery dialog to continue.";
-const KEY_UNREADABLE_REFUSAL: &str =
-    "The secret store key file secret-store.key in the Speedwave data directory is damaged. Restore it from a backup, or remove it together with the encrypted secrets in the secrets directory.";
-const STORE_UNAVAILABLE_REFUSAL: &str =
-    "The secrets directory cannot be read. Check its permissions.";
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum SecretStoreState {
-    Ready,
-    KeyMissing,
-    PlaintextInStore { count: usize },
-    KeyUnreadable,
-    StoreUnavailable,
-}
+const KEY_MISSING_STEP: &str = "Complete the secret store recovery dialog to continue.";
 
 pub(crate) struct MigrationNotices(Vec<String>);
 
@@ -71,31 +57,29 @@ impl MigrationNotices {
 }
 
 pub(crate) fn log_startup_state(data_dir: &Path) {
-    let state = evaluate(data_dir);
+    let state = secret_store_state(data_dir);
     if state != SecretStoreState::Ready {
-        log::warn!("secret store is not ready: {}", state.log_label());
+        log::warn!("secret store is not ready: {}", log_label(&state));
     }
 }
 
-impl SecretStoreState {
-    fn name(&self) -> SecretStoreStateName {
-        match self {
-            Self::Ready => SecretStoreStateName::Ready,
-            Self::KeyMissing => SecretStoreStateName::KeyMissing,
-            Self::PlaintextInStore { .. } => SecretStoreStateName::PlaintextInStore,
-            Self::KeyUnreadable => SecretStoreStateName::KeyUnreadable,
-            Self::StoreUnavailable => SecretStoreStateName::StoreUnavailable,
-        }
+fn state_name(state: &SecretStoreState) -> SecretStoreStateName {
+    match state {
+        SecretStoreState::Ready => SecretStoreStateName::Ready,
+        SecretStoreState::KeyMissing => SecretStoreStateName::KeyMissing,
+        SecretStoreState::PlaintextInStore { .. } => SecretStoreStateName::PlaintextInStore,
+        SecretStoreState::KeyUnreadable => SecretStoreStateName::KeyUnreadable,
+        SecretStoreState::StoreUnavailable => SecretStoreStateName::StoreUnavailable,
     }
+}
 
-    fn log_label(&self) -> String {
-        match self {
-            Self::Ready => "ready".to_owned(),
-            Self::KeyMissing => "key missing".to_owned(),
-            Self::PlaintextInStore { count } => format!("{count} unexpected entries"),
-            Self::KeyUnreadable => "key unreadable".to_owned(),
-            Self::StoreUnavailable => "store unavailable".to_owned(),
-        }
+fn log_label(state: &SecretStoreState) -> String {
+    match state {
+        SecretStoreState::Ready => "ready".to_owned(),
+        SecretStoreState::KeyMissing => "key missing".to_owned(),
+        SecretStoreState::PlaintextInStore { count } => format!("unexpected entries: {count}"),
+        SecretStoreState::KeyUnreadable => "key unreadable".to_owned(),
+        SecretStoreState::StoreUnavailable => "store unavailable".to_owned(),
     }
 }
 
@@ -104,7 +88,7 @@ pub(crate) fn get_secret_store_status(
     notices: tauri::State<'_, MigrationNotices>,
 ) -> SecretStoreStatus {
     let data_dir = speedwave_runtime::consts::data_dir();
-    let state = evaluate(data_dir);
+    let state = secret_store_state(data_dir);
     status_of(data_dir, &state, active_project().as_deref(), &notices.0)
 }
 
@@ -122,22 +106,14 @@ pub(crate) fn ensure_ready_for_start() -> Result<(), String> {
 }
 
 fn ensure_ready_in(data_dir: &Path) -> Result<(), String> {
-    match refusal_for(&evaluate(data_dir)) {
+    match refusal_for(&secret_store_state(data_dir)) {
         Some(message) => Err(message),
         None => Ok(()),
     }
 }
 
 fn refusal_for(state: &SecretStoreState) -> Option<String> {
-    match state {
-        SecretStoreState::Ready => None,
-        SecretStoreState::KeyMissing => Some(KEY_MISSING_REFUSAL.to_owned()),
-        SecretStoreState::PlaintextInStore { count } => Some(format!(
-            "The secrets directory holds {count} unexpected files. Remove them or reinstall Speedwave to continue."
-        )),
-        SecretStoreState::KeyUnreadable => Some(KEY_UNREADABLE_REFUSAL.to_owned()),
-        SecretStoreState::StoreUnavailable => Some(STORE_UNAVAILABLE_REFUSAL.to_owned()),
-    }
+    state.refusal(KEY_MISSING_STEP)
 }
 
 fn reset_in(
@@ -149,12 +125,12 @@ fn reset_in(
     if !confirmed {
         return Err("Creating a new secret store key needs an explicit confirmation.".to_owned());
     }
-    if evaluate(data_dir) != SecretStoreState::KeyMissing {
+    if secret_store_state(data_dir) != SecretStoreState::KeyMissing {
         return Err("The secret store does not need a new key.".to_owned());
     }
     let removed = discard_secrets_without_key(data_dir).map_err(|e| e.to_string())?;
     log::warn!("secret store reset: discarded {removed} encrypted files without a key");
-    let state = evaluate(data_dir);
+    let state = secret_store_state(data_dir);
     if state == SecretStoreState::KeyMissing {
         let remaining = undiscardable_count(data_dir).map_err(|e| e.to_string())?;
         let entries = if remaining == 1 { "entry" } else { "entries" };
@@ -168,21 +144,6 @@ fn reset_in(
         active_project,
         migration_notices,
     ))
-}
-
-fn evaluate(data_dir: &Path) -> SecretStoreState {
-    match SecretStore::open(data_dir).and_then(|store| store.verify_layout()) {
-        Ok(()) => SecretStoreState::Ready,
-        Err(SecretStoreError::KeyMissing) => SecretStoreState::KeyMissing,
-        Err(SecretStoreError::PlaintextInStore { count }) => {
-            SecretStoreState::PlaintextInStore { count }
-        }
-        Err(SecretStoreError::KeyUnreadable) => SecretStoreState::KeyUnreadable,
-        Err(e) => {
-            log::warn!("secret store check failed: {e}");
-            SecretStoreState::StoreUnavailable
-        }
-    }
 }
 
 fn status_of(
@@ -212,7 +173,7 @@ fn status_of(
         _ => Vec::new(),
     };
     SecretStoreStatus {
-        state: state.name(),
+        state: state_name(state),
         integrations,
         plaintext_count,
         unreadable,
@@ -233,7 +194,7 @@ fn active_project() -> Option<String> {
 )]
 mod tests {
     use super::*;
-    use speedwave_runtime::secret_store::SecretName;
+    use speedwave_runtime::secret_store::{SecretName, SecretStore};
 
     fn seed_enc(root: &Path, project: &str, file: &str) -> std::path::PathBuf {
         let dir = root.join("secrets").join(project);
@@ -253,7 +214,7 @@ mod tests {
     #[test]
     fn an_empty_data_dir_is_ready() {
         let tmp = tempfile::tempdir().unwrap();
-        assert_eq!(evaluate(tmp.path()), SecretStoreState::Ready);
+        assert_eq!(secret_store_state(tmp.path()), SecretStoreState::Ready);
         assert!(ensure_ready_in(tmp.path()).is_ok());
     }
 
@@ -267,14 +228,14 @@ mod tests {
                 "v",
             )
             .unwrap();
-        assert_eq!(evaluate(tmp.path()), SecretStoreState::Ready);
+        assert_eq!(secret_store_state(tmp.path()), SecretStoreState::Ready);
     }
 
     #[test]
     fn ciphertext_without_a_key_is_key_missing() {
         let tmp = tempfile::tempdir().unwrap();
         seed_enc(tmp.path(), "demo", "slack.token.enc");
-        assert_eq!(evaluate(tmp.path()), SecretStoreState::KeyMissing);
+        assert_eq!(secret_store_state(tmp.path()), SecretStoreState::KeyMissing);
         assert_eq!(
             ensure_ready_in(tmp.path()).unwrap_err(),
             "The secret store key is missing. Complete the secret store recovery dialog to continue."
@@ -286,7 +247,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("secret-store.key"), "garbage").unwrap();
         seed_enc(tmp.path(), "demo", "slack.token.enc");
-        assert_eq!(evaluate(tmp.path()), SecretStoreState::KeyUnreadable);
+        assert_eq!(
+            secret_store_state(tmp.path()),
+            SecretStoreState::KeyUnreadable
+        );
         assert!(ensure_ready_in(tmp.path()).unwrap_err().contains("damaged"));
     }
 
@@ -297,7 +261,7 @@ mod tests {
         seed_enc(tmp.path(), "demo", "slack.token");
         seed_enc(tmp.path(), "demo", "notes.txt");
         assert_eq!(
-            evaluate(tmp.path()),
+            secret_store_state(tmp.path()),
             SecretStoreState::PlaintextInStore { count: 2 }
         );
         assert!(ensure_ready_in(tmp.path())
@@ -421,7 +385,10 @@ mod tests {
         let key = tmp.path().join("secret-store.key");
         std::fs::write(&key, "").unwrap();
 
-        assert_eq!(evaluate(tmp.path()), SecretStoreState::KeyUnreadable);
+        assert_eq!(
+            secret_store_state(tmp.path()),
+            SecretStoreState::KeyUnreadable
+        );
         assert!(ensure_ready_in(tmp.path()).unwrap_err().contains("damaged"));
         assert!(reset_in(tmp.path(), true, None, &[]).is_err());
         assert_eq!(std::fs::read_to_string(&key).unwrap(), "");
@@ -503,7 +470,7 @@ mod tests {
         std::fs::create_dir_all(&secrets).unwrap();
         std::fs::set_permissions(&secrets, std::fs::Permissions::from_mode(0o000)).unwrap();
 
-        let state = evaluate(tmp.path());
+        let state = secret_store_state(tmp.path());
         std::fs::set_permissions(&secrets, std::fs::Permissions::from_mode(0o700)).unwrap();
 
         assert_eq!(state, SecretStoreState::StoreUnavailable);
@@ -516,7 +483,7 @@ mod tests {
             Some("The secrets directory cannot be read. Check its permissions.")
         );
         assert_eq!(
-            SecretStoreState::StoreUnavailable.name(),
+            state_name(&SecretStoreState::StoreUnavailable),
             SecretStoreStateName::StoreUnavailable
         );
     }

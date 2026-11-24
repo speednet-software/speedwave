@@ -7,6 +7,7 @@ mod key_source;
 mod layout;
 mod name;
 mod recovery;
+mod state;
 mod store;
 
 pub(crate) use error::unreadable_secret_message;
@@ -17,4 +18,5 @@ pub use name::SecretName;
 pub use recovery::{
     discard_secrets_without_key, encrypted_integrations, undiscardable_count, EncryptedIntegration,
 };
+pub use state::{secret_store_state, SecretStoreState};
 pub use store::{secret_exists_in, ProjectSecrets, SecretStore};

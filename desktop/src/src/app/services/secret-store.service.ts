@@ -10,11 +10,7 @@ import { errorText } from '../shared/error-text';
 import { LoggerService } from './logger.service';
 import { TauriService } from './tauri.service';
 
-/**
- * State of the encrypted secret store: blocks the UI while the key is missing or the store is
- * damaged, and carries the non-blocking notices about unreadable integration credentials and
- * failed migrations.
- */
+/** State of the encrypted secret store. */
 @Injectable({ providedIn: 'root' })
 export class SecretStoreService {
   private readonly tauri = inject(TauriService);
@@ -40,12 +36,12 @@ export class SecretStoreService {
   readonly resetting: Signal<boolean> = this.resettingState.asReadonly();
   readonly resetError: Signal<string | null> = this.resetErrorState.asReadonly();
 
-  /** Loads the status once at startup. */
+  /** Loads the status. */
   constructor() {
     void this.refresh();
   }
 
-  /** Reads the current status from the backend; a failed or malformed answer keeps the last one. */
+  /** Reads the current status from the backend. */
   async refresh(): Promise<void> {
     try {
       const status = await this.tauri.invoke<unknown>('get_secret_store_status');
@@ -55,7 +51,7 @@ export class SecretStoreService {
     }
   }
 
-  /** Discards the unreadable credentials so a new key can be created; irreversible. */
+  /** Discards the unreadable credentials and creates a new key. */
   async createNewKey(): Promise<void> {
     if (this.resettingState()) return;
     this.resettingState.set(true);
@@ -74,7 +70,7 @@ export class SecretStoreService {
     }
   }
 
-  /** Hides the notices that are shown now; a different message appears again. */
+  /** Hides the notices shown now. */
   dismissNotices(): void {
     this.dismissedState.update((dismissed) => [...dismissed, ...this.notices()]);
   }

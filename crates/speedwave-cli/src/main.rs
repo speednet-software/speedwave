@@ -7,7 +7,7 @@ use speedwave_runtime::engine_path;
 use speedwave_runtime::oauth_refresh::{self, RefreshOutcome};
 use speedwave_runtime::plugin;
 use speedwave_runtime::runtime::{detect_runtime, ensure_exec_healthy};
-use speedwave_runtime::secret_store::{SecretStore, SecretStoreError};
+use speedwave_runtime::secret_store::secret_store_state;
 use speedwave_runtime::update;
 use speedwave_runtime::update_channel::{self, UpdateChannel};
 use speedwave_runtime::validation;
@@ -1269,28 +1269,7 @@ fn ensure_secret_store_ready(project: &str) {
 }
 
 fn secret_store_start_error(data_dir: &Path) -> Option<String> {
-    SecretStore::open(data_dir)
-        .and_then(|store| store.verify_layout())
-        .err()
-        .map(|error| secret_store_refusal(&error))
-}
-
-fn secret_store_refusal(error: &SecretStoreError) -> String {
-    match error {
-        SecretStoreError::KeyMissing => {
-            "The secret store key is missing. Open Speedwave Desktop to continue.".to_owned()
-        }
-        SecretStoreError::PlaintextInStore { count } => format!(
-            "The secrets directory holds {count} unexpected files. Remove them or reinstall Speedwave to continue."
-        ),
-        SecretStoreError::KeyUnreadable => {
-            "The secret store key file secret-store.key in the Speedwave data directory is damaged. Restore it from a backup, or remove it together with the encrypted secrets in the secrets directory.".to_owned()
-        }
-        SecretStoreError::Io(_) => {
-            "The secrets directory cannot be read. Check its permissions.".to_owned()
-        }
-        other => format!("The secret store cannot be opened: {other}"),
-    }
+    secret_store_state(data_dir).refusal("Open Speedwave Desktop to continue.")
 }
 
 fn resolve_project_fallback(user_config: &config::SpeedwaveUserConfig) -> anyhow::Result<String> {
@@ -2039,7 +2018,7 @@ mod tests {
     #[test]
     fn a_working_secret_store_passes_the_check() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = SecretStore::open(tmp.path()).unwrap();
+        let store = speedwave_runtime::secret_store::SecretStore::open(tmp.path()).unwrap();
         let name =
             speedwave_runtime::secret_store::SecretName::integration("demo", "slack", "token")
                 .unwrap();
@@ -2083,17 +2062,6 @@ mod tests {
             "The secrets directory holds 2 unexpected files. Remove them or reinstall Speedwave to continue."
         );
         assert!(!message.contains("slack"));
-    }
-
-    #[test]
-    fn an_io_failure_asks_to_check_the_permissions_without_details() {
-        let message =
-            secret_store_refusal(&SecretStoreError::Io("list secrets: denied".to_owned()));
-        assert_eq!(
-            message,
-            "The secrets directory cannot be read. Check its permissions."
-        );
-        assert!(!message.contains("denied"));
     }
 
     #[test]

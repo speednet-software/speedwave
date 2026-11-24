@@ -447,10 +447,6 @@ async fn exchange_slack_code(
     })
 }
 
-/// Persists the outcome: the non-secret `features.json` first, then one state write that stores the
-/// refresh token and the access token in the secret store and the plain metadata last. A failed
-/// state write leaves the previous tokens in place.
-/// `data_dir`-parameterised so tests pass a tempdir (cf. `save_oauth_state_in`).
 fn persist_slack_tokens_in(
     data_dir: &Path,
     project: &str,

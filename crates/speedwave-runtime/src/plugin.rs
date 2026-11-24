@@ -618,8 +618,7 @@ pub fn oauth_state_file(project: &str, service_id: &str) -> PathBuf {
     oauth_state_file_in(consts::data_dir(), project, service_id)
 }
 
-/// `data_dir`-parameterised variant so migration/test code can bypass the
-/// `consts::data_dir()` `OnceLock`. Production goes through `oauth_state_file`.
+/// Path of the OAuth state file of a service under `data_dir`.
 pub fn oauth_state_file_in(data_dir: &Path, project: &str, service_id: &str) -> PathBuf {
     data_dir
         .join(consts::OAUTH_SUBDIR)
@@ -854,8 +853,6 @@ fn token_dir_with_base(home: &Path, project: &str, service_id: &str) -> PathBuf 
         .join(service_id)
 }
 
-/// Writes credential values of a plugin under a fake home; test-only wrapper of
-/// [`write_plugin_credentials_in`] for fields that are all declared with the given secrecy.
 #[cfg(test)]
 fn configure_plugin_tokens_with_base(
     home: &Path,
@@ -877,8 +874,6 @@ fn configure_plugin_tokens_with_base(
     )
 }
 
-/// Checks whether a plugin's required secret fields have values. Test-only: Desktop owns the
-/// production readiness check (`plugin_cmd`) on top of [`missing_required_credentials_in`].
 #[cfg(test)]
 fn get_plugin_token_status_in(
     data_dir: &Path,

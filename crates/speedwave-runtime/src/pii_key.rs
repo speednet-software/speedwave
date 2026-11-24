@@ -9,9 +9,7 @@ use crate::secret_store::{SecretName, SecretStore};
 
 const LEGACY_KEY_FILE: &str = "key";
 
-/// Creates the key in the secret store when absent. Two racing processes end with one key; a legacy
-/// plaintext key that still awaits migration blocks creation, because a new key would make the
-/// tokens already in history unreadable.
+/// Creates the key in the secret store when absent.
 pub fn ensure_project_key_in(data_dir: &Path, project: &str) -> anyhow::Result<()> {
     let name = SecretName::pii_key(project)?;
     let store = SecretStore::open(data_dir)?;

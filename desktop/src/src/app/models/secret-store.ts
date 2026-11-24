@@ -1,4 +1,4 @@
-/** Health of the encrypted secret store; mirrors the `state` of the Rust `SecretStoreStatus`. */
+/** Health of the encrypted secret store. */
 export type SecretStoreState =
   'ready' | 'keyMissing' | 'plaintextInStore' | 'keyUnreadable' | 'storeUnavailable';
 
@@ -32,7 +32,7 @@ const SECRET_STORE_STATES: readonly string[] = [
 ];
 
 /**
- * Narrows an IPC payload to a well-formed status; anything else is treated as "no status".
+ * Narrows an IPC payload to a well-formed status.
  * @param value - Raw value returned by the backend.
  */
 export function isSecretStoreStatus(value: unknown): value is SecretStoreStatus {
@@ -49,7 +49,7 @@ export function isSecretStoreStatus(value: unknown): value is SecretStoreStatus 
 }
 
 /**
- * Groups affected integrations by project, projects and services in input order without repeats.
+ * Groups affected integrations by project.
  * @param integrations - Integrations listed by the backend.
  */
 export function groupByProject(

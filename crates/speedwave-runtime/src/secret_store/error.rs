@@ -15,7 +15,7 @@ pub enum SecretStoreError {
     #[error("the secret {0} cannot be read")]
     Unreadable(SecretName),
     /// The store directory holds entries that are not encrypted secrets.
-    #[error("the secret store holds {count} unexpected entries")]
+    #[error("the secret store holds unexpected entries: {count}")]
     PlaintextInStore {
         /// Number of unexpected entries.
         count: usize,
@@ -148,7 +148,7 @@ mod tests {
     fn plaintext_error_reports_the_count() {
         assert_eq!(
             SecretStoreError::PlaintextInStore { count: 2 }.to_string(),
-            "the secret store holds 2 unexpected entries"
+            "the secret store holds unexpected entries: 2"
         );
     }
 }

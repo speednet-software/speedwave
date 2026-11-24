@@ -1,7 +1,7 @@
 import { ChangeDetectionStrategy, Component, inject } from '@angular/core';
 import { SecretStoreService } from '../../services/secret-store.service';
 
-/** Non-blocking banner for unreadable integration credentials and failed startup migrations. */
+/** Banner for unreadable credentials and failed migrations. */
 @Component({
   selector: 'app-secret-store-notice',
   changeDetection: ChangeDetectionStrategy.OnPush,

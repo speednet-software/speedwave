@@ -62,7 +62,7 @@ pub fn discard_secrets_without_key(data_dir: &Path) -> Result<usize, SecretStore
     Ok(removed)
 }
 
-/// Number of entries that still block a new key (for example an `.enc` directory or a symlinked project directory).
+/// Number of entries that still block a new key.
 pub fn undiscardable_count(data_dir: &Path) -> Result<usize, SecretStoreError> {
     count_unrecoverable(&data_dir.join(SECRETS_DIR))
 }

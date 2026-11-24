@@ -235,9 +235,7 @@ impl LlmConfig {
         }
     }
 
-    /// Sets each provider's `has_api_key` from the existence of its secret store entry — the
-    /// authoritative source (ADR-073), so a stale echo never reaches the renderer. Nothing is
-    /// decrypted, so it works while the install key is missing.
+    /// Sets each provider's `has_api_key` from the existence of its secret store entry.
     pub fn sync_has_api_key_from_disk_in(&mut self, data_dir: &Path, project: &str) {
         for entry in &mut self.providers {
             if let Ok(name) = crate::secret_store::SecretName::llm_provider_key(project, &entry.id)

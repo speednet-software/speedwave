@@ -281,8 +281,7 @@ fn legacy_llm_env_in(
     }
 }
 
-/// Reads a local-LLM secret (`api_key` or `custom_headers`) from the secret store. Returns `None`
-/// on any failure (missing, unreadable, empty); callers fall back to a dummy or skip injection.
+/// Reads a local-LLM secret (`api_key` or `custom_headers`) from the secret store.
 pub fn read_local_llm_token_opt_in(data_dir: &Path, project: &str, file: &str) -> Option<String> {
     let name = match file {
         "api_key" => SecretName::local_llm_api_key(project),

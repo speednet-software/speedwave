@@ -6,8 +6,8 @@ use super::name::ENCRYPTED_SUFFIX;
 
 pub(super) const LOCK_SUFFIX: &str = ".lock";
 const TEMP_INFIX: &str = ".enc.tmp";
-const PENDING_ANTHROPIC_KEY_FILE: &str = "anthropic_api_key";
-const PENDING_AUTH_TOKEN_SUFFIX: &str = "-auth-token";
+const LEGACY_ANTHROPIC_KEY_FILE: &str = "anthropic_api_key";
+const LEGACY_AUTH_TOKEN_SUFFIX: &str = "-auth-token";
 
 pub(super) fn contains_encrypted(secrets_dir: &Path) -> Result<bool, SecretStoreError> {
     for entry in entries(secrets_dir)? {
@@ -131,15 +131,14 @@ fn is_expected_in_project_dir(entry: &DirEntry) -> bool {
         return false;
     };
     name.ends_with(ENCRYPTED_SUFFIX)
-        || is_pending_migration_file(name)
+        || is_legacy_plaintext_file(name)
         || is_atomic_write_temp(name)
         || (name.ends_with(LOCK_SUFFIX) && entry.metadata().is_ok_and(|meta| meta.len() == 0))
 }
 
-fn is_pending_migration_file(name: &str) -> bool {
-    name == PENDING_ANTHROPIC_KEY_FILE
-        || (name.len() > PENDING_AUTH_TOKEN_SUFFIX.len()
-            && name.ends_with(PENDING_AUTH_TOKEN_SUFFIX))
+fn is_legacy_plaintext_file(name: &str) -> bool {
+    name == LEGACY_ANTHROPIC_KEY_FILE
+        || (name.len() > LEGACY_AUTH_TOKEN_SUFFIX.len() && name.ends_with(LEGACY_AUTH_TOKEN_SUFFIX))
 }
 
 fn is_atomic_write_temp(name: &str) -> bool {
@@ -365,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_migration_legacy_files_are_not_counted() {
+    fn legacy_plaintext_files_are_not_counted() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = project_dir(tmp.path());
         std::fs::write(dir.join("anthropic_api_key"), "x").unwrap();

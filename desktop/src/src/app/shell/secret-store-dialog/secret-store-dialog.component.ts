@@ -17,10 +17,7 @@ const BUTTON_PRIMARY =
 const BUTTON_SECONDARY =
   'mono cursor-pointer rounded border border-[var(--line)] bg-transparent px-4 py-2 text-[13px] text-[var(--ink)] hover:bg-[var(--bg-2)] disabled:cursor-not-allowed disabled:opacity-40';
 
-/**
- * Blocking dialog shown while the secret store is not ready: a missing key offers one confirmed
- * way forward (a new key), a plaintext or damaged store offers none.
- */
+/** Blocking dialog shown while the secret store is not ready. */
 @Component({
   selector: 'app-secret-store-dialog',
   imports: [A11yModule],
@@ -185,19 +182,16 @@ export class SecretStoreDialogComponent {
       : `Speedwave found ${count} plaintext files in the secrets directory.`;
   });
 
-  /** Moves to the second step; the irreversible call needs one more click. */
   protected askConfirmation(): void {
     this.confirming.set(true);
     this.focusAfterRender(this.confirmButton);
   }
 
-  /** Returns to the first step without changing anything. */
   protected back(): void {
     this.confirming.set(false);
     this.focusAfterRender(this.createButton);
   }
 
-  /** Creates the new key; on failure the dialog stays and shows the error. */
   protected async confirm(): Promise<void> {
     await this.store.createNewKey();
     if (!this.store.blocking()) this.confirming.set(false);

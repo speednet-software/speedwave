@@ -17,8 +17,6 @@ use crate::secret_store::{ProjectSecrets, SecretStore};
 
 const BEARER_PURPOSE: &str = "bearer";
 
-/// `SPW_CREDENTIALS_DIGEST` of every worker that has user-entered credentials: the non-secret
-/// token files plus the values of its secrets in the secret store.
 pub(crate) fn apply_credentials_digests_in(
     data_dir: &std::path::Path,
     yaml: &str,
@@ -101,8 +99,6 @@ pub(super) fn is_write_in_progress(name: &std::ffi::OsStr) -> bool {
     name.to_string_lossy().contains(".tmp.")
 }
 
-/// SHA-256 over the sorted (name, value) set the worker's tokens slot carries, minus volatile
-/// names. `Ok(None)` = no credentials, or a secret of the integration cannot be read.
 fn credentials_digest(
     credentials: &WorkerCredentials,
     project: &str,
