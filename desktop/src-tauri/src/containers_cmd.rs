@@ -1984,7 +1984,7 @@ pub async fn set_llm_provider_key(
     provider_id: String,
     key: Option<String>,
     project: Option<String>,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     tokio::task::spawn_blocking(move || {
         set_llm_provider_key_then(
             speedwave_runtime::consts::data_dir(),
@@ -2004,9 +2004,9 @@ fn set_llm_provider_key_then(
     key: Option<&str>,
     project: Option<&str>,
     restage: impl FnOnce(&str) -> Result<(), String>,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let active = set_llm_provider_key_in(data_dir, provider_id, key, project)?;
-    restage(&active)
+    Ok(restage(&active).err())
 }
 
 fn set_llm_provider_key_in(
@@ -3069,15 +3069,20 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_restage_after_a_provider_key_change_is_returned_to_the_ui() {
+    fn a_failed_restage_after_a_provider_key_change_keeps_the_key_and_is_reported() {
         let tmp = seeded_config_tempdir_with_local_model("llama");
 
-        let err = set_llm_provider_key_then(tmp.path(), "local", Some("sk-local"), None, |_| {
-            Err("engine did not answer".to_string())
-        })
-        .unwrap_err();
+        let restage_error =
+            set_llm_provider_key_then(tmp.path(), "local", Some("sk-local"), None, |_| {
+                Err("engine did not answer".to_string())
+            })
+            .unwrap();
 
-        assert_eq!(err, "engine did not answer");
+        assert_eq!(restage_error, Some("engine did not answer".to_string()));
+        let path =
+            speedwave_runtime::compose::llm_provider_key_path_in(tmp.path(), "alpha", "local")
+                .unwrap();
+        assert!(path.exists());
     }
 
     #[test]

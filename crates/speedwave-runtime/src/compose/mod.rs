@@ -66,11 +66,12 @@ pub(crate) use networks::{
 use plugins::apply_plugins_from_verified;
 pub(crate) use plugins::ApplyPluginsCtx;
 
+pub use tokens::init_secrets_dir_in;
+pub(crate) use tokens::resolve_tokens_dir_in;
 pub use tokens::{
     ensure_token_dir, ensure_token_dir_in, init_secrets_dir, llm_provider_key_path_in, tokens_path,
     tokens_path_in, LLM_TOKEN_FILE_SUFFIX, LLM_TOKEN_SERVICE,
 };
-pub(crate) use tokens::{init_secrets_dir_in, resolve_tokens_dir_in};
 
 pub(crate) use workers::{
     apply_integrations_filter, apply_worker_auth_tokens_in, apply_worker_config,

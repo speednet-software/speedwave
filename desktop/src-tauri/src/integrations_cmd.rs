@@ -1230,20 +1230,30 @@ pub(crate) fn restage_container_secrets(project: &str) {
 }
 
 pub(crate) fn restage_container_secrets_now(project: &str) -> Result<(), String> {
-    if project_has_no_llm_provider_in(speedwave_runtime::consts::data_dir(), project) {
+    let data_dir = speedwave_runtime::consts::data_dir();
+    if project_has_no_llm_provider_in(data_dir, project)? {
         return Ok(());
     }
     restage_secrets(&speedwave_runtime::runtime::detect_runtime(), project)
 }
 
-fn project_has_no_llm_provider_in(data_dir: &std::path::Path, project: &str) -> bool {
-    speedwave_runtime::config::load_user_config_from(&data_dir.join("config.json"))
-        .ok()
-        .and_then(|config| config.find_project(project).cloned())
-        .and_then(|entry| entry.claude)
-        .and_then(|claude| claude.llm)
-        .unwrap_or_default()
-        .is_unconfigured()
+fn project_has_no_llm_provider_in(
+    data_dir: &std::path::Path,
+    project: &str,
+) -> Result<bool, String> {
+    let user_config =
+        speedwave_runtime::config::load_user_config_from(&data_dir.join("config.json"))
+            .map_err(|e| e.to_string())?;
+    let entry = user_config
+        .require_project(project)
+        .map_err(|e| e.to_string())?;
+    let (resolved, _) = speedwave_runtime::config::resolve_project_config_in(
+        data_dir,
+        std::path::Path::new(&entry.dir),
+        &user_config,
+        project,
+    );
+    Ok(resolved.llm.is_unconfigured())
 }
 
 fn restage_secrets(
@@ -2229,7 +2239,7 @@ mod tests {
     fn a_project_without_an_llm_section_has_no_provider() {
         let dir = data_dir_with_llm(None);
 
-        assert!(project_has_no_llm_provider_in(dir.path(), "acme"));
+        assert_eq!(project_has_no_llm_provider_in(dir.path(), "acme"), Ok(true));
     }
 
     #[test]
@@ -2240,7 +2250,38 @@ mod tests {
             "active": { "provider_id": "anthropic" }
         })));
 
-        assert!(!project_has_no_llm_provider_in(dir.path(), "acme"));
+        assert_eq!(
+            project_has_no_llm_provider_in(dir.path(), "acme"),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn a_config_before_the_provider_list_with_a_local_provider_has_one() {
+        let dir = data_dir_with_llm(Some(serde_json::json!({
+            "provider": "local",
+            "base_url": "http://localhost:8080"
+        })));
+
+        assert_eq!(
+            project_has_no_llm_provider_in(dir.path(), "acme"),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn a_project_missing_from_the_config_is_an_error() {
+        let dir = data_dir_with_llm(None);
+
+        assert!(project_has_no_llm_provider_in(dir.path(), "other").is_err());
+    }
+
+    #[test]
+    fn an_unreadable_config_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.json"), "{ not json").unwrap();
+
+        assert!(project_has_no_llm_provider_in(dir.path(), "acme").is_err());
     }
 
     #[test]

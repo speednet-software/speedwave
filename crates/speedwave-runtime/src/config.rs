@@ -1733,7 +1733,7 @@ pub fn resolve_project_config(
     )
 }
 
-pub(crate) fn resolve_project_config_in(
+pub fn resolve_project_config_in(
     data_dir: &Path,
     project_dir: &Path,
     user_config: &SpeedwaveUserConfig,
