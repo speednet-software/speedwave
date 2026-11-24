@@ -1,10 +1,6 @@
 /** Health of the encrypted secret store; mirrors the `state` of the Rust `SecretStoreStatus`. */
 export type SecretStoreState =
-  | 'ready'
-  | 'keyMissing'
-  | 'plaintextInStore'
-  | 'keyUnreadable'
-  | 'storeUnavailable';
+  'ready' | 'keyMissing' | 'plaintextInStore' | 'keyUnreadable' | 'storeUnavailable';
 
 /** One integration whose encrypted credentials lost their key. */
 export interface SecretStoreIntegration {

@@ -93,9 +93,9 @@ const BUTTON_SECONDARY =
               @default {
                 <p data-testid="secret-store-damaged-text">
                   The key file secret-store.key in the Speedwave data directory is damaged and
-                  cannot be read. Restore it from a backup, or remove it together with the
-                  encrypted secrets in the secrets directory. Reinstalling alone may keep the data
-                  directory. Speedwave will not start projects until then.
+                  cannot be read. Restore it from a backup, or remove it together with the encrypted
+                  secrets in the secrets directory. Reinstalling alone may keep the data directory.
+                  Speedwave will not start projects until then.
                 </p>
               }
             }
