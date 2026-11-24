@@ -1,5 +1,3 @@
-//! Per-project token directory path and the secret store namespace of Proxy provider keys.
-
 use std::path::{Path, PathBuf};
 
 /// Returns the tokens directory for a project under an explicit data dir.

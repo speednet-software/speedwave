@@ -333,8 +333,7 @@ pub(super) fn proxy_state_digest_in(
     Ok(crate::bundle::bytes_to_hex(&hasher.finalize()))
 }
 
-/// Validates + stores one provider's API key in the secret store:
-/// strips `Bearer `, rejects control chars and empty values (ADR-040).
+/// Stores one provider's API key in the secret store.
 pub fn write_llm_provider_key_in(
     data_dir: &Path,
     project: &str,
@@ -354,7 +353,7 @@ pub fn write_llm_provider_key_in(
     Ok(())
 }
 
-/// Removes one provider's key (e.g. provider deleted in Settings). A missing key is not an error.
+/// Removes one provider's key from the secret store.
 pub fn remove_llm_provider_key_in(
     data_dir: &Path,
     project: &str,

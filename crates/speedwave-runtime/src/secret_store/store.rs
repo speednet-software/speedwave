@@ -125,7 +125,7 @@ impl SecretStore {
             .map_err(|_| operation_failure("write secret"))
     }
 
-    /// Removes one secret file; a missing file is success.
+    /// Removes one secret file.
     pub fn delete(&self, name: &SecretName) -> Result<(), SecretStoreError> {
         match std::fs::remove_file(self.path_of(name)) {
             Ok(()) => Ok(()),
@@ -134,7 +134,7 @@ impl SecretStore {
         }
     }
 
-    /// Removes every secret and lock file of one service in a project; a missing one is success.
+    /// Removes every secret and lock file of one service in a project.
     pub fn delete_service(&self, project: &str, service: &str) -> Result<(), SecretStoreError> {
         if crate::validation::validate_project_name(project).is_err() {
             return Ok(());
@@ -171,7 +171,7 @@ impl SecretStore {
         Ok(())
     }
 
-    /// Whether the secret file exists; nothing is decrypted.
+    /// Whether the secret file exists.
     pub fn exists(&self, name: &SecretName) -> bool {
         self.path_of(name).is_file()
     }

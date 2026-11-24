@@ -626,9 +626,7 @@ pub fn oauth_state_file_in(data_dir: &Path, project: &str, service_id: &str) -> 
         .join(format!("{service_id}.json"))
 }
 
-/// Host-only pre-auth seed `~/.speedwave/oauth/<project>/<slug>.seed.json`: the non-secret values
-/// saved before authorization (secret ones are in the secret store). `start_plugin_oauth` reads it
-/// through [`read_oauth_seed_in`] and writes full state; never mounted.
+/// Path of the pre-auth seed file of a plugin.
 pub fn oauth_seed_file(project: &str, slug: &str) -> PathBuf {
     oauth_seed_file_in(consts::data_dir(), project, slug)
 }
@@ -641,8 +639,7 @@ pub fn oauth_seed_file_in(data_dir: &Path, project: &str, slug: &str) -> PathBuf
         .join(format!("{slug}.seed.json"))
 }
 
-/// Saves credential values of one plugin: secret fields go to the secret store, non-secret
-/// `oauth_flow` fields to the pre-auth seed, every other field to `tokens/<project>/<service_id>/<key>`.
+/// Saves credential values of one plugin.
 pub fn write_plugin_credentials_in(
     data_dir: &Path,
     project: &str,
@@ -727,8 +724,7 @@ pub fn missing_required_credentials_in(
         .collect()
 }
 
-/// The pre-auth seed of an OAuth plugin as one map: the plain seed file plus the secret `oauth_flow`
-/// values from the secret store. Fails when nothing is configured yet or a secret cannot be read.
+/// Reads the pre-auth seed of an OAuth plugin.
 pub fn read_oauth_seed_in(
     data_dir: &Path,
     project: &str,
@@ -775,8 +771,7 @@ pub fn oauth_seed_keys_in(
     keys
 }
 
-/// Deletes every stored secret of one plugin service in a project (credential fields,
-/// `client_secret`, `refresh_token`, `access_token`) and their lock files; missing ones are fine.
+/// Deletes every stored secret of one plugin service in a project.
 pub fn remove_plugin_secrets_in(
     data_dir: &Path,
     project: &str,

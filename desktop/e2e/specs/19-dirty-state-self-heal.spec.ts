@@ -1,5 +1,3 @@
-/** Dirty-state self-heal: planted engine debris must not survive a backend restart.
- *  Runs after spec 18 (e2e-second active) and before 07. */
 import {
   composePrefix,
   plantGhost,

@@ -12,7 +12,7 @@ const KEY_LEN: usize = 32;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-/// Where the install key lives; `create` must be race-safe and never replace an existing key.
+/// Where the install key lives.
 pub trait KeySource: Send + Sync {
     /// Returns the key, or `None` when none was created yet; a malformed key is an error.
     fn load(&self) -> Result<Option<Key>, SecretStoreError>;
