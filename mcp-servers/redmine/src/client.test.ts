@@ -297,6 +297,32 @@ describe('RedmineClient', () => {
       });
     });
 
+    it('should send the date, progress, privacy, watcher and custom field filters unchanged', async () => {
+      mockAxiosInstance.get.mockResolvedValue({ data: { issues: [], total_count: 0 } });
+
+      await client.listIssues({
+        due_date: '<=2026-11-30',
+        start_date: '><2026-11-01|2026-11-30',
+        done_ratio: '<100',
+        is_private: '0',
+        watcher_id: 'me',
+        cf: { '1': '2.4' },
+      });
+
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/issues.json', {
+        params: {
+          limit: 25,
+          offset: 0,
+          due_date: '<=2026-11-30',
+          start_date: '><2026-11-01|2026-11-30',
+          done_ratio: '<100',
+          is_private: '0',
+          watcher_id: 'me',
+          cf_1: '2.4',
+        },
+      });
+    });
+
     it('should clamp an oversized limit down to 100', async () => {
       mockAxiosInstance.get.mockResolvedValue({ data: { issues: [], total_count: 0 } });
 
@@ -512,211 +538,53 @@ describe('RedmineClient', () => {
   });
 
   describe('createIssue', () => {
-    it('should create issue with required fields only', async () => {
-      const mockIssue: Partial<RedmineIssue> = {
-        id: 1,
+    const created = { id: 1, subject: 'New Issue', project: { id: 1, name: 'Test Project' } };
+
+    it('posts the payload as it is and returns the issue read back after the write', async () => {
+      const readBack = { ...created, done_ratio: 20 };
+      mockAxiosInstance.post.mockResolvedValue({ data: { issue: created } });
+      mockAxiosInstance.get.mockResolvedValue({ data: { issue: readBack } });
+
+      const payload = {
+        project_id: 'test-project',
         subject: 'New Issue',
-        project: { id: 1, name: 'Test Project' },
+        done_ratio: 20,
+        custom_fields: [{ id: 1, value: '2.4' }],
       };
+      const result = await client.createIssue(payload);
 
-      mockAxiosInstance.post.mockResolvedValue({
-        data: { issue: mockIssue },
-      });
-
-      const result = await client.createIssue({
-        project_id: 'test-project',
-        subject: '  New Issue  ',
-      });
-
-      expect(mockAxiosInstance.post).toHaveBeenCalledWith('/issues.json', {
-        issue: {
-          project_id: 'test-project',
-          subject: 'New Issue',
-        },
-      });
-      expect(result).toEqual(mockIssue);
+      expect(mockAxiosInstance.post).toHaveBeenCalledWith('/issues.json', { issue: payload });
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/issues/1.json', { params: {} });
+      expect(result).toEqual(readBack);
     });
 
-    it('should create issue with all optional fields', async () => {
-      const mockIssue: Partial<RedmineIssue> = {
-        id: 1,
-        subject: 'New Issue',
-      };
+    it('reads watchers back when watcher_user_ids was sent', async () => {
+      mockAxiosInstance.post.mockResolvedValue({ data: { issue: created } });
+      mockAxiosInstance.get.mockResolvedValue({ data: { issue: created } });
 
-      mockAxiosInstance.post.mockResolvedValue({
-        data: { issue: mockIssue },
-      });
+      await client.createIssue({ project_id: 'p', subject: 's', watcher_user_ids: [1739] });
 
-      await client.createIssue({
-        project_id: 'test-project',
-        subject: 'New Issue',
-        description: 'Test description',
-        tracker_id: 1,
-        status_id: 2,
-        priority_id: 3,
-        assigned_to_id: 4,
-        parent_issue_id: 5,
-        estimated_hours: 8.5,
-        fixed_version_id: 87,
-      });
-
-      expect(mockAxiosInstance.post).toHaveBeenCalledWith('/issues.json', {
-        issue: {
-          project_id: 'test-project',
-          subject: 'New Issue',
-          description: 'Test description',
-          tracker_id: 1,
-          status_id: 2,
-          priority_id: 3,
-          assigned_to_id: 4,
-          parent_issue_id: 5,
-          estimated_hours: 8.5,
-          fixed_version_id: 87,
-        },
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/issues/1.json', {
+        params: { include: 'watchers' },
       });
     });
 
-    it('should sanitize description', async () => {
-      mockAxiosInstance.post.mockResolvedValue({
-        data: { issue: { id: 1 } },
-      });
+    it('says the issue exists and must not be created again when reading it back fails', async () => {
+      mockAxiosInstance.post.mockResolvedValue({ data: { issue: created } });
+      mockAxiosInstance.get.mockRejectedValue(new Error('read failed'));
 
-      await client.createIssue({
-        project_id: 'test-project',
-        subject: 'Test',
-        description: '<script>alert("xss")</script>Safe text',
-      });
+      const failure = client.createIssue({ project_id: 'p', subject: 's' });
 
-      const call = mockAxiosInstance.post.mock.calls[0];
-      expect(call[1].issue.description).not.toContain('<script>');
-      expect(call[1].issue.description).toContain('Safe text');
+      await expect(failure).rejects.toThrow('Issue 1 was created, but reading it back failed');
+      await expect(failure).rejects.toThrow('do not create it again');
     });
 
-    it('should sanitize multiline script tags', async () => {
-      mockAxiosInstance.post.mockResolvedValue({
-        data: { issue: { id: 1 } },
-      });
+    it('propagates the error Redmine returns for the create request', async () => {
+      const rejection = new Error('Unprocessable Entity');
+      mockAxiosInstance.post.mockRejectedValue(rejection);
 
-      await client.createIssue({
-        project_id: 'test-project',
-        subject: 'Test',
-        description: '<script type="text/javascript">\nalert("xss")\n</script >Safe text',
-      });
-
-      const call = mockAxiosInstance.post.mock.calls[0];
-      expect(call[1].issue.description).not.toContain('alert');
-      expect(call[1].issue.description).toContain('Safe text');
-    });
-
-    it('should sanitize event handler attributes', async () => {
-      mockAxiosInstance.post.mockResolvedValue({
-        data: { issue: { id: 1 } },
-      });
-
-      await client.createIssue({
-        project_id: 'test-project',
-        subject: 'Test',
-        description: '<img src="x" onerror="alert(1)">Safe text',
-      });
-
-      const call = mockAxiosInstance.post.mock.calls[0];
-      expect(call[1].issue.description).not.toContain('onerror');
-      expect(call[1].issue.description).toContain('Safe text');
-    });
-
-    it('should sanitize vbscript: and data: URI schemes', async () => {
-      mockAxiosInstance.post.mockResolvedValue({
-        data: { issue: { id: 1 } },
-      });
-
-      await client.createIssue({
-        project_id: 'test-project',
-        subject: 'Test',
-        description:
-          '<a href="vbscript:MsgBox">click</a> <img src="data:text/html;base64,PHNjcml">Safe',
-      });
-
-      const call = mockAxiosInstance.post.mock.calls[0];
-      expect(call[1].issue.description).not.toContain('vbscript:');
-      expect(call[1].issue.description).not.toContain('data:');
-      expect(call[1].issue.description).toContain('Safe');
-    });
-
-    it('should handle nested dangerous tag payloads', async () => {
-      mockAxiosInstance.post.mockResolvedValue({
-        data: { issue: { id: 1 } },
-      });
-
-      await client.createIssue({
-        project_id: 'test-project',
-        subject: 'Test',
-        description: '<scr<script>ipt>alert(1)</script>Safe text',
-      });
-
-      const call = mockAxiosInstance.post.mock.calls[0];
-      expect(call[1].issue.description).not.toContain('<script');
-      expect(call[1].issue.description).toContain('Safe text');
-    });
-
-    it('should sanitize closing tags with junk before >', async () => {
-      mockAxiosInstance.post.mockResolvedValue({
-        data: { issue: { id: 1 } },
-      });
-
-      await client.createIssue({
-        project_id: 'test-project',
-        subject: 'Test',
-        description: '<script>alert(1)</script\t\n bar>Safe text',
-      });
-
-      const call = mockAxiosInstance.post.mock.calls[0];
-      expect(call[1].issue.description).not.toContain('<script');
-      expect(call[1].issue.description).not.toContain('alert');
-      expect(call[1].issue.description).toContain('Safe text');
-    });
-
-    it('should sanitize data: URIs in plain text', async () => {
-      mockAxiosInstance.post.mockResolvedValue({
-        data: { issue: { id: 1 } },
-      });
-
-      await client.createIssue({
-        project_id: 'test-project',
-        subject: 'Test',
-        description: '"Click":data:text/html,<img onerror="alert(1)"> Safe text',
-      });
-
-      const call = mockAxiosInstance.post.mock.calls[0];
-      expect(call[1].issue.description).not.toContain('data:');
-      expect(call[1].issue.description).toContain('Safe text');
-    });
-
-    it('should sanitize form tags', async () => {
-      mockAxiosInstance.post.mockResolvedValue({
-        data: { issue: { id: 1 } },
-      });
-
-      await client.createIssue({
-        project_id: 'test-project',
-        subject: 'Test',
-        description: '<form action="evil"><input type="submit"></form>Safe text',
-      });
-
-      const call = mockAxiosInstance.post.mock.calls[0];
-      expect(call[1].issue.description).not.toContain('<form');
-      expect(call[1].issue.description).toContain('Safe text');
-    });
-
-    it('should throw when subject is empty string', async () => {
-      await expect(client.createIssue({ project_id: 'test-project', subject: '' })).rejects.toThrow(
-        'Subject cannot be empty'
-      );
-    });
-
-    it('should throw when subject is whitespace only', async () => {
-      await expect(
-        client.createIssue({ project_id: 'test-project', subject: '   ' })
-      ).rejects.toThrow('Subject cannot be empty');
+      await expect(client.createIssue({ project_id: 'p', subject: 's' })).rejects.toBe(rejection);
+      expect(mockAxiosInstance.get).not.toHaveBeenCalled();
     });
   });
 
@@ -729,137 +597,46 @@ describe('RedmineClient', () => {
       project: { id: 1, name: 'Test Project' },
     };
 
-    it('should update issue with provided fields', async () => {
+    it('puts the payload as it is and returns the issue read back after the write', async () => {
       mockAxiosInstance.put.mockResolvedValue({ data: {} });
       mockAxiosInstance.get.mockResolvedValue({ data: { issue: mockUpdatedIssue } });
 
-      const result = await client.updateIssue(1, {
-        subject: '  Updated Subject  ',
-        status_id: 2,
-        priority_id: 3,
-        tracker_id: 4,
-      });
+      const payload = { subject: 'Updated Subject', due_date: null, done_ratio: 50 };
+      const result = await client.updateIssue(1, payload);
 
-      expect(mockAxiosInstance.put).toHaveBeenCalledWith('/issues/1.json', {
-        issue: {
-          subject: 'Updated Subject',
-          status_id: 2,
-          priority_id: 3,
-          tracker_id: 4,
-        },
-      });
-      expect(result.id).toBe(1);
+      expect(mockAxiosInstance.put).toHaveBeenCalledWith('/issues/1.json', { issue: payload });
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/issues/1.json', { params: {} });
+      expect(result).toEqual(mockUpdatedIssue);
     });
 
-    it('should handle undefined values correctly', async () => {
+    it('returns the issue as Redmine holds it, even when the change did not apply', async () => {
       mockAxiosInstance.put.mockResolvedValue({ data: {} });
-      mockAxiosInstance.get.mockResolvedValue({ data: { issue: mockUpdatedIssue } });
-
-      await client.updateIssue(1, {
-        description: '',
-        assigned_to_id: 0,
-        parent_issue_id: 0,
-        estimated_hours: 0,
+      mockAxiosInstance.get.mockResolvedValue({
+        data: { issue: { ...mockUpdatedIssue, assigned_to: undefined } },
       });
 
-      const call = mockAxiosInstance.put.mock.calls[0];
-      expect(call[1].issue).toHaveProperty('description');
-      expect(call[1].issue).toHaveProperty('assigned_to_id');
-      expect(call[1].issue).toHaveProperty('parent_issue_id');
-      expect(call[1].issue).toHaveProperty('estimated_hours');
+      const result = await client.updateIssue(123, { assigned_to_id: 5 });
+
+      expect(result.assigned_to).toBeUndefined();
     });
 
-    it('should sanitize notes and description', async () => {
-      mockAxiosInstance.put.mockResolvedValue({ data: {} });
-      mockAxiosInstance.get.mockResolvedValue({ data: { issue: mockUpdatedIssue } });
-
-      await client.updateIssue(1, {
-        description: '<iframe src="evil"></iframe>Good text',
-        notes: '<object data="bad"></object>Safe note',
-      });
-
-      const call = mockAxiosInstance.put.mock.calls[0];
-      expect(call[1].issue.description).not.toContain('<iframe>');
-      expect(call[1].issue.notes).not.toContain('<object>');
-    });
-
-    it('should update with notes only', async () => {
-      mockAxiosInstance.put.mockResolvedValue({ data: {} });
-      mockAxiosInstance.get.mockResolvedValue({ data: { issue: mockUpdatedIssue } });
-
-      await client.updateIssue(1, {
-        notes: 'Adding a comment',
-      });
-
-      expect(mockAxiosInstance.put).toHaveBeenCalledWith('/issues/1.json', {
-        issue: {
-          notes: 'Adding a comment',
-        },
-      });
-    });
-
-    it('should move issue to another project', async () => {
+    it('moves an issue to another project', async () => {
       mockAxiosInstance.put.mockResolvedValue({ data: {} });
       mockAxiosInstance.get.mockResolvedValue({
         data: { issue: { ...mockUpdatedIssue, id: 123, project: { id: 2, name: 'app' } } },
       });
 
-      const result = await client.updateIssue(123, {
-        project_id: 'app',
-      });
+      const result = await client.updateIssue(123, { project_id: 'app' });
 
       expect(mockAxiosInstance.put).toHaveBeenCalledWith('/issues/123.json', {
-        issue: {
-          project_id: 'app',
-        },
+        issue: { project_id: 'app' },
       });
       expect(result.project.name).toBe('app');
     });
 
-    it('should return updated issue for verification', async () => {
-      mockAxiosInstance.put.mockResolvedValue({ data: {} });
-      mockAxiosInstance.get.mockResolvedValue({
-        data: {
-          issue: {
-            id: 123,
-            subject: 'Test Issue',
-            status: { id: 6, name: 'Odrzucony' },
-            assigned_to: null,
-            project: { id: 1, name: 'Test' },
-          },
-        },
-      });
-
-      const result = await client.updateIssue(123, {
-        assigned_to_id: 5,
-      });
-
-      expect(result.assigned_to).toBeNull();
-    });
-
-    it('sends fixed_version_id and returns the issue with its new target version', async () => {
-      mockAxiosInstance.put.mockResolvedValue({ data: {} });
-      mockAxiosInstance.get.mockResolvedValue({
-        data: { issue: { ...mockUpdatedIssue, fixed_version: { id: 87, name: 'Week 10' } } },
-      });
-
-      const result = await client.updateIssue(1, { fixed_version_id: 87 });
-
-      expect(mockAxiosInstance.put).toHaveBeenCalledWith('/issues/1.json', {
-        issue: { fixed_version_id: 87 },
-      });
-      expect(result.fixed_version).toEqual({ id: 87, name: 'Week 10' });
-    });
-
-    it.each([
-      [{}],
-      [{ subject: '' }],
-      [{ notes: '' }],
-      [{ status_id: 0 }],
-      [{ fixed_version_id: 0 }],
-    ])('sends nothing and throws when every field in %j is empty', async (options) => {
-      await expect(client.updateIssue(5, options)).rejects.toThrow(
-        'Nothing to update on issue 5: every field given was empty or unset, so no request was sent to Redmine.'
+    it('throws and sends nothing when the payload is empty', async () => {
+      await expect(client.updateIssue(5, {})).rejects.toThrow(
+        'Nothing to update on issue 5: no field was given, so no request was sent to Redmine.'
       );
       expect(mockAxiosInstance.put).not.toHaveBeenCalled();
     });
@@ -869,15 +646,6 @@ describe('RedmineClient', () => {
         'Invalid identifier ".."'
       );
       expect(mockAxiosInstance.put).not.toHaveBeenCalled();
-    });
-
-    it('leaves the target version out of the payload when fixed_version_id is not given', async () => {
-      mockAxiosInstance.put.mockResolvedValue({ data: {} });
-      mockAxiosInstance.get.mockResolvedValue({ data: { issue: mockUpdatedIssue } });
-
-      await client.updateIssue(1, { notes: 'n' });
-
-      expect(mockAxiosInstance.put.mock.calls[0][1].issue).not.toHaveProperty('fixed_version_id');
     });
 
     it('propagates the 422 Redmine returns for a version the issue cannot use', async () => {
@@ -2372,101 +2140,6 @@ describe('RedmineClient', () => {
     });
   });
 
-  describe('input sanitization', () => {
-    it('should remove script tags from input', async () => {
-      mockAxiosInstance.post.mockResolvedValue({
-        data: { issue: { id: 1 } },
-      });
-
-      await client.createIssue({
-        project_id: 'test',
-        subject: 'Test',
-        description: 'Before <script>alert("xss")</script> After',
-      });
-
-      const call = mockAxiosInstance.post.mock.calls[0];
-      expect(call[1].issue.description).toBe('Before  After');
-    });
-
-    it('should remove iframe tags from input', async () => {
-      mockAxiosInstance.post.mockResolvedValue({
-        data: { issue: { id: 1 } },
-      });
-
-      await client.createIssue({
-        project_id: 'test',
-        subject: 'Test',
-        description: '<iframe src="evil.com">content</iframe>safe',
-      });
-
-      const call = mockAxiosInstance.post.mock.calls[0];
-      expect(call[1].issue.description).not.toContain('iframe');
-      expect(call[1].issue.description).toContain('safe');
-    });
-
-    it('should remove object tags from input', async () => {
-      mockAxiosInstance.post.mockResolvedValue({
-        data: { issue: { id: 1 } },
-      });
-
-      await client.createIssue({
-        project_id: 'test',
-        subject: 'Test',
-        description: '<object data="bad.swf"></object>clean',
-      });
-
-      const call = mockAxiosInstance.post.mock.calls[0];
-      expect(call[1].issue.description).not.toContain('object');
-    });
-
-    it('should remove embed tags from input', async () => {
-      mockAxiosInstance.post.mockResolvedValue({
-        data: { issue: { id: 1 } },
-      });
-
-      await client.createIssue({
-        project_id: 'test',
-        subject: 'Test',
-        description: '<embed src="evil.swf">text',
-      });
-
-      const call = mockAxiosInstance.post.mock.calls[0];
-      expect(call[1].issue.description).not.toContain('embed');
-    });
-
-    it('should remove javascript: protocol from input', async () => {
-      mockAxiosInstance.post.mockResolvedValue({
-        data: { issue: { id: 1 } },
-      });
-
-      await client.createIssue({
-        project_id: 'test',
-        subject: 'Test',
-        description: 'Link: javascript:alert("xss") safe text',
-      });
-
-      const call = mockAxiosInstance.post.mock.calls[0];
-      expect(call[1].issue.description).not.toContain('javascript:');
-    });
-
-    it('should handle case-insensitive tag matching', async () => {
-      mockAxiosInstance.post.mockResolvedValue({
-        data: { issue: { id: 1 } },
-      });
-
-      await client.createIssue({
-        project_id: 'test',
-        subject: 'Test',
-        description: '<SCRIPT>alert()</SCRIPT><iFrAmE></iFrAmE>safe',
-      });
-
-      const call = mockAxiosInstance.post.mock.calls[0];
-      expect(call[1].issue.description).not.toContain('SCRIPT');
-      expect(call[1].issue.description).not.toContain('iFrAmE');
-      expect(call[1].issue.description).toContain('safe');
-    });
-  });
-
   describe('Project Scoping', () => {
     const scopedProjectConfig: RedmineProjectConfig = {
       host_url: 'https://redmine.example.com',
@@ -3587,6 +3260,7 @@ describe('RedmineClient', () => {
       it('should succeed when scoped and project_id matches', async () => {
         const scopedClient = new RedmineClient(config, scopedProjectConfig);
         const createdIssue = { ...inScopeIssue, id: 10, subject: 'New issue' };
+        setupScopedGetMock({ '/issues/10.json': { data: { issue: createdIssue } } });
         mockAxiosInstance.post.mockResolvedValue({ data: { issue: createdIssue } });
 
         const result = await scopedClient.createIssue({
@@ -3617,7 +3291,9 @@ describe('RedmineClient', () => {
 
       it('should create a subtask of an in-scope parent', async () => {
         const scopedClient = new RedmineClient(config, scopedProjectConfig);
-        setupScopedGetMock();
+        setupScopedGetMock({
+          '/issues/11.json': { data: { issue: { ...inScopeIssue, id: 11 } } },
+        });
         mockAxiosInstance.post.mockResolvedValue({ data: { issue: { id: 11 } } });
 
         await scopedClient.createIssue({

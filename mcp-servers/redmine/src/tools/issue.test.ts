@@ -457,6 +457,54 @@ describe('issue-tools', () => {
       expect((def.tool.outputSchema!.properties as Record<string, unknown>).issue).toBeUndefined();
     });
 
+    it('declares the journal and custom field keys Redmine sends in their nested schemas', async () => {
+      const issue = {
+        id: 1,
+        custom_fields: [{ id: 1, name: 'Tags', value: ['a'], multiple: true }],
+        journals: [
+          {
+            id: 9,
+            user: { id: 1, name: 'U' },
+            notes: 'n',
+            private_notes: true,
+            details: [{ property: 'attr', name: 'done_ratio', old_value: '0', new_value: '50' }],
+            created_on: '2026-11-24T09:00:00Z',
+            updated_on: '2026-11-24T09:05:00Z',
+          },
+        ],
+      };
+      mockClient.showIssue.mockResolvedValue(issue);
+      const def = createIssueTools(mockClient as unknown as RedmineClient).find(
+        (t) => t.tool.name === 'getIssueFull'
+      )!;
+
+      const emitted = expectEmittedKeysDeclared(
+        def.tool,
+        await def.handler({ issue_id: 1, include: ['journals'] })
+      ) as typeof issue;
+
+      const schema = def.tool.outputSchema!.properties as Record<string, SchemaNode>;
+      expect(Object.keys(schema.journals.items!.properties!)).toEqual(
+        expect.arrayContaining(Object.keys(emitted.journals[0]))
+      );
+      expect(Object.keys(schema.custom_fields.items!.properties!)).toEqual(
+        expect.arrayContaining(Object.keys(emitted.custom_fields[0]))
+      );
+    });
+
+    it('describes what each include value adds', () => {
+      const def = createIssueTools(mockClient as unknown as RedmineClient).find(
+        (t) => t.tool.name === 'getIssueFull'
+      )!;
+      const include = (def.tool.inputSchema.properties as Record<string, { description: string }>)
+        .include;
+      const enumValues = (
+        def.tool.inputSchema.properties as Record<string, { items: { enum: string[] } }>
+      ).include.items.enum;
+
+      for (const value of enumValues) expect(include.description).toContain(`${value}:`);
+    });
+
     it('includes additional data when requested', async () => {
       mockClient.showIssue.mockResolvedValue({ id: 1 });
 
@@ -631,14 +679,14 @@ describe('issue-tools', () => {
         content: [
           {
             type: 'text',
-            text: JSON.stringify(mockCreatedIssue, null, 2),
+            text: JSON.stringify({ ...mockCreatedIssue, ignored_fields: [] }, null, 2),
           },
         ],
       });
-      expect(mockClient.createIssue).toHaveBeenCalledWith({
-        project_id: 'test-project',
-        subject: 'New Issue',
-      });
+      expect(mockClient.createIssue).toHaveBeenCalledWith(
+        { project_id: 'test-project', subject: 'New Issue' },
+        undefined
+      );
     });
 
     describe('file_paths', () => {
@@ -672,11 +720,9 @@ describe('issue-tools', () => {
           file_paths: ['shot.png'],
         });
 
-        expect(mockClient.createIssue).toHaveBeenCalledWith({
-          project_id: 'p',
-          subject: 's',
-          files: [{ path: path.join(workspace, 'shot.png'), name: 'shot.png', size: 3 }],
-        });
+        expect(mockClient.createIssue).toHaveBeenCalledWith({ project_id: 'p', subject: 's' }, [
+          { path: path.join(workspace, 'shot.png'), name: 'shot.png', size: 3 },
+        ]);
       });
 
       it('rejects a path outside the workspace before resolving the assignee or creating anything', async () => {
@@ -698,7 +744,10 @@ describe('issue-tools', () => {
 
         await createIssueHandler()({ project_id: 'p', subject: 's' });
 
-        expect(mockClient.createIssue).toHaveBeenCalledWith({ project_id: 'p', subject: 's' });
+        expect(mockClient.createIssue).toHaveBeenCalledWith(
+          { project_id: 'p', subject: 's' },
+          undefined
+        );
       });
     });
 
@@ -714,11 +763,10 @@ describe('issue-tools', () => {
         tracker: 'bug',
       });
 
-      expect(mockClient.createIssue).toHaveBeenCalledWith({
-        project_id: 'test-project',
-        subject: 'Bug Fix',
-        tracker_id: 1,
-      });
+      expect(mockClient.createIssue).toHaveBeenCalledWith(
+        { project_id: 'test-project', subject: 'Bug Fix', tracker_id: 1 },
+        undefined
+      );
     });
 
     it('resolves assigned_to username to user ID', async () => {
@@ -735,11 +783,10 @@ describe('issue-tools', () => {
       });
 
       expect(mockClient.resolveUser).toHaveBeenCalledWith('john.doe');
-      expect(mockClient.createIssue).toHaveBeenCalledWith({
-        project_id: 'test-project',
-        subject: 'Assigned Issue',
-        assigned_to_id: 42,
-      });
+      expect(mockClient.createIssue).toHaveBeenCalledWith(
+        { project_id: 'test-project', subject: 'Assigned Issue', assigned_to_id: 42 },
+        undefined
+      );
     });
 
     it('returns a teaching error instead of silently creating an unassigned issue', async () => {
@@ -775,12 +822,15 @@ describe('issue-tools', () => {
         fixed_version_id: 87,
       });
 
-      expect(mockClient.createIssue).toHaveBeenCalledWith({
-        project_id: 'test-project',
-        subject: 'Sub-task',
-        parent_issue_id: 10,
-        fixed_version_id: 87,
-      });
+      expect(mockClient.createIssue).toHaveBeenCalledWith(
+        {
+          project_id: 'test-project',
+          subject: 'Sub-task',
+          parent_issue_id: 10,
+          fixed_version_id: 87,
+        },
+        undefined
+      );
     });
 
     it('names the fixed_version_id it sent when Redmine rejects the new issue', async () => {
@@ -814,13 +864,16 @@ describe('issue-tools', () => {
         status: 'in_progress',
       });
 
-      expect(mockClient.createIssue).toHaveBeenCalledWith({
-        project_id: 'test-project',
-        subject: 'Complex Issue',
-        tracker_id: 2,
-        priority_id: 3,
-        status_id: 2,
-      });
+      expect(mockClient.createIssue).toHaveBeenCalledWith(
+        {
+          project_id: 'test-project',
+          subject: 'Complex Issue',
+          tracker_id: 2,
+          priority_id: 3,
+          status_id: 2,
+        },
+        undefined
+      );
     });
 
     it('handles creation errors', async () => {
@@ -833,7 +886,7 @@ describe('issue-tools', () => {
 
       const result = await handler!({
         project_id: 'test-project',
-        subject: '',
+        subject: 'Subject',
       });
 
       expect(result).toEqual({
@@ -873,28 +926,14 @@ describe('issue-tools', () => {
         content: [
           {
             type: 'text',
-            text: JSON.stringify(
-              {
-                id: 1,
-                subject: 'Updated Subject',
-                project: { id: 1, name: 'Test Project' },
-                tracker: { id: 1, name: 'Bug' },
-                status: { id: 2, name: 'In Progress' },
-                priority: { id: 2, name: 'Normal' },
-              },
-              null,
-              2
-            ),
+            text: JSON.stringify({ ...mockUpdatedIssue, ignored_fields: [] }, null, 2),
           },
         ],
       });
-      expect(mockClient.updateIssue).toHaveBeenCalledWith(1, {
-        issue_id: 1,
-        subject: 'Updated Subject',
-      });
+      expect(mockClient.updateIssue).toHaveBeenCalledWith(1, { subject: 'Updated Subject' });
     });
 
-    it('returns every field it can change as the issue holds it after the update', async () => {
+    it('returns the whole issue as it holds after the update', async () => {
       mockClient.updateIssue.mockResolvedValue({
         id: 83432,
         subject: 'Plan me',
@@ -907,7 +946,9 @@ describe('issue-tools', () => {
         fixed_version: { id: 87, name: 'Week 10' },
         parent: { id: 83000 },
         estimated_hours: 4,
-        description: 'not echoed',
+        description: 'kept in the result',
+        done_ratio: 50,
+        custom_fields: [{ id: 1, name: 'Version', value: '2.4' }],
       });
 
       const tools = createIssueTools(mockClient as unknown as RedmineClient);
@@ -916,22 +957,16 @@ describe('issue-tools', () => {
       const result = await tool.handler({ issue_id: 83432, fixed_version_id: 87 });
 
       const emitted = expectEmittedKeysDeclared(tool.tool, result);
-      expect(emitted).toEqual({
+      expect(emitted).toMatchObject({
         id: 83432,
-        subject: 'Plan me',
-        project: { id: 1972, name: 'Auditor' },
-        tracker: { id: 2, name: 'Feature' },
-        status: { id: 1, name: 'New' },
-        priority: { id: 3, name: 'High' },
-        assigned_to: { id: 1454, name: 'Kacper' },
-        fixed_version: { id: 87, name: 'Week 10' },
-        parent: { id: 83000 },
-        estimated_hours: 4,
+        author: { id: 7, name: 'Ala' },
+        description: 'kept in the result',
+        done_ratio: 50,
+        custom_fields: [{ id: 1, name: 'Version', value: '2.4' }],
+        ignored_fields: [],
       });
-      expect(mockClient.updateIssue).toHaveBeenCalledWith(83432, {
-        issue_id: 83432,
-        fixed_version_id: 87,
-      });
+      expect(emitted).not.toHaveProperty('message');
+      expect(mockClient.updateIssue).toHaveBeenCalledWith(83432, { fixed_version_id: 87 });
     });
 
     it('names the fixed_version_id it sent when Redmine rejects the update', async () => {
@@ -958,11 +993,7 @@ describe('issue-tools', () => {
 
       await handler({ issue_id: 5, tracker: 'feature', priority: 'high' });
 
-      expect(mockClient.updateIssue).toHaveBeenCalledWith(5, {
-        issue_id: 5,
-        tracker_id: 2,
-        priority_id: 3,
-      });
+      expect(mockClient.updateIssue).toHaveBeenCalledWith(5, { tracker_id: 2, priority_id: 3 });
     });
 
     it('updates status using name mapping', async () => {
@@ -980,10 +1011,7 @@ describe('issue-tools', () => {
         status: 'resolved',
       });
 
-      expect(mockClient.updateIssue).toHaveBeenCalledWith(1, {
-        issue_id: 1,
-        status_id: 3,
-      });
+      expect(mockClient.updateIssue).toHaveBeenCalledWith(1, { status_id: 3 });
     });
 
     it('resolves assigned_to username', async () => {
@@ -1003,10 +1031,7 @@ describe('issue-tools', () => {
       });
 
       expect(mockClient.resolveUser).toHaveBeenCalledWith('jane.doe');
-      expect(mockClient.updateIssue).toHaveBeenCalledWith(1, {
-        issue_id: 1,
-        assigned_to_id: 99,
-      });
+      expect(mockClient.updateIssue).toHaveBeenCalledWith(1, { assigned_to_id: 99 });
     });
 
     it('returns a teaching error instead of silently no-oping the reassignment', async () => {
@@ -1055,6 +1080,212 @@ describe('issue-tools', () => {
       await handler!({ issue_id: 9999, subject: 'Updated' });
 
       expect(formatErrorSpy).toHaveBeenCalledWith(expect.any(Error), { issue_id: 9999 });
+    });
+  });
+
+  describe('write rules from the issue field table', () => {
+    const toolOf = (name: string) =>
+      createIssueTools(mockClient as unknown as RedmineClient).find((t) => t.tool.name === name)!;
+    const textOf = (result: { content: unknown[] }) => (result.content[0] as { text: string }).text;
+    const issueAfter = {
+      id: 1,
+      subject: 'A',
+      project: { id: 1, name: 'P' },
+      done_ratio: 20,
+      start_date: '2026-11-24',
+      custom_fields: [{ id: 1, name: 'Version', value: '2.4' }],
+      watchers: [{ id: 1739, name: 'W' }],
+    };
+
+    it('creates an issue with the new fields and returns it with empty ignored_fields', async () => {
+      mockClient.createIssue.mockResolvedValue(issueAfter);
+      const tool = toolOf('createIssue');
+
+      const result = await tool.handler({
+        project_id: 'x',
+        subject: 'A',
+        done_ratio: 20,
+        start_date: '2026-11-24',
+        custom_fields: [{ id: 1, value: '2.4' }],
+        watcher_user_ids: [1739],
+      });
+
+      const emitted = expectEmittedKeysDeclared(tool.tool, result);
+      expect(emitted).toEqual({ ...issueAfter, ignored_fields: [] });
+      expect(mockClient.createIssue).toHaveBeenCalledWith(
+        {
+          project_id: 'x',
+          subject: 'A',
+          done_ratio: 20,
+          start_date: '2026-11-24',
+          custom_fields: [{ id: 1, value: '2.4' }],
+          watcher_user_ids: [1739],
+        },
+        undefined
+      );
+    });
+
+    it('rejects an empty subject on create with the field named and sends nothing', async () => {
+      const result = await toolOf('createIssue').handler({ project_id: 'x', subject: '' });
+
+      expect(result.isError).toBe(true);
+      expect(textOf(result)).toContain('subject: empty string is not a value');
+      expect(textOf(result)).toContain('createIssue rejected the call and sent nothing');
+      expect(mockClient.createIssue).not.toHaveBeenCalled();
+    });
+
+    it('reports the sent fields Redmine did not apply on create', async () => {
+      mockClient.createIssue.mockResolvedValue({ ...issueAfter, done_ratio: 0 });
+
+      const result = await toolOf('createIssue').handler({
+        project_id: 'x',
+        subject: 'A',
+        done_ratio: 20,
+      });
+
+      expect(JSON.parse(textOf(result)).ignored_fields).toEqual(['done_ratio']);
+    });
+
+    it('updates dates and progress and returns the whole issue after the write', async () => {
+      mockClient.updateIssue.mockResolvedValue({
+        ...issueAfter,
+        due_date: '2026-12-01',
+        done_ratio: 50,
+      });
+      const tool = toolOf('updateIssue');
+
+      const result = await tool.handler({ issue_id: 1, due_date: '2026-12-01', done_ratio: 50 });
+
+      const emitted = expectEmittedKeysDeclared(tool.tool, result);
+      expect(emitted).toEqual({
+        ...issueAfter,
+        due_date: '2026-12-01',
+        done_ratio: 50,
+        ignored_fields: [],
+      });
+      expect(mockClient.updateIssue).toHaveBeenCalledWith(1, {
+        due_date: '2026-12-01',
+        done_ratio: 50,
+      });
+    });
+
+    it('lists done_ratio as ignored with a message when Redmine derives progress from status', async () => {
+      mockClient.updateIssue.mockResolvedValue({ ...issueAfter, done_ratio: 20 });
+      const tool = toolOf('updateIssue');
+
+      const result = await tool.handler({ issue_id: 1, done_ratio: 50 });
+
+      const emitted = expectEmittedKeysDeclared(tool.tool, result);
+      expect(emitted.ignored_fields).toEqual(['done_ratio']);
+      expect(emitted.message).toBe(
+        'Redmine did not apply done_ratio: no permission, the field is disabled for the tracker, or it is derived from status or subtasks.'
+      );
+    });
+
+    it('clears fields with null and sends "" for the description', async () => {
+      mockClient.updateIssue.mockResolvedValue({ id: 1, subject: 'A' });
+
+      const result = await toolOf('updateIssue').handler({
+        issue_id: 1,
+        due_date: null,
+        fixed_version_id: null,
+        description: null,
+      });
+
+      expect(JSON.parse(textOf(result)).ignored_fields).toEqual([]);
+      expect(mockClient.updateIssue).toHaveBeenCalledWith(1, {
+        due_date: null,
+        fixed_version_id: null,
+        description: '',
+      });
+    });
+
+    it('sends a private note', async () => {
+      mockClient.updateIssue.mockResolvedValue({ id: 1, subject: 'A' });
+
+      await toolOf('updateIssue').handler({
+        issue_id: 1,
+        notes: 'Only for the team',
+        private_notes: true,
+      });
+
+      expect(mockClient.updateIssue).toHaveBeenCalledWith(1, {
+        notes: 'Only for the team',
+        private_notes: true,
+      });
+    });
+
+    it.each([
+      [{ subject: null }, 'subject cannot be cleared'],
+      [{ subject: '', notes: 'x' }, 'subject: empty string is not a value'],
+      [{ notes: '' }, 'notes: empty string is not a value'],
+      [{ status: '' }, 'status cannot be cleared'],
+      [{ estimated_hours: '' }, 'pass null to clear it'],
+    ])('rejects %j on update and sends nothing', async (fields, expected) => {
+      const result = await toolOf('updateIssue').handler({ issue_id: 1, ...fields });
+
+      expect(result.isError).toBe(true);
+      expect(textOf(result)).toContain(expected);
+      expect(mockClient.updateIssue).not.toHaveBeenCalled();
+    });
+
+    it('rejects assigned_to null by name and says to clear with assigned_to_id', async () => {
+      const result = await toolOf('updateIssue').handler({ issue_id: 1, assigned_to: null });
+
+      expect(textOf(result)).toContain('assigned_to_id: null to clear it');
+      expect(mockClient.updateIssue).not.toHaveBeenCalled();
+    });
+
+    it('declares a clearable field with null and a non-clearable one without', () => {
+      const properties = toolOf('updateIssue').tool.inputSchema.properties as Record<
+        string,
+        { type: unknown; description: string }
+      >;
+
+      expect(properties.assigned_to_id.type).toEqual(['number', 'null']);
+      expect(properties.due_date.description).toContain('null clears');
+      expect(properties.subject.type).toBe('string');
+    });
+
+    it('requires only project_id and subject on create', () => {
+      expect(toolOf('createIssue').tool.inputSchema.required).toEqual(['project_id', 'subject']);
+      expect(toolOf('updateIssue').tool.inputSchema.required).toEqual(['issue_id']);
+    });
+  });
+
+  describe('listIssueIds filters from the issue field table', () => {
+    it('passes the date, progress, privacy, watcher and custom field filters to the client', async () => {
+      mockClient.listIssues.mockResolvedValue({
+        issues: [{ id: 101 }, { id: 107 }],
+        total_count: 2,
+      });
+      const handler = createIssueTools(mockClient as unknown as RedmineClient).find(
+        (t) => t.tool.name === 'listIssueIds'
+      )!.handler;
+
+      const result = await handler({
+        project_id: 'x',
+        due_date: '<=2026-11-30',
+        done_ratio: '<100',
+        start_date: '><2026-11-01|2026-11-30',
+        is_private: '0',
+        watcher_id: 'me',
+        cf: { '1': '2.4' },
+      });
+
+      expect(JSON.parse((result.content[0] as { text: string }).text)).toEqual({
+        ids: [101, 107],
+        total_count: 2,
+      });
+      expect(mockClient.listIssues).toHaveBeenCalledWith({
+        project_id: 'x',
+        due_date: '<=2026-11-30',
+        done_ratio: '<100',
+        start_date: '><2026-11-01|2026-11-30',
+        is_private: '0',
+        watcher_id: 'me',
+        cf: { '1': '2.4' },
+      });
     });
   });
 

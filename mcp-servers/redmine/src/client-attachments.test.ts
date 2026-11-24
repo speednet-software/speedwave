@@ -276,9 +276,11 @@ describe('RedmineClient attachments', () => {
       route = (r) =>
         r.url.startsWith('/uploads.json')
           ? { status: 201, body: { upload: { token: 'tok' } } }
-          : { status: 201, body: { issue: { id: 55 } } };
+          : r.method === 'POST'
+            ? { status: 201, body: { issue: { id: 55 } } }
+            : { status: 200, body: { issue: { id: 55, project: { id: 1, name: 'P' } } } };
 
-      const issue = await client().createIssue({ project_id: 'p', subject: 's', files: [file] });
+      const issue = await client().createIssue({ project_id: 'p', subject: 's' }, [file]);
 
       expect(issue.id).toBe(55);
       const create = callsTo('POST', '/issues.json')[0];
@@ -294,9 +296,9 @@ describe('RedmineClient attachments', () => {
           ? { status: 422, body: { errors: ['Too large'] } }
           : { status: 201, body: { issue: { id: 55 } } };
 
-      await expect(
-        client().createIssue({ project_id: 'p', subject: 's', files: [file] })
-      ).rejects.toThrow(/Too large/);
+      await expect(client().createIssue({ project_id: 'p', subject: 's' }, [file])).rejects.toThrow(
+        /Too large/
+      );
 
       expect(callsTo('POST', '/issues.json')).toHaveLength(0);
     });

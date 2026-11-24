@@ -16,14 +16,25 @@ import { createProjectTools } from './project-tools.js';
 import { createRelationTools } from './relation-tools.js';
 import { createConfigTools } from './config-tools.js';
 
+function isNumericIdType(type: unknown): boolean {
+  return (
+    type === 'number' ||
+    (Array.isArray(type) && type.length === 2 && type.includes('number') && type.includes('null'))
+  );
+}
+
 function withNumericIds(tool: Tool, handler: ToolHandler): ToolHandler {
   const ids = Object.entries(tool.inputSchema.properties)
     .filter(
-      ([name, schema]) => name.endsWith('_id') && (schema as { type?: unknown }).type === 'number'
+      ([name, schema]) =>
+        name.endsWith('_id') && isNumericIdType((schema as { type?: unknown }).type)
     )
     .map(([name]) => name);
   return async (params, ...rest) => {
-    const normalized = normalizeNumericIdParams(params, ids);
+    const normalized = normalizeNumericIdParams(
+      params,
+      ids.filter((name) => params[name] !== null)
+    );
     if (!normalized.ok) {
       const { paramName, nextStep } = normalized.error;
       return teachingErrorResult({ paramName, nextStep });

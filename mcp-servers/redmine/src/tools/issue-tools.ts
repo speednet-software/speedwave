@@ -15,6 +15,14 @@ import {
   MAX_WORKSPACE_FILES,
 } from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
+import {
+  buildIssuePayload,
+  ignoredFields,
+  issueFilterProperties,
+  issueInputProperties,
+  issueRequiredOnCreate,
+  type IssueWriteResult,
+} from '../issue-fields.js';
 import { resolveParams } from './helpers.js';
 import { resolveAttachmentFiles } from './attachment-files.js';
 import { withRedmineErrors } from './error-handling.js';
@@ -67,10 +75,81 @@ function versionContext(params: Record<string, unknown>): { fixed_version_id: nu
     : undefined;
 }
 
+const ISSUE_PROPERTIES = {
+  id: { type: 'number' },
+  project: NAMED_REF,
+  tracker: NAMED_REF,
+  status: NAMED_REF,
+  priority: NAMED_REF,
+  author: NAMED_REF,
+  assigned_to: { ...NAMED_REF, description: 'Absent when unassigned' },
+  category: { ...NAMED_REF, description: 'Absent when none is set' },
+  fixed_version: { ...NAMED_REF, description: 'Target version; absent when none is set' },
+  parent: { type: 'object', properties: { id: { type: 'number' } } },
+  subject: { type: 'string' },
+  description: { type: 'string' },
+  start_date: { type: ['string', 'null'] },
+  due_date: { type: ['string', 'null'] },
+  done_ratio: { type: 'number' },
+  is_private: { type: 'boolean' },
+  estimated_hours: { type: ['number', 'null'] },
+  total_estimated_hours: { type: ['number', 'null'] },
+  spent_hours: { type: 'number' },
+  total_spent_hours: { type: 'number' },
+  custom_fields: {
+    type: 'array',
+    items: {
+      type: 'object',
+      properties: {
+        id: { type: 'number' },
+        name: { type: 'string' },
+        value: { type: ['string', 'array', 'null'], description: 'An array for a multiple field' },
+        multiple: { type: 'boolean' },
+      },
+    },
+  },
+  created_on: { type: 'string', description: 'ISO 8601 timestamp' },
+  updated_on: { type: 'string', description: 'ISO 8601 timestamp' },
+  closed_on: { type: ['string', 'null'] },
+  journals: {
+    type: 'array',
+    description: 'Only with include: ["journals"]',
+    items: {
+      type: 'object',
+      properties: {
+        id: { type: 'number' },
+        user: NAMED_REF,
+        notes: { type: 'string' },
+        private_notes: { type: 'boolean' },
+        details: { type: 'array', items: { type: 'object' } },
+        created_on: { type: 'string' },
+        updated_on: { type: 'string' },
+      },
+    },
+  },
+  attachments: { type: 'array', description: 'Only with include: ["attachments"]' },
+  relations: { type: 'array', description: 'Only with include: ["relations"]' },
+  children: { type: 'array', description: 'Only with include: ["children"]' },
+  watchers: { type: 'array', description: 'Only with include: ["watchers"]' },
+  changesets: { type: 'array', description: 'Only with include: ["changesets"]' },
+  allowed_statuses: { type: 'array', description: 'Only with include: ["allowed_statuses"]' },
+};
+
+const WRITE_RESULT_SCHEMA = successResultSchema({
+  ...ISSUE_PROPERTIES,
+  ignored_fields: {
+    type: 'array',
+    items: { type: 'string' },
+    description:
+      'Sent fields that the issue read back after the write does not hold (custom fields as custom_fields.<id>); empty when every sent field was applied. notes and private_notes cannot be verified this way',
+  },
+  message: { type: 'string', description: 'Present only when ignored_fields is not empty' },
+});
+
 const listIssueIdsTool: Tool = {
   name: 'listIssueIds',
   description:
-    'List issue IDs with optional filters. Returns only IDs for efficiency. Omitting assigned_to returns issues for ALL users; pass assigned_to: "me" to scope to the current user. Omitting status returns open issues only; pass status: "*" to count closed ones too, e.g. for every issue in a target version or every subtask.',
+    'List issue IDs with optional filters. Returns only IDs for efficiency. Omitting assigned_to returns issues for ALL users; pass assigned_to: "me" to scope to the current user. Omitting status returns open issues only; pass status: "*" to count closed ones too, e.g. for every issue in a target version or every subtask. start_date, due_date, done_ratio, is_private and watcher_id take a Redmine filter expression (e.g. due_date: "<=2026-11-30", done_ratio: "<100"); cf maps a custom field ID to an expression.',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
@@ -82,28 +161,12 @@ const listIssueIdsTool: Tool = {
   inputSchema: {
     type: 'object',
     properties: {
-      project_id: { type: 'string', description: 'Project identifier or key' },
       status: {
         type: 'string',
         description: 'open (default), closed, * (all), or a status name from getMappings',
       },
-      status_id: {
-        type: ['number', 'string'],
-        description: 'Status ID, or open / closed / *; use for a status getMappings does not map',
-      },
       assigned_to: { type: 'string', description: 'Assignee: me, user_id, or username' },
-      assigned_to_id: { type: 'number', description: 'Assignee user ID' },
-      tracker_id: { type: 'number', description: 'Tracker ID' },
-      priority_id: { type: 'number', description: 'Priority ID' },
-      fixed_version_id: {
-        type: 'number',
-        description:
-          'Target version ID — obtained from listVersions; add status: "*" for closed ones',
-      },
-      parent_id: {
-        type: 'number',
-        description: 'Parent issue ID (lists its subtasks); add status: "*" for closed ones',
-      },
+      ...issueFilterProperties(),
       limit: { type: 'number', description: 'Max results (default 25, max 100)' },
       offset: { type: 'number', description: 'Pagination offset' },
     },
@@ -121,6 +184,19 @@ const listIssueIdsTool: Tool = {
     {
       description: 'Full: project issues with subtasks',
       input: { project_id: 'my-project', status: 'open', assigned_to: 'me', limit: 50 },
+    },
+    {
+      description: 'Filters: due by the end of the month, not finished, custom field 1 equals 2.4',
+      input: {
+        project_id: 'my-project',
+        due_date: '<=2026-11-30',
+        done_ratio: '<100',
+        cf: { '1': '2.4' },
+      },
+    },
+    {
+      description: 'Filters: started in November, watched by me',
+      input: { project_id: 'my-project', start_date: '><2026-11-01|2026-11-30', watcher_id: 'me' },
     },
   ],
 };
@@ -153,56 +229,13 @@ const getIssueFullTool: Tool = {
             'allowed_statuses',
           ],
         },
-        description: 'Additional data to include',
+        description:
+          'Additional data to include. journals: comments, each with private_notes, details (field changes), created_on and updated_on. watchers: users watching the issue, set with watcher_user_ids on createIssue. attachments: files, for downloadAttachment. relations: links to other issues. children: subtasks. changesets: linked repository revisions. allowed_statuses: statuses the current user may set.',
       },
     },
     required: ['issue_id'],
   },
-  outputSchema: successResultSchema({
-    id: { type: 'number' },
-    project: NAMED_REF,
-    tracker: NAMED_REF,
-    status: NAMED_REF,
-    priority: NAMED_REF,
-    author: NAMED_REF,
-    assigned_to: { ...NAMED_REF, description: 'Absent when unassigned' },
-    category: { ...NAMED_REF, description: 'Absent when none is set' },
-    fixed_version: { ...NAMED_REF, description: 'Target version; absent when none is set' },
-    parent: { type: 'object', properties: { id: { type: 'number' } } },
-    subject: { type: 'string' },
-    description: { type: 'string' },
-    start_date: { type: ['string', 'null'] },
-    due_date: { type: ['string', 'null'] },
-    done_ratio: { type: 'number' },
-    is_private: { type: 'boolean' },
-    estimated_hours: { type: ['number', 'null'] },
-    total_estimated_hours: { type: ['number', 'null'] },
-    spent_hours: { type: 'number' },
-    total_spent_hours: { type: 'number' },
-    custom_fields: { type: 'array', items: { type: 'object' } },
-    created_on: { type: 'string', description: 'ISO 8601 timestamp' },
-    updated_on: { type: 'string', description: 'ISO 8601 timestamp' },
-    closed_on: { type: ['string', 'null'] },
-    journals: {
-      type: 'array',
-      description: 'Only with include: ["journals"]',
-      items: {
-        type: 'object',
-        properties: {
-          id: { type: 'number' },
-          user: NAMED_REF,
-          notes: { type: 'string' },
-          created_on: { type: 'string' },
-        },
-      },
-    },
-    attachments: { type: 'array', description: 'Only with include: ["attachments"]' },
-    relations: { type: 'array', description: 'Only with include: ["relations"]' },
-    children: { type: 'array', description: 'Only with include: ["children"]' },
-    watchers: { type: 'array', description: 'Only with include: ["watchers"]' },
-    changesets: { type: 'array', description: 'Only with include: ["changesets"]' },
-    allowed_statuses: { type: 'array', description: 'Only with include: ["allowed_statuses"]' },
-  }),
+  outputSchema: successResultSchema(ISSUE_PROPERTIES),
   inputExamples: [
     {
       description: 'Minimal: get basic issue details',
@@ -250,7 +283,7 @@ const searchIssueIdsTool: Tool = {
 
 const createIssueTool: Tool = {
   name: 'createIssue',
-  description: `Create a new Redmine issue. tracker/priority/status names must match this project's configured mappings (see getMappings); an unrecognized name throws an error listing valid values. file_paths attaches 1 to ${MAX_WORKSPACE_FILES} files from /workspace; a path outside /workspace is rejected before anything is created.`,
+  description: `Create a new Redmine issue. tracker/priority/status names must match this project's configured mappings (see getMappings); an unrecognized name throws an error listing valid values. Omitted fields keep Redmine's defaults; null clears a field whose description says so, '' is rejected, and a rejected call sends nothing. file_paths attaches 1 to ${MAX_WORKSPACE_FILES} files from /workspace; a path outside /workspace is rejected before anything is created. Returns the whole issue as Redmine holds it after the write plus ignored_fields, the sent fields Redmine did not apply (no permission, a field disabled for the tracker, or a value derived from status or subtasks).`,
   annotations: WRITE_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
@@ -263,26 +296,7 @@ const createIssueTool: Tool = {
   inputSchema: {
     type: 'object',
     properties: {
-      project_id: { type: 'string', description: 'Project ID or identifier' },
-      subject: { type: 'string', description: 'Issue subject/title' },
-      description: { type: 'string', description: 'Issue description' },
-      tracker_id: { type: 'number', description: 'Tracker ID' },
-      tracker: { type: 'string', description: 'Tracker name' },
-      status_id: { type: 'number', description: 'Status ID' },
-      status: { type: 'string', description: 'Status name' },
-      priority_id: { type: 'number', description: 'Priority ID' },
-      priority: { type: 'string', description: 'Priority name' },
-      assigned_to_id: { type: 'number', description: 'Assigned user ID' },
-      assigned_to: {
-        type: 'string',
-        description: "Assignee name, or 'me' to assign to the current authenticated user",
-      },
-      parent_issue_id: { type: 'number', description: 'Parent issue ID' },
-      estimated_hours: { type: 'number', description: 'Estimated hours' },
-      fixed_version_id: {
-        type: 'number',
-        description: 'Target version ID — obtained from listVersions',
-      },
+      ...issueInputProperties('create'),
       file_paths: {
         type: 'array',
         items: { type: 'string' },
@@ -292,27 +306,9 @@ const createIssueTool: Tool = {
           'Paths under /workspace of files to attach, e.g. ["/workspace/screenshot.png"]',
       },
     },
-    required: ['project_id', 'subject'],
+    required: issueRequiredOnCreate(),
   },
-  outputSchema: {
-    type: 'object',
-    properties: {
-      success: { type: 'boolean' },
-      issue: {
-        type: 'object',
-        properties: {
-          id: { type: 'number', description: 'ID of created issue' },
-          subject: { type: 'string' },
-          project: {
-            type: 'object',
-            properties: { id: { type: 'number' }, name: { type: 'string' } },
-          },
-        },
-      },
-      error: { type: 'string' },
-    },
-    required: ['success'],
-  },
+  outputSchema: WRITE_RESULT_SCHEMA,
   inputExamples: [
     {
       description: 'Minimal: create with required fields only',
@@ -338,6 +334,19 @@ const createIssueTool: Tool = {
       },
     },
     {
+      description: 'Planning fields: dates, progress, custom field, watcher',
+      input: {
+        subject: 'Prepare the migration',
+        project_id: 'my-project',
+        start_date: '2026-11-24',
+        due_date: '2026-12-01',
+        done_ratio: 20,
+        custom_fields: [{ id: 1, value: '2.4' }],
+        watcher_user_ids: [1739],
+        is_private: false,
+      },
+    },
+    {
       description: 'Full: create subtask with all fields',
       input: {
         subject: 'Implement JWT validation',
@@ -356,7 +365,7 @@ const createIssueTool: Tool = {
 const updateIssueTool: Tool = {
   name: 'updateIssue',
   description:
-    "Update an existing Redmine issue. tracker/priority/status names must match this project's configured mappings (see getMappings); an unrecognized name throws an error listing valid values.",
+    "Update an existing Redmine issue. tracker/priority/status names must match this project's configured mappings (see getMappings); an unrecognized name throws an error listing valid values. Omitted fields stay unchanged; null clears a field whose description says so, '' is rejected, and a rejected call sends nothing. Returns the whole issue as Redmine holds it after the update plus ignored_fields, the sent fields Redmine did not apply (no permission, a field disabled for the tracker, or a value derived from status or subtasks); notes and private_notes cannot be verified.",
   annotations: WRITE_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: true,
@@ -364,63 +373,22 @@ const updateIssueTool: Tool = {
     [META_KEYS.SELF_PARAM]: "assigned_to: 'me'",
   },
   keywords: ['redmine', 'issue', 'update', 'modify', 'change', 'edit', 'move', 'project'],
-  example: `const updated = await redmine.updateIssue({ issue_id: 12345, assigned_to_id: userId });
-// IMPORTANT: Verify change was applied - Redmine silently ignores some changes for closed issues
-if (!updated.assigned_to || updated.assigned_to.id !== userId) {
-  throw new Error("Assignment failed - issue status may block this change");
+  example: `const updated = await redmine.updateIssue({ issue_id: 12345, done_ratio: 50, due_date: null });
+if (updated.ignored_fields.length > 0) {
+  throw new Error(updated.message);
 }`,
   inputSchema: {
     type: 'object',
     properties: {
       issue_id: {
         type: 'number',
-        description: 'Issue ID to update — obtained from listIssueIds or searchIssueIds',
+        description: 'Issue ID to update, obtained from listIssueIds or searchIssueIds',
       },
-      project_id: { type: 'string', description: 'Move the issue to this project' },
-      subject: { type: 'string', description: 'New subject' },
-      description: { type: 'string', description: 'New description' },
-      tracker_id: { type: 'number', description: 'Tracker ID' },
-      tracker: { type: 'string', description: 'Tracker name' },
-      status_id: { type: 'number', description: 'Status ID' },
-      status: { type: 'string', description: 'Status name' },
-      priority_id: { type: 'number', description: 'Priority ID' },
-      priority: { type: 'string', description: 'Priority name' },
-      assigned_to_id: { type: 'number', description: 'Assigned user ID' },
-      assigned_to: {
-        type: 'string',
-        description: "Assignee name, or 'me' to assign to the current authenticated user",
-      },
-      parent_issue_id: { type: 'number', description: 'Parent issue ID' },
-      estimated_hours: { type: 'number', description: 'Estimated hours' },
-      fixed_version_id: {
-        type: 'number',
-        description: 'Target version ID — obtained from listVersions; only an open version',
-      },
-      notes: { type: 'string', description: 'Update notes/comment' },
+      ...issueInputProperties('update'),
     },
     required: ['issue_id'],
   },
-  outputSchema: {
-    type: 'object',
-    description:
-      'Returns the issue as Redmine holds it after the update - ALWAYS compare every field you changed with your request (Redmine may silently ignore changes, e.g. on closed issues or a tracker the user may not set)',
-    properties: {
-      id: { type: 'number', description: 'Issue ID' },
-      subject: { type: 'string', description: 'Issue subject' },
-      project: NAMED_REF,
-      tracker: NAMED_REF,
-      status: NAMED_REF,
-      priority: NAMED_REF,
-      assigned_to: { ...NAMED_REF, description: 'Assigned user; absent when unassigned' },
-      fixed_version: { ...NAMED_REF, description: 'Target version; absent when none is set' },
-      parent: {
-        type: 'object',
-        description: 'Parent issue; absent when none is set',
-        properties: { id: { type: 'number' } },
-      },
-      estimated_hours: { type: ['number', 'null'] },
-    },
-  },
+  outputSchema: WRITE_RESULT_SCHEMA,
   inputExamples: [
     {
       description: 'Minimal: close issue',
@@ -437,6 +405,14 @@ if (!updated.assigned_to || updated.assigned_to.id !== userId) {
     {
       description: 'Partial: plan into a target version (id from listVersions)',
       input: { issue_id: 12345, fixed_version_id: 87 },
+    },
+    {
+      description: 'Plan: set the due date and progress, clear the target version',
+      input: { issue_id: 12345, due_date: '2026-12-01', done_ratio: 50, fixed_version_id: null },
+    },
+    {
+      description: 'Private note',
+      input: { issue_id: 12345, notes: 'Only for the team', private_notes: true },
     },
     {
       description: 'Full: update multiple fields',
@@ -572,37 +548,24 @@ export function createIssueTools(client: RedmineClient | null): ToolDefinition[]
           const resolved = resolveParams(fields, client.getMappings());
           const assignError = await resolveAssignedTo(client, resolved);
           if (assignError) return assignError;
-          const result = await client.createIssue({
-            ...(resolved as Parameters<typeof client.createIssue>[0]),
-            files: attachments.files,
-          });
-          return jsonResult(result);
+          const built = buildIssuePayload(resolved, 'create');
+          if (!built.ok) return rejectedWrite('createIssue', built);
+          const issue = await client.createIssue(built.payload, attachments.files);
+          return writeResult(issue, built.payload);
         }),
     },
     {
       tool: updateIssueTool,
       handler: async (params) => {
-        const { issue_id } = params as { issue_id: number };
+        const { issue_id, ...fields } = params as { issue_id: number } & Record<string, unknown>;
         return withRedmineErrors({ issue_id, ...versionContext(params) }, async () => {
-          const resolved = resolveParams(params as Record<string, unknown>, client.getMappings());
+          const resolved = resolveParams(fields, client.getMappings());
           const assignError = await resolveAssignedTo(client, resolved);
           if (assignError) return assignError;
-          const updatedIssue = await client.updateIssue(
-            issue_id,
-            resolved as Parameters<typeof client.updateIssue>[1]
-          );
-          return jsonResult({
-            id: updatedIssue.id,
-            subject: updatedIssue.subject,
-            project: updatedIssue.project,
-            tracker: updatedIssue.tracker,
-            status: updatedIssue.status,
-            priority: updatedIssue.priority,
-            assigned_to: updatedIssue.assigned_to,
-            fixed_version: updatedIssue.fixed_version,
-            parent: updatedIssue.parent,
-            estimated_hours: updatedIssue.estimated_hours,
-          });
+          const built = buildIssuePayload(resolved, 'update');
+          if (!built.ok) return rejectedWrite('updateIssue', built);
+          const issue = await client.updateIssue(issue_id, built.payload);
+          return writeResult(issue, built.payload);
         });
       },
     },
@@ -617,4 +580,25 @@ export function createIssueTools(client: RedmineClient | null): ToolDefinition[]
       },
     },
   ];
+}
+
+function rejectedWrite(
+  toolName: string,
+  { paramName, problem }: Extract<IssueWriteResult, { ok: false }>
+): ReturnType<typeof teachingErrorResult> {
+  return teachingErrorResult({
+    paramName,
+    nextStep: `${problem} ${toolName} rejected the call and sent nothing to Redmine.`,
+  });
+}
+
+function writeResult(issue: object, payload: Record<string, unknown>) {
+  const ignored = ignoredFields(payload, issue);
+  return jsonResult({
+    ...issue,
+    ignored_fields: ignored,
+    ...(ignored.length > 0 && {
+      message: `Redmine did not apply ${ignored.join(', ')}: no permission, the field is disabled for the tracker, or it is derived from status or subtasks.`,
+    }),
+  });
 }

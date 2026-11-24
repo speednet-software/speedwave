@@ -21,6 +21,8 @@ import {
 } from '@speedwave/mcp-shared';
 import { MAPPABLE_FIELDS } from './tools/helpers.js';
 import { TOOL_NAMES } from './tool-names.js';
+import { sanitizeTextile } from './textile.js';
+import { issueFilterParams, issueReadIncludes, type IssueWrite } from './issue-fields.js';
 
 /** Extended Axios request configuration with retry counter. */
 interface RetryConfig extends InternalAxiosRequestConfig {
@@ -643,55 +645,6 @@ export interface IssueRelation {
 type UploadRef = { token: string; filename: string };
 
 /**
- * Payload for creating or updating an issue.
- * @interface IssuePayload
- */
-interface IssuePayload {
-  /**
-   * Project identifier.
-   */
-  project_id: string;
-  /**
-   * Issue subject/title.
-   */
-  subject: string;
-  /**
-   * Issue description.
-   */
-  description?: string;
-  /**
-   * Tracker ID.
-   */
-  tracker_id?: number;
-  /**
-   * Status ID.
-   */
-  status_id?: number;
-  /**
-   * Priority ID.
-   */
-  priority_id?: number;
-  /**
-   * Assigned user ID.
-   */
-  assigned_to_id?: number;
-  /**
-   * Parent issue ID (for subtasks).
-   */
-  parent_issue_id?: number;
-  /**
-   * Estimated hours.
-   */
-  estimated_hours?: number;
-  fixed_version_id?: number;
-  /**
-   * Update notes/comment.
-   */
-  notes?: string;
-  uploads?: UploadRef[];
-}
-
-/**
  * Payload for creating or updating a time entry.
  * @interface TimeEntryPayload
  */
@@ -740,99 +693,6 @@ async function loadRedmineConfig(): Promise<RedmineProjectConfig | null> {
     }
     return null;
   }
-}
-
-/** Tags whose entire content (opening tag + body + closing tag) must be removed */
-const DANGEROUS_TAGS = ['script', 'style', 'iframe', 'object', 'embed', 'form', 'applet'];
-
-/** Textile-safe HTML tags (Redmine Textile allows basic formatting) */
-const SAFE_TAGS = new Set([
-  'a',
-  'abbr',
-  'b',
-  'blockquote',
-  'br',
-  'cite',
-  'code',
-  'dd',
-  'del',
-  'dfn',
-  'dl',
-  'dt',
-  'em',
-  'h1',
-  'h2',
-  'h3',
-  'h4',
-  'h5',
-  'h6',
-  'hr',
-  'i',
-  'img',
-  'ins',
-  'kbd',
-  'li',
-  'ol',
-  'p',
-  'pre',
-  'q',
-  's',
-  'span',
-  'strong',
-  'sub',
-  'sup',
-  'table',
-  'tbody',
-  'td',
-  'tfoot',
-  'th',
-  'thead',
-  'tr',
-  'u',
-  'ul',
-  'var',
-]);
-
-/**
- * Sanitize Textile markup to remove potentially dangerous content.
- * @param textile - Raw Textile markup to sanitize.
- */
-function sanitizeTextile(textile: string): string {
-  let result = textile;
-  let previous: string;
-
-  do {
-    previous = result;
-    for (const tag of DANGEROUS_TAGS) {
-      result = result.replace(new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}[^>]*>`, 'gi'), '');
-      result = result.replace(new RegExp(`<${tag}\\b[^>]*/?>`, 'gi'), '');
-      result = result.replace(new RegExp(`<\\/${tag}[^>]*>`, 'gi'), '');
-    }
-  } while (result !== previous);
-
-  do {
-    previous = result;
-    result = result.replace(/<\/?([a-zA-Z][a-zA-Z0-9]*)\b[^>]*\/?>/gi, (match, tag: string) => {
-      return SAFE_TAGS.has(tag.toLowerCase()) ? match : '';
-    });
-  } while (result !== previous);
-
-  do {
-    previous = result;
-    result = result.replace(
-      /(<[^>]*?)[\s/]+on\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)([^>]*>)/gi,
-      '$1$2'
-    );
-    result = result.replace(/(<[^>]*?(?:href|src|action)\s*=\s*["']?)\s*javascript\s*:/gi, '$1');
-    result = result.replace(/(<[^>]*?(?:href|src|action)\s*=\s*["']?)\s*vbscript\s*:/gi, '$1');
-    result = result.replace(/(<[^>]*?(?:href|src|action)\s*=\s*["']?)\s*data\s*:/gi, '$1');
-  } while (result !== previous);
-
-  result = result.replace(/javascript\s*:/gi, '');
-  result = result.replace(/vbscript\s*:/gi, '');
-  result = result.replace(/data\s*:/gi, '');
-
-  return result;
 }
 
 function pathSegment(value: string | number): string {
@@ -1101,45 +961,19 @@ export class RedmineClient {
   }
 
   /**
-   * List issues from Redmine with optional filtering (project/assignee/status/parent); `limit` defaults to 25.
+   * List issues from Redmine; `options` carries the filters of the issue field table plus `limit` (default 25) and `offset`.
    * @param options - Filter and pagination options.
-   * @param options.project_id - Filter by project identifier.
-   * @param options.assigned_to_id - Filter by assignee ('me', user ID, or username).
-   * @param options.status_id - Filter by status ('open', 'closed', '*', or status ID).
-   * @param options.tracker_id - Filter by tracker ID.
-   * @param options.priority_id - Filter by priority ID.
-   * @param options.fixed_version_id - Filter by target version ID.
-   * @param options.parent_id - Filter by parent issue ID.
-   * @param options.limit - Maximum number of results (default 25).
-   * @param options.offset - Pagination offset (default 0).
    */
   async listIssues(
-    options: {
-      project_id?: string;
-      assigned_to_id?: string | number;
-      status_id?: string | number;
-      tracker_id?: number;
-      priority_id?: number;
-      fixed_version_id?: number;
-      parent_id?: number;
-      limit?: number;
-      offset?: number;
-    } = {}
+    options: Record<string, unknown> = {}
   ): Promise<{ issues: RedmineIssue[]; total_count: number }> {
-    const enforcedProjectId = this._enforceProjectId(options.project_id);
+    const enforcedProjectId = this._enforceProjectId(options.project_id as string | undefined);
 
-    const params: Record<string, string | number> = {
+    const params = {
       limit: clampPageSize(options.limit, 25, 100),
       offset: options.offset || 0,
+      ...issueFilterParams({ ...options, project_id: enforcedProjectId }),
     };
-
-    if (enforcedProjectId) params.project_id = enforcedProjectId;
-    if (options.assigned_to_id) params.assigned_to_id = options.assigned_to_id;
-    if (options.status_id) params.status_id = options.status_id;
-    if (options.tracker_id) params.tracker_id = options.tracker_id;
-    if (options.priority_id) params.priority_id = options.priority_id;
-    if (options.fixed_version_id) params.fixed_version_id = options.fixed_version_id;
-    if (options.parent_id) params.parent_id = options.parent_id;
 
     const response = await this.client.get('/issues.json', { params });
     return response.data;
@@ -1202,130 +1036,54 @@ export class RedmineClient {
   }
 
   /**
-   * Create a new issue in Redmine; `description` is sanitized Textile markup.
-   * @param options - Issue creation options.
-   * @param options.project_id - Project identifier (required).
-   * @param options.subject - Issue subject/title (required).
-   * @param options.description - Issue description in Textile markup.
-   * @param options.tracker_id - Tracker ID (Bug, Feature, Task, etc.).
-   * @param options.status_id - Status ID.
-   * @param options.priority_id - Priority ID.
-   * @param options.assigned_to_id - Assigned user ID.
-   * @param options.parent_issue_id - Parent issue ID (for subtasks).
-   * @param options.estimated_hours - Estimated hours for completion.
-   * @param options.fixed_version_id - Target version ID.
-   * @param options.files - Workspace files streamed to Redmine and attached to the new issue.
-   * @throws {Error} When subject is empty or API request fails.
+   * Create an issue from a payload built by buildIssuePayload and return it as Redmine holds it afterwards.
+   * @param payload - Fields of the new issue; `project_id` is required.
+   * @param files - Workspace files streamed to Redmine and attached to the new issue.
+   * @throws {Error} When the issue was created but reading it back failed, or the API request fails.
    */
-  async createIssue(options: {
-    project_id: string;
-    subject: string;
-    description?: string;
-    tracker_id?: number;
-    status_id?: number;
-    priority_id?: number;
-    assigned_to_id?: number;
-    parent_issue_id?: number;
-    estimated_hours?: number;
-    fixed_version_id?: number;
-    files?: WorkspaceFile[];
-  }): Promise<RedmineIssue> {
-    this._enforceProjectId(options.project_id);
-    if (options.parent_issue_id) {
-      await this._ensureIssueInScope(options.parent_issue_id);
+  async createIssue(payload: IssueWrite, files?: WorkspaceFile[]): Promise<RedmineIssue> {
+    this._enforceProjectId(payload.project_id as string);
+    if (typeof payload.parent_issue_id === 'number') {
+      await this._ensureIssueInScope(payload.parent_issue_id);
     }
 
-    const trimmedSubject = options.subject.trim();
-    if (!trimmedSubject) {
-      throw new Error('Subject cannot be empty');
-    }
-
-    const issue: IssuePayload = {
-      project_id: options.project_id,
-      subject: trimmedSubject,
-    };
-
-    if (options.description) {
-      issue.description = sanitizeTextile(options.description);
-    }
-    if (options.tracker_id) issue.tracker_id = options.tracker_id;
-    if (options.status_id) issue.status_id = options.status_id;
-    if (options.priority_id) issue.priority_id = options.priority_id;
-    if (options.assigned_to_id) issue.assigned_to_id = options.assigned_to_id;
-    if (options.parent_issue_id) issue.parent_issue_id = options.parent_issue_id;
-    if (options.estimated_hours) issue.estimated_hours = options.estimated_hours;
-    if (options.fixed_version_id) issue.fixed_version_id = options.fixed_version_id;
-    if (options.files?.length) issue.uploads = await this._uploadFiles(options.files);
-
+    const issue = files?.length ? { ...payload, uploads: await this._uploadFiles(files) } : payload;
     const response = await this.client.post('/issues.json', { issue });
-    return response.data.issue;
+    const created: RedmineIssue = response.data.issue;
+
+    try {
+      return await this.showIssue(created.id, { include: issueReadIncludes(payload) });
+    } catch (error) {
+      throw new Error(
+        `Issue ${created.id} was created, but reading it back failed: ${RedmineClient.formatError(error, { issue_id: created.id })} Check it with ${TOOL_NAMES.GET_ISSUE_FULL}({ issue_id: ${created.id} }) and do not create it again.`
+      );
+    }
   }
 
   /**
-   * Update an existing issue in Redmine; all `options` fields are optional partial updates.
+   * Update an issue from a payload built by buildIssuePayload and return it as Redmine holds it afterwards.
    * @param issueId - The issue ID to update.
-   * @param options - Update options (all optional).
-   * @param options.project_id - Move issue to another project.
-   * @param options.subject - New issue subject/title.
-   * @param options.description - New issue description in Textile markup.
-   * @param options.tracker_id - New tracker ID.
-   * @param options.status_id - New status ID.
-   * @param options.priority_id - New priority ID.
-   * @param options.assigned_to_id - New assigned user ID.
-   * @param options.parent_issue_id - New parent issue ID.
-   * @param options.estimated_hours - New estimated hours.
-   * @param options.fixed_version_id - New target version ID.
-   * @param options.notes - Update notes/comment.
+   * @param payload - Fields to change.
+   * @throws {Error} When the payload is empty or the API request fails.
    */
-  async updateIssue(
-    issueId: number,
-    options: {
-      project_id?: string;
-      subject?: string;
-      description?: string;
-      tracker_id?: number;
-      status_id?: number;
-      priority_id?: number;
-      assigned_to_id?: number;
-      parent_issue_id?: number;
-      estimated_hours?: number;
-      fixed_version_id?: number;
-      notes?: string;
-    }
-  ): Promise<RedmineIssue> {
+  async updateIssue(issueId: number, payload: IssueWrite): Promise<RedmineIssue> {
     await this._ensureIssueInScope(issueId);
-    if (options.project_id) {
-      this._enforceProjectId(options.project_id);
+    if (typeof payload.project_id === 'string') {
+      this._enforceProjectId(payload.project_id);
     }
-    if (options.parent_issue_id) {
-      await this._ensureIssueInScope(options.parent_issue_id);
+    if (typeof payload.parent_issue_id === 'number') {
+      await this._ensureIssueInScope(payload.parent_issue_id);
     }
 
-    const issue: Partial<IssuePayload> = {};
-
-    if (options.project_id) issue.project_id = options.project_id;
-    if (options.subject) issue.subject = options.subject.trim();
-    if (options.description !== undefined) {
-      issue.description = sanitizeTextile(options.description);
-    }
-    if (options.tracker_id) issue.tracker_id = options.tracker_id;
-    if (options.status_id) issue.status_id = options.status_id;
-    if (options.priority_id) issue.priority_id = options.priority_id;
-    if (options.assigned_to_id !== undefined) issue.assigned_to_id = options.assigned_to_id;
-    if (options.parent_issue_id !== undefined) issue.parent_issue_id = options.parent_issue_id;
-    if (options.estimated_hours !== undefined) issue.estimated_hours = options.estimated_hours;
-    if (options.fixed_version_id) issue.fixed_version_id = options.fixed_version_id;
-    if (options.notes) issue.notes = sanitizeTextile(options.notes);
-
-    if (Object.keys(issue).length === 0) {
+    if (Object.keys(payload).length === 0) {
       throw new Error(
-        `Nothing to update on issue ${issueId}: every field given was empty or unset, so no request was sent to Redmine. Pass at least one field with a value.`
+        `Nothing to update on issue ${issueId}: no field was given, so no request was sent to Redmine. Pass at least one field.`
       );
     }
 
-    await this.client.put(`/issues/${pathSegment(issueId)}.json`, { issue });
+    await this.client.put(`/issues/${pathSegment(issueId)}.json`, { issue: payload });
 
-    return this.showIssue(issueId);
+    return this.showIssue(issueId, { include: issueReadIncludes(payload) });
   }
 
   /**
@@ -1352,7 +1110,9 @@ export class RedmineClient {
     notes?: string
   ): Promise<{ attachments: RedmineAttachment[]; warning?: string }> {
     const before = await this.showIssue(issueId, { include: ['attachments'] });
-    const issue: Partial<IssuePayload> = { uploads: await this._uploadFiles(files) };
+    const issue: { uploads: UploadRef[]; notes?: string } = {
+      uploads: await this._uploadFiles(files),
+    };
     if (notes) issue.notes = sanitizeTextile(notes);
     await this.client.put(`/issues/${pathSegment(issueId)}.json`, { issue });
     try {
