@@ -89,6 +89,7 @@ impl KeySource for FileKeySource {
 }
 
 fn write_temp_key(temp: &Path, bytes: &[u8; KEY_LEN]) -> Result<(), SecretStoreError> {
+    let _ = std::fs::remove_file(temp);
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -99,6 +100,8 @@ fn write_temp_key(temp: &Path, bytes: &[u8; KEY_LEN]) -> Result<(), SecretStoreE
     file.write_all(hex.as_bytes())
         .and_then(|()| file.flush())
         .map_err(|e| io_failure("write key file", &e))?;
+    file.sync_all()
+        .map_err(|e| io_failure("sync key file", &e))?;
     crate::fs_perms::fsync_file_durable(&file).map_err(|e| io_failure("sync key file", &e))
 }
 
@@ -226,6 +229,17 @@ mod tests {
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, vec!["secret-store.key".to_owned()]);
+    }
+
+    #[test]
+    fn a_stale_temp_file_does_not_block_writing_the_temp_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let temp = tmp.path().join(".secret-store.key.tmp.1.0");
+        std::fs::write(&temp, "stale").unwrap();
+
+        write_temp_key(&temp, &[0x11; KEY_LEN]).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&temp).unwrap(), "11".repeat(32));
     }
 
     #[test]

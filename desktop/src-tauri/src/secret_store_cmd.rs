@@ -5,13 +5,16 @@ use speedwave_migrations::MigrationReport;
 use speedwave_runtime::compose::unreadable_integration_messages;
 use speedwave_runtime::config;
 use speedwave_runtime::secret_store::{
-    discard_secrets_without_key, encrypted_integrations, SecretStore, SecretStoreError,
+    discard_secrets_without_key, encrypted_integrations, undiscardable_count, SecretStore,
+    SecretStoreError,
 };
 
 const KEY_MISSING_REFUSAL: &str =
     "The secret store key is missing. Complete the secret store recovery dialog to continue.";
 const KEY_UNREADABLE_REFUSAL: &str =
-    "The secret store key file is damaged. Reinstall Speedwave to continue.";
+    "The secret store key file secret-store.key in the Speedwave data directory is damaged. Restore it from a backup, or remove it together with the encrypted secrets in the secrets directory.";
+const STORE_UNAVAILABLE_REFUSAL: &str =
+    "The secrets directory cannot be read. Check its permissions.";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SecretStoreState {
@@ -19,6 +22,7 @@ pub(crate) enum SecretStoreState {
     KeyMissing,
     PlaintextInStore { count: usize },
     KeyUnreadable,
+    StoreUnavailable,
 }
 
 pub(crate) struct MigrationNotices(Vec<String>);
@@ -30,6 +34,7 @@ pub(crate) enum SecretStoreStateName {
     KeyMissing,
     PlaintextInStore,
     KeyUnreadable,
+    StoreUnavailable,
 }
 
 #[derive(Serialize, Debug, PartialEq, Eq)]
@@ -79,6 +84,7 @@ impl SecretStoreState {
             Self::KeyMissing => SecretStoreStateName::KeyMissing,
             Self::PlaintextInStore { .. } => SecretStoreStateName::PlaintextInStore,
             Self::KeyUnreadable => SecretStoreStateName::KeyUnreadable,
+            Self::StoreUnavailable => SecretStoreStateName::StoreUnavailable,
         }
     }
 
@@ -88,6 +94,7 @@ impl SecretStoreState {
             Self::KeyMissing => "key missing".to_owned(),
             Self::PlaintextInStore { count } => format!("{count} unexpected entries"),
             Self::KeyUnreadable => "key unreadable".to_owned(),
+            Self::StoreUnavailable => "store unavailable".to_owned(),
         }
     }
 }
@@ -129,6 +136,7 @@ fn refusal_for(state: &SecretStoreState) -> Option<String> {
             "The secrets directory holds {count} unexpected files. Remove them or reinstall Speedwave to continue."
         )),
         SecretStoreState::KeyUnreadable => Some(KEY_UNREADABLE_REFUSAL.to_owned()),
+        SecretStoreState::StoreUnavailable => Some(STORE_UNAVAILABLE_REFUSAL.to_owned()),
     }
 }
 
@@ -147,6 +155,12 @@ fn reset_in(
     let removed = discard_secrets_without_key(data_dir).map_err(|e| e.to_string())?;
     log::warn!("secret store reset: discarded {removed} encrypted files without a key");
     let state = evaluate(data_dir);
+    if state == SecretStoreState::KeyMissing {
+        let remaining = undiscardable_count(data_dir).map_err(|e| e.to_string())?;
+        return Err(format!(
+            "{remaining} entries in the secrets directory could not be removed automatically. Remove them by hand and try again."
+        ));
+    }
     Ok(status_of(
         data_dir,
         &state,
@@ -165,7 +179,7 @@ fn evaluate(data_dir: &Path) -> SecretStoreState {
         Err(SecretStoreError::KeyUnreadable) => SecretStoreState::KeyUnreadable,
         Err(e) => {
             log::warn!("secret store check failed: {e}");
-            SecretStoreState::KeyUnreadable
+            SecretStoreState::StoreUnavailable
         }
     }
 }
@@ -368,6 +382,7 @@ mod tests {
             SecretStoreState::KeyMissing,
             SecretStoreState::PlaintextInStore { count: 1 },
             SecretStoreState::KeyUnreadable,
+            SecretStoreState::StoreUnavailable,
         ] {
             let status = status_of(tmp.path(), &state, None, &notices);
             assert_eq!(status.migration_notices, notices);
@@ -435,6 +450,80 @@ mod tests {
     }
 
     #[test]
+    fn reset_reports_the_count_of_entries_it_cannot_remove() {
+        let tmp = tempfile::tempdir().unwrap();
+        let secret = seed_enc(tmp.path(), "demo", "slack.token.enc");
+        std::fs::create_dir(tmp.path().join("secrets/demo/dir.enc")).unwrap();
+        std::fs::write(tmp.path().join("secrets").join("loose.enc"), "x").unwrap();
+
+        let err = reset_in(tmp.path(), true, None, &[]).unwrap_err();
+
+        assert_eq!(
+            err,
+            "2 entries in the secrets directory could not be removed automatically. Remove them by hand and try again."
+        );
+        assert!(!secret.exists());
+        assert!(!err.contains("dir.enc"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reset_reports_a_symlinked_project_dir_it_cannot_remove() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("other.enc"), "keep").unwrap();
+        std::fs::create_dir_all(tmp.path().join("secrets")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), tmp.path().join("secrets/linked")).unwrap();
+
+        let err = reset_in(tmp.path(), true, None, &[]).unwrap_err();
+
+        assert!(err.starts_with("1 entries in the secrets directory"));
+        assert!(outside.path().join("other.enc").exists());
+    }
+
+    #[test]
+    fn a_stray_non_enc_file_does_not_block_the_reset() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_enc(tmp.path(), "demo", "slack.token.enc");
+        std::fs::write(tmp.path().join("secrets").join(".DS_Store"), "x").unwrap();
+
+        let status = reset_in(tmp.path(), true, None, &[]).unwrap();
+
+        assert_eq!(status.state, SecretStoreStateName::PlaintextInStore);
+        assert_eq!(status.plaintext_count, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_secrets_dir_is_store_unavailable() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let secrets = tmp.path().join("secrets");
+        std::fs::create_dir_all(&secrets).unwrap();
+        std::fs::set_permissions(&secrets, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = std::fs::read_dir(&secrets).is_ok();
+
+        let state = evaluate(tmp.path());
+        std::fs::set_permissions(&secrets, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        if !readable {
+            assert_eq!(state, SecretStoreState::StoreUnavailable);
+        }
+    }
+
+    #[test]
+    fn store_unavailable_refuses_with_a_permissions_hint() {
+        assert_eq!(
+            refusal_for(&SecretStoreState::StoreUnavailable).as_deref(),
+            Some("The secrets directory cannot be read. Check its permissions.")
+        );
+        assert_eq!(
+            SecretStoreState::StoreUnavailable.name(),
+            SecretStoreStateName::StoreUnavailable
+        );
+    }
+
+    #[test]
     fn reset_refuses_outside_key_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let store = SecretStore::open(tmp.path()).unwrap();
@@ -484,6 +573,7 @@ mod tests {
                 SecretStoreStateName::KeyMissing,
                 SecretStoreStateName::PlaintextInStore,
                 SecretStoreStateName::KeyUnreadable,
+                SecretStoreStateName::StoreUnavailable,
             ]),
             ts_union_members(ts, "SecretStoreState")
         );

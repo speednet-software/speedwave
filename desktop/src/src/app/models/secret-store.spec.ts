@@ -11,7 +11,13 @@ const READY = {
 
 describe('isSecretStoreStatus', () => {
   it('accepts every state of a well-formed status', () => {
-    for (const state of ['ready', 'keyMissing', 'plaintextInStore', 'keyUnreadable']) {
+    for (const state of [
+      'ready',
+      'keyMissing',
+      'plaintextInStore',
+      'keyUnreadable',
+      'storeUnavailable',
+    ]) {
       expect(isSecretStoreStatus({ ...READY, state })).toBe(true);
     }
   });

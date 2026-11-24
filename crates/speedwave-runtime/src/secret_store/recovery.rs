@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use super::error::{io_failure, SecretStoreError};
 use super::key_source::{FileKeySource, KeySource};
-use super::layout::{is_encrypted_file, is_lock_file, is_project_dir};
+use super::layout::{count_unrecoverable, is_encrypted_file, is_lock_file, is_project_dir};
 use super::name::SecretName;
 use super::store::{KEY_FILE, SECRETS_DIR};
 
@@ -60,6 +60,11 @@ pub fn discard_secrets_without_key(data_dir: &Path) -> Result<usize, SecretStore
         }
     }
     Ok(removed)
+}
+
+/// Number of entries that still block a new key (for example an `.enc` directory or a symlinked project directory).
+pub fn undiscardable_count(data_dir: &Path) -> Result<usize, SecretStoreError> {
+    count_unrecoverable(&data_dir.join(SECRETS_DIR))
 }
 
 fn project_dirs(secrets_dir: &Path) -> Vec<(String, PathBuf)> {
@@ -182,6 +187,31 @@ mod tests {
             SecretStore::open(tmp.path()),
             Err(SecretStoreError::KeyMissing)
         ));
+    }
+
+    #[test]
+    fn a_stray_non_enc_file_does_not_keep_the_key_missing_after_a_discard() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed(tmp.path(), "alpha", "slack.token.enc", "x");
+        std::fs::write(tmp.path().join("secrets").join(".DS_Store"), "x").unwrap();
+
+        assert_eq!(discard_secrets_without_key(tmp.path()).unwrap(), 1);
+
+        assert!(SecretStore::open(tmp.path()).is_ok());
+    }
+
+    #[test]
+    fn undiscardable_count_counts_what_a_discard_leaves_behind() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(undiscardable_count(tmp.path()).unwrap(), 0);
+        seed(tmp.path(), "alpha", "slack.token.enc", "x");
+        std::fs::create_dir(tmp.path().join("secrets/alpha/dir.enc")).unwrap();
+        std::fs::write(tmp.path().join("secrets").join("loose.enc"), "x").unwrap();
+        assert_eq!(undiscardable_count(tmp.path()).unwrap(), 3);
+
+        discard_secrets_without_key(tmp.path()).unwrap();
+
+        assert_eq!(undiscardable_count(tmp.path()).unwrap(), 2);
     }
 
     #[test]

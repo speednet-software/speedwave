@@ -84,11 +84,18 @@ const BUTTON_SECONDARY =
                   or the app is reinstalled.
                 </p>
               }
+              @case ('storeUnavailable') {
+                <p data-testid="secret-store-unavailable-text">
+                  The secrets directory cannot be read. Check its permissions. Speedwave will not
+                  start projects until it can be read.
+                </p>
+              }
               @default {
                 <p data-testid="secret-store-damaged-text">
-                  The key file that protects your saved credentials is damaged and cannot be read.
-                  Speedwave will not start projects until the key file is restored or the app is
-                  reinstalled.
+                  The key file secret-store.key in the Speedwave data directory is damaged and
+                  cannot be read. Restore it from a backup, or remove it together with the
+                  encrypted secrets in the secrets directory. Reinstalling alone may keep the data
+                  directory. Speedwave will not start projects until then.
                 </p>
               }
             }
@@ -164,6 +171,8 @@ export class SecretStoreDialogComponent {
         return 'The key for your saved credentials is missing';
       case 'plaintextInStore':
         return 'Unexpected files in the secrets directory';
+      case 'storeUnavailable':
+        return 'The secrets directory cannot be read';
       default:
         return 'The secret store key file is damaged';
     }

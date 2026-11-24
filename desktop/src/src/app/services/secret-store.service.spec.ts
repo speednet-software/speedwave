@@ -100,6 +100,13 @@ describe('SecretStoreService', () => {
     expect(service.state()).toBe('keyUnreadable');
   });
 
+  it('blocks when the secrets directory cannot be read', async () => {
+    const service = await create(async () => ({ ...READY, state: 'storeUnavailable' }));
+
+    expect(service.blocking()).toBe(true);
+    expect(service.state()).toBe('storeUnavailable');
+  });
+
   it('ignores a malformed status and keeps the last one', async () => {
     let answer: unknown = KEY_MISSING;
     const service = await create(async () => answer);

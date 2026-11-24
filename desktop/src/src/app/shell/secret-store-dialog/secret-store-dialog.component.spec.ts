@@ -162,6 +162,21 @@ describe('SecretStoreDialogComponent', () => {
       expect(byId('secret-store-error')?.textContent).toContain('does not need a new key');
     });
 
+    it('shows the count of entries the reset could not remove', async () => {
+      resetHandler = async () => {
+        throw new Error(
+          '2 entries in the secrets directory could not be removed automatically. Remove them by hand and try again.'
+        );
+      };
+      byId('secret-store-create-btn')?.click();
+      await settle();
+      byId('secret-store-confirm-btn')?.click();
+      await settle();
+
+      expect(byId('secret-store-dialog')).not.toBeNull();
+      expect(byId('secret-store-error')?.textContent).toContain('2 entries in the secrets');
+    });
+
     it('disables both buttons while the reset runs', async () => {
       let release: (value: unknown) => void = () => undefined;
       resetHandler = () => new Promise((resolve) => (release = resolve));
@@ -194,12 +209,25 @@ describe('SecretStoreDialogComponent', () => {
     });
   });
 
+  describe('store unavailable', () => {
+    it('asks to check the permissions and has no button', async () => {
+      await render({ ...READY, state: 'storeUnavailable' });
+
+      expect(byId('secret-store-title')?.textContent).toContain('cannot be read');
+      expect(byId('secret-store-unavailable-text')?.textContent).toContain('Check its permissions');
+      expect(root().querySelectorAll('button')).toHaveLength(0);
+    });
+  });
+
   describe('key unreadable', () => {
     it('says the key file is damaged and has no button', async () => {
       await render({ ...READY, state: 'keyUnreadable' });
 
       expect(byId('secret-store-title')?.textContent).toContain('damaged');
-      expect(byId('secret-store-damaged-text')?.textContent).toContain('reinstalled');
+      const text = byId('secret-store-damaged-text')?.textContent ?? '';
+      expect(text).toContain('secret-store.key');
+      expect(text).toContain('Restore it from a backup');
+      expect(text).toContain('backup');
       expect(root().querySelectorAll('button')).toHaveLength(0);
     });
   });

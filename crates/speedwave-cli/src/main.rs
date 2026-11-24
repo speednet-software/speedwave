@@ -1284,7 +1284,10 @@ fn secret_store_refusal(error: &SecretStoreError) -> String {
             "The secrets directory holds {count} unexpected files. Remove them or reinstall Speedwave to continue."
         ),
         SecretStoreError::KeyUnreadable => {
-            "The secret store key file is damaged. Reinstall Speedwave to continue.".to_owned()
+            "The secret store key file secret-store.key in the Speedwave data directory is damaged. Restore it from a backup, or remove it together with the encrypted secrets in the secrets directory.".to_owned()
+        }
+        SecretStoreError::Io(_) => {
+            "The secrets directory cannot be read. Check its permissions.".to_owned()
         }
         other => format!("The secret store cannot be opened: {other}"),
     }
@@ -2063,7 +2066,7 @@ mod tests {
         std::fs::write(tmp.path().join("secret-store.key"), "garbage").unwrap();
         assert_eq!(
             secret_store_start_error(tmp.path()).as_deref(),
-            Some("The secret store key file is damaged. Reinstall Speedwave to continue.")
+            Some("The secret store key file secret-store.key in the Speedwave data directory is damaged. Restore it from a backup, or remove it together with the encrypted secrets in the secrets directory.")
         );
     }
 
@@ -2083,13 +2086,14 @@ mod tests {
     }
 
     #[test]
-    fn an_unexpected_store_failure_keeps_its_label_only() {
+    fn an_io_failure_asks_to_check_the_permissions_without_details() {
         let message =
             secret_store_refusal(&SecretStoreError::Io("list secrets: denied".to_owned()));
         assert_eq!(
             message,
-            "The secret store cannot be opened: secret store operation failed: list secrets: denied"
+            "The secrets directory cannot be read. Check its permissions."
         );
+        assert!(!message.contains("denied"));
     }
 
     #[test]

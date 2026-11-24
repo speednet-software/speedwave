@@ -672,6 +672,23 @@ mod tests {
     }
 
     #[test]
+    fn a_stray_non_enc_file_does_not_prevent_creating_the_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("secrets")).unwrap();
+        std::fs::write(tmp.path().join("secrets").join(".DS_Store"), "x").unwrap();
+        let store = SecretStore::open(tmp.path()).unwrap();
+
+        store.ensure_key().unwrap();
+        store.write(&name("slack", "token"), "v").unwrap();
+
+        assert!(key_path(tmp.path()).exists());
+        assert!(matches!(
+            store.verify_layout(),
+            Err(SecretStoreError::PlaintextInStore { count: 1 })
+        ));
+    }
+
+    #[test]
     fn unrecoverable_looking_entries_refuse_to_create_a_key() {
         let tmp = tempfile::tempdir().unwrap();
         let store = SecretStore::open(tmp.path()).unwrap();

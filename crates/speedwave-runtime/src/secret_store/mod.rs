@@ -14,5 +14,7 @@ pub use error::SecretStoreError;
 pub use fields::{builtin_secret_fields, is_builtin_secret_field};
 pub use key_source::{FileKeySource, KeySource};
 pub use name::SecretName;
-pub use recovery::{discard_secrets_without_key, encrypted_integrations, EncryptedIntegration};
+pub use recovery::{
+    discard_secrets_without_key, encrypted_integrations, undiscardable_count, EncryptedIntegration,
+};
 pub use store::{secret_exists_in, ProjectSecrets, SecretStore};

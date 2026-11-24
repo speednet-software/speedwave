@@ -28,21 +28,45 @@ pub(super) fn may_hold_ciphertext(secrets_dir: &Path) -> Result<bool, SecretStor
 }
 
 fn has_unrecoverable_entry(secrets_dir: &Path) -> Result<bool, SecretStoreError> {
+    Ok(count_unrecoverable(secrets_dir)? > 0)
+}
+
+pub(super) fn count_unrecoverable(secrets_dir: &Path) -> Result<usize, SecretStoreError> {
+    let mut count = 0;
     for entry in entries(secrets_dir)? {
-        if !is_directory(&entry) || entry.file_name().to_str().is_none() {
-            return Ok(true);
+        if has_encrypted_name(&entry) {
+            count += 1;
+            continue;
         }
-        for inner in entries(&entry.path())? {
-            if inner
-                .file_name()
-                .to_string_lossy()
-                .ends_with(ENCRYPTED_SUFFIX)
-            {
-                return Ok(true);
+        let kind = entry
+            .file_type()
+            .map_err(|e| io_failure("list secrets", &e))?;
+        if kind.is_file() {
+            continue;
+        }
+        if !kind.is_dir() {
+            if std::fs::metadata(entry.path()).is_ok_and(|meta| meta.is_dir()) {
+                count += 1;
             }
+            continue;
         }
+        if entry.file_name().to_str().is_none() {
+            count += 1;
+            continue;
+        }
+        count += entries(&entry.path())?
+            .iter()
+            .filter(|inner| has_encrypted_name(inner))
+            .count();
     }
-    Ok(false)
+    Ok(count)
+}
+
+fn has_encrypted_name(entry: &DirEntry) -> bool {
+    entry
+        .file_name()
+        .to_string_lossy()
+        .ends_with(ENCRYPTED_SUFFIX)
 }
 
 pub(super) fn is_project_dir(entry: &DirEntry) -> bool {
@@ -231,11 +255,67 @@ mod tests {
     }
 
     #[test]
-    fn may_hold_ciphertext_is_true_for_a_loose_entry_in_the_secrets_dir() {
+    fn may_hold_ciphertext_is_true_for_a_loose_enc_entry_in_the_secrets_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let secrets = tmp.path().join("secrets");
         project_dir(tmp.path());
+        std::fs::write(secrets.join("loose.enc"), "x").unwrap();
+        assert!(may_hold_ciphertext(&secrets).unwrap());
+        std::fs::remove_file(secrets.join("loose.enc")).unwrap();
+        std::fs::create_dir(secrets.join("dir.enc")).unwrap();
+        assert!(may_hold_ciphertext(&secrets).unwrap());
+    }
+
+    #[test]
+    fn count_unrecoverable_counts_enc_names_and_odd_project_dirs_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let secrets = tmp.path().join("secrets");
+        let dir = project_dir(tmp.path());
+        assert_eq!(count_unrecoverable(&secrets).unwrap(), 0);
+        std::fs::write(secrets.join(".DS_Store"), "x").unwrap();
+        std::fs::write(dir.join("notes.txt"), "x").unwrap();
+        assert_eq!(count_unrecoverable(&secrets).unwrap(), 0);
+        std::fs::write(secrets.join("loose.enc"), "x").unwrap();
+        std::fs::create_dir(dir.join("a.b.enc")).unwrap();
+        std::fs::write(dir.join("c.d.enc"), "x").unwrap();
+        assert_eq!(count_unrecoverable(&secrets).unwrap(), 3);
+    }
+
+    #[test]
+    fn may_hold_ciphertext_ignores_loose_non_enc_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let secrets = tmp.path().join("secrets");
+        project_dir(tmp.path());
+        std::fs::write(secrets.join(".DS_Store"), "x").unwrap();
+        std::fs::write(secrets.join("notes.txt"), "x").unwrap();
         std::fs::write(secrets.join("loose.json"), "{}").unwrap();
+        assert!(!may_hold_ciphertext(&secrets).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn may_hold_ciphertext_is_true_for_a_non_utf8_project_dir() {
+        use std::os::unix::ffi::OsStrExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let secrets = tmp.path().join("secrets");
+        std::fs::create_dir_all(&secrets).unwrap();
+        let odd = secrets.join(std::ffi::OsStr::from_bytes(b"pro\xffject"));
+        std::fs::create_dir(&odd).unwrap();
+        assert!(may_hold_ciphertext(&secrets).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn may_hold_ciphertext_is_true_for_a_non_utf8_enc_name() {
+        use std::os::unix::ffi::OsStrExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let secrets = tmp.path().join("secrets");
+        let dir = project_dir(tmp.path());
+        std::fs::write(
+            dir.join(std::ffi::OsStr::from_bytes(b"sl\xffck.token.enc")),
+            "x",
+        )
+        .unwrap();
         assert!(may_hold_ciphertext(&secrets).unwrap());
     }
 
