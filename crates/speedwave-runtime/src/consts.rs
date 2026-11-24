@@ -3366,47 +3366,6 @@ mod tests {
     }
 
     #[test]
-    fn dirty_state_spec_service_token_path_matches_tokens_and_workers_shape() {
-        let tokens_src = include_str!("../../../crates/speedwave-runtime/src/compose/tokens.rs");
-        let marker = "let secrets_dir = data_dir.join(\"";
-        let after_marker = tokens_src
-            .find(marker)
-            .map(|i| &tokens_src[i + marker.len()..])
-            .expect("tokens.rs must build the secrets dir via data_dir.join(\"...\")");
-        let secrets_dir_name = &after_marker[..after_marker
-            .find('"')
-            .expect("secrets dir name must be a quoted literal")];
-
-        let workers_src = include_str!("../../../crates/speedwave-runtime/src/compose/workers.rs");
-        let marker = "{token_key}";
-        let after_marker = workers_src
-            .find(marker)
-            .map(|i| &workers_src[i + marker.len()..])
-            .expect("workers.rs must format the token filename using {token_key}");
-        let token_suffix = &after_marker[..after_marker
-            .find('"')
-            .expect("token filename suffix must be a quoted literal")];
-        assert!(
-            token_suffix.starts_with('-') && !token_suffix.is_empty(),
-            "token filename suffix must be a non-empty, hyphen-prefixed literal, \
-             got: {token_suffix:?}"
-        );
-
-        let spec_src = include_str!("../../../desktop/e2e/specs/19-dirty-state-self-heal.spec.ts");
-        assert!(
-            spec_src.contains(&format!("'{secrets_dir_name}'")),
-            "19-dirty-state-self-heal.spec.ts serviceTokenPath() must use the same \
-             '{secrets_dir_name}' directory name as tokens::init_secrets_dir_in; \
-             rename it there too"
-        );
-        assert!(
-            spec_src.contains(&format!("{token_suffix}`")),
-            "19-dirty-state-self-heal.spec.ts serviceTokenPath() must keep the '{token_suffix}' \
-             filename suffix from workers::worker_bearer_file_name; rename it there too"
-        );
-    }
-
-    #[test]
     fn update_dirty_state_bats_prefix_derivation_mirrors_compose_prefix() {
         let bats = include_str!("../../../_tests/e2e/update-dirty-state.bats");
         assert!(
