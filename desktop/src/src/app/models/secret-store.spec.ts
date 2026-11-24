@@ -1,7 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { groupByProject, isSecretStoreStatus } from './secret-store';
 
-const READY = { state: 'ready', integrations: [], plaintextCount: 0,
+const READY = {
+  state: 'ready',
+  integrations: [],
+  plaintextCount: 0,
   unreadable: [],
   migrationNotices: [],
 };

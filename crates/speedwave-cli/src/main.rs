@@ -637,7 +637,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     match speedwave_migrations::run_all(consts::data_dir()) {
-        Ok(report) if report.failed.is_empty() => log::debug!("migrations: {report}"),
+        Ok(report) if report.failures.is_empty() => log::debug!("migrations: {report}"),
         Ok(report) => {
             log::warn!("migrations: {report}");
             for (name, reason) in &report.failures {

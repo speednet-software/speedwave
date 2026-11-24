@@ -647,7 +647,7 @@ fn run_all_runs_this_migration_before_legacy_files() {
     let report = crate::run_all(dir).unwrap();
 
     assert_eq!(report.executed, vec!["secrets_at_rest", "legacy_files"]);
-    assert!(report.failed.is_empty());
+    assert!(report.failed().is_empty());
     assert_eq!(
         stored(dir, &name("alpha", "gitlab", "token")).as_deref(),
         Some(GITLAB_TOKEN)
@@ -668,7 +668,7 @@ fn run_all_reports_a_failed_migration_by_name_and_still_runs_legacy_files() {
 
     let report = crate::run_all(dir).unwrap();
 
-    assert_eq!(report.failed, vec!["secrets_at_rest"]);
+    assert_eq!(report.failed(), vec!["secrets_at_rest"]);
     assert_eq!(report.failures.len(), 1);
     assert_eq!(report.failures[0].0, "secrets_at_rest");
     assert!(report.failures[0]

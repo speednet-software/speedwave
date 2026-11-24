@@ -652,7 +652,7 @@ fn main() {
             log::set_max_level(log::LevelFilter::Trace);
             logging_cmd::init_bundle_identifier(app.config().identifier.clone());
             match &migrations {
-                Ok(report) if report.failed.is_empty() => log::debug!("migrations: {report}"),
+                Ok(report) if report.failures.is_empty() => log::debug!("migrations: {report}"),
                 Ok(report) => {
                     log::warn!("migrations: {report}");
                     for (name, reason) in &report.failures {

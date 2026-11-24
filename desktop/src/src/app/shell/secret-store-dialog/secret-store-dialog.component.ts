@@ -80,8 +80,8 @@ const BUTTON_SECONDARY =
               }
               @case ('plaintextInStore') {
                 <p data-testid="secret-store-plaintext-text">
-                  {{ plaintextSentence() }} Speedwave will not start projects until they are
-                  removed or the app is reinstalled.
+                  {{ plaintextSentence() }} Speedwave will not start projects until they are removed
+                  or the app is reinstalled.
                 </p>
               }
               @default {

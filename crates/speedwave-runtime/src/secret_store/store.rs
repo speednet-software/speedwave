@@ -61,19 +61,14 @@ impl SecretStore {
     }
 
     /// Opens the store of `data_dir` with a custom key source; fails closed when the key is
-    /// missing but encrypted secrets exist.
+    /// missing but encrypted secrets may exist.
     pub fn open_with(
         data_dir: &Path,
         source: Box<dyn KeySource>,
     ) -> Result<Self, SecretStoreError> {
         let secrets_dir = data_dir.join(SECRETS_DIR);
-        let mut key = match source.load() {
-            Err(SecretStoreError::KeyUnreadable) if !layout::contains_encrypted(&secrets_dir)? => {
-                None
-            }
-            loaded => loaded?,
-        };
-        if key.is_none() && layout::contains_encrypted(&secrets_dir)? {
+        let mut key = source.load()?;
+        if key.is_none() && layout::may_hold_ciphertext(&secrets_dir)? {
             key = Some(source.load()?.ok_or(SecretStoreError::KeyMissing)?);
         }
         Ok(Self {
@@ -247,19 +242,10 @@ impl SecretStore {
     }
 
     fn load_or_create_key(&self) -> Result<Key, SecretStoreError> {
-        let loaded = match self.source.load() {
-            Err(SecretStoreError::KeyUnreadable)
-                if !layout::contains_encrypted(&self.secrets_dir)? =>
-            {
-                self.source.discard_malformed()?;
-                self.source.load()?
-            }
-            loaded => loaded?,
-        };
-        if let Some(key) = loaded {
+        if let Some(key) = self.source.load()? {
             return Ok(key);
         }
-        if layout::contains_encrypted(&self.secrets_dir)? {
+        if layout::may_hold_ciphertext(&self.secrets_dir)? {
             return self.source.load()?.ok_or(SecretStoreError::KeyMissing);
         }
         self.source.create()
@@ -641,70 +627,86 @@ mod tests {
     }
 
     #[test]
-    fn a_malformed_key_file_without_any_secret_is_recreated_on_first_write() {
+    fn a_malformed_key_file_without_any_secret_is_an_error_and_stays_untouched() {
         let tmp = tempfile::tempdir().unwrap();
         for broken in [&b""[..], b"not-a-key", b"abcd"] {
             std::fs::write(key_path(tmp.path()), broken).unwrap();
 
-            let store = SecretStore::open(tmp.path()).unwrap();
-            assert!(store.read(&name("slack", "token")).unwrap().is_none());
+            assert!(matches!(
+                SecretStore::open(tmp.path()),
+                Err(SecretStoreError::KeyUnreadable)
+            ));
+            let fresh = SecretStore {
+                secrets_dir: tmp.path().join("secrets"),
+                source: Box::new(FileKeySource::new(key_path(tmp.path()))),
+                key: Mutex::new(None),
+            };
+            assert!(matches!(
+                fresh.write(&name("slack", "token"), "v"),
+                Err(SecretStoreError::KeyUnreadable)
+            ));
+            assert!(matches!(
+                fresh.ensure_key(),
+                Err(SecretStoreError::KeyUnreadable)
+            ));
+            assert!(matches!(
+                fresh.derive_token("bearer", "demo", "slack"),
+                Err(SecretStoreError::KeyUnreadable)
+            ));
             assert_eq!(std::fs::read(key_path(tmp.path())).unwrap(), broken);
-
-            let secret = name("slack", "token");
-            store.write(&secret, "v").unwrap();
-
-            assert_eq!(
-                std::fs::read_to_string(key_path(tmp.path())).unwrap().len(),
-                64
-            );
-            assert_eq!(
-                SecretStore::open(tmp.path())
-                    .unwrap()
-                    .read(&secret)
-                    .unwrap()
-                    .unwrap()
-                    .as_str(),
-                "v"
-            );
-            std::fs::remove_dir_all(tmp.path().join("secrets")).unwrap();
+            assert!(!tmp.path().join("secrets").exists());
         }
     }
 
     #[test]
-    fn a_malformed_key_file_without_any_secret_is_recreated_by_ensure_key_and_derive_token() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(key_path(tmp.path()), "").unwrap();
-        SecretStore::open(tmp.path()).unwrap().ensure_key().unwrap();
-        let first = std::fs::read(key_path(tmp.path())).unwrap();
-        assert_eq!(first.len(), 64);
-
-        std::fs::write(key_path(tmp.path()), "garbage").unwrap();
-        let token = SecretStore::open(tmp.path())
-            .unwrap()
-            .derive_token("bearer", "demo", "slack")
-            .unwrap();
-        assert_eq!(token.len(), 64);
-        assert_eq!(std::fs::read(key_path(tmp.path())).unwrap().len(), 64);
-    }
-
-    #[test]
-    fn stray_enc_entries_outside_project_dirs_do_not_block_key_recreation() {
+    fn a_loose_enc_entry_without_a_key_is_key_missing_and_creates_no_key() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("secrets")).unwrap();
         std::fs::write(tmp.path().join("secrets").join("loose.enc"), "x").unwrap();
-        std::fs::write(key_path(tmp.path()), "").unwrap();
 
+        assert!(matches!(
+            SecretStore::open(tmp.path()),
+            Err(SecretStoreError::KeyMissing)
+        ));
+        assert!(!key_path(tmp.path()).exists());
+    }
+
+    #[test]
+    fn unrecoverable_looking_entries_refuse_to_create_a_key() {
+        let tmp = tempfile::tempdir().unwrap();
         let store = SecretStore::open(tmp.path()).unwrap();
-        store.write(&name("slack", "token"), "v").unwrap();
+        let dir = tmp.path().join("secrets").join("demo");
+        std::fs::create_dir_all(dir.join("slack.token.enc")).unwrap();
 
-        assert_eq!(
-            store
-                .read(&name("slack", "token"))
-                .unwrap()
-                .unwrap()
-                .as_str(),
-            "v"
-        );
+        assert!(matches!(
+            store.write(&name("slack", "other"), "v"),
+            Err(SecretStoreError::KeyMissing)
+        ));
+        assert!(matches!(
+            store.ensure_key(),
+            Err(SecretStoreError::KeyMissing)
+        ));
+        assert!(matches!(
+            store.derive_token("bearer", "demo", "slack"),
+            Err(SecretStoreError::KeyMissing)
+        ));
+        assert!(!key_path(tmp.path()).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_project_dir_without_a_key_is_key_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("secrets")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), tmp.path().join("secrets").join("demo"))
+            .unwrap();
+
+        assert!(matches!(
+            SecretStore::open(tmp.path()),
+            Err(SecretStoreError::KeyMissing)
+        ));
+        assert!(!key_path(tmp.path()).exists());
     }
 
     #[test]
@@ -794,11 +796,10 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join("secrets")).unwrap();
         std::fs::write(tmp.path().join("secrets").join("loose.enc"), "x").unwrap();
 
-        let store = SecretStore::open(tmp.path()).unwrap();
+        let err = SecretStore::open(tmp.path()).err().unwrap();
 
+        assert!(matches!(err, SecretStoreError::KeyMissing));
         assert!(!key_path(tmp.path()).exists());
-        store.write(&name("slack", "token"), "v").unwrap();
-        assert!(key_path(tmp.path()).is_file());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use rand::TryRng;
 use speedwave_crypto::Key;
@@ -9,8 +9,8 @@ use zeroize::Zeroizing;
 use super::error::{io_failure, operation_failure, SecretStoreError};
 
 const KEY_LEN: usize = 32;
-const RACE_LOAD_ATTEMPTS: u32 = 25;
-const RACE_LOAD_DELAY: Duration = Duration::from_millis(20);
+
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Where the install key lives; `create` must be race-safe and never replace an existing key.
 pub trait KeySource: Send + Sync {
@@ -19,9 +19,6 @@ pub trait KeySource: Send + Sync {
 
     /// Creates a fresh key; when another creator wins the race, returns the winner's key.
     fn create(&self) -> Result<Key, SecretStoreError>;
-
-    /// Removes a key that stays malformed after waiting for a concurrent creator; a valid key stays.
-    fn discard_malformed(&self) -> Result<(), SecretStoreError>;
 }
 
 /// Key stored as 64 hex characters in an owner-only file.
@@ -35,17 +32,17 @@ impl FileKeySource {
         Self { path }
     }
 
-    fn load_winner(&self) -> Result<Key, SecretStoreError> {
-        for _ in 1..RACE_LOAD_ATTEMPTS {
-            match self.load() {
-                Ok(Some(key)) => return Ok(key),
-                Ok(None) | Err(SecretStoreError::KeyUnreadable) => {
-                    std::thread::sleep(RACE_LOAD_DELAY)
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        self.load()?.ok_or(SecretStoreError::KeyUnreadable)
+    fn temp_path(&self) -> PathBuf {
+        let file_name = self
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        self.path.with_file_name(format!(
+            ".{file_name}.tmp.{}.{sequence}",
+            std::process::id()
+        ))
     }
 }
 
@@ -63,7 +60,8 @@ impl KeySource for FileKeySource {
     }
 
     fn create(&self) -> Result<Key, SecretStoreError> {
-        if let Some(parent) = self.path.parent() {
+        let parent = self.path.parent();
+        if let Some(parent) = parent {
             std::fs::create_dir_all(parent).map_err(|e| io_failure("create key directory", &e))?;
         }
         let mut bytes = Zeroizing::new([0u8; KEY_LEN]);
@@ -71,60 +69,37 @@ impl KeySource for FileKeySource {
             .try_fill_bytes(&mut *bytes)
             .map_err(|_| operation_failure("read OS entropy"))?;
 
-        let mut file = match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&self.path)
-        {
-            Ok(file) => file,
+        let temp = self.temp_path();
+        let published =
+            write_temp_key(&temp, &bytes).map(|()| std::fs::hard_link(&temp, &self.path));
+        let _ = std::fs::remove_file(&temp);
+        match published? {
+            Ok(()) => {
+                if let Some(parent) = parent {
+                    crate::fs_perms::fsync_parent_dir(parent);
+                }
+                Ok(Key::from_bytes(*bytes))
+            }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                return self.load_winner();
+                self.load()?.ok_or(SecretStoreError::KeyUnreadable)
             }
-            Err(e) => return Err(io_failure("create key file", &e)),
-        };
-
-        if let Err(e) = write_and_sync_key(&mut file, &self.path, &bytes) {
-            let _ = std::fs::remove_file(&self.path);
-            return Err(e);
-        }
-        Ok(Key::from_bytes(*bytes))
-    }
-
-    fn discard_malformed(&self) -> Result<(), SecretStoreError> {
-        for _ in 1..RACE_LOAD_ATTEMPTS {
-            match self.load() {
-                Err(SecretStoreError::KeyUnreadable) => std::thread::sleep(RACE_LOAD_DELAY),
-                Ok(_) => return Ok(()),
-                Err(e) => return Err(e),
-            }
-        }
-        match self.load() {
-            Err(SecretStoreError::KeyUnreadable) => match std::fs::remove_file(&self.path) {
-                Ok(()) => Ok(()),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(e) => Err(io_failure("remove key file", &e)),
-            },
-            Ok(_) => Ok(()),
-            Err(e) => Err(e),
+            Err(e) => Err(io_failure("publish key file", &e)),
         }
     }
 }
 
-fn write_and_sync_key(
-    file: &mut std::fs::File,
-    path: &Path,
-    bytes: &[u8; KEY_LEN],
-) -> Result<(), SecretStoreError> {
-    crate::fs_perms::set_owner_only(path).map_err(|_| operation_failure("restrict key file"))?;
+fn write_temp_key(temp: &Path, bytes: &[u8; KEY_LEN]) -> Result<(), SecretStoreError> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(temp)
+        .map_err(|e| io_failure("create key file", &e))?;
+    crate::fs_perms::set_owner_only(temp).map_err(|_| operation_failure("restrict key file"))?;
     let hex = Zeroizing::new(crate::bundle::bytes_to_hex(bytes));
     file.write_all(hex.as_bytes())
         .and_then(|()| file.flush())
         .map_err(|e| io_failure("write key file", &e))?;
-    crate::fs_perms::fsync_file_durable(file).map_err(|e| io_failure("sync key file", &e))?;
-    if let Some(parent) = path.parent() {
-        crate::fs_perms::fsync_parent_dir(parent);
-    }
-    Ok(())
+    crate::fs_perms::fsync_file_durable(&file).map_err(|e| io_failure("sync key file", &e))
 }
 
 #[cfg(test)]
@@ -232,52 +207,39 @@ mod tests {
     }
 
     #[test]
-    fn discard_malformed_removes_an_empty_or_malformed_key_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("secret-store.key");
-        for content in [&b""[..], b"not a key", &[0xffu8, 0xfe][..], b"abcd"] {
-            std::fs::write(&path, content).unwrap();
-            source(tmp.path()).discard_malformed().unwrap();
-            assert!(!path.exists());
-        }
-    }
-
-    #[test]
-    fn discard_malformed_keeps_a_valid_key_and_accepts_a_missing_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let src = source(tmp.path());
-        src.discard_malformed().unwrap();
-        let created = src.create().unwrap();
-        src.discard_malformed().unwrap();
-        assert_eq!(src.load().unwrap().unwrap().id(), created.id());
-    }
-
-    #[test]
-    fn discard_malformed_waits_for_a_concurrent_creator_to_finish() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("secret-store.key");
-        std::fs::write(&path, "").unwrap();
-        let finisher = {
-            let path = path.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(100));
-                std::fs::write(path, "ab".repeat(32)).unwrap();
-            })
-        };
-        source(tmp.path()).discard_malformed().unwrap();
-        finisher.join().unwrap();
-        assert_eq!(
-            source(tmp.path()).load().unwrap().unwrap().id(),
-            Key::from_bytes([0xab; 32]).id()
-        );
-    }
-
-    #[test]
     fn load_reports_an_io_error_for_an_unreadable_path() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir(tmp.path().join("secret-store.key")).unwrap();
         let err = source(tmp.path()).load().err().unwrap();
         assert!(matches!(err, SecretStoreError::Io(_)));
+    }
+
+    #[test]
+    fn create_leaves_no_temp_file_behind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = source(tmp.path());
+        src.create().unwrap();
+        src.create().unwrap();
+
+        let names: Vec<String> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["secret-store.key".to_owned()]);
+    }
+
+    #[test]
+    fn create_keeps_a_complete_existing_key_byte_for_byte() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("secret-store.key");
+        let existing = "cd".repeat(32);
+        std::fs::write(&path, &existing).unwrap();
+
+        let key = source(tmp.path()).create().unwrap();
+
+        assert_eq!(key.id(), Key::from_bytes([0xcd; 32]).id());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), existing);
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
     }
 
     #[test]
@@ -295,6 +257,7 @@ mod tests {
             .collect();
         assert!(ids.windows(2).all(|pair| pair[0] == pair[1]));
         assert_eq!(source(tmp.path()).load().unwrap().unwrap().id(), ids[0]);
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
     }
 
     #[cfg(unix)]

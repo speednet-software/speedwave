@@ -23,6 +23,28 @@ pub(super) fn contains_encrypted(secrets_dir: &Path) -> Result<bool, SecretStore
     Ok(false)
 }
 
+pub(super) fn may_hold_ciphertext(secrets_dir: &Path) -> Result<bool, SecretStoreError> {
+    Ok(contains_encrypted(secrets_dir)? || has_unrecoverable_entry(secrets_dir)?)
+}
+
+fn has_unrecoverable_entry(secrets_dir: &Path) -> Result<bool, SecretStoreError> {
+    for entry in entries(secrets_dir)? {
+        if !is_directory(&entry) || entry.file_name().to_str().is_none() {
+            return Ok(true);
+        }
+        for inner in entries(&entry.path())? {
+            if inner
+                .file_name()
+                .to_string_lossy()
+                .ends_with(ENCRYPTED_SUFFIX)
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 pub(super) fn is_project_dir(entry: &DirEntry) -> bool {
     is_directory(entry) && entry.file_name().to_str().is_some()
 }
@@ -180,6 +202,60 @@ mod tests {
         .unwrap();
         std::os::unix::fs::symlink(outside.path(), secrets.join("linked")).unwrap();
         assert!(!contains_encrypted(&secrets).unwrap());
+    }
+
+    #[test]
+    fn may_hold_ciphertext_is_false_for_an_empty_or_clean_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let secrets = tmp.path().join("secrets");
+        assert!(!may_hold_ciphertext(&secrets).unwrap());
+        let dir = project_dir(tmp.path());
+        assert!(!may_hold_ciphertext(&secrets).unwrap());
+        std::fs::write(dir.join("a.b.enc.lock"), "").unwrap();
+        std::fs::write(dir.join("anthropic_api_key"), "x").unwrap();
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub").join("deep.enc"), "x").unwrap();
+        assert!(!may_hold_ciphertext(&secrets).unwrap());
+    }
+
+    #[test]
+    fn may_hold_ciphertext_is_true_for_an_enc_file_or_enc_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let secrets = tmp.path().join("secrets");
+        let dir = project_dir(tmp.path());
+        std::fs::create_dir(dir.join("slack.token.enc")).unwrap();
+        assert!(may_hold_ciphertext(&secrets).unwrap());
+        std::fs::remove_dir(dir.join("slack.token.enc")).unwrap();
+        std::fs::write(dir.join("slack.token.enc"), "x").unwrap();
+        assert!(may_hold_ciphertext(&secrets).unwrap());
+    }
+
+    #[test]
+    fn may_hold_ciphertext_is_true_for_a_loose_entry_in_the_secrets_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let secrets = tmp.path().join("secrets");
+        project_dir(tmp.path());
+        std::fs::write(secrets.join("loose.json"), "{}").unwrap();
+        assert!(may_hold_ciphertext(&secrets).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn may_hold_ciphertext_is_true_for_symlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let secrets = tmp.path().join("secrets");
+        let dir = project_dir(tmp.path());
+        std::os::unix::fs::symlink(
+            outside.path().join("victim.enc"),
+            dir.join("slack.token.enc"),
+        )
+        .unwrap();
+        assert!(may_hold_ciphertext(&secrets).unwrap());
+        std::fs::remove_file(dir.join("slack.token.enc")).unwrap();
+        assert!(!may_hold_ciphertext(&secrets).unwrap());
+        std::os::unix::fs::symlink(outside.path(), secrets.join("linked")).unwrap();
+        assert!(may_hold_ciphertext(&secrets).unwrap());
     }
 
     #[test]

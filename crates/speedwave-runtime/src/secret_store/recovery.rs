@@ -166,14 +166,29 @@ mod tests {
     }
 
     #[test]
-    fn after_a_discard_the_store_opens_although_stray_entries_remain() {
+    fn after_a_discard_stray_entries_keep_the_key_missing() {
         let tmp = tempfile::tempdir().unwrap();
         seed(tmp.path(), "alpha", "slack.token.enc", "x");
         seed(tmp.path(), "alpha", "slack.token.enc.lock", "");
         std::fs::write(tmp.path().join("secrets").join("loose.enc"), "x").unwrap();
-        let nested = tmp.path().join("secrets/alpha/sub");
-        std::fs::create_dir_all(&nested).unwrap();
-        std::fs::write(nested.join("deep.enc"), "x").unwrap();
+        assert!(matches!(
+            SecretStore::open(tmp.path()),
+            Err(SecretStoreError::KeyMissing)
+        ));
+
+        assert_eq!(discard_secrets_without_key(tmp.path()).unwrap(), 2);
+
+        assert!(matches!(
+            SecretStore::open(tmp.path()),
+            Err(SecretStoreError::KeyMissing)
+        ));
+    }
+
+    #[test]
+    fn after_a_discard_of_every_entry_the_store_opens() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed(tmp.path(), "alpha", "slack.token.enc", "x");
+        seed(tmp.path(), "alpha", "slack.token.enc.lock", "");
         assert!(matches!(
             SecretStore::open(tmp.path()),
             Err(SecretStoreError::KeyMissing)
@@ -186,7 +201,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn after_a_discard_a_symlinked_enc_file_does_not_keep_the_key_missing() {
+    fn a_symlinked_enc_file_keeps_the_key_missing_and_is_never_discarded() {
         let tmp = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         let target = outside.path().join("victim.enc");
@@ -195,7 +210,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::os::unix::fs::symlink(&target, dir.join("slack.token.enc")).unwrap();
 
-        assert!(SecretStore::open(tmp.path()).is_ok());
+        assert!(matches!(
+            SecretStore::open(tmp.path()),
+            Err(SecretStoreError::KeyMissing)
+        ));
         assert_eq!(discard_secrets_without_key(tmp.path()).unwrap(), 0);
         assert!(target.exists());
     }

@@ -231,7 +231,6 @@ mod tests {
     fn report_with(failures: Vec<(&'static str, String)>) -> MigrationReport {
         MigrationReport {
             executed: Vec::new(),
-            failed: failures.iter().map(|(name, _)| *name).collect(),
             failures,
         }
     }
@@ -401,19 +400,15 @@ mod tests {
     }
 
     #[test]
-    fn a_malformed_key_without_secrets_is_ready_and_a_fresh_key_is_created_on_first_write() {
+    fn a_malformed_key_without_secrets_is_key_unreadable_and_stays_untouched() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("secret-store.key"), "").unwrap();
+        let key = tmp.path().join("secret-store.key");
+        std::fs::write(&key, "").unwrap();
 
-        assert_eq!(evaluate(tmp.path()), SecretStoreState::Ready);
-        let store = SecretStore::open(tmp.path()).unwrap();
-        store
-            .write(
-                &SecretName::integration("demo", "slack", "token").unwrap(),
-                "v",
-            )
-            .unwrap();
-        assert_eq!(evaluate(tmp.path()), SecretStoreState::Ready);
+        assert_eq!(evaluate(tmp.path()), SecretStoreState::KeyUnreadable);
+        assert!(ensure_ready_in(tmp.path()).unwrap_err().contains("damaged"));
+        assert!(reset_in(tmp.path(), true, None, &[]).is_err());
+        assert_eq!(std::fs::read_to_string(&key).unwrap(), "");
     }
 
     #[test]

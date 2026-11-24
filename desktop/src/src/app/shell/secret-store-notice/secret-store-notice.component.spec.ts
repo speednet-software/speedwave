@@ -60,10 +60,7 @@ describe('SecretStoreNoticeComponent', () => {
     await render();
 
     const items = [...root().querySelectorAll('[data-testid="secret-store-notice-item"]')];
-    expect(items.map((li) => li.textContent?.trim())).toEqual([
-      ...unreadable,
-      ...migrationNotices,
-    ]);
+    expect(items.map((li) => li.textContent?.trim())).toEqual([...unreadable, ...migrationNotices]);
   });
 
   it('hides the notice after Dismiss', async () => {
