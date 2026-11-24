@@ -239,6 +239,7 @@ impl DeviceCodeProvider for SharepointProvider {
                 ) {
                     return emit_error(format!("Failed to save tokens: {e}"));
                 }
+                crate::integrations_cmd::restage_container_secrets(&self.project);
                 PollStep::Emit {
                     status: ProgressStatus::Success,
                     message: "Authentication successful".to_string(),

@@ -10,6 +10,9 @@ vi.mock('./retry.js', () => ({
   retryAsync: (fn: () => Promise<unknown>) => fn(),
 }));
 
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { bootWorker } from './boot.js';
 
 describe('bootWorker', () => {
@@ -76,6 +79,76 @@ describe('bootWorker', () => {
       })
     ).rejects.toThrow('exit:1');
     expect(errorSpy.mock.calls.flat().join(' ')).toContain('MCP_TEST_AUTH_TOKEN is required');
+  });
+
+  describe('auth token source', () => {
+    let dir: string;
+    const boot = () =>
+      bootWorker({
+        serverName: 'mcp-test',
+        version: '1.0.0',
+        authTokenEnv: 'MCP_TEST_AUTH_TOKEN',
+        makeTools: () => [],
+      });
+    const servedToken = () =>
+      (createMCPServerMock.mock.calls[0][0] as { auth: { token: string } }).auth.token;
+
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), 'boot-token-'));
+      delete process.env.MCP_TEST_AUTH_TOKEN;
+      delete process.env.MCP_TEST_AUTH_TOKEN_FILE;
+    });
+
+    afterEach(() => {
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it('uses the trimmed file content and prefers it over the env value', async () => {
+      const file = join(dir, 'token');
+      writeFileSync(file, 'from-file\n');
+      process.env.MCP_TEST_AUTH_TOKEN_FILE = file;
+      process.env.MCP_TEST_AUTH_TOKEN = 'from-env';
+      await boot();
+      expect(servedToken()).toBe('from-file');
+    });
+
+    it('uses the env value when no file is configured', async () => {
+      process.env.MCP_TEST_AUTH_TOKEN = 'from-env';
+      await boot();
+      expect(servedToken()).toBe('from-env');
+    });
+
+    it('falls back to the env value when the file is empty', async () => {
+      const file = join(dir, 'token');
+      writeFileSync(file, '\n');
+      process.env.MCP_TEST_AUTH_TOKEN_FILE = file;
+      process.env.MCP_TEST_AUTH_TOKEN = 'from-env';
+      await boot();
+      expect(servedToken()).toBe('from-env');
+    });
+
+    it('falls back to the env value when the file is unreadable', async () => {
+      process.env.MCP_TEST_AUTH_TOKEN_FILE = join(dir, 'missing');
+      process.env.MCP_TEST_AUTH_TOKEN = 'from-env';
+      await boot();
+      expect(servedToken()).toBe('from-env');
+      const warned = warnSpy.mock.calls.flat().join(' ');
+      expect(warned).toContain('MCP_TEST_AUTH_TOKEN_FILE');
+      expect(warned).not.toContain(join(dir, 'missing'));
+    });
+
+    it('exits when the file is empty and no env value exists', async () => {
+      const file = join(dir, 'token');
+      writeFileSync(file, '');
+      process.env.MCP_TEST_AUTH_TOKEN_FILE = file;
+      await expect(boot()).rejects.toThrow('exit:1');
+    });
+
+    it('exits when the file is missing and no env value exists', async () => {
+      process.env.MCP_TEST_AUTH_TOKEN_FILE = join(dir, 'missing');
+      await expect(boot()).rejects.toThrow('exit:1');
+      expect(errorSpy.mock.calls.flat().join(' ')).toContain('MCP_TEST_AUTH_TOKEN is required');
+    });
   });
 
   it('exits on an invalid PORT value', async () => {

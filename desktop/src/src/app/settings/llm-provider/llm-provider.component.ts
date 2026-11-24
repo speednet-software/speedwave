@@ -37,6 +37,11 @@ import {
   ProviderTarget,
 } from '../../models/llm';
 
+interface ApiKeyChange {
+  needs_restart: boolean;
+  restage_error: string | null;
+}
+
 interface ExtraProviderEdit {
   id: ExtraProviderId;
   kind: 'open_router';
@@ -1027,13 +1032,13 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     this.anthropicApiKeySaved.set(false);
     this.errorOccurred.emit('');
     try {
-      const needsRestart = await this.tauri.invoke<boolean>('save_api_key', {
+      const change = await this.tauri.invoke<ApiKeyChange>('save_api_key', {
         project,
         apiKey,
       });
       this.anthropicApiKeySaved.set(true);
       this.anthropicApiKeyInput.set('');
-      await this.applyAnthropicKeyChange(project, needsRestart);
+      await this.applyAnthropicKeyChange(project, change);
       setTimeout(() => {
         this.anthropicApiKeySaved.set(false);
         this.cdr.markForCheck();
@@ -1051,17 +1056,18 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     if (!project) return;
     this.errorOccurred.emit('');
     try {
-      const needsRestart = await this.tauri.invoke<boolean>('delete_api_key', { project });
-      await this.applyAnthropicKeyChange(project, needsRestart);
+      const change = await this.tauri.invoke<ApiKeyChange>('delete_api_key', { project });
+      await this.applyAnthropicKeyChange(project, change);
     } catch (e: unknown) {
       this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
     }
     this.cdr.markForCheck();
   }
 
-  private async applyAnthropicKeyChange(project: string, needsRestart: boolean): Promise<void> {
+  private async applyAnthropicKeyChange(project: string, change: ApiKeyChange): Promise<void> {
     await this.loadAuthStatus();
-    if (!needsRestart) return;
+    if (change.restage_error) this.errorOccurred.emit(change.restage_error);
+    if (!change.needs_restart) return;
     this.projectState.requestRestartFor(project);
     await this.loadConfig();
   }
@@ -1398,12 +1404,14 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
         update.custom_headers = nullIfEmpty(this.customHeaders());
       }
       const touchedExtras = this.extraProviders().filter((e) => e.keyTouched);
+      let restageError: string | null = null;
       for (const extra of touchedExtras) {
-        await this.tauri.invoke('set_llm_provider_key', {
+        const failed = await this.tauri.invoke<string | null>('set_llm_provider_key', {
           providerId: extra.id,
           key: nullIfEmpty(extra.keyInput),
           project,
         });
+        restageError ??= failed ?? null;
       }
       await this.tauri.invoke('update_llm_config', { update });
 
@@ -1438,7 +1446,11 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
       void this.chatState.refreshLlmConfigCacheAll();
       if (!this.destroyRef.destroyed) this.providerChange.emit(provider);
       const activeKey = this.computeActiveKey(active.provider_id, active.model, update.providers);
-      await this.applySavedConfig(project, forceRestart || activeKey !== this.loadedActiveKey);
+      await this.applySavedConfig(
+        project,
+        forceRestart || restageError !== null || activeKey !== this.loadedActiveKey
+      );
+      if (restageError !== null) this.errorOccurred.emit(restageError);
       this.loadedActiveKey = activeKey;
       this.snapshotSavedForm();
       setTimeout(() => {

@@ -573,6 +573,17 @@ impl ContainerRuntime for LimaRuntime {
         super::vm_exec_run(command, stdin, timeout)
     }
 
+    fn vm_exec_as_root(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        stdin: &[u8],
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<super::VmExecOutput> {
+        let argv: Vec<&str> = std::iter::once(cmd).chain(args.iter().copied()).collect();
+        self.vm_exec("sudo", &argv, stdin, timeout)
+    }
+
     fn is_available(&self) -> bool {
         let limactl_ok = self.runner.run("limactl", &["--version"]).is_ok();
         if !limactl_ok {

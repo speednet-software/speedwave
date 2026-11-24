@@ -1,5 +1,5 @@
 //! Host-side PII NER detector wiring (ADR-096): reads the Desktop service lock and renders
-//! the `ner` section of `proxy.json`, so the proxy can ask the host for entity spans.
+//! the `ner` section of the proxy config, so the proxy can ask the host for entity spans.
 
 use std::path::Path;
 
@@ -79,12 +79,56 @@ pub fn live_service_in(data_dir: &Path) -> Option<LiveNerService> {
 }
 
 /// The `ner` object of `proxy.json`; field names mirror `containers/proxy/src/ner.rs::NerConfig`.
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, PartialEq)]
 pub(crate) struct NerRenderConfig {
     url: String,
     token: String,
     min_confidence: f32,
     labels: Vec<String>,
+}
+
+impl NerRenderConfig {
+    pub(super) fn url(&self) -> &str {
+        &self.url
+    }
+}
+
+impl std::fmt::Debug for NerRenderConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NerRenderConfig")
+            .field("url", &self.url)
+            .field("token", &"***REDACTED***")
+            .finish_non_exhaustive()
+    }
+}
+
+pub(super) const NER_URL_ENV: &str = "SPW_NER_URL";
+
+pub(super) fn live_ner_config_in(data_dir: &Path, enabled: bool) -> Option<NerRenderConfig> {
+    enabled
+        .then(|| live_service_in(data_dir))
+        .flatten()
+        .map(|live| {
+            log::info!(
+                "rendering the proxy config with the host PII NER detector on port {}",
+                live.port
+            );
+            ner_render_config(&live)
+        })
+}
+
+pub(super) fn apply_ner_url_env(yaml: &str, ner_url: Option<&str>) -> anyhow::Result<String> {
+    let Some(url) = ner_url else {
+        return Ok(yaml.to_string());
+    };
+    let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
+    super::add_service_env_var(
+        &mut doc,
+        super::secret_slots::PROXY_SERVICE,
+        NER_URL_ENV,
+        url,
+    )?;
+    Ok(serde_yaml_ng::to_string(&doc)?)
 }
 
 pub(crate) fn ner_render_config(live: &LiveNerService) -> NerRenderConfig {
@@ -115,17 +159,18 @@ pub(super) fn validate_ner_url(raw: &str) -> Result<u16, String> {
         .ok_or_else(|| "an explicit port is required".to_string())
 }
 
-/// Exact match between `ner.url` in `proxy_json` and the URL the renderer would write for
-/// `live_port`; an unparsable config never counts as current.
-pub fn ner_url_state(proxy_json: &str, live_port: Option<u16>) -> RenderedUrlState {
-    let doc: serde_json::Value = match serde_json::from_str(proxy_json) {
+/// Exact match between the detector URL rendered into `compose.yml` and the URL the renderer
+/// would write for `live_port`; an unparsable compose never counts as current.
+pub fn ner_url_state(compose_yaml: &str, live_port: Option<u16>) -> RenderedUrlState {
+    let doc: serde_yaml_ng::Value = match serde_yaml_ng::from_str(compose_yaml) {
         Ok(doc) => doc,
         Err(e) => {
-            log::warn!("proxy.json is not parsable ({e}); treating the NER URL as stale");
+            log::warn!("compose is not parsable ({e}); treating the NER URL as stale");
             return RenderedUrlState::Stale;
         }
     };
-    let rendered = doc.pointer("/ner/url").and_then(|v| v.as_str());
+    let rendered =
+        super::workers::service_env_value(&doc, super::secret_slots::PROXY_SERVICE, NER_URL_ENV);
     match (rendered, live_port) {
         (None, None) => RenderedUrlState::Absent,
         (Some(url), Some(port)) if url == super::workers::worker_gateway_url(port) => {
@@ -222,10 +267,17 @@ mod tests {
         }
     }
 
+    fn proxy_compose_with_ner_url(url: Option<&str>) -> String {
+        let env = url
+            .map(|url| format!("    environment:\n      - {NER_URL_ENV}={url}\n"))
+            .unwrap_or_default();
+        format!("services:\n  proxy:\n    image: proxy\n{env}")
+    }
+
     #[test]
     fn ner_url_state_matches_exactly() {
         let expected = super::super::workers::worker_gateway_url(50333);
-        let rendered = format!(r#"{{"routes":[],"ner":{{"url":"{expected}","token":"t"}}}}"#);
+        let rendered = proxy_compose_with_ner_url(Some(&expected));
         assert_eq!(
             ner_url_state(&rendered, Some(50333)),
             RenderedUrlState::Current
@@ -235,15 +287,31 @@ mod tests {
             RenderedUrlState::Stale
         );
         assert_eq!(ner_url_state(&rendered, None), RenderedUrlState::Stale);
+        let without = proxy_compose_with_ner_url(None);
         assert_eq!(
-            ner_url_state(r#"{"routes":[]}"#, Some(50333)),
+            ner_url_state(&without, Some(50333)),
             RenderedUrlState::Stale
         );
+        assert_eq!(ner_url_state(&without, None), RenderedUrlState::Absent);
         assert_eq!(
-            ner_url_state(r#"{"routes":[]}"#, None),
-            RenderedUrlState::Absent
+            ner_url_state("services: [unclosed", None),
+            RenderedUrlState::Stale
         );
-        assert_eq!(ner_url_state("not json", None), RenderedUrlState::Stale);
+    }
+
+    #[test]
+    fn applying_the_ner_url_env_round_trips_through_the_state_verdict() {
+        let url = super::super::workers::worker_gateway_url(50444);
+        let yaml = apply_ner_url_env(&proxy_compose_with_ner_url(None), Some(&url)).unwrap();
+        assert_eq!(ner_url_state(&yaml, Some(50444)), RenderedUrlState::Current);
+        let untouched = apply_ner_url_env(&proxy_compose_with_ner_url(None), None).unwrap();
+        assert_eq!(ner_url_state(&untouched, None), RenderedUrlState::Absent);
+    }
+
+    #[test]
+    fn ner_render_config_debug_hides_the_token() {
+        let cfg = ner_render_config(&LiveNerService::test_new(50555, "ner-secret-token"));
+        assert!(!format!("{cfg:?}").contains("ner-secret-token"));
     }
 
     fn declared_confidence(src: &str, pattern: &str) -> Option<f32> {

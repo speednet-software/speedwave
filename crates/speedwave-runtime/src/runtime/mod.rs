@@ -164,6 +164,17 @@ pub(crate) trait ContainerRuntime: Send + Sync {
         let _ = (cmd, args, stdin, timeout);
         anyhow::bail!("vm_exec not implemented for this runtime");
     }
+
+    fn vm_exec_as_root(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        stdin: &[u8],
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<VmExecOutput> {
+        let _ = (cmd, args, stdin, timeout);
+        anyhow::bail!("vm_exec_as_root not implemented for this runtime");
+    }
 }
 
 /// Output of a [`ContainerRuntime::vm_exec`] call.
@@ -1647,7 +1658,7 @@ pub(crate) fn compose_down_and_cleanup(
 /// SSOT entry point: the only way to obtain a runtime handle outside this
 /// crate. Returns `LockedRuntime` so callers cannot bypass per-project locks.
 pub fn detect_runtime() -> LockedRuntime {
-    LockedRuntime::new(detect_runtime_inner(), engine_teardown_started)
+    LockedRuntime::new(detect_runtime_inner(), engine_teardown_started).with_secret_staging()
 }
 
 pub(crate) fn detect_runtime_inner() -> Box<dyn ContainerRuntime> {

@@ -3315,7 +3315,9 @@ describe('LlmProviderComponent', () => {
       const calls: string[] = [];
       mockTauri.invokeHandler = async (cmd: string) => {
         calls.push(cmd);
-        if (cmd === 'save_api_key' || cmd === 'delete_api_key') return needsRestart;
+        if (cmd === 'save_api_key' || cmd === 'delete_api_key') {
+          return { needs_restart: needsRestart, restage_error: null };
+        }
         if (cmd === 'get_auth_status') {
           return {
             api_key_configured: true,
@@ -3343,9 +3345,74 @@ describe('LlmProviderComponent', () => {
     }
   );
 
+  it('keeps a saved anthropic key, shows the restage error and asks for the restart when the containers could not be updated', async () => {
+    const restageError =
+      'The change is saved on this computer, but the running containers could not be updated.';
+    const calls: string[] = [];
+    mockTauri.invokeHandler = async (cmd: string) => {
+      calls.push(cmd);
+      if (cmd === 'save_api_key' || cmd === 'delete_api_key') {
+        return { needs_restart: true, restage_error: restageError };
+      }
+      if (cmd === 'get_auth_status') {
+        return { api_key_configured: true, oauth_authenticated: false, provider_configured: true };
+      }
+      return undefined;
+    };
+    const errors: string[] = [];
+    component.errorOccurred.subscribe((m: string) => errors.push(m));
+    const requestSpy = vi.spyOn(TestBed.inject(ProjectStateService), 'requestRestartFor');
+    fixture.componentRef.setInput('activeProject', 'proj');
+    component.anthropicApiKeyInput.set('sk-ant-test');
+
+    await component.saveAnthropicApiKey();
+
+    expect(errors).toContain(restageError);
+    expect(requestSpy.mock.calls).toEqual([['proj']]);
+    expect(calls).toContain('get_auth_status');
+    expect(component.anthropicApiKeySaved()).toBe(true);
+
+    errors.length = 0;
+    requestSpy.mockClear();
+    await component.deleteAnthropicApiKey();
+
+    expect(errors).toContain(restageError);
+    expect(requestSpy.mock.calls).toEqual([['proj']]);
+  });
+
+  it('saves the rest of the form and asks for a full restart when a provider key could not be restaged', async () => {
+    const restageError =
+      'The change is saved on this computer, but the running containers could not be updated.';
+    const calls: string[] = [];
+    mockTauri.invokeHandler = async (cmd: string) => {
+      calls.push(cmd);
+      if (cmd === 'set_llm_provider_key') return restageError;
+      if (cmd === 'get_auth_status') {
+        return { api_key_configured: false, provider_configured: true };
+      }
+      return undefined;
+    };
+    const errors: string[] = [];
+    component.errorOccurred.subscribe((m: string) => errors.push(m));
+    const requestSpy = vi.spyOn(TestBed.inject(ProjectStateService), 'requestRestartFor');
+    fixture.componentRef.setInput('activeProject', 'proj');
+    component.provider.set('anthropic');
+    component.selectedTarget.set('anthropic');
+    component.toggleExtraExpanded(component.extraProviders()[0]);
+    component.onExtraKeyInput(component.extraProviders()[0], 'sk-or-v1-fresh');
+
+    await component.saveConfig();
+
+    expect(calls.indexOf('set_llm_provider_key')).toBeLessThan(calls.indexOf('update_llm_config'));
+    expect(calls).toContain('update_llm_config');
+    expect(requestSpy.mock.calls).toEqual([['proj']]);
+    expect(errors).toContain(restageError);
+    expect(component.saved()).toBe(true);
+  });
+
   it('asks for the restart after the saved key settles a project without a provider', async () => {
     mockTauri.invokeHandler = async (cmd: string) => {
-      if (cmd === 'save_api_key') return true;
+      if (cmd === 'save_api_key') return { needs_restart: true, restage_error: null };
       if (cmd === 'get_auth_status') {
         return {
           api_key_configured: true,

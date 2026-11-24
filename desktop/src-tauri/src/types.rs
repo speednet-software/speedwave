@@ -76,6 +76,12 @@ pub(crate) enum OauthSignIn {
     None,
 }
 
+#[derive(Debug, PartialEq, Serialize)]
+pub(crate) struct ApiKeyChange {
+    pub(crate) needs_restart: bool,
+    pub(crate) restage_error: Option<String>,
+}
+
 #[derive(Serialize, Deserialize)]
 pub(crate) struct AuthStatusResponse {
     pub(crate) api_key_configured: bool,

@@ -3,14 +3,20 @@
 
 use std::time::Duration;
 
+use crate::consts;
+
 /// Env var carrying the per-spawn instance id into the container process.
 /// Lands in `/proc/<pid>/environ`, matched by [`kill_by_instance_command`].
 pub const SESSION_INSTANCE_ENV: &str = "SPW_SESSION_INSTANCE_ID";
 
-/// argv prefix that stamps `claude` with `id` via `env VAR=id`. Prepend to the
-/// claude argv so the marker is inherited into the process environment.
+/// argv prefix that runs the command under [`consts::SPEEDWAVE_EXEC_WRAPPER`] stamped with
+/// `id`. Prepend to the claude argv so the marker is inherited into the process environment
+/// and the claude secret files are loaded into it.
 pub fn instance_env_argv(id: &str) -> Vec<String> {
-    vec!["env".to_string(), format!("{SESSION_INSTANCE_ENV}={id}")]
+    vec![
+        consts::SPEEDWAVE_EXEC_WRAPPER.to_string(),
+        format!("{SESSION_INSTANCE_ENV}={id}"),
+    ]
 }
 
 /// Fresh per-spawn instance id for [`SESSION_INSTANCE_ENV`].
@@ -175,7 +181,13 @@ mod tests {
     #[test]
     fn instance_env_argv_prefixes_env_assignment() {
         let argv = instance_env_argv("abc-123");
-        assert_eq!(argv, vec!["env", "SPW_SESSION_INSTANCE_ID=abc-123"]);
+        assert_eq!(
+            argv,
+            vec![
+                consts::SPEEDWAVE_EXEC_WRAPPER,
+                "SPW_SESSION_INSTANCE_ID=abc-123"
+            ]
+        );
     }
 
     #[test]

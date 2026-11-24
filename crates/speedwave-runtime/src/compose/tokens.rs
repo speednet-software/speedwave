@@ -16,7 +16,7 @@ pub fn init_secrets_dir(project: &str) -> anyhow::Result<PathBuf> {
 }
 
 /// Testable variant: accepts explicit data_dir.
-pub(crate) fn init_secrets_dir_in(data_dir: &Path, project: &str) -> anyhow::Result<PathBuf> {
+pub fn init_secrets_dir_in(data_dir: &Path, project: &str) -> anyhow::Result<PathBuf> {
     crate::validation::validate_project_name(project)?;
     let secrets_dir = data_dir.join("secrets").join(project);
     std::fs::create_dir_all(&secrets_dir)?;

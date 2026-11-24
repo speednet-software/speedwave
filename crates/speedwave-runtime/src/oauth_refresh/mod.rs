@@ -11,15 +11,17 @@ mod service;
 mod slack;
 mod status;
 mod store;
+mod tmpfs;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{mpsc, PoisonError};
+use std::sync::{mpsc, Arc, PoisonError};
 use std::time::{Duration, Instant};
 
 use provider::{ErrorCode, RefreshRequest, RefreshResponse};
 
 use crate::consts;
+use crate::runtime::LockedRuntime;
 
 /// Result of one check.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,6 +50,23 @@ pub struct SessionRefresher {
     _stop: mpsc::Sender<()>,
 }
 
+#[derive(Clone)]
+struct Shared {
+    holds: service::Holds,
+    publications: tmpfs::Publications,
+    runtime: Arc<LockedRuntime>,
+}
+
+impl Shared {
+    fn process_wide() -> Self {
+        Self {
+            holds: service::Holds::shared(),
+            publications: tmpfs::Publications::shared(),
+            runtime: Arc::new(crate::runtime::detect_runtime()),
+        }
+    }
+}
+
 /// Display name of a service for messages to the user: a built-in's name, a verified plugin's
 /// name, else the service id.
 pub fn service_display_name(service: &str) -> String {
@@ -61,7 +80,7 @@ pub fn refresh_now_with_timeout(project: &str, timeout: Duration) -> Vec<Service
         project.to_string(),
         timeout,
         provider::refresh,
-        service::Holds::shared(),
+        Shared::process_wide(),
     )
 }
 
@@ -70,7 +89,7 @@ fn refresh_with_timeout<F>(
     project: String,
     timeout: Duration,
     call: F,
-    holds: service::Holds,
+    shared: Shared,
 ) -> Vec<ServiceRefresh>
 where
     F: Fn(&str, &RefreshRequest<'_>) -> Result<RefreshResponse, ErrorCode> + Send + 'static,
@@ -83,7 +102,7 @@ where
                 &data_dir,
                 &project,
                 &call,
-                &holds,
+                &shared,
                 &mut HashMap::new(),
                 Instant::now(),
             ));
@@ -112,7 +131,7 @@ where
                 &provider::refresh,
                 &on_change,
                 &stopped,
-                &service::Holds::shared(),
+                &Shared::process_wide(),
             );
         });
     if spawned.is_err() {
@@ -128,7 +147,7 @@ fn run_session_refresher<F, G>(
     call: &F,
     on_change: &G,
     stopped: &mpsc::Receiver<()>,
-    holds: &service::Holds,
+    shared: &Shared,
 ) where
     F: Fn(&str, &RefreshRequest<'_>) -> Result<RefreshResponse, ErrorCode>,
     G: Fn(&ServiceRefresh),
@@ -136,7 +155,8 @@ fn run_session_refresher<F, G>(
     let mut last: HashMap<String, RefreshOutcome> = HashMap::new();
     let mut names = HashMap::new();
     loop {
-        for result in refresh_project(&data_dir, project, call, holds, &mut names, Instant::now()) {
+        for result in refresh_project(&data_dir, project, call, shared, &mut names, Instant::now())
+        {
             report(&mut last, &result, on_change);
         }
         if !matches!(
@@ -152,20 +172,30 @@ fn refresh_project<F>(
     data_dir: &std::path::Path,
     project: &str,
     call: &F,
-    holds: &service::Holds,
+    shared: &Shared,
     names: &mut HashMap<String, String>,
     now: Instant,
 ) -> Vec<ServiceRefresh>
 where
     F: Fn(&str, &RefreshRequest<'_>) -> Result<RefreshResponse, ErrorCode>,
 {
+    let target = tmpfs::Target {
+        runtime: &shared.runtime,
+        data_dir,
+        project,
+    };
     store::services(data_dir, project)
         .into_iter()
         .map(|service| {
-            display_name::write(data_dir, project, &service, names);
-            let slot = holds.slot(project, &service);
-            let mut hold = slot.lock().unwrap_or_else(PoisonError::into_inner);
-            let outcome = service::refresh_gated(data_dir, project, &service, call, &mut hold, now);
+            let name = display_name::write(data_dir, project, &service, names);
+            let outcome = {
+                let slot = shared.holds.slot(project, &service);
+                let mut hold = slot.lock().unwrap_or_else(PoisonError::into_inner);
+                service::refresh_gated(data_dir, project, &service, call, &mut hold, now)
+            };
+            shared
+                .publications
+                .publish(target, &service, tmpfs::Change { outcome, name });
             ServiceRefresh { service, outcome }
         })
         .collect()
@@ -223,6 +253,15 @@ mod tests {
         std::fs::write(path, json.to_string()).unwrap();
     }
 
+    fn test_shared() -> Shared {
+        let (runtime, _) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
+        Shared {
+            holds: service::Holds::default(),
+            publications: tmpfs::Publications::default(),
+            runtime: Arc::new(runtime),
+        }
+    }
+
     fn rotated(_: &str, _: &RefreshRequest<'_>) -> Result<RefreshResponse, ErrorCode> {
         Ok(RefreshResponse {
             access_token: "at".to_string(),
@@ -237,10 +276,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_due_state(dir.path(), "slack");
         write_due_state(dir.path(), "sharepoint");
-        let holds = service::Holds::default();
+        let shared = test_shared();
         let mut names = HashMap::new();
         let now = Instant::now();
-        let results = refresh_project(dir.path(), "proj", &rotated, &holds, &mut names, now);
+        let results = refresh_project(dir.path(), "proj", &rotated, &shared, &mut names, now);
         let outcomes: Vec<(&str, RefreshOutcome)> = results
             .iter()
             .map(|r| (r.service.as_str(), r.outcome))
@@ -253,13 +292,15 @@ mod tests {
             ]
         );
         assert_eq!(
-            refresh_project(dir.path(), "proj", &rotated, &holds, &mut names, now)
+            refresh_project(dir.path(), "proj", &rotated, &shared, &mut names, now)
                 .iter()
                 .map(|r| r.outcome)
                 .collect::<Vec<_>>(),
             vec![RefreshOutcome::NotDue, RefreshOutcome::NotDue]
         );
-        assert!(refresh_project(dir.path(), "other", &rotated, &holds, &mut names, now).is_empty());
+        assert!(
+            refresh_project(dir.path(), "other", &rotated, &shared, &mut names, now).is_empty()
+        );
     }
 
     #[test]
@@ -289,7 +330,7 @@ mod tests {
                     &call,
                     &on,
                     &stopped,
-                    &service::Holds::default(),
+                    &test_shared(),
                 );
             })
         };
@@ -345,7 +386,7 @@ mod tests {
             "proj".to_string(),
             Duration::from_secs(10),
             rotated,
-            service::Holds::default(),
+            test_shared(),
         );
         assert_eq!(
             results,
@@ -370,7 +411,7 @@ mod tests {
             "proj".to_string(),
             Duration::from_millis(20),
             slow,
-            service::Holds::default(),
+            test_shared(),
         );
         assert!(results.is_empty());
         assert!(started.elapsed() < Duration::from_millis(250));
@@ -389,7 +430,7 @@ mod tests {
     fn the_start_check_and_the_refresher_share_a_refused_state() {
         let dir = tempfile::tempdir().unwrap();
         write_due_state(dir.path(), "slack");
-        let holds = service::Holds::default();
+        let shared = test_shared();
         let calls = Arc::new(AtomicUsize::new(0));
         let counted = Arc::clone(&calls);
         let call = move |_: &str, _: &RefreshRequest<'_>| {
@@ -402,7 +443,7 @@ mod tests {
             "proj".to_string(),
             Duration::from_secs(10),
             call.clone(),
-            holds.clone(),
+            shared.clone(),
         );
         assert_eq!(started[0].outcome, RefreshOutcome::ReconnectRequired);
 
@@ -416,7 +457,7 @@ mod tests {
             &call,
             &|refresh: &ServiceRefresh| reported.lock().unwrap().push(refresh.outcome),
             &stopped,
-            &holds,
+            &shared,
         );
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -426,5 +467,60 @@ mod tests {
         );
         let audit = store::Paths::new(dir.path(), "proj", "slack").audit;
         assert_eq!(std::fs::read_to_string(audit).unwrap().lines().count(), 1);
+    }
+
+    #[test]
+    fn a_refresh_reaches_the_running_worker_and_the_service_name_follows() {
+        let dir = tempfile::tempdir().unwrap();
+        write_due_state(dir.path(), "slack");
+        let config = crate::config::SpeedwaveUserConfig {
+            projects: vec![crate::config::ProjectUserEntry {
+                name: "proj".to_string(),
+                dir: dir.path().join("project").to_string_lossy().into_owned(),
+                claude: None,
+                integrations: Some(crate::config::IntegrationsConfig {
+                    slack: Some(crate::config::IntegrationConfig {
+                        enabled: Some(true),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                plugin_settings: None,
+                policy: None,
+                effort_pin: None,
+                read_only: false,
+            }],
+            ..Default::default()
+        };
+        crate::config::save_user_config_to(&config, &dir.path().join("config.json")).unwrap();
+        let (runtime, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
+        let shared = Shared {
+            holds: service::Holds::default(),
+            publications: tmpfs::Publications::default(),
+            runtime: Arc::new(runtime),
+        };
+        let mut names = HashMap::new();
+        let now = Instant::now();
+
+        refresh_project(dir.path(), "proj", &rotated, &shared, &mut names, now);
+        refresh_project(dir.path(), "proj", &rotated, &shared, &mut names, now);
+
+        let frames: Vec<String> = handles
+            .vm_exec_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|call| String::from_utf8(call.stdin.clone()).unwrap())
+            .collect();
+        let encoded =
+            |text: &str| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, text);
+        assert!(frames.iter().any(|f| f.contains(&format!(
+            "F mcp-slack/tokens access_token {}",
+            encoded("at")
+        ))));
+        assert!(frames.iter().any(|f| f.contains(&format!(
+            "F mcp-slack/tokens service_name {}",
+            encoded("Slack")
+        ))));
     }
 }

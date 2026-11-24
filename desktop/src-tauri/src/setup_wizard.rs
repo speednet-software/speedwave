@@ -255,7 +255,7 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
         log::warn!("Failed to list installed plugins: {e}");
         Vec::new()
     });
-    let expected_paths = compose::SecurityExpectedPaths::compute(project, project_dir)?
+    let expected_paths = compose::SecurityExpectedPaths::compute(project_dir)?
         .with_telemetry_locked(resolved.telemetry.any_locked);
     speedwave_runtime::fs_security::ensure_data_dir_permissions(project)?;
     let violations = compose::SecurityCheck::run(&yaml, project, &manifests, &expected_paths);
@@ -342,7 +342,7 @@ pub(crate) fn project_needs_anthropic_auth(
 
 fn auth_status_exec_argv() -> Vec<String> {
     vec![
-        "env".to_string(),
+        consts::SPEEDWAVE_EXEC_WRAPPER.to_string(),
         format!("{}=1", consts::CLAUDE_DISABLE_NONESSENTIAL_TRAFFIC_ENV),
         format!("https_proxy={}", consts::CLAUDE_OFFLINE_HTTPS_PROXY),
         format!("HTTPS_PROXY={}", consts::CLAUDE_OFFLINE_HTTPS_PROXY),
@@ -1033,7 +1033,7 @@ mod tests {
         assert_eq!(
             auth_status_exec_argv(),
             vec![
-                "env",
+                "/usr/local/bin/speedwave-exec",
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
                 "https_proxy=http://127.0.0.1:1",
                 "HTTPS_PROXY=http://127.0.0.1:1",
@@ -1091,7 +1091,10 @@ mod tests {
     #[test]
     fn auth_status_argv_puts_the_env_assignments_before_the_binary() {
         let argv = auth_status_exec_argv();
-        assert_eq!(argv.first().map(String::as_str), Some("env"));
+        assert_eq!(
+            argv.first().map(String::as_str),
+            Some(consts::SPEEDWAVE_EXEC_WRAPPER)
+        );
 
         let binary_pos = argv
             .iter()
@@ -3225,10 +3228,7 @@ services:
     environment:
       - CLAUDE_VERSION=1.0.3
 "#;
-        let expected_paths = compose::SecurityExpectedPaths::from_raw(
-            "/test/project",
-            "/test/.speedwave/tokens/test",
-        );
+        let expected_paths = compose::SecurityExpectedPaths::from_raw("/test/project");
         let violations = compose::SecurityCheck::run(yaml, "test", &[], &expected_paths);
         assert!(
             violations
@@ -3277,10 +3277,7 @@ services:
       - CLAUDE_VERSION=1.0.3
 "#;
 
-        let expected_paths = compose::SecurityExpectedPaths::from_raw(
-            "/test/project",
-            "/test/.speedwave/tokens/test",
-        );
+        let expected_paths = compose::SecurityExpectedPaths::from_raw("/test/project");
         let violations = compose::SecurityCheck::run(yaml, "test-ordering", &[], &expected_paths);
         assert!(!violations.is_empty(), "Should detect violations");
 
@@ -3309,16 +3306,14 @@ services:
     user: "1000:1000"
     volumes:
       - /test/project:/workspace:rw
+      - /run/speedwave-secrets/test/claude/secrets:/run/speedwave/secrets:ro
     environment:
       - CLAUDE_VERSION=1.0.3
 networks:
   speedwave_test_network:
     driver: bridge
 "#;
-        let expected_paths = compose::SecurityExpectedPaths::from_raw(
-            "/test/project",
-            "/test/.speedwave/tokens/test",
-        );
+        let expected_paths = compose::SecurityExpectedPaths::from_raw("/test/project");
         let violations: Vec<_> = compose::SecurityCheck::run(yaml, "test", &[], &expected_paths)
             .into_iter()
             .filter(|v| v.rule != compose::SecurityRule::FileSecurityViolation)

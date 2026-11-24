@@ -964,10 +964,12 @@ pub fn save_integration_credentials(
     std::fs::create_dir_all(&svc_dir).map_err(|e| e.to_string())?;
 
     if service == "redmine" {
-        return save_redmine_credentials(&svc_dir, &credentials, allowed);
+        save_redmine_credentials(&svc_dir, &credentials, allowed)?;
+    } else {
+        save_with_field_storage(&project, &service, &svc_dir, &credentials)?;
     }
-
-    save_with_field_storage(&project, &service, &svc_dir, &credentials)
+    restage_container_secrets(&project);
+    Ok(())
 }
 
 /// Generic per-field routing of UI credentials by `FieldStorage` tier. Partitions `credentials`
@@ -1153,6 +1155,7 @@ pub fn save_redmine_mappings(
     let json = serde_json::to_string_pretty(&config_obj).map_err(|e| e.to_string())?;
     speedwave_runtime::fs_perms::write_restricted_file(&config_path, &json)
         .map_err(|e| e.to_string())?;
+    restage_container_secrets(&project);
 
     Ok(())
 }
@@ -1210,7 +1213,63 @@ pub fn delete_integration_credentials(project: String, service: String) -> Resul
         .map_err(|e| e.to_string())?;
     }
 
+    restage_container_secrets(&project);
     Ok(())
+}
+
+pub(crate) fn restage_container_secrets(project: &str) {
+    let project = project.to_string();
+    let spawned = std::thread::Builder::new()
+        .name("restage-secrets".to_string())
+        .spawn(move || {
+            let _ = restage_secrets(&speedwave_runtime::runtime::detect_runtime(), &project);
+        });
+    if spawned.is_err() {
+        log::warn!("failed to start the container secrets update");
+    }
+}
+
+pub(crate) fn restage_container_secrets_now(project: &str) -> Result<(), String> {
+    let data_dir = speedwave_runtime::consts::data_dir();
+    if project_has_no_llm_provider_in(data_dir, project)? {
+        return Ok(());
+    }
+    restage_secrets(&speedwave_runtime::runtime::detect_runtime(), project)
+}
+
+fn project_has_no_llm_provider_in(
+    data_dir: &std::path::Path,
+    project: &str,
+) -> Result<bool, String> {
+    let user_config =
+        speedwave_runtime::config::load_user_config_from(&data_dir.join("config.json"))
+            .map_err(|e| e.to_string())?;
+    let entry = user_config
+        .require_project(project)
+        .map_err(|e| e.to_string())?;
+    let (resolved, _) = speedwave_runtime::config::resolve_project_config_in(
+        data_dir,
+        std::path::Path::new(&entry.dir),
+        &user_config,
+        project,
+    );
+    Ok(resolved.llm.is_unconfigured())
+}
+
+fn restage_secrets(
+    rt: &speedwave_runtime::runtime::LockedRuntime,
+    project: &str,
+) -> Result<(), String> {
+    if !rt.is_available() {
+        return Ok(());
+    }
+    rt.stage_project_secrets(project).map_err(|e| {
+        log::warn!("could not update the container secrets of project {project}: {e:#}");
+        format!(
+            "The change is saved on this computer, but the running containers could not be updated ({}). Restart the project to apply it.",
+            speedwave_runtime::build::user_facing_engine_error(&e)
+        )
+    })
 }
 
 /// Builds missing worker images for `project`. Returns sanitized error on failure.
@@ -2131,6 +2190,131 @@ mod tests {
             !svc_dir.join("config.json").exists(),
             "config.json should not be written when only secret fields are saved"
         );
+    }
+
+    fn restage_runtime(
+        available: bool,
+        exit: i32,
+        data_dir: &std::path::Path,
+    ) -> (
+        speedwave_runtime::runtime::LockedRuntime,
+        speedwave_runtime::runtime::mock_runtime::MockHandles,
+    ) {
+        let config = config::SpeedwaveUserConfig {
+            projects: vec![config::ProjectUserEntry {
+                name: "acme".to_string(),
+                dir: data_dir.join("project").to_string_lossy().into_owned(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+                policy: None,
+                effort_pin: None,
+                read_only: false,
+            }],
+            ..Default::default()
+        };
+        config::save_user_config_to(&config, &data_dir.join("config.json")).unwrap();
+        let secrets = data_dir.join("secrets").join("acme");
+        std::fs::create_dir_all(&secrets).unwrap();
+        std::fs::write(secrets.join("anthropic_api_key"), "sk-ant-test").unwrap();
+        speedwave_runtime::runtime::mock_runtime::MockRuntimeBuilder::new()
+            .with_is_available(available)
+            .with_vm_exec_as_root_exit(exit, "")
+            .with_data_dir(data_dir)
+            .build()
+    }
+
+    fn data_dir_with_llm(llm: Option<serde_json::Value>) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let mut project = serde_json::json!({ "name": "acme", "dir": "/tmp/acme" });
+        if let Some(llm) = llm {
+            project["claude"] = serde_json::json!({ "llm": llm });
+        }
+        let config = serde_json::json!({ "projects": [project], "active_project": "acme" });
+        std::fs::write(dir.path().join("config.json"), config.to_string()).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_project_without_an_llm_section_has_no_provider() {
+        let dir = data_dir_with_llm(None);
+
+        assert_eq!(project_has_no_llm_provider_in(dir.path(), "acme"), Ok(true));
+    }
+
+    #[test]
+    fn a_project_with_an_active_provider_has_one() {
+        let dir = data_dir_with_llm(Some(serde_json::json!({
+            "schema_version": 3,
+            "providers": [{ "id": "anthropic", "kind": "anthropic_oauth" }],
+            "active": { "provider_id": "anthropic" }
+        })));
+
+        assert_eq!(
+            project_has_no_llm_provider_in(dir.path(), "acme"),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn a_config_before_the_provider_list_with_a_local_provider_has_one() {
+        let dir = data_dir_with_llm(Some(serde_json::json!({
+            "provider": "local",
+            "base_url": "http://localhost:8080"
+        })));
+
+        assert_eq!(
+            project_has_no_llm_provider_in(dir.path(), "acme"),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn a_project_missing_from_the_config_is_an_error() {
+        let dir = data_dir_with_llm(None);
+
+        assert!(project_has_no_llm_provider_in(dir.path(), "other").is_err());
+    }
+
+    #[test]
+    fn an_unreadable_config_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.json"), "{ not json").unwrap();
+
+        assert!(project_has_no_llm_provider_in(dir.path(), "acme").is_err());
+    }
+
+    #[test]
+    fn restaging_skips_an_engine_that_is_not_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let (rt, handles) = restage_runtime(false, 0, dir.path());
+
+        restage_secrets(&rt, "acme").unwrap();
+
+        assert!(handles.vm_exec_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn restaging_a_running_engine_syncs_the_project_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let (rt, handles) = restage_runtime(true, 0, dir.path());
+
+        restage_secrets(&rt, "acme").unwrap();
+
+        let calls = handles.vm_exec_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].stdin.starts_with(b"sync acme\n"));
+    }
+
+    #[test]
+    fn a_failed_restage_is_reported_after_one_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        let (rt, handles) = restage_runtime(true, 1, dir.path());
+
+        let err = restage_secrets(&rt, "acme").unwrap_err();
+
+        assert!(err.contains("could not be updated"), "{err}");
+        assert_eq!(handles.vm_exec_calls.lock().unwrap().len(), 1);
     }
 
     // -- restart_integration_containers structural tests --

@@ -68,6 +68,7 @@ where
 pub struct LockedRuntime {
     inner: Box<dyn ContainerRuntime>,
     engine_teardown_started: fn() -> bool,
+    secret_staging: bool,
     #[cfg(any(test, feature = "test-support"))]
     data_dir_override: Option<std::path::PathBuf>,
 }
@@ -80,9 +81,15 @@ impl LockedRuntime {
         Self {
             inner,
             engine_teardown_started,
+            secret_staging: false,
             #[cfg(any(test, feature = "test-support"))]
             data_dir_override: None,
         }
+    }
+
+    pub(crate) fn with_secret_staging(mut self) -> Self {
+        self.secret_staging = true;
+        self
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -133,6 +140,7 @@ impl LockedRuntime {
     pub fn compose_up_service(&self, project: &str, service: &str) -> anyhow::Result<()> {
         with_acquired(project, || {
             self.refuse_during_engine_teardown()?;
+            self.stage_secrets_when_enabled(project)?;
             let legacy = self.isolate_egress_less_networks(project)?;
             if !legacy.is_empty() {
                 log::warn!(
@@ -283,6 +291,29 @@ impl LockedRuntime {
         self.inner.vm_exec(cmd, args, stdin, timeout)
     }
 
+    /// Rewrites the project's secrets in the VM tmpfs from the host sources (under the
+    /// per-project lock), for callers that change credentials while containers run.
+    pub fn stage_project_secrets(&self, project: &str) -> anyhow::Result<()> {
+        with_acquired(project, || self.stage_secrets(project))
+    }
+
+    pub(crate) fn put_secret_file(
+        &self,
+        project: &str,
+        slot: &crate::secrets_tmpfs::Slot,
+        name: &str,
+        content: &[u8],
+    ) -> anyhow::Result<()> {
+        with_acquired(project, || {
+            crate::secrets_tmpfs::stage::put_file(
+                self.inner.as_ref(),
+                project,
+                slot,
+                &crate::secrets_tmpfs::layout::SecretFile::new(name, content),
+            )
+        })
+    }
+
     /// Runs a multi-step compose transaction under the per-project lock. Inner compose ops on
     /// the same project nest reentrantly. Use for snapshot+build+down+save+validate+up.
     pub fn transaction<F, T>(&self, project: &str, f: F) -> anyhow::Result<T>
@@ -298,6 +329,7 @@ impl LockedRuntime {
         up: impl FnOnce() -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
         self.refuse_during_engine_teardown()?;
+        self.stage_secrets_when_enabled(project)?;
         let legacy = self.isolate_egress_less_networks(project)?;
         if legacy.is_empty() {
             return up();
@@ -320,6 +352,17 @@ impl LockedRuntime {
         }
         self.settle_legacy_networks(project);
         Ok(())
+    }
+
+    fn stage_secrets_when_enabled(&self, project: &str) -> anyhow::Result<()> {
+        if self.secret_staging {
+            self.stage_secrets(project)?;
+        }
+        Ok(())
+    }
+
+    fn stage_secrets(&self, project: &str) -> anyhow::Result<()> {
+        crate::secrets_tmpfs::stage::stage_project(self.inner.as_ref(), self.data_dir(), project)
     }
 
     fn isolate_egress_less_networks(&self, project: &str) -> anyhow::Result<Vec<String>> {
@@ -402,6 +445,181 @@ mod tests {
         }
         assert!(handles.up_projects().is_empty());
         assert!(!handles.was_recreated());
+    }
+
+    fn staged_runtime(
+        project: &str,
+        builder: MockRuntimeBuilder,
+    ) -> (
+        LockedRuntime,
+        crate::runtime::mock_runtime::MockHandles,
+        tempfile::TempDir,
+    ) {
+        let data_dir = tempfile::tempdir().unwrap();
+        let config = crate::config::SpeedwaveUserConfig {
+            projects: vec![crate::config::ProjectUserEntry {
+                name: project.to_string(),
+                dir: data_dir
+                    .path()
+                    .join("project")
+                    .to_string_lossy()
+                    .into_owned(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+                policy: None,
+                effort_pin: None,
+                read_only: false,
+            }],
+            ..Default::default()
+        };
+        crate::config::save_user_config_to(&config, &data_dir.path().join("config.json")).unwrap();
+        let secrets = data_dir.path().join("secrets").join(project);
+        std::fs::create_dir_all(&secrets).unwrap();
+        std::fs::write(secrets.join("anthropic_api_key"), "sk-ant-test").unwrap();
+        let (rt, handles) = builder.with_data_dir(data_dir.path()).build();
+        (rt.with_secret_staging(), handles, data_dir)
+    }
+
+    #[test]
+    fn a_failed_secret_write_aborts_every_way_of_starting_the_stack() {
+        let (rt, handles, _data_dir) = staged_runtime(
+            "acme",
+            MockRuntimeBuilder::new().with_vm_exec_as_root_exit(1, "mount: permission denied"),
+        );
+        for started in [
+            rt.compose_up("acme"),
+            rt.compose_up_recreate("acme"),
+            rt.compose_up_service("acme", crate::consts::CLAUDE_COMPOSE_SERVICE),
+        ] {
+            let err = started.unwrap_err();
+            assert!(
+                format!("{err:#}").contains("mount: permission denied"),
+                "got: {err:#}"
+            );
+        }
+        assert!(handles.up_projects().is_empty());
+        assert!(!handles.was_recreated());
+        assert!(handles.up_service_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn secrets_are_written_as_a_sync_frame_before_each_start() {
+        let (rt, handles, _data_dir) = staged_runtime("acme", MockRuntimeBuilder::new());
+
+        rt.compose_up("acme").unwrap();
+        rt.compose_up_service("acme", crate::consts::CLAUDE_COMPOSE_SERVICE)
+            .unwrap();
+
+        assert_eq!(handles.up_projects(), vec!["acme".to_string()]);
+        let calls = handles.vm_exec_calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        for call in calls.iter() {
+            assert_eq!(call.cmd, "sh");
+            assert_eq!(call.args[0], "-c");
+            assert_eq!(
+                call.args.last().unwrap(),
+                crate::secrets_tmpfs::layout::VM_ROOT
+            );
+            assert!(call.stdin.starts_with(b"sync acme\n"));
+        }
+    }
+
+    #[test]
+    fn secrets_are_written_under_the_project_lock_before_the_start() {
+        let (rt, handles, _data_dir) = staged_runtime("locked-start", MockRuntimeBuilder::new());
+        let rt = Arc::new(rt);
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = {
+            let rt = Arc::clone(&rt);
+            std::thread::spawn(move || {
+                rt.transaction("locked-start", |_| {
+                    held_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(())
+                })
+            })
+        };
+        held_rx.recv().unwrap();
+        let starter = {
+            let rt = Arc::clone(&rt);
+            std::thread::spawn(move || rt.compose_up("locked-start"))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(handles.vm_exec_calls.lock().unwrap().is_empty());
+        assert!(handles.up_projects().is_empty());
+        release_tx.send(()).unwrap();
+        holder.join().unwrap().unwrap();
+        starter.join().unwrap().unwrap();
+        assert_eq!(handles.vm_exec_calls.lock().unwrap().len(), 1);
+        assert_eq!(handles.up_projects(), vec!["locked-start".to_string()]);
+    }
+
+    #[test]
+    fn a_runtime_without_secret_staging_starts_without_touching_the_vm() {
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_vm_exec_as_root_exit(1, "must not run")
+            .build();
+
+        rt.compose_up("plain").unwrap();
+        rt.compose_up_recreate("plain").unwrap();
+        rt.compose_up_service("plain", crate::consts::CLAUDE_COMPOSE_SERVICE)
+            .unwrap();
+
+        assert!(handles.vm_exec_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn staging_an_unknown_project_fails_without_writing() {
+        let (rt, handles, _data_dir) = staged_runtime("acme", MockRuntimeBuilder::new());
+
+        let err = rt.stage_project_secrets("other").unwrap_err();
+
+        assert!(format!("{err:#}").contains("not found"), "got: {err:#}");
+        assert!(handles.vm_exec_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn put_secret_file_sends_a_put_frame_without_staging_or_starting() {
+        let (rt, handles) = MockRuntimeBuilder::new().build();
+        let slot = crate::secrets_tmpfs::Slot::new(
+            "mcp-slack",
+            crate::secrets_tmpfs::layout::PURPOSE_TOKENS,
+        )
+        .unwrap();
+
+        rt.put_secret_file("acme", &slot, "access_token", b"fresh")
+            .unwrap();
+
+        let calls = handles.vm_exec_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let frame = String::from_utf8(calls[0].stdin.clone()).unwrap();
+        assert!(frame.starts_with("put acme\nF mcp-slack/tokens access_token "));
+        assert!(handles.up_projects().is_empty());
+    }
+
+    #[test]
+    fn a_failed_put_reports_the_vm_stderr_only() {
+        let (rt, _handles) = MockRuntimeBuilder::new()
+            .with_vm_exec_as_root_exit(1, "speedwave-secrets: bad slot")
+            .build();
+        let slot = crate::secrets_tmpfs::Slot::new(
+            "mcp-slack",
+            crate::secrets_tmpfs::layout::PURPOSE_TOKENS,
+        )
+        .unwrap();
+
+        let err = rt
+            .put_secret_file("acme", &slot, "access_token", b"super-secret-value")
+            .unwrap_err();
+
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("speedwave-secrets: bad slot"),
+            "got: {message}"
+        );
+        assert!(!message.contains("super-secret-value"));
     }
 
     #[test]

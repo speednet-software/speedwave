@@ -1542,7 +1542,7 @@ mod tests {
             .build();
         let _ = run_discovery(&runtime, "test-container");
         let calls = handles.exec_calls.lock().unwrap();
-        assert_eq!(calls[0].argv[0], "env");
+        assert_eq!(calls[0].argv[0], consts::SPEEDWAVE_EXEC_WRAPPER);
         assert!(calls[0].argv[1].starts_with("SPW_SESSION_INSTANCE_ID="));
     }
 

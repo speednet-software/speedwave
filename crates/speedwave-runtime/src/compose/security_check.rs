@@ -7,13 +7,18 @@ use crate::git_allowlist::GitForgeService;
 use crate::plugin::{self, PluginManifest};
 use strum::EnumProperty;
 
-use super::{container_user, resolve_tokens_dir_in};
+use super::container_user;
+use super::secret_slots::{
+    claude_secrets_mount, expected_slot_mounts, hub_policy_mount, hub_secrets_mount,
+    is_under_secrets_root, proxy_config_mount, proxy_git_mount, proxy_policy_mount,
+    proxy_tokens_mount, worker_auth_mount, worker_tokens_mount, CLAUDE_SECRETS_TARGET, HUB_SERVICE,
+    PROXY_SERVICE, WORKER_AUTH_TARGET,
+};
 
 /// Expected engine paths for security validation.
 /// Single source of truth — used by both render_compose() and SecurityCheck.
 pub struct SecurityExpectedPaths {
     project_engine_path: String,
-    tokens_engine_dir: String,
     telemetry_locked: bool,
 }
 
@@ -23,26 +28,18 @@ impl SecurityExpectedPaths {
         &self.project_engine_path
     }
 
-    /// Returns the engine-format tokens directory path.
-    pub fn tokens_engine_dir(&self) -> &str {
-        &self.tokens_engine_dir
-    }
-
-    /// Computes the expected engine-format paths for a project.
-    pub fn compute(project_name: &str, project_dir: &str) -> anyhow::Result<Self> {
-        let tokens_dir = resolve_tokens_dir_in(consts::data_dir(), project_name);
+    /// Computes the expected engine-format paths for a project directory.
+    pub fn compute(project_dir: &str) -> anyhow::Result<Self> {
         Ok(Self {
             project_engine_path: to_engine_path(std::path::Path::new(project_dir))?,
-            tokens_engine_dir: to_engine_path(&tokens_dir)?,
             telemetry_locked: false,
         })
     }
 
     /// Create from explicit paths (for tests in this crate and downstream crates).
-    pub fn from_raw(project_engine_path: &str, tokens_engine_dir: &str) -> Self {
+    pub fn from_raw(project_engine_path: &str) -> Self {
         Self {
             project_engine_path: project_engine_path.to_string(),
-            tokens_engine_dir: tokens_engine_dir.to_string(),
             telemetry_locked: false,
         }
     }
@@ -142,6 +139,21 @@ fn short_form_targets_area(entry: &str, area: &str) -> bool {
         .any(|t| is_mount_area_target(&normalize_mount_target(t), area))
 }
 
+fn service_env_names(service: &serde_yaml_ng::Value) -> Vec<String> {
+    match service.get("environment") {
+        Some(serde_yaml_ng::Value::Sequence(seq)) => seq
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(|entry| entry.split('=').next().unwrap_or("").to_string())
+            .collect(),
+        Some(serde_yaml_ng::Value::Mapping(map)) => map
+            .keys()
+            .filter_map(|key| key.as_str().map(str::to_string))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// Collects a service's env values for `key`, from sequence and map env forms.
 fn service_env_values(service: &serde_yaml_ng::Value, key: &str) -> Vec<String> {
     let Some(env) = service.get("environment") else {
@@ -233,6 +245,11 @@ pub enum SecurityRule {
     #[strum(to_string = "CONTAINER_USER")]
     #[strum(props(description = "All containers use correct platform user"))]
     ContainerUser,
+
+    /// Built-in services carry no worker bearer in env.
+    #[strum(to_string = "NO_TOKENS_WORKERS")]
+    #[strum(props(description = "Built-in services carry no MCP_<SVC>_AUTH_TOKEN env"))]
+    NoTokensWorkers,
 
     /// Plugin containers are not privileged.
     #[strum(to_string = "PLUGIN_NO_PRIVILEGED")]
@@ -403,13 +420,22 @@ pub enum SecurityRule {
     ))]
     SpeedwaveProxyVolumes,
 
-    /// `proxy.json` `ner.url`, when rendered, is exactly `http://<gateway alias>:<port>`
-    /// (ADR-096): request text goes only to the host-side detector, never elsewhere.
+    /// The detector URL rendered for the proxy (`SPW_NER_URL`, the `ner.url` of its config), when
+    /// present, is exactly `http://<gateway alias>:<port>` (ADR-096): request text goes only to
+    /// the host-side detector, never elsewhere.
     #[strum(to_string = "PROXY_NER_URL")]
     #[strum(props(
-        description = "proxy.json ner.url targets the host gateway alias over http with no path"
+        description = "the proxy detector URL targets the host gateway alias over http with no path"
     ))]
     SpeedwaveProxyNerUrl,
+
+    /// Every mount sourced from the secrets tmpfs is one of the slots its container owns, `:ro`,
+    /// inside the project's own tree (ADR-115): no container reads another one's secrets.
+    #[strum(to_string = "SECRET_SLOT_MOUNT")]
+    #[strum(props(
+        description = "Secrets tmpfs mounts are read-only slots the container owns, from its own project"
+    ))]
+    SecretSlotMount,
 
     /// The native managed-settings.json mount on claude is :ro from the
     /// per-project managed dir at the exact `/etc/claude-code/` target (MDM telemetry).
@@ -621,6 +647,7 @@ impl SecurityCheck {
             Self::check_tmpfs_noexec(&doc),
             Self::check_no_tokens_in_claude(&doc),
             Self::check_no_tokens_in_hub(&doc),
+            Self::check_no_bearer_env_on_builtin_services(&doc, plugin_manifests),
             Self::check_ports_localhost_only(&doc),
             Self::check_claude_no_socket(&doc),
             Self::check_no_external_llm_keys_claude(&doc),
@@ -628,21 +655,23 @@ impl SecurityCheck {
             Self::check_container_user(&doc),
             Self::check_plugin_no_privileged(&doc),
             Self::check_plugin_no_host_network(&doc),
-            Self::check_plugin_volumes(&doc, expected_paths, plugin_manifests),
-            Self::check_builtin_sharepoint_volumes(&doc, expected_paths),
-            Self::check_builtin_slack_volumes(&doc, expected_paths),
-            Self::check_builtin_atlassian_volumes(&doc, expected_paths),
-            Self::check_builtin_redmine_volumes(&doc, expected_paths),
-            Self::check_proxy_volumes(&doc, expected_paths),
-            Self::check_proxy_ner_url(data_dir, project),
+            Self::check_plugin_volumes(&doc, expected_paths, project, plugin_manifests),
+            Self::check_builtin_sharepoint_volumes(&doc, expected_paths, project),
+            Self::check_builtin_slack_volumes(&doc, expected_paths, project),
+            Self::check_builtin_atlassian_volumes(&doc, expected_paths, project),
+            Self::check_builtin_redmine_volumes(&doc, expected_paths, project),
+            Self::check_proxy_volumes(&doc, project),
+            Self::check_proxy_ner_url(&doc),
+            Self::check_secret_slot_mounts(&doc, project),
             Self::check_claude_managed_settings(
                 &doc,
                 data_dir,
                 project,
                 expected_paths.telemetry_locked,
             ),
-            Self::check_hub_policy_mount(&doc, data_dir, project),
-            Self::check_proxy_policy_mount(&doc, data_dir, project),
+            Self::check_hub_policy_mount(&doc, project),
+            Self::check_hub_secrets_mount(&doc, project),
+            Self::check_proxy_policy_mount(&doc, project),
             Self::check_audit_mount(&doc, data_dir, project, "proxy"),
             Self::check_audit_mount(&doc, data_dir, project, "mcp-hub"),
             Self::check_no_policy_or_audit_mount_on_claude(&doc, data_dir, project),
@@ -793,38 +822,71 @@ impl SecurityCheck {
         };
 
         if let Some((_name, service)) = services.iter().find(|(n, _)| n == "claude") {
-            if let Some(env_seq) = service.get("environment").and_then(|v| v.as_sequence()) {
-                let forbidden_patterns = ["TOKEN", "KEY", "SECRET"];
-                let allowed = [
-                    "ANTHROPIC_AUTH_TOKEN",
-                    "ANTHROPIC_API_KEY",
-                    "CLAUDE_CODE_OAUTH_TOKEN",
-                    "DISABLE_AUTOUPDATER",
-                    "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
-                ];
+            let forbidden_patterns = ["TOKEN", "KEY", "SECRET"];
+            let forbidden_names = [
+                "ANTHROPIC_API_KEY",
+                "ANTHROPIC_AUTH_TOKEN",
+                "ANTHROPIC_CUSTOM_HEADERS",
+                "SPEEDWAVE_GIT_PROXY_AUTH",
+            ];
+            let allowed = [
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                "DISABLE_AUTOUPDATER",
+                "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+            ];
 
-                for item in env_seq {
-                    if let Some(env_str) = item.as_str() {
-                        let var_name = env_str.split('=').next().unwrap_or("");
-                        let upper = var_name.to_uppercase();
+            for var_name in service_env_names(service) {
+                let upper = var_name.to_uppercase();
+                let matches_pattern = forbidden_patterns
+                    .iter()
+                    .any(|pattern| upper.contains(pattern))
+                    && !allowed.iter().any(|a| upper == *a);
+                let delivered_by_slot = forbidden_names.contains(&upper.as_str());
+                if matches_pattern || delivered_by_slot {
+                    violations.push(SecurityViolation {
+                        container: "claude".into(),
+                        rule: SecurityRule::NoTokensClaude,
+                        message: format!("env contains forbidden variable: {}", var_name),
+                        remediation: if delivered_by_slot {
+                            "This variable comes from 'claude.env' in the user config; remove it there. Speedwave delivers it through the secrets slot."
+                        } else {
+                            "Claude container must have zero service tokens. Remove from compose."
+                        },
+                    });
+                }
+            }
+        }
+        violations
+    }
 
-                        if forbidden_patterns
-                            .iter()
-                            .any(|pattern| upper.contains(pattern))
-                            && !allowed.iter().any(|a| upper == *a)
-                        {
-                            violations.push(SecurityViolation {
-                                container: "claude".into(),
-                                rule: SecurityRule::NoTokensClaude,
-                                message: format!(
-                                    "env contains forbidden variable: {}",
-                                    var_name
-                                ),
-                                remediation:
-                                    "Claude container must have zero service tokens. Remove from compose.",
-                            });
-                        }
-                    }
+    fn check_no_bearer_env_on_builtin_services(
+        doc: &serde_yaml_ng::Value,
+        plugin_manifests: &[PluginManifest],
+    ) -> Vec<SecurityViolation> {
+        let mut violations = Vec::new();
+        let Some(services) = get_services(doc) else {
+            return violations;
+        };
+        for (name, service) in services {
+            let is_installed_plugin = plugin_manifests.iter().any(|manifest| {
+                manifest
+                    .service_id
+                    .as_deref()
+                    .is_some_and(|sid| plugin::derive_compose_name(sid) == name)
+            });
+            if is_installed_plugin {
+                continue;
+            }
+            for var_name in service_env_names(service) {
+                let upper = var_name.to_uppercase();
+                if upper.starts_with("MCP_") && upper.ends_with("_AUTH_TOKEN") {
+                    violations.push(SecurityViolation {
+                        container: name.clone(),
+                        rule: SecurityRule::NoTokensWorkers,
+                        message: format!("env contains a worker bearer: {var_name}"),
+                        remediation:
+                            "Built-in services read the bearer from '<ENV>_FILE' pointing into the auth slot, never from env.",
+                    });
                 }
             }
         }
@@ -1208,6 +1270,7 @@ impl SecurityCheck {
     fn check_plugin_volumes(
         doc: &serde_yaml_ng::Value,
         expected_paths: &SecurityExpectedPaths,
+        project: &str,
         manifests: &[PluginManifest],
     ) -> Vec<SecurityViolation> {
         let mut violations = Vec::new();
@@ -1248,9 +1311,17 @@ impl SecurityCheck {
             } else {
                 Vec::new()
             };
+            let expected_tokens_path = match expected_tokens_source(&name, project) {
+                Ok(path) => path,
+                Err(e) => {
+                    violations.push(unresolvable_slot(&name, &e));
+                    continue;
+                }
+            };
             let params = VolumeCheckParams {
                 container_name: &name,
-                expected_tokens_path: format!("{}/{}", expected_paths.tokens_engine_dir(), sid),
+                expected_tokens_path,
+                expected_auth_path: None,
                 expected_workspace_path: expected_paths.project_engine_path(),
                 expected_token_mode,
                 expected_workspace_mode: "rw",
@@ -1263,16 +1334,13 @@ impl SecurityCheck {
         violations
     }
 
-    fn check_proxy_volumes(
-        doc: &serde_yaml_ng::Value,
-        expected_paths: &SecurityExpectedPaths,
-    ) -> Vec<SecurityViolation> {
+    fn check_proxy_volumes(doc: &serde_yaml_ng::Value, project: &str) -> Vec<SecurityViolation> {
         let mut violations = Vec::new();
         let services = match get_services(doc) {
             Some(s) => s,
             None => return violations,
         };
-        let (name, service) = match services.iter().find(|(n, _)| n == "proxy") {
+        let (name, service) = match services.iter().find(|(n, _)| n == PROXY_SERVICE) {
             Some(pair) => pair,
             None => return violations,
         };
@@ -1296,17 +1364,27 @@ impl SecurityCheck {
             })
             .unwrap_or_default();
 
-        let expected_tokens = format!("{}/llm", expected_paths.tokens_engine_dir());
+        let expected_config = proxy_config_mount().map(|m| m.source(project));
+        let expected_tokens = proxy_tokens_mount().map(|m| m.source(project));
         let mut matched = 0usize;
         for vol in &volumes {
             if let Some((host, mode)) = extract_volume_for_target(vol, "/config") {
-                let _ = host;
                 if mode.as_deref() != Some("ro") {
                     violations.push(SecurityViolation {
                         container: name.clone(),
                         rule: SecurityRule::SpeedwaveProxyVolumes,
                         message: format!("proxy /config mount must be ro: {vol}"),
-                        remediation: "Mount the rendered config directory ':ro'.",
+                        remediation: "Mount the proxy config slot ':ro'.",
+                    });
+                }
+                if expected_config.as_ref().ok() != Some(&host) {
+                    violations.push(SecurityViolation {
+                        container: name.clone(),
+                        rule: SecurityRule::SpeedwaveProxyVolumes,
+                        message: format!(
+                            "proxy /config host path must be the proxy config slot, got: {vol}"
+                        ),
+                        remediation: "Mount '<secrets root>/<project>/proxy/config' at /config.",
                     });
                 }
                 matched += 1;
@@ -1316,18 +1394,17 @@ impl SecurityCheck {
                         container: name.clone(),
                         rule: SecurityRule::SpeedwaveProxyVolumes,
                         message: format!("proxy /tokens mount must be ro: {vol}"),
-                        remediation: "Mount the llm token directory ':ro'.",
+                        remediation: "Mount the llm token slot ':ro'.",
                     });
                 }
-                if host != expected_tokens {
+                if expected_tokens.as_ref().ok() != Some(&host) {
                     violations.push(SecurityViolation {
                         container: name.clone(),
                         rule: SecurityRule::SpeedwaveProxyVolumes,
                         message: format!(
-                            "proxy /tokens host path must be the llm namespace \
-                             ('{expected_tokens}'), got: {vol}"
+                            "proxy /tokens host path must be the proxy llm token slot, got: {vol}"
                         ),
-                        remediation: "Mount '<data_dir>/tokens/<project>/llm' at /tokens.",
+                        remediation: "Mount '<secrets root>/<project>/proxy/tokens' at /tokens.",
                     });
                 }
                 matched += 1;
@@ -1345,21 +1422,18 @@ impl SecurityCheck {
                 extract_volume_for_target(vol, &kind.token_mount_target())
                     .map(|(host, mode)| (*kind, host, mode))
             }) {
-                let expected_git_tokens = format!(
-                    "{}/{}",
-                    expected_paths.tokens_engine_dir(),
-                    kind.config_key()
-                );
-                if mode.as_deref() != Some("ro") || host != expected_git_tokens {
+                let expected_git_tokens = proxy_git_mount(kind).map(|m| m.source(project));
+                if mode.as_deref() != Some("ro") || expected_git_tokens.as_ref().ok() != Some(&host)
+                {
                     violations.push(SecurityViolation {
                         container: name.clone(),
                         rule: SecurityRule::SpeedwaveProxyVolumes,
                         message: format!(
-                            "proxy {} mount must be '{expected_git_tokens}' mounted ro, got: {vol}",
+                            "proxy {} mount must be its own git token slot mounted ro, got: {vol}",
                             kind.token_mount_target()
                         ),
                         remediation:
-                            "Mount '<data_dir>/tokens/<project>/<github|gitlab>' read-only at /git-tokens/<github|gitlab>.",
+                            "Mount '<secrets root>/<project>/proxy/git-<github|gitlab>' read-only at /git-tokens/<github|gitlab>.",
                     });
                 }
             } else if extract_volume_for_target(vol, "/policy").is_some()
@@ -1568,81 +1642,127 @@ impl SecurityCheck {
         violations
     }
 
-    /// The resolved PII policy mount on mcp-hub is presence-mandatory: exactly the
-    /// canonical `<policies dir>:/policy:ro`, no other `/policy*` target, env pinned.
-    fn check_hub_policy_mount(
-        doc: &serde_yaml_ng::Value,
-        data_dir: &std::path::Path,
-        project: &str,
-    ) -> Vec<SecurityViolation> {
-        let expected_source =
-            to_engine_path(&crate::pii_policy::policy_config_dir_in(data_dir, project));
+    fn check_hub_policy_mount(doc: &serde_yaml_ng::Value, project: &str) -> Vec<SecurityViolation> {
         let mut violations = Self::check_mount_area_profile(
             doc,
-            "mcp-hub",
+            HUB_SERVICE,
             "/policy",
             "ro",
             SecurityRule::HubPolicyMount,
-            expected_source,
+            hub_policy_mount().map(|m| m.source(project)),
         );
         violations.extend(Self::check_policy_file_env_pin(
             doc,
-            "mcp-hub",
+            HUB_SERVICE,
             SecurityRule::HubPolicyMount,
         ));
         violations
     }
 
-    /// A rendered `ner.url` must point at the host gateway alias over plain http with no
-    /// path: the only legitimate reader of request text outside the proxy is the host detector.
-    fn check_proxy_ner_url(data_dir: &std::path::Path, project: &str) -> Vec<SecurityViolation> {
-        let path = super::proxy::proxy_config_path_in(data_dir, project);
-        let Ok(raw) = std::fs::read_to_string(&path) else {
-            return Vec::new();
-        };
-        let Ok(doc) = serde_json::from_str::<serde_json::Value>(&raw) else {
-            return Vec::new();
-        };
-        let Some(url) = doc.pointer("/ner/url") else {
-            return Vec::new();
-        };
-        let verdict = match url.as_str() {
-            Some(url) => super::pii_ner::validate_ner_url(url).map(|_| ()),
-            None => Err("ner.url is not a string".to_string()),
-        };
-        match verdict {
-            Ok(()) => Vec::new(),
-            Err(reason) => vec![SecurityViolation {
-                container: "proxy".into(),
-                rule: SecurityRule::SpeedwaveProxyNerUrl,
-                message: format!("proxy.json ner.url is not the host detector endpoint: {reason}"),
-                remediation: "Re-render the compose so proxy.json is regenerated from the                               live pii-ner lock; never hand-edit proxy.json.",
-            }],
-        }
-    }
-
-    /// Mirrors [`Self::check_hub_policy_mount`] for the proxy service (same
-    /// source, target, mode, and env pin — reuses the identical helpers).
-    fn check_proxy_policy_mount(
+    fn check_hub_secrets_mount(
         doc: &serde_yaml_ng::Value,
-        data_dir: &std::path::Path,
         project: &str,
     ) -> Vec<SecurityViolation> {
-        let expected_source =
-            to_engine_path(&crate::pii_policy::policy_config_dir_in(data_dir, project));
+        Self::check_mount_area_profile(
+            doc,
+            HUB_SERVICE,
+            "/secrets",
+            "ro",
+            SecurityRule::SecretSlotMount,
+            hub_secrets_mount().map(|m| m.source(project)),
+        )
+    }
+
+    fn check_proxy_ner_url(doc: &serde_yaml_ng::Value) -> Vec<SecurityViolation> {
+        let Some(services) = get_services(doc) else {
+            return Vec::new();
+        };
+        let Some((_, proxy)) = services.iter().find(|(n, _)| n == PROXY_SERVICE) else {
+            return Vec::new();
+        };
+        service_env_values(proxy, super::pii_ner::NER_URL_ENV)
+            .iter()
+            .filter_map(|url| super::pii_ner::validate_ner_url(url).err())
+            .map(|reason| SecurityViolation {
+                container: PROXY_SERVICE.into(),
+                rule: SecurityRule::SpeedwaveProxyNerUrl,
+                message: format!("the proxy detector URL is not the host detector endpoint: {reason}"),
+                remediation: "Re-render the compose so the proxy config is regenerated from the live pii-ner lock; never hand-edit the compose.",
+            })
+            .collect()
+    }
+
+    fn check_proxy_policy_mount(
+        doc: &serde_yaml_ng::Value,
+        project: &str,
+    ) -> Vec<SecurityViolation> {
         let mut violations = Self::check_mount_area_profile(
             doc,
-            "proxy",
+            PROXY_SERVICE,
             "/policy",
             "ro",
             SecurityRule::ProxyPolicyMount,
-            expected_source,
+            proxy_policy_mount().map(|m| m.source(project)),
         );
         violations.extend(Self::check_policy_file_env_pin(
             doc,
-            "proxy",
+            PROXY_SERVICE,
             SecurityRule::ProxyPolicyMount,
         ));
+        violations
+    }
+
+    fn check_secret_slot_mounts(
+        doc: &serde_yaml_ng::Value,
+        project: &str,
+    ) -> Vec<SecurityViolation> {
+        let mut violations = Vec::new();
+        let Some(services) = get_services(doc) else {
+            return violations;
+        };
+        for (name, service) in services {
+            let allowed: Vec<(String, String)> =
+                match expected_slot_mounts(&name, is_plugin_service(service)) {
+                    Ok(mounts) => mounts
+                        .into_iter()
+                        .map(|mount| (mount.source(project), mount.target))
+                        .collect(),
+                    Err(e) => {
+                        violations.push(unresolvable_slot(&name, &e));
+                        continue;
+                    }
+                };
+            let Some(vols) = service.get("volumes").and_then(|v| v.as_sequence()) else {
+                continue;
+            };
+            for vol in vols {
+                let Some(source) = mount_source(vol) else {
+                    continue;
+                };
+                if !is_under_secrets_root(&normalize_mount_target(&source)) {
+                    continue;
+                }
+                let canonical = vol.as_str().and_then(parse_short_form_volume).is_some_and(
+                    |(host, target, mode)| {
+                        mode == Some("ro")
+                            && allowed.iter().any(|(slot, slot_target)| {
+                                host == slot.as_str() && target == slot_target.as_str()
+                            })
+                    },
+                );
+                if !canonical {
+                    violations.push(SecurityViolation {
+                        container: name.clone(),
+                        rule: SecurityRule::SecretSlotMount,
+                        message: format!(
+                            "mount from the secrets tmpfs is not a read-only slot this container owns: {source}"
+                        ),
+                        remediation:
+                            "A container mounts only its own '<secrets root>/<project>/<service>/<purpose>' slots, read-only, in short form.",
+                    });
+                }
+            }
+        }
         violations
     }
 
@@ -1761,7 +1881,9 @@ impl SecurityCheck {
             ("/speedwave/resources", "/claude-resources", "ro"),
             ("/usage", usage_suffix.as_str(), "ro"),
         ];
+        let expected_secrets = claude_secrets_mount().map(|m| m.source(project));
         let mut matches = 0;
+        let mut secrets_matches = 0;
         for vol in &vols {
             let Some(s) = vol.as_str() else {
                 violations.push(SecurityViolation {
@@ -1801,6 +1923,22 @@ impl SecurityCheck {
                         rule: SecurityRule::ClaudeWorkspaceMount,
                         message: format!("/workspace mount must be :rw, got: {s}"),
                         remediation: "Re-render compose; /workspace is the writable project mount.",
+                    });
+                }
+                continue;
+            }
+            if target == CLAUDE_SECRETS_TARGET {
+                secrets_matches += 1;
+                if expected_secrets.as_ref().ok().map(String::as_str) != Some(host)
+                    || mode != Some("ro")
+                {
+                    violations.push(SecurityViolation {
+                        container: "claude".into(),
+                        rule: SecurityRule::ClaudeWorkspaceMount,
+                        message: format!(
+                            "claude {CLAUDE_SECRETS_TARGET} must be its own secrets slot mounted :ro, got: {s}"
+                        ),
+                        remediation: "Re-render compose; claude mounts exactly its own secrets slot read-only.",
                     });
                 }
                 continue;
@@ -1851,6 +1989,16 @@ impl SecurityCheck {
                 rule: SecurityRule::ClaudeWorkspaceMount,
                 message: format!("claude must have exactly one /workspace mount, found {matches}"),
                 remediation: "Re-render compose; a control char in the project path can inject extra mounts.",
+            });
+        }
+        if secrets_matches != 1 {
+            violations.push(SecurityViolation {
+                container: "claude".into(),
+                rule: SecurityRule::ClaudeWorkspaceMount,
+                message: format!(
+                    "claude must have exactly one {CLAUDE_SECRETS_TARGET} mount, found {secrets_matches}"
+                ),
+                remediation: "Re-render compose; the secrets slot mount is unconditional.",
             });
         }
         violations
@@ -1917,10 +2065,12 @@ impl SecurityCheck {
     fn check_builtin_sharepoint_volumes(
         doc: &serde_yaml_ng::Value,
         expected_paths: &SecurityExpectedPaths,
+        project: &str,
     ) -> Vec<SecurityViolation> {
         Self::check_builtin_workspace_worker_volumes(
             doc,
             expected_paths,
+            project,
             "sharepoint",
             "rw",
             VolumeCheckRules::SHAREPOINT,
@@ -1932,10 +2082,12 @@ impl SecurityCheck {
     fn check_builtin_slack_volumes(
         doc: &serde_yaml_ng::Value,
         expected_paths: &SecurityExpectedPaths,
+        project: &str,
     ) -> Vec<SecurityViolation> {
         Self::check_builtin_workspace_worker_volumes(
             doc,
             expected_paths,
+            project,
             "slack",
             "rw",
             VolumeCheckRules::SLACK,
@@ -1945,10 +2097,12 @@ impl SecurityCheck {
     fn check_builtin_atlassian_volumes(
         doc: &serde_yaml_ng::Value,
         expected_paths: &SecurityExpectedPaths,
+        project: &str,
     ) -> Vec<SecurityViolation> {
         Self::check_builtin_workspace_worker_volumes(
             doc,
             expected_paths,
+            project,
             "atlassian",
             "rw",
             VolumeCheckRules::ATLASSIAN,
@@ -1958,10 +2112,12 @@ impl SecurityCheck {
     fn check_builtin_redmine_volumes(
         doc: &serde_yaml_ng::Value,
         expected_paths: &SecurityExpectedPaths,
+        project: &str,
     ) -> Vec<SecurityViolation> {
         Self::check_builtin_workspace_worker_volumes(
             doc,
             expected_paths,
+            project,
             "redmine",
             "rw",
             VolumeCheckRules::REDMINE,
@@ -1973,6 +2129,7 @@ impl SecurityCheck {
     fn check_builtin_workspace_worker_volumes(
         doc: &serde_yaml_ng::Value,
         expected_paths: &SecurityExpectedPaths,
+        project: &str,
         service_id: &str,
         expected_workspace_mode: &str,
         rules: VolumeCheckRules,
@@ -1988,9 +2145,15 @@ impl SecurityCheck {
             None => return Vec::new(),
         };
 
+        let (expected_tokens_path, expected_auth_path) =
+            match expected_worker_sources(name, project) {
+                Ok((tokens, auth)) => (tokens, Some(auth)),
+                Err(e) => return vec![unresolvable_slot(name, &e)],
+            };
         let params = VolumeCheckParams {
             container_name: name,
-            expected_tokens_path: format!("{}/{service_id}", expected_paths.tokens_engine_dir()),
+            expected_tokens_path,
+            expected_auth_path,
             expected_workspace_path: expected_paths.project_engine_path(),
             expected_token_mode: "ro",
             expected_workspace_mode,
@@ -2320,6 +2483,7 @@ impl VolumeCheckRules {
 struct VolumeCheckParams<'a> {
     container_name: &'a str,
     expected_tokens_path: String,
+    expected_auth_path: Option<String>,
     expected_workspace_path: &'a str,
     /// Expected token mount mode: "ro" or "rw"
     expected_token_mode: &'a str,
@@ -2329,6 +2493,26 @@ struct VolumeCheckParams<'a> {
     /// bearer of a plugin). Each entry is matched as an exact `target`; the mount must be `:ro`.
     extra_allowed_ro_targets: &'a [String],
     rules: VolumeCheckRules,
+}
+
+fn expected_tokens_source(compose_name: &str, project: &str) -> anyhow::Result<String> {
+    Ok(worker_tokens_mount(compose_name)?.source(project))
+}
+
+fn expected_worker_sources(compose_name: &str, project: &str) -> anyhow::Result<(String, String)> {
+    Ok((
+        expected_tokens_source(compose_name, project)?,
+        worker_auth_mount(compose_name)?.source(project),
+    ))
+}
+
+fn unresolvable_slot(container: &str, error: &anyhow::Error) -> SecurityViolation {
+    SecurityViolation {
+        container: container.to_string(),
+        rule: SecurityRule::SecretSlotMount,
+        message: format!("the secrets slots of this container cannot be resolved: {error:#}"),
+        remediation: "Use a compose service name that is a valid secrets slot component.",
+    }
 }
 
 /// Validates volume mounts on one service; returns violations plus the actual
@@ -2400,6 +2584,32 @@ fn validate_service_volume_mounts(
                         rule: params.rules.workspace_mount_mode,
                         message: params.rules.workspace_mount_mode_msg.to_string(),
                         remediation: params.rules.workspace_mount_mode_rem,
+                    });
+                }
+            } else if let Some((host_path, mode)) = params
+                .expected_auth_path
+                .as_ref()
+                .and_then(|_| extract_volume_for_target(vol_str, WORKER_AUTH_TARGET))
+            {
+                if params.expected_auth_path.as_deref() != Some(host_path.as_str()) {
+                    violations.push(SecurityViolation {
+                        container: params.container_name.to_string(),
+                        rule: params.rules.token_path_mismatch,
+                        message: format!(
+                            "Auth host path '{host_path}' does not match the container's own auth slot"
+                        ),
+                        remediation: params.rules.token_path_mismatch_rem,
+                    });
+                }
+                if mode.as_deref() != Some("ro") {
+                    violations.push(SecurityViolation {
+                        container: params.container_name.to_string(),
+                        rule: params.rules.no_extra_volumes,
+                        message: format!(
+                            "{} {} (must be :ro)",
+                            params.rules.no_extra_volumes_msg_prefix, vol_str
+                        ),
+                        remediation: params.rules.no_extra_volumes_rem,
                     });
                 }
             } else if let Some(extra) = params
@@ -2503,27 +2713,24 @@ mod tests {
         );
     }
 
-    const GIT_TOKENS_ROOT: &str = "/host/.speedwave/tokens/p";
-
     fn proxy_volume_violations(git_mounts: &[&str]) -> Vec<SecurityViolation> {
         let mut volumes = vec![
-            "/host/.speedwave/proxy/p:/config:ro".to_string(),
-            format!("{GIT_TOKENS_ROOT}/llm:/tokens:ro"),
+            "/run/speedwave-secrets/p/proxy/config:/config:ro".to_string(),
+            "/run/speedwave-secrets/p/proxy/tokens:/tokens:ro".to_string(),
             "/host/.speedwave/usage/p/proxy:/usage:rw".to_string(),
         ];
         volumes.extend(git_mounts.iter().map(|m| m.to_string()));
         let refs: Vec<&str> = volumes.iter().map(String::as_str).collect();
         let doc = service_doc("proxy", &refs, &[]);
-        let expected = SecurityExpectedPaths::from_raw("/proj", GIT_TOKENS_ROOT);
-        SecurityCheck::check_proxy_volumes(&doc, &expected)
+        SecurityCheck::check_proxy_volumes(&doc, "p")
     }
 
     #[test]
     fn proxy_volumes_accept_no_git_mounts_and_both_canonical_git_mounts() {
         assert!(proxy_volume_violations(&[]).is_empty());
         let v = proxy_volume_violations(&[
-            "/host/.speedwave/tokens/p/github:/git-tokens/github:ro",
-            "/host/.speedwave/tokens/p/gitlab:/git-tokens/gitlab:ro",
+            "/run/speedwave-secrets/p/proxy/git-github:/git-tokens/github:ro",
+            "/run/speedwave-secrets/p/proxy/git-gitlab:/git-tokens/gitlab:ro",
         ]);
         assert!(v.is_empty(), "{v:?}");
     }
@@ -2531,11 +2738,12 @@ mod tests {
     #[test]
     fn proxy_volumes_reject_git_mounts_with_wrong_source_or_mode() {
         for bad in [
-            "/host/.speedwave/tokens/p/gitlab:/git-tokens/github:ro",
-            "/host/.speedwave/tokens/other/github:/git-tokens/github:ro",
-            "/host/.speedwave/tokens/p/github:/git-tokens/github:rw",
-            "/host/.speedwave/tokens/p/github:/git-tokens/github",
-            "/host/.speedwave/tokens/p:/git-tokens/gitlab:ro",
+            "/run/speedwave-secrets/p/proxy/git-gitlab:/git-tokens/github:ro",
+            "/run/speedwave-secrets/other/proxy/git-github:/git-tokens/github:ro",
+            "/run/speedwave-secrets/p/proxy/git-github:/git-tokens/github:rw",
+            "/run/speedwave-secrets/p/proxy/git-github:/git-tokens/github",
+            "/run/speedwave-secrets/p/proxy/tokens:/git-tokens/gitlab:ro",
+            "/host/.speedwave/tokens/p/github:/git-tokens/github:ro",
         ] {
             let v = proxy_volume_violations(&[bad]);
             assert!(
@@ -2549,14 +2757,51 @@ mod tests {
     #[test]
     fn proxy_volumes_reject_any_other_git_tokens_target() {
         for bad in [
-            "/host/.speedwave/tokens/p/github:/git-tokens:ro",
-            "/host/.speedwave/tokens/p/github:/git-tokens/github/sub:ro",
-            "/host/.speedwave/tokens/p/slack:/git-tokens/slack:ro",
+            "/run/speedwave-secrets/p/proxy/git-github:/git-tokens:ro",
+            "/run/speedwave-secrets/p/proxy/git-github:/git-tokens/github/sub:ro",
+            "/run/speedwave-secrets/p/proxy/git-slack:/git-tokens/slack:ro",
         ] {
             let v = proxy_volume_violations(&[bad]);
             assert!(
                 v.iter().any(|x| x.message.contains("unexpected volume")),
                 "'{bad}' must be rejected, got: {v:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_volumes_reject_config_or_tokens_from_another_slot() {
+        let config = "/run/speedwave-secrets/p/proxy/config:/config:ro";
+        let tokens = "/run/speedwave-secrets/p/proxy/tokens:/tokens:ro";
+        let usage = "/host/.speedwave/usage/p/proxy:/usage:rw";
+        for (bad_config, bad_tokens) in [
+            (
+                "/run/speedwave-secrets/p/mcp-hub/secrets:/config:ro",
+                tokens,
+            ),
+            (
+                "/run/speedwave-secrets/other/proxy/config:/config:ro",
+                tokens,
+            ),
+            ("/host/.speedwave/proxy/p:/config:ro", tokens),
+            ("/run/speedwave-secrets/p/proxy/config:/config:rw", tokens),
+            (
+                config,
+                "/run/speedwave-secrets/p/mcp-slack/tokens:/tokens:ro",
+            ),
+            (
+                config,
+                "/run/speedwave-secrets/other/proxy/tokens:/tokens:ro",
+            ),
+            (config, "/host/.speedwave/tokens/p/llm:/tokens:ro"),
+            (config, "/run/speedwave-secrets/p/proxy/tokens:/tokens:rw"),
+        ] {
+            let doc = service_doc("proxy", &[bad_config, bad_tokens, usage], &[]);
+            let v = SecurityCheck::check_proxy_volumes(&doc, "p");
+            assert!(
+                v.iter()
+                    .any(|x| x.rule == SecurityRule::SpeedwaveProxyVolumes),
+                "'{bad_config}' with '{bad_tokens}' must be rejected, got: {v:?}"
             );
         }
     }
@@ -2568,6 +2813,9 @@ mod tests {
             "MANAGED_SETTINGS_MOUNT",
         );
     }
+
+    const CLAUDE_SECRETS_MOUNT: &str =
+        "/run/speedwave-secrets/p/claude/secrets:/run/speedwave/secrets:ro";
 
     /// Builds a compose doc whose claude service carries a single given volume.
     fn claude_doc_with_volume(mount: &str) -> serde_yaml_ng::Value {
@@ -2642,12 +2890,13 @@ mod tests {
         let yaml = format!(
             "services:\n  claude:\n    volumes:\n      \
              - /proj:/workspace:rw\n      \
+             - {CLAUDE_SECRETS_MOUNT}\n      \
              - {}:/speedwave/plugins/figma:ro\n",
             plugin_resources_source(data_dir, "figma")
         );
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
-        let expected = SecurityExpectedPaths::from_raw("/proj", "/tokens");
-        let v = SecurityCheck::check_claude_workspace_mount(&doc, &expected, data_dir, "test");
+        let expected = SecurityExpectedPaths::from_raw("/proj");
+        let v = SecurityCheck::check_claude_workspace_mount(&doc, &expected, data_dir, "p");
         assert!(
             v.is_empty(),
             "plugin claude-resources mount must be allowed, got: {v:?}"
@@ -2661,7 +2910,7 @@ mod tests {
                     - /proj:/workspace:rw\n      \
                     - /tmp/foreign/plugins/presalefix/claude-resources:/speedwave/plugins/presalefix:ro\n";
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
-        let expected = SecurityExpectedPaths::from_raw("/proj", "/tokens");
+        let expected = SecurityExpectedPaths::from_raw("/proj");
         let v = SecurityCheck::check_claude_workspace_mount(&doc, &expected, data_dir, "test");
         assert!(
             v.iter()
@@ -2679,7 +2928,7 @@ mod tests {
                     - /proj:/workspace:rw\n      \
                     - /host/evil:/etc/cron.d:ro\n";
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
-        let expected = SecurityExpectedPaths::from_raw("/proj", "/tokens");
+        let expected = SecurityExpectedPaths::from_raw("/proj");
         let v = SecurityCheck::check_claude_workspace_mount(&doc, &expected, data_dir, "test");
         assert!(
             v.iter()
@@ -2751,7 +3000,7 @@ mod tests {
                     - /proj:/workspace:rw\n      \
                     - type: bind\n        source: /evil\n        target: /usage\n";
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
-        let expected = SecurityExpectedPaths::from_raw("/proj", "/tokens");
+        let expected = SecurityExpectedPaths::from_raw("/proj");
         let v = SecurityCheck::check_claude_workspace_mount(&doc, &expected, data_dir, "test");
         assert!(
             v.iter()
@@ -2768,7 +3017,7 @@ mod tests {
                     - /proj:/workspace:rw\n      \
                     - cache-vol\n";
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
-        let expected = SecurityExpectedPaths::from_raw("/proj", "/tokens");
+        let expected = SecurityExpectedPaths::from_raw("/proj");
         let v = SecurityCheck::check_claude_workspace_mount(&doc, &expected, data_dir, "test");
         assert!(
             v.iter()
@@ -2785,7 +3034,7 @@ mod tests {
                     - /proj:/workspace:rw\n      \
                     - /evil:/usage:ro\n";
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
-        let expected = SecurityExpectedPaths::from_raw("/proj", "/tokens");
+        let expected = SecurityExpectedPaths::from_raw("/proj");
         let v = SecurityCheck::check_claude_workspace_mount(&doc, &expected, data_dir, "test");
         assert!(
             v.iter()
@@ -2803,7 +3052,7 @@ mod tests {
                     - /proj:/workspace:rw\n      \
                     - /host/.speedwave/usage/test/proxy:/usage:rw\n";
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
-        let expected = SecurityExpectedPaths::from_raw("/proj", "/tokens");
+        let expected = SecurityExpectedPaths::from_raw("/proj");
         let v = SecurityCheck::check_claude_workspace_mount(&doc, &expected, data_dir, "test");
         assert!(
             v.iter()
@@ -2830,7 +3079,7 @@ mod tests {
         let yaml = "services:\n  claude:\n    volumes:\n      \
                     - /proj:/workspace:ro\n";
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
-        let expected = SecurityExpectedPaths::from_raw("/proj", "/tokens");
+        let expected = SecurityExpectedPaths::from_raw("/proj");
         let v = SecurityCheck::check_claude_workspace_mount(&doc, &expected, data_dir, "test");
         assert!(
             v.iter()
@@ -2847,7 +3096,7 @@ mod tests {
                     - /proj:/workspace:rw\n      \
                     - /host:/speedwave/plugins:rw\n";
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
-        let expected = SecurityExpectedPaths::from_raw("/proj", "/tokens");
+        let expected = SecurityExpectedPaths::from_raw("/proj");
         let v = SecurityCheck::check_claude_workspace_mount(&doc, &expected, data_dir, "test");
         assert!(
             v.iter()
@@ -2863,7 +3112,7 @@ mod tests {
         let yaml = "services:\n  claude:\n    volumes:\n      \
                     - /host/.speedwave/claude-resources:/speedwave/resources:ro\n";
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
-        let expected = SecurityExpectedPaths::from_raw("/proj", "/tokens");
+        let expected = SecurityExpectedPaths::from_raw("/proj");
         let v = SecurityCheck::check_claude_workspace_mount(&doc, &expected, data_dir, "test");
         assert!(
             v.iter()
@@ -2885,11 +3134,12 @@ mod tests {
              - /host/.speedwave/claude-resources:/speedwave/resources:ro\n      \
              - /host/.speedwave/ide-bridge:/home/speedwave/.claude/ide:ro\n      \
              - /host/.speedwave/usage/p/proxy:/usage:ro\n      \
+             - {CLAUDE_SECRETS_MOUNT}\n      \
              - {managed}:/etc/claude-code/managed-settings.json:ro\n      \
              - {plugin_resources}:/speedwave/plugins/figma:ro\n"
         );
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
-        let expected = SecurityExpectedPaths::from_raw("/proj", "/tokens");
+        let expected = SecurityExpectedPaths::from_raw("/proj");
         let v = SecurityCheck::check_claude_workspace_mount(&doc, &expected, data_dir, "p");
         assert!(
             v.is_empty(),
@@ -2948,56 +3198,52 @@ mod tests {
         );
     }
 
-    fn write_proxy_json(data_dir: &std::path::Path, body: &str) {
-        let path = super::super::proxy::proxy_config_path_in(data_dir, "p");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, body).unwrap();
+    fn proxy_doc_with_ner_url(url: &str) -> serde_yaml_ng::Value {
+        let env = format!("{}={url}", super::super::pii_ner::NER_URL_ENV);
+        service_doc("proxy", &[], &[env.as_str()])
     }
 
     #[test]
-    fn proxy_ner_url_rule_is_silent_without_a_config_or_a_ner_section() {
-        let tmp = tempfile::tempdir().unwrap();
-        assert!(SecurityCheck::check_proxy_ner_url(tmp.path(), "p").is_empty());
-        write_proxy_json(tmp.path(), r#"{"routes":[]}"#);
-        assert!(SecurityCheck::check_proxy_ner_url(tmp.path(), "p").is_empty());
-        write_proxy_json(
-            tmp.path(),
-            r#"{"routes":[],"ner":{"url":"http://host.docker.internal:50123","token":"t"}}"#,
-        );
-        assert!(SecurityCheck::check_proxy_ner_url(tmp.path(), "p").is_empty());
+    fn proxy_ner_url_rule_is_silent_without_a_proxy_or_the_env() {
+        let no_proxy: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str("services:\n  claude:\n    image: x\n").unwrap();
+        assert!(SecurityCheck::check_proxy_ner_url(&no_proxy).is_empty());
+        let no_env = service_doc("proxy", &[], &["OTHER=1"]);
+        assert!(SecurityCheck::check_proxy_ner_url(&no_env).is_empty());
+        let valid = proxy_doc_with_ner_url("http://host.docker.internal:50123");
+        assert!(SecurityCheck::check_proxy_ner_url(&valid).is_empty());
     }
 
     #[test]
     fn proxy_ner_url_rule_rejects_foreign_hosts_schemes_and_paths() {
-        let tmp = tempfile::tempdir().unwrap();
         for url in [
             "http://10.0.0.5:50123",
             "https://host.docker.internal:50123",
             "http://host.docker.internal:50123/v1/detect",
             "http://host.docker.internal",
         ] {
-            write_proxy_json(
-                tmp.path(),
-                &format!(r#"{{"routes":[],"ner":{{"url":"{url}","token":"t"}}}}"#),
-            );
-            let v = SecurityCheck::check_proxy_ner_url(tmp.path(), "p");
+            let v = SecurityCheck::check_proxy_ner_url(&proxy_doc_with_ner_url(url));
             assert_eq!(v.len(), 1, "{url}");
             assert_eq!(v[0].rule, SecurityRule::SpeedwaveProxyNerUrl);
             assert_eq!(v[0].container, "proxy");
         }
-        write_proxy_json(tmp.path(), r#"{"routes":[],"ner":{"url":7}}"#);
-        assert_eq!(SecurityCheck::check_proxy_ner_url(tmp.path(), "p").len(), 1);
+    }
+
+    #[test]
+    fn proxy_ner_url_rule_reads_the_map_form_env() {
+        let yaml =
+            "services:\n  proxy:\n    environment:\n      SPW_NER_URL: http://evil.example:50123\n";
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
+        let v = SecurityCheck::check_proxy_ner_url(&doc);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].rule, SecurityRule::SpeedwaveProxyNerUrl);
     }
 
     #[test]
     fn run_reports_a_bad_proxy_ner_url_against_the_proxy_container() {
         let tmp = tempfile::tempdir().unwrap();
-        write_proxy_json(
-            tmp.path(),
-            r#"{"routes":[],"ner":{"url":"http://evil.example:50123","token":"t"}}"#,
-        );
-        let doc = "services:\n  claude:\n    volumes: []\n";
-        let expected = SecurityExpectedPaths::from_raw("/p", "/t");
+        let doc = "services:\n  proxy:\n    environment:\n      - SPW_NER_URL=http://evil.example:50123\n";
+        let expected = SecurityExpectedPaths::from_raw("/p");
         let v = SecurityCheck::run_with_data_dir(doc, "p", &[], &expected, tmp.path());
         assert!(v
             .iter()
@@ -3008,7 +3254,7 @@ mod tests {
     fn run_requires_managed_settings_mount_when_expected_paths_lock_telemetry() {
         let doc = "services:\n  claude:\n    volumes: []\n";
         let data_dir = std::path::Path::new("/data");
-        let expected = SecurityExpectedPaths::from_raw("/p", "/t").with_telemetry_locked(true);
+        let expected = SecurityExpectedPaths::from_raw("/p").with_telemetry_locked(true);
         let v = SecurityCheck::run_with_data_dir(doc, "p", &[], &expected, data_dir);
         assert!(
             v.iter()
@@ -3022,7 +3268,7 @@ mod tests {
     fn run_does_not_require_managed_settings_mount_by_default() {
         let doc = "services:\n  claude:\n    volumes: []\n";
         let data_dir = std::path::Path::new("/data");
-        let expected = SecurityExpectedPaths::from_raw("/p", "/t");
+        let expected = SecurityExpectedPaths::from_raw("/p");
         let v = SecurityCheck::run_with_data_dir(doc, "p", &[], &expected, data_dir);
         assert!(
             !v.iter()
@@ -3074,7 +3320,11 @@ mod tests {
         service_doc("mcp-hub", volumes, env)
     }
 
-    fn policy_source(data_dir: &std::path::Path, project: &str) -> String {
+    fn policy_source(service: &str, project: &str) -> String {
+        format!("/run/speedwave-secrets/{project}/{service}/policy")
+    }
+
+    fn host_policy_source(data_dir: &std::path::Path, project: &str) -> String {
         to_engine_path(&crate::pii_policy::policy_config_dir_in(data_dir, project)).unwrap()
     }
 
@@ -3084,19 +3334,17 @@ mod tests {
 
     #[test]
     fn hub_policy_mount_canonical_with_pinned_env_passes() {
-        let data_dir = std::path::Path::new("/data");
-        let mount = format!("{}:/policy:ro", policy_source(data_dir, "p"));
+        let mount = format!("{}:/policy:ro", policy_source("mcp-hub", "p"));
         let doc = hub_doc(&[&mount], &[PINNED_POLICY_ENV]);
-        let v = SecurityCheck::check_hub_policy_mount(&doc, data_dir, "p");
+        let v = SecurityCheck::check_hub_policy_mount(&doc, "p");
         assert!(v.is_empty(), "correct mount + env must pass, got: {v:?}");
     }
 
     #[test]
     fn hub_policy_mount_rw_fails() {
-        let data_dir = std::path::Path::new("/data");
-        let mount = format!("{}:/policy:rw", policy_source(data_dir, "p"));
+        let mount = format!("{}:/policy:rw", policy_source("mcp-hub", "p"));
         let doc = hub_doc(&[&mount], &[PINNED_POLICY_ENV]);
-        let v = SecurityCheck::check_hub_policy_mount(&doc, data_dir, "p");
+        let v = SecurityCheck::check_hub_policy_mount(&doc, "p");
         assert!(
             v.iter().any(|x| x.rule == SecurityRule::HubPolicyMount),
             ":rw policy mount must fail"
@@ -3105,11 +3353,10 @@ mod tests {
 
     #[test]
     fn hub_policy_mount_wrong_source_fails() {
-        let data_dir = std::path::Path::new("/data");
-        let bad = to_engine_path(&data_dir.join("proxy").join("p")).unwrap();
+        let bad = "/run/speedwave-secrets/p/proxy/policy";
         let mount = format!("{bad}:/policy:ro");
         let doc = hub_doc(&[&mount], &[PINNED_POLICY_ENV]);
-        let v = SecurityCheck::check_hub_policy_mount(&doc, data_dir, "p");
+        let v = SecurityCheck::check_hub_policy_mount(&doc, "p");
         assert!(
             v.iter().any(|x| x.rule == SecurityRule::HubPolicyMount),
             "source outside policies/<project>/ must fail"
@@ -3118,9 +3365,8 @@ mod tests {
 
     #[test]
     fn hub_policy_mount_missing_fails() {
-        let data_dir = std::path::Path::new("/data");
         let doc = hub_doc(&[], &[PINNED_POLICY_ENV]);
-        let v = SecurityCheck::check_hub_policy_mount(&doc, data_dir, "p");
+        let v = SecurityCheck::check_hub_policy_mount(&doc, "p");
         assert!(
             v.iter().any(|x| x.rule == SecurityRule::HubPolicyMount),
             "missing policy mount must fail (unconditional, unlike managed-settings)"
@@ -3129,11 +3375,10 @@ mod tests {
 
     #[test]
     fn hub_policy_mount_nested_target_overlay_fails() {
-        let data_dir = std::path::Path::new("/data");
-        let canonical = format!("{}:/policy:ro", policy_source(data_dir, "p"));
+        let canonical = format!("{}:/policy:ro", policy_source("mcp-hub", "p"));
         for overlay in ["/evil:/policy/policy.json:ro", "/evil:/policy/policy.json"] {
             let doc = hub_doc(&[&canonical, overlay], &[PINNED_POLICY_ENV]);
-            let v = SecurityCheck::check_hub_policy_mount(&doc, data_dir, "p");
+            let v = SecurityCheck::check_hub_policy_mount(&doc, "p");
             assert!(
                 v.iter().any(|x| x.rule == SecurityRule::HubPolicyMount),
                 "nested-target overlay '{overlay}' must fail even beside the canonical mount"
@@ -3143,15 +3388,14 @@ mod tests {
 
     #[test]
     fn hub_policy_mount_map_form_policy_target_fails() {
-        let data_dir = std::path::Path::new("/data");
         let yaml = format!(
             "services:\n  mcp-hub:\n    volumes:\n      - {}:/policy:ro\n      \
              - type: bind\n        source: /evil\n        target: /policy/policy.json\n        \
              read_only: true\n    environment:\n      - {PINNED_POLICY_ENV}\n",
-            policy_source(data_dir, "p")
+            policy_source("mcp-hub", "p")
         );
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
-        let v = SecurityCheck::check_hub_policy_mount(&doc, data_dir, "p");
+        let v = SecurityCheck::check_hub_policy_mount(&doc, "p");
         assert!(
             v.iter().any(|x| x.rule == SecurityRule::HubPolicyMount),
             "map-form volume targeting the policy area must fail, not be skipped"
@@ -3172,32 +3416,30 @@ mod tests {
 
     #[test]
     fn hub_policy_mount_normalization_dodges_fail() {
-        let data_dir = std::path::Path::new("/data");
-        let canonical = format!("{}:/policy:ro", policy_source(data_dir, "p"));
+        let canonical = format!("{}:/policy:ro", policy_source("mcp-hub", "p"));
         for dodge in ["evil://policy:ro", "evil:/./policy:ro", "evil://policy"] {
             let doc = hub_doc(&[&canonical, dodge], &[PINNED_POLICY_ENV]);
-            let v = SecurityCheck::check_hub_policy_mount(&doc, data_dir, "p");
+            let v = SecurityCheck::check_hub_policy_mount(&doc, "p");
             assert!(
                 v.iter().any(|x| x.rule == SecurityRule::HubPolicyMount),
                 "normalization dodge '{dodge}' must fail even beside the canonical mount"
             );
         }
         let doc = hub_doc(&[&canonical], &[PINNED_POLICY_ENV]);
-        let v = SecurityCheck::check_hub_policy_mount(&doc, data_dir, "p");
+        let v = SecurityCheck::check_hub_policy_mount(&doc, "p");
         assert!(v.is_empty(), "canonical mount must still pass, got: {v:?}");
     }
 
     #[test]
     fn hub_policy_mount_map_form_normalized_target_fails() {
-        let data_dir = std::path::Path::new("/data");
         let yaml = format!(
             "services:\n  mcp-hub:\n    volumes:\n      - {}:/policy:ro\n      \
              - type: bind\n        source: /evil\n        target: /policy/.\n        \
              read_only: true\n    environment:\n      - {PINNED_POLICY_ENV}\n",
-            policy_source(data_dir, "p")
+            policy_source("mcp-hub", "p")
         );
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
-        let v = SecurityCheck::check_hub_policy_mount(&doc, data_dir, "p");
+        let v = SecurityCheck::check_hub_policy_mount(&doc, "p");
         assert!(
             v.iter().any(|x| x.rule == SecurityRule::HubPolicyMount),
             "map-form 'target: /policy/.' must fail after normalization"
@@ -3206,10 +3448,9 @@ mod tests {
 
     #[test]
     fn hub_policy_mount_repointed_policy_file_env_fails() {
-        let data_dir = std::path::Path::new("/data");
-        let mount = format!("{}:/policy:ro", policy_source(data_dir, "p"));
+        let mount = format!("{}:/policy:ro", policy_source("mcp-hub", "p"));
         let doc = hub_doc(&[&mount], &["POLICY_FILE=/pol2/policy.json"]);
-        let v = SecurityCheck::check_hub_policy_mount(&doc, data_dir, "p");
+        let v = SecurityCheck::check_hub_policy_mount(&doc, "p");
         assert!(
             v.iter().any(|x| x.rule == SecurityRule::HubPolicyMount),
             "repointed POLICY_FILE must fail"
@@ -3218,10 +3459,9 @@ mod tests {
 
     #[test]
     fn hub_policy_mount_missing_policy_file_env_fails() {
-        let data_dir = std::path::Path::new("/data");
-        let mount = format!("{}:/policy:ro", policy_source(data_dir, "p"));
+        let mount = format!("{}:/policy:ro", policy_source("mcp-hub", "p"));
         let doc = hub_doc(&[&mount], &[]);
-        let v = SecurityCheck::check_hub_policy_mount(&doc, data_dir, "p");
+        let v = SecurityCheck::check_hub_policy_mount(&doc, "p");
         assert!(
             v.iter().any(|x| x.rule == SecurityRule::HubPolicyMount),
             "missing POLICY_FILE env must fail"
@@ -3230,14 +3470,13 @@ mod tests {
 
     #[test]
     fn hub_policy_mount_map_form_env_repoint_fails() {
-        let data_dir = std::path::Path::new("/data");
         let yaml = format!(
             "services:\n  mcp-hub:\n    volumes:\n      - {}:/policy:ro\n    \
              environment:\n      POLICY_FILE: /pol2/policy.json\n",
-            policy_source(data_dir, "p")
+            policy_source("mcp-hub", "p")
         );
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
-        let v = SecurityCheck::check_hub_policy_mount(&doc, data_dir, "p");
+        let v = SecurityCheck::check_hub_policy_mount(&doc, "p");
         assert!(
             v.iter().any(|x| x.rule == SecurityRule::HubPolicyMount),
             "map-form env repoint must fail"
@@ -3246,9 +3485,8 @@ mod tests {
 
     #[test]
     fn hub_policy_mount_absent_hub_service_is_ok() {
-        let data_dir = std::path::Path::new("/data");
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str("services:\n  claude:\n").unwrap();
-        let v = SecurityCheck::check_hub_policy_mount(&doc, data_dir, "p");
+        let v = SecurityCheck::check_hub_policy_mount(&doc, "p");
         assert!(v.is_empty(), "no mcp-hub service = no violation");
     }
 
@@ -3262,19 +3500,17 @@ mod tests {
 
     #[test]
     fn proxy_policy_mount_canonical_with_pinned_env_passes() {
-        let data_dir = std::path::Path::new("/data");
-        let mount = format!("{}:/policy:ro", policy_source(data_dir, "p"));
+        let mount = format!("{}:/policy:ro", policy_source("proxy", "p"));
         let doc = service_doc("proxy", &[&mount], &[PINNED_POLICY_ENV]);
-        let v = SecurityCheck::check_proxy_policy_mount(&doc, data_dir, "p");
+        let v = SecurityCheck::check_proxy_policy_mount(&doc, "p");
         assert!(v.is_empty(), "correct mount + env must pass, got: {v:?}");
     }
 
     #[test]
     fn proxy_policy_mount_rw_fails() {
-        let data_dir = std::path::Path::new("/data");
-        let mount = format!("{}:/policy:rw", policy_source(data_dir, "p"));
+        let mount = format!("{}:/policy:rw", policy_source("proxy", "p"));
         let doc = service_doc("proxy", &[&mount], &[PINNED_POLICY_ENV]);
-        let v = SecurityCheck::check_proxy_policy_mount(&doc, data_dir, "p");
+        let v = SecurityCheck::check_proxy_policy_mount(&doc, "p");
         assert!(
             v.iter().any(|x| x.rule == SecurityRule::ProxyPolicyMount),
             ":rw policy mount on proxy must fail"
@@ -3283,11 +3519,10 @@ mod tests {
 
     #[test]
     fn proxy_policy_mount_wrong_source_fails() {
-        let data_dir = std::path::Path::new("/data");
-        let bad = to_engine_path(&data_dir.join("audit").join("p")).unwrap();
+        let bad = "/run/speedwave-secrets/p/mcp-hub/policy";
         let mount = format!("{bad}:/policy:ro");
         let doc = service_doc("proxy", &[&mount], &[PINNED_POLICY_ENV]);
-        let v = SecurityCheck::check_proxy_policy_mount(&doc, data_dir, "p");
+        let v = SecurityCheck::check_proxy_policy_mount(&doc, "p");
         assert!(
             v.iter().any(|x| x.rule == SecurityRule::ProxyPolicyMount),
             "source outside policies/<project>/ must fail"
@@ -3296,9 +3531,8 @@ mod tests {
 
     #[test]
     fn proxy_policy_mount_missing_fails() {
-        let data_dir = std::path::Path::new("/data");
         let doc = service_doc("proxy", &[], &[PINNED_POLICY_ENV]);
-        let v = SecurityCheck::check_proxy_policy_mount(&doc, data_dir, "p");
+        let v = SecurityCheck::check_proxy_policy_mount(&doc, "p");
         assert!(
             v.iter().any(|x| x.rule == SecurityRule::ProxyPolicyMount),
             "missing policy mount on proxy must fail (unconditional)"
@@ -3307,14 +3541,13 @@ mod tests {
 
     #[test]
     fn proxy_policy_mount_nested_target_overlay_fails() {
-        let data_dir = std::path::Path::new("/data");
-        let canonical = format!("{}:/policy:ro", policy_source(data_dir, "p"));
+        let canonical = format!("{}:/policy:ro", policy_source("proxy", "p"));
         let doc = service_doc(
             "proxy",
             &[&canonical, "/evil:/policy/policy.json:ro"],
             &[PINNED_POLICY_ENV],
         );
-        let v = SecurityCheck::check_proxy_policy_mount(&doc, data_dir, "p");
+        let v = SecurityCheck::check_proxy_policy_mount(&doc, "p");
         assert!(
             v.iter().any(|x| x.rule == SecurityRule::ProxyPolicyMount),
             "nested-target overlay must fail even beside the canonical mount"
@@ -3323,10 +3556,9 @@ mod tests {
 
     #[test]
     fn proxy_policy_mount_repointed_policy_file_env_fails() {
-        let data_dir = std::path::Path::new("/data");
-        let mount = format!("{}:/policy:ro", policy_source(data_dir, "p"));
+        let mount = format!("{}:/policy:ro", policy_source("proxy", "p"));
         let doc = service_doc("proxy", &[&mount], &["POLICY_FILE=/pol2/policy.json"]);
-        let v = SecurityCheck::check_proxy_policy_mount(&doc, data_dir, "p");
+        let v = SecurityCheck::check_proxy_policy_mount(&doc, "p");
         assert!(
             v.iter().any(|x| x.rule == SecurityRule::ProxyPolicyMount),
             "repointed POLICY_FILE on proxy must fail"
@@ -3335,10 +3567,9 @@ mod tests {
 
     #[test]
     fn proxy_policy_mount_missing_policy_file_env_fails() {
-        let data_dir = std::path::Path::new("/data");
-        let mount = format!("{}:/policy:ro", policy_source(data_dir, "p"));
+        let mount = format!("{}:/policy:ro", policy_source("proxy", "p"));
         let doc = service_doc("proxy", &[&mount], &[]);
-        let v = SecurityCheck::check_proxy_policy_mount(&doc, data_dir, "p");
+        let v = SecurityCheck::check_proxy_policy_mount(&doc, "p");
         assert!(
             v.iter().any(|x| x.rule == SecurityRule::ProxyPolicyMount),
             "missing POLICY_FILE env on proxy must fail"
@@ -3347,9 +3578,8 @@ mod tests {
 
     #[test]
     fn proxy_policy_mount_absent_proxy_service_is_ok() {
-        let data_dir = std::path::Path::new("/data");
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str("services:\n  claude:\n").unwrap();
-        let v = SecurityCheck::check_proxy_policy_mount(&doc, data_dir, "p");
+        let v = SecurityCheck::check_proxy_policy_mount(&doc, "p");
         assert!(v.is_empty(), "no proxy service = no violation");
     }
 
@@ -3445,7 +3675,7 @@ mod tests {
     #[test]
     fn claude_rejects_policy_dir_mount() {
         let data_dir = std::path::Path::new("/data");
-        let mount = format!("{}:/whatever:ro", policy_source(data_dir, "p"));
+        let mount = format!("{}:/whatever:ro", host_policy_source(data_dir, "p"));
         let doc = service_doc("claude", &[&mount], &[]);
         let v = SecurityCheck::check_no_policy_or_audit_mount_on_claude(&doc, data_dir, "p");
         assert!(
@@ -3474,7 +3704,7 @@ mod tests {
         let yaml = format!(
             "services:\n  claude:\n    volumes:\n      - type: bind\n        source: {}\n        \
              target: /whatever\n",
-            policy_source(data_dir, "p")
+            host_policy_source(data_dir, "p")
         );
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
         let v = SecurityCheck::check_no_policy_or_audit_mount_on_claude(&doc, data_dir, "p");
@@ -3505,7 +3735,7 @@ mod tests {
     #[test]
     fn claude_rejects_policy_dir_mount_with_trailing_slash() {
         let data_dir = std::path::Path::new("/data");
-        let mount = format!("{}/:/whatever:ro", policy_source(data_dir, "p"));
+        let mount = format!("{}/:/whatever:ro", host_policy_source(data_dir, "p"));
         let doc = service_doc("claude", &[&mount], &[]);
         let v = SecurityCheck::check_no_policy_or_audit_mount_on_claude(&doc, data_dir, "p");
         assert!(
@@ -3557,5 +3787,379 @@ mod tests {
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str("services:\n  mcp-hub:\n").unwrap();
         let v = SecurityCheck::check_no_policy_or_audit_mount_on_claude(&doc, data_dir, "p");
         assert!(v.is_empty(), "no claude service = no violation");
+    }
+
+    #[test]
+    fn secret_slot_mount_variant_renders_expected_code() {
+        assert_eq!(
+            SecurityRule::SecretSlotMount.to_string(),
+            "SECRET_SLOT_MOUNT"
+        );
+    }
+
+    fn slot_doc(service: &str, plugin: bool, volumes: &[&str]) -> serde_yaml_ng::Value {
+        let mut yaml = format!("services:\n  {service}:\n    image: x\n");
+        if plugin {
+            yaml.push_str("    labels:\n      speedwave.plugin-service: \"true\"\n");
+        }
+        yaml.push_str("    volumes:\n");
+        for v in volumes {
+            yaml.push_str(&format!("      - {v}\n"));
+        }
+        serde_yaml_ng::from_str(&yaml).unwrap()
+    }
+
+    fn slot_violations(doc: &serde_yaml_ng::Value) -> Vec<SecurityViolation> {
+        SecurityCheck::check_secret_slot_mounts(doc, "p")
+    }
+
+    #[test]
+    fn secret_slot_mounts_accept_the_canonical_mounts_of_every_container() {
+        let claude = slot_doc(
+            "claude",
+            false,
+            &[
+                CLAUDE_SECRETS_MOUNT,
+                "/proj:/workspace:rw",
+                "/host/.speedwave/usage/p/proxy:/usage:ro",
+            ],
+        );
+        let hub = slot_doc(
+            "mcp-hub",
+            false,
+            &[
+                "/run/speedwave-secrets/p/mcp-hub/secrets:/secrets:ro",
+                "/run/speedwave-secrets/p/mcp-hub/policy:/policy:ro",
+                "/host/.speedwave/audit/p:/audit:rw",
+            ],
+        );
+        let proxy = slot_doc(
+            "proxy",
+            false,
+            &[
+                "/run/speedwave-secrets/p/proxy/config:/config:ro",
+                "/run/speedwave-secrets/p/proxy/tokens:/tokens:ro",
+                "/run/speedwave-secrets/p/proxy/policy:/policy:ro",
+                "/run/speedwave-secrets/p/proxy/git-github:/git-tokens/github:ro",
+                "/run/speedwave-secrets/p/proxy/git-gitlab:/git-tokens/gitlab:ro",
+                "/host/.speedwave/usage/p/proxy:/usage:rw",
+            ],
+        );
+        let worker = slot_doc(
+            "mcp-slack",
+            false,
+            &[
+                "/run/speedwave-secrets/p/mcp-slack/tokens:/tokens:ro",
+                "/run/speedwave-secrets/p/mcp-slack/auth:/run/speedwave/auth:ro",
+                "/proj:/workspace:rw",
+            ],
+        );
+        let plugin = slot_doc(
+            "mcp-example",
+            true,
+            &[
+                "/run/speedwave-secrets/p/mcp-example/tokens:/tokens:ro",
+                "/proj:/workspace:rw",
+            ],
+        );
+        for (label, doc) in [
+            ("claude", claude),
+            ("hub", hub),
+            ("proxy", proxy),
+            ("worker", worker),
+            ("plugin", plugin),
+        ] {
+            let v = slot_violations(&doc);
+            assert!(
+                v.is_empty(),
+                "{label}: canonical mounts must pass, got: {v:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn secret_slot_mounts_reject_slots_a_container_does_not_own() {
+        let cases = [
+            (
+                "claude",
+                false,
+                "/run/speedwave-secrets/p/mcp-slack/tokens:/tokens:ro",
+            ),
+            (
+                "mcp-slack",
+                false,
+                "/run/speedwave-secrets/p/mcp-sharepoint/tokens:/tokens:ro",
+            ),
+            (
+                "mcp-slack",
+                false,
+                "/run/speedwave-secrets/p/mcp-sharepoint/auth:/run/speedwave/auth:ro",
+            ),
+            (
+                "mcp-example",
+                true,
+                "/run/speedwave-secrets/p/mcp-slack/auth:/run/speedwave/auth:ro",
+            ),
+            (
+                "mcp-example",
+                true,
+                "/run/speedwave-secrets/p/mcp-example/auth:/run/speedwave/auth:ro",
+            ),
+            (
+                "mcp-hub",
+                false,
+                "/run/speedwave-secrets/p/proxy/tokens:/tokens:ro",
+            ),
+            (
+                "proxy",
+                false,
+                "/run/speedwave-secrets/p/mcp-hub/secrets:/secrets:ro",
+            ),
+        ];
+        for (service, plugin, mount) in cases {
+            let doc = slot_doc(service, plugin, &[mount]);
+            let v = slot_violations(&doc);
+            assert!(
+                v.iter()
+                    .any(|x| x.rule == SecurityRule::SecretSlotMount && x.container == service),
+                "{service} mounting '{mount}' must be rejected, got: {v:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn secret_slot_mounts_reject_read_write_and_modeless_mounts() {
+        for mount in [
+            "/run/speedwave-secrets/p/mcp-slack/tokens:/tokens:rw",
+            "/run/speedwave-secrets/p/mcp-slack/tokens:/tokens",
+        ] {
+            let doc = slot_doc("mcp-slack", false, &[mount]);
+            let v = slot_violations(&doc);
+            assert!(
+                v.iter().any(|x| x.rule == SecurityRule::SecretSlotMount),
+                "'{mount}' must be rejected, got: {v:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn secret_slot_mounts_reject_another_projects_slot_and_wrong_targets() {
+        for mount in [
+            "/run/speedwave-secrets/other/mcp-slack/tokens:/tokens:ro",
+            "/run/speedwave-secrets/p/mcp-slack/tokens:/elsewhere:ro",
+            "/run/speedwave-secrets/p/mcp-slack/../mcp-sharepoint/tokens:/tokens:ro",
+            "/run/speedwave-secrets/p/mcp-slack:/tokens:ro",
+            "/run/speedwave-secrets:/tokens:ro",
+        ] {
+            let doc = slot_doc("mcp-slack", false, &[mount]);
+            let v = slot_violations(&doc);
+            assert!(
+                v.iter().any(|x| x.rule == SecurityRule::SecretSlotMount),
+                "'{mount}' must be rejected, got: {v:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn secret_slot_mounts_reject_a_long_form_volume_from_the_secrets_root() {
+        let yaml = "services:\n  mcp-slack:\n    image: x\n    volumes:\n      \
+                    - type: bind\n        source: /run/speedwave-secrets/p/mcp-slack/tokens\n        \
+                    target: /tokens\n        read_only: true\n";
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
+        let v = slot_violations(&doc);
+        assert!(
+            v.iter().any(|x| x.rule == SecurityRule::SecretSlotMount),
+            "a map-form mount from the secrets root must be rejected, got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn secret_slot_mounts_ignore_a_lookalike_root_and_foreign_sources() {
+        let doc = slot_doc(
+            "mcp-slack",
+            false,
+            &[
+                "/run/speedwave-secrets-evil/p/mcp-slack/tokens:/tokens:ro",
+                "/host/.speedwave/tokens/p/mcp-slack:/other:ro",
+                "/proj:/workspace:rw",
+            ],
+        );
+        let v = slot_violations(&doc);
+        assert!(v.is_empty(), "not under the secrets root, got: {v:?}");
+    }
+
+    #[test]
+    fn secret_slot_mounts_skip_services_without_volumes() {
+        let doc: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str("services:\n  claude:\n    image: x\n").unwrap();
+        assert!(slot_violations(&doc).is_empty());
+    }
+
+    #[test]
+    fn run_reports_a_worker_slot_mounted_on_claude() {
+        let tmp = tempfile::tempdir().unwrap();
+        let doc = "services:\n  claude:\n    volumes:\n      \
+                   - /run/speedwave-secrets/p/mcp-slack/tokens:/tokens:ro\n";
+        let expected = SecurityExpectedPaths::from_raw("/p");
+        let v = SecurityCheck::run_with_data_dir(doc, "p", &[], &expected, tmp.path());
+        assert!(v
+            .iter()
+            .any(|x| x.rule == SecurityRule::SecretSlotMount && x.container == "claude"));
+    }
+
+    fn slack_doc(volumes: &[&str]) -> serde_yaml_ng::Value {
+        service_doc("mcp-slack", volumes, &[])
+    }
+
+    const SLACK_TOKENS: &str = "/run/speedwave-secrets/p/mcp-slack/tokens:/tokens:ro";
+    const SLACK_AUTH: &str = "/run/speedwave-secrets/p/mcp-slack/auth:/run/speedwave/auth:ro";
+
+    fn slack_violations(volumes: &[&str]) -> Vec<SecurityViolation> {
+        let expected = SecurityExpectedPaths::from_raw("/proj");
+        SecurityCheck::check_builtin_slack_volumes(&slack_doc(volumes), &expected, "p")
+    }
+
+    #[test]
+    fn worker_profile_accepts_its_own_tokens_and_auth_slots() {
+        let v = slack_violations(&[SLACK_TOKENS, "/proj:/workspace:rw"]);
+        assert!(v.is_empty(), "{v:?}");
+        let v = slack_violations(&[SLACK_TOKENS, SLACK_AUTH, "/proj:/workspace:rw"]);
+        assert!(v.is_empty(), "{v:?}");
+    }
+
+    #[test]
+    fn worker_profile_rejects_tokens_from_another_workers_slot() {
+        for tokens in [
+            "/run/speedwave-secrets/p/mcp-sharepoint/tokens:/tokens:ro",
+            "/run/speedwave-secrets/other/mcp-slack/tokens:/tokens:ro",
+            "/host/.speedwave/tokens/p/slack:/tokens:ro",
+        ] {
+            let v = slack_violations(&[tokens, "/proj:/workspace:rw"]);
+            assert!(
+                v.iter()
+                    .any(|x| x.rule == SecurityRule::SlackTokenPathMismatch),
+                "'{tokens}' must be rejected, got: {v:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn worker_profile_rejects_a_read_write_or_foreign_auth_slot() {
+        let v = slack_violations(&[
+            SLACK_TOKENS,
+            "/run/speedwave-secrets/p/mcp-slack/auth:/run/speedwave/auth:rw",
+            "/proj:/workspace:rw",
+        ]);
+        assert!(
+            v.iter()
+                .any(|x| x.rule == SecurityRule::SlackNoExtraVolumes),
+            "a :rw auth mount must be rejected, got: {v:?}"
+        );
+        let v = slack_violations(&[
+            SLACK_TOKENS,
+            "/run/speedwave-secrets/p/mcp-sharepoint/auth:/run/speedwave/auth:ro",
+            "/proj:/workspace:rw",
+        ]);
+        assert!(
+            v.iter()
+                .any(|x| x.rule == SecurityRule::SlackTokenPathMismatch),
+            "another worker's auth slot must be rejected, got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn hub_secrets_mount_missing_reports_the_secret_slot_rule() {
+        let doc = hub_doc(&[], &[]);
+        let v = SecurityCheck::check_hub_secrets_mount(&doc, "p");
+        assert!(v.iter().all(|x| x.rule == SecurityRule::SecretSlotMount));
+        assert!(!v.is_empty());
+    }
+
+    #[test]
+    fn hub_secrets_mount_canonical_passes() {
+        let doc = hub_doc(
+            &["/run/speedwave-secrets/p/mcp-hub/secrets:/secrets:ro"],
+            &[],
+        );
+        let v = SecurityCheck::check_hub_secrets_mount(&doc, "p");
+        assert!(v.is_empty(), "{v:?}");
+    }
+
+    #[test]
+    fn hub_secrets_mount_fails_when_missing_read_write_or_from_another_slot() {
+        for volumes in [
+            vec![],
+            vec!["/run/speedwave-secrets/p/mcp-hub/secrets:/secrets:rw"],
+            vec!["/run/speedwave-secrets/p/mcp-hub/secrets:/secrets"],
+            vec!["/run/speedwave-secrets/p/mcp-hub/policy:/secrets:ro"],
+            vec!["/run/speedwave-secrets/other/mcp-hub/secrets:/secrets:ro"],
+            vec![
+                "/run/speedwave-secrets/p/mcp-hub/secrets:/secrets:ro",
+                "/evil:/secrets/extra:ro",
+            ],
+        ] {
+            let doc = hub_doc(&volumes, &[]);
+            let v = SecurityCheck::check_hub_secrets_mount(&doc, "p");
+            assert!(
+                v.iter().any(|x| x.rule == SecurityRule::SecretSlotMount),
+                "{volumes:?} must fail, got: {v:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hub_secrets_mount_absent_hub_service_is_ok() {
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str("services:\n  claude:\n").unwrap();
+        assert!(SecurityCheck::check_hub_secrets_mount(&doc, "p").is_empty());
+    }
+
+    fn claude_secrets_violations(secrets: &[&str]) -> Vec<SecurityViolation> {
+        let data_dir = std::path::Path::new("/host/.speedwave");
+        let mut volumes = vec!["/proj:/workspace:rw"];
+        volumes.extend_from_slice(secrets);
+        let doc = service_doc("claude", &volumes, &[]);
+        let expected = SecurityExpectedPaths::from_raw("/proj");
+        SecurityCheck::check_claude_workspace_mount(&doc, &expected, data_dir, "p")
+    }
+
+    #[test]
+    fn claude_requires_exactly_one_read_only_own_secrets_mount() {
+        let v = claude_secrets_violations(&[CLAUDE_SECRETS_MOUNT]);
+        assert!(v.is_empty(), "{v:?}");
+
+        let v = claude_secrets_violations(&[]);
+        assert!(
+            v.iter()
+                .any(|x| x.rule == SecurityRule::ClaudeWorkspaceMount
+                    && x.message.contains("/run/speedwave/secrets mount, found 0")),
+            "a missing secrets mount must be rejected, got: {v:?}"
+        );
+
+        let v = claude_secrets_violations(&[CLAUDE_SECRETS_MOUNT, CLAUDE_SECRETS_MOUNT]);
+        assert!(
+            v.iter()
+                .any(|x| x.rule == SecurityRule::ClaudeWorkspaceMount
+                    && x.message.contains("/run/speedwave/secrets mount, found 2")),
+            "a duplicated secrets mount must be rejected, got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn claude_rejects_a_read_write_or_foreign_secrets_mount() {
+        for mount in [
+            "/run/speedwave-secrets/p/claude/secrets:/run/speedwave/secrets:rw",
+            "/run/speedwave-secrets/p/claude/secrets:/run/speedwave/secrets",
+            "/run/speedwave-secrets/p/mcp-slack/tokens:/run/speedwave/secrets:ro",
+            "/run/speedwave-secrets/other/claude/secrets:/run/speedwave/secrets:ro",
+            "/host/.speedwave/claude-secrets/p:/run/speedwave/secrets:ro",
+        ] {
+            let v = claude_secrets_violations(&[mount]);
+            assert!(
+                v.iter()
+                    .any(|x| x.rule == SecurityRule::ClaudeWorkspaceMount
+                        && x.message.contains("own secrets slot")),
+                "'{mount}' must be rejected, got: {v:?}"
+            );
+        }
     }
 }

@@ -333,10 +333,9 @@ pub(crate) fn render_and_save_compose(project: &str) -> Result<(), String> {
         log::warn!("Failed to list installed plugins: {e}");
         Vec::new()
     });
-    let expected_paths =
-        speedwave_runtime::compose::SecurityExpectedPaths::compute(project, &project_dir)
-            .map_err(|e| e.to_string())?
-            .with_telemetry_locked(resolved.telemetry.any_locked);
+    let expected_paths = speedwave_runtime::compose::SecurityExpectedPaths::compute(&project_dir)
+        .map_err(|e| e.to_string())?
+        .with_telemetry_locked(resolved.telemetry.any_locked);
     let prereq_violations = speedwave_runtime::os_prereqs::check_os_prereqs();
     if !prereq_violations.is_empty() {
         return Err(format!(
@@ -1981,17 +1980,33 @@ fn ensure_saving_for_active_project(active: &str, expected: Option<&str>) -> any
 }
 
 #[tauri::command]
-pub fn set_llm_provider_key(
+pub async fn set_llm_provider_key(
     provider_id: String,
     key: Option<String>,
     project: Option<String>,
-) -> Result<(), String> {
-    set_llm_provider_key_in(
-        speedwave_runtime::consts::data_dir(),
-        &provider_id,
-        key.as_deref(),
-        project.as_deref(),
-    )
+) -> Result<Option<String>, String> {
+    tokio::task::spawn_blocking(move || {
+        set_llm_provider_key_then(
+            speedwave_runtime::consts::data_dir(),
+            &provider_id,
+            key.as_deref(),
+            project.as_deref(),
+            crate::integrations_cmd::restage_container_secrets_now,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn set_llm_provider_key_then(
+    data_dir: &std::path::Path,
+    provider_id: &str,
+    key: Option<&str>,
+    project: Option<&str>,
+    restage: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<Option<String>, String> {
+    let active = set_llm_provider_key_in(data_dir, provider_id, key, project)?;
+    Ok(restage(&active).err())
 }
 
 fn set_llm_provider_key_in(
@@ -1999,7 +2014,7 @@ fn set_llm_provider_key_in(
     provider_id: &str,
     key: Option<&str>,
     project: Option<&str>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     log::info!(
         "setting LLM provider key provider_id={provider_id} action={}",
         if key.is_some_and(|k| !k.trim().is_empty()) {
@@ -2048,7 +2063,7 @@ fn set_llm_provider_key_in(
             }
         }
         config::save_user_config_to(&user_config, &config_path)?;
-        Ok(())
+        Ok(active)
     })
     .map_err(|e: anyhow::Error| e.to_string())
 }
@@ -3035,11 +3050,65 @@ mod tests {
     }
 
     #[test]
+    fn a_saved_provider_key_restages_the_active_project_after_the_write() {
+        let tmp = seeded_config_tempdir_with_local_model("llama");
+        let restaged = std::cell::RefCell::new(Vec::new());
+
+        set_llm_provider_key_then(tmp.path(), "local", Some("sk-local"), Some("alpha"), |p| {
+            let key_path =
+                speedwave_runtime::compose::llm_provider_key_path_in(tmp.path(), p, "local")
+                    .unwrap();
+            restaged
+                .borrow_mut()
+                .push((p.to_string(), key_path.exists()));
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(*restaged.borrow(), vec![("alpha".to_string(), true)]);
+    }
+
+    #[test]
+    fn a_failed_restage_after_a_provider_key_change_keeps_the_key_and_is_reported() {
+        let tmp = seeded_config_tempdir_with_local_model("llama");
+
+        let restage_error =
+            set_llm_provider_key_then(tmp.path(), "local", Some("sk-local"), None, |_| {
+                Err("engine did not answer".to_string())
+            })
+            .unwrap();
+
+        assert_eq!(restage_error, Some("engine did not answer".to_string()));
+        let path =
+            speedwave_runtime::compose::llm_provider_key_path_in(tmp.path(), "alpha", "local")
+                .unwrap();
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn a_refused_provider_key_change_is_not_restaged() {
+        let tmp = seeded_config_tempdir_with_local_model("llama");
+        let restaged = std::cell::Cell::new(false);
+
+        let err =
+            set_llm_provider_key_then(tmp.path(), "local", Some("sk-local"), Some("beta"), |_| {
+                restaged.set(true);
+                Ok(())
+            })
+            .unwrap_err();
+
+        assert!(err.contains("not 'beta'"), "{err}");
+        assert!(!restaged.get());
+    }
+
+    #[test]
     fn a_provider_key_for_the_active_project_is_written_and_flagged() {
         let tmp = seeded_config_tempdir_with_local_model("llama");
 
-        set_llm_provider_key_in(tmp.path(), "local", Some("sk-local"), Some("alpha")).unwrap();
+        let changed =
+            set_llm_provider_key_in(tmp.path(), "local", Some("sk-local"), Some("alpha")).unwrap();
 
+        assert_eq!(changed, "alpha");
         let path =
             speedwave_runtime::compose::llm_provider_key_path_in(tmp.path(), "alpha", "local")
                 .unwrap();

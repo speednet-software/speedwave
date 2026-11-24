@@ -2466,7 +2466,7 @@ pub fn generate_plugin_service(
     plugin_dir: &Path,
     project_name: &str,
     network_name: &str,
-    tokens_dir: &Path,
+    tokens_source: &str,
     project_dir: &str,
 ) -> anyhow::Result<serde_yaml_ng::Value> {
     let sid = manifest
@@ -2489,8 +2489,6 @@ pub fn generate_plugin_service(
         TokenMount::ReadWrite { .. } => "rw",
     };
 
-    let tokens_path =
-        crate::engine_path::vm_path_join(&crate::engine_path::to_engine_path(tokens_dir)?, sid);
     let workspace_path = crate::engine_path::to_engine_path(Path::new(project_dir))?;
     let mem_limit = manifest
         .mem_limit
@@ -2527,7 +2525,7 @@ security_opt:
 tmpfs:
   - /tmp:noexec,nosuid,size={plugin_tmpfs}
 volumes:
-  - {tokens_path}:/tokens:{token_mount_mode}
+  - {tokens_source}:/tokens:{token_mount_mode}
   - {workspace_path}:/workspace:rw
 environment:
 {env_lines}
@@ -2544,7 +2542,7 @@ deploy:
         tag = tag,
         container_name = container_name,
         user = user,
-        tokens_path = tokens_path,
+        tokens_source = tokens_source,
         token_mount_mode = token_mount_mode,
         workspace_path = workspace_path,
         env_lines = env_lines,
@@ -3086,14 +3084,14 @@ mod tests {
             oauth: None,
         };
 
-        let tokens_dir = PathBuf::from("/home/user/.speedwave/tokens/myproject");
+        let tokens_source = "/run/speedwave-secrets/proj/mcp-example/tokens";
         let result = generate_plugin_service(
             &manifest,
             "f00ddeadbeefcafe0123456789abcdef",
             Path::new("/nonexistent/plugins/example-plugin"),
             "myproject",
             "speedwave_myproject_network",
-            &tokens_dir,
+            tokens_source,
             "/home/user/projects/myproject",
         )
         .unwrap();
@@ -3123,7 +3121,7 @@ mod tests {
             "default tmpfs from PLUGIN_DEFAULT_TMPFS: {yaml}"
         );
         assert!(
-            yaml.contains("/home/user/.speedwave/tokens/myproject/example-plugin:/tokens:ro"),
+            yaml.contains(&format!("{tokens_source}:/tokens:ro")),
             "token mount: {yaml}"
         );
         assert!(yaml.contains("/workspace:rw"), "workspace mount: {yaml}");
@@ -3173,14 +3171,14 @@ mod tests {
             oauth: None,
         };
 
-        let tokens_dir = PathBuf::from("/home/user/.speedwave/tokens/proj");
+        let tokens_source = "/run/speedwave-secrets/proj/mcp-example/tokens";
         let result = generate_plugin_service(
             &manifest,
             "f00ddeadbeefcafe0123456789abcdef",
             Path::new("/nonexistent/plugins/sp-ext"),
             "proj",
             "speedwave_proj_network",
-            &tokens_dir,
+            tokens_source,
             "/test/project",
         )
         .unwrap();
@@ -3218,14 +3216,14 @@ mod tests {
             oauth: None,
         };
 
-        let tokens_dir = PathBuf::from("/tokens");
+        let tokens_source = "/run/speedwave-secrets/proj/mcp-example/tokens";
         let result = generate_plugin_service(
             &manifest,
             "f00ddeadbeefcafe0123456789abcdef",
             Path::new("/nonexistent/plugins/test-env"),
             "proj",
             "net",
-            &tokens_dir,
+            tokens_source,
             "/test/project",
         )
         .unwrap();
@@ -4791,14 +4789,14 @@ mod tests {
             oauth: None,
         };
 
-        let tokens_dir = PathBuf::from("/tokens");
+        let tokens_source = "/run/speedwave-secrets/proj/mcp-example/tokens";
         let result = generate_plugin_service(
             &manifest,
             "f00ddeadbeefcafe0123456789abcdef",
             Path::new("/nonexistent/plugins/test-special"),
             "proj",
             "net",
-            &tokens_dir,
+            tokens_source,
             "/test/project",
         )
         .unwrap();
@@ -5037,14 +5035,14 @@ mod tests {
             oauth: None,
         };
 
-        let tokens_dir = PathBuf::from("/home/user/.speedwave/tokens/proj");
+        let tokens_source = "/run/speedwave-secrets/proj/mcp-example/tokens";
         let result = generate_plugin_service(
             &manifest,
             "f00ddeadbeefcafe0123456789abcdef",
             Path::new("/nonexistent/plugins/heavy"),
             "proj",
             "speedwave_proj_network",
-            &tokens_dir,
+            tokens_source,
             "/home/user/projects/proj",
         )
         .unwrap();

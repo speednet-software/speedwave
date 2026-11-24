@@ -1002,9 +1002,8 @@ fn main() -> anyhow::Result<()> {
         log::warn!("Failed to list installed plugins: {e}");
         Vec::new()
     });
-    let expected_paths =
-        compose::SecurityExpectedPaths::compute(&project_name, &project_dir.to_string_lossy())?
-            .with_telemetry_locked(resolved.telemetry.any_locked);
+    let expected_paths = compose::SecurityExpectedPaths::compute(&project_dir.to_string_lossy())?
+        .with_telemetry_locked(resolved.telemetry.any_locked);
 
     let prereq_violations = speedwave_runtime::os_prereqs::check_os_prereqs();
 
@@ -1909,7 +1908,7 @@ mod tests {
             "id-1",
             vec![consts::CLAUDE_BINARY.to_string(), "--flag".to_string()],
         );
-        assert_eq!(argv[0], "env");
+        assert_eq!(argv[0], consts::SPEEDWAVE_EXEC_WRAPPER);
         assert_eq!(
             argv[1],
             format!("{}=id-1", speedwave_runtime::session::SESSION_INSTANCE_ENV)
