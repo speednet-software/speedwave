@@ -8,13 +8,11 @@ import {
   jsonResult,
   errorResult,
   notConfiguredMessage,
-  teachingErrorResult,
   READ_ONLY_ANNOTATIONS,
   META_KEYS,
 } from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
-import { TOOL_NAMES } from '../tool-names.js';
-import { withRedmineErrors } from './error-handling.js';
+import { withRedmineErrors, withTargetProject } from './error-handling.js';
 import { successResultSchema } from './schema-helpers.js';
 
 const listProjectIdsTool: Tool = {
@@ -306,16 +304,7 @@ export function createProjectTools(client: RedmineClient | null): ToolDefinition
       tool: listVersionsTool,
       handler: async (params) => {
         const { project_id } = params as { project_id?: string | number };
-        const target = project_id || client.getProjectScope();
-        if (!target) {
-          return teachingErrorResult({
-            paramName: 'project_id',
-            received: project_id,
-            correctValueTool: TOOL_NAMES.LIST_PROJECT_IDS,
-            nextStep: 'No default project is configured, so pass project_id explicitly.',
-          });
-        }
-        return withRedmineErrors({ project_id: target }, async () => {
+        return withTargetProject(client, project_id, async (target) => {
           const result = await client.listVersions(target);
           return jsonResult({ versions: result.versions, total_count: result.total_count });
         });

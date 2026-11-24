@@ -15,32 +15,39 @@ import { createUserTools } from './user-tools.js';
 import { createProjectTools } from './project-tools.js';
 import { createRelationTools } from './relation-tools.js';
 import { createConfigTools } from './config-tools.js';
-
-function isNumericIdType(type: unknown): boolean {
-  return (
-    type === 'number' ||
-    (Array.isArray(type) && type.length === 2 && type.includes('number') && type.includes('null'))
-  );
-}
+import { createCategoryTools } from './category-tools.js';
 
 function withNumericIds(tool: Tool, handler: ToolHandler): ToolHandler {
-  const ids = Object.entries(tool.inputSchema.properties)
-    .filter(
-      ([name, schema]) =>
-        name.endsWith('_id') && isNumericIdType((schema as { type?: unknown }).type)
-    )
-    .map(([name]) => name);
+  const { ids, nullable } = numericIdParams(tool);
   return async (params, ...rest) => {
-    const normalized = normalizeNumericIdParams(
-      params,
-      ids.filter((name) => params[name] !== null)
-    );
+    const checked = ids.filter((name) => !(nullable.has(name) && params[name] === null));
+    const normalized = normalizeNumericIdParams(params, checked);
     if (!normalized.ok) {
       const { paramName, nextStep } = normalized.error;
       return teachingErrorResult({ paramName, nextStep });
     }
     return handler(normalized.value, ...rest);
   };
+}
+
+function numericIdParams(tool: Tool): { ids: string[]; nullable: Set<string> } {
+  const ids: string[] = [];
+  const nullable = new Set<string>();
+  for (const [name, schema] of Object.entries(tool.inputSchema.properties)) {
+    if (!name.endsWith('_id')) continue;
+    const type = (schema as { type?: unknown }).type;
+    if (type === 'number') ids.push(name);
+    if (
+      Array.isArray(type) &&
+      type.length === 2 &&
+      type.includes('number') &&
+      type.includes('null')
+    ) {
+      ids.push(name);
+      nullable.add(name);
+    }
+  }
+  return { ids, nullable };
 }
 
 function withoutAliasConflicts(tool: Tool, handler: ToolHandler): ToolHandler {
@@ -74,6 +81,7 @@ export function createToolDefinitions(client: RedmineClient | null): ToolDefinit
     ...createJournalTools(client),
     ...createUserTools(client),
     ...createProjectTools(client),
+    ...createCategoryTools(client),
     ...createRelationTools(client),
     ...createConfigTools(client),
   ].map(({ tool, handler }) => ({

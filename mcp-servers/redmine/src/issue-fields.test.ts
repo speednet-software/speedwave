@@ -38,6 +38,7 @@ describe('buildIssuePayload', () => {
       status_id: 2,
       priority_id: 3,
       assigned_to_id: 4,
+      category_id: 7,
       fixed_version_id: 5,
       parent_issue_id: 6,
       start_date: '2026-11-24',
@@ -60,6 +61,7 @@ describe('buildIssuePayload', () => {
       status_id: 2,
       priority_id: 3,
       assigned_to_id: 4,
+      category_id: 7,
       fixed_version_id: 5,
       parent_issue_id: 6,
       start_date: '2026-11-24',
@@ -122,13 +124,17 @@ describe('buildIssuePayload', () => {
     expect(payload).toEqual({ description: expected, notes: expected });
   });
 
-  it.each(['description', 'assigned_to_id', 'fixed_version_id', 'start_date', 'estimated_hours'])(
-    'clears the clearable field %s with null',
-    (name) => {
-      const payload = payloadOf({ [name]: null }, 'update');
-      expect(payload).toEqual({ [name]: name === 'description' ? '' : null });
-    }
-  );
+  it.each([
+    'description',
+    'assigned_to_id',
+    'category_id',
+    'fixed_version_id',
+    'start_date',
+    'estimated_hours',
+  ])('clears the clearable field %s with null', (name) => {
+    const payload = payloadOf({ [name]: null }, 'update');
+    expect(payload).toEqual({ [name]: name === 'description' ? '' : null });
+  });
 
   it.each(['subject', 'tracker_id', 'done_ratio', 'is_private', 'notes', 'private_notes'])(
     'rejects null for the non-clearable field %s and names it',
@@ -300,6 +306,7 @@ describe('issueFilterProperties', () => {
         'assigned_to_id',
         'tracker_id',
         'priority_id',
+        'category_id',
         'fixed_version_id',
         'parent_id',
         'start_date',
@@ -382,6 +389,7 @@ describe('ignoredFields', () => {
     priority: { id: 3, name: 'Normal' },
     assigned_to: { id: 4, name: 'U' },
     fixed_version: { id: 5, name: 'V' },
+    category: { id: 7, name: 'C' },
     parent: { id: 6 },
     start_date: '2026-11-24',
     due_date: '2026-12-01',
@@ -405,6 +413,7 @@ describe('ignoredFields', () => {
           status_id: 2,
           priority_id: 3,
           assigned_to_id: 4,
+          category_id: 7,
           fixed_version_id: 5,
           parent_issue_id: 6,
           start_date: '2026-11-24',

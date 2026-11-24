@@ -6,6 +6,8 @@ import {
   metaValue,
   WORKSPACE_WRITE_ANNOTATIONS,
   DESTRUCTIVE_ANNOTATIONS,
+  WRITE_ANNOTATIONS,
+  READ_ONLY_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
 
 const ALL_TOOLS: Tool[] = createToolDefinitions(null).map((td) => td.tool);
@@ -33,6 +35,11 @@ const EXPECTED_TOOL_NAMES = [
   'getProjectFull',
   'searchProjectIds',
   'listVersions',
+  'listCategories',
+  'getCategory',
+  'createCategory',
+  'updateCategory',
+  'deleteCategory',
   'listRelations',
   'createRelation',
   'deleteRelation',
@@ -41,8 +48,8 @@ const EXPECTED_TOOL_NAMES = [
 ];
 
 describe('Redmine tool metadata', () => {
-  it('exports exactly 27 tools', () => {
-    expect(ALL_TOOLS).toHaveLength(27);
+  it('exports exactly 32 tools', () => {
+    expect(ALL_TOOLS).toHaveLength(32);
   });
 
   it('exports all expected tool names', () => {
@@ -126,6 +133,8 @@ describe('Redmine tool metadata', () => {
         'updateIssue',
         'listTimeEntries',
         'createTimeEntry',
+        'createCategory',
+        'updateCategory',
         'resolveUser',
         'getCurrentUser',
       ]);
@@ -173,6 +182,8 @@ const READ_ONLY_TOOL_NAMES = [
   'getProjectFull',
   'searchProjectIds',
   'listVersions',
+  'listCategories',
+  'getCategory',
   'listRelations',
   'getMappings',
   'getConfig',
@@ -192,6 +203,9 @@ const CHANGING_TOOL_NAMES = [
   'deleteJournal',
   'createRelation',
   'deleteRelation',
+  'createCategory',
+  'updateCategory',
+  'deleteCategory',
 ];
 
 describe('Redmine read-only access annotations', () => {
@@ -222,6 +236,15 @@ describe('Redmine read-only access annotations', () => {
     expect(hint('deleteAttachment')).toEqual(DESTRUCTIVE_ANNOTATIONS);
     expect(hint('addAttachment')?.destructiveHint).toBe(false);
     expect(hint('createIssue')?.destructiveHint).toBe(false);
+  });
+
+  it('marks deleteCategory destructive and the other category writers not destructive', () => {
+    const hint = (name: string) => tools.find((t) => t.name === name)?.annotations;
+    expect(hint('deleteCategory')).toEqual(DESTRUCTIVE_ANNOTATIONS);
+    expect(hint('createCategory')).toEqual(WRITE_ANNOTATIONS);
+    expect(hint('updateCategory')).toEqual(WRITE_ANNOTATIONS);
+    expect(hint('listCategories')).toEqual(READ_ONLY_ANNOTATIONS);
+    expect(hint('getCategory')).toEqual(READ_ONLY_ANNOTATIONS);
   });
 
   it.each(['addAttachment', 'downloadAttachment', 'deleteAttachment', 'createIssue'])(

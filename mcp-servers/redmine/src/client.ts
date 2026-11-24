@@ -272,6 +272,7 @@ export interface RedmineIssue {
    * Assigned user (optional).
    */
   assigned_to?: { id: number; name: string };
+  category?: { id: number; name: string };
   fixed_version?: { id: number; name: string };
   /**
    * Issue title/subject.
@@ -535,6 +536,16 @@ export interface RedmineVersion {
 }
 
 /**
+ * Redmine issue category.
+ */
+export interface RedmineCategory {
+  id: number;
+  project: { id: number; name: string };
+  name: string;
+  assigned_to?: { id: number; name: string };
+}
+
+/**
  * Redmine project object.
  * @interface RedmineProject
  */
@@ -705,6 +716,9 @@ function pathSegment(value: string | number): string {
   return segment;
 }
 
+const CATEGORY_PERMISSION_DENIED =
+  'Permission denied. Creating, changing and deleting issue categories needs the Redmine permission "Manage issue categories" (manage_categories) in the category\'s project, and this API key\'s user does not have it there. Have a Redmine administrator grant it, or use an account that has it.';
+
 /** Attempted resource identifier(s) surfaced in an error message, e.g. `{ issue_id: 12345 }`. */
 export type ErrorContext = Record<string, string | number>;
 
@@ -717,6 +731,7 @@ const NOT_FOUND_RECOVERY_HINTS: Record<string, string> = {
   relation_id: `Verify the relation ID with ${TOOL_NAMES.LIST_RELATIONS}(issue_id).`,
   attachment_id: `Verify the attachment ID with ${TOOL_NAMES.GET_ISSUE_FULL}(issue_id, include ["attachments"]).`,
   time_entry_id: `Verify the time entry ID with ${TOOL_NAMES.LIST_TIME_ENTRIES}.`,
+  category_id: `Verify the category ID with ${TOOL_NAMES.LIST_CATEGORIES}(project_id).`,
 };
 
 /**
@@ -781,6 +796,8 @@ function formatValidationError(errors: unknown, context?: ErrorContext): string 
     names(ASSIGNEE_HINT_PREFIXES) && 'Call resolveUser or listUsers to find a valid assignee.',
     (context?.fixed_version_id !== undefined || names(['target version'])) &&
       `If the error is about the target version, call ${TOOL_NAMES.LIST_VERSIONS} and pick a version whose status is open.`,
+    names(['category']) &&
+      `If the error is about the category, call ${TOOL_NAMES.LIST_CATEGORIES} for the issue's project and pick one of its categories.`,
     names(MAPPABLE_FIELDS) && 'Call getMappings for valid values in this project.',
   ].filter((hint): hint is string => typeof hint === 'string');
   return hints.length > 0 ? `${prefixed}. ${hints.join(' ')}` : prefixed;
@@ -1425,13 +1442,113 @@ export class RedmineClient {
     projectId: string | number
   ): Promise<{ versions: RedmineVersion[]; total_count: number }> {
     const target = String(projectId);
+    await this._ensureProjectInScope(target);
+    const response = await this.client.get(`/projects/${pathSegment(target)}/versions.json`);
+    const versions = (response.data.versions ?? []) as RedmineVersion[];
+    return { versions, total_count: response.data.total_count ?? versions.length };
+  }
+
+  /**
+   * List the issue categories of a project.
+   * @param projectId - Project ID or identifier.
+   */
+  async listCategories(
+    projectId: string | number
+  ): Promise<{ categories: RedmineCategory[]; total_count: number }> {
+    const target = String(projectId);
+    await this._ensureProjectInScope(target);
+    const response = await this.client.get(
+      `/projects/${pathSegment(target)}/issue_categories.json`
+    );
+    const categories = (response.data.issue_categories ?? []) as RedmineCategory[];
+    return { categories, total_count: response.data.total_count ?? categories.length };
+  }
+
+  /**
+   * Get one issue category by ID.
+   * @param categoryId - The category ID.
+   */
+  async showCategory(categoryId: number): Promise<RedmineCategory> {
+    const response = await this.client.get(`/issue_categories/${pathSegment(categoryId)}.json`);
+    return response.data.issue_category;
+  }
+
+  /**
+   * Create an issue category in a project.
+   * @param projectId - Project ID or identifier.
+   * @param options - Category fields.
+   * @param options.name - Category name.
+   * @param options.assigned_to_id - Default assignee user ID.
+   */
+  async createCategory(
+    projectId: string | number,
+    options: { name: string; assigned_to_id?: number }
+  ): Promise<RedmineCategory> {
+    const target = String(projectId);
+    await this._ensureProjectInScope(target);
+    const issue_category: { name: string; assigned_to_id?: number } = { name: options.name };
+    if (options.assigned_to_id) issue_category.assigned_to_id = options.assigned_to_id;
+    const response = await this._asCategoryManager(() =>
+      this.client.post(`/projects/${pathSegment(target)}/issue_categories.json`, {
+        issue_category,
+      })
+    );
+    return response.data.issue_category;
+  }
+
+  /**
+   * Update an issue category by ID.
+   * @param categoryId - The category ID.
+   * @param options - Fields to change.
+   * @param options.name - New category name.
+   * @param options.assigned_to_id - New default assignee user ID.
+   */
+  async updateCategory(
+    categoryId: number,
+    options: { name?: string; assigned_to_id?: number | null }
+  ): Promise<void> {
+    const issue_category: { name?: string; assigned_to_id?: number | null } = {};
+    if (options.name !== undefined) issue_category.name = options.name;
+    if (options.assigned_to_id !== undefined)
+      issue_category.assigned_to_id = options.assigned_to_id;
+    if (Object.keys(issue_category).length === 0) {
+      throw new Error(
+        `Nothing to update on category ${categoryId}: no field was given, so no request was sent to Redmine. Pass name or assigned_to_id.`
+      );
+    }
+    await this._asCategoryManager(() =>
+      this.client.put(`/issue_categories/${pathSegment(categoryId)}.json`, { issue_category })
+    );
+  }
+
+  /**
+   * Delete an issue category by ID.
+   * @param categoryId - The category ID.
+   * @param reassignToId - Category that takes over the issues.
+   */
+  async deleteCategory(categoryId: number, reassignToId?: number): Promise<void> {
+    const params = reassignToId === undefined ? {} : { reassign_to_id: reassignToId };
+    await this._asCategoryManager(() =>
+      this.client.delete(`/issue_categories/${pathSegment(categoryId)}.json`, { params })
+    );
+  }
+
+  private async _asCategoryManager<T>(request: () => Promise<T>): Promise<T> {
+    try {
+      return await request();
+    } catch (error) {
+      if (axios.isAxiosError(error) && error.response?.status === 403) {
+        throw new Error(CATEGORY_PERMISSION_DENIED);
+      }
+      throw error;
+    }
+  }
+
+  private async _ensureProjectInScope(target: string): Promise<void> {
     const scope = this.getProjectScope();
     if (scope && target !== scope && !(await this._namesScopedProject(scope, target))) {
       throw new ProjectScopeError(scope, target);
     }
-    const response = await this.client.get(`/projects/${pathSegment(target)}/versions.json`);
-    const versions = (response.data.versions ?? []) as RedmineVersion[];
-    return { versions, total_count: response.data.total_count ?? versions.length };
   }
 
   private async _namesScopedProject(scope: string, target: string): Promise<boolean> {

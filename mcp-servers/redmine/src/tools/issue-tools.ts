@@ -25,7 +25,7 @@ import {
 } from '../issue-fields.js';
 import { resolveParams } from './helpers.js';
 import { resolveAttachmentFiles } from './attachment-files.js';
-import { withRedmineErrors } from './error-handling.js';
+import { withRedmineErrors, withTargetProject } from './error-handling.js';
 import { successResultSchema } from './schema-helpers.js';
 
 /** Result shape of every ids-only issue lookup; getIssueFull takes an id from `ids`. */
@@ -63,6 +63,9 @@ async function resolveAssignedTo(
   delete resolved.assigned_to;
   return undefined;
 }
+
+const CATEGORY_NEEDS_PROJECT =
+  'category_id requires project_id: Redmine ignores the category filter on a query without a project, so no request was sent. Pass project_id, or configure the Project ID of the integration.';
 
 const NAMED_REF = {
   type: 'object',
@@ -180,6 +183,10 @@ const listIssueIdsTool: Tool = {
     {
       description: 'Partial: my open issues',
       input: { status: 'open', assigned_to: 'me' },
+    },
+    {
+      description: 'Partial: issues without a category (needs a project)',
+      input: { project_id: 'my-project', category_id: '!*' },
     },
     {
       description: 'Full: project issues with subtasks',
@@ -486,28 +493,38 @@ export function createIssueTools(client: RedmineClient | null): ToolDefinition[]
   return [
     {
       tool: listIssueIdsTool,
-      handler: async (params) =>
-        withRedmineErrors(undefined, async () => {
-          const p = params as Record<string, unknown>;
-          const specialStatuses = ['open', 'closed', '*'];
-          const statusValue = p.status as string | undefined;
-          let resolved: Record<string, unknown>;
-          if (statusValue && specialStatuses.includes(statusValue)) {
-            resolved = { ...p, status_id: statusValue };
-            delete resolved.status;
-          } else {
-            resolved = resolveParams(p, client.getMappings());
-          }
-          const assignError = await resolveAssignedTo(client, resolved);
-          if (assignError) return assignError;
-          const result = await client.listIssues(
-            resolved as Parameters<typeof client.listIssues>[0]
-          );
-          return jsonResult({
-            ids: result.issues.map((i: { id: number }) => i.id),
-            total_count: result.total_count,
+      handler: async (params) => {
+        const p = params as Record<string, unknown>;
+        const listIds = () =>
+          withRedmineErrors(undefined, async () => {
+            const specialStatuses = ['open', 'closed', '*'];
+            const statusValue = p.status as string | undefined;
+            let resolved: Record<string, unknown>;
+            if (statusValue && specialStatuses.includes(statusValue)) {
+              resolved = { ...p, status_id: statusValue };
+              delete resolved.status;
+            } else {
+              resolved = resolveParams(p, client.getMappings());
+            }
+            const assignError = await resolveAssignedTo(client, resolved);
+            if (assignError) return assignError;
+            const result = await client.listIssues(
+              resolved as Parameters<typeof client.listIssues>[0]
+            );
+            return jsonResult({
+              ids: result.issues.map((i: { id: number }) => i.id),
+              total_count: result.total_count,
+            });
           });
-        }),
+        return p.category_id
+          ? withTargetProject(
+              client,
+              p.project_id as string | undefined,
+              listIds,
+              CATEGORY_NEEDS_PROJECT
+            )
+          : listIds();
+      },
     },
     {
       tool: getIssueFullTool,

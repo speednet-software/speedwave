@@ -112,6 +112,23 @@ const ISSUE_FIELDS: readonly IssueField[] = [
     read: 'assigned_to.id',
   },
   {
+    name: 'category_id',
+    type: 'number',
+    description:
+      "Category ID, from listCategories; must belong to the issue's project. A category with a default assignee sets the assignee when none is given",
+    create: true,
+    update: true,
+    clearable: true,
+    filter: {
+      name: 'category_id',
+      syntax: 'value',
+      type: ['number', 'string'],
+      description:
+        'Category filter, ID from listCategories, or Redmine filter syntax: "5|6" (any of), "!5" (not), "!*" (no category), "*" (any). Needs project_id or a configured project',
+    },
+    read: 'category.id',
+  },
+  {
     name: 'fixed_version_id',
     type: 'number',
     description: 'Target version ID, obtained from listVersions',
