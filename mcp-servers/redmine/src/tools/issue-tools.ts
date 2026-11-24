@@ -15,10 +15,9 @@ import {
   MAX_WORKSPACE_FILES,
 } from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
-import { TOOL_NAMES } from '../tool-names.js';
 import { resolveParams } from './helpers.js';
 import { resolveAttachmentFiles } from './attachment-files.js';
-import { withRedmineErrors } from './error-handling.js';
+import { withRedmineErrors, withTargetProject } from './error-handling.js';
 import { successResultSchema } from './schema-helpers.js';
 
 /** Result shape of every ids-only issue lookup; getIssueFull takes an id from `ids`. */
@@ -56,6 +55,9 @@ async function resolveAssignedTo(
   delete resolved.assigned_to;
   return undefined;
 }
+
+const CATEGORY_NEEDS_PROJECT =
+  'category_id requires project_id: Redmine ignores the category filter on a query without a project, so no request was sent. Pass project_id, or configure the Project ID of the integration.';
 
 const NAMED_REF = {
   type: 'object',
@@ -104,7 +106,7 @@ const listIssueIdsTool: Tool = {
       category_id: {
         type: ['number', 'string'],
         description:
-          'Category filter — ID from listCategories, or Redmine filter syntax: "5|6" (any of), "!5" (not), "!*" (no category), "*" (any), ev / !ev / cf for history. Needs project_id or a configured project',
+          'Category filter, ID from listCategories, or Redmine filter syntax: "5|6" (any of), "!5" (not), "!*" (no category), "*" (any), ev / !ev / cf for history. Needs project_id or a configured project',
       },
       parent_id: {
         type: 'number',
@@ -296,7 +298,7 @@ const createIssueTool: Tool = {
       category_id: {
         type: 'number',
         description:
-          "Category ID — obtained from listCategories; must belong to the issue's project. A category with a default assignee sets the assignee when none is given",
+          "Category ID, from listCategories; must belong to the issue's project. A category with a default assignee sets the assignee when none is given",
       },
       file_paths: {
         type: 'array',
@@ -414,7 +416,7 @@ if (!updated.assigned_to || updated.assigned_to.id !== userId) {
       category_id: {
         type: ['number', 'null'],
         description:
-          "Category ID — obtained from listCategories; must belong to the issue's project. null clears the category",
+          "Category ID, from listCategories; must belong to the issue's project. null clears the category",
       },
       notes: { type: 'string', description: 'Update notes/comment' },
     },
@@ -539,36 +541,38 @@ export function createIssueTools(client: RedmineClient | null): ToolDefinition[]
   return [
     {
       tool: listIssueIdsTool,
-      handler: async (params) =>
-        withRedmineErrors(undefined, async () => {
-          const p = params as Record<string, unknown>;
-          const specialStatuses = ['open', 'closed', '*'];
-          const statusValue = p.status as string | undefined;
-          let resolved: Record<string, unknown>;
-          if (statusValue && specialStatuses.includes(statusValue)) {
-            resolved = { ...p, status_id: statusValue };
-            delete resolved.status;
-          } else {
-            resolved = resolveParams(p, client.getMappings());
-          }
-          const assignError = await resolveAssignedTo(client, resolved);
-          if (assignError) return assignError;
-          if (resolved.category_id && !(resolved.project_id || client.getProjectScope())) {
-            return teachingErrorResult({
-              paramName: 'project_id',
-              correctValueTool: TOOL_NAMES.LIST_PROJECT_IDS,
-              nextStep:
-                'category_id requires project_id: Redmine ignores the category filter on a query without a project, so no request was sent. Pass project_id, or configure the Project ID of the integration.',
+      handler: async (params) => {
+        const p = params as Record<string, unknown>;
+        const listIds = () =>
+          withRedmineErrors(undefined, async () => {
+            const specialStatuses = ['open', 'closed', '*'];
+            const statusValue = p.status as string | undefined;
+            let resolved: Record<string, unknown>;
+            if (statusValue && specialStatuses.includes(statusValue)) {
+              resolved = { ...p, status_id: statusValue };
+              delete resolved.status;
+            } else {
+              resolved = resolveParams(p, client.getMappings());
+            }
+            const assignError = await resolveAssignedTo(client, resolved);
+            if (assignError) return assignError;
+            const result = await client.listIssues(
+              resolved as Parameters<typeof client.listIssues>[0]
+            );
+            return jsonResult({
+              ids: result.issues.map((i: { id: number }) => i.id),
+              total_count: result.total_count,
             });
-          }
-          const result = await client.listIssues(
-            resolved as Parameters<typeof client.listIssues>[0]
-          );
-          return jsonResult({
-            ids: result.issues.map((i: { id: number }) => i.id),
-            total_count: result.total_count,
           });
-        }),
+        return p.category_id
+          ? withTargetProject(
+              client,
+              p.project_id as string | undefined,
+              listIds,
+              CATEGORY_NEEDS_PROJECT
+            )
+          : listIds();
+      },
     },
     {
       tool: getIssueFullTool,

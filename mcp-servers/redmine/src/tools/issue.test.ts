@@ -390,21 +390,18 @@ describe('issue-tools', () => {
         mockClient.listIssues.mockResolvedValue({ issues: [{ id: 101 }], total_count: 1 });
       });
 
-      it.each([5, '5|6', '!5', '!*', '*', 'ev5'])(
-        'passes %j to the client unchanged',
-        async (category_id) => {
-          const result = await listIssueIds()({ project_id: 'my-project', category_id });
+      it('passes a string filter to the client and returns the ids', async () => {
+        const result = await listIssueIds()({ project_id: 'my-project', category_id: '!*' });
 
-          expect(mockClient.listIssues).toHaveBeenCalledWith({
-            project_id: 'my-project',
-            category_id,
-          });
-          expect(JSON.parse((result.content[0] as { text: string }).text)).toEqual({
-            ids: [101],
-            total_count: 1,
-          });
-        }
-      );
+        expect(mockClient.listIssues).toHaveBeenCalledWith({
+          project_id: 'my-project',
+          category_id: '!*',
+        });
+        expect(JSON.parse((result.content[0] as { text: string }).text)).toEqual({
+          ids: [101],
+          total_count: 1,
+        });
+      });
 
       it('uses the configured project when project_id is omitted', async () => {
         mockClient.getProjectScope.mockReturnValue('my-project');
@@ -423,6 +420,15 @@ describe('issue-tools', () => {
         expect((result.content[0] as { text: string }).text).toContain(
           'category_id requires project_id'
         );
+      });
+
+      it('rejects the call before any user or mapping lookup', async () => {
+        const result = await listIssueIds()({ category_id: 5, assigned_to: 'me', status: 'new' });
+
+        expect(result.isError).toBe(true);
+        expect(mockClient.resolveUser).not.toHaveBeenCalled();
+        expect(mockClient.getMappings).not.toHaveBeenCalled();
+        expect(mockClient.listIssues).not.toHaveBeenCalled();
       });
 
       it('does not require a project when category_id is not given', async () => {

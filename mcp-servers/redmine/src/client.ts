@@ -534,8 +534,7 @@ export interface RedmineVersion {
 }
 
 /**
- * Redmine issue category: a project's label for issues, with an optional default assignee.
- * @interface RedmineCategory
+ * Redmine issue category.
  */
 export interface RedmineCategory {
   id: number;
@@ -1128,7 +1127,7 @@ export class RedmineClient {
    * @param options.tracker_id - Filter by tracker ID.
    * @param options.priority_id - Filter by priority ID.
    * @param options.fixed_version_id - Filter by target version ID.
-   * @param options.category_id - Filter by category, in Redmine's short filter syntax (`5`, `5|6`, `!5`, `!*`, `*`).
+   * @param options.category_id - Filter by category ID or short filter expression.
    * @param options.parent_id - Filter by parent issue ID.
    * @param options.limit - Maximum number of results (default 25).
    * @param options.offset - Pagination offset (default 0).
@@ -1236,7 +1235,7 @@ export class RedmineClient {
    * @param options.parent_issue_id - Parent issue ID (for subtasks).
    * @param options.estimated_hours - Estimated hours for completion.
    * @param options.fixed_version_id - Target version ID.
-   * @param options.category_id - Category ID; a category with a default assignee sets the assignee when none is given.
+   * @param options.category_id - Category ID.
    * @param options.files - Workspace files streamed to Redmine and attached to the new issue.
    * @throws {Error} When subject is empty or API request fails.
    */
@@ -1701,8 +1700,7 @@ export class RedmineClient {
 
   /**
    * List the issue categories of a project.
-   * @param projectId - Project ID or identifier; the configured project may be named either way.
-   * @throws {ProjectScopeError} When projectId names a project other than the configured one.
+   * @param projectId - Project ID or identifier.
    */
   async listCategories(
     projectId: string | number
@@ -1717,7 +1715,7 @@ export class RedmineClient {
   }
 
   /**
-   * Get one issue category by ID; the category's project is not checked against the configured one.
+   * Get one issue category by ID.
    * @param categoryId - The category ID.
    */
   async showCategory(categoryId: number): Promise<RedmineCategory> {
@@ -1726,12 +1724,11 @@ export class RedmineClient {
   }
 
   /**
-   * Create an issue category in a project; needs the Redmine permission "Manage issue categories".
-   * @param projectId - Project ID or identifier; the configured project may be named either way.
+   * Create an issue category in a project.
+   * @param projectId - Project ID or identifier.
    * @param options - Category fields.
-   * @param options.name - Category name, unique within the project.
-   * @param options.assigned_to_id - Default assignee for issues in this category.
-   * @throws {ProjectScopeError} When projectId names a project other than the configured one.
+   * @param options.name - Category name.
+   * @param options.assigned_to_id - Default assignee user ID.
    */
   async createCategory(
     projectId: string | number,
@@ -1750,12 +1747,11 @@ export class RedmineClient {
   }
 
   /**
-   * Update an issue category by ID; the category's project is not checked against the configured one.
+   * Update an issue category by ID.
    * @param categoryId - The category ID.
    * @param options - Fields to change.
    * @param options.name - New category name.
-   * @param options.assigned_to_id - New default assignee, or null to clear it.
-   * @throws {Error} When no field is given.
+   * @param options.assigned_to_id - New default assignee user ID, or null.
    */
   async updateCategory(
     categoryId: number,
@@ -1776,9 +1772,9 @@ export class RedmineClient {
   }
 
   /**
-   * Delete an issue category by ID; the category's project is not checked against the configured one.
+   * Delete an issue category by ID.
    * @param categoryId - The category ID.
-   * @param reassignToId - Category of the same project that takes over the issues; without it they lose their category.
+   * @param reassignToId - Category that takes over the issues.
    */
   async deleteCategory(categoryId: number, reassignToId?: number): Promise<void> {
     const params = reassignToId === undefined ? {} : { reassign_to_id: reassignToId };

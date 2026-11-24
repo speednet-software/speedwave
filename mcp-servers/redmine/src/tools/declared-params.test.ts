@@ -292,6 +292,38 @@ describe('Redmine declared-parameter guard', () => {
       expect(textOf(result)).toContain('Invalid category_id');
     });
 
+    it.each(['', -1, 'abc', 0])(
+      'rejects assigned_to_id %j on updateCategory, which only null may skip',
+      async (value) => {
+        const client = { ...createMockClient(), updateCategory: vi.fn() };
+
+        const result = await handlerFor(
+          client,
+          'updateCategory'
+        )({ category_id: 5, assigned_to_id: value });
+
+        expect(client.updateCategory).not.toHaveBeenCalled();
+        expect(textOf(result)).toContain('Invalid assigned_to_id');
+      }
+    );
+
+    it.each(['', -1, 'abc'])('rejects category_id %j on updateIssue', async (value) => {
+      const client = createMockClient();
+
+      const result = await handlerFor(client, 'updateIssue')({ issue_id: 5, category_id: value });
+
+      expect(client.updateIssue).not.toHaveBeenCalled();
+      expect(textOf(result)).toContain('Invalid category_id');
+    });
+
+    it('turns a digit-string category_id on updateIssue into a number', async () => {
+      const client = createMockClient();
+
+      await handlerFor(client, 'updateIssue')({ issue_id: 5, category_id: '7' });
+
+      expect(client.updateIssue).toHaveBeenCalledWith(5, { issue_id: 5, category_id: 7 });
+    });
+
     it('rejects a path-traversal category_id on deleteCategory before the client', async () => {
       const client = { ...createMockClient(), deleteCategory: vi.fn() };
 

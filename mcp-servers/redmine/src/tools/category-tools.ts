@@ -1,7 +1,3 @@
-/**
- * Category Tools - 5 tools for Redmine issue category operations
- */
-
 import {
   Tool,
   ToolDefinition,
@@ -31,8 +27,7 @@ const CATEGORY_PROPERTIES = {
 
 const PROJECT_ID_PROPERTY = {
   type: ['string', 'number'],
-  description:
-    'Project ID or identifier — obtained from listProjectIds; defaults to the configured project',
+  description: 'Project ID or identifier, from listProjectIds; defaults to the configured project',
 };
 
 const MANAGE_CATEGORIES_NOTE =
@@ -73,7 +68,7 @@ const getCategoryTool: Tool = {
     properties: {
       category_id: {
         type: 'number',
-        description: 'Category ID — obtained from listCategories',
+        description: 'Category ID, from listCategories',
       },
     },
     required: ['category_id'],
@@ -100,7 +95,7 @@ const createCategoryTool: Tool = {
       name: { type: 'string', description: 'Category name, unique within the project' },
       assigned_to_id: {
         type: 'number',
-        description: 'Default assignee user ID — obtained from resolveUser or listUsers',
+        description: 'Default assignee user ID, from resolveUser or listUsers',
       },
     },
     required: ['name'],
@@ -131,7 +126,7 @@ const updateCategoryTool: Tool = {
     properties: {
       category_id: {
         type: 'number',
-        description: 'Category ID — obtained from listCategories',
+        description: 'Category ID, from listCategories',
       },
       name: { type: 'string', description: 'New category name' },
       assigned_to_id: {
@@ -163,7 +158,7 @@ const deleteCategoryTool: Tool = {
     properties: {
       category_id: {
         type: 'number',
-        description: 'Category ID to delete — obtained from listCategories',
+        description: 'Category ID to delete, from listCategories',
       },
       reassign_to_id: {
         type: 'number',
@@ -187,7 +182,7 @@ const deleteCategoryTool: Tool = {
 };
 
 /**
- * Tool handler function.
+ * Create the category tools.
  * @param client - Redmine client instance
  */
 export function createCategoryTools(client: RedmineClient | null): ToolDefinition[] {
