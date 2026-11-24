@@ -737,6 +737,41 @@ mod tests {
     }
 
     #[test]
+    fn diagnostics_zip_never_includes_the_secret_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("diag-secret-store.zip");
+
+        let log_dir = tmp.path().join("logs");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        std::fs::write(
+            log_dir.join("app.log"),
+            "2026-11-13T11:00:00.000+00:00 normal log\n",
+        )
+        .unwrap();
+        std::fs::write(log_dir.join("slack.token.enc"), "STORE-SENTINEL-sealed").unwrap();
+        std::fs::write(log_dir.join("secret-store.key"), "STORE-SENTINEL-key").unwrap();
+        let secrets_dir = tmp.path().join("secrets").join("proj");
+        std::fs::create_dir_all(&secrets_dir).unwrap();
+        std::fs::write(secrets_dir.join("slack.token.enc"), "STORE-SENTINEL-sealed").unwrap();
+
+        let mut input = empty_input();
+        input.log_dir = Some(log_dir);
+        build_zip(&zip_path, &input).unwrap();
+
+        let names = zip_entry_names(&zip_path);
+        assert!(
+            !names
+                .iter()
+                .any(|n| n.contains("secret") || n.ends_with(".enc") || n.ends_with(".key")),
+            "ZIP must never contain secret store entries: {names:?}"
+        );
+        assert!(
+            !all_entries_text(&zip_path).contains("STORE-SENTINEL"),
+            "ZIP must never carry secret store content"
+        );
+    }
+
+    #[test]
     fn diagnostics_zip_never_includes_tokens_directory() {
         let tmp = tempfile::tempdir().unwrap();
         let zip_path = tmp.path().join("diag-tokens.zip");
