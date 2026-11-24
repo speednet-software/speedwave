@@ -18,6 +18,7 @@ describe('SecretStoreNoticeComponent', () => {
     fixture = TestBed.createComponent(SecretStoreNoticeComponent);
     fixture.detectChanges();
     await fixture.whenStable();
+    await new Promise((resolve) => setTimeout(resolve, 0));
     fixture.detectChanges();
   }
 

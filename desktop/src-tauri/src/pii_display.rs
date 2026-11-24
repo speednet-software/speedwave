@@ -457,6 +457,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         speedwave_runtime::pii_key::ensure_project_key_in(tmp.path(), "proj").unwrap();
         let policy_path = speedwave_runtime::pii_policy::policy_config_path_in(tmp.path(), "proj");
+        std::fs::create_dir_all(policy_path.parent().unwrap()).unwrap();
         std::fs::write(
             &policy_path,
             r#"{"version":3,"source":{"policies":[],"forced":[]},"rules":[],"keywords":[{"match":"coca-cola","alias":"Brandex","caseSensitive":false}]}"#,

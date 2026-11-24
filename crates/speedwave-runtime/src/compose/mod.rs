@@ -25,8 +25,8 @@ mod workers;
 
 pub(crate) use proxy::enabled_git_forge_kinds_in;
 pub use proxy::{
-    proxy_config_dir_in, remove_llm_provider_key_in, render_proxy_config, spw_key_env_name,
-    write_llm_provider_key_in, PROXY_BASE_URL, PROXY_CALLER_AUTH_HEADER, PROXY_PORT,
+    remove_llm_provider_key_in, render_proxy_config, spw_key_env_name, write_llm_provider_key_in,
+    PROXY_BASE_URL, PROXY_CALLER_AUTH_HEADER, PROXY_PORT,
 };
 
 pub use pii_ner::{
@@ -6301,10 +6301,6 @@ services:
         );
 
         assert!(
-            data_dir.path().join("proxy").join("test-project").is_dir(),
-            "proxy state dir must be created"
-        );
-        assert!(
             data_dir
                 .path()
                 .join("usage")
@@ -8224,11 +8220,6 @@ services:
             mode_of(&data_dir.path().join("ide-bridge")),
             0o700,
             "ide_lock_dir must be owner-only"
-        );
-        assert_eq!(
-            mode_of(&proxy::proxy_config_dir_in(data_dir.path(), "test-project")),
-            0o700,
-            "proxy_config_dir must be owner-only"
         );
         assert_eq!(
             mode_of(

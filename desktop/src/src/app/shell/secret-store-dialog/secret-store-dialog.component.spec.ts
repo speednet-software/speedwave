@@ -40,6 +40,7 @@ describe('SecretStoreDialogComponent', () => {
 
   async function settle(): Promise<void> {
     await fixture.whenStable();
+    await new Promise((resolve) => setTimeout(resolve, 0));
     fixture.detectChanges();
   }
 

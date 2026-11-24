@@ -292,30 +292,34 @@ mod tests {
         assert!(!may_hold_ciphertext(&secrets).unwrap());
     }
 
-    #[cfg(unix)]
+    #[cfg(windows)]
+    fn unpaired_surrogate_name(prefix: &str, suffix: &str) -> std::ffi::OsString {
+        use std::os::windows::ffi::OsStringExt;
+        let wide: Vec<u16> = prefix
+            .encode_utf16()
+            .chain(std::iter::once(0xD800))
+            .chain(suffix.encode_utf16())
+            .collect();
+        std::ffi::OsString::from_wide(&wide)
+    }
+
+    #[cfg(windows)]
     #[test]
     fn may_hold_ciphertext_is_true_for_a_non_utf8_project_dir() {
-        use std::os::unix::ffi::OsStrExt;
         let tmp = tempfile::tempdir().unwrap();
         let secrets = tmp.path().join("secrets");
         std::fs::create_dir_all(&secrets).unwrap();
-        let odd = secrets.join(std::ffi::OsStr::from_bytes(b"pro\xffject"));
-        std::fs::create_dir(&odd).unwrap();
+        std::fs::create_dir(secrets.join(unpaired_surrogate_name("pro", "ject"))).unwrap();
         assert!(may_hold_ciphertext(&secrets).unwrap());
     }
 
-    #[cfg(unix)]
+    #[cfg(windows)]
     #[test]
     fn may_hold_ciphertext_is_true_for_a_non_utf8_enc_name() {
-        use std::os::unix::ffi::OsStrExt;
         let tmp = tempfile::tempdir().unwrap();
         let secrets = tmp.path().join("secrets");
         let dir = project_dir(tmp.path());
-        std::fs::write(
-            dir.join(std::ffi::OsStr::from_bytes(b"sl\xffck.token.enc")),
-            "x",
-        )
-        .unwrap();
+        std::fs::write(dir.join(unpaired_surrogate_name("sl", "ck.token.enc")), "x").unwrap();
         assert!(may_hold_ciphertext(&secrets).unwrap());
     }
 

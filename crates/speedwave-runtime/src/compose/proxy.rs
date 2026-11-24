@@ -6,7 +6,7 @@ use crate::git_allowlist::{enforced_entries, forge_host_in, GitForgeService};
 use crate::secret_store::{SecretName, SecretStore};
 use serde::Serialize;
 use speedwave_access_policy::{AccessMode, AccessPolicy};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Serialize)]
 #[serde(untagged)]
@@ -185,11 +185,6 @@ pub fn spw_key_env_name(provider_id: &str) -> String {
         "SPW_KEY_{}",
         provider_id.to_ascii_uppercase().replace('-', "_")
     )
-}
-
-/// Per-project proxy state dir: `<data_dir>/proxy/<project>/`.
-pub fn proxy_config_dir_in(data_dir: &Path, project: &str) -> PathBuf {
-    data_dir.join("proxy").join(project)
 }
 
 /// Header carrying the per-project caller secret; mirror of the proxy's
@@ -447,9 +442,7 @@ mod tests {
         assert_eq!(t1.len(), 64);
         assert!(t1.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(t1, caller_token_in(dir.path(), "other").unwrap());
-        assert!(!proxy_config_dir_in(dir.path(), "proj")
-            .join("caller-token")
-            .exists());
+        assert!(!dir.path().join("proxy").join("proj").exists());
         assert!(caller_token_in(dir.path(), "../evil").is_err());
     }
 
@@ -482,7 +475,7 @@ mod tests {
 
     #[test]
     fn render_proxy_config_writes_no_proxy_json_and_no_caller_token_file() {
-        fn files_named(dir: &Path, name: &str, found: &mut Vec<PathBuf>) {
+        fn files_named(dir: &Path, name: &str, found: &mut Vec<std::path::PathBuf>) {
             for entry in std::fs::read_dir(dir).unwrap() {
                 let path = entry.unwrap().path();
                 if path.is_dir() {
