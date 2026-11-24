@@ -37,30 +37,6 @@ pub(crate) struct PluginsResponse {
     pub(crate) plugins: Vec<PluginStatusEntry>,
 }
 
-fn token_dir_for(project: &str, service_id: &str) -> Result<std::path::PathBuf, String> {
-    plugin::token_dir(project, service_id).map_err(|e| e.to_string())
-}
-
-#[cfg(test)]
-fn token_dir_for_in(
-    data_dir: &std::path::Path,
-    project: &str,
-    service_id: &str,
-) -> std::path::PathBuf {
-    plugin::token_dir_in(data_dir, project, service_id)
-}
-
-fn field_has_stored_value(path: &std::path::Path) -> bool {
-    match std::fs::metadata(path) {
-        Ok(m) => m.len() > 0,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-        Err(e) => {
-            log::warn!("could not stat credential file {}: {e}", path.display());
-            false
-        }
-    }
-}
-
 fn instructions_for_ui(verified: bool, instructions: Option<&str>) -> Option<String> {
     if !verified {
         return None;
@@ -140,9 +116,10 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
 
         let auth_fields: Vec<plugin::AuthFieldDef> = manifest.auth_fields.clone();
 
-        let svc_token_dir = token_dir_for(&project, sid)?;
-        let configured = is_plugin_configured(
-            &svc_token_dir,
+        let data_dir = consts::data_dir();
+        let svc_token_dir = plugin::token_dir_in(data_dir, &project, sid);
+        let configured = is_plugin_configured_in(
+            data_dir,
             &manifest.auth_fields,
             &manifest.requires_integrations,
             &project,
@@ -156,7 +133,7 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
         };
         let oauth_authorized = oauth_expires_at.is_some();
         let seed_keys = if has_oauth {
-            oauth_seed_keys(&project, sid)
+            plugin::oauth_seed_keys_in(data_dir, &project, sid, &manifest.auth_fields)
         } else {
             std::collections::HashSet::new()
         };
@@ -170,14 +147,13 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
                 }
                 continue;
             }
-            let path = svc_token_dir.join(&field.key);
-            if field_has_stored_value(&path) {
+            if plugin::plugin_credential_present_in(data_dir, &project, sid, field) {
                 configured_fields.push(field.key.clone());
             }
             if field.is_secret {
                 continue;
             }
-            if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Ok(content) = std::fs::read_to_string(svc_token_dir.join(&field.key)) {
                 let trimmed = content.trim().to_string();
                 if !trimmed.is_empty() {
                     current_values.insert(field.key.clone(), trimmed);
@@ -239,43 +215,8 @@ fn plugin_oauth_authorized_in(data_dir: &std::path::Path, project: &str, slug: &
     plugin_oauth_expires_at_in(data_dir, project, slug).is_some()
 }
 
-fn oauth_seed_keys(project: &str, slug: &str) -> std::collections::HashSet<String> {
-    oauth_seed_keys_in(speedwave_runtime::consts::data_dir(), project, slug)
-}
-
-fn oauth_seed_keys_in(
-    data_dir: &std::path::Path,
-    project: &str,
-    slug: &str,
-) -> std::collections::HashSet<String> {
-    let path = speedwave_runtime::plugin::oauth_seed_file_in(data_dir, project, slug);
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|b| serde_json::from_str::<HashMap<String, String>>(&b).ok())
-        .map(|m| m.into_keys().collect())
-        .unwrap_or_default()
-}
-
-fn is_plugin_configured(
-    svc_token_dir: &std::path::Path,
-    auth_fields: &[plugin::AuthFieldDef],
-    requires_integrations: &[String],
-    project: &str,
-    slug: &str,
-) -> bool {
-    is_plugin_configured_in(
-        speedwave_runtime::consts::data_dir(),
-        svc_token_dir,
-        auth_fields,
-        requires_integrations,
-        project,
-        slug,
-    )
-}
-
 fn is_plugin_configured_in(
     data_dir: &std::path::Path,
-    svc_token_dir: &std::path::Path,
     auth_fields: &[plugin::AuthFieldDef],
     requires_integrations: &[String],
     project: &str,
@@ -286,21 +227,8 @@ fn is_plugin_configured_in(
         return false;
     }
 
-    let secret_fields: Vec<_> = auth_fields
-        .iter()
-        .filter(|f| plugin::blocks_plugin_readiness(f) && !f.oauth_flow)
-        .collect();
-    if !secret_fields.is_empty() {
-        let all_present = secret_fields.iter().all(|f| {
-            let path = svc_token_dir.join(&f.key);
-            path.exists()
-                && std::fs::metadata(&path)
-                    .map(|m| m.len() > 0)
-                    .unwrap_or(false)
-        });
-        if !all_present {
-            return false;
-        }
+    if !plugin::missing_required_credentials_in(data_dir, project, slug, auth_fields).is_empty() {
+        return false;
     }
 
     for integration in requires_integrations {
@@ -437,25 +365,31 @@ pub fn remove_plugin(slug: String) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
 
     for project_name in &project_names {
-        let svc_dir = token_dir_for(project_name, &service_id)?;
-        if svc_dir.exists() {
-            std::fs::remove_dir_all(&svc_dir).map_err(|e| e.to_string())?;
-        }
-        remove_oauth_offmount(project_name, &service_id)?;
+        remove_plugin_data_in(consts::data_dir(), project_name, &service_id)?;
     }
 
     Ok(())
 }
 
-fn remove_oauth_offmount(project: &str, service_id: &str) -> Result<(), String> {
-    remove_oauth_offmount_in(speedwave_runtime::consts::data_dir(), project, service_id)
+fn remove_plugin_data_in(
+    data_dir: &std::path::Path,
+    project: &str,
+    service_id: &str,
+) -> Result<(), String> {
+    let svc_dir = plugin::token_dir_in(data_dir, project, service_id);
+    if svc_dir.exists() {
+        std::fs::remove_dir_all(&svc_dir).map_err(|e| e.to_string())?;
+    }
+    remove_oauth_offmount_in(data_dir, project, service_id)
 }
 
+/// Deletes the stored secrets of a plugin service, then its OAuth state and seed files.
 fn remove_oauth_offmount_in(
     data_dir: &std::path::Path,
     project: &str,
     service_id: &str,
 ) -> Result<(), String> {
+    plugin::remove_plugin_secrets_in(data_dir, project, service_id).map_err(|e| e.to_string())?;
     for path in [
         speedwave_runtime::plugin::oauth_state_file_in(data_dir, project, service_id),
         speedwave_runtime::plugin::oauth_seed_file_in(data_dir, project, service_id),
@@ -549,8 +483,6 @@ fn save_plugin_credentials_in(
     manifest: &plugin::PluginManifest,
     credentials: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let mut plain: Vec<(&str, &str)> = Vec::new();
-    let mut oauth_seed: HashMap<String, String> = HashMap::new();
     for (key, value) in credentials {
         let field = manifest
             .auth_fields
@@ -559,39 +491,11 @@ fn save_plugin_credentials_in(
             .ok_or_else(|| format!("field '{}' not allowed for plugin '{}'", key, manifest.slug))?;
         validate_credential_field(key, value)?;
         plugin::validate_credential_value(field, value)?;
-        if field.oauth_flow {
-            oauth_seed.insert(key.clone(), value.clone());
-        } else {
-            plain.push((key.as_str(), value.as_str()));
-        }
     }
 
     let sid = manifest.service_id.as_deref().unwrap_or(&manifest.slug);
-    let svc_dir = plugin::token_dir_in(data_dir, project, sid);
-    std::fs::create_dir_all(&svc_dir).map_err(|e| e.to_string())?;
-    for (key, value) in plain {
-        let file_path = svc_dir.join(key);
-        std::fs::write(&file_path, value).map_err(|e| e.to_string())?;
-        speedwave_runtime::fs_perms::set_owner_only(&file_path)?;
-    }
-    if !oauth_seed.is_empty() {
-        write_oauth_seed_in(data_dir, project, sid, &oauth_seed)?;
-    }
-    Ok(())
-}
-
-fn write_oauth_seed_in(
-    data_dir: &std::path::Path,
-    project: &str,
-    slug: &str,
-    seed: &HashMap<String, String>,
-) -> Result<(), String> {
-    let path = plugin::oauth_seed_file_in(data_dir, project, slug);
-    let parent = path.parent().ok_or_else(|| "seed: no parent".to_string())?;
-    speedwave_runtime::fs_perms::ensure_owner_only_dir(parent).map_err(|e| e.to_string())?;
-    let body = serde_json::to_string_pretty(seed).map_err(|e| e.to_string())? + "\n";
-    speedwave_runtime::fs_perms::write_restricted_file(&path, &body).map_err(|e| e.to_string())?;
-    Ok(())
+    plugin::write_plugin_credentials_in(data_dir, project, sid, &manifest.auth_fields, credentials)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -714,20 +618,7 @@ pub fn delete_plugin_credentials(project: String, slug: String) -> Result<(), St
         .and_then(|m| m.service_id.as_deref())
         .unwrap_or(slug.as_str());
 
-    let svc_dir = token_dir_for(&project, sid)?;
-    if svc_dir.exists() {
-        let keys: Vec<String> = match manifest {
-            Some(m) => m.auth_fields.iter().map(|f| f.key.clone()).collect(),
-            None => std::fs::read_dir(&svc_dir)
-                .map_err(|e| e.to_string())?
-                .flatten()
-                .filter_map(|e| e.file_name().into_string().ok())
-                .collect(),
-        };
-        for key in &keys {
-            remove_credential_file_guarded(&svc_dir, key)?;
-        }
-    }
+    delete_plugin_credentials_in(consts::data_dir(), &project, sid, manifest)?;
 
     config::with_config_lock(|| {
         let mut user_config = config::load_user_config()?;
@@ -743,6 +634,31 @@ pub fn delete_plugin_credentials(project: String, slug: String) -> Result<(), St
     Ok(())
 }
 
+/// Removes the credential token files, every stored secret and the OAuth state and seed of a
+/// plugin service in one project.
+fn delete_plugin_credentials_in(
+    data_dir: &std::path::Path,
+    project: &str,
+    sid: &str,
+    manifest: Option<&plugin::PluginManifest>,
+) -> Result<(), String> {
+    let svc_dir = plugin::token_dir_in(data_dir, project, sid);
+    if svc_dir.exists() {
+        let keys: Vec<String> = match manifest {
+            Some(m) => m.auth_fields.iter().map(|f| f.key.clone()).collect(),
+            None => std::fs::read_dir(&svc_dir)
+                .map_err(|e| e.to_string())?
+                .flatten()
+                .filter_map(|e| e.file_name().into_string().ok())
+                .collect(),
+        };
+        for key in &keys {
+            remove_credential_file_guarded(&svc_dir, key)?;
+        }
+    }
+    remove_oauth_offmount_in(data_dir, project, sid)
+}
+
 #[tauri::command]
 pub fn delete_plugin_credential_field(
     project: String,
@@ -753,20 +669,32 @@ pub fn delete_plugin_credential_field(
     log::info!("deleting plugin credential field key={key} for project={project} slug={slug}");
 
     let manifest = require_verified_with_manifest(&slug)?;
-    let sid = manifest.service_id.as_deref().unwrap_or(&manifest.slug);
-
-    if !manifest.auth_fields.iter().any(|f| f.key == key) {
-        return Err(format!(
-            "field '{}' is not declared in plugin '{}' auth_fields",
-            key, slug
-        ));
-    }
-    validate_credential_field(&key, "")?;
-
-    let svc_dir = token_dir_for(&project, sid)?;
-    remove_credential_file_guarded(&svc_dir, &key)?;
+    delete_plugin_credential_field_in(consts::data_dir(), &project, &manifest, &key)?;
     crate::integrations_cmd::restage_container_secrets(&project);
     Ok(())
+}
+
+fn delete_plugin_credential_field_in(
+    data_dir: &std::path::Path,
+    project: &str,
+    manifest: &plugin::PluginManifest,
+    key: &str,
+) -> Result<(), String> {
+    let sid = manifest.service_id.as_deref().unwrap_or(&manifest.slug);
+
+    let Some(field) = manifest.auth_fields.iter().find(|f| f.key == key) else {
+        return Err(format!(
+            "field '{}' is not declared in plugin '{}' auth_fields",
+            key, manifest.slug
+        ));
+    };
+    validate_credential_field(key, "")?;
+
+    if field.is_secret {
+        plugin::remove_plugin_secret_in(data_dir, project, sid, key).map_err(|e| e.to_string())?;
+    }
+    let svc_dir = plugin::token_dir_in(data_dir, project, sid);
+    remove_credential_file_guarded(&svc_dir, key)
 }
 
 fn remove_credential_file_guarded(svc_dir: &std::path::Path, key: &str) -> Result<(), String> {
@@ -790,6 +718,69 @@ fn remove_credential_file_guarded(svc_dir: &std::path::Path, key: &str) -> Resul
 )]
 mod tests {
     use super::*;
+    use speedwave_runtime::secret_store::{secret_exists_in, SecretName, SecretStore};
+
+    const SENTINEL: &str = "SENTINEL-997-plugins";
+
+    fn plain_field(key: &str, oauth_flow: bool, pattern: Option<&str>) -> plugin::AuthFieldDef {
+        plugin::AuthFieldDef {
+            is_secret: false,
+            ..auth_field(key, oauth_flow, pattern)
+        }
+    }
+
+    fn secret_field(key: &str, required: bool) -> plugin::AuthFieldDef {
+        plugin::AuthFieldDef {
+            required,
+            ..auth_field(key, false, None)
+        }
+    }
+
+    fn secret_name(project: &str, sid: &str, key: &str) -> SecretName {
+        SecretName::integration(project, sid, key).unwrap()
+    }
+
+    fn plant_secret(data_dir: &std::path::Path, project: &str, sid: &str, key: &str, value: &str) {
+        SecretStore::open(data_dir)
+            .unwrap()
+            .write(&secret_name(project, sid, key), value)
+            .unwrap();
+    }
+
+    fn plant_secret_without_install_key(
+        data_dir: &std::path::Path,
+        project: &str,
+        sid: &str,
+        key: &str,
+    ) {
+        let elsewhere = data_dir.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let source = speedwave_runtime::secret_store::FileKeySource::new(elsewhere.join("k"));
+        SecretStore::open_with(data_dir, Box::new(source))
+            .unwrap()
+            .write(&secret_name(project, sid, key), SENTINEL)
+            .unwrap();
+    }
+
+    fn read_secret(
+        data_dir: &std::path::Path,
+        project: &str,
+        sid: &str,
+        key: &str,
+    ) -> Option<String> {
+        SecretStore::open(data_dir)
+            .unwrap()
+            .read(&secret_name(project, sid, key))
+            .unwrap()
+            .map(|value| value.as_str().to_string())
+    }
+
+    fn no_plaintext(data_dir: &std::path::Path, needle: &str) {
+        assert!(
+            crate::types::test_support::files_containing(data_dir, needle).is_empty(),
+            "a secret is stored as plaintext"
+        );
+    }
 
     #[test]
     fn remove_oauth_offmount_deletes_state_and_seed() {
@@ -987,21 +978,10 @@ mod tests {
 
     #[test]
     fn is_plugin_configured_true_when_no_secret_fields() {
-        let fields = vec![plugin::AuthFieldDef {
-            key: "host_url".into(),
-            label: "Host".into(),
-            field_type: "text".into(),
-            placeholder: "".into(),
-            is_secret: false,
-            required: true,
-            description: None,
-            validation: None,
-            oauth_flow: false,
-        }];
+        let fields = vec![plain_field("host_url", false, None)];
         let tmp = tempfile::tempdir().unwrap();
         assert!(is_plugin_configured_in(
             tmp.path(),
-            std::path::Path::new("/nonexistent"),
             &fields,
             &[],
             "any-project",
@@ -1014,7 +994,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         assert!(is_plugin_configured_in(
             tmp.path(),
-            std::path::Path::new("/nonexistent"),
             &[],
             &[],
             "any-project",
@@ -1023,22 +1002,11 @@ mod tests {
     }
 
     #[test]
-    fn is_plugin_configured_false_when_dir_missing() {
-        let fields = vec![plugin::AuthFieldDef {
-            key: "api_key".into(),
-            label: "API Key".into(),
-            field_type: "password".into(),
-            placeholder: "".into(),
-            is_secret: true,
-            required: true,
-            description: None,
-            validation: None,
-            oauth_flow: false,
-        }];
+    fn is_plugin_configured_false_when_the_secret_is_missing() {
+        let fields = vec![secret_field("api_key", true)];
         let tmp = tempfile::tempdir().unwrap();
         assert!(!is_plugin_configured_in(
             tmp.path(),
-            std::path::Path::new("/nonexistent/path"),
             &fields,
             &[],
             "any-project",
@@ -1047,79 +1015,56 @@ mod tests {
     }
 
     #[test]
-    fn is_plugin_configured_true_when_secret_file_exists() {
-        let dir = tempfile::tempdir().unwrap();
-        let key_path = dir.path().join("api_key");
-        std::fs::write(&key_path, "secret-value").unwrap();
-
-        let fields = vec![plugin::AuthFieldDef {
-            key: "api_key".into(),
-            label: "API Key".into(),
-            field_type: "password".into(),
-            placeholder: "".into(),
-            is_secret: true,
-            required: true,
-            description: None,
-            validation: None,
-            oauth_flow: false,
-        }];
+    fn is_plugin_configured_true_when_the_secret_is_stored() {
         let tmp = tempfile::tempdir().unwrap();
+        plant_secret(tmp.path(), "proj", "slug", "api_key", SENTINEL);
+        let fields = vec![secret_field("api_key", true)];
         assert!(is_plugin_configured_in(
             tmp.path(),
-            dir.path(),
             &fields,
             &[],
-            "any-project",
-            "any-slug",
+            "proj",
+            "slug",
         ));
     }
 
     #[test]
-    fn is_plugin_configured_false_when_secret_file_empty() {
-        let dir = tempfile::tempdir().unwrap();
-        let key_path = dir.path().join("api_key");
-        std::fs::write(&key_path, "").unwrap();
-
-        let fields = vec![plugin::AuthFieldDef {
-            key: "api_key".into(),
-            label: "API Key".into(),
-            field_type: "password".into(),
-            placeholder: "".into(),
-            is_secret: true,
-            required: true,
-            description: None,
-            validation: None,
-            oauth_flow: false,
-        }];
+    fn is_plugin_configured_ignores_a_plaintext_secret_file() {
         let tmp = tempfile::tempdir().unwrap();
+        let dir = plugin::token_dir_in(tmp.path(), "proj", "slug");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("api_key"), "legacy").unwrap();
+        let fields = vec![secret_field("api_key", true)];
         assert!(!is_plugin_configured_in(
             tmp.path(),
-            dir.path(),
             &fields,
             &[],
-            "any-project",
-            "any-slug",
+            "proj",
+            "slug",
+        ));
+    }
+
+    #[test]
+    fn is_plugin_configured_works_without_the_install_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        plant_secret_without_install_key(tmp.path(), "proj", "slug", "api_key");
+        assert!(SecretStore::open(tmp.path()).is_err());
+        let fields = vec![secret_field("api_key", true)];
+        assert!(is_plugin_configured_in(
+            tmp.path(),
+            &fields,
+            &[],
+            "proj",
+            "slug",
         ));
     }
 
     #[test]
     fn is_plugin_configured_true_when_only_secret_is_optional_and_absent() {
-        let dir = tempfile::tempdir().unwrap();
-        let fields = vec![plugin::AuthFieldDef {
-            key: "api_key".into(),
-            label: "API Key".into(),
-            field_type: "password".into(),
-            placeholder: "".into(),
-            is_secret: true,
-            required: false,
-            description: None,
-            validation: None,
-            oauth_flow: false,
-        }];
+        let fields = vec![secret_field("api_key", false)];
         let tmp = tempfile::tempdir().unwrap();
         assert!(is_plugin_configured_in(
             tmp.path(),
-            dir.path(),
             &fields,
             &[],
             "any-project",
@@ -1129,69 +1074,19 @@ mod tests {
 
     #[test]
     fn is_plugin_configured_false_when_required_secret_missing_alongside_optional() {
-        let dir = tempfile::tempdir().unwrap();
-        let fields = vec![
-            plugin::AuthFieldDef {
-                key: "api_key".into(),
-                label: "API Key".into(),
-                field_type: "password".into(),
-                placeholder: "".into(),
-                is_secret: true,
-                required: true,
-                description: None,
-                validation: None,
-                oauth_flow: false,
-            },
-            plugin::AuthFieldDef {
-                key: "extra_token".into(),
-                label: "Extra".into(),
-                field_type: "password".into(),
-                placeholder: "".into(),
-                is_secret: true,
-                required: false,
-                description: None,
-                validation: None,
-                oauth_flow: false,
-            },
-        ];
         let tmp = tempfile::tempdir().unwrap();
+        plant_secret(tmp.path(), "proj", "slug", "extra_token", SENTINEL);
+        let fields = vec![
+            secret_field("api_key", true),
+            secret_field("extra_token", false),
+        ];
         assert!(!is_plugin_configured_in(
             tmp.path(),
-            dir.path(),
             &fields,
             &[],
-            "any-project",
-            "any-slug",
+            "proj",
+            "slug",
         ));
-    }
-
-    #[test]
-    fn field_has_stored_value_true_for_non_empty_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("example_pat");
-        std::fs::write(&path, "tok_abc").unwrap();
-        assert!(field_has_stored_value(&path));
-    }
-
-    #[test]
-    fn field_has_stored_value_false_for_empty_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("example_pat");
-        std::fs::write(&path, "").unwrap();
-        assert!(
-            !field_has_stored_value(&path),
-            "zero-byte file must count as not-configured"
-        );
-    }
-
-    #[test]
-    fn field_has_stored_value_false_for_missing_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("does_not_exist");
-        assert!(
-            !field_has_stored_value(&path),
-            "absent file must count as not-configured"
-        );
     }
 
     #[test]
@@ -1681,24 +1576,6 @@ mod tests {
         assert!(seed.to_string_lossy().ends_with("my-plugin.seed.json"));
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn write_oauth_seed_writes_owner_only_json() {
-        use std::os::unix::fs::PermissionsExt;
-        let tmp = tempfile::tempdir().unwrap();
-        let mut seed = HashMap::new();
-        seed.insert("client_id".to_string(), "abc".to_string());
-        seed.insert("client_secret".to_string(), "shhh".to_string());
-        write_oauth_seed_in(tmp.path(), "proj", "my-plugin", &seed).unwrap();
-
-        let path = plugin::oauth_seed_file_in(tmp.path(), "proj", "my-plugin");
-        let body = std::fs::read_to_string(&path).unwrap();
-        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(json["client_secret"], "shhh");
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "seed file must be chmod 600");
-    }
-
     #[test]
     fn set_plugin_enabled_rejects_unknown_service_id() {
         let service_id = "nonexistent-plugin";
@@ -1710,19 +1587,10 @@ mod tests {
     }
 
     #[test]
-    fn token_dir_for_constructs_correct_path() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = token_dir_for_in(tmp.path(), "my-project", "my-service");
-        assert!(path.ends_with("tokens/my-project/my-service"));
-    }
-
-    #[test]
     fn is_plugin_configured_false_when_required_integration_missing() {
-        let dir = tempfile::tempdir().unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let configured = is_plugin_configured_in(
             tmp.path(),
-            dir.path(),
             &[],
             &["sharepoint".to_string()],
             "nonexistent-project",
@@ -1736,10 +1604,8 @@ mod tests {
 
     #[test]
     fn is_plugin_configured_true_when_no_required_integrations() {
-        let dir = tempfile::tempdir().unwrap();
         let tmp = tempfile::tempdir().unwrap();
-        let configured =
-            is_plugin_configured_in(tmp.path(), dir.path(), &[], &[], "any-project", "any-slug");
+        let configured = is_plugin_configured_in(tmp.path(), &[], &[], "any-project", "any-slug");
         assert!(
             configured,
             "should be true when no integrations required and no auth fields"
@@ -1764,25 +1630,14 @@ mod tests {
     fn is_plugin_configured_false_for_oauth_plugin_without_state() {
         let tmp = tempfile::tempdir().unwrap();
         let fields = vec![oauth_field("client_id")];
-        let configured = is_plugin_configured_in(
-            tmp.path(),
-            std::path::Path::new("/nonexistent"),
-            &fields,
-            &[],
-            "proj",
-            "my-plugin",
-        );
+        let configured = is_plugin_configured_in(tmp.path(), &fields, &[], "proj", "my-plugin");
         assert!(!configured, "no oauth state -> not configured");
     }
 
     fn write_oauth_state(data_dir: &std::path::Path, project: &str, slug: &str, expires_at: &str) {
         let path = speedwave_runtime::plugin::oauth_state_file_in(data_dir, project, slug);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &path,
-            format!("{{\"refreshToken\":\"r\",\"expiresAt\":\"{expires_at}\"}}"),
-        )
-        .unwrap();
+        std::fs::write(&path, format!("{{\"expiresAt\":\"{expires_at}\"}}")).unwrap();
     }
 
     #[test]
@@ -1791,14 +1646,7 @@ mod tests {
         write_oauth_state(tmp.path(), "proj", "my-plugin", "2026-01-01T00:00:00.000Z");
 
         let fields = vec![oauth_field("client_id")];
-        let configured = is_plugin_configured_in(
-            tmp.path(),
-            std::path::Path::new("/nonexistent"),
-            &fields,
-            &[],
-            "proj",
-            "my-plugin",
-        );
+        let configured = is_plugin_configured_in(tmp.path(), &fields, &[], "proj", "my-plugin");
         assert!(configured, "authorized oauth state -> configured");
     }
 
@@ -1829,21 +1677,6 @@ mod tests {
             !plugin_oauth_authorized_in(tmp.path(), "proj", "p"),
             "seed present + state absent must be unauthorized"
         );
-    }
-
-    #[test]
-    fn oauth_seed_keys_returns_saved_credential_keys() {
-        let tmp = tempfile::tempdir().unwrap();
-        assert!(
-            oauth_seed_keys_in(tmp.path(), "proj", "p").is_empty(),
-            "no seed -> no keys"
-        );
-
-        let seed = speedwave_runtime::plugin::oauth_seed_file_in(tmp.path(), "proj", "p");
-        std::fs::create_dir_all(seed.parent().unwrap()).unwrap();
-        std::fs::write(&seed, "{\"client_id\":\"a\",\"client_secret\":\"b\"}").unwrap();
-        let keys = oauth_seed_keys_in(tmp.path(), "proj", "p");
-        assert!(keys.contains("client_id") && keys.contains("client_secret"));
     }
 
     fn blocks_auto_enable(auth_fields: &[plugin::AuthFieldDef]) -> bool {
@@ -2059,44 +1892,60 @@ mod tests {
     }
 
     #[test]
-    fn save_plugin_credentials_in_writes_plain_fields_to_tokens_and_oauth_fields_to_seed() {
+    fn save_plugin_credentials_in_routes_secrets_to_the_store_and_the_rest_to_files() {
         let tmp = tempfile::tempdir().unwrap();
         let manifest = manifest_with_auth_fields(vec![
             auth_field("api_key", false, None),
-            auth_field("host_url", false, Some("https://.*")),
-            auth_field("client_id", true, None),
+            plain_field("host_url", false, Some("https://.*")),
+            plain_field("client_id", true, None),
             auth_field("client_secret", true, None),
         ]);
         let creds = credentials(&[
-            ("api_key", "sk-live-123"),
+            ("api_key", SENTINEL),
             ("host_url", "https://example.test"),
             ("client_id", "cid-1"),
-            ("client_secret", "shh"),
+            ("client_secret", SENTINEL),
         ]);
 
         save_plugin_credentials_in(tmp.path(), "proj", &manifest, &creds).unwrap();
 
         let svc_dir = plugin::token_dir_in(tmp.path(), "proj", "test-plugin");
-        assert_eq!(token_file_names(&svc_dir), ["api_key", "host_url"]);
-        assert_eq!(
-            std::fs::read_to_string(svc_dir.join("api_key")).unwrap(),
-            "sk-live-123"
-        );
+        assert_eq!(token_file_names(&svc_dir), ["host_url"]);
         assert_eq!(
             std::fs::read_to_string(svc_dir.join("host_url")).unwrap(),
             "https://example.test"
         );
-        assert_owner_only_file(&svc_dir.join("api_key"));
         assert_owner_only_file(&svc_dir.join("host_url"));
+        assert_eq!(
+            read_secret(tmp.path(), "proj", "test-plugin", "api_key").as_deref(),
+            Some(SENTINEL)
+        );
+        assert_eq!(
+            read_secret(tmp.path(), "proj", "test-plugin", "client_secret").as_deref(),
+            Some(SENTINEL)
+        );
+        no_plaintext(tmp.path(), SENTINEL);
 
         let seed_path = plugin::oauth_seed_file_in(tmp.path(), "proj", "test-plugin");
         let seed: HashMap<String, String> =
             serde_json::from_str(&std::fs::read_to_string(&seed_path).unwrap()).unwrap();
-        assert_eq!(
-            seed,
-            credentials(&[("client_id", "cid-1"), ("client_secret", "shh")])
-        );
+        assert_eq!(seed, credentials(&[("client_id", "cid-1")]));
         assert_owner_only_file(&seed_path);
+    }
+
+    #[test]
+    fn save_plugin_credentials_in_writes_nothing_when_a_secret_is_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = manifest_with_auth_fields(vec![
+            auth_field("api_key", false, None),
+            plain_field("host_url", false, None),
+        ]);
+        let creds = credentials(&[("api_key", ""), ("host_url", "https://example.test")]);
+
+        let result = save_plugin_credentials_in(tmp.path(), "proj", &manifest, &creds);
+
+        assert!(result.is_err());
+        assert!(fs_snapshot(tmp.path()).is_empty());
     }
 
     #[test]
@@ -2125,17 +1974,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let manifest = manifest_with_auth_fields(vec![
             auth_field("api_key", false, None),
-            auth_field("client_id", true, None),
+            plain_field("client_id", true, None),
         ]);
 
         save_plugin_credentials_in(tmp.path(), "proj", &manifest, &HashMap::new()).unwrap();
 
-        let svc_dir = plugin::token_dir_in(tmp.path(), "proj", "test-plugin");
-        assert!(svc_dir.is_dir(), "the service dir is created as before");
-        assert!(token_file_names(&svc_dir).is_empty());
         assert!(
-            !plugin::oauth_seed_file_in(tmp.path(), "proj", "test-plugin").exists(),
-            "an empty save must not create an OAuth seed"
+            fs_snapshot(tmp.path()).is_empty(),
+            "an empty save must not create a token dir, a secret, a key or an OAuth seed"
         );
     }
 
@@ -2179,8 +2025,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let manifest = manifest_with_auth_fields(vec![
             auth_field("api_key", false, None),
-            auth_field("webhook_url", false, Some("https://.*")),
-            auth_field("client_id", true, None),
+            plain_field("webhook_url", false, Some("https://.*")),
+            plain_field("client_id", true, None),
         ]);
         let planted = credentials(&[
             ("api_key", "old-key"),
@@ -2189,10 +2035,9 @@ mod tests {
         ]);
         save_plugin_credentials_in(tmp.path(), "proj", &manifest, &planted).unwrap();
         let before = fs_snapshot(tmp.path());
-        assert_eq!(
-            before.values().filter(|v| v.is_some()).count(),
-            3,
-            "plant: two token files plus the OAuth seed"
+        assert!(
+            before.values().filter(|v| v.is_some()).count() >= 4,
+            "plant: the install key, the secret, one token file and the OAuth seed"
         );
 
         let rejected = credentials(&[
@@ -2214,8 +2059,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let manifest = manifest_with_auth_fields(vec![
             auth_field("api_key", false, None),
-            auth_field("host_url", false, None),
-            auth_field("client_id", true, None),
+            plain_field("host_url", false, None),
+            plain_field("client_id", true, None),
         ]);
         let first = credentials(&[
             ("api_key", "old-key"),
@@ -2229,17 +2074,158 @@ mod tests {
 
         let svc_dir = plugin::token_dir_in(tmp.path(), "proj", "test-plugin");
         assert_eq!(
-            std::fs::read_to_string(svc_dir.join("api_key")).unwrap(),
-            "new-key"
+            read_secret(tmp.path(), "proj", "test-plugin", "api_key").as_deref(),
+            Some("new-key")
         );
         assert_eq!(
             std::fs::read_to_string(svc_dir.join("host_url")).unwrap(),
             "https://old.test"
         );
-        assert_owner_only_file(&svc_dir.join("api_key"));
+        assert_owner_only_file(&svc_dir.join("host_url"));
         let seed_path = plugin::oauth_seed_file_in(tmp.path(), "proj", "test-plugin");
         let seed: HashMap<String, String> =
             serde_json::from_str(&std::fs::read_to_string(seed_path).unwrap()).unwrap();
         assert_eq!(seed, credentials(&[("client_id", "new-cid")]));
+    }
+
+    #[test]
+    fn deleting_a_secret_field_removes_it_from_the_store_and_keeps_the_others() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = manifest_with_auth_fields(vec![
+            auth_field("api_key", false, None),
+            auth_field("other_key", false, None),
+            plain_field("host_url", false, None),
+        ]);
+        save_plugin_credentials_in(
+            tmp.path(),
+            "proj",
+            &manifest,
+            &credentials(&[
+                ("api_key", SENTINEL),
+                ("other_key", "keep"),
+                ("host_url", "https://x.test"),
+            ]),
+        )
+        .unwrap();
+
+        delete_plugin_credential_field_in(tmp.path(), "proj", &manifest, "api_key").unwrap();
+        assert!(!secret_exists_in(
+            tmp.path(),
+            &secret_name("proj", "test-plugin", "api_key")
+        ));
+        assert!(secret_exists_in(
+            tmp.path(),
+            &secret_name("proj", "test-plugin", "other_key")
+        ));
+
+        delete_plugin_credential_field_in(tmp.path(), "proj", &manifest, "host_url").unwrap();
+        assert!(!plugin::token_dir_in(tmp.path(), "proj", "test-plugin")
+            .join("host_url")
+            .exists());
+
+        delete_plugin_credential_field_in(tmp.path(), "proj", &manifest, "api_key").unwrap();
+    }
+
+    #[test]
+    fn deleting_an_undeclared_field_is_refused_and_touches_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = manifest_with_auth_fields(vec![auth_field("api_key", false, None)]);
+        plant_secret(tmp.path(), "proj", "test-plugin", "api_key", SENTINEL);
+
+        let err =
+            delete_plugin_credential_field_in(tmp.path(), "proj", &manifest, "other").unwrap_err();
+
+        assert!(err.contains("not declared"));
+        assert!(secret_exists_in(
+            tmp.path(),
+            &secret_name("proj", "test-plugin", "api_key")
+        ));
+    }
+
+    #[test]
+    fn deleting_all_credentials_removes_files_secrets_state_and_seed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = manifest_with_auth_fields(vec![
+            auth_field("api_key", false, None),
+            plain_field("host_url", false, None),
+        ]);
+        save_plugin_credentials_in(
+            tmp.path(),
+            "proj",
+            &manifest,
+            &credentials(&[("api_key", SENTINEL), ("host_url", "https://x.test")]),
+        )
+        .unwrap();
+        for field in ["access_token", "refresh_token", "client_secret"] {
+            plant_secret(tmp.path(), "proj", "test-plugin", field, SENTINEL);
+        }
+        plant_secret(tmp.path(), "proj", "other-plugin", "api_key", "other");
+        write_oauth_state(
+            tmp.path(),
+            "proj",
+            "test-plugin",
+            "2026-01-01T00:00:00.000Z",
+        );
+        let seed = plugin::oauth_seed_file_in(tmp.path(), "proj", "test-plugin");
+        std::fs::write(&seed, "{}").unwrap();
+
+        delete_plugin_credentials_in(tmp.path(), "proj", "test-plugin", Some(&manifest)).unwrap();
+
+        for field in ["api_key", "access_token", "refresh_token", "client_secret"] {
+            assert!(!secret_exists_in(
+                tmp.path(),
+                &secret_name("proj", "test-plugin", field)
+            ));
+        }
+        assert!(secret_exists_in(
+            tmp.path(),
+            &secret_name("proj", "other-plugin", "api_key")
+        ));
+        assert!(!plugin::token_dir_in(tmp.path(), "proj", "test-plugin")
+            .join("host_url")
+            .exists());
+        assert!(!seed.exists());
+        assert!(!plugin::oauth_state_file_in(tmp.path(), "proj", "test-plugin").exists());
+        delete_plugin_credentials_in(tmp.path(), "proj", "test-plugin", Some(&manifest)).unwrap();
+    }
+
+    #[test]
+    fn deleting_credentials_with_a_missing_install_key_reports_the_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        plant_secret_without_install_key(tmp.path(), "proj", "test-plugin", "api_key");
+
+        let err =
+            delete_plugin_credentials_in(tmp.path(), "proj", "test-plugin", None).unwrap_err();
+
+        assert!(!err.contains(SENTINEL));
+        assert!(secret_exists_in(
+            tmp.path(),
+            &secret_name("proj", "test-plugin", "api_key")
+        ));
+    }
+
+    #[test]
+    fn removing_a_plugin_deletes_its_token_dir_secrets_and_oauth_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = plugin::token_dir_in(tmp.path(), "proj", "svc");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("host_url"), "https://x.test").unwrap();
+        plant_secret(tmp.path(), "proj", "svc", "access_token", SENTINEL);
+        plant_secret(tmp.path(), "proj", "svc", "refresh_token", SENTINEL);
+        write_oauth_state(tmp.path(), "proj", "svc", "2026-01-01T00:00:00.000Z");
+
+        remove_plugin_data_in(tmp.path(), "proj", "svc").unwrap();
+
+        assert!(!dir.exists());
+        assert!(!secret_exists_in(
+            tmp.path(),
+            &secret_name("proj", "svc", "access_token")
+        ));
+        assert!(!secret_exists_in(
+            tmp.path(),
+            &secret_name("proj", "svc", "refresh_token")
+        ));
+        assert!(!plugin::oauth_state_file_in(tmp.path(), "proj", "svc").exists());
+        remove_plugin_data_in(tmp.path(), "proj", "svc").unwrap();
     }
 }

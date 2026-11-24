@@ -66,7 +66,7 @@ pub(crate) fn refusal_message(features: &[&SlackFeature]) -> String {
     )
 }
 
-/// Writes `features.json` next to `access_token`, derived from the scopes Slack granted.
+/// Writes the non-secret `features.json` into the Slack token directory, derived from the scopes Slack granted.
 pub(crate) fn write_features_file_in(svc_dir: &Path, granted: &[String]) -> Result<(), String> {
     let lowercased: Vec<String> = granted.iter().map(|s| s.to_lowercase()).collect();
     let body = serde_json::json!({ "enabled": enabled_feature_ids(&lowercased) }).to_string();

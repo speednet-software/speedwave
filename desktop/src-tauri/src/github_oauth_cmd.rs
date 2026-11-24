@@ -1,5 +1,5 @@
 use crate::oauth_flow::{
-    self, emit_error, save_credential_file, DeviceCodeInfo, DeviceCodeProvider, FlowRegistry,
+    self, emit_error, save_secret_credential, DeviceCodeInfo, DeviceCodeProvider, FlowRegistry,
     PollStep, ProgressStatus,
 };
 use crate::types::check_project;
@@ -119,12 +119,13 @@ impl DeviceCodeProvider for GithubProvider {
                     Ok(t) => t,
                     Err(e) => return emit_error(format!("Failed to parse token response: {e}")),
                 };
-                let svc_dir = speedwave_runtime::plugin::token_dir_in(
+                if let Err(e) = save_secret_credential(
                     &self.data_dir,
                     &self.project,
                     "github",
-                );
-                if let Err(e) = save_credential_file(&svc_dir, "token", &tokens.access_token) {
+                    "token",
+                    &tokens.access_token,
+                ) {
                     return emit_error(format!("Failed to save token: {e}"));
                 }
                 crate::integrations_cmd::restage_container_secrets(&self.project);
@@ -415,15 +416,48 @@ mod tests {
     fn provider_success_saves_token_and_emits_success() {
         let tmp = tempfile::tempdir().unwrap();
 
-        let body = br#"{"access_token":"gho_secret","token_type":"bearer"}"#;
+        let body = br#"{"access_token":"SENTINEL-997-github","token_type":"bearer"}"#;
         let step = provider_in(tmp.path().to_path_buf()).handle_token_response(ok_status(), body);
         match step {
             PollStep::Emit { status, .. } => assert_eq!(status, ProgressStatus::Success),
             PollStep::KeepPolling { .. } => panic!("success must terminate"),
         }
-        let token_path =
-            speedwave_runtime::plugin::token_dir_in(tmp.path(), "p", "github").join("token");
-        assert_eq!(std::fs::read_to_string(&token_path).unwrap(), "gho_secret");
+        let name = speedwave_runtime::secret_store::SecretName::integration("p", "github", "token")
+            .unwrap();
+        let stored = speedwave_runtime::secret_store::SecretStore::open(tmp.path())
+            .unwrap()
+            .read(&name)
+            .unwrap();
+        assert_eq!(
+            stored.as_deref().map(String::as_str),
+            Some("SENTINEL-997-github")
+        );
+        assert!(
+            !speedwave_runtime::plugin::token_dir_in(tmp.path(), "p", "github")
+                .join("token")
+                .exists()
+        );
+        assert!(
+            crate::types::test_support::files_containing(tmp.path(), "SENTINEL-997").is_empty()
+        );
+    }
+
+    #[test]
+    fn provider_save_failure_emits_an_error_without_the_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let big = "x".repeat(crate::types::MAX_CREDENTIAL_BYTES + 1);
+        let body = format!(r#"{{"access_token":"{big}","token_type":"bearer"}}"#);
+        match provider_in(tmp.path().to_path_buf())
+            .handle_token_response(ok_status(), body.as_bytes())
+        {
+            PollStep::Emit { status, message } => {
+                assert_eq!(status, ProgressStatus::Error);
+                assert!(message.starts_with("Failed to save token"));
+                assert!(!message.contains(&big));
+            }
+            PollStep::KeepPolling { .. } => panic!("a failed save must terminate"),
+        }
+        assert!(!tmp.path().join("secrets").exists());
     }
 
     #[test]
