@@ -1299,7 +1299,7 @@ export class RedmineClient {
    * @param options.parent_issue_id - New parent issue ID.
    * @param options.estimated_hours - New estimated hours.
    * @param options.fixed_version_id - New target version ID.
-   * @param options.category_id - New category ID, or null to clear the category.
+   * @param options.category_id - New category ID.
    * @param options.notes - Update notes/comment.
    */
   async updateIssue(
@@ -1751,7 +1751,7 @@ export class RedmineClient {
    * @param categoryId - The category ID.
    * @param options - Fields to change.
    * @param options.name - New category name.
-   * @param options.assigned_to_id - New default assignee user ID, or null.
+   * @param options.assigned_to_id - New default assignee user ID.
    */
   async updateCategory(
     categoryId: number,

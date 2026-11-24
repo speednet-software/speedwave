@@ -1,4 +1,4 @@
-/** Shared tool-handler error wrapping: run a Redmine operation and format any thrown error via RedmineClient.formatError with structured context. */
+/** Shared Redmine tool-handler wrappers: error formatting and target-project resolution. */
 
 import { errorResult, teachingErrorResult, type ToolsCallResult } from '@speedwave/mcp-shared';
 import { RedmineClient, type ErrorContext } from '../client.js';

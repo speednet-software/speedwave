@@ -17,6 +17,19 @@ import { createRelationTools } from './relation-tools.js';
 import { createConfigTools } from './config-tools.js';
 import { createCategoryTools } from './category-tools.js';
 
+function withNumericIds(tool: Tool, handler: ToolHandler): ToolHandler {
+  const { ids, nullable } = numericIdParams(tool);
+  return async (params, ...rest) => {
+    const checked = ids.filter((name) => !(nullable.has(name) && params[name] === null));
+    const normalized = normalizeNumericIdParams(params, checked);
+    if (!normalized.ok) {
+      const { paramName, nextStep } = normalized.error;
+      return teachingErrorResult({ paramName, nextStep });
+    }
+    return handler(normalized.value, ...rest);
+  };
+}
+
 function numericIdParams(tool: Tool): { ids: string[]; nullable: Set<string> } {
   const ids: string[] = [];
   const nullable = new Set<string>();
@@ -35,19 +48,6 @@ function numericIdParams(tool: Tool): { ids: string[]; nullable: Set<string> } {
     }
   }
   return { ids, nullable };
-}
-
-function withNumericIds(tool: Tool, handler: ToolHandler): ToolHandler {
-  const { ids, nullable } = numericIdParams(tool);
-  return async (params, ...rest) => {
-    const checked = ids.filter((name) => !(nullable.has(name) && params[name] === null));
-    const normalized = normalizeNumericIdParams(params, checked);
-    if (!normalized.ok) {
-      const { paramName, nextStep } = normalized.error;
-      return teachingErrorResult({ paramName, nextStep });
-    }
-    return handler(normalized.value, ...rest);
-  };
 }
 
 function withoutAliasConflicts(tool: Tool, handler: ToolHandler): ToolHandler {
