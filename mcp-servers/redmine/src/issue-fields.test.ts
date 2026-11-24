@@ -3,10 +3,12 @@ import {
   buildIssuePayload,
   ignoredFields,
   issueFilterParams,
+  issueFilterProblem,
   issueFilterProperties,
   issueInputProperties,
   issueReadIncludes,
   issueRequiredOnCreate,
+  resolvedAliasIds,
 } from './issue-fields.js';
 
 const payloadOf = (params: Record<string, unknown>, mode: 'create' | 'update') => {
@@ -222,6 +224,56 @@ describe('buildIssuePayload', () => {
     expect(problem.paramName).toBe('custom_fields');
   });
 
+  it.each([
+    ['start_date', '2026-13-01'],
+    ['due_date', '2026-02-30'],
+    ['due_date', '24-11-2026'],
+    ['due_date', 20261124],
+    ['done_ratio', 101],
+    ['done_ratio', -1],
+    ['done_ratio', 50.5],
+    ['done_ratio', '50'],
+    ['done_ratio', Infinity],
+    ['estimated_hours', -1],
+    ['estimated_hours', '8'],
+    ['tracker_id', Number.NaN],
+    ['is_private', 'false'],
+    ['is_private', 0],
+    ['private_notes', 'true'],
+    ['subject', 5],
+    ['description', ['x']],
+    ['watcher_user_ids', 1739],
+    ['watcher_user_ids', [0]],
+    ['watcher_user_ids', ['1']],
+  ])('rejects %s given as %j, naming the field and not echoing the value', (name, value) => {
+    const problem = problemOf({ [name]: value }, name === 'private_notes' ? 'update' : 'create');
+    expect(problem.paramName).toBe(name);
+    expect(problem.problem).toContain(name);
+    expect(problem.problem).not.toContain(`${JSON.stringify(value)}`);
+  });
+
+  it('accepts the boundary values of the typed fields', () => {
+    expect(
+      payloadOf(
+        {
+          start_date: '2024-02-29',
+          done_ratio: 0,
+          estimated_hours: 0,
+          is_private: false,
+          watcher_user_ids: [],
+        },
+        'create'
+      )
+    ).toEqual({
+      start_date: '2024-02-29',
+      done_ratio: 0,
+      estimated_hours: 0,
+      is_private: false,
+      watcher_user_ids: [],
+    });
+    expect(payloadOf({ done_ratio: 100 }, 'update')).toEqual({ done_ratio: 100 });
+  });
+
   it('tells how to clear a custom field when its value is an empty string', () => {
     expect(problemOf({ custom_fields: [{ id: 4, value: '' }] }, 'update').problem).toContain(
       'value: null'
@@ -335,14 +387,14 @@ describe('issueFilterParams', () => {
     expect(
       issueFilterParams({
         due_date: '<=2026-11-30',
-        done_ratio: '<100',
+        done_ratio: '<=99',
         start_date: '><2026-11-01|2026-11-30',
         is_private: '0',
         watcher_id: 'me',
       })
     ).toEqual({
       due_date: '<=2026-11-30',
-      done_ratio: '<100',
+      done_ratio: '<=99',
       start_date: '><2026-11-01|2026-11-30',
       is_private: '0',
       watcher_id: 'me',
@@ -511,12 +563,42 @@ describe('ignoredFields', () => {
 
   it('lists watchers that are missing from the issue', () => {
     expect(ignoredFields({ watcher_user_ids: [1739, 5] }, issue)).toEqual(['watcher_user_ids']);
-    expect(ignoredFields({ watcher_user_ids: [1] }, { subject: 'A' })).toEqual([
-      'watcher_user_ids',
-    ]);
+  });
+
+  it('skips watchers when the issue read back carries none, which the viewer may not see', () => {
+    expect(ignoredFields({ watcher_user_ids: [1] }, { subject: 'A' })).toEqual([]);
   });
 
   it('cannot verify notes, private_notes or a project given by identifier', () => {
     expect(ignoredFields({ notes: 'n', private_notes: true, project_id: 'p' }, {})).toEqual([]);
+  });
+});
+
+describe('issueFilterProblem', () => {
+  it.each([
+    ['a string', 'x'],
+    ['a list', ['1']],
+    ['a key that is not digits', { abc: 'x' }],
+    ['a key with a query separator', { '1&project_id': 'x' }],
+    ['a value that is not a string', { '1': 5 }],
+  ])('rejects cf given as %s and names cf', (_label, cf) => {
+    const problem = issueFilterProblem({ cf });
+    expect(problem?.paramName).toBe('cf');
+    expect(problem?.problem).toContain('custom field ID');
+  });
+
+  it('accepts a map of digit keys to expressions and an omitted, null or empty cf', () => {
+    expect(issueFilterProblem({ cf: { '1': '2.4', '12': '!*' } })).toBeUndefined();
+    for (const cf of [undefined, null, '']) {
+      expect(issueFilterProblem({ cf })).toBeUndefined();
+    }
+  });
+});
+
+describe('resolvedAliasIds', () => {
+  it('returns the IDs of the fields that have a name alias and nothing else', () => {
+    expect(
+      resolvedAliasIds({ tracker_id: 2, assigned_to_id: 9, subject: 'A', category_id: 7 })
+    ).toEqual({ tracker_id: 2, assigned_to_id: 9 });
   });
 });

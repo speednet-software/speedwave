@@ -297,15 +297,13 @@ describe('RedmineClient', () => {
       });
     });
 
-    it('should send the date, progress, privacy, watcher and custom field filters unchanged', async () => {
+    it('sends the filters of the issue field table as query parameters', async () => {
       mockAxiosInstance.get.mockResolvedValue({ data: { issues: [], total_count: 0 } });
 
       await client.listIssues({
+        project_id: 'my-project',
+        category_id: '!*',
         due_date: '<=2026-11-30',
-        start_date: '><2026-11-01|2026-11-30',
-        done_ratio: '<100',
-        is_private: '0',
-        watcher_id: 'me',
         cf: { '1': '2.4' },
       });
 
@@ -313,35 +311,12 @@ describe('RedmineClient', () => {
         params: {
           limit: 25,
           offset: 0,
+          project_id: 'my-project',
+          category_id: '!*',
           due_date: '<=2026-11-30',
-          start_date: '><2026-11-01|2026-11-30',
-          done_ratio: '<100',
-          is_private: '0',
-          watcher_id: 'me',
           cf_1: '2.4',
         },
       });
-    });
-
-    it.each([5, '5|6', '!5', '!*', '*', 'ev5'])(
-      'passes the category filter %j to Redmine unchanged',
-      async (category_id) => {
-        mockAxiosInstance.get.mockResolvedValue({ data: { issues: [], total_count: 0 } });
-
-        await client.listIssues({ project_id: 'my-project', category_id });
-
-        expect(mockAxiosInstance.get).toHaveBeenCalledWith('/issues.json', {
-          params: { limit: 25, offset: 0, project_id: 'my-project', category_id },
-        });
-      }
-    );
-
-    it('leaves category_id out of the query when it is empty', async () => {
-      mockAxiosInstance.get.mockResolvedValue({ data: { issues: [], total_count: 0 } });
-
-      await client.listIssues({ category_id: '' });
-
-      expect(mockAxiosInstance.get.mock.calls[0][1].params).not.toHaveProperty('category_id');
     });
 
     it('should clamp an oversized limit down to 100', async () => {
@@ -667,6 +642,16 @@ describe('RedmineClient', () => {
         'Invalid identifier ".."'
       );
       expect(mockAxiosInstance.put).not.toHaveBeenCalled();
+    });
+
+    it('says the issue was updated and must not be updated again when reading it back fails', async () => {
+      mockAxiosInstance.put.mockResolvedValue({ data: {} });
+      mockAxiosInstance.get.mockRejectedValue(new Error('read failed'));
+
+      const failure = client.updateIssue(1, { notes: 'n' });
+
+      await expect(failure).rejects.toThrow('Issue 1 was updated, but reading it back failed');
+      await expect(failure).rejects.toThrow('do not repeat the update');
     });
 
     it('propagates the 422 Redmine returns for a version the issue cannot use', async () => {

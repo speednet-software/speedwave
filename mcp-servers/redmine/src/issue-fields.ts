@@ -1,6 +1,6 @@
 import { sanitizeTextile } from './textile.js';
 
-type FieldType = 'string' | 'textile' | 'number' | 'boolean' | 'ids' | 'custom_fields';
+type FieldType = 'string' | 'date' | 'textile' | 'number' | 'boolean' | 'ids' | 'custom_fields';
 
 type FilterSyntax = 'value' | 'expression' | 'map';
 
@@ -15,6 +15,7 @@ interface IssueField {
   update: boolean;
   required?: boolean;
   clearable?: boolean;
+  bounds?: { min: number; max?: number; integer?: boolean };
   alias?: { name: string; description: string };
   filter?: { name: string; syntax: FilterSyntax; type?: string | string[]; description: string };
   read?: string;
@@ -124,7 +125,7 @@ const ISSUE_FIELDS: readonly IssueField[] = [
       syntax: 'value',
       type: ['number', 'string'],
       description:
-        'Category filter, ID from listCategories, or Redmine filter syntax: "5|6" (any of), "!5" (not), "!*" (no category), "*" (any). Needs project_id or a configured project',
+        'Category filter, ID from listCategories, or Redmine filter syntax: "5|6" (any of), "!5" (not), "!*" (no category), "*" (any), ev / !ev / cf for history. Needs project_id or a configured project',
     },
     read: 'category.id',
   },
@@ -161,7 +162,7 @@ const ISSUE_FIELDS: readonly IssueField[] = [
   },
   {
     name: 'start_date',
-    type: 'string',
+    type: 'date',
     description: 'Start date, YYYY-MM-DD',
     create: true,
     update: true,
@@ -176,7 +177,7 @@ const ISSUE_FIELDS: readonly IssueField[] = [
   },
   {
     name: 'due_date',
-    type: 'string',
+    type: 'date',
     description: 'Due date, YYYY-MM-DD',
     create: true,
     update: true,
@@ -192,19 +193,21 @@ const ISSUE_FIELDS: readonly IssueField[] = [
   {
     name: 'done_ratio',
     type: 'number',
+    bounds: { min: 0, max: 100, integer: true },
     description: 'Percent done, 0 to 100; Redmine ignores it when progress is derived from status',
     create: true,
     update: true,
     filter: {
       name: 'done_ratio',
       syntax: 'expression',
-      description: 'Redmine filter expression on percent done: 50, >=50, <100, ><20|80',
+      description: 'Redmine filter expression on percent done: 50, >=50, <=99, ><20|80',
     },
     read: 'done_ratio',
   },
   {
     name: 'estimated_hours',
     type: 'number',
+    bounds: { min: 0 },
     description: 'Estimated hours',
     create: true,
     update: true,
@@ -270,19 +273,18 @@ const ISSUE_FIELDS: readonly IssueField[] = [
   },
 ];
 
-/** Whether a write creates a new issue or changes an existing one. */
-export type IssueWriteMode = 'create' | 'update';
+type IssueWriteMode = 'create' | 'update';
 
-/** The `issue` object sent to Redmine on create or update. */
+/** The `issue` object sent to Redmine. */
 export type IssueWrite = Record<string, unknown>;
 
-/** Result of {@link buildIssuePayload}: the payload, or the field that cannot be sent and why. */
+/** A payload, or the field that cannot be sent and why. */
 export type IssueWriteResult =
   { ok: true; payload: IssueWrite } | { ok: false; paramName: string; problem: string };
 
 /**
- * Input-schema properties of the fields a write accepts, with the name aliases next to their IDs.
- * @param mode - Whether the tool creates or updates an issue.
+ * Input-schema properties of the fields a write accepts.
+ * @param mode - Create or update.
  */
 export function issueInputProperties(mode: IssueWriteMode): Record<string, unknown> {
   const properties: Record<string, unknown> = {};
@@ -300,7 +302,7 @@ export function issueRequiredOnCreate(): string[] {
   return ISSUE_FIELDS.filter((f) => f.required).map((f) => f.name);
 }
 
-/** Input-schema properties of the issue filters listIssueIds accepts. */
+/** Input-schema properties of the listIssueIds filters. */
 export function issueFilterProperties(): Record<string, unknown> {
   const properties: Record<string, unknown> = {};
   for (const { filter } of ISSUE_FIELDS) {
@@ -315,7 +317,28 @@ export function issueFilterProperties(): Record<string, unknown> {
 }
 
 /**
- * Query parameters for the issue filters present in `options`; others are skipped.
+ * The filter that cannot be sent, with why.
+ * @param options - Tool parameters that may carry filters.
+ */
+export function issueFilterProblem(
+  options: Record<string, unknown>
+): { paramName: string; problem: string } | undefined {
+  for (const { filter } of ISSUE_FIELDS) {
+    if (filter?.syntax !== 'map') continue;
+    const value = options[filter.name];
+    if (value === undefined || value === null || value === '' || isCustomFieldFilter(value)) {
+      continue;
+    }
+    return {
+      paramName: filter.name,
+      problem: `${filter.name} must be an object mapping a custom field ID (digits) to a filter expression string, e.g. { "1": "2.4" }.`,
+    };
+  }
+  return undefined;
+}
+
+/**
+ * Query parameters for the filters present in `options`.
  * @param options - Tool parameters that may carry filters.
  */
 export function issueFilterParams(options: Record<string, unknown>): Record<string, unknown> {
@@ -335,9 +358,9 @@ export function issueFilterParams(options: Record<string, unknown>): Record<stri
 }
 
 /**
- * Validate the fields of a write by the table's value rule and build the payload Redmine receives.
- * @param params - Tool parameters after names are resolved to IDs.
- * @param mode - Whether the tool creates or updates an issue.
+ * Validate the fields of a write and build the payload; a name alias with a value is left for the caller to resolve.
+ * @param params - Tool parameters.
+ * @param mode - Create or update.
  */
 export function buildIssuePayload(
   params: Record<string, unknown>,
@@ -359,9 +382,21 @@ export function buildIssuePayload(
 }
 
 /**
- * Names of the sent fields whose value the issue read back after the write does not hold.
- * @param payload - The payload that was sent.
- * @param issue - The issue as Redmine holds it after the write.
+ * The IDs that name aliases resolved to.
+ * @param resolved - Tool parameters after names are resolved.
+ */
+export function resolvedAliasIds(resolved: Record<string, unknown>): IssueWrite {
+  const ids: IssueWrite = {};
+  for (const { name, alias } of ISSUE_FIELDS) {
+    if (alias && resolved[name] !== undefined) ids[name] = resolved[name];
+  }
+  return ids;
+}
+
+/**
+ * Sent fields the issue read back does not hold.
+ * @param payload - What was sent.
+ * @param issue - The issue after the write.
  */
 export function ignoredFields(payload: IssueWrite, issue: object): string[] {
   const ignored: string[] = [];
@@ -378,11 +413,22 @@ export function ignoredFields(payload: IssueWrite, issue: object): string[] {
 }
 
 /**
- * Extra `include` values showIssue needs to read back the fields of a payload.
- * @param payload - The payload that was sent.
+ * The `include` values the read-back needs.
+ * @param payload - What was sent.
  */
 export function issueReadIncludes(payload: IssueWrite): string[] {
   return ISSUE_FIELDS.filter((f) => f.include && f.name in payload).map((f) => f.include!);
+}
+
+function isCustomFieldFilter(value: unknown): boolean {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.entries(value).every(
+      ([id, expression]) => /^\d+$/.test(id) && typeof expression === 'string'
+    )
+  );
 }
 
 function fieldSchema(field: IssueField, mode: IssueWriteMode): Record<string, unknown> {
@@ -400,6 +446,7 @@ function fieldSchema(field: IssueField, mode: IssueWriteMode): Record<string, un
 function typeSchema(type: FieldType): { type: string; [key: string]: unknown } {
   switch (type) {
     case 'string':
+    case 'date':
     case 'textile':
       return { type: 'string' };
     case 'number':
@@ -444,7 +491,51 @@ function valueProblem(field: IssueField, value: unknown): string | undefined {
       ? `${name}: empty string is not a value; pass null to clear it, or omit it to leave the field unchanged.`
       : `${name}: empty string is not a value; ${name} cannot be cleared, so pass a value or omit it.`;
   }
-  return field.type === 'custom_fields' ? customFieldsProblem(value) : undefined;
+  return value === null ? undefined : typeProblem(field, value);
+}
+
+function typeProblem(field: IssueField, value: unknown): string | undefined {
+  const name = field.name;
+  switch (field.type) {
+    case 'string':
+    case 'textile':
+      return typeof value === 'string' ? undefined : `${name} must be a string.`;
+    case 'date':
+      return typeof value === 'string' && isRealDate(value)
+        ? undefined
+        : `${name} must be a real date in YYYY-MM-DD format.`;
+    case 'number':
+      return numberProblem(field, value);
+    case 'boolean':
+      return typeof value === 'boolean' ? undefined : `${name} must be true or false.`;
+    case 'ids':
+      return Array.isArray(value) && value.every((id) => Number.isInteger(id) && id > 0)
+        ? undefined
+        : `${name} must be a list of positive integer user IDs.`;
+    case 'custom_fields':
+      return customFieldsProblem(value);
+  }
+}
+
+function isRealDate(value: string): boolean {
+  const time = Date.parse(`${value}T00:00:00Z`);
+  return (
+    /^\d{4}-\d{2}-\d{2}$/.test(value) &&
+    !Number.isNaN(time) &&
+    new Date(time).toISOString().slice(0, 10) === value
+  );
+}
+
+function numberProblem(field: IssueField, value: unknown): string | undefined {
+  const bounds = field.bounds;
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return `${field.name} must be a finite number.`;
+  }
+  if (bounds?.integer && !Number.isInteger(value)) return `${field.name} must be a whole number.`;
+  if (bounds && (value < bounds.min || (bounds.max !== undefined && value > bounds.max))) {
+    return `${field.name} must be ${bounds.max === undefined ? `at least ${bounds.min}` : `from ${bounds.min} to ${bounds.max}`}.`;
+  }
+  return undefined;
 }
 
 function customFieldsProblem(value: unknown): string | undefined {
@@ -491,10 +582,28 @@ function readPath(source: unknown, path: string): unknown {
     .reduce<unknown>((node, key) => (node as Record<string, unknown> | undefined)?.[key], source);
 }
 
+function ignoredCustomFields(sent: CustomFieldValue[], actual: unknown): string[] {
+  const present = (actual as Array<CustomFieldValue> | undefined) ?? [];
+  return sent
+    .filter(({ id, value }) => listOf(value) !== listOf(present.find((cf) => cf.id === id)?.value))
+    .map(({ id }) => `custom_fields.${id}`);
+}
+
+function listOf(value: unknown): string {
+  const items = Array.isArray(value) ? value : [value];
+  return JSON.stringify(
+    items
+      .filter((item) => item !== null && item !== undefined && item !== '')
+      .map(String)
+      .sort()
+  );
+}
+
 function holds(field: IssueField, sent: unknown, actual: unknown): boolean {
   switch (field.type) {
     case 'ids': {
-      const present = ((actual as Array<{ id: number }> | undefined) ?? []).map((w) => w.id);
+      if (actual === undefined) return true;
+      const present = (actual as Array<{ id: number }>).map((w) => w.id);
       return (sent as number[]).every((id) => present.includes(id));
     }
     case 'number':
@@ -512,24 +621,4 @@ function numberOf(value: unknown): number | null {
 
 function textOf(value: unknown): string {
   return value === null || value === undefined ? '' : String(value).replace(/\r\n/g, '\n').trim();
-}
-
-function ignoredCustomFields(sent: CustomFieldValue[], actual: unknown): string[] {
-  const present = (actual as Array<CustomFieldValue> | undefined) ?? [];
-  return sent
-    .filter(({ id, value }) => {
-      const held = present.find((cf) => cf.id === id);
-      return listOf(value) !== listOf(held?.value);
-    })
-    .map(({ id }) => `custom_fields.${id}`);
-}
-
-function listOf(value: unknown): string {
-  const items = Array.isArray(value) ? value : [value];
-  return JSON.stringify(
-    items
-      .filter((item) => item !== null && item !== undefined && item !== '')
-      .map(String)
-      .sort()
-  );
 }

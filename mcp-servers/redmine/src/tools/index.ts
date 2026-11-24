@@ -16,11 +16,24 @@ import { createProjectTools } from './project-tools.js';
 import { createRelationTools } from './relation-tools.js';
 import { createConfigTools } from './config-tools.js';
 import { createCategoryTools } from './category-tools.js';
+import { TOOL_NAMES } from '../tool-names.js';
+
+const TABLE_VALIDATED_TOOLS: ReadonlySet<string> = new Set([
+  TOOL_NAMES.CREATE_ISSUE,
+  TOOL_NAMES.UPDATE_ISSUE,
+]);
+
+const isEmptyValue = (value: unknown) => value === null || value === '';
 
 function withNumericIds(tool: Tool, handler: ToolHandler): ToolHandler {
   const { ids, nullable } = numericIdParams(tool);
   return async (params, ...rest) => {
-    const checked = ids.filter((name) => !(nullable.has(name) && params[name] === null));
+    const tableOwned = TABLE_VALIDATED_TOOLS.has(tool.name);
+    const checked = ids.filter(
+      (name) =>
+        !(nullable.has(name) && params[name] === null) &&
+        !(tableOwned && isEmptyValue(params[name]))
+    );
     const normalized = normalizeNumericIdParams(params, checked);
     if (!normalized.ok) {
       const { paramName, nextStep } = normalized.error;

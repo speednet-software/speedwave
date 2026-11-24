@@ -978,8 +978,8 @@ export class RedmineClient {
   }
 
   /**
-   * List issues from Redmine; `options` carries the filters of the issue field table plus `limit` (default 25) and `offset`.
-   * @param options - Filter and pagination options.
+   * List issues by the table's filters.
+   * @param options - Filters, `limit` and `offset`.
    */
   async listIssues(
     options: Record<string, unknown> = {}
@@ -1053,10 +1053,9 @@ export class RedmineClient {
   }
 
   /**
-   * Create an issue from a payload built by buildIssuePayload and return it as Redmine holds it afterwards.
-   * @param payload - Fields of the new issue; `project_id` is required.
-   * @param files - Workspace files streamed to Redmine and attached to the new issue.
-   * @throws {Error} When the issue was created but reading it back failed, or the API request fails.
+   * Create an issue and return it as read back.
+   * @param payload - Fields of the new issue.
+   * @param files - Workspace files to attach.
    */
   async createIssue(payload: IssueWrite, files?: WorkspaceFile[]): Promise<RedmineIssue> {
     this._enforceProjectId(payload.project_id as string);
@@ -1068,20 +1067,13 @@ export class RedmineClient {
     const response = await this.client.post('/issues.json', { issue });
     const created: RedmineIssue = response.data.issue;
 
-    try {
-      return await this.showIssue(created.id, { include: issueReadIncludes(payload) });
-    } catch (error) {
-      throw new Error(
-        `Issue ${created.id} was created, but reading it back failed: ${RedmineClient.formatError(error, { issue_id: created.id })} Check it with ${TOOL_NAMES.GET_ISSUE_FULL}({ issue_id: ${created.id} }) and do not create it again.`
-      );
-    }
+    return this._readBack(created.id, payload, 'created', 'create it again');
   }
 
   /**
-   * Update an issue from a payload built by buildIssuePayload and return it as Redmine holds it afterwards.
-   * @param issueId - The issue ID to update.
+   * Update an issue and return it as read back.
+   * @param issueId - The issue ID.
    * @param payload - Fields to change.
-   * @throws {Error} When the payload is empty or the API request fails.
    */
   async updateIssue(issueId: number, payload: IssueWrite): Promise<RedmineIssue> {
     await this._ensureIssueInScope(issueId);
@@ -1100,7 +1092,22 @@ export class RedmineClient {
 
     await this.client.put(`/issues/${pathSegment(issueId)}.json`, { issue: payload });
 
-    return this.showIssue(issueId, { include: issueReadIncludes(payload) });
+    return this._readBack(issueId, payload, 'updated', 'repeat the update');
+  }
+
+  private async _readBack(
+    issueId: number,
+    payload: IssueWrite,
+    done: 'created' | 'updated',
+    doNot: string
+  ): Promise<RedmineIssue> {
+    try {
+      return await this.showIssue(issueId, { include: issueReadIncludes(payload) });
+    } catch (error) {
+      throw new Error(
+        `Issue ${issueId} was ${done}, but reading it back failed: ${RedmineClient.formatError(error, { issue_id: issueId })} Check it with ${TOOL_NAMES.GET_ISSUE_FULL}({ issue_id: ${issueId} }) and do not ${doNot}.`
+      );
+    }
   }
 
   /**

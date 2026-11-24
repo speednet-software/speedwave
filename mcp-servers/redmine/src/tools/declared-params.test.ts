@@ -167,22 +167,6 @@ describe('Redmine declared-parameter guard', () => {
       expect(client.listIssues).not.toHaveBeenCalled();
       expect(textOf(result)).toContain('takes either status (a name) or status_id (an ID)');
     });
-
-    it('rejects an empty name given with its ID instead of dropping it', async () => {
-      const client = createMockClient();
-
-      const result = await handlerFor(
-        client,
-        'updateIssue'
-      )({
-        issue_id: 83432,
-        tracker: '',
-        tracker_id: 2,
-      });
-
-      expect(client.updateIssue).not.toHaveBeenCalled();
-      expect(textOf(result)).toContain('Invalid tracker.');
-    });
   });
 
   describe('numeric IDs', () => {
@@ -225,6 +209,35 @@ describe('Redmine declared-parameter guard', () => {
       await handlerFor(client, 'deleteJournal')({ issue_id: '5', journal_id: '67890' });
 
       expect(client.deleteJournal).toHaveBeenCalledWith(5, 67890);
+    });
+
+    it.each([
+      [
+        'createIssue',
+        { project_id: 'p', subject: 's', tracker_id: null },
+        'tracker_id cannot be cleared',
+      ],
+      ['updateIssue', { issue_id: 5, category_id: '' }, 'category_id: empty string is not a value'],
+    ])(
+      'leaves an empty ID of %s to the field table, whose message names the field',
+      async (name, params, expected) => {
+        const client = createMockClient();
+
+        const result = await handlerFor(client, name)(params);
+
+        expect(client.createIssue).not.toHaveBeenCalled();
+        expect(client.updateIssue).not.toHaveBeenCalled();
+        expect(textOf(result)).toContain(expected);
+      }
+    );
+
+    it('still rejects an empty ID filter of listIssueIds as a bad number', async () => {
+      const client = { ...createMockClient(), listIssues: vi.fn() };
+
+      const result = await handlerFor(client, 'listIssueIds')({ tracker_id: '' });
+
+      expect(client.listIssues).not.toHaveBeenCalled();
+      expect(textOf(result)).toContain('Invalid tracker_id');
     });
 
     it('lets null through for a clearable ID instead of rejecting it as a bad number', async () => {

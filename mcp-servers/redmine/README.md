@@ -82,8 +82,8 @@ List issue IDs with optional filters.
 - `fixed_version_id` (number, optional): Filter by target version (from `listVersions`)
 - `category_id` (number or string, optional): Filter by category (from `listCategories`), passed to Redmine unchanged: `5`, `"5|6"` (any of), `"!5"` (not), `"!*"` (no category), `"*"` (any), history operators `ev`, `!ev`, `cf`. Redmine skips this filter on a query without a project, so the call fails before any request unless `project_id` or the integration Project ID is set
 - `parent_id` (number, optional): Filter by parent issue
-- `start_date`, `due_date`, `done_ratio`, `is_private`, `watcher_id` (string, optional): Redmine filter expression passed unchanged, e.g. `"<=2026-11-30"`, `"<100"`, `"><2026-11-01|2026-11-30"`, `"me"`
-- `cf` (object, optional): Custom field filters, a map of custom field ID to a Redmine filter expression, sent as `cf_<id>`, e.g. `{ "1": "2.4" }`
+- `start_date`, `due_date`, `done_ratio`, `is_private`, `watcher_id` (string, optional): Redmine filter expression passed unchanged, e.g. `"<=2026-11-30"`, `"<=99"`, `"><2026-11-01|2026-11-30"`, `"me"`
+- `cf` (object, optional): Custom field filters, a map of custom field ID to a Redmine filter expression, sent as `cf_<id>`, e.g. `{ "1": "2.4" }`; keys must be digits and values strings, otherwise the call is rejected
 - `limit` (number, optional): Max results (1-100, default 25)
 - `offset` (number, optional): Pagination offset (default 0)
 
@@ -148,9 +148,9 @@ Create a new issue.
 - `watcher_user_ids` (number[], optional): Users to add as watchers (Redmine accepts them only on create)
 - `file_paths` (string[], optional): 1 to 10 paths under `/workspace` to attach to the new issue
 
-Returns the whole issue as Redmine holds it after the write, plus `ignored_fields`: the sent fields the issue does not hold (no permission, a field disabled for the tracker, or a value derived from status or subtasks), with a `message` when it is not empty. Custom fields are listed as `custom_fields.<id>`; `notes` and `private_notes` are not verified.
+Returns the whole issue as Redmine holds it after the write, plus `ignored_fields`: the sent fields the issue does not hold (no permission, a field disabled for the tracker, or a value derived from status or subtasks), with a `message` when it is not empty. Custom fields are listed as `custom_fields.<id>`; `notes`, `private_notes` and `project_id` are not verified.
 
-Empty values follow one rule on every write field: omitted means unchanged, `null` clears a clearable field (its schema type includes `null`; a text field is sent as `""`), `null` on another field is an error, and `''` is an error. An error names the field and nothing reaches Redmine.
+Empty values follow one rule on every write field: omitted means unchanged, `null` clears a clearable field (its schema type includes `null`; a text field is sent as `""`), `null` on another field is an error, and `''` is an error. Values are type-checked before sending: dates are real `YYYY-MM-DD` dates, `done_ratio` is a whole number from 0 to 100, `estimated_hours` is not negative, `is_private` and `private_notes` are booleans. An error names the field and nothing reaches Redmine.
 
 #### 5. updateIssue
 

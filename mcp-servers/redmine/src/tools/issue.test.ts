@@ -870,44 +870,6 @@ describe('issue-tools', () => {
       expect(text).toContain('Get a valid value from resolveUser.');
     });
 
-    it('passes parent_issue_id and fixed_version_id through to the client', async () => {
-      mockClient.createIssue.mockResolvedValue({ id: 1 });
-
-      const tools = createIssueTools(mockClient as unknown as RedmineClient);
-      const handler = tools.find((t) => t.tool.name === 'createIssue')?.handler;
-
-      await handler!({
-        project_id: 'test-project',
-        subject: 'Sub-task',
-        parent_issue_id: 10,
-        fixed_version_id: 87,
-      });
-
-      expect(mockClient.createIssue).toHaveBeenCalledWith(
-        {
-          project_id: 'test-project',
-          subject: 'Sub-task',
-          parent_issue_id: 10,
-          fixed_version_id: 87,
-        },
-        undefined
-      );
-    });
-
-    it('passes category_id through to the client', async () => {
-      mockClient.createIssue.mockResolvedValue({ id: 1 });
-
-      const tools = createIssueTools(mockClient as unknown as RedmineClient);
-      const handler = tools.find((t) => t.tool.name === 'createIssue')!.handler;
-
-      await handler({ project_id: 'p', subject: 's', category_id: 5 });
-
-      expect(mockClient.createIssue).toHaveBeenCalledWith(
-        { project_id: 'p', subject: 's', category_id: 5 },
-        undefined
-      );
-    });
-
     it('names the fixed_version_id it sent when Redmine rejects the new issue', async () => {
       const formatErrorSpy = vi.spyOn(RedmineClient, 'formatError');
       formatErrorSpy.mockClear();
@@ -1042,29 +1004,6 @@ describe('issue-tools', () => {
       });
       expect(emitted).not.toHaveProperty('message');
       expect(mockClient.updateIssue).toHaveBeenCalledWith(83432, { fixed_version_id: 87 });
-    });
-
-    it.each([
-      [5, { id: 5, name: 'Backend' }],
-      [null, null],
-    ])('sends category_id %j and reads back category %j', async (category_id, category) => {
-      mockClient.updateIssue.mockResolvedValue({
-        id: 12345,
-        subject: 's',
-        ...(category ? { category } : {}),
-      });
-      const tool = createIssueTools(mockClient as unknown as RedmineClient).find(
-        (t) => t.tool.name === 'updateIssue'
-      )!;
-
-      const emitted = expectEmittedKeysDeclared(
-        tool.tool,
-        await tool.handler({ issue_id: 12345, category_id })
-      );
-
-      expect(mockClient.updateIssue).toHaveBeenCalledWith(12345, { category_id });
-      expect(emitted.category).toEqual(category ?? undefined);
-      expect(emitted.ignored_fields).toEqual([]);
     });
 
     it('names the fixed_version_id it sent when Redmine rejects the update', async () => {
@@ -1223,25 +1162,51 @@ describe('issue-tools', () => {
       );
     });
 
-    it('rejects an empty subject on create with the field named and sends nothing', async () => {
-      const result = await toolOf('createIssue').handler({ project_id: 'x', subject: '' });
+    it.each([
+      ['createIssue', { project_id: 'x', subject: '' }, 'subject: empty string is not a value'],
+      ['updateIssue', { issue_id: 1, subject: null }, 'subject cannot be cleared'],
+    ])(
+      '%s rejects an invalid value naming the field and the tool',
+      async (name, params, expected) => {
+        const result = await toolOf(name).handler(params);
 
-      expect(result.isError).toBe(true);
-      expect(textOf(result)).toContain('subject: empty string is not a value');
-      expect(textOf(result)).toContain('createIssue rejected the call and sent nothing');
-      expect(mockClient.createIssue).not.toHaveBeenCalled();
-    });
+        expect(result.isError).toBe(true);
+        expect(textOf(result)).toContain(expected);
+        expect(textOf(result)).toContain(`${name} rejected the call and sent nothing`);
+      }
+    );
 
-    it('reports the sent fields Redmine did not apply on create', async () => {
-      mockClient.createIssue.mockResolvedValue({ ...issueAfter, done_ratio: 0 });
+    it.each([
+      ['createIssue', { project_id: 'x', subject: 'A', assigned_to: 'jane', done_ratio: 'many' }],
+      ['updateIssue', { issue_id: 1, assigned_to: 'jane', subject: '' }],
+    ])(
+      '%s makes no client call for a rejected value even when a name needs resolving',
+      async (name, params) => {
+        const result = await toolOf(name).handler(params);
 
-      const result = await toolOf('createIssue').handler({
-        project_id: 'x',
-        subject: 'A',
-        done_ratio: 20,
+        expect(result.isError).toBe(true);
+        expect(mockClient.resolveUser).not.toHaveBeenCalled();
+        expect(mockClient.createIssue).not.toHaveBeenCalled();
+        expect(mockClient.updateIssue).not.toHaveBeenCalled();
+      }
+    );
+
+    it('resolves a name after validation and sends its ID with the table fields', async () => {
+      mockClient.updateIssue.mockResolvedValue(issueAfter);
+      mockClient.resolveUser.mockResolvedValue(42);
+
+      await toolOf('updateIssue').handler({
+        issue_id: 1,
+        assigned_to: 'jane',
+        tracker: 'feature',
+        due_date: '2026-12-01',
       });
 
-      expect(JSON.parse(textOf(result)).ignored_fields).toEqual(['done_ratio']);
+      expect(mockClient.updateIssue).toHaveBeenCalledWith(1, {
+        due_date: '2026-12-01',
+        assigned_to_id: 42,
+        tracker_id: 2,
+      });
     });
 
     it('updates dates and progress and returns the whole issue after the write', async () => {
@@ -1279,76 +1244,6 @@ describe('issue-tools', () => {
         'Redmine did not apply done_ratio: no permission, the field is disabled for the tracker, or it is derived from status or subtasks.'
       );
     });
-
-    it('clears fields with null and sends "" for the description', async () => {
-      mockClient.updateIssue.mockResolvedValue({ id: 1, subject: 'A' });
-
-      const result = await toolOf('updateIssue').handler({
-        issue_id: 1,
-        due_date: null,
-        fixed_version_id: null,
-        description: null,
-      });
-
-      expect(JSON.parse(textOf(result)).ignored_fields).toEqual([]);
-      expect(mockClient.updateIssue).toHaveBeenCalledWith(1, {
-        due_date: null,
-        fixed_version_id: null,
-        description: '',
-      });
-    });
-
-    it('sends a private note', async () => {
-      mockClient.updateIssue.mockResolvedValue({ id: 1, subject: 'A' });
-
-      await toolOf('updateIssue').handler({
-        issue_id: 1,
-        notes: 'Only for the team',
-        private_notes: true,
-      });
-
-      expect(mockClient.updateIssue).toHaveBeenCalledWith(1, {
-        notes: 'Only for the team',
-        private_notes: true,
-      });
-    });
-
-    it.each([
-      [{ subject: null }, 'subject cannot be cleared'],
-      [{ subject: '', notes: 'x' }, 'subject: empty string is not a value'],
-      [{ notes: '' }, 'notes: empty string is not a value'],
-      [{ status: '' }, 'status cannot be cleared'],
-      [{ estimated_hours: '' }, 'pass null to clear it'],
-    ])('rejects %j on update and sends nothing', async (fields, expected) => {
-      const result = await toolOf('updateIssue').handler({ issue_id: 1, ...fields });
-
-      expect(result.isError).toBe(true);
-      expect(textOf(result)).toContain(expected);
-      expect(mockClient.updateIssue).not.toHaveBeenCalled();
-    });
-
-    it('rejects assigned_to null by name and says to clear with assigned_to_id', async () => {
-      const result = await toolOf('updateIssue').handler({ issue_id: 1, assigned_to: null });
-
-      expect(textOf(result)).toContain('assigned_to_id: null to clear it');
-      expect(mockClient.updateIssue).not.toHaveBeenCalled();
-    });
-
-    it('declares a clearable field with null and a non-clearable one without', () => {
-      const properties = toolOf('updateIssue').tool.inputSchema.properties as Record<
-        string,
-        { type: unknown; description: string }
-      >;
-
-      expect(properties.assigned_to_id.type).toEqual(['number', 'null']);
-      expect(properties.due_date.description).toContain('null clears');
-      expect(properties.subject.type).toBe('string');
-    });
-
-    it('requires only project_id and subject on create', () => {
-      expect(toolOf('createIssue').tool.inputSchema.required).toEqual(['project_id', 'subject']);
-      expect(toolOf('updateIssue').tool.inputSchema.required).toEqual(['issue_id']);
-    });
   });
 
   describe('listIssueIds filters from the issue field table', () => {
@@ -1364,7 +1259,7 @@ describe('issue-tools', () => {
       const result = await handler({
         project_id: 'x',
         due_date: '<=2026-11-30',
-        done_ratio: '<100',
+        done_ratio: '<=99',
         start_date: '><2026-11-01|2026-11-30',
         is_private: '0',
         watcher_id: 'me',
@@ -1378,12 +1273,25 @@ describe('issue-tools', () => {
       expect(mockClient.listIssues).toHaveBeenCalledWith({
         project_id: 'x',
         due_date: '<=2026-11-30',
-        done_ratio: '<100',
+        done_ratio: '<=99',
         start_date: '><2026-11-01|2026-11-30',
         is_private: '0',
         watcher_id: 'me',
         cf: { '1': '2.4' },
       });
+    });
+
+    it('rejects an invalid cf naming it and sends nothing', async () => {
+      const handler = createIssueTools(mockClient as unknown as RedmineClient).find(
+        (t) => t.tool.name === 'listIssueIds'
+      )!.handler;
+
+      const result = await handler({ cf: { abc: 'x' }, assigned_to: 'jane' });
+
+      expect(result.isError).toBe(true);
+      expect((result.content[0] as { text: string }).text).toContain('Invalid cf.');
+      expect(mockClient.resolveUser).not.toHaveBeenCalled();
+      expect(mockClient.listIssues).not.toHaveBeenCalled();
     });
   });
 

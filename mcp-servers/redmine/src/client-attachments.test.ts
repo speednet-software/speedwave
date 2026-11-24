@@ -169,6 +169,21 @@ describe('RedmineClient attachments', () => {
       expect(body.issue).toEqual({ uploads: [{ token: 't', filename: 'a.txt' }] });
     });
 
+    it('sanitizes the comment sent with the files', async () => {
+      const file = await writeWorkspaceFile('a.txt', Buffer.from('x'));
+      route = (r) =>
+        r.method === 'POST'
+          ? { status: 201, body: { upload: { token: 't' } } }
+          : r.method === 'PUT'
+            ? { status: 204 }
+            : issueReply([]);
+
+      await client().addAttachments(7, [file], '<script>alert(1)</script>See the file');
+
+      const body = JSON.parse(callsTo('PUT', '/issues/7.json')[0].body.toString());
+      expect(body.issue.notes).toBe('See the file');
+    });
+
     it('rejects an issue of another project before uploading anything', async () => {
       const file = await writeWorkspaceFile('a.txt', Buffer.from('x'));
       route = (r) => {

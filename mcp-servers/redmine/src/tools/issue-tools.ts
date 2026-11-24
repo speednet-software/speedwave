@@ -18,10 +18,11 @@ import { RedmineClient } from '../client.js';
 import {
   buildIssuePayload,
   ignoredFields,
+  issueFilterProblem,
   issueFilterProperties,
   issueInputProperties,
   issueRequiredOnCreate,
-  type IssueWriteResult,
+  resolvedAliasIds,
 } from '../issue-fields.js';
 import { resolveParams } from './helpers.js';
 import { resolveAttachmentFiles } from './attachment-files.js';
@@ -144,7 +145,7 @@ const WRITE_RESULT_SCHEMA = successResultSchema({
     type: 'array',
     items: { type: 'string' },
     description:
-      'Sent fields that the issue read back after the write does not hold (custom fields as custom_fields.<id>); empty when every sent field was applied. notes and private_notes cannot be verified this way',
+      'Sent fields that the issue read back after the write does not hold (custom fields as custom_fields.<id>); empty when every sent field was applied. notes, private_notes and project_id cannot be verified this way',
   },
   message: { type: 'string', description: 'Present only when ignored_fields is not empty' },
 });
@@ -152,7 +153,7 @@ const WRITE_RESULT_SCHEMA = successResultSchema({
 const listIssueIdsTool: Tool = {
   name: 'listIssueIds',
   description:
-    'List issue IDs with optional filters. Returns only IDs for efficiency. Omitting assigned_to returns issues for ALL users; pass assigned_to: "me" to scope to the current user. Omitting status returns open issues only; pass status: "*" to count closed ones too, e.g. for every issue in a target version or every subtask. start_date, due_date, done_ratio, is_private and watcher_id take a Redmine filter expression (e.g. due_date: "<=2026-11-30", done_ratio: "<100"); cf maps a custom field ID to an expression.',
+    'List issue IDs with optional filters. Returns only IDs for efficiency. Omitting assigned_to returns issues for ALL users; pass assigned_to: "me" to scope to the current user. Omitting status returns open issues only; pass status: "*" to count closed ones too, e.g. for every issue in a target version or every subtask. start_date, due_date, done_ratio, is_private and watcher_id take a Redmine filter expression (e.g. due_date: "<=2026-11-30", done_ratio: "<=99"); cf maps a custom field ID to an expression.',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
@@ -197,7 +198,7 @@ const listIssueIdsTool: Tool = {
       input: {
         project_id: 'my-project',
         due_date: '<=2026-11-30',
-        done_ratio: '<100',
+        done_ratio: '<=99',
         cf: { '1': '2.4' },
       },
     },
@@ -290,7 +291,7 @@ const searchIssueIdsTool: Tool = {
 
 const createIssueTool: Tool = {
   name: 'createIssue',
-  description: `Create a new Redmine issue. tracker/priority/status names must match this project's configured mappings (see getMappings); an unrecognized name throws an error listing valid values. Omitted fields keep Redmine's defaults; null clears a field whose description says so, '' is rejected, and a rejected call sends nothing. file_paths attaches 1 to ${MAX_WORKSPACE_FILES} files from /workspace; a path outside /workspace is rejected before anything is created. Returns the whole issue as Redmine holds it after the write plus ignored_fields, the sent fields Redmine did not apply (no permission, a field disabled for the tracker, or a value derived from status or subtasks).`,
+  description: `Create a new Redmine issue. tracker/priority/status names must match this project's configured mappings (see getMappings); an unrecognized name throws an error listing valid values. Omitted fields keep Redmine's defaults; null clears a field whose description says so, '' is rejected, and a rejected call sends nothing. file_paths attaches 1 to ${MAX_WORKSPACE_FILES} files from /workspace; a path outside /workspace is rejected before anything is created. Returns the whole issue as Redmine holds it after the write plus ignored_fields, the sent fields Redmine did not apply (no permission, a field disabled for the tracker, or a value derived from status or subtasks); project_id cannot be verified.`,
   annotations: WRITE_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
@@ -372,7 +373,7 @@ const createIssueTool: Tool = {
 const updateIssueTool: Tool = {
   name: 'updateIssue',
   description:
-    "Update an existing Redmine issue. tracker/priority/status names must match this project's configured mappings (see getMappings); an unrecognized name throws an error listing valid values. Omitted fields stay unchanged; null clears a field whose description says so, '' is rejected, and a rejected call sends nothing. Returns the whole issue as Redmine holds it after the update plus ignored_fields, the sent fields Redmine did not apply (no permission, a field disabled for the tracker, or a value derived from status or subtasks); notes and private_notes cannot be verified.",
+    "Update an existing Redmine issue. tracker/priority/status names must match this project's configured mappings (see getMappings); an unrecognized name throws an error listing valid values. Omitted fields stay unchanged; null clears a field whose description says so, '' is rejected, and a rejected call sends nothing. Returns the whole issue as Redmine holds it after the update plus ignored_fields, the sent fields Redmine did not apply (no permission, a field disabled for the tracker, or a value derived from status or subtasks); notes, private_notes and project_id cannot be verified.",
   annotations: WRITE_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: true,
@@ -495,6 +496,8 @@ export function createIssueTools(client: RedmineClient | null): ToolDefinition[]
       tool: listIssueIdsTool,
       handler: async (params) => {
         const p = params as Record<string, unknown>;
+        const filterProblem = issueFilterProblem(p);
+        if (filterProblem) return rejected(listIssueIdsTool.name, filterProblem);
         const listIds = () =>
           withRedmineErrors(undefined, async () => {
             const specialStatuses = ['open', 'closed', '*'];
@@ -557,6 +560,8 @@ export function createIssueTools(client: RedmineClient | null): ToolDefinition[]
       handler: async (params) =>
         withRedmineErrors(versionContext(params), async () => {
           const { file_paths, ...fields } = params as Record<string, unknown>;
+          const checked = buildIssuePayload(fields, 'create');
+          if (!checked.ok) return rejected(createIssueTool.name, checked);
           const attachments =
             file_paths === undefined
               ? { files: undefined }
@@ -565,10 +570,9 @@ export function createIssueTools(client: RedmineClient | null): ToolDefinition[]
           const resolved = resolveParams(fields, client.getMappings());
           const assignError = await resolveAssignedTo(client, resolved);
           if (assignError) return assignError;
-          const built = buildIssuePayload(resolved, 'create');
-          if (!built.ok) return rejectedWrite('createIssue', built);
-          const issue = await client.createIssue(built.payload, attachments.files);
-          return writeResult(issue, built.payload);
+          const payload = { ...checked.payload, ...resolvedAliasIds(resolved) };
+          const issue = await client.createIssue(payload, attachments.files);
+          return writeResult(issue, payload);
         }),
     },
     {
@@ -576,13 +580,14 @@ export function createIssueTools(client: RedmineClient | null): ToolDefinition[]
       handler: async (params) => {
         const { issue_id, ...fields } = params as { issue_id: number } & Record<string, unknown>;
         return withRedmineErrors({ issue_id, ...versionContext(params) }, async () => {
+          const checked = buildIssuePayload(fields, 'update');
+          if (!checked.ok) return rejected(updateIssueTool.name, checked);
           const resolved = resolveParams(fields, client.getMappings());
           const assignError = await resolveAssignedTo(client, resolved);
           if (assignError) return assignError;
-          const built = buildIssuePayload(resolved, 'update');
-          if (!built.ok) return rejectedWrite('updateIssue', built);
-          const issue = await client.updateIssue(issue_id, built.payload);
-          return writeResult(issue, built.payload);
+          const payload = { ...checked.payload, ...resolvedAliasIds(resolved) };
+          const issue = await client.updateIssue(issue_id, payload);
+          return writeResult(issue, payload);
         });
       },
     },
@@ -599,9 +604,9 @@ export function createIssueTools(client: RedmineClient | null): ToolDefinition[]
   ];
 }
 
-function rejectedWrite(
+function rejected(
   toolName: string,
-  { paramName, problem }: Extract<IssueWriteResult, { ok: false }>
+  { paramName, problem }: { paramName: string; problem: string }
 ): ReturnType<typeof teachingErrorResult> {
   return teachingErrorResult({
     paramName,

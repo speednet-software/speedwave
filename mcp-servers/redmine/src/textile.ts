@@ -1,7 +1,5 @@
-/** Tags whose entire content (opening tag + body + closing tag) must be removed */
 const DANGEROUS_TAGS = ['script', 'style', 'iframe', 'object', 'embed', 'form', 'applet'];
 
-/** Textile-safe HTML tags (Redmine Textile allows basic formatting) */
 const SAFE_TAGS = new Set([
   'a',
   'abbr',
