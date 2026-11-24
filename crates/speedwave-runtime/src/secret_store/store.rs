@@ -21,6 +21,15 @@ pub struct SecretStore {
     key: Mutex<Option<Key>>,
 }
 
+/// Whether the secret file exists under `data_dir`; nothing is decrypted and no key is needed.
+pub fn secret_exists_in(data_dir: &Path, name: &SecretName) -> bool {
+    data_dir
+        .join(SECRETS_DIR)
+        .join(name.project())
+        .join(name.file_name())
+        .is_file()
+}
+
 /// Every secret of one project: readable values and names of files that cannot be read.
 #[derive(Default)]
 pub struct ProjectSecrets {
@@ -130,6 +139,11 @@ impl SecretStore {
     /// Whether the secret file exists; nothing is decrypted.
     pub fn exists(&self, name: &SecretName) -> bool {
         self.path_of(name).is_file()
+    }
+
+    /// Path of the encrypted file of one secret.
+    pub(crate) fn file_path(&self, name: &SecretName) -> PathBuf {
+        self.path_of(name)
     }
 
     /// Reads every secret of a project; a bad file lands in `unreadable` and never fails the call.
@@ -786,5 +800,19 @@ mod tests {
         );
 
         assert!(matches!(reopened, Err(SecretStoreError::KeyMissing)));
+    }
+
+    #[test]
+    fn secret_exists_in_checks_the_file_without_a_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SecretStore::open(tmp.path()).unwrap();
+        let secret = name("slack", "token");
+        assert!(!secret_exists_in(tmp.path(), &secret));
+
+        store.write(&secret, SENTINEL).unwrap();
+        std::fs::remove_file(key_path(tmp.path())).unwrap();
+
+        assert!(secret_exists_in(tmp.path(), &secret));
+        assert!(!secret_exists_in(tmp.path(), &name("slack", "other")));
     }
 }

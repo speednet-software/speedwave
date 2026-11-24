@@ -235,14 +235,14 @@ impl LlmConfig {
         }
     }
 
-    /// Sets each provider's `has_api_key` from its key file's existence — the
-    /// authoritative source (ADR-073), so a stale echo never reaches the renderer.
+    /// Sets each provider's `has_api_key` from the existence of its secret store entry — the
+    /// authoritative source (ADR-073), so a stale echo never reaches the renderer. Nothing is
+    /// decrypted, so it works while the install key is missing.
     pub fn sync_has_api_key_from_disk_in(&mut self, data_dir: &Path, project: &str) {
         for entry in &mut self.providers {
-            if let Ok(key_path) =
-                crate::compose::llm_provider_key_path_in(data_dir, project, &entry.id)
+            if let Ok(name) = crate::secret_store::SecretName::llm_provider_key(project, &entry.id)
             {
-                entry.has_api_key = key_path.exists();
+                entry.has_api_key = crate::secret_store::secret_exists_in(data_dir, &name);
             }
         }
     }
@@ -254,7 +254,7 @@ impl LlmConfig {
 pub enum AnthropicEvidence {
     /// No Anthropic credential on disk.
     None,
-    /// `secrets/<project>/anthropic_api_key` exists.
+    /// The `anthropic.api_key` secret of the project exists in the secret store.
     ApiKey,
     /// Claude Code OAuth credentials exist in the project's claude-home.
     Oauth,
@@ -1999,11 +1999,8 @@ fn apply_repo_model_suggestion(llm: &mut LlmConfig, suggestion: Option<String>) 
 }
 
 fn anthropic_secret_exists_in(data_dir: &Path, project_name: &str) -> bool {
-    data_dir
-        .join("secrets")
-        .join(project_name)
-        .join("anthropic_api_key")
-        .is_file()
+    crate::secret_store::SecretName::anthropic_api_key(project_name)
+        .is_ok_and(|name| crate::secret_store::secret_exists_in(data_dir, &name))
 }
 
 /// Provider names that route through a local LLM server. SSOT for the set;
@@ -2918,6 +2915,45 @@ mod tests {
 
         assert!(!llm.providers[0].has_api_key, "no key file → false");
         assert!(llm.providers[1].has_api_key, "key file present → true");
+    }
+
+    #[test]
+    fn sync_has_api_key_from_disk_needs_no_install_key() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::compose::write_llm_provider_key_in(dir.path(), "proj", "openrouter", "sk-x")
+            .unwrap();
+        std::fs::remove_file(dir.path().join("secret-store.key")).unwrap();
+        let mut llm = LlmConfig {
+            providers: vec![LlmProviderEntry {
+                id: "openrouter".into(),
+                kind: LlmProviderKind::OpenRouter,
+                base_url: None,
+                model: None,
+                has_api_key: false,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            ..Default::default()
+        };
+
+        llm.sync_has_api_key_from_disk_in(dir.path(), "proj");
+
+        assert!(
+            llm.providers[0].has_api_key,
+            "existence is read from the .enc file, nothing is decrypted"
+        );
+    }
+
+    #[test]
+    fn anthropic_evidence_ignores_a_plaintext_key_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = dir.path().join("secrets").join("p");
+        std::fs::create_dir_all(&secrets).unwrap();
+        std::fs::write(secrets.join("anthropic_api_key"), "k").unwrap();
+        assert_eq!(
+            AnthropicEvidence::detect_in(dir.path(), "p"),
+            AnthropicEvidence::None
+        );
     }
 
     #[test]
@@ -4573,9 +4609,13 @@ mod tests {
             AnthropicEvidence::detect_in(dir.path(), "p"),
             AnthropicEvidence::Oauth
         );
-        let secrets = dir.path().join("secrets").join("p");
-        std::fs::create_dir_all(&secrets).unwrap();
-        std::fs::write(secrets.join("anthropic_api_key"), "k").unwrap();
+        crate::secret_store::SecretStore::open(dir.path())
+            .unwrap()
+            .write(
+                &crate::secret_store::SecretName::anthropic_api_key("p").unwrap(),
+                "k",
+            )
+            .unwrap();
         assert_eq!(
             AnthropicEvidence::detect_in(dir.path(), "p"),
             AnthropicEvidence::ApiKey,

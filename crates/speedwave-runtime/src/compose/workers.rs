@@ -1,30 +1,43 @@
 //! Host-side worker + built-in MCP worker wiring: per-worker Bearer auth tokens, the integrations
 //! filter (drop disabled services + their hub env), and the URL to reach a host-side worker.
 
+use super::secret_payload::WorkerCredentials;
 use super::secret_slots::{
     enabled_builtin_workers, enabled_plugin_workers, worker_auth_mount, WORKER_AUTH_FILE,
     WORKER_AUTH_TARGET,
 };
 use super::{
-    add_service_env_var, add_service_volume, ensure_host_gateway_extra_host, init_secrets_dir_in,
-    inject_env_into, inject_worker_env,
+    add_service_env_var, add_service_volume, ensure_host_gateway_extra_host, inject_env_into,
+    inject_worker_env,
 };
 use crate::config::ResolvedIntegrationsConfig;
 use crate::consts;
 use crate::plugin;
+use crate::secret_store::{ProjectSecrets, SecretStore};
 
-/// `SPW_CREDENTIALS_DIGEST` of every worker that has user-entered credential files.
+const BEARER_PURPOSE: &str = "bearer";
+
+/// `SPW_CREDENTIALS_DIGEST` of every worker that has user-entered credentials: the non-secret
+/// token files plus the values of its secrets in the secret store.
 pub(crate) fn apply_credentials_digests_in(
     data_dir: &std::path::Path,
     yaml: &str,
     project_name: &str,
+    plugin_manifests: &[plugin::PluginManifest],
 ) -> anyhow::Result<String> {
     let tokens_root = super::resolve_tokens_dir_in(data_dir, project_name);
-    apply_credentials_digests(yaml, &tokens_root)
+    let secrets = SecretStore::open(data_dir)?.read_project(project_name)?;
+    apply_credentials_digests(yaml, project_name, &tokens_root, &secrets, plugin_manifests)
 }
 
 /// Testable core of [`apply_credentials_digests_in`] with explicit roots.
-fn apply_credentials_digests(yaml: &str, tokens_root: &std::path::Path) -> anyhow::Result<String> {
+fn apply_credentials_digests(
+    yaml: &str,
+    project: &str,
+    tokens_root: &std::path::Path,
+    secrets: &ProjectSecrets,
+    plugin_manifests: &[plugin::PluginManifest],
+) -> anyhow::Result<String> {
     let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
     let service_names: Vec<String> = doc
         .get("services")
@@ -39,7 +52,8 @@ fn apply_credentials_digests(yaml: &str, tokens_root: &std::path::Path) -> anyho
         .unwrap_or_default();
     for name in service_names {
         let key = name.strip_prefix("mcp-").unwrap_or(&name);
-        match credentials_digest(&tokens_root.join(key)) {
+        let credentials = worker_credentials(&name, plugin_manifests);
+        match credentials_digest(&credentials, project, &tokens_root.join(key), secrets) {
             Ok(Some(digest)) => {
                 add_service_env_var(&mut doc, &name, "SPW_CREDENTIALS_DIGEST", &digest)?;
             }
@@ -50,6 +64,26 @@ fn apply_credentials_digests(yaml: &str, tokens_root: &std::path::Path) -> anyho
         }
     }
     Ok(serde_yaml_ng::to_string(&doc)?)
+}
+
+fn worker_credentials(
+    compose_name: &str,
+    plugin_manifests: &[plugin::PluginManifest],
+) -> WorkerCredentials {
+    if let Some(svc) = consts::TOGGLEABLE_MCP_SERVICES
+        .iter()
+        .find(|svc| svc.compose_name == compose_name)
+    {
+        return WorkerCredentials::builtin(svc);
+    }
+    let key = compose_name.strip_prefix("mcp-").unwrap_or(compose_name);
+    match plugin_manifests
+        .iter()
+        .find(|manifest| manifest.service_id.as_deref() == Some(key))
+    {
+        Some(manifest) => WorkerCredentials::plugin(key, manifest),
+        None => WorkerCredentials::builtin_key(key),
+    }
 }
 
 /// Machine-written files in a token dir that must NOT trigger recreate: `access_token` is rotated by
@@ -67,45 +101,28 @@ pub(super) fn is_write_in_progress(name: &std::ffi::OsStr) -> bool {
     name.to_string_lossy().contains(".tmp.")
 }
 
-/// SHA-256 over sorted user-entered token files. `Ok(None)` = no credentials.
-fn credentials_digest(token_dir: &std::path::Path) -> anyhow::Result<Option<String>> {
+/// SHA-256 over the sorted (name, value) set the worker's tokens slot carries, minus volatile
+/// names. `Ok(None)` = no credentials, or a secret of the integration cannot be read.
+fn credentials_digest(
+    credentials: &WorkerCredentials,
+    project: &str,
+    token_dir: &std::path::Path,
+    secrets: &ProjectSecrets,
+) -> anyhow::Result<Option<String>> {
     use sha2::{Digest, Sha256};
+    let Some(files) = credentials.files(project, token_dir, secrets)? else {
+        return Ok(None);
+    };
     let mut hasher = Sha256::new();
     let mut found = false;
-    let entries = match std::fs::read_dir(token_dir) {
-        Ok(entries) => Some(entries),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => {
-            anyhow::bail!("credentials dir unreadable: {}: {e}", token_dir.display())
-        }
-    };
-    if let Some(entries) = entries {
-        let mut files: Vec<std::path::PathBuf> = entries
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .map(|e| e.path())
-            .filter(|p| !p.is_symlink() && p.is_file())
-            .filter(|p| {
-                p.file_name()
-                    .map(|n| {
-                        !is_write_in_progress(n)
-                            && !VOLATILE_CREDENTIAL_FILES
-                                .iter()
-                                .any(|v| n == std::ffi::OsStr::new(v))
-                    })
-                    .unwrap_or(false)
-            })
-            .collect();
-        files.sort();
-        for f in files {
-            let bytes = std::fs::read(&f)?;
-            if let Some(name) = f.file_name() {
-                hasher.update(name.to_string_lossy().as_bytes());
-                hasher.update([0u8]);
-                hasher.update(&bytes);
-                found = true;
-            }
-        }
+    for file in files
+        .iter()
+        .filter(|file| !VOLATILE_CREDENTIAL_FILES.contains(&file.name.as_str()))
+    {
+        hasher.update(file.name.as_bytes());
+        hasher.update([0u8]);
+        hasher.update(&file.content);
+        found = true;
     }
     if !found {
         return Ok(None);
@@ -122,14 +139,34 @@ pub(crate) fn apply_worker_auth_tokens_in(
     integrations: &ResolvedIntegrationsConfig,
     installed_plugins: &[plugin::PluginManifest],
 ) -> anyhow::Result<String> {
-    let secrets_dir = init_secrets_dir_in(data_dir, project_name)?;
-    apply_worker_auth_tokens_with_dir(
-        yaml,
-        project_name,
-        &secrets_dir,
-        integrations,
-        installed_plugins,
-    )
+    let store = SecretStore::open(data_dir)?;
+    let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
+
+    for svc in enabled_builtin_workers(integrations) {
+        add_service_env_var(
+            &mut doc,
+            svc.compose_name,
+            &format!("{}_FILE", worker_bearer_env_name(svc.config_key)),
+            &format!("{WORKER_AUTH_TARGET}/{WORKER_AUTH_FILE}"),
+        )?;
+        add_service_volume(
+            &mut doc,
+            svc.compose_name,
+            &worker_auth_mount(svc.compose_name)?.entry(project_name),
+        )?;
+    }
+
+    for worker in enabled_plugin_workers(integrations, installed_plugins) {
+        let token = derived_worker_bearer(&store, project_name, worker.service_id)?;
+        add_service_env_var(
+            &mut doc,
+            &worker.compose_name,
+            &worker_bearer_env_name(worker.service_id),
+            &token,
+        )?;
+    }
+
+    Ok(serde_yaml_ng::to_string(&doc)?)
 }
 
 pub(super) fn worker_bearer_env_name(token_key: &str) -> String {
@@ -143,91 +180,16 @@ pub(super) fn worker_bearer_file_name(token_key: &str) -> String {
     format!("{token_key}-auth-token")
 }
 
-/// Reads or generates one worker's Bearer auth token (UUID v4) in `secrets_dir`, written
-/// atomically at 0o600.
-pub(super) fn read_or_create_worker_bearer(
-    secrets_dir: &std::path::Path,
+/// One worker's Bearer auth token, derived from the install key; never stored. Plugin workers get
+/// it as compose env, built-in workers through their `auth` slot.
+pub(super) fn derived_worker_bearer(
+    store: &SecretStore,
+    project: &str,
     token_key: &str,
 ) -> anyhow::Result<String> {
-    let token_file_name = worker_bearer_file_name(token_key);
-    let token_path = secrets_dir.join(&token_file_name);
-
-    let token = if !token_path.is_symlink() && token_path.is_file() {
-        match std::fs::read_to_string(&token_path) {
-            Ok(content) if !content.trim().is_empty() => content.trim().to_string(),
-            Ok(_) => {
-                log::warn!(
-                    "Token file at {} is empty — generating new auth token; MCP workers will require restart",
-                    token_path.display()
-                );
-                uuid::Uuid::new_v4().to_string()
-            }
-            Err(e) => {
-                log::warn!(
-                    "Token file at {} is unreadable ({e}) — regenerating; MCP workers will require restart",
-                    token_path.display()
-                );
-                let _ = std::fs::remove_file(&token_path);
-                uuid::Uuid::new_v4().to_string()
-            }
-        }
-    } else {
-        if token_path.is_symlink() {
-            log::warn!(
-                "Stale symlink at token location, removing: {}",
-                token_path.display()
-            );
-            std::fs::remove_file(&token_path)?;
-        } else if token_path.exists() {
-            log::warn!(
-                "Unexpected directory at token location {}, removing recursively",
-                token_path.display()
-            );
-            std::fs::remove_dir_all(&token_path)?;
-        }
-        uuid::Uuid::new_v4().to_string()
-    };
-
-    crate::fs_perms::write_restricted_file_atomic(&token_path, &token)?;
-    Ok(token)
-}
-
-/// Testable version: accepts explicit secrets directory and plugin list.
-pub(crate) fn apply_worker_auth_tokens_with_dir(
-    yaml: &str,
-    project: &str,
-    secrets_dir: &std::path::Path,
-    integrations: &ResolvedIntegrationsConfig,
-    installed_plugins: &[plugin::PluginManifest],
-) -> anyhow::Result<String> {
-    let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
-
-    for svc in enabled_builtin_workers(integrations) {
-        read_or_create_worker_bearer(secrets_dir, svc.config_key)?;
-        add_service_env_var(
-            &mut doc,
-            svc.compose_name,
-            &format!("{}_FILE", worker_bearer_env_name(svc.config_key)),
-            &format!("{WORKER_AUTH_TARGET}/{WORKER_AUTH_FILE}"),
-        )?;
-        add_service_volume(
-            &mut doc,
-            svc.compose_name,
-            &worker_auth_mount(svc.compose_name)?.entry(project),
-        )?;
-    }
-
-    for worker in enabled_plugin_workers(integrations, installed_plugins) {
-        let token = read_or_create_worker_bearer(secrets_dir, worker.service_id)?;
-        add_service_env_var(
-            &mut doc,
-            &worker.compose_name,
-            &worker_bearer_env_name(worker.service_id),
-            &token,
-        )?;
-    }
-
-    Ok(serde_yaml_ng::to_string(&doc)?)
+    Ok(store
+        .derive_token(BEARER_PURPOSE, project, token_key)?
+        .to_string())
 }
 
 /// SSOT for `apply_integrations_filter`'s `ENABLED_SERVICES`: enabled built-in MCP keys, `os` when
@@ -499,8 +461,11 @@ pub(crate) fn mcp_os_gateway_url(port: u16) -> String {
 mod credentials_digest_tests {
     use super::*;
 
+    const PROJECT: &str = "p";
     const YAML: &str = "services:\n  mcp-hub:\n    image: hub\n  mcp-slack:\n    image: slack\n  mcp-github:\n    image: gh\n";
     const YAML2: &str = "services:\n  mcp-hub:\n    image: hub\n  mcp-sharepoint:\n    image: sp\n";
+    const YAML_PLUGIN: &str =
+        "services:\n  mcp-hub:\n    image: hub\n  mcp-example-plugin:\n    image: plugin\n";
 
     fn env_of(yaml: &str, svc: &str) -> Option<String> {
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
@@ -512,62 +477,207 @@ mod credentials_digest_tests {
             .map(str::to_string)
     }
 
+    fn put_secret(root: &std::path::Path, service: &str, field: &str, value: &str) {
+        let name = crate::secret_store::SecretName::integration(PROJECT, service, field).unwrap();
+        SecretStore::open(root)
+            .unwrap()
+            .write(&name, value)
+            .unwrap();
+    }
+
+    fn put_file(root: &std::path::Path, service: &str, file: &str, value: &str) {
+        let dir = root.join("tokens").join(service);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(file), value).unwrap();
+    }
+
+    fn digests_with(
+        yaml: &str,
+        root: &std::path::Path,
+        manifests: &[plugin::PluginManifest],
+    ) -> anyhow::Result<String> {
+        let secrets = SecretStore::open(root)
+            .unwrap()
+            .read_project(PROJECT)
+            .unwrap();
+        apply_credentials_digests(yaml, PROJECT, &root.join("tokens"), &secrets, manifests)
+    }
+
+    fn digests(yaml: &str, root: &std::path::Path) -> String {
+        digests_with(yaml, root, &[]).unwrap()
+    }
+
+    fn example_plugin(secret_field: &str) -> plugin::PluginManifest {
+        plugin::PluginManifest {
+            name: "Example Plugin".to_string(),
+            slug: "example-plugin".to_string(),
+            service_id: Some("example-plugin".to_string()),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: plugin::TokenMount::ReadOnly,
+            auth_fields: vec![plugin::AuthFieldDef {
+                key: secret_field.to_string(),
+                label: secret_field.to_string(),
+                field_type: "password".to_string(),
+                placeholder: String::new(),
+                is_secret: true,
+                required: true,
+                description: None,
+                validation: None,
+                oauth_flow: false,
+            }],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            cpu_limit: None,
+            requires_integrations: vec![],
+            host_bridge: None,
+            instructions: None,
+            oauth: None,
+        }
+    }
+
     #[test]
     fn injects_digest_only_into_workers_with_credentials() {
         let tmp = tempfile::tempdir().unwrap();
-        let tokens = tmp.path().join("tokens");
-        std::fs::create_dir_all(tokens.join("slack")).unwrap();
-        std::fs::write(tokens.join("slack").join("bot_token"), "xoxb-1").unwrap();
-        let out = apply_credentials_digests(YAML, &tokens).unwrap();
-        assert!(env_of(&out, "mcp-slack").is_some(), "slack has credentials");
-        assert!(env_of(&out, "mcp-github").is_none(), "github has none");
+        put_secret(tmp.path(), "github", "token", "ghp-secret");
+        let out = digests(YAML, tmp.path());
+        assert!(env_of(&out, "mcp-github").is_some(), "github has a secret");
+        assert!(env_of(&out, "mcp-slack").is_none(), "slack has none");
         assert!(env_of(&out, "mcp-hub").is_none(), "hub must never get one");
+    }
+
+    #[test]
+    fn the_digest_is_16_hex_characters_and_never_the_secret() {
+        let tmp = tempfile::tempdir().unwrap();
+        put_secret(tmp.path(), "github", "token", "ghp-secret");
+        let out = digests(YAML, tmp.path());
+        let env = env_of(&out, "mcp-github").unwrap();
+        let digest = env.strip_prefix("SPW_CREDENTIALS_DIGEST=").unwrap();
+        assert_eq!(digest.len(), 16);
+        assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(!out.contains("ghp-secret"));
     }
 
     #[test]
     fn rotation_changes_digest_for_that_worker_only() {
         let tmp = tempfile::tempdir().unwrap();
-        let tokens = tmp.path().join("tokens");
-        for svc in ["slack", "github"] {
-            std::fs::create_dir_all(tokens.join(svc)).unwrap();
-            std::fs::write(tokens.join(svc).join("token"), "old").unwrap();
-        }
-        let before = apply_credentials_digests(YAML, &tokens).unwrap();
-        std::fs::write(tokens.join("slack").join("token"), "rotated").unwrap();
-        let after = apply_credentials_digests(YAML, &tokens).unwrap();
+        put_secret(tmp.path(), "github", "token", "old");
+        put_file(tmp.path(), "slack", "team_id", "T1");
+        let before = digests(YAML, tmp.path());
+        put_secret(tmp.path(), "github", "token", "rotated");
+        let after = digests(YAML, tmp.path());
         assert_ne!(
-            env_of(&before, "mcp-slack"),
-            env_of(&after, "mcp-slack"),
+            env_of(&before, "mcp-github"),
+            env_of(&after, "mcp-github"),
             "rotated token must change the digest (config-hash recreate)"
         );
         assert_eq!(
-            env_of(&before, "mcp-github"),
-            env_of(&after, "mcp-github"),
+            env_of(&before, "mcp-slack"),
+            env_of(&after, "mcp-slack"),
             "untouched worker keeps its digest"
+        );
+    }
+
+    #[test]
+    fn a_non_secret_credential_file_is_part_of_the_digest() {
+        let tmp = tempfile::tempdir().unwrap();
+        put_file(tmp.path(), "sharepoint", "site_id", "site-a");
+        let before = digests(YAML2, tmp.path());
+        assert!(env_of(&before, "mcp-sharepoint").is_some());
+        put_file(tmp.path(), "sharepoint", "site_id", "site-b");
+        let after = digests(YAML2, tmp.path());
+        assert_ne!(
+            env_of(&before, "mcp-sharepoint"),
+            env_of(&after, "mcp-sharepoint")
         );
     }
 
     #[test]
     fn volatile_oauth_artifacts_do_not_change_digest() {
         let tmp = tempfile::tempdir().unwrap();
-        let tokens = tmp.path().join("tokens");
-        std::fs::create_dir_all(tokens.join("sharepoint")).unwrap();
-        std::fs::write(tokens.join("sharepoint").join("client_secret"), "s3cret").unwrap();
-        std::fs::write(tokens.join("sharepoint").join("access_token"), "tok-A").unwrap();
-        let before = apply_credentials_digests(YAML2, &tokens).unwrap();
-        std::fs::write(tokens.join("sharepoint").join("access_token"), "tok-B").unwrap();
-        let after = apply_credentials_digests(YAML2, &tokens).unwrap();
+        put_file(tmp.path(), "sharepoint", "site_id", "site-a");
+        put_secret(tmp.path(), "sharepoint", "access_token", "tok-A");
+        let before = digests(YAML2, tmp.path());
+        put_secret(tmp.path(), "sharepoint", "access_token", "tok-B");
+        let after = digests(YAML2, tmp.path());
         assert_eq!(
             env_of(&before, "mcp-sharepoint"),
             env_of(&after, "mcp-sharepoint"),
             "machine-managed access_token churn must not change the digest"
         );
-        std::fs::write(tokens.join("sharepoint").join("client_secret"), "rotated").unwrap();
-        let rotated = apply_credentials_digests(YAML2, &tokens).unwrap();
+        put_file(tmp.path(), "sharepoint", "site_id", "site-b");
+        let rotated = digests(YAML2, tmp.path());
         assert_ne!(
             env_of(&after, "mcp-sharepoint"),
             env_of(&rotated, "mcp-sharepoint")
         );
+    }
+
+    #[test]
+    fn the_host_only_refresh_token_does_not_change_digest() {
+        let tmp = tempfile::tempdir().unwrap();
+        put_file(tmp.path(), "sharepoint", "site_id", "site-a");
+        put_secret(tmp.path(), "sharepoint", "refresh_token", "r-1");
+        let before = digests(YAML2, tmp.path());
+        put_secret(tmp.path(), "sharepoint", "refresh_token", "r-2");
+        let after = digests(YAML2, tmp.path());
+        assert_eq!(
+            env_of(&before, "mcp-sharepoint"),
+            env_of(&after, "mcp-sharepoint"),
+            "the refresh token never reaches the worker, so its rotation must not recreate it"
+        );
+    }
+
+    #[test]
+    fn a_plaintext_secret_file_is_not_a_credential() {
+        let tmp = tempfile::tempdir().unwrap();
+        put_file(tmp.path(), "github", "token", "plaintext-leftover");
+        let out = digests(YAML, tmp.path());
+        assert!(
+            env_of(&out, "mcp-github").is_none(),
+            "a secret field is read from the store only"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_secret_skips_that_worker_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        put_secret(tmp.path(), "github", "token", "ghp-secret");
+        put_file(tmp.path(), "slack", "team_id", "T1");
+        std::fs::write(tmp.path().join("secrets/p/github.token.enc"), "garbage\n").unwrap();
+
+        let out = digests(YAML, tmp.path());
+
+        assert!(env_of(&out, "mcp-github").is_none());
+        assert!(env_of(&out, "mcp-slack").is_some());
+    }
+
+    #[test]
+    fn a_plugin_secret_declared_by_its_manifest_is_part_of_the_digest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifests = [example_plugin("api_key")];
+        put_secret(tmp.path(), "example-plugin", "api_key", "k-1");
+        let before = digests_with(YAML_PLUGIN, tmp.path(), &manifests).unwrap();
+        assert!(env_of(&before, "mcp-example-plugin").is_some());
+        put_secret(tmp.path(), "example-plugin", "api_key", "k-2");
+        let after = digests_with(YAML_PLUGIN, tmp.path(), &manifests).unwrap();
+        assert_ne!(
+            env_of(&before, "mcp-example-plugin"),
+            env_of(&after, "mcp-example-plugin")
+        );
+    }
+
+    #[test]
+    fn a_plugin_secret_with_an_invalid_field_name_is_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifests = [example_plugin("Bad Field")];
+        let out = digests_with(YAML_PLUGIN, tmp.path(), &manifests).unwrap();
+        assert!(env_of(&out, "mcp-example-plugin").is_none());
     }
 
     #[test]
@@ -579,15 +689,11 @@ mod credentials_digest_tests {
     fn transient_unreadable_dir_skips_worker_not_whole_render() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
-        let tokens = tmp.path().join("tokens");
-        let slack_dir = tokens.join("slack");
-        std::fs::create_dir_all(&slack_dir).unwrap();
-        std::fs::write(slack_dir.join("token"), "t").unwrap();
-        let github_dir = tokens.join("github");
-        std::fs::create_dir_all(&github_dir).unwrap();
-        std::fs::write(github_dir.join("token"), "gh-token").unwrap();
+        put_file(tmp.path(), "slack", "team_id", "T1");
+        put_secret(tmp.path(), "github", "token", "gh-token");
+        let slack_dir = tmp.path().join("tokens").join("slack");
         std::fs::set_permissions(&slack_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let result = apply_credentials_digests(YAML, &tokens);
+        let result = digests_with(YAML, tmp.path(), &[]);
         std::fs::set_permissions(&slack_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         let out = result.expect("render must succeed despite one unreadable token dir");
         assert!(
@@ -603,7 +709,7 @@ mod credentials_digest_tests {
     #[test]
     fn no_credentials_anywhere_yields_unchanged_services() {
         let tmp = tempfile::tempdir().unwrap();
-        let out = apply_credentials_digests(YAML, &tmp.path().join("tokens")).unwrap();
+        let out = digests(YAML, tmp.path());
         for svc in ["mcp-slack", "mcp-github", "mcp-hub"] {
             assert!(env_of(&out, svc).is_none());
         }
@@ -612,39 +718,40 @@ mod credentials_digest_tests {
     #[test]
     fn symlinked_token_file_is_ignored() {
         let tmp = tempfile::tempdir().unwrap();
-        let tokens = tmp.path().join("tokens");
-        std::fs::create_dir_all(tokens.join("slack")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("tokens").join("slack")).unwrap();
         let outside = tmp.path().join("outside");
         std::fs::write(&outside, "evil").unwrap();
         #[cfg(unix)]
-        std::os::unix::fs::symlink(&outside, tokens.join("slack").join("token")).unwrap();
-        let out = apply_credentials_digests(YAML, &tokens).unwrap();
+        std::os::unix::fs::symlink(
+            &outside,
+            tmp.path().join("tokens").join("slack").join("team_id"),
+        )
+        .unwrap();
+        let out = digests(YAML, tmp.path());
         assert!(env_of(&out, "mcp-slack").is_none());
     }
 
     #[test]
     fn write_in_progress_tmp_file_does_not_change_digest() {
         let tmp = tempfile::tempdir().unwrap();
-        let tokens = tmp.path().join("tokens");
-        let slack_dir = tokens.join("slack");
-        std::fs::create_dir_all(&slack_dir).unwrap();
-        std::fs::write(slack_dir.join("bot_token"), "xoxb-stable").unwrap();
+        put_file(tmp.path(), "slack", "team_id", "T1");
+        let slack_dir = tmp.path().join("tokens").join("slack");
 
-        let before = apply_credentials_digests(YAML, &tokens).unwrap();
+        let before = digests(YAML, tmp.path());
 
-        std::fs::write(slack_dir.join("access_token.tmp.1234.abcdef"), "ephemeral").unwrap();
+        std::fs::write(slack_dir.join("team_id.tmp.1234.abcdef"), "ephemeral").unwrap();
 
-        let during = apply_credentials_digests(YAML, &tokens).unwrap();
+        let during = digests(YAML, tmp.path());
         assert_eq!(
             env_of(&before, "mcp-slack"),
             env_of(&during, "mcp-slack"),
             ".tmp. in-progress file must not change the digest"
         );
 
-        std::fs::remove_file(slack_dir.join("access_token.tmp.1234.abcdef")).unwrap();
-        std::fs::write(slack_dir.join("access_token"), "tok-A").unwrap();
+        std::fs::remove_file(slack_dir.join("team_id.tmp.1234.abcdef")).unwrap();
+        put_secret(tmp.path(), "slack", "access_token", "tok-A");
 
-        let after = apply_credentials_digests(YAML, &tokens).unwrap();
+        let after = digests(YAML, tmp.path());
         assert_eq!(
             env_of(&before, "mcp-slack"),
             env_of(&after, "mcp-slack"),
@@ -655,20 +762,18 @@ mod credentials_digest_tests {
     #[test]
     fn slack_features_file_does_not_change_digest() {
         let tmp = tempfile::tempdir().unwrap();
-        let tokens = tmp.path().join("tokens");
-        let slack_dir = tokens.join("slack");
-        std::fs::create_dir_all(&slack_dir).unwrap();
-        std::fs::write(slack_dir.join("bot_token"), "secret-A").unwrap();
-        let before = apply_credentials_digests(YAML, &tokens).unwrap();
+        put_file(tmp.path(), "slack", "team_id", "T1");
+        let before = digests(YAML, tmp.path());
         assert!(env_of(&before, "mcp-slack").is_some());
 
-        std::fs::write(
-            slack_dir.join(crate::consts::SLACK_FEATURES_FILE),
+        put_file(
+            tmp.path(),
+            "slack",
+            crate::consts::SLACK_FEATURES_FILE,
             r#"{"enabled":["file_upload"]}"#,
-        )
-        .unwrap();
+        );
 
-        let after = apply_credentials_digests(YAML, &tokens).unwrap();
+        let after = digests(YAML, tmp.path());
         assert_eq!(
             env_of(&before, "mcp-slack"),
             env_of(&after, "mcp-slack"),
@@ -679,31 +784,30 @@ mod credentials_digest_tests {
     #[test]
     fn refresh_status_file_does_not_change_digest() {
         let tmp = tempfile::tempdir().unwrap();
-        let tokens = tmp.path().join("tokens");
-        let slack_dir = tokens.join("slack");
-        std::fs::create_dir_all(&slack_dir).unwrap();
-        std::fs::write(slack_dir.join("bot_token"), "secret-A").unwrap();
-        let before = apply_credentials_digests(YAML, &tokens).unwrap();
+        put_file(tmp.path(), "slack", "team_id", "T1");
+        let before = digests(YAML, tmp.path());
 
-        std::fs::write(
-            slack_dir.join(crate::consts::OAUTH_REFRESH_STATUS_FILE),
+        put_file(
+            tmp.path(),
+            "slack",
+            crate::consts::OAUTH_REFRESH_STATUS_FILE,
             r#"{"state":"network_error","at":"2026-11-18T10:00:00Z"}"#,
-        )
-        .unwrap();
+        );
 
-        let after = apply_credentials_digests(YAML, &tokens).unwrap();
+        let after = digests(YAML, tmp.path());
         assert_eq!(
             env_of(&before, "mcp-slack"),
             env_of(&after, "mcp-slack"),
             "a refresh status write must not recreate the worker"
         );
 
-        std::fs::write(
-            slack_dir.join(crate::consts::OAUTH_SERVICE_NAME_FILE),
+        put_file(
+            tmp.path(),
+            "slack",
+            crate::consts::OAUTH_SERVICE_NAME_FILE,
             "Slack",
-        )
-        .unwrap();
-        let named = apply_credentials_digests(YAML, &tokens).unwrap();
+        );
+        let named = digests(YAML, tmp.path());
         assert_eq!(
             env_of(&before, "mcp-slack"),
             env_of(&named, "mcp-slack"),

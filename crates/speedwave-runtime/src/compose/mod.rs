@@ -25,8 +25,9 @@ mod workers;
 
 pub(crate) use proxy::enabled_git_forge_kinds_in;
 pub use proxy::{
-    proxy_config_dir_in, remove_llm_provider_key_in, render_proxy_config, spw_key_env_name,
-    write_llm_provider_key_in, PROXY_BASE_URL, PROXY_CALLER_AUTH_HEADER, PROXY_PORT,
+    caller_token_in, proxy_config_dir_in, remove_llm_provider_key_in, render_proxy_config,
+    spw_key_env_name, write_llm_provider_key_in, PROXY_BASE_URL, PROXY_CALLER_AUTH_HEADER,
+    PROXY_PORT,
 };
 
 pub use pii_ner::{
@@ -66,21 +67,18 @@ pub(crate) use networks::{
 use plugins::apply_plugins_from_verified;
 pub(crate) use plugins::ApplyPluginsCtx;
 
-pub use tokens::init_secrets_dir_in;
 pub(crate) use tokens::resolve_tokens_dir_in;
-pub use tokens::{
-    ensure_token_dir, ensure_token_dir_in, init_secrets_dir, llm_provider_key_path_in, tokens_path,
-    tokens_path_in, LLM_TOKEN_FILE_SUFFIX, LLM_TOKEN_SERVICE,
-};
+pub use tokens::LLM_TOKEN_SERVICE;
+
+pub use secret_payload::unreadable_integration_messages;
 
 pub(crate) use workers::{
-    apply_integrations_filter, apply_worker_auth_tokens_in, apply_worker_config,
-};
-#[cfg(test)]
-use workers::{
-    apply_worker_auth_tokens_with_dir, mcp_os_gateway_url, read_lock_port, remove_env_from,
+    apply_credentials_digests_in, apply_integrations_filter, apply_worker_auth_tokens_in,
+    apply_worker_config,
 };
 pub use workers::{enabled_hub_service_ids, worker_os_url_state, RenderedUrlState};
+#[cfg(test)]
+use workers::{mcp_os_gateway_url, read_lock_port, remove_env_from};
 
 const COMPOSE_TEMPLATE: &str = include_str!("../../../../containers/compose.template.yml");
 
@@ -316,7 +314,7 @@ pub fn render_compose_in(
     yaml = yaml.replace("${PROXY_USAGE_DIR}", &to_engine_path(&proxy_usage_dir)?);
     yaml = yaml.replace(
         "${PROXY_CONFIG_DIGEST}",
-        &proxy::proxy_state_digest_in(&proxy_config.content, data_dir, project_name),
+        &proxy::proxy_state_digest_in(&proxy_config.content, data_dir, project_name)?,
     );
 
     let pii_policy = resolved_config
@@ -412,7 +410,7 @@ pub fn render_compose_in(
 
     yaml = apply_integrations_filter(&yaml, integrations, &network_name, &plugin_manifests)?;
 
-    yaml = workers::apply_credentials_digests_in(data_dir, &yaml, project_name)?;
+    yaml = apply_credentials_digests_in(data_dir, &yaml, project_name, &plugin_manifests)?;
 
     yaml = harden_env_scalar_quoting(&yaml)?;
 
@@ -1122,6 +1120,22 @@ mod tests {
             .expect("payload collection must succeed")
     }
 
+    fn write_secret(data_dir: &Path, project: &str, service: &str, field: &str, value: &str) {
+        let name = crate::secret_store::SecretName::integration(project, service, field).unwrap();
+        crate::secret_store::SecretStore::open(data_dir)
+            .unwrap()
+            .write(&name, value)
+            .unwrap();
+    }
+
+    fn write_local_llm_secret(data_dir: &Path, project: &str, file: &str, value: &str) {
+        write_secret(data_dir, project, "local-llm", file, value);
+    }
+
+    fn write_api_key_in(data_dir: &Path, project: &str, key: &str) {
+        write_secret(data_dir, project, "anthropic", "api_key", key);
+    }
+
     fn payload_slot_files<'a>(
         payload: &'a crate::secrets_tmpfs::layout::ProjectPayload,
         service: &str,
@@ -1299,14 +1313,13 @@ mod tests {
     fn render_compose_with_multiline_custom_headers_is_valid_yaml() {
         let data_dir = tempfile::tempdir().unwrap();
         let project = format!("render-multiline-headers-{}", std::process::id());
-        let tokens_dir = ensure_token_dir_in(data_dir.path(), &project, "local-llm")
-            .expect("ensure_token_dir must succeed in test env");
-        std::fs::write(tokens_dir.join("api_key"), "sk-test-key").unwrap();
-        std::fs::write(
-            tokens_dir.join("custom_headers"),
+        write_local_llm_secret(data_dir.path(), &project, "api_key", "sk-test-key");
+        write_local_llm_secret(
+            data_dir.path(),
+            &project,
+            "custom_headers",
             "X-Tenant-ID: foo\nX-Subscription-ID: bar\n",
-        )
-        .unwrap();
+        );
         let tmp = tempfile::tempdir().unwrap();
         let project_dir = tmp.path().join("project");
         std::fs::create_dir_all(&project_dir).unwrap();
@@ -1378,10 +1391,6 @@ mod tests {
             .as_deref(),
             Some("sk-test-key")
         );
-
-        let _ = std::fs::remove_file(tokens_dir.join("api_key"));
-        let _ = std::fs::remove_file(tokens_dir.join("custom_headers"));
-        let _ = std::fs::remove_dir(&tokens_dir);
     }
 
     #[test]
@@ -1580,9 +1589,7 @@ mod tests {
     fn render_compose_no_anthropic_key_when_openrouter_active() {
         let data_dir = tempfile::tempdir().unwrap();
         let project = format!("render-stale-key-openrouter-{}", std::process::id());
-        let secrets = data_dir.path().join("secrets").join(&project);
-        std::fs::create_dir_all(&secrets).unwrap();
-        std::fs::write(secrets.join("anthropic_api_key"), "sk-ant-stale").unwrap();
+        write_api_key_in(data_dir.path(), &project, "sk-ant-stale");
 
         let tmp = tempfile::tempdir().unwrap();
         let project_dir = tmp.path().join("project");
@@ -1635,7 +1642,6 @@ mod tests {
                 .is_none(),
             "stale Anthropic key must not be staged while OpenRouter is active"
         );
-        let _ = std::fs::remove_file(secrets.join("anthropic_api_key"));
     }
 
     #[test]
@@ -1720,14 +1726,13 @@ mod tests {
     fn render_compose_strips_authorization_from_custom_headers() {
         let data_dir = tempfile::tempdir().unwrap();
         let project = format!("authz-strip-{}", std::process::id());
-        let tokens_dir = ensure_token_dir_in(data_dir.path(), &project, "local-llm")
-            .expect("ensure_token_dir must succeed in test env");
-        std::fs::write(tokens_dir.join("api_key"), "sk-test").unwrap();
-        std::fs::write(
-            tokens_dir.join("custom_headers"),
+        write_local_llm_secret(data_dir.path(), &project, "api_key", "sk-test");
+        write_local_llm_secret(
+            data_dir.path(),
+            &project,
+            "custom_headers",
             "X-Tenant-ID: foo\nAuthorization: Bearer leaked\nX-Other: bar\n",
-        )
-        .unwrap();
+        );
         let tmp = tempfile::tempdir().unwrap();
         let project_dir = tmp.path().join("project");
         std::fs::create_dir_all(&project_dir).unwrap();
@@ -1789,10 +1794,6 @@ mod tests {
             "Authorization header must be stripped, got: {header_entry:?}"
         );
         assert!(!header_entry.contains("leaked"));
-
-        let _ = std::fs::remove_file(tokens_dir.join("api_key"));
-        let _ = std::fs::remove_file(tokens_dir.join("custom_headers"));
-        let _ = std::fs::remove_dir(&tokens_dir);
     }
 
     #[test]
@@ -3115,7 +3116,7 @@ services:
                 .to_string()
         ));
 
-        let caller_token = proxy::ensure_caller_token_in(data_dir.path(), "test-project").unwrap();
+        let caller_token = proxy::caller_token_in(data_dir.path(), "test-project").unwrap();
         let env = service_strings(&doc, "claude", "environment");
         assert!(env.iter().any(|e| e.starts_with("SPEEDWAVE_GIT_HOSTS=")));
         assert!(env.contains(&"SPEEDWAVE_GIT_PROXY_URL=http://proxy:4000/git".to_string()));
@@ -4210,7 +4211,7 @@ services:
     struct PlantedSecrets {
         values: Vec<String>,
         anthropic_key: &'static str,
-        caller_token: &'static str,
+        caller_token: String,
         pii_key: &'static str,
         os_token: &'static str,
         ner_token: &'static str,
@@ -4218,66 +4219,39 @@ services:
 
     fn plant_secrets(data_dir: &Path) -> PlantedSecrets {
         use crate::host_mcp_process::lock::{self, LockFile, LockService};
-        let planted = PlantedSecrets {
-            values: Vec::new(),
-            anthropic_key: "SENTINEL-anthropic-api-key-0001", // gitleaks:allow
-            caller_token: "SENTINEL-caller-token-0002",
-            pii_key: "SENTINEL-pii-key-0003", // gitleaks:allow
-            os_token: "SENTINEL-os-token-0004",
-            ner_token: "SENTINEL-ner-token-0005",
-        };
-        let mut values: Vec<String> = [
-            planted.anthropic_key,
-            planted.caller_token,
-            planted.pii_key,
-            planted.os_token,
-            planted.ner_token,
-        ]
-        .iter()
-        .map(|v| v.to_string())
-        .collect();
+        const ANTHROPIC_KEY: &str = "SENTINEL-anthropic-api-key-0001"; // gitleaks:allow
+        const PII_KEY: &str = "SENTINEL-pii-key-0003"; // gitleaks:allow
+        const OS_TOKEN: &str = "SENTINEL-os-token-0004";
+        const NER_TOKEN: &str = "SENTINEL-ner-token-0005";
 
-        let secrets = data_dir.join("secrets").join(SECRETS_PROJECT);
-        std::fs::create_dir_all(&secrets).unwrap();
-        std::fs::write(secrets.join("anthropic_api_key"), planted.anthropic_key).unwrap();
+        write_api_key_in(data_dir, SECRETS_PROJECT, ANTHROPIC_KEY);
+        write_secret(data_dir, SECRETS_PROJECT, "pii", "key", PII_KEY);
+        let mut values: Vec<String> = [ANTHROPIC_KEY, PII_KEY, OS_TOKEN, NER_TOKEN]
+            .iter()
+            .map(|v| v.to_string())
+            .collect();
+
+        let caller_token = proxy::caller_token_in(data_dir, SECRETS_PROJECT).unwrap();
+        values.push(caller_token.clone());
+        let store = crate::secret_store::SecretStore::open(data_dir).unwrap();
         for svc in consts::TOGGLEABLE_MCP_SERVICES {
-            let bearer = format!("SENTINEL-bearer-{}", svc.config_key);
-            std::fs::write(
-                secrets.join(format!("{}-auth-token", svc.config_key)),
-                &bearer,
-            )
-            .unwrap();
-            values.push(bearer);
-        }
-        let tokens = data_dir.join("tokens").join(SECRETS_PROJECT);
-        for svc in consts::TOGGLEABLE_MCP_SERVICES {
-            if svc.credential_files.is_empty() {
-                continue;
+            values.push(
+                workers::derived_worker_bearer(&store, SECRETS_PROJECT, svc.config_key).unwrap(),
+            );
+            for field in crate::secret_store::builtin_secret_fields(svc.config_key) {
+                let value = format!("SENTINEL-credential-{}-{field}", svc.config_key);
+                write_secret(data_dir, SECRETS_PROJECT, svc.config_key, field, &value);
+                values.push(value);
             }
-            let dir = tokens.join(svc.config_key);
-            std::fs::create_dir_all(&dir).unwrap();
-            let value = format!("SENTINEL-credential-{}", svc.config_key);
-            std::fs::write(dir.join("access_token"), &value).unwrap();
-            values.push(value);
         }
-        let proxy_dir = data_dir.join("proxy").join(SECRETS_PROJECT);
-        std::fs::create_dir_all(&proxy_dir).unwrap();
-        std::fs::write(proxy_dir.join("caller-token"), planted.caller_token).unwrap();
-        let policy_dir = data_dir.join("policies").join(SECRETS_PROJECT);
-        std::fs::create_dir_all(&policy_dir).unwrap();
-        std::fs::write(policy_dir.join("key"), planted.pii_key).unwrap();
-        std::fs::write(
-            data_dir.join(consts::MCP_OS_AUTH_TOKEN_FILE),
-            planted.os_token,
-        )
-        .unwrap();
+        std::fs::write(data_dir.join(consts::MCP_OS_AUTH_TOKEN_FILE), OS_TOKEN).unwrap();
         lock::write(
             &data_dir.join(consts::MCP_OS_LOCK_FILE),
             &LockFile::new(
                 LockService::McpOs,
                 std::process::id(),
                 54321,
-                planted.os_token.into(),
+                OS_TOKEN.into(),
             ),
         )
         .unwrap();
@@ -4287,11 +4261,18 @@ services:
                 LockService::PiiNer,
                 std::process::id(),
                 54322,
-                planted.ner_token.into(),
+                NER_TOKEN.into(),
             ),
         )
         .unwrap();
-        PlantedSecrets { values, ..planted }
+        PlantedSecrets {
+            values,
+            anthropic_key: ANTHROPIC_KEY,
+            caller_token,
+            pii_key: PII_KEY,
+            os_token: OS_TOKEN,
+            ner_token: NER_TOKEN,
+        }
     }
 
     fn api_key_config() -> ResolvedClaudeConfig {
@@ -4361,14 +4342,18 @@ services:
     #[serial_test::serial(host_addressing)]
     fn a_direct_local_render_carries_no_token_or_header_value() {
         let data_dir = tempfile::tempdir().unwrap();
-        let tokens_dir =
-            ensure_token_dir_in(data_dir.path(), SECRETS_PROJECT, "local-llm").unwrap();
-        std::fs::write(tokens_dir.join("api_key"), "SENTINEL-local-llm-token-0006").unwrap();
-        std::fs::write(
-            tokens_dir.join("custom_headers"),
+        write_local_llm_secret(
+            data_dir.path(),
+            SECRETS_PROJECT,
+            "api_key",
+            "SENTINEL-local-llm-token-0006",
+        );
+        write_local_llm_secret(
+            data_dir.path(),
+            SECRETS_PROJECT,
+            "custom_headers",
             "X-Tenant: SENTINEL-local-header-0007\n",
-        )
-        .unwrap();
+        );
         let mut llm = LlmConfig {
             provider: Some("local".to_string()),
             model: Some("qwen3".to_string()),
@@ -4467,8 +4452,11 @@ services:
         let text = |service: &str, purpose: &str, name: &str| {
             payload_file_text(&payload, service, purpose, SECRETS_PROJECT, name)
         };
+        let store = crate::secret_store::SecretStore::open(data_dir.path()).unwrap();
         for svc in consts::TOGGLEABLE_MCP_SERVICES {
-            let bearer = format!("SENTINEL-bearer-{}", svc.config_key);
+            let bearer =
+                workers::derived_worker_bearer(&store, SECRETS_PROJECT, svc.config_key).unwrap();
+            assert_eq!(bearer.len(), 64, "a derived bearer is 64 hex characters");
             assert_eq!(
                 text(svc.compose_name, "auth", "token").as_deref(),
                 Some(bearer.as_str())
@@ -4482,11 +4470,18 @@ services:
                 .as_deref(),
                 Some(bearer.as_str())
             );
-            if !svc.credential_files.is_empty() {
-                assert_eq!(
-                    text(svc.compose_name, "tokens", "access_token").as_deref(),
-                    Some(format!("SENTINEL-credential-{}", svc.config_key).as_str())
-                );
+            for field in crate::secret_store::builtin_secret_fields(svc.config_key) {
+                let delivered = text(svc.compose_name, "tokens", field);
+                if field == "refresh_token" {
+                    assert_eq!(delivered, None, "the refresh token never leaves the host");
+                } else {
+                    assert_eq!(
+                        delivered,
+                        Some(format!("SENTINEL-credential-{}-{field}", svc.config_key)),
+                        "{} {field}",
+                        svc.config_key
+                    );
+                }
             }
         }
         assert_eq!(
@@ -4499,7 +4494,7 @@ services:
         );
         assert_eq!(
             text("claude", "secrets", "git-proxy-auth").as_deref(),
-            Some(planted.caller_token)
+            Some(planted.caller_token.as_str())
         );
         assert_eq!(
             text("claude", "secrets", "anthropic-custom-headers").as_deref(),
@@ -4514,7 +4509,7 @@ services:
             Some(planted.pii_key)
         );
         let proxy_config = text("proxy", "config", "proxy.json").unwrap();
-        assert!(proxy_config.contains(planted.caller_token));
+        assert!(proxy_config.contains(&planted.caller_token));
         assert!(proxy_config.contains(planted.ner_token));
     }
 
@@ -4528,8 +4523,11 @@ services:
             .join("tokens")
             .join(SECRETS_PROJECT)
             .join("slack");
+        std::fs::create_dir_all(&slack_tokens).unwrap();
         std::fs::write(slack_tokens.join("refresh_status"), "stale-host-copy").unwrap();
         std::fs::write(slack_tokens.join("access_token.tmp.1.abc"), "half-written").unwrap();
+        std::fs::write(slack_tokens.join("access_token"), "stale-plaintext").unwrap();
+        std::fs::write(slack_tokens.join("refresh_token"), "stale-plaintext").unwrap();
         let integrations = ResolvedIntegrationsConfig {
             slack: true,
             ..Default::default()
@@ -4546,6 +4544,18 @@ services:
         assert_eq!(slot.keep, ["refresh_status"]);
         let names: Vec<&str> = slot.files.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, ["access_token"]);
+        assert_eq!(
+            payload_file_text(
+                &payload,
+                "mcp-slack",
+                "tokens",
+                SECRETS_PROJECT,
+                "access_token"
+            )
+            .as_deref(),
+            Some("SENTINEL-credential-slack-access_token"),
+            "the store value wins over a lingering plaintext file"
+        );
     }
 
     #[test]
@@ -4560,12 +4570,20 @@ services:
             .join("example-plugin");
         std::fs::create_dir_all(&plugin_tokens).unwrap();
         std::fs::write(plugin_tokens.join("_settings.json"), "{}").unwrap();
-        std::fs::write(plugin_tokens.join("api_key"), "SENTINEL-plugin-key").unwrap();
+        std::fs::write(plugin_tokens.join("api_key"), "stale-plaintext").unwrap();
+        write_secret(
+            data_dir.path(),
+            SECRETS_PROJECT,
+            "example-plugin",
+            "api_key",
+            "SENTINEL-plugin-key",
+        );
         let mut integrations = ResolvedIntegrationsConfig::default();
         integrations
             .plugins
             .insert("example-plugin".to_string(), true);
-        let manifest = test_example_plugin_manifest(plugin::TokenMount::ReadOnly);
+        let mut manifest = test_example_plugin_manifest(plugin::TokenMount::ReadOnly);
+        manifest.auth_fields = vec![secret_auth_field("api_key")];
 
         let payload = secret_payload::collect_project_payload_in(
             data_dir.path(),
@@ -4580,6 +4598,17 @@ services:
             payload_slot_files(&payload, "mcp-example-plugin", "tokens", SECRETS_PROJECT).unwrap();
         let names: Vec<&str> = slot.files.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, ["_settings.json", "api_key"]);
+        assert_eq!(
+            payload_file_text(
+                &payload,
+                "mcp-example-plugin",
+                "tokens",
+                SECRETS_PROJECT,
+                "api_key"
+            )
+            .as_deref(),
+            Some("SENTINEL-plugin-key")
+        );
         assert!(
             payload_slot_files(&payload, "mcp-example-plugin", "auth", SECRETS_PROJECT).is_none(),
             "a plugin worker has no auth slot"
@@ -4606,6 +4635,365 @@ services:
             &[],
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn an_unreadable_secret_leaves_only_its_integration_without_credentials() {
+        let data_dir = tempfile::tempdir().unwrap();
+        plant_secrets(data_dir.path());
+        std::fs::write(
+            data_dir
+                .path()
+                .join("secrets")
+                .join(SECRETS_PROJECT)
+                .join("slack.access_token.enc"),
+            "garbage\n",
+        )
+        .unwrap();
+
+        let payload = collect_payload(
+            data_dir.path(),
+            SECRETS_PROJECT,
+            &api_key_config(),
+            &all_enabled_integrations(),
+        );
+
+        let slack = payload_slot_files(&payload, "mcp-slack", "tokens", SECRETS_PROJECT).unwrap();
+        assert!(slack.files.is_empty(), "no credential file for slack");
+        assert_eq!(slack.keep, ["refresh_status"]);
+        assert_eq!(
+            payload_file_text(&payload, "mcp-github", "tokens", SECRETS_PROJECT, "token")
+                .as_deref(),
+            Some("SENTINEL-credential-github-token"),
+            "the other integrations keep their credentials"
+        );
+        assert!(
+            payload_file_text(&payload, "mcp-slack", "auth", SECRETS_PROJECT, "token").is_some(),
+            "the project still starts with the slack worker"
+        );
+        let messages = unreadable_integration_messages(data_dir.path(), SECRETS_PROJECT);
+        assert_eq!(
+            messages,
+            [crate::secret_store::unreadable_secret_message(
+                &crate::secret_store::SecretName::integration(
+                    SECRETS_PROJECT,
+                    "slack",
+                    "access_token"
+                )
+                .unwrap()
+            )]
+        );
+        assert!(messages[0].starts_with("Integration slack:"));
+    }
+
+    #[test]
+    fn unreadable_messages_are_empty_for_healthy_and_unknown_projects() {
+        let data_dir = tempfile::tempdir().unwrap();
+        write_secret(data_dir.path(), "healthy", "slack", "access_token", "v");
+
+        assert!(unreadable_integration_messages(data_dir.path(), "healthy").is_empty());
+        assert!(unreadable_integration_messages(data_dir.path(), "unknown").is_empty());
+        assert!(unreadable_integration_messages(data_dir.path(), "../evil").is_empty());
+    }
+
+    #[test]
+    fn unreadable_messages_name_each_integration_once() {
+        let data_dir = tempfile::tempdir().unwrap();
+        write_secret(data_dir.path(), "p", "slack", "access_token", "v");
+        write_secret(data_dir.path(), "p", "slack", "refresh_token", "v");
+        write_secret(data_dir.path(), "p", "github", "token", "v");
+        let project_dir = data_dir.path().join("secrets/p");
+        for file in [
+            "slack.access_token.enc",
+            "slack.refresh_token.enc",
+            "github.token.enc",
+        ] {
+            std::fs::write(project_dir.join(file), "garbage\n").unwrap();
+        }
+
+        let messages = unreadable_integration_messages(data_dir.path(), "p");
+
+        assert_eq!(messages.len(), 2, "{messages:?}");
+        assert!(messages
+            .iter()
+            .any(|m| m.starts_with("Integration github:")));
+        assert!(messages.iter().any(|m| m.starts_with("Integration slack:")));
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn a_missing_store_key_beside_secrets_stops_payload_collection() {
+        let data_dir = tempfile::tempdir().unwrap();
+        plant_secrets(data_dir.path());
+        std::fs::remove_file(data_dir.path().join("secret-store.key")).unwrap();
+
+        let result = secret_payload::collect_project_payload_in(
+            data_dir.path(),
+            SECRETS_PROJECT,
+            &api_key_config(),
+            &all_enabled_integrations(),
+            &[],
+        );
+
+        assert!(result.is_err(), "the project must not start");
+        assert!(
+            !data_dir.path().join("secret-store.key").exists(),
+            "a missing key is never silently recreated"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn the_proxy_tokens_slot_carries_the_provider_keys_of_the_project_only() {
+        let data_dir = tempfile::tempdir().unwrap();
+        write_llm_provider_key_in(data_dir.path(), SECRETS_PROJECT, "openrouter", "sk-or").unwrap();
+        write_llm_provider_key_in(data_dir.path(), SECRETS_PROJECT, "local", "sk-local").unwrap();
+        write_llm_provider_key_in(data_dir.path(), "other", "stranger", "sk-other").unwrap();
+
+        let payload = collect_payload(
+            data_dir.path(),
+            SECRETS_PROJECT,
+            &api_key_config(),
+            &ResolvedIntegrationsConfig::default(),
+        );
+
+        let slot = payload_slot_files(&payload, "proxy", "tokens", SECRETS_PROJECT).unwrap();
+        let names: Vec<&str> = slot.files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["local_api_key", "openrouter_api_key"]);
+        assert_eq!(
+            payload_file_text(
+                &payload,
+                "proxy",
+                "tokens",
+                SECRETS_PROJECT,
+                "openrouter_api_key"
+            )
+            .as_deref(),
+            Some("sk-or")
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn git_forge_slots_carry_the_store_token_and_the_non_secret_files() {
+        let data_dir = tempfile::tempdir().unwrap();
+        plant_secrets(data_dir.path());
+        let gitlab_tokens = data_dir
+            .path()
+            .join("tokens")
+            .join(SECRETS_PROJECT)
+            .join("gitlab");
+        std::fs::create_dir_all(&gitlab_tokens).unwrap();
+        std::fs::write(gitlab_tokens.join("host_url"), "https://git.corp.example\n").unwrap();
+        std::fs::write(gitlab_tokens.join("token"), "stale-plaintext").unwrap();
+        let integrations = ResolvedIntegrationsConfig {
+            github: true,
+            gitlab: true,
+            ..Default::default()
+        };
+
+        let payload = collect_payload(
+            data_dir.path(),
+            SECRETS_PROJECT,
+            &api_key_config(),
+            &integrations,
+        );
+
+        let gitlab = payload_slot_files(&payload, "proxy", "git-gitlab", SECRETS_PROJECT).unwrap();
+        let names: Vec<&str> = gitlab.files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["host_url", "token"]);
+        assert_eq!(
+            payload_file_text(&payload, "proxy", "git-gitlab", SECRETS_PROJECT, "token").as_deref(),
+            Some("SENTINEL-credential-gitlab-token")
+        );
+        assert_eq!(
+            payload_file_text(&payload, "proxy", "git-github", SECRETS_PROJECT, "token").as_deref(),
+            Some("SENTINEL-credential-github-token")
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn the_policy_slots_carry_the_store_key_and_never_a_plaintext_key_file() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let planted = plant_secrets(data_dir.path());
+        let policy_dir = data_dir.path().join("policies").join(SECRETS_PROJECT);
+        std::fs::create_dir_all(&policy_dir).unwrap();
+        std::fs::write(policy_dir.join("policy.json"), "{}").unwrap();
+        std::fs::write(policy_dir.join("key"), "plaintext-leftover").unwrap();
+
+        let payload = collect_payload(
+            data_dir.path(),
+            SECRETS_PROJECT,
+            &api_key_config(),
+            &ResolvedIntegrationsConfig::default(),
+        );
+
+        for service in ["mcp-hub", "proxy"] {
+            let slot = payload_slot_files(&payload, service, "policy", SECRETS_PROJECT).unwrap();
+            let names: Vec<&str> = slot.files.iter().map(|f| f.name.as_str()).collect();
+            assert_eq!(names, ["key", "policy.json"], "{service}");
+            assert_eq!(
+                payload_file_text(&payload, service, "policy", SECRETS_PROJECT, "key").as_deref(),
+                Some(planted.pii_key),
+                "{service}"
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn payload_collection_creates_the_pii_key_in_the_store_when_nothing_exists() {
+        let data_dir = tempfile::tempdir().unwrap();
+
+        let payload = collect_payload(
+            data_dir.path(),
+            SECRETS_PROJECT,
+            &api_key_config(),
+            &ResolvedIntegrationsConfig::default(),
+        );
+
+        let key = payload_file_text(&payload, "mcp-hub", "policy", SECRETS_PROJECT, "key").unwrap();
+        assert_eq!(key.len(), 64);
+        assert!(key.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(data_dir
+            .path()
+            .join("secrets")
+            .join(SECRETS_PROJECT)
+            .join("pii.key.enc")
+            .is_file());
+        assert!(!data_dir
+            .path()
+            .join("policies")
+            .join(SECRETS_PROJECT)
+            .join("key")
+            .exists());
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn payload_collection_refuses_to_mint_a_pii_key_while_a_plaintext_key_awaits_migration() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let policy_dir = data_dir.path().join("policies").join(SECRETS_PROJECT);
+        std::fs::create_dir_all(&policy_dir).unwrap();
+        std::fs::write(policy_dir.join("key"), "ab".repeat(32)).unwrap();
+
+        let err = secret_payload::collect_project_payload_in(
+            data_dir.path(),
+            SECRETS_PROJECT,
+            &api_key_config(),
+            &ResolvedIntegrationsConfig::default(),
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("migration pending"), "got: {err}");
+        assert!(!data_dir
+            .path()
+            .join("secrets")
+            .join(SECRETS_PROJECT)
+            .join("pii.key.enc")
+            .exists());
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn the_hub_gets_a_derived_bearer_per_enabled_plugin_worker() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut integrations = ResolvedIntegrationsConfig::default();
+        integrations
+            .plugins
+            .insert("example-plugin".to_string(), true);
+
+        let payload = secret_payload::collect_project_payload_in(
+            data_dir.path(),
+            SECRETS_PROJECT,
+            &api_key_config(),
+            &integrations,
+            &[test_example_plugin_manifest(plugin::TokenMount::ReadOnly)],
+        )
+        .unwrap();
+
+        let store = crate::secret_store::SecretStore::open(data_dir.path()).unwrap();
+        let expected =
+            workers::derived_worker_bearer(&store, SECRETS_PROJECT, "example-plugin").unwrap();
+        assert_eq!(
+            payload_file_text(
+                &payload,
+                "mcp-hub",
+                "secrets",
+                SECRETS_PROJECT,
+                "example-plugin-auth-token"
+            )
+            .as_deref(),
+            Some(expected.as_str())
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn an_oauth_plugin_gets_its_access_token_from_the_store_and_never_its_refresh_token() {
+        let data_dir = tempfile::tempdir().unwrap();
+        write_secret(
+            data_dir.path(),
+            SECRETS_PROJECT,
+            "example-plugin",
+            "access_token",
+            "plugin-access",
+        );
+        write_secret(
+            data_dir.path(),
+            SECRETS_PROJECT,
+            "example-plugin",
+            "refresh_token",
+            "plugin-refresh",
+        );
+        let mut manifest = test_example_plugin_manifest(plugin::TokenMount::ReadOnly);
+        manifest.oauth = Some(plugin::PluginOAuthSpec {
+            grant_type: plugin::OAuthGrantType::AuthorizationCode,
+            token_url: Some("https://idp.example/token".to_string()),
+            authorize_url: Some("https://idp.example/authorize".to_string()),
+            device_authorization_url: None,
+            base_url_field: None,
+            authorize_suffix: None,
+            token_suffix: None,
+            scopes: vec![],
+            auth_style: Default::default(),
+            client_id_field: "client_id".to_string(),
+            client_secret_field: None,
+            redirect_port: None,
+        });
+        let mut integrations = ResolvedIntegrationsConfig::default();
+        integrations
+            .plugins
+            .insert("example-plugin".to_string(), true);
+
+        let payload = secret_payload::collect_project_payload_in(
+            data_dir.path(),
+            SECRETS_PROJECT,
+            &api_key_config(),
+            &integrations,
+            &[manifest],
+        )
+        .unwrap();
+
+        let slot =
+            payload_slot_files(&payload, "mcp-example-plugin", "tokens", SECRETS_PROJECT).unwrap();
+        let names: Vec<&str> = slot.files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["access_token"]);
+        assert_eq!(
+            payload_file_text(
+                &payload,
+                "mcp-example-plugin",
+                "tokens",
+                SECRETS_PROJECT,
+                "access_token"
+            )
+            .as_deref(),
+            Some("plugin-access")
+        );
     }
 
     const DEBUG_ENV_EXCEPTIONS: &[&str] = &[];
@@ -4724,10 +5112,16 @@ services:
             "digest placeholder must be substituted"
         );
 
-        let key_path = crate::pii_key::project_key_path_in(data_dir.path(), "test-project");
         assert!(
-            key_path.is_file(),
-            "render_compose must ensure the per-project tokenization key next to policy.json"
+            data_dir
+                .path()
+                .join("secrets/test-project/pii.key.enc")
+                .is_file(),
+            "render_compose must ensure the per-project tokenization key in the secret store"
+        );
+        assert!(
+            !data_dir.path().join("policies/test-project/key").exists(),
+            "the tokenization key is never a plaintext file next to policy.json"
         );
     }
 
@@ -5730,8 +6124,12 @@ services:
     #[serial_test::serial(host_addressing)]
     fn test_proxy_local_custom_headers_falls_back_to_direct() {
         let data_dir = tempfile::tempdir().unwrap();
-        let tokens_dir = ensure_token_dir_in(data_dir.path(), "test-project", "local-llm").unwrap();
-        std::fs::write(tokens_dir.join("custom_headers"), "X-Test: 1\n").unwrap();
+        write_local_llm_secret(
+            data_dir.path(),
+            "test-project",
+            "custom_headers",
+            "X-Test: 1\n",
+        );
         let mut llm = LlmConfig {
             provider: Some("local".to_string()),
             model: Some("qwen3".to_string()),
@@ -8343,23 +8741,24 @@ services:
     }
 
     #[test]
-    fn test_init_secrets_dir_rejects_invalid_name() {
+    fn test_caller_token_rejects_invalid_name() {
         let data_dir = tempfile::tempdir().unwrap();
-        assert!(init_secrets_dir_in(data_dir.path(), "").is_err());
-        assert!(init_secrets_dir_in(data_dir.path(), "../evil").is_err());
-        assert!(init_secrets_dir_in(data_dir.path(), &"a".repeat(64)).is_err());
+        assert!(caller_token_in(data_dir.path(), "").is_err());
+        assert!(caller_token_in(data_dir.path(), "../evil").is_err());
+        assert!(caller_token_in(data_dir.path(), &"a".repeat(64)).is_err());
     }
 
     #[cfg(unix)]
     #[test]
-    fn test_init_secrets_dir_secures_parent_directory() {
+    fn test_secret_store_write_secures_the_secrets_directories() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
 
         let original_mode = std::fs::metadata(data_dir).unwrap().permissions().mode() & 0o777;
 
-        let secrets_dir = init_secrets_dir_in(data_dir, "proj").unwrap();
+        write_secret(data_dir, "proj", "slack", "access_token", "v");
+        let secrets_dir = data_dir.join("secrets").join("proj");
 
         assert_eq!(
             std::fs::metadata(&secrets_dir)
@@ -8989,6 +9388,20 @@ services:
             host_bridge: None,
             instructions: None,
             oauth: None,
+        }
+    }
+
+    fn secret_auth_field(key: &str) -> plugin::AuthFieldDef {
+        plugin::AuthFieldDef {
+            key: key.to_string(),
+            label: key.to_string(),
+            field_type: "password".to_string(),
+            placeholder: String::new(),
+            is_secret: true,
+            required: true,
+            description: None,
+            validation: None,
+            oauth_flow: false,
         }
     }
 
@@ -10972,10 +11385,10 @@ networks:
         let tmp = tempfile::tempdir().unwrap();
         let integrations = all_enabled_integrations();
 
-        let result = apply_worker_auth_tokens_with_dir(
+        let result = apply_worker_auth_tokens_in(
+            tmp.path(),
             VALID_COMPOSE_ALL_WORKERS,
             "test",
-            tmp.path(),
             &integrations,
             &[],
         )
@@ -11015,10 +11428,10 @@ networks:
             ..Default::default()
         };
 
-        let result = apply_worker_auth_tokens_with_dir(
+        let result = apply_worker_auth_tokens_in(
+            tmp.path(),
             VALID_COMPOSE_ALL_WORKERS,
             "test",
-            tmp.path(),
             &integrations,
             &[],
         )
@@ -11055,10 +11468,10 @@ networks:
         let tmp = tempfile::tempdir().unwrap();
         let integrations = all_enabled_integrations();
 
-        let result = apply_worker_auth_tokens_with_dir(
+        let result = apply_worker_auth_tokens_in(
+            tmp.path(),
             VALID_COMPOSE_ALL_WORKERS,
             "test",
-            tmp.path(),
             &integrations,
             &[],
         )
@@ -11090,13 +11503,8 @@ networks:
         let integrations = all_enabled_integrations();
         let malformed_doc = "services:\n  mcp-hub:\n    image: hub\n";
 
-        let result = apply_worker_auth_tokens_with_dir(
-            malformed_doc,
-            "test",
-            tmp.path(),
-            &integrations,
-            &[],
-        );
+        let result =
+            apply_worker_auth_tokens_in(tmp.path(), malformed_doc, "test", &integrations, &[]);
         assert!(
             result.is_err(),
             "a missing worker service must be an error, not a silent no-op"
@@ -11108,10 +11516,10 @@ networks:
         let tmp = tempfile::tempdir().unwrap();
         let integrations = all_enabled_integrations();
 
-        let result = apply_worker_auth_tokens_with_dir(
+        let result = apply_worker_auth_tokens_in(
+            tmp.path(),
             VALID_COMPOSE_ALL_WORKERS,
             "test",
-            tmp.path(),
             &integrations,
             &[],
         )
@@ -11126,122 +11534,93 @@ networks:
         );
     }
 
+    fn test_worker_auth_tokens_are_derived_64_hex_and_distinct_per_service() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = crate::secret_store::SecretStore::open(tmp.path()).unwrap();
+        let mut seen = std::collections::HashSet::new();
+
+        for svc in consts::TOGGLEABLE_MCP_SERVICES {
+            let token = workers::derived_worker_bearer(&store, "test", svc.config_key).unwrap();
+            assert_eq!(token.len(), 64, "token for '{}'", svc.config_key);
+            assert!(
+                token
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+                "token for '{}' must be lowercase hex",
+                svc.config_key
+            );
+            assert!(seen.insert(token), "bearers must differ per service");
+        }
+    }
+
+    fn test_worker_auth_tokens_persist_across_renders() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bearers = |project: &str| -> Vec<String> {
+            let store = crate::secret_store::SecretStore::open(tmp.path()).unwrap();
+            consts::TOGGLEABLE_MCP_SERVICES
+                .iter()
+                .map(|svc| workers::derived_worker_bearer(&store, project, svc.config_key).unwrap())
+                .collect()
+        };
+
+        let first = bearers("test");
+        let second = bearers("test");
+        let other_project = bearers("other");
+
+        assert_eq!(first, second, "tokens should persist across renders");
+        assert_ne!(first, other_project, "tokens are per project");
+    }
+
     #[test]
-    fn test_worker_auth_tokens_are_uuids() {
+    fn test_worker_auth_tokens_are_never_written_to_disk() {
         let tmp = tempfile::tempdir().unwrap();
         let integrations = all_enabled_integrations();
 
-        apply_worker_auth_tokens_with_dir(
+        apply_worker_auth_tokens_in(
+            tmp.path(),
             VALID_COMPOSE_ALL_WORKERS,
             "test",
-            tmp.path(),
             &integrations,
             &[],
         )
         .unwrap();
+        let store = crate::secret_store::SecretStore::open(tmp.path()).unwrap();
+        let bearer = workers::derived_worker_bearer(&store, "test", "slack").unwrap();
 
-        for svc in consts::TOGGLEABLE_MCP_SERVICES {
-            let token_path = tmp.path().join(format!("{}-auth-token", svc.config_key));
-            let token = std::fs::read_to_string(&token_path).unwrap();
-            assert!(
-                uuid::Uuid::parse_str(token.trim()).is_ok(),
-                "token for '{}' should be a valid UUID, got: '{}'",
-                svc.config_key,
-                token
-            );
+        let mut stack = vec![tmp.path().to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().to_string();
+                assert!(!name.ends_with("-auth-token"), "bearer file {name}");
+                let content = std::fs::read_to_string(&path).unwrap_or_default();
+                assert!(!content.contains(&bearer), "bearer stored in {name}");
+            }
         }
     }
 
     #[test]
-    fn test_worker_auth_tokens_persist_across_renders() {
+    fn test_worker_auth_tokens_fail_when_the_store_key_is_missing() {
         let tmp = tempfile::tempdir().unwrap();
-        let integrations = all_enabled_integrations();
+        write_secret(tmp.path(), "test", "slack", "access_token", "v");
+        std::fs::remove_file(tmp.path().join("secret-store.key")).unwrap();
 
-        apply_worker_auth_tokens_with_dir(
+        let result = apply_worker_auth_tokens_in(
+            tmp.path(),
             VALID_COMPOSE_ALL_WORKERS,
             "test",
-            tmp.path(),
-            &integrations,
+            &all_enabled_integrations(),
             &[],
-        )
-        .unwrap();
-
-        let first_tokens: Vec<String> = consts::TOGGLEABLE_MCP_SERVICES
-            .iter()
-            .map(|svc| {
-                std::fs::read_to_string(tmp.path().join(format!("{}-auth-token", svc.config_key)))
-                    .unwrap()
-            })
-            .collect();
-
-        apply_worker_auth_tokens_with_dir(
-            VALID_COMPOSE_ALL_WORKERS,
-            "test",
-            tmp.path(),
-            &integrations,
-            &[],
-        )
-        .unwrap();
-
-        let second_tokens: Vec<String> = consts::TOGGLEABLE_MCP_SERVICES
-            .iter()
-            .map(|svc| {
-                std::fs::read_to_string(tmp.path().join(format!("{}-auth-token", svc.config_key)))
-                    .unwrap()
-            })
-            .collect();
-
-        assert_eq!(
-            first_tokens, second_tokens,
-            "tokens should persist across renders"
         );
-    }
 
-    #[test]
-    fn test_worker_auth_token_regenerated_when_unreadable() {
-        let tmp = tempfile::tempdir().unwrap();
-        let integrations = ResolvedIntegrationsConfig {
-            slack: true,
-            ..Default::default()
-        };
-
-        apply_worker_auth_tokens_with_dir(
-            VALID_COMPOSE_ALL_WORKERS,
-            "test",
-            tmp.path(),
-            &integrations,
-            &[],
-        )
-        .unwrap();
-        let token_path = tmp.path().join("slack-auth-token");
-        let first = std::fs::read_to_string(&token_path).unwrap();
-
-        crate::fs_perms::make_unreadable_for_test(&token_path);
+        assert!(result.is_err(), "a missing key must stop the project");
         assert!(
-            std::fs::read_to_string(&token_path).is_err(),
-            "artifact must be unreadable"
-        );
-
-        let result = apply_worker_auth_tokens_with_dir(
-            VALID_COMPOSE_ALL_WORKERS,
-            "test",
-            tmp.path(),
-            &integrations,
-            &[],
-        );
-        assert!(
-            result.is_ok(),
-            "an unreadable token must self-heal, not fail the render: {:?}",
-            result.err()
-        );
-        let regenerated = std::fs::read_to_string(&token_path).unwrap();
-        assert!(
-            uuid::Uuid::parse_str(regenerated.trim()).is_ok(),
-            "regenerated token must be a valid UUID, got '{regenerated}'"
-        );
-        assert_ne!(
-            first, regenerated,
-            "a fresh token must replace the corrupt one"
+            !tmp.path().join("secret-store.key").exists(),
+            "a missing key is never silently recreated"
         );
     }
 
@@ -11253,10 +11632,10 @@ networks:
             ..Default::default()
         };
 
-        let result = apply_worker_auth_tokens_with_dir(
+        let result = apply_worker_auth_tokens_in(
+            tmp.path(),
             VALID_COMPOSE_ALL_WORKERS,
             "test",
-            tmp.path(),
             &integrations,
             &[],
         )
@@ -11287,8 +11666,7 @@ networks:
                 &networks::project_network_name("test"),
             );
         let result =
-            apply_worker_auth_tokens_with_dir(&yaml, "test", tmp.path(), &integrations, &[])
-                .unwrap();
+            apply_worker_auth_tokens_in(tmp.path(), &yaml, "test", &integrations, &[]).unwrap();
 
         let data_tmp = tempfile::tempdir().unwrap();
         let result = with_hub_policy_and_audit_mounts(&result, data_tmp.path(), "test");
@@ -11306,262 +11684,6 @@ networks:
                 .iter()
                 .map(|v| format!("{}", v))
                 .collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn test_worker_auth_token_skipped_when_directory() {
-        let tmp = tempfile::tempdir().unwrap();
-        let integrations = ResolvedIntegrationsConfig {
-            slack: true,
-            ..Default::default()
-        };
-
-        std::fs::create_dir(tmp.path().join("slack-auth-token")).unwrap();
-
-        let result = apply_worker_auth_tokens_with_dir(
-            VALID_COMPOSE_ALL_WORKERS,
-            "test",
-            tmp.path(),
-            &integrations,
-            &[],
-        )
-        .unwrap();
-
-        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&result).unwrap();
-        let env = get_service_env_seq(&doc, "mcp-slack");
-        assert!(
-            env.iter()
-                .any(|e| e.starts_with("MCP_SLACK_AUTH_TOKEN_FILE=")),
-            "the worker must name its bearer file"
-        );
-        let token_path = tmp.path().join("slack-auth-token");
-        assert!(
-            token_path.is_file(),
-            "a regular token file must replace the directory"
-        );
-        assert!(
-            uuid::Uuid::parse_str(std::fs::read_to_string(&token_path).unwrap().trim()).is_ok()
-        );
-    }
-
-    #[cfg(unix)]
-    fn assert_fresh_uuid_token(token_path: &Path, sentinel: &str) -> String {
-        let value = std::fs::read_to_string(token_path).unwrap();
-        let value = value.trim();
-        assert!(
-            uuid::Uuid::parse_str(value).is_ok(),
-            "token must be a valid UUID, got: '{}'",
-            value
-        );
-        assert_ne!(
-            value, sentinel,
-            "token must not equal the planted sentinel '{}'",
-            sentinel
-        );
-        value.to_string()
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_worker_auth_token_skipped_when_symlink() {
-        const SENTINEL: &str = "PLANTED-NOT-A-UUID";
-        let tmp = tempfile::tempdir().unwrap();
-        let integrations = ResolvedIntegrationsConfig {
-            slack: true,
-            ..Default::default()
-        };
-
-        let target = tmp.path().join("some-target");
-        std::fs::write(&target, SENTINEL).unwrap();
-        std::os::unix::fs::symlink(&target, tmp.path().join("slack-auth-token")).unwrap();
-
-        apply_worker_auth_tokens_with_dir(
-            VALID_COMPOSE_ALL_WORKERS,
-            "test",
-            tmp.path(),
-            &integrations,
-            &[],
-        )
-        .unwrap();
-
-        assert_fresh_uuid_token(&tmp.path().join("slack-auth-token"), SENTINEL);
-
-        let token_path = tmp.path().join("slack-auth-token");
-        assert!(token_path.is_file(), "token should be a regular file");
-        assert!(
-            !token_path.is_symlink(),
-            "token should not be a symlink after cleanup"
-        );
-        let disk_token = std::fs::read_to_string(&token_path).unwrap();
-        assert!(
-            uuid::Uuid::parse_str(disk_token.trim()).is_ok(),
-            "on-disk token should be a valid UUID, got: '{}'",
-            disk_token
-        );
-        assert_ne!(
-            disk_token.trim(),
-            SENTINEL,
-            "on-disk token must not equal the planted sentinel"
-        );
-    }
-
-    #[test]
-    fn test_worker_auth_token_written_with_0o600() {
-        let tmp = tempfile::tempdir().unwrap();
-        let integrations = ResolvedIntegrationsConfig {
-            slack: true,
-            ..Default::default()
-        };
-
-        apply_worker_auth_tokens_with_dir(
-            VALID_COMPOSE_ALL_WORKERS,
-            "test",
-            tmp.path(),
-            &integrations,
-            &[],
-        )
-        .unwrap();
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let token_path = tmp.path().join("slack-auth-token");
-            let mode = std::fs::metadata(&token_path).unwrap().permissions().mode();
-            assert_eq!(
-                mode & 0o777,
-                0o600,
-                "token file should have 0o600 permissions, got: {:o}",
-                mode & 0o777
-            );
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_worker_auth_token_rejects_symlink_with_uuid_target() {
-        const PLANTED_UUID: &str = "550e8400-e29b-41d4-a716-446655440000";
-        let tmp = tempfile::tempdir().unwrap();
-        let integrations = ResolvedIntegrationsConfig {
-            slack: true,
-            ..Default::default()
-        };
-
-        let target = tmp.path().join("uuid-target");
-        std::fs::write(&target, PLANTED_UUID).unwrap();
-        std::os::unix::fs::symlink(&target, tmp.path().join("slack-auth-token")).unwrap();
-
-        apply_worker_auth_tokens_with_dir(
-            VALID_COMPOSE_ALL_WORKERS,
-            "test",
-            tmp.path(),
-            &integrations,
-            &[],
-        )
-        .unwrap();
-
-        assert_fresh_uuid_token(&tmp.path().join("slack-auth-token"), PLANTED_UUID);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_worker_auth_token_rejects_symlink_chain() {
-        const SENTINEL: &str = "CHAIN-SENTINEL";
-        let tmp = tempfile::tempdir().unwrap();
-        let integrations = ResolvedIntegrationsConfig {
-            slack: true,
-            ..Default::default()
-        };
-
-        let file_c = tmp.path().join("chain-target-file");
-        std::fs::write(&file_c, SENTINEL).unwrap();
-        let link_b = tmp.path().join("chain-link-b");
-        std::os::unix::fs::symlink(&file_c, &link_b).unwrap();
-        std::os::unix::fs::symlink(&link_b, tmp.path().join("slack-auth-token")).unwrap();
-
-        apply_worker_auth_tokens_with_dir(
-            VALID_COMPOSE_ALL_WORKERS,
-            "test",
-            tmp.path(),
-            &integrations,
-            &[],
-        )
-        .unwrap();
-
-        let token_path = tmp.path().join("slack-auth-token");
-        assert!(token_path.is_file(), "token should be a regular file");
-        assert!(
-            !token_path.is_symlink(),
-            "token should not be a symlink after chain cleanup"
-        );
-
-        assert_fresh_uuid_token(&tmp.path().join("slack-auth-token"), SENTINEL);
-    }
-
-    #[test]
-    fn test_worker_bearer_is_trimmed_and_kept_when_the_file_holds_a_legacy_value() {
-        const KNOWN_UUID: &str = "550e8400-e29b-41d4-a716-446655440000";
-        let tmp = tempfile::tempdir().unwrap();
-
-        let token_path = tmp.path().join("slack-auth-token");
-        std::fs::write(&token_path, "  550e8400-e29b-41d4-a716-446655440000\n  \n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        }
-
-        let token = workers::read_or_create_worker_bearer(tmp.path(), "slack").unwrap();
-
-        assert_eq!(token, KNOWN_UUID);
-        assert_eq!(
-            std::fs::read_to_string(&token_path).unwrap().trim(),
-            KNOWN_UUID,
-            "the file keeps the same value"
-        );
-    }
-
-    #[test]
-    fn test_worker_bearer_empty_file_generates_fresh_uuid() {
-        let tmp = tempfile::tempdir().unwrap();
-        let token_path = tmp.path().join("slack-auth-token");
-        std::fs::write(&token_path, "   \n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        }
-
-        let token = workers::read_or_create_worker_bearer(tmp.path(), "slack").unwrap();
-
-        assert!(uuid::Uuid::parse_str(&token).is_ok(), "got: '{token}'");
-        let disk = std::fs::read_to_string(&token_path).unwrap();
-        assert_eq!(disk.trim(), token);
-    }
-
-    #[test]
-    fn test_worker_auth_token_atomic_write() {
-        let tmp = tempfile::tempdir().unwrap();
-        let integrations = all_enabled_integrations();
-
-        apply_worker_auth_tokens_with_dir(
-            VALID_COMPOSE_ALL_WORKERS,
-            "test",
-            tmp.path(),
-            &integrations,
-            &[],
-        )
-        .unwrap();
-
-        let tmp_files: Vec<_> = std::fs::read_dir(tmp.path())
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "tmp"))
-            .collect();
-        assert!(
-            tmp_files.is_empty(),
-            "no .tmp files should remain after atomic write, found: {:?}",
-            tmp_files.iter().map(|e| e.path()).collect::<Vec<_>>()
         );
     }
 
@@ -11605,13 +11727,10 @@ networks:
             .plugins
             .insert("example-plugin".to_string(), true);
 
-        let secrets_dir = tmp.path().join("secrets");
-        std::fs::create_dir_all(&secrets_dir).unwrap();
-
-        let result = apply_worker_auth_tokens_with_dir(
+        let result = apply_worker_auth_tokens_in(
+            tmp.path(),
             &compose_with_plugin,
             "test",
-            &secrets_dir,
             &integrations,
             &plugins,
         )
@@ -11637,7 +11756,17 @@ networks:
         );
         assert!(get_hub_volumes(&doc).is_empty());
 
-        assert!(secrets_dir.join("example-plugin-auth-token").exists());
+        let store = crate::secret_store::SecretStore::open(tmp.path()).unwrap();
+        let expected = workers::derived_worker_bearer(&store, "test", "example-plugin").unwrap();
+        assert_eq!(
+            find_env_value(&env, "MCP_EXAMPLE_PLUGIN_AUTH_TOKEN=").as_deref(),
+            Some(expected.as_str()),
+            "the plugin bearer is the derived value"
+        );
+        assert!(
+            !tmp.path().join("secrets").exists(),
+            "a derived bearer leaves no file behind"
+        );
     }
 
     #[test]
@@ -11926,7 +12055,7 @@ services:
         secure_mkdir(data_dir, &["secrets", "testproj"]);
         let secrets_dir = data_dir.join("secrets").join("testproj");
 
-        let token_file = secrets_dir.join("slack-auth-token");
+        let token_file = secrets_dir.join("slack.access_token.enc");
         std::fs::write(&token_file, "secret").unwrap();
         std::fs::set_permissions(&token_file, std::fs::Permissions::from_mode(0o600)).unwrap();
 
@@ -11943,6 +12072,32 @@ services:
 
     #[cfg(unix)]
     #[test]
+    fn test_file_security_passes_for_files_written_by_the_secret_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        write_secret(data_dir, "testproj", "slack", "access_token", "secret");
+        let store = crate::secret_store::SecretStore::open(data_dir).unwrap();
+        let name =
+            crate::secret_store::SecretName::integration("testproj", "slack", "access_token")
+                .unwrap();
+        crate::fs_perms::with_file_lock_in(&store.lock_path(&name), || Ok(())).unwrap();
+
+        let violations = SecurityCheck::check_file_security(data_dir, "testproj");
+        assert!(
+            violations.is_empty(),
+            "store entries and their lock files must satisfy the permission check, got: {:?}",
+            violations
+                .iter()
+                .map(|v| format!("{v}"))
+                .collect::<Vec<_>>()
+        );
+        assert!(data_dir
+            .join("secrets/testproj/slack.access_token.enc.lock")
+            .is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn test_file_security_detects_world_readable_secret() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -11952,7 +12107,7 @@ services:
         secure_mkdir(data_dir, &["secrets", "testproj"]);
         let secrets_dir = data_dir.join("secrets").join("testproj");
 
-        let token_file = secrets_dir.join("slack-auth-token");
+        let token_file = secrets_dir.join("slack.access_token.enc");
         std::fs::write(&token_file, "secret").unwrap();
         std::fs::set_permissions(&token_file, std::fs::Permissions::from_mode(0o644)).unwrap();
 
@@ -11980,7 +12135,7 @@ services:
         secure_mkdir(data_dir, &["secrets", "testproj"]);
         let secrets_dir = data_dir.join("secrets").join("testproj");
 
-        let token_file = secrets_dir.join("slack-auth-token");
+        let token_file = secrets_dir.join("slack.access_token.enc");
         std::fs::write(&token_file, "secret").unwrap();
         std::fs::set_permissions(&token_file, std::fs::Permissions::from_mode(0o640)).unwrap();
 
@@ -12297,7 +12452,7 @@ services:
         secure_mkdir(data_dir, &["secrets", "testproj"]);
         let secrets_dir = data_dir.join("secrets").join("testproj");
 
-        let token_file = secrets_dir.join("slack-auth-token");
+        let token_file = secrets_dir.join("slack.access_token.enc");
         std::fs::write(&token_file, "secret").unwrap();
         std::fs::set_permissions(&token_file, std::fs::Permissions::from_mode(0o600)).unwrap();
 
@@ -12527,12 +12682,6 @@ services:
     environment:
       - CLAUDE_VERSION=1.0.3
 "#
-    }
-
-    fn write_api_key_in(data_dir: &std::path::Path, project: &str, key: &str) {
-        let dir = data_dir.join("secrets").join(project);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("anthropic_api_key"), key).unwrap();
     }
 
     #[test]
@@ -13448,134 +13597,73 @@ services:
     }
 
     #[test]
-    fn tokens_path_resolves_for_local_llm() {
+    fn llm_provider_key_is_sealed_in_the_secret_store_not_in_the_tokens_tree() {
         let dir = tempfile::tempdir().unwrap();
-        let p = super::tokens_path_in(dir.path(), "myproj", "local-llm", "api_key").unwrap();
-        let expected = dir
-            .path()
-            .join("tokens")
-            .join("myproj")
-            .join("local-llm")
-            .join("api_key");
-        assert_eq!(p, expected);
+        write_llm_provider_key_in(dir.path(), "myproj", "openrouter", "sk-test-1").unwrap();
+
+        let sealed = dir.path().join("secrets/myproj/llm.openrouter_api_key.enc");
+        assert!(sealed.is_file());
+        assert!(!std::fs::read_to_string(&sealed)
+            .unwrap()
+            .contains("sk-test-1"));
+        assert!(!dir.path().join("tokens").exists());
+        write_llm_provider_key_in(dir.path(), "myproj", "my-anthropic", "sk-test-2").unwrap();
+        let name =
+            crate::secret_store::SecretName::llm_provider_key("myproj", "my-anthropic").unwrap();
+        let stored = crate::secret_store::SecretStore::open(dir.path())
+            .unwrap()
+            .read(&name)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.as_str(), "sk-test-2");
     }
 
     #[test]
-    fn tokens_path_rejects_unknown_service() {
+    fn local_llm_secrets_are_read_from_the_store_by_allow_listed_file() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(super::tokens_path_in(dir.path(), "myproj", "../etc", "api_key").is_err());
-        assert!(super::tokens_path_in(dir.path(), "myproj", "slack", "token").is_err());
-    }
+        write_local_llm_secret(dir.path(), "myproj", "api_key", "sk-local\n");
+        write_local_llm_secret(dir.path(), "myproj", "custom_headers", "X-A: b");
 
-    #[test]
-    fn tokens_path_rejects_unknown_file() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(super::tokens_path_in(dir.path(), "myproj", "local-llm", "../passwd").is_err());
-        assert!(super::tokens_path_in(dir.path(), "myproj", "local-llm", "random").is_err());
-    }
-
-    #[test]
-    fn tokens_path_rejects_invalid_project_name() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(super::tokens_path_in(dir.path(), "../etc", "local-llm", "api_key").is_err());
-    }
-
-    #[test]
-    fn llm_provider_key_path_resolves_for_valid_slug() {
-        let dir = tempfile::tempdir().unwrap();
-        let p =
-            super::tokens::llm_provider_key_path_in(dir.path(), "myproj", "openrouter").unwrap();
-        let expected = dir
-            .path()
-            .join("tokens")
-            .join("myproj")
-            .join("llm")
-            .join("openrouter_api_key");
-        assert_eq!(p, expected);
-        assert!(
-            super::tokens::llm_provider_key_path_in(dir.path(), "myproj", "my-anthropic").is_ok()
+        assert_eq!(
+            read_local_llm_token_opt_in(dir.path(), "myproj", "api_key").as_deref(),
+            Some("sk-local")
+        );
+        assert_eq!(
+            read_local_llm_token_opt_in(dir.path(), "myproj", "custom_headers").as_deref(),
+            Some("X-A: b")
+        );
+        assert_eq!(
+            read_local_llm_token_opt_in(dir.path(), "myproj", "random"),
+            None
+        );
+        assert_eq!(
+            read_local_llm_token_opt_in(dir.path(), "myproj", "../passwd"),
+            None
+        );
+        assert_eq!(
+            read_local_llm_token_opt_in(dir.path(), "../etc", "api_key"),
+            None
+        );
+        assert_eq!(
+            read_local_llm_token_opt_in(dir.path(), "empty", "api_key"),
+            None
         );
     }
 
     #[test]
-    fn llm_provider_key_path_rejects_traversal_and_bad_slugs() {
+    fn local_llm_secret_that_cannot_be_read_falls_back_to_none() {
         let dir = tempfile::tempdir().unwrap();
-        for bad in [
-            "../passwd",
-            "a/b",
-            "a\\b",
-            "UPPER",
-            "Bad.Provider",
-            "under_score",
-            "",
-            "1starts-with-digit",
-        ] {
-            assert!(
-                super::tokens::llm_provider_key_path_in(dir.path(), "myproj", bad).is_err(),
-                "provider id '{bad}' must be rejected"
-            );
-        }
-    }
+        write_local_llm_secret(dir.path(), "myproj", "api_key", "sk-local");
+        std::fs::write(
+            dir.path().join("secrets/myproj/local-llm.api_key.enc"),
+            "garbage\n",
+        )
+        .unwrap();
 
-    #[test]
-    fn llm_tokens_path_requires_api_key_suffix() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(super::tokens_path_in(dir.path(), "myproj", "llm", "openrouter_api_key").is_ok());
-        assert!(super::tokens_path_in(dir.path(), "myproj", "llm", "openrouter").is_err());
-        assert!(super::tokens_path_in(dir.path(), "myproj", "llm", "../escape_api_key").is_err());
-    }
-
-    #[test]
-    fn ensure_token_dir_supports_llm_service() {
-        let dir = tempfile::tempdir().unwrap();
-        let service_dir = super::ensure_token_dir_in(dir.path(), "myproj", "llm").unwrap();
-        assert!(service_dir.is_dir());
-        assert!(service_dir.ends_with("tokens/myproj/llm"));
-    }
-
-    #[test]
-    fn ensure_token_dir_creates_three_levels() {
-        let dir = tempfile::tempdir().unwrap();
-        let service_dir = super::ensure_token_dir_in(dir.path(), "myproj", "local-llm").unwrap();
-
-        assert!(service_dir.is_dir());
-        assert!(dir.path().join("tokens").is_dir());
-        assert!(dir.path().join("tokens").join("myproj").is_dir());
-        assert!(dir
-            .path()
-            .join("tokens")
-            .join("myproj")
-            .join("local-llm")
-            .is_dir());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn ensure_token_dir_sets_0o700_on_all_levels() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        super::ensure_token_dir_in(dir.path(), "myproj", "local-llm").unwrap();
-
-        for level in &[
-            dir.path().join("tokens"),
-            dir.path().join("tokens").join("myproj"),
-            dir.path().join("tokens").join("myproj").join("local-llm"),
-        ] {
-            let mode = std::fs::metadata(level).unwrap().permissions().mode() & 0o777;
-            assert_eq!(
-                mode,
-                0o700,
-                "expected 0o700 at {}, got 0o{mode:o}",
-                level.display()
-            );
-        }
-    }
-
-    #[test]
-    fn ensure_token_dir_idempotent() {
-        let dir = tempfile::tempdir().unwrap();
-        super::ensure_token_dir_in(dir.path(), "myproj", "local-llm").unwrap();
-        super::ensure_token_dir_in(dir.path(), "myproj", "local-llm").unwrap();
+        assert_eq!(
+            read_local_llm_token_opt_in(dir.path(), "myproj", "api_key"),
+            None
+        );
     }
 
     #[test]
@@ -13839,11 +13927,12 @@ services:
     fn apply_llm_config_ignores_orphaned_token_when_flag_is_false() {
         let data_dir = tempfile::tempdir().unwrap();
         let project = format!("crash-recovery-{}", std::process::id());
-        let dir = ensure_token_dir_in(data_dir.path(), &project, "local-llm")
-            .expect("ensure_token_dir must succeed in test env");
-        let api_key_path = dir.join("api_key");
-        crate::fs_perms::write_restricted_file_atomic(&api_key_path, "leaked-secret-from-crash")
-            .expect("write must succeed");
+        write_local_llm_secret(
+            data_dir.path(),
+            &project,
+            "api_key",
+            "leaked-secret-from-crash",
+        );
 
         let mut llm = LlmConfig {
             provider: Some("local".to_string()),
@@ -13870,21 +13959,14 @@ services:
             !env.iter().any(|e| e.contains("leaked-secret-from-crash")),
             "Leaked secret must not appear in rendered YAML: {env:?}"
         );
-
-        let _ = std::fs::remove_file(&api_key_path);
-        let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]
     fn apply_llm_config_multiline_custom_headers_survives_yaml_roundtrip() {
         let data_dir = tempfile::tempdir().unwrap();
         let project = format!("custom-headers-roundtrip-{}", std::process::id());
-        let dir = ensure_token_dir_in(data_dir.path(), &project, "local-llm")
-            .expect("ensure_token_dir must succeed in test env");
-        let headers_path = dir.join("custom_headers");
         let multiline = "X-Foo: bar\nX-Tenant-ID: acme\nOcp-Apim-Subscription-Key: secret-123";
-        crate::fs_perms::write_restricted_file_atomic(&headers_path, multiline)
-            .expect("write_restricted_file_atomic must succeed");
+        write_local_llm_secret(data_dir.path(), &project, "custom_headers", multiline);
 
         let mut llm = LlmConfig {
             provider: Some("local".to_string()),
@@ -13923,9 +14005,6 @@ services:
         }
         let _: serde_yaml_ng::Value = serde_yaml_ng::from_str(&rendered)
             .expect("rendered compose must re-parse — block-literal regression?");
-
-        let _ = std::fs::remove_file(&headers_path);
-        let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]
