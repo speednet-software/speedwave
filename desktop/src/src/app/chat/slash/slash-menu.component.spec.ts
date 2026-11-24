@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { signal } from '@angular/core';
 import { SlashMenuComponent } from './slash-menu.component';
-import { SlashService, type SlashCommand, type DiscoverySource } from './slash.service';
+import { SlashService, type DiscoverySource } from './slash.service';
+import type { SlashCommand } from '../../models/slash';
 
 class FakeSlashService {
   commands = signal<readonly SlashCommand[]>([]);

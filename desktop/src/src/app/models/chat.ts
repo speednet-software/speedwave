@@ -1,5 +1,6 @@
 import type { ClaudeContextUsage } from './claude-control';
 import type { ToolUseState } from './state-tree';
+import type { SlashCommand } from './slash';
 
 /** Mirror of Rust `speedwave_runtime::stream::TurnErrorKind`. */
 export type TurnErrorKind = 'authentication_failed';
@@ -36,13 +37,22 @@ export type StreamChunk =
         turn_cost?: number;
         model?: string;
         context_usage?: TurnUsage;
+        response_ids?: string[];
       };
     }
   | {
       chunk_type: 'Error';
-      data: { content: string; turn_ended?: boolean; kind?: TurnErrorKind };
+      data: {
+        content: string;
+        turn_ended?: boolean;
+        kind?: TurnErrorKind;
+        response_ids?: string[];
+      };
     }
-  | { chunk_type: 'SystemInit'; data: { model: string; session_id?: string } }
+  | {
+      chunk_type: 'SystemInit';
+      data: { model: string; session_id?: string; slash_commands?: readonly SlashCommand[] };
+    }
   | {
       chunk_type: 'ControlChip';
       data: { command: string; argument: string; uuid?: string };
@@ -58,7 +68,25 @@ export type StreamChunk =
   | {
       chunk_type: 'QueueDrained';
       data: { session_id: string; text: string };
+    }
+  | { chunk_type: 'TurnStarted'; data: { origin: TurnOrigin } }
+  | {
+      chunk_type: 'SubagentActivity';
+      data: { parent_tool_id: string; tool_id: string; tool_name: string; input_json: string };
+    }
+  | {
+      chunk_type: 'SubagentStatus';
+      data: { tool_id: string; status: SubagentState; summary: string };
     };
+
+/** Mirror of Rust `chat.rs::SubagentState`. */
+export type SubagentState = 'running' | 'completed' | 'error' | 'stopped';
+
+/** What started a Claude Code turn. */
+export type TurnOrigin = 'user' | 'scheduled' | 'task_notification';
+
+/** Origin of a turn Claude Code started without a user message. */
+export type SelfStartedTurnOrigin = Exclude<TurnOrigin, 'user'>;
 
 /** `chat_stream` payload: the tagged chunk plus the owning tab. Mirror of Rust chat.rs::TabStreamChunk. */
 export type TabStreamChunk = StreamChunk & { tab_id: string };
@@ -153,6 +181,7 @@ export interface EntryMeta {
   model?: string;
   usage?: TurnUsage;
   cost?: number;
+  response_ids?: string[];
 }
 
 /**
@@ -178,6 +207,7 @@ export type MessageBlock =
       decided?: 'allow_once' | 'allow_always' | 'deny';
     }
   | { type: 'chip'; command: string; argument: string }
+  | { type: 'turn_origin'; origin: SelfStartedTurnOrigin }
   | { type: 'image'; media_type: string; alt?: string }
   | { type: 'file'; filename: string; size_bytes: number };
 
@@ -244,7 +274,16 @@ export type NormalizedToolInput =
   | { kind: 'task_get'; task_id: string }
   | { kind: 'web_search'; query: string }
   | { kind: 'web_fetch'; url: string }
-  | { kind: 'agent'; description: string }
+  | { kind: 'agent'; description: string; subagent_type?: string; run_in_background?: boolean }
+  | {
+      kind: 'workflow';
+      title: string;
+      description?: string;
+      args: Array<{ key: string; value: string }>;
+      script?: string;
+      scriptPath?: string;
+      resumeFromRunId?: string;
+    }
   | { kind: 'generic'; raw_json: string };
 
 /** Retry-anchor UUID commit state for a ChatMessage (ADR-046). */
@@ -304,9 +343,17 @@ export interface ConversationTranscript {
   messages: ConversationMessage[];
 }
 
+/** A tool call a subagent made. Mirror of Rust `chat.rs::SubagentCall`. */
+export interface SubagentCall {
+  tool_id: string;
+  tool_name: string;
+  input_json: string;
+}
+
 /** A tool call in a transcript, paired with its result; `result` is null when the call was never answered. */
 export interface HistoryToolUse extends ToolUseState {
   type: 'tool_use';
+  activities: readonly SubagentCall[];
 }
 
 /** One block of a transcript message, as `get_conversation` returns it. */
@@ -315,7 +362,8 @@ export type HistoryMessageBlock =
   | { type: 'thinking'; content: string }
   | HistoryToolUse
   | { type: 'error'; content: string }
-  | { type: 'control_chip'; command: string; argument: string };
+  | { type: 'control_chip'; command: string; argument: string }
+  | { type: 'turn_origin'; origin: SelfStartedTurnOrigin };
 
 /** A single message within a conversation transcript. */
 export interface ConversationMessage {
@@ -326,6 +374,7 @@ export interface ConversationMessage {
   uuid?: string;
   model?: string;
   usage?: TurnUsage;
+  response_ids?: string[];
 }
 
 /** Text segment of a wire user message. */

@@ -61,6 +61,8 @@ pub enum StreamChunk {
         model: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         context_usage: Option<TurnUsage>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        response_ids: Vec<String>,
     },
     AskUserQuestion {
         tool_id: String,
@@ -73,11 +75,15 @@ pub enum StreamChunk {
         turn_ended: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         kind: Option<TurnErrorKind>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        response_ids: Vec<String>,
     },
     SystemInit {
         model: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        slash_commands: Option<Vec<speedwave_runtime::slash::SlashCommand>>,
     },
     RateLimit {
         status: String,
@@ -100,6 +106,49 @@ pub enum StreamChunk {
         session_id: String,
         text: String,
     },
+    TurnStarted {
+        origin: TurnOrigin,
+    },
+    SubagentActivity {
+        parent_tool_id: String,
+        tool_id: String,
+        tool_name: String,
+        input_json: String,
+    },
+    SubagentStatus {
+        tool_id: String,
+        status: SubagentState,
+        summary: String,
+    },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentState {
+    Running,
+    Completed,
+    Error,
+    Stopped,
+}
+
+impl SubagentState {
+    fn from_task_status(status: &str) -> Option<Self> {
+        match status {
+            "running" | "pending" => Some(Self::Running),
+            "completed" => Some(Self::Completed),
+            "failed" | "error" => Some(Self::Error),
+            "stopped" | "killed" | "cancelled" => Some(Self::Stopped),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnOrigin {
+    User,
+    Scheduled,
+    TaskNotification,
 }
 
 pub(crate) fn sanitize_chunk(chunk: StreamChunk) -> StreamChunk {
@@ -124,10 +173,12 @@ pub(crate) fn sanitize_chunk(chunk: StreamChunk) -> StreamChunk {
             content,
             turn_ended,
             kind,
+            response_ids,
         } => StreamChunk::Error {
             content: sanitize(&content),
             turn_ended,
             kind,
+            response_ids,
         },
         StreamChunk::Result {
             result_text: Some(text),
@@ -140,6 +191,7 @@ pub(crate) fn sanitize_chunk(chunk: StreamChunk) -> StreamChunk {
             turn_cost,
             model,
             context_usage,
+            response_ids,
         } => StreamChunk::Result {
             result_text: Some(sanitize(&text)),
             session_id,
@@ -151,10 +203,20 @@ pub(crate) fn sanitize_chunk(chunk: StreamChunk) -> StreamChunk {
             turn_cost,
             model,
             context_usage,
+            response_ids,
         },
         StreamChunk::QueueDrained { session_id, text } => StreamChunk::QueueDrained {
             session_id,
             text: sanitize(&text),
+        },
+        StreamChunk::SubagentStatus {
+            tool_id,
+            status,
+            summary,
+        } => StreamChunk::SubagentStatus {
+            tool_id,
+            status,
+            summary: sanitize(&summary),
         },
         StreamChunk::AskUserQuestion {
             tool_id,
@@ -204,10 +266,12 @@ fn detokenize_chunk(chunk: StreamChunk, policy: &DisplayPolicy) -> StreamChunk {
             content,
             turn_ended,
             kind,
+            response_ids,
         } => StreamChunk::Error {
             content: detok(policy, &content),
             turn_ended,
             kind,
+            response_ids,
         },
         StreamChunk::Result {
             result_text: Some(text),
@@ -220,6 +284,7 @@ fn detokenize_chunk(chunk: StreamChunk, policy: &DisplayPolicy) -> StreamChunk {
             turn_cost,
             model,
             context_usage,
+            response_ids,
         } => StreamChunk::Result {
             result_text: Some(detok(policy, &text)),
             session_id,
@@ -231,10 +296,20 @@ fn detokenize_chunk(chunk: StreamChunk, policy: &DisplayPolicy) -> StreamChunk {
             turn_cost,
             model,
             context_usage,
+            response_ids,
         },
         StreamChunk::QueueDrained { session_id, text } => StreamChunk::QueueDrained {
             session_id,
             text: detok(policy, &text),
+        },
+        StreamChunk::SubagentStatus {
+            tool_id,
+            status,
+            summary,
+        } => StreamChunk::SubagentStatus {
+            tool_id,
+            status,
+            summary: detok(policy, &summary),
         },
         StreamChunk::AskUserQuestion {
             tool_id,
@@ -308,6 +383,15 @@ impl TurnUsage {
         }
     }
 
+    pub fn plus(self, other: Self) -> Self {
+        Self {
+            input_tokens: self.input_tokens + other.input_tokens,
+            output_tokens: self.output_tokens + other.output_tokens,
+            cache_read_tokens: self.cache_read_tokens + other.cache_read_tokens,
+            cache_write_tokens: self.cache_write_tokens + other.cache_write_tokens,
+        }
+    }
+
     pub fn delta(current: &Self, previous: &Self) -> Self {
         Self {
             input_tokens: current.input_tokens.saturating_sub(previous.input_tokens),
@@ -328,6 +412,37 @@ pub(crate) const USAGE_CACHE_READ_TOKENS: &str = "cache_read_input_tokens";
 pub(crate) const USAGE_CACHE_WRITE_TOKENS: &str = "cache_creation_input_tokens";
 pub(crate) const USAGE_CACHE_READ_TOKENS_LEGACY: &str = "cache_read_tokens";
 pub(crate) const USAGE_CACHE_WRITE_TOKENS_LEGACY: &str = "cache_write_tokens";
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SubagentCall {
+    pub tool_id: String,
+    pub tool_name: String,
+    pub input_json: String,
+}
+
+pub(crate) fn subagent_calls(parsed: &serde_json::Value) -> Vec<SubagentCall> {
+    let Some(blocks) = parsed["message"]["content"].as_array() else {
+        return Vec::new();
+    };
+    blocks
+        .iter()
+        .filter(|b| b["type"].as_str() == Some("tool_use"))
+        .filter_map(|b| {
+            let tool_id = b["id"].as_str().filter(|s| !s.is_empty())?;
+            let tool_name = b["name"].as_str().filter(|s| !s.is_empty())?;
+            let input = &b["input"];
+            Some(SubagentCall {
+                tool_id: tool_id.to_string(),
+                tool_name: tool_name.to_string(),
+                input_json: if input.is_object() {
+                    input.to_string()
+                } else {
+                    "{}".to_string()
+                },
+            })
+        })
+        .collect()
+}
 
 pub(crate) fn is_sidechain_event(parsed: &serde_json::Value) -> bool {
     !parsed["parent_tool_use_id"].is_null() || parsed["isSidechain"].as_bool() == Some(true)
@@ -432,6 +547,7 @@ fn option_to_vec(
 pub struct StreamParser {
     active_blocks: HashMap<u64, (String, String)>,
     pending_assistant_uuid: Option<String>,
+    pending_response_ids: Vec<String>,
     pending_turn_error_kind: Option<TurnErrorKind>,
     committed_user_uuids: std::collections::HashSet<String>,
     previous_session_usage: TurnUsage,
@@ -439,6 +555,9 @@ pub struct StreamParser {
     previous_session_cost: Option<f64>,
     model_tracker: crate::session_model::SessionModelTracker,
     seen_unknown_types: std::collections::HashSet<String>,
+    next_turn_origin: Option<TurnOrigin>,
+    subagent_tasks: HashMap<String, String>,
+    slash_session: Option<speedwave_runtime::slash::SessionSlash>,
 }
 
 const MAX_TRACKED_UNKNOWN_TYPES: usize = 32;
@@ -448,6 +567,7 @@ impl StreamParser {
         Self {
             active_blocks: HashMap::new(),
             pending_assistant_uuid: None,
+            pending_response_ids: Vec::new(),
             pending_turn_error_kind: None,
             committed_user_uuids: std::collections::HashSet::new(),
             previous_session_usage: TurnUsage::default(),
@@ -455,7 +575,19 @@ impl StreamParser {
             previous_session_cost: None,
             model_tracker: crate::session_model::SessionModelTracker::default(),
             seen_unknown_types: std::collections::HashSet::new(),
+            next_turn_origin: None,
+            subagent_tasks: HashMap::new(),
+            slash_session: None,
         }
+    }
+
+    fn set_slash_project(
+        &mut self,
+        project: Option<speedwave_runtime::slash::ProjectHandle>,
+        data_dir: &std::path::Path,
+    ) {
+        self.slash_session =
+            project.map(|project| speedwave_runtime::slash::SessionSlash::new(project, data_dir));
     }
 
     pub fn restore_session_snapshot(
@@ -490,18 +622,29 @@ impl StreamParser {
         let msg_type = parsed["type"].as_str().unwrap_or("");
 
         match msg_type {
+            "stream_event" if is_sidechain_event(parsed) => (Vec::new(), None),
             "stream_event" => option_to_vec(self.parse_stream_event(&parsed["event"])),
+            "user" if is_sidechain_event(parsed) => (Vec::new(), None),
             "user" => self.parse_user_message(parsed),
-            "result" => option_to_vec(self.parse_result(parsed)),
+            "result" => {
+                self.next_turn_origin = None;
+                option_to_vec(self.parse_result(parsed))
+            }
             "assistant" => {
                 self.capture_assistant_uuid(parsed);
                 self.capture_assistant_model(parsed);
                 self.capture_context_usage(parsed);
                 self.capture_turn_error_kind(parsed);
-                (Self::complete_tool_inputs(parsed), None)
+                (Self::assistant_tool_chunks(parsed), None)
             }
-            "system" => option_to_vec(self.parse_system_message(parsed)),
+            "system" => self.parse_system_line(parsed),
             "rate_limit_event" => option_to_vec(Self::parse_rate_limit_event(parsed)),
+            "command_lifecycle" => {
+                if parsed["state"].as_str() == Some("started") {
+                    self.next_turn_origin = Some(TurnOrigin::Scheduled);
+                }
+                (Vec::new(), None)
+            }
             other => {
                 let label = if other.is_empty() { "<none>" } else { other };
                 if self.seen_unknown_types.len() < MAX_TRACKED_UNKNOWN_TYPES
@@ -524,10 +667,15 @@ impl StreamParser {
     }
 
     fn capture_assistant_uuid(&mut self, parsed: &serde_json::Value) {
-        if let Some(id) = parsed["message"]["id"].as_str() {
-            if !id.is_empty() {
-                self.pending_assistant_uuid = Some(id.to_string());
-            }
+        if is_sidechain_event(parsed) {
+            return;
+        }
+        let Some(id) = parsed["message"]["id"].as_str().filter(|id| !id.is_empty()) else {
+            return;
+        };
+        self.pending_assistant_uuid = Some(id.to_string());
+        if !self.pending_response_ids.iter().any(|known| known == id) {
+            self.pending_response_ids.push(id.to_string());
         }
     }
 
@@ -560,6 +708,28 @@ impl StreamParser {
         }
     }
 
+    fn assistant_tool_chunks(parsed: &serde_json::Value) -> Vec<StreamChunk> {
+        match parsed["parent_tool_use_id"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+        {
+            Some(parent) => Self::subagent_activities(parsed, parent),
+            None => Self::complete_tool_inputs(parsed),
+        }
+    }
+
+    fn subagent_activities(parsed: &serde_json::Value, parent: &str) -> Vec<StreamChunk> {
+        subagent_calls(parsed)
+            .into_iter()
+            .map(|call| StreamChunk::SubagentActivity {
+                parent_tool_id: parent.to_string(),
+                tool_id: call.tool_id,
+                tool_name: call.tool_name,
+                input_json: call.input_json,
+            })
+            .collect()
+    }
+
     fn complete_tool_inputs(parsed: &serde_json::Value) -> Vec<StreamChunk> {
         if is_sidechain_event(parsed) {
             return Vec::new();
@@ -590,6 +760,7 @@ impl StreamParser {
     pub fn new_session(&mut self) {
         self.reset();
         self.pending_assistant_uuid = None;
+        self.pending_response_ids.clear();
         self.previous_session_usage = TurnUsage::default();
         self.last_context_usage = None;
         self.previous_session_cost = None;
@@ -912,6 +1083,7 @@ impl StreamParser {
         parsed: &serde_json::Value,
     ) -> (Option<StreamChunk>, Option<LogEntry>) {
         let assistant_uuid = self.pending_assistant_uuid.take();
+        let response_ids = std::mem::take(&mut self.pending_response_ids);
         let turn_error_kind = self.pending_turn_error_kind.take();
 
         let is_error = parsed["is_error"].as_bool().unwrap_or(false);
@@ -950,6 +1122,7 @@ impl StreamParser {
                     content: error_text,
                     turn_ended: true,
                     kind: turn_error_kind,
+                    response_ids,
                 }),
                 Some(LogEntry {
                     prefix: "RESULT",
@@ -1038,6 +1211,7 @@ impl StreamParser {
                 turn_cost,
                 model,
                 context_usage: self.last_context_usage,
+                response_ids,
             }),
             log_entry,
         )
@@ -1092,6 +1266,64 @@ impl StreamParser {
         "Error:",
     ];
 
+    fn parse_system_line(
+        &mut self,
+        parsed: &serde_json::Value,
+    ) -> (Vec<StreamChunk>, Option<LogEntry>) {
+        let subtype = parsed["subtype"].as_str();
+        if subtype == Some("task_notification") {
+            self.next_turn_origin = Some(TurnOrigin::TaskNotification);
+        }
+        let (mut chunks, log) = option_to_vec(self.parse_system_message(parsed));
+        chunks.extend(self.subagent_status_chunk(parsed));
+        if subtype == Some("init") {
+            chunks.push(StreamChunk::TurnStarted {
+                origin: self.next_turn_origin.take().unwrap_or(TurnOrigin::User),
+            });
+        }
+        (chunks, log)
+    }
+
+    fn subagent_status_chunk(&mut self, parsed: &serde_json::Value) -> Option<StreamChunk> {
+        let task_id = parsed["task_id"].as_str().filter(|s| !s.is_empty())?;
+        match parsed["subtype"].as_str()? {
+            "task_started" => {
+                if parsed["task_type"].as_str() != Some("local_agent") {
+                    return None;
+                }
+                let tool_id = parsed["tool_use_id"].as_str().filter(|s| !s.is_empty())?;
+                self.subagent_tasks
+                    .insert(task_id.to_string(), tool_id.to_string());
+                Some(StreamChunk::SubagentStatus {
+                    tool_id: tool_id.to_string(),
+                    status: SubagentState::Running,
+                    summary: String::new(),
+                })
+            }
+            "task_updated" => {
+                let tool_id = self.subagent_tasks.get(task_id)?.clone();
+                let status = SubagentState::from_task_status(parsed["patch"]["status"].as_str()?)?;
+                Some(StreamChunk::SubagentStatus {
+                    tool_id,
+                    status,
+                    summary: String::new(),
+                })
+            }
+            "task_notification" => {
+                let tool_id = self.subagent_tasks.remove(task_id)?;
+                Some(StreamChunk::SubagentStatus {
+                    tool_id,
+                    status: parsed["status"]
+                        .as_str()
+                        .and_then(SubagentState::from_task_status)
+                        .unwrap_or(SubagentState::Completed),
+                    summary: parsed["summary"].as_str().unwrap_or_default().to_string(),
+                })
+            }
+            _ => None,
+        }
+    }
+
     fn parse_system_message(
         &mut self,
         parsed: &serde_json::Value,
@@ -1101,6 +1333,10 @@ impl StreamParser {
                 .as_str()
                 .filter(|s| !s.is_empty())
                 .map(String::from);
+            let slash_commands = self
+                .slash_session
+                .as_ref()
+                .and_then(|session| session.init_commands(parsed));
             if let Some(model) = parsed["model"].as_str() {
                 if !model.is_empty() {
                     self.model_tracker.observe_init(model);
@@ -1112,6 +1348,7 @@ impl StreamParser {
                         Some(StreamChunk::SystemInit {
                             model: model.to_string(),
                             session_id,
+                            slash_commands,
                         }),
                         log_entry,
                     );
@@ -1122,6 +1359,7 @@ impl StreamParser {
                     Some(StreamChunk::SystemInit {
                         model: String::new(),
                         session_id,
+                        slash_commands,
                     }),
                     Some(LogEntry {
                         prefix: "SYSTEM",
@@ -1160,6 +1398,7 @@ impl StreamParser {
                     content: message.to_string(),
                     turn_ended: false,
                     kind: None,
+                    response_ids: Vec::new(),
                 }),
                 log_entry,
             )
@@ -2273,6 +2512,10 @@ impl ChatSession {
         let display_policy =
             crate::pii_display::load_display_policy(consts::data_dir(), &self.project_name);
 
+        let slash_project = crate::slash_cmd::project_handle(&self.project_name)
+            .inspect_err(|_| log::warn!("slash project for '{}' unavailable", self.project_name))
+            .ok();
+
         let resume_seed = resume_session_id.and_then(|id| {
             match history::compute_resume_snapshot(&self.project_name, id) {
                 Ok(s) => Some(s),
@@ -2285,6 +2528,7 @@ impl ChatSession {
 
         let h = std::thread::spawn(move || {
             let mut parser = StreamParser::new();
+            parser.set_slash_project(slash_project, consts::data_dir());
             if let Some(seed) = resume_seed {
                 parser.restore_resume_snapshot(seed);
             }
@@ -2293,7 +2537,7 @@ impl ChatSession {
                 .and_then(speedwave_runtime::log_file::open_log_file);
             let reader = BufReader::new(stdout);
             let mut http_collator = speedwave_runtime::http_debug_collator::Collator::new();
-            for line in reader.lines() {
+            for line in lines_until_stopped(reader, stopping_for_reader.clone()) {
                 let line = match line {
                     Ok(l) => l,
                     Err(e) => {
@@ -2355,6 +2599,7 @@ impl ChatSession {
                                             .to_string(),
                                         turn_ended: false,
                                         kind: None,
+                                        response_ids: Vec::new(),
                                     },
                                     &display_policy,
                                 );
@@ -2402,6 +2647,7 @@ impl ChatSession {
                                             ),
                                             turn_ended: false,
                                             kind: None,
+                                            response_ids: Vec::new(),
                                         },
                                         &display_policy,
                                     );
@@ -2420,6 +2666,7 @@ impl ChatSession {
                                             ),
                                             turn_ended: false,
                                             kind: None,
+                                            response_ids: Vec::new(),
                                         },
                                         &display_policy,
                                     );
@@ -2435,6 +2682,7 @@ impl ChatSession {
                                         content: "Internal error: stdin lock poisoned".to_string(),
                                         turn_ended: false,
                                         kind: None,
+                                        response_ids: Vec::new(),
                                     },
                                     &display_policy,
                                 );
@@ -2503,6 +2751,7 @@ impl ChatSession {
                             content: refusal,
                             turn_ended: false,
                             kind: None,
+                            response_ids: Vec::new(),
                         },
                         &display_policy,
                     );
@@ -2572,6 +2821,7 @@ impl ChatSession {
                             .to_string(),
                     turn_ended: false,
                     kind: None,
+                    response_ids: Vec::new(),
                 };
                 emit_sanitized_chunk(&app_handle, &tab_id_for_reader, chunk, &display_policy);
                 notify_session_event(
@@ -2976,6 +3226,15 @@ impl Drop for ChatSession {
     }
 }
 
+fn lines_until_stopped<R: BufRead>(
+    reader: R,
+    stopping: Arc<std::sync::atomic::AtomicBool>,
+) -> impl Iterator<Item = std::io::Result<String>> {
+    reader
+        .lines()
+        .take_while(move |_| !stopping.load(std::sync::atomic::Ordering::SeqCst))
+}
+
 fn drain_queued_message(
     app_handle: &AppHandle,
     tab_id: &str,
@@ -3376,6 +3635,7 @@ mod tests {
                 content: secret.into(),
                 turn_ended: false,
                 kind: None,
+                response_ids: Vec::new(),
             },
         ] {
             let out = format!("{:?}", sanitize_chunk(chunk));
@@ -3407,6 +3667,7 @@ mod tests {
             turn_cost: None,
             model: None,
             context_usage: None,
+            response_ids: Vec::new(),
         };
         let out = format!("{:?}", sanitize_chunk(chunk));
         assert!(!out.contains("secretsecretsecretsecret"), "leaked: {out}");
@@ -3523,6 +3784,7 @@ mod tests {
                 content: tokenized.clone(),
                 turn_ended: true,
                 kind: Some(TurnErrorKind::AuthenticationFailed),
+                response_ids: Vec::new(),
             },
             &policy,
         ) {
@@ -3530,6 +3792,7 @@ mod tests {
                 content,
                 turn_ended,
                 kind,
+                ..
             } => {
                 assert_eq!(content, "secret@example.com");
                 assert!(turn_ended, "detokenizing must keep the turn-end marker");
@@ -3558,6 +3821,7 @@ mod tests {
             turn_cost: None,
             model: None,
             context_usage: None,
+            response_ids: Vec::new(),
         };
         match detokenize_chunk(result_chunk, &policy) {
             StreamChunk::Result { result_text, .. } => {
@@ -3934,6 +4198,7 @@ mod tests {
             turn_cost: None,
             model: None,
             context_usage: None,
+            response_ids: Vec::new(),
         }
     }
 
@@ -3973,6 +4238,7 @@ mod tests {
             content: "retrying".to_string(),
             turn_ended: false,
             kind: None,
+            response_ids: Vec::new(),
         }]);
         assert!(
             holds_the_turn_awake(&awaited),
@@ -3990,6 +4256,7 @@ mod tests {
             content: "overloaded".to_string(),
             turn_ended: true,
             kind: None,
+            response_ids: Vec::new(),
         }]);
         assert!(!holds_the_turn_awake(&awaited));
         awaited.message_written();
@@ -4031,6 +4298,7 @@ mod tests {
                 content: "overloaded".to_string(),
                 turn_ended: true,
                 kind: None,
+                response_ids: Vec::new(),
             }]),
             Some(SessionEvent::SessionError)
         );
@@ -4039,6 +4307,7 @@ mod tests {
                 content: "model refused".to_string(),
                 turn_ended: false,
                 kind: None,
+                response_ids: Vec::new(),
             }]),
             None,
             "an error that leaves the turn running is not the end of the session's work"
@@ -4069,6 +4338,7 @@ mod tests {
             content: "boom".to_string(),
             turn_ended: false,
             kind: None,
+            response_ids: Vec::new(),
         }]);
         assert!(!awaited.is_awaited());
         awaited.observe(&[]);
@@ -4286,6 +4556,40 @@ mod tests {
                 "{name}: a write that never reached Claude Code must not keep the computer awake"
             );
         }
+    }
+
+    #[test]
+    fn a_running_session_reads_every_stdout_line() {
+        let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let lines: Vec<String> =
+            lines_until_stopped(std::io::Cursor::new("one\ntwo\nthree\n"), stopping)
+                .map(Result::unwrap)
+                .collect();
+        assert_eq!(lines, ["one", "two", "three"]);
+    }
+
+    #[test]
+    fn a_stopped_session_forwards_no_line_its_process_writes_afterwards() {
+        let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut lines = lines_until_stopped(
+            std::io::Cursor::new(
+                "{\"type\":\"assistant\"}\n{\"type\":\"control_response\"}\n{\"type\":\"result\"}\n",
+            ),
+            stopping.clone(),
+        );
+        assert_eq!(lines.next().unwrap().unwrap(), "{\"type\":\"assistant\"}");
+        stopping.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(lines.next().is_none());
+        assert!(lines.next().is_none());
+    }
+
+    #[test]
+    fn a_session_stopped_before_its_first_line_forwards_nothing() {
+        let stopping = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        assert_eq!(
+            lines_until_stopped(std::io::Cursor::new("late\n"), stopping).count(),
+            0
+        );
     }
 
     #[test]
@@ -5082,6 +5386,7 @@ mod tests {
             turn_cost: None,
             model: None,
             context_usage: None,
+            response_ids: Vec::new(),
         };
         let serialized = serde_json::to_string(&original).unwrap();
         let deserialized: StreamChunk = serde_json::from_str(&serialized).unwrap();
@@ -5304,6 +5609,7 @@ mod tests {
         vec![StreamChunk::SystemInit {
             model: model.to_string(),
             session_id: Some("sess-1".to_string()),
+            slash_commands: None,
         }]
     }
 
@@ -6833,10 +7139,20 @@ mod tests {
             "\"toolu_parent\"",
             r#"{"type":"tool_use","id":"toolu_sub","name":"Read","input":{"file_path":"/x"}}"#,
         );
-        assert!(
-            parse_line_all_str(&mut parser, &sidechain).is_empty(),
-            "subagent tools have no frontend block"
-        );
+        match parse_line_all_str(&mut parser, &sidechain).as_slice() {
+            [StreamChunk::SubagentActivity {
+                parent_tool_id,
+                tool_id,
+                tool_name,
+                input_json,
+            }] => {
+                assert_eq!(parent_tool_id, "toolu_parent");
+                assert_eq!(tool_id, "toolu_sub");
+                assert_eq!(tool_name, "Read");
+                assert_eq!(input_json, r#"{"file_path":"/x"}"#);
+            }
+            other => panic!("expected one SubagentActivity, got {other:?}"),
+        }
 
         let ask = assistant_tool_use_line(
             "null",
@@ -6852,6 +7168,339 @@ mod tests {
             r#"{"type":"tool_use","name":"Read","input":{"a":1}},{"type":"tool_use","id":"","name":"Read","input":{"a":1}},{"type":"tool_use","id":"toolu_noinput","name":"Read"},{"type":"tool_use","id":"toolu_str","name":"Read","input":"not an object"}"#,
         );
         assert!(parse_line_all_str(&mut parser, &malformed).is_empty());
+    }
+
+    #[test]
+    fn sidechain_assistant_line_emits_one_activity_per_tool_use_block() {
+        let mut parser = StreamParser::new();
+        let line = assistant_tool_use_line(
+            "\"toolu_parent\"",
+            r#"{"type":"text","text":"x"},{"type":"tool_use","id":"toolu_a","name":"Read","input":{"file_path":"/a"}},{"type":"tool_use","id":"toolu_b","name":"Bash","input":"odd"},{"type":"tool_use","name":"Read","input":{}}"#,
+        );
+        let chunks = parse_line_all_str(&mut parser, &line);
+        let got: Vec<(&str, &str, &str, &str)> = chunks
+            .iter()
+            .map(|c| match c {
+                StreamChunk::SubagentActivity {
+                    parent_tool_id,
+                    tool_id,
+                    tool_name,
+                    input_json,
+                } => (
+                    parent_tool_id.as_str(),
+                    tool_id.as_str(),
+                    tool_name.as_str(),
+                    input_json.as_str(),
+                ),
+                other => panic!("expected SubagentActivity, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("toolu_parent", "toolu_a", "Read", r#"{"file_path":"/a"}"#),
+                ("toolu_parent", "toolu_b", "Bash", "{}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn sidechain_flag_without_parent_id_emits_no_activity() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"assistant","isSidechain":true,"message":{"id":"m","content":[{"type":"tool_use","id":"toolu_a","name":"Read","input":{}}]}}"#;
+        assert!(parse_line_all_str(&mut parser, line).is_empty());
+    }
+
+    #[test]
+    fn sidechain_stream_events_do_not_reach_the_parent_turn() {
+        let mut parser = StreamParser::new();
+        let tool_start = TOOL_START_LINE.replacen(
+            r#"{"type":"stream_event","#,
+            r#"{"type":"stream_event","parent_tool_use_id":"toolu_parent","#,
+            1,
+        );
+        assert!(parse_line_all_str(&mut parser, &tool_start).is_empty());
+        assert!(parser.active_blocks.is_empty());
+        let text = r#"{"type":"stream_event","parent_tool_use_id":"toolu_parent","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}}"#;
+        assert!(parse_line_all_str(&mut parser, text).is_empty());
+    }
+
+    #[test]
+    fn sidechain_activity_leaves_context_and_model_untouched() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"assistant","parent_tool_use_id":"toolu_parent","message":{"id":"m","model":"claude-haiku-4-5","content":[{"type":"tool_use","id":"toolu_a","name":"Read","input":{}}],"usage":{"input_tokens":9,"output_tokens":9}}}"#;
+        parse_line_all_str(&mut parser, line);
+        assert!(parser.last_context_usage.is_none());
+    }
+
+    #[test]
+    fn subagent_activity_variant_matches_ts_mirror() {
+        let ts = include_str!("../../src/src/app/models/chat.ts");
+        let chunk = StreamChunk::SubagentActivity {
+            parent_tool_id: "p".into(),
+            tool_id: "t".into(),
+            tool_name: "Read".into(),
+            input_json: "{}".into(),
+        };
+        let v = serde_json::to_value(&chunk).unwrap();
+        assert_eq!(v["chunk_type"], "SubagentActivity");
+        let mut keys: Vec<&str> = v["data"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["input_json", "parent_tool_id", "tool_id", "tool_name"]
+        );
+        let marker = "chunk_type: 'SubagentActivity';";
+        let start = ts
+            .find(marker)
+            .expect("models/chat.ts must declare SubagentActivity");
+        let body = &ts[start..start + ts[start..].find("};").unwrap()];
+        for key in keys {
+            assert!(
+                body.contains(&format!("{key}: string")),
+                "SubagentActivity.{key} missing in models/chat.ts"
+            );
+        }
+    }
+
+    const SUBAGENT_CAPTURE: &str =
+        include_str!("../tests/fixtures/cc-2.1.322-subagent.sanitized.ndjson");
+
+    #[test]
+    fn the_subagent_capture_is_of_the_pinned_claude_code() {
+        let versions: Vec<String> = capture_lines(SUBAGENT_CAPTURE)
+            .iter()
+            .filter(|l| l["type"] == "system" && l["subtype"] == "init")
+            .map(|l| l["claude_code_version"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(versions.len(), 5);
+        assert!(
+            versions
+                .iter()
+                .all(|v| v == speedwave_runtime::defaults::CLAUDE_VERSION),
+            "re-capture the subagent streams from Claude Code {} (got {versions:?})",
+            speedwave_runtime::defaults::CLAUDE_VERSION
+        );
+    }
+
+    fn subagent_capture_chunks() -> Vec<StreamChunk> {
+        let mut parser = StreamParser::new();
+        capture_lines(SUBAGENT_CAPTURE)
+            .iter()
+            .flat_map(|l| parser.parse_line(l).0)
+            .collect()
+    }
+
+    #[test]
+    fn the_capture_carries_each_subagent_tool_call_under_its_parent() {
+        let calls: Vec<(String, String, String, String)> = subagent_capture_chunks()
+            .into_iter()
+            .filter_map(|c| match c {
+                StreamChunk::SubagentActivity {
+                    parent_tool_id,
+                    tool_id,
+                    tool_name,
+                    input_json,
+                } => Some((parent_tool_id, tool_id, tool_name, input_json)),
+                _ => None,
+            })
+            .collect();
+        let bash = r#"{"command":"echo sub-ok","description":"Print sub-ok"}"#;
+        assert_eq!(
+            calls,
+            [
+                ("toolu_stub_1", "toolu_stub_2", "Bash", bash),
+                ("toolu_stub_5", "toolu_stub_6", "Bash", bash),
+            ]
+            .map(|(a, b, c, d)| (
+                a.to_string(),
+                b.to_string(),
+                c.to_string(),
+                d.to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn the_capture_reports_the_status_of_both_agents_and_not_of_the_workflow() {
+        let statuses: Vec<(String, SubagentState, String)> = subagent_capture_chunks()
+            .into_iter()
+            .filter_map(|c| match c {
+                StreamChunk::SubagentStatus {
+                    tool_id,
+                    status,
+                    summary,
+                } => Some((tool_id, status, summary)),
+                _ => None,
+            })
+            .collect();
+        let done = |tool: &str| {
+            [
+                (tool.to_string(), SubagentState::Running, String::new()),
+                (tool.to_string(), SubagentState::Completed, String::new()),
+                (
+                    tool.to_string(),
+                    SubagentState::Completed,
+                    "sub done".to_string(),
+                ),
+            ]
+        };
+        let expected: Vec<_> = done("toolu_stub_1")
+            .into_iter()
+            .chain(done("toolu_stub_5"))
+            .collect();
+        assert_eq!(statuses, expected);
+    }
+
+    #[test]
+    fn the_capture_shows_only_main_thread_tool_blocks_and_results() {
+        let chunks = subagent_capture_chunks();
+        let started: Vec<&str> = chunks
+            .iter()
+            .filter_map(|c| match c {
+                StreamChunk::ToolStart { tool_name, .. } => Some(tool_name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(started, ["Agent", "Agent", "Workflow"]);
+        let results: Vec<&str> = chunks
+            .iter()
+            .filter_map(|c| match c {
+                StreamChunk::ToolResult { tool_id, .. } => Some(tool_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(results, ["toolu_stub_1", "toolu_stub_5", "toolu_stub_10"]);
+    }
+
+    fn status_line(extra: &str) -> String {
+        format!(r#"{{"type":"system","task_id":"t1",{extra}}}"#)
+    }
+
+    #[test]
+    fn an_agent_task_ends_with_the_status_of_its_notification() {
+        let cases = [
+            ("failed", SubagentState::Error),
+            ("stopped", SubagentState::Stopped),
+            ("completed", SubagentState::Completed),
+            ("some-future-status", SubagentState::Completed),
+        ];
+        for (status, expected) in cases {
+            let mut parser = StreamParser::new();
+            let started = status_line(
+                r#""subtype":"task_started","task_type":"local_agent","tool_use_id":"toolu_a""#,
+            );
+            parse_line_all_str(&mut parser, &started);
+            let ended = status_line(&format!(
+                r#""subtype":"task_notification","status":"{status}","summary":"s""#
+            ));
+            match parse_line_all_str(&mut parser, &ended).as_slice() {
+                [StreamChunk::SubagentStatus {
+                    tool_id,
+                    status,
+                    summary,
+                }] => {
+                    assert_eq!(tool_id, "toolu_a");
+                    assert_eq!(*status, expected);
+                    assert_eq!(summary, "s");
+                }
+                other => panic!("expected one SubagentStatus for {status}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_task_update_moves_a_known_agent_task_and_ignores_the_rest() {
+        let mut parser = StreamParser::new();
+        let update = status_line(r#""subtype":"task_updated","patch":{"status":"killed"}"#);
+        assert!(
+            parse_line_all_str(&mut parser, &update).is_empty(),
+            "an update of an unknown task has no tool to point at"
+        );
+        let started = status_line(
+            r#""subtype":"task_started","task_type":"local_agent","tool_use_id":"toolu_a""#,
+        );
+        parse_line_all_str(&mut parser, &started);
+        match parse_line_all_str(&mut parser, &update).as_slice() {
+            [StreamChunk::SubagentStatus { status, .. }] => {
+                assert_eq!(*status, SubagentState::Stopped)
+            }
+            other => panic!("expected one SubagentStatus, got {other:?}"),
+        }
+        let no_status = status_line(r#""subtype":"task_updated","patch":{"end_time":1}"#);
+        assert!(parse_line_all_str(&mut parser, &no_status).is_empty());
+        let unknown = status_line(r#""subtype":"task_updated","patch":{"status":"paused"}"#);
+        assert!(
+            parse_line_all_str(&mut parser, &unknown).is_empty(),
+            "an unknown status in an update is not a final status"
+        );
+    }
+
+    #[test]
+    fn a_task_that_is_not_an_agent_reports_no_status() {
+        let mut parser = StreamParser::new();
+        let started = status_line(
+            r#""subtype":"task_started","task_type":"local_workflow","tool_use_id":"toolu_w""#,
+        );
+        assert!(parse_line_all_str(&mut parser, &started).is_empty());
+        let ended = status_line(r#""subtype":"task_notification","status":"completed""#);
+        assert!(parse_line_all_str(&mut parser, &ended).is_empty());
+        let bare = r#"{"type":"system","subtype":"task_started"}"#;
+        assert!(parse_line_all_str(&mut parser, bare).is_empty());
+    }
+
+    #[test]
+    fn a_sidechain_tool_result_does_not_answer_a_main_thread_call() {
+        let mut parser = StreamParser::new();
+        let forged = r#"{"type":"user","parent_tool_use_id":"toolu_parent","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_parent","content":"forged"}]}}"#;
+        assert!(parse_line_all_str(&mut parser, forged).is_empty());
+    }
+
+    #[test]
+    fn subagent_status_variant_matches_ts_mirror() {
+        let ts = include_str!("../../src/src/app/models/chat.ts");
+        let chunk = StreamChunk::SubagentStatus {
+            tool_id: "t".into(),
+            status: SubagentState::Running,
+            summary: String::new(),
+        };
+        let v = serde_json::to_value(&chunk).unwrap();
+        assert_eq!(v["chunk_type"], "SubagentStatus");
+        let mut keys: Vec<&str> = v["data"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["status", "summary", "tool_id"]);
+        let marker = "chunk_type: 'SubagentStatus';";
+        let start = ts
+            .find(marker)
+            .expect("models/chat.ts must declare SubagentStatus");
+        let body = &ts[start..start + ts[start..].find("};").unwrap()];
+        assert!(body.contains("tool_id: string"));
+        assert!(body.contains("summary: string"));
+        assert!(body.contains("status: SubagentState"));
+        let wire: Vec<String> = [
+            SubagentState::Running,
+            SubagentState::Completed,
+            SubagentState::Error,
+            SubagentState::Stopped,
+        ]
+        .iter()
+        .map(|s| format!("'{}'", serde_json::to_value(s).unwrap().as_str().unwrap()))
+        .collect();
+        let mirror = format!("export type SubagentState = {};", wire.join(" | "));
+        assert!(
+            ts.contains(&mirror),
+            "models/chat.ts must declare `{mirror}`"
+        );
     }
 
     #[test]
@@ -7484,6 +8133,7 @@ mod tests {
             content: "expired".to_string(),
             turn_ended: true,
             kind: Some(TurnErrorKind::AuthenticationFailed),
+            response_ids: Vec::new(),
         })
         .unwrap();
         assert_eq!(tagged["data"]["kind"], "authentication_failed");
@@ -7491,6 +8141,7 @@ mod tests {
             content: "boom".to_string(),
             turn_ended: true,
             kind: None,
+            response_ids: Vec::new(),
         })
         .unwrap();
         assert!(plain["data"].get("kind").is_none(), "{plain}");
@@ -7506,6 +8157,7 @@ mod tests {
                 content,
                 turn_ended,
                 kind,
+                ..
             } => {
                 assert_eq!(content, "Something went wrong");
                 assert!(
@@ -7621,6 +8273,133 @@ mod tests {
     }
 
     #[test]
+    fn result_lists_every_main_thread_response_of_the_turn_once() {
+        let mut parser = StreamParser::new();
+        for line in [
+            r#"{"type":"assistant","message":{"id":"msg_1","role":"assistant","content":[]}}"#,
+            r#"{"type":"assistant","message":{"id":"msg_1","role":"assistant","content":[]}}"#,
+            r#"{"type":"assistant","parent_tool_use_id":"toolu_task","message":{"id":"msg_sub","role":"assistant","content":[]}}"#,
+            r#"{"type":"assistant","message":{"id":"msg_2","role":"assistant","content":[]}}"#,
+        ] {
+            parse_line_str(&mut parser, line);
+        }
+        let result = r#"{"type":"result","session_id":"s1","total_cost_usd":0.01,"is_error":false,"result":""}"#;
+        match parse_line_str(&mut parser, result).unwrap() {
+            StreamChunk::Result {
+                response_ids,
+                assistant_uuid,
+                ..
+            } => {
+                assert_eq!(response_ids, ["msg_1", "msg_2"]);
+                assert_eq!(assistant_uuid.as_deref(), Some("msg_2"));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"assistant","message":{"id":"msg_3","role":"assistant","content":[]}}"#,
+        );
+        match parse_line_str(&mut parser, result).unwrap() {
+            StreamChunk::Result { response_ids, .. } => assert_eq!(response_ids, ["msg_3"]),
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_error_result_carries_the_responses_of_its_turn_and_hands_none_on() {
+        let mut parser = StreamParser::new();
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"assistant","message":{"id":"msg_err","role":"assistant","content":[]}}"#,
+        );
+        match parse_line_str(
+            &mut parser,
+            r#"{"type":"result","is_error":true,"result":"something broke"}"#,
+        )
+        .unwrap()
+        {
+            StreamChunk::Error {
+                response_ids,
+                turn_ended,
+                ..
+            } => {
+                assert!(turn_ended);
+                assert_eq!(response_ids, ["msg_err"]);
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"assistant","message":{"id":"msg_next","role":"assistant","content":[]}}"#,
+        );
+        let result = r#"{"type":"result","session_id":"s1","total_cost_usd":0.01,"is_error":false,"result":""}"#;
+        match parse_line_str(&mut parser, result).unwrap() {
+            StreamChunk::Result { response_ids, .. } => assert_eq!(response_ids, ["msg_next"]),
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_sidechain_line_sets_neither_the_assistant_uuid_nor_a_response_id() {
+        let mut parser = StreamParser::new();
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"assistant","message":{"id":"msg_main","role":"assistant","content":[]}}"#,
+        );
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"assistant","isSidechain":true,"message":{"id":"msg_sub","role":"assistant","content":[]}}"#,
+        );
+        let result = r#"{"type":"result","session_id":"s1","total_cost_usd":0.01,"is_error":false,"result":""}"#;
+        match parse_line_str(&mut parser, result).unwrap() {
+            StreamChunk::Result {
+                response_ids,
+                assistant_uuid,
+                ..
+            } => {
+                assert_eq!(response_ids, ["msg_main"]);
+                assert_eq!(assistant_uuid.as_deref(), Some("msg_main"));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn turn_usage_plus_adds_every_field() {
+        let a = TurnUsage {
+            input_tokens: 1,
+            output_tokens: 2,
+            cache_read_tokens: 3,
+            cache_write_tokens: 4,
+        };
+        let b = TurnUsage {
+            input_tokens: 10,
+            output_tokens: 20,
+            cache_read_tokens: 30,
+            cache_write_tokens: 40,
+        };
+        assert_eq!(
+            a.plus(b),
+            TurnUsage {
+                input_tokens: 11,
+                output_tokens: 22,
+                cache_read_tokens: 33,
+                cache_write_tokens: 44,
+            }
+        );
+    }
+
+    #[test]
+    fn a_result_without_responses_leaves_response_ids_off_the_wire() {
+        let mut parser = StreamParser::new();
+        let result = r#"{"type":"result","session_id":"s1","total_cost_usd":0.01,"is_error":false,"result":""}"#;
+        let chunk = parse_line_str(&mut parser, result).unwrap();
+        let json = serde_json::to_value(&chunk).unwrap();
+        assert!(json["data"].get("response_ids").is_none(), "{json}");
+    }
+
+    #[test]
     fn assistant_uuid_does_not_leak_into_error_result() {
         let mut parser = StreamParser::new();
         let assistant =
@@ -7733,6 +8512,7 @@ mod tests {
                 content,
                 turn_ended,
                 kind,
+                ..
             } => {
                 assert!(content.contains("hit your limit"));
                 assert!(!turn_ended, "a system message may arrive mid-turn");
@@ -7778,7 +8558,9 @@ mod tests {
         let line = r#"{"type":"system","subtype":"init","model":"claude-opus-4-6"}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
-            StreamChunk::SystemInit { model, session_id } => {
+            StreamChunk::SystemInit {
+                model, session_id, ..
+            } => {
                 assert_eq!(model, "claude-opus-4-6");
                 assert!(session_id.is_none());
             }
@@ -7792,7 +8574,9 @@ mod tests {
         let line = r#"{"type":"system","subtype":"init","model":"claude-opus-4-6","session_id":"abc","tools":["Read","Write"],"mcp_servers":[],"message":""}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
-            StreamChunk::SystemInit { model, session_id } => {
+            StreamChunk::SystemInit {
+                model, session_id, ..
+            } => {
                 assert_eq!(model, "claude-opus-4-6");
                 assert_eq!(session_id.as_deref(), Some("abc"));
             }
@@ -7806,7 +8590,9 @@ mod tests {
         let line = r#"{"type":"system","subtype":"init","session_id":"abc"}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
-            StreamChunk::SystemInit { model, session_id } => {
+            StreamChunk::SystemInit {
+                model, session_id, ..
+            } => {
                 assert_eq!(model, "");
                 assert_eq!(session_id.as_deref(), Some("abc"));
             }
@@ -7815,22 +8601,204 @@ mod tests {
     }
 
     #[test]
-    fn parse_system_init_with_empty_model_and_no_session_falls_through() {
+    fn parse_system_init_with_empty_model_and_no_session_only_starts_the_turn() {
         let mut parser = StreamParser::new();
         let line = r#"{"type":"system","subtype":"init","model":""}"#;
-        assert!(
-            parse_line_str(&mut parser, line).is_none(),
-            "init with empty model and no session id should fall through and produce None"
+        assert_eq!(
+            turn_origins(&parse_line_all_str(&mut parser, line)),
+            vec![TurnOrigin::User],
+            "init with empty model and no session id should only start the turn"
         );
     }
 
     #[test]
-    fn parse_system_init_with_null_model_falls_through() {
+    fn parse_system_init_with_null_model_only_starts_the_turn() {
         let mut parser = StreamParser::new();
         let line = r#"{"type":"system","subtype":"init","model":null}"#;
+        assert_eq!(
+            turn_origins(&parse_line_all_str(&mut parser, line)),
+            vec![TurnOrigin::User],
+            "init with null model should only start the turn"
+        );
+    }
+
+    fn turn_origins(chunks: &[StreamChunk]) -> Vec<TurnOrigin> {
+        chunks
+            .iter()
+            .filter_map(|c| match c {
+                StreamChunk::TurnStarted { origin } => Some(*origin),
+                StreamChunk::SystemInit { .. } => None,
+                other => panic!("init must emit only SystemInit and TurnStarted, got {other:?}"),
+            })
+            .collect()
+    }
+
+    const SELF_STARTED_TURNS_CAPTURE: &str =
+        include_str!("../tests/fixtures/cc-2.1.322-self-started-turns.sanitized.ndjson");
+
+    #[test]
+    fn the_self_started_turn_capture_is_of_the_pinned_claude_code() {
+        let versions: Vec<String> = capture_lines(SELF_STARTED_TURNS_CAPTURE)
+            .iter()
+            .filter(|l| l["type"] == "system" && l["subtype"] == "init")
+            .map(|l| l["claude_code_version"].as_str().unwrap().to_string())
+            .collect();
+        assert!(!versions.is_empty());
         assert!(
-            parse_line_str(&mut parser, line).is_none(),
-            "init with null model should fall through and produce None"
+            versions
+                .iter()
+                .all(|v| v == speedwave_runtime::defaults::CLAUDE_VERSION),
+            "re-capture the self-started turns from Claude Code {} (got {versions:?})",
+            speedwave_runtime::defaults::CLAUDE_VERSION
+        );
+    }
+
+    #[test]
+    fn every_turn_in_the_capture_starts_with_its_origin() {
+        let mut parser = StreamParser::new();
+        let chunks: Vec<StreamChunk> = capture_lines(SELF_STARTED_TURNS_CAPTURE)
+            .iter()
+            .flat_map(|l| parser.parse_line(l).0)
+            .collect();
+        let started: Vec<TurnOrigin> = chunks
+            .iter()
+            .filter_map(|c| match c {
+                StreamChunk::TurnStarted { origin } => Some(*origin),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            started,
+            vec![
+                TurnOrigin::User,
+                TurnOrigin::TaskNotification,
+                TurnOrigin::User,
+                TurnOrigin::User,
+                TurnOrigin::Scheduled,
+                TurnOrigin::User,
+            ]
+        );
+        let results = chunks
+            .iter()
+            .filter(|c| matches!(c, StreamChunk::Result { .. }))
+            .count();
+        assert_eq!(
+            results,
+            started.len(),
+            "every started turn ends in a result"
+        );
+        let after = parse_line_all_str(
+            &mut parser,
+            r#"{"type":"system","subtype":"init","model":"m","session_id":"s"}"#,
+        );
+        assert!(
+            matches!(
+                after[1],
+                StreamChunk::TurnStarted {
+                    origin: TurnOrigin::User
+                }
+            ),
+            "a notification folded into the last turn must not mark the next one"
+        );
+    }
+
+    #[test]
+    fn init_emits_turn_started_after_system_init() {
+        let mut parser = StreamParser::new();
+        let chunks = parse_line_all_str(
+            &mut parser,
+            r#"{"type":"system","subtype":"init","model":"m","session_id":"s"}"#,
+        );
+        assert!(matches!(chunks[0], StreamChunk::SystemInit { .. }));
+        assert!(matches!(
+            chunks[1],
+            StreamChunk::TurnStarted {
+                origin: TurnOrigin::User
+            }
+        ));
+        assert_eq!(chunks.len(), 2);
+    }
+
+    #[test]
+    fn a_turn_origin_applies_to_the_next_turn_only() {
+        let mut parser = StreamParser::new();
+        let init = r#"{"type":"system","subtype":"init","model":"m"}"#;
+        let notification =
+            r#"{"type":"system","subtype":"task_notification","task_id":"t","status":"completed"}"#;
+        assert!(parse_line_all_str(&mut parser, notification).is_empty());
+        assert_eq!(
+            turn_origins(&parse_line_all_str(&mut parser, init)),
+            vec![TurnOrigin::TaskNotification]
+        );
+        assert_eq!(
+            turn_origins(&parse_line_all_str(&mut parser, init)),
+            vec![TurnOrigin::User]
+        );
+    }
+
+    #[test]
+    fn a_notification_folded_into_a_running_turn_does_not_mark_the_next_one() {
+        let mut parser = StreamParser::new();
+        let init = r#"{"type":"system","subtype":"init","model":"m"}"#;
+        let notification =
+            r#"{"type":"system","subtype":"task_notification","task_id":"t","status":"completed"}"#;
+        let result = r#"{"type":"result","subtype":"success","is_error":false,"session_id":"s"}"#;
+        parse_line_all_str(&mut parser, init);
+        parse_line_all_str(&mut parser, notification);
+        parse_line_all_str(&mut parser, result);
+        assert_eq!(
+            turn_origins(&parse_line_all_str(&mut parser, init)),
+            vec![TurnOrigin::User]
+        );
+    }
+
+    #[test]
+    fn only_a_started_command_lifecycle_marks_a_scheduled_turn() {
+        let mut parser = StreamParser::new();
+        let init = r#"{"type":"system","subtype":"init","model":"m"}"#;
+        let completed = r#"{"type":"command_lifecycle","command_uuid":"c","state":"completed"}"#;
+        let started = r#"{"type":"command_lifecycle","command_uuid":"c","state":"started"}"#;
+        let (chunks, log) = parse_line_full(&mut parser, completed);
+        assert!(chunks.is_none());
+        assert!(log.is_none(), "command_lifecycle is a known type");
+        assert_eq!(
+            turn_origins(&parse_line_all_str(&mut parser, init)),
+            vec![TurnOrigin::User]
+        );
+        assert!(parse_line_all_str(&mut parser, started).is_empty());
+        assert_eq!(
+            turn_origins(&parse_line_all_str(&mut parser, init)),
+            vec![TurnOrigin::Scheduled]
+        );
+    }
+
+    #[test]
+    fn turn_origin_matches_ts_mirror() {
+        let ts = include_str!("../../src/src/app/models/chat.ts");
+        let wire: Vec<String> = [
+            TurnOrigin::User,
+            TurnOrigin::Scheduled,
+            TurnOrigin::TaskNotification,
+        ]
+        .iter()
+        .map(|o| format!("'{}'", serde_json::to_value(o).unwrap().as_str().unwrap()))
+        .collect();
+        let mirror = format!("export type TurnOrigin = {};", wire.join(" | "));
+        assert!(
+            ts.contains(&mirror),
+            "models/chat.ts must declare `{mirror}`"
+        );
+    }
+
+    #[test]
+    fn turn_started_serializes_its_origin_in_snake_case() {
+        let json = serde_json::to_string(&StreamChunk::TurnStarted {
+            origin: TurnOrigin::TaskNotification,
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            r#"{"chunk_type":"TurnStarted","data":{"origin":"task_notification"}}"#
         );
     }
 
@@ -7860,6 +8828,7 @@ mod tests {
         let chunk = StreamChunk::SystemInit {
             model: "test".to_string(),
             session_id: None,
+            slash_commands: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         assert_eq!(
@@ -7868,7 +8837,9 @@ mod tests {
         );
         let deserialized: StreamChunk = serde_json::from_str(&json).unwrap();
         match deserialized {
-            StreamChunk::SystemInit { model, session_id } => {
+            StreamChunk::SystemInit {
+                model, session_id, ..
+            } => {
                 assert_eq!(model, "test");
                 assert!(session_id.is_none());
             }
@@ -7878,12 +8849,169 @@ mod tests {
         let chunk = StreamChunk::SystemInit {
             model: "test".to_string(),
             session_id: Some("abc".to_string()),
+            slash_commands: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         assert_eq!(
             json,
             r#"{"chunk_type":"SystemInit","data":{"model":"test","session_id":"abc"}}"#
         );
+    }
+
+    fn init_line_with_commands(commands: &[&str]) -> serde_json::Value {
+        serde_json::json!({
+            "type": "system",
+            "subtype": "init",
+            "session_id": "abc",
+            "model": "claude-opus-4-6",
+            "slash_commands": commands,
+            "plugins": [],
+            "agents": [],
+        })
+    }
+
+    fn system_init_commands(
+        chunk: StreamChunk,
+    ) -> Option<Vec<speedwave_runtime::slash::SlashCommand>> {
+        match chunk {
+            StreamChunk::SystemInit { slash_commands, .. } => slash_commands,
+            other => panic!("expected SystemInit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_system_init_carries_the_session_slash_commands() {
+        let project_dir = tempfile::tempdir().unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut parser = StreamParser::new();
+        parser.set_slash_project(
+            Some(speedwave_runtime::slash::ProjectHandle::new(
+                "acme",
+                project_dir.path(),
+            )),
+            data_dir.path(),
+        );
+        let (chunk, _) =
+            parser.parse_system_message(&init_line_with_commands(&["clear", "doctor", "simplify"]));
+        let commands = system_init_commands(chunk.unwrap()).expect("init list");
+        let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["clear", "simplify"]);
+    }
+
+    #[test]
+    fn parse_system_init_without_a_slash_project_carries_no_list() {
+        let mut parser = StreamParser::new();
+        let (chunk, _) = parser.parse_system_message(&init_line_with_commands(&["clear"]));
+        assert!(system_init_commands(chunk.unwrap()).is_none());
+    }
+
+    #[test]
+    fn parse_system_init_without_a_slash_commands_key_carries_no_list() {
+        let project_dir = tempfile::tempdir().unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut parser = StreamParser::new();
+        parser.set_slash_project(
+            Some(speedwave_runtime::slash::ProjectHandle::new(
+                "acme",
+                project_dir.path(),
+            )),
+            data_dir.path(),
+        );
+        let (chunk, _) = parser.parse_system_message(&serde_json::json!({
+            "type": "system",
+            "subtype": "init",
+            "session_id": "abc",
+            "model": "claude-opus-4-6",
+        }));
+        assert!(system_init_commands(chunk.unwrap()).is_none());
+    }
+
+    #[test]
+    fn parse_system_init_keeps_the_list_when_the_model_is_missing() {
+        let project_dir = tempfile::tempdir().unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut parser = StreamParser::new();
+        parser.set_slash_project(
+            Some(speedwave_runtime::slash::ProjectHandle::new(
+                "acme",
+                project_dir.path(),
+            )),
+            data_dir.path(),
+        );
+        let (chunk, _) = parser.parse_system_message(&serde_json::json!({
+            "type": "system",
+            "subtype": "init",
+            "session_id": "abc",
+            "slash_commands": ["simplify"],
+        }));
+        let commands = system_init_commands(chunk.unwrap()).expect("init list");
+        assert_eq!(commands.len(), 1);
+    }
+
+    #[test]
+    fn stream_chunk_system_init_slash_commands_round_trip() {
+        let chunk = StreamChunk::SystemInit {
+            model: "test".to_string(),
+            session_id: None,
+            slash_commands: Some(vec![speedwave_runtime::slash::SlashCommand {
+                name: "simplify".to_string(),
+                description: None,
+                argument_hint: None,
+                kind: speedwave_runtime::slash::SlashKind::Command,
+                plugin: None,
+            }]),
+        };
+        let json = serde_json::to_value(&chunk).unwrap();
+        assert_eq!(json["data"]["slash_commands"][0]["name"], "simplify");
+        let back: StreamChunk = serde_json::from_value(json).unwrap();
+        assert_eq!(system_init_commands(back).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn system_init_chunk_fields_match_ts_mirror() {
+        let ts = include_str!("../../src/src/app/models/chat.ts");
+        let marker = "chunk_type: 'SystemInit';";
+        let idx = ts
+            .find(marker)
+            .expect("chat.ts must declare the SystemInit arm");
+        let arm = &ts[idx..ts[idx..].find("\n  |").map_or(ts.len(), |end| idx + end)];
+        let chunk = StreamChunk::SystemInit {
+            model: "m".to_string(),
+            session_id: Some("s".to_string()),
+            slash_commands: Some(Vec::new()),
+        };
+        let json = serde_json::to_value(&chunk).unwrap();
+        let mut rust: Vec<&str> = json["data"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        rust.sort_unstable();
+        for field in rust {
+            assert!(
+                arm.contains(&format!("{field}?: ")) || arm.contains(&format!("{field}: ")),
+                "the TS SystemInit arm must declare `{field}`: {arm}"
+            );
+        }
+    }
+
+    #[test]
+    fn slash_command_fields_match_ts_mirror() {
+        let ts = include_str!("../../src/src/app/models/slash.ts");
+        let mut ts_fields: Vec<&str> = crate::ts_mirror::ts_interface_fields(ts, "SlashCommand")
+            .into_iter()
+            .map(|field| field.trim_start_matches("readonly "))
+            .collect();
+        ts_fields.sort_unstable();
+        let sample = speedwave_runtime::slash::SlashCommand {
+            name: "x".to_string(),
+            description: None,
+            argument_hint: None,
+            kind: speedwave_runtime::slash::SlashKind::Command,
+            plugin: None,
+        };
+        assert_eq!(crate::ts_mirror::rust_fields(&sample), ts_fields);
     }
 
     #[test]
@@ -9368,6 +10496,7 @@ mod tests {
             content: "rate limit".to_string(),
             turn_ended: false,
             kind: None,
+            response_ids: Vec::new(),
         })
         .unwrap();
         assert!(mid_turn["data"].get("turn_ended").is_none(), "{mid_turn}");
@@ -9376,6 +10505,7 @@ mod tests {
             content: "overloaded".to_string(),
             turn_ended: true,
             kind: None,
+            response_ids: Vec::new(),
         })
         .unwrap();
         assert_eq!(ended["data"]["turn_ended"], serde_json::Value::Bool(true));
@@ -9981,6 +11111,7 @@ mod tests {
             turn_cost: None,
             model: None,
             context_usage: None,
+            response_ids: Vec::new(),
         };
         let json = serde_json::to_string(&chunk).unwrap();
         assert!(
@@ -10014,6 +11145,7 @@ mod tests {
             turn_cost: None,
             model: None,
             context_usage: None,
+            response_ids: Vec::new(),
         };
         let json = serde_json::to_string(&chunk).unwrap();
         assert!(
@@ -10174,6 +11306,7 @@ mod tests {
                 cache_read_tokens: 4,
                 cache_write_tokens: 5,
             }),
+            response_ids: Vec::new(),
         };
         let json = serde_json::to_string(&chunk).unwrap();
         assert!(

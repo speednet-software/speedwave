@@ -1,3 +1,5 @@
+import type { SelfStartedTurnOrigin } from './chat';
+
 /** Conversation role. */
 export type EntryRole = 'user' | 'assistant';
 
@@ -33,6 +35,7 @@ export interface EntryMetaState {
   model?: string;
   usage?: TurnUsageState;
   cost?: number;
+  response_ids?: string[];
 }
 
 import type { AskUserQuestionItem } from './chat';
@@ -69,7 +72,8 @@ export type MessageBlockState =
   | { kind: 'error'; content: string }
   | { kind: 'image'; media_type: string; alt: string | null }
   | { kind: 'file'; filename: string; size_bytes: number }
-  | { kind: 'chip'; command: string; argument: string };
+  | { kind: 'chip'; command: string; argument: string }
+  | { kind: 'turn_origin'; origin: SelfStartedTurnOrigin };
 
 /** One entry in the conversation — user or assistant. */
 export interface ConversationEntryState {

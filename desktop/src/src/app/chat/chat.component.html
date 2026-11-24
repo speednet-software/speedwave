@@ -71,6 +71,7 @@
         class="min-h-0 flex-1 overflow-hidden"
         [messages]="chat.messagesFromState()"
         [currentBlocks]="chat.currentBlocksFromState()"
+        [agents]="chat.activeStore().agentsById()"
         [isStreaming]="chat.isStreamingFromState()"
         [loadingTranscript]="chat.loadingTranscriptFromState()"
         [lastAssistantIndex]="lastAssistantIndex()"
@@ -89,6 +90,11 @@
             [streaming]="chat.isStreamingFromState()"
             [expanded]="chat.activeStore().taskPlanExpanded()"
             (expandedChange)="chat.activeStore().taskPlanExpanded.set($event)"
+          />
+          <app-agent-panel
+            [agents]="chat.activeStore().agentPanel()"
+            [expanded]="chat.activeStore().agentPanelExpanded()"
+            (expandedChange)="chat.activeStore().agentPanelExpanded.set($event)"
           />
           @if (chat.activeStore().sessionEnded()) {
             <div

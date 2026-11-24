@@ -205,6 +205,34 @@ setup() {
 }
 
 
+@test "missing macOS CLI archive sig fails with exact sig name" {
+  export FIXTURE_ASSETS_JSON="$FIXTURES/assets-missing-cli-macos-sig.json"
+  export FIXTURE_LATEST_JSON="$FIXTURES/latest-happy.json"
+  run bash "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "missing signature: speedwave-v0.8.1-aarch64-apple-darwin.tar.gz.sig" ]]
+}
+
+
+@test "missing Windows CLI archive sig fails with exact sig name" {
+  export FIXTURE_ASSETS_JSON="$FIXTURES/assets-missing-cli-windows-sig.json"
+  export FIXTURE_LATEST_JSON="$FIXTURES/latest-happy.json"
+  run bash "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "missing signature: speedwave-v0.8.1-x86_64-pc-windows-msvc.zip.sig" ]]
+}
+
+
+@test "empty CLI archive sig file fails with 'signature file empty' message" {
+  export FIXTURE_ASSETS_JSON="$FIXTURES/assets-happy.json"
+  export FIXTURE_LATEST_JSON="$FIXTURES/latest-happy.json"
+  export EMPTY_SIG_NAME="speedwave-v0.8.1-aarch64-apple-darwin.tar.gz.sig"
+  run bash "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "signature file empty: speedwave-v0.8.1-aarch64-apple-darwin.tar.gz.sig" ]]
+}
+
+
 @test "missing MSI sig fails with exact sig name" {
   export FIXTURE_ASSETS_JSON="$FIXTURES/assets-missing-msi-sig.json"
   export FIXTURE_LATEST_JSON="$FIXTURES/latest-happy.json"

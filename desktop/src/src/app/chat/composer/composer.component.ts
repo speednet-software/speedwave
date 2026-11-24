@@ -23,7 +23,8 @@ import {
 } from '@angular/cdk/overlay';
 import { ProjectStateService } from '../../services/project-state.service';
 import { SlashMenuComponent } from '../slash/slash-menu.component';
-import { SlashService, isBlankOrSlashOnly, type SlashCommand } from '../slash/slash.service';
+import { SlashService, isBlankOrSlashOnly } from '../slash/slash.service';
+import type { SlashCommand } from '../../models/slash';
 import { TooltipDirective } from '../../shared/tooltip.directive';
 import { AttachmentStripComponent, type AttachmentViewModel } from './attachment-strip.component';
 import { FileDropDirective, partitionItems, type DroppedItems } from './file-drop.directive';

@@ -29,11 +29,15 @@ pub enum MessageBlock {
         input: String,
         result: Option<String>,
         is_error: bool,
+        #[serde(default)]
+        activities: Vec<crate::chat::SubagentCall>,
     },
     #[serde(rename = "error")]
     Error { content: String },
     #[serde(rename = "control_chip")]
     ControlChip { command: String, argument: String },
+    #[serde(rename = "turn_origin")]
+    TurnOrigin { origin: crate::chat::TurnOrigin },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -49,6 +53,8 @@ pub struct ConversationMessage {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<crate::chat::TurnUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_ids: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -189,6 +195,9 @@ fn parse_jsonl_entry(parsed: &serde_json::Value) -> Option<ConversationMessage> 
     let msg_type = parsed["type"].as_str().unwrap_or("");
 
     if msg_type == "user" {
+        if let Some(origin) = self_started_turn_origin(parsed) {
+            return Some(turn_origin_message(parsed, origin));
+        }
         let meta_reason = if parsed["isMeta"].as_bool().unwrap_or(false) {
             Some("isMeta")
         } else if parsed["message"]["isMeta"].as_bool().unwrap_or(false) {
@@ -296,6 +305,33 @@ fn scan_tail(path: &Path) -> std::io::Result<TailScan> {
     Ok(TailScan { timestamp, titles })
 }
 
+fn self_started_turn_origin(parsed: &serde_json::Value) -> Option<crate::chat::TurnOrigin> {
+    if parsed["promptSource"].as_str() != Some("system") {
+        return None;
+    }
+    match parsed["turnOrigin"].as_str()? {
+        "scheduled" => Some(crate::chat::TurnOrigin::Scheduled),
+        "task_notification" => Some(crate::chat::TurnOrigin::TaskNotification),
+        _ => None,
+    }
+}
+
+fn turn_origin_message(
+    parsed: &serde_json::Value,
+    origin: crate::chat::TurnOrigin,
+) -> ConversationMessage {
+    ConversationMessage {
+        role: "user".to_string(),
+        content: String::new(),
+        blocks: Some(vec![MessageBlock::TurnOrigin { origin }]),
+        timestamp: parsed["timestamp"].as_str().map(String::from),
+        uuid: parsed["uuid"].as_str().map(String::from),
+        model: None,
+        usage: None,
+        response_ids: None,
+    }
+}
+
 fn is_synthetic_user_entry(parsed: &serde_json::Value) -> bool {
     let content = &parsed["message"]["content"];
     if let Some(s) = content.as_str() {
@@ -366,6 +402,7 @@ fn command_line_message(parsed: &serde_json::Value, line: String) -> Conversatio
         uuid: parsed["uuid"].as_str().map(String::from),
         model: None,
         usage: None,
+        response_ids: None,
     }
 }
 
@@ -389,6 +426,7 @@ fn parse_user_message(parsed: &serde_json::Value) -> Option<ConversationMessage>
             uuid,
             model: None,
             usage: None,
+            response_ids: None,
         });
     }
 
@@ -426,6 +464,7 @@ fn parse_user_message(parsed: &serde_json::Value) -> Option<ConversationMessage>
             uuid,
             model: None,
             usage: None,
+            response_ids: None,
         });
     }
 
@@ -436,18 +475,16 @@ fn parse_assistant_message(parsed: &serde_json::Value) -> Option<ConversationMes
     let message = &parsed["message"];
     let content = &message["content"];
     let timestamp = parsed["timestamp"].as_str().map(String::from);
-    let uuid = parsed["uuid"].as_str().map(String::from);
+    let line_uuid = parsed["uuid"].as_str().map(String::from);
 
     let raw_blocks = content.as_array()?;
 
-    let mut parts = Vec::new();
     let mut rich_blocks = Vec::new();
     for block in raw_blocks {
         let block_type = block["type"].as_str().unwrap_or("");
         match block_type {
             "text" => {
                 if let Some(t) = block["text"].as_str() {
-                    parts.push(t.to_string());
                     rich_blocks.push(MessageBlock::Text {
                         content: t.to_string(),
                     });
@@ -462,13 +499,13 @@ fn parse_assistant_message(parsed: &serde_json::Value) -> Option<ConversationMes
             }
             "tool_use" => {
                 if let Some(name) = block["name"].as_str() {
-                    parts.push(format!("[Tool: {name}]"));
                     rich_blocks.push(MessageBlock::ToolUse {
                         tool_id: block["id"].as_str().unwrap_or_default().to_string(),
                         tool_name: name.to_string(),
                         input: block["input"].to_string(),
                         result: None,
                         is_error: false,
+                        activities: Vec::new(),
                     });
                 }
             }
@@ -476,34 +513,54 @@ fn parse_assistant_message(parsed: &serde_json::Value) -> Option<ConversationMes
         }
     }
 
-    if parts.is_empty() && rich_blocks.is_empty() {
+    if rich_blocks.is_empty() {
         return None;
     }
 
-    let flat_content = if parts.is_empty() {
-        "[thinking]".to_string()
-    } else {
-        parts.join("\n")
-    };
-
     let model = message["model"].as_str().map(String::from);
-    let usage = if crate::chat::is_sidechain_event(parsed) {
-        None
+    let main_thread = !crate::chat::is_sidechain_event(parsed);
+    let response_id = message["id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .map(String::from);
+    let (uuid, response_ids, usage) = if main_thread {
+        (
+            response_id.clone().or(line_uuid),
+            Some(response_id.into_iter().collect::<Vec<_>>()),
+            message
+                .get("usage")
+                .and_then(crate::chat::turn_usage_from_jsonl),
+        )
     } else {
-        message
-            .get("usage")
-            .and_then(crate::chat::turn_usage_from_jsonl)
+        (line_uuid, None, None)
     };
 
     Some(ConversationMessage {
         role: "assistant".to_string(),
-        content: flat_content,
+        content: assistant_flat_content(&rich_blocks),
         blocks: Some(rich_blocks),
         timestamp,
         uuid,
         model,
         usage,
+        response_ids,
     })
+}
+
+fn assistant_flat_content(blocks: &[MessageBlock]) -> String {
+    let parts: Vec<String> = blocks
+        .iter()
+        .filter_map(|block| match block {
+            MessageBlock::Text { content } => Some(content.clone()),
+            MessageBlock::ToolUse { tool_name, .. } => Some(format!("[Tool: {tool_name}]")),
+            _ => None,
+        })
+        .collect();
+    if parts.is_empty() {
+        "[thinking]".to_string()
+    } else {
+        parts.join("\n")
+    }
 }
 
 fn parse_result_message(parsed: &serde_json::Value) -> Option<ConversationMessage> {
@@ -528,6 +585,7 @@ fn parse_result_message(parsed: &serde_json::Value) -> Option<ConversationMessag
             uuid: uuid.clone(),
             model: None,
             usage: None,
+            response_ids: None,
         });
     }
 
@@ -541,6 +599,7 @@ fn parse_result_message(parsed: &serde_json::Value) -> Option<ConversationMessag
         uuid,
         model: None,
         usage: None,
+        response_ids: None,
     })
 }
 
@@ -575,6 +634,78 @@ fn attach_tool_results(
             _ => log::debug!(
                 "skipping tool_result without a matching main-thread tool_use tool_use_id={tool_use_id}"
             ),
+        }
+    }
+}
+
+const MAX_TRANSCRIPT_LINES: usize = 10_000;
+
+fn read_subagent_calls(session_dir: &Path) -> HashMap<String, Vec<crate::chat::SubagentCall>> {
+    let mut by_parent: HashMap<String, Vec<crate::chat::SubagentCall>> = HashMap::new();
+    let Ok(entries) = fs::read_dir(session_dir.join("subagents")) else {
+        return by_parent;
+    };
+    let mut metas: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".meta.json"))
+        })
+        .collect();
+    metas.sort();
+    for meta_path in metas {
+        let parent = fs::read_to_string(&meta_path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .and_then(|meta| meta["toolUseId"].as_str().map(String::from))
+            .filter(|id| !id.is_empty());
+        let Some(parent) = parent else {
+            continue;
+        };
+        let transcript = meta_path.with_file_name(
+            meta_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .replace(".meta.json", ".jsonl"),
+        );
+        let Ok(file) = fs::File::open(&transcript) else {
+            log::debug!(
+                "subagent has no transcript file next to {}",
+                meta_path.display()
+            );
+            continue;
+        };
+        let calls = BufReader::new(file)
+            .lines()
+            .take(MAX_TRANSCRIPT_LINES)
+            .map_while(Result::ok)
+            .filter_map(|line| parse_jsonl_line(&line))
+            .filter(|parsed| parsed["type"].as_str() == Some("assistant"))
+            .flat_map(|parsed| crate::chat::subagent_calls(&parsed));
+        by_parent.entry(parent).or_default().extend(calls);
+    }
+    by_parent
+}
+
+fn attach_subagent_calls(
+    messages: &mut [ConversationMessage],
+    mut by_parent: HashMap<String, Vec<crate::chat::SubagentCall>>,
+) {
+    for message in messages {
+        for block in message.blocks.iter_mut().flatten() {
+            if let MessageBlock::ToolUse {
+                tool_id,
+                activities,
+                ..
+            } = block
+            {
+                if let Some(calls) = by_parent.remove(tool_id.as_str()) {
+                    *activities = calls;
+                }
+            }
         }
     }
 }
@@ -669,6 +800,7 @@ fn list_conversations_impl(
         let mut preview = String::new();
         let mut message_count: usize = 0;
         let mut user_message_count: usize = 0;
+        let mut previous: Option<ConversationMessage> = None;
         let mut dedupe = TranscriptDedupe::default();
         let mut titles = SessionTitles::default();
         let mut scanned_lines: usize = 0;
@@ -692,18 +824,27 @@ fn list_conversations_impl(
             let Some(parsed) = parse_jsonl_line(&line) else {
                 continue;
             };
+            if crate::chat::is_sidechain_event(&parsed) {
+                continue;
+            }
             if let Some(msg) = parse_jsonl_entry(&parsed) {
                 let is_control_chip_user = msg.role == "user"
                     && speedwave_runtime::slash::parse_control_command(&msg.content).is_some();
                 let is_synthetic_chip_reply = msg.role == "assistant"
                     && msg.model.as_deref() == Some(crate::session_model::SYNTHETIC_MODEL);
-                if is_control_chip_user || is_synthetic_chip_reply {
+                if is_control_chip_user || is_turn_origin_message(&msg) {
+                    previous = None;
+                    continue;
+                }
+                if is_synthetic_chip_reply {
                     continue;
                 }
                 if !dedupe.admit(&parsed, &msg, message_count) {
                     continue;
                 }
-                message_count += 1;
+                if !previous.as_ref().is_some_and(|p| joins_turn(p, &msg)) {
+                    message_count += 1;
+                }
                 if msg.role == "user" {
                     user_message_count += 1;
                 }
@@ -713,6 +854,7 @@ fn list_conversations_impl(
                 if preview.is_empty() && msg.role == "user" {
                     preview = truncate_preview(&msg.content, LABEL_MAX_CHARS);
                 }
+                previous = Some(msg);
             }
         }
 
@@ -775,6 +917,13 @@ fn list_conversations_impl(
     Ok(summaries)
 }
 
+fn is_turn_origin_message(msg: &ConversationMessage) -> bool {
+    matches!(
+        msg.blocks.as_deref(),
+        Some([MessageBlock::TurnOrigin { .. }])
+    )
+}
+
 pub fn get_conversation(project: &str, session_id: &str) -> anyhow::Result<ConversationTranscript> {
     get_conversation_impl(consts::data_dir(), project, session_id)
 }
@@ -790,7 +939,6 @@ fn get_conversation_impl(
     let file = fs::File::open(&path)
         .map_err(|e| anyhow::anyhow!("cannot read session {session_id}: {e}"))?;
 
-    const MAX_TRANSCRIPT_LINES: usize = 10_000;
     let reader = BufReader::new(file);
     let mut messages: Vec<ConversationMessage> = Vec::new();
     let mut dedupe = TranscriptDedupe::default();
@@ -800,6 +948,9 @@ fn get_conversation_impl(
             continue;
         };
         attach_tool_results(&parsed, &mut messages, &dedupe.calls);
+        if crate::chat::is_sidechain_event(&parsed) {
+            continue;
+        }
         if let Some(msg) = parse_jsonl_entry(&parsed) {
             if dedupe.admit(&parsed, &msg, messages.len()) {
                 messages.push(msg);
@@ -808,11 +959,63 @@ fn get_conversation_impl(
     }
 
     fold_history_control_chips(&mut messages);
+    fold_assistant_turns(&mut messages);
+    attach_subagent_calls(
+        &mut messages,
+        read_subagent_calls(&sessions_dir_impl(data_dir, project).join(session_id)),
+    );
 
     Ok(ConversationTranscript {
         session_id: session_id.to_string(),
         messages,
     })
+}
+
+fn fold_assistant_turns(messages: &mut Vec<ConversationMessage>) {
+    let mut folded: Vec<ConversationMessage> = Vec::with_capacity(messages.len());
+    for message in messages.drain(..) {
+        match folded.last_mut() {
+            Some(turn) if joins_turn(turn, &message) => absorb_response(turn, message),
+            _ => folded.push(message),
+        }
+    }
+    *messages = folded;
+}
+
+fn joins_turn(previous: &ConversationMessage, next: &ConversationMessage) -> bool {
+    is_turn_response(previous) && is_turn_response(next)
+}
+
+fn is_turn_response(message: &ConversationMessage) -> bool {
+    message.role == "assistant" && message.response_ids.is_some()
+}
+
+fn absorb_response(turn: &mut ConversationMessage, next: ConversationMessage) {
+    let turn_ids = turn.response_ids.get_or_insert_with(Vec::new);
+    let next_ids = next.response_ids.unwrap_or_default();
+    let already_counted = if next_ids.is_empty() {
+        turn.usage.is_some()
+    } else {
+        next_ids.iter().all(|id| turn_ids.contains(id))
+    };
+    for id in next_ids {
+        if !turn_ids.contains(&id) {
+            turn_ids.push(id);
+        }
+    }
+    if !already_counted {
+        turn.usage = match (turn.usage, next.usage) {
+            (Some(counted), Some(added)) => Some(counted.plus(added)),
+            (counted, added) => counted.or(added),
+        };
+    }
+    turn.blocks
+        .get_or_insert_with(Vec::new)
+        .extend(next.blocks.unwrap_or_default());
+    turn.content = assistant_flat_content(turn.blocks.as_deref().unwrap_or_default());
+    turn.timestamp = next.timestamp.or(turn.timestamp.take());
+    turn.uuid = next.uuid.or(turn.uuid.take());
+    turn.model = next.model.or(turn.model.take());
 }
 
 pub fn get_project_memory(project: &str) -> anyhow::Result<String> {
@@ -1262,6 +1465,7 @@ mod tests {
             uuid: Some(uuid.to_string()),
             model: None,
             usage: None,
+            response_ids: None,
         }
     }
 
@@ -1276,6 +1480,7 @@ mod tests {
             uuid: None,
             model: model.map(str::to_string),
             usage: None,
+            response_ids: None,
         }
     }
 
@@ -1370,6 +1575,7 @@ mod tests {
             uuid: Some("u1".to_string()),
             model: None,
             usage: None,
+            response_ids: None,
         }];
         fold_history_control_chips(&mut messages);
         assert!(matches!(
@@ -2201,7 +2407,7 @@ mod tests {
             .position(|s| s == "/model openrouter/openai/gpt-4o-mini")
             .expect("the switch is rebuilt as a /model chip");
         assert_eq!(shapes.iter().filter(|s| s.starts_with("/model")).count(), 1);
-        assert_eq!(shapes[chip - 1], "stub reply", "{shapes:?}");
+        assert_eq!(shapes[chip - 1], "[Tool: Read]\nstub reply", "{shapes:?}");
         assert_eq!(shapes[chip + 1], "Second message.", "{shapes:?}");
         assert_eq!(
             shapes.first().map(String::as_str),
@@ -3407,9 +3613,256 @@ mod tests {
             .collect();
         assert_eq!(
             roles,
-            ["user", "assistant", "assistant", "assistant", "assistant"],
-            "a user message holding only tool_result blocks adds no message"
+            ["user", "assistant"],
+            "a user message holding only tool_result blocks adds no message, and the calls of one turn fold into one"
         );
+    }
+
+    const TURN_OF_THREE_RESPONSES: [&str; 9] = [
+        r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"go"},"timestamp":"2026-11-19T10:00:00Z"}"#,
+        r#"{"type":"assistant","uuid":"l1","message":{"id":"msg_1","role":"assistant","model":"claude-a","content":[{"type":"thinking","thinking":"plan"}],"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":100,"cache_creation_input_tokens":20}},"timestamp":"2026-11-19T10:00:01Z"}"#,
+        r#"{"type":"assistant","uuid":"l2","message":{"id":"msg_1","role":"assistant","model":"claude-a","content":[{"type":"tool_use","id":"toolu_a","name":"Bash","input":{"command":"echo ok"}}],"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":100,"cache_creation_input_tokens":20}},"timestamp":"2026-11-19T10:00:02Z"}"#,
+        r#"{"type":"user","uuid":"l3","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_a","content":"ok"}]},"timestamp":"2026-11-19T10:00:03Z"}"#,
+        r#"{"type":"assistant","uuid":"l4","message":{"id":"msg_2","role":"assistant","model":"claude-b","content":[{"type":"tool_use","id":"toolu_b","name":"Read","input":{"file_path":"/a"}}],"usage":{"input_tokens":12,"output_tokens":6,"cache_read_input_tokens":110,"cache_creation_input_tokens":0}},"timestamp":"2026-11-19T10:00:04Z"}"#,
+        r#"{"type":"user","uuid":"l5","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_b","content":"body","is_error":true}]},"timestamp":"2026-11-19T10:00:05Z"}"#,
+        r#"{"type":"assistant","uuid":"l6","message":{"id":"msg_3","role":"assistant","model":"claude-c","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":15,"output_tokens":7,"cache_read_input_tokens":120,"cache_creation_input_tokens":0}},"timestamp":"2026-11-19T10:00:06Z"}"#,
+        r#"{"type":"user","uuid":"u2","message":{"role":"user","content":"next"},"timestamp":"2026-11-19T10:01:00Z"}"#,
+        r#"{"type":"assistant","uuid":"l7","message":{"id":"msg_4","role":"assistant","model":"claude-c","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}},"timestamp":"2026-11-19T10:01:01Z"}"#,
+    ];
+
+    fn block_kinds(msg: &ConversationMessage) -> Vec<&'static str> {
+        msg.blocks
+            .iter()
+            .flatten()
+            .map(|b| match b {
+                MessageBlock::Text { .. } => "text",
+                MessageBlock::Thinking { .. } => "thinking",
+                MessageBlock::ToolUse { .. } => "tool_use",
+                MessageBlock::Error { .. } => "error",
+                MessageBlock::ControlChip { .. } => "control_chip",
+                MessageBlock::TurnOrigin { .. } => "turn_origin",
+            })
+            .collect()
+    }
+
+    #[test]
+    fn get_conversation_folds_the_responses_of_one_turn_into_one_assistant_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        write_session(&dir, id, &TURN_OF_THREE_RESPONSES);
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+
+        let roles: Vec<&str> = transcript
+            .messages
+            .iter()
+            .map(|m| m.role.as_str())
+            .collect();
+        assert_eq!(roles, ["user", "assistant", "user", "assistant"]);
+        let turn = &transcript.messages[1];
+        assert_eq!(
+            block_kinds(turn),
+            ["thinking", "tool_use", "tool_use", "text"]
+        );
+        assert_eq!(turn.content, "[Tool: Bash]\n[Tool: Read]\ndone");
+        assert_eq!(
+            tool_uses(&transcript),
+            vec![
+                ("toolu_a".to_string(), Some("ok".to_string()), false),
+                ("toolu_b".to_string(), Some("body".to_string()), true),
+            ]
+        );
+        assert_eq!(turn.timestamp.as_deref(), Some("2026-11-19T10:00:06Z"));
+    }
+
+    #[test]
+    fn a_folded_turn_counts_the_usage_of_each_response_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        write_session(&dir, id, &TURN_OF_THREE_RESPONSES);
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+
+        assert_eq!(
+            transcript.messages[1].usage,
+            Some(crate::chat::TurnUsage {
+                input_tokens: 37,
+                output_tokens: 18,
+                cache_read_tokens: 330,
+                cache_write_tokens: 20,
+            })
+        );
+        assert_eq!(transcript.messages[1].model.as_deref(), Some("claude-c"));
+    }
+
+    #[test]
+    fn a_folded_turn_is_identified_by_its_last_response_and_lists_every_response() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        write_session(&dir, id, &TURN_OF_THREE_RESPONSES);
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+
+        let turn = &transcript.messages[1];
+        assert_eq!(turn.uuid.as_deref(), Some("msg_3"));
+        assert_eq!(
+            turn.response_ids,
+            Some(vec![
+                "msg_1".to_string(),
+                "msg_2".to_string(),
+                "msg_3".to_string()
+            ])
+        );
+        let next = &transcript.messages[3];
+        assert_eq!(next.uuid.as_deref(), Some("msg_4"));
+        assert_eq!(next.response_ids, Some(vec!["msg_4".to_string()]));
+        assert_eq!(transcript.messages[0].uuid.as_deref(), Some("u1"));
+        assert_eq!(transcript.messages[0].response_ids, None);
+        assert_eq!(transcript.messages[2].uuid.as_deref(), Some("u2"));
+    }
+
+    #[test]
+    fn a_sidechain_line_between_two_responses_leaves_the_turn_whole() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"go"}}"#,
+                r#"{"type":"assistant","uuid":"l1","message":{"id":"msg_1","role":"assistant","content":[{"type":"text","text":"first"}]}}"#,
+                r#"{"type":"assistant","uuid":"s1","isSidechain":true,"message":{"id":"msg_s","role":"assistant","content":[{"type":"text","text":"subagent"}]}}"#,
+                r#"{"type":"assistant","uuid":"l2","message":{"id":"msg_2","role":"assistant","content":[{"type":"text","text":"second"}]}}"#,
+            ],
+        );
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+
+        let rows: Vec<(&str, Option<&str>)> = transcript
+            .messages
+            .iter()
+            .map(|m| (m.content.as_str(), m.uuid.as_deref()))
+            .collect();
+        assert_eq!(rows, [("go", Some("u1")), ("first\nsecond", Some("msg_2"))]);
+        assert_eq!(
+            transcript.messages[1].response_ids,
+            Some(vec!["msg_1".to_string(), "msg_2".to_string()])
+        );
+    }
+
+    #[test]
+    fn an_error_result_line_after_a_response_stays_a_message_of_its_own() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"go"}}"#,
+                r#"{"type":"assistant","uuid":"l1","message":{"id":"msg_1","role":"assistant","content":[{"type":"text","text":"partial"}]}}"#,
+                r#"{"type":"result","is_error":true,"result":"API error"}"#,
+            ],
+        );
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+
+        assert_eq!(transcript.messages.len(), 3);
+        assert_eq!(block_kinds(&transcript.messages[2]), ["error"]);
+    }
+
+    #[test]
+    fn a_turn_of_lines_without_a_message_id_counts_usage_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"go"}}"#,
+                r#"{"type":"assistant","uuid":"l1","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_a","name":"Bash","input":{}}],"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#,
+                r#"{"type":"assistant","uuid":"l2","message":{"role":"assistant","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#,
+            ],
+        );
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+
+        assert_eq!(transcript.messages.len(), 2);
+        let turn = &transcript.messages[1];
+        assert_eq!(
+            turn.usage,
+            Some(crate::chat::TurnUsage {
+                input_tokens: 10,
+                output_tokens: 5,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            })
+        );
+        assert_eq!(turn.uuid.as_deref(), Some("l2"));
+        assert_eq!(turn.response_ids, Some(Vec::new()));
+    }
+
+    #[test]
+    fn list_conversations_counts_a_folded_turn_like_the_transcript() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        write_session(&dir, id, &TURN_OF_THREE_RESPONSES);
+
+        let summaries = list_conversations_impl(tmp.path(), "proj").unwrap();
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+
+        assert_eq!(transcript.messages.len(), 4);
+        assert_eq!(summaries[0].message_count, transcript.messages.len());
+    }
+
+    #[test]
+    fn parse_assistant_message_takes_the_message_id_as_its_uuid_and_response() {
+        let line = r#"{"type":"assistant","uuid":"line-uuid","message":{"id":"msg_9","role":"assistant","content":[{"type":"text","text":"ok"}]}}"#;
+        let msg = parse_jsonl_message(line).unwrap();
+        assert_eq!(msg.uuid.as_deref(), Some("msg_9"));
+        assert_eq!(msg.response_ids, Some(vec!["msg_9".to_string()]));
+    }
+
+    #[test]
+    fn parse_assistant_message_without_a_message_id_keeps_its_line_uuid() {
+        let line = r#"{"type":"assistant","uuid":"line-uuid","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}"#;
+        let msg = parse_jsonl_message(line).unwrap();
+        assert_eq!(msg.uuid.as_deref(), Some("line-uuid"));
+        assert_eq!(msg.response_ids, Some(Vec::new()));
+    }
+
+    #[test]
+    fn parse_assistant_message_on_a_sidechain_line_lists_no_response() {
+        let line = r#"{"type":"assistant","uuid":"line-uuid","isSidechain":true,"message":{"id":"msg_9","role":"assistant","content":[{"type":"text","text":"ok"}]}}"#;
+        let msg = parse_jsonl_message(line).unwrap();
+        assert_eq!(msg.uuid.as_deref(), Some("line-uuid"));
+        assert_eq!(msg.response_ids, None);
+    }
+
+    #[test]
+    fn conversation_message_fields_match_ts_mirror() {
+        let ts = include_str!("../../src/src/app/models/chat.ts");
+        let message = ConversationMessage {
+            role: "assistant".to_string(),
+            content: String::new(),
+            blocks: Some(Vec::new()),
+            timestamp: None,
+            uuid: Some("msg_1".to_string()),
+            model: Some("claude-a".to_string()),
+            usage: Some(crate::chat::TurnUsage::default()),
+            response_ids: Some(vec!["msg_1".to_string()]),
+        };
+        let ts_fields: Vec<&str> = crate::ts_mirror::ts_interface_fields(ts, "ConversationMessage")
+            .into_iter()
+            .map(|f| f.trim_end_matches('?'))
+            .collect();
+        assert_eq!(crate::ts_mirror::rust_fields(&message), ts_fields);
     }
 
     #[test]
@@ -3513,12 +3966,12 @@ mod tests {
         let summaries = list_conversations_impl(tmp.path(), "proj").unwrap();
         let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
 
-        assert_eq!(transcript.messages.len(), 3);
+        assert_eq!(transcript.messages.len(), 2);
         assert_eq!(summaries[0].message_count, transcript.messages.len());
     }
 
     #[test]
-    fn get_conversation_ignores_sidechain_tool_calls_and_results() {
+    fn get_conversation_ignores_sidechain_tool_results() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
@@ -3527,8 +3980,8 @@ mod tests {
             &dir,
             id,
             &[
-                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_main","name":"Task","input":{}}]}}"#,
-                r#"{"type":"assistant","isSidechain":true,"message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_side","name":"Read","input":{}}]}}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_main","name":"Agent","input":{}}]}}"#,
+                r#"{"type":"assistant","parent_tool_use_id":"toolu_main","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_side","name":"Read","input":{}}]}}"#,
                 r#"{"type":"user","isSidechain":true,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_side","content":"from a subagent"}]}}"#,
                 r#"{"type":"user","isSidechain":true,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_main","content":"forged by a subagent"}]}}"#,
                 r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_main","content":"main result"}]}}"#,
@@ -3539,14 +3992,161 @@ mod tests {
 
         assert_eq!(
             tool_uses(&transcript),
-            vec![
-                (
-                    "toolu_main".to_string(),
-                    Some("main result".to_string()),
-                    false
-                ),
-                ("toolu_side".to_string(), None, false),
-            ]
+            vec![(
+                "toolu_main".to_string(),
+                Some("main result".to_string()),
+                false
+            )]
+        );
+    }
+
+    const MAIN_TRANSCRIPT: [&str; 4] = [
+        r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"delegate"}}"#,
+        r#"{"type":"assistant","uuid":"a1","message":{"id":"msg_1","role":"assistant","content":[{"type":"tool_use","id":"toolu_agent","name":"Agent","input":{"description":"d"}}]}}"#,
+        r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_agent","content":"done"}]}}"#,
+        r#"{"type":"assistant","uuid":"a2","message":{"id":"msg_2","role":"assistant","content":[{"type":"text","text":"all done"}]}}"#,
+    ];
+
+    const SUBAGENT_FILE: [&str; 5] = [
+        r#"{"type":"user","isSidechain":true,"agentId":"a1","message":{"role":"user","content":"the subagent prompt"}}"#,
+        r#"{"type":"attachment","isSidechain":true,"agentId":"a1"}"#,
+        r#"{"type":"assistant","isSidechain":true,"agentId":"a1","message":{"id":"msg_s1","role":"assistant","content":[{"type":"text","text":"subagent text"},{"type":"tool_use","id":"toolu_sub","name":"Bash","input":{"command":"ls"}}]}}"#,
+        r#"{"type":"user","isSidechain":true,"agentId":"a1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_sub","content":"out"}]}}"#,
+        r#"{"type":"assistant","isSidechain":true,"agentId":"a1","message":{"id":"msg_s2","role":"assistant","content":[{"type":"text","text":"sub done"}]}}"#,
+    ];
+
+    fn write_subagent(dir: &Path, session_id: &str, agent: &str, meta: &str, lines: &[&str]) {
+        let subagents = dir.join(session_id).join("subagents");
+        fs::create_dir_all(&subagents).unwrap();
+        fs::write(subagents.join(format!("agent-{agent}.meta.json")), meta).unwrap();
+        fs::write(
+            subagents.join(format!("agent-{agent}.jsonl")),
+            lines.join("\n"),
+        )
+        .unwrap();
+    }
+
+    const SUBAGENT_META: &str = r#"{"agentType":"general-purpose","description":"d","toolUseId":"toolu_agent","spawnDepth":1,"requestShape":"foreground"}"#;
+
+    fn agent_activities(transcript: &ConversationTranscript) -> Vec<crate::chat::SubagentCall> {
+        transcript
+            .messages
+            .iter()
+            .flat_map(|m| m.blocks.iter().flatten())
+            .find_map(|b| match b {
+                MessageBlock::ToolUse {
+                    tool_name,
+                    activities,
+                    ..
+                } if tool_name == "Agent" => Some(activities.clone()),
+                _ => None,
+            })
+            .expect("the transcript holds an Agent call")
+    }
+
+    #[test]
+    fn get_conversation_puts_the_tool_calls_of_a_subagent_under_its_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        write_session(&dir, id, &MAIN_TRANSCRIPT);
+        write_subagent(&dir, id, "a1", SUBAGENT_META, &SUBAGENT_FILE);
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+
+        let roles: Vec<&str> = transcript
+            .messages
+            .iter()
+            .map(|m| m.role.as_str())
+            .collect();
+        assert_eq!(roles, ["user", "assistant"]);
+        assert_eq!(block_kinds(&transcript.messages[1]), ["tool_use", "text"]);
+        assert_eq!(
+            tool_uses(&transcript),
+            vec![("toolu_agent".to_string(), Some("done".to_string()), false)]
+        );
+        assert_eq!(
+            agent_activities(&transcript),
+            vec![crate::chat::SubagentCall {
+                tool_id: "toolu_sub".to_string(),
+                tool_name: "Bash".to_string(),
+                input_json: r#"{"command":"ls"}"#.to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_subagent_file_without_a_known_parent_adds_no_activity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        write_session(&dir, id, &MAIN_TRANSCRIPT);
+        write_subagent(
+            &dir,
+            id,
+            "a1",
+            r#"{"toolUseId":"toolu_unknown"}"#,
+            &SUBAGENT_FILE,
+        );
+        write_subagent(
+            &dir,
+            id,
+            "a2",
+            r#"{"agentType":"general-purpose"}"#,
+            &SUBAGENT_FILE,
+        );
+        write_subagent(&dir, id, "a3", "not json", &SUBAGENT_FILE);
+        let orphan = dir.join(id).join("subagents").join("agent-a4.meta.json");
+        fs::write(orphan, SUBAGENT_META).unwrap();
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+
+        assert!(agent_activities(&transcript).is_empty());
+        assert_eq!(tool_uses(&transcript).len(), 1);
+    }
+
+    #[test]
+    fn a_session_without_subagent_files_has_no_activities() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        write_session(&dir, id, &MAIN_TRANSCRIPT);
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+
+        assert!(agent_activities(&transcript).is_empty());
+    }
+
+    #[test]
+    fn a_sidechain_line_in_the_main_transcript_is_not_a_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        let mut lines: Vec<&str> = MAIN_TRANSCRIPT[..2].to_vec();
+        lines.extend(SUBAGENT_FILE);
+        lines.extend(&MAIN_TRANSCRIPT[2..]);
+        write_session(&dir, id, &lines);
+
+        let summaries = list_conversations_impl(tmp.path(), "proj").unwrap();
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+
+        assert_eq!(transcript.messages.len(), 2);
+        assert_eq!(block_kinds(&transcript.messages[1]), ["tool_use", "text"]);
+        assert_eq!(summaries[0].message_count, transcript.messages.len());
+        assert_eq!(summaries[0].preview, "delegate");
+    }
+
+    #[test]
+    fn subagent_call_fields_match_ts_mirror() {
+        let ts = include_str!("../../src/src/app/models/chat.ts");
+        let call = crate::chat::SubagentCall {
+            tool_id: String::new(),
+            tool_name: String::new(),
+            input_json: String::new(),
+        };
+        assert_eq!(
+            crate::ts_mirror::rust_fields(&call),
+            crate::ts_mirror::ts_interface_fields(ts, "SubagentCall")
         );
     }
 
@@ -3584,6 +4184,7 @@ mod tests {
             input: "{}".to_string(),
             result: None,
             is_error: false,
+            activities: Vec::new(),
         })
         .unwrap();
         let live = serde_json::to_value(
@@ -3601,7 +4202,7 @@ mod tests {
                 .as_object()
                 .unwrap()
                 .keys()
-                .filter(|k| *k != "type" && *k != "kind")
+                .filter(|k| *k != "type" && *k != "kind" && *k != "activities")
                 .cloned()
                 .collect();
             keys.sort_unstable();
@@ -3619,11 +4220,18 @@ mod tests {
             input: "{}".to_string(),
             result: None,
             is_error: false,
+            activities: Vec::new(),
         };
         let mut expected: Vec<&str> = crate::ts_mirror::ts_interface_fields(ts, "ToolUseState");
         expected.push("type");
+        expected.push("activities");
         expected.sort_unstable();
         assert_eq!(crate::ts_mirror::rust_fields(&block), expected);
+        assert!(
+            include_str!("../../src/src/app/models/chat.ts")
+                .contains("  activities: readonly SubagentCall[];"),
+            "HistoryToolUse must declare the activities of a subagent call"
+        );
     }
 
     #[test]
@@ -3643,12 +4251,16 @@ mod tests {
                 command: String::new(),
                 argument: String::new(),
             },
+            MessageBlock::TurnOrigin {
+                origin: crate::chat::TurnOrigin::Scheduled,
+            },
             MessageBlock::ToolUse {
                 tool_id: String::new(),
                 tool_name: String::new(),
                 input: String::new(),
                 result: None,
                 is_error: false,
+                activities: Vec::new(),
             },
         ];
         let union = crate::ts_mirror::ts_tagged_union(ts, "HistoryMessageBlock");
@@ -4957,6 +5569,170 @@ mod tests {
         delete_conversation_impl(tmp.path(), "proj", id_a).unwrap();
         assert!(!dir.join(format!("{id_a}.jsonl")).exists());
         assert!(dir.join(format!("{id_b}.jsonl")).exists());
+    }
+
+    const SCHEDULED_TURN_LINE: &str = r#"{"type":"user","isMeta":true,"promptSource":"system","turnOrigin":"scheduled","uuid":"u-cron","message":{"role":"user","content":"reply with the word CRONFIRED only."},"timestamp":"2026-11-06T17:28:00Z"}"#;
+    const TASK_NOTIFICATION_TURN_LINE: &str = r#"{"type":"user","promptSource":"system","turnOrigin":"task_notification","origin":{"kind":"task-notification"},"uuid":"u-task","message":{"role":"user","content":"<task-notification>\n<task-id>b2s3bnh3p</task-id>\n<status>completed</status>\n</task-notification>"},"timestamp":"2026-11-06T17:25:57Z"}"#;
+
+    fn turn_origin_of(msg: &ConversationMessage) -> Option<crate::chat::TurnOrigin> {
+        match msg.blocks.as_deref() {
+            Some([MessageBlock::TurnOrigin { origin }]) => Some(*origin),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn parse_jsonl_message_turns_a_scheduled_prompt_into_a_turn_origin_row() {
+        let msg = parse_jsonl_message(SCHEDULED_TURN_LINE).expect("scheduled turn must be kept");
+        assert_eq!(msg.role, "user");
+        assert_eq!(
+            turn_origin_of(&msg),
+            Some(crate::chat::TurnOrigin::Scheduled)
+        );
+        assert_eq!(msg.uuid.as_deref(), Some("u-cron"));
+        assert_eq!(msg.timestamp.as_deref(), Some("2026-11-06T17:28:00Z"));
+        assert!(msg.content.is_empty(), "the prompt text is not shown");
+    }
+
+    #[test]
+    fn parse_jsonl_message_turns_a_task_notification_into_a_turn_origin_row() {
+        let msg = parse_jsonl_message(TASK_NOTIFICATION_TURN_LINE)
+            .expect("task notification turn must be kept");
+        assert_eq!(
+            turn_origin_of(&msg),
+            Some(crate::chat::TurnOrigin::TaskNotification)
+        );
+        assert!(
+            msg.content.is_empty(),
+            "the notification markup is not shown"
+        );
+    }
+
+    #[test]
+    fn parse_jsonl_message_keeps_composer_messages_and_unknown_origins_as_they_were() {
+        let sdk = r#"{"type":"user","promptSource":"sdk","turnOrigin":"sdk","message":{"role":"user","content":"hello"}}"#;
+        let msg = parse_jsonl_message(sdk).unwrap();
+        assert_eq!(msg.content, "hello");
+        assert_eq!(turn_origin_of(&msg), None);
+
+        let unknown = r#"{"type":"user","isMeta":true,"promptSource":"system","turnOrigin":"something_new","message":{"role":"user","content":"x"}}"#;
+        assert!(parse_jsonl_message(unknown).is_none());
+
+        let not_system = r#"{"type":"user","promptSource":"sdk","turnOrigin":"scheduled","message":{"role":"user","content":"typed"}}"#;
+        assert_eq!(parse_jsonl_message(not_system).unwrap().content, "typed");
+    }
+
+    #[test]
+    fn get_conversation_starts_a_self_started_turn_with_its_origin_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","uuid":"u1","promptSource":"sdk","message":{"role":"user","content":"run it in the background"},"timestamp":"2026-11-06T17:25:40Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"STARTED"}]},"timestamp":"2026-11-06T17:25:42Z"}"#,
+                TASK_NOTIFICATION_TURN_LINE,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"FINISHED"}]},"timestamp":"2026-11-06T17:25:59Z"}"#,
+                SCHEDULED_TURN_LINE,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"CRONFIRED"}]},"timestamp":"2026-11-06T17:28:01Z"}"#,
+            ],
+        );
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+        let rows: Vec<(String, Option<crate::chat::TurnOrigin>, String)> = transcript
+            .messages
+            .iter()
+            .map(|m| (m.role.clone(), turn_origin_of(m), m.content.clone()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("user".into(), None, "run it in the background".into()),
+                ("assistant".into(), None, "STARTED".into()),
+                (
+                    "user".into(),
+                    Some(crate::chat::TurnOrigin::TaskNotification),
+                    String::new()
+                ),
+                ("assistant".into(), None, "FINISHED".into()),
+                (
+                    "user".into(),
+                    Some(crate::chat::TurnOrigin::Scheduled),
+                    String::new()
+                ),
+                ("assistant".into(), None, "CRONFIRED".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn list_conversations_does_not_count_or_preview_turn_origin_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        write_session(
+            &dir,
+            id,
+            &[
+                SCHEDULED_TURN_LINE,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"CRONFIRED"}]},"timestamp":"2026-11-06T17:28:01Z"}"#,
+                r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"first typed question"},"timestamp":"2026-11-06T17:29:00Z"}"#,
+            ],
+        );
+
+        let list = list_conversations_impl(tmp.path(), "proj").unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].preview, "first typed question");
+        assert_eq!(list[0].message_count, 2);
+    }
+
+    const SKILL_COMMAND_LINE: &str = r#"{"type":"user","uuid":"u-skill","message":{"role":"user","content":"<command-name>/review</command-name>\n<command-message>review</command-message>\n<command-args>the branch</command-args>"},"timestamp":"2026-11-06T17:20:00Z"}"#;
+
+    #[test]
+    fn a_restored_command_line_and_a_turn_origin_row_keep_their_order_and_counts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        write_session(
+            &dir,
+            id,
+            &[
+                SKILL_COMMAND_LINE,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"REVIEWED"}]},"timestamp":"2026-11-06T17:20:05Z"}"#,
+                SCHEDULED_TURN_LINE,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"CRONFIRED"}]},"timestamp":"2026-11-06T17:28:01Z"}"#,
+            ],
+        );
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+        let rows: Vec<(String, Option<crate::chat::TurnOrigin>, String)> = transcript
+            .messages
+            .iter()
+            .map(|m| (m.role.clone(), turn_origin_of(m), m.content.clone()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("user".into(), None, "/review the branch".into()),
+                ("assistant".into(), None, "REVIEWED".into()),
+                (
+                    "user".into(),
+                    Some(crate::chat::TurnOrigin::Scheduled),
+                    String::new()
+                ),
+                ("assistant".into(), None, "CRONFIRED".into()),
+            ]
+        );
+
+        let list = list_conversations_impl(tmp.path(), "proj").unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].preview, "/review the branch");
+        assert_eq!(
+            list[0].message_count, 3,
+            "the command line counts, the turn-origin row does not"
+        );
     }
 
     #[test]
