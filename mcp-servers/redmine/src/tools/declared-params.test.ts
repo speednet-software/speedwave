@@ -247,6 +247,60 @@ describe('Redmine declared-parameter guard', () => {
       }
     );
 
+    it('lets updateIssue clear the category with a null category_id', async () => {
+      const client = createMockClient();
+
+      const result = await handlerFor(
+        client,
+        'updateIssue'
+      )({ issue_id: 83432, category_id: null });
+
+      expect(result.isError).toBeUndefined();
+      expect(client.updateIssue).toHaveBeenCalledWith(83432, {
+        issue_id: 83432,
+        category_id: null,
+      });
+    });
+
+    it('lets updateCategory clear the default assignee with a null assigned_to_id', async () => {
+      const client = {
+        ...createMockClient(),
+        updateCategory: vi.fn().mockResolvedValue(undefined),
+      };
+
+      const result = await handlerFor(
+        client,
+        'updateCategory'
+      )({ category_id: 5, assigned_to_id: null });
+
+      expect(result.isError).toBeUndefined();
+      expect(client.updateCategory).toHaveBeenCalledWith(5, {
+        name: undefined,
+        assigned_to_id: null,
+      });
+    });
+
+    it.each(['../1', 0, -2])('rejects category_id %j on createIssue', async (value) => {
+      const client = createMockClient();
+
+      const result = await handlerFor(
+        client,
+        'createIssue'
+      )({ project_id: 'p', subject: 's', category_id: value });
+
+      expect(client.createIssue).not.toHaveBeenCalled();
+      expect(textOf(result)).toContain('Invalid category_id');
+    });
+
+    it('rejects a path-traversal category_id on deleteCategory before the client', async () => {
+      const client = { ...createMockClient(), deleteCategory: vi.fn() };
+
+      const result = await handlerFor(client, 'deleteCategory')({ category_id: '../projects/1' });
+
+      expect(client.deleteCategory).not.toHaveBeenCalled();
+      expect(textOf(result)).toContain('Invalid category_id');
+    });
+
     it('leaves status_id, which also takes open/closed/*, to the handler', async () => {
       const client = { ...createMockClient(), listIssues: vi.fn() };
       client.listIssues.mockResolvedValue({ issues: [], total_count: 0 });

@@ -297,6 +297,27 @@ describe('RedmineClient', () => {
       });
     });
 
+    it.each([5, '5|6', '!5', '!*', '*', 'ev5'])(
+      'passes the category filter %j to Redmine unchanged',
+      async (category_id) => {
+        mockAxiosInstance.get.mockResolvedValue({ data: { issues: [], total_count: 0 } });
+
+        await client.listIssues({ project_id: 'my-project', category_id });
+
+        expect(mockAxiosInstance.get).toHaveBeenCalledWith('/issues.json', {
+          params: { limit: 25, offset: 0, project_id: 'my-project', category_id },
+        });
+      }
+    );
+
+    it('leaves category_id out of the query when it is empty', async () => {
+      mockAxiosInstance.get.mockResolvedValue({ data: { issues: [], total_count: 0 } });
+
+      await client.listIssues({ category_id: '' });
+
+      expect(mockAxiosInstance.get.mock.calls[0][1].params).not.toHaveProperty('category_id');
+    });
+
     it('should clamp an oversized limit down to 100', async () => {
       mockAxiosInstance.get.mockResolvedValue({ data: { issues: [], total_count: 0 } });
 
@@ -558,6 +579,7 @@ describe('RedmineClient', () => {
         parent_issue_id: 5,
         estimated_hours: 8.5,
         fixed_version_id: 87,
+        category_id: 5,
       });
 
       expect(mockAxiosInstance.post).toHaveBeenCalledWith('/issues.json', {
@@ -572,6 +594,7 @@ describe('RedmineClient', () => {
           parent_issue_id: 5,
           estimated_hours: 8.5,
           fixed_version_id: 87,
+          category_id: 5,
         },
       });
     });
@@ -869,6 +892,40 @@ describe('RedmineClient', () => {
         'Invalid identifier ".."'
       );
       expect(mockAxiosInstance.put).not.toHaveBeenCalled();
+    });
+
+    it('sends category_id and returns the issue with its new category', async () => {
+      mockAxiosInstance.put.mockResolvedValue({ data: {} });
+      mockAxiosInstance.get.mockResolvedValue({
+        data: { issue: { ...mockUpdatedIssue, category: { id: 5, name: 'Backend' } } },
+      });
+
+      const result = await client.updateIssue(1, { category_id: 5 });
+
+      expect(mockAxiosInstance.put).toHaveBeenCalledWith('/issues/1.json', {
+        issue: { category_id: 5 },
+      });
+      expect(result.category).toEqual({ id: 5, name: 'Backend' });
+    });
+
+    it('sends a null category_id to clear the category', async () => {
+      mockAxiosInstance.put.mockResolvedValue({ data: {} });
+      mockAxiosInstance.get.mockResolvedValue({ data: { issue: mockUpdatedIssue } });
+
+      await client.updateIssue(1, { category_id: null });
+
+      expect(mockAxiosInstance.put).toHaveBeenCalledWith('/issues/1.json', {
+        issue: { category_id: null },
+      });
+    });
+
+    it('leaves the category out of the payload when category_id is not given', async () => {
+      mockAxiosInstance.put.mockResolvedValue({ data: {} });
+      mockAxiosInstance.get.mockResolvedValue({ data: { issue: mockUpdatedIssue } });
+
+      await client.updateIssue(1, { notes: 'n' });
+
+      expect(mockAxiosInstance.put.mock.calls[0][1].issue).not.toHaveProperty('category_id');
     });
 
     it('leaves the target version out of the payload when fixed_version_id is not given', async () => {
@@ -1415,6 +1472,271 @@ describe('RedmineClient', () => {
       mockAxiosInstance.get.mockRejectedValue(notFound);
 
       await expect(client.listVersions('missing')).rejects.toBe(notFound);
+    });
+  });
+
+  describe('categories', () => {
+    const category = {
+      id: 5,
+      project: { id: 3, name: 'My project' },
+      name: 'Backend',
+      assigned_to: { id: 7, name: 'Jan Kowalski' },
+    };
+
+    const httpError = (status: number, data: unknown = {}) =>
+      Object.assign(new Error(`HTTP ${status}`), {
+        isAxiosError: true,
+        response: { status, data },
+      });
+
+    beforeEach(() => {
+      vi.spyOn(axios, 'isAxiosError').mockImplementation(
+        (error) => (error as { isAxiosError?: boolean })?.isAxiosError === true
+      );
+    });
+
+    describe('listCategories', () => {
+      it("returns the project's categories and Redmine's total", async () => {
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { issue_categories: [category], total_count: 1 },
+        });
+
+        const result = await client.listCategories('my-project');
+
+        expect(mockAxiosInstance.get).toHaveBeenCalledWith(
+          '/projects/my-project/issue_categories.json'
+        );
+        expect(result).toEqual({ categories: [category], total_count: 1 });
+      });
+
+      it('counts the categories when Redmine sends no total_count', async () => {
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { issue_categories: [category, category] },
+        });
+
+        const result = await client.listCategories(3);
+
+        expect(result.total_count).toBe(2);
+      });
+
+      it('returns an empty list when the project has no issue_categories key', async () => {
+        mockAxiosInstance.get.mockResolvedValue({ data: {} });
+
+        const result = await client.listCategories('my-project');
+
+        expect(result).toEqual({ categories: [], total_count: 0 });
+      });
+
+      it('encodes the project identifier as a single path segment', async () => {
+        mockAxiosInstance.get.mockResolvedValue({ data: {} });
+
+        await client.listCategories('../users/current');
+
+        expect(mockAxiosInstance.get).toHaveBeenCalledWith(
+          '/projects/..%2Fusers%2Fcurrent/issue_categories.json'
+        );
+      });
+
+      it.each(['.', '..', ''])('refuses the dot or empty segment %j', async (projectId) => {
+        await expect(client.listCategories(projectId)).rejects.toThrow('Invalid identifier');
+        expect(mockAxiosInstance.get).not.toHaveBeenCalled();
+      });
+
+      it('propagates a 404 for an unknown project', async () => {
+        const notFound = httpError(404);
+        mockAxiosInstance.get.mockRejectedValue(notFound);
+
+        await expect(client.listCategories('missing')).rejects.toBe(notFound);
+      });
+    });
+
+    describe('showCategory', () => {
+      it('returns the category by its ID alone', async () => {
+        mockAxiosInstance.get.mockResolvedValue({ data: { issue_category: category } });
+
+        const result = await client.showCategory(5);
+
+        expect(mockAxiosInstance.get).toHaveBeenCalledWith('/issue_categories/5.json');
+        expect(result).toEqual(category);
+      });
+
+      it('does not check the category project against the configured one', async () => {
+        const scopedClient = new RedmineClient(config, {
+          host_url: 'https://redmine.example.com',
+          project_id: 'other-project',
+        });
+        mockAxiosInstance.get.mockResolvedValue({ data: { issue_category: category } });
+
+        await scopedClient.showCategory(5);
+
+        expect(mockAxiosInstance.get).toHaveBeenCalledTimes(1);
+        expect(mockAxiosInstance.get).toHaveBeenCalledWith('/issue_categories/5.json');
+      });
+
+      it('refuses an ID that would climb out of the /issue_categories/ path', async () => {
+        await expect(client.showCategory('..' as unknown as number)).rejects.toThrow(
+          'Invalid identifier ".."'
+        );
+        expect(mockAxiosInstance.get).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('createCategory', () => {
+      it('posts the name and the default assignee and returns the created category', async () => {
+        mockAxiosInstance.post.mockResolvedValue({ data: { issue_category: category } });
+
+        const result = await client.createCategory('my-project', {
+          name: 'Backend',
+          assigned_to_id: 7,
+        });
+
+        expect(mockAxiosInstance.post).toHaveBeenCalledWith(
+          '/projects/my-project/issue_categories.json',
+          { issue_category: { name: 'Backend', assigned_to_id: 7 } }
+        );
+        expect(result).toEqual(category);
+      });
+
+      it('leaves the assignee out of the payload when it is not given', async () => {
+        mockAxiosInstance.post.mockResolvedValue({ data: { issue_category: category } });
+
+        await client.createCategory(3, { name: 'Backend' });
+
+        expect(mockAxiosInstance.post).toHaveBeenCalledWith('/projects/3/issue_categories.json', {
+          issue_category: { name: 'Backend' },
+        });
+      });
+
+      it('refuses a dot segment as the project', async () => {
+        await expect(client.createCategory('..', { name: 'x' })).rejects.toThrow(
+          'Invalid identifier'
+        );
+        expect(mockAxiosInstance.post).not.toHaveBeenCalled();
+      });
+
+      it('names the manage_categories permission on a 403', async () => {
+        mockAxiosInstance.post.mockRejectedValue(httpError(403));
+
+        await expect(client.createCategory('my-project', { name: 'x' })).rejects.toThrow(
+          'Manage issue categories" (manage_categories)'
+        );
+      });
+
+      it('propagates a 422 for a duplicate name unchanged', async () => {
+        const rejection = httpError(422, { errors: ['Name has already been taken'] });
+        mockAxiosInstance.post.mockRejectedValue(rejection);
+
+        await expect(client.createCategory('my-project', { name: 'Backend' })).rejects.toBe(
+          rejection
+        );
+      });
+    });
+
+    describe('updateCategory', () => {
+      it('puts only the fields given', async () => {
+        mockAxiosInstance.put.mockResolvedValue({ data: '' });
+
+        await client.updateCategory(5, { name: 'API' });
+
+        expect(mockAxiosInstance.put).toHaveBeenCalledWith('/issue_categories/5.json', {
+          issue_category: { name: 'API' },
+        });
+      });
+
+      it('sends a null assignee to clear the default assignee', async () => {
+        mockAxiosInstance.put.mockResolvedValue({ data: '' });
+
+        await client.updateCategory(5, { name: 'API', assigned_to_id: null });
+
+        expect(mockAxiosInstance.put).toHaveBeenCalledWith('/issue_categories/5.json', {
+          issue_category: { name: 'API', assigned_to_id: null },
+        });
+      });
+
+      it('sends nothing and throws when no field is given', async () => {
+        await expect(client.updateCategory(5, {})).rejects.toThrow(
+          'Nothing to update on category 5'
+        );
+        expect(mockAxiosInstance.put).not.toHaveBeenCalled();
+      });
+
+      it('does not check the category project against the configured one', async () => {
+        const scopedClient = new RedmineClient(config, {
+          host_url: 'https://redmine.example.com',
+          project_id: 'other-project',
+        });
+        mockAxiosInstance.put.mockResolvedValue({ data: '' });
+
+        await scopedClient.updateCategory(5, { name: 'API' });
+
+        expect(mockAxiosInstance.get).not.toHaveBeenCalled();
+        expect(mockAxiosInstance.put).toHaveBeenCalledTimes(1);
+      });
+
+      it('names the manage_categories permission on a 403', async () => {
+        mockAxiosInstance.put.mockRejectedValue(httpError(403));
+
+        await expect(client.updateCategory(5, { name: 'API' })).rejects.toThrow(
+          'Manage issue categories" (manage_categories)'
+        );
+      });
+
+      it('propagates a 404 for an unknown category unchanged', async () => {
+        const notFound = httpError(404);
+        mockAxiosInstance.put.mockRejectedValue(notFound);
+
+        await expect(client.updateCategory(999, { name: 'API' })).rejects.toBe(notFound);
+      });
+    });
+
+    describe('deleteCategory', () => {
+      it('deletes without a reassignment when none is given', async () => {
+        mockAxiosInstance.delete.mockResolvedValue({ data: '' });
+
+        await client.deleteCategory(5);
+
+        expect(mockAxiosInstance.delete).toHaveBeenCalledWith('/issue_categories/5.json', {
+          params: {},
+        });
+      });
+
+      it('sends reassign_to_id as a query parameter', async () => {
+        mockAxiosInstance.delete.mockResolvedValue({ data: '' });
+
+        await client.deleteCategory(5, 6);
+
+        expect(mockAxiosInstance.delete).toHaveBeenCalledWith('/issue_categories/5.json', {
+          params: { reassign_to_id: 6 },
+        });
+      });
+
+      it('does not check the category project against the configured one', async () => {
+        const scopedClient = new RedmineClient(config, {
+          host_url: 'https://redmine.example.com',
+          project_id: 'other-project',
+        });
+        mockAxiosInstance.delete.mockResolvedValue({ data: '' });
+
+        await scopedClient.deleteCategory(5);
+
+        expect(mockAxiosInstance.get).not.toHaveBeenCalled();
+        expect(mockAxiosInstance.delete).toHaveBeenCalledTimes(1);
+      });
+
+      it('names the manage_categories permission on a 403', async () => {
+        mockAxiosInstance.delete.mockRejectedValue(httpError(403));
+
+        await expect(client.deleteCategory(5)).rejects.toThrow(
+          'Manage issue categories" (manage_categories)'
+        );
+      });
+
+      it('propagates any other failure unchanged', async () => {
+        const failure = new Error('socket hang up');
+        mockAxiosInstance.delete.mockRejectedValue(failure);
+
+        await expect(client.deleteCategory(5)).rejects.toBe(failure);
+      });
     });
   });
 
@@ -2052,6 +2374,63 @@ describe('RedmineClient', () => {
       const result = RedmineClient.formatError(error);
       expect(result).toContain('listVersions');
       expect(result).toContain('Call getMappings for valid values in this project.');
+    });
+
+    it('appends a listCategories hint when a 422 validation error names the category', () => {
+      const error = {
+        isAxiosError: true,
+        response: {
+          status: 422,
+          data: { errors: ['Category is not included in the list'] },
+        },
+        message: 'Unprocessable Entity',
+      } as AxiosError;
+
+      const result = RedmineClient.formatError(error, { issue_id: 83432 });
+      expect(result).toBe(
+        'Validation error: ["Category is not included in the list"] (issue_id=83432). ' +
+          "If the error is about the category, call listCategories for the issue's project and pick one of its categories."
+      );
+    });
+
+    it('keeps the listVersions and listCategories hints together', () => {
+      const error = {
+        isAxiosError: true,
+        response: {
+          status: 422,
+          data: { errors: ['Target version is not included in the list', 'Category is invalid'] },
+        },
+        message: 'Unprocessable Entity',
+      } as AxiosError;
+
+      const result = RedmineClient.formatError(error);
+      expect(result).toContain('listVersions');
+      expect(result).toContain('listCategories');
+    });
+
+    it('does not append a listCategories hint for a category name error', () => {
+      const error = {
+        isAxiosError: true,
+        response: {
+          status: 422,
+          data: { errors: ['Name has already been taken'] },
+        },
+        message: 'Unprocessable Entity',
+      } as AxiosError;
+
+      expect(RedmineClient.formatError(error)).not.toContain('listCategories');
+    });
+
+    it('names listCategories when a category ID is not found', () => {
+      const error = {
+        isAxiosError: true,
+        response: { status: 404, data: {} },
+        message: 'Not Found',
+      } as AxiosError;
+
+      expect(RedmineClient.formatError(error, { category_id: 999 })).toBe(
+        'Resource not found in Redmine: category_id=999. Verify the category ID with listCategories(project_id).'
+      );
     });
 
     it('does not append a listVersions hint for a field that merely starts with "target version"', () => {
@@ -3525,6 +3904,68 @@ describe('RedmineClient', () => {
         await scopedClient.listVersions('my-project');
 
         expect(mockAxiosInstance.get).toHaveBeenCalledWith('/projects/my-project/versions.json');
+      });
+    });
+
+    describe('listCategories() and createCategory() scoping', () => {
+      it('reads the categories of the configured project', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockResolvedValue({ data: { issue_categories: [] } });
+
+        await scopedClient.listCategories('my-project');
+
+        expect(mockAxiosInstance.get).toHaveBeenCalledWith(
+          '/projects/my-project/issue_categories.json'
+        );
+      });
+
+      it('rejects another project without reading its categories', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        setupScopedGetMock({
+          '/projects/other-project.json': { data: { project: { id: 99 } } },
+        });
+
+        await expect(scopedClient.listCategories('other-project')).rejects.toThrow(
+          ProjectScopeError
+        );
+        expect(mockAxiosInstance.get).not.toHaveBeenCalledWith(
+          '/projects/other-project/issue_categories.json'
+        );
+      });
+
+      it("accepts the configured project's numeric id", async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        setupScopedGetMock({
+          '/projects/42/issue_categories.json': { data: { issue_categories: [] } },
+        });
+
+        await scopedClient.listCategories(42);
+
+        expect(mockAxiosInstance.get).toHaveBeenCalledWith('/projects/42/issue_categories.json');
+      });
+
+      it('rejects another project without creating a category in it', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        setupScopedGetMock({
+          '/projects/other-project.json': { data: { project: { id: 99 } } },
+        });
+
+        await expect(scopedClient.createCategory('other-project', { name: 'x' })).rejects.toThrow(
+          ProjectScopeError
+        );
+        expect(mockAxiosInstance.post).not.toHaveBeenCalled();
+      });
+
+      it('creates a category in the configured project', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.post.mockResolvedValue({ data: { issue_category: { id: 5 } } });
+
+        await scopedClient.createCategory('my-project', { name: 'x' });
+
+        expect(mockAxiosInstance.post).toHaveBeenCalledWith(
+          '/projects/my-project/issue_categories.json',
+          { issue_category: { name: 'x' } }
+        );
       });
     });
 

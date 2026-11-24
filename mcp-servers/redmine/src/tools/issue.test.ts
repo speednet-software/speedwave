@@ -18,6 +18,7 @@ type MockClient = {
   commentIssue: Mock;
   resolveUser: Mock;
   getMappings: Mock;
+  getProjectScope: Mock;
 };
 
 const createMockClient = (): MockClient => ({
@@ -29,6 +30,7 @@ const createMockClient = (): MockClient => ({
   commentIssue: vi.fn(),
   resolveUser: vi.fn(),
   getMappings: vi.fn(),
+  getProjectScope: vi.fn().mockReturnValue(null),
 });
 
 describe('issue-tools', () => {
@@ -375,6 +377,59 @@ describe('issue-tools', () => {
         priority_id: 3,
         fixed_version_id: 87,
         parent_id: 10,
+      });
+    });
+
+    describe('category_id', () => {
+      const listIssueIds = () =>
+        createIssueTools(mockClient as unknown as RedmineClient).find(
+          (t) => t.tool.name === 'listIssueIds'
+        )!.handler;
+
+      beforeEach(() => {
+        mockClient.listIssues.mockResolvedValue({ issues: [{ id: 101 }], total_count: 1 });
+      });
+
+      it.each([5, '5|6', '!5', '!*', '*', 'ev5'])(
+        'passes %j to the client unchanged',
+        async (category_id) => {
+          const result = await listIssueIds()({ project_id: 'my-project', category_id });
+
+          expect(mockClient.listIssues).toHaveBeenCalledWith({
+            project_id: 'my-project',
+            category_id,
+          });
+          expect(JSON.parse((result.content[0] as { text: string }).text)).toEqual({
+            ids: [101],
+            total_count: 1,
+          });
+        }
+      );
+
+      it('uses the configured project when project_id is omitted', async () => {
+        mockClient.getProjectScope.mockReturnValue('my-project');
+
+        const result = await listIssueIds()({ category_id: 5 });
+
+        expect(result.isError).toBeUndefined();
+        expect(mockClient.listIssues).toHaveBeenCalledWith({ category_id: 5 });
+      });
+
+      it('returns an error before any request when there is no project', async () => {
+        const result = await listIssueIds()({ category_id: 5 });
+
+        expect(mockClient.listIssues).not.toHaveBeenCalled();
+        expect(result.isError).toBe(true);
+        expect((result.content[0] as { text: string }).text).toContain(
+          'category_id requires project_id'
+        );
+      });
+
+      it('does not require a project when category_id is not given', async () => {
+        const result = await listIssueIds()({ status: 'open' });
+
+        expect(result.isError).toBeUndefined();
+        expect(mockClient.listIssues).toHaveBeenCalledTimes(1);
       });
     });
   });
@@ -783,6 +838,22 @@ describe('issue-tools', () => {
       });
     });
 
+    it('passes category_id through to the client', async () => {
+      mockClient.createIssue.mockResolvedValue({ id: 1 });
+
+      const tools = createIssueTools(mockClient as unknown as RedmineClient);
+      const handler = tools.find((t) => t.tool.name === 'createIssue')!.handler;
+
+      await handler({ project_id: 'p', subject: 's', category_id: 5 });
+
+      expect(mockClient.createIssue).toHaveBeenCalledWith({
+        project_id: 'p',
+        subject: 's',
+        category_id: 5,
+        files: undefined,
+      });
+    });
+
     it('names the fixed_version_id it sent when Redmine rejects the new issue', async () => {
       const formatErrorSpy = vi.spyOn(RedmineClient, 'formatError');
       formatErrorSpy.mockClear();
@@ -881,6 +952,7 @@ describe('issue-tools', () => {
                 tracker: { id: 1, name: 'Bug' },
                 status: { id: 2, name: 'In Progress' },
                 priority: { id: 2, name: 'Normal' },
+                category: null,
               },
               null,
               2
@@ -925,6 +997,7 @@ describe('issue-tools', () => {
         priority: { id: 3, name: 'High' },
         assigned_to: { id: 1454, name: 'Kacper' },
         fixed_version: { id: 87, name: 'Week 10' },
+        category: null,
         parent: { id: 83000 },
         estimated_hours: 4,
       });
@@ -932,6 +1005,31 @@ describe('issue-tools', () => {
         issue_id: 83432,
         fixed_version_id: 87,
       });
+    });
+
+    it.each([
+      [5, { id: 5, name: 'Backend' }],
+      [null, null],
+    ])('sends category_id %j and returns category %j', async (category_id, category) => {
+      mockClient.updateIssue.mockResolvedValue({
+        id: 12345,
+        subject: 's',
+        ...(category ? { category } : {}),
+      });
+      const tool = createIssueTools(mockClient as unknown as RedmineClient).find(
+        (t) => t.tool.name === 'updateIssue'
+      )!;
+
+      const emitted = expectEmittedKeysDeclared(
+        tool.tool,
+        await tool.handler({ issue_id: 12345, category_id })
+      );
+
+      expect(mockClient.updateIssue).toHaveBeenCalledWith(12345, {
+        issue_id: 12345,
+        category_id,
+      });
+      expect(emitted.category).toEqual(category);
     });
 
     it('names the fixed_version_id it sent when Redmine rejects the update', async () => {

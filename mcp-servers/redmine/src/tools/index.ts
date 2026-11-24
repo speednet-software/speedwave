@@ -15,6 +15,7 @@ import { createUserTools } from './user-tools.js';
 import { createProjectTools } from './project-tools.js';
 import { createRelationTools } from './relation-tools.js';
 import { createConfigTools } from './config-tools.js';
+import { createCategoryTools } from './category-tools.js';
 
 function withNumericIds(tool: Tool, handler: ToolHandler): ToolHandler {
   const ids = Object.entries(tool.inputSchema.properties)
@@ -63,6 +64,7 @@ export function createToolDefinitions(client: RedmineClient | null): ToolDefinit
     ...createJournalTools(client),
     ...createUserTools(client),
     ...createProjectTools(client),
+    ...createCategoryTools(client),
     ...createRelationTools(client),
     ...createConfigTools(client),
   ].map(({ tool, handler }) => ({
@@ -79,3 +81,4 @@ export { createUserTools } from './user-tools.js';
 export { createProjectTools } from './project-tools.js';
 export { createRelationTools } from './relation-tools.js';
 export { createConfigTools } from './config-tools.js';
+export { createCategoryTools } from './category-tools.js';

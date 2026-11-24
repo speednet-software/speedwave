@@ -15,6 +15,7 @@ import {
   MAX_WORKSPACE_FILES,
 } from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
+import { TOOL_NAMES } from '../tool-names.js';
 import { resolveParams } from './helpers.js';
 import { resolveAttachmentFiles } from './attachment-files.js';
 import { withRedmineErrors } from './error-handling.js';
@@ -100,6 +101,11 @@ const listIssueIdsTool: Tool = {
         description:
           'Target version ID — obtained from listVersions; add status: "*" for closed ones',
       },
+      category_id: {
+        type: ['number', 'string'],
+        description:
+          'Category filter — ID from listCategories, or Redmine filter syntax: "5|6" (any of), "!5" (not), "!*" (no category), "*" (any), ev / !ev / cf for history. Needs project_id or a configured project',
+      },
       parent_id: {
         type: 'number',
         description: 'Parent issue ID (lists its subtasks); add status: "*" for closed ones',
@@ -117,6 +123,10 @@ const listIssueIdsTool: Tool = {
     {
       description: 'Partial: my open issues',
       input: { status: 'open', assigned_to: 'me' },
+    },
+    {
+      description: 'Partial: issues without a category (needs a project)',
+      input: { project_id: 'my-project', category_id: '!*' },
     },
     {
       description: 'Full: project issues with subtasks',
@@ -283,6 +293,11 @@ const createIssueTool: Tool = {
         type: 'number',
         description: 'Target version ID — obtained from listVersions',
       },
+      category_id: {
+        type: 'number',
+        description:
+          "Category ID — obtained from listCategories; must belong to the issue's project. A category with a default assignee sets the assignee when none is given",
+      },
       file_paths: {
         type: 'array',
         items: { type: 'string' },
@@ -396,6 +411,11 @@ if (!updated.assigned_to || updated.assigned_to.id !== userId) {
         type: 'number',
         description: 'Target version ID — obtained from listVersions; only an open version',
       },
+      category_id: {
+        type: ['number', 'null'],
+        description:
+          "Category ID — obtained from listCategories; must belong to the issue's project. null clears the category",
+      },
       notes: { type: 'string', description: 'Update notes/comment' },
     },
     required: ['issue_id'],
@@ -413,6 +433,11 @@ if (!updated.assigned_to || updated.assigned_to.id !== userId) {
       priority: NAMED_REF,
       assigned_to: { ...NAMED_REF, description: 'Assigned user; absent when unassigned' },
       fixed_version: { ...NAMED_REF, description: 'Target version; absent when none is set' },
+      category: {
+        type: ['object', 'null'],
+        description: 'Category; null when none is set',
+        properties: { id: { type: 'number' }, name: { type: 'string' } },
+      },
       parent: {
         type: 'object',
         description: 'Parent issue; absent when none is set',
@@ -437,6 +462,10 @@ if (!updated.assigned_to || updated.assigned_to.id !== userId) {
     {
       description: 'Partial: plan into a target version (id from listVersions)',
       input: { issue_id: 12345, fixed_version_id: 87 },
+    },
+    {
+      description: 'Partial: set a category (id from listCategories), or null to clear it',
+      input: { issue_id: 12345, category_id: 5 },
     },
     {
       description: 'Full: update multiple fields',
@@ -524,6 +553,14 @@ export function createIssueTools(client: RedmineClient | null): ToolDefinition[]
           }
           const assignError = await resolveAssignedTo(client, resolved);
           if (assignError) return assignError;
+          if (resolved.category_id && !(resolved.project_id || client.getProjectScope())) {
+            return teachingErrorResult({
+              paramName: 'project_id',
+              correctValueTool: TOOL_NAMES.LIST_PROJECT_IDS,
+              nextStep:
+                'category_id requires project_id: Redmine ignores the category filter on a query without a project, so no request was sent. Pass project_id, or configure the Project ID of the integration.',
+            });
+          }
           const result = await client.listIssues(
             resolved as Parameters<typeof client.listIssues>[0]
           );
@@ -600,6 +637,7 @@ export function createIssueTools(client: RedmineClient | null): ToolDefinition[]
             priority: updatedIssue.priority,
             assigned_to: updatedIssue.assigned_to,
             fixed_version: updatedIssue.fixed_version,
+            category: updatedIssue.category ?? null,
             parent: updatedIssue.parent,
             estimated_hours: updatedIssue.estimated_hours,
           });

@@ -270,6 +270,7 @@ export interface RedmineIssue {
    * Assigned user (optional).
    */
   assigned_to?: { id: number; name: string };
+  category?: { id: number; name: string };
   fixed_version?: { id: number; name: string };
   /**
    * Issue title/subject.
@@ -533,6 +534,17 @@ export interface RedmineVersion {
 }
 
 /**
+ * Redmine issue category: a project's label for issues, with an optional default assignee.
+ * @interface RedmineCategory
+ */
+export interface RedmineCategory {
+  id: number;
+  project: { id: number; name: string };
+  name: string;
+  assigned_to?: { id: number; name: string };
+}
+
+/**
  * Redmine project object.
  * @interface RedmineProject
  */
@@ -684,6 +696,7 @@ interface IssuePayload {
    */
   estimated_hours?: number;
   fixed_version_id?: number;
+  category_id?: number | null;
   /**
    * Update notes/comment.
    */
@@ -845,6 +858,9 @@ function pathSegment(value: string | number): string {
   return segment;
 }
 
+const CATEGORY_PERMISSION_DENIED =
+  'Permission denied. Creating, changing and deleting issue categories needs the Redmine permission "Manage issue categories" (manage_categories) in the category\'s project, and this API key\'s user does not have it there. Have a Redmine administrator grant it, or use an account that has it.';
+
 /** Attempted resource identifier(s) surfaced in an error message, e.g. `{ issue_id: 12345 }`. */
 export type ErrorContext = Record<string, string | number>;
 
@@ -857,6 +873,7 @@ const NOT_FOUND_RECOVERY_HINTS: Record<string, string> = {
   relation_id: `Verify the relation ID with ${TOOL_NAMES.LIST_RELATIONS}(issue_id).`,
   attachment_id: `Verify the attachment ID with ${TOOL_NAMES.GET_ISSUE_FULL}(issue_id, include ["attachments"]).`,
   time_entry_id: `Verify the time entry ID with ${TOOL_NAMES.LIST_TIME_ENTRIES}.`,
+  category_id: `Verify the category ID with ${TOOL_NAMES.LIST_CATEGORIES}(project_id).`,
 };
 
 /**
@@ -921,6 +938,8 @@ function formatValidationError(errors: unknown, context?: ErrorContext): string 
     names(ASSIGNEE_HINT_PREFIXES) && 'Call resolveUser or listUsers to find a valid assignee.',
     (context?.fixed_version_id !== undefined || names(['target version'])) &&
       `If the error is about the target version, call ${TOOL_NAMES.LIST_VERSIONS} and pick a version whose status is open.`,
+    names(['category']) &&
+      `If the error is about the category, call ${TOOL_NAMES.LIST_CATEGORIES} for the issue's project and pick one of its categories.`,
     names(MAPPABLE_FIELDS) && 'Call getMappings for valid values in this project.',
   ].filter((hint): hint is string => typeof hint === 'string');
   return hints.length > 0 ? `${prefixed}. ${hints.join(' ')}` : prefixed;
@@ -1109,6 +1128,7 @@ export class RedmineClient {
    * @param options.tracker_id - Filter by tracker ID.
    * @param options.priority_id - Filter by priority ID.
    * @param options.fixed_version_id - Filter by target version ID.
+   * @param options.category_id - Filter by category, in Redmine's short filter syntax (`5`, `5|6`, `!5`, `!*`, `*`).
    * @param options.parent_id - Filter by parent issue ID.
    * @param options.limit - Maximum number of results (default 25).
    * @param options.offset - Pagination offset (default 0).
@@ -1121,6 +1141,7 @@ export class RedmineClient {
       tracker_id?: number;
       priority_id?: number;
       fixed_version_id?: number;
+      category_id?: number | string;
       parent_id?: number;
       limit?: number;
       offset?: number;
@@ -1139,6 +1160,7 @@ export class RedmineClient {
     if (options.tracker_id) params.tracker_id = options.tracker_id;
     if (options.priority_id) params.priority_id = options.priority_id;
     if (options.fixed_version_id) params.fixed_version_id = options.fixed_version_id;
+    if (options.category_id) params.category_id = options.category_id;
     if (options.parent_id) params.parent_id = options.parent_id;
 
     const response = await this.client.get('/issues.json', { params });
@@ -1214,6 +1236,7 @@ export class RedmineClient {
    * @param options.parent_issue_id - Parent issue ID (for subtasks).
    * @param options.estimated_hours - Estimated hours for completion.
    * @param options.fixed_version_id - Target version ID.
+   * @param options.category_id - Category ID; a category with a default assignee sets the assignee when none is given.
    * @param options.files - Workspace files streamed to Redmine and attached to the new issue.
    * @throws {Error} When subject is empty or API request fails.
    */
@@ -1228,6 +1251,7 @@ export class RedmineClient {
     parent_issue_id?: number;
     estimated_hours?: number;
     fixed_version_id?: number;
+    category_id?: number;
     files?: WorkspaceFile[];
   }): Promise<RedmineIssue> {
     this._enforceProjectId(options.project_id);
@@ -1255,6 +1279,7 @@ export class RedmineClient {
     if (options.parent_issue_id) issue.parent_issue_id = options.parent_issue_id;
     if (options.estimated_hours) issue.estimated_hours = options.estimated_hours;
     if (options.fixed_version_id) issue.fixed_version_id = options.fixed_version_id;
+    if (options.category_id) issue.category_id = options.category_id;
     if (options.files?.length) issue.uploads = await this._uploadFiles(options.files);
 
     const response = await this.client.post('/issues.json', { issue });
@@ -1275,6 +1300,7 @@ export class RedmineClient {
    * @param options.parent_issue_id - New parent issue ID.
    * @param options.estimated_hours - New estimated hours.
    * @param options.fixed_version_id - New target version ID.
+   * @param options.category_id - New category ID, or null to clear the category.
    * @param options.notes - Update notes/comment.
    */
   async updateIssue(
@@ -1290,6 +1316,7 @@ export class RedmineClient {
       parent_issue_id?: number;
       estimated_hours?: number;
       fixed_version_id?: number;
+      category_id?: number | null;
       notes?: string;
     }
   ): Promise<RedmineIssue> {
@@ -1315,6 +1342,7 @@ export class RedmineClient {
     if (options.parent_issue_id !== undefined) issue.parent_issue_id = options.parent_issue_id;
     if (options.estimated_hours !== undefined) issue.estimated_hours = options.estimated_hours;
     if (options.fixed_version_id) issue.fixed_version_id = options.fixed_version_id;
+    if (options.category_id !== undefined) issue.category_id = options.category_id;
     if (options.notes) issue.notes = sanitizeTextile(options.notes);
 
     if (Object.keys(issue).length === 0) {
@@ -1665,13 +1693,116 @@ export class RedmineClient {
     projectId: string | number
   ): Promise<{ versions: RedmineVersion[]; total_count: number }> {
     const target = String(projectId);
+    await this._ensureProjectInScope(target);
+    const response = await this.client.get(`/projects/${pathSegment(target)}/versions.json`);
+    const versions = (response.data.versions ?? []) as RedmineVersion[];
+    return { versions, total_count: response.data.total_count ?? versions.length };
+  }
+
+  /**
+   * List the issue categories of a project.
+   * @param projectId - Project ID or identifier; the configured project may be named either way.
+   * @throws {ProjectScopeError} When projectId names a project other than the configured one.
+   */
+  async listCategories(
+    projectId: string | number
+  ): Promise<{ categories: RedmineCategory[]; total_count: number }> {
+    const target = String(projectId);
+    await this._ensureProjectInScope(target);
+    const response = await this.client.get(
+      `/projects/${pathSegment(target)}/issue_categories.json`
+    );
+    const categories = (response.data.issue_categories ?? []) as RedmineCategory[];
+    return { categories, total_count: response.data.total_count ?? categories.length };
+  }
+
+  /**
+   * Get one issue category by ID; the category's project is not checked against the configured one.
+   * @param categoryId - The category ID.
+   */
+  async showCategory(categoryId: number): Promise<RedmineCategory> {
+    const response = await this.client.get(`/issue_categories/${pathSegment(categoryId)}.json`);
+    return response.data.issue_category;
+  }
+
+  /**
+   * Create an issue category in a project; needs the Redmine permission "Manage issue categories".
+   * @param projectId - Project ID or identifier; the configured project may be named either way.
+   * @param options - Category fields.
+   * @param options.name - Category name, unique within the project.
+   * @param options.assigned_to_id - Default assignee for issues in this category.
+   * @throws {ProjectScopeError} When projectId names a project other than the configured one.
+   */
+  async createCategory(
+    projectId: string | number,
+    options: { name: string; assigned_to_id?: number }
+  ): Promise<RedmineCategory> {
+    const target = String(projectId);
+    await this._ensureProjectInScope(target);
+    const issue_category: { name: string; assigned_to_id?: number } = { name: options.name };
+    if (options.assigned_to_id) issue_category.assigned_to_id = options.assigned_to_id;
+    const response = await this._asCategoryManager(() =>
+      this.client.post(`/projects/${pathSegment(target)}/issue_categories.json`, {
+        issue_category,
+      })
+    );
+    return response.data.issue_category;
+  }
+
+  /**
+   * Update an issue category by ID; the category's project is not checked against the configured one.
+   * @param categoryId - The category ID.
+   * @param options - Fields to change.
+   * @param options.name - New category name.
+   * @param options.assigned_to_id - New default assignee, or null to clear it.
+   * @throws {Error} When no field is given.
+   */
+  async updateCategory(
+    categoryId: number,
+    options: { name?: string; assigned_to_id?: number | null }
+  ): Promise<void> {
+    const issue_category: { name?: string; assigned_to_id?: number | null } = {};
+    if (options.name !== undefined) issue_category.name = options.name;
+    if (options.assigned_to_id !== undefined)
+      issue_category.assigned_to_id = options.assigned_to_id;
+    if (Object.keys(issue_category).length === 0) {
+      throw new Error(
+        `Nothing to update on category ${categoryId}: no field was given, so no request was sent to Redmine. Pass name or assigned_to_id.`
+      );
+    }
+    await this._asCategoryManager(() =>
+      this.client.put(`/issue_categories/${pathSegment(categoryId)}.json`, { issue_category })
+    );
+  }
+
+  /**
+   * Delete an issue category by ID; the category's project is not checked against the configured one.
+   * @param categoryId - The category ID.
+   * @param reassignToId - Category of the same project that takes over the issues; without it they lose their category.
+   */
+  async deleteCategory(categoryId: number, reassignToId?: number): Promise<void> {
+    const params = reassignToId === undefined ? {} : { reassign_to_id: reassignToId };
+    await this._asCategoryManager(() =>
+      this.client.delete(`/issue_categories/${pathSegment(categoryId)}.json`, { params })
+    );
+  }
+
+  private async _asCategoryManager<T>(request: () => Promise<T>): Promise<T> {
+    try {
+      return await request();
+    } catch (error) {
+      if (axios.isAxiosError(error) && error.response?.status === 403) {
+        throw new Error(CATEGORY_PERMISSION_DENIED);
+      }
+      throw error;
+    }
+  }
+
+  private async _ensureProjectInScope(target: string): Promise<void> {
     const scope = this.getProjectScope();
     if (scope && target !== scope && !(await this._namesScopedProject(scope, target))) {
       throw new ProjectScopeError(scope, target);
     }
-    const response = await this.client.get(`/projects/${pathSegment(target)}/versions.json`);
-    const versions = (response.data.versions ?? []) as RedmineVersion[];
-    return { versions, total_count: response.data.total_count ?? versions.length };
   }
 
   private async _namesScopedProject(scope: string, target: string): Promise<boolean> {

@@ -7,6 +7,7 @@ export const TOOL_NAMES = {
   LIST_PROJECT_IDS: 'listProjectIds',
   SEARCH_PROJECT_IDS: 'searchProjectIds',
   LIST_VERSIONS: 'listVersions',
+  LIST_CATEGORIES: 'listCategories',
   LIST_JOURNALS: 'listJournals',
   LIST_RELATIONS: 'listRelations',
   LIST_TIME_ENTRIES: 'listTimeEntries',
