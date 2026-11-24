@@ -10,7 +10,7 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-burn = { version = "0.21", default-features = false, features = ["std", "ndarray", "wgpu"] }
+burn = { version = "0.22", default-features = false, features = ["std", "ndarray", "wgpu"] }
 tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }
 safetensors = "0.8"
 sha2 = "0.11"
