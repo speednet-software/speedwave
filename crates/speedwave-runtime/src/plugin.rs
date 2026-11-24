@@ -2,9 +2,10 @@
 
 use crate::compose::container_user;
 use crate::consts;
+use crate::secret_store::{secret_exists_in, SecretName, SecretStore};
 use crate::signing;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Slug validation: lowercase letters, digits, hyphens. Starts with letter. Max 64 chars.
@@ -48,7 +49,7 @@ pub struct AuthFieldDef {
     pub field_type: String,
     /// Placeholder text for the input.
     pub placeholder: String,
-    /// Whether the value is a secret (stored as a token file).
+    /// Whether the value is a secret (kept in the encrypted secret store, never a token file).
     pub is_secret: bool,
     /// Whether the user must provide a value before the plugin can run. Defaults to `true` so
     /// manifests that omit the field keep the pre-existing strict behavior.
@@ -612,7 +613,7 @@ pub fn write_settings_file_in(
 }
 
 /// Host-only OAuth state `~/.speedwave/oauth/<project>/<service_id>.json`
-/// (refreshToken + providerData + scopes; ADR-060). Never mounted into a worker.
+/// (providerData + scopes + expiry, no secrets; ADR-060). Never mounted into a worker.
 pub fn oauth_state_file(project: &str, service_id: &str) -> PathBuf {
     oauth_state_file_in(consts::data_dir(), project, service_id)
 }
@@ -626,8 +627,9 @@ pub fn oauth_state_file_in(data_dir: &Path, project: &str, service_id: &str) -> 
         .join(format!("{service_id}.json"))
 }
 
-/// Host-only pre-auth seed `~/.speedwave/oauth/<project>/<slug>.seed.json`: client id/secret saved
-/// before authorization. `start_plugin_oauth` reads it and writes full state; never mounted.
+/// Host-only pre-auth seed `~/.speedwave/oauth/<project>/<slug>.seed.json`: the non-secret values
+/// saved before authorization (secret ones are in the secret store). `start_plugin_oauth` reads it
+/// through [`read_oauth_seed_in`] and writes full state; never mounted.
 pub fn oauth_seed_file(project: &str, slug: &str) -> PathBuf {
     oauth_seed_file_in(consts::data_dir(), project, slug)
 }
@@ -640,6 +642,233 @@ pub fn oauth_seed_file_in(data_dir: &Path, project: &str, slug: &str) -> PathBuf
         .join(format!("{slug}.seed.json"))
 }
 
+/// Saves credential values of one plugin: secret fields go to the secret store, non-secret
+/// `oauth_flow` fields to the pre-auth seed, every other field to `tokens/<project>/<service_id>/<key>`.
+pub fn write_plugin_credentials_in(
+    data_dir: &Path,
+    project: &str,
+    service_id: &str,
+    fields: &[AuthFieldDef],
+    values: &HashMap<String, String>,
+) -> anyhow::Result<()> {
+    let mut secrets = Vec::new();
+    let mut plain = Vec::new();
+    let mut seed = BTreeMap::new();
+    for (key, value) in values {
+        let field = fields
+            .iter()
+            .find(|f| f.key == *key)
+            .ok_or_else(|| anyhow::anyhow!("field '{key}' is not declared by the plugin"))?;
+        if field.is_secret {
+            if value.is_empty() {
+                anyhow::bail!("field '{key}' must not be empty");
+            }
+            secrets.push((secret_name(project, service_id, key)?, value));
+        } else if field.oauth_flow {
+            seed.insert(key.clone(), value.clone());
+        } else {
+            if key.is_empty() || key.contains(['/', '\\', '\0']) || key.contains("..") {
+                anyhow::bail!("field '{key}' is not a valid token file name");
+            }
+            plain.push((key, value));
+        }
+    }
+
+    if !secrets.is_empty() {
+        let store = SecretStore::open(data_dir)?;
+        for (name, value) in secrets {
+            store.write(&name, value)?;
+        }
+    }
+    if !plain.is_empty() {
+        let token_dir = token_dir_in(data_dir, project, service_id);
+        for dir in token_dir.ancestors().take(3) {
+            crate::fs_perms::ensure_owner_only_dir(dir)?;
+        }
+        for (key, value) in plain {
+            crate::fs_perms::write_restricted_file(&token_dir.join(key), value)?;
+        }
+    }
+    if !seed.is_empty() {
+        write_oauth_seed_in(data_dir, project, service_id, &seed)?;
+    }
+    Ok(())
+}
+
+/// Whether one credential field of a plugin has a value: a secret is checked by the existence of its
+/// encrypted file (nothing is decrypted), any other field by a non-empty token file.
+pub fn plugin_credential_present_in(
+    data_dir: &Path,
+    project: &str,
+    service_id: &str,
+    field: &AuthFieldDef,
+) -> bool {
+    if field.is_secret {
+        return secret_name(project, service_id, &field.key)
+            .is_ok_and(|name| secret_exists_in(data_dir, &name));
+    }
+    token_dir_in(data_dir, project, service_id)
+        .join(&field.key)
+        .metadata()
+        .is_ok_and(|m| m.len() > 0)
+}
+
+/// Keys of the required, non-OAuth secret fields that have no value yet.
+pub fn missing_required_credentials_in(
+    data_dir: &Path,
+    project: &str,
+    service_id: &str,
+    fields: &[AuthFieldDef],
+) -> Vec<String> {
+    fields
+        .iter()
+        .filter(|f| blocks_plugin_readiness(f) && !f.oauth_flow)
+        .filter(|f| !plugin_credential_present_in(data_dir, project, service_id, f))
+        .map(|f| f.key.clone())
+        .collect()
+}
+
+/// The pre-auth seed of an OAuth plugin as one map: the plain seed file plus the secret `oauth_flow`
+/// values from the secret store. Fails when nothing is configured yet or a secret cannot be read.
+pub fn read_oauth_seed_in(
+    data_dir: &Path,
+    project: &str,
+    slug: &str,
+    fields: &[AuthFieldDef],
+) -> anyhow::Result<HashMap<String, String>> {
+    let mut seed = read_plain_seed(data_dir, project, slug)?;
+    let stored: Vec<(&AuthFieldDef, SecretName)> = oauth_secret_fields(fields, project, slug)?
+        .into_iter()
+        .filter(|(_, name)| secret_exists_in(data_dir, name))
+        .collect();
+    if !stored.is_empty() {
+        let store = SecretStore::open(data_dir)?;
+        for (field, name) in stored {
+            if let Some(value) = store.read(&name)? {
+                seed.insert(field.key.clone(), value.as_str().to_string());
+            }
+        }
+    }
+    if seed.is_empty() {
+        anyhow::bail!("OAuth client credentials are not configured yet");
+    }
+    Ok(seed)
+}
+
+/// Keys the pre-auth seed holds, secret ones included; nothing is decrypted.
+pub fn oauth_seed_keys_in(
+    data_dir: &Path,
+    project: &str,
+    slug: &str,
+    fields: &[AuthFieldDef],
+) -> HashSet<String> {
+    let mut keys: HashSet<String> = read_plain_seed(data_dir, project, slug)
+        .map(|seed| seed.into_keys().collect())
+        .unwrap_or_default();
+    if let Ok(secret_fields) = oauth_secret_fields(fields, project, slug) {
+        keys.extend(
+            secret_fields
+                .into_iter()
+                .filter(|(_, name)| secret_exists_in(data_dir, name))
+                .map(|(field, _)| field.key.clone()),
+        );
+    }
+    keys
+}
+
+/// Deletes every stored secret of one plugin service in a project (credential fields,
+/// `client_secret`, `refresh_token`, `access_token`) and their lock files; missing ones are fine.
+pub fn remove_plugin_secrets_in(
+    data_dir: &Path,
+    project: &str,
+    service_id: &str,
+) -> anyhow::Result<()> {
+    let store = SecretStore::open(data_dir)?;
+    let anchor = secret_name(project, service_id, "refresh_token")?;
+    let Some(dir) = store.file_path(&anchor).parent().map(Path::to_path_buf) else {
+        return Ok(());
+    };
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    for entry in entries.flatten() {
+        let Some(file_name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let secret_file = file_name.strip_suffix(".lock").unwrap_or(&file_name);
+        let belongs = SecretName::from_file_name(project, secret_file)
+            .is_some_and(|name| name.service() == service_id);
+        if belongs {
+            match std::fs::remove_file(entry.path()) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Deletes the stored secret of one plugin field; a missing one is fine.
+pub fn remove_plugin_secret_in(
+    data_dir: &Path,
+    project: &str,
+    service_id: &str,
+    key: &str,
+) -> anyhow::Result<()> {
+    let name = secret_name(project, service_id, key)?;
+    SecretStore::open(data_dir)?.delete(&name)?;
+    Ok(())
+}
+
+fn secret_name(project: &str, service_id: &str, key: &str) -> anyhow::Result<SecretName> {
+    SecretName::integration(project, service_id, key)
+        .map_err(|_| anyhow::anyhow!("plugin field '{key}' cannot be stored as a secret"))
+}
+
+fn oauth_secret_fields<'a>(
+    fields: &'a [AuthFieldDef],
+    project: &str,
+    slug: &str,
+) -> anyhow::Result<Vec<(&'a AuthFieldDef, SecretName)>> {
+    fields
+        .iter()
+        .filter(|f| f.is_secret && f.oauth_flow)
+        .map(|f| -> anyhow::Result<_> { Ok((f, secret_name(project, slug, &f.key)?)) })
+        .collect()
+}
+
+fn read_plain_seed(
+    data_dir: &Path,
+    project: &str,
+    slug: &str,
+) -> anyhow::Result<HashMap<String, String>> {
+    let path = oauth_seed_file_in(data_dir, project, slug);
+    match crate::fs_perms::read_regular_file_no_follow(&path) {
+        Ok(Some(text)) => serde_json::from_str(&text)
+            .map_err(|_| anyhow::anyhow!("the OAuth seed of plugin '{slug}' is corrupt")),
+        Ok(None) => Ok(HashMap::new()),
+        Err(_) => anyhow::bail!("the OAuth seed of plugin '{slug}' cannot be read"),
+    }
+}
+
+fn write_oauth_seed_in(
+    data_dir: &Path,
+    project: &str,
+    slug: &str,
+    seed: &BTreeMap<String, String>,
+) -> anyhow::Result<()> {
+    let path = oauth_seed_file_in(data_dir, project, slug);
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("the OAuth seed has no parent directory"))?;
+    crate::fs_perms::ensure_owner_only_dir(parent)?;
+    let body = serde_json::to_string_pretty(seed)? + "\n";
+    crate::fs_perms::write_restricted_file(&path, &body)
+}
+
 /// Testable version: constructs `<base>/.speedwave/tokens/<project>/<service_id>/`
 #[cfg(test)]
 fn token_dir_with_base(home: &Path, project: &str, service_id: &str) -> PathBuf {
@@ -649,85 +878,50 @@ fn token_dir_with_base(home: &Path, project: &str, service_id: &str) -> PathBuf 
         .join(service_id)
 }
 
-/// Writes credential/token files for a plugin to a token directory. Creates `<dir>/<key>` per
-/// entry with 0o600 perms. Test-only: Desktop owns the production write path (`plugin_cmd.rs`).
+/// Writes credential values of a plugin under a fake home; test-only wrapper of
+/// [`write_plugin_credentials_in`] for fields that are all declared with the given secrecy.
 #[cfg(test)]
 fn configure_plugin_tokens_with_base(
     home: &Path,
     project: &str,
     service_id: &str,
+    is_secret: bool,
     tokens: &HashMap<String, String>,
 ) -> anyhow::Result<()> {
-    let token_dir = token_dir_with_base(home, project, service_id);
-    write_token_files(&token_dir, tokens)
+    let fields: Vec<AuthFieldDef> = tokens
+        .keys()
+        .map(|key| test_field(key, is_secret))
+        .collect();
+    write_plugin_credentials_in(
+        &home.join(consts::DATA_DIR),
+        project,
+        service_id,
+        &fields,
+        tokens,
+    )
 }
 
-#[cfg(test)]
-fn write_token_files(token_dir: &Path, tokens: &HashMap<String, String>) -> anyhow::Result<()> {
-    std::fs::create_dir_all(token_dir)?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode_700 = std::fs::Permissions::from_mode(0o700);
-        std::fs::set_permissions(token_dir, mode_700.clone())?;
-        if let Some(project_dir) = token_dir.parent() {
-            std::fs::set_permissions(project_dir, mode_700.clone())?;
-            if let Some(tokens_dir) = project_dir.parent() {
-                std::fs::set_permissions(tokens_dir, mode_700)?;
-            }
-        }
-    }
-
-    for (key, value) in tokens {
-        let file_path = token_dir.join(key);
-        std::fs::write(&file_path, value)?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o600))?;
-        }
-    }
-    Ok(())
-}
-
-/// Checks whether a plugin's required auth_fields have corresponding token files. Test-only:
-/// Desktop owns the production readiness check (`plugin_cmd`).
+/// Checks whether a plugin's required secret fields have values. Test-only: Desktop owns the
+/// production readiness check (`plugin_cmd`) on top of [`missing_required_credentials_in`].
 #[cfg(test)]
 fn get_plugin_token_status_in(
     data_dir: &Path,
     project: &str,
     manifest: &PluginManifest,
 ) -> TokenStatus {
-    if manifest.auth_fields.is_empty() {
-        return TokenStatus::NoTokensRequired;
-    }
-
-    let secret_fields: Vec<&AuthFieldDef> = manifest
+    let any_blocking = manifest
         .auth_fields
         .iter()
-        .filter(|f| blocks_plugin_readiness(f))
-        .collect();
-
-    if secret_fields.is_empty() {
+        .any(|f| blocks_plugin_readiness(f) && !f.oauth_flow);
+    if !any_blocking {
         return TokenStatus::NoTokensRequired;
     }
-
-    let token_dir = data_dir
-        .join("tokens")
-        .join(project)
-        .join(manifest.config_key());
-
-    let mut missing = Vec::new();
-    for field in &secret_fields {
-        let file_path = token_dir.join(&field.key);
-        let has_content = file_path.metadata().map(|m| m.len() > 0).unwrap_or(false);
-        if !has_content {
-            missing.push(field.key.clone());
-        }
-    }
-
+    let missing = missing_required_credentials_in(
+        data_dir,
+        project,
+        manifest.config_key(),
+        &manifest.auth_fields,
+    );
     if missing.is_empty() {
         TokenStatus::Configured
     } else {
@@ -743,6 +937,21 @@ fn get_plugin_token_status_with_base(
     manifest: &PluginManifest,
 ) -> TokenStatus {
     get_plugin_token_status_in(&home.join(consts::DATA_DIR), project, manifest)
+}
+
+#[cfg(test)]
+fn test_field(key: &str, is_secret: bool) -> AuthFieldDef {
+    AuthFieldDef {
+        key: key.to_string(),
+        label: key.to_string(),
+        field_type: "text".to_string(),
+        placeholder: String::new(),
+        is_secret,
+        required: true,
+        description: None,
+        validation: None,
+        oauth_flow: false,
+    }
 }
 
 /// Derives WORKER_{SID}_URL from a service_id. E.g. "example-plugin" → "WORKER_EXAMPLE_PLUGIN_URL"
@@ -3446,16 +3655,34 @@ mod tests {
         );
     }
 
+    const SENTINEL_SECRET: &str = "SENTINEL-997-plugin-secret";
+
+    fn put_plugin_secret(home: &Path, project: &str, sid: &str, key: &str, value: &str) {
+        SecretStore::open(&home.join(consts::DATA_DIR))
+            .unwrap()
+            .write(&SecretName::integration(project, sid, key).unwrap(), value)
+            .unwrap();
+    }
+
+    fn read_plugin_secret(home: &Path, project: &str, sid: &str, key: &str) -> Option<String> {
+        SecretStore::open(&home.join(consts::DATA_DIR))
+            .unwrap()
+            .read(&SecretName::integration(project, sid, key).unwrap())
+            .unwrap()
+            .map(|value| value.as_str().to_string())
+    }
+
     #[test]
     fn test_configure_plugin_tokens_creates_files() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
 
         let mut tokens = HashMap::new();
-        tokens.insert("api_key".to_string(), "sk-secret-123".to_string());
-        tokens.insert("refresh_token".to_string(), "rt-abc".to_string());
+        tokens.insert("label".to_string(), "My Label".to_string());
+        tokens.insert("site".to_string(), "https://example.test".to_string());
 
-        configure_plugin_tokens_with_base(home, "myproject", "example-plugin", &tokens).unwrap();
+        configure_plugin_tokens_with_base(home, "myproject", "example-plugin", false, &tokens)
+            .unwrap();
 
         let token_dir = home
             .join(consts::DATA_DIR)
@@ -3464,12 +3691,109 @@ mod tests {
             .join("example-plugin");
 
         assert_eq!(
-            std::fs::read_to_string(token_dir.join("api_key")).unwrap(),
-            "sk-secret-123"
+            std::fs::read_to_string(token_dir.join("label")).unwrap(),
+            "My Label"
         );
         assert_eq!(
-            std::fs::read_to_string(token_dir.join("refresh_token")).unwrap(),
-            "rt-abc"
+            std::fs::read_to_string(token_dir.join("site")).unwrap(),
+            "https://example.test"
+        );
+    }
+
+    #[test]
+    fn secret_credentials_go_to_the_store_and_no_plaintext_file_holds_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+
+        let mut tokens = HashMap::new();
+        tokens.insert("api_key".to_string(), SENTINEL_SECRET.to_string());
+        tokens.insert("refresh_token".to_string(), "rt-abc".to_string());
+
+        configure_plugin_tokens_with_base(home, "myproject", "example-plugin", true, &tokens)
+            .unwrap();
+
+        assert_eq!(
+            read_plugin_secret(home, "myproject", "example-plugin", "api_key").as_deref(),
+            Some(SENTINEL_SECRET)
+        );
+        assert_eq!(
+            read_plugin_secret(home, "myproject", "example-plugin", "refresh_token").as_deref(),
+            Some("rt-abc")
+        );
+        assert!(
+            crate::oauth_persist::test_support::files_containing(home, SENTINEL_SECRET).is_empty()
+        );
+        assert!(!token_dir_with_base(home, "myproject", "example-plugin").exists());
+    }
+
+    #[test]
+    fn mixed_credentials_are_split_by_secrecy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let fields = vec![test_field("api_key", true), test_field("label", false)];
+        let values = HashMap::from([
+            ("api_key".to_string(), SENTINEL_SECRET.to_string()),
+            ("label".to_string(), "L".to_string()),
+        ]);
+
+        write_plugin_credentials_in(data_dir, "proj", "svc", &fields, &values).unwrap();
+
+        let token_dir = token_dir_in(data_dir, "proj", "svc");
+        assert_eq!(
+            std::fs::read_to_string(token_dir.join("label")).unwrap(),
+            "L"
+        );
+        assert!(!token_dir.join("api_key").exists());
+        assert!(plugin_credential_present_in(
+            data_dir, "proj", "svc", &fields[0]
+        ));
+        assert!(plugin_credential_present_in(
+            data_dir, "proj", "svc", &fields[1]
+        ));
+        assert!(
+            crate::oauth_persist::test_support::files_containing(data_dir, SENTINEL_SECRET)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn saving_an_undeclared_empty_or_unsafe_field_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let fields = vec![test_field("api_key", true), test_field("../x", false)];
+        let save = |key: &str, value: &str| {
+            write_plugin_credentials_in(
+                data_dir,
+                "proj",
+                "svc",
+                &fields,
+                &HashMap::from([(key.to_string(), value.to_string())]),
+            )
+        };
+        assert!(save("other", "v").is_err());
+        assert!(save("api_key", "").is_err());
+        assert!(save("../x", "v").is_err());
+        assert!(!plugin_credential_present_in(
+            data_dir, "proj", "svc", &fields[0]
+        ));
+    }
+
+    #[test]
+    fn a_secret_field_name_the_store_cannot_hold_is_refused_by_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fields = vec![test_field("ApiKey", true)];
+        let err = write_plugin_credentials_in(
+            tmp.path(),
+            "proj",
+            "svc",
+            &fields,
+            &HashMap::from([("ApiKey".to_string(), "SENTINEL-997-x".to_string())]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("ApiKey") && !err.contains("SENTINEL-997"),
+            "{err}"
         );
     }
 
@@ -3482,16 +3806,16 @@ mod tests {
         let home = tmp.path();
 
         let mut tokens = HashMap::new();
-        tokens.insert("secret".to_string(), "value".to_string());
+        tokens.insert("label".to_string(), "value".to_string());
 
-        configure_plugin_tokens_with_base(home, "proj", "svc", &tokens).unwrap();
+        configure_plugin_tokens_with_base(home, "proj", "svc", false, &tokens).unwrap();
 
         let file_path = home
             .join(consts::DATA_DIR)
             .join("tokens")
             .join("proj")
             .join("svc")
-            .join("secret");
+            .join("label");
 
         let perms = std::fs::metadata(&file_path).unwrap().permissions();
         assert_eq!(
@@ -3500,6 +3824,152 @@ mod tests {
             "Token file should have 0o600 permissions, got {:o}",
             perms.mode() & 0o777
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stored_plugin_secret_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let tokens = HashMap::from([("secret".to_string(), "value".to_string())]);
+        configure_plugin_tokens_with_base(home, "proj", "svc", true, &tokens).unwrap();
+
+        let file = home
+            .join(consts::DATA_DIR)
+            .join("secrets")
+            .join("proj")
+            .join("svc.secret.enc");
+        assert_eq!(
+            std::fs::metadata(file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn the_oauth_seed_keeps_secret_values_in_the_store_and_reads_back_whole() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let mut client_id = test_field("client_id", false);
+        client_id.oauth_flow = true;
+        let mut client_secret = test_field("client_secret", true);
+        client_secret.oauth_flow = true;
+        let fields = vec![client_id, client_secret];
+        let values = HashMap::from([
+            ("client_id".to_string(), "cid".to_string()),
+            ("client_secret".to_string(), SENTINEL_SECRET.to_string()),
+        ]);
+
+        write_plugin_credentials_in(data_dir, "proj", "svc", &fields, &values).unwrap();
+
+        let seed_text =
+            std::fs::read_to_string(oauth_seed_file_in(data_dir, "proj", "svc")).unwrap();
+        assert!(seed_text.contains("cid") && !seed_text.contains("client_secret"));
+        assert!(
+            crate::oauth_persist::test_support::files_containing(data_dir, SENTINEL_SECRET)
+                .is_empty()
+        );
+        assert_eq!(
+            read_oauth_seed_in(data_dir, "proj", "svc", &fields).unwrap(),
+            values
+        );
+        assert_eq!(
+            oauth_seed_keys_in(data_dir, "proj", "svc", &fields),
+            HashSet::from(["client_id".to_string(), "client_secret".to_string()])
+        );
+        let same_file = SecretName::oauth_client_secret("proj", "svc").unwrap();
+        assert_eq!(
+            SecretStore::open(data_dir)
+                .unwrap()
+                .read(&same_file)
+                .unwrap()
+                .unwrap()
+                .as_str(),
+            SENTINEL_SECRET
+        );
+    }
+
+    #[test]
+    fn an_unconfigured_oauth_seed_is_an_error_and_has_no_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut secret = test_field("client_secret", true);
+        secret.oauth_flow = true;
+        let fields = vec![secret];
+        assert!(read_oauth_seed_in(tmp.path(), "proj", "svc", &fields).is_err());
+        assert!(oauth_seed_keys_in(tmp.path(), "proj", "svc", &fields).is_empty());
+    }
+
+    #[test]
+    fn a_corrupt_seed_or_an_unreadable_secret_fails_the_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let mut secret = test_field("client_secret", true);
+        secret.oauth_flow = true;
+        let fields = vec![secret];
+        let seed = oauth_seed_file_in(data_dir, "proj", "svc");
+        std::fs::create_dir_all(seed.parent().unwrap()).unwrap();
+        std::fs::write(&seed, "{not json").unwrap();
+        assert!(read_oauth_seed_in(data_dir, "proj", "svc", &fields).is_err());
+
+        std::fs::write(&seed, "{}").unwrap();
+        let name = SecretName::integration("proj", "svc", "client_secret").unwrap();
+        SecretStore::open(data_dir)
+            .unwrap()
+            .write(&name, "x")
+            .unwrap();
+        let file = data_dir.join("secrets").join("proj").join(name.file_name());
+        std::fs::write(file, "garbage").unwrap();
+        assert!(read_oauth_seed_in(data_dir, "proj", "svc", &fields).is_err());
+        assert!(oauth_seed_keys_in(data_dir, "proj", "svc", &fields).contains("client_secret"));
+    }
+
+    #[test]
+    fn removing_plugin_secrets_deletes_every_secret_of_that_service_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let store = SecretStore::open(data_dir).unwrap();
+        let mine = ["api_key", "client_secret", "refresh_token", "access_token"];
+        for field in mine {
+            let name = SecretName::integration("proj", "svc", field).unwrap();
+            store.write(&name, "v").unwrap();
+        }
+        let other_service = SecretName::integration("proj", "svc-two", "api_key").unwrap();
+        let other_project = SecretName::integration("other", "svc", "api_key").unwrap();
+        store.write(&other_service, "v").unwrap();
+        store.write(&other_project, "v").unwrap();
+        let lock = store.lock_path(&SecretName::oauth_refresh_token("proj", "svc").unwrap());
+        std::fs::write(&lock, "").unwrap();
+
+        remove_plugin_secrets_in(data_dir, "proj", "svc").unwrap();
+        remove_plugin_secrets_in(data_dir, "proj", "svc").unwrap();
+
+        for field in mine {
+            let name = SecretName::integration("proj", "svc", field).unwrap();
+            assert!(!store.exists(&name), "{field}");
+        }
+        assert!(!lock.exists());
+        assert!(store.exists(&other_service));
+        assert!(store.exists(&other_project));
+    }
+
+    #[test]
+    fn removing_secrets_without_any_is_fine_and_one_field_can_be_removed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        remove_plugin_secrets_in(data_dir, "proj", "svc").unwrap();
+
+        let fields = vec![test_field("api_key", true)];
+        let values = HashMap::from([("api_key".to_string(), "v".to_string())]);
+        write_plugin_credentials_in(data_dir, "proj", "svc", &fields, &values).unwrap();
+        assert!(plugin_credential_present_in(
+            data_dir, "proj", "svc", &fields[0]
+        ));
+        remove_plugin_secret_in(data_dir, "proj", "svc", "api_key").unwrap();
+        remove_plugin_secret_in(data_dir, "proj", "svc", "api_key").unwrap();
+        assert!(!plugin_credential_present_in(
+            data_dir, "proj", "svc", &fields[0]
+        ));
     }
 
     #[test]
@@ -3513,8 +3983,8 @@ mod tests {
             .join("proj")
             .join("test-svc");
         std::fs::create_dir_all(&token_dir).unwrap();
-        std::fs::write(token_dir.join("api_key"), "sk-123").unwrap();
-        std::fs::write(token_dir.join("token"), "tok-abc").unwrap();
+        put_plugin_secret(home, "proj", "test-svc", "api_key", "sk-123");
+        put_plugin_secret(home, "proj", "test-svc", "token", "tok-abc");
 
         let manifest = PluginManifest {
             name: "Test".to_string(),
@@ -3587,7 +4057,7 @@ mod tests {
             .join("proj")
             .join("test-svc");
         std::fs::create_dir_all(&token_dir).unwrap();
-        std::fs::write(token_dir.join("api_key"), "sk-123").unwrap();
+        put_plugin_secret(home, "proj", "test-svc", "api_key", "sk-123");
 
         let manifest = PluginManifest {
             name: "Test".to_string(),
@@ -3716,7 +4186,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_plugin_token_status_empty_file_counts_as_missing() {
+    fn test_get_plugin_token_status_empty_value_is_refused_and_stays_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
 
@@ -3726,7 +4196,16 @@ mod tests {
             .join("proj")
             .join("test-svc");
         std::fs::create_dir_all(&token_dir).unwrap();
-        std::fs::write(token_dir.join("api_key"), "").unwrap();
+        let fields = vec![test_field("api_key", true)];
+        let empty = HashMap::from([("api_key".to_string(), String::new())]);
+        assert!(write_plugin_credentials_in(
+            &home.join(consts::DATA_DIR),
+            "proj",
+            "test-svc",
+            &fields,
+            &empty
+        )
+        .is_err());
 
         let manifest = PluginManifest {
             name: "Test".to_string(),
@@ -7430,7 +7909,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn write_token_files_secures_token_dirs() {
+    fn writing_plain_plugin_credentials_secures_token_dirs() {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = tempfile::tempdir().unwrap();
@@ -7439,7 +7918,14 @@ mod tests {
 
         let token_dir = data_dir.join("tokens").join("proj").join("slack");
         let tokens = HashMap::from([("token.txt".to_string(), "secret".to_string())]);
-        write_token_files(&token_dir, &tokens).unwrap();
+        write_plugin_credentials_in(
+            data_dir,
+            "proj",
+            "slack",
+            &[test_field("token.txt", false)],
+            &tokens,
+        )
+        .unwrap();
 
         assert_eq!(
             std::fs::metadata(&token_dir).unwrap().permissions().mode() & 0o777,

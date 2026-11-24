@@ -61,7 +61,7 @@ pub(super) fn refresh_gated<F>(
 where
     F: Fn(&str, &RefreshRequest<'_>) -> Result<RefreshResponse, ErrorCode>,
 {
-    let state = match fingerprint(&Paths::new(data_dir, project, service).state) {
+    let state = match fingerprint(&Paths::new(data_dir, project, service)) {
         Ok(state) => state,
         Err(_) => match *hold {
             Hold::StateChange { .. } => return RefreshOutcome::ReconnectRequired,
@@ -101,13 +101,23 @@ where
     outcome
 }
 
-fn fingerprint(path: &Path) -> std::io::Result<Option<u64>> {
+fn fingerprint(paths: &Paths) -> std::io::Result<Option<u64>> {
+    let secrets = store::Secrets::open(paths)
+        .map_err(|_| std::io::Error::other("the secret store cannot be opened"))?;
+    let state = read_if_present(&paths.state)?;
+    let refresh_token = read_if_present(&secrets.refresh_file())?;
+    if state.is_none() && refresh_token.is_none() {
+        return Ok(None);
+    }
+    let mut hasher = DefaultHasher::new();
+    state.hash(&mut hasher);
+    refresh_token.hash(&mut hasher);
+    Ok(Some(hasher.finish()))
+}
+
+fn read_if_present(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
     match std::fs::read(path) {
-        Ok(bytes) => {
-            let mut hasher = DefaultHasher::new();
-            bytes.hash(&mut hasher);
-            Ok(Some(hasher.finish()))
-        }
+        Ok(bytes) => Ok(Some(bytes)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),
     }
@@ -118,7 +128,7 @@ where
     F: Fn(&str, &RefreshRequest<'_>) -> Result<RefreshResponse, ErrorCode>,
 {
     let paths = Paths::new(data_dir, project, service);
-    let due = match store::load(&paths.state) {
+    let due = match store::load(&paths) {
         Ok(None) => return RefreshOutcome::NotDue,
         Ok(Some(state)) => {
             schedule::needs_refresh(Utc::now(), state.last_refresh_at, state.expires_at)
@@ -128,9 +138,12 @@ where
     if !due {
         return RefreshOutcome::NotDue;
     }
-    match fs_perms::with_file_lock_in(&paths.lock, || {
-        Ok(refresh_locked(&paths, project, service, call))
-    }) {
+    let lock = match store::Secrets::open(&paths) {
+        Ok(secrets) => secrets.lock_path(),
+        Err(code) => return failed(&paths, project, service, code),
+    };
+    match fs_perms::with_file_lock_in(&lock, || Ok(refresh_locked(&paths, project, service, call)))
+    {
         Ok(outcome) => outcome,
         Err(_) => {
             log::warn!("could not take the token refresh lock for service {service}");
@@ -143,7 +156,7 @@ fn refresh_locked<F>(paths: &Paths, project: &str, service: &str, call: &F) -> R
 where
     F: Fn(&str, &RefreshRequest<'_>) -> Result<RefreshResponse, ErrorCode>,
 {
-    let state = match store::load(&paths.state) {
+    let state = match store::load(paths) {
         Ok(Some(state)) => state,
         Ok(None) => return RefreshOutcome::NotDue,
         Err(code) => return failed(paths, project, service, code),
@@ -154,7 +167,7 @@ where
 
     let request = RefreshRequest {
         grant_type: state.grant(),
-        refresh_token: &state.refresh_token,
+        refresh_token: state.refresh_token.as_str(),
         scopes: &state.scopes,
         provider_data: &state.provider_data,
     };
@@ -192,14 +205,13 @@ mod tests {
 
     use super::*;
 
-    fn write_state(paths: &Paths, hours_left: i64) {
+    fn write_state(data_dir: &Path, paths: &Paths, hours_left: i64) {
         let now = Utc::now();
         let json = serde_json::json!({
             "provider": "slack",
             "providerData": {"clientId": "cid"},
             "scopes": ["chat:write"],
             "grantedScopes": ["chat:write"],
-            "refreshToken": "old-rt",
             "expiresAt": (now + chrono::Duration::hours(hours_left))
                 .to_rfc3339_opts(SecondsFormat::Millis, true),
             "lastRefreshAt": (now + chrono::Duration::hours(hours_left - 12))
@@ -207,6 +219,23 @@ mod tests {
         });
         std::fs::create_dir_all(paths.state.parent().unwrap()).unwrap();
         std::fs::write(&paths.state, json.to_string()).unwrap();
+        put_refresh(data_dir, "old-rt");
+    }
+
+    fn put_refresh(data_dir: &Path, value: &str) {
+        crate::secret_store::SecretStore::open(data_dir)
+            .unwrap()
+            .write(
+                &crate::secret_store::SecretName::oauth_refresh_token("proj", "slack").unwrap(),
+                value,
+            )
+            .unwrap();
+    }
+
+    fn stored_access_token(dir: &Path) -> Option<String> {
+        store::read_access_token(dir, "proj", "slack")
+            .ok()
+            .map(|token| token.as_str().to_string())
     }
 
     fn rotated() -> Result<RefreshResponse, ErrorCode> {
@@ -222,7 +251,7 @@ mod tests {
     fn a_fresh_token_is_left_alone() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::new(dir.path(), "proj", "slack");
-        write_state(&paths, 10);
+        write_state(dir.path(), &paths, 10);
         let calls = AtomicUsize::new(0);
         let call = |_: &str, _: &RefreshRequest<'_>| {
             calls.fetch_add(1, Ordering::SeqCst);
@@ -233,7 +262,7 @@ mod tests {
             RefreshOutcome::NotDue
         );
         assert_eq!(calls.load(Ordering::SeqCst), 0);
-        assert!(!paths.token_dir.join("access_token").exists());
+        assert_eq!(stored_access_token(dir.path()), None);
     }
 
     #[test]
@@ -250,7 +279,7 @@ mod tests {
     fn a_token_below_a_quarter_of_its_lifetime_is_refreshed_and_stored() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::new(dir.path(), "proj", "slack");
-        write_state(&paths, 2);
+        write_state(dir.path(), &paths, 2);
         let call = |provider: &str, request: &RefreshRequest<'_>| {
             assert_eq!(provider, "slack");
             assert_eq!(request.refresh_token, "old-rt");
@@ -263,12 +292,9 @@ mod tests {
             RefreshOutcome::Refreshed
         );
 
-        let state = store::load(&paths.state).ok().flatten().unwrap();
-        assert_eq!(state.refresh_token, "new-rt");
-        assert_eq!(
-            std::fs::read_to_string(paths.token_dir.join("access_token")).unwrap(),
-            "new-at"
-        );
+        let state = store::load(&paths).ok().flatten().unwrap();
+        assert_eq!(state.refresh_token.as_str(), "new-rt");
+        assert_eq!(stored_access_token(dir.path()).as_deref(), Some("new-at"));
         let audit = std::fs::read_to_string(&paths.audit).unwrap();
         assert!(audit.contains(" service=slack action=refresh outcome=ok"));
         assert_eq!(
@@ -281,7 +307,7 @@ mod tests {
     fn an_expired_token_is_refreshed() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::new(dir.path(), "proj", "slack");
-        write_state(&paths, -5);
+        write_state(dir.path(), &paths, -5);
         let call = |_: &str, _: &RefreshRequest<'_>| rotated();
         assert_eq!(
             refresh_if_due(dir.path(), "proj", "slack", &call),
@@ -293,7 +319,7 @@ mod tests {
     fn a_rejected_grant_asks_for_a_reconnect_and_keeps_the_tokens() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::new(dir.path(), "proj", "slack");
-        write_state(&paths, 1);
+        write_state(dir.path(), &paths, 1);
         let call = |_: &str, _: &RefreshRequest<'_>| Err(ErrorCode::InvalidGrant);
 
         assert_eq!(
@@ -301,9 +327,9 @@ mod tests {
             RefreshOutcome::ReconnectRequired
         );
 
-        let state = store::load(&paths.state).ok().flatten().unwrap();
-        assert_eq!(state.refresh_token, "old-rt");
-        assert!(!paths.token_dir.join("access_token").exists());
+        let state = store::load(&paths).ok().flatten().unwrap();
+        assert_eq!(state.refresh_token.as_str(), "old-rt");
+        assert_eq!(stored_access_token(dir.path()), None);
         let audit = std::fs::read_to_string(&paths.audit).unwrap();
         assert!(audit.contains(" outcome=error:invalid_grant"));
     }
@@ -312,7 +338,7 @@ mod tests {
     fn a_network_failure_is_retried_and_reported_as_such() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::new(dir.path(), "proj", "slack");
-        write_state(&paths, 1);
+        write_state(dir.path(), &paths, 1);
         let failing = |_: &str, _: &RefreshRequest<'_>| Err(ErrorCode::Network);
 
         assert_eq!(
@@ -341,10 +367,91 @@ mod tests {
     }
 
     #[test]
+    fn the_lock_file_is_created_next_to_the_refresh_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path(), "proj", "slack");
+        write_state(dir.path(), &paths, 1);
+        let call = |_: &str, _: &RefreshRequest<'_>| rotated();
+        refresh_if_due(dir.path(), "proj", "slack", &call);
+        assert!(dir
+            .path()
+            .join("secrets")
+            .join("proj")
+            .join("slack.refresh_token.enc.lock")
+            .is_file());
+        assert!(!dir
+            .path()
+            .join("oauth")
+            .join("proj")
+            .join("slack.lock")
+            .exists());
+    }
+
+    #[test]
+    fn a_missing_refresh_token_asks_for_a_reconnect() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path(), "proj", "slack");
+        write_state(dir.path(), &paths, 1);
+        std::fs::remove_file(store::Secrets::open(&paths).unwrap().refresh_file()).unwrap();
+        let calls = AtomicUsize::new(0);
+        let call = failing_with(ErrorCode::Network, &calls);
+        assert_eq!(
+            refresh_if_due(dir.path(), "proj", "slack", &call),
+            RefreshOutcome::ReconnectRequired
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn the_fingerprint_changes_when_only_the_refresh_token_is_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path(), "proj", "slack");
+        write_state(dir.path(), &paths, 1);
+        let before = fingerprint(&paths).unwrap();
+        assert!(before.is_some());
+        assert_eq!(fingerprint(&paths).unwrap(), before);
+
+        put_refresh(dir.path(), "replacement-rt");
+        assert_ne!(fingerprint(&paths).unwrap(), before);
+    }
+
+    #[test]
+    fn a_replaced_refresh_token_ends_the_wait_for_a_reconnect() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path(), "proj", "slack");
+        write_state(dir.path(), &paths, 1);
+        let calls = AtomicUsize::new(0);
+        let rejecting = failing_with(ErrorCode::InvalidGrant, &calls);
+        let mut hold = Hold::default();
+        let t0 = Instant::now();
+        refresh_gated(dir.path(), "proj", "slack", &rejecting, &mut hold, t0);
+        refresh_gated(
+            dir.path(),
+            "proj",
+            "slack",
+            &rejecting,
+            &mut hold,
+            secs(t0, 10),
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        put_refresh(dir.path(), "reconnected-rt");
+        refresh_gated(
+            dir.path(),
+            "proj",
+            "slack",
+            &rejecting,
+            &mut hold,
+            secs(t0, 20),
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
     fn two_threads_at_the_threshold_make_one_provider_call() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::new(dir.path(), "proj", "slack");
-        write_state(&paths, 1);
+        write_state(dir.path(), &paths, 1);
         let calls = AtomicUsize::new(0);
         let call = |_: &str, request: &RefreshRequest<'_>| {
             assert_eq!(request.refresh_token, "old-rt");
@@ -365,8 +472,8 @@ mod tests {
             outcomes,
             [RefreshOutcome::NotDue, RefreshOutcome::Refreshed]
         );
-        let state = store::load(&paths.state).ok().flatten().unwrap();
-        assert_eq!(state.refresh_token, "new-rt");
+        let state = store::load(&paths).ok().flatten().unwrap();
+        assert_eq!(state.refresh_token.as_str(), "new-rt");
     }
 
     fn failing_with(
@@ -399,7 +506,7 @@ mod tests {
         ] {
             let dir = tempfile::tempdir().unwrap();
             let paths = Paths::new(dir.path(), "proj", "slack");
-            write_state(&paths, 1);
+            write_state(dir.path(), &paths, 1);
             let calls = AtomicUsize::new(0);
             let call = failing_with(code, &calls);
             let mut hold = Hold::default();
@@ -445,7 +552,7 @@ mod tests {
         assert_eq!(audit_lines(&paths), 1);
         assert_eq!(calls.load(Ordering::SeqCst), 0);
 
-        write_state(&paths, 1);
+        write_state(dir.path(), &paths, 1);
         assert_eq!(
             refresh_gated(dir.path(), "proj", "slack", &call, &mut hold, secs(t0, 40)),
             RefreshOutcome::ReconnectRequired
@@ -457,7 +564,7 @@ mod tests {
     fn an_unreadable_state_file_keeps_the_held_outcome() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::new(dir.path(), "proj", "slack");
-        write_state(&paths, 1);
+        write_state(dir.path(), &paths, 1);
         let calls = AtomicUsize::new(0);
         let call = failing_with(ErrorCode::InvalidGrant, &calls);
         let mut hold = Hold::default();
@@ -478,7 +585,7 @@ mod tests {
     fn a_changed_state_file_ends_the_wait_for_a_reconnect() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::new(dir.path(), "proj", "slack");
-        write_state(&paths, 1);
+        write_state(dir.path(), &paths, 1);
         let calls = AtomicUsize::new(0);
         let rejecting = failing_with(ErrorCode::InvalidGrant, &calls);
         let mut hold = Hold::default();
@@ -494,7 +601,7 @@ mod tests {
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
-        write_state(&paths, 2);
+        write_state(dir.path(), &paths, 2);
         let working = |_: &str, _: &RefreshRequest<'_>| {
             calls.fetch_add(1, Ordering::SeqCst);
             rotated()
@@ -518,7 +625,7 @@ mod tests {
     fn a_successful_refresh_resets_the_backoff() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::new(dir.path(), "proj", "slack");
-        write_state(&paths, 1);
+        write_state(dir.path(), &paths, 1);
         let calls = AtomicUsize::new(0);
         let failing = failing_with(ErrorCode::Network, &calls);
         let mut hold = Hold::default();
@@ -561,7 +668,7 @@ mod tests {
     fn a_changed_state_file_resets_the_backoff_and_retries_at_once() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::new(dir.path(), "proj", "slack");
-        write_state(&paths, 1);
+        write_state(dir.path(), &paths, 1);
         let calls = AtomicUsize::new(0);
         let call = failing_with(ErrorCode::Network, &calls);
         let mut hold = Hold::default();
@@ -571,7 +678,7 @@ mod tests {
         refresh_gated(dir.path(), "proj", "slack", &call, &mut hold, secs(t0, 30));
         assert_eq!(calls.load(Ordering::SeqCst), 3);
 
-        write_state(&paths, 2);
+        write_state(dir.path(), &paths, 2);
         refresh_gated(dir.path(), "proj", "slack", &call, &mut hold, secs(t0, 31));
         assert_eq!(calls.load(Ordering::SeqCst), 4);
         assert!(matches!(hold, Hold::Until { failures: 1, .. }));
@@ -584,7 +691,7 @@ mod tests {
     fn a_network_failure_backs_off_from_ten_seconds_and_doubles_to_the_cap() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::new(dir.path(), "proj", "slack");
-        write_state(&paths, 1);
+        write_state(dir.path(), &paths, 1);
         let calls = AtomicUsize::new(0);
         let call = failing_with(ErrorCode::Network, &calls);
         let mut hold = Hold::default();
@@ -613,7 +720,7 @@ mod tests {
     fn an_unreadable_state_file_keeps_the_backoff_even_after_the_deadline() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::new(dir.path(), "proj", "slack");
-        write_state(&paths, 1);
+        write_state(dir.path(), &paths, 1);
         let calls = AtomicUsize::new(0);
         let call = failing_with(ErrorCode::Network, &calls);
         let mut hold = Hold::default();
