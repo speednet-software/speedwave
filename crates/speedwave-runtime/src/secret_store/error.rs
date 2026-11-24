@@ -26,11 +26,19 @@ pub enum SecretStoreError {
 }
 
 /// User-facing text for a secret that cannot be read; it names the service only.
-pub fn unreadable_secret_message(name: &SecretName) -> String {
-    format!(
-        "Integration {}: cannot read the secret. Reconnect it in Speedwave Desktop (Settings, Integrations).",
-        name.service()
-    )
+pub(crate) fn unreadable_secret_message(name: &SecretName) -> String {
+    let label = match name.service() {
+        "llm" => "provider key",
+        "anthropic" => "Anthropic API key",
+        "local-llm" => "local LLM key",
+        "pii" => "PII key",
+        service => {
+            return format!(
+                "Integration {service}: cannot read the secret. Reconnect it in Speedwave Desktop (Settings, Integrations)."
+            )
+        }
+    };
+    format!("Cannot read the stored {label}. Enter it again in Speedwave Desktop (Settings).")
 }
 
 pub(super) fn io_failure(operation: &str, error: &io::Error) -> SecretStoreError {
@@ -63,6 +71,40 @@ mod tests {
             "Integration slack: cannot read the secret. Reconnect it in Speedwave Desktop (Settings, Integrations)."
         );
         assert!(!message.contains("demo"));
+    }
+
+    #[test]
+    fn internal_store_names_get_a_label_and_no_integrations_wording() {
+        let cases = [
+            (
+                SecretName::llm_provider_key("demo", "openai").unwrap(),
+                "provider key",
+            ),
+            (
+                SecretName::anthropic_api_key("demo").unwrap(),
+                "Anthropic API key",
+            ),
+            (
+                SecretName::local_llm_api_key("demo").unwrap(),
+                "local LLM key",
+            ),
+            (
+                SecretName::local_llm_custom_headers("demo").unwrap(),
+                "local LLM key",
+            ),
+            (SecretName::pii_key("demo").unwrap(), "PII key"),
+        ];
+        for (secret, label) in cases {
+            let message = unreadable_secret_message(&secret);
+            assert_eq!(
+                message,
+                format!(
+                    "Cannot read the stored {label}. Enter it again in Speedwave Desktop (Settings)."
+                )
+            );
+            assert!(!message.contains("Integration"));
+            assert!(!message.contains("demo"));
+        }
     }
 
     #[test]

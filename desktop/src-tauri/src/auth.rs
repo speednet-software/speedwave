@@ -20,33 +20,6 @@ pub(crate) fn has_api_key_in(data_dir: &Path, project: &str) -> bool {
 }
 
 #[cfg(test)]
-pub(crate) mod test_support {
-    use std::path::{Path, PathBuf};
-
-    pub(crate) fn files_containing(root: &Path, needle: &str) -> Vec<PathBuf> {
-        let mut hits = Vec::new();
-        collect_hits(root, needle.as_bytes(), &mut hits);
-        hits
-    }
-
-    fn collect_hits(dir: &Path, needle: &[u8], hits: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                collect_hits(&path, needle, hits);
-            } else if let Ok(bytes) = std::fs::read(&path) {
-                if bytes.windows(needle.len()).any(|w| w == needle) {
-                    hits.push(path);
-                }
-            }
-        }
-    }
-}
-
-#[cfg(test)]
 #[expect(
     clippy::unwrap_used,
     reason = "test module uses unwrap() only, never expect()"
@@ -74,7 +47,8 @@ mod tests {
             Some("sk-ant-SENTINEL-1016")
         );
         assert!(
-            test_support::files_containing(data_dir.path(), "SENTINEL-1016").is_empty(),
+            crate::types::test_support::files_containing(data_dir.path(), "SENTINEL-1016")
+                .is_empty(),
             "the key must not appear in any file of the data dir"
         );
     }

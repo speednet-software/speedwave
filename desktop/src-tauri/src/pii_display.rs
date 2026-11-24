@@ -139,7 +139,7 @@ mod tests {
             .join("key")
             .exists());
         assert!(
-            crate::auth::test_support::files_containing(tmp.path(), &key_hex).is_empty(),
+            crate::types::test_support::files_containing(tmp.path(), &key_hex).is_empty(),
             "the PII key must not appear in any plaintext file"
         );
     }

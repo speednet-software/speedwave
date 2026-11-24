@@ -12,6 +12,7 @@ const READY: SecretStoreStatus = {
   integrations: [],
   plaintextCount: 0,
   unreadable: [],
+  migrationNotices: [],
 };
 
 const KEY_MISSING: SecretStoreStatus = {
@@ -22,6 +23,7 @@ const KEY_MISSING: SecretStoreStatus = {
   ],
   plaintextCount: 0,
   unreadable: [],
+  migrationNotices: [],
 };
 
 describe('SecretStoreService', () => {
@@ -128,6 +130,29 @@ describe('SecretStoreService', () => {
     unreadable = ['Integration slack: cannot read the secret.', 'Integration redmine: cannot read'];
     await service.refresh();
     expect(service.notices()).toEqual(['Integration redmine: cannot read']);
+  });
+
+  it('adds failed-migration notices after the unreadable ones and dismisses both', async () => {
+    const service = await create(async () => ({
+      ...READY,
+      unreadable: ['Integration slack: cannot read the secret.'],
+      migrationNotices: ['Startup migration secrets_at_rest did not finish: 1 problem(s).'],
+    }));
+    expect(service.notices()).toEqual([
+      'Integration slack: cannot read the secret.',
+      'Startup migration secrets_at_rest did not finish: 1 problem(s).',
+    ]);
+
+    service.dismissNotices();
+    expect(service.notices()).toEqual([]);
+  });
+
+  it('shows failed-migration notices on their own', async () => {
+    const service = await create(async () => ({
+      ...READY,
+      migrationNotices: ['Startup migration legacy_files did not finish: 2 paths.'],
+    }));
+    expect(service.notices()).toEqual(['Startup migration legacy_files did not finish: 2 paths.']);
   });
 
   it('creates a new key with confirmed true and applies the returned status', async () => {

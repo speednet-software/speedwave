@@ -112,12 +112,13 @@ impl<'a> Run<'a> {
     }
 
     fn store_secret(&mut self, name: &SecretName, value: &str) -> bool {
-        if secret_exists_in(self.data_dir, name) {
-            return true;
-        }
+        let already_stored = secret_exists_in(self.data_dir, name);
         let Some(store) = self.open_store() else {
             return false;
         };
+        if already_stored && matches!(store.read(name), Ok(Some(_))) {
+            return true;
+        }
         if store.ensure_key().is_err() || store.write(name, value).is_err() {
             return false;
         }

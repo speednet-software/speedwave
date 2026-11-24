@@ -120,6 +120,7 @@ function buildMockTauri(): MockTauriService {
           integrations: [{ project: 'demo', service: 'slack' }],
           plaintextCount: 0,
           unreadable: ['Integration redmine: cannot read the secret.'],
+          migrationNotices: [],
         };
       default:
         return undefined;

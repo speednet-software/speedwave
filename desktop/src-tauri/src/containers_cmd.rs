@@ -3050,7 +3050,7 @@ mod tests {
             Some("sk-typed-in-the-form")
         );
         assert!(
-            crate::auth::test_support::files_containing(tmp.path(), "sk-typed-in-the-form")
+            crate::types::test_support::files_containing(tmp.path(), "sk-typed-in-the-form")
                 .is_empty(),
             "the key must not appear in any plaintext file"
         );
@@ -3104,7 +3104,7 @@ mod tests {
         assert!(!provider_key_exists(tmp.path(), "alpha", "other"));
         for sentinel in ["LOCAL-SENTINEL", "HEADERS-SENTINEL"] {
             assert!(
-                crate::auth::test_support::files_containing(tmp.path(), sentinel).is_empty(),
+                crate::types::test_support::files_containing(tmp.path(), sentinel).is_empty(),
                 "{sentinel} must not appear in any plaintext file"
             );
         }
@@ -3246,7 +3246,7 @@ mod tests {
             .unwrap();
         assert_eq!(stored.as_deref().map(String::as_str), Some("sk-local"));
         assert!(
-            crate::auth::test_support::files_containing(tmp.path(), "sk-local").is_empty(),
+            crate::types::test_support::files_containing(tmp.path(), "sk-local").is_empty(),
             "the provider key must not appear in any plaintext file"
         );
         let saved = config::load_user_config_from(&tmp.path().join("config.json")).unwrap();

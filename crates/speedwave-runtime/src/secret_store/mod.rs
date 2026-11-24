@@ -9,7 +9,8 @@ mod name;
 mod recovery;
 mod store;
 
-pub use error::{unreadable_secret_message, SecretStoreError};
+pub(crate) use error::unreadable_secret_message;
+pub use error::SecretStoreError;
 pub use fields::{builtin_secret_fields, is_builtin_secret_field};
 pub use key_source::{FileKeySource, KeySource};
 pub use name::SecretName;

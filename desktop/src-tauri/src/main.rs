@@ -471,8 +471,9 @@ fn main() {
     }));
 
     let migrations = speedwave_migrations::run_all(speedwave_runtime::consts::data_dir());
-    let secret_store_health =
-        secret_store_cmd::SecretStoreHealth::open(speedwave_runtime::consts::data_dir());
+    secret_store_cmd::log_startup_state(speedwave_runtime::consts::data_dir());
+    let migration_notices =
+        secret_store_cmd::MigrationNotices::from_report(migrations.as_ref().ok());
 
     let setup_started = setup_wizard::SetupState::load().runtime_ready;
 
@@ -635,7 +636,7 @@ fn main() {
             }
         }))
         .manage(chat_sessions)
-        .manage(secret_store_health)
+        .manage(migration_notices)
         .manage(ide_bridge.clone())
         .manage(clipboard_bridge_slot.clone())
         .manage(plugin_bridges.clone())
@@ -652,7 +653,12 @@ fn main() {
             logging_cmd::init_bundle_identifier(app.config().identifier.clone());
             match &migrations {
                 Ok(report) if report.failed.is_empty() => log::debug!("migrations: {report}"),
-                Ok(report) => log::warn!("migrations: {report}"),
+                Ok(report) => {
+                    log::warn!("migrations: {report}");
+                    for (name, reason) in &report.failures {
+                        log::warn!("migration {name} failed: {reason}");
+                    }
+                }
                 Err(e) => {
                     log::error!("startup migrations failed: the migrations lock could not be taken");
                     let body = format!(

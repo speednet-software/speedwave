@@ -10,6 +10,7 @@ describe('SecretStoreNoticeComponent', () => {
   let mockTauri: MockTauriService;
   let fixture: ComponentFixture<SecretStoreNoticeComponent>;
   let unreadable: string[];
+  let migrationNotices: string[];
 
   const root = (): HTMLElement => fixture.nativeElement as HTMLElement;
 
@@ -23,9 +24,10 @@ describe('SecretStoreNoticeComponent', () => {
   beforeEach(() => {
     mockTauri = new MockTauriService();
     unreadable = [];
+    migrationNotices = [];
     mockTauri.invokeHandler = async (cmd) =>
       cmd === 'get_secret_store_status'
-        ? { state: 'ready', integrations: [], plaintextCount: 0, unreadable }
+        ? { state: 'ready', integrations: [], plaintextCount: 0, unreadable, migrationNotices }
         : undefined;
     TestBed.configureTestingModule({
       imports: [SecretStoreNoticeComponent],
@@ -50,6 +52,18 @@ describe('SecretStoreNoticeComponent', () => {
     expect(notice?.getAttribute('role')).toBe('status');
     const items = [...root().querySelectorAll('[data-testid="secret-store-notice-item"]')];
     expect(items.map((li) => li.textContent?.trim())).toEqual(unreadable);
+  });
+
+  it('lists failed-migration notices in the same region', async () => {
+    unreadable = ['Integration slack: cannot read the secret.'];
+    migrationNotices = ['Startup migration secrets_at_rest did not finish: 1 problem(s).'];
+    await render();
+
+    const items = [...root().querySelectorAll('[data-testid="secret-store-notice-item"]')];
+    expect(items.map((li) => li.textContent?.trim())).toEqual([
+      ...unreadable,
+      ...migrationNotices,
+    ]);
   });
 
   it('hides the notice after Dismiss', async () => {

@@ -12,6 +12,7 @@ const READY: SecretStoreStatus = {
   integrations: [],
   plaintextCount: 0,
   unreadable: [],
+  migrationNotices: [],
 };
 
 const KEY_MISSING: SecretStoreStatus = {
@@ -23,6 +24,7 @@ const KEY_MISSING: SecretStoreStatus = {
   ],
   plaintextCount: 0,
   unreadable: [],
+  migrationNotices: [],
 };
 
 describe('SecretStoreDialogComponent', () => {

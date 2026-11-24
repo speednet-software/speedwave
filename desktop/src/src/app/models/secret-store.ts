@@ -13,6 +13,7 @@ export interface SecretStoreStatus {
   integrations: SecretStoreIntegration[];
   plaintextCount: number;
   unreadable: string[];
+  migrationNotices: string[];
 }
 
 /** Integrations of one project that are affected by the missing key. */
@@ -40,7 +41,8 @@ export function isSecretStoreStatus(value: unknown): value is SecretStoreStatus 
     SECRET_STORE_STATES.includes(candidate['state']) &&
     typeof candidate['plaintextCount'] === 'number' &&
     Array.isArray(candidate['integrations']) &&
-    Array.isArray(candidate['unreadable'])
+    Array.isArray(candidate['unreadable']) &&
+    Array.isArray(candidate['migrationNotices'])
   );
 }
 

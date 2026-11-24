@@ -783,31 +783,7 @@ pub fn remove_plugin_secrets_in(
     project: &str,
     service_id: &str,
 ) -> anyhow::Result<()> {
-    let store = SecretStore::open(data_dir)?;
-    let anchor = secret_name(project, service_id, "refresh_token")?;
-    let Some(dir) = store.file_path(&anchor).parent().map(Path::to_path_buf) else {
-        return Ok(());
-    };
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e.into()),
-    };
-    for entry in entries.flatten() {
-        let Some(file_name) = entry.file_name().to_str().map(str::to_string) else {
-            continue;
-        };
-        let secret_file = file_name.strip_suffix(".lock").unwrap_or(&file_name);
-        let belongs = SecretName::from_file_name(project, secret_file)
-            .is_some_and(|name| name.service() == service_id);
-        if belongs {
-            match std::fs::remove_file(entry.path()) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e.into()),
-            }
-        }
-    }
+    SecretStore::open(data_dir)?.delete_service(project, service_id)?;
     Ok(())
 }
 
@@ -3156,6 +3132,26 @@ mod tests {
                 result.is_err(),
                 "slug '{}' should be rejected as built-in service ID",
                 sid
+            );
+        }
+    }
+
+    #[test]
+    fn validate_manifest_rejects_secret_store_namespaces_as_slug_and_service_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        for namespace in ["pii", "anthropic", "local-llm"] {
+            let mut manifest = manifest_with_validation(None);
+            manifest.slug = namespace.to_string();
+            manifest.service_id = Some(namespace.to_string());
+            let err = validate_manifest(&manifest, tmp.path())
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("built-in service ID"), "{namespace}: {err}");
+
+            manifest.service_id = None;
+            assert!(
+                validate_manifest(&manifest, tmp.path()).is_err(),
+                "{namespace}"
             );
         }
     }

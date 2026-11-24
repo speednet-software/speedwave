@@ -197,7 +197,7 @@ pub fn proxy_config_dir_in(data_dir: &Path, project: &str) -> PathBuf {
 pub const PROXY_CALLER_AUTH_HEADER: &str = "x-speedwave-proxy-auth";
 
 /// Per-project caller secret, derived from the install key; it is never stored.
-pub fn caller_token_in(data_dir: &Path, project: &str) -> anyhow::Result<String> {
+pub(crate) fn caller_token_in(data_dir: &Path, project: &str) -> anyhow::Result<String> {
     crate::validation::validate_project_name(project)?;
     let store = SecretStore::open(data_dir)?;
     Ok(store

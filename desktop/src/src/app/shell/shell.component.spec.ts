@@ -194,6 +194,7 @@ describe('ShellComponent', () => {
             integrations: [{ project: 'test', service: 'slack' }],
             plaintextCount: 0,
             unreadable: [],
+            migrationNotices: [],
           }
         : previous(cmd, args);
 

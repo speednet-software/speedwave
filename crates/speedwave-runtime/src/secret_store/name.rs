@@ -70,7 +70,7 @@ impl SecretName {
     }
 
     /// Parses `<service>.<field>.enc` of a project directory back into a name; strict.
-    pub fn from_file_name(project: &str, file_name: &str) -> Option<Self> {
+    pub(crate) fn from_file_name(project: &str, file_name: &str) -> Option<Self> {
         let stem = file_name.strip_suffix(ENCRYPTED_SUFFIX)?;
         let (service, field) = stem.split_once('.')?;
         Self::integration(project, service, field).ok()
@@ -128,6 +128,24 @@ fn is_valid_part(value: &str, max_len: usize, extra: &[u8]) -> bool {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn internal_store_services_are_reserved_against_plugin_slugs() {
+        let internal = [
+            SecretName::anthropic_api_key("demo").unwrap(),
+            SecretName::llm_provider_key("demo", "openai").unwrap(),
+            SecretName::local_llm_api_key("demo").unwrap(),
+            SecretName::local_llm_custom_headers("demo").unwrap(),
+            SecretName::pii_key("demo").unwrap(),
+        ];
+        for name in internal {
+            assert!(
+                crate::consts::BUILT_IN_SERVICE_IDS.contains(&name.service()),
+                "{} is not reserved",
+                name.service()
+            );
+        }
+    }
 
     #[test]
     fn integration_accepts_valid_parts_and_exposes_them() {

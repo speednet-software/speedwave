@@ -67,7 +67,12 @@ impl SecretStore {
         source: Box<dyn KeySource>,
     ) -> Result<Self, SecretStoreError> {
         let secrets_dir = data_dir.join(SECRETS_DIR);
-        let mut key = source.load()?;
+        let mut key = match source.load() {
+            Err(SecretStoreError::KeyUnreadable) if !layout::contains_encrypted(&secrets_dir)? => {
+                None
+            }
+            loaded => loaded?,
+        };
         if key.is_none() && layout::contains_encrypted(&secrets_dir)? {
             key = Some(source.load()?.ok_or(SecretStoreError::KeyMissing)?);
         }
@@ -85,7 +90,7 @@ impl SecretStore {
     }
 
     /// Derives a stable token from the install key (HKDF), creating the key on first use.
-    pub fn derive_token(
+    pub(crate) fn derive_token(
         &self,
         purpose: &str,
         project: &str,
@@ -134,6 +139,43 @@ impl SecretStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(io_failure("delete secret", &e)),
         }
+    }
+
+    /// Removes every secret and lock file of one service in a project; a missing one is success.
+    pub fn delete_service(&self, project: &str, service: &str) -> Result<(), SecretStoreError> {
+        if crate::validation::validate_project_name(project).is_err() {
+            return Ok(());
+        }
+        let dir = self.secrets_dir.join(project);
+        match std::fs::symlink_metadata(&dir) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(io_failure("delete service secrets", &e)),
+        }
+        let read = std::fs::read_dir(&dir).map_err(|e| io_failure("delete service secrets", &e))?;
+        for entry in read {
+            let entry = entry.map_err(|e| io_failure("delete service secrets", &e))?;
+            if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                continue;
+            }
+            let file_name = entry.file_name();
+            let Some(file_name) = file_name.to_str() else {
+                continue;
+            };
+            let secret_file = file_name.strip_suffix(LOCK_SUFFIX).unwrap_or(file_name);
+            let belongs = SecretName::from_file_name(project, secret_file)
+                .is_some_and(|name| name.service() == service);
+            if !belongs {
+                continue;
+            }
+            match std::fs::remove_file(entry.path()) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(io_failure("delete service secrets", &e)),
+            }
+        }
+        Ok(())
     }
 
     /// Whether the secret file exists; nothing is decrypted.
@@ -205,7 +247,16 @@ impl SecretStore {
     }
 
     fn load_or_create_key(&self) -> Result<Key, SecretStoreError> {
-        if let Some(key) = self.source.load()? {
+        let loaded = match self.source.load() {
+            Err(SecretStoreError::KeyUnreadable)
+                if !layout::contains_encrypted(&self.secrets_dir)? =>
+            {
+                self.source.discard_malformed()?;
+                self.source.load()?
+            }
+            loaded => loaded?,
+        };
+        if let Some(key) = loaded {
             return Ok(key);
         }
         if layout::contains_encrypted(&self.secrets_dir)? {
@@ -556,33 +607,104 @@ mod tests {
     }
 
     #[test]
-    fn a_malformed_key_file_is_key_unreadable_and_stays_untouched() {
+    fn a_malformed_key_file_beside_secrets_is_key_unreadable_and_stays_untouched() {
         let tmp = tempfile::tempdir().unwrap();
+        let store = SecretStore::open(tmp.path()).unwrap();
+        store.write(&name("slack", "token"), "v").unwrap();
         std::fs::write(key_path(tmp.path()), "not-a-key").unwrap();
 
         assert!(matches!(
             SecretStore::open(tmp.path()),
             Err(SecretStoreError::KeyUnreadable)
         ));
-        let source = FileKeySource::new(key_path(tmp.path()));
-        let store = SecretStore {
+        let fresh = SecretStore {
             secrets_dir: tmp.path().join("secrets"),
-            source: Box::new(source),
+            source: Box::new(FileKeySource::new(key_path(tmp.path()))),
             key: Mutex::new(None),
         };
         assert!(matches!(
-            store.write(&name("slack", "token"), "v"),
+            fresh.write(&name("slack", "other"), "v"),
             Err(SecretStoreError::KeyUnreadable)
         ));
         assert!(matches!(
-            store.ensure_key(),
+            fresh.ensure_key(),
+            Err(SecretStoreError::KeyUnreadable)
+        ));
+        assert!(matches!(
+            fresh.derive_token("bearer", "demo", "slack"),
             Err(SecretStoreError::KeyUnreadable)
         ));
         assert_eq!(
             std::fs::read_to_string(key_path(tmp.path())).unwrap(),
             "not-a-key"
         );
-        assert!(!tmp.path().join("secrets").exists());
+    }
+
+    #[test]
+    fn a_malformed_key_file_without_any_secret_is_recreated_on_first_write() {
+        let tmp = tempfile::tempdir().unwrap();
+        for broken in [&b""[..], b"not-a-key", b"abcd"] {
+            std::fs::write(key_path(tmp.path()), broken).unwrap();
+
+            let store = SecretStore::open(tmp.path()).unwrap();
+            assert!(store.read(&name("slack", "token")).unwrap().is_none());
+            assert_eq!(std::fs::read(key_path(tmp.path())).unwrap(), broken);
+
+            let secret = name("slack", "token");
+            store.write(&secret, "v").unwrap();
+
+            assert_eq!(
+                std::fs::read_to_string(key_path(tmp.path())).unwrap().len(),
+                64
+            );
+            assert_eq!(
+                SecretStore::open(tmp.path())
+                    .unwrap()
+                    .read(&secret)
+                    .unwrap()
+                    .unwrap()
+                    .as_str(),
+                "v"
+            );
+            std::fs::remove_dir_all(tmp.path().join("secrets")).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_malformed_key_file_without_any_secret_is_recreated_by_ensure_key_and_derive_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(key_path(tmp.path()), "").unwrap();
+        SecretStore::open(tmp.path()).unwrap().ensure_key().unwrap();
+        let first = std::fs::read(key_path(tmp.path())).unwrap();
+        assert_eq!(first.len(), 64);
+
+        std::fs::write(key_path(tmp.path()), "garbage").unwrap();
+        let token = SecretStore::open(tmp.path())
+            .unwrap()
+            .derive_token("bearer", "demo", "slack")
+            .unwrap();
+        assert_eq!(token.len(), 64);
+        assert_eq!(std::fs::read(key_path(tmp.path())).unwrap().len(), 64);
+    }
+
+    #[test]
+    fn stray_enc_entries_outside_project_dirs_do_not_block_key_recreation() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("secrets")).unwrap();
+        std::fs::write(tmp.path().join("secrets").join("loose.enc"), "x").unwrap();
+        std::fs::write(key_path(tmp.path()), "").unwrap();
+
+        let store = SecretStore::open(tmp.path()).unwrap();
+        store.write(&name("slack", "token"), "v").unwrap();
+
+        assert_eq!(
+            store
+                .read(&name("slack", "token"))
+                .unwrap()
+                .unwrap()
+                .as_str(),
+            "v"
+        );
     }
 
     #[test]
@@ -601,6 +723,99 @@ mod tests {
         store.delete(&secret).unwrap();
         assert!(!store.exists(&secret));
         assert!(store.read(&secret).unwrap().is_none());
+    }
+
+    #[test]
+    fn delete_service_removes_every_field_and_lock_of_that_service_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SecretStore::open(tmp.path()).unwrap();
+        let token = name("svc", "token");
+        let refresh = name("svc", "refresh_token");
+        let other_service = name("svc-two", "token");
+        let other_project = SecretName::integration("other", "svc", "token").unwrap();
+        for secret in [&token, &refresh, &other_service, &other_project] {
+            store.write(secret, "v").unwrap();
+        }
+        let lock = store.lock_path(&refresh);
+        std::fs::write(&lock, "").unwrap();
+        let other_lock = store.lock_path(&other_service);
+        std::fs::write(&other_lock, "").unwrap();
+        let dir = tmp.path().join("secrets").join("demo");
+        std::fs::write(dir.join("svc.note"), "keep").unwrap();
+
+        store.delete_service("demo", "svc").unwrap();
+
+        assert!(!store.exists(&token) && !store.exists(&refresh));
+        assert!(!lock.exists());
+        assert!(store.exists(&other_service) && other_lock.exists());
+        assert!(store.exists(&other_project));
+        assert!(dir.join("svc.note").exists());
+    }
+
+    #[test]
+    fn delete_service_is_idempotent_and_accepts_unknown_or_invalid_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SecretStore::open(tmp.path()).unwrap();
+        store.delete_service("demo", "svc").unwrap();
+        store.write(&name("svc", "token"), "v").unwrap();
+        store.delete_service("demo", "svc").unwrap();
+        store.delete_service("demo", "svc").unwrap();
+        store.delete_service("../demo", "svc").unwrap();
+        store.delete_service("demo", "../svc").unwrap();
+        assert!(!store.exists(&name("svc", "token")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_service_never_follows_symlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("svc.token.enc");
+        std::fs::write(&victim, "keep").unwrap();
+        let store = SecretStore::open(tmp.path()).unwrap();
+        store.write(&name("slack", "token"), "v").unwrap();
+        let dir = tmp.path().join("secrets").join("demo");
+        std::os::unix::fs::symlink(&victim, dir.join("svc.token.enc")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), tmp.path().join("secrets").join("linked"))
+            .unwrap();
+        std::fs::create_dir(dir.join("svc.dir.enc")).unwrap();
+
+        store.delete_service("demo", "svc").unwrap();
+        store.delete_service("linked", "svc").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+        assert!(dir.join("svc.dir.enc").is_dir());
+        assert!(store.exists(&name("slack", "token")));
+    }
+
+    #[test]
+    fn stray_enc_entries_do_not_count_as_stored_secrets() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("secrets")).unwrap();
+        std::fs::write(tmp.path().join("secrets").join("loose.enc"), "x").unwrap();
+
+        let store = SecretStore::open(tmp.path()).unwrap();
+
+        assert!(!key_path(tmp.path()).exists());
+        store.write(&name("slack", "token"), "v").unwrap();
+        assert!(key_path(tmp.path()).is_file());
+    }
+
+    #[test]
+    fn verify_layout_ignores_pending_migration_plaintext_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SecretStore::open(tmp.path()).unwrap();
+        store.write(&name("slack", "token"), "v").unwrap();
+        let dir = tmp.path().join("secrets").join("demo");
+        std::fs::write(dir.join("anthropic_api_key"), SENTINEL).unwrap();
+        std::fs::write(dir.join("slack-auth-token"), SENTINEL).unwrap();
+        store.verify_layout().unwrap();
+
+        std::fs::write(dir.join("stray-secret"), SENTINEL).unwrap();
+        assert!(matches!(
+            store.verify_layout(),
+            Err(SecretStoreError::PlaintextInStore { count: 1 })
+        ));
     }
 
     #[test]

@@ -19,6 +19,9 @@ pub trait KeySource: Send + Sync {
 
     /// Creates a fresh key; when another creator wins the race, returns the winner's key.
     fn create(&self) -> Result<Key, SecretStoreError>;
+
+    /// Removes a key that stays malformed after waiting for a concurrent creator; a valid key stays.
+    fn discard_malformed(&self) -> Result<(), SecretStoreError>;
 }
 
 /// Key stored as 64 hex characters in an owner-only file.
@@ -85,6 +88,25 @@ impl KeySource for FileKeySource {
             return Err(e);
         }
         Ok(Key::from_bytes(*bytes))
+    }
+
+    fn discard_malformed(&self) -> Result<(), SecretStoreError> {
+        for _ in 1..RACE_LOAD_ATTEMPTS {
+            match self.load() {
+                Err(SecretStoreError::KeyUnreadable) => std::thread::sleep(RACE_LOAD_DELAY),
+                Ok(_) => return Ok(()),
+                Err(e) => return Err(e),
+            }
+        }
+        match self.load() {
+            Err(SecretStoreError::KeyUnreadable) => match std::fs::remove_file(&self.path) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(io_failure("remove key file", &e)),
+            },
+            Ok(_) => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -207,6 +229,47 @@ mod tests {
 
         assert!(matches!(err, SecretStoreError::KeyUnreadable));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "not a key");
+    }
+
+    #[test]
+    fn discard_malformed_removes_an_empty_or_malformed_key_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("secret-store.key");
+        for content in [&b""[..], b"not a key", &[0xffu8, 0xfe][..], b"abcd"] {
+            std::fs::write(&path, content).unwrap();
+            source(tmp.path()).discard_malformed().unwrap();
+            assert!(!path.exists());
+        }
+    }
+
+    #[test]
+    fn discard_malformed_keeps_a_valid_key_and_accepts_a_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = source(tmp.path());
+        src.discard_malformed().unwrap();
+        let created = src.create().unwrap();
+        src.discard_malformed().unwrap();
+        assert_eq!(src.load().unwrap().unwrap().id(), created.id());
+    }
+
+    #[test]
+    fn discard_malformed_waits_for_a_concurrent_creator_to_finish() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("secret-store.key");
+        std::fs::write(&path, "").unwrap();
+        let finisher = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                std::fs::write(path, "ab".repeat(32)).unwrap();
+            })
+        };
+        source(tmp.path()).discard_malformed().unwrap();
+        finisher.join().unwrap();
+        assert_eq!(
+            source(tmp.path()).load().unwrap().unwrap().id(),
+            Key::from_bytes([0xab; 32]).id()
+        );
     }
 
     #[test]

@@ -1091,7 +1091,8 @@ pub const BUILT_IN_SERVICES: &[&str] = &[
     "mcp-context7",
 ];
 
-/// Built-in service IDs (logical names) — plugin install rejects these slugs.
+/// Built-in service IDs (logical names), including the secret store namespaces `llm`, `pii`,
+/// `anthropic` and `local-llm` — plugin install rejects these slugs.
 /// Hyphen→underscore normalization happens in both Rust and the hub TS.
 pub const BUILT_IN_SERVICE_IDS: &[&str] = &[
     "slack",
@@ -1107,6 +1108,9 @@ pub const BUILT_IN_SERVICE_IDS: &[&str] = &[
     "oauth",
     "ide",
     "llm",
+    "pii",
+    "anthropic",
+    "local-llm",
 ];
 
 /// Env names plugins can't set via `extra_env` (Speedwave-reserved or hijack

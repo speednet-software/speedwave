@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 use super::error::{io_failure, SecretStoreError};
 use super::key_source::{FileKeySource, KeySource};
-use super::layout::LOCK_SUFFIX;
-use super::name::{SecretName, ENCRYPTED_SUFFIX};
+use super::layout::{is_encrypted_file, is_lock_file, is_project_dir};
+use super::name::SecretName;
 use super::store::{KEY_FILE, SECRETS_DIR};
 
 /// One integration of a project that still has encrypted secrets on disk; names only.
@@ -65,7 +65,7 @@ pub fn discard_secrets_without_key(data_dir: &Path) -> Result<usize, SecretStore
 fn project_dirs(secrets_dir: &Path) -> Vec<(String, PathBuf)> {
     dir_entries(secrets_dir)
         .into_iter()
-        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter(is_project_dir)
         .filter_map(|entry| {
             let project = entry.file_name().to_str()?.to_owned();
             Some((project, entry.path()))
@@ -80,13 +80,7 @@ fn dir_entries(dir: &Path) -> Vec<DirEntry> {
 }
 
 fn is_discardable(entry: &DirEntry) -> bool {
-    if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
-        return false;
-    }
-    entry
-        .file_name()
-        .to_str()
-        .is_some_and(|name| name.ends_with(ENCRYPTED_SUFFIX) || name.ends_with(LOCK_SUFFIX))
+    is_encrypted_file(entry) || is_lock_file(entry)
 }
 
 #[cfg(test)]
@@ -96,6 +90,7 @@ fn is_discardable(entry: &DirEntry) -> bool {
 )]
 mod tests {
     use super::*;
+    use crate::secret_store::SecretStore;
 
     fn seed(root: &Path, project: &str, file: &str, content: &str) -> PathBuf {
         let dir = root.join("secrets").join(project);
@@ -168,6 +163,41 @@ mod tests {
         assert_eq!(discard_secrets_without_key(tmp.path()).unwrap(), 1);
         assert!(plain.exists() && note.exists() && loose.exists() && config.exists());
         assert!(nested.join("deep.enc").exists());
+    }
+
+    #[test]
+    fn after_a_discard_the_store_opens_although_stray_entries_remain() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed(tmp.path(), "alpha", "slack.token.enc", "x");
+        seed(tmp.path(), "alpha", "slack.token.enc.lock", "");
+        std::fs::write(tmp.path().join("secrets").join("loose.enc"), "x").unwrap();
+        let nested = tmp.path().join("secrets/alpha/sub");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("deep.enc"), "x").unwrap();
+        assert!(matches!(
+            SecretStore::open(tmp.path()),
+            Err(SecretStoreError::KeyMissing)
+        ));
+
+        discard_secrets_without_key(tmp.path()).unwrap();
+
+        assert!(SecretStore::open(tmp.path()).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn after_a_discard_a_symlinked_enc_file_does_not_keep_the_key_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("victim.enc");
+        std::fs::write(&target, "keep").unwrap();
+        let dir = tmp.path().join("secrets").join("alpha");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink(&target, dir.join("slack.token.enc")).unwrap();
+
+        assert!(SecretStore::open(tmp.path()).is_ok());
+        assert_eq!(discard_secrets_without_key(tmp.path()).unwrap(), 0);
+        assert!(target.exists());
     }
 
     #[test]

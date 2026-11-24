@@ -1,7 +1,7 @@
 use std::path::Path;
-use std::sync::{Mutex, PoisonError};
 
 use serde::Serialize;
+use speedwave_migrations::MigrationReport;
 use speedwave_runtime::compose::unreadable_integration_messages;
 use speedwave_runtime::config;
 use speedwave_runtime::secret_store::{
@@ -9,7 +9,7 @@ use speedwave_runtime::secret_store::{
 };
 
 const KEY_MISSING_REFUSAL: &str =
-    "The secret store key is missing. Open Speedwave Desktop (Settings) to create a new key.";
+    "The secret store key is missing. Complete the secret store recovery dialog to continue.";
 const KEY_UNREADABLE_REFUSAL: &str =
     "The secret store key file is damaged. Reinstall Speedwave to continue.";
 
@@ -21,7 +21,7 @@ pub(crate) enum SecretStoreState {
     KeyUnreadable,
 }
 
-pub(crate) struct SecretStoreHealth(Mutex<SecretStoreState>);
+pub(crate) struct MigrationNotices(Vec<String>);
 
 #[derive(Serialize, Debug, PartialEq, Eq, Clone, Copy)]
 #[serde(rename_all = "camelCase")]
@@ -45,19 +45,30 @@ pub(crate) struct SecretStoreStatus {
     integrations: Vec<SecretStoreIntegration>,
     plaintext_count: usize,
     unreadable: Vec<String>,
+    migration_notices: Vec<String>,
 }
 
-impl SecretStoreHealth {
-    pub(crate) fn open(data_dir: &Path) -> Self {
-        let state = evaluate(data_dir);
-        if state != SecretStoreState::Ready {
-            log::warn!("secret store is not ready: {}", state.log_label());
-        }
-        Self(Mutex::new(state))
+impl MigrationNotices {
+    pub(crate) fn from_report(report: Option<&MigrationReport>) -> Self {
+        let notices = report
+            .map(|report| {
+                report
+                    .failures
+                    .iter()
+                    .map(|(name, reason)| {
+                        format!("Startup migration {name} did not finish: {reason}")
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self(notices)
     }
+}
 
-    fn replace(&self, state: SecretStoreState) {
-        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = state;
+pub(crate) fn log_startup_state(data_dir: &Path) {
+    let state = evaluate(data_dir);
+    if state != SecretStoreState::Ready {
+        log::warn!("secret store is not ready: {}", state.log_label());
     }
 }
 
@@ -83,21 +94,20 @@ impl SecretStoreState {
 
 #[tauri::command]
 pub(crate) fn get_secret_store_status(
-    health: tauri::State<'_, SecretStoreHealth>,
+    notices: tauri::State<'_, MigrationNotices>,
 ) -> SecretStoreStatus {
     let data_dir = speedwave_runtime::consts::data_dir();
     let state = evaluate(data_dir);
-    health.replace(state.clone());
-    status_of(data_dir, &state, active_project().as_deref())
+    status_of(data_dir, &state, active_project().as_deref(), &notices.0)
 }
 
 #[tauri::command]
 pub(crate) fn reset_secret_store(
-    health: tauri::State<'_, SecretStoreHealth>,
+    notices: tauri::State<'_, MigrationNotices>,
     confirmed: bool,
 ) -> Result<SecretStoreStatus, String> {
     let data_dir = speedwave_runtime::consts::data_dir();
-    reset_in(data_dir, confirmed, active_project().as_deref(), &health)
+    reset_in(data_dir, confirmed, active_project().as_deref(), &notices.0)
 }
 
 pub(crate) fn ensure_ready_for_start() -> Result<(), String> {
@@ -126,7 +136,7 @@ fn reset_in(
     data_dir: &Path,
     confirmed: bool,
     active_project: Option<&str>,
-    health: &SecretStoreHealth,
+    migration_notices: &[String],
 ) -> Result<SecretStoreStatus, String> {
     if !confirmed {
         return Err("Creating a new secret store key needs an explicit confirmation.".to_owned());
@@ -137,8 +147,12 @@ fn reset_in(
     let removed = discard_secrets_without_key(data_dir).map_err(|e| e.to_string())?;
     log::warn!("secret store reset: discarded {removed} encrypted files without a key");
     let state = evaluate(data_dir);
-    health.replace(state.clone());
-    Ok(status_of(data_dir, &state, active_project))
+    Ok(status_of(
+        data_dir,
+        &state,
+        active_project,
+        migration_notices,
+    ))
 }
 
 fn evaluate(data_dir: &Path) -> SecretStoreState {
@@ -160,6 +174,7 @@ fn status_of(
     data_dir: &Path,
     state: &SecretStoreState,
     active_project: Option<&str>,
+    migration_notices: &[String],
 ) -> SecretStoreStatus {
     let integrations = match state {
         SecretStoreState::KeyMissing => encrypted_integrations(data_dir)
@@ -186,6 +201,7 @@ fn status_of(
         integrations,
         plaintext_count,
         unreadable,
+        migration_notices: migration_notices.to_vec(),
     }
 }
 
@@ -212,8 +228,12 @@ mod tests {
         path
     }
 
-    fn health(root: &Path) -> SecretStoreHealth {
-        SecretStoreHealth::open(root)
+    fn report_with(failures: Vec<(&'static str, String)>) -> MigrationReport {
+        MigrationReport {
+            executed: Vec::new(),
+            failed: failures.iter().map(|(name, _)| *name).collect(),
+            failures,
+        }
     }
 
     #[test]
@@ -243,7 +263,7 @@ mod tests {
         assert_eq!(evaluate(tmp.path()), SecretStoreState::KeyMissing);
         assert_eq!(
             ensure_ready_in(tmp.path()).unwrap_err(),
-            "The secret store key is missing. Open Speedwave Desktop (Settings) to create a new key."
+            "The secret store key is missing. Complete the secret store recovery dialog to continue."
         );
     }
 
@@ -251,6 +271,7 @@ mod tests {
     fn a_malformed_key_file_is_key_unreadable() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("secret-store.key"), "garbage").unwrap();
+        seed_enc(tmp.path(), "demo", "slack.token.enc");
         assert_eq!(evaluate(tmp.path()), SecretStoreState::KeyUnreadable);
         assert!(ensure_ready_in(tmp.path()).unwrap_err().contains("damaged"));
     }
@@ -277,7 +298,7 @@ mod tests {
         seed_enc(tmp.path(), "demo", "slack.refresh_token.enc");
         seed_enc(tmp.path(), "demo", "redmine.api_key.enc");
 
-        let status = status_of(tmp.path(), &SecretStoreState::KeyMissing, Some("demo"));
+        let status = status_of(tmp.path(), &SecretStoreState::KeyMissing, Some("demo"), &[]);
 
         assert_eq!(status.state, SecretStoreStateName::KeyMissing);
         assert_eq!(
@@ -304,6 +325,7 @@ mod tests {
             tmp.path(),
             &SecretStoreState::PlaintextInStore { count: 4 },
             Some("demo"),
+            &[],
         );
         assert_eq!(status.state, SecretStoreStateName::PlaintextInStore);
         assert_eq!(status.plaintext_count, 4);
@@ -326,9 +348,9 @@ mod tests {
         )
         .unwrap();
 
-        let active = status_of(tmp.path(), &SecretStoreState::Ready, Some("demo"));
-        let other = status_of(tmp.path(), &SecretStoreState::Ready, Some("other"));
-        let none = status_of(tmp.path(), &SecretStoreState::Ready, None);
+        let active = status_of(tmp.path(), &SecretStoreState::Ready, Some("demo"), &[]);
+        let other = status_of(tmp.path(), &SecretStoreState::Ready, Some("other"), &[]);
+        let none = status_of(tmp.path(), &SecretStoreState::Ready, None, &[]);
 
         assert_eq!(active.state, SecretStoreStateName::Ready);
         assert_eq!(active.unreadable.len(), 1);
@@ -338,12 +360,68 @@ mod tests {
     }
 
     #[test]
+    fn status_of_carries_the_migration_notices_in_every_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let notices = vec!["Startup migration a did not finish: 1 problem(s).".to_owned()];
+
+        for state in [
+            SecretStoreState::Ready,
+            SecretStoreState::KeyMissing,
+            SecretStoreState::PlaintextInStore { count: 1 },
+            SecretStoreState::KeyUnreadable,
+        ] {
+            let status = status_of(tmp.path(), &state, None, &notices);
+            assert_eq!(status.migration_notices, notices);
+        }
+    }
+
+    #[test]
+    fn notices_hold_one_text_per_failed_migration_and_nothing_without_failures() {
+        let report = report_with(vec![
+            (
+                "secrets_at_rest",
+                "1 problem(s): project alpha: the PII key could not be migrated".to_owned(),
+            ),
+            ("legacy_files", "2 paths could not be removed".to_owned()),
+        ]);
+
+        assert_eq!(
+            MigrationNotices::from_report(Some(&report)).0,
+            vec![
+                "Startup migration secrets_at_rest did not finish: 1 problem(s): project alpha: the PII key could not be migrated".to_owned(),
+                "Startup migration legacy_files did not finish: 2 paths could not be removed".to_owned(),
+            ]
+        );
+        assert!(
+            MigrationNotices::from_report(Some(&report_with(Vec::new())))
+                .0
+                .is_empty()
+        );
+        assert!(MigrationNotices::from_report(None).0.is_empty());
+    }
+
+    #[test]
+    fn a_malformed_key_without_secrets_is_ready_and_a_fresh_key_is_created_on_first_write() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("secret-store.key"), "").unwrap();
+
+        assert_eq!(evaluate(tmp.path()), SecretStoreState::Ready);
+        let store = SecretStore::open(tmp.path()).unwrap();
+        store
+            .write(
+                &SecretName::integration("demo", "slack", "token").unwrap(),
+                "v",
+            )
+            .unwrap();
+        assert_eq!(evaluate(tmp.path()), SecretStoreState::Ready);
+    }
+
+    #[test]
     fn reset_refuses_without_confirmation_and_keeps_the_files() {
         let tmp = tempfile::tempdir().unwrap();
         let secret = seed_enc(tmp.path(), "demo", "slack.token.enc");
-        let health = health(tmp.path());
 
-        assert!(reset_in(tmp.path(), false, None, &health).is_err());
+        assert!(reset_in(tmp.path(), false, None, &[]).is_err());
         assert!(secret.exists());
     }
 
@@ -351,13 +429,13 @@ mod tests {
     fn reset_discards_the_ciphertexts_and_returns_ready() {
         let tmp = tempfile::tempdir().unwrap();
         let secret = seed_enc(tmp.path(), "demo", "slack.token.enc");
-        let health = health(tmp.path());
+        let notices = ["Startup migration x did not finish: y".to_owned()];
 
-        let status = reset_in(tmp.path(), true, Some("demo"), &health).unwrap();
+        let status = reset_in(tmp.path(), true, Some("demo"), &notices).unwrap();
 
         assert_eq!(status.state, SecretStoreStateName::Ready);
+        assert_eq!(status.migration_notices, notices);
         assert!(!secret.exists());
-        assert_eq!(*health.0.lock().unwrap(), SecretStoreState::Ready);
         assert!(ensure_ready_in(tmp.path()).is_ok());
     }
 
@@ -367,9 +445,8 @@ mod tests {
         let store = SecretStore::open(tmp.path()).unwrap();
         let name = SecretName::integration("demo", "slack", "token").unwrap();
         store.write(&name, "v").unwrap();
-        let health = health(tmp.path());
 
-        assert!(reset_in(tmp.path(), true, None, &health).is_err());
+        assert!(reset_in(tmp.path(), true, None, &[]).is_err());
         assert_eq!(store.read(&name).unwrap().unwrap().as_str(), "v");
     }
 
@@ -378,9 +455,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("secret-store.key"), "garbage").unwrap();
         let secret = seed_enc(tmp.path(), "demo", "slack.token.enc");
-        let health = health(tmp.path());
 
-        assert!(reset_in(tmp.path(), true, None, &health).is_err());
+        assert!(reset_in(tmp.path(), true, None, &[]).is_err());
         assert!(secret.exists());
     }
 
@@ -393,6 +469,7 @@ mod tests {
             integrations: Vec::new(),
             plaintext_count: 0,
             unreadable: Vec::new(),
+            migration_notices: Vec::new(),
         };
         let integration = SecretStoreIntegration {
             project: String::new(),

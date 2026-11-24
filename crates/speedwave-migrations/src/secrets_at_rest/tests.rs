@@ -530,6 +530,48 @@ fn a_missing_install_key_beside_ciphertexts_fails_every_secret_and_creates_no_ke
 }
 
 #[test]
+fn a_missing_install_key_beside_the_same_ciphertext_keeps_the_plaintext() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let store = SecretStore::open(dir).unwrap();
+    store
+        .write(&name("alpha", "gitlab", "token"), "SENTINEL-stored")
+        .unwrap();
+    std::fs::remove_file(dir.join("secret-store.key")).unwrap();
+    write(&tokens(dir, "alpha", "gitlab", "token"), GITLAB_TOKEN);
+
+    let error = migrate(dir).unwrap_err();
+
+    assert!(error.contains("Integration gitlab (project alpha)"));
+    assert_eq!(
+        std::fs::read_to_string(tokens(dir, "alpha", "gitlab", "token")).unwrap(),
+        GITLAB_TOKEN
+    );
+    assert!(enc_exists(dir, &name("alpha", "gitlab", "token")));
+    assert!(!dir.join("secret-store.key").exists());
+}
+
+#[test]
+fn an_unreadable_ciphertext_is_replaced_from_the_plaintext() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let store = SecretStore::open(dir).unwrap();
+    store
+        .write(&name("alpha", "gitlab", "token"), "SENTINEL-stored")
+        .unwrap();
+    write(&dir.join("secrets/alpha/gitlab.token.enc"), "garbage");
+    write(&tokens(dir, "alpha", "gitlab", "token"), GITLAB_TOKEN);
+
+    migrate(dir).unwrap();
+
+    assert_eq!(
+        stored(dir, &name("alpha", "gitlab", "token")).as_deref(),
+        Some(GITLAB_TOKEN)
+    );
+    assert!(!tokens(dir, "alpha", "gitlab", "token").exists());
+}
+
+#[test]
 fn generated_files_with_plaintext_secrets_are_removed_and_clean_ones_stay() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
@@ -627,6 +669,12 @@ fn run_all_reports_a_failed_migration_by_name_and_still_runs_legacy_files() {
     let report = crate::run_all(dir).unwrap();
 
     assert_eq!(report.failed, vec!["secrets_at_rest"]);
+    assert_eq!(report.failures.len(), 1);
+    assert_eq!(report.failures[0].0, "secrets_at_rest");
+    assert!(report.failures[0]
+        .1
+        .contains("project alpha: the PII key could not be migrated"));
+    assert!(!format!("{report:?}").contains("not-hex"));
     assert_eq!(report.executed, vec!["legacy_files"]);
     assert!(!dir.join("mcp-os-port").exists());
     assert!(dir.join("policies/alpha/key").is_file());

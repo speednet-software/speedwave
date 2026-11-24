@@ -25,9 +25,8 @@ mod workers;
 
 pub(crate) use proxy::enabled_git_forge_kinds_in;
 pub use proxy::{
-    caller_token_in, proxy_config_dir_in, remove_llm_provider_key_in, render_proxy_config,
-    spw_key_env_name, write_llm_provider_key_in, PROXY_BASE_URL, PROXY_CALLER_AUTH_HEADER,
-    PROXY_PORT,
+    proxy_config_dir_in, remove_llm_provider_key_in, render_proxy_config, spw_key_env_name,
+    write_llm_provider_key_in, PROXY_BASE_URL, PROXY_CALLER_AUTH_HEADER, PROXY_PORT,
 };
 
 pub use pii_ner::{
@@ -8743,9 +8742,9 @@ services:
     #[test]
     fn test_caller_token_rejects_invalid_name() {
         let data_dir = tempfile::tempdir().unwrap();
-        assert!(caller_token_in(data_dir.path(), "").is_err());
-        assert!(caller_token_in(data_dir.path(), "../evil").is_err());
-        assert!(caller_token_in(data_dir.path(), &"a".repeat(64)).is_err());
+        assert!(proxy::caller_token_in(data_dir.path(), "").is_err());
+        assert!(proxy::caller_token_in(data_dir.path(), "../evil").is_err());
+        assert!(proxy::caller_token_in(data_dir.path(), &"a".repeat(64)).is_err());
     }
 
     #[cfg(unix)]
