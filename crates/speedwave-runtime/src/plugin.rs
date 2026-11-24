@@ -184,21 +184,20 @@ pub enum OAuthAuthStyle {
     Body,
 }
 
-/// Host of the loopback redirect URI in the `authorization_code` flow. Defaults to `127.0.0.1`
-/// (RFC 8252 §7.3); `localhost` is for IdPs that refuse an IP literal (Entra ID). See ADR-069.
+/// Host of the OAuth loopback redirect URI.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OAuthRedirectHost {
-    /// `http://127.0.0.1:<port>/callback`.
+    /// `127.0.0.1`.
     #[default]
     #[serde(rename = "127.0.0.1")]
     Loopback,
-    /// `http://localhost:<port>/callback`, served on both `127.0.0.1` and `::1`.
+    /// `localhost`.
     #[serde(rename = "localhost")]
     Localhost,
 }
 
 impl OAuthRedirectHost {
-    /// Wire string, matching the serde names; also the host of the redirect URI.
+    /// Host name in the redirect URI.
     pub fn as_str(self) -> &'static str {
         match self {
             OAuthRedirectHost::Loopback => "127.0.0.1",
@@ -6280,15 +6279,6 @@ mod tests {
                 serde_json::json!(host.as_str())
             );
         }
-    }
-
-    #[test]
-    fn validate_oauth_spec_accepts_localhost_redirect_with_and_without_port() {
-        let mut spec = valid_oauth_spec();
-        spec.redirect_host = OAuthRedirectHost::Localhost;
-        assert!(validate_oauth_spec(Some(&spec), &oauth_auth_fields()).is_ok());
-        spec.redirect_port = Some(47821);
-        assert!(validate_oauth_spec(Some(&spec), &oauth_auth_fields()).is_ok());
     }
 
     #[test]

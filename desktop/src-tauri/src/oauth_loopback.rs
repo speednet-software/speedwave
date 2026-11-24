@@ -4,47 +4,36 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
-/// How many ephemeral ports a `localhost` bind tries before giving up on a taken `::1` side.
 const EPHEMERAL_BIND_ATTEMPTS: usize = 8;
 
-/// The bound callback server: `secondary` is the `::1` side of a `localhost` redirect.
 pub(crate) struct CallbackListeners {
     pub(crate) primary: TcpListener,
     pub(crate) secondary: Option<TcpListener>,
-    pub(crate) port: u16,
+    host: OAuthRedirectHost,
+    port: u16,
 }
 
-/// Why the callback wait ended without an authorization code. Cancellation is distinct so the UI
-/// shows a quiet `cancelled` terminal, not a red `error` (mirrors device-code's `Cancelled`).
-#[derive(Debug)]
-pub(crate) enum CallbackFailure {
-    Cancelled,
-    TimedOut,
-    /// The provider redirected back with an `error` (or without a code); `provider_error` is the
-    /// provider's `error` code when it sent one.
-    Denied {
-        provider_error: Option<String>,
-        message: String,
-    },
-    Error(String),
-}
-
-impl CallbackFailure {
-    /// Display text of a failure that ends the flow.
-    pub(crate) fn message(&self) -> &str {
-        match self {
-            CallbackFailure::Cancelled => "OAuth flow cancelled",
-            CallbackFailure::TimedOut => "OAuth flow timed out",
-            CallbackFailure::Denied { message, .. } => message,
-            CallbackFailure::Error(message) => message,
-        }
+impl CallbackListeners {
+    pub(crate) fn redirect_uri(&self) -> String {
+        format!("http://{}:{}/callback", self.host.as_str(), self.port)
     }
 }
 
-/// Binds the callback server for `host` on `port` (`0` picks an ephemeral one). A `localhost`
-/// redirect also binds `::1` on the same port, since the browser may resolve the name there first;
-/// a `::1` port another process holds fails a fixed port and re-picks an ephemeral one, so the
-/// redirect never reaches that process. Without IPv6 loopback only `127.0.0.1` is served.
+#[derive(Debug, PartialEq)]
+enum Ipv6BindFailure {
+    PortTaken,
+    Unavailable,
+}
+
+fn classify_ipv6_bind_error(e: &std::io::Error) -> Ipv6BindFailure {
+    match e.kind() {
+        std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied => {
+            Ipv6BindFailure::PortTaken
+        }
+        _ => Ipv6BindFailure::Unavailable,
+    }
+}
+
 pub(crate) async fn bind_callback_listeners(
     host: OAuthRedirectHost,
     port: u16,
@@ -54,42 +43,34 @@ pub(crate) async fn bind_callback_listeners(
         // SSOT-allow: browser-side OAuth redirect listener, not the container-reach bind (ADR-069).
         let primary = TcpListener::bind(("127.0.0.1", port)).await?;
         let bound = primary.local_addr()?.port();
-        if host == OAuthRedirectHost::Loopback {
-            return Ok(CallbackListeners {
-                primary,
-                secondary: None,
-                port: bound,
-            });
-        }
-        match TcpListener::bind(("::1", bound)).await {
-            Ok(v6) => {
-                return Ok(CallbackListeners {
-                    primary,
-                    secondary: Some(v6),
-                    port: bound,
-                });
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-                attempts += 1;
-                if port != 0 || attempts >= EPHEMERAL_BIND_ATTEMPTS {
-                    return Err(e);
-                }
-            }
-            Err(e) => {
-                log::debug!("OAuth callback served on IPv4 only, IPv6 loopback unavailable: {e}");
-                return Ok(CallbackListeners {
-                    primary,
-                    secondary: None,
-                    port: bound,
-                });
-            }
-        }
+        let secondary = match host {
+            OAuthRedirectHost::Loopback => None,
+            OAuthRedirectHost::Localhost => match TcpListener::bind(("::1", bound)).await {
+                Ok(v6) => Some(v6),
+                Err(e) => match classify_ipv6_bind_error(&e) {
+                    Ipv6BindFailure::PortTaken => {
+                        attempts += 1;
+                        if port != 0 || attempts >= EPHEMERAL_BIND_ATTEMPTS {
+                            return Err(e);
+                        }
+                        continue;
+                    }
+                    Ipv6BindFailure::Unavailable => {
+                        log::warn!(
+                            "OAuth callback served on IPv4 only, IPv6 loopback unavailable: {e}"
+                        );
+                        None
+                    }
+                },
+            },
+        };
+        return Ok(CallbackListeners {
+            primary,
+            secondary,
+            host,
+            port: bound,
+        });
     }
-}
-
-/// The redirect URI the IdP sends the browser back to.
-pub(crate) fn redirect_uri(host: OAuthRedirectHost, port: u16) -> String {
-    format!("http://{}:{port}/callback", host.as_str())
 }
 
 /// Builds the authorize redirect URL with PKCE + state. `scope_param` is the scopes query key:
@@ -450,16 +431,47 @@ mod tests {
         client.await.unwrap();
     }
 
+    #[tokio::test]
+    async fn redirect_uri_names_the_declared_host_and_bound_port() {
+        for (host, name) in [
+            (OAuthRedirectHost::Loopback, "127.0.0.1"),
+            (OAuthRedirectHost::Localhost, "localhost"),
+        ] {
+            let bound = bind_callback_listeners(host, 0).await.unwrap();
+            assert_eq!(
+                bound.redirect_uri(),
+                format!("http://{name}:{}/callback", bound.port)
+            );
+        }
+    }
+
     #[test]
-    fn redirect_uri_names_the_declared_host_and_port() {
-        assert_eq!(
-            redirect_uri(OAuthRedirectHost::Loopback, 47821),
-            "http://127.0.0.1:47821/callback"
-        );
-        assert_eq!(
-            redirect_uri(OAuthRedirectHost::Localhost, 47821),
-            "http://localhost:47821/callback"
-        );
+    fn ipv6_bind_error_that_may_mean_another_owner_is_port_taken() {
+        for kind in [
+            std::io::ErrorKind::AddrInUse,
+            std::io::ErrorKind::PermissionDenied,
+        ] {
+            assert_eq!(
+                classify_ipv6_bind_error(&std::io::Error::from(kind)),
+                Ipv6BindFailure::PortTaken,
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ipv6_bind_error_without_ipv6_loopback_is_unavailable() {
+        for kind in [
+            std::io::ErrorKind::AddrNotAvailable,
+            std::io::ErrorKind::Unsupported,
+            std::io::ErrorKind::Other,
+        ] {
+            assert_eq!(
+                classify_ipv6_bind_error(&std::io::Error::from(kind)),
+                Ipv6BindFailure::Unavailable,
+                "{kind:?}"
+            );
+        }
     }
 
     #[tokio::test]

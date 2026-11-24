@@ -1,6 +1,6 @@
 use crate::oauth_flow::{self, FlowRegistry, ProgressStatus};
 use crate::oauth_loopback::{
-    bind_callback_listeners, build_authorize_url, redirect_uri, wait_for_callback, CallbackFailure,
+    bind_callback_listeners, build_authorize_url, wait_for_callback, CallbackFailure,
 };
 use crate::types::check_project;
 use serde::Deserialize;
@@ -90,7 +90,7 @@ pub async fn start_plugin_oauth(
             FLOW_STATE.clear_if_current(&request_id);
             format!("failed to bind loopback callback server: {e}")
         })?;
-    let redirect_uri = redirect_uri(oauth.redirect_host, listeners.port);
+    let redirect_uri = listeners.redirect_uri();
 
     let auth_redirect = build_authorize_url(
         &authorize_url,
