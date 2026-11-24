@@ -89,6 +89,49 @@ describe('ChatMessageComponent', () => {
     expect(el.querySelector('[data-testid="tool-name"]')?.textContent).toBe('Read');
   });
 
+  it('hands a subagent call the view of the agent it started', () => {
+    const blocks: MessageBlock[] = [
+      {
+        type: 'tool_use',
+        tool: {
+          type: 'tool_use',
+          tool_id: 'a1',
+          tool_name: 'Agent',
+          input_json: '{"description":"Explore code"}',
+          status: 'done',
+          result: 'Async agent launched',
+          result_is_error: false,
+        },
+      },
+    ];
+    fixture.componentRef.setInput('blocks', blocks);
+    fixture.componentRef.setInput('role', 'assistant');
+    fixture.componentRef.setInput(
+      'agents',
+      new Map([
+        [
+          'a1',
+          {
+            id: 'a1',
+            label: 'Explore code',
+            type: null,
+            background: true,
+            status: 'running' as const,
+            toolCount: 3,
+            lastActivity: '',
+            result: null,
+          },
+        ],
+      ])
+    );
+    fixture.detectChanges();
+
+    const el = fixture.nativeElement as HTMLElement;
+    expect(el.querySelector('[data-testid="tool-meta"]')?.textContent?.trim()).toBe(
+      '3 tools · running'
+    );
+  });
+
   it('renders multiple blocks in order', () => {
     const blocks: MessageBlock[] = [
       { type: 'text', content: 'First' },

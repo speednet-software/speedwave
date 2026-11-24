@@ -11,19 +11,7 @@ pub(crate) async fn list_slash_commands(
     check_project(&project_id)?;
 
     let discovery = tauri::async_runtime::spawn_blocking(move || {
-        let user_config = config::load_user_config().map_err(|e| e.to_string())?;
-        let project_entry = user_config
-            .require_project(&project_id)
-            .map_err(|e| e.to_string())?;
-        let project_dir = PathBuf::from(&project_entry.dir);
-        let enabled_plugins =
-            config::resolve_integrations(&project_dir, &user_config, &project_entry.name)
-                .enabled_plugin_service_ids()
-                .into_iter()
-                .map(String::from)
-                .collect();
-        let handle = slash::ProjectHandle::new(&project_entry.name, project_dir)
-            .with_enabled_plugins(enabled_plugins);
+        let handle = project_handle(&project_id)?;
         let rt = runtime::detect_runtime();
         slash::discover_slash_commands(&rt, &handle).map_err(|e| e.to_string())
     })
@@ -31,6 +19,22 @@ pub(crate) async fn list_slash_commands(
     .map_err(|e| format!("slash discovery task failed: {e}"))??;
 
     Ok(discovery)
+}
+
+pub(crate) fn project_handle(project_id: &str) -> Result<slash::ProjectHandle, String> {
+    let user_config = config::load_user_config().map_err(|e| e.to_string())?;
+    let project_entry = user_config
+        .require_project(project_id)
+        .map_err(|e| e.to_string())?;
+    let project_dir = PathBuf::from(&project_entry.dir);
+    let enabled_plugins =
+        config::resolve_integrations(&project_dir, &user_config, &project_entry.name)
+            .enabled_plugin_service_ids()
+            .into_iter()
+            .map(String::from)
+            .collect();
+    Ok(slash::ProjectHandle::new(&project_entry.name, project_dir)
+        .with_enabled_plugins(enabled_plugins))
 }
 
 #[tauri::command]

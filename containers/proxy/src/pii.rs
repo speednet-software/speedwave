@@ -463,9 +463,11 @@ mod tests {
         let path = dir.path().join("policy.json");
         std::fs::write(dir.path().join("key"), "ab".repeat(32)).unwrap();
         let late = path.clone();
+        let staging = dir.path().join("policy.json.tmp");
         let writer = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(50));
-            std::fs::write(&late, default_policy_json()).unwrap();
+            std::fs::write(&staging, default_policy_json()).unwrap();
+            std::fs::rename(&staging, &late).unwrap();
         });
         let state = load_from_file(&path, 200, Duration::from_millis(5));
         writer.join().unwrap();

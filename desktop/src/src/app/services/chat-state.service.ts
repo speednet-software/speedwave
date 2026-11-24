@@ -15,6 +15,7 @@ import { AnthropicModelsService } from './anthropic-models.service';
 import { ClaudeControlService } from './claude-control.service';
 import { PlanUsageService } from './plan-usage.service';
 import { LoggerService } from './logger.service';
+import { SlashService } from '../chat/slash/slash.service';
 import { BetaService } from './beta.service';
 import { WindowFocusService } from './window-focus.service';
 import {
@@ -102,6 +103,7 @@ export class ChatStateService {
   private log = inject(LoggerService);
   private beta = inject(BetaService);
   private windowFocus = inject(WindowFocusService);
+  private slash = inject(SlashService);
 
   private readonly deps: ChatStoreDeps;
 
@@ -148,6 +150,7 @@ export class ChatStateService {
       planUsage: this.planUsage,
       clipboard: this.clipboard,
       log: this.log,
+      slash: this.slash,
       ensureListeners: () => this.ensureListeners(),
     };
     const initial = this.makeStore();
@@ -180,6 +183,7 @@ export class ChatStateService {
 
   private setActiveTab(tabId: string): void {
     this._activeTabId.set(tabId);
+    this.slash.setActiveSession(tabId);
     const open = this._tabs();
     this._recentTabIds = [
       tabId,
@@ -815,7 +819,10 @@ export class ChatStateService {
         if (
           chunk.chunk_type === 'SystemInit' ||
           chunk.chunk_type === 'RateLimit' ||
-          chunk.chunk_type === 'QueueDrained'
+          chunk.chunk_type === 'QueueDrained' ||
+          chunk.chunk_type === 'TurnStarted' ||
+          chunk.chunk_type === 'SubagentActivity' ||
+          chunk.chunk_type === 'SubagentStatus'
         ) {
           store.handleStreamChunk(chunk);
           return;

@@ -86,7 +86,7 @@ pub(crate) fn detokenize_transcript(
                 MessageBlock::ControlChip { argument, .. } => {
                     *argument = detokenize_for_display(policy, argument)
                 }
-                MessageBlock::ToolUse { result: None, .. } => {}
+                MessageBlock::ToolUse { result: None, .. } | MessageBlock::TurnOrigin { .. } => {}
             }
         }
     }
@@ -260,12 +260,14 @@ mod tests {
                         input: tokenized.clone(),
                         result: Some(tokenized.clone()),
                         is_error: false,
+                        activities: Vec::new(),
                     },
                 ]),
                 timestamp: None,
                 uuid: None,
                 model: None,
                 usage: None,
+                response_ids: None,
             }],
         };
 
@@ -281,6 +283,7 @@ mod tests {
                 | MessageBlock::Error { content } => content,
                 MessageBlock::ToolUse { .. } => panic!("unexpected ToolUse in first 3"),
                 MessageBlock::ControlChip { .. } => panic!("unexpected ControlChip in first 3"),
+                MessageBlock::TurnOrigin { .. } => panic!("unexpected TurnOrigin in first 3"),
             };
             assert_eq!(content.as_str(), "jan@example.com");
         }
@@ -309,6 +312,7 @@ mod tests {
                 uuid: None,
                 model: None,
                 usage: None,
+                response_ids: None,
             }],
         };
         detokenize_transcript(&mut transcript, &DisplayPolicy::default());
@@ -397,11 +401,13 @@ mod tests {
                     input: "{\"q\":\"brandex\"}".to_string(),
                     result: Some("brandex done".to_string()),
                     is_error: false,
+                    activities: Vec::new(),
                 }]),
                 timestamp: None,
                 uuid: None,
                 model: None,
                 usage: None,
+                response_ids: None,
             }],
         };
 

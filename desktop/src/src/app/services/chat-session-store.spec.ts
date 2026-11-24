@@ -28,17 +28,20 @@ import { TauriService } from './tauri.service';
 import { AnthropicModelsService } from './anthropic-models.service';
 import { ClaudeControlService } from './claude-control.service';
 import { LoggerService } from './logger.service';
+import { SlashService } from '../chat/slash/slash.service';
 import { makeStagedImage } from '../testing/attachments';
 import { PlanUsageService } from './plan-usage.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
 import { createDeferred, type Deferred } from '../testing/deferred';
 import { makeMockLogger } from '../testing/mock-logger';
 import type {
+  ChatMessage,
   ConversationTranscript,
   MessageBlock,
   HistoryMessageBlock,
   HistoryToolUse,
   StreamChunk,
+  SubagentState,
   ToolUseBlock,
 } from '../models/chat';
 import type { ModelSwitchOutcome } from '../models/claude-control';
@@ -104,6 +107,7 @@ describe('ChatSessionStore', () => {
       planUsage: TestBed.inject(PlanUsageService),
       clipboard: TestBed.inject(Clipboard),
       log: mockLogger,
+      slash: TestBed.inject(SlashService),
       ensureListeners: () => Promise.resolve(),
     };
     store = new ChatSessionStore('test-tab-id', deps);
@@ -2059,6 +2063,20 @@ describe('ChatSessionStore', () => {
       }
     });
 
+    it('leaves the blocks untouched on a SubagentActivity chunk', () => {
+      store.handleStreamChunk({
+        chunk_type: 'ToolStart',
+        data: { tool_id: 'p1', tool_name: 'Agent' },
+      });
+      const before = store.currentBlocks;
+      store.handleStreamChunk({
+        chunk_type: 'SubagentActivity',
+        data: { parent_tool_id: 'p1', tool_id: 's1', tool_name: 'Read', input_json: '{}' },
+      });
+
+      expect(store.currentBlocks).toBe(before);
+    });
+
     it('handles ToolInputDelta chunk', () => {
       store.handleStreamChunk({
         chunk_type: 'ToolStart',
@@ -2487,6 +2505,97 @@ describe('ChatSessionStore', () => {
       await new Promise((r) => setTimeout(r, 0));
       expect(sentIds).toContain('msg_1');
       expect(sentIds).toContain('msg_2');
+    });
+
+    it('sends every response of a turn with tools to get_conversation_cost', async () => {
+      TestBed.inject(ProjectStateService).activeProject.set('proj');
+      let sentIds: string[] = [];
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      spy.mockImplementation(async (cmd: string, args?: unknown) => {
+        if (cmd === 'get_usage_for_response') return { cost_usd: 0.1, cost_source: 'catalog' };
+        if (cmd === 'get_conversation_cost') {
+          sentIds = (args as { responseIds: string[] }).responseIds;
+          return 0.3;
+        }
+        return undefined;
+      });
+      store.handleStreamChunk({ chunk_type: 'Text', data: { content: 'a' } });
+      store.handleStreamChunk({
+        chunk_type: 'Result',
+        data: {
+          session_id: 'abc',
+          assistant_uuid: 'msg_3',
+          response_ids: ['msg_1', 'msg_2', 'msg_3'],
+          total_cost: 0.3,
+        },
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      expect([...sentIds].sort()).toEqual(['msg_1', 'msg_2', 'msg_3']);
+      expect(store.messages.at(-1)?.meta?.response_ids).toEqual(['msg_1', 'msg_2', 'msg_3']);
+    });
+
+    it('a turn that ended in an error still counts its responses in get_conversation_cost', async () => {
+      TestBed.inject(ProjectStateService).activeProject.set('proj');
+      let sentIds: string[] = [];
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      spy.mockImplementation(async (cmd: string, args?: unknown) => {
+        if (cmd === 'get_usage_for_response') return { cost_usd: 0.1, cost_source: 'catalog' };
+        if (cmd === 'get_conversation_cost') {
+          sentIds = (args as { responseIds: string[] }).responseIds;
+          return 0.2;
+        }
+        return undefined;
+      });
+      store.handleStreamChunk({ chunk_type: 'Text', data: { content: 'a' } });
+      store.handleStreamChunk({
+        chunk_type: 'Error',
+        data: { content: 'overloaded', turn_ended: true, response_ids: ['msg_e'] },
+      });
+      expect(store.messages.at(-1)?.meta?.response_ids).toEqual(['msg_e']);
+      store.handleStreamChunk({ chunk_type: 'Text', data: { content: 'b' } });
+      store.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', assistant_uuid: 'msg_n', total_cost: 0.2 },
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      expect([...sentIds].sort()).toEqual(['msg_e', 'msg_n']);
+    });
+
+    it('a resumed turn counts every response of that turn in get_conversation_cost', async () => {
+      TestBed.inject(ProjectStateService).activeProject.set('proj');
+      let sentIds: string[] = [];
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      spy.mockImplementation(async (cmd: string, args?: unknown) => {
+        if (cmd === 'get_usage_for_response') return { cost_usd: 0.1, cost_source: 'catalog' };
+        if (cmd === 'get_conversation_cost') {
+          sentIds = (args as { responseIds: string[] }).responseIds;
+          return 0.4;
+        }
+        return undefined;
+      });
+      store.loadMessages(
+        toChatMessages({
+          session_id: 'abc',
+          messages: [
+            { role: 'user', content: 'go', timestamp: null, uuid: 'u1' },
+            {
+              role: 'assistant',
+              content: 'done',
+              timestamp: null,
+              blocks: [{ type: 'text', content: 'done' }],
+              uuid: 'msg_b',
+              response_ids: ['msg_a', 'msg_b'],
+            },
+          ],
+        })
+      );
+      store.handleStreamChunk({ chunk_type: 'Text', data: { content: 'c' } });
+      store.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', assistant_uuid: 'msg_c', total_cost: 0.4 },
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      expect([...sentIds].sort()).toEqual(['msg_a', 'msg_b', 'msg_c']);
     });
 
     it('lagging proxy append (get_usage_for_response null) keeps live CC and skips get_conversation_cost', async () => {
@@ -3048,6 +3157,69 @@ describe('ChatSessionStore', () => {
       });
 
       expect(store.sessionStats?.model).toBeUndefined();
+    });
+  });
+
+  describe('SystemInit slash commands', () => {
+    const initList = [
+      {
+        name: 'simplify',
+        description: null,
+        argument_hint: null,
+        kind: 'Command' as const,
+        plugin: null,
+      },
+    ];
+
+    it('hands the init list to the slash service under its tab id', () => {
+      const slash = TestBed.inject(SlashService);
+      slash.setActiveSession('test-tab-id');
+
+      store.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-6', slash_commands: initList },
+      });
+
+      expect(slash.commands()).toEqual(initList);
+    });
+
+    it('keeps the earlier list when an init carries none', () => {
+      const slash = TestBed.inject(SlashService);
+      slash.setActiveSession('test-tab-id');
+      store.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-6', slash_commands: initList },
+      });
+
+      store.handleStreamChunk({ chunk_type: 'SystemInit', data: { model: 'claude-opus-4-6' } });
+
+      expect(slash.commands()).toEqual(initList);
+    });
+
+    it('drops the list when a new conversation starts', () => {
+      const slash = TestBed.inject(SlashService);
+      slash.setActiveSession('test-tab-id');
+      store.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-6', slash_commands: initList },
+      });
+
+      store.resetForNewConversation();
+
+      expect(slash.commands()).toEqual([]);
+    });
+
+    it('drops the list when the tab is disposed', () => {
+      const slash = TestBed.inject(SlashService);
+      slash.setActiveSession('test-tab-id');
+      store.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-6', slash_commands: initList },
+      });
+
+      store.dispose();
+
+      expect(slash.commands()).toEqual([]);
     });
   });
 
@@ -4722,6 +4894,7 @@ describe('ChatSessionStore', () => {
           },
           pendingEffort: { level: 'max', project: 'test', mark: 0, request: 1 },
           confirmedModel: 'claude-sonnet-5',
+          subagentRuns: new Map([['a1', { activities: [], state: 'running', summary: '' }]]),
         };
 
         internals.restoreConversationView(view);
@@ -6555,6 +6728,18 @@ describe('ChatSessionStore', () => {
     it('canRetryLastAssistant returns true when last assistant is committed and a session id is known', () => {
       seedRetryableSession();
       expect(store.canRetryLastAssistant()).toBe(true);
+    });
+
+    it('canRetryLastAssistant returns false for a turn Claude Code started on its own', () => {
+      seedRetryableSession();
+      const messages = store.messages;
+      const userIdx = messages.map((m) => m.role).lastIndexOf('user');
+      store._setState({
+        messages: messages.map((m, i) =>
+          i === userIdx ? { ...m, blocks: [{ type: 'turn_origin', origin: 'scheduled' }] } : m
+        ),
+      });
+      expect(store.canRetryLastAssistant()).toBe(false);
     });
 
     it('canRetryLastAssistant returns false while streaming', () => {
@@ -8456,6 +8641,25 @@ describe('ChatSessionStore', () => {
       expect(msg.meta?.usage).toBeUndefined();
     });
 
+    it('maps the response ids of a folded turn into ChatMessage.meta', () => {
+      const transcript: ConversationTranscript = {
+        session_id: 's1',
+        messages: [
+          {
+            role: 'assistant',
+            content: 'done',
+            timestamp: '2025-01-01T00:00:00Z',
+            blocks: [{ type: 'text', content: 'done' }],
+            uuid: 'msg_2',
+            response_ids: ['msg_1', 'msg_2'],
+          },
+        ],
+      };
+      const [msg] = toChatMessages(transcript);
+      expect(msg.uuid).toBe('msg_2');
+      expect(msg.meta?.response_ids).toEqual(['msg_1', 'msg_2']);
+    });
+
     it('leaves meta undefined when neither model nor usage present', () => {
       const transcript: ConversationTranscript = {
         session_id: '00000000-0000-0000-0000-000000000000',
@@ -8496,6 +8700,7 @@ describe('ChatSessionStore', () => {
         input: '{"command":"ls"}',
         result: null,
         is_error: false,
+        activities: [],
         ...overrides,
       };
     }
@@ -8575,6 +8780,16 @@ describe('ChatSessionStore', () => {
         { type: 'error', content: 'boom' },
         { type: 'chip', command: 'model', argument: 'claude-sonnet-5' },
       ]);
+    });
+
+    it('keeps a history turn_origin block as the live-path origin row', () => {
+      const [msg] = toChatMessages(transcriptWith([{ type: 'turn_origin', origin: 'scheduled' }]));
+      expect(msg.blocks).toEqual([{ type: 'turn_origin', origin: 'scheduled' }]);
+    });
+
+    it('round-trips a turn_origin block through the state tree', () => {
+      const blocks = [{ type: 'turn_origin' as const, origin: 'task_notification' as const }];
+      expect(stateBlocksToMessageBlocks(messageBlocksToState(blocks))).toEqual(blocks);
     });
   });
 
@@ -9599,6 +9814,7 @@ describe('ChatSessionStore', () => {
           input: JSON.stringify(input),
           result,
           is_error: false,
+          activities: [],
         };
       }
 
@@ -9654,6 +9870,245 @@ describe('ChatSessionStore', () => {
           { id: '1', subject: 'Read', status: 'completed', activeForm: undefined },
         ]);
       });
+    });
+  });
+  describe('subagents', () => {
+    function agentTool(
+      tool_id: string,
+      input: Record<string, unknown>,
+      result: string | null,
+      tool_name = 'Agent'
+    ): MessageBlock {
+      const base = {
+        type: 'tool_use' as const,
+        tool_id,
+        tool_name,
+        input_json: JSON.stringify(input),
+      };
+      return {
+        type: 'tool_use',
+        tool:
+          result === null
+            ? { ...base, status: 'running' }
+            : { ...base, status: 'done', result, result_is_error: false },
+      };
+    }
+
+    function activity(parent: string, tool_id: string, command: string): void {
+      store.handleStreamChunk({
+        chunk_type: 'SubagentActivity',
+        data: {
+          parent_tool_id: parent,
+          tool_id,
+          tool_name: 'Bash',
+          input_json: JSON.stringify({ command }),
+        },
+      });
+    }
+
+    function status(tool_id: string, state: SubagentState, summary = ''): void {
+      store.handleStreamChunk({
+        chunk_type: 'SubagentStatus',
+        data: { tool_id, status: state, summary },
+      });
+    }
+
+    function committed(blocks: MessageBlock[]): ChatMessage[] {
+      return [
+        { role: 'user', blocks: [{ type: 'text', content: 'go' }], timestamp: 1 },
+        { role: 'assistant', blocks, timestamp: 2, uuid: 'msg_a1', uuid_status: 'Committed' },
+      ];
+    }
+
+    it('has no agents and no panel without a subagent call', () => {
+      store._setState({ currentBlocks: [agentTool('b1', {}, null, 'Bash')] });
+      expect(store.agentsById().size).toBe(0);
+      expect(store.agentPanel()).toEqual([]);
+    });
+
+    it('shows a foreground agent running until its call is answered, whichever tool name it has', () => {
+      store.isStreaming = true;
+      store._setState({
+        currentBlocks: [
+          agentTool('a1', { description: 'Explore', subagent_type: 'Explore' }, null),
+          agentTool('a2', { description: 'Review' }, 'ok', 'Task'),
+        ],
+      });
+      expect(store.agentPanel().map((a) => [a.id, a.label, a.type, a.status])).toEqual([
+        ['a1', 'Explore', 'Explore', 'running'],
+        ['a2', 'Review', null, 'completed'],
+      ]);
+    });
+
+    it('counts the tool calls of each agent and names the last one in the format of a tool header', () => {
+      store.isStreaming = true;
+      store._setState({
+        currentBlocks: [agentTool('a1', { description: 'One' }, null)],
+      });
+      activity('a1', 's1', 'ls');
+      activity('a1', 's2', 'make test');
+      activity('a1', 's2', 'make test');
+
+      const agent = store.agentsById().get('a1');
+      expect(agent?.toolCount).toBe(2);
+      expect(agent?.lastActivity).toBe('Bash $ make test');
+    });
+
+    it('keeps a background agent running after its launch result, and ends it on its final status', () => {
+      store._setState({
+        messages: committed([
+          agentTool(
+            'a1',
+            { description: 'Watch', run_in_background: true },
+            'Async agent launched'
+          ),
+        ]),
+      });
+      status('a1', 'running');
+      expect(store.agentsById().get('a1')?.status).toBe('running');
+
+      status('a1', 'completed', 'all quiet');
+      expect(store.agentsById().get('a1')).toMatchObject({
+        status: 'completed',
+        result: 'all quiet',
+      });
+    });
+
+    it('keeps a running background agent of an earlier turn in the panel and nothing else', () => {
+      store._setState({
+        messages: committed([
+          agentTool(
+            'a1',
+            { description: 'Watch', run_in_background: true },
+            'Async agent launched'
+          ),
+          agentTool('a2', { description: 'Done one' }, 'ok'),
+        ]),
+      });
+      status('a1', 'running');
+      status('a2', 'completed');
+
+      expect(store.agentPanel().map((a) => a.id)).toEqual(['a1']);
+    });
+
+    it('lists a finished agent while its turn streams and drops it when the turn is committed', () => {
+      store.isStreaming = true;
+      store._setState({
+        currentBlocks: [agentTool('a1', { description: 'Quick' }, 'ok')],
+      });
+      status('a1', 'completed', 'quick done');
+      expect(store.agentPanel().map((a) => [a.id, a.status])).toEqual([['a1', 'completed']]);
+
+      store._setState({
+        messages: committed([agentTool('a1', { description: 'Quick' }, 'ok')]),
+        currentBlocks: [],
+      });
+      expect(store.agentPanel()).toEqual([]);
+      expect(store.agentsById().get('a1')?.status).toBe('completed');
+    });
+
+    it('shows parallel agents one by one with their own status', () => {
+      store.isStreaming = true;
+      store._setState({
+        currentBlocks: [
+          agentTool('a1', { description: 'One' }, null),
+          agentTool('a2', { description: 'Two' }, null),
+          agentTool('a3', { description: 'Three' }, null),
+        ],
+      });
+      status('a1', 'running');
+      status('a2', 'error', 'boom');
+      status('a3', 'stopped');
+
+      expect(store.agentPanel().map((a) => [a.id, a.status])).toEqual([
+        ['a1', 'running'],
+        ['a2', 'error'],
+        ['a3', 'stopped'],
+      ]);
+    });
+
+    it('leaves the blocks alone when a subagent chunk arrives', () => {
+      store._setState({ currentBlocks: [agentTool('a1', {}, null)] });
+      const before = store.currentBlocks;
+      activity('a1', 's1', 'ls');
+      status('a1', 'running');
+      expect(store.currentBlocks).toBe(before);
+    });
+
+    it('has no panel once the session ended', () => {
+      store._setState({
+        messages: committed([
+          agentTool(
+            'a1',
+            { description: 'Watch', run_in_background: true },
+            'Async agent launched'
+          ),
+        ]),
+      });
+      status('a1', 'running');
+      expect(store.agentPanel()).toHaveLength(1);
+
+      store.markSessionEnded();
+      expect(store.agentPanel()).toEqual([]);
+    });
+
+    it('forgets the agents of a conversation when a new one starts', () => {
+      store._setState({ messages: committed([agentTool('a1', { description: 'One' }, 'ok')]) });
+      activity('a1', 's1', 'ls');
+      expect(store.agentsById().get('a1')?.toolCount).toBe(1);
+
+      store.resetForNewConversation();
+      store._setState({ messages: committed([agentTool('a1', { description: 'One' }, 'ok')]) });
+      expect(store.agentsById().get('a1')?.toolCount).toBe(0);
+    });
+
+    it('takes the tool calls of a resumed agent from the transcript, with no status of its own', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'get_conversation':
+            return {
+              session_id: 'sess-agent',
+              messages: [
+                {
+                  role: 'assistant',
+                  content: '',
+                  timestamp: null,
+                  uuid: 'a-1',
+                  blocks: [
+                    {
+                      type: 'tool_use',
+                      tool_id: 'a1',
+                      tool_name: 'Agent',
+                      input: '{"description":"Watch","run_in_background":true}',
+                      result: 'Async agent launched',
+                      is_error: false,
+                      activities: [
+                        { tool_id: 's1', tool_name: 'Bash', input_json: '{"command":"ls"}' },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            } satisfies ConversationTranscript;
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'check_containers_running':
+            return true;
+          default:
+            return undefined;
+        }
+      };
+      await TestBed.inject(ProjectStateService).init();
+      await store.resumeConversation('sess-agent');
+
+      expect(store.agentsById().get('a1')).toMatchObject({
+        status: 'completed',
+        toolCount: 1,
+        lastActivity: 'Bash $ ls',
+      });
+      expect(store.agentPanel()).toEqual([]);
     });
   });
 });

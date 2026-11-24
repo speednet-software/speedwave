@@ -17,6 +17,7 @@ import {
   viewChild,
 } from '@angular/core';
 import type { ChatMessage, MessageBlock } from '../../models/chat';
+import { NO_AGENT_VIEWS, type AgentView } from '../agents/agents';
 import { ChatMessageComponent } from '../message/chat-message.component';
 import { SpinIconComponent } from '../../shared/spin-icon.component';
 import { IconComponent } from '../../shared/icon.component';
@@ -61,6 +62,7 @@ const SCROLL_BOTTOM_THRESHOLD_PX = 16;
             [isLast]="i === lastAssistantIndex()"
             [entry]="msg"
             [precedingEdited]="isPrecedingUserEdited(i)"
+            [agents]="agents()"
             (questionAnswered)="questionAnswered.emit($event)"
           />
         }
@@ -70,6 +72,7 @@ const SCROLL_BOTTOM_THRESHOLD_PX = 16;
             [blocks]="currentBlocks()"
             role="assistant"
             [streaming]="true"
+            [agents]="agents()"
             (questionAnswered)="questionAnswered.emit($event)"
           />
         } @else if (showAwaitingCaret()) {
@@ -114,6 +117,7 @@ const SCROLL_BOTTOM_THRESHOLD_PX = 16;
 export class ChatMessageListComponent implements AfterViewChecked, OnChanges, OnDestroy {
   readonly messages = input.required<readonly ChatMessage[]>();
   readonly currentBlocks = input<readonly MessageBlock[]>([]);
+  readonly agents = input<ReadonlyMap<string, AgentView>>(NO_AGENT_VIEWS);
   readonly isStreaming = input(false);
   /** Shows a centered spinner while a resumed transcript is being fetched. */
   readonly loadingTranscript = input(false);

@@ -10,7 +10,11 @@ import { LoggerService } from './logger.service';
 import { DEFAULT_ALIAS } from './model-picker.service';
 import type { ClaudeContextUsage, ModelSwitchOutcome } from '../models/claude-control';
 import type { ChatSessionEventKind } from '../models/notifications';
-import { isBlankOrSlashOnly, isControlShaped } from '../chat/slash/slash.service';
+import {
+  isBlankOrSlashOnly,
+  isControlShaped,
+  type SlashService,
+} from '../chat/slash/slash.service';
 import { ComposerAttachments } from '../chat/composer/composer-attachments';
 import { DEFAULT_FIND_STATE, escapeRegExp, type ChatFindState } from '../chat/find/chat-find';
 import {
@@ -29,6 +33,16 @@ import {
   type MessageBlockState,
 } from '../models/state-tree';
 import { foldTaskPlan, type PlannedTask } from '../chat/task-plan/task-plan';
+import {
+  NO_AGENT_RUNS,
+  agentRunsFromTranscript,
+  foldAgents,
+  sameAgents,
+  withAgentActivity,
+  withAgentStatus,
+  type AgentRuns,
+  type AgentView,
+} from '../chat/agents/agents';
 import {
   chatInputFromText,
   chatInputToBlocks,
@@ -62,6 +76,7 @@ interface StartResult {
 }
 
 interface ConversationView extends LegacyStateSnapshot {
+  subagentRuns: AgentRuns;
   totalOutputTokens: number;
   contextWindowSize: number | null;
   contextSnapshot: ClaudeContextUsage | null;
@@ -83,6 +98,7 @@ function emptyConversationView(): ConversationView {
     pendingQueue: null,
     sessionStats: null,
     model: '',
+    subagentRuns: NO_AGENT_RUNS,
     totalOutputTokens: 0,
     contextWindowSize: null,
     contextSnapshot: null,
@@ -237,6 +253,7 @@ export interface ChatStoreDeps {
   planUsage: PlanUsageService;
   clipboard: Clipboard;
   log: LoggerService;
+  slash: SlashService;
   /** Ensures the (service-owned, single per project) stream listener is set up. */
   ensureListeners: () => Promise<void>;
 }
@@ -901,6 +918,8 @@ export class ChatSessionStore {
   /** Per-tab plan-mode flag restored when a background tab is reactivated, or on a nav-rail remount. */
   readonly composerPlanMode = signal(false);
   readonly taskPlanExpanded = signal(false);
+  readonly agentPanelExpanded = signal(false);
+  private readonly _subagentRuns = signal<AgentRuns>(NO_AGENT_RUNS);
   /** Per-tab staged image attachments (SPEED-785) — a paste/drop resolves into this instance regardless of which tab's composer is active when it finishes. */
   readonly composerAttachments = new ComposerAttachments();
   private readonly _stagedTranscript = signal<StagedTranscript | null>(null);
@@ -1112,12 +1131,36 @@ export class ChatSessionStore {
     () => this._state().pending_queue
   );
 
-  readonly taskPlan: Signal<readonly PlannedTask[] | null> = computed(() =>
-    foldTaskPlan(
-      this._state().entries.flatMap((entry) =>
-        entry.blocks.flatMap((b) => (b.kind === 'tool_use' ? [b] : []))
-      )
+  private readonly toolCalls = computed(() =>
+    this._state().entries.flatMap((entry) =>
+      entry.blocks.flatMap((b) => (b.kind === 'tool_use' ? [b] : []))
     )
+  );
+
+  readonly taskPlan: Signal<readonly PlannedTask[] | null> = computed(() =>
+    foldTaskPlan(this.toolCalls())
+  );
+
+  private readonly agentViews: Signal<readonly AgentView[]> = computed(
+    () => foldAgents(this.toolCalls(), this._subagentRuns()),
+    { equal: sameAgents }
+  );
+
+  readonly agentsById: Signal<ReadonlyMap<string, AgentView>> = computed(
+    () => new Map(this.agentViews().map((a) => [a.id, a]))
+  );
+
+  readonly agentPanel: Signal<readonly AgentView[]> = computed(
+    () => {
+      if (this._sessionEnded()) return [];
+      const inTurn = new Set(
+        this.currentBlocksFromState().flatMap((b) =>
+          b.type === 'tool_use' ? [b.tool.tool_id] : []
+        )
+      );
+      return this.agentViews().filter((a) => a.status === 'running' || inTurn.has(a.id));
+    },
+    { equal: sameAgents }
   );
 
   /**
@@ -1343,19 +1386,7 @@ export class ChatSessionStore {
     }
     const isControlSend = chatInput.attachments.length === 0 && isControlShaped(chatInput.text);
     if (isControlSend) this.recordTypedModelCommand(chatInput.text);
-    if (!isControlSend) {
-      this._messages = [
-        ...this._messages,
-        {
-          role: 'user',
-          blocks: displayBlocks,
-          timestamp: Date.now(),
-        },
-      ];
-    }
-    this.isStreaming = true;
-    this._turnId += 1;
-    this._currentBlocks = [];
+    this.openTurn(isControlSend ? null : displayBlocks);
     this.requestAutoScroll();
     this.notifyChange();
 
@@ -1708,6 +1739,9 @@ export class ChatSessionStore {
           this.seedSessionId(chunk.data.session_id);
           void this.flushDeferredQueue(chunk.data.session_id);
         }
+        if (chunk.data.slash_commands) {
+          this.deps.slash.setSessionCommands(this.tabId, chunk.data.slash_commands);
+        }
         break;
 
       case 'ControlChip': {
@@ -1822,6 +1856,9 @@ export class ChatSessionStore {
           role: 'assistant',
           blocks: [...this._currentBlocks],
           timestamp: Date.now(),
+          ...(chunk.data.response_ids?.length
+            ? { meta: { response_ids: chunk.data.response_ids } }
+            : {}),
         };
         this._messages = [...this._messages, errorMessage];
         this._currentBlocks = [];
@@ -1834,22 +1871,31 @@ export class ChatSessionStore {
         break;
       }
 
+      case 'TurnStarted':
+        if (chunk.data.origin === 'user' || this.isStreaming) return;
+        this.openTurn([{ type: 'turn_origin', origin: chunk.data.origin }]);
+        break;
+
+      case 'SubagentActivity': {
+        const { parent_tool_id, tool_id, tool_name, input_json } = chunk.data;
+        this._subagentRuns.update((runs) =>
+          withAgentActivity(runs, parent_tool_id, { tool_id, tool_name, input_json })
+        );
+        return;
+      }
+
+      case 'SubagentStatus': {
+        const { tool_id, status, summary } = chunk.data;
+        this._subagentRuns.update((runs) => withAgentStatus(runs, tool_id, status, summary));
+        return;
+      }
+
       case 'QueueDrained': {
         this._pendingQueue = null;
         this._queueAwaitingSession = false;
-        if (!isControlShaped(chunk.data.text)) {
-          this._messages = [
-            ...this._messages,
-            {
-              role: 'user',
-              blocks: [{ type: 'text', content: chunk.data.text }],
-              timestamp: Date.now(),
-            },
-          ];
-        }
-        this.isStreaming = true;
-        this._turnId += 1;
-        this._currentBlocks = [];
+        this.openTurn(
+          isControlShaped(chunk.data.text) ? null : [{ type: 'text', content: chunk.data.text }]
+        );
         break;
       }
 
@@ -1890,6 +1936,18 @@ export class ChatSessionStore {
     }
   }
 
+  private openTurn(userBlocks: MessageBlock[] | null): void {
+    if (userBlocks) {
+      this._messages = [
+        ...this._messages,
+        { role: 'user', blocks: userBlocks, timestamp: Date.now() },
+      ];
+    }
+    this.isStreaming = true;
+    this._turnId += 1;
+    this._currentBlocks = [];
+  }
+
   private forgetContextWindow(): void {
     this._contextWindowSize = null;
     this._contextSnapshot = null;
@@ -1899,6 +1957,7 @@ export class ChatSessionStore {
 
   private captureConversationView(): ConversationView {
     return {
+      subagentRuns: this._subagentRuns(),
       messages: this._messages,
       currentBlocks: this._currentBlocks,
       isStreaming: this.isStreaming,
@@ -1923,6 +1982,7 @@ export class ChatSessionStore {
   }
 
   private restoreConversationView(view: ConversationView): void {
+    this._subagentRuns.set(view.subagentRuns);
     this._messages = [...view.messages];
     this._currentBlocks = [...view.currentBlocks];
     this.isStreaming = view.isStreaming;
@@ -1953,6 +2013,7 @@ export class ChatSessionStore {
     this._sessionGeneration += 1;
     this.startingSession = false;
     this.dropPendingPicks();
+    this.deps.slash.clearSession(this.tabId);
     this._sessionEnded.set(false);
     this.restoreConversationView(emptyConversationView());
   }
@@ -2262,6 +2323,9 @@ export class ChatSessionStore {
       if (gen !== this._sessionGeneration || !sameProject()) return;
       if (transcript) {
         this.loadMessages(toChatMessages(transcript));
+        this._subagentRuns.update(
+          (live) => new Map([...agentRunsFromTranscript(transcript), ...live])
+        );
       } else {
         this.loadMessages([
           {
@@ -2401,7 +2465,8 @@ export class ChatSessionStore {
   private conversationResponseIds(latestUuid: string): string[] {
     const ids = new Set<string>();
     for (const m of this._messages) {
-      if (m.role === 'assistant' && m.uuid) ids.add(m.uuid);
+      if (m.role !== 'assistant') continue;
+      for (const id of m.meta?.response_ids ?? (m.uuid ? [m.uuid] : [])) ids.add(id);
     }
     ids.add(latestUuid);
     return [...ids];
@@ -2481,6 +2546,7 @@ export class ChatSessionStore {
     this._launchedFor = null;
     this.dropPendingPicks();
     this.setResumeDecider(null);
+    this.deps.slash.clearSession(this.tabId);
     this.composerAttachments.dispose();
   }
 }
@@ -2589,6 +2655,7 @@ function findRetryAnchorIn(
     if (m.uuid_status !== undefined && m.uuid_status !== committedTag) return null;
     const firstBlock = m.blocks?.[0];
     if (firstBlock?.type === 'chip' || firstBlock?.kind === 'chip') return null;
+    if (firstBlock?.type === 'turn_origin' || firstBlock?.kind === 'turn_origin') return null;
     return { userUuid: m.uuid, lastAssistantIdx, userIdx: i };
   }
   return null;
@@ -2599,18 +2666,21 @@ function buildEntryMeta(
     turn_usage?: TurnUsage;
     turn_cost?: number;
     model?: string;
+    response_ids?: string[];
   },
   resolvedModel: string | undefined,
   suppressCost = false
 ): EntryMeta | undefined {
   const { turn_usage, turn_cost } = data;
   const model = data.model ?? resolvedModel;
-  if (!turn_usage && !model && turn_cost === undefined) {
+  const responseIds = data.response_ids?.length ? data.response_ids : undefined;
+  if (!turn_usage && !model && turn_cost === undefined && !responseIds) {
     return undefined;
   }
   const meta: EntryMeta = {};
   if (model) meta.model = model;
   if (turn_usage) meta.usage = turn_usage;
+  if (responseIds) meta.response_ids = responseIds;
 
   if (!suppressCost && turn_cost !== undefined && Number.isFinite(turn_cost)) {
     meta.cost = turn_cost;
@@ -2695,6 +2765,7 @@ export function buildStateTreeFromLegacy(src: LegacyStateSnapshot): Conversation
             model: m.meta.model,
             usage: m.meta.usage,
             cost: m.meta.cost,
+            response_ids: m.meta.response_ids,
           }
         : null,
       edited_at: m.edited_at ?? null,
@@ -2821,6 +2892,9 @@ export function stateBlocksToMessageBlocks(blocks: readonly MessageBlockState[])
       case 'chip':
         out.push({ type: 'chip', command: b.command, argument: b.argument });
         break;
+      case 'turn_origin':
+        out.push({ type: 'turn_origin', origin: b.origin });
+        break;
       default: {
         const unknownKind = (b as { kind: string }).kind;
         pluginLogWarn(
@@ -2899,6 +2973,9 @@ export function messageBlocksToState(blocks: readonly MessageBlock[]): MessageBl
       case 'chip':
         out.push({ kind: 'chip', command: b.command, argument: b.argument });
         break;
+      case 'turn_origin':
+        out.push({ kind: 'turn_origin', origin: b.origin });
+        break;
     }
   }
   return out;
@@ -2947,10 +3024,11 @@ export function toChatMessages(transcript: ConversationTranscript): ChatMessage[
       base.uuid = msg.uuid;
       base.uuid_status = 'Committed';
     }
-    if (msg.model !== undefined || msg.usage !== undefined) {
+    if (msg.model !== undefined || msg.usage !== undefined || msg.response_ids?.length) {
       base.meta = {};
       if (msg.model !== undefined) base.meta.model = msg.model;
       if (msg.usage !== undefined) base.meta.usage = msg.usage;
+      if (msg.response_ids?.length) base.meta.response_ids = msg.response_ids;
     }
     return base;
   });
@@ -2966,6 +3044,8 @@ function historyBlockToMessageBlock(block: HistoryMessageBlock): MessageBlock {
       return { type: 'error', content: block.content };
     case 'control_chip':
       return { type: 'chip', command: block.command, argument: block.argument };
+    case 'turn_origin':
+      return { type: 'turn_origin', origin: block.origin };
     case 'tool_use':
       return {
         type: 'tool_use',

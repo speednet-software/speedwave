@@ -15,6 +15,7 @@ import {
 import { ProjectStateService } from './project-state.service';
 import { TauriService } from './tauri.service';
 import { LoggerService } from './logger.service';
+import { SlashService } from '../chat/slash/slash.service';
 import { PlanUsageService } from './plan-usage.service';
 import { BetaService } from './beta.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
@@ -408,6 +409,31 @@ describe('ChatStateService', () => {
         expect(store2.currentBlocks).toEqual([{ type: 'text', content: 'to tab2' }]);
       });
 
+      it('shows the init slash list of the active tab in the picker', async () => {
+        await service.init();
+        const tab1 = service.activeTabId();
+        const tab2 = await service.openTab();
+        const slash = TestBed.inject(SlashService);
+        const list = (name: string) => [
+          { name, description: null, argument_hint: null, kind: 'Command' as const, plugin: null },
+        ];
+
+        mockTauri.dispatchEvent('chat_stream', {
+          tab_id: tab1,
+          chunk_type: 'SystemInit',
+          data: { model: 'm', slash_commands: list('one') },
+        });
+        mockTauri.dispatchEvent('chat_stream', {
+          tab_id: tab2,
+          chunk_type: 'SystemInit',
+          data: { model: 'm', slash_commands: list('two') },
+        });
+
+        expect(slash.commands()).toEqual(list('two'));
+        service.activateTab(tab1);
+        expect(slash.commands()).toEqual(list('one'));
+      });
+
       it('streams two tabs concurrently with no cross-talk', async () => {
         await service.init();
         const tab1 = service.activeTabId();
@@ -479,6 +505,54 @@ describe('ChatStateService', () => {
 
         expect(store1.currentBlocks).toEqual([]);
         expect(store1.sessionStats?.session_id).toBe('sid-bypass');
+      });
+    });
+
+    describe('subagent chunks', () => {
+      it('reach the store of a tab whose turn already ended, so a background agent can finish', async () => {
+        await service.init();
+        const tab = service.activeTabId();
+        const store = service.tabs().get(tab)!;
+        store.isStreaming = false;
+
+        mockTauri.dispatchEvent('chat_stream', {
+          tab_id: tab,
+          chunk_type: 'SubagentActivity',
+          data: { parent_tool_id: 'a1', tool_id: 's1', tool_name: 'Bash', input_json: '{}' },
+        });
+        mockTauri.dispatchEvent('chat_stream', {
+          tab_id: tab,
+          chunk_type: 'SubagentStatus',
+          data: { tool_id: 'a1', status: 'completed', summary: 'done' },
+        });
+
+        store._setState({
+          messages: [
+            {
+              role: 'assistant',
+              blocks: [
+                {
+                  type: 'tool_use',
+                  tool: {
+                    type: 'tool_use',
+                    tool_id: 'a1',
+                    tool_name: 'Agent',
+                    input_json: '{"run_in_background":true}',
+                    status: 'done',
+                    result: 'Async agent launched',
+                    result_is_error: false,
+                  },
+                },
+              ],
+              timestamp: 1,
+            },
+          ],
+        });
+        expect(store.agentsById().get('a1')).toMatchObject({
+          status: 'completed',
+          toolCount: 1,
+          result: 'done',
+        });
       });
     });
 
@@ -2525,6 +2599,89 @@ describe('ChatStateService', () => {
       await answerPromise;
       expect(service.messages.every((m) => m.blocks.every((b) => b.type !== 'error'))).toBe(true);
       expect(service.currentBlocks).toEqual([]);
+    });
+  });
+
+  describe('a turn Claude Code started on its own (SPEED-908)', () => {
+    const dispatch = (chunk_type: string, data: Record<string, unknown>): void =>
+      mockTauri.dispatchEvent('chat_stream', { chunk_type, tab_id: service.tabId, data });
+
+    beforeEach(async () => {
+      mockTauri.isRunningInTauri = () => true;
+      await service.init();
+    });
+
+    it('shows a task-notification turn with its origin row, thinking, tool and answer', () => {
+      dispatch('SystemInit', { model: 'claude-opus-5-5', session_id: 's-1' });
+      dispatch('TurnStarted', { origin: 'task_notification' });
+      expect(service.isStreaming).toBe(true);
+      dispatch('Thinking', { content: 'the tests finished' });
+      dispatch('ToolStart', { tool_id: 't1', tool_name: 'Bash' });
+      dispatch('ToolResult', { tool_id: 't1', content: 'ok', is_error: false });
+      dispatch('Text', { content: 'All tests pass.' });
+      dispatch('Result', { session_id: 's-1', result_text: 'All tests pass.' });
+
+      expect(service.isStreaming).toBe(false);
+      expect(service.messages).toHaveLength(2);
+      expect(service.messages[0].role).toBe('user');
+      expect(service.messages[0].blocks).toEqual([
+        { type: 'turn_origin', origin: 'task_notification' },
+      ]);
+      expect(service.messages[1].role).toBe('assistant');
+      expect(service.messages[1].blocks.map((b) => b.type)).toEqual([
+        'thinking',
+        'tool_use',
+        'text',
+      ]);
+    });
+
+    it('shows a scheduled turn with its origin row', () => {
+      dispatch('TurnStarted', { origin: 'scheduled' });
+      dispatch('Text', { content: 'Reminder: stand-up.' });
+      dispatch('Result', { session_id: 's-1' });
+      expect(service.messages.map((m) => m.blocks[0])).toEqual([
+        { type: 'turn_origin', origin: 'scheduled' },
+        { type: 'text', content: 'Reminder: stand-up.' },
+      ]);
+    });
+
+    it('a composer turn is unchanged: no origin row, one user message', async () => {
+      await service.sendMessage('hello');
+      dispatch('SystemInit', { model: 'claude-opus-5-5', session_id: 's-1' });
+      dispatch('TurnStarted', { origin: 'user' });
+      dispatch('Text', { content: 'hi' });
+      dispatch('Result', { session_id: 's-1' });
+      expect(service.messages.map((m) => m.role)).toEqual(['user', 'assistant']);
+      expect(service.messages[0].blocks).toEqual([{ type: 'text', content: 'hello' }]);
+    });
+
+    it('an origin arriving while a turn streams adds no row', () => {
+      service.isStreaming = true;
+      dispatch('TurnStarted', { origin: 'task_notification' });
+      expect(service.messages).toHaveLength(0);
+      expect(service.isStreaming).toBe(true);
+    });
+
+    it('chunks left over after Stop are still dropped', async () => {
+      service.isStreaming = true;
+      await service.stopConversation();
+      dispatch('TurnStarted', { origin: 'user' });
+      dispatch('Text', { content: 'late content from stopped turn' });
+      dispatch('Result', { session_id: 's-1' });
+      expect(service.isStreaming).toBe(false);
+      expect(service.messages).toHaveLength(0);
+    });
+
+    it('a self-started turn can be stopped like any other', async () => {
+      dispatch('TurnStarted', { origin: 'scheduled' });
+      dispatch('Text', { content: 'partial' });
+      await service.stopConversation();
+      dispatch('Text', { content: 'after stop' });
+      expect(service.isStreaming).toBe(false);
+      expect(service.messages.map((m) => m.blocks)).toEqual([
+        [{ type: 'turn_origin', origin: 'scheduled' }],
+        [{ type: 'text', content: 'partial' }],
+      ]);
     });
   });
 

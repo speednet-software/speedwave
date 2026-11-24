@@ -51,7 +51,8 @@ This is a **display filter only**. A user who hand-types any native command
   unmodified; there is no interception layer. Names that are not in the table,
   not plugin-prefixed, not an agent name, and do not resolve to a known
   skill/command/resource file are hidden by default-deny, but still execute if
-  typed. `user-invocable: false` is always respected, integration-shipped
+  typed. Default-deny applies only to the discovery run before the first
+  `system/init` of a session; the session's init list keeps such names. `user-invocable: false` is always respected, integration-shipped
   skills included: all 13 current integration skills declare it, so they stay
   hidden by their authors' intent regardless of provenance classification.
   This preserves CLI parity: the product controls what it suggests, never what

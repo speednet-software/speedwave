@@ -166,4 +166,19 @@ describe('UserMessageComponent', () => {
     expect(chip).not.toBeNull();
     expect(chip?.textContent?.trim()).toBe('model -> sonnet-5');
   });
+
+  it('renders a turn_origin block as the source of a turn Claude Code started', () => {
+    fixture.componentRef.setInput('blocks', [{ type: 'turn_origin', origin: 'task_notification' }]);
+    fixture.detectChanges();
+
+    const row = fixture.nativeElement.querySelector('[data-testid="turn-origin"]') as HTMLElement;
+    expect(row.textContent?.trim()).toBe('background task finished');
+    expect(row.getAttribute('data-origin')).toBe('task_notification');
+
+    fixture.componentRef.setInput('blocks', [{ type: 'turn_origin', origin: 'scheduled' }]);
+    fixture.detectChanges();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="turn-origin"]')?.textContent?.trim()
+    ).toBe('scheduled task');
+  });
 });
