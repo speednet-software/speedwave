@@ -1,5 +1,5 @@
 
-FROM mcr.microsoft.com/playwright:v1.59.1-jammy@sha256:8a0360d39d1973be506dd59002904a774f6d697d4946c94063b3fd006461c8ff
+FROM mcr.microsoft.com/playwright:v1.65.1-jammy@sha256:b0ee5ce5e14ac42c394c0564a0a30adbda052153c611561bb2d31263593d6dd8
 
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tzdata \
@@ -12,11 +12,17 @@ COPY playwright/package.json playwright/package-lock.json ./
 RUN npm ci --omit=dev \
     && npm cache clean --force
 
-RUN sed -i 's/mcpServer\.connect(serverBackendFactory, transport, true)/mcpServer.connect(serverBackendFactory, transport, false)/' \
-       node_modules/playwright-core/lib/tools/utils/mcp/http.js \
-    && grep -q 'mcpServer.connect(serverBackendFactory, transport, false)' \
-       node_modules/playwright-core/lib/tools/utils/mcp/http.js \
+RUN sed -i 's/connect(serverBackendFactory, sessionInfo\.transport, sessionInfo\.transportInitialized, true)/connect(serverBackendFactory, sessionInfo.transport, sessionInfo.transportInitialized, false)/' \
+       node_modules/playwright-core/lib/coreBundle.js \
+    && grep -q 'connect(serverBackendFactory, sessionInfo.transport, sessionInfo.transportInitialized, false)' \
+       node_modules/playwright-core/lib/coreBundle.js \
     || (echo "FATAL: heartbeat patch did not apply, verify the playwright-core path for the @playwright/mcp version pinned in package-lock.json" && exit 1)
+
+RUN revision="$(node -p "require('./node_modules/playwright-core/browsers.json').browsers.find((b) => b.name === 'chromium-headless-shell').revision")" \
+    && ln -s "$(ls /ms-playwright/chromium_headless_shell-${revision}/chrome-headless-shell-linux*/chrome-headless-shell)" \
+       /opt/playwright-mcp/chrome-headless-shell \
+    && test -x /opt/playwright-mcp/chrome-headless-shell \
+    || (echo "FATAL: the base image has no chromium-headless-shell revision that the pinned playwright-core expects, bump the base image tag to the playwright-core version" && exit 1)
 
 USER pwuser
 
@@ -32,7 +38,7 @@ CMD ["sh", "-c", "trap 'exit 0' TERM INT; /opt/playwright-mcp/node_modules/.bin/
      --host 0.0.0.0 \
      --port 3000 \
      --browser chromium \
-     --executable-path /ms-playwright/chromium_headless_shell-1217/chrome-linux/headless_shell \
+     --executable-path /opt/playwright-mcp/chrome-headless-shell \
      --user-data-dir /tmp/playwright-mcp-userdata \
      --output-dir /tmp/playwright-mcp-output \
      --allowed-hosts '*' \
