@@ -920,17 +920,6 @@ describe('discussion-tools', () => {
     it('classifies every tool of the module', () => {
       expect([...toolsByName.keys()].sort()).toEqual([...WRITE_TOOLS, ...READ_TOOLS].sort());
     });
-
-    it.each([...WRITE_TOOLS, ...READ_TOOLS])('%s reports the missing client', async (name) => {
-      const handler = createDiscussionTools(null).find((t) => t.tool.name === name)!.handler;
-
-      const result = await handler({});
-
-      expect(result).toEqual({
-        content: [{ type: 'text', text: `Error: ${notConfiguredMessage('GitLab')}` }],
-        isError: true,
-      });
-    });
   });
 
   describe('unconfigured client', () => {

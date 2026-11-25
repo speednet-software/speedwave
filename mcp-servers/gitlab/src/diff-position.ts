@@ -13,8 +13,7 @@ export interface MrFileDiff {
   diff: string;
 }
 
-/** Side of the diff a line number refers to. */
-export type Side = 'new' | 'old';
+type Side = 'new' | 'old';
 
 /** Where a comment goes; without `path` it is not attached to code. */
 export type DiffAnchor = {
