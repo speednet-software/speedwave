@@ -83,7 +83,7 @@ export function buildPosition(
   }
 
   const first = findDiffLine(lines, line, side);
-  const codePath = side === 'new' ? new_path : old_path;
+  const codePath = new_path || old_path;
   return {
     ...position,
     line_range: { start: rangePoint(codePath, first), end: rangePoint(codePath, last) },

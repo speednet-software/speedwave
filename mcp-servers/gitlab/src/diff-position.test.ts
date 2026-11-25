@@ -4,7 +4,8 @@ import { buildPosition, isAnchored, type MrFileDiff } from './diff-position.js';
 const refs = { base_sha: 'base', start_sha: 'start', head_sha: 'head' };
 
 const SHA_A = '21ff24dd18cc19d35de15a120639695824655b58';
-const SHA_OLD = '07cb195e51f24ddeb4d37a3a653dec8ab1239df7';
+const SHA_RENAMED = 'a17762f51ce44d82ee9e2a0dec1f100a986d3d67';
+const SHA_GONE = '3610915ac3ee397af8456cf1dd1f95aa7a212463';
 
 const diff = [
   '@@ -1,4 +1,5 @@',
@@ -126,7 +127,7 @@ describe('buildPosition', () => {
     });
   });
 
-  it('builds a line range on the old side with the old path', () => {
+  it('builds a line range on the old side with line codes from the new path', () => {
     const position = buildPosition(refs, files, {
       path: 'src/old.ts',
       line: 1,
@@ -141,10 +142,26 @@ describe('buildPosition', () => {
       position_type: 'text',
       old_line: 2,
       line_range: {
-        start: { line_code: `${SHA_OLD}_1_1`, old_line: 1, new_line: 1 },
-        end: { line_code: `${SHA_OLD}_2_2`, old_line: 2, type: 'old' },
+        start: { line_code: `${SHA_RENAMED}_1_1`, old_line: 1, new_line: 1 },
+        end: { line_code: `${SHA_RENAMED}_2_2`, old_line: 2, type: 'old' },
       },
     });
+  });
+
+  it('takes line codes from the old path when the new path is empty', () => {
+    const removed: MrFileDiff[] = [
+      { old_path: 'src/gone.ts', new_path: '', diff: '@@ -1,2 +0,0 @@\n-a\n-b' },
+    ];
+
+    const position = buildPosition(refs, removed, {
+      path: 'src/gone.ts',
+      line: 1,
+      end_line: 2,
+      side: 'old',
+    });
+
+    expect(position?.line_range?.start.line_code).toBe(`${SHA_GONE}_1_0`);
+    expect(position?.line_range?.end.line_code).toBe(`${SHA_GONE}_2_0`);
   });
 
   it('builds line codes for lines outside the diff with zero on the other side', () => {

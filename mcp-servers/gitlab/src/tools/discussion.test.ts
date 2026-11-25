@@ -47,6 +47,14 @@ const WRITE_TOOLS = [
 
 const READ_TOOLS = ['listMrDiscussions', 'listMrDraftNotes'];
 
+const DELETE_TOOLS = ['deleteMrDiscussionNote', 'deleteMrDraftNote'];
+
+const ORPHAN_ANCHORS = [
+  ['createMrDiscussion', { body: 'b' }],
+  ['createMrDraftNote', { note: 'n' }],
+  ['updateMrDraftNote', { draft_note_id: 3 }],
+] as const;
+
 const run = async (client: MockClient, name: string, params: Record<string, unknown>) => {
   const tools = createDiscussionTools(client as unknown as GitLabClient);
   return tools.find((t) => t.tool.name === name)!.handler(params);
@@ -898,6 +906,40 @@ describe('discussion-tools', () => {
     });
   });
 
+  describe('anchor fields without path', () => {
+    it.each(
+      ORPHAN_ANCHORS.flatMap(([name, base]) =>
+        (['line', 'end_line', 'side'] as const).map((field) => [name, base, field] as const)
+      )
+    )('%s rejects %s without path and calls no GitLab method', async (name, base, field) => {
+      const value = field === 'side' ? 'new' : 5;
+      const result = await run(mockClient, name, {
+        project_id: 1,
+        mr_iid: 10,
+        ...base,
+        [field]: value,
+      });
+
+      expect(result.isError).toBe(true);
+      expect((result.content[0] as { text: string }).text).toContain(field);
+      expect((result.content[0] as { text: string }).text).toContain('path');
+      expect(mockClient[name].mock.calls).toHaveLength(0);
+    });
+
+    it('names every anchor field that was given', async () => {
+      const result = await run(mockClient, 'createMrDraftNote', {
+        project_id: 1,
+        mr_iid: 10,
+        note: 'n',
+        line: 3,
+        end_line: 4,
+        side: 'old',
+      });
+
+      expect((result.content[0] as { text: string }).text).toContain('line, end_line, side');
+    });
+  });
+
   describe('tool classification', () => {
     const toolsByName = new Map(createDiscussionTools(null).map((d) => [d.tool.name, d.tool]));
 
@@ -914,8 +956,31 @@ describe('discussion-tools', () => {
       const tool = toolsByName.get(name)!;
 
       expect(tool.annotations?.readOnlyHint).toBe(true);
-      expect((tool._meta as Record<string, unknown>)[META_KEYS.USER_SCOPED]).toBeUndefined();
     });
+
+    it('scopes the draft list to the current user because GitLab keeps drafts per author', () => {
+      const meta = toolsByName.get('listMrDraftNotes')!._meta as Record<string, unknown>;
+
+      expect(meta[META_KEYS.USER_SCOPED]).toBe(true);
+      expect(meta[META_KEYS.CURRENT_USER_TOOL]).toBe('getCurrentUser');
+    });
+
+    it('does not scope the discussion list to a user', () => {
+      const meta = toolsByName.get('listMrDiscussions')!._meta as Record<string, unknown>;
+
+      expect(meta[META_KEYS.USER_SCOPED]).toBeUndefined();
+    });
+
+    it.each(DELETE_TOOLS)('%s is marked destructive', (name) => {
+      expect(toolsByName.get(name)!.annotations?.destructiveHint).toBe(true);
+    });
+
+    it.each(WRITE_TOOLS.filter((n) => !DELETE_TOOLS.includes(n)))(
+      '%s is not marked destructive',
+      (name) => {
+        expect(toolsByName.get(name)!.annotations?.destructiveHint).toBeFalsy();
+      }
+    );
 
     it('classifies every tool of the module', () => {
       expect([...toolsByName.keys()].sort()).toEqual([...WRITE_TOOLS, ...READ_TOOLS].sort());

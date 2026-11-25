@@ -4,7 +4,9 @@ import {
   jsonResult,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
+  DESTRUCTIVE_ANNOTATIONS,
   META_KEYS,
+  teachingErrorResult,
 } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import type { DraftNoteInput, PublishDraftNotesInput } from '../client.js';
@@ -19,6 +21,7 @@ type MrParams = {
 
 interface WriteToolSpec {
   name: string;
+  annotations?: Tool['annotations'];
   description: string;
   keywords: string[];
   example: string;
@@ -212,6 +215,7 @@ const updateMrDiscussionNoteTool = writeTool({
 
 const deleteMrDiscussionNoteTool = writeTool({
   name: 'deleteMrDiscussionNote',
+  annotations: DESTRUCTIVE_ANNOTATIONS,
   description: 'Delete a note from a merge request discussion.',
   keywords: ['gitlab', 'merge', 'request', 'discussion', 'delete', 'note'],
   example:
@@ -313,6 +317,7 @@ const updateMrDraftNoteTool = writeTool({
 
 const deleteMrDraftNoteTool = writeTool({
   name: 'deleteMrDraftNote',
+  annotations: DESTRUCTIVE_ANNOTATIONS,
   description: 'Delete a draft review note.',
   keywords: ['gitlab', 'merge', 'request', 'draft', 'review', 'delete', 'note'],
   example:
@@ -332,9 +337,10 @@ const deleteMrDraftNoteTool = writeTool({
 
 const listMrDraftNotesTool: Tool = {
   name: 'listMrDraftNotes',
-  description: 'List your unpublished draft review notes on a merge request',
+  description:
+    'List the unpublished draft review notes of the currently authenticated GitLab user on a merge request; GitLab keeps drafts per author, so notes of other users are not listed',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { [META_KEYS.DEFER_LOADING]: true },
+  _meta: WRITE_META,
   keywords: ['gitlab', 'merge', 'request', 'draft', 'review', 'notes'],
   example:
     'const drafts = await gitlab.listMrDraftNotes({ project_id: "speedwave/core", mr_iid: 42 })',
@@ -434,6 +440,8 @@ export function createDiscussionTools(client: GitLabClient | null): ToolDefiniti
       handler: withValidation(client, async (c, params) => {
         const { project_id, mr_iid, body, path, line, end_line, side } = params as MrParams &
           DiffAnchor & { body: string };
+        const orphan = orphanAnchorError({ path, line, end_line, side });
+        if (orphan) return orphan;
         const result = await c.createMrDiscussion(project_id, mr_iid, body, {
           path,
           line,
@@ -498,6 +506,8 @@ export function createDiscussionTools(client: GitLabClient | null): ToolDefiniti
       tool: createMrDraftNoteTool,
       handler: withValidation(client, async (c, params) => {
         const { project_id, mr_iid, ...input } = params as MrParams & DraftNoteInput;
+        const orphan = orphanAnchorError(input);
+        if (orphan) return orphan;
         const draft_note = await c.createMrDraftNote(project_id, mr_iid, input);
         return jsonResult({ success: true, draft_note });
       }),
@@ -507,6 +517,8 @@ export function createDiscussionTools(client: GitLabClient | null): ToolDefiniti
       handler: withValidation(client, async (c, params) => {
         const { project_id, mr_iid, draft_note_id, ...input } = params as MrParams &
           DraftNoteInput & { draft_note_id: number };
+        const orphan = orphanAnchorError(input);
+        if (orphan) return orphan;
         const draft_note = await c.updateMrDraftNote(project_id, mr_iid, draft_note_id, input);
         return jsonResult({ success: true, draft_note });
       }),
@@ -550,11 +562,21 @@ export function createDiscussionTools(client: GitLabClient | null): ToolDefiniti
   ];
 }
 
+function orphanAnchorError(anchor: DiffAnchor) {
+  if (anchor.path !== undefined) return undefined;
+  const given = (['line', 'end_line', 'side'] as const).filter((k) => anchor[k] !== undefined);
+  if (given.length === 0) return undefined;
+  return teachingErrorResult({
+    paramName: given.join(', '),
+    nextStep: 'Add path (the file to comment on) or remove line, end_line and side',
+  });
+}
+
 function writeTool(spec: WriteToolSpec): Tool {
   return {
     name: spec.name,
     description: spec.description,
-    annotations: WRITE_ANNOTATIONS,
+    annotations: spec.annotations ?? WRITE_ANNOTATIONS,
     _meta: WRITE_META,
     keywords: spec.keywords,
     example: spec.example,
