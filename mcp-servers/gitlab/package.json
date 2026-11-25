@@ -24,7 +24,7 @@
   "author": "Speednet",
   "license": "Apache-2.0",
   "dependencies": {
-    "@gitbeaker/rest": "^44.0.0",
+    "@gitbeaker/rest": "^44.1.10",
     "@speedwave/mcp-shared": "file:../shared"
   },
   "devDependencies": {
@@ -34,7 +34,7 @@
     "@vitest/coverage-v8": "^5.1.1",
     "eslint": "^10.15.0",
     "eslint-config-prettier": "^10.1.8",
-    "eslint-plugin-jsdoc": "^65.4.5",
+    "eslint-plugin-jsdoc": "^65.5.1",
     "eslint-plugin-prettier": "^5.5.7",
     "globals": "^17.14.0",
     "prettier": "^3.10.1",
