@@ -1,23 +1,24 @@
 //! Per-project PII tokenization key: a persistent 32-byte AES-SIV key generated once on
-//! first use, stored hex-encoded in the secret store (`SecretName::pii_key`).
+//! first use, stored hex-encoded in the secret store (`SecretName::pii_key`). A stored key that
+//! cannot be read is replaced by a new one.
 
 use std::path::{Path, PathBuf};
 
 use rand::TryRng;
 
-use crate::secret_store::{SecretName, SecretStore};
+use crate::secret_store::{SecretName, SecretStore, SecretStoreError};
 
 const LEGACY_KEY_FILE: &str = "key";
 
-/// Creates the key in the secret store when absent.
+/// Creates the key in the secret store when absent or unreadable.
 pub fn ensure_project_key_in(data_dir: &Path, project: &str) -> anyhow::Result<()> {
     let name = SecretName::pii_key(project)?;
     let store = SecretStore::open(data_dir)?;
-    if store.exists(&name) {
+    if has_readable_key(&store, &name, project)? {
         return Ok(());
     }
     crate::fs_perms::with_file_lock_in(&store.lock_path(&name), || {
-        if store.exists(&name) {
+        if has_readable_key(&store, &name, project)? {
             return Ok(());
         }
         if legacy_key_file_in(data_dir, project).exists() {
@@ -26,6 +27,20 @@ pub fn ensure_project_key_in(data_dir: &Path, project: &str) -> anyhow::Result<(
         store.write(&name, &generate_key_hex()?)?;
         Ok(())
     })
+}
+
+fn has_readable_key(store: &SecretStore, name: &SecretName, project: &str) -> anyhow::Result<bool> {
+    if !store.exists(name) {
+        return Ok(false);
+    }
+    match store.read(name) {
+        Ok(_) => Ok(true),
+        Err(SecretStoreError::Unreadable(_)) => {
+            log::warn!("the PII key of project '{project}' cannot be read, a new key replaces it");
+            Ok(false)
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 fn legacy_key_file_in(data_dir: &Path, project: &str) -> PathBuf {
@@ -239,6 +254,41 @@ mod tests {
         std::fs::write(tmp.path().join("secrets/proj/pii.key.enc"), "garbage\n").unwrap();
 
         assert!(read_project_key_in(tmp.path(), "proj").is_err());
+    }
+
+    #[test]
+    fn ensure_replaces_an_unreadable_key_with_a_new_readable_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        ensure_project_key_in(tmp.path(), "proj").unwrap();
+        let path = tmp.path().join("secrets/proj/pii.key.enc");
+        std::fs::write(&path, "garbage\n").unwrap();
+
+        ensure_project_key_in(tmp.path(), "proj").unwrap();
+
+        let key = read_project_key_in(tmp.path(), "proj").unwrap();
+        assert_eq!(
+            crate::bundle::bytes_to_hex(&key),
+            store_entry(tmp.path(), "proj").unwrap()
+        );
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("garbage"));
+    }
+
+    #[test]
+    fn ensure_keeps_an_unreadable_key_while_a_legacy_plaintext_key_awaits_migration() {
+        let tmp = tempfile::tempdir().unwrap();
+        ensure_project_key_in(tmp.path(), "proj").unwrap();
+        let path = tmp.path().join("secrets/proj/pii.key.enc");
+        std::fs::write(&path, "garbage\n").unwrap();
+        let legacy = legacy_key_file(tmp.path(), "proj");
+        crate::fs_perms::ensure_owner_only_dir(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, "ab".repeat(32)).unwrap();
+
+        let err = ensure_project_key_in(tmp.path(), "proj")
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("migration pending"), "got: {err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "garbage\n");
     }
 
     #[test]
