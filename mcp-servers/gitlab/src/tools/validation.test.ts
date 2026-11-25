@@ -117,7 +117,14 @@ describe('withValidation', () => {
 });
 
 describe('withValidation numeric-id normalization', () => {
-  const paramNames = ['mr_iid', 'issue_iid', 'pipeline_id', 'job_id'] as const;
+  const paramNames = [
+    'mr_iid',
+    'issue_iid',
+    'pipeline_id',
+    'job_id',
+    'note_id',
+    'draft_note_id',
+  ] as const;
 
   function echoHandler() {
     const client = new GitLabClient({ token: 'x', host: 'https://gitlab.example.com' });
@@ -169,6 +176,26 @@ describe('withValidation numeric-id normalization', () => {
       expect((result.content[0] as { text: string }).text).toContain('pipeline_id');
     }
   );
+
+  it.each(['note_id', 'draft_note_id'])('rejects a path-traversal value for %s', async (param) => {
+    const wrapped = echoHandler();
+    const result = await wrapped({ [param]: '..' });
+    expect(result.isError).toBe(true);
+    expect((result.content[0] as { text: string }).text).toContain(param);
+  });
+
+  it('passes a hex discussion_id through', async () => {
+    const wrapped = echoHandler();
+    const result = await wrapped({ discussion_id: '6a9c0f' });
+    expect(JSON.parse(result.content[0].text as string)).toEqual({ discussion_id: '6a9c0f' });
+  });
+
+  it.each(['..', '.', 'a/b', '', 7])('rejects discussion_id %j', async (value) => {
+    const wrapped = echoHandler();
+    const result = await wrapped({ discussion_id: value });
+    expect(result.isError).toBe(true);
+    expect((result.content[0] as { text: string }).text).toContain('discussion_id');
+  });
 
   it('rejects a present null value', async () => {
     const wrapped = echoHandler();

@@ -32,21 +32,24 @@ Isolated GitLab MCP server with per-service token isolation for Speedwave.
 
 The exact tool count is pinned by `src/tools/metadata.test.ts`; all tool names are camelCase.
 
-| Domain        | Count | Tools                                                                                                              |
-| ------------- | ----- | ------------------------------------------------------------------------------------------------------------------ |
-| Project       | 3     | listProjectIds, getProjectFull, searchCode                                                                         |
-| User          | 1     | getCurrentUser (resolves the token owner's identity for "me"/"my" filters)                                         |
-| Merge Request | 7     | listMrIds, getMrFull, createMergeRequest, approveMergeRequest, mergeMergeRequest, updateMergeRequest, getMrChanges |
-| MR Notes      | 4     | listMrCommits, listMrPipelines, listMrNotes, createMrNote                                                          |
-| Discussion    | 2     | listMrDiscussions, createMrDiscussion                                                                              |
-| Branch        | 5     | listBranches, getBranch, createBranch, deleteBranch, compareBranches                                               |
-| Commit        | 4     | listBranchCommits, listCommits, searchCommits, getCommitDiff                                                       |
-| Pipeline      | 5     | listPipelineIds, getPipelineFull, getJobLog, retryPipeline, triggerPipeline                                        |
-| Repository    | 3     | getTree, getFile, getBlame                                                                                         |
-| Artifact      | 3     | listArtifacts, downloadArtifact, deleteArtifacts                                                                   |
-| Issue         | 7     | listIssues, getIssue, createIssue, updateIssue, closeIssue, listIssueNotes, createIssueNote                        |
-| Label         | 2     | listLabels, createLabel                                                                                            |
-| Release       | 4     | listTags, createTag, deleteTag, createRelease                                                                      |
+| Domain        | Count | Tools                                                                                                                              |
+| ------------- | ----- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Project       | 3     | listProjectIds, getProjectFull, searchCode                                                                                         |
+| User          | 1     | getCurrentUser (resolves the token owner's identity for "me"/"my" filters)                                                         |
+| Merge Request | 7     | listMrIds, getMrFull, createMergeRequest, approveMergeRequest, mergeMergeRequest, updateMergeRequest, getMrChanges                 |
+| MR Notes      | 4     | listMrCommits, listMrPipelines, listMrNotes, createMrNote                                                                          |
+| Discussion    | 6     | listMrDiscussions, createMrDiscussion, createMrDiscussionNote, updateMrDiscussionNote, deleteMrDiscussionNote, resolveMrDiscussion |
+| Draft notes   | 6     | createMrDraftNote, updateMrDraftNote, deleteMrDraftNote, listMrDraftNotes, publishMrDraftNote, publishMrDraftNotes                 |
+| Branch        | 5     | listBranches, getBranch, createBranch, deleteBranch, compareBranches                                                               |
+| Commit        | 4     | listBranchCommits, listCommits, searchCommits, getCommitDiff                                                                       |
+| Pipeline      | 5     | listPipelineIds, getPipelineFull, getJobLog, retryPipeline, triggerPipeline                                                        |
+| Repository    | 3     | getTree, getFile, getBlame                                                                                                         |
+| Artifact      | 3     | listArtifacts, downloadArtifact, deleteArtifacts                                                                                   |
+| Issue         | 7     | listIssues, getIssue, createIssue, updateIssue, closeIssue, listIssueNotes, createIssueNote                                        |
+| Label         | 2     | listLabels, createLabel                                                                                                            |
+| Release       | 4     | listTags, createTag, deleteTag, createRelease                                                                                      |
+
+`createMrDiscussion` and `createMrDraftNote` take an optional anchor: `path` alone attaches the comment to a file, `path` with `line` (and `end_line` for a range, `side` `new` or `old`) attaches it to the diff; `line`, `end_line` or `side` without `path`, and `end_line` without `line`, is an error. The worker reads the merge request's latest diff version and the file diff, builds the GitLab `position` in `src/diff-position.ts`, and sends a line outside the diff as given, so GitLab answers with its own error (`line_code can't be blank`): the line must be an added, removed or context line of a diff hunk. `updateMrDraftNote` edits only the text (`note` is required); to move a draft, call `deleteMrDraftNote` and then `createMrDraftNote`, because GitLab keeps the old position in its thread preview after a position change. Draft notes are the unpublished review comments of the authenticated account (GitLab lists only the caller's drafts); `publishMrDraftNotes` publishes all of them with an optional summary `note` and `reviewer_state`, and does not approve the merge request (`approveMergeRequest` does).
 
 `downloadArtifact` and `getJobLog` return job log text (this client cannot fetch a raw CI artifact zip, only the job log/trace), each capped to the last N lines.
 
@@ -61,6 +64,7 @@ gitlab/
 └── src/
     ├── index.ts            # MCP server bootstrap (auth, tool registration, health check)
     ├── client.ts           # GitLabClient class: @gitbeaker/rest wrapper + initializeGitLabClient()
+    ├── diff-position.ts    # pure builder of the GitLab diff position from a file diff and an anchor
     ├── tool-names.ts        # SSOT for tool names referenced by client teaching messages and other tools' _meta
     ├── identity-scopes.ts   # SSOT for the assigned_to_me/created_by_me/all scope filter
     └── tools/               # Tool definitions with handlers (per domain) + validation.ts + test-helpers.ts

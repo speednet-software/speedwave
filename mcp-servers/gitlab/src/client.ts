@@ -19,6 +19,8 @@ import fs from 'fs/promises';
 import { basename } from 'node:path';
 import { TOOL_NAMES } from './tool-names.js';
 import type { IdentityScope } from './identity-scopes.js';
+import { buildPosition, isAnchored } from './diff-position.js';
+import type { DiffAnchor, DiffPosition, MrFileDiff } from './diff-position.js';
 
 /**
  * Reads `rec[camel] ?? rec[snake]`, the dual camelCase/gitbeaker snake_case response read.
@@ -40,6 +42,28 @@ function clampTailLines(value: number | undefined, def: number): number {
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return def;
   return Math.floor(value);
 }
+
+type GitbeakerClient = InstanceType<typeof Gitlab>;
+type DiscussionCreateOptions = NonNullable<
+  Parameters<GitbeakerClient['MergeRequestDiscussions']['create']>[3]
+>;
+type DraftNoteCreateOptions = NonNullable<
+  Parameters<GitbeakerClient['MergeRequestDraftNotes']['create']>[3]
+>;
+
+/** Draft note text, reply target and anchor. */
+export type DraftNoteInput = DiffAnchor & {
+  note: string;
+  in_reply_to_discussion_id?: string;
+  resolve_discussion?: boolean;
+};
+
+/** Options of a bulk publish. */
+export type PublishDraftNotesInput = {
+  note?: string;
+  internal?: boolean;
+  reviewer_state?: 'reviewed' | 'requested_changes';
+};
 
 /** Max jobs fetched in one page for a pipeline's job list (`listArtifacts`, `showPipeline`). */
 const JOB_LIST_PAGE_CAP = 100;
@@ -761,17 +785,216 @@ export class GitLabClient {
   }
 
   /**
-   * Creates a new discussion thread (Markdown body) on a merge request.
-   * @param projectId - Project ID or path (e.g. "group/project" or 123).
-   * @param mrIid - Merge request internal ID (IID, not ID).
-   * @param body - Discussion comment text (Markdown).
+   * Creates a discussion thread.
+   * @param projectId - Project ID or path.
+   * @param mrIid - Merge request IID.
+   * @param body - Note text.
+   * @param anchor - File, line and side.
    */
   async createMrDiscussion(
     projectId: string | number,
     mrIid: number,
+    body: string,
+    anchor: DiffAnchor = {}
+  ): Promise<unknown> {
+    const position = await this.positionFor(projectId, mrIid, anchor);
+    if (!position) {
+      return await this.gitlab.MergeRequestDiscussions.create(projectId, mrIid, body);
+    }
+    return await this.gitlab.MergeRequestDiscussions.create(projectId, mrIid, body, {
+      position: position as unknown as DiscussionCreateOptions['position'],
+    });
+  }
+
+  /**
+   * Replies in a discussion.
+   * @param projectId - Project ID or path.
+   * @param mrIid - Merge request IID.
+   * @param discussionId - Discussion ID.
+   * @param body - Note text.
+   */
+  async createMrDiscussionNote(
+    projectId: string | number,
+    mrIid: number,
+    discussionId: string,
     body: string
   ): Promise<unknown> {
-    return await this.gitlab.MergeRequestDiscussions.create(projectId, mrIid, body);
+    return await this.gitlab.MergeRequestDiscussions.addNote(projectId, mrIid, discussionId, body);
+  }
+
+  /**
+   * Edits a discussion note.
+   * @param projectId - Project ID or path.
+   * @param mrIid - Merge request IID.
+   * @param discussionId - Discussion ID.
+   * @param noteId - Note ID.
+   * @param body - Note text.
+   */
+  async updateMrDiscussionNote(
+    projectId: string | number,
+    mrIid: number,
+    discussionId: string,
+    noteId: number,
+    body: string
+  ): Promise<unknown> {
+    return await this.gitlab.MergeRequestDiscussions.editNote(
+      projectId,
+      mrIid,
+      discussionId,
+      noteId,
+      { body }
+    );
+  }
+
+  /**
+   * Deletes a discussion note.
+   * @param projectId - Project ID or path.
+   * @param mrIid - Merge request IID.
+   * @param discussionId - Discussion ID.
+   * @param noteId - Note ID.
+   */
+  async deleteMrDiscussionNote(
+    projectId: string | number,
+    mrIid: number,
+    discussionId: string,
+    noteId: number
+  ): Promise<void> {
+    await this.gitlab.MergeRequestDiscussions.removeNote(projectId, mrIid, discussionId, noteId);
+  }
+
+  /**
+   * Resolves or reopens a discussion.
+   * @param projectId - Project ID or path.
+   * @param mrIid - Merge request IID.
+   * @param discussionId - Discussion ID.
+   * @param resolved - True to resolve, false to reopen.
+   */
+  async resolveMrDiscussion(
+    projectId: string | number,
+    mrIid: number,
+    discussionId: string,
+    resolved: boolean
+  ): Promise<unknown> {
+    return await this.gitlab.MergeRequestDiscussions.resolve(
+      projectId,
+      mrIid,
+      discussionId,
+      resolved
+    );
+  }
+
+  /**
+   * Creates a draft note.
+   * @param projectId - Project ID or path.
+   * @param mrIid - Merge request IID.
+   * @param input - Note text and anchor.
+   */
+  async createMrDraftNote(
+    projectId: string | number,
+    mrIid: number,
+    input: DraftNoteInput
+  ): Promise<unknown> {
+    const { note, in_reply_to_discussion_id, resolve_discussion, ...anchor } = input;
+    const position = await this.positionFor(projectId, mrIid, anchor);
+    const options = {
+      inReplyToDiscussionId: in_reply_to_discussion_id,
+      resolveDiscussion: resolve_discussion,
+      position,
+    } as unknown as DraftNoteCreateOptions;
+    return await this.gitlab.MergeRequestDraftNotes.create(projectId, mrIid, note, options);
+  }
+
+  /**
+   * Edits a draft note.
+   * @param projectId - Project ID or path.
+   * @param mrIid - Merge request IID.
+   * @param draftNoteId - Draft note ID.
+   * @param note - New note text.
+   */
+  async updateMrDraftNote(
+    projectId: string | number,
+    mrIid: number,
+    draftNoteId: number,
+    note: string
+  ): Promise<unknown> {
+    return await this.gitlab.MergeRequestDraftNotes.edit(projectId, mrIid, draftNoteId, { note });
+  }
+
+  /**
+   * Deletes a draft note.
+   * @param projectId - Project ID or path.
+   * @param mrIid - Merge request IID.
+   * @param draftNoteId - Draft note ID.
+   */
+  async deleteMrDraftNote(
+    projectId: string | number,
+    mrIid: number,
+    draftNoteId: number
+  ): Promise<void> {
+    await this.gitlab.MergeRequestDraftNotes.remove(projectId, mrIid, draftNoteId);
+  }
+
+  /**
+   * Lists draft notes.
+   * @param projectId - Project ID or path.
+   * @param mrIid - Merge request IID.
+   */
+  async listMrDraftNotes(projectId: string | number, mrIid: number): Promise<unknown[]> {
+    return await this.gitlab.MergeRequestDraftNotes.all(projectId, mrIid);
+  }
+
+  /**
+   * Publishes one draft note.
+   * @param projectId - Project ID or path.
+   * @param mrIid - Merge request IID.
+   * @param draftNoteId - Draft note ID.
+   */
+  async publishMrDraftNote(
+    projectId: string | number,
+    mrIid: number,
+    draftNoteId: number
+  ): Promise<void> {
+    await this.gitlab.MergeRequestDraftNotes.publish(projectId, mrIid, draftNoteId);
+  }
+
+  /**
+   * Publishes all draft notes.
+   * @param projectId - Project ID or path.
+   * @param mrIid - Merge request IID.
+   * @param options - Summary note, internal flag, reviewer state.
+   */
+  async publishMrDraftNotes(
+    projectId: string | number,
+    mrIid: number,
+    options: PublishDraftNotesInput
+  ): Promise<void> {
+    const project = encodeURIComponent(String(projectId));
+    await this.gitlab.MergeRequestDraftNotes.requester.post(
+      `projects/${project}/merge_requests/${mrIid}/draft_notes/bulk_publish`,
+      { body: { ...options } }
+    );
+  }
+
+  private async positionFor(
+    projectId: string | number,
+    mrIid: number,
+    anchor: DiffAnchor
+  ): Promise<DiffPosition | undefined> {
+    if (!isAnchored(anchor)) return undefined;
+    const [versions, diffs] = await Promise.all([
+      this.gitlab.MergeRequests.allDiffVersions(projectId, mrIid),
+      this.gitlab.MergeRequests.allDiffs(projectId, mrIid),
+    ]);
+    const version = versions[0];
+    if (!version) {
+      throw new Error('Merge request has no diff versions to anchor a comment to');
+    }
+    const refs = {
+      base_sha: String(version.base_commit_sha),
+      start_sha: String(version.start_commit_sha),
+      head_sha: String(version.head_commit_sha),
+    };
+    return buildPosition(refs, diffs as MrFileDiff[], anchor);
   }
 
   /**

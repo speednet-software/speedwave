@@ -3,20 +3,64 @@
  */
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
-import { notConfiguredMessage, withSetupGuidance } from '@speedwave/mcp-shared';
+import { META_KEYS, notConfiguredMessage, withSetupGuidance } from '@speedwave/mcp-shared';
 import { createDiscussionTools } from './discussion-tools.js';
-import { expectNotFoundTeachingError, expectPermissionTeachingError } from './test-helpers.js';
+import {
+  expectEmittedKeysDeclared,
+  expectNotFoundTeachingError,
+  expectPermissionTeachingError,
+} from './test-helpers.js';
 import type { GitLabClient } from '../client.js';
 
-type MockClient = {
-  listMrDiscussions: Mock;
-  createMrDiscussion: Mock;
+const CLIENT_METHODS = [
+  'listMrDiscussions',
+  'createMrDiscussion',
+  'createMrDiscussionNote',
+  'updateMrDiscussionNote',
+  'deleteMrDiscussionNote',
+  'resolveMrDiscussion',
+  'createMrDraftNote',
+  'updateMrDraftNote',
+  'deleteMrDraftNote',
+  'listMrDraftNotes',
+  'publishMrDraftNote',
+  'publishMrDraftNotes',
+] as const;
+
+type MockClient = Record<(typeof CLIENT_METHODS)[number], Mock>;
+
+const createMockClient = (): MockClient =>
+  Object.fromEntries(CLIENT_METHODS.map((m) => [m, vi.fn()])) as MockClient;
+
+const WRITE_TOOLS = [
+  'createMrDiscussion',
+  'createMrDiscussionNote',
+  'updateMrDiscussionNote',
+  'deleteMrDiscussionNote',
+  'resolveMrDiscussion',
+  'createMrDraftNote',
+  'updateMrDraftNote',
+  'deleteMrDraftNote',
+  'publishMrDraftNote',
+  'publishMrDraftNotes',
+];
+
+const READ_TOOLS = ['listMrDiscussions', 'listMrDraftNotes'];
+
+const DELETE_TOOLS = ['deleteMrDiscussionNote', 'deleteMrDraftNote'];
+
+const ORPHAN_ANCHORS = [
+  ['createMrDiscussion', { body: 'b' }],
+  ['createMrDraftNote', { note: 'n' }],
+] as const;
+
+const run = async (client: MockClient, name: string, params: Record<string, unknown>) => {
+  const tools = createDiscussionTools(client as unknown as GitLabClient);
+  return tools.find((t) => t.tool.name === name)!.handler(params);
 };
 
-const createMockClient = (): MockClient => ({
-  listMrDiscussions: vi.fn(),
-  createMrDiscussion: vi.fn(),
-});
+const parse = (result: Awaited<ReturnType<typeof run>>) =>
+  JSON.parse((result.content[0] as { text: string }).text) as Record<string, unknown>;
 
 describe('discussion-tools', () => {
   let mockClient: MockClient;
@@ -340,11 +384,11 @@ describe('discussion-tools', () => {
         content: [
           {
             type: 'text',
-            text: JSON.stringify(mockDiscussion, null, 2),
+            text: JSON.stringify({ success: true, discussion: mockDiscussion }, null, 2),
           },
         ],
       });
-      expect(mockClient.createMrDiscussion).toHaveBeenCalledWith(1, 10, 'Start of discussion');
+      expect(mockClient.createMrDiscussion).toHaveBeenCalledWith(1, 10, 'Start of discussion', {});
     });
 
     it('creates discussion with project path string', async () => {
@@ -377,14 +421,15 @@ describe('discussion-tools', () => {
         content: [
           {
             type: 'text',
-            text: JSON.stringify(mockDiscussion, null, 2),
+            text: JSON.stringify({ success: true, discussion: mockDiscussion }, null, 2),
           },
         ],
       });
       expect(mockClient.createMrDiscussion).toHaveBeenCalledWith(
         'group/project',
         10,
-        'Discussion comment'
+        'Discussion comment',
+        {}
       );
     });
 
@@ -420,11 +465,11 @@ describe('discussion-tools', () => {
         content: [
           {
             type: 'text',
-            text: JSON.stringify(mockDiscussion, null, 2),
+            text: JSON.stringify({ success: true, discussion: mockDiscussion }, null, 2),
           },
         ],
       });
-      expect(mockClient.createMrDiscussion).toHaveBeenCalledWith(1, 10, markdownBody);
+      expect(mockClient.createMrDiscussion).toHaveBeenCalledWith(1, 10, markdownBody, {});
     });
 
     it('creates discussion with numeric project ID', async () => {
@@ -457,11 +502,11 @@ describe('discussion-tools', () => {
         content: [
           {
             type: 'text',
-            text: JSON.stringify(mockDiscussion, null, 2),
+            text: JSON.stringify({ success: true, discussion: mockDiscussion }, null, 2),
           },
         ],
       });
-      expect(mockClient.createMrDiscussion).toHaveBeenCalledWith(42, 10, 'Comment');
+      expect(mockClient.createMrDiscussion).toHaveBeenCalledWith(42, 10, 'Comment', {});
     });
 
     it('handles merge request not found error', async () => {
@@ -502,7 +547,7 @@ describe('discussion-tools', () => {
 
       await handler!({ project_id: 1, mr_iid: '#10', body: 'Comment' });
 
-      expect(mockClient.createMrDiscussion).toHaveBeenCalledWith(1, 10, 'Comment');
+      expect(mockClient.createMrDiscussion).toHaveBeenCalledWith(1, 10, 'Comment', {});
     });
 
     it('states in its description that the discussion is posted as the authenticated user', () => {
@@ -589,11 +634,402 @@ describe('discussion-tools', () => {
     });
   });
 
+  describe('createMrDiscussion with an anchor', () => {
+    it('passes path, line, end_line and side to the client', async () => {
+      mockClient.createMrDiscussion.mockResolvedValue({ id: 'd1', notes: [] });
+
+      const tool = createDiscussionTools(mockClient as unknown as GitLabClient).find(
+        (t) => t.tool.name === 'createMrDiscussion'
+      )!.tool;
+
+      const result = await run(mockClient, 'createMrDiscussion', {
+        project_id: 'g/p',
+        mr_iid: 10,
+        body: 'Null check',
+        path: 'src/a.ts',
+        line: 42,
+        end_line: 45,
+        side: 'old',
+      });
+
+      expect(expectEmittedKeysDeclared(tool, result)).toEqual({
+        success: true,
+        discussion: { id: 'd1', notes: [] },
+      });
+
+      expect(mockClient.createMrDiscussion).toHaveBeenCalledWith('g/p', 10, 'Null check', {
+        path: 'src/a.ts',
+        line: 42,
+        end_line: 45,
+        side: 'old',
+      });
+    });
+
+    it('returns GitLab error text for an out-of-diff line', async () => {
+      mockClient.createMrDiscussion.mockRejectedValue(
+        new Error('400 Bad request - Position is invalid')
+      );
+
+      const result = await run(mockClient, 'createMrDiscussion', {
+        project_id: 1,
+        mr_iid: 10,
+        body: 'x',
+        path: 'a.ts',
+        line: 9999,
+      });
+
+      expect(result.isError).toBe(true);
+      expect((result.content[0] as { text: string }).text).toContain('Position is invalid');
+    });
+  });
+
+  describe('discussion note tools', () => {
+    it('creates a reply and returns the note', async () => {
+      mockClient.createMrDiscussionNote.mockResolvedValue({ id: 1202, body: 'Done' });
+
+      const result = await run(mockClient, 'createMrDiscussionNote', {
+        project_id: 1,
+        mr_iid: '#10',
+        discussion_id: 'abc',
+        body: 'Done',
+      });
+
+      expect(mockClient.createMrDiscussionNote).toHaveBeenCalledWith(1, 10, 'abc', 'Done');
+      expect(parse(result)).toEqual({ success: true, note: { id: 1202, body: 'Done' } });
+    });
+
+    it('updates a note and returns it', async () => {
+      mockClient.updateMrDiscussionNote.mockResolvedValue({ id: 1202 });
+
+      const result = await run(mockClient, 'updateMrDiscussionNote', {
+        project_id: 1,
+        mr_iid: 10,
+        discussion_id: 'abc',
+        note_id: 1202,
+        body: 'Edited',
+      });
+
+      expect(mockClient.updateMrDiscussionNote).toHaveBeenCalledWith(1, 10, 'abc', 1202, 'Edited');
+      expect(parse(result)).toEqual({ success: true, note: { id: 1202 } });
+    });
+
+    it('deletes a note', async () => {
+      mockClient.deleteMrDiscussionNote.mockResolvedValue(undefined);
+
+      const result = await run(mockClient, 'deleteMrDiscussionNote', {
+        project_id: 1,
+        mr_iid: 10,
+        discussion_id: 'abc',
+        note_id: 1202,
+      });
+
+      expect(mockClient.deleteMrDiscussionNote).toHaveBeenCalledWith(1, 10, 'abc', 1202);
+      expect(parse(result)).toEqual({ success: true });
+    });
+
+    it.each([true, false])('resolves a discussion with resolved %s', async (resolved) => {
+      mockClient.resolveMrDiscussion.mockResolvedValue({ id: 'abc', notes: [] });
+      const tool = createDiscussionTools(null).find(
+        (t) => t.tool.name === 'resolveMrDiscussion'
+      )!.tool;
+
+      const result = await run(mockClient, 'resolveMrDiscussion', {
+        project_id: 1,
+        mr_iid: 10,
+        discussion_id: 'abc',
+        resolved,
+      });
+
+      expect(mockClient.resolveMrDiscussion).toHaveBeenCalledWith(1, 10, 'abc', resolved);
+      expectEmittedKeysDeclared(tool, result);
+      expect(parse(result)).toEqual({ success: true, discussion: { id: 'abc', notes: [] } });
+    });
+
+    it('reports a GitLab failure for a missing discussion', async () => {
+      mockClient.createMrDiscussionNote.mockRejectedValue(new Error('404 Not Found'));
+
+      const result = await run(mockClient, 'createMrDiscussionNote', {
+        project_id: 1,
+        mr_iid: 10,
+        discussion_id: 'nope',
+        body: 'x',
+      });
+
+      expectNotFoundTeachingError(result);
+    });
+
+    it('reports a permission failure on delete', async () => {
+      mockClient.deleteMrDiscussionNote.mockRejectedValue(new Error('403 Forbidden'));
+
+      const result = await run(mockClient, 'deleteMrDiscussionNote', {
+        project_id: 1,
+        mr_iid: 10,
+        discussion_id: 'abc',
+        note_id: 1,
+      });
+
+      expectPermissionTeachingError(result);
+    });
+  });
+
+  describe('draft note tools', () => {
+    it('creates an anchored draft note', async () => {
+      mockClient.createMrDraftNote.mockResolvedValue({ id: 88, note: 'nit' });
+
+      const result = await run(mockClient, 'createMrDraftNote', {
+        project_id: 1,
+        mr_iid: 10,
+        note: 'nit',
+        path: 'a.ts',
+        line: 7,
+        end_line: 9,
+        side: 'new',
+      });
+
+      expect(mockClient.createMrDraftNote).toHaveBeenCalledWith(1, 10, {
+        note: 'nit',
+        path: 'a.ts',
+        line: 7,
+        end_line: 9,
+        side: 'new',
+      });
+      expect(parse(result)).toEqual({ success: true, draft_note: { id: 88, note: 'nit' } });
+    });
+
+    it('creates a draft reply that resolves the discussion', async () => {
+      mockClient.createMrDraftNote.mockResolvedValue({ id: 89 });
+
+      await run(mockClient, 'createMrDraftNote', {
+        project_id: 1,
+        mr_iid: 10,
+        note: 'done',
+        in_reply_to_discussion_id: 'abc',
+        resolve_discussion: true,
+      });
+
+      expect(mockClient.createMrDraftNote).toHaveBeenCalledWith(1, 10, {
+        note: 'done',
+        in_reply_to_discussion_id: 'abc',
+        resolve_discussion: true,
+      });
+    });
+
+    it('updates a draft note', async () => {
+      mockClient.updateMrDraftNote.mockResolvedValue({ id: 88 });
+
+      const result = await run(mockClient, 'updateMrDraftNote', {
+        project_id: 1,
+        mr_iid: 10,
+        draft_note_id: 88,
+        note: 'reworded',
+      });
+
+      expect(mockClient.updateMrDraftNote).toHaveBeenCalledWith(1, 10, 88, 'reworded');
+      expect(parse(result)).toEqual({ success: true, draft_note: { id: 88 } });
+    });
+
+    it('takes only the note text and points to delete plus create for a move', () => {
+      const tool = createDiscussionTools(mockClient as unknown as GitLabClient).find(
+        (t) => t.tool.name === 'updateMrDraftNote'
+      )!.tool;
+
+      expect(Object.keys(tool.inputSchema.properties as object).sort()).toEqual([
+        'draft_note_id',
+        'mr_iid',
+        'note',
+        'project_id',
+      ]);
+      expect(tool.inputSchema.required).toContain('note');
+      expect(tool.description).toContain('deleteMrDraftNote');
+      expect(tool.description).toContain('createMrDraftNote');
+    });
+
+    it('deletes a draft note', async () => {
+      mockClient.deleteMrDraftNote.mockResolvedValue(undefined);
+
+      const result = await run(mockClient, 'deleteMrDraftNote', {
+        project_id: 1,
+        mr_iid: 10,
+        draft_note_id: 88,
+      });
+
+      expect(mockClient.deleteMrDraftNote).toHaveBeenCalledWith(1, 10, 88);
+      expect(parse(result)).toEqual({ success: true });
+    });
+
+    it('lists draft notes with a count', async () => {
+      mockClient.listMrDraftNotes.mockResolvedValue([{ id: 88 }, { id: 89 }]);
+      const tool = createDiscussionTools(null).find(
+        (t) => t.tool.name === 'listMrDraftNotes'
+      )!.tool;
+
+      const result = await run(mockClient, 'listMrDraftNotes', { project_id: 1, mr_iid: 10 });
+
+      expect(mockClient.listMrDraftNotes).toHaveBeenCalledWith(1, 10);
+      expect(expectEmittedKeysDeclared(tool, result)).toEqual({
+        success: true,
+        draft_notes: [{ id: 88 }, { id: 89 }],
+        count: 2,
+      });
+    });
+
+    it('lists no draft notes', async () => {
+      mockClient.listMrDraftNotes.mockResolvedValue([]);
+
+      const result = await run(mockClient, 'listMrDraftNotes', { project_id: 1, mr_iid: 10 });
+
+      expect(parse(result)).toEqual({ success: true, draft_notes: [], count: 0 });
+    });
+
+    it('publishes one draft note', async () => {
+      mockClient.publishMrDraftNote.mockResolvedValue(undefined);
+
+      const result = await run(mockClient, 'publishMrDraftNote', {
+        project_id: 1,
+        mr_iid: 10,
+        draft_note_id: 88,
+      });
+
+      expect(mockClient.publishMrDraftNote).toHaveBeenCalledWith(1, 10, 88);
+      expect(parse(result)).toEqual({ success: true });
+    });
+
+    it('publishes all draft notes with a summary and reviewer state', async () => {
+      mockClient.publishMrDraftNotes.mockResolvedValue(undefined);
+
+      const result = await run(mockClient, 'publishMrDraftNotes', {
+        project_id: 1,
+        mr_iid: 10,
+        note: 'Summary',
+        internal: false,
+        reviewer_state: 'requested_changes',
+      });
+
+      expect(mockClient.publishMrDraftNotes).toHaveBeenCalledWith(1, 10, {
+        note: 'Summary',
+        internal: false,
+        reviewer_state: 'requested_changes',
+      });
+      expect(parse(result)).toEqual({ success: true });
+    });
+
+    it('publishes all draft notes without options', async () => {
+      mockClient.publishMrDraftNotes.mockResolvedValue(undefined);
+
+      await run(mockClient, 'publishMrDraftNotes', { project_id: 1, mr_iid: 10 });
+
+      expect(mockClient.publishMrDraftNotes).toHaveBeenCalledWith(1, 10, {});
+    });
+
+    it('returns the GitLab error when publishing fails', async () => {
+      mockClient.publishMrDraftNotes.mockRejectedValue(new Error('403 Forbidden'));
+
+      const result = await run(mockClient, 'publishMrDraftNotes', { project_id: 1, mr_iid: 10 });
+
+      expectPermissionTeachingError(result);
+    });
+  });
+
+  describe('anchor fields without path', () => {
+    it.each(
+      ORPHAN_ANCHORS.flatMap(([name, base]) =>
+        (['line', 'end_line', 'side'] as const).map((field) => [name, base, field] as const)
+      )
+    )('%s rejects %s without path and calls no GitLab method', async (name, base, field) => {
+      const value = field === 'side' ? 'new' : 5;
+      const result = await run(mockClient, name, {
+        project_id: 1,
+        mr_iid: 10,
+        ...base,
+        [field]: value,
+      });
+
+      expect(result.isError).toBe(true);
+      expect((result.content[0] as { text: string }).text).toContain(field);
+      expect((result.content[0] as { text: string }).text).toContain('path');
+      expect(mockClient[name].mock.calls).toHaveLength(0);
+    });
+
+    it.each(ORPHAN_ANCHORS)('%s rejects end_line without line', async (name, base) => {
+      const result = await run(mockClient, name, {
+        project_id: 1,
+        mr_iid: 10,
+        ...base,
+        path: 'a.ts',
+        end_line: 5,
+      });
+
+      expect(result.isError).toBe(true);
+      expect((result.content[0] as { text: string }).text).toContain('end_line');
+      expect(mockClient[name].mock.calls).toHaveLength(0);
+    });
+
+    it('names every anchor field that was given', async () => {
+      const result = await run(mockClient, 'createMrDraftNote', {
+        project_id: 1,
+        mr_iid: 10,
+        note: 'n',
+        line: 3,
+        end_line: 4,
+        side: 'old',
+      });
+
+      expect((result.content[0] as { text: string }).text).toContain('line, end_line, side');
+    });
+  });
+
+  describe('tool classification', () => {
+    const toolsByName = new Map(createDiscussionTools(null).map((d) => [d.tool.name, d.tool]));
+
+    it.each(WRITE_TOOLS)('%s changes GitLab state and acts as the current user', (name) => {
+      const tool = toolsByName.get(name)!;
+      const meta = tool._meta as Record<string, unknown>;
+
+      expect(tool.annotations?.readOnlyHint).toBe(false);
+      expect(meta[META_KEYS.USER_SCOPED]).toBe(true);
+      expect(meta[META_KEYS.CURRENT_USER_TOOL]).toBe('getCurrentUser');
+    });
+
+    it.each(READ_TOOLS)('%s only reads', (name) => {
+      const tool = toolsByName.get(name)!;
+
+      expect(tool.annotations?.readOnlyHint).toBe(true);
+    });
+
+    it('scopes the draft list to the current user because GitLab keeps drafts per author', () => {
+      const meta = toolsByName.get('listMrDraftNotes')!._meta as Record<string, unknown>;
+
+      expect(meta[META_KEYS.USER_SCOPED]).toBe(true);
+      expect(meta[META_KEYS.CURRENT_USER_TOOL]).toBe('getCurrentUser');
+    });
+
+    it('does not scope the discussion list to a user', () => {
+      const meta = toolsByName.get('listMrDiscussions')!._meta as Record<string, unknown>;
+
+      expect(meta[META_KEYS.USER_SCOPED]).toBeUndefined();
+    });
+
+    it.each(DELETE_TOOLS)('%s is marked destructive', (name) => {
+      expect(toolsByName.get(name)!.annotations?.destructiveHint).toBe(true);
+    });
+
+    it.each(WRITE_TOOLS.filter((n) => !DELETE_TOOLS.includes(n)))(
+      '%s is not marked destructive',
+      (name) => {
+        expect(toolsByName.get(name)!.annotations?.destructiveHint).toBeFalsy();
+      }
+    );
+
+    it('classifies every tool of the module', () => {
+      expect([...toolsByName.keys()].sort()).toEqual([...WRITE_TOOLS, ...READ_TOOLS].sort());
+    });
+  });
+
   describe('unconfigured client', () => {
     it('returns error for all tools when client is null', async () => {
       const tools = createDiscussionTools(null);
 
-      expect(tools).toHaveLength(2);
+      expect(tools).toHaveLength(12);
 
       for (const { tool, handler } of tools) {
         const result = await handler({});

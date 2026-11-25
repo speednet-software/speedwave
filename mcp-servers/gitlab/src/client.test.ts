@@ -55,10 +55,26 @@ interface MockGitlabEndpoints {
     allDiffs: Mock;
     allCommits: Mock;
     allPipelines: Mock;
+    allDiffVersions: Mock;
   };
   MergeRequestApprovals: { approve: Mock };
   MergeRequestNotes: { all: Mock; create: Mock };
-  MergeRequestDiscussions: { all: Mock; create: Mock };
+  MergeRequestDiscussions: {
+    all: Mock;
+    create: Mock;
+    addNote: Mock;
+    editNote: Mock;
+    removeNote: Mock;
+    resolve: Mock;
+  };
+  MergeRequestDraftNotes: {
+    all: Mock;
+    create: Mock;
+    edit: Mock;
+    remove: Mock;
+    publish: Mock;
+    requester: { post: Mock };
+  };
   Commits: { all: Mock; showDiff: Mock };
   Pipelines: { all: Mock; show: Mock; retry: Mock; create: Mock };
   Jobs: { all: Mock; showLog: Mock; erase: Mock };
@@ -112,6 +128,7 @@ describe('GitLabClient', () => {
         allDiffs: vi.fn(),
         allCommits: vi.fn(),
         allPipelines: vi.fn(),
+        allDiffVersions: vi.fn(),
       },
       MergeRequestApprovals: {
         approve: vi.fn(),
@@ -123,6 +140,18 @@ describe('GitLabClient', () => {
       MergeRequestDiscussions: {
         all: vi.fn(),
         create: vi.fn(),
+        addNote: vi.fn(),
+        editNote: vi.fn(),
+        removeNote: vi.fn(),
+        resolve: vi.fn(),
+      },
+      MergeRequestDraftNotes: {
+        all: vi.fn(),
+        create: vi.fn(),
+        edit: vi.fn(),
+        remove: vi.fn(),
+        publish: vi.fn(),
+        requester: { post: vi.fn() },
       },
       Commits: {
         all: vi.fn(),
@@ -2015,7 +2044,257 @@ describe('GitLabClient', () => {
         10,
         'New discussion'
       );
+      expect(mockGitlabInstance.MergeRequests.allDiffVersions).not.toHaveBeenCalled();
       expect(result).toEqual(mockDiscussion);
+    });
+
+    it('ignores line and side without a path', async () => {
+      mockGitlabInstance.MergeRequestDiscussions.create.mockResolvedValue({ id: 'd' });
+
+      await client.createMrDiscussion(1, 10, 'text', { line: 3, side: 'old' });
+
+      expect(mockGitlabInstance.MergeRequestDiscussions.create).toHaveBeenCalledWith(1, 10, 'text');
+    });
+
+    it('anchors the discussion to a diff line using the first diff version', async () => {
+      mockGitlabInstance.MergeRequests.allDiffVersions.mockResolvedValue([
+        { base_commit_sha: 'b1', start_commit_sha: 's1', head_commit_sha: 'h1' },
+        { base_commit_sha: 'b0', start_commit_sha: 's0', head_commit_sha: 'h0' },
+      ]);
+      mockGitlabInstance.MergeRequests.allDiffs.mockResolvedValue([
+        {
+          old_path: 'src/a.ts',
+          new_path: 'src/a.ts',
+          diff: '@@ -1,2 +1,3 @@\n one\n+two\n three',
+        },
+      ]);
+      mockGitlabInstance.MergeRequestDiscussions.create.mockResolvedValue({ id: 'd' });
+
+      await client.createMrDiscussion(1, 10, 'text', { path: 'src/a.ts', line: 2 });
+
+      expect(mockGitlabInstance.MergeRequests.allDiffVersions).toHaveBeenCalledWith(1, 10);
+      expect(mockGitlabInstance.MergeRequests.allDiffs).toHaveBeenCalledWith(1, 10);
+      expect(mockGitlabInstance.MergeRequestDiscussions.create).toHaveBeenCalledWith(
+        1,
+        10,
+        'text',
+        {
+          position: {
+            base_sha: 'b1',
+            start_sha: 's1',
+            head_sha: 'h1',
+            position_type: 'text',
+            old_path: 'src/a.ts',
+            new_path: 'src/a.ts',
+            new_line: 2,
+          },
+        }
+      );
+    });
+
+    it('fails when the merge request has no diff versions', async () => {
+      mockGitlabInstance.MergeRequests.allDiffVersions.mockResolvedValue([]);
+      mockGitlabInstance.MergeRequests.allDiffs.mockResolvedValue([]);
+
+      await expect(
+        client.createMrDiscussion(1, 10, 'text', { path: 'src/a.ts', line: 2 })
+      ).rejects.toThrow('Merge request has no diff versions');
+      expect(mockGitlabInstance.MergeRequestDiscussions.create).not.toHaveBeenCalled();
+    });
+
+    it('lets a GitLab error through unchanged', async () => {
+      const error = new Error('400 Bad request - Position is invalid');
+      mockGitlabInstance.MergeRequests.allDiffVersions.mockResolvedValue([
+        { base_commit_sha: 'b', start_commit_sha: 's', head_commit_sha: 'h' },
+      ]);
+      mockGitlabInstance.MergeRequests.allDiffs.mockResolvedValue([]);
+      mockGitlabInstance.MergeRequestDiscussions.create.mockRejectedValue(error);
+
+      await expect(
+        client.createMrDiscussion(1, 10, 'text', { path: 'x.ts', line: 1 })
+      ).rejects.toBe(error);
+    });
+  });
+
+  describe('merge request discussion notes', () => {
+    it('replies in a discussion', async () => {
+      mockGitlabInstance.MergeRequestDiscussions.addNote.mockResolvedValue({ id: 5 });
+
+      const result = await client.createMrDiscussionNote('g/p', 10, 'abc', 'reply');
+
+      expect(mockGitlabInstance.MergeRequestDiscussions.addNote).toHaveBeenCalledWith(
+        'g/p',
+        10,
+        'abc',
+        'reply'
+      );
+      expect(result).toEqual({ id: 5 });
+    });
+
+    it('edits a note body', async () => {
+      mockGitlabInstance.MergeRequestDiscussions.editNote.mockResolvedValue({ id: 5 });
+
+      await client.updateMrDiscussionNote(1, 10, 'abc', 5, 'new text');
+
+      expect(mockGitlabInstance.MergeRequestDiscussions.editNote).toHaveBeenCalledWith(
+        1,
+        10,
+        'abc',
+        5,
+        { body: 'new text' }
+      );
+    });
+
+    it('deletes a note', async () => {
+      mockGitlabInstance.MergeRequestDiscussions.removeNote.mockResolvedValue(undefined);
+
+      await client.deleteMrDiscussionNote(1, 10, 'abc', 5);
+
+      expect(mockGitlabInstance.MergeRequestDiscussions.removeNote).toHaveBeenCalledWith(
+        1,
+        10,
+        'abc',
+        5
+      );
+    });
+
+    it.each([true, false])('sets a discussion resolved to %s', async (resolved) => {
+      mockGitlabInstance.MergeRequestDiscussions.resolve.mockResolvedValue({ id: 'abc' });
+
+      const result = await client.resolveMrDiscussion(1, 10, 'abc', resolved);
+
+      expect(mockGitlabInstance.MergeRequestDiscussions.resolve).toHaveBeenCalledWith(
+        1,
+        10,
+        'abc',
+        resolved
+      );
+      expect(result).toEqual({ id: 'abc' });
+    });
+  });
+
+  describe('merge request draft notes', () => {
+    const positionFixtures = () => {
+      mockGitlabInstance.MergeRequests.allDiffVersions.mockResolvedValue([
+        { base_commit_sha: 'b', start_commit_sha: 's', head_commit_sha: 'h' },
+      ]);
+      mockGitlabInstance.MergeRequests.allDiffs.mockResolvedValue([]);
+    };
+    const filePosition = {
+      base_sha: 'b',
+      start_sha: 's',
+      head_sha: 'h',
+      position_type: 'file',
+      old_path: 'a.ts',
+      new_path: 'a.ts',
+    };
+
+    it('creates a draft note without a position', async () => {
+      mockGitlabInstance.MergeRequestDraftNotes.create.mockResolvedValue({ id: 88 });
+
+      const result = await client.createMrDraftNote(1, 10, { note: 'nit' });
+
+      expect(mockGitlabInstance.MergeRequestDraftNotes.create).toHaveBeenCalledWith(1, 10, 'nit', {
+        inReplyToDiscussionId: undefined,
+        resolveDiscussion: undefined,
+        position: undefined,
+      });
+      expect(result).toEqual({ id: 88 });
+    });
+
+    it('creates a draft reply that resolves the discussion', async () => {
+      mockGitlabInstance.MergeRequestDraftNotes.create.mockResolvedValue({ id: 88 });
+
+      await client.createMrDraftNote(1, 10, {
+        note: 'done',
+        in_reply_to_discussion_id: 'abc',
+        resolve_discussion: true,
+      });
+
+      expect(mockGitlabInstance.MergeRequestDraftNotes.create).toHaveBeenCalledWith(1, 10, 'done', {
+        inReplyToDiscussionId: 'abc',
+        resolveDiscussion: true,
+        position: undefined,
+      });
+    });
+
+    it('creates an anchored draft note', async () => {
+      positionFixtures();
+      mockGitlabInstance.MergeRequestDraftNotes.create.mockResolvedValue({ id: 88 });
+
+      await client.createMrDraftNote(1, 10, { note: 'file note', path: 'a.ts' });
+
+      expect(mockGitlabInstance.MergeRequestDraftNotes.create).toHaveBeenCalledWith(
+        1,
+        10,
+        'file note',
+        {
+          inReplyToDiscussionId: undefined,
+          resolveDiscussion: undefined,
+          position: filePosition,
+        }
+      );
+    });
+
+    it('edits the draft note text', async () => {
+      mockGitlabInstance.MergeRequestDraftNotes.edit.mockResolvedValue({ id: 88 });
+
+      await client.updateMrDraftNote(1, 10, 88, 'reworded');
+
+      expect(mockGitlabInstance.MergeRequestDraftNotes.edit).toHaveBeenCalledWith(1, 10, 88, {
+        note: 'reworded',
+      });
+    });
+
+    it('deletes a draft note', async () => {
+      mockGitlabInstance.MergeRequestDraftNotes.remove.mockResolvedValue(undefined);
+
+      await client.deleteMrDraftNote(1, 10, 88);
+
+      expect(mockGitlabInstance.MergeRequestDraftNotes.remove).toHaveBeenCalledWith(1, 10, 88);
+    });
+
+    it('lists draft notes', async () => {
+      mockGitlabInstance.MergeRequestDraftNotes.all.mockResolvedValue([{ id: 88 }]);
+
+      const result = await client.listMrDraftNotes(1, 10);
+
+      expect(mockGitlabInstance.MergeRequestDraftNotes.all).toHaveBeenCalledWith(1, 10);
+      expect(result).toEqual([{ id: 88 }]);
+    });
+
+    it('publishes one draft note', async () => {
+      mockGitlabInstance.MergeRequestDraftNotes.publish.mockResolvedValue(undefined);
+
+      await client.publishMrDraftNote(1, 10, 88);
+
+      expect(mockGitlabInstance.MergeRequestDraftNotes.publish).toHaveBeenCalledWith(1, 10, 88);
+    });
+
+    it('bulk publishes with the note and reviewer state through the raw request', async () => {
+      mockGitlabInstance.MergeRequestDraftNotes.requester.post.mockResolvedValue({});
+
+      await client.publishMrDraftNotes('grp/proj', 10, {
+        note: 'Summary',
+        internal: false,
+        reviewer_state: 'requested_changes',
+      });
+
+      expect(mockGitlabInstance.MergeRequestDraftNotes.requester.post).toHaveBeenCalledWith(
+        'projects/grp%2Fproj/merge_requests/10/draft_notes/bulk_publish',
+        { body: { note: 'Summary', internal: false, reviewer_state: 'requested_changes' } }
+      );
+    });
+
+    it('bulk publishes without options', async () => {
+      mockGitlabInstance.MergeRequestDraftNotes.requester.post.mockResolvedValue({});
+
+      await client.publishMrDraftNotes(7, 10, {});
+
+      expect(mockGitlabInstance.MergeRequestDraftNotes.requester.post).toHaveBeenCalledWith(
+        'projects/7/merge_requests/10/draft_notes/bulk_publish',
+        { body: {} }
+      );
     });
   });
 

@@ -12,6 +12,13 @@ Issues and specs for this repo live as GitLab issues. Every operation goes throu
 - **Close**: `gitlab.closeIssue` takes no closing comment, so post the explanation first with `gitlab.createIssueNote`, then close.
 - **Merge requests**: GitLab calls PRs "merge requests". `gitlab.getMrFull`, `gitlab.listMrIds`, `gitlab.createMrNote`, `gitlab.updateMergeRequest` are the MR counterparts of the issue tools above.
 
+## Reviewing a merge request
+
+- **Read the diff**: `gitlab.getMrChanges`; existing threads with `gitlab.listMrDiscussions`.
+- **Comment on code**: `gitlab.createMrDiscussion` with `body`, `path`, `line` (and `end_line` for a range, `side: "old"` for a removed line); `path` alone comments on the file; `line`, `end_line` and `side` need `path`, and `end_line` needs `line`. The line must be an added, removed or context line of a diff hunk; GitLab rejects any other with a `line_code` error.
+- **Reply, edit, delete, resolve**: `gitlab.createMrDiscussionNote`, `gitlab.updateMrDiscussionNote`, `gitlab.deleteMrDiscussionNote` with the `discussion_id` from `listMrDiscussions`; `gitlab.resolveMrDiscussion` with `resolved: true` or `false`.
+- **Batch review**: collect comments with `gitlab.createMrDraftNote` (same anchor fields, or `in_reply_to_discussion_id` with `resolve_discussion`), check them with `gitlab.listMrDraftNotes`, reword one with `gitlab.updateMrDraftNote` (text only; to move a draft, `gitlab.deleteMrDraftNote` and create it again) or remove it with `gitlab.deleteMrDraftNote`, then publish with `gitlab.publishMrDraftNote` (one) or `gitlab.publishMrDraftNotes` (all, with optional `note` and `reviewer_state` of `reviewed` or `requested_changes`). Publishing does not approve: use `gitlab.approveMergeRequest`.
+
 ## Merge requests as a triage surface
 
 **MRs as a request surface: no.** _(Set to `yes` if this repo treats external merge requests as feature requests; `/speedwave-triage` reads this flag.)_
