@@ -1,8 +1,9 @@
 //! Moves every plaintext secret of the data directory into the encrypted secret store: token files
 //! of built-in and plugin integrations, LLM provider and local LLM keys, the Anthropic API key, the
 //! PII key, and the refresh token and client secret inside the OAuth state and seed files. Also
-//! removes generated compose files and snapshots that carry plaintext secrets. A plaintext copy is
-//! deleted only after the encrypted copy was written and read back. Jira: SPEED-1016.
+//! removes the old generated compose files and snapshots. A plaintext copy is deleted only after
+//! the encrypted copy was written and read back, or when an encrypted file already exists for it.
+//! Jira: SPEED-1016.
 //! Added in: v0.23.0
 
 mod generated;
@@ -86,7 +87,7 @@ impl<'a> Run<'a> {
         }
         if self.stale_files > 0 {
             problems.push(format!(
-                "{} generated file(s) with plaintext secrets could not be removed.",
+                "{} generated file(s) could not be removed.",
                 self.stale_files
             ));
         }
@@ -116,7 +117,7 @@ impl<'a> Run<'a> {
         let Some(store) = self.open_store() else {
             return false;
         };
-        if already_stored && matches!(store.read(name), Ok(Some(_))) {
+        if already_stored {
             return true;
         }
         if store.ensure_key().is_err() || store.write(name, value).is_err() {

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
-use speedwave_runtime::secret_store::{SecretName, SecretStore};
+use speedwave_runtime::secret_store::{SecretName, SecretStore, SecretStoreError};
 
 use super::migrate;
 
@@ -552,7 +552,7 @@ fn a_missing_install_key_beside_the_same_ciphertext_keeps_the_plaintext() {
 }
 
 #[test]
-fn an_unreadable_ciphertext_is_replaced_from_the_plaintext() {
+fn an_unreadable_ciphertext_wins_and_the_plaintext_is_removed() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     let store = SecretStore::open(dir).unwrap();
@@ -565,14 +565,37 @@ fn an_unreadable_ciphertext_is_replaced_from_the_plaintext() {
     migrate(dir).unwrap();
 
     assert_eq!(
-        stored(dir, &name("alpha", "gitlab", "token")).as_deref(),
-        Some(GITLAB_TOKEN)
+        std::fs::read_to_string(dir.join("secrets/alpha/gitlab.token.enc")).unwrap(),
+        "garbage"
     );
+    assert!(matches!(
+        store.read(&name("alpha", "gitlab", "token")),
+        Err(SecretStoreError::Unreadable(_))
+    ));
     assert!(!tokens(dir, "alpha", "gitlab", "token").exists());
+    assert!(!tree_contains(dir, GITLAB_TOKEN));
 }
 
 #[test]
-fn generated_files_with_plaintext_secrets_are_removed_and_clean_ones_stay() {
+fn an_unreadable_pii_key_ciphertext_wins_and_the_plaintext_key_is_removed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    SecretStore::open(dir).unwrap().ensure_key().unwrap();
+    write(&dir.join("secrets/alpha/pii.key.enc"), "garbage");
+    write(&dir.join("policies/alpha/key"), PII_KEY);
+
+    migrate(dir).unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(dir.join("secrets/alpha/pii.key.enc")).unwrap(),
+        "garbage"
+    );
+    assert!(!dir.join("policies/alpha/key").exists());
+    assert!(!tree_contains(dir, PII_KEY));
+}
+
+#[test]
+fn generated_compose_files_and_snapshots_are_removed_whatever_they_hold() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     write(
@@ -588,14 +611,28 @@ fn generated_files_with_plaintext_secrets_are_removed_and_clean_ones_stay() {
         &dir.join("snapshots/beta/snapshot.json"),
         r#"{"compose_yml":"services: {}"}"#,
     );
+    write(&dir.join("compose/beta/other.txt"), "kept");
 
     migrate(dir).unwrap();
 
     assert!(!dir.join("compose/alpha/compose.yml").exists());
     assert!(!dir.join("snapshots/alpha/snapshot.json").exists());
-    assert!(dir.join("compose/beta/compose.yml").is_file());
-    assert!(dir.join("snapshots/beta/snapshot.json").is_file());
+    assert!(!dir.join("compose/beta/compose.yml").exists());
+    assert!(!dir.join("snapshots/beta/snapshot.json").exists());
+    assert!(dir.join("compose/beta/other.txt").is_file());
     assert!(!dir.join("secret-store.key").exists());
+}
+
+#[test]
+fn a_generated_file_that_cannot_be_removed_fails_the_run() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    write(&dir.join("compose/alpha/compose.yml/inner"), "x");
+
+    let error = migrate(dir).unwrap_err();
+
+    assert!(error.contains("1 generated file(s) could not be removed."));
+    assert!(dir.join("compose/alpha/compose.yml/inner").is_file());
 }
 
 #[cfg(unix)]
