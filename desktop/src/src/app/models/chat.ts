@@ -75,12 +75,34 @@ export type StreamChunk =
       data: { parent_tool_id: string; tool_id: string; tool_name: string; input_json: string };
     }
   | {
-      chunk_type: 'SubagentStatus';
-      data: { tool_id: string; status: SubagentState; summary: string };
+      chunk_type: 'TaskStatus';
+      data: { tool_id: string; status: TaskState; summary: string };
+    }
+  | {
+      chunk_type: 'WorkflowProgress';
+      data: { tool_id: string; phases: WorkflowPhase[]; agents: WorkflowAgent[] };
     };
 
-/** Mirror of Rust `chat.rs::SubagentState`. */
-export type SubagentState = 'running' | 'completed' | 'error' | 'stopped';
+/** Mirror of Rust `chat.rs::TaskState`. */
+export type TaskState = 'running' | 'completed' | 'error' | 'stopped';
+
+/** One phase of a workflow run. Mirror of Rust `workflow_progress.rs::WorkflowPhase`. */
+export interface WorkflowPhase {
+  index: number;
+  title: string;
+}
+
+/** One agent of a workflow run. Mirror of Rust `workflow_progress.rs::WorkflowAgent`. */
+export interface WorkflowAgent {
+  label: string;
+  phase_index: number;
+  state: TaskState;
+  last_tool_name?: string;
+  last_tool_summary?: string;
+  tool_calls: number;
+  duration_ms: number;
+  result_preview?: string;
+}
 
 /** What started a Claude Code turn. */
 export type TurnOrigin = 'user' | 'scheduled' | 'task_notification';

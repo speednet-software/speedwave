@@ -41,7 +41,8 @@ import type {
   HistoryMessageBlock,
   HistoryToolUse,
   StreamChunk,
-  SubagentState,
+  TaskState,
+  WorkflowAgent,
   ToolUseBlock,
 } from '../models/chat';
 import type { ModelSwitchOutcome } from '../models/claude-control';
@@ -4895,6 +4896,7 @@ describe('ChatSessionStore', () => {
           pendingEffort: { level: 'max', project: 'test', mark: 0, request: 1 },
           confirmedModel: 'claude-sonnet-5',
           subagentRuns: new Map([['a1', { activities: [], state: 'running', summary: '' }]]),
+          workflowRuns: new Map([['w1', { state: 'running', phases: [], agents: [] }]]),
         };
 
         internals.restoreConversationView(view);
@@ -9906,9 +9908,9 @@ describe('ChatSessionStore', () => {
       });
     }
 
-    function status(tool_id: string, state: SubagentState, summary = ''): void {
+    function status(tool_id: string, state: TaskState, summary = ''): void {
       store.handleStreamChunk({
-        chunk_type: 'SubagentStatus',
+        chunk_type: 'TaskStatus',
         data: { tool_id, status: state, summary },
       });
     }
@@ -10109,6 +10111,148 @@ describe('ChatSessionStore', () => {
         lastActivity: 'Bash $ ls',
       });
       expect(store.agentPanel()).toEqual([]);
+    });
+  });
+
+  describe('workflows', () => {
+    const PHASES = [
+      { index: 1, title: 'Prepare' },
+      { index: 2, title: 'Finish' },
+    ];
+    const AGENT: WorkflowAgent = {
+      label: 'agent-a',
+      phase_index: 1,
+      state: 'running',
+      last_tool_name: 'Bash',
+      last_tool_summary: 'echo REC-WFA-ok',
+      tool_calls: 1,
+      duration_ms: 4065,
+    };
+
+    function workflowTool(tool_id: string, result: string | null = 'launched'): MessageBlock {
+      const base = {
+        type: 'tool_use' as const,
+        tool_id,
+        tool_name: 'Workflow',
+        input_json: JSON.stringify({ name: 'rec-wf2' }),
+      };
+      return {
+        type: 'tool_use',
+        tool:
+          result === null
+            ? { ...base, status: 'running' }
+            : { ...base, status: 'done', result, result_is_error: false },
+      };
+    }
+
+    function progress(tool_id: string, agents: WorkflowAgent[] = [AGENT]): void {
+      store.handleStreamChunk({
+        chunk_type: 'WorkflowProgress',
+        data: { tool_id, phases: PHASES, agents },
+      });
+    }
+
+    function status(tool_id: string, state: TaskState): void {
+      store.handleStreamChunk({
+        chunk_type: 'TaskStatus',
+        data: { tool_id, status: state, summary: '' },
+      });
+    }
+
+    function committed(blocks: MessageBlock[]): ChatMessage[] {
+      return [
+        { role: 'user', blocks: [{ type: 'text', content: 'go' }], timestamp: 1 },
+        { role: 'assistant', blocks, timestamp: 2, uuid: 'msg_a1', uuid_status: 'Committed' },
+      ];
+    }
+
+    it('has no workflow view without a workflow call', () => {
+      progress('w1');
+      expect(store.workflowsById().size).toBe(0);
+    });
+
+    it('updates the run from a WorkflowProgress chunk after the turn ended', () => {
+      store._setState({ messages: committed([workflowTool('w1')]) });
+      expect(store.isStreaming).toBe(false);
+
+      status('w1', 'running');
+      progress('w1');
+      expect(store.workflowsById().get('w1')).toMatchObject({
+        status: 'running',
+        phaseCounter: 'phase 1/2',
+      });
+
+      progress('w1', [{ ...AGENT, state: 'completed', tool_calls: 2 }]);
+      status('w1', 'completed');
+      const view = store.workflowsById().get('w1');
+      expect(view?.status).toBe('completed');
+      expect(view?.phaseCounter).toBe('phase 2/2');
+      expect(view?.phases[0].agents[0]).toMatchObject({ state: 'completed', toolCount: 2 });
+    });
+
+    it('replaces the whole previous snapshot', () => {
+      store._setState({ messages: committed([workflowTool('w1')]) });
+      progress('w1', [AGENT, { ...AGENT, label: 'agent-b' }]);
+      progress('w1', [AGENT]);
+      expect(
+        store
+          .workflowsById()
+          .get('w1')
+          ?.phases[0].agents.map((a) => a.label)
+      ).toEqual(['agent-a']);
+    });
+
+    it('keeps workflows out of the agent panel and agents out of the workflow views', () => {
+      store._setState({
+        messages: committed([
+          workflowTool('w1'),
+          {
+            type: 'tool_use',
+            tool: {
+              type: 'tool_use',
+              tool_id: 'a1',
+              tool_name: 'Agent',
+              input_json: JSON.stringify({ description: 'Explore', run_in_background: true }),
+              status: 'done',
+              result: 'Async agent launched',
+              result_is_error: false,
+            },
+          },
+        ]),
+      });
+      status('w1', 'running');
+      status('a1', 'running');
+      progress('w1');
+      expect(store.agentsById().has('w1')).toBe(false);
+      expect(store.agentPanel().map((a) => a.id)).toEqual(['a1']);
+      expect([...store.workflowsById().keys()]).toEqual(['w1']);
+    });
+
+    it('lets a status arrive before the call is known', () => {
+      status('w1', 'completed');
+      progress('w1');
+      store._setState({ messages: committed([workflowTool('w1')]) });
+      expect(store.workflowsById().get('w1')?.status).toBe('completed');
+    });
+
+    it('carries the runs through a tab switch snapshot and drops them on reset', () => {
+      const internals = store as unknown as {
+        captureConversationView(): { workflowRuns: ReadonlyMap<string, { agents: unknown[] }> };
+        restoreConversationView(view: unknown): void;
+      };
+      store._setState({ messages: committed([workflowTool('w1')]) });
+      status('w1', 'running');
+      progress('w1');
+
+      const view = internals.captureConversationView();
+      expect(view.workflowRuns.get('w1')?.agents).toHaveLength(1);
+
+      store.resetForNewConversation();
+      expect(store.workflowsById().size).toBe(0);
+
+      internals.restoreConversationView(view);
+      store._setState({ messages: committed([workflowTool('w1')]) });
+      expect(store.workflowsById().get('w1')?.status).toBe('running');
     });
   });
 });

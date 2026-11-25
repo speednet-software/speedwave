@@ -72,6 +72,7 @@
         [messages]="chat.messagesFromState()"
         [currentBlocks]="chat.currentBlocksFromState()"
         [agents]="chat.activeStore().agentsById()"
+        [workflows]="chat.activeStore().workflowsById()"
         [isStreaming]="chat.isStreamingFromState()"
         [loadingTranscript]="chat.loadingTranscriptFromState()"
         [lastAssistantIndex]="lastAssistantIndex()"

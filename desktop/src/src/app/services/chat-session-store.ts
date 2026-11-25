@@ -44,6 +44,15 @@ import {
   type AgentView,
 } from '../chat/agents/agents';
 import {
+  NO_WORKFLOW_RUNS,
+  foldWorkflows,
+  sameWorkflows,
+  withWorkflowProgress,
+  withWorkflowStatus,
+  type WorkflowRuns,
+  type WorkflowView,
+} from '../chat/agents/workflows';
+import {
   chatInputFromText,
   chatInputToBlocks,
   contextTokensFrom,
@@ -77,6 +86,7 @@ interface StartResult {
 
 interface ConversationView extends LegacyStateSnapshot {
   subagentRuns: AgentRuns;
+  workflowRuns: WorkflowRuns;
   totalOutputTokens: number;
   contextWindowSize: number | null;
   contextSnapshot: ClaudeContextUsage | null;
@@ -99,6 +109,7 @@ function emptyConversationView(): ConversationView {
     sessionStats: null,
     model: '',
     subagentRuns: NO_AGENT_RUNS,
+    workflowRuns: NO_WORKFLOW_RUNS,
     totalOutputTokens: 0,
     contextWindowSize: null,
     contextSnapshot: null,
@@ -920,6 +931,7 @@ export class ChatSessionStore {
   readonly taskPlanExpanded = signal(false);
   readonly agentPanelExpanded = signal(false);
   private readonly _subagentRuns = signal<AgentRuns>(NO_AGENT_RUNS);
+  private readonly _workflowRuns = signal<WorkflowRuns>(NO_WORKFLOW_RUNS);
   /** Per-tab staged image attachments (SPEED-785) — a paste/drop resolves into this instance regardless of which tab's composer is active when it finishes. */
   readonly composerAttachments = new ComposerAttachments();
   private readonly _stagedTranscript = signal<StagedTranscript | null>(null);
@@ -1148,6 +1160,11 @@ export class ChatSessionStore {
 
   readonly agentsById: Signal<ReadonlyMap<string, AgentView>> = computed(
     () => new Map(this.agentViews().map((a) => [a.id, a]))
+  );
+
+  readonly workflowsById: Signal<ReadonlyMap<string, WorkflowView>> = computed(
+    () => foldWorkflows(this.toolCalls(), this._workflowRuns()),
+    { equal: sameWorkflows }
   );
 
   readonly agentPanel: Signal<readonly AgentView[]> = computed(
@@ -1884,9 +1901,16 @@ export class ChatSessionStore {
         return;
       }
 
-      case 'SubagentStatus': {
+      case 'TaskStatus': {
         const { tool_id, status, summary } = chunk.data;
         this._subagentRuns.update((runs) => withAgentStatus(runs, tool_id, status, summary));
+        this._workflowRuns.update((runs) => withWorkflowStatus(runs, tool_id, status));
+        return;
+      }
+
+      case 'WorkflowProgress': {
+        const { tool_id, phases, agents } = chunk.data;
+        this._workflowRuns.update((runs) => withWorkflowProgress(runs, tool_id, phases, agents));
         return;
       }
 
@@ -1958,6 +1982,7 @@ export class ChatSessionStore {
   private captureConversationView(): ConversationView {
     return {
       subagentRuns: this._subagentRuns(),
+      workflowRuns: this._workflowRuns(),
       messages: this._messages,
       currentBlocks: this._currentBlocks,
       isStreaming: this.isStreaming,
@@ -1983,6 +2008,7 @@ export class ChatSessionStore {
 
   private restoreConversationView(view: ConversationView): void {
     this._subagentRuns.set(view.subagentRuns);
+    this._workflowRuns.set(view.workflowRuns);
     this._messages = [...view.messages];
     this._currentBlocks = [...view.currentBlocks];
     this.isStreaming = view.isStreaming;

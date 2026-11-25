@@ -522,7 +522,7 @@ describe('ChatStateService', () => {
         });
         mockTauri.dispatchEvent('chat_stream', {
           tab_id: tab,
-          chunk_type: 'SubagentStatus',
+          chunk_type: 'TaskStatus',
           data: { tool_id: 'a1', status: 'completed', summary: 'done' },
         });
 
@@ -553,6 +553,71 @@ describe('ChatStateService', () => {
           toolCount: 1,
           result: 'done',
         });
+      });
+    });
+
+    describe('workflow chunks', () => {
+      it('reach the store of a tab whose turn already ended', async () => {
+        await service.init();
+        const tab = service.activeTabId();
+        const store = service.tabs().get(tab)!;
+        store.isStreaming = false;
+        store._setState({
+          messages: [
+            {
+              role: 'assistant',
+              blocks: [
+                {
+                  type: 'tool_use',
+                  tool: {
+                    type: 'tool_use',
+                    tool_id: 'w1',
+                    tool_name: 'Workflow',
+                    input_json: '{"name":"rec-wf2"}',
+                    status: 'done',
+                    result: 'Workflow launched in background',
+                    result_is_error: false,
+                  },
+                },
+              ],
+              timestamp: 1,
+            },
+          ],
+        });
+
+        mockTauri.dispatchEvent('chat_stream', {
+          tab_id: tab,
+          chunk_type: 'TaskStatus',
+          data: { tool_id: 'w1', status: 'running', summary: '' },
+        });
+        mockTauri.dispatchEvent('chat_stream', {
+          tab_id: tab,
+          chunk_type: 'WorkflowProgress',
+          data: {
+            tool_id: 'w1',
+            phases: [{ index: 1, title: 'Prepare' }],
+            agents: [
+              {
+                label: 'agent-a',
+                phase_index: 1,
+                state: 'running',
+                tool_calls: 0,
+                duration_ms: 29,
+              },
+            ],
+          },
+        });
+        expect(store.workflowsById().get('w1')).toMatchObject({
+          status: 'running',
+          phaseCounter: 'phase 1/1',
+        });
+
+        mockTauri.dispatchEvent('chat_stream', {
+          tab_id: tab,
+          chunk_type: 'TaskStatus',
+          data: { tool_id: 'w1', status: 'completed', summary: '' },
+        });
+        expect(store.workflowsById().get('w1')?.status).toBe('completed');
       });
     });
 
