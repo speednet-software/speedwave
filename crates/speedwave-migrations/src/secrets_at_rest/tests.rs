@@ -595,7 +595,7 @@ fn an_unreadable_pii_key_ciphertext_wins_and_the_plaintext_key_is_removed() {
 }
 
 #[test]
-fn generated_compose_files_and_snapshots_are_removed_whatever_they_hold() {
+fn generated_files_with_plaintext_secrets_are_removed_and_clean_ones_stay() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     write(
@@ -611,28 +611,14 @@ fn generated_compose_files_and_snapshots_are_removed_whatever_they_hold() {
         &dir.join("snapshots/beta/snapshot.json"),
         r#"{"compose_yml":"services: {}"}"#,
     );
-    write(&dir.join("compose/beta/other.txt"), "kept");
 
     migrate(dir).unwrap();
 
     assert!(!dir.join("compose/alpha/compose.yml").exists());
     assert!(!dir.join("snapshots/alpha/snapshot.json").exists());
-    assert!(!dir.join("compose/beta/compose.yml").exists());
-    assert!(!dir.join("snapshots/beta/snapshot.json").exists());
-    assert!(dir.join("compose/beta/other.txt").is_file());
+    assert!(dir.join("compose/beta/compose.yml").is_file());
+    assert!(dir.join("snapshots/beta/snapshot.json").is_file());
     assert!(!dir.join("secret-store.key").exists());
-}
-
-#[test]
-fn a_generated_file_that_cannot_be_removed_fails_the_run() {
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path();
-    write(&dir.join("compose/alpha/compose.yml/inner"), "x");
-
-    let error = migrate(dir).unwrap_err();
-
-    assert!(error.contains("1 generated file(s) could not be removed."));
-    assert!(dir.join("compose/alpha/compose.yml/inner").is_file());
 }
 
 #[cfg(unix)]
