@@ -10,9 +10,7 @@ use super::{llm, proxy, workers};
 use crate::config::{ResolvedClaudeConfig, ResolvedIntegrationsConfig};
 use crate::consts::{self, McpServiceDescriptor};
 use crate::plugin::PluginManifest;
-use crate::secret_store::{
-    builtin_secret_fields, unreadable_secret_message, ProjectSecrets, SecretName, SecretStore,
-};
+use crate::secret_store::{builtin_secret_fields, ProjectSecrets, SecretName, SecretStore};
 use crate::secrets_tmpfs::layout::{validate_file_name, ProjectPayload, SecretFile, SlotFiles};
 use std::path::Path;
 
@@ -105,23 +103,6 @@ impl WorkerCredentials {
     }
 }
 
-/// User-facing messages of the secrets of `project` that cannot be read, one per integration.
-pub fn unreadable_integration_messages(data_dir: &Path, project: &str) -> Vec<String> {
-    match SecretStore::open(data_dir).and_then(|store| store.read_project(project)) {
-        Ok(secrets) => unreadable_messages(&secrets),
-        Err(e) => {
-            log::warn!("cannot list the unreadable secrets of project '{project}': {e}");
-            Vec::new()
-        }
-    }
-}
-
-fn unreadable_messages(secrets: &ProjectSecrets) -> Vec<String> {
-    let mut names = secrets.unreadable.clone();
-    names.dedup_by(|a, b| a.service() == b.service());
-    names.iter().map(unreadable_secret_message).collect()
-}
-
 fn has_unreadable_secret(secrets: &ProjectSecrets, service: &str) -> bool {
     secrets
         .unreadable
@@ -149,7 +130,7 @@ pub(crate) fn collect_project_payload_in(
     let store = SecretStore::open(data_dir)?;
     crate::pii_key::ensure_project_key_in(data_dir, project)?;
     let secrets = store.read_project(project)?;
-    for message in unreadable_messages(&secrets) {
+    for message in secrets.unreadable_messages() {
         log::warn!("{message} The integration is started without its credentials.");
     }
     let proxy_config =

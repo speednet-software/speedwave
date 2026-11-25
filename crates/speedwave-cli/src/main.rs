@@ -7,7 +7,7 @@ use speedwave_runtime::engine_path;
 use speedwave_runtime::oauth_refresh::{self, RefreshOutcome};
 use speedwave_runtime::plugin;
 use speedwave_runtime::runtime::{detect_runtime, ensure_exec_healthy};
-use speedwave_runtime::secret_store::secret_store_state;
+use speedwave_runtime::secret_store::{secret_store_state, unreadable_integration_messages};
 use speedwave_runtime::update;
 use speedwave_runtime::update_channel::{self, UpdateChannel};
 use speedwave_runtime::validation;
@@ -1263,7 +1263,7 @@ fn ensure_secret_store_ready(project: &str) {
         err!("{message}");
         std::process::exit(1);
     }
-    for line in compose::unreadable_integration_messages(data_dir, project) {
+    for line in unreadable_integration_messages(data_dir, project) {
         err!("{line}");
     }
 }

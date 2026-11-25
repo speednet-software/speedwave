@@ -69,8 +69,6 @@ pub(crate) use plugins::ApplyPluginsCtx;
 pub(crate) use tokens::resolve_tokens_dir_in;
 pub use tokens::LLM_TOKEN_SERVICE;
 
-pub use secret_payload::unreadable_integration_messages;
-
 pub(crate) use workers::{
     apply_credentials_digests_in, apply_integrations_filter, apply_worker_auth_tokens_in,
     apply_worker_config,
@@ -4671,53 +4669,6 @@ services:
             payload_file_text(&payload, "mcp-slack", "auth", SECRETS_PROJECT, "token").is_some(),
             "the project still starts with the slack worker"
         );
-        let messages = unreadable_integration_messages(data_dir.path(), SECRETS_PROJECT);
-        assert_eq!(
-            messages,
-            [crate::secret_store::unreadable_secret_message(
-                &crate::secret_store::SecretName::integration(
-                    SECRETS_PROJECT,
-                    "slack",
-                    "access_token"
-                )
-                .unwrap()
-            )]
-        );
-        assert!(messages[0].starts_with("Integration slack:"));
-    }
-
-    #[test]
-    fn unreadable_messages_are_empty_for_healthy_and_unknown_projects() {
-        let data_dir = tempfile::tempdir().unwrap();
-        write_secret(data_dir.path(), "healthy", "slack", "access_token", "v");
-
-        assert!(unreadable_integration_messages(data_dir.path(), "healthy").is_empty());
-        assert!(unreadable_integration_messages(data_dir.path(), "unknown").is_empty());
-        assert!(unreadable_integration_messages(data_dir.path(), "../evil").is_empty());
-    }
-
-    #[test]
-    fn unreadable_messages_name_each_integration_once() {
-        let data_dir = tempfile::tempdir().unwrap();
-        write_secret(data_dir.path(), "p", "slack", "access_token", "v");
-        write_secret(data_dir.path(), "p", "slack", "refresh_token", "v");
-        write_secret(data_dir.path(), "p", "github", "token", "v");
-        let project_dir = data_dir.path().join("secrets/p");
-        for file in [
-            "slack.access_token.enc",
-            "slack.refresh_token.enc",
-            "github.token.enc",
-        ] {
-            std::fs::write(project_dir.join(file), "garbage\n").unwrap();
-        }
-
-        let messages = unreadable_integration_messages(data_dir.path(), "p");
-
-        assert_eq!(messages.len(), 2, "{messages:?}");
-        assert!(messages
-            .iter()
-            .any(|m| m.starts_with("Integration github:")));
-        assert!(messages.iter().any(|m| m.starts_with("Integration slack:")));
     }
 
     #[test]

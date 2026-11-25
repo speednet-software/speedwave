@@ -10,7 +10,6 @@ mod recovery;
 mod state;
 mod store;
 
-pub(crate) use error::unreadable_secret_message;
 pub use error::SecretStoreError;
 pub use fields::{builtin_secret_fields, is_builtin_secret_field};
 pub use key_source::{FileKeySource, KeySource};
@@ -19,4 +18,4 @@ pub use recovery::{
     discard_secrets_without_key, encrypted_integrations, undiscardable_count, EncryptedIntegration,
 };
 pub use state::{secret_store_state, SecretStoreState};
-pub use store::{secret_exists_in, ProjectSecrets, SecretStore};
+pub use store::{secret_exists_in, unreadable_integration_messages, ProjectSecrets, SecretStore};

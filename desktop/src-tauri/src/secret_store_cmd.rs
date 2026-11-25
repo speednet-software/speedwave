@@ -2,11 +2,10 @@ use std::path::Path;
 
 use serde::Serialize;
 use speedwave_migrations::MigrationReport;
-use speedwave_runtime::compose::unreadable_integration_messages;
 use speedwave_runtime::config;
 use speedwave_runtime::secret_store::{
     discard_secrets_without_key, encrypted_integrations, secret_store_state, undiscardable_count,
-    SecretStoreState,
+    unreadable_integration_messages, SecretStoreState,
 };
 
 const KEY_MISSING_STEP: &str = "Complete the secret store recovery dialog to continue.";

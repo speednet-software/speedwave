@@ -5,7 +5,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use speedwave_crypto::Key;
 use zeroize::Zeroizing;
 
-use super::error::{io_failure, operation_failure, SecretStoreError};
+use super::error::{io_failure, operation_failure, unreadable_secret_message, SecretStoreError};
 use super::format;
 use super::key_source::{FileKeySource, KeySource};
 use super::layout::{self, LOCK_SUFFIX};
@@ -30,6 +30,17 @@ pub fn secret_exists_in(data_dir: &Path, name: &SecretName) -> bool {
         .is_file()
 }
 
+/// User-facing messages of the secrets of `project` that cannot be read, one per integration.
+pub fn unreadable_integration_messages(data_dir: &Path, project: &str) -> Vec<String> {
+    match SecretStore::open(data_dir).and_then(|store| store.read_project(project)) {
+        Ok(secrets) => secrets.unreadable_messages(),
+        Err(e) => {
+            log::warn!("cannot list the unreadable secrets of project '{project}': {e}");
+            Vec::new()
+        }
+    }
+}
+
 /// Every secret of one project: readable values and names of files that cannot be read.
 #[derive(Default)]
 pub struct ProjectSecrets {
@@ -48,6 +59,14 @@ impl fmt::Debug for ProjectSecrets {
             .field("unreadable", &self.unreadable)
             .field("unreadable_count", &self.unreadable.len())
             .finish()
+    }
+}
+
+impl ProjectSecrets {
+    pub(crate) fn unreadable_messages(&self) -> Vec<String> {
+        let mut names = self.unreadable.clone();
+        names.dedup_by(|a, b| a.service() == b.service());
+        names.iter().map(unreadable_secret_message).collect()
     }
 }
 
@@ -939,6 +958,54 @@ mod tests {
                 .as_str(),
             "v"
         );
+    }
+
+    #[test]
+    fn unreadable_messages_name_each_integration_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SecretStore::open(tmp.path()).unwrap();
+        let broken = [
+            name("slack", "access_token"),
+            name("slack", "refresh_token"),
+            name("github", "token"),
+        ];
+        for secret in &broken {
+            store.write(secret, "v").unwrap();
+            std::fs::write(enc_path(tmp.path(), secret), "garbage\n").unwrap();
+        }
+
+        let messages = unreadable_integration_messages(tmp.path(), "demo");
+
+        assert_eq!(messages.len(), 2, "{messages:?}");
+        assert!(messages
+            .iter()
+            .any(|m| m.starts_with("Integration github:")));
+        assert!(messages.iter().any(|m| m.starts_with("Integration slack:")));
+    }
+
+    #[test]
+    fn an_unreadable_message_is_the_message_of_its_secret() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SecretStore::open(tmp.path()).unwrap();
+        let secret = name("slack", "access_token");
+        store.write(&secret, "v").unwrap();
+        std::fs::write(enc_path(tmp.path(), &secret), "garbage\n").unwrap();
+
+        assert_eq!(
+            unreadable_integration_messages(tmp.path(), "demo"),
+            [unreadable_secret_message(&secret)]
+        );
+    }
+
+    #[test]
+    fn unreadable_messages_are_empty_for_healthy_and_unknown_projects() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SecretStore::open(tmp.path()).unwrap();
+        store.write(&name("slack", "access_token"), "v").unwrap();
+
+        assert!(unreadable_integration_messages(tmp.path(), "demo").is_empty());
+        assert!(unreadable_integration_messages(tmp.path(), "unknown").is_empty());
+        assert!(unreadable_integration_messages(tmp.path(), "../evil").is_empty());
     }
 
     #[test]

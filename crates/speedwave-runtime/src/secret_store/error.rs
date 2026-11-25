@@ -19,7 +19,7 @@ pub enum SecretStoreError {
     Io(String),
 }
 
-pub(crate) fn unreadable_secret_message(name: &SecretName) -> String {
+pub(super) fn unreadable_secret_message(name: &SecretName) -> String {
     let label = match name.service() {
         "llm" => "provider key",
         "anthropic" => "Anthropic API key",
