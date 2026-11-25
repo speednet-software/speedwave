@@ -1,6 +1,6 @@
 export default {
   extends: ['@commitlint/config-conventional'],
-  ignores: [(message) => /^chore\(deps(-dev)?\): bump /.test(message)],
+  ignores: [(message) => /^chore\(deps(-dev)?\): [Bb]ump /.test(message)],
   rules: {
     'header-max-length': [2, 'always', 100],
     'subject-empty': [2, 'never'],
