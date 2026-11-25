@@ -236,7 +236,6 @@ impl SecretStore {
         dir.join(format!("{}{LOCK_SUFFIX}", name.file_name()))
     }
 
-    /// Removes everything but encrypted secrets, locks, temp files and the legacy names.
     pub(super) fn clean_layout(&self) -> Result<(), SecretStoreError> {
         let removed = layout::remove_unexpected(&self.secrets_dir)?;
         if removed > 0 {

@@ -1,6 +1,5 @@
 //! Per-project PII tokenization key: a persistent 32-byte AES-SIV key generated once on
-//! first use, stored hex-encoded in the secret store (`SecretName::pii_key`). A stored key that
-//! cannot be read is replaced by a new one.
+//! first use, stored hex-encoded in the secret store (`SecretName::pii_key`).
 
 use std::path::{Path, PathBuf};
 

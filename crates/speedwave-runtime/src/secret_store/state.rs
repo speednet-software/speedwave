@@ -12,7 +12,7 @@ pub enum SecretStoreState {
     KeyMissing,
     /// The install key file exists but is malformed.
     KeyUnreadable,
-    /// The store directory or the key file cannot be read, or an unknown entry cannot be removed.
+    /// The store cannot be read or cleaned.
     StoreUnavailable,
 }
 
