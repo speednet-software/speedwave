@@ -1,0 +1,184 @@
+import { describe, it, expect } from 'vitest';
+import { buildPosition, type DiffRefs, type MrFileDiff } from './diff-position.js';
+
+const refs: DiffRefs = { base_sha: 'base', start_sha: 'start', head_sha: 'head' };
+
+const SHA_A = '21ff24dd18cc19d35de15a120639695824655b58';
+const SHA_OLD = '07cb195e51f24ddeb4d37a3a653dec8ab1239df7';
+
+const diff = [
+  '@@ -1,4 +1,5 @@',
+  ' line1',
+  '-line2',
+  '+line2 changed',
+  '+line2b',
+  ' line3',
+  ' line4',
+  '\\ No newline at end of file',
+  '@@ -20,2 +21,2 @@',
+  ' tail',
+  '-gone',
+  '+new',
+].join('\n');
+
+const files: MrFileDiff[] = [
+  { old_path: 'src/a.ts', new_path: 'src/a.ts', diff },
+  { old_path: 'src/old.ts', new_path: 'src/renamed.ts', diff },
+];
+
+const base = { ...refs, old_path: 'src/a.ts', new_path: 'src/a.ts' };
+
+describe('buildPosition', () => {
+  it('anchors an added line with only new_line', () => {
+    expect(buildPosition(refs, files, { path: 'src/a.ts', line: 2 })).toEqual({
+      ...base,
+      position_type: 'text',
+      new_line: 2,
+    });
+  });
+
+  it('anchors a removed line with only old_line when side is old', () => {
+    expect(buildPosition(refs, files, { path: 'src/a.ts', line: 2, side: 'old' })).toEqual({
+      ...base,
+      position_type: 'text',
+      old_line: 2,
+    });
+  });
+
+  it('anchors a context line with both numbers read from the hunk', () => {
+    expect(buildPosition(refs, files, { path: 'src/a.ts', line: 4, side: 'new' })).toEqual({
+      ...base,
+      position_type: 'text',
+      old_line: 3,
+      new_line: 4,
+    });
+  });
+
+  it('finds the same context line through the old side', () => {
+    expect(buildPosition(refs, files, { path: 'src/a.ts', line: 3, side: 'old' })).toEqual({
+      ...base,
+      position_type: 'text',
+      old_line: 3,
+      new_line: 4,
+    });
+  });
+
+  it('reads numbers from a later hunk', () => {
+    expect(buildPosition(refs, files, { path: 'src/a.ts', line: 21 })).toEqual({
+      ...base,
+      position_type: 'text',
+      old_line: 20,
+      new_line: 21,
+    });
+  });
+
+  it('sends a line outside the diff as given on the new side', () => {
+    expect(buildPosition(refs, files, { path: 'src/a.ts', line: 99 })).toEqual({
+      ...base,
+      position_type: 'text',
+      new_line: 99,
+    });
+  });
+
+  it('sends a line outside the diff as given on the old side', () => {
+    expect(buildPosition(refs, files, { path: 'src/a.ts', line: 99, side: 'old' })).toEqual({
+      ...base,
+      position_type: 'text',
+      old_line: 99,
+    });
+  });
+
+  it('does not match an added line through the old side', () => {
+    expect(buildPosition(refs, files, { path: 'src/a.ts', line: 3, side: 'new' })).toEqual({
+      ...base,
+      position_type: 'text',
+      new_line: 3,
+    });
+  });
+
+  it('builds a file position when no line is given', () => {
+    expect(buildPosition(refs, files, { path: 'src/a.ts' })).toEqual({
+      ...base,
+      position_type: 'file',
+    });
+  });
+
+  it('uses the path for both sides when the file is not in the diff', () => {
+    expect(buildPosition(refs, files, { path: 'docs/readme.md', line: 5 })).toEqual({
+      ...refs,
+      old_path: 'docs/readme.md',
+      new_path: 'docs/readme.md',
+      position_type: 'text',
+      new_line: 5,
+    });
+  });
+
+  it('builds a line range with line codes from the new path', () => {
+    expect(buildPosition(refs, files, { path: 'src/a.ts', line: 2, end_line: 4 })).toEqual({
+      ...base,
+      position_type: 'text',
+      old_line: 3,
+      new_line: 4,
+      line_range: {
+        start: { line_code: `${SHA_A}_3_2`, type: 'new' },
+        end: { line_code: `${SHA_A}_3_4`, type: 'new' },
+      },
+    });
+  });
+
+  it('builds a line range on the old side with the old path', () => {
+    const position = buildPosition(refs, files, {
+      path: 'src/old.ts',
+      line: 1,
+      end_line: 2,
+      side: 'old',
+    });
+
+    expect(position).toEqual({
+      ...refs,
+      old_path: 'src/old.ts',
+      new_path: 'src/renamed.ts',
+      position_type: 'text',
+      old_line: 2,
+      line_range: {
+        start: { line_code: `${SHA_OLD}_1_1`, type: 'old' },
+        end: { line_code: `${SHA_OLD}_2_2`, type: 'old' },
+      },
+    });
+  });
+
+  it('builds line codes for lines outside the diff with zero on the other side', () => {
+    const position = buildPosition(refs, files, {
+      path: 'src/a.ts',
+      line: 90,
+      end_line: 91,
+    });
+
+    expect(position.line_range).toEqual({
+      start: { line_code: `${SHA_A}_0_90`, type: 'new' },
+      end: { line_code: `${SHA_A}_0_91`, type: 'new' },
+    });
+  });
+
+  it('builds a range for a file missing from the diff on the old side', () => {
+    const position = buildPosition(refs, [], {
+      path: 'src/a.ts',
+      line: 3,
+      end_line: 4,
+      side: 'old',
+    });
+
+    expect(position).toMatchObject({ old_line: 4, old_path: 'src/a.ts', new_path: 'src/a.ts' });
+    expect(position.line_range?.start).toEqual({ line_code: `${SHA_A}_3_0`, type: 'old' });
+  });
+
+  it('treats a diff without hunks as having no lines', () => {
+    const empty = [{ old_path: 'src/a.ts', new_path: 'src/a.ts', diff: '' }];
+
+    expect(buildPosition(refs, empty, { path: 'src/a.ts', line: 1 })).toEqual({
+      ...base,
+      position_type: 'text',
+      new_line: 1,
+    });
+  });
+});
