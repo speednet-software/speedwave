@@ -14,12 +14,6 @@ pub enum SecretStoreError {
     /// The secret file is corrupt, sealed under another key or tampered with.
     #[error("the secret {0} cannot be read")]
     Unreadable(SecretName),
-    /// The store directory holds entries that are not encrypted secrets.
-    #[error("the secret store holds unexpected entries: {count}")]
-    PlaintextInStore {
-        /// Number of unexpected entries.
-        count: usize,
-    },
     /// A filesystem or entropy operation failed.
     #[error("secret store operation failed: {0}")]
     Io(String),
@@ -112,7 +106,6 @@ mod tests {
             SecretStoreError::KeyMissing,
             SecretStoreError::KeyUnreadable,
             SecretStoreError::Unreadable(name()),
-            SecretStoreError::PlaintextInStore { count: 3 },
             io_failure(
                 "write secret",
                 &io::Error::from(io::ErrorKind::PermissionDenied),
@@ -142,13 +135,5 @@ mod tests {
         assert!(text.contains("write secret"));
         assert!(text.contains("not found"));
         assert!(!text.contains("/home/user"));
-    }
-
-    #[test]
-    fn plaintext_error_reports_the_count() {
-        assert_eq!(
-            SecretStoreError::PlaintextInStore { count: 2 }.to_string(),
-            "the secret store holds unexpected entries: 2"
-        );
     }
 }

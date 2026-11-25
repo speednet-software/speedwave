@@ -10,7 +10,6 @@ import type { SecretStoreStatus } from '../../models/secret-store';
 const READY: SecretStoreStatus = {
   state: 'ready',
   integrations: [],
-  plaintextCount: 0,
   unreadable: [],
   migrationNotices: [],
 };
@@ -22,7 +21,6 @@ const KEY_MISSING: SecretStoreStatus = {
     { project: 'alpha', service: 'slack' },
     { project: 'beta', service: 'gitlab' },
   ],
-  plaintextCount: 0,
   unreadable: [],
   migrationNotices: [],
 };
@@ -190,23 +188,6 @@ describe('SecretStoreDialogComponent', () => {
       expect(byId<HTMLButtonElement>('secret-store-back-btn')?.disabled).toBe(true);
       release(READY);
       await settle();
-    });
-  });
-
-  describe('plaintext in the store', () => {
-    it('shows the count and has no button', async () => {
-      await render({ ...READY, state: 'plaintextInStore', plaintextCount: 3 });
-
-      const text = byId('secret-store-plaintext-text')?.textContent ?? '';
-      expect(text).toContain('3 plaintext files');
-      expect(text).toContain('removed or the app is reinstalled');
-      expect(root().querySelectorAll('button')).toHaveLength(0);
-    });
-
-    it('uses the singular for one file', async () => {
-      await render({ ...READY, state: 'plaintextInStore', plaintextCount: 1 });
-
-      expect(byId('secret-store-plaintext-text')?.textContent).toContain('1 plaintext file ');
     });
   });
 

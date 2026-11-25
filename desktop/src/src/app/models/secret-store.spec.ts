@@ -4,20 +4,13 @@ import { groupByProject, isSecretStoreStatus } from './secret-store';
 const READY = {
   state: 'ready',
   integrations: [],
-  plaintextCount: 0,
   unreadable: [],
   migrationNotices: [],
 };
 
 describe('isSecretStoreStatus', () => {
   it('accepts every state of a well-formed status', () => {
-    for (const state of [
-      'ready',
-      'keyMissing',
-      'plaintextInStore',
-      'keyUnreadable',
-      'storeUnavailable',
-    ]) {
+    for (const state of ['ready', 'keyMissing', 'keyUnreadable', 'storeUnavailable']) {
       expect(isSecretStoreStatus({ ...READY, state })).toBe(true);
     }
   });
@@ -27,7 +20,6 @@ describe('isSecretStoreStatus', () => {
     expect(isSecretStoreStatus(null)).toBe(false);
     expect(isSecretStoreStatus('ready')).toBe(false);
     expect(isSecretStoreStatus({ ...READY, state: 'broken' })).toBe(false);
-    expect(isSecretStoreStatus({ ...READY, plaintextCount: '0' })).toBe(false);
     expect(isSecretStoreStatus({ ...READY, integrations: null })).toBe(false);
     expect(isSecretStoreStatus({ ...READY, unreadable: undefined })).toBe(false);
     expect(isSecretStoreStatus({ ...READY, migrationNotices: undefined })).toBe(false);

@@ -192,7 +192,6 @@ describe('ShellComponent', () => {
         ? {
             state: 'keyMissing',
             integrations: [{ project: 'test', service: 'slack' }],
-            plaintextCount: 0,
             unreadable: [],
             migrationNotices: [],
           }

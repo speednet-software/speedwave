@@ -1,6 +1,5 @@
 /** Health of the encrypted secret store. */
-export type SecretStoreState =
-  'ready' | 'keyMissing' | 'plaintextInStore' | 'keyUnreadable' | 'storeUnavailable';
+export type SecretStoreState = 'ready' | 'keyMissing' | 'keyUnreadable' | 'storeUnavailable';
 
 /** One integration whose encrypted credentials lost their key. */
 export interface SecretStoreIntegration {
@@ -12,7 +11,6 @@ export interface SecretStoreIntegration {
 export interface SecretStoreStatus {
   state: SecretStoreState;
   integrations: SecretStoreIntegration[];
-  plaintextCount: number;
   unreadable: string[];
   migrationNotices: string[];
 }
@@ -26,7 +24,6 @@ export interface SecretStoreProjectGroup {
 const SECRET_STORE_STATES: readonly string[] = [
   'ready',
   'keyMissing',
-  'plaintextInStore',
   'keyUnreadable',
   'storeUnavailable',
 ];
@@ -41,7 +38,6 @@ export function isSecretStoreStatus(value: unknown): value is SecretStoreStatus 
   return (
     typeof candidate['state'] === 'string' &&
     SECRET_STORE_STATES.includes(candidate['state']) &&
-    typeof candidate['plaintextCount'] === 'number' &&
     Array.isArray(candidate['integrations']) &&
     Array.isArray(candidate['unreadable']) &&
     Array.isArray(candidate['migrationNotices'])

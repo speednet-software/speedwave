@@ -212,12 +212,13 @@ impl SecretStore {
         dir.join(format!("{}{LOCK_SUFFIX}", name.file_name()))
     }
 
-    /// Fails with a count when the store holds anything but encrypted secrets, locks and temp files.
-    pub fn verify_layout(&self) -> Result<(), SecretStoreError> {
-        match layout::count_unexpected(&self.secrets_dir)? {
-            0 => Ok(()),
-            count => Err(SecretStoreError::PlaintextInStore { count }),
+    /// Removes everything but encrypted secrets, locks, temp files and the legacy names.
+    pub(super) fn clean_layout(&self) -> Result<(), SecretStoreError> {
+        let removed = layout::remove_unexpected(&self.secrets_dir)?;
+        if removed > 0 {
+            log::warn!("secret store: removed {removed} unknown entries");
         }
+        Ok(())
     }
 
     fn lock_key(&self) -> MutexGuard<'_, Option<Key>> {
@@ -679,10 +680,9 @@ mod tests {
         store.write(&name("slack", "token"), "v").unwrap();
 
         assert!(key_path(tmp.path()).exists());
-        assert!(matches!(
-            store.verify_layout(),
-            Err(SecretStoreError::PlaintextInStore { count: 1 })
-        ));
+        store.clean_layout().unwrap();
+        assert!(!tmp.path().join("secrets").join(".DS_Store").exists());
+        assert!(store.exists(&name("slack", "token")));
     }
 
     #[test]
@@ -817,20 +817,21 @@ mod tests {
     }
 
     #[test]
-    fn verify_layout_ignores_the_legacy_plaintext_names() {
+    fn clean_layout_keeps_the_legacy_plaintext_names_and_removes_other_files() {
         let tmp = tempfile::tempdir().unwrap();
         let store = SecretStore::open(tmp.path()).unwrap();
         store.write(&name("slack", "token"), "v").unwrap();
         let dir = tmp.path().join("secrets").join("demo");
         std::fs::write(dir.join("anthropic_api_key"), SENTINEL).unwrap();
         std::fs::write(dir.join("slack-auth-token"), SENTINEL).unwrap();
-        store.verify_layout().unwrap();
+        store.clean_layout().unwrap();
+        assert!(dir.join("anthropic_api_key").is_file());
+        assert!(dir.join("slack-auth-token").is_file());
 
         std::fs::write(dir.join("stray-secret"), SENTINEL).unwrap();
-        assert!(matches!(
-            store.verify_layout(),
-            Err(SecretStoreError::PlaintextInStore { count: 1 })
-        ));
+        store.clean_layout().unwrap();
+        assert!(!dir.join("stray-secret").exists());
+        assert!(dir.join("anthropic_api_key").is_file());
     }
 
     #[test]
@@ -896,49 +897,48 @@ mod tests {
         assert!(lock.parent().unwrap().is_dir());
         crate::fs_perms::with_file_lock_in(&lock, || Ok(())).unwrap();
         store.write(&secret, "v").unwrap();
-        store.verify_layout().unwrap();
+        store.clean_layout().unwrap();
+        assert!(lock.is_file());
+        assert!(store.exists(&secret));
     }
 
     #[test]
-    fn verify_layout_accepts_a_clean_store_and_a_missing_dir() {
+    fn clean_layout_accepts_a_clean_store_and_a_missing_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let store = SecretStore::open(tmp.path()).unwrap();
-        store.verify_layout().unwrap();
+        store.clean_layout().unwrap();
         store.write(&name("slack", "token"), "v").unwrap();
         let dir = tmp.path().join("secrets").join("demo");
         std::fs::write(dir.join("slack.token.enc.lock"), "").unwrap();
         std::fs::write(dir.join(".slack.token.enc.tmp.1.2"), "x").unwrap();
-        store.verify_layout().unwrap();
+        store.clean_layout().unwrap();
+        assert!(dir.join("slack.token.enc.lock").is_file());
+        assert!(dir.join(".slack.token.enc.tmp.1.2").is_file());
     }
 
     #[test]
-    fn verify_layout_reports_a_count_for_plaintext_entries() {
+    fn clean_layout_removes_plaintext_entries_and_keeps_the_secrets() {
         let tmp = tempfile::tempdir().unwrap();
         let store = SecretStore::open(tmp.path()).unwrap();
         store.write(&name("slack", "token"), "v").unwrap();
         let dir = tmp.path().join("secrets").join("demo");
-
         std::fs::write(dir.join("slack.token"), SENTINEL).unwrap();
-        assert!(matches!(
-            store.verify_layout(),
-            Err(SecretStoreError::PlaintextInStore { count: 1 })
-        ));
-        std::fs::remove_file(dir.join("slack.token")).unwrap();
-
         std::fs::write(dir.join("x.enc.lock"), "locked").unwrap();
-        assert!(matches!(
-            store.verify_layout(),
-            Err(SecretStoreError::PlaintextInStore { count: 1 })
-        ));
-        std::fs::remove_file(dir.join("x.enc.lock")).unwrap();
-
         std::fs::write(tmp.path().join("secrets").join("loose.txt"), SENTINEL).unwrap();
-        let err = store.verify_layout().err().unwrap();
-        assert!(matches!(
-            err,
-            SecretStoreError::PlaintextInStore { count: 1 }
-        ));
-        assert!(!format!("{err} {err:?}").contains(SENTINEL));
+
+        store.clean_layout().unwrap();
+
+        assert!(!dir.join("slack.token").exists());
+        assert!(!dir.join("x.enc.lock").exists());
+        assert!(!tmp.path().join("secrets").join("loose.txt").exists());
+        assert_eq!(
+            store
+                .read(&name("slack", "token"))
+                .unwrap()
+                .unwrap()
+                .as_str(),
+            "v"
+        );
     }
 
     #[test]

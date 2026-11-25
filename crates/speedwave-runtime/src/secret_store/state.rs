@@ -10,25 +10,17 @@ pub enum SecretStoreState {
     Ready,
     /// Encrypted secrets exist but the install key does not.
     KeyMissing,
-    /// The store directory holds entries that are not encrypted secrets.
-    PlaintextInStore {
-        /// Number of unexpected entries.
-        count: usize,
-    },
     /// The install key file exists but is malformed.
     KeyUnreadable,
-    /// The store directory or the key file cannot be read.
+    /// The store directory or the key file cannot be read, or an unknown entry cannot be removed.
     StoreUnavailable,
 }
 
-/// Opens the store of `data_dir` and checks its layout.
+/// Opens the store of `data_dir`, removes unknown entries from it and reports its state.
 pub fn secret_store_state(data_dir: &Path) -> SecretStoreState {
-    match SecretStore::open(data_dir).and_then(|store| store.verify_layout()) {
+    match SecretStore::open(data_dir).and_then(|store| store.clean_layout()) {
         Ok(()) => SecretStoreState::Ready,
         Err(SecretStoreError::KeyMissing) => SecretStoreState::KeyMissing,
-        Err(SecretStoreError::PlaintextInStore { count }) => {
-            SecretStoreState::PlaintextInStore { count }
-        }
         Err(SecretStoreError::KeyUnreadable) => SecretStoreState::KeyUnreadable,
         Err(e) => {
             log::warn!("secret store check failed: {e}");
@@ -44,13 +36,6 @@ impl SecretStoreState {
             Self::Ready => None,
             Self::KeyMissing => Some(format!(
                 "The secret store key is missing. {key_missing_step}"
-            )),
-            Self::PlaintextInStore { count: 1 } => Some(
-                "The secrets directory holds 1 unexpected file. Remove it or reinstall Speedwave to continue."
-                    .to_owned(),
-            ),
-            Self::PlaintextInStore { count } => Some(format!(
-                "The secrets directory holds {count} unexpected files. Remove them or reinstall Speedwave to continue."
             )),
             Self::KeyUnreadable => Some(
                 "The secret store key file secret-store.key in the Speedwave data directory is damaged. Restore it from a backup, or remove it together with the encrypted secrets in the secrets directory."
@@ -72,13 +57,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn one_unexpected_entry_is_named_in_the_singular() {
-        assert_eq!(
-            SecretStoreState::PlaintextInStore { count: 1 }
-                .refusal("")
-                .unwrap(),
-            "The secrets directory holds 1 unexpected file. Remove it or reinstall Speedwave to continue."
-        );
+    fn unknown_entries_are_removed_and_the_store_is_ready() {
+        let tmp = tempfile::tempdir().unwrap();
+        let secrets = tmp.path().join("secrets");
+        std::fs::create_dir_all(secrets.join("demo")).unwrap();
+        std::fs::write(secrets.join(".DS_Store"), "x").unwrap();
+        std::fs::write(secrets.join("demo").join("slack.token"), "x").unwrap();
+
+        assert_eq!(secret_store_state(tmp.path()), SecretStoreState::Ready);
+
+        assert!(!secrets.join(".DS_Store").exists());
+        assert!(!secrets.join("demo").join("slack.token").exists());
+    }
+
+    #[test]
+    fn a_missing_key_leaves_unknown_entries_in_place() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("secrets").join("demo");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("slack.token.enc"), "x").unwrap();
+        std::fs::write(dir.join("notes.txt"), "x").unwrap();
+
+        assert_eq!(secret_store_state(tmp.path()), SecretStoreState::KeyMissing);
+
+        assert!(dir.join("notes.txt").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unknown_entry_that_cannot_be_removed_makes_the_store_unavailable() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("secrets").join("demo");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("notes.txt"), "x").unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let state = secret_store_state(tmp.path());
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert_eq!(state, SecretStoreState::StoreUnavailable);
     }
 
     #[test]

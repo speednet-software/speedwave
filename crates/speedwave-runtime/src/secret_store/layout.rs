@@ -81,20 +81,49 @@ pub(super) fn is_lock_file(entry: &DirEntry) -> bool {
     is_regular_file_with_suffix(entry, LOCK_SUFFIX)
 }
 
-pub(super) fn count_unexpected(secrets_dir: &Path) -> Result<usize, SecretStoreError> {
-    let mut count = 0;
+pub(super) fn remove_unexpected(secrets_dir: &Path) -> Result<usize, SecretStoreError> {
+    match std::fs::symlink_metadata(secrets_dir) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => {
+            return Err(SecretStoreError::Io(
+                "clean secrets: the secrets path is not a directory".to_owned(),
+            ))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(io_failure("clean secrets", &e)),
+    }
+    let mut removed = 0;
     for entry in entries(secrets_dir)? {
         if !is_directory(&entry) {
-            count += 1;
+            remove_entry(&entry)?;
+            removed += 1;
             continue;
         }
         for inner in entries(&entry.path())? {
             if !is_expected_in_project_dir(&inner) {
-                count += 1;
+                remove_entry(&inner)?;
+                removed += 1;
             }
         }
     }
-    Ok(count)
+    Ok(removed)
+}
+
+fn remove_entry(entry: &DirEntry) -> Result<(), SecretStoreError> {
+    let path = entry.path();
+    let kind = entry
+        .file_type()
+        .map_err(|e| io_failure("remove unexpected entry", &e))?;
+    let result = if kind.is_dir() {
+        std::fs::remove_dir_all(&path)
+    } else {
+        std::fs::remove_file(&path).or_else(|first| std::fs::remove_dir(&path).map_err(|_| first))
+    };
+    match result {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(io_failure("remove unexpected entry", &e)),
+    }
 }
 
 fn entries(dir: &Path) -> Result<Vec<DirEntry>, SecretStoreError> {
@@ -177,7 +206,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let secrets = tmp.path().join("secrets");
         assert!(!contains_encrypted(&secrets).unwrap());
-        assert_eq!(count_unexpected(&secrets).unwrap(), 0);
+        assert_eq!(remove_unexpected(&secrets).unwrap(), 0);
     }
 
     #[test]
@@ -341,40 +370,68 @@ mod tests {
         assert!(may_hold_ciphertext(&secrets).unwrap());
     }
 
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_str().unwrap().to_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
     #[test]
-    fn expected_entries_are_not_counted() {
+    fn expected_entries_are_kept() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = project_dir(tmp.path());
         std::fs::write(dir.join("slack.token.enc"), "x").unwrap();
         std::fs::write(dir.join("slack.token.enc.lock"), "").unwrap();
         std::fs::write(dir.join(".slack.token.enc.tmp.4242.7"), "x").unwrap();
         std::fs::create_dir_all(tmp.path().join("secrets").join("empty")).unwrap();
-        assert_eq!(count_unexpected(&tmp.path().join("secrets")).unwrap(), 0);
+
+        assert_eq!(remove_unexpected(&tmp.path().join("secrets")).unwrap(), 0);
+
+        assert_eq!(
+            names_in(&dir),
+            [
+                ".slack.token.enc.tmp.4242.7",
+                "slack.token.enc",
+                "slack.token.enc.lock"
+            ]
+        );
+        assert!(tmp.path().join("secrets").join("empty").is_dir());
     }
 
     #[test]
-    fn unexpected_entries_are_counted() {
+    fn unexpected_entries_are_removed() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = project_dir(tmp.path());
+        std::fs::write(dir.join("slack.token.enc"), "x").unwrap();
         std::fs::write(dir.join("slack.token"), "x").unwrap();
         std::fs::write(dir.join("notes.txt"), "x").unwrap();
         std::fs::write(dir.join("busy.enc.lock"), "locked").unwrap();
         std::fs::create_dir(dir.join("subdir")).unwrap();
-        assert_eq!(count_unexpected(&tmp.path().join("secrets")).unwrap(), 4);
+        std::fs::write(dir.join("subdir").join("deep.txt"), "x").unwrap();
+
+        assert_eq!(remove_unexpected(&tmp.path().join("secrets")).unwrap(), 4);
+
+        assert_eq!(names_in(&dir), ["slack.token.enc"]);
     }
 
     #[test]
-    fn legacy_plaintext_files_are_not_counted() {
+    fn legacy_plaintext_files_are_kept() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = project_dir(tmp.path());
         std::fs::write(dir.join("anthropic_api_key"), "x").unwrap();
         std::fs::write(dir.join("slack-auth-token"), "x").unwrap();
         std::fs::write(dir.join("my-plugin-auth-token"), "x").unwrap();
-        assert_eq!(count_unexpected(&tmp.path().join("secrets")).unwrap(), 0);
+
+        assert_eq!(remove_unexpected(&tmp.path().join("secrets")).unwrap(), 0);
+
+        assert_eq!(names_in(&dir).len(), 3);
     }
 
     #[test]
-    fn other_plaintext_beside_pending_legacy_files_is_still_counted() {
+    fn other_plaintext_beside_pending_legacy_files_is_removed() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = project_dir(tmp.path());
         std::fs::write(dir.join("anthropic_api_key"), "x").unwrap();
@@ -383,15 +440,74 @@ mod tests {
         std::fs::write(dir.join("slack-auth-token.txt"), "x").unwrap();
         std::fs::write(dir.join("other_api_key"), "x").unwrap();
         std::fs::create_dir(dir.join("db-auth-token")).unwrap();
-        assert_eq!(count_unexpected(&tmp.path().join("secrets")).unwrap(), 5);
+
+        assert_eq!(remove_unexpected(&tmp.path().join("secrets")).unwrap(), 5);
+
+        assert_eq!(names_in(&dir), ["anthropic_api_key"]);
     }
 
     #[test]
-    fn a_loose_file_in_the_secrets_dir_is_counted() {
+    fn a_loose_file_in_the_secrets_dir_is_removed() {
         let tmp = tempfile::tempdir().unwrap();
-        project_dir(tmp.path());
-        std::fs::write(tmp.path().join("secrets").join("loose.json"), "{}").unwrap();
-        assert_eq!(count_unexpected(&tmp.path().join("secrets")).unwrap(), 1);
+        let dir = project_dir(tmp.path());
+        let secrets = tmp.path().join("secrets");
+        std::fs::write(secrets.join("loose.json"), "{}").unwrap();
+        std::fs::write(secrets.join(".DS_Store"), "x").unwrap();
+
+        assert_eq!(remove_unexpected(&secrets).unwrap(), 2);
+
+        assert_eq!(names_in(&secrets), ["demo"]);
+        assert!(dir.is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_are_removed_and_never_followed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("victim.txt"), "keep").unwrap();
+        let secrets = tmp.path().join("secrets");
+        let dir = project_dir(tmp.path());
+        std::os::unix::fs::symlink(outside.path().join("victim.txt"), dir.join("link.txt"))
+            .unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.join("link-dir")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), secrets.join("linked")).unwrap();
+
+        assert_eq!(remove_unexpected(&secrets).unwrap(), 3);
+
+        assert!(names_in(&dir).is_empty());
+        assert_eq!(names_in(&secrets), ["demo"]);
+        assert_eq!(names_in(outside.path()), ["victim.txt"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_secrets_dir_is_refused_and_its_target_is_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("victim.txt"), "keep").unwrap();
+        std::os::unix::fs::symlink(outside.path(), tmp.path().join("secrets")).unwrap();
+
+        let result = remove_unexpected(&tmp.path().join("secrets"));
+
+        assert!(matches!(result, Err(SecretStoreError::Io(_))));
+        assert_eq!(names_in(outside.path()), ["victim.txt"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_entry_that_cannot_be_removed_is_an_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = project_dir(tmp.path());
+        std::fs::write(dir.join("junk.txt"), "x").unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let result = remove_unexpected(&tmp.path().join("secrets"));
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(matches!(result, Err(SecretStoreError::Io(_))));
+        assert!(dir.join("junk.txt").is_file());
     }
 
     #[test]

@@ -18,7 +18,6 @@ pub(crate) struct MigrationNotices(Vec<String>);
 pub(crate) enum SecretStoreStateName {
     Ready,
     KeyMissing,
-    PlaintextInStore,
     KeyUnreadable,
     StoreUnavailable,
 }
@@ -34,7 +33,6 @@ pub(crate) struct SecretStoreIntegration {
 pub(crate) struct SecretStoreStatus {
     state: SecretStoreStateName,
     integrations: Vec<SecretStoreIntegration>,
-    plaintext_count: usize,
     unreadable: Vec<String>,
     migration_notices: Vec<String>,
 }
@@ -67,7 +65,6 @@ fn state_name(state: &SecretStoreState) -> SecretStoreStateName {
     match state {
         SecretStoreState::Ready => SecretStoreStateName::Ready,
         SecretStoreState::KeyMissing => SecretStoreStateName::KeyMissing,
-        SecretStoreState::PlaintextInStore { .. } => SecretStoreStateName::PlaintextInStore,
         SecretStoreState::KeyUnreadable => SecretStoreStateName::KeyUnreadable,
         SecretStoreState::StoreUnavailable => SecretStoreStateName::StoreUnavailable,
     }
@@ -77,7 +74,6 @@ fn log_label(state: &SecretStoreState) -> String {
     match state {
         SecretStoreState::Ready => "ready".to_owned(),
         SecretStoreState::KeyMissing => "key missing".to_owned(),
-        SecretStoreState::PlaintextInStore { count } => format!("unexpected entries: {count}"),
         SecretStoreState::KeyUnreadable => "key unreadable".to_owned(),
         SecretStoreState::StoreUnavailable => "store unavailable".to_owned(),
     }
@@ -162,10 +158,6 @@ fn status_of(
             .collect(),
         _ => Vec::new(),
     };
-    let plaintext_count = match state {
-        SecretStoreState::PlaintextInStore { count } => *count,
-        _ => 0,
-    };
     let unreadable = match (state, active_project) {
         (SecretStoreState::Ready, Some(project)) => {
             unreadable_integration_messages(data_dir, project)
@@ -175,7 +167,6 @@ fn status_of(
     SecretStoreStatus {
         state: state_name(state),
         integrations,
-        plaintext_count,
         unreadable,
         migration_notices: migration_notices.to_vec(),
     }
@@ -255,18 +246,19 @@ mod tests {
     }
 
     #[test]
-    fn plaintext_beside_the_secrets_is_reported_with_a_count() {
+    fn unknown_entries_beside_the_secrets_are_removed_at_the_check() {
         let tmp = tempfile::tempdir().unwrap();
         SecretStore::open(tmp.path()).unwrap().ensure_key().unwrap();
-        seed_enc(tmp.path(), "demo", "slack.token");
-        seed_enc(tmp.path(), "demo", "notes.txt");
-        assert_eq!(
-            secret_store_state(tmp.path()),
-            SecretStoreState::PlaintextInStore { count: 2 }
-        );
-        assert!(ensure_ready_in(tmp.path())
-            .unwrap_err()
-            .contains("2 unexpected files"));
+        let plain = seed_enc(tmp.path(), "demo", "slack.token");
+        let notes = seed_enc(tmp.path(), "demo", "notes.txt");
+        let secret = seed_enc(tmp.path(), "demo", "slack.token.enc");
+
+        assert_eq!(secret_store_state(tmp.path()), SecretStoreState::Ready);
+
+        assert!(ensure_ready_in(tmp.path()).is_ok());
+        assert!(!plain.exists());
+        assert!(!notes.exists());
+        assert!(secret.exists());
     }
 
     #[test]
@@ -292,22 +284,7 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(status.plaintext_count, 0);
         assert!(status.unreadable.is_empty());
-    }
-
-    #[test]
-    fn status_of_plaintext_carries_the_count_only() {
-        let tmp = tempfile::tempdir().unwrap();
-        let status = status_of(
-            tmp.path(),
-            &SecretStoreState::PlaintextInStore { count: 4 },
-            Some("demo"),
-            &[],
-        );
-        assert_eq!(status.state, SecretStoreStateName::PlaintextInStore);
-        assert_eq!(status.plaintext_count, 4);
-        assert!(status.integrations.is_empty());
     }
 
     #[test]
@@ -345,7 +322,6 @@ mod tests {
         for state in [
             SecretStoreState::Ready,
             SecretStoreState::KeyMissing,
-            SecretStoreState::PlaintextInStore { count: 1 },
             SecretStoreState::KeyUnreadable,
             SecretStoreState::StoreUnavailable,
         ] {
@@ -457,8 +433,8 @@ mod tests {
 
         let status = reset_in(tmp.path(), true, None, &[]).unwrap();
 
-        assert_eq!(status.state, SecretStoreStateName::PlaintextInStore);
-        assert_eq!(status.plaintext_count, 1);
+        assert_eq!(status.state, SecretStoreStateName::Ready);
+        assert!(!tmp.path().join("secrets/.DS_Store").exists());
     }
 
     #[cfg(unix)]
@@ -516,7 +492,6 @@ mod tests {
         let status = SecretStoreStatus {
             state: SecretStoreStateName::Ready,
             integrations: Vec::new(),
-            plaintext_count: 0,
             unreadable: Vec::new(),
             migration_notices: Vec::new(),
         };
@@ -536,7 +511,6 @@ mod tests {
             serde_names(&[
                 SecretStoreStateName::Ready,
                 SecretStoreStateName::KeyMissing,
-                SecretStoreStateName::PlaintextInStore,
                 SecretStoreStateName::KeyUnreadable,
                 SecretStoreStateName::StoreUnavailable,
             ]),

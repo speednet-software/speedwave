@@ -75,12 +75,6 @@ const BUTTON_SECONDARY =
                   </p>
                 }
               }
-              @case ('plaintextInStore') {
-                <p data-testid="secret-store-plaintext-text">
-                  {{ plaintextSentence() }} Speedwave will not start projects until they are removed
-                  or the app is reinstalled.
-                </p>
-              }
               @case ('storeUnavailable') {
                 <p data-testid="secret-store-unavailable-text">
                   The secrets directory cannot be read. Check its permissions. Speedwave will not
@@ -166,20 +160,11 @@ export class SecretStoreDialogComponent {
     switch (this.store.state()) {
       case 'keyMissing':
         return 'The key for your saved credentials is missing';
-      case 'plaintextInStore':
-        return 'Unexpected files in the secrets directory';
       case 'storeUnavailable':
         return 'The secrets directory cannot be read';
       default:
         return 'The secret store key file is damaged';
     }
-  });
-
-  protected readonly plaintextSentence = computed(() => {
-    const count = this.store.plaintextCount();
-    return count === 1
-      ? 'Speedwave found 1 plaintext file in the secrets directory.'
-      : `Speedwave found ${count} plaintext files in the secrets directory.`;
   });
 
   protected askConfirmation(): void {

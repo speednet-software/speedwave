@@ -26,7 +26,6 @@ export class SecretStoreService {
   readonly affectedProjects: Signal<SecretStoreProjectGroup[]> = computed(() =>
     groupByProject(this.statusState()?.integrations ?? [])
   );
-  readonly plaintextCount: Signal<number> = computed(() => this.statusState()?.plaintextCount ?? 0);
   readonly notices: Signal<string[]> = computed(() => {
     const status = this.statusState();
     return [...(status?.unreadable ?? []), ...(status?.migrationNotices ?? [])].filter(

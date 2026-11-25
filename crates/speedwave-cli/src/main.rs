@@ -2050,18 +2050,19 @@ mod tests {
     }
 
     #[test]
-    fn plaintext_in_the_store_refuses_to_start_with_a_count_only() {
+    fn unknown_entries_in_the_store_are_removed_and_do_not_refuse_the_start() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("secrets").join("demo");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("slack.token"), "PLAINTEXT-SENTINEL").unwrap();
         std::fs::write(dir.join("notes.txt"), "x").unwrap();
-        let message = secret_store_start_error(tmp.path()).unwrap();
-        assert_eq!(
-            message,
-            "The secrets directory holds 2 unexpected files. Remove them or reinstall Speedwave to continue."
-        );
-        assert!(!message.contains("slack"));
+        std::fs::write(tmp.path().join("secrets").join(".DS_Store"), "x").unwrap();
+
+        assert_eq!(secret_store_start_error(tmp.path()), None);
+
+        assert!(!dir.join("slack.token").exists());
+        assert!(!dir.join("notes.txt").exists());
+        assert!(!tmp.path().join("secrets").join(".DS_Store").exists());
     }
 
     #[test]

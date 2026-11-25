@@ -10,7 +10,6 @@ import type { SecretStoreStatus } from '../models/secret-store';
 const READY: SecretStoreStatus = {
   state: 'ready',
   integrations: [],
-  plaintextCount: 0,
   unreadable: [],
   migrationNotices: [],
 };
@@ -21,7 +20,6 @@ const KEY_MISSING: SecretStoreStatus = {
     { project: 'alpha', service: 'redmine' },
     { project: 'alpha', service: 'slack' },
   ],
-  plaintextCount: 0,
   unreadable: [],
   migrationNotices: [],
 };
@@ -80,17 +78,6 @@ describe('SecretStoreService', () => {
     expect(service.affectedProjects()).toEqual([
       { project: 'alpha', services: ['redmine', 'slack'] },
     ]);
-  });
-
-  it('exposes the plaintext count and blocks', async () => {
-    const service = await create(async () => ({
-      ...READY,
-      state: 'plaintextInStore',
-      plaintextCount: 3,
-    }));
-
-    expect(service.blocking()).toBe(true);
-    expect(service.plaintextCount()).toBe(3);
   });
 
   it('blocks when the key file is unreadable', async () => {

@@ -28,7 +28,7 @@ describe('SecretStoreNoticeComponent', () => {
     migrationNotices = [];
     mockTauri.invokeHandler = async (cmd) =>
       cmd === 'get_secret_store_status'
-        ? { state: 'ready', integrations: [], plaintextCount: 0, unreadable, migrationNotices }
+        ? { state: 'ready', integrations: [], unreadable, migrationNotices }
         : undefined;
     TestBed.configureTestingModule({
       imports: [SecretStoreNoticeComponent],

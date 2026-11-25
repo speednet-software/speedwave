@@ -118,7 +118,6 @@ function buildMockTauri(): MockTauriService {
         return {
           state: 'keyMissing',
           integrations: [{ project: 'demo', service: 'slack' }],
-          plaintextCount: 0,
           unreadable: ['Integration redmine: cannot read the secret.'],
           migrationNotices: [],
         };
