@@ -44,14 +44,6 @@ interface DiffLine {
 const HUNK_HEADER = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
 
 /**
- * Tells whether the anchor names a file.
- * @param anchor - Anchor to check.
- */
-export function isAnchored(anchor: DiffAnchor): boolean {
-  return anchor.path !== undefined;
-}
-
-/**
  * Lists the anchor fields that no position would carry.
  * @param anchor - Anchor to check.
  */
@@ -60,6 +52,14 @@ export function droppedAnchorFields(anchor: DiffAnchor): string[] {
     return (['line', 'end_line', 'side'] as const).filter((k) => anchor[k] !== undefined);
   }
   return anchor.line === undefined && anchor.end_line !== undefined ? ['end_line'] : [];
+}
+
+/**
+ * Tells whether the anchor names a file.
+ * @param anchor - Anchor to check.
+ */
+export function isAnchored(anchor: DiffAnchor): boolean {
+  return anchor.path !== undefined;
 }
 
 /**

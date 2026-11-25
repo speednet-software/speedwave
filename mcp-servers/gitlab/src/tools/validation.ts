@@ -13,7 +13,16 @@ import {
 import { GitLabClient, isTeachingError } from '../client.js';
 
 /** Param names that carry a GitLab IID/ID accepted as a number or a '#'/'!'-prefixed string. */
-const NUMERIC_ID_PARAMS = ['mr_iid', 'issue_iid', 'pipeline_id', 'job_id'] as const;
+const NUMERIC_ID_PARAMS = [
+  'mr_iid',
+  'issue_iid',
+  'pipeline_id',
+  'job_id',
+  'note_id',
+  'draft_note_id',
+] as const;
+
+const DISCUSSION_ID = /^[0-9A-Za-z]+$/;
 
 /**
  * Wrap a tool handler with client-presence, IID/ID forgiveness, and error handling.
@@ -36,6 +45,19 @@ export function withValidation<T>(
       });
       if (!normalized.ok) {
         return Promise.resolve(teachingErrorResult(normalized.error));
+      }
+      const discussionId = normalized.value.discussion_id;
+      if (
+        discussionId !== undefined &&
+        !(typeof discussionId === 'string' && DISCUSSION_ID.test(discussionId))
+      ) {
+        return Promise.resolve(
+          teachingErrorResult({
+            paramName: 'discussion_id',
+            received: discussionId,
+            nextStep: 'Pass the discussion id from listMrDiscussions: letters and digits only.',
+          })
+        );
       }
       return handler(c, normalized.value as T);
     },

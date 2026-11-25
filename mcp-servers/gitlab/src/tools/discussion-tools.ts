@@ -31,7 +31,7 @@ interface WriteToolSpec {
   inputExample: { description: string; input: Record<string, unknown> };
 }
 
-const WRITE_META = {
+const USER_SCOPED_META = {
   [META_KEYS.DEFER_LOADING]: true,
   [META_KEYS.USER_SCOPED]: true,
   [META_KEYS.CURRENT_USER_TOOL]: TOOL_NAMES.GET_CURRENT_USER,
@@ -116,7 +116,7 @@ const createMrDiscussionTool: Tool = {
   description:
     'Create a discussion thread on a merge request, optionally attached to a file, line or line range of the diff. Posted as the currently authenticated GitLab user.',
   annotations: WRITE_ANNOTATIONS,
-  _meta: WRITE_META,
+  _meta: USER_SCOPED_META,
   keywords: ['gitlab', 'merge', 'request', 'discussion', 'thread', 'line', 'diff', 'review'],
   example:
     'await gitlab.createMrDiscussion({ project_id: "speedwave/core", mr_iid: 42, body: "Missing null check", path: "src/a.ts", line: 42, side: "new" })',
@@ -344,7 +344,7 @@ const listMrDraftNotesTool: Tool = {
   description:
     'List the unpublished draft review notes of the currently authenticated GitLab user on a merge request; GitLab keeps drafts per author, so notes of other users are not listed',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: WRITE_META,
+  _meta: USER_SCOPED_META,
   keywords: ['gitlab', 'merge', 'request', 'draft', 'review', 'notes'],
   example:
     'const drafts = await gitlab.listMrDraftNotes({ project_id: "speedwave/core", mr_iid: 42 })',
@@ -580,7 +580,7 @@ function writeTool(spec: WriteToolSpec): Tool {
     name: spec.name,
     description: spec.description,
     annotations: spec.annotations ?? WRITE_ANNOTATIONS,
-    _meta: WRITE_META,
+    _meta: USER_SCOPED_META,
     keywords: spec.keywords,
     example: spec.example,
     inputSchema: { type: 'object', properties: spec.properties, required: spec.required },

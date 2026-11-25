@@ -53,7 +53,7 @@ type DraftNoteCreateOptions = NonNullable<
 
 /** Draft note text, reply target and anchor. */
 export type DraftNoteInput = DiffAnchor & {
-  note?: string;
+  note: string;
   in_reply_to_discussion_id?: string;
   resolve_discussion?: boolean;
 };
@@ -901,12 +901,7 @@ export class GitLabClient {
       resolveDiscussion: resolve_discussion,
       position,
     } as unknown as DraftNoteCreateOptions;
-    return await this.gitlab.MergeRequestDraftNotes.create(
-      projectId,
-      mrIid,
-      note as string,
-      options
-    );
+    return await this.gitlab.MergeRequestDraftNotes.create(projectId, mrIid, note, options);
   }
 
   /**
