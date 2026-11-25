@@ -53,7 +53,10 @@ const ANCHOR_PROPERTIES = {
     type: 'number',
     description: 'Line number on the chosen side; with end_line, the first line',
   },
-  end_line: { type: 'number', description: 'Last line of a multi-line comment, same side as line' },
+  end_line: {
+    type: 'number',
+    description: 'Last line of a multi-line comment, same side as line; needs line',
+  },
   side: {
     type: 'string',
     enum: ['new', 'old'],
