@@ -15,7 +15,7 @@ Issues and specs for this repo live as GitLab issues. Every operation goes throu
 ## Reviewing a merge request
 
 - **Read the diff**: `gitlab.getMrChanges`; existing threads with `gitlab.listMrDiscussions`.
-- **Comment on code**: `gitlab.createMrDiscussion` with `body`, `path`, `line` (and `end_line` for a range, `side: "old"` for a removed line); `path` alone comments on the file; `line`, `end_line` and `side` need `path`. A line outside the diff is sent as given and GitLab's error comes back.
+- **Comment on code**: `gitlab.createMrDiscussion` with `body`, `path`, `line` (and `end_line` for a range, `side: "old"` for a removed line); `path` alone comments on the file; `line`, `end_line` and `side` need `path`, and `end_line` needs `line`. A line outside the diff is sent as given and GitLab's error comes back.
 - **Reply, edit, delete, resolve**: `gitlab.createMrDiscussionNote`, `gitlab.updateMrDiscussionNote`, `gitlab.deleteMrDiscussionNote` with the `discussion_id` from `listMrDiscussions`; `gitlab.resolveMrDiscussion` with `resolved: true` or `false`.
 - **Batch review**: collect comments with `gitlab.createMrDraftNote` (same anchor fields, or `in_reply_to_discussion_id` with `resolve_discussion`), check them with `gitlab.listMrDraftNotes`, change them with `gitlab.updateMrDraftNote` or `gitlab.deleteMrDraftNote`, then publish with `gitlab.publishMrDraftNote` (one) or `gitlab.publishMrDraftNotes` (all, with optional `note` and `reviewer_state` of `reviewed` or `requested_changes`). Publishing does not approve: use `gitlab.approveMergeRequest`.
 

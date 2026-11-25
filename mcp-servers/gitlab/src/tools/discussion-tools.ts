@@ -10,7 +10,7 @@ import {
 } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import type { DraftNoteInput, PublishDraftNotesInput } from '../client.js';
-import { orphanAnchorFields, type DiffAnchor } from '../diff-position.js';
+import { droppedAnchorFields, type DiffAnchor } from '../diff-position.js';
 import { withValidation } from './validation.js';
 import { TOOL_NAMES } from '../tool-names.js';
 
@@ -439,7 +439,7 @@ export function createDiscussionTools(client: GitLabClient | null): ToolDefiniti
       handler: withValidation(client, async (c, params) => {
         const { project_id, mr_iid, body, path, line, end_line, side } = params as MrParams &
           DiffAnchor & { body: string };
-        const orphan = orphanAnchorError({ path, line, end_line, side });
+        const orphan = droppedAnchorError({ path, line, end_line, side });
         if (orphan) return orphan;
         const result = await c.createMrDiscussion(project_id, mr_iid, body, {
           path,
@@ -505,7 +505,7 @@ export function createDiscussionTools(client: GitLabClient | null): ToolDefiniti
       tool: createMrDraftNoteTool,
       handler: withValidation(client, async (c, params) => {
         const { project_id, mr_iid, ...input } = params as MrParams & DraftNoteInput;
-        const orphan = orphanAnchorError(input);
+        const orphan = droppedAnchorError(input);
         if (orphan) return orphan;
         const draft_note = await c.createMrDraftNote(project_id, mr_iid, input);
         return jsonResult({ success: true, draft_note });
@@ -516,7 +516,7 @@ export function createDiscussionTools(client: GitLabClient | null): ToolDefiniti
       handler: withValidation(client, async (c, params) => {
         const { project_id, mr_iid, draft_note_id, ...input } = params as MrParams &
           DraftNoteInput & { draft_note_id: number };
-        const orphan = orphanAnchorError(input);
+        const orphan = droppedAnchorError(input);
         if (orphan) return orphan;
         const draft_note = await c.updateMrDraftNote(project_id, mr_iid, draft_note_id, input);
         return jsonResult({ success: true, draft_note });
@@ -561,12 +561,13 @@ export function createDiscussionTools(client: GitLabClient | null): ToolDefiniti
   ];
 }
 
-function orphanAnchorError(anchor: DiffAnchor) {
-  const given = orphanAnchorFields(anchor);
+function droppedAnchorError(anchor: DiffAnchor) {
+  const given = droppedAnchorFields(anchor);
   if (given.length === 0) return undefined;
   return teachingErrorResult({
     paramName: given.join(', '),
-    nextStep: 'Add path (the file to comment on) or remove line, end_line and side',
+    nextStep:
+      'line, end_line and side need path (the file to comment on), and end_line needs line; add the missing field or remove the field',
   });
 }
 

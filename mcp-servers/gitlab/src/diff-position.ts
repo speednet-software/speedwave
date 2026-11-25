@@ -52,12 +52,14 @@ export function isAnchored(anchor: DiffAnchor): boolean {
 }
 
 /**
- * Lists the anchor fields given without a path.
+ * Lists the anchor fields that no position would carry.
  * @param anchor - Anchor to check.
  */
-export function orphanAnchorFields(anchor: DiffAnchor): string[] {
-  if (isAnchored(anchor)) return [];
-  return (['line', 'end_line', 'side'] as const).filter((k) => anchor[k] !== undefined);
+export function droppedAnchorFields(anchor: DiffAnchor): string[] {
+  if (!isAnchored(anchor)) {
+    return (['line', 'end_line', 'side'] as const).filter((k) => anchor[k] !== undefined);
+  }
+  return anchor.line === undefined && anchor.end_line !== undefined ? ['end_line'] : [];
 }
 
 /**

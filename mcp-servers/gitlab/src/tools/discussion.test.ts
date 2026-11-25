@@ -926,6 +926,20 @@ describe('discussion-tools', () => {
       expect(mockClient[name].mock.calls).toHaveLength(0);
     });
 
+    it.each(ORPHAN_ANCHORS)('%s rejects end_line without line', async (name, base) => {
+      const result = await run(mockClient, name, {
+        project_id: 1,
+        mr_iid: 10,
+        ...base,
+        path: 'a.ts',
+        end_line: 5,
+      });
+
+      expect(result.isError).toBe(true);
+      expect((result.content[0] as { text: string }).text).toContain('end_line');
+      expect(mockClient[name].mock.calls).toHaveLength(0);
+    });
+
     it('names every anchor field that was given', async () => {
       const result = await run(mockClient, 'createMrDraftNote', {
         project_id: 1,
