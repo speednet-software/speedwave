@@ -29,7 +29,8 @@ USER pwuser
 WORKDIR /home/pwuser
 
 ENV PORT=3000 \
-    NODE_ENV=production
+    NODE_ENV=production \
+    XDG_CACHE_HOME=/tmp/playwright-mcp-cache
 
 EXPOSE 3000
 
