@@ -10,7 +10,7 @@ import {
 } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import type { DraftNoteInput, PublishDraftNotesInput } from '../client.js';
-import type { DiffAnchor } from '../diff-position.js';
+import { orphanAnchorFields, type DiffAnchor } from '../diff-position.js';
 import { withValidation } from './validation.js';
 import { TOOL_NAMES } from '../tool-names.js';
 
@@ -388,8 +388,7 @@ const publishMrDraftNoteTool = writeTool({
 
 const publishMrDraftNotesTool = writeTool({
   name: 'publishMrDraftNotes',
-  description:
-    'Publish all your draft review notes at once, optionally with a summary note and a reviewer state. Does not approve the merge request; use approveMergeRequest for that.',
+  description: `Publish all your draft review notes at once, optionally with a summary note and a reviewer state. Does not approve the merge request; use ${TOOL_NAMES.APPROVE_MERGE_REQUEST} for that.`,
   keywords: ['gitlab', 'merge', 'request', 'draft', 'review', 'publish', 'submit'],
   example:
     'await gitlab.publishMrDraftNotes({ project_id: "speedwave/core", mr_iid: 42, note: "Summary", reviewer_state: "requested_changes" })',
@@ -563,8 +562,7 @@ export function createDiscussionTools(client: GitLabClient | null): ToolDefiniti
 }
 
 function orphanAnchorError(anchor: DiffAnchor) {
-  if (anchor.path !== undefined) return undefined;
-  const given = (['line', 'end_line', 'side'] as const).filter((k) => anchor[k] !== undefined);
+  const given = orphanAnchorFields(anchor);
   if (given.length === 0) return undefined;
   return teachingErrorResult({
     paramName: given.join(', '),

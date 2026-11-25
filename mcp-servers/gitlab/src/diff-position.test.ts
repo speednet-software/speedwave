@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildPosition, isAnchored, type MrFileDiff } from './diff-position.js';
+import { buildPosition, isAnchored, orphanAnchorFields, type MrFileDiff } from './diff-position.js';
 
 const refs = { base_sha: 'base', start_sha: 'start', head_sha: 'head' };
 
@@ -221,5 +221,24 @@ describe('isAnchored', () => {
   it('is true only when the anchor has a path', () => {
     expect(isAnchored({ path: 'src/a.ts' })).toBe(true);
     expect(isAnchored({ line: 3 })).toBe(false);
+  });
+});
+
+describe('orphanAnchorFields', () => {
+  it('lists the fields given without a path', () => {
+    expect(orphanAnchorFields({ line: 1, end_line: 2, side: 'old' })).toEqual([
+      'line',
+      'end_line',
+      'side',
+    ]);
+  });
+
+  it('lists only the fields that were given', () => {
+    expect(orphanAnchorFields({ side: 'new' })).toEqual(['side']);
+  });
+
+  it('lists nothing for an empty anchor or one with a path', () => {
+    expect(orphanAnchorFields({})).toEqual([]);
+    expect(orphanAnchorFields({ path: 'a.ts', line: 1, side: 'new' })).toEqual([]);
   });
 });

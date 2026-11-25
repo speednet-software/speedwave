@@ -15,7 +15,7 @@ export interface MrFileDiff {
 
 type Side = 'new' | 'old';
 
-/** Where a comment goes; without `path` it is not attached to code. */
+/** Where a comment goes. */
 export type DiffAnchor = {
   path?: string;
   line?: number;
@@ -44,7 +44,7 @@ interface DiffLine {
 const HUNK_HEADER = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
 
 /**
- * Tells whether the anchor names a file, which is what makes it a position.
+ * Tells whether the anchor names a file.
  * @param anchor - Anchor to check.
  */
 export function isAnchored(anchor: DiffAnchor): boolean {
@@ -52,7 +52,16 @@ export function isAnchored(anchor: DiffAnchor): boolean {
 }
 
 /**
- * Builds the GitLab position of an anchor, or undefined when the anchor has no path.
+ * Lists the anchor fields given without a path.
+ * @param anchor - Anchor to check.
+ */
+export function orphanAnchorFields(anchor: DiffAnchor): string[] {
+  if (isAnchored(anchor)) return [];
+  return (['line', 'end_line', 'side'] as const).filter((k) => anchor[k] !== undefined);
+}
+
+/**
+ * Builds the GitLab position of an anchor.
  * @param refs - Base, start and head SHAs of the diff version.
  * @param diffs - Changed files of the merge request.
  * @param anchor - File, optional line and end line, and side.

@@ -788,7 +788,7 @@ export class GitLabClient {
   }
 
   /**
-   * Creates a discussion thread, on the diff when the anchor has a path.
+   * Creates a discussion thread.
    * @param projectId - Project ID or path.
    * @param mrIid - Merge request IID.
    * @param body - Note text.

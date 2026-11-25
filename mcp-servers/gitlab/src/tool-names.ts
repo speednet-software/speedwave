@@ -9,4 +9,5 @@ export const TOOL_NAMES = {
   LIST_ISSUES: 'listIssues',
   LIST_BRANCHES: 'listBranches',
   GET_CURRENT_USER: 'getCurrentUser',
+  APPROVE_MERGE_REQUEST: 'approveMergeRequest',
 } as const;
