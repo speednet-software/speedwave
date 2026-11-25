@@ -64,7 +64,12 @@ impl fmt::Debug for ProjectSecrets {
 
 impl ProjectSecrets {
     pub(crate) fn unreadable_messages(&self) -> Vec<String> {
-        let mut names = self.unreadable.clone();
+        let mut names: Vec<SecretName> = self
+            .unreadable
+            .iter()
+            .filter(|name| !name.is_pii_key())
+            .cloned()
+            .collect();
         names.dedup_by(|a, b| a.service() == b.service());
         names.iter().map(unreadable_secret_message).collect()
     }
@@ -981,6 +986,29 @@ mod tests {
             .iter()
             .any(|m| m.starts_with("Integration github:")));
         assert!(messages.iter().any(|m| m.starts_with("Integration slack:")));
+    }
+
+    #[test]
+    fn an_unreadable_pii_key_is_not_listed_because_the_start_replaces_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SecretStore::open(tmp.path()).unwrap();
+        let pii = SecretName::pii_key("demo").unwrap();
+        store.write(&pii, "v").unwrap();
+        std::fs::write(enc_path(tmp.path(), &pii), "garbage\n").unwrap();
+        assert!(matches!(
+            store.read(&pii),
+            Err(SecretStoreError::Unreadable(_))
+        ));
+
+        assert!(unreadable_integration_messages(tmp.path(), "demo").is_empty());
+
+        let broken = name("slack", "token");
+        store.write(&broken, "v").unwrap();
+        std::fs::write(enc_path(tmp.path(), &broken), "garbage\n").unwrap();
+        assert_eq!(
+            unreadable_integration_messages(tmp.path(), "demo"),
+            [unreadable_secret_message(&broken)]
+        );
     }
 
     #[test]

@@ -90,6 +90,10 @@ impl SecretName {
         &self.field
     }
 
+    pub(super) fn is_pii_key(&self) -> bool {
+        self.service == "pii" && self.field == "key"
+    }
+
     /// The file name `<service>.<field>.enc`.
     pub fn file_name(&self) -> String {
         format!("{}.{}{ENCRYPTED_SUFFIX}", self.service, self.field)

@@ -24,7 +24,6 @@ pub(super) fn unreadable_secret_message(name: &SecretName) -> String {
         "llm" => "provider key",
         "anthropic" => "Anthropic API key",
         "local-llm" => "local LLM key",
-        "pii" => "PII key",
         service => {
             return format!(
                 "Integration {service}: cannot read the secret. Reconnect it in Speedwave Desktop (Settings, Integrations)."
@@ -85,7 +84,6 @@ mod tests {
                 SecretName::local_llm_custom_headers("demo").unwrap(),
                 "local LLM key",
             ),
-            (SecretName::pii_key("demo").unwrap(), "PII key"),
         ];
         for (secret, label) in cases {
             let message = unreadable_secret_message(&secret);
