@@ -33,7 +33,7 @@ fn has_readable_key(store: &SecretStore, name: &SecretName, project: &str) -> an
         return Ok(false);
     }
     match store.read(name) {
-        Ok(_) => Ok(true),
+        Ok(value) => Ok(value.is_some()),
         Err(SecretStoreError::Unreadable(_)) => {
             log::warn!("the PII key of project '{project}' cannot be read, a new key replaces it");
             Ok(false)
