@@ -1,7 +1,3 @@
-/**
- * Discussion Tools - GitLab MR discussions and draft review notes
- */
-
 import {
   Tool,
   ToolDefinition,
@@ -12,19 +8,13 @@ import {
 } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import type { DraftNoteInput, PublishDraftNotesInput } from '../client.js';
+import type { DiffAnchor } from '../diff-position.js';
 import { withValidation } from './validation.js';
 import { TOOL_NAMES } from '../tool-names.js';
 
 type MrParams = {
   project_id: string | number;
   mr_iid: number;
-};
-
-type AnchorParams = {
-  path?: string;
-  line?: number;
-  end_line?: number;
-  side?: 'new' | 'old';
 };
 
 interface WriteToolSpec {
@@ -443,7 +433,7 @@ export function createDiscussionTools(client: GitLabClient | null): ToolDefiniti
       tool: createMrDiscussionTool,
       handler: withValidation(client, async (c, params) => {
         const { project_id, mr_iid, body, path, line, end_line, side } = params as MrParams &
-          AnchorParams & { body: string };
+          DiffAnchor & { body: string };
         const result = await c.createMrDiscussion(project_id, mr_iid, body, {
           path,
           line,

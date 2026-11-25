@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { buildPosition, type DiffRefs, type MrFileDiff } from './diff-position.js';
+import { buildPosition, isAnchored, type MrFileDiff } from './diff-position.js';
 
-const refs: DiffRefs = { base_sha: 'base', start_sha: 'start', head_sha: 'head' };
+const refs = { base_sha: 'base', start_sha: 'start', head_sha: 'head' };
 
 const SHA_A = '21ff24dd18cc19d35de15a120639695824655b58';
 const SHA_OLD = '07cb195e51f24ddeb4d37a3a653dec8ab1239df7';
@@ -120,8 +120,8 @@ describe('buildPosition', () => {
       old_line: 3,
       new_line: 4,
       line_range: {
-        start: { line_code: `${SHA_A}_3_2`, type: 'new' },
-        end: { line_code: `${SHA_A}_3_4`, type: 'new' },
+        start: { line_code: `${SHA_A}_3_2`, new_line: 2, type: 'new' },
+        end: { line_code: `${SHA_A}_3_4`, old_line: 3, new_line: 4 },
       },
     });
   });
@@ -141,8 +141,8 @@ describe('buildPosition', () => {
       position_type: 'text',
       old_line: 2,
       line_range: {
-        start: { line_code: `${SHA_OLD}_1_1`, type: 'old' },
-        end: { line_code: `${SHA_OLD}_2_2`, type: 'old' },
+        start: { line_code: `${SHA_OLD}_1_1`, old_line: 1, new_line: 1 },
+        end: { line_code: `${SHA_OLD}_2_2`, old_line: 2, type: 'old' },
       },
     });
   });
@@ -154,9 +154,9 @@ describe('buildPosition', () => {
       end_line: 91,
     });
 
-    expect(position.line_range).toEqual({
-      start: { line_code: `${SHA_A}_0_90`, type: 'new' },
-      end: { line_code: `${SHA_A}_0_91`, type: 'new' },
+    expect(position?.line_range).toEqual({
+      start: { line_code: `${SHA_A}_0_90`, new_line: 90, type: 'new' },
+      end: { line_code: `${SHA_A}_0_91`, new_line: 91, type: 'new' },
     });
   });
 
@@ -169,7 +169,11 @@ describe('buildPosition', () => {
     });
 
     expect(position).toMatchObject({ old_line: 4, old_path: 'src/a.ts', new_path: 'src/a.ts' });
-    expect(position.line_range?.start).toEqual({ line_code: `${SHA_A}_3_0`, type: 'old' });
+    expect(position?.line_range?.start).toEqual({
+      line_code: `${SHA_A}_3_0`,
+      old_line: 3,
+      type: 'old',
+    });
   });
 
   it('treats a diff without hunks as having no lines', () => {
@@ -180,5 +184,25 @@ describe('buildPosition', () => {
       position_type: 'text',
       new_line: 1,
     });
+  });
+
+  it('builds a range that starts and ends on context lines without a type', () => {
+    const position = buildPosition(refs, files, { path: 'src/a.ts', line: 1, end_line: 5 });
+
+    expect(position?.line_range).toEqual({
+      start: { line_code: `${SHA_A}_1_1`, old_line: 1, new_line: 1 },
+      end: { line_code: `${SHA_A}_4_5`, old_line: 4, new_line: 5 },
+    });
+  });
+
+  it('returns no position when the anchor has no path', () => {
+    expect(buildPosition(refs, files, { line: 2, end_line: 3, side: 'old' })).toBeUndefined();
+  });
+});
+
+describe('isAnchored', () => {
+  it('is true only when the anchor has a path', () => {
+    expect(isAnchored({ path: 'src/a.ts' })).toBe(true);
+    expect(isAnchored({ line: 3 })).toBe(false);
   });
 });

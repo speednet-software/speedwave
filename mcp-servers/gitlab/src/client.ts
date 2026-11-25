@@ -19,7 +19,7 @@ import fs from 'fs/promises';
 import { basename } from 'node:path';
 import { TOOL_NAMES } from './tool-names.js';
 import type { IdentityScope } from './identity-scopes.js';
-import { buildPosition } from './diff-position.js';
+import { buildPosition, isAnchored } from './diff-position.js';
 import type { DiffAnchor, DiffPosition, MrFileDiff } from './diff-position.js';
 
 /**
@@ -54,17 +54,14 @@ type DraftNoteEditOptions = NonNullable<
   Parameters<GitbeakerClient['MergeRequestDraftNotes']['edit']>[3]
 >;
 
-/** Optional placement of a merge request comment; `path` is required for the rest to apply. */
-export type MrAnchor = Partial<DiffAnchor>;
-
-/** Options of a draft note: text, reply target and optional placement. */
-export type DraftNoteInput = MrAnchor & {
+/** Draft note text, reply target and anchor. */
+export type DraftNoteInput = DiffAnchor & {
   note?: string;
   in_reply_to_discussion_id?: string;
   resolve_discussion?: boolean;
 };
 
-/** Options of a bulk publish of draft notes. */
+/** Options of a bulk publish. */
 export type PublishDraftNotesInput = {
   note?: string;
   internal?: boolean;
@@ -791,17 +788,17 @@ export class GitLabClient {
   }
 
   /**
-   * Creates a new discussion thread (Markdown body) on a merge request, anchored to code when `anchor.path` is set.
-   * @param projectId - Project ID or path (e.g. "group/project" or 123).
-   * @param mrIid - Merge request internal ID (IID, not ID).
-   * @param body - Discussion comment text (Markdown).
-   * @param anchor - Optional file, line and side to attach the discussion to.
+   * Creates a discussion thread, on the diff when the anchor has a path.
+   * @param projectId - Project ID or path.
+   * @param mrIid - Merge request IID.
+   * @param body - Note text.
+   * @param anchor - File, line and side.
    */
   async createMrDiscussion(
     projectId: string | number,
     mrIid: number,
     body: string,
-    anchor: MrAnchor = {}
+    anchor: DiffAnchor = {}
   ): Promise<unknown> {
     const position = await this.positionFor(projectId, mrIid, anchor);
     if (!position) {
@@ -813,11 +810,11 @@ export class GitLabClient {
   }
 
   /**
-   * Adds a reply to an existing merge request discussion.
-   * @param projectId - Project ID or path (e.g. "group/project" or 123).
-   * @param mrIid - Merge request internal ID (IID, not ID).
+   * Replies in a discussion.
+   * @param projectId - Project ID or path.
+   * @param mrIid - Merge request IID.
    * @param discussionId - Discussion ID.
-   * @param body - Reply text (Markdown).
+   * @param body - Note text.
    */
   async createMrDiscussionNote(
     projectId: string | number,
@@ -829,12 +826,12 @@ export class GitLabClient {
   }
 
   /**
-   * Edits the body of a note in a merge request discussion.
-   * @param projectId - Project ID or path (e.g. "group/project" or 123).
-   * @param mrIid - Merge request internal ID (IID, not ID).
+   * Edits a discussion note.
+   * @param projectId - Project ID or path.
+   * @param mrIid - Merge request IID.
    * @param discussionId - Discussion ID.
    * @param noteId - Note ID.
-   * @param body - New note text (Markdown).
+   * @param body - Note text.
    */
   async updateMrDiscussionNote(
     projectId: string | number,
@@ -853,9 +850,9 @@ export class GitLabClient {
   }
 
   /**
-   * Deletes a note from a merge request discussion.
-   * @param projectId - Project ID or path (e.g. "group/project" or 123).
-   * @param mrIid - Merge request internal ID (IID, not ID).
+   * Deletes a discussion note.
+   * @param projectId - Project ID or path.
+   * @param mrIid - Merge request IID.
    * @param discussionId - Discussion ID.
    * @param noteId - Note ID.
    */
@@ -869,9 +866,9 @@ export class GitLabClient {
   }
 
   /**
-   * Resolves or reopens a merge request discussion.
-   * @param projectId - Project ID or path (e.g. "group/project" or 123).
-   * @param mrIid - Merge request internal ID (IID, not ID).
+   * Resolves or reopens a discussion.
+   * @param projectId - Project ID or path.
+   * @param mrIid - Merge request IID.
    * @param discussionId - Discussion ID.
    * @param resolved - True to resolve, false to reopen.
    */
@@ -890,10 +887,10 @@ export class GitLabClient {
   }
 
   /**
-   * Creates a draft review note, a reply when `in_reply_to_discussion_id` is set, anchored to code when `path` is set.
-   * @param projectId - Project ID or path (e.g. "group/project" or 123).
-   * @param mrIid - Merge request internal ID (IID, not ID).
-   * @param input - Note text, reply target and optional placement.
+   * Creates a draft note.
+   * @param projectId - Project ID or path.
+   * @param mrIid - Merge request IID.
+   * @param input - Note text and anchor.
    */
   async createMrDraftNote(
     projectId: string | number,
@@ -916,11 +913,11 @@ export class GitLabClient {
   }
 
   /**
-   * Edits a draft note's text and/or placement.
-   * @param projectId - Project ID or path (e.g. "group/project" or 123).
-   * @param mrIid - Merge request internal ID (IID, not ID).
+   * Edits a draft note.
+   * @param projectId - Project ID or path.
+   * @param mrIid - Merge request IID.
    * @param draftNoteId - Draft note ID.
-   * @param input - New note text and optional new placement.
+   * @param input - Note text and anchor.
    */
   async updateMrDraftNote(
     projectId: string | number,
@@ -936,8 +933,8 @@ export class GitLabClient {
 
   /**
    * Deletes a draft note.
-   * @param projectId - Project ID or path (e.g. "group/project" or 123).
-   * @param mrIid - Merge request internal ID (IID, not ID).
+   * @param projectId - Project ID or path.
+   * @param mrIid - Merge request IID.
    * @param draftNoteId - Draft note ID.
    */
   async deleteMrDraftNote(
@@ -949,9 +946,9 @@ export class GitLabClient {
   }
 
   /**
-   * Lists the authenticated user's draft notes on a merge request.
-   * @param projectId - Project ID or path (e.g. "group/project" or 123).
-   * @param mrIid - Merge request internal ID (IID, not ID).
+   * Lists draft notes.
+   * @param projectId - Project ID or path.
+   * @param mrIid - Merge request IID.
    */
   async listMrDraftNotes(projectId: string | number, mrIid: number): Promise<unknown[]> {
     return await this.gitlab.MergeRequestDraftNotes.all(projectId, mrIid);
@@ -959,8 +956,8 @@ export class GitLabClient {
 
   /**
    * Publishes one draft note.
-   * @param projectId - Project ID or path (e.g. "group/project" or 123).
-   * @param mrIid - Merge request internal ID (IID, not ID).
+   * @param projectId - Project ID or path.
+   * @param mrIid - Merge request IID.
    * @param draftNoteId - Draft note ID.
    */
   async publishMrDraftNote(
@@ -972,10 +969,10 @@ export class GitLabClient {
   }
 
   /**
-   * Publishes every draft note of the authenticated user, optionally with a summary note and reviewer state.
-   * @param projectId - Project ID or path (e.g. "group/project" or 123).
-   * @param mrIid - Merge request internal ID (IID, not ID).
-   * @param options - Summary note, internal flag and reviewer state.
+   * Publishes all draft notes.
+   * @param projectId - Project ID or path.
+   * @param mrIid - Merge request IID.
+   * @param options - Summary note, internal flag, reviewer state.
    */
   async publishMrDraftNotes(
     projectId: string | number,
@@ -989,19 +986,12 @@ export class GitLabClient {
     );
   }
 
-  /**
-   * Builds the GitLab position for an anchor, or undefined when the anchor has no path.
-   * @param projectId - Project ID or path (e.g. "group/project" or 123).
-   * @param mrIid - Merge request internal ID (IID, not ID).
-   * @param anchor - Optional file, line, end line and side.
-   */
   private async positionFor(
     projectId: string | number,
     mrIid: number,
-    anchor: MrAnchor
+    anchor: DiffAnchor
   ): Promise<DiffPosition | undefined> {
-    const { path, line, end_line, side } = anchor;
-    if (path === undefined) return undefined;
+    if (!isAnchored(anchor)) return undefined;
     const [versions, diffs] = await Promise.all([
       this.gitlab.MergeRequests.allDiffVersions(projectId, mrIid),
       this.gitlab.MergeRequests.allDiffs(projectId, mrIid),
@@ -1015,7 +1005,7 @@ export class GitLabClient {
       start_sha: String(version.start_commit_sha),
       head_sha: String(version.head_commit_sha),
     };
-    return buildPosition(refs, diffs as MrFileDiff[], { path, line, end_line, side });
+    return buildPosition(refs, diffs as MrFileDiff[], anchor);
   }
 
   /**
