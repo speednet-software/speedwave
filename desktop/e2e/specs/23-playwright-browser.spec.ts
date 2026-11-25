@@ -73,7 +73,15 @@ function textOf(result) {
 }
 
 async function main() {
-  const out = { ok: false, navigateIsError: true, snapshotHasMarker: false, snapshotChars: 0, error: null };
+  const out = {
+    ok: false,
+    navigateIsError: true,
+    snapshotHasMarker: false,
+    snapshotChars: 0,
+    navigateText: '',
+    snapshotText: '',
+    error: null,
+  };
   const server = http.createServer((req, res) => {
     res.setHeader('content-type', 'text/html');
     res.end(PAGE);
@@ -112,6 +120,7 @@ async function main() {
     );
     if (nav.msg && nav.msg.error) throw new Error('browser_navigate: ' + JSON.stringify(nav.msg.error));
     out.navigateIsError = Boolean(nav.msg && nav.msg.result && nav.msg.result.isError);
+    out.navigateText = textOf((nav.msg && nav.msg.result) || {}).slice(0, 2000);
 
     const snap = await post(
       { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'browser_snapshot', arguments: {} } },
@@ -120,6 +129,7 @@ async function main() {
     if (snap.msg && snap.msg.error) throw new Error('browser_snapshot: ' + JSON.stringify(snap.msg.error));
     const text = textOf((snap.msg && snap.msg.result) || {});
     out.snapshotChars = text.length;
+    out.snapshotText = text.slice(0, 500);
     out.snapshotHasMarker = text.includes(MARKER);
     out.ok = !out.navigateIsError && out.snapshotHasMarker;
   } catch (err) {
