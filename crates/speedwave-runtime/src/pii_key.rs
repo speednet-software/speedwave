@@ -13,11 +13,11 @@ const LEGACY_KEY_FILE: &str = "key";
 pub fn ensure_project_key_in(data_dir: &Path, project: &str) -> anyhow::Result<()> {
     let name = SecretName::pii_key(project)?;
     let store = SecretStore::open(data_dir)?;
-    if has_readable_key(&store, &name, project)? {
+    if has_readable_key(&store, &name)? {
         return Ok(());
     }
     crate::fs_perms::with_file_lock_in(&store.lock_path(&name), || {
-        if has_readable_key(&store, &name, project)? {
+        if has_readable_key(&store, &name)? {
             return Ok(());
         }
         if legacy_key_file_in(data_dir, project).exists() {
@@ -31,7 +31,7 @@ pub fn ensure_project_key_in(data_dir: &Path, project: &str) -> anyhow::Result<(
     })
 }
 
-fn has_readable_key(store: &SecretStore, name: &SecretName, project: &str) -> anyhow::Result<bool> {
+fn has_readable_key(store: &SecretStore, name: &SecretName) -> anyhow::Result<bool> {
     if !store.exists(name) {
         return Ok(false);
     }
