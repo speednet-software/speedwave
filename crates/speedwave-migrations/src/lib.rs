@@ -2,6 +2,7 @@
 //! first on every start, before anything reads the config or a secret.
 
 mod legacy_files;
+mod secrets_at_rest;
 
 use std::path::Path;
 
@@ -9,25 +10,38 @@ use speedwave_runtime::fs_perms::with_file_lock_in;
 
 const LOCK_FILE: &str = "migrations.lock";
 
-const MIGRATIONS: &[Migration] = &[legacy_files::MIGRATION];
+const MIGRATIONS: &[Migration] = &[secrets_at_rest::MIGRATION, legacy_files::MIGRATION];
 
 struct Migration {
     name: &'static str,
     run: fn(&Path) -> Result<(), String>,
 }
 
-/// Names, never values, of the migrations one [`run_all`] call ran.
+/// Names and error texts, never values, of the migrations one [`run_all`] call ran.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct MigrationReport {
     /// Migrations that finished without an error, in the order they ran.
     pub executed: Vec<&'static str>,
-    /// Migrations that reported an error; the migrations after them still ran.
-    pub failed: Vec<&'static str>,
+    /// Name and error text of every failed migration, in the order they ran; the migrations after
+    /// a failed one still ran and the text carries names and counts only.
+    pub failures: Vec<(&'static str, String)>,
+}
+
+impl MigrationReport {
+    /// Names of the migrations that reported an error.
+    pub fn failed(&self) -> Vec<&'static str> {
+        self.failures.iter().map(|(name, _)| *name).collect()
+    }
 }
 
 impl std::fmt::Display for MigrationReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "executed {:?}, failed {:?}", self.executed, self.failed)
+        write!(
+            f,
+            "executed {:?}, failed {:?}",
+            self.executed,
+            self.failed()
+        )
     }
 }
 
@@ -59,7 +73,7 @@ fn run_steps(data_dir: &Path, steps: &[Migration]) -> MigrationReport {
             Ok(()) => report.executed.push(step.name),
             Err(reason) => {
                 log::warn!("migration {} failed: {reason}", step.name);
-                report.failed.push(step.name);
+                report.failures.push((step.name, reason));
             }
         }
     }
@@ -93,8 +107,9 @@ mod tests {
 
         let report = run_all(tmp.path()).unwrap();
 
-        assert_eq!(report.executed, vec!["legacy_files"]);
-        assert!(report.failed.is_empty());
+        assert_eq!(report.executed, vec!["secrets_at_rest", "legacy_files"]);
+        assert!(report.failed().is_empty());
+        assert!(report.failures.is_empty());
         assert!(!legacy.exists());
         assert!(!format!("{report:?}").contains("SECRET-VALUE"));
     }
@@ -103,7 +118,10 @@ mod tests {
     fn the_report_displays_step_names_only() {
         let report = MigrationReport {
             executed: vec!["first"],
-            failed: vec!["second", "third"],
+            failures: vec![
+                ("second", "reason".to_string()),
+                ("third", "other".to_string()),
+            ],
         };
 
         assert_eq!(
@@ -129,7 +147,7 @@ mod tests {
 
         let report = run_all(tmp.path()).unwrap();
 
-        assert_eq!(report.executed, vec!["legacy_files"]);
+        assert_eq!(report.executed, vec!["secrets_at_rest", "legacy_files"]);
         assert!(!tmp.path().join("mcp-os-pid").exists());
     }
 
@@ -194,7 +212,25 @@ mod tests {
         let report = run_steps(tmp.path(), &steps);
 
         assert_eq!(report.executed, vec!["first", "third"]);
-        assert_eq!(report.failed, vec!["second"]);
+        assert_eq!(report.failed(), vec!["second"]);
+        assert_eq!(
+            report.failures,
+            vec![("second", "2 paths could not be removed".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_report_without_a_failure_has_no_failure_texts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let steps = [Migration {
+            name: "first",
+            run: succeeds,
+        }];
+
+        let report = run_steps(tmp.path(), &steps);
+
+        assert!(report.failed().is_empty());
+        assert!(report.failures.is_empty());
     }
 
     #[test]
@@ -226,7 +262,7 @@ mod tests {
             released.load(Ordering::SeqCst),
             "run_all returned while another holder still owned the lock"
         );
-        assert_eq!(report.executed, vec!["legacy_files"]);
+        assert_eq!(report.executed, vec!["secrets_at_rest", "legacy_files"]);
         assert!(!legacy.exists());
         holder.join().unwrap();
     }
@@ -255,8 +291,8 @@ mod tests {
 
         for handle in handles {
             let report = handle.join().unwrap().unwrap();
-            assert_eq!(report.executed, vec!["legacy_files"]);
-            assert!(report.failed.is_empty());
+            assert_eq!(report.executed, vec!["secrets_at_rest", "legacy_files"]);
+            assert!(report.failed().is_empty());
         }
         for project in ["alpha", "beta", "gamma"] {
             let token = data_dir.join("tokens").join(project).join("sharepoint");

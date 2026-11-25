@@ -242,7 +242,7 @@ mod tests {
         }
 
         let files_to_create = [
-            data_dir.join("secrets/proj/worker-auth-token"),
+            data_dir.join("secrets/proj/slack.token.enc"),
             data_dir.join("tokens/proj/slack/token.txt"),
             data_dir.join("tokens/proj/gitlab/key.txt"),
             data_dir.join("tokens/proj/github/key.txt"),
@@ -293,7 +293,7 @@ mod tests {
         assert!(dirs.contains(&data_dir.join("claude-managed/proj")));
 
         assert_eq!(files.len(), 16, "expected 16 files, got: {files:?}");
-        assert!(files.contains(&data_dir.join("secrets/proj/worker-auth-token")));
+        assert!(files.contains(&data_dir.join("secrets/proj/slack.token.enc")));
         assert!(files.contains(&data_dir.join("tokens/proj/slack/token.txt")));
         assert!(files.contains(&data_dir.join("tokens/proj/gitlab/key.txt")));
         assert!(files.contains(&data_dir.join("tokens/proj/github/key.txt")));
@@ -361,7 +361,7 @@ mod tests {
         assert_eq!(get_mode(&data_dir.join("ide-bridge")), 0o700);
 
         assert_eq!(
-            get_mode(&data_dir.join("secrets/proj/worker-auth-token")),
+            get_mode(&data_dir.join("secrets/proj/slack.token.enc")),
             0o600
         );
         assert_eq!(

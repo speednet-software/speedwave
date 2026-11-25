@@ -373,6 +373,39 @@ pub(crate) fn check_project(name: &str) -> Result<(), String> {
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    pub(crate) fn files_containing(
+        root: &std::path::Path,
+        needle: &str,
+    ) -> Vec<std::path::PathBuf> {
+        let mut found = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+                let Ok(bytes) = std::fs::read(&path) else {
+                    continue;
+                };
+                if bytes
+                    .windows(needle.len())
+                    .any(|window| window == needle.as_bytes())
+                {
+                    found.push(path);
+                }
+            }
+        }
+        found
+    }
+}
+
+#[cfg(test)]
 #[expect(
     clippy::unwrap_used,
     clippy::expect_used,

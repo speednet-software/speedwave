@@ -1,10 +1,3 @@
-/** Dirty-state self-heal: planted engine debris must not survive a backend restart.
- *  Runs after spec 18 (e2e-second active) and before 07; leaves context7 disabled. */
-import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
-
 import {
   composePrefix,
   plantGhost,
@@ -13,44 +6,16 @@ import {
   assertLiveEntriesIntact,
 } from '../helpers/engine';
 import { waitForHealthy } from '../helpers/health';
-import { openIntegrations, rowStatus, toggleIntegration } from '../helpers/llm';
 import { switchToProject, activeProjectSlug } from '../helpers/projects';
-import { confirmRestartAndWait, requestBackendRestart, RESTART_WAIT_MS } from '../helpers/shell';
+import { requestBackendRestart, RESTART_WAIT_MS } from '../helpers/shell';
 
 const PROJECT = 'e2e-test';
-const SERVICE = 'context7';
 const HUB = `${composePrefix()}_${PROJECT}_mcp_hub`;
 const CLAUDE = `${composePrefix()}_${PROJECT}_claude`;
 const PROJECT_PREFIX = `${composePrefix()}_${PROJECT}_`;
 
 function projectEntries(snapshot: Map<string, string>): Map<string, string> {
   return new Map([...snapshot].filter(([name]) => name.startsWith(PROJECT_PREFIX)));
-}
-
-function serviceTokenPath(): string {
-  const dataDir = process.env.SPEEDWAVE_DATA_DIR || join(homedir(), '.speedwave');
-  return join(dataDir, 'secrets', PROJECT, `${SERVICE}-auth-token`);
-}
-
-function systemPowershellPath(): string {
-  const systemRoot = process.env.SystemRoot || 'C:\\Windows';
-  return join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-}
-
-/** Drives the spec-15/16 toggle+restart UI flow until the context7 row shows `target`. */
-async function setContext7(target: 'running' | 'disabled'): Promise<void> {
-  await openIntegrations();
-  const enabled = (await rowStatus(SERVICE)) !== 'disabled';
-  if (enabled !== (target === 'running')) {
-    await toggleIntegration(SERVICE);
-    await confirmRestartAndWait();
-    await openIntegrations();
-  }
-  await browser.waitUntil(async () => (await rowStatus(SERVICE)) === target, {
-    timeout: 120_000,
-    interval: 3_000,
-    timeoutMsg: `${SERVICE} row did not reach ${target}`,
-  });
 }
 
 describe('Dirty-state self-heal', function () {
@@ -80,47 +45,5 @@ describe('Dirty-state self-heal', function () {
     await waitForHealthy(PROJECT);
     assertStoreHealed([HUB, CLAUDE]);
     assertLiveEntriesIntact(before, [HUB, CLAUDE]);
-  });
-
-  it('heals an unreadable worker auth token (Windows empty-DACL corruption)', async function () {
-    if (process.platform !== 'win32') {
-      this.skip();
-    }
-    this.timeout(RESTART_WAIT_MS + 420_000);
-
-    const token = serviceTokenPath();
-    let before: string;
-    try {
-      await setContext7('running');
-      before = readFileSync(token, 'utf8');
-      const psToken = token.replace(/'/g, "''");
-      const script = [
-        "$ErrorActionPreference = 'Stop'",
-        '$acl = New-Object System.Security.AccessControl.FileSecurity',
-        "$acl.SetSecurityDescriptorSddlForm('D:P', 'Access')",
-        `[System.IO.File]::SetAccessControl('${psToken}', $acl)`,
-        `$sddl = (Get-Acl -LiteralPath '${psToken}').Sddl`,
-        'if ($sddl -notmatch \'D:P(AI)?(?!\\()\') { throw "plant no-op: unexpected SDDL $sddl" }',
-        'try {',
-        `  [System.IO.File]::ReadAllText('${psToken}') | Out-Null`,
-        "  throw 'plant no-op: read succeeded despite empty protected DACL'",
-        '} catch [System.UnauthorizedAccessException] {}',
-        'Write-Output PLANT_OK',
-      ].join('; ');
-      const plantOutput = execFileSync(
-        systemPowershellPath(),
-        ['-NoProfile', '-NonInteractive', '-Command', script],
-        { encoding: 'utf8' }
-      );
-      expect(plantOutput).toContain('PLANT_OK');
-
-      await requestBackendRestart();
-      await waitForHealthy(PROJECT);
-
-      const after = readFileSync(token, 'utf8');
-      expect(after).not.toBe(before);
-    } finally {
-      await setContext7('disabled');
-    }
   });
 });

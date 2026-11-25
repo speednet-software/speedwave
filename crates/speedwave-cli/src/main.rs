@@ -7,13 +7,14 @@ use speedwave_runtime::engine_path;
 use speedwave_runtime::oauth_refresh::{self, RefreshOutcome};
 use speedwave_runtime::plugin;
 use speedwave_runtime::runtime::{detect_runtime, ensure_exec_healthy};
+use speedwave_runtime::secret_store::{secret_store_state, unreadable_integration_messages};
 use speedwave_runtime::update;
 use speedwave_runtime::update_channel::{self, UpdateChannel};
 use speedwave_runtime::validation;
 use strum::IntoEnumIterator;
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -636,8 +637,13 @@ fn main() -> anyhow::Result<()> {
     }
 
     match speedwave_migrations::run_all(consts::data_dir()) {
-        Ok(report) if report.failed.is_empty() => log::debug!("migrations: {report}"),
-        Ok(report) => log::warn!("migrations: {report}"),
+        Ok(report) if report.failures.is_empty() => log::debug!("migrations: {report}"),
+        Ok(report) => {
+            log::warn!("migrations: {report}");
+            for (name, reason) in &report.failures {
+                err!("Warning: startup migration {name} did not finish: {reason}");
+            }
+        }
         Err(e) => {
             err!("Startup migrations failed: {}", redact_err(&e));
             std::process::exit(1);
@@ -712,6 +718,7 @@ fn main() -> anyhow::Result<()> {
             std::process::exit(1);
         });
         let project_name = resolve_action_project(&action, &user_config)?;
+        ensure_secret_store_ready(&project_name);
         out!("Updating containers for project '{}'...", project_name);
         match update::update_containers(&runtime, &project_name) {
             Ok(result) => {
@@ -945,6 +952,8 @@ fn main() -> anyhow::Result<()> {
     let project_name = resolve_action_project(&action, &user_config)?;
 
     validate_project_name(&project_name).map_err(|e| anyhow::anyhow!(e))?;
+
+    ensure_secret_store_ready(&project_name);
 
     if matches!(action, CliAction::Login(_)) {
         if let Err(e) = select_anthropic_after_login(&project_name) {
@@ -1246,6 +1255,21 @@ fn resolve_action_project(
         }
         _ => resolve_project_fallback(user_config),
     }
+}
+
+fn ensure_secret_store_ready(project: &str) {
+    let data_dir = consts::data_dir();
+    if let Some(message) = secret_store_start_error(data_dir) {
+        err!("{message}");
+        std::process::exit(1);
+    }
+    for line in unreadable_integration_messages(data_dir, project) {
+        err!("{line}");
+    }
+}
+
+fn secret_store_start_error(data_dir: &Path) -> Option<String> {
+    secret_store_state(data_dir).refusal("Open Speedwave Desktop to continue.")
 }
 
 fn resolve_project_fallback(user_config: &config::SpeedwaveUserConfig) -> anyhow::Result<String> {
@@ -1983,6 +2007,62 @@ mod tests {
             assert!(script.contains(key), "unset list missing `{key}`: {script}");
         }
         assert!(script.contains(compose::PROXY_BASE_URL), "{script}");
+    }
+
+    #[test]
+    fn an_empty_data_dir_passes_the_secret_store_check() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(secret_store_start_error(tmp.path()), None);
+    }
+
+    #[test]
+    fn a_working_secret_store_passes_the_check() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = speedwave_runtime::secret_store::SecretStore::open(tmp.path()).unwrap();
+        let name =
+            speedwave_runtime::secret_store::SecretName::integration("demo", "slack", "token")
+                .unwrap();
+        store.write(&name, "value").unwrap();
+        assert_eq!(secret_store_start_error(tmp.path()), None);
+    }
+
+    #[test]
+    fn ciphertext_without_a_key_refuses_to_start() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("secrets").join("demo");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("slack.token.enc"), "x").unwrap();
+        assert_eq!(
+            secret_store_start_error(tmp.path()).as_deref(),
+            Some("The secret store key is missing. Open Speedwave Desktop to continue.")
+        );
+        assert!(!tmp.path().join("secret-store.key").exists());
+    }
+
+    #[test]
+    fn a_malformed_key_file_refuses_to_start() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("secret-store.key"), "garbage").unwrap();
+        assert_eq!(
+            secret_store_start_error(tmp.path()).as_deref(),
+            Some("The secret store key file secret-store.key in the Speedwave data directory is damaged. Restore it from a backup, or remove it together with the encrypted secrets in the secrets directory.")
+        );
+    }
+
+    #[test]
+    fn unknown_entries_in_the_store_are_removed_and_do_not_refuse_the_start() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("secrets").join("demo");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("slack.token"), "PLAINTEXT-SENTINEL").unwrap();
+        std::fs::write(dir.join("notes.txt"), "x").unwrap();
+        std::fs::write(tmp.path().join("secrets").join(".DS_Store"), "x").unwrap();
+
+        assert_eq!(secret_store_start_error(tmp.path()), None);
+
+        assert!(!dir.join("slack.token").exists());
+        assert!(!dir.join("notes.txt").exists());
+        assert!(!tmp.path().join("secrets").join(".DS_Store").exists());
     }
 
     #[test]

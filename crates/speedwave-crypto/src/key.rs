@@ -1,6 +1,8 @@
 use crate::error::CryptoError;
+use crate::hex;
 use aes_siv::siv::Aes128Siv;
 use aes_siv::KeyInit;
+use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
 /// 32-byte secret key (AES-128-SIV per RFC 5297: SIV keys are double-width).
@@ -25,6 +27,14 @@ impl Key {
             bytes[i] = u8::from_str_radix(pair, 16).map_err(|_| CryptoError::Encoding)?;
         }
         Ok(Self(bytes))
+    }
+
+    /// Public key identifier: the first 4 bytes of SHA-256 over the key as 8 lowercase hex chars.
+    pub fn id(&self) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(self.0);
+        let digest = hasher.finalize();
+        hex::encode(&digest.as_slice()[..4])
     }
 
     pub(crate) fn siv_cipher(&self) -> Aes128Siv {
@@ -64,6 +74,30 @@ mod tests {
         assert_eq!(
             seal_deterministic(&from_hex_key, "EMAIL", b"same-value").unwrap(),
             seal_deterministic(&expected_key, "EMAIL", b"same-value").unwrap()
+        );
+    }
+
+    #[test]
+    fn id_matches_the_frozen_vector() {
+        assert_eq!(Key::from_bytes([7u8; 32]).id(), "4bb06f8e");
+    }
+
+    #[test]
+    fn id_is_8_lowercase_hex_chars_and_stable_per_key() {
+        let key = Key::from_bytes([0xABu8; 32]);
+        let id = key.id();
+        assert_eq!(id.len(), 8);
+        assert!(id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+        assert_eq!(id, Key::from_hex(&"AB".repeat(32)).unwrap().id());
+    }
+
+    #[test]
+    fn id_differs_between_keys() {
+        assert_ne!(
+            Key::from_bytes([1u8; 32]).id(),
+            Key::from_bytes([2u8; 32]).id()
         );
     }
 

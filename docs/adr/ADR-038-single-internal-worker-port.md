@@ -24,7 +24,7 @@ The question this ADR answers: **does per-worker port uniqueness carry any secur
 
 Speedwave's security model is explicit about its three pillars[^3]:
 
-- **Token isolation** — each worker mounts only its own `~/.speedwave/tokens/<project>/<service>/` directory as `/tokens:ro`.
+- **Token isolation** — each worker mounts only its own `~/.speedwave/tokens/<project>/<service>/` directory as `/tokens:ro`.  *Amended by [ADR-116](ADR-116-secret-store.md) (2026-11-24): the secret fields of that directory are encrypted in the secret store and the worker reads them from its tmpfs slot (ADR-115); the directory holds non-secret fields only.*
 - **Network isolation** — each project has a dedicated `speedwave_<project>_network`; workers in project A cannot see workers in project B.
 - **Container hardening** — `cap_drop: ALL`, `security_opt: no-new-privileges:true`, `read_only: true`, `tmpfs` with `noexec,nosuid`, per-service resource limits[^4].
 

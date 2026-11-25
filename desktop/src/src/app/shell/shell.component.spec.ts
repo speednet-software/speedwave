@@ -7,6 +7,7 @@ import { TauriService } from '../services/tauri.service';
 import { BetaService } from '../services/beta.service';
 import { ChatStateService } from '../services/chat-state.service';
 import { ProjectStateService } from '../services/project-state.service';
+import { SecretStoreService } from '../services/secret-store.service';
 import { ThemeService } from '../services/theme.service';
 import { UiStateService } from '../services/ui-state.service';
 import { TabSwitcherService } from '../services/tab-switcher.service';
@@ -176,6 +177,50 @@ describe('ShellComponent', () => {
   it('should render router-outlet', () => {
     const el = fixture.nativeElement.querySelector('router-outlet');
     expect(el).toBeTruthy();
+  });
+
+  it('renders the secret store notice and dialog hosts', () => {
+    expect(fixture.nativeElement.querySelector('app-secret-store-notice')).toBeTruthy();
+    expect(fixture.nativeElement.querySelector('app-secret-store-dialog')).toBeTruthy();
+    expect(fixture.nativeElement.querySelector('[data-testid="secret-store-dialog"]')).toBeNull();
+  });
+
+  it('blocks with the recovery dialog when the secret store key is missing', async () => {
+    const previous = mockTauri.invokeHandler;
+    mockTauri.invokeHandler = async (cmd, args) =>
+      cmd === 'get_secret_store_status'
+        ? {
+            state: 'keyMissing',
+            integrations: [{ project: 'test', service: 'slack' }],
+            unreadable: [],
+            migrationNotices: [],
+          }
+        : previous(cmd, args);
+
+    await TestBed.inject(SecretStoreService).refresh();
+    fixture.detectChanges();
+
+    const dialog = fixture.nativeElement.querySelector('[data-testid="secret-store-dialog"]');
+    expect(dialog).not.toBeNull();
+    expect(dialog.textContent).toContain('test: slack');
+  });
+
+  it('re-reads the secret store status when the active project changes', async () => {
+    let reads = 0;
+    const previous = mockTauri.invokeHandler;
+    mockTauri.invokeHandler = async (cmd, args) => {
+      if (cmd === 'get_secret_store_status') reads += 1;
+      return previous(cmd, args);
+    };
+    projectState.activeProject.set('first');
+    fixture.detectChanges();
+    await vi.waitFor(() => expect(reads).toBeGreaterThan(0));
+    const before = reads;
+
+    projectState.activeProject.set('second');
+    fixture.detectChanges();
+
+    await vi.waitFor(() => expect(reads).toBeGreaterThan(before));
   });
 
   it('shows loading overlay by default', () => {

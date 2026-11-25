@@ -226,6 +226,7 @@ pub fn build_images() -> anyhow::Result<()> {
 }
 
 pub fn start_containers(project: &str) -> anyhow::Result<()> {
+    crate::secret_store_cmd::ensure_ready_for_start().map_err(anyhow::Error::msg)?;
     if crate::containers_cmd::project_llm_is_unconfigured(project).map_err(anyhow::Error::msg)? {
         log::info!("project '{project}' has no LLM provider — skipping container start");
         return defer_container_start_gated(project, true);
@@ -1026,7 +1027,6 @@ mod tests {
     use speedwave_runtime::config::{
         ClaudeOverrides, LlmConfig, ProjectUserEntry, SpeedwaveUserConfig,
     };
-    use std::collections::HashMap;
 
     #[test]
     fn auth_status_argv_runs_the_claude_binary_offline_with_nonessential_traffic_off() {
@@ -1476,73 +1476,6 @@ mod tests {
         assert!(!project_needs_anthropic_auth(&cfg, "fresh"));
     }
 
-    fn validate_path_component(name: &str, label: &str) -> anyhow::Result<()> {
-        if name.is_empty() {
-            anyhow::bail!("{label} is empty");
-        }
-        if name.contains('/') || name.contains('\\') || name.contains("..") {
-            anyhow::bail!("{label} '{name}' contains path traversal characters");
-        }
-        if !name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
-        {
-            anyhow::bail!("{label} '{name}' contains invalid characters");
-        }
-        Ok(())
-    }
-
-    fn write_tokens(
-        data_dir: &std::path::Path,
-        project: &str,
-        service: &str,
-        tokens: &HashMap<String, String>,
-    ) -> anyhow::Result<()> {
-        validate_path_component(project, "project name")?;
-        validate_path_component(service, "service name")?;
-        for key in tokens.keys() {
-            validate_path_component(key, "token key")?;
-        }
-
-        let token_dir = data_dir.join("tokens").join(project).join(service);
-        std::fs::create_dir_all(&token_dir)?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode_700 = std::fs::Permissions::from_mode(0o700);
-            std::fs::set_permissions(&token_dir, mode_700.clone())?;
-            if let Some(project_dir) = token_dir.parent() {
-                std::fs::set_permissions(project_dir, mode_700.clone())?;
-                if let Some(tokens_dir) = project_dir.parent() {
-                    std::fs::set_permissions(tokens_dir, mode_700)?;
-                }
-            }
-        }
-
-        for (key, value) in tokens {
-            let token_path = token_dir.join(key);
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                let mut file = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .mode(0o600)
-                    .open(&token_path)?;
-                std::io::Write::write_all(&mut file, value.as_bytes())?;
-            }
-            #[cfg(not(unix))]
-            {
-                std::fs::write(&token_path, value)?;
-            }
-        }
-
-        Ok(())
-    }
-
     #[test]
     fn wipe_data_dir_removes_everything() {
         let tmp = tempfile::tempdir().expect("failed to create temp dir");
@@ -1584,6 +1517,60 @@ mod tests {
 
         assert!(!data_dir.exists(), "data dir should be gone");
         assert!(tmp.path().exists(), "parent should still exist");
+    }
+
+    #[test]
+    fn wipe_data_dir_removes_the_install_key_and_every_encrypted_secret() {
+        use speedwave_runtime::secret_store::{SecretName, SecretStore};
+
+        let tmp = tempfile::tempdir().expect("failed to create temp dir");
+        let data_dir = tmp.path().join("speedwave-data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        let anthropic = SecretName::anthropic_api_key("acme").expect("name");
+        let slack = SecretName::integration("acme", "slack", "token").expect("name");
+        let store = SecretStore::open(&data_dir).expect("open store");
+        store.write(&anthropic, "sk-ant-one").expect("write");
+        store.write(&slack, "xoxp-one").expect("write");
+        assert!(data_dir.join("secret-store.key").is_file());
+        assert!(data_dir.join("secrets").join("acme").is_dir());
+
+        wipe_data_dir(&data_dir).expect("wipe should succeed");
+
+        assert!(!data_dir.join("secret-store.key").exists());
+        assert!(!data_dir.join("secrets").exists());
+        assert!(!data_dir.exists());
+    }
+
+    #[test]
+    fn a_secret_written_after_a_wipe_is_sealed_under_a_new_key() {
+        use speedwave_runtime::secret_store::{SecretName, SecretStore};
+
+        let tmp = tempfile::tempdir().expect("failed to create temp dir");
+        let data_dir = tmp.path().join("speedwave-data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        let name = SecretName::anthropic_api_key("acme").expect("name");
+        SecretStore::open(&data_dir)
+            .expect("open store")
+            .write(&name, "sk-ant-before")
+            .expect("write");
+        let old_key = std::fs::read_to_string(data_dir.join("secret-store.key")).expect("old key");
+
+        wipe_data_dir(&data_dir).expect("wipe should succeed");
+        std::fs::create_dir_all(&data_dir).expect("recreate data dir");
+
+        let reopened = SecretStore::open(&data_dir).expect("open after wipe");
+        assert!(reopened.read(&name).expect("read").is_none());
+        reopened.write(&name, "sk-ant-after").expect("write");
+        let new_key = std::fs::read_to_string(data_dir.join("secret-store.key")).expect("new key");
+        assert_ne!(old_key, new_key, "a wipe must not carry the old key over");
+        assert_eq!(
+            reopened
+                .read(&name)
+                .expect("read")
+                .as_deref()
+                .map(String::as_str),
+            Some("sk-ant-after")
+        );
     }
 
     #[cfg(unix)]
@@ -2243,181 +2230,6 @@ mod tests {
             !state.is_complete(),
             "is_complete must return false when vm_ready is false"
         );
-    }
-
-    #[test]
-    fn write_tokens_creates_files_with_correct_content() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let tokens = HashMap::from([
-            ("api_key".to_string(), "xoxb-secret-123".to_string()),
-            (
-                "webhook_url".to_string(),
-                "https://hooks.slack.com/x".to_string(),
-            ),
-        ]);
-
-        write_tokens(tmp.path(), "acme", "slack", &tokens).expect("write_tokens should succeed");
-
-        let key_path = tmp.path().join("tokens/acme/slack/api_key");
-        let url_path = tmp.path().join("tokens/acme/slack/webhook_url");
-
-        assert_eq!(
-            std::fs::read_to_string(&key_path).expect("read api_key"),
-            "xoxb-secret-123"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&url_path).expect("read webhook_url"),
-            "https://hooks.slack.com/x"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn write_tokens_sets_chmod_600() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let data_dir = tmp.path();
-        let original_mode = std::fs::metadata(data_dir).unwrap().permissions().mode() & 0o777;
-
-        let tokens = HashMap::from([("secret".to_string(), "value".to_string())]);
-
-        write_tokens(data_dir, "proj", "svc", &tokens).expect("write_tokens");
-
-        let path = data_dir.join("tokens/proj/svc/secret");
-        let mode = std::fs::metadata(&path)
-            .expect("metadata")
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o777, 0o600, "token file should be chmod 600");
-
-        assert_eq!(
-            std::fs::metadata(data_dir.join("tokens/proj/svc"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o700,
-            "tokens/proj/svc should be 0o700"
-        );
-        assert_eq!(
-            std::fs::metadata(data_dir.join("tokens/proj"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o700,
-            "tokens/proj should be 0o700"
-        );
-        assert_eq!(
-            std::fs::metadata(data_dir.join("tokens"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o700,
-            "tokens should be 0o700"
-        );
-
-        assert_eq!(
-            std::fs::metadata(data_dir).unwrap().permissions().mode() & 0o777,
-            original_mode,
-            "data_dir should not have been changed"
-        );
-    }
-
-    #[test]
-    fn write_tokens_multiple_services_isolated() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-
-        let slack_tokens = HashMap::from([("token".to_string(), "slack-secret".to_string())]);
-        let gitlab_tokens = HashMap::from([("token".to_string(), "gitlab-secret".to_string())]);
-
-        write_tokens(tmp.path(), "acme", "slack", &slack_tokens).expect("slack");
-        write_tokens(tmp.path(), "acme", "gitlab", &gitlab_tokens).expect("gitlab");
-
-        assert_eq!(
-            std::fs::read_to_string(tmp.path().join("tokens/acme/slack/token")).expect("read"),
-            "slack-secret"
-        );
-        assert_eq!(
-            std::fs::read_to_string(tmp.path().join("tokens/acme/gitlab/token")).expect("read"),
-            "gitlab-secret"
-        );
-
-        assert!(!tmp.path().join("tokens/acme/slack/gitlab-secret").exists());
-    }
-
-    #[test]
-    fn validate_path_component_accepts_valid_names() {
-        assert!(validate_path_component("slack", "service").is_ok());
-        assert!(validate_path_component("my-service", "service").is_ok());
-        assert!(validate_path_component("service_v2", "service").is_ok());
-        assert!(validate_path_component("config.json", "key").is_ok());
-        assert!(validate_path_component("abc123", "key").is_ok());
-    }
-
-    #[test]
-    fn validate_path_component_rejects_empty() {
-        assert!(validate_path_component("", "service").is_err());
-    }
-
-    #[test]
-    fn validate_path_component_rejects_slash() {
-        let err = validate_path_component("../etc/passwd", "service").unwrap_err();
-        assert!(err.to_string().contains("path traversal"));
-    }
-
-    #[test]
-    fn validate_path_component_rejects_backslash() {
-        let err = validate_path_component("..\\windows\\system32", "service").unwrap_err();
-        assert!(err.to_string().contains("path traversal"));
-    }
-
-    #[test]
-    fn validate_path_component_rejects_double_dot() {
-        let err = validate_path_component("foo..bar", "key").unwrap_err();
-        assert!(err.to_string().contains("path traversal"));
-    }
-
-    #[test]
-    fn validate_path_component_rejects_special_characters() {
-        assert!(validate_path_component("key with spaces", "key").is_err());
-        assert!(validate_path_component("key;rm", "key").is_err());
-        assert!(validate_path_component("key$(cmd)", "key").is_err());
-        assert!(validate_path_component("key`whoami`", "key").is_err());
-    }
-
-    #[test]
-    fn write_tokens_rejects_traversal_in_service() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let tokens = HashMap::from([("key".to_string(), "value".to_string())]);
-        let err = write_tokens(tmp.path(), "proj", "../escape", &tokens).unwrap_err();
-        assert!(err.to_string().contains("path traversal"));
-    }
-
-    #[test]
-    fn write_tokens_rejects_traversal_in_key() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let tokens = HashMap::from([("../../etc/shadow".to_string(), "value".to_string())]);
-        let err = write_tokens(tmp.path(), "proj", "slack", &tokens).unwrap_err();
-        assert!(err.to_string().contains("path traversal"));
-    }
-
-    #[test]
-    fn write_tokens_rejects_slash_in_service() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let tokens = HashMap::from([("key".to_string(), "value".to_string())]);
-        let err = write_tokens(tmp.path(), "proj", "a/b", &tokens).unwrap_err();
-        assert!(err.to_string().contains("path traversal"));
-    }
-
-    #[test]
-    fn write_tokens_rejects_traversal_in_project() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let tokens = HashMap::from([("key".to_string(), "value".to_string())]);
-        let err = write_tokens(tmp.path(), "../escape", "slack", &tokens).unwrap_err();
-        assert!(err.to_string().contains("path traversal"));
     }
 
     #[test]

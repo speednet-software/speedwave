@@ -32,7 +32,7 @@ There are two plugin types: an **MCP service plugin** has a `service_id` and a r
 ## Service ID constants (current values — verify against `consts.rs`)
 
 - `consts::BUILT_IN_SERVICES` (compose names, for SecurityCheck): `claude`, `mcp-hub`, `mcp-slack`, `mcp-sharepoint`, `mcp-redmine`, `mcp-gitlab`, `mcp-github`, `mcp-atlassian`, `mcp-office`, `mcp-playwright`, `mcp-context7`.
-- `consts::BUILT_IN_SERVICE_IDS` (logical IDs, for plugin collision check): `slack`, `sharepoint`, `redmine`, `gitlab`, `github`, `atlassian`, `office`, `playwright`, `context7`, `os`, `oauth`, `ide`. (`oauth` and `ide` have no compose service — they are host-side workers/bridges reserved purely so a plugin slug cannot shadow them; ADR-060, ADR-063.)
+- `consts::BUILT_IN_SERVICE_IDS` (logical IDs, for plugin collision check): `slack`, `sharepoint`, `redmine`, `gitlab`, `github`, `atlassian`, `office`, `playwright`, `context7`, `os`, `oauth`, `ide`, `llm`, `pii`, `anthropic`, `local-llm`. (`oauth` and `ide` have no compose service — they are host-side workers/bridges reserved purely so a plugin slug cannot shadow them; ADR-060, ADR-063. `llm`, `pii`, `anthropic` and `local-llm` are secret store namespaces, ADR-116.)
 - A guard test verifies no overlap between the two lists.
 
 ## Where it lives in code

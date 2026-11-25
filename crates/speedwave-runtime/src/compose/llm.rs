@@ -1,6 +1,7 @@
-use super::{inject_claude_env, tokens_path_in};
+use super::inject_claude_env;
 use crate::config::{LlmConfig, LlmProviderKind};
 use crate::consts;
+use crate::secret_store::{SecretName, SecretStore, SecretStoreError};
 use std::path::Path;
 
 const NO_KEY_REQUIRED_TOKEN: &str = "sk-no-key-required";
@@ -31,15 +32,23 @@ pub(super) fn anthropic_api_key_in(
     data_dir: &Path,
     project: &str,
 ) -> anyhow::Result<Option<String>> {
-    let key_path = data_dir
-        .join("secrets")
-        .join(project)
-        .join("anthropic_api_key");
-    if !key_path.exists() {
+    let name = SecretName::anthropic_api_key(project)?;
+    let Some(value) = read_secret_in(data_dir, &name)? else {
         return Ok(None);
-    }
-    let api_key = std::fs::read_to_string(&key_path)?.trim().to_string();
+    };
+    let api_key = value.trim().to_string();
     Ok((!api_key.is_empty()).then_some(api_key))
+}
+
+fn read_secret_in(data_dir: &Path, name: &SecretName) -> anyhow::Result<Option<String>> {
+    match SecretStore::open(data_dir)?.read(name) {
+        Ok(value) => Ok(value.map(|value| value.to_string())),
+        Err(SecretStoreError::Unreadable(unreadable)) => {
+            log::warn!("secret {unreadable} cannot be read; the integration is started without it");
+            Ok(None)
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 pub(super) fn claude_llm_env_in(
@@ -62,7 +71,7 @@ pub(super) fn claude_llm_env_in(
         if let Some(entry) = llm.active_provider() {
             let needs_direct = entry.kind == LlmProviderKind::Local && entry.has_custom_headers;
             if !needs_direct {
-                let caller_token = super::proxy::ensure_caller_token_in(data_dir, project)?;
+                let caller_token = super::proxy::caller_token_in(data_dir, project)?;
                 return proxy_llm_env(llm, &caller_token);
             }
             log::info!("custom headers configured — using the direct (non-proxy) path");
@@ -272,12 +281,16 @@ fn legacy_llm_env_in(
     }
 }
 
-/// Reads a local-LLM token file under `data_dir`. Returns `None` on any failure (missing
-/// file, I/O error, empty content); callers fall back to a dummy or skip injection.
+/// Reads a local-LLM secret (`api_key` or `custom_headers`) from the secret store.
 pub fn read_local_llm_token_opt_in(data_dir: &Path, project: &str, file: &str) -> Option<String> {
-    let path = tokens_path_in(data_dir, project, "local-llm", file).ok()?;
-    let content = std::fs::read_to_string(&path).ok()?;
-    let trimmed = content.trim_end_matches(['\n', '\r']).to_string();
+    let name = match file {
+        "api_key" => SecretName::local_llm_api_key(project),
+        "custom_headers" => SecretName::local_llm_custom_headers(project),
+        _ => return None,
+    }
+    .ok()?;
+    let value = read_secret_in(data_dir, &name).ok()??;
+    let trimmed = value.trim_end_matches(['\n', '\r']).to_string();
     if trimmed.is_empty() {
         None
     } else {
@@ -955,5 +968,111 @@ mod tests {
                 "{model}: {rendered}"
             );
         }
+    }
+
+    fn store_anthropic_key(data_dir: &Path, value: &str) {
+        SecretStore::open(data_dir)
+            .unwrap()
+            .write(&SecretName::anthropic_api_key("proj").unwrap(), value)
+            .unwrap();
+    }
+
+    #[test]
+    fn anthropic_api_key_is_read_from_the_store_and_trimmed() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(anthropic_api_key_in(dir.path(), "proj").unwrap(), None);
+
+        store_anthropic_key(dir.path(), "  sk-ant-1\n");
+
+        assert_eq!(
+            anthropic_api_key_in(dir.path(), "proj").unwrap().as_deref(),
+            Some("sk-ant-1")
+        );
+        assert_eq!(anthropic_api_key_in(dir.path(), "other").unwrap(), None);
+    }
+
+    #[test]
+    fn a_plaintext_anthropic_key_file_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join("secrets").join("proj");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("anthropic_api_key"), "sk-plaintext").unwrap();
+
+        assert_eq!(anthropic_api_key_in(dir.path(), "proj").unwrap(), None);
+    }
+
+    #[test]
+    fn an_unreadable_anthropic_key_degrades_to_none() {
+        let dir = tempfile::tempdir().unwrap();
+        store_anthropic_key(dir.path(), "sk-ant-1");
+        std::fs::write(
+            dir.path().join("secrets/proj/anthropic.api_key.enc"),
+            "garbage\n",
+        )
+        .unwrap();
+
+        assert_eq!(anthropic_api_key_in(dir.path(), "proj").unwrap(), None);
+    }
+
+    #[test]
+    fn a_missing_install_key_is_an_error_not_a_silent_none() {
+        let dir = tempfile::tempdir().unwrap();
+        store_anthropic_key(dir.path(), "sk-ant-1");
+        std::fs::remove_file(dir.path().join("secret-store.key")).unwrap();
+
+        assert!(anthropic_api_key_in(dir.path(), "proj").is_err());
+    }
+
+    #[test]
+    fn the_direct_local_path_reads_its_token_and_headers_from_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SecretStore::open(dir.path()).unwrap();
+        store
+            .write(&SecretName::local_llm_api_key("proj").unwrap(), "sk-local")
+            .unwrap();
+        store
+            .write(
+                &SecretName::local_llm_custom_headers("proj").unwrap(),
+                "X-A: 1\nAuthorization: Bearer leaked\nX-B: 2\n",
+            )
+            .unwrap();
+        let llm = crate::config::LlmConfig {
+            provider: Some("local".to_string()),
+            model: Some("qwen3".to_string()),
+            base_url: Some("http://host.docker.internal:9000".to_string()),
+            has_api_key: true,
+            has_custom_headers: true,
+            ..Default::default()
+        };
+
+        let env = legacy_llm_env_in(dir.path(), &llm, "proj").unwrap();
+
+        assert_eq!(env.auth_token.as_deref(), Some("sk-local"));
+        assert_eq!(env.custom_headers.as_deref(), Some("X-A: 1, X-B: 2"));
+    }
+
+    #[test]
+    fn the_direct_local_path_falls_back_to_the_dummy_token_when_the_key_cannot_be_read() {
+        let dir = tempfile::tempdir().unwrap();
+        SecretStore::open(dir.path())
+            .unwrap()
+            .write(&SecretName::local_llm_api_key("proj").unwrap(), "sk-local")
+            .unwrap();
+        std::fs::write(
+            dir.path().join("secrets/proj/local-llm.api_key.enc"),
+            "garbage\n",
+        )
+        .unwrap();
+        let llm = crate::config::LlmConfig {
+            provider: Some("local".to_string()),
+            model: Some("qwen3".to_string()),
+            base_url: Some("http://host.docker.internal:9000".to_string()),
+            has_api_key: true,
+            ..Default::default()
+        };
+
+        let env = legacy_llm_env_in(dir.path(), &llm, "proj").unwrap();
+
+        assert_eq!(env.auth_token.as_deref(), Some(NO_KEY_REQUIRED_TOKEN));
     }
 }

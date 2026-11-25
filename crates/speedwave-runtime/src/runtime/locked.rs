@@ -474,9 +474,13 @@ mod tests {
             ..Default::default()
         };
         crate::config::save_user_config_to(&config, &data_dir.path().join("config.json")).unwrap();
-        let secrets = data_dir.path().join("secrets").join(project);
-        std::fs::create_dir_all(&secrets).unwrap();
-        std::fs::write(secrets.join("anthropic_api_key"), "sk-ant-test").unwrap();
+        crate::secret_store::SecretStore::open(data_dir.path())
+            .unwrap()
+            .write(
+                &crate::secret_store::SecretName::anthropic_api_key(project).unwrap(),
+                "sk-ant-test",
+            )
+            .unwrap();
         let (rt, handles) = builder.with_data_dir(data_dir.path()).build();
         (rt.with_secret_staging(), handles, data_dir)
     }

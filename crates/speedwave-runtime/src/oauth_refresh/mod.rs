@@ -242,7 +242,6 @@ mod tests {
             "providerData": {"clientId": "cid"},
             "scopes": [],
             "grantedScopes": [],
-            "refreshToken": "rt",
             "expiresAt": (now + chrono::Duration::minutes(30))
                 .to_rfc3339_opts(SecondsFormat::Millis, true),
             "lastRefreshAt": (now - chrono::Duration::hours(11))
@@ -251,6 +250,13 @@ mod tests {
         let path = crate::plugin::oauth_state_file_in(data_dir, "proj", service);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, json.to_string()).unwrap();
+        crate::secret_store::SecretStore::open(data_dir)
+            .unwrap()
+            .write(
+                &crate::secret_store::SecretName::oauth_refresh_token("proj", service).unwrap(),
+                "rt",
+            )
+            .unwrap();
     }
 
     fn test_shared() -> Shared {
@@ -416,14 +422,13 @@ mod tests {
         assert!(results.is_empty());
         assert!(started.elapsed() < Duration::from_millis(250));
 
-        let token = store::Paths::new(dir.path(), "proj", "slack")
-            .token_dir
-            .join("access_token");
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while !token.exists() && std::time::Instant::now() < deadline {
+        let mut token = store::read_access_token(dir.path(), "proj", "slack");
+        while token.is_err() && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
+            token = store::read_access_token(dir.path(), "proj", "slack");
         }
-        assert_eq!(std::fs::read_to_string(token).unwrap(), "at");
+        assert_eq!(token.unwrap().as_str(), "at");
     }
 
     #[test]

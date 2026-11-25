@@ -16,6 +16,8 @@ fn cleanup_project_dirs_in(project: &str, data_dir: &Path) {
         "context",
         crate::consts::CLAUDE_HOME_SUBDIR,
         "secrets",
+        "policies",
+        "proxy",
         "snapshots",
         "usage",
         crate::consts::OAUTH_SUBDIR,
@@ -1076,7 +1078,13 @@ mod tests {
         )
         .unwrap();
 
-        for sub in &["secrets", "snapshots", crate::consts::OAUTH_SUBDIR] {
+        for sub in &[
+            "secrets",
+            "policies",
+            "proxy",
+            "snapshots",
+            crate::consts::OAUTH_SUBDIR,
+        ] {
             let d = data_dir.join(sub).join("alpha");
             std::fs::create_dir_all(&d).unwrap();
             std::fs::write(d.join("secret"), b"x").unwrap();
@@ -1093,6 +1101,8 @@ mod tests {
             "context",
             crate::consts::CLAUDE_HOME_SUBDIR,
             "secrets",
+            "policies",
+            "proxy",
             "snapshots",
             crate::consts::OAUTH_SUBDIR,
         ] {

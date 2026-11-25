@@ -55,7 +55,6 @@ const PATTERNS: &[&str] = &[
     "clear_teardown_intent(",
     "is_plugin_configured(",
     "is_service_configured(",
-    "ensure_token_dir(",
     "compose_file_path(",
     "save_user_config(",
     "load_user_config(",

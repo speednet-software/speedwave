@@ -447,16 +447,16 @@ async fn exchange_slack_code(
     })
 }
 
-/// Persists the outcome in the order oauth state (refresh token), `features.json`, mounted access
-/// token: a crash in between leaves recoverable state, and a failed write never pairs a new access
-/// token with a feature file from the previous sign-in.
-/// `data_dir`-parameterised so tests pass a tempdir (cf. `save_oauth_state_in`).
 fn persist_slack_tokens_in(
     data_dir: &Path,
     project: &str,
     token: &SlackUserToken,
     requested_scopes: &[String],
 ) -> Result<(), String> {
+    let max = crate::types::MAX_CREDENTIAL_BYTES;
+    if token.access_token.len() > max {
+        return Err(format!("access_token exceeds {max} bytes"));
+    }
     let mut provider_data = std::collections::BTreeMap::new();
     provider_data.insert(
         "clientId".to_string(),
@@ -475,9 +475,13 @@ fn persist_slack_tokens_in(
         provider_data.insert("authedUserName".to_string(), user_name.clone());
     }
 
-    let state_path = speedwave_runtime::plugin::oauth_state_file_in(data_dir, project, "slack");
+    let svc_dir = speedwave_runtime::plugin::token_dir_in(data_dir, project, "slack");
+    slack_features::write_features_file_in(&svc_dir, &token.granted_scopes)?;
+
     speedwave_runtime::oauth_persist::write_oauth_state(
-        &state_path,
+        data_dir,
+        project,
+        "slack",
         &speedwave_runtime::oauth_persist::OAuthStateParams {
             provider: crate::oauth_providers::SLACK_PROVIDER_ID,
             grant_type: Some("refresh_token"),
@@ -485,13 +489,10 @@ fn persist_slack_tokens_in(
             scopes: requested_scopes.to_vec(),
             granted_scopes: token.granted_scopes.clone(),
             refresh_token: &token.refresh_token,
+            access_token: Some(&token.access_token),
             expires_in: token.expires_in,
         },
-    )?;
-
-    let svc_dir = speedwave_runtime::plugin::token_dir_in(data_dir, project, "slack");
-    slack_features::write_features_file_in(&svc_dir, &token.granted_scopes)?;
-    oauth_flow::save_credential_file(&svc_dir, "access_token", &token.access_token)
+    )
 }
 
 #[cfg(test)]
@@ -767,10 +768,23 @@ mod tests {
         slack_features::requested_scopes(&[], None)
     }
 
+    const SENTINEL_AT: &str = "SENTINEL-997-slack-access";
+    const SENTINEL_RT: &str = "SENTINEL-997-slack-refresh";
+
+    fn read_secret(data_dir: &Path, field: &str) -> Option<String> {
+        let name = speedwave_runtime::secret_store::SecretName::integration("proj", "slack", field)
+            .unwrap();
+        speedwave_runtime::secret_store::SecretStore::open(data_dir)
+            .unwrap()
+            .read(&name)
+            .unwrap()
+            .map(|value| value.as_str().to_string())
+    }
+
     fn sample_token() -> SlackUserToken {
         SlackUserToken {
-            access_token: "xoxe.xoxp-at".to_string(),
-            refresh_token: "xoxe-1-rt".to_string(),
+            access_token: SENTINEL_AT.to_string(),
+            refresh_token: SENTINEL_RT.to_string(),
             expires_in: 43200,
             granted_scopes: vec!["chat:write".to_string()],
             team_id: Some("T123".to_string()),
@@ -794,7 +808,11 @@ mod tests {
         let state: serde_json::Value = serde_json::from_str(&state_raw).unwrap();
         assert_eq!(state["provider"], "slack");
         assert_eq!(state["grantType"], "refresh_token");
-        assert_eq!(state["refreshToken"], "xoxe-1-rt");
+        assert!(state.get("refreshToken").is_none());
+        assert_eq!(
+            read_secret(tmp.path(), "refresh_token").as_deref(),
+            Some(SENTINEL_RT)
+        );
         assert_eq!(
             state["providerData"]["clientId"],
             consts::SLACK_OAUTH_CLIENT_ID
@@ -815,12 +833,18 @@ mod tests {
         .unwrap();
         assert_eq!(features, r#"{"enabled":[]}"#);
 
-        let access = std::fs::read_to_string(
-            speedwave_runtime::plugin::token_dir_in(tmp.path(), "proj", "slack")
-                .join("access_token"),
-        )
-        .unwrap();
-        assert_eq!(access, "xoxe.xoxp-at");
+        assert_eq!(
+            read_secret(tmp.path(), "access_token").as_deref(),
+            Some(SENTINEL_AT)
+        );
+        assert!(
+            !speedwave_runtime::plugin::token_dir_in(tmp.path(), "proj", "slack")
+                .join("access_token")
+                .exists()
+        );
+        assert!(
+            crate::types::test_support::files_containing(tmp.path(), "SENTINEL-997").is_empty()
+        );
     }
 
     #[test]
@@ -899,20 +923,33 @@ mod tests {
     }
 
     #[test]
-    fn persist_writes_the_features_file_before_the_access_token() {
+    fn persist_writes_the_features_file_before_the_state_and_the_tokens() {
         let tmp = tempfile::tempdir().unwrap();
         let mut token = sample_token();
-        token.access_token = "x".repeat(crate::types::MAX_CREDENTIAL_BYTES + 1);
+        token.expires_in = 0;
         let svc_dir = speedwave_runtime::plugin::token_dir_in(tmp.path(), "proj", "slack");
 
         let result = persist_slack_tokens_in(tmp.path(), "proj", &token, &requested());
 
         assert!(result.is_err());
         assert!(svc_dir.join(consts::SLACK_FEATURES_FILE).exists());
-        assert!(!svc_dir.join("access_token").exists());
         assert!(
-            speedwave_runtime::plugin::oauth_state_file_in(tmp.path(), "proj", "slack").exists()
+            !speedwave_runtime::plugin::oauth_state_file_in(tmp.path(), "proj", "slack").exists()
         );
+    }
+
+    #[test]
+    fn persist_rejects_an_oversized_access_token_before_writing_anything() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut token = sample_token();
+        token.access_token = "x".repeat(crate::types::MAX_CREDENTIAL_BYTES + 1);
+
+        let err = persist_slack_tokens_in(tmp.path(), "proj", &token, &requested()).unwrap_err();
+
+        assert!(err.contains("access_token"));
+        assert!(!tmp.path().join("tokens").exists());
+        assert!(!tmp.path().join("oauth").exists());
+        assert!(!tmp.path().join("secrets").exists());
     }
 
     struct Stored {
@@ -928,7 +965,7 @@ mod tests {
             state: read(speedwave_runtime::plugin::oauth_state_file_in(
                 data_dir, "proj", "slack",
             )),
-            access_token: read(svc_dir.join("access_token")),
+            access_token: read_secret(data_dir, "access_token").unwrap(),
             features: read(svc_dir.join(consts::SLACK_FEATURES_FILE)),
         }
     }

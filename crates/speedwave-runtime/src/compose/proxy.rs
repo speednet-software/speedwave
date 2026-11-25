@@ -3,9 +3,10 @@ use crate::config::{
     ResolvedIntegrationsConfig,
 };
 use crate::git_allowlist::{enforced_entries, forge_host_in, GitForgeService};
+use crate::secret_store::{SecretName, SecretStore};
 use serde::Serialize;
 use speedwave_access_policy::{AccessMode, AccessPolicy};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Serialize)]
 #[serde(untagged)]
@@ -43,6 +44,9 @@ pub const PROXY_PORT: u16 = 4000;
 /// In-network proxy URL every session points `ANTHROPIC_BASE_URL` at; routing
 /// is by the request body's model prefix, not the URL path.
 pub const PROXY_BASE_URL: &str = "http://proxy:4000";
+
+const CALLER_TOKEN_PURPOSE: &str = "caller";
+const CALLER_TOKEN_SERVICE: &str = "proxy";
 
 const GIT_TOKENS_MOUNT_ROOT: &str = "/git-tokens";
 
@@ -183,35 +187,16 @@ pub fn spw_key_env_name(provider_id: &str) -> String {
     )
 }
 
-/// Per-project proxy state dir: `<data_dir>/proxy/<project>/`, holding the caller token.
-pub fn proxy_config_dir_in(data_dir: &Path, project: &str) -> PathBuf {
-    data_dir.join("proxy").join(project)
-}
-
 /// Header carrying the per-project caller secret; mirror of the proxy's
 /// `CALLER_AUTH_HEADER` in `containers/proxy/src/main.rs`.
 pub const PROXY_CALLER_AUTH_HEADER: &str = "x-speedwave-proxy-auth";
 
-fn caller_token_path_in(data_dir: &Path, project: &str) -> PathBuf {
-    proxy_config_dir_in(data_dir, project).join("caller-token")
-}
-
-pub fn ensure_caller_token_in(data_dir: &Path, project: &str) -> anyhow::Result<String> {
+pub(crate) fn caller_token_in(data_dir: &Path, project: &str) -> anyhow::Result<String> {
     crate::validation::validate_project_name(project)?;
-    let path = caller_token_path_in(data_dir, project);
-    if let Ok(existing) = std::fs::read_to_string(&path) {
-        let trimmed = existing.trim();
-        if !trimmed.is_empty() {
-            return Ok(trimmed.to_string());
-        }
-    }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-        crate::fs_perms::ensure_owner_only_dir(parent)?;
-    }
-    let token = crate::pkce::generate_state();
-    crate::fs_perms::write_restricted_file_atomic(&path, &token)?;
-    Ok(token)
+    let store = SecretStore::open(data_dir)?;
+    Ok(store
+        .derive_token(CALLER_TOKEN_PURPOSE, project, CALLER_TOKEN_SERVICE)?
+        .to_string())
 }
 
 /// Renders the proxy routing config (a `routes` array consumed by the forwarder
@@ -315,7 +300,7 @@ fn render_proxy_config_in(
     git_forges: &[GitForge],
 ) -> anyhow::Result<RenderedProxyConfig> {
     crate::validation::validate_project_name(project)?;
-    let token = ensure_caller_token_in(data_dir, project)?;
+    let token = caller_token_in(data_dir, project)?;
     let ner = super::pii_ner::live_ner_config_in(data_dir, pii_ner_enabled);
     let content = render_proxy_config_full(llm, Some(&token), ner.as_ref(), git_forges);
     Ok(RenderedProxyConfig {
@@ -324,42 +309,37 @@ fn render_proxy_config_in(
     })
 }
 
-pub(super) fn proxy_state_digest_in(content: &str, data_dir: &Path, project: &str) -> String {
+pub(super) fn proxy_state_digest_in(
+    content: &str,
+    data_dir: &Path,
+    project: &str,
+) -> anyhow::Result<String> {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(super::secret_slots::PROXY_CONFIG_FILE.as_bytes());
     hasher.update(b"\0");
     hasher.update(content.as_bytes());
     hasher.update(b"\0");
-    let tokens_dir = data_dir.join("tokens").join(project).join("llm");
-    let mut entries: Vec<(std::ffi::OsString, Vec<u8>)> = std::fs::read_dir(&tokens_dir)
-        .map(|dir| {
-            dir.filter_map(|e| e.ok())
-                .map(|e| {
-                    let content_hash = Sha256::digest(std::fs::read(e.path()).unwrap_or_default());
-                    (e.file_name(), content_hash.to_vec())
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-    for (name, content_hash) in entries {
-        hasher.update(name.as_encoded_bytes());
+    let secrets = SecretStore::open(data_dir)?.read_project(project)?;
+    for (name, value) in &secrets.values {
+        if name.service() != super::LLM_TOKEN_SERVICE {
+            continue;
+        }
+        hasher.update(name.field().as_bytes());
         hasher.update(b"\0");
-        hasher.update(&content_hash);
+        hasher.update(Sha256::digest(value.as_bytes()));
         hasher.update(b"\n");
     }
-    crate::bundle::bytes_to_hex(&hasher.finalize())
+    Ok(crate::bundle::bytes_to_hex(&hasher.finalize()))
 }
 
-/// Validates + persists one provider's API key in the llm token namespace:
-/// strips `Bearer `, rejects control chars and empty values (ADR-040).
+/// Stores one provider's API key in the secret store.
 pub fn write_llm_provider_key_in(
     data_dir: &Path,
     project: &str,
     provider_id: &str,
     key: &str,
-) -> anyhow::Result<PathBuf> {
+) -> anyhow::Result<()> {
     let value = key.trim();
     let value = value.strip_prefix("Bearer ").unwrap_or(value).trim();
     if value.is_empty() {
@@ -368,28 +348,20 @@ pub fn write_llm_provider_key_in(
     if value.chars().any(|c| c.is_control()) {
         anyhow::bail!("API key must not contain control characters");
     }
-    let path = super::tokens::llm_provider_key_path_in(data_dir, project, provider_id)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-        crate::fs_perms::ensure_owner_only_dir(parent)?;
-    }
-    crate::fs_perms::write_restricted_file_atomic(&path, value)?;
-    Ok(path)
+    let name = SecretName::llm_provider_key(project, provider_id)?;
+    SecretStore::open(data_dir)?.write(&name, value)?;
+    Ok(())
 }
 
-/// Removes one provider's key file (e.g. provider deleted in Settings).
-/// Missing file is not an error.
+/// Removes one provider's key from the secret store.
 pub fn remove_llm_provider_key_in(
     data_dir: &Path,
     project: &str,
     provider_id: &str,
 ) -> anyhow::Result<()> {
-    let path = super::tokens::llm_provider_key_path_in(data_dir, project, provider_id)?;
-    match std::fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e.into()),
-    }
+    let name = SecretName::llm_provider_key(project, provider_id)?;
+    SecretStore::open(data_dir)?.delete(&name)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -460,21 +432,25 @@ mod tests {
     }
 
     #[test]
-    fn ensure_caller_token_is_stable_and_restricted() {
+    fn caller_token_is_derived_stable_per_project_and_never_stored() {
         let dir = tempfile::tempdir().unwrap();
-        let t1 = ensure_caller_token_in(dir.path(), "proj").unwrap();
-        let t2 = ensure_caller_token_in(dir.path(), "proj").unwrap();
+        let t1 = caller_token_in(dir.path(), "proj").unwrap();
+        let t2 = caller_token_in(dir.path(), "proj").unwrap();
         assert_eq!(t1, t2, "token must be stable across renders");
-        assert!(!t1.is_empty());
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(caller_token_path_in(dir.path(), "proj"))
-                .unwrap()
-                .permissions()
-                .mode();
-            assert_eq!(mode & 0o777, 0o600, "token file must be 0600");
-        }
+        assert_eq!(t1.len(), 64);
+        assert!(t1.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(t1, caller_token_in(dir.path(), "other").unwrap());
+        assert!(!dir.path().join("proxy").join("proj").exists());
+        assert!(caller_token_in(dir.path(), "../evil").is_err());
+    }
+
+    fn stored_key(dir: &Path, provider_id: &str) -> Option<String> {
+        let name = SecretName::llm_provider_key("proj", provider_id).unwrap();
+        SecretStore::open(dir)
+            .unwrap()
+            .read(&name)
+            .unwrap()
+            .map(|value| value.to_string())
     }
 
     fn rendered_content(dir: &Path, llm: &LlmConfig, forges: &[GitForge]) -> String {
@@ -488,7 +464,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = full_provider_mix();
         let rendered = rendered_content(dir.path(), &cfg, &[]);
-        let token = ensure_caller_token_in(dir.path(), "proj").unwrap();
+        let token = caller_token_in(dir.path(), "proj").unwrap();
         assert!(
             rendered.contains(&format!(r#""caller_token":"{token}""#)),
             "rendered proxy config must carry the caller token"
@@ -496,8 +472,8 @@ mod tests {
     }
 
     #[test]
-    fn render_proxy_config_writes_no_proxy_json_and_keeps_the_caller_token_file_owner_only() {
-        fn files_named(dir: &Path, name: &str, found: &mut Vec<PathBuf>) {
+    fn render_proxy_config_writes_no_proxy_json_and_no_caller_token_file() {
+        fn files_named(dir: &Path, name: &str, found: &mut Vec<std::path::PathBuf>) {
             for entry in std::fs::read_dir(dir).unwrap() {
                 let path = entry.unwrap().path();
                 if path.is_dir() {
@@ -520,14 +496,9 @@ mod tests {
         files_named(dir.path(), "proxy.json", &mut proxy_jsons);
         assert!(proxy_jsons.is_empty(), "found {proxy_jsons:?}");
 
-        let token_path = caller_token_path_in(dir.path(), "proj");
-        assert!(token_path.is_file());
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&token_path).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o600, "caller token must be owner-only");
-        }
+        let mut token_files = Vec::new();
+        files_named(dir.path(), "caller-token", &mut token_files);
+        assert!(token_files.is_empty(), "found {token_files:?}");
     }
 
     #[test]
@@ -1066,7 +1037,7 @@ mod tests {
                 access,
             );
             let content = rendered_content(dir.path(), &full_provider_mix(), &forges);
-            proxy_state_digest_in(&content, dir.path(), "proj")
+            proxy_state_digest_in(&content, dir.path(), "proj").unwrap()
         };
         let full = digest_with(&composed(false, false, &[]));
         let read_only = digest_with(&composed(false, true, &[]));
@@ -1175,10 +1146,12 @@ mod tests {
     #[test]
     fn write_key_validates_and_strips_bearer() {
         let dir = tempfile::tempdir().unwrap();
-        let path =
-            write_llm_provider_key_in(dir.path(), "proj", "openrouter", "Bearer sk-or-v1-abc ")
-                .unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "sk-or-v1-abc");
+        write_llm_provider_key_in(dir.path(), "proj", "openrouter", "Bearer sk-or-v1-abc ")
+            .unwrap();
+        assert_eq!(
+            stored_key(dir.path(), "openrouter").as_deref(),
+            Some("sk-or-v1-abc")
+        );
 
         assert!(write_llm_provider_key_in(dir.path(), "proj", "openrouter", "  ").is_err());
         assert!(
@@ -1205,22 +1178,25 @@ mod tests {
         };
         let content = rendered_content(dir.path(), &llm, &[]);
 
-        let d1 = proxy_state_digest_in(&content, dir.path(), "proj");
+        let d1 = proxy_state_digest_in(&content, dir.path(), "proj").unwrap();
         assert_eq!(d1.len(), 64);
         assert!(d1.chars().all(|c| c.is_ascii_hexdigit()));
-        assert_eq!(d1, proxy_state_digest_in(&content, dir.path(), "proj"));
+        assert_eq!(
+            d1,
+            proxy_state_digest_in(&content, dir.path(), "proj").unwrap()
+        );
 
         write_llm_provider_key_in(dir.path(), "proj", "openrouter", "sk-or-v1-abc").unwrap();
-        let d2 = proxy_state_digest_in(&content, dir.path(), "proj");
+        let d2 = proxy_state_digest_in(&content, dir.path(), "proj").unwrap();
         assert_ne!(d1, d2);
         assert!(!d2.contains("sk-or-v1-abc"));
 
         write_llm_provider_key_in(dir.path(), "proj", "openrouter", "sk-or-v1-xyz").unwrap();
-        let d3 = proxy_state_digest_in(&content, dir.path(), "proj");
+        let d3 = proxy_state_digest_in(&content, dir.path(), "proj").unwrap();
         assert_ne!(d2, d3, "same-length key rotation must change the digest");
 
         remove_llm_provider_key_in(dir.path(), "proj", "openrouter").unwrap();
-        let d4 = proxy_state_digest_in(&content, dir.path(), "proj");
+        let d4 = proxy_state_digest_in(&content, dir.path(), "proj").unwrap();
         assert_ne!(d3, d4);
         assert_eq!(d1, d4, "removing the key restores the original digest");
 
@@ -1233,7 +1209,10 @@ mod tests {
         };
         let content2 = rendered_content(dir.path(), &llm2, &[]);
         assert_ne!(content, content2);
-        assert_ne!(d1, proxy_state_digest_in(&content2, dir.path(), "proj"));
+        assert_ne!(
+            d1,
+            proxy_state_digest_in(&content2, dir.path(), "proj").unwrap()
+        );
     }
 
     #[test]
@@ -1244,10 +1223,10 @@ mod tests {
             ..Default::default()
         };
         let content = rendered_content(dir.path(), &llm, &[]);
-        let d1 = proxy_state_digest_in(&content, dir.path(), "proj");
+        let d1 = proxy_state_digest_in(&content, dir.path(), "proj").unwrap();
         assert_ne!(
             d1,
-            proxy_state_digest_in(r#"{"routes":[]}"#, dir.path(), "proj")
+            proxy_state_digest_in(r#"{"routes":[]}"#, dir.path(), "proj").unwrap()
         );
     }
 
@@ -1267,7 +1246,7 @@ mod tests {
                 &AccessPolicy::default(),
             );
             let content = rendered_content(dir.path(), &full_provider_mix(), &forges);
-            proxy_state_digest_in(&content, dir.path(), "proj")
+            proxy_state_digest_in(&content, dir.path(), "proj").unwrap()
         };
         let empty = digest_with(&[]);
         let one = digest_with(&["owner/repo"]);
@@ -1278,13 +1257,16 @@ mod tests {
     }
 
     #[test]
-    fn state_digest_handles_a_missing_tokens_dir() {
+    fn state_digest_handles_a_store_without_keys() {
         let dir = tempfile::tempdir().unwrap();
         let content = r#"{"routes":[]}"#;
-        let d = proxy_state_digest_in(content, dir.path(), "proj");
+        let d = proxy_state_digest_in(content, dir.path(), "proj").unwrap();
         assert_eq!(d.len(), 64);
-        assert_eq!(d, proxy_state_digest_in(content, dir.path(), "proj"));
-        assert_ne!(d, proxy_state_digest_in("{}", dir.path(), "proj"));
+        assert_eq!(
+            d,
+            proxy_state_digest_in(content, dir.path(), "proj").unwrap()
+        );
+        assert_ne!(d, proxy_state_digest_in("{}", dir.path(), "proj").unwrap());
     }
 
     #[test]
@@ -1300,12 +1282,10 @@ mod tests {
         };
         write_llm_provider_key_in(dir.path(), "proj", "local", "sk-rotated").unwrap();
         rendered_content(dir.path(), &llm, &[]);
-        let target =
-            super::super::tokens::llm_provider_key_path_in(dir.path(), "proj", "local").unwrap();
         assert_eq!(
-            std::fs::read_to_string(&target).unwrap(),
-            "sk-rotated",
-            "render_proxy_config_in must not touch an existing key in the new namespace"
+            stored_key(dir.path(), "local").as_deref(),
+            Some("sk-rotated"),
+            "render_proxy_config_in must not touch an existing key in the store"
         );
     }
 

@@ -90,7 +90,7 @@ This is distro-internal config — distinct from the host `%USERPROFILE%\.wslcon
 
 The `CLAUDE_CODE_OAUTH_TOKEN` env-var injection path was considered (an earlier draft of this ADR described it) but **rejected**: it requires Speedwave to capture the token from `claude setup-token` stdout, which is a brittle parser dependency on Anthropic's CLI output format. The `claude /login` path requires zero token handling on the Speedwave side — Anthropic owns the entire credential lifecycle. `SecurityCheck::check_no_tokens_in_claude` keeps `CLAUDE_CODE_OAUTH_TOKEN` on its env-var allowlist anyway: a user can still set it via shell environment for CI scenarios, and the allowlist guards against future regressions if we ever revisit injection.
 
-The legacy API-key path (`ANTHROPIC_API_KEY` injected from `~/.speedwave/secrets/<project>/anthropic_api_key`) remains untouched for users who set their key via Settings → Authentication → API key.
+The legacy API-key path (`ANTHROPIC_API_KEY` injected from `~/.speedwave/secrets/<project>/anthropic_api_key`) remains untouched for users who set their key via Settings → Authentication → API key.  *Amended by [ADR-116](ADR-116-secret-store.md) (2026-11-24): the API key is the encrypted secret `anthropic.api_key.enc` in `secrets/<project>/`, not a plaintext file.*
 
 ## Alternatives Considered
 

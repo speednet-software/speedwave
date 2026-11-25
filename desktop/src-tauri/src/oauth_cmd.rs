@@ -1,6 +1,5 @@
 use crate::oauth_flow::{
-    self, emit_error, save_credential_file, DeviceCodeInfo, DeviceCodeProvider, FlowRegistry,
-    PollStep, ProgressStatus,
+    self, emit_error, DeviceCodeInfo, DeviceCodeProvider, FlowRegistry, PollStep, ProgressStatus,
 };
 use crate::types::check_project;
 use serde::Deserialize;
@@ -84,6 +83,7 @@ struct SpOAuthState<'a> {
     client_id: &'a str,
     tenant_id: &'a str,
     refresh_token: &'a str,
+    access_token: &'a str,
     scopes: &'a str,
     expires_in: u64,
 }
@@ -99,14 +99,18 @@ fn save_oauth_state_in(
     if st.refresh_token.len() > max {
         return Err(format!("refresh_token exceeds {max} bytes"));
     }
+    if st.access_token.len() > max {
+        return Err(format!("access_token exceeds {max} bytes"));
+    }
     let scopes_vec: Vec<String> = st.scopes.split_whitespace().map(String::from).collect();
     let mut provider_data = std::collections::BTreeMap::new();
     provider_data.insert("clientId".to_string(), st.client_id.to_string());
     provider_data.insert("tenantId".to_string(), st.tenant_id.to_string());
 
-    let path = speedwave_runtime::plugin::oauth_state_file_in(data_dir, project, service);
     speedwave_runtime::oauth_persist::write_oauth_state(
-        &path,
+        data_dir,
+        project,
+        service,
         &speedwave_runtime::oauth_persist::OAuthStateParams {
             provider: crate::oauth_providers::MICROSOFT_PROVIDER_ID,
             grant_type: None,
@@ -114,6 +118,7 @@ fn save_oauth_state_in(
             scopes: scopes_vec.clone(),
             granted_scopes: scopes_vec,
             refresh_token: st.refresh_token,
+            access_token: Some(st.access_token),
             expires_in: st.expires_in,
         },
     )
@@ -186,13 +191,11 @@ fn save_tokens_in(
             client_id,
             tenant_id,
             refresh_token: &tokens.refresh_token,
+            access_token: &tokens.access_token,
             scopes: speedwave_runtime::consts::SHAREPOINT_OAUTH_SCOPES,
             expires_in: tokens.expires_in(),
         },
-    )?;
-    let svc_dir = speedwave_runtime::plugin::token_dir_in(data_dir, project, "sharepoint");
-    save_credential_file(&svc_dir, "access_token", &tokens.access_token)?;
-    Ok(())
+    )
 }
 
 /// SharePoint/Microsoft device-code polling behaviour. Drives the shared
@@ -360,6 +363,19 @@ pub fn cancel_sharepoint_oauth() {
 #[expect(clippy::unwrap_used, reason = "unwrap is fine in test assertions")]
 mod tests {
     use super::*;
+    use speedwave_runtime::secret_store::{SecretName, SecretStore};
+
+    const SENTINEL_RT: &str = "SENTINEL-997-sharepoint-refresh";
+    const SENTINEL_AT: &str = "SENTINEL-997-sharepoint-access";
+
+    fn read_secret(data_dir: &std::path::Path, field: &str) -> Option<String> {
+        let name = SecretName::integration("test-project", "sharepoint", field).unwrap();
+        SecretStore::open(data_dir)
+            .unwrap()
+            .read(&name)
+            .unwrap()
+            .map(|value| value.as_str().to_string())
+    }
 
     #[test]
     fn validate_tenant_id_accepts_uuid_with_hyphens() {
@@ -546,7 +562,8 @@ mod tests {
             &SpOAuthState {
                 client_id: "11111111-1111-1111-1111-111111111111",
                 tenant_id: "common",
-                refresh_token: "rt-secret",
+                refresh_token: SENTINEL_RT,
+                access_token: SENTINEL_AT,
                 scopes: speedwave_runtime::consts::SHAREPOINT_OAUTH_SCOPES,
                 expires_in: 3600,
             },
@@ -568,7 +585,18 @@ mod tests {
         assert_eq!(json["providerData"]["tenantId"], "common");
         assert!(json.get("clientId").is_none());
         assert!(json.get("tenantId").is_none());
-        assert_eq!(json["refreshToken"], "rt-secret");
+        assert!(json.get("refreshToken").is_none());
+        assert_eq!(
+            read_secret(tmp.path(), "refresh_token").as_deref(),
+            Some(SENTINEL_RT)
+        );
+        assert_eq!(
+            read_secret(tmp.path(), "access_token").as_deref(),
+            Some(SENTINEL_AT)
+        );
+        assert!(
+            crate::types::test_support::files_containing(tmp.path(), "SENTINEL-997").is_empty()
+        );
         assert!(json["scopes"].as_array().unwrap().len() >= 2);
         assert!(json["grantedScopes"].as_array().unwrap().len() >= 2);
         assert!(json["expiresAt"].as_str().unwrap().ends_with('Z'));
@@ -595,7 +623,6 @@ mod tests {
             "providerData",
             "scopes",
             "grantedScopes",
-            "refreshToken",
             "expiresAt",
             "lastRefreshAt",
         ];
@@ -609,7 +636,8 @@ mod tests {
             &SpOAuthState {
                 client_id: "11111111-1111-1111-1111-111111111111",
                 tenant_id: "common",
-                refresh_token: "rt-secret",
+                refresh_token: SENTINEL_RT,
+                access_token: SENTINEL_AT,
                 scopes: speedwave_runtime::consts::SHAREPOINT_OAUTH_SCOPES,
                 expires_in: 3600,
             },
@@ -663,6 +691,7 @@ mod tests {
                 client_id: "11111111-1111-1111-1111-111111111111",
                 tenant_id: "common",
                 refresh_token: &big,
+                access_token: "at",
                 scopes: speedwave_runtime::consts::SHAREPOINT_OAUTH_SCOPES,
                 expires_in: 3600,
             },
@@ -671,11 +700,32 @@ mod tests {
     }
 
     #[test]
-    fn save_tokens_splits_into_two_locations() {
+    fn save_oauth_state_rejects_oversized_access_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let big = "x".repeat(crate::types::MAX_CREDENTIAL_BYTES + 1);
+        let result = save_oauth_state_in(
+            tmp.path(),
+            "test-project",
+            "sharepoint",
+            &SpOAuthState {
+                client_id: "11111111-1111-1111-1111-111111111111",
+                tenant_id: "common",
+                refresh_token: "rt",
+                access_token: &big,
+                scopes: speedwave_runtime::consts::SHAREPOINT_OAUTH_SCOPES,
+                expires_in: 3600,
+            },
+        );
+        assert!(result.unwrap_err().contains("access_token"));
+        assert!(!tmp.path().join("secrets").exists());
+    }
+
+    #[test]
+    fn save_tokens_stores_secrets_and_keeps_metadata_in_the_state_file() {
         let tmp = tempfile::tempdir().unwrap();
         let tokens = MsTokenResponse {
-            access_token: "at-secret".to_string(),
-            refresh_token: "rt-secret".to_string(),
+            access_token: SENTINEL_AT.to_string(),
+            refresh_token: SENTINEL_RT.to_string(),
             _token_type: "Bearer".to_string(),
             expires_in: 3600,
         };
@@ -690,13 +740,21 @@ mod tests {
 
         let svc_dir =
             speedwave_runtime::plugin::token_dir_in(tmp.path(), "test-project", "sharepoint");
-        assert_eq!(
-            std::fs::read_to_string(svc_dir.join("access_token")).unwrap(),
-            "at-secret"
-        );
+        assert!(!svc_dir.join("access_token").exists());
         assert!(
             !svc_dir.join("refresh_token").exists(),
             "refresh_token must NOT be in the worker-mounted dir"
+        );
+        assert_eq!(
+            read_secret(tmp.path(), "access_token").as_deref(),
+            Some(SENTINEL_AT)
+        );
+        assert_eq!(
+            read_secret(tmp.path(), "refresh_token").as_deref(),
+            Some(SENTINEL_RT)
+        );
+        assert!(
+            crate::types::test_support::files_containing(tmp.path(), "SENTINEL-997").is_empty()
         );
         let state_path = speedwave_runtime::plugin::oauth_state_file_in(
             tmp.path(),
@@ -705,12 +763,45 @@ mod tests {
         );
         let content = std::fs::read_to_string(&state_path).unwrap();
         let json: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(json["refreshToken"], "rt-secret");
+        assert!(json.get("refreshToken").is_none());
         assert_eq!(
             json["providerData"]["clientId"],
             "11111111-1111-1111-1111-111111111111"
         );
         assert_eq!(json["providerData"]["tenantId"], "common");
+    }
+
+    #[test]
+    fn save_tokens_fails_without_writing_the_state_when_the_install_key_is_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let other = SecretName::integration("test-project", "gitlab", "token").unwrap();
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        SecretStore::open_with(
+            tmp.path(),
+            Box::new(speedwave_runtime::secret_store::FileKeySource::new(
+                elsewhere.join("k"),
+            )),
+        )
+        .unwrap()
+        .write(&other, "x")
+        .unwrap();
+        let tokens = MsTokenResponse {
+            access_token: SENTINEL_AT.to_string(),
+            refresh_token: SENTINEL_RT.to_string(),
+            _token_type: "Bearer".to_string(),
+            expires_in: 3600,
+        };
+
+        let err = save_tokens_in(tmp.path(), "test-project", "cid", "common", &tokens).unwrap_err();
+
+        assert!(!err.contains("SENTINEL-997"));
+        assert!(!speedwave_runtime::plugin::oauth_state_file_in(
+            tmp.path(),
+            "test-project",
+            "sharepoint"
+        )
+        .exists());
     }
 
     #[test]
@@ -874,9 +965,13 @@ mod tests {
             PollStep::Emit { status, .. } => assert_eq!(status, ProgressStatus::Success),
             PollStep::KeepPolling { .. } => panic!("success must terminate"),
         }
-        let at_path =
-            speedwave_runtime::plugin::token_dir_in(tmp.path(), "test-project", "sharepoint")
-                .join("access_token");
-        assert_eq!(std::fs::read_to_string(&at_path).unwrap(), "at-secret");
+        assert_eq!(
+            read_secret(tmp.path(), "access_token").as_deref(),
+            Some("at-secret")
+        );
+        assert_eq!(
+            read_secret(tmp.path(), "refresh_token").as_deref(),
+            Some("rt-secret")
+        );
     }
 }

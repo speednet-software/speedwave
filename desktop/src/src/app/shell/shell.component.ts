@@ -3,10 +3,12 @@ import {
   ChangeDetectorRef,
   Component,
   computed,
+  effect,
   inject,
   OnDestroy,
   OnInit,
   signal,
+  untracked,
 } from '@angular/core';
 import { DOCUMENT } from '@angular/common';
 import { Dialog } from '@angular/cdk/dialog';
@@ -20,6 +22,7 @@ import { BetaService } from '../services/beta.service';
 import { ChatStateService } from '../services/chat-state.service';
 import { NotificationsService } from '../services/notifications.service';
 import { ProjectStateService } from '../services/project-state.service';
+import { SecretStoreService } from '../services/secret-store.service';
 import { TabSwitcherService } from '../services/tab-switcher.service';
 import { TranscriptionService } from '../services/transcription.service';
 import { UiStateService } from '../services/ui-state.service';
@@ -28,6 +31,8 @@ import { ModalOverlayComponent } from './modal-overlay/modal-overlay.component';
 import { NavRailComponent, type NavRailEntry } from './nav-rail/nav-rail.component';
 import { SpinIconComponent } from '../shared/spin-icon.component';
 import { CloudStorageModalComponent } from '../shared/cloudstorage-modal/cloudstorage-modal.component';
+import { SecretStoreDialogComponent } from './secret-store-dialog/secret-store-dialog.component';
+import { SecretStoreNoticeComponent } from './secret-store-notice/secret-store-notice.component';
 
 const TRANSCRIPTION_ENTRY_ID = 'meeting-transcription';
 
@@ -46,6 +51,8 @@ const TRANSCRIPTION_ENTRY_ID = 'meeting-transcription';
     CommandPaletteComponent,
     SpinIconComponent,
     CloudStorageModalComponent,
+    SecretStoreDialogComponent,
+    SecretStoreNoticeComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { '(document:keydown)': 'onKeydown($event)' },
@@ -155,12 +162,15 @@ const TRANSCRIPTION_ENTRY_ID = 'meeting-transcription';
         />
       }
       <app-update-notification />
+      <app-secret-store-notice />
 
       <!-- CloudStorage TCC modal — shown when project dir is in OneDrive/Dropbox/etc. and TCC is denied -->
       <app-cloudstorage-modal
         [visible]="projectState.errorKind === 'cloudstorage_tcc_required'"
         [provider]="projectState.failureProvider"
       />
+
+      <app-secret-store-dialog />
 
       <div class="flex flex-1 overflow-hidden">
         <app-nav-rail
@@ -204,6 +214,7 @@ export class ShellComponent implements OnInit, OnDestroy {
   private cdr = inject(ChangeDetectorRef);
   private router = inject(Router);
   private readonly notifications = inject(NotificationsService);
+  private readonly secretStore = inject(SecretStoreService);
   private unsubscribe: (() => void) | null = null;
   private routerSub: Subscription | null = null;
   private stopNotificationRouting: UnlistenFn | null = null;
@@ -288,6 +299,16 @@ export class ShellComponent implements OnInit, OnDestroy {
       default:
         return '';
     }
+  }
+
+  /** Re-reads the secret store status whenever the active project changes. */
+  constructor() {
+    effect(() => {
+      if (this.projectState.activeProject() === null) return;
+      untracked(() => {
+        void this.secretStore.refresh();
+      });
+    });
   }
 
   /** Bootstraps project state, tracks the current URL and routes notification clicks. */

@@ -48,6 +48,3 @@ desktop/src/src/app/services/transcription.service.spec.ts:generic-api-key:1942
 desktop/src/src/app/meeting-transcription/recording-controls/recording-controls.component.spec.ts:generic-api-key:102
 
 .claude/rules/architecture.md:generic-api-key:7
-
-crates/speedwave-runtime/src/compose/mod.rs:generic-api-key:4211
-crates/speedwave-runtime/src/compose/mod.rs:generic-api-key:4213

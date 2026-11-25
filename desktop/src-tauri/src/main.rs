@@ -57,6 +57,7 @@ mod queue_cmd;
 mod reconcile;
 mod redmine_api_cmd;
 mod retry_cmd;
+mod secret_store_cmd;
 mod session_model;
 mod session_refresh;
 mod setup_wizard;
@@ -470,6 +471,9 @@ fn main() {
     }));
 
     let migrations = speedwave_migrations::run_all(speedwave_runtime::consts::data_dir());
+    secret_store_cmd::log_startup_state(speedwave_runtime::consts::data_dir());
+    let migration_notices =
+        secret_store_cmd::MigrationNotices::from_report(migrations.as_ref().ok());
 
     let setup_started = setup_wizard::SetupState::load().runtime_ready;
 
@@ -632,6 +636,7 @@ fn main() {
             }
         }))
         .manage(chat_sessions)
+        .manage(migration_notices)
         .manage(ide_bridge.clone())
         .manage(clipboard_bridge_slot.clone())
         .manage(plugin_bridges.clone())
@@ -647,8 +652,13 @@ fn main() {
             log::set_max_level(log::LevelFilter::Trace);
             logging_cmd::init_bundle_identifier(app.config().identifier.clone());
             match &migrations {
-                Ok(report) if report.failed.is_empty() => log::debug!("migrations: {report}"),
-                Ok(report) => log::warn!("migrations: {report}"),
+                Ok(report) if report.failures.is_empty() => log::debug!("migrations: {report}"),
+                Ok(report) => {
+                    log::warn!("migrations: {report}");
+                    for (name, reason) in &report.failures {
+                        log::warn!("migration {name} failed: {reason}");
+                    }
+                }
                 Err(e) => {
                     log::error!("startup migrations failed: the migrations lock could not be taken");
                     let body = format!(
@@ -967,6 +977,8 @@ fn main() {
             containers_cmd::set_provider_model,
             containers_cmd::clear_active_llm_provider,
             containers_cmd::restart_llm_proxy,
+            secret_store_cmd::get_secret_store_status,
+            secret_store_cmd::reset_secret_store,
             access_cmd::get_access_settings,
             access_cmd::set_read_only_mode,
             access_cmd::get_integration_access,

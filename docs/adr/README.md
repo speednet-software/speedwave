@@ -118,6 +118,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-113](ADR-113-startup-migrations-in-one-crate.md)                  | Startup migrations of the data directory in one crate (`speedwave-migrations`)                                              | Accepted                                                                           |
 | [ADR-114](ADR-114-cryptography-in-one-leaf-crate.md)                   | Cryptography in one leaf crate (`speedwave-crypto`)                                                                         | Accepted                                                                           |
 | [ADR-115](ADR-115-container-secrets-in-a-vm-tmpfs.md)                  | Container secrets in a VM tmpfs: slots per container, written through stdin before every start, files instead of env        | Accepted                                                                           |
+| [ADR-116](ADR-116-secret-store.md)                                     | Secret store: encrypted per-secret files under `secrets/`, one install key, derived bearers, migration `secrets_at_rest`    | Accepted                                                                           |
 
 ## Creating a New ADR
 

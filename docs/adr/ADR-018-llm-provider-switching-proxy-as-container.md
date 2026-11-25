@@ -22,7 +22,7 @@ ADR-040 deleted LiteLLM and the `llm-proxy` container. The current behaviour, im
 
 ## Secrets management (current state)
 
-There is no `~/.speedwave/secrets/<project>/llm.env` file and no `env_file` mechanism. Local-provider credentials live in two per-project token files under `tokens/<project>/local-llm/` — `api_key` and `custom_headers` — read by `read_local_llm_token_opt_in` in `crates/speedwave-runtime/src/compose.rs`. The `api_key` becomes the `ANTHROPIC_AUTH_TOKEN` Bearer; `custom_headers` are flattened into `ANTHROPIC_CUSTOM_HEADERS` (a defensive filter strips any `Authorization:` line so a stale token cannot collide with the Bearer).
+There is no `~/.speedwave/secrets/<project>/llm.env` file and no `env_file` mechanism. Local-provider credentials live in two per-project token files under `tokens/<project>/local-llm/` — `api_key` and `custom_headers` — read by `read_local_llm_token_opt_in` in `crates/speedwave-runtime/src/compose.rs`. The `api_key` becomes the `ANTHROPIC_AUTH_TOKEN` Bearer; `custom_headers` are flattened into `ANTHROPIC_CUSTOM_HEADERS` (a defensive filter strips any `Authorization:` line so a stale token cannot collide with the Bearer).  *Amended by [ADR-116](ADR-116-secret-store.md) (2026-11-24): the local LLM `api_key` and `custom_headers` are the encrypted secrets `local-llm.api_key.enc` and `local-llm.custom_headers.enc`, not files under `tokens/`.*
 
 ## Security check (survives)
 

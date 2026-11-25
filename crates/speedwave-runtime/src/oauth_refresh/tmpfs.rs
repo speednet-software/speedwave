@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use super::status::Status;
-use super::store::{self, Paths};
+use super::store;
 use super::RefreshOutcome;
 use crate::compose::secret_slots::{
     builtin_worker_has_tokens, enabled_builtin_workers, enabled_plugin_workers, proxy_git_mount,
@@ -121,16 +121,13 @@ impl Entry {
             return Ok(());
         };
         if self.pending.token {
-            let host_file = Paths::new(target.data_dir, target.project, service)
-                .token_dir
-                .join(store::ACCESS_TOKEN_FILE);
-            let token = std::fs::read(host_file)?;
+            let token = store::read_access_token(target.data_dir, target.project, service)?;
             for slot in std::iter::once(&worker).chain(&slots.git) {
                 target.runtime.put_secret_file(
                     target.project,
                     slot,
                     store::ACCESS_TOKEN_FILE,
-                    &token,
+                    token.as_bytes(),
                 )?;
             }
             self.pending.token = false;
@@ -260,9 +257,18 @@ mod tests {
     }
 
     fn write_access_token(data_dir: &Path, service: &str, token: &str) {
-        let dir = Paths::new(data_dir, "proj", service).token_dir;
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(store::ACCESS_TOKEN_FILE), token).unwrap();
+        crate::secret_store::SecretStore::open(data_dir)
+            .unwrap()
+            .write(
+                &crate::secret_store::SecretName::integration(
+                    "proj",
+                    service,
+                    store::ACCESS_TOKEN_FILE,
+                )
+                .unwrap(),
+                token,
+            )
+            .unwrap();
     }
 
     fn running_runtime(exit: i32) -> (LockedRuntime, MockHandles) {
@@ -352,6 +358,42 @@ mod tests {
     }
 
     #[test]
+    fn the_token_put_into_the_slot_comes_from_the_store_and_is_on_no_host_file() {
+        let data_dir = data_dir_with_project();
+        write_access_token(data_dir.path(), "slack", "SENTINEL-997-slot-token");
+        let (runtime, handles) = running_runtime(0);
+
+        publish(
+            &Publications::default(),
+            &runtime,
+            data_dir.path(),
+            RefreshOutcome::Refreshed,
+        );
+
+        assert_eq!(puts(&handles)[0].2, "SENTINEL-997-slot-token");
+        assert!(crate::oauth_persist::test_support::files_containing(
+            data_dir.path(),
+            "SENTINEL-997-slot-token"
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn a_refresh_without_a_stored_access_token_puts_nothing() {
+        let data_dir = data_dir_with_project();
+        let (runtime, handles) = running_runtime(0);
+
+        publish(
+            &Publications::default(),
+            &runtime,
+            data_dir.path(),
+            RefreshOutcome::Refreshed,
+        );
+
+        assert!(puts(&handles).is_empty());
+    }
+
+    #[test]
     fn a_service_without_a_mounted_worker_publishes_nothing() {
         let data_dir = data_dir_with_project();
         write_access_token(data_dir.path(), "mystery", "at");
@@ -392,7 +434,7 @@ mod tests {
             statuses(&handles),
             ["network_error", "reconnect_required", ""]
         );
-        let host_dir = Paths::new(data_dir.path(), "proj", "slack").token_dir;
+        let host_dir = crate::plugin::token_dir_in(data_dir.path(), "proj", "slack");
         assert!(!host_dir.join(consts::OAUTH_REFRESH_STATUS_FILE).exists());
     }
 

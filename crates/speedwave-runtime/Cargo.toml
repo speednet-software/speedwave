@@ -22,6 +22,7 @@ fs2 = "0.4"
 log = { workspace = true }
 regex = "1"
 speedwave-access-policy = { path = "../access-policy" }
+speedwave-crypto = { path = "../speedwave-crypto" }
 speedwave-pii-engine = { path = "../pii-engine" }
 zip = { version = "9", default-features = false, features = ["deflate"] }
 ed25519-dalek = "3"
@@ -37,6 +38,7 @@ shlex = "2.0"
 strum = { version = "0.28", features = ["derive"] }
 strum_macros = "0.28"
 tempfile = "3"
+zeroize = "1"
 
 hound = { version = "3", optional = true }
 symphonia = { version = "0.6.1", optional = true, default-features = false, features = ["aac", "flac", "isomp4", "mp3", "ogg", "pcm", "vorbis", "wav"] }

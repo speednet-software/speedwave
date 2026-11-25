@@ -60,7 +60,13 @@ pub async fn start_plugin_oauth(
             oauth.grant_type.as_str()
         ));
     }
-    let seed = read_oauth_seed(&project, &slug)?;
+    let seed = speedwave_runtime::plugin::read_oauth_seed_in(
+        speedwave_runtime::consts::data_dir(),
+        &project,
+        &slug,
+        &manifest.auth_fields,
+    )
+    .map_err(|e| e.to_string())?;
     let client_id = seed
         .get(&oauth.client_id_field)
         .cloned()
@@ -187,17 +193,11 @@ pub async fn start_plugin_oauth(
             return;
         }
 
-        if let Err(e) = persist_state(
-            &project,
-            &slug,
-            &oauth,
-            &token_url,
-            &client_id,
-            client_secret.as_deref(),
-            &token,
-        )
-        .and_then(|()| write_access_token(&project, &slug, &token.access_token))
-        .and_then(|()| project_base_url_to_mount(&project, &slug, &oauth, &seed))
+        let data_dir = speedwave_runtime::consts::data_dir();
+        let provider_data =
+            build_provider_data(&oauth, &token_url, &client_id, client_secret.as_deref());
+        if let Err(e) = persist_state(data_dir, &project, &slug, &oauth, provider_data, &token)
+            .and_then(|()| project_base_url_to_mount(data_dir, &project, &slug, &oauth, &seed))
         {
             oauth_flow::emit_terminal(&app, &FLOW_STATE, ProgressStatus::Error, &e, &request_id);
             return;
@@ -216,14 +216,6 @@ pub async fn start_plugin_oauth(
 #[tauri::command]
 pub fn cancel_plugin_oauth() {
     FLOW_STATE.cancel();
-}
-
-/// Reads the pre-auth seed (`oauth/<project>/<slug>.seed.json`).
-fn read_oauth_seed(project: &str, slug: &str) -> Result<HashMap<String, String>, String> {
-    let path = speedwave_runtime::plugin::oauth_seed_file(project, slug);
-    let body = std::fs::read_to_string(&path)
-        .map_err(|_| "OAuth client credentials are not configured yet".to_string())?;
-    serde_json::from_str(&body).map_err(|e| format!("corrupt oauth seed: {e}"))
 }
 
 /// Returns `(authorize_url, token_url)`: static manifest URLs, or per-instance ones resolved
@@ -246,6 +238,7 @@ fn resolve_endpoints(
 /// Copies the per-instance base URL from the seed into the worker's `/tokens`
 /// mount so the worker can read its API base. The seed remains the SSOT.
 fn project_base_url_to_mount(
+    data_dir: &std::path::Path,
     project: &str,
     slug: &str,
     oauth: &PluginOAuthSpec,
@@ -257,10 +250,7 @@ fn project_base_url_to_mount(
     let Some(value) = seed.get(field) else {
         return Ok(());
     };
-    let dir = access_token_path(project, slug)?
-        .parent()
-        .ok_or_else(|| "base projection: no parent".to_string())?
-        .to_path_buf();
+    let dir = speedwave_runtime::plugin::token_dir_in(data_dir, project, slug);
     oauth_flow::save_credential_file(&dir, field, value)
 }
 
@@ -309,14 +299,12 @@ async fn exchange_code(
         .map_err(|e| format!("malformed token response: {e}"))
 }
 
-/// Writes the full OAuthState (provider=generic) off-mount via the runtime SSOT.
 fn persist_state(
+    data_dir: &std::path::Path,
     project: &str,
     slug: &str,
     oauth: &PluginOAuthSpec,
-    token_url: &str,
-    client_id: &str,
-    client_secret: Option<&str>,
+    provider_data: std::collections::BTreeMap<String, String>,
     token: &TokenResponse,
 ) -> Result<(), String> {
     let refresh_token = token.refresh_token.clone().ok_or_else(|| {
@@ -330,11 +318,15 @@ fn persist_state(
         .map(|s| s.split_whitespace().map(String::from).collect())
         .unwrap_or_default();
 
-    let provider_data = build_provider_data(oauth, token_url, client_id, client_secret);
+    let max = crate::types::MAX_CREDENTIAL_BYTES;
+    if token.access_token.len() > max {
+        return Err(format!("access_token exceeds {max} bytes"));
+    }
 
-    let path = speedwave_runtime::plugin::oauth_state_file(project, slug);
     speedwave_runtime::oauth_persist::write_oauth_state(
-        &path,
+        data_dir,
+        project,
+        slug,
         &speedwave_runtime::oauth_persist::OAuthStateParams {
             provider: "generic",
             grant_type: Some("refresh_token"),
@@ -342,13 +334,12 @@ fn persist_state(
             scopes: oauth.scopes.clone(),
             granted_scopes: granted,
             refresh_token: &refresh_token,
+            access_token: Some(&token.access_token),
             expires_in: token.expires_in,
         },
     )
 }
 
-/// providerData map the host-side generic refresh reads (`oauth_refresh::generic`); `token_url` is
-/// the RESOLVED absolute URL.
 fn build_provider_data(
     oauth: &PluginOAuthSpec,
     token_url: &str,
@@ -370,22 +361,6 @@ fn build_provider_data(
         .to_string(),
     );
     provider_data
-}
-
-/// Writes the short-lived access token to the plugin's tokens dir (mounted ro).
-fn write_access_token(project: &str, slug: &str, access_token: &str) -> Result<(), String> {
-    let path = access_token_path(project, slug)?;
-    let dir = path
-        .parent()
-        .ok_or_else(|| "access: no parent".to_string())?;
-    oauth_flow::save_credential_file(dir, "access_token", access_token)
-}
-
-/// `~/.speedwave/tokens/<project>/<slug>/access_token`.
-fn access_token_path(project: &str, slug: &str) -> Result<std::path::PathBuf, String> {
-    Ok(speedwave_runtime::plugin::token_dir(project, slug)
-        .map_err(|e| e.to_string())?
-        .join("access_token"))
 }
 
 #[cfg(test)]
@@ -467,15 +442,6 @@ mod tests {
             authorize.as_deref(),
             Some("https://glpi.example.com/api.php/authorize")
         );
-    }
-
-    #[test]
-    fn access_token_path_is_under_tokens() {
-        let p = access_token_path("proj", "my-plugin").unwrap();
-        let tail: std::path::PathBuf = ["tokens", "proj", "my-plugin", "access_token"]
-            .iter()
-            .collect();
-        assert!(p.ends_with(tail));
     }
 
     #[test]
@@ -672,17 +638,135 @@ mod tests {
             expires_in: 3600,
             scope: None,
         };
-        let err = persist_state(
-            "proj",
-            "plug",
+        let tmp = tempfile::tempdir().unwrap();
+        let provider_data =
+            build_provider_data(&spec(), "https://idp.example.com/token", "cid", None);
+        let err =
+            persist_state(tmp.path(), "proj", "plug", &spec(), provider_data, &token).unwrap_err();
+        assert!(err.contains("no refresh_token"), "got: {err}");
+        assert!(!tmp.path().join("secrets").exists());
+    }
+
+    const SENTINEL_AT: &str = "SENTINEL-997-plugin-access";
+    const SENTINEL_RT: &str = "SENTINEL-997-plugin-refresh";
+    const SENTINEL_CS: &str = "SENTINEL-997-plugin-client";
+
+    fn sample_token() -> TokenResponse {
+        TokenResponse {
+            access_token: SENTINEL_AT.to_string(),
+            refresh_token: Some(SENTINEL_RT.to_string()),
+            expires_in: 3600,
+            scope: Some("read write".to_string()),
+        }
+    }
+
+    fn read_secret(data_dir: &std::path::Path, field: &str) -> Option<String> {
+        let name = speedwave_runtime::secret_store::SecretName::integration("proj", "plug", field)
+            .unwrap();
+        speedwave_runtime::secret_store::SecretStore::open(data_dir)
+            .unwrap()
+            .read(&name)
+            .unwrap()
+            .map(|value| value.as_str().to_string())
+    }
+
+    #[test]
+    fn persist_state_moves_every_secret_to_the_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let provider_data = build_provider_data(
             &spec(),
             "https://idp.example.com/token",
             "cid",
-            None,
-            &token,
+            Some(SENTINEL_CS),
+        );
+
+        persist_state(
+            tmp.path(),
+            "proj",
+            "plug",
+            &spec(),
+            provider_data,
+            &sample_token(),
         )
-        .unwrap_err();
-        assert!(err.contains("no refresh_token"), "got: {err}");
+        .unwrap();
+
+        assert_eq!(
+            read_secret(tmp.path(), "access_token").as_deref(),
+            Some(SENTINEL_AT)
+        );
+        assert_eq!(
+            read_secret(tmp.path(), "refresh_token").as_deref(),
+            Some(SENTINEL_RT)
+        );
+        assert_eq!(
+            read_secret(tmp.path(), "client_secret").as_deref(),
+            Some(SENTINEL_CS)
+        );
+        assert!(
+            !speedwave_runtime::plugin::token_dir_in(tmp.path(), "proj", "plug")
+                .join("access_token")
+                .exists()
+        );
+
+        let state: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(speedwave_runtime::plugin::oauth_state_file_in(
+                tmp.path(),
+                "proj",
+                "plug",
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(state["providerData"]["clientId"], "cid");
+        assert!(state["providerData"].get("clientSecret").is_none());
+        assert!(state.get("refreshToken").is_none());
+        assert!(
+            crate::types::test_support::files_containing(tmp.path(), "SENTINEL-997").is_empty()
+        );
+    }
+
+    #[test]
+    fn persist_state_rejects_an_oversized_access_token_before_writing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut token = sample_token();
+        token.access_token = "x".repeat(crate::types::MAX_CREDENTIAL_BYTES + 1);
+        let provider_data =
+            build_provider_data(&spec(), "https://idp.example.com/token", "cid", None);
+
+        let err =
+            persist_state(tmp.path(), "proj", "plug", &spec(), provider_data, &token).unwrap_err();
+
+        assert!(err.contains("access_token"));
+        assert!(!tmp.path().join("secrets").exists());
+        assert!(!tmp.path().join("oauth").exists());
+    }
+
+    #[test]
+    fn project_base_url_to_mount_writes_the_non_secret_base_url_as_a_plain_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut s = spec();
+        s.base_url_field = Some("base".to_string());
+        let seed: HashMap<String, String> = [(
+            "base".to_string(),
+            "https://glpi.example.com/api.php".to_string(),
+        )]
+        .into_iter()
+        .collect();
+
+        project_base_url_to_mount(tmp.path(), "proj", "plug", &s, &seed).unwrap();
+
+        let file = speedwave_runtime::plugin::token_dir_in(tmp.path(), "proj", "plug").join("base");
+        assert_eq!(
+            std::fs::read_to_string(file).unwrap(),
+            "https://glpi.example.com/api.php"
+        );
+    }
+
+    #[test]
+    fn project_base_url_to_mount_is_a_no_op_without_a_base_url_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        project_base_url_to_mount(tmp.path(), "proj", "plug", &spec(), &HashMap::new()).unwrap();
+        assert!(!tmp.path().join("tokens").exists());
     }
 
     #[test]

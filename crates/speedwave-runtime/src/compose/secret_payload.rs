@@ -8,10 +8,115 @@ use super::secret_slots::{
 };
 use super::{llm, proxy, workers};
 use crate::config::{ResolvedClaudeConfig, ResolvedIntegrationsConfig};
-use crate::consts;
+use crate::consts::{self, McpServiceDescriptor};
 use crate::plugin::PluginManifest;
+use crate::secret_store::{builtin_secret_fields, ProjectSecrets, SecretName, SecretStore};
 use crate::secrets_tmpfs::layout::{validate_file_name, ProjectPayload, SecretFile, SlotFiles};
 use std::path::Path;
+
+const REFRESH_TOKEN_FIELD: &str = "refresh_token";
+const ACCESS_TOKEN_FIELD: &str = "access_token";
+const PII_SERVICE: &str = "pii";
+const PII_KEY_FIELD: &str = "key";
+const LLM_KEY_FIELD_SUFFIX: &str = "_api_key";
+
+pub(super) struct WorkerCredentials {
+    service: String,
+    delivered: Vec<String>,
+    host_only: Vec<String>,
+}
+
+impl WorkerCredentials {
+    pub(super) fn builtin_key(config_key: &str) -> Self {
+        let (host_only, delivered) = builtin_secret_fields(config_key)
+            .into_iter()
+            .map(str::to_string)
+            .partition(|field| field == REFRESH_TOKEN_FIELD);
+        Self {
+            service: config_key.to_string(),
+            delivered,
+            host_only,
+        }
+    }
+
+    pub(super) fn builtin(svc: &McpServiceDescriptor) -> Self {
+        Self::builtin_key(svc.config_key)
+    }
+
+    pub(super) fn plugin(service_id: &str, manifest: &PluginManifest) -> Self {
+        let mut delivered = Vec::new();
+        let mut host_only = Vec::new();
+        for field in manifest.auth_fields.iter().filter(|field| field.is_secret) {
+            if field.oauth_flow {
+                host_only.push(field.key.clone());
+            } else {
+                delivered.push(field.key.clone());
+            }
+        }
+        if manifest.oauth.is_some() {
+            delivered.push(ACCESS_TOKEN_FIELD.to_string());
+            host_only.push(REFRESH_TOKEN_FIELD.to_string());
+        }
+        delivered.sort();
+        delivered.dedup();
+        host_only.sort();
+        host_only.dedup();
+        host_only.retain(|field| !delivered.contains(field));
+        Self {
+            service: service_id.to_string(),
+            delivered,
+            host_only,
+        }
+    }
+
+    pub(super) fn files(
+        &self,
+        project: &str,
+        tokens_dir: &Path,
+        secrets: &ProjectSecrets,
+    ) -> anyhow::Result<Option<Vec<SecretFile>>> {
+        if has_unreadable_secret(secrets, &self.service) {
+            return Ok(None);
+        }
+        let mut excluded = vec![consts::OAUTH_REFRESH_STATUS_FILE];
+        excluded.extend(
+            self.delivered
+                .iter()
+                .chain(&self.host_only)
+                .map(String::as_str),
+        );
+        let mut files = regular_files_in(tokens_dir, &excluded)?;
+        for field in &self.delivered {
+            if SecretName::integration(project, &self.service, field).is_err() {
+                log::warn!(
+                    "plugin '{}' declares a secret field that is not a valid secret name; skipped",
+                    self.service
+                );
+                continue;
+            }
+            if let Some(value) = secret_value(secrets, &self.service, field) {
+                files.push(SecretFile::new(field.clone(), value.as_bytes()));
+            }
+        }
+        files.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(Some(files))
+    }
+}
+
+fn has_unreadable_secret(secrets: &ProjectSecrets, service: &str) -> bool {
+    secrets
+        .unreadable
+        .iter()
+        .any(|name| name.service() == service)
+}
+
+fn secret_value<'a>(secrets: &'a ProjectSecrets, service: &str, field: &str) -> Option<&'a str> {
+    secrets
+        .values
+        .iter()
+        .find(|(name, _)| name.service() == service && name.field() == field)
+        .map(|(_, value)| value.as_str())
+}
 
 pub(crate) fn collect_project_payload_in(
     data_dir: &Path,
@@ -22,7 +127,12 @@ pub(crate) fn collect_project_payload_in(
 ) -> anyhow::Result<ProjectPayload> {
     crate::validation::validate_project_name(project)?;
     let tokens_root = super::resolve_tokens_dir_in(data_dir, project);
-    let secrets_dir = super::init_secrets_dir_in(data_dir, project)?;
+    let store = SecretStore::open(data_dir)?;
+    crate::pii_key::ensure_project_key_in(data_dir, project)?;
+    let secrets = store.read_project(project)?;
+    for message in secrets.unreadable_messages() {
+        log::warn!("{message} The integration is started without its credentials.");
+    }
     let proxy_config =
         proxy::project_proxy_config_in(data_dir, project, resolved_config, integrations)?;
     let mut slots = Vec::new();
@@ -30,12 +140,17 @@ pub(crate) fn collect_project_payload_in(
 
     for svc in enabled_builtin_workers(integrations) {
         if builtin_worker_has_tokens(svc) {
+            let files = WorkerCredentials::builtin(svc).files(
+                project,
+                &tokens_root.join(svc.config_key),
+                &secrets,
+            )?;
             slots.push(worker_tokens_slot(
                 worker_tokens_mount(svc.compose_name)?,
-                &tokens_root.join(svc.config_key),
-            )?);
+                files,
+            ));
         }
-        let bearer = workers::read_or_create_worker_bearer(&secrets_dir, svc.config_key)?;
+        let bearer = workers::derived_worker_bearer(&store, project, svc.config_key)?;
         slots.push(SlotFiles::new(
             worker_auth_mount(svc.compose_name)?.slot,
             vec![SecretFile::new(WORKER_AUTH_FILE, bearer.as_str())],
@@ -47,13 +162,18 @@ pub(crate) fn collect_project_payload_in(
     }
 
     for worker in enabled_plugin_workers(integrations, plugin_manifests) {
+        let files = WorkerCredentials::plugin(worker.service_id, worker.manifest).files(
+            project,
+            &tokens_root.join(worker.service_id),
+            &secrets,
+        )?;
         slots.push(worker_tokens_slot(
             worker_tokens_mount(&worker.compose_name)?,
-            &tokens_root.join(worker.service_id),
-        )?);
+            files,
+        ));
         hub_files.push(SecretFile::new(
             workers::worker_bearer_file_name(worker.service_id),
-            workers::read_or_create_worker_bearer(&secrets_dir, worker.service_id)?,
+            workers::derived_worker_bearer(&store, project, worker.service_id)?,
         ));
     }
 
@@ -62,11 +182,7 @@ pub(crate) fn collect_project_payload_in(
     }
     slots.push(SlotFiles::new(hub_secrets_mount()?.slot, hub_files));
 
-    crate::pii_key::ensure_project_key_in(data_dir, project)?;
-    let policy_files = regular_files_in(
-        &crate::pii_policy::policy_config_dir_in(data_dir, project),
-        &[],
-    )?;
+    let policy_files = policy_files(data_dir, project, &secrets)?;
     slots.push(SlotFiles::new(
         hub_policy_mount()?.slot,
         policy_files.clone(),
@@ -82,12 +198,15 @@ pub(crate) fn collect_project_payload_in(
     ));
     slots.push(SlotFiles::new(
         proxy_tokens_mount()?.slot,
-        regular_files_in(&tokens_root.join(super::LLM_TOKEN_SERVICE), &[])?,
+        provider_key_files(&secrets),
     ));
     for forge in &proxy_config.git_forges {
+        let key = forge.kind.config_key();
+        let files =
+            WorkerCredentials::builtin_key(key).files(project, &tokens_root.join(key), &secrets)?;
         slots.push(SlotFiles::new(
             proxy_git_mount(forge.kind)?.slot,
-            regular_files_in(&tokens_root.join(forge.kind.config_key()), &[])?,
+            files.unwrap_or_default(),
         ));
     }
 
@@ -104,14 +223,40 @@ pub(crate) fn collect_project_payload_in(
     Ok(ProjectPayload { slots })
 }
 
-fn worker_tokens_slot(mount: SlotMount, host_dir: &Path) -> anyhow::Result<SlotFiles> {
-    let mut slot = SlotFiles::new(
-        mount.slot,
-        regular_files_in(host_dir, &[consts::OAUTH_REFRESH_STATUS_FILE])?,
-    );
+fn worker_tokens_slot(mount: SlotMount, files: Option<Vec<SecretFile>>) -> SlotFiles {
+    let mut slot = SlotFiles::new(mount.slot, files.unwrap_or_default());
     slot.keep
         .push(consts::OAUTH_REFRESH_STATUS_FILE.to_string());
-    Ok(slot)
+    slot
+}
+
+fn provider_key_files(secrets: &ProjectSecrets) -> Vec<SecretFile> {
+    secrets
+        .values
+        .iter()
+        .filter(|(name, _)| {
+            name.service() == super::LLM_TOKEN_SERVICE
+                && name.field().ends_with(LLM_KEY_FIELD_SUFFIX)
+        })
+        .map(|(name, value)| SecretFile::new(name.field(), value.as_bytes()))
+        .collect()
+}
+
+fn policy_files(
+    data_dir: &Path,
+    project: &str,
+    secrets: &ProjectSecrets,
+) -> anyhow::Result<Vec<SecretFile>> {
+    let mut files = regular_files_in(
+        &crate::pii_policy::policy_config_dir_in(data_dir, project),
+        &[PII_KEY_FIELD],
+    )?;
+    let Some(key) = secret_value(secrets, PII_SERVICE, PII_KEY_FIELD) else {
+        anyhow::bail!("the PII tokenization key of project '{project}' cannot be read");
+    };
+    files.push(SecretFile::new(PII_KEY_FIELD, key.as_bytes()));
+    files.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(files)
 }
 
 fn claude_secret_files(
@@ -136,7 +281,7 @@ fn claude_secret_files(
     if git_forges_enabled {
         files.push(SecretFile::new(
             CLAUDE_GIT_PROXY_AUTH_FILE,
-            proxy::ensure_caller_token_in(data_dir, project)?,
+            proxy::caller_token_in(data_dir, project)?,
         ));
     }
     Ok(files)

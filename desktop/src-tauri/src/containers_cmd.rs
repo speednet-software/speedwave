@@ -1,4 +1,5 @@
 use speedwave_runtime::config;
+use speedwave_runtime::secret_store::{SecretName, SecretStore};
 
 use crate::reconcile::{SharedIdeBridge, SharedMcpOs};
 use crate::setup_wizard;
@@ -307,6 +308,7 @@ pub(crate) fn project_llm_is_unconfigured_in(
 }
 
 pub(crate) fn render_and_save_compose(project: &str) -> Result<(), String> {
+    crate::secret_store_cmd::ensure_ready_for_start()?;
     crate::pii_ner_service::start_if_active_wants();
     let user_config = config::load_user_config().map_err(|e| e.to_string())?;
     let project_dir = user_config
@@ -658,6 +660,7 @@ pub async fn start_containers(
     crate::session_refresh::start_sync(app.clone());
 
     tokio::task::spawn_blocking(move || {
+        crate::secret_store_cmd::ensure_ready_for_start()?;
         ensure_images_ready()?;
         check_project(&project)?;
         crate::pii_ner_service::sync_with_active_project();
@@ -2172,29 +2175,30 @@ fn apply_credential_action(
     match action {
         CredentialAction::Keep => Ok(()),
         CredentialAction::Delete => {
-            let path =
-                speedwave_runtime::compose::tokens_path_in(data_dir, project, "local-llm", file)?;
-            match std::fs::remove_file(&path) {
-                Ok(()) => log::info!("removed LLM token file {}", path.display()),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e.into()),
-            }
+            let name = local_llm_secret_name(project, file)?;
+            SecretStore::open(data_dir)?.delete(&name)?;
+            log::info!("removed local LLM {file} secret for project={project}");
             mirror_local_key_to_llm_namespace(data_dir, project, file, None)?;
             Ok(())
         }
         CredentialAction::Write(value) => {
-            speedwave_runtime::compose::ensure_token_dir_in(data_dir, project, "local-llm")?;
-            let path =
-                speedwave_runtime::compose::tokens_path_in(data_dir, project, "local-llm", file)?;
-            speedwave_runtime::fs_perms::write_restricted_file_atomic(&path, value)?;
+            let name = local_llm_secret_name(project, file)?;
+            SecretStore::open(data_dir)?.write(&name, value)?;
             log::info!(
-                "wrote LLM token file {} ({} bytes)",
-                path.display(),
+                "stored local LLM {file} secret for project={project} ({} bytes)",
                 value.len()
             );
             mirror_local_key_to_llm_namespace(data_dir, project, file, Some(value))?;
             Ok(())
         }
+    }
+}
+
+fn local_llm_secret_name(project: &str, file: &str) -> anyhow::Result<SecretName> {
+    match file {
+        "api_key" => SecretName::local_llm_api_key(project),
+        "custom_headers" => SecretName::local_llm_custom_headers(project),
+        _ => anyhow::bail!("unknown local LLM credential '{file}'"),
     }
 }
 
@@ -3008,7 +3012,7 @@ mod tests {
             before
         );
         assert!(
-            !tmp.path().join("tokens").exists(),
+            !tmp.path().join("secrets").exists() && !tmp.path().join("secret-store.key").exists(),
             "the key typed in the form must not reach any project"
         );
     }
@@ -3030,7 +3034,139 @@ mod tests {
             .and_then(|c| c.llm.as_ref())
             .unwrap();
         assert_eq!(llm.providers[0].model.as_deref(), Some("llama-new"));
-        assert!(tmp.path().join("tokens").join("alpha").exists());
+        let store = SecretStore::open(tmp.path()).unwrap();
+        let local_key = store
+            .read(&SecretName::local_llm_api_key("alpha").unwrap())
+            .unwrap();
+        assert_eq!(
+            local_key.as_deref().map(String::as_str),
+            Some("sk-typed-in-the-form")
+        );
+        let mirrored = store
+            .read(&SecretName::llm_provider_key("alpha", "local").unwrap())
+            .unwrap();
+        assert_eq!(
+            mirrored.as_deref().map(String::as_str),
+            Some("sk-typed-in-the-form")
+        );
+        assert!(
+            crate::types::test_support::files_containing(tmp.path(), "sk-typed-in-the-form")
+                .is_empty(),
+            "the key must not appear in any plaintext file"
+        );
+    }
+
+    fn provider_key_exists(data_dir: &std::path::Path, project: &str, provider: &str) -> bool {
+        speedwave_runtime::secret_store::secret_exists_in(
+            data_dir,
+            &SecretName::llm_provider_key(project, provider).unwrap(),
+        )
+    }
+
+    fn local_secret(data_dir: &std::path::Path, name: &SecretName) -> Option<String> {
+        SecretStore::open(data_dir)
+            .unwrap()
+            .read(name)
+            .unwrap()
+            .map(|value| value.to_string())
+    }
+
+    #[test]
+    fn writing_the_local_credentials_stores_them_encrypted_and_mirrors_the_api_key() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        apply_credential_action(
+            tmp.path(),
+            "alpha",
+            "api_key",
+            &CredentialAction::Write("sk-LOCAL-SENTINEL".to_string()),
+        )
+        .unwrap();
+        apply_credential_action(
+            tmp.path(),
+            "alpha",
+            "custom_headers",
+            &CredentialAction::Write("X-Team: HEADERS-SENTINEL".to_string()),
+        )
+        .unwrap();
+
+        let api_key = SecretName::local_llm_api_key("alpha").unwrap();
+        let headers = SecretName::local_llm_custom_headers("alpha").unwrap();
+        assert_eq!(
+            local_secret(tmp.path(), &api_key).as_deref(),
+            Some("sk-LOCAL-SENTINEL")
+        );
+        assert_eq!(
+            local_secret(tmp.path(), &headers).as_deref(),
+            Some("X-Team: HEADERS-SENTINEL")
+        );
+        assert!(provider_key_exists(tmp.path(), "alpha", "local"));
+        assert!(!provider_key_exists(tmp.path(), "alpha", "other"));
+        for sentinel in ["LOCAL-SENTINEL", "HEADERS-SENTINEL"] {
+            assert!(
+                crate::types::test_support::files_containing(tmp.path(), sentinel).is_empty(),
+                "{sentinel} must not appear in any plaintext file"
+            );
+        }
+    }
+
+    #[test]
+    fn deleting_the_local_api_key_removes_it_and_its_mirror_but_keeps_the_headers() {
+        let tmp = tempfile::tempdir().unwrap();
+        for (file, value) in [("api_key", "sk-local"), ("custom_headers", "X-Team: a")] {
+            apply_credential_action(
+                tmp.path(),
+                "alpha",
+                file,
+                &CredentialAction::Write(value.to_string()),
+            )
+            .unwrap();
+        }
+
+        apply_credential_action(tmp.path(), "alpha", "api_key", &CredentialAction::Delete).unwrap();
+
+        let api_key = SecretName::local_llm_api_key("alpha").unwrap();
+        let headers = SecretName::local_llm_custom_headers("alpha").unwrap();
+        assert_eq!(local_secret(tmp.path(), &api_key), None);
+        assert!(!provider_key_exists(tmp.path(), "alpha", "local"));
+        assert_eq!(
+            local_secret(tmp.path(), &headers).as_deref(),
+            Some("X-Team: a")
+        );
+    }
+
+    #[test]
+    fn deleting_a_local_credential_that_was_never_stored_succeeds() {
+        let tmp = tempfile::tempdir().unwrap();
+        apply_credential_action(
+            tmp.path(),
+            "alpha",
+            "custom_headers",
+            &CredentialAction::Delete,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn keeping_a_local_credential_touches_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        apply_credential_action(tmp.path(), "alpha", "api_key", &CredentialAction::Keep).unwrap();
+        assert!(!tmp.path().join("secrets").exists());
+        assert!(!tmp.path().join("secret-store.key").exists());
+    }
+
+    #[test]
+    fn an_unknown_local_credential_is_refused_without_echoing_the_value() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = apply_credential_action(
+            tmp.path(),
+            "alpha",
+            "token",
+            &CredentialAction::Write("VALUE-SENTINEL".to_string()),
+        )
+        .unwrap_err();
+        assert!(!err.to_string().contains("VALUE-SENTINEL"));
+        assert!(!tmp.path().join("secrets").exists());
     }
 
     #[test]
@@ -3042,10 +3178,10 @@ mod tests {
 
         assert!(err.contains("not 'beta'"), "{err}");
         for project in ["alpha", "beta"] {
-            let path =
-                speedwave_runtime::compose::llm_provider_key_path_in(tmp.path(), project, "local")
-                    .unwrap();
-            assert!(!path.exists(), "{project} must not get the key");
+            assert!(
+                !provider_key_exists(tmp.path(), project, "local"),
+                "{project} must not get the key"
+            );
         }
     }
 
@@ -3055,12 +3191,9 @@ mod tests {
         let restaged = std::cell::RefCell::new(Vec::new());
 
         set_llm_provider_key_then(tmp.path(), "local", Some("sk-local"), Some("alpha"), |p| {
-            let key_path =
-                speedwave_runtime::compose::llm_provider_key_path_in(tmp.path(), p, "local")
-                    .unwrap();
             restaged
                 .borrow_mut()
-                .push((p.to_string(), key_path.exists()));
+                .push((p.to_string(), provider_key_exists(tmp.path(), p, "local")));
             Ok(())
         })
         .unwrap();
@@ -3079,10 +3212,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(restage_error, Some("engine did not answer".to_string()));
-        let path =
-            speedwave_runtime::compose::llm_provider_key_path_in(tmp.path(), "alpha", "local")
-                .unwrap();
-        assert!(path.exists());
+        assert!(provider_key_exists(tmp.path(), "alpha", "local"));
     }
 
     #[test]
@@ -3109,10 +3239,16 @@ mod tests {
             set_llm_provider_key_in(tmp.path(), "local", Some("sk-local"), Some("alpha")).unwrap();
 
         assert_eq!(changed, "alpha");
-        let path =
-            speedwave_runtime::compose::llm_provider_key_path_in(tmp.path(), "alpha", "local")
-                .unwrap();
-        assert!(path.exists());
+        assert!(provider_key_exists(tmp.path(), "alpha", "local"));
+        let stored = SecretStore::open(tmp.path())
+            .unwrap()
+            .read(&SecretName::llm_provider_key("alpha", "local").unwrap())
+            .unwrap();
+        assert_eq!(stored.as_deref().map(String::as_str), Some("sk-local"));
+        assert!(
+            crate::types::test_support::files_containing(tmp.path(), "sk-local").is_empty(),
+            "the provider key must not appear in any plaintext file"
+        );
         let saved = config::load_user_config_from(&tmp.path().join("config.json")).unwrap();
         let local = saved
             .projects

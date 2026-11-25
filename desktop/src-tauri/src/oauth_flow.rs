@@ -335,7 +335,24 @@ pub(crate) async fn run_device_code_poll<P: DeviceCodeProvider>(poll: DeviceCode
     }
 }
 
-/// Atomic 0o600 write of a single credential into `svc_dir/<file_name>`.
+pub(crate) fn save_secret_credential(
+    data_dir: &std::path::Path,
+    project: &str,
+    service: &str,
+    field: &str,
+    value: &str,
+) -> Result<(), String> {
+    let max = crate::types::MAX_CREDENTIAL_BYTES;
+    if value.len() > max {
+        return Err(format!("{field} exceeds {max} bytes"));
+    }
+    let name = speedwave_runtime::secret_store::SecretName::integration(project, service, field)
+        .map_err(|e| e.to_string())?;
+    speedwave_runtime::secret_store::SecretStore::open(data_dir)
+        .and_then(|store| store.write(&name, value))
+        .map_err(|e| e.to_string())
+}
+
 pub(crate) fn save_credential_file(
     svc_dir: &std::path::Path,
     file_name: &str,
@@ -519,6 +536,40 @@ mod tests {
                 & 0o777;
             assert_eq!(mode, 0o600);
         }
+    }
+
+    #[test]
+    fn save_secret_credential_seals_the_value_and_leaves_no_plaintext() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sentinel = "SENTINEL-997-oauth-flow";
+        save_secret_credential(tmp.path(), "proj", "github", "token", sentinel).unwrap();
+
+        let name =
+            speedwave_runtime::secret_store::SecretName::integration("proj", "github", "token")
+                .unwrap();
+        assert!(speedwave_runtime::secret_store::secret_exists_in(
+            tmp.path(),
+            &name
+        ));
+        let store = speedwave_runtime::secret_store::SecretStore::open(tmp.path()).unwrap();
+        assert_eq!(store.read(&name).unwrap().unwrap().as_str(), sentinel);
+        assert!(crate::types::test_support::files_containing(tmp.path(), sentinel).is_empty());
+        assert!(!tmp.path().join("tokens").exists());
+    }
+
+    #[test]
+    fn save_secret_credential_rejects_oversized() {
+        let tmp = tempfile::tempdir().unwrap();
+        let big = "x".repeat(crate::types::MAX_CREDENTIAL_BYTES + 1);
+        let err = save_secret_credential(tmp.path(), "proj", "github", "token", &big).unwrap_err();
+        assert!(err.contains("exceeds"));
+        assert!(!tmp.path().join("secrets").exists());
+    }
+
+    #[test]
+    fn save_secret_credential_rejects_an_invalid_field_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(save_secret_credential(tmp.path(), "proj", "github", "../x", "v").is_err());
     }
 
     #[test]

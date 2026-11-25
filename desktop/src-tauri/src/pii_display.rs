@@ -124,6 +124,33 @@ mod tests {
     }
 
     #[test]
+    fn the_display_key_comes_from_the_secret_store_and_is_in_no_plaintext_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        speedwave_runtime::pii_key::ensure_project_key_in(tmp.path(), "proj").unwrap();
+        let key_bytes =
+            speedwave_runtime::pii_key::read_project_key_in(tmp.path(), "proj").unwrap();
+        let key_hex: String = key_bytes.iter().map(|b| format!("{b:02x}")).collect();
+
+        assert!(load_display_key(tmp.path(), "proj").is_some());
+        assert!(!tmp
+            .path()
+            .join("policies")
+            .join("proj")
+            .join("key")
+            .exists());
+        assert!(
+            crate::types::test_support::files_containing(tmp.path(), &key_hex).is_empty(),
+            "the PII key must not appear in any plaintext file"
+        );
+    }
+
+    #[test]
+    fn no_display_key_loads_when_the_project_has_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(load_display_key(tmp.path(), "proj").is_none());
+    }
+
+    #[test]
     fn roundtrips_a_real_token_back_to_its_original_value() {
         let tmp = tempfile::tempdir().unwrap();
         speedwave_runtime::pii_key::ensure_project_key_in(tmp.path(), "proj").unwrap();
@@ -430,6 +457,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         speedwave_runtime::pii_key::ensure_project_key_in(tmp.path(), "proj").unwrap();
         let policy_path = speedwave_runtime::pii_policy::policy_config_path_in(tmp.path(), "proj");
+        std::fs::create_dir_all(policy_path.parent().unwrap()).unwrap();
         std::fs::write(
             &policy_path,
             r#"{"version":3,"source":{"policies":[],"forced":[]},"rules":[],"keywords":[{"match":"coca-cola","alias":"Brandex","caseSensitive":false}]}"#,

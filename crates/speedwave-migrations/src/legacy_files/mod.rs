@@ -1,7 +1,8 @@
 //! Removes files and directories under the data directory that older releases wrote and the
 //! current code neither reads nor writes: the host-exec state tree, the SharePoint v1 secrets, the
-//! mcp-os port and pid files, the in-tree plugin image marker and the state of the removed OAuth
-//! worker. Jira: SPEED-1013. Added in: v0.23.0
+//! mcp-os port and pid files, the in-tree plugin image marker, the state of the removed OAuth
+//! worker, and the worker bearers, proxy caller token and OAuth refresh locks that moved into the
+//! secret store layout. Jira: SPEED-1013, SPEED-1016. Added in: v0.23.0
 
 use std::path::Path;
 
@@ -81,6 +82,21 @@ const LEGACY_PATHS: &[LegacyPath] = &[
     LegacyPath {
         pattern: "oauth/{project}/pid",
         reason: "pid file of the removed OAuth worker",
+        added_in: ADDED_IN,
+    },
+    LegacyPath {
+        pattern: "secrets/{project}/{service}-auth-token",
+        reason: "worker bearer file, now derived from the install key",
+        added_in: ADDED_IN,
+    },
+    LegacyPath {
+        pattern: "proxy/{project}/caller-token",
+        reason: "proxy caller token file, now derived from the install key",
+        added_in: ADDED_IN,
+    },
+    LegacyPath {
+        pattern: "oauth/{project}/{service}.lock",
+        reason: "OAuth refresh lock, now kept next to the encrypted refresh token",
         added_in: ADDED_IN,
     },
 ];
@@ -276,9 +292,21 @@ mod tests {
                 let sharepoint = data_dir.join("tokens").join(project).join("sharepoint");
                 files.push(sharepoint.join(name));
             }
-            for name in [".bearer-map.json", "lock.json", "auth-token", "port", "pid"] {
+            for name in [
+                ".bearer-map.json",
+                "lock.json",
+                "auth-token",
+                "port",
+                "pid",
+                "sharepoint.lock",
+                "slack.lock",
+            ] {
                 files.push(data_dir.join("oauth").join(project).join(name));
             }
+            let secrets = data_dir.join("secrets").join(project);
+            files.push(secrets.join("sharepoint-auth-token"));
+            files.push(secrets.join("worker-auth-token"));
+            files.push(data_dir.join("proxy").join(project).join("caller-token"));
         }
         files.push(data_dir.join("plugins").join("glpi").join(".image_pending"));
         files.push(
@@ -310,11 +338,18 @@ mod tests {
             files.push(tokens.join("local-llm").join("custom_headers"));
             let oauth = data_dir.join("oauth").join(project);
             files.push(oauth.join("sharepoint.json"));
-            files.push(oauth.join("sharepoint.lock"));
             files.push(oauth.join("audit.log"));
             files.push(oauth.join("bearer-sharepoint"));
             files.push(oauth.join("bearer-glpi"));
+            let secrets = data_dir.join("secrets").join(project);
+            files.push(secrets.join("slack.access_token.enc"));
+            files.push(secrets.join("slack.refresh_token.enc"));
+            files.push(secrets.join("slack.refresh_token.enc.lock"));
+            files.push(secrets.join("anthropic.api_key.enc"));
+            files.push(secrets.join("pii.key.enc"));
+            files.push(secrets.join("llm.openrouter_api_key.enc"));
         }
+        files.push(data_dir.join("secret-store.key"));
         files
     }
 

@@ -4,6 +4,8 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use crate::secret_store::{SecretName, SecretStore, SecretStoreError};
+
 /// Top-level keys lifted into `providerData` — SSOT for the IdP identity keys, pinned to the
 /// descriptor SSOT by `identity_keys_match_oauth_state_provider_data_descriptors`.
 pub const IDENTITY_KEYS: &[&str] = &["clientId", "tenantId"];
@@ -25,14 +27,16 @@ pub struct OAuthStateParams<'a> {
     /// `refresh_token` | `client_credentials`. `None` omits the field
     /// (read back as `refresh_token` by the worker migration path).
     pub grant_type: Option<&'a str>,
-    /// IdP-specific fields (clientId, tenantId, tokenUrl, …).
+    /// IdP-specific fields (clientId, tenantId, tokenUrl, ...); `clientSecret` goes to the store.
     pub provider_data: BTreeMap<String, String>,
     /// Scopes requested at authorize time.
     pub scopes: Vec<String>,
     /// Scopes the IdP actually granted.
     pub granted_scopes: Vec<String>,
-    /// Long-lived secret persisted off-mount (empty for `client_credentials`).
+    /// Long-lived secret kept in the store (empty for `client_credentials`: none is stored).
     pub refresh_token: &'a str,
+    /// Short-lived access token kept in the store; `None` leaves the stored one untouched.
+    pub access_token: Option<&'a str>,
     /// Access-token lifetime in seconds.
     pub expires_in: u64,
 }
@@ -41,18 +45,30 @@ pub struct OAuthStateParams<'a> {
 /// malformed/hostile response; clamping keeps `now_ms + expires_in*1000` in range.
 const MAX_EXPIRES_IN_SECS: u64 = 10 * 365 * 24 * 60 * 60;
 
-/// Writes OAuth state JSON to `path` (0o600, parent 0o700); caller supplies an off-mount path from
-/// `plugin::oauth_state_file`. Rejects non-positive `expires_in` (SSOT guard); clamps a huge one.
-pub fn write_oauth_state(path: &Path, params: &OAuthStateParams) -> Result<(), String> {
+const CLIENT_SECRET_KEY: &str = "clientSecret";
+const ACCESS_TOKEN_FIELD: &str = "access_token";
+
+/// Writes the secrets of one OAuth service to the store, then its plain state JSON.
+pub fn write_oauth_state(
+    data_dir: &Path,
+    project: &str,
+    service: &str,
+    params: &OAuthStateParams,
+) -> Result<(), String> {
     if params.expires_in == 0 {
         return Err("oauth state: expires_in must be > 0".to_string());
     }
     let expires_in = params.expires_in.min(MAX_EXPIRES_IN_SECS);
+    let path = crate::plugin::oauth_state_file_in(data_dir, project, service);
     let parent = path
         .parent()
         .ok_or_else(|| "oauth state: no parent".to_string())?;
-    crate::fs_perms::ensure_owner_only_dir(parent).map_err(|e| e.to_string())?;
 
+    let mut provider_data = params.provider_data.clone();
+    let client_secret = provider_data.remove(CLIENT_SECRET_KEY);
+    write_secrets(data_dir, project, service, params, client_secret.as_deref())?;
+
+    crate::fs_perms::ensure_owner_only_dir(parent).map_err(|e| e.to_string())?;
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -65,7 +81,7 @@ pub fn write_oauth_state(path: &Path, params: &OAuthStateParams) -> Result<(), S
     }
     obj.insert(
         "providerData".into(),
-        serde_json::to_value(&params.provider_data).map_err(|e| e.to_string())?,
+        serde_json::to_value(&provider_data).map_err(|e| e.to_string())?,
     );
     obj.insert(
         "scopes".into(),
@@ -75,7 +91,6 @@ pub fn write_oauth_state(path: &Path, params: &OAuthStateParams) -> Result<(), S
         "grantedScopes".into(),
         serde_json::to_value(&params.granted_scopes).map_err(|e| e.to_string())?,
     );
-    obj.insert("refreshToken".into(), params.refresh_token.into());
     obj.insert(
         "expiresAt".into(),
         iso8601_from_unix_ms(now_ms.saturating_add(expires_in.saturating_mul(1000))).into(),
@@ -85,7 +100,41 @@ pub fn write_oauth_state(path: &Path, params: &OAuthStateParams) -> Result<(), S
     let body = serde_json::to_string_pretty(&serde_json::Value::Object(obj))
         .map_err(|e| e.to_string())?
         + "\n";
-    crate::fs_perms::write_restricted_file(path, &body).map_err(|e| e.to_string())
+    crate::fs_perms::write_restricted_file_atomic(&path, &body).map_err(|e| e.to_string())
+}
+
+fn write_secrets(
+    data_dir: &Path,
+    project: &str,
+    service: &str,
+    params: &OAuthStateParams,
+    client_secret: Option<&str>,
+) -> Result<(), String> {
+    let store = SecretStore::open(data_dir).map_err(|e| e.to_string())?;
+    let name_error = |_: anyhow::Error| "oauth state: invalid service name".to_string();
+    let store_error = |e: SecretStoreError| e.to_string();
+
+    let refresh = SecretName::oauth_refresh_token(project, service).map_err(name_error)?;
+    if params.refresh_token.is_empty() {
+        store.delete(&refresh).map_err(store_error)?;
+    } else {
+        store
+            .write(&refresh, params.refresh_token)
+            .map_err(store_error)?;
+    }
+
+    let client = SecretName::oauth_client_secret(project, service).map_err(name_error)?;
+    match client_secret.filter(|secret| !secret.is_empty()) {
+        Some(secret) => store.write(&client, secret).map_err(store_error)?,
+        None => store.delete(&client).map_err(store_error)?,
+    }
+
+    if let Some(access_token) = params.access_token {
+        let access =
+            SecretName::integration(project, service, ACCESS_TOKEN_FIELD).map_err(name_error)?;
+        store.write(&access, access_token).map_err(store_error)?;
+    }
+    Ok(())
 }
 
 /// snake_case descriptor key → camelCase property name in `oauth.json`.
@@ -128,6 +177,38 @@ pub fn ensure_provider_data_object(obj: &mut serde_json::Map<String, serde_json:
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    use std::path::{Path, PathBuf};
+
+    pub(crate) fn files_containing(root: &Path, needle: &str) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+                let Ok(bytes) = std::fs::read(&path) else {
+                    continue;
+                };
+                if bytes
+                    .windows(needle.len())
+                    .any(|window| window == needle.as_bytes())
+                {
+                    found.push(path);
+                }
+            }
+        }
+        found
+    }
+}
+
+#[cfg(test)]
 #[expect(
     clippy::unwrap_used,
     reason = "test code: panics on setup failure are acceptable"
@@ -151,15 +232,45 @@ mod tests {
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
     }
 
+    const SENTINEL_RT: &str = "SENTINEL-997-refresh";
+    const SENTINEL_CS: &str = "SENTINEL-997-client-secret";
+    const SENTINEL_AT: &str = "SENTINEL-997-access";
+
+    fn state_path(data_dir: &Path, service: &str) -> std::path::PathBuf {
+        crate::plugin::oauth_state_file_in(data_dir, "proj", service)
+    }
+
+    fn read_secret(data_dir: &Path, name: &SecretName) -> Option<String> {
+        SecretStore::open(data_dir)
+            .unwrap()
+            .read(name)
+            .unwrap()
+            .map(|value| value.as_str().to_string())
+    }
+
+    fn params(refresh_token: &str, expires_in: u64) -> OAuthStateParams<'_> {
+        OAuthStateParams {
+            provider: "generic",
+            grant_type: Some("refresh_token"),
+            provider_data: BTreeMap::new(),
+            scopes: vec![],
+            granted_scopes: vec![],
+            refresh_token,
+            access_token: None,
+            expires_in,
+        }
+    }
+
     #[test]
     fn writes_microsoft_shape_without_grant_type() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("p").join("sharepoint.json");
         let mut pd = BTreeMap::new();
         pd.insert("clientId".to_string(), "cid".to_string());
         pd.insert("tenantId".to_string(), "common".to_string());
         write_oauth_state(
-            &path,
+            tmp.path(),
+            "proj",
+            "sharepoint",
             &OAuthStateParams {
                 provider: "microsoft",
                 grant_type: None,
@@ -167,44 +278,130 @@ mod tests {
                 scopes: vec!["Sites.Manage.All".to_string()],
                 granted_scopes: vec!["Sites.Manage.All".to_string()],
                 refresh_token: "r",
+                access_token: None,
                 expires_in: 3600,
             },
         )
         .unwrap();
-        let json = read_json(&path);
+        let json = read_json(&state_path(tmp.path(), "sharepoint"));
         assert_eq!(json["provider"], "microsoft");
         assert!(
             json.get("grantType").is_none(),
             "grantType omitted when None"
         );
         assert_eq!(json["providerData"]["tenantId"], "common");
-        assert_eq!(json["refreshToken"], "r");
+        assert!(json.get("refreshToken").is_none());
         assert!(json["expiresAt"].as_str().unwrap().ends_with('Z'));
+        let refresh = SecretName::oauth_refresh_token("proj", "sharepoint").unwrap();
+        assert_eq!(read_secret(tmp.path(), &refresh).as_deref(), Some("r"));
     }
 
     #[test]
     fn writes_generic_shape_with_grant_type() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("g.json");
         let mut pd = BTreeMap::new();
         pd.insert("tokenUrl".to_string(), "https://idp/token".to_string());
-        write_oauth_state(
-            &path,
-            &OAuthStateParams {
-                provider: "generic",
-                grant_type: Some("refresh_token"),
-                provider_data: pd,
-                scopes: vec![],
-                granted_scopes: vec![],
-                refresh_token: "rt",
-                expires_in: 60,
-            },
-        )
-        .unwrap();
-        let json = read_json(&path);
+        let mut p = params("rt", 60);
+        p.provider_data = pd;
+        write_oauth_state(tmp.path(), "proj", "g", &p).unwrap();
+        let json = read_json(&state_path(tmp.path(), "g"));
         assert_eq!(json["provider"], "generic");
         assert_eq!(json["grantType"], "refresh_token");
         assert_eq!(json["providerData"]["tokenUrl"], "https://idp/token");
+    }
+
+    #[test]
+    fn secrets_go_to_the_store_and_never_into_a_plain_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut p = params(SENTINEL_RT, 3600);
+        p.provider_data
+            .insert("clientSecret".to_string(), SENTINEL_CS.to_string());
+        p.provider_data
+            .insert("clientId".to_string(), "cid".to_string());
+        p.access_token = Some(SENTINEL_AT);
+        write_oauth_state(tmp.path(), "proj", "svc", &p).unwrap();
+
+        let json = read_json(&state_path(tmp.path(), "svc"));
+        assert!(json.get("refreshToken").is_none());
+        assert!(json["providerData"].get("clientSecret").is_none());
+        assert_eq!(json["providerData"]["clientId"], "cid");
+
+        let refresh = SecretName::oauth_refresh_token("proj", "svc").unwrap();
+        let client = SecretName::oauth_client_secret("proj", "svc").unwrap();
+        let access = SecretName::integration("proj", "svc", "access_token").unwrap();
+        assert_eq!(
+            read_secret(tmp.path(), &refresh).as_deref(),
+            Some(SENTINEL_RT)
+        );
+        assert_eq!(
+            read_secret(tmp.path(), &client).as_deref(),
+            Some(SENTINEL_CS)
+        );
+        assert_eq!(
+            read_secret(tmp.path(), &access).as_deref(),
+            Some(SENTINEL_AT)
+        );
+        for sentinel in [SENTINEL_RT, SENTINEL_CS, SENTINEL_AT] {
+            assert!(test_support::files_containing(tmp.path(), sentinel).is_empty());
+        }
+    }
+
+    #[test]
+    fn an_empty_refresh_token_deletes_the_stored_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_oauth_state(tmp.path(), "proj", "svc", &params("old", 60)).unwrap();
+        let refresh = SecretName::oauth_refresh_token("proj", "svc").unwrap();
+        assert!(read_secret(tmp.path(), &refresh).is_some());
+
+        let mut p = params("", 60);
+        p.grant_type = Some("client_credentials");
+        write_oauth_state(tmp.path(), "proj", "svc", &p).unwrap();
+        assert!(read_secret(tmp.path(), &refresh).is_none());
+    }
+
+    #[test]
+    fn a_login_without_a_client_secret_removes_a_stale_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut p = params("rt", 60);
+        p.provider_data
+            .insert("clientSecret".to_string(), SENTINEL_CS.to_string());
+        write_oauth_state(tmp.path(), "proj", "svc", &p).unwrap();
+        write_oauth_state(tmp.path(), "proj", "svc", &params("rt", 60)).unwrap();
+        let client = SecretName::oauth_client_secret("proj", "svc").unwrap();
+        assert!(read_secret(tmp.path(), &client).is_none());
+    }
+
+    #[test]
+    fn a_metadata_failure_leaves_the_tokens_written_and_the_old_expiry() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_oauth_state(tmp.path(), "proj", "svc", &params("rt-1", 60)).unwrap();
+        let path = state_path(tmp.path(), "svc");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+
+        let mut p = params("rt-2", 3600);
+        p.access_token = Some("at-2");
+        assert!(write_oauth_state(tmp.path(), "proj", "svc", &p).is_err());
+
+        let refresh = SecretName::oauth_refresh_token("proj", "svc").unwrap();
+        let access = SecretName::integration("proj", "svc", "access_token").unwrap();
+        assert_eq!(read_secret(tmp.path(), &refresh).as_deref(), Some("rt-2"));
+        assert_eq!(read_secret(tmp.path(), &access).as_deref(), Some("at-2"));
+        assert!(path.is_dir());
+    }
+
+    #[test]
+    fn a_store_failure_writes_no_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let name = SecretName::oauth_refresh_token("proj", "svc").unwrap();
+        SecretStore::open(tmp.path())
+            .unwrap()
+            .write(&name, "x")
+            .unwrap();
+        std::fs::remove_file(tmp.path().join("secret-store.key")).unwrap();
+
+        assert!(write_oauth_state(tmp.path(), "proj", "svc", &params("rt", 60)).is_err());
+        assert!(!state_path(tmp.path(), "svc").exists());
     }
 
     #[cfg(unix)]
@@ -212,50 +409,27 @@ mod tests {
     fn writes_file_mode_0o600() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("m.json");
-        write_oauth_state(
-            &path,
-            &OAuthStateParams {
-                provider: "generic",
-                grant_type: Some("refresh_token"),
-                provider_data: BTreeMap::new(),
-                scopes: vec![],
-                granted_scopes: vec![],
-                refresh_token: "r",
-                expires_in: 1,
-            },
-        )
-        .unwrap();
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        write_oauth_state(tmp.path(), "proj", "m", &params("r", 1)).unwrap();
+        let mode = std::fs::metadata(state_path(tmp.path(), "m"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(mode, 0o600);
-    }
-
-    fn params_with_expires(expires_in: u64) -> OAuthStateParams<'static> {
-        OAuthStateParams {
-            provider: "generic",
-            grant_type: Some("refresh_token"),
-            provider_data: BTreeMap::new(),
-            scopes: vec![],
-            granted_scopes: vec![],
-            refresh_token: "r",
-            expires_in,
-        }
     }
 
     #[test]
     fn rejects_zero_expires_in() {
         let tmp = tempfile::tempdir().unwrap();
-        let err =
-            write_oauth_state(&tmp.path().join("z.json"), &params_with_expires(0)).unwrap_err();
+        let err = write_oauth_state(tmp.path(), "proj", "z", &params("r", 0)).unwrap_err();
         assert!(err.contains("expires_in"), "got: {err}");
     }
 
     #[test]
     fn clamps_absurd_expires_in_without_overflow() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("big.json");
-        write_oauth_state(&path, &params_with_expires(u64::MAX)).unwrap();
-        let json = read_json(&path);
+        write_oauth_state(tmp.path(), "proj", "big", &params("r", u64::MAX)).unwrap();
+        let json = read_json(&state_path(tmp.path(), "big"));
         let exp = json["expiresAt"].as_str().unwrap();
         assert!(exp.ends_with('Z') && exp.starts_with("20"), "got: {exp}");
     }

@@ -1948,11 +1948,17 @@ mod tests {
             ("api_key", "sk-local-server"),
             ("custom_headers", "X-Team: a"),
         ] {
-            let path =
-                speedwave_runtime::compose::tokens_path_in(tmp.path(), "alpha", "local-llm", file)
-                    .expect("token path");
-            std::fs::create_dir_all(path.parent().expect("token dir")).expect("create token dir");
-            std::fs::write(&path, format!("{value}\n")).expect("write token");
+            let name = match file {
+                "api_key" => {
+                    speedwave_runtime::secret_store::SecretName::local_llm_api_key("alpha")
+                }
+                _ => speedwave_runtime::secret_store::SecretName::local_llm_custom_headers("alpha"),
+            }
+            .expect("secret name");
+            speedwave_runtime::secret_store::SecretStore::open(tmp.path())
+                .expect("open store")
+                .write(&name, &format!("{value}\n"))
+                .expect("write secret");
         }
 
         for (file, value) in [

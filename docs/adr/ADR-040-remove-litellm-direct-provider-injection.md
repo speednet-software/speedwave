@@ -22,7 +22,7 @@ Remove the LiteLLM proxy container entirely. When a local LLM provider is select
 
 ## Credentials for local servers
 
-- The Bearer token lives at `~/.speedwave/tokens/<project>/local-llm/api_key` and custom headers at `~/.speedwave/tokens/<project>/local-llm/custom_headers` (newline-separated `Name: Value`), both outside `config.json`. Only `has_api_key` / `has_custom_headers` presence flags land in config.
+- The Bearer token lives at `~/.speedwave/tokens/<project>/local-llm/api_key` and custom headers at `~/.speedwave/tokens/<project>/local-llm/custom_headers` (newline-separated `Name: Value`), both outside `config.json`. Only `has_api_key` / `has_custom_headers` presence flags land in config.  *Amended by [ADR-116](ADR-116-secret-store.md) (2026-11-24): the key and the custom headers are the encrypted secrets `local-llm.api_key.enc` and `local-llm.custom_headers.enc` in `secrets/<project>/`; the paths above are the layout before that change.*
 - Files are owner-only and written atomically (write to a sibling tempfile, then rename) so a crash never leaves a truncated secret. Validation runs before write: `api_key` strips a leading `Bearer ` and rejects CRLF; `custom_headers` rejects `Authorization`, `Cookie`, `Host`, `Content-Length`, `Transfer-Encoding`, and any value containing a carriage return (request-smuggling defense).
 - At compose-render time the files are read and injected as `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_CUSTOM_HEADERS`. Missing or unreadable files fall back to the dummy token with a warn log (the sanitizer redacts any leaked `sk-` value).
 

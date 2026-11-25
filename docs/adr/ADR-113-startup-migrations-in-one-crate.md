@@ -19,6 +19,6 @@ Seven migrations of `~/.speedwave` ran at five different moments: `legacy_token_
 ## Consequences
 
 - A new path in the data directory must not match `LEGACY_PATHS`; the rule is in `.claude/rules/data-dir-migrations.md` and is kept by review.
-- `tokens/<project>/local-llm/{api_key,custom_headers}` and `oauth/<project>/bearer-<service>` are not in the list: Desktop and the compose renderer still write and read them.
+- `tokens/<project>/local-llm/{api_key,custom_headers}` and `oauth/<project>/bearer-<service>` are not in the list: Desktop and the compose renderer still write and read them.  *Amended by [ADR-116](ADR-116-secret-store.md) (2026-11-24): `secrets_at_rest` now moves these secrets into the store before `legacy_files` runs, so the code no longer writes or reads the plaintext paths.*
 - The Anthropic model of a project last run on `v0.19.x` or older is not carried into its pin any more (decision 5).
 - The removed `migrate_legacy_local_key_in` copied a legacy `local-llm/api_key` into the `llm` token namespace; a project that never saved its local key after that release has to enter it again.

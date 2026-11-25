@@ -112,20 +112,21 @@ pub(crate) fn enabled_builtin_workers(
 pub(crate) struct PluginWorker<'a> {
     pub(crate) service_id: &'a str,
     pub(crate) compose_name: String,
+    pub(crate) manifest: &'a PluginManifest,
 }
 
 pub(crate) fn enabled_plugin_workers<'a>(
     integrations: &'a ResolvedIntegrationsConfig,
     manifests: &'a [PluginManifest],
 ) -> impl Iterator<Item = PluginWorker<'a>> + 'a {
-    manifests
-        .iter()
-        .filter_map(|manifest| manifest.service_id.as_deref())
-        .filter(|sid| integrations.is_plugin_enabled(sid))
-        .map(|sid| PluginWorker {
+    manifests.iter().filter_map(move |manifest| {
+        let sid = manifest.service_id.as_deref()?;
+        integrations.is_plugin_enabled(sid).then(|| PluginWorker {
             service_id: sid,
             compose_name: crate::plugin::derive_compose_name(sid),
+            manifest,
         })
+    })
 }
 
 pub(super) fn expected_slot_mounts(

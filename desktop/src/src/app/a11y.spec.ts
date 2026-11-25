@@ -19,6 +19,8 @@ import { PluginsComponent } from './plugins/plugins.component';
 import { PluginDetailComponent } from './plugins/plugin-detail/plugin-detail.component';
 import { SetupWizardComponent } from './setup/setup-wizard.component';
 import { ShellComponent } from './shell/shell.component';
+import { SecretStoreDialogComponent } from './shell/secret-store-dialog/secret-store-dialog.component';
+import { SecretStoreNoticeComponent } from './shell/secret-store-notice/secret-store-notice.component';
 import { ErrorBlockComponent } from './chat/blocks/error-block.component';
 import { ThinkingBlockComponent } from './chat/blocks/thinking-block.component';
 import { TextBlockComponent } from './chat/blocks/text-block.component';
@@ -112,6 +114,13 @@ function buildMockTauri(): MockTauriService {
         return null;
       case 'get_integration_statuses':
         return { services: [] };
+      case 'get_secret_store_status':
+        return {
+          state: 'keyMissing',
+          integrations: [{ project: 'demo', service: 'slack' }],
+          unreadable: ['Integration redmine: cannot read the secret.'],
+          migrationNotices: [],
+        };
       default:
         return undefined;
     }
@@ -154,6 +163,8 @@ async function render(view: ViewUnderTest, mockTauri: MockTauriService): Promise
 const VIEWS: readonly ViewUnderTest[] = [
   { name: 'AppComponent', component: AppComponent },
   { name: 'ShellComponent', component: ShellComponent },
+  { name: 'SecretStoreDialogComponent', component: SecretStoreDialogComponent },
+  { name: 'SecretStoreNoticeComponent', component: SecretStoreNoticeComponent },
   { name: 'ChatComponent', component: ChatComponent },
   { name: 'SettingsComponent', component: SettingsComponent },
   { name: 'IntegrationsComponent', component: IntegrationsComponent },

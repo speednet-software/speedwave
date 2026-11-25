@@ -3,6 +3,7 @@
 
 use crate::http_util::read_body_limited;
 use crate::llm_cmd::{build_llm_probe_client_with_auth, strip_bearer_prefix};
+use speedwave_runtime::secret_store::{SecretName, SecretStore};
 
 /// OpenRouter generation-cost endpoint — fixed host, never user input.
 const OPENROUTER_GENERATION_URL: &str = "https://openrouter.ai/api/v1/generation";
@@ -134,6 +135,12 @@ async fn openrouter_costs_for(
         .collect()
 }
 
+fn read_openrouter_key(data_dir: &std::path::Path, project: &str) -> Option<String> {
+    let name = SecretName::llm_provider_key(project, "openrouter").ok()?;
+    let value = SecretStore::open(data_dir).ok()?.read(&name).ok()??;
+    strip_bearer_prefix(&value)
+}
+
 /// Real cost (`data.total_cost`, USD) for an OpenRouter generation id, fetched
 /// host-side (ADR-041). `None` on a non-`gen-` id, missing key, or any error.
 async fn fetch_openrouter_gen_cost(
@@ -144,10 +151,7 @@ async fn fetch_openrouter_gen_cost(
     if !gen_id.starts_with("gen-") {
         return None;
     }
-    let key_path =
-        speedwave_runtime::compose::llm_provider_key_path_in(data_dir, project, "openrouter")
-            .ok()?;
-    let key = strip_bearer_prefix(&std::fs::read_to_string(key_path).ok()?)?;
+    let key = read_openrouter_key(data_dir, project)?;
     let client = build_llm_probe_client_with_auth(Some(&key), None).ok()?;
     let resp = client
         .get(OPENROUTER_GENERATION_URL)
@@ -187,6 +191,35 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let c = fetch_openrouter_gen_cost(dir.path(), "proj", "gen-abc").await;
         assert!(c.is_none(), "no openrouter key on disk → None, not a panic");
+    }
+
+    #[test]
+    fn openrouter_key_is_read_from_the_store_without_its_bearer_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = SecretName::llm_provider_key("proj", "openrouter").unwrap();
+        SecretStore::open(dir.path())
+            .unwrap()
+            .write(&name, "Bearer sk-or-v1-abc")
+            .unwrap();
+
+        assert_eq!(
+            read_openrouter_key(dir.path(), "proj").as_deref(),
+            Some("sk-or-v1-abc")
+        );
+        assert_eq!(read_openrouter_key(dir.path(), "other"), None);
+    }
+
+    #[test]
+    fn openrouter_key_is_none_when_the_store_cannot_be_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = SecretName::llm_provider_key("proj", "openrouter").unwrap();
+        SecretStore::open(dir.path())
+            .unwrap()
+            .write(&name, "sk-or-v1-abc")
+            .unwrap();
+        std::fs::remove_file(dir.path().join("secret-store.key")).unwrap();
+
+        assert_eq!(read_openrouter_key(dir.path(), "proj"), None);
     }
 
     #[tokio::test]

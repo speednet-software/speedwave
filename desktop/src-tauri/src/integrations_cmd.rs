@@ -4,6 +4,9 @@ use crate::types::{
 };
 use speedwave_runtime::config;
 use speedwave_runtime::plugin;
+use speedwave_runtime::secret_store::{
+    builtin_secret_fields, is_builtin_secret_field, secret_exists_in, SecretName, SecretStore,
+};
 
 /// Re-auth banner trigger (SharePoint, Slack). ScopeMismatch, Stale, and an
 /// expired Slack refresh token all collapse to one UI code.
@@ -181,13 +184,26 @@ fn redmine_config_json_fields() -> Vec<&'static str> {
         .unwrap_or_default()
 }
 
-/// True when any of `files` exists as a non-empty file under `svc_token_dir`.
-fn has_any_credential_file(svc_token_dir: &std::path::Path, files: &[&str]) -> bool {
+fn has_any_credential_file(
+    data_dir: &std::path::Path,
+    project: &str,
+    service: &str,
+    files: &[&str],
+) -> bool {
+    let svc_token_dir = plugin::token_dir_in(data_dir, project, service);
     files.iter().any(|name| {
+        if is_builtin_secret_field(service, name) {
+            return secret_present(data_dir, project, service, name);
+        }
         std::fs::metadata(svc_token_dir.join(name))
             .map(|m| m.len() > 0)
             .unwrap_or(false)
     })
+}
+
+fn secret_present(data_dir: &std::path::Path, project: &str, service: &str, field: &str) -> bool {
+    SecretName::integration(project, service, field)
+        .is_ok_and(|name| secret_exists_in(data_dir, &name))
 }
 
 fn read_service_config(svc_token_dir: &std::path::Path) -> serde_json::Value {
@@ -237,17 +253,27 @@ fn read_redmine_current_values(
     (current_values, mappings)
 }
 
-/// Saves Redmine credentials: secret fields go to individual files,
-/// config fields (host_url, project_id) go into config.json.
 fn save_redmine_credentials(
-    svc_dir: &std::path::Path,
+    data_dir: &std::path::Path,
+    project: &str,
     credentials: &std::collections::HashMap<String, String>,
     allowed: &[&str],
 ) -> Result<(), String> {
+    let svc_dir = plugin::token_dir_in(data_dir, project, "redmine");
+    let config_fields = redmine_config_json_fields();
+    for (key, value) in credentials {
+        if !allowed.contains(&key.as_str()) {
+            return Err(format!("field '{}' not allowed for service 'redmine'", key));
+        }
+        validate_credential_field(key, value)?;
+        if key == "host_url" {
+            crate::redmine_api_cmd::validate_redmine_host_url(value)?;
+        }
+    }
+
     let has_config_fields = credentials
         .keys()
-        .any(|k| redmine_config_json_fields().contains(&k.as_str()));
-
+        .any(|k| config_fields.contains(&k.as_str()));
     let config_path = svc_dir.join("config.json");
     let mut config_obj = if has_config_fields {
         if let Ok(content) = std::fs::read_to_string(&config_path) {
@@ -260,30 +286,65 @@ fn save_redmine_credentials(
         serde_json::json!({})
     };
 
+    let mut secrets: Vec<(&str, &str)> = Vec::new();
+    let mut plain: Vec<(&str, &str)> = Vec::new();
     for (key, value) in credentials {
-        if !allowed.contains(&key.as_str()) {
-            return Err(format!("field '{}' not allowed for service 'redmine'", key));
-        }
-        validate_credential_field(key, value)?;
-        if key == "host_url" {
-            crate::redmine_api_cmd::validate_redmine_host_url(value)?;
-        }
-
-        if redmine_config_json_fields().contains(&key.as_str()) {
+        if is_builtin_secret_field("redmine", key) {
+            secrets.push((key.as_str(), value.as_str()));
+        } else if config_fields.contains(&key.as_str()) {
             config_obj[key] = serde_json::Value::String(value.clone());
         } else {
-            let file_path = svc_dir.join(key);
-            speedwave_runtime::fs_perms::write_restricted_file(&file_path, value)
-                .map_err(|e| e.to_string())?;
+            plain.push((key.as_str(), value.as_str()));
         }
     }
 
+    write_secret_fields(data_dir, project, "redmine", &secrets)?;
+    write_plain_token_files(&svc_dir, &plain)?;
+
     if has_config_fields {
+        std::fs::create_dir_all(&svc_dir).map_err(|e| e.to_string())?;
         let json = serde_json::to_string_pretty(&config_obj).map_err(|e| e.to_string())?;
         speedwave_runtime::fs_perms::write_restricted_file(&config_path, &json)
             .map_err(|e| e.to_string())?;
     }
 
+    Ok(())
+}
+
+fn write_secret_fields(
+    data_dir: &std::path::Path,
+    project: &str,
+    service: &str,
+    secrets: &[(&str, &str)],
+) -> Result<(), String> {
+    if secrets.is_empty() {
+        return Ok(());
+    }
+    let store = SecretStore::open(data_dir).map_err(|e| e.to_string())?;
+    for (field, value) in secrets {
+        let name = SecretName::integration(project, service, field).map_err(|e| e.to_string())?;
+        let written = if value.is_empty() {
+            store.delete(&name)
+        } else {
+            store.write(&name, value)
+        };
+        written.map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn write_plain_token_files(
+    svc_dir: &std::path::Path,
+    files: &[(&str, &str)],
+) -> Result<(), String> {
+    if files.is_empty() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(svc_dir).map_err(|e| e.to_string())?;
+    for (key, value) in files {
+        speedwave_runtime::fs_perms::write_restricted_file(&svc_dir.join(key), value)
+            .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -346,7 +407,7 @@ pub fn get_integrations(project: String) -> Result<IntegrationsResponse, String>
                     None
                 };
             for field in &auth_fields {
-                if is_secret_field(&field.key) {
+                if is_builtin_secret_field(svc, &field.key) {
                     continue;
                 }
                 let descriptor = svc_desc
@@ -387,8 +448,12 @@ pub fn get_integrations(project: String) -> Result<IntegrationsResponse, String>
             !svc_desc.auth_fields.is_empty() && svc_desc.auth_fields.iter().all(|f| f.optional);
         let badge = if all_optional
             && configured
-            && has_any_credential_file(&svc_token_dir, svc_desc.credential_files)
-        {
+            && has_any_credential_file(
+                speedwave_runtime::consts::data_dir(),
+                &project,
+                svc,
+                svc_desc.credential_files,
+            ) {
             None
         } else {
             svc_desc.badge.map(|b| b.to_string())
@@ -471,23 +536,30 @@ pub(crate) fn is_service_configured_in(
         .auth_fields
         .iter()
         .filter(|f| !f.optional)
-        .all(|f| match f.storage {
-            speedwave_runtime::consts::FieldStorage::OAuthState
-            | speedwave_runtime::consts::FieldStorage::OAuthStateProviderData => oauth_state_json
-                .as_ref()
-                .and_then(|j| get_oauth_field(j, f.storage, f.key))
-                .map(|s| !s.is_empty())
-                .unwrap_or(false),
-            speedwave_runtime::consts::FieldStorage::WorkerMountedConfig => config_json
-                .get(f.key)
-                .and_then(|v| v.as_str())
-                .map(|s| !s.is_empty())
-                .unwrap_or(false),
-            speedwave_runtime::consts::FieldStorage::WorkerMountedToken => {
-                let path = svc_token_dir.join(f.key);
-                std::fs::metadata(&path)
-                    .map(|m| m.len() > 0)
-                    .unwrap_or(false)
+        .all(|f| {
+            if f.is_secret {
+                return secret_present(data_dir, project, service, f.key);
+            }
+            match f.storage {
+                speedwave_runtime::consts::FieldStorage::OAuthState
+                | speedwave_runtime::consts::FieldStorage::OAuthStateProviderData => {
+                    oauth_state_json
+                        .as_ref()
+                        .and_then(|j| get_oauth_field(j, f.storage, f.key))
+                        .map(|s| !s.is_empty())
+                        .unwrap_or(false)
+                }
+                speedwave_runtime::consts::FieldStorage::WorkerMountedConfig => config_json
+                    .get(f.key)
+                    .and_then(|v| v.as_str())
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false),
+                speedwave_runtime::consts::FieldStorage::WorkerMountedToken => {
+                    let path = svc_token_dir.join(f.key);
+                    std::fs::metadata(&path)
+                        .map(|m| m.len() > 0)
+                        .unwrap_or(false)
+                }
             }
         })
 }
@@ -957,27 +1029,20 @@ pub fn save_integration_credentials(
     let allowed =
         get_allowed_fields(&service).ok_or_else(|| format!("unknown service: {}", service))?;
 
-    let svc_dir = speedwave_runtime::consts::data_dir()
-        .join("tokens")
-        .join(&project)
-        .join(&service);
-    std::fs::create_dir_all(&svc_dir).map_err(|e| e.to_string())?;
-
+    let data_dir = speedwave_runtime::consts::data_dir();
     if service == "redmine" {
-        save_redmine_credentials(&svc_dir, &credentials, allowed)?;
+        save_redmine_credentials(data_dir, &project, &credentials, allowed)?;
     } else {
-        save_with_field_storage(&project, &service, &svc_dir, &credentials)?;
+        save_with_field_storage(data_dir, &project, &service, &credentials)?;
     }
     restage_container_secrets(&project);
     Ok(())
 }
 
-/// Generic per-field routing of UI credentials by `FieldStorage` tier. Partitions `credentials`
-/// into the worker-mounted file set and the OAuth state JSON merge set, writing both with `0o600`.
 fn save_with_field_storage(
+    data_dir: &std::path::Path,
     project: &str,
     service: &str,
-    svc_dir: &std::path::Path,
     credentials: &std::collections::HashMap<String, String>,
 ) -> Result<(), String> {
     use std::collections::HashMap;
@@ -986,7 +1051,8 @@ fn save_with_field_storage(
 
     let mut to_oauth_json: HashMap<&str, (speedwave_runtime::consts::FieldStorage, &str)> =
         HashMap::new();
-    let mut to_tokens_dir: HashMap<&str, &str> = HashMap::new();
+    let mut to_tokens_dir: Vec<(&str, &str)> = Vec::new();
+    let mut to_store: Vec<(&str, &str)> = Vec::new();
     for (key, value) in credentials {
         if !crate::types::is_allowed_field(service, key) {
             return Err(format!(
@@ -995,52 +1061,36 @@ fn save_with_field_storage(
             ));
         }
         validate_credential_field(key, value)?;
+        if is_builtin_secret_field(service, key) {
+            to_store.push((key.as_str(), value.as_str()));
+            continue;
+        }
         match crate::types::field_storage(service, key) {
             Some(s @ speedwave_runtime::consts::FieldStorage::OAuthState)
             | Some(s @ speedwave_runtime::consts::FieldStorage::OAuthStateProviderData) => {
                 to_oauth_json.insert(key.as_str(), (s, value.as_str()));
             }
-            _ => {
-                to_tokens_dir.insert(key.as_str(), value.as_str());
-            }
+            _ => to_tokens_dir.push((key.as_str(), value.as_str())),
         }
     }
-
-    for (key, value) in &to_tokens_dir {
-        let file_path = svc_dir.join(key);
-        speedwave_runtime::fs_perms::write_restricted_file(&file_path, value)
-            .map_err(|e| e.to_string())?;
+    if !to_oauth_json.is_empty() && svc_desc.oauth_state_fields.is_none() {
+        return Err(format!(
+            "service '{}' has no oauth_state_fields but received OAuth-state values",
+            service
+        ));
     }
 
+    write_secret_fields(data_dir, project, service, &to_store)?;
+    write_plain_token_files(
+        &plugin::token_dir_in(data_dir, project, service),
+        &to_tokens_dir,
+    )?;
     if !to_oauth_json.is_empty() {
-        if svc_desc.oauth_state_fields.is_none() {
-            return Err(format!(
-                "service '{}' has no oauth_state_fields but received OAuth-state values",
-                service
-            ));
-        }
-        merge_oauth_state_json(project, service, &to_oauth_json)?;
+        merge_oauth_state_json_in(data_dir, project, service, &to_oauth_json)?;
     }
     Ok(())
 }
 
-/// Read-modify-write merge into `oauth/<project>/<service>.json`. `provider` is derived from the
-/// descriptor; IdP-specific fields land under `providerData`, rest top-level (ADR-060). 0o600 kept.
-fn merge_oauth_state_json(
-    project: &str,
-    service: &str,
-    fields: &std::collections::HashMap<&str, (speedwave_runtime::consts::FieldStorage, &str)>,
-) -> Result<(), String> {
-    merge_oauth_state_json_in(
-        speedwave_runtime::consts::data_dir(),
-        project,
-        service,
-        fields,
-    )
-}
-
-/// Parameterised by `data_dir` so unit tests avoid the `consts::data_dir()`
-/// `OnceLock` cache. Production callers go through `merge_oauth_state_json`.
 fn merge_oauth_state_json_in(
     data_dir: &std::path::Path,
     project: &str,
@@ -1048,6 +1098,14 @@ fn merge_oauth_state_json_in(
     fields: &std::collections::HashMap<&str, (speedwave_runtime::consts::FieldStorage, &str)>,
 ) -> Result<(), String> {
     use speedwave_runtime::consts::FieldStorage;
+    if let Some(secret) = fields
+        .keys()
+        .find(|key| is_builtin_secret_field(service, key))
+    {
+        return Err(format!(
+            "field '{secret}' is a secret and not stored in the OAuth state"
+        ));
+    }
     let provider = provider_id_for_service(service)
         .ok_or_else(|| format!("service '{service}' has no provider id mapping"))?;
     let path = speedwave_runtime::plugin::oauth_state_file_in(data_dir, project, service);
@@ -1170,6 +1228,49 @@ fn remove_credential_files(svc_dir: &std::path::Path, files: &[&str]) -> Result<
     Ok(())
 }
 
+fn remove_integration_credentials_in(
+    data_dir: &std::path::Path,
+    project: &str,
+    service: &str,
+    files: &[&str],
+) -> Result<(), String> {
+    remove_integration_secrets_in(data_dir, project, service)?;
+    remove_credential_files(&plugin::token_dir_in(data_dir, project, service), files)?;
+    let svc_desc = speedwave_runtime::consts::find_mcp_service(service);
+    if svc_desc.is_some_and(|d| d.oauth_state_fields.is_some()) {
+        let oauth_path = plugin::oauth_state_file_in(data_dir, project, service);
+        if oauth_path.exists() {
+            std::fs::remove_file(&oauth_path).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_integration_secrets_in(
+    data_dir: &std::path::Path,
+    project: &str,
+    service: &str,
+) -> Result<(), String> {
+    let mut names = Vec::new();
+    for field in builtin_secret_fields(service) {
+        names.push(SecretName::integration(project, service, field));
+    }
+    if speedwave_runtime::consts::find_mcp_service(service)
+        .is_some_and(|d| d.oauth_state_fields.is_some())
+    {
+        names.push(SecretName::oauth_client_secret(project, service));
+    }
+    if names.is_empty() {
+        return Ok(());
+    }
+    let store = SecretStore::open(data_dir).map_err(|e| e.to_string())?;
+    for name in names {
+        let name = name.map_err(|e| e.to_string())?;
+        store.delete(&name).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn delete_integration_credentials(project: String, service: String) -> Result<(), String> {
     check_project(&project)?;
@@ -1177,21 +1278,14 @@ pub fn delete_integration_credentials(project: String, service: String) -> Resul
     let allowed =
         get_allowed_fields(&service).ok_or_else(|| format!("unknown service: {}", service))?;
 
-    let svc_dir = speedwave_runtime::consts::data_dir()
-        .join("tokens")
-        .join(&project)
-        .join(&service);
-
-    remove_credential_files(&svc_dir, allowed)?;
+    remove_integration_credentials_in(
+        speedwave_runtime::consts::data_dir(),
+        &project,
+        &service,
+        allowed,
+    )?;
 
     let svc_desc = speedwave_runtime::consts::find_mcp_service(&service);
-    if svc_desc.is_some_and(|d| d.oauth_state_fields.is_some()) {
-        let oauth_path = speedwave_runtime::plugin::oauth_state_file(&project, &service);
-        if oauth_path.exists() {
-            std::fs::remove_file(&oauth_path).map_err(|e| e.to_string())?;
-        }
-    }
-
     let all_optional = svc_desc
         .map(|d| !d.auth_fields.is_empty() && d.auth_fields.iter().all(|f| f.optional))
         .unwrap_or(false);
@@ -1373,6 +1467,7 @@ pub async fn restart_integration_containers(
     just_enabled: Option<String>,
 ) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
+        crate::secret_store_cmd::ensure_ready_for_start()?;
         crate::containers_cmd::ensure_images_ready()?;
         check_project(&project)?;
         if let Ok(cfg) = speedwave_runtime::config::load_user_config() {
@@ -1447,6 +1542,74 @@ pub async fn restart_integration_containers(
 )]
 mod tests {
     use super::*;
+
+    const SENTINEL: &str = "SENTINEL-997-integrations";
+
+    fn data_dir_of(home: &std::path::Path) -> std::path::PathBuf {
+        home.join(speedwave_runtime::consts::DATA_DIR)
+    }
+
+    fn plant_secret(
+        data_dir: &std::path::Path,
+        project: &str,
+        service: &str,
+        field: &str,
+        value: &str,
+    ) {
+        std::fs::create_dir_all(data_dir).unwrap();
+        let name = SecretName::integration(project, service, field).unwrap();
+        SecretStore::open(data_dir)
+            .unwrap()
+            .write(&name, value)
+            .unwrap();
+    }
+
+    fn plant_secret_without_install_key(
+        data_dir: &std::path::Path,
+        project: &str,
+        service: &str,
+        field: &str,
+        value: &str,
+    ) {
+        std::fs::create_dir_all(data_dir).unwrap();
+        let name = SecretName::integration(project, service, field).unwrap();
+        let elsewhere = data_dir.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let source = speedwave_runtime::secret_store::FileKeySource::new(elsewhere.join("k"));
+        SecretStore::open_with(data_dir, Box::new(source))
+            .unwrap()
+            .write(&name, value)
+            .unwrap();
+    }
+
+    fn read_secret(
+        data_dir: &std::path::Path,
+        project: &str,
+        service: &str,
+        field: &str,
+    ) -> Option<String> {
+        let name = SecretName::integration(project, service, field).unwrap();
+        SecretStore::open(data_dir)
+            .unwrap()
+            .read(&name)
+            .unwrap()
+            .map(|value| value.as_str().to_string())
+    }
+
+    fn secret_file_exists(
+        data_dir: &std::path::Path,
+        project: &str,
+        service: &str,
+        field: &str,
+    ) -> bool {
+        let name = SecretName::integration(project, service, field).unwrap();
+        secret_exists_in(data_dir, &name)
+    }
+
+    fn no_plaintext_secret(data_dir: &std::path::Path, value: &str) {
+        let leaks = crate::types::test_support::files_containing(data_dir, value);
+        assert!(leaks.is_empty(), "a secret is stored as plaintext");
+    }
 
     /// Drift guard: the camelCase keys derived from `OAuthStateProviderData` descriptors must
     /// equal the runtime `IDENTITY_KEYS` nested under `providerData`.
@@ -1714,7 +1877,6 @@ mod tests {
                 "provider": "slack",
                 "providerData": { "clientId": "1.2" },
                 "grantedScopes": granted,
-                "refreshToken": "xoxe-1-rt",
                 "lastRefreshAt": last_refresh_at,
             })
             .to_string(),
@@ -2120,19 +2282,24 @@ mod tests {
     }
 
     #[test]
-    fn save_redmine_credentials_writes_config_fields_to_json() {
+    fn save_redmine_credentials_writes_config_fields_to_json_and_the_key_to_the_store() {
         let tmp = tempfile::tempdir().unwrap();
-        let svc_dir = tmp.path();
+        let data_dir = tmp.path();
+        let svc_dir = plugin::token_dir_in(data_dir, "proj", "redmine");
         let mut creds = std::collections::HashMap::new();
         creds.insert("host_url".to_string(), "https://r.test".to_string());
         creds.insert("project_id".to_string(), "proj1".to_string());
-        creds.insert("api_key".to_string(), "secret123".to_string());
+        creds.insert("api_key".to_string(), SENTINEL.to_string());
 
         let allowed = &["api_key", "host_url", "project_id", "config.json"];
-        save_redmine_credentials(svc_dir, &creds, allowed).unwrap();
+        save_redmine_credentials(data_dir, "proj", &creds, allowed).unwrap();
 
-        let api_key = std::fs::read_to_string(svc_dir.join("api_key")).unwrap();
-        assert_eq!(api_key, "secret123");
+        assert_eq!(
+            read_secret(data_dir, "proj", "redmine", "api_key").as_deref(),
+            Some(SENTINEL)
+        );
+        assert!(!svc_dir.join("api_key").exists());
+        no_plaintext_secret(data_dir, SENTINEL);
 
         let config_content = std::fs::read_to_string(svc_dir.join("config.json")).unwrap();
         let config_json: serde_json::Value = serde_json::from_str(&config_content).unwrap();
@@ -2149,7 +2316,7 @@ mod tests {
         creds.insert("evil_field".to_string(), "value".to_string());
 
         let allowed = &["api_key", "host_url"];
-        let result = save_redmine_credentials(tmp.path(), &creds, allowed);
+        let result = save_redmine_credentials(tmp.path(), "proj", &creds, allowed);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not allowed"));
     }
@@ -2165,10 +2332,12 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let mut creds = std::collections::HashMap::new();
             creds.insert("host_url".to_string(), bad.to_string());
-            let result = save_redmine_credentials(tmp.path(), &creds, allowed);
+            let result = save_redmine_credentials(tmp.path(), "proj", &creds, allowed);
             assert!(result.is_err(), "must reject host_url {bad}");
             assert!(
-                !tmp.path().join("config.json").exists(),
+                !plugin::token_dir_in(tmp.path(), "proj", "redmine")
+                    .join("config.json")
+                    .exists(),
                 "no config.json must be written for a rejected host_url {bad}"
             );
         }
@@ -2177,19 +2346,167 @@ mod tests {
     #[test]
     fn save_redmine_credentials_skips_config_json_when_only_secret_fields() {
         let tmp = tempfile::tempdir().unwrap();
-        let svc_dir = tmp.path();
+        let data_dir = tmp.path();
+        let svc_dir = plugin::token_dir_in(data_dir, "proj", "redmine");
         let mut creds = std::collections::HashMap::new();
-        creds.insert("api_key".to_string(), "secret123".to_string());
+        creds.insert("api_key".to_string(), SENTINEL.to_string());
 
         let allowed = &["api_key", "host_url", "project_id", "config.json"];
-        save_redmine_credentials(svc_dir, &creds, allowed).unwrap();
+        save_redmine_credentials(data_dir, "proj", &creds, allowed).unwrap();
 
-        assert!(svc_dir.join("api_key").exists());
-
+        assert!(secret_file_exists(data_dir, "proj", "redmine", "api_key"));
+        assert!(!svc_dir.join("api_key").exists());
         assert!(
             !svc_dir.join("config.json").exists(),
             "config.json should not be written when only secret fields are saved"
         );
+    }
+
+    #[test]
+    fn save_redmine_credentials_writes_nothing_when_one_field_is_invalid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let mut creds = std::collections::HashMap::new();
+        creds.insert("api_key".to_string(), SENTINEL.to_string());
+        creds.insert("host_url".to_string(), "http://127.0.0.1/".to_string());
+
+        let allowed = &["api_key", "host_url", "project_id", "config.json"];
+        assert!(save_redmine_credentials(data_dir, "proj", &creds, allowed).is_err());
+
+        assert!(!secret_file_exists(data_dir, "proj", "redmine", "api_key"));
+        assert!(!data_dir.join("tokens").exists());
+    }
+
+    #[test]
+    fn saving_credentials_leaves_no_secret_in_a_plaintext_file() {
+        let cases: [(&str, &[(&str, &str)]); 5] = [
+            (
+                "gitlab",
+                &[
+                    ("token", SENTINEL),
+                    ("host_url", "https://gitlab.example.com"),
+                ],
+            ),
+            ("github", &[("token", SENTINEL)]),
+            (
+                "atlassian",
+                &[
+                    ("api_token", SENTINEL),
+                    ("email", "dev@example.test"),
+                    ("site_url", "https://x.atlassian.net"),
+                ],
+            ),
+            ("context7", &[("api_key", SENTINEL)]),
+            (
+                "sharepoint",
+                &[
+                    ("client_id", "cid"),
+                    ("tenant_id", "tid"),
+                    ("site_id", "site"),
+                ],
+            ),
+        ];
+        for (service, fields) in cases {
+            let tmp = tempfile::tempdir().unwrap();
+            let data_dir = tmp.path();
+            let creds: std::collections::HashMap<String, String> = fields
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+
+            save_with_field_storage(data_dir, "proj", service, &creds).unwrap();
+
+            no_plaintext_secret(data_dir, SENTINEL);
+            let svc_dir = plugin::token_dir_in(data_dir, "proj", service);
+            for (key, value) in fields {
+                if is_builtin_secret_field(service, key) {
+                    assert_eq!(
+                        read_secret(data_dir, "proj", service, key).as_deref(),
+                        Some(*value),
+                        "{service}.{key} must be in the store"
+                    );
+                    assert!(!svc_dir.join(key).exists());
+                } else if *key == "client_id" || *key == "tenant_id" {
+                    let state = std::fs::read_to_string(plugin::oauth_state_file_in(
+                        data_dir, "proj", service,
+                    ))
+                    .unwrap();
+                    assert!(state.contains(value));
+                } else {
+                    assert_eq!(std::fs::read_to_string(svc_dir.join(key)).unwrap(), *value);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn saving_a_refresh_token_goes_to_the_store_and_never_to_the_state_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let creds: std::collections::HashMap<String, String> = [
+            ("client_id".to_string(), "cid".to_string()),
+            ("refresh_token".to_string(), SENTINEL.to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        save_with_field_storage(data_dir, "proj", "sharepoint", &creds).unwrap();
+
+        let name = SecretName::oauth_refresh_token("proj", "sharepoint").unwrap();
+        assert!(secret_exists_in(data_dir, &name));
+        let state: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(plugin::oauth_state_file_in(data_dir, "proj", "sharepoint"))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(state.get("refreshToken").is_none());
+        assert_eq!(state["providerData"]["clientId"], "cid");
+        no_plaintext_secret(data_dir, SENTINEL);
+    }
+
+    #[test]
+    fn saving_an_empty_secret_removes_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        plant_secret(data_dir, "proj", "github", "token", SENTINEL);
+        let creds: std::collections::HashMap<String, String> =
+            [("token".to_string(), String::new())].into_iter().collect();
+
+        save_with_field_storage(data_dir, "proj", "github", &creds).unwrap();
+
+        assert!(!secret_file_exists(data_dir, "proj", "github", "token"));
+        assert!(!is_service_configured_in(data_dir, "proj", "github"));
+    }
+
+    #[test]
+    fn saving_rejects_a_field_the_service_does_not_allow_and_writes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let creds: std::collections::HashMap<String, String> = [
+            ("token".to_string(), SENTINEL.to_string()),
+            ("evil".to_string(), "x".to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        let err = save_with_field_storage(data_dir, "proj", "github", &creds).unwrap_err();
+
+        assert!(err.contains("not allowed"));
+        assert!(!secret_file_exists(data_dir, "proj", "github", "token"));
+    }
+
+    #[test]
+    fn merge_oauth_state_json_refuses_a_secret_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fields: std::collections::HashMap<_, _> = [merge_field("refresh_token", SENTINEL)]
+            .into_iter()
+            .collect();
+
+        let err = merge_oauth_state_json_in(tmp.path(), "p", "sharepoint", &fields).unwrap_err();
+
+        assert!(err.contains("refresh_token"));
+        assert!(!err.contains(SENTINEL));
+        assert!(!plugin::oauth_state_file_in(tmp.path(), "p", "sharepoint").exists());
     }
 
     fn restage_runtime(
@@ -2214,9 +2531,13 @@ mod tests {
             ..Default::default()
         };
         config::save_user_config_to(&config, &data_dir.join("config.json")).unwrap();
-        let secrets = data_dir.join("secrets").join("acme");
-        std::fs::create_dir_all(&secrets).unwrap();
-        std::fs::write(secrets.join("anthropic_api_key"), "sk-ant-test").unwrap();
+        SecretStore::open(data_dir)
+            .unwrap()
+            .write(
+                &SecretName::anthropic_api_key("acme").unwrap(),
+                "sk-ant-test",
+            )
+            .unwrap();
         speedwave_runtime::runtime::mock_runtime::MockRuntimeBuilder::new()
             .with_is_available(available)
             .with_vm_exec_as_root_exit(exit, "")
@@ -2473,9 +2794,9 @@ mod tests {
     #[test]
     fn is_service_configured_returns_false_when_only_secrets_exist() {
         let tmp = tempfile::tempdir().unwrap();
-        let svc_dir = make_svc_token_dir(tmp.path(), "proj", "sharepoint");
-        std::fs::write(svc_dir.join("access_token"), "tok").unwrap();
-        std::fs::write(svc_dir.join("refresh_token"), "ref").unwrap();
+        let data_dir = data_dir_of(tmp.path());
+        plant_secret(&data_dir, "proj", "sharepoint", "access_token", "tok");
+        plant_secret(&data_dir, "proj", "sharepoint", "refresh_token", "ref");
 
         assert!(
             !is_service_configured_with_home(tmp.path(), "proj", "sharepoint"),
@@ -2486,8 +2807,10 @@ mod tests {
     #[test]
     fn is_service_configured_returns_true_when_all_fields_present() {
         let tmp = tempfile::tempdir().unwrap();
+        let data_dir = data_dir_of(tmp.path());
         let svc_dir = make_svc_token_dir(tmp.path(), "proj", "sharepoint");
-        std::fs::write(svc_dir.join("access_token"), "tok").unwrap();
+        plant_secret(&data_dir, "proj", "sharepoint", "access_token", "tok");
+        plant_secret(&data_dir, "proj", "sharepoint", "refresh_token", "ref");
         std::fs::write(svc_dir.join("site_id"), "my-site").unwrap();
 
         let oauth_dir = tmp.path().join(".speedwave").join("oauth").join("proj");
@@ -2500,7 +2823,6 @@ mod tests {
                     "clientId": "550e8400-e29b-41d4-a716-446655440000",
                     "tenantId": "common",
                 },
-                "refreshToken": "ref",
             })
             .to_string(),
         )
@@ -2513,10 +2835,64 @@ mod tests {
     }
 
     #[test]
+    fn is_service_configured_does_not_need_the_install_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = data_dir_of(tmp.path());
+        plant_secret_without_install_key(&data_dir, "proj", "github", "token", SENTINEL);
+
+        assert!(SecretStore::open(&data_dir).is_err());
+        assert!(is_service_configured_in(&data_dir, "proj", "github"));
+        assert!(has_any_credential_file(
+            &data_dir,
+            "proj",
+            "github",
+            &["token"]
+        ));
+    }
+
+    #[test]
+    fn has_any_credential_file_checks_secrets_in_the_store_and_the_rest_in_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        assert!(!has_any_credential_file(
+            data_dir,
+            "proj",
+            "gitlab",
+            &["token", "host_url"]
+        ));
+
+        let svc_dir = plugin::token_dir_in(data_dir, "proj", "gitlab");
+        std::fs::create_dir_all(&svc_dir).unwrap();
+        std::fs::write(svc_dir.join("token"), "legacy plaintext").unwrap();
+        assert!(
+            !has_any_credential_file(data_dir, "proj", "gitlab", &["token"]),
+            "a plaintext file does not count as a secret"
+        );
+
+        plant_secret(data_dir, "proj", "gitlab", "token", SENTINEL);
+        assert!(has_any_credential_file(
+            data_dir,
+            "proj",
+            "gitlab",
+            &["token"]
+        ));
+
+        std::fs::write(svc_dir.join("host_url"), "https://g.example.com").unwrap();
+        assert!(has_any_credential_file(
+            data_dir,
+            "proj",
+            "gitlab",
+            &["host_url"]
+        ));
+    }
+
+    #[test]
     fn is_service_configured_returns_false_for_pre_provider_data_layout() {
         let tmp = tempfile::tempdir().unwrap();
+        let data_dir = data_dir_of(tmp.path());
         let svc_dir = make_svc_token_dir(tmp.path(), "proj", "sharepoint");
-        std::fs::write(svc_dir.join("access_token"), "tok").unwrap();
+        plant_secret(&data_dir, "proj", "sharepoint", "access_token", "tok");
+        plant_secret(&data_dir, "proj", "sharepoint", "refresh_token", "ref");
         std::fs::write(svc_dir.join("site_id"), "site").unwrap();
 
         let oauth_dir = tmp.path().join(".speedwave").join("oauth").join("proj");
@@ -2527,7 +2903,6 @@ mod tests {
                 "provider": "microsoft",
                 "clientId": "550e8400-e29b-41d4-a716-446655440000",
                 "tenantId": "common",
-                "refreshToken": "ref",
             })
             .to_string(),
         )
@@ -2542,9 +2917,10 @@ mod tests {
     #[test]
     fn is_service_configured_checks_stored_in_config_json_for_redmine() {
         let tmp = tempfile::tempdir().unwrap();
+        let data_dir = data_dir_of(tmp.path());
         let svc_dir = make_svc_token_dir(tmp.path(), "proj", "redmine");
 
-        std::fs::write(svc_dir.join("api_key"), "secret").unwrap();
+        plant_secret(&data_dir, "proj", "redmine", "api_key", "secret");
         assert!(
             !is_service_configured_with_home(tmp.path(), "proj", "redmine"),
             "should be false when required config.json field (host_url) is missing"
@@ -2578,8 +2954,25 @@ mod tests {
         );
     }
 
-    /// Writes a minimal slack oauth.json with the given refreshToken.
-    fn write_slack_oauth_state(home: &std::path::Path, project: &str, refresh_token: &str) {
+    #[test]
+    fn is_service_configured_ignores_a_plaintext_secret_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let svc_dir = make_svc_token_dir(tmp.path(), "proj", "redmine");
+        std::fs::write(svc_dir.join("api_key"), "legacy").unwrap();
+        std::fs::write(
+            svc_dir.join("config.json"),
+            r#"{"host_url":"https://r.test"}"#,
+        )
+        .unwrap();
+
+        assert!(!is_service_configured_with_home(
+            tmp.path(),
+            "proj",
+            "redmine"
+        ));
+    }
+
+    fn write_slack_oauth_state(home: &std::path::Path, project: &str) {
         let data_dir = home.join(speedwave_runtime::consts::DATA_DIR);
         let path = speedwave_runtime::plugin::oauth_state_file_in(&data_dir, project, "slack");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -2590,7 +2983,6 @@ mod tests {
                 "grantType": "refresh_token",
                 "providerData": {"clientId": "1.2"},
                 "grantedScopes": [],
-                "refreshToken": refresh_token,
             })
             .to_string(),
         )
@@ -2598,35 +2990,39 @@ mod tests {
     }
 
     #[test]
-    fn is_service_configured_returns_false_for_empty_files() {
+    fn is_service_configured_slack_needs_both_stored_tokens() {
         let tmp = tempfile::tempdir().unwrap();
-        let svc_dir = make_svc_token_dir(tmp.path(), "proj", "slack");
+        let data_dir = data_dir_of(tmp.path());
+        write_slack_oauth_state(tmp.path(), "proj");
 
-        std::fs::write(svc_dir.join("access_token"), "").unwrap();
-        write_slack_oauth_state(tmp.path(), "proj", "xoxe-1-rt");
+        plant_secret(&data_dir, "proj", "slack", "refresh_token", "rt");
         assert!(
             !is_service_configured_with_home(tmp.path(), "proj", "slack"),
-            "should be false when access_token is empty (0 bytes)"
+            "should be false without an access token"
         );
 
-        std::fs::write(svc_dir.join("access_token"), "xoxe.xoxp-123").unwrap();
+        plant_secret(&data_dir, "proj", "slack", "access_token", "at");
         assert!(
             is_service_configured_with_home(tmp.path(), "proj", "slack"),
-            "should be true when access_token and refreshToken are present"
+            "should be true when both tokens are stored"
         );
 
-        write_slack_oauth_state(tmp.path(), "proj", "");
+        let refresh = SecretName::oauth_refresh_token("proj", "slack").unwrap();
+        SecretStore::open(&data_dir)
+            .unwrap()
+            .delete(&refresh)
+            .unwrap();
         assert!(
             !is_service_configured_with_home(tmp.path(), "proj", "slack"),
-            "should be false when the oauth state has no refreshToken"
+            "should be false without a refresh token"
         );
     }
 
     #[test]
     fn is_service_configured_slack_false_without_oauth_state() {
         let tmp = tempfile::tempdir().unwrap();
-        let svc_dir = make_svc_token_dir(tmp.path(), "proj", "slack");
-        std::fs::write(svc_dir.join("access_token"), "xoxe.xoxp-123").unwrap();
+        let data_dir = data_dir_of(tmp.path());
+        plant_secret(&data_dir, "proj", "slack", "access_token", "at");
         assert!(!is_service_configured_with_home(
             tmp.path(),
             "proj",
@@ -2637,8 +3033,9 @@ mod tests {
     #[test]
     fn is_service_configured_returns_false_for_empty_config_json_values() {
         let tmp = tempfile::tempdir().unwrap();
+        let data_dir = data_dir_of(tmp.path());
         let svc_dir = make_svc_token_dir(tmp.path(), "proj", "redmine");
-        std::fs::write(svc_dir.join("api_key"), "secret").unwrap();
+        plant_secret(&data_dir, "proj", "redmine", "api_key", "secret");
         let config = serde_json::json!({
             "host_url": "",
             "project_id": "proj"
@@ -3130,16 +3527,87 @@ mod tests {
     #[test]
     fn disconnecting_slack_removes_the_features_file_with_the_access_token() {
         let tmp = tempfile::tempdir().unwrap();
-        let svc_dir = tmp.path().join("slack");
+        let data_dir = tmp.path();
+        let svc_dir = plugin::token_dir_in(data_dir, "proj", "slack");
         std::fs::create_dir_all(&svc_dir).unwrap();
-        for name in ["access_token", "features.json"] {
-            std::fs::write(svc_dir.join(name), "x").unwrap();
-        }
+        std::fs::write(svc_dir.join("features.json"), "{}").unwrap();
+        plant_secret(data_dir, "proj", "slack", "access_token", SENTINEL);
+        plant_secret(data_dir, "proj", "slack", "refresh_token", SENTINEL);
+        let client = SecretName::oauth_client_secret("proj", "slack").unwrap();
+        SecretStore::open(data_dir)
+            .unwrap()
+            .write(&client, SENTINEL)
+            .unwrap();
+        let state = plugin::oauth_state_file_in(data_dir, "proj", "slack");
+        std::fs::create_dir_all(state.parent().unwrap()).unwrap();
+        std::fs::write(&state, "{}").unwrap();
+        plant_secret(data_dir, "proj", "sharepoint", "access_token", "other");
 
-        remove_credential_files(&svc_dir, get_allowed_fields("slack").unwrap()).unwrap();
+        remove_integration_credentials_in(
+            data_dir,
+            "proj",
+            "slack",
+            get_allowed_fields("slack").unwrap(),
+        )
+        .unwrap();
 
-        assert!(!svc_dir.join("access_token").exists());
         assert!(!svc_dir.join("features.json").exists());
+        assert!(!state.exists());
+        assert!(!secret_file_exists(
+            data_dir,
+            "proj",
+            "slack",
+            "access_token"
+        ));
+        assert!(!secret_file_exists(
+            data_dir,
+            "proj",
+            "slack",
+            "refresh_token"
+        ));
+        assert!(!secret_exists_in(data_dir, &client));
+        assert!(
+            secret_file_exists(data_dir, "proj", "sharepoint", "access_token"),
+            "another service keeps its secrets"
+        );
+    }
+
+    #[test]
+    fn disconnecting_is_idempotent_and_needs_no_store_when_nothing_is_stored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        for _ in 0..2 {
+            remove_integration_credentials_in(
+                data_dir,
+                "proj",
+                "github",
+                get_allowed_fields("github").unwrap(),
+            )
+            .unwrap();
+        }
+        assert!(!data_dir.join("secrets").exists());
+    }
+
+    #[test]
+    fn disconnecting_with_a_missing_install_key_reports_the_error_and_keeps_the_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        plant_secret_without_install_key(data_dir, "proj", "github", "token", SENTINEL);
+        let svc_dir = plugin::token_dir_in(data_dir, "proj", "github");
+        std::fs::create_dir_all(&svc_dir).unwrap();
+        std::fs::write(svc_dir.join("token"), "legacy").unwrap();
+
+        let err = remove_integration_credentials_in(
+            data_dir,
+            "proj",
+            "github",
+            get_allowed_fields("github").unwrap(),
+        )
+        .unwrap_err();
+
+        assert!(!err.contains(SENTINEL));
+        assert!(secret_file_exists(data_dir, "proj", "github", "token"));
+        assert!(svc_dir.join("token").exists());
     }
 
     #[test]
@@ -3285,7 +3753,6 @@ mod tests {
         let fields: std::collections::HashMap<_, _> = [
             merge_field("client_id", "cid"),
             merge_field("tenant_id", "tid"),
-            merge_field("refresh_token", "rt"),
         ]
         .into_iter()
         .collect();
@@ -3297,7 +3764,7 @@ mod tests {
         assert_eq!(json["provider"], "microsoft");
         assert_eq!(json["providerData"]["clientId"], "cid");
         assert_eq!(json["providerData"]["tenantId"], "tid");
-        assert_eq!(json["refreshToken"], "rt");
+        assert!(json.get("refreshToken").is_none());
         assert!(json.get("clientId").is_none());
         assert!(json.get("tenantId").is_none());
 
@@ -3328,18 +3795,14 @@ mod tests {
             serde_json::json!({
                 "provider": "microsoft",
                 "providerData": { "clientId": "old-cid" },
-                "refreshToken": "old-rt",
+                "expiresAt": "old-expiry",
             })
             .to_string(),
         )
         .unwrap();
 
-        let fields: std::collections::HashMap<_, _> = [
-            merge_field("tenant_id", "new-tid"),
-            merge_field("refresh_token", "new-rt"),
-        ]
-        .into_iter()
-        .collect();
+        let fields: std::collections::HashMap<_, _> =
+            [merge_field("tenant_id", "new-tid")].into_iter().collect();
         merge_oauth_state_json_in(data_dir, "p", "sharepoint", &fields).unwrap();
 
         let json: serde_json::Value =
@@ -3347,7 +3810,8 @@ mod tests {
         assert_eq!(json["providerData"]["clientId"], "old-cid");
         assert_eq!(json["providerData"]["tenantId"], "new-tid");
         assert!(json.get("tenantId").is_none());
-        assert_eq!(json["refreshToken"], "new-rt");
+        assert_eq!(json["expiresAt"], "old-expiry");
+        assert!(json.get("refreshToken").is_none());
         assert_eq!(json["provider"], "microsoft");
 
         #[cfg(unix)]
@@ -3412,7 +3876,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            serde_json::json!({ "provider": "microsoft", "refreshToken": "old" }).to_string(),
+            serde_json::json!({ "provider": "microsoft", "expiresAt": "old" }).to_string(),
         )
         .unwrap();
 
@@ -3423,7 +3887,7 @@ mod tests {
         let json: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(json["providerData"]["clientId"], "cid");
-        assert_eq!(json["refreshToken"], "old");
+        assert_eq!(json["expiresAt"], "old");
     }
 
     #[test]
@@ -3439,7 +3903,7 @@ mod tests {
                 "provider": "microsoft",
                 "clientId": "legacy-cid",
                 "tenantId": "legacy-tid",
-                "refreshToken": "rt"
+                "expiresAt": "x"
             })
             .to_string(),
         )
@@ -3455,6 +3919,6 @@ mod tests {
         assert_eq!(json["providerData"]["tenantId"], "new-tid");
         assert!(json.get("clientId").is_none());
         assert!(json.get("tenantId").is_none());
-        assert_eq!(json["refreshToken"], "rt");
+        assert_eq!(json["expiresAt"], "x");
     }
 }
