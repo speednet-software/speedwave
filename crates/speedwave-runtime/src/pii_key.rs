@@ -23,6 +23,9 @@ pub fn ensure_project_key_in(data_dir: &Path, project: &str) -> anyhow::Result<(
         if legacy_key_file_in(data_dir, project).exists() {
             anyhow::bail!("PII key migration pending for project '{project}'");
         }
+        if store.exists(&name) {
+            log::warn!("the PII key of project '{project}' cannot be read, a new key replaces it");
+        }
         store.write(&name, &generate_key_hex()?)?;
         Ok(())
     })
@@ -34,10 +37,7 @@ fn has_readable_key(store: &SecretStore, name: &SecretName, project: &str) -> an
     }
     match store.read(name) {
         Ok(value) => Ok(value.is_some()),
-        Err(SecretStoreError::Unreadable(_)) => {
-            log::warn!("the PII key of project '{project}' cannot be read, a new key replaces it");
-            Ok(false)
-        }
+        Err(SecretStoreError::Unreadable(_)) => Ok(false),
         Err(e) => Err(e.into()),
     }
 }
