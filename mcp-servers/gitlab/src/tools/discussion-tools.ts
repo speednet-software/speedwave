@@ -51,7 +51,8 @@ const ANCHOR_PROPERTIES = {
   },
   line: {
     type: 'number',
-    description: 'Line number on the chosen side; with end_line, the first line',
+    description:
+      'Line number on the chosen side; with end_line, the first line. The line must be inside a diff hunk (added, removed or context line); GitLab rejects any other with a line_code error',
   },
   end_line: {
     type: 'number',
@@ -299,7 +300,8 @@ const createMrDraftNoteTool = writeTool({
 
 const updateMrDraftNoteTool = writeTool({
   name: 'updateMrDraftNote',
-  description: 'Edit the text and/or placement of a draft review note.',
+  description:
+    'Edit the text of a draft review note. The anchor cannot be changed: to move a draft, call deleteMrDraftNote and then createMrDraftNote.',
   keywords: ['gitlab', 'merge', 'request', 'draft', 'review', 'edit', 'note'],
   example:
     'await gitlab.updateMrDraftNote({ project_id: "speedwave/core", mr_iid: 42, draft_note_id: 88, note: "Reworded" })',
@@ -308,9 +310,8 @@ const updateMrDraftNoteTool = writeTool({
     mr_iid: MR_IID,
     draft_note_id: { type: 'number', description: 'Draft note ID from listMrDraftNotes' },
     note: { type: 'string', description: 'New draft note body' },
-    ...ANCHOR_PROPERTIES,
   },
-  required: ['project_id', 'mr_iid', 'draft_note_id'],
+  required: ['project_id', 'mr_iid', 'draft_note_id', 'note'],
   output: { draft_note: { type: 'object' } },
   inputExample: {
     description: 'Reword a draft',
@@ -444,13 +445,13 @@ export function createDiscussionTools(client: GitLabClient | null): ToolDefiniti
           DiffAnchor & { body: string };
         const orphan = droppedAnchorError({ path, line, end_line, side });
         if (orphan) return orphan;
-        const result = await c.createMrDiscussion(project_id, mr_iid, body, {
+        const discussion = await c.createMrDiscussion(project_id, mr_iid, body, {
           path,
           line,
           end_line,
           side,
         });
-        return jsonResult(result);
+        return jsonResult({ success: true, discussion });
       }),
     },
     {
@@ -517,11 +518,11 @@ export function createDiscussionTools(client: GitLabClient | null): ToolDefiniti
     {
       tool: updateMrDraftNoteTool,
       handler: withValidation(client, async (c, params) => {
-        const { project_id, mr_iid, draft_note_id, ...input } = params as MrParams &
-          DraftNoteInput & { draft_note_id: number };
-        const orphan = droppedAnchorError(input);
-        if (orphan) return orphan;
-        const draft_note = await c.updateMrDraftNote(project_id, mr_iid, draft_note_id, input);
+        const { project_id, mr_iid, draft_note_id, note } = params as MrParams & {
+          draft_note_id: number;
+          note: string;
+        };
+        const draft_note = await c.updateMrDraftNote(project_id, mr_iid, draft_note_id, note);
         return jsonResult({ success: true, draft_note });
       }),
     },

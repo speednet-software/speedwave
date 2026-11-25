@@ -50,9 +50,6 @@ type DiscussionCreateOptions = NonNullable<
 type DraftNoteCreateOptions = NonNullable<
   Parameters<GitbeakerClient['MergeRequestDraftNotes']['create']>[3]
 >;
-type DraftNoteEditOptions = NonNullable<
-  Parameters<GitbeakerClient['MergeRequestDraftNotes']['edit']>[3]
->;
 
 /** Draft note text, reply target and anchor. */
 export type DraftNoteInput = DiffAnchor & {
@@ -917,18 +914,15 @@ export class GitLabClient {
    * @param projectId - Project ID or path.
    * @param mrIid - Merge request IID.
    * @param draftNoteId - Draft note ID.
-   * @param input - Note text and anchor.
+   * @param note - New note text.
    */
   async updateMrDraftNote(
     projectId: string | number,
     mrIid: number,
     draftNoteId: number,
-    input: DraftNoteInput
+    note: string
   ): Promise<unknown> {
-    const { note, ...anchor } = input;
-    const position = await this.positionFor(projectId, mrIid, anchor);
-    const options = { note, position } as unknown as DraftNoteEditOptions;
-    return await this.gitlab.MergeRequestDraftNotes.edit(projectId, mrIid, draftNoteId, options);
+    return await this.gitlab.MergeRequestDraftNotes.edit(projectId, mrIid, draftNoteId, { note });
   }
 
   /**

@@ -2236,26 +2236,13 @@ describe('GitLabClient', () => {
       );
     });
 
-    it('edits a draft note text only', async () => {
+    it('edits the draft note text', async () => {
       mockGitlabInstance.MergeRequestDraftNotes.edit.mockResolvedValue({ id: 88 });
 
-      await client.updateMrDraftNote(1, 10, 88, { note: 'reworded' });
+      await client.updateMrDraftNote(1, 10, 88, 'reworded');
 
       expect(mockGitlabInstance.MergeRequestDraftNotes.edit).toHaveBeenCalledWith(1, 10, 88, {
         note: 'reworded',
-        position: undefined,
-      });
-    });
-
-    it('moves a draft note to a new position', async () => {
-      positionFixtures();
-      mockGitlabInstance.MergeRequestDraftNotes.edit.mockResolvedValue({ id: 88 });
-
-      await client.updateMrDraftNote(1, 10, 88, { path: 'a.ts' });
-
-      expect(mockGitlabInstance.MergeRequestDraftNotes.edit).toHaveBeenCalledWith(1, 10, 88, {
-        note: undefined,
-        position: filePosition,
       });
     });
 

@@ -52,7 +52,6 @@ const DELETE_TOOLS = ['deleteMrDiscussionNote', 'deleteMrDraftNote'];
 const ORPHAN_ANCHORS = [
   ['createMrDiscussion', { body: 'b' }],
   ['createMrDraftNote', { note: 'n' }],
-  ['updateMrDraftNote', { draft_note_id: 3 }],
 ] as const;
 
 const run = async (client: MockClient, name: string, params: Record<string, unknown>) => {
@@ -385,7 +384,7 @@ describe('discussion-tools', () => {
         content: [
           {
             type: 'text',
-            text: JSON.stringify(mockDiscussion, null, 2),
+            text: JSON.stringify({ success: true, discussion: mockDiscussion }, null, 2),
           },
         ],
       });
@@ -422,7 +421,7 @@ describe('discussion-tools', () => {
         content: [
           {
             type: 'text',
-            text: JSON.stringify(mockDiscussion, null, 2),
+            text: JSON.stringify({ success: true, discussion: mockDiscussion }, null, 2),
           },
         ],
       });
@@ -466,7 +465,7 @@ describe('discussion-tools', () => {
         content: [
           {
             type: 'text',
-            text: JSON.stringify(mockDiscussion, null, 2),
+            text: JSON.stringify({ success: true, discussion: mockDiscussion }, null, 2),
           },
         ],
       });
@@ -503,7 +502,7 @@ describe('discussion-tools', () => {
         content: [
           {
             type: 'text',
-            text: JSON.stringify(mockDiscussion, null, 2),
+            text: JSON.stringify({ success: true, discussion: mockDiscussion }, null, 2),
           },
         ],
       });
@@ -639,7 +638,11 @@ describe('discussion-tools', () => {
     it('passes path, line, end_line and side to the client', async () => {
       mockClient.createMrDiscussion.mockResolvedValue({ id: 'd1', notes: [] });
 
-      await run(mockClient, 'createMrDiscussion', {
+      const tool = createDiscussionTools(mockClient as unknown as GitLabClient).find(
+        (t) => t.tool.name === 'createMrDiscussion'
+      )!.tool;
+
+      const result = await run(mockClient, 'createMrDiscussion', {
         project_id: 'g/p',
         mr_iid: 10,
         body: 'Null check',
@@ -647,6 +650,11 @@ describe('discussion-tools', () => {
         line: 42,
         end_line: 45,
         side: 'old',
+      });
+
+      expect(expectEmittedKeysDeclared(tool, result)).toEqual({
+        success: true,
+        discussion: { id: 'd1', notes: [] },
       });
 
       expect(mockClient.createMrDiscussion).toHaveBeenCalledWith('g/p', 10, 'Null check', {
@@ -816,8 +824,24 @@ describe('discussion-tools', () => {
         note: 'reworded',
       });
 
-      expect(mockClient.updateMrDraftNote).toHaveBeenCalledWith(1, 10, 88, { note: 'reworded' });
+      expect(mockClient.updateMrDraftNote).toHaveBeenCalledWith(1, 10, 88, 'reworded');
       expect(parse(result)).toEqual({ success: true, draft_note: { id: 88 } });
+    });
+
+    it('takes only the note text and points to delete plus create for a move', () => {
+      const tool = createDiscussionTools(mockClient as unknown as GitLabClient).find(
+        (t) => t.tool.name === 'updateMrDraftNote'
+      )!.tool;
+
+      expect(Object.keys(tool.inputSchema.properties as object).sort()).toEqual([
+        'draft_note_id',
+        'mr_iid',
+        'note',
+        'project_id',
+      ]);
+      expect(tool.inputSchema.required).toContain('note');
+      expect(tool.description).toContain('deleteMrDraftNote');
+      expect(tool.description).toContain('createMrDraftNote');
     });
 
     it('deletes a draft note', async () => {
