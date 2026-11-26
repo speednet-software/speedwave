@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "Speedwave Chrome Bridge (PoC)",
+  "version": "0.1.0",
+  "description": "Lets Speedwave read and control this browser through Speedwave Desktop.",
+  "minimum_chrome_version": "116",
+  "permissions": ["tabs", "tabGroups", "debugger", "storage", "alarms"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": { "default_title": "Speedwave", "default_popup": "popup.html" }
+}

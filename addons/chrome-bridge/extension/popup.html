@@ -1,0 +1,50 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body {
+        font:
+          13px system-ui,
+          sans-serif;
+        width: 300px;
+        margin: 12px;
+      }
+      label {
+        display: block;
+        margin-top: 8px;
+      }
+      input {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 4px;
+      }
+      button {
+        margin-top: 10px;
+        margin-right: 6px;
+      }
+      #status {
+        margin-top: 10px;
+        font-weight: 600;
+      }
+      .connected {
+        color: #1a7f37;
+      }
+      .waiting {
+        color: #9a6700;
+      }
+      .disconnected,
+      .error {
+        color: #cf222e;
+      }
+    </style>
+  </head>
+  <body>
+    <div>Speedwave Chrome Bridge</div>
+    <label>URL <input id="url" placeholder="ws://127.0.0.1:60124/" /></label>
+    <label>Token <input id="token" type="password" /></label>
+    <button id="connect">Connect</button><button id="disconnect">Disconnect</button>
+    <div id="status"></div>
+    <script src="popup.js" type="module"></script>
+  </body>
+</html>
