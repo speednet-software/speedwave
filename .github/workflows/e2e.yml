@@ -15,6 +15,8 @@ jobs:
     runs-on: [self-hosted, macOS, ARM64]
     environment: e2e
     timeout-minutes: 120
+    env:
+      E2E_LOCK_OWNER: gh-${{ github.run_id }}-${{ github.run_attempt }}-macos
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -29,6 +31,10 @@ jobs:
           LOCAL_LLM_API_KEY: ${{ secrets.LOCAL_LLM_API_KEY }}
           LOCAL_LLM_MODEL: ${{ secrets.LOCAL_LLM_MODEL }}
         run: SPEEDWAVE_MACOS_HOST="$(whoami)@127.0.0.1" bash scripts/e2e-vm.sh macos
+
+      - name: Release the rig lock
+        if: always()
+        run: SPEEDWAVE_MACOS_HOST="$(whoami)@127.0.0.1" bash scripts/e2e-vm.sh release-lock macos
 
       - name: Upload failure screenshots and the app log
         if: failure()
@@ -47,6 +53,8 @@ jobs:
     runs-on: [self-hosted, Windows, X64]
     environment: e2e
     timeout-minutes: 120
+    env:
+      E2E_LOCK_OWNER: gh-${{ github.run_id }}-${{ github.run_attempt }}-windows
     defaults:
       run:
         shell: bash
@@ -68,6 +76,10 @@ jobs:
           LOCAL_LLM_API_KEY: ${{ secrets.LOCAL_LLM_API_KEY }}
           LOCAL_LLM_MODEL: ${{ secrets.LOCAL_LLM_MODEL }}
         run: SPEEDWAVE_WINDOWS_HOST="$USERNAME@127.0.0.1" bash scripts/e2e-vm.sh windows
+
+      - name: Release the rig lock
+        if: always()
+        run: SPEEDWAVE_WINDOWS_HOST="$USERNAME@127.0.0.1" bash scripts/e2e-vm.sh release-lock windows
 
       - name: Upload failure screenshots and the app log
         if: failure()

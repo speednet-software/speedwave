@@ -108,10 +108,12 @@ env LIMA_HOME="$HOME/.speedwave/lima" "$HOME/Applications/Speedwave.app/Contents
 RIG_LOCK_STALE_MINUTES=150
 RIG_LOCK_POLL_SECONDS=30
 RIG_LOCK_WAIT_SECONDS=1800
+RIG_LOCK_OWNER="${E2E_LOCK_OWNER:-local-$(uname -n)-$$}"
 
 with_rig_lock() {
-    local runner="$1" lock="$2" waited=0 rc=0
+    local runner="$1" lock="$2" waited=0 rc=0 child=""
     shift 2
+    rig_lock_owner_valid || return 1
     while :; do
         rc=0
         rig_lock_try_script "$lock" | "$runner" || rc=$?
@@ -128,20 +130,112 @@ with_rig_lock() {
         sleep "$RIG_LOCK_POLL_SECONDS"
         waited=$((waited + RIG_LOCK_POLL_SECONDS))
     done
+    trap 'rig_lock_abort "$runner" "$lock" "$child" 129' HUP
+    trap 'rig_lock_abort "$runner" "$lock" "$child" 130' INT
+    trap 'rig_lock_abort "$runner" "$lock" "$child" 143' TERM
     rc=0
-    ("$@") || rc=$?
-    printf 'rm -rf "%s"\n' "$lock" | "$runner" || true
+    ("$@") &
+    child=$!
+    wait "$child" || rc=$?
+    trap - HUP INT TERM
+    rig_lock_release_script "$lock" | "$runner" || true
     return "$rc"
 }
 
+release_rig_lock() {
+    local runner="$1" lock="$2" clean_state="$3" rc=0
+    rig_lock_owner_valid || return 1
+    rig_lock_owner_check_script "$lock" | "$runner" || rc=$?
+    case "$rc" in
+        0) ;;
+        1)
+            echo "no rig lock at $lock, nothing to release"
+            return 0
+            ;;
+        2)
+            echo "the rig lock $lock belongs to another run, left in place"
+            return 0
+            ;;
+        *)
+            echo "could not reach the rig to release its lock $lock (exit $rc)" >&2
+            return "$rc"
+            ;;
+    esac
+    "$clean_state" || echo "WARNING: cleaning the rig before releasing its lock failed" >&2
+    rig_lock_release_script "$lock" | "$runner"
+    echo "released the rig lock $lock"
+}
+
+rig_lock_abort() {
+    local runner="$1" lock="$2" child="$3" status="$4"
+    trap - HUP INT TERM
+    [ -z "$child" ] || rig_lock_kill_tree "$child"
+    [ "${CI:-}" = "true" ] || rig_lock_release_script "$lock" | "$runner" || true
+    exit "$status"
+}
+
+rig_lock_kill_tree() {
+    local pid="$1" kids kid
+    kids="$(rig_lock_children "$pid")"
+    kill "$pid" 2>/dev/null || true
+    for kid in $kids; do
+        rig_lock_kill_tree "$kid"
+    done
+}
+
+rig_lock_children() {
+    local stat line ppid
+    if command -v pgrep >/dev/null 2>&1; then
+        pgrep -P "$1" || true
+        return 0
+    fi
+    for stat in /proc/[0-9]*/stat; do
+        line="$(cat "$stat" 2>/dev/null)" || continue
+        ppid="${line##*) }"
+        ppid="${ppid#* }"
+        ppid="${ppid%% *}"
+        [ "$ppid" = "$1" ] && line="${stat#/proc/}" && echo "${line%/stat}"
+    done
+    return 0
+}
+
+rig_lock_owner_valid() {
+    case "$RIG_LOCK_OWNER" in
+        '' | *[!A-Za-z0-9._-]*)
+            echo "ERROR: the rig lock owner must be non-empty and contain only letters, digits, dot, underscore and hyphen" >&2
+            return 1
+            ;;
+    esac
+}
+
 rig_lock_try_script() {
+    rig_lock_owner_valid || return 1
     cat <<SCRIPT
 lock="$1"
-if mkdir "\$lock" 2>/dev/null; then exit 0; fi
+owner='$RIG_LOCK_OWNER'
+if mkdir "\$lock" 2>/dev/null; then printf '%s' "\$owner" >"\$lock/owner"; exit 0; fi
 if [ -n "\$(find "\$lock" -maxdepth 0 -mmin +$RIG_LOCK_STALE_MINUTES)" ]; then
-    rm -rf "\$lock" && mkdir "\$lock" && exit 0
+    rm -rf "\$lock" && mkdir "\$lock" && printf '%s' "\$owner" >"\$lock/owner" && exit 0
 fi
 exit 1
+SCRIPT
+}
+
+rig_lock_owner_check_script() {
+    rig_lock_owner_valid || return 1
+    cat <<SCRIPT
+lock="$1"
+owner='$RIG_LOCK_OWNER'
+[ -d "\$lock" ] || exit 1
+[ "\$(cat "\$lock/owner" 2>/dev/null)" = "\$owner" ] || exit 2
+:
+SCRIPT
+}
+
+rig_lock_release_script() {
+    rig_lock_owner_check_script "$1" || return 1
+    cat <<'SCRIPT'
+rm -rf "$lock"
 SCRIPT
 }
 
@@ -1124,12 +1218,22 @@ case "$TARGET" in
             exit 1
         fi
         ;;
+    release-lock)
+        case "${2:-}" in
+            windows|win) release_rig_lock windows_wsl "$WINDOWS_RIG_LOCK" windows_clean_state ;;
+            macos|mac)   release_rig_lock macos_bash "$MACOS_RIG_LOCK" macos_clean_state ;;
+            *)
+                echo "Usage: $0 release-lock <windows|macos>" >&2
+                exit 1
+                ;;
+        esac
+        ;;
     preview-windows|preview-win)
         preview_windows ;;
     preview-macos|preview-mac)
         preview_macos ;;
     *)
-        echo "Usage: $0 [windows|macos|all|preview-windows|preview-macos]" >&2
+        echo "Usage: $0 [windows|macos|all|release-lock <windows|macos>|preview-windows|preview-macos]" >&2
         exit 1
         ;;
 esac
