@@ -146,7 +146,7 @@ rig_lock_abort() {
     local runner="$1" lock="$2" child="$3" status="$4"
     trap - HUP INT TERM
     [ -z "$child" ] || kill "$child" 2>/dev/null || true
-    rig_lock_release_script "$lock" | "$runner" || true
+    [ "${CI:-}" = "true" ] || rig_lock_release_script "$lock" | "$runner" || true
     exit "$status"
 }
 

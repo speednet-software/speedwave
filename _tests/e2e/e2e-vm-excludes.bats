@@ -360,6 +360,23 @@ _record_clean() {
     ! kill -0 "$wrapped_pid" 2>/dev/null
 }
 
+@test "with_rig_lock leaves its lock to the release step when terminated in CI" {
+    _load_rig_lock
+    export PIDFILE="$BATS_TEST_TMPDIR/wrapped.pid"
+    ( CI=true with_rig_lock bash "$LOCK" bash -c 'echo $$ >"$PIDFILE"; exec sleep 30' ) >/dev/null 2>&1 &
+    local runner_pid=$! tries=0
+    while [ ! -s "$PIDFILE" ] && [ "$tries" -lt 100 ]; do sleep 0.1; tries=$((tries + 1)); done
+    [ -s "$PIDFILE" ]
+    local wrapped_pid
+    wrapped_pid="$(cat "$PIDFILE")"
+    kill -TERM "$runner_pid"
+    local status=0
+    wait "$runner_pid" || status=$?
+    [ "$status" -eq 143 ]
+    [ "$(cat "$LOCK/owner")" = "test-owner" ]
+    ! kill -0 "$wrapped_pid" 2>/dev/null
+}
+
 @test "an owner with forbidden characters is rejected before the rig is touched" {
     _load_rig_lock
     RIG_LOCK_OWNER='bad owner; rm -rf /'
