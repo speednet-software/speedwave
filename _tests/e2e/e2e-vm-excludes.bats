@@ -345,7 +345,7 @@ _record_clean() {
 @test "with_rig_lock releases its lock and exits 143 when the run is terminated" {
     _load_rig_lock
     export PIDFILE="$BATS_TEST_TMPDIR/wrapped.pid"
-    ( with_rig_lock bash "$LOCK" bash -c 'echo $$ >"$PIDFILE"; exec sleep 30' ) >/dev/null 2>&1 &
+    ( CI= with_rig_lock bash "$LOCK" bash -c 'echo $$ >"$PIDFILE"; exec sleep 30' ) >/dev/null 2>&1 &
     local runner_pid=$! tries=0
     while [ ! -s "$PIDFILE" ] && [ "$tries" -lt 100 ]; do sleep 0.1; tries=$((tries + 1)); done
     [ -s "$PIDFILE" ]
@@ -363,7 +363,7 @@ _record_clean() {
 @test "with_rig_lock stops the whole wrapped run and releases its lock on HUP" {
     _load_rig_lock
     export PIDFILE="$BATS_TEST_TMPDIR/grandchild.pid"
-    ( with_rig_lock bash "$LOCK" bash -c 'sleep 30 & echo $! >"$PIDFILE"; wait' ) >/dev/null 2>&1 &
+    ( CI= with_rig_lock bash "$LOCK" bash -c 'sleep 30 & echo $! >"$PIDFILE"; wait' ) >/dev/null 2>&1 &
     local runner_pid=$! tries=0
     while [ ! -s "$PIDFILE" ] && [ "$tries" -lt 100 ]; do sleep 0.1; tries=$((tries + 1)); done
     [ -s "$PIDFILE" ]
