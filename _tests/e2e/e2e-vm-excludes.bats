@@ -203,8 +203,9 @@ _run_installer() {
 }
 
 _load_rig_lock() {
-    eval "$(sed -n '/^RIG_LOCK_STALE_MINUTES=/p;/^RIG_LOCK_POLL_SECONDS=/p;/^RIG_LOCK_WAIT_SECONDS=/p;/^with_rig_lock()/,/^}/p;/^rig_lock_try_script()/,/^}/p' "$SCRIPT")"
+    eval "$(sed -n '/^RIG_LOCK_STALE_MINUTES=/p;/^RIG_LOCK_POLL_SECONDS=/p;/^RIG_LOCK_WAIT_SECONDS=/p;/^RIG_LOCK_OWNER=/p;/^with_rig_lock()/,/^}/p;/^rig_lock_abort()/,/^}/p;/^release_lock()/,/^}/p;/^rig_lock_owner_valid()/,/^}/p;/^rig_lock_try_script()/,/^}/p;/^rig_lock_owner_check_script()/,/^}/p;/^rig_lock_release_script()/,/^}/p' "$SCRIPT")"
     RIG_LOCK_POLL_SECONDS=0
+    RIG_LOCK_OWNER="test-owner"
     LOCK="$BATS_TEST_TMPDIR/rig.lock"
 }
 
@@ -257,6 +258,122 @@ _record_run() {
     [ "$status" -eq 255 ]
     [[ "$output" == *"could not reach the rig"* ]]
     [ ! -e "$BATS_TEST_TMPDIR/runs" ]
+}
+
+_plant_lock() {
+    mkdir "$LOCK"
+    [ -z "${1:-}" ] || printf '%s' "$1" >"$LOCK/owner"
+}
+
+_record_clean() {
+    if [ -d "$LOCK" ]; then echo "cleaned-with-lock" >>"$BATS_TEST_TMPDIR/cleans"; else echo "cleaned-without-lock" >>"$BATS_TEST_TMPDIR/cleans"; fi
+}
+
+@test "with_rig_lock writes its owner into the lock it takes" {
+    _load_rig_lock
+    run with_rig_lock bash "$LOCK" bash -c 'cat "$0/owner"' "$LOCK"
+    [ "$status" -eq 0 ]
+    [ "$output" = "test-owner" ]
+}
+
+@test "with_rig_lock writes its owner into a lock it takes over as stale" {
+    _load_rig_lock
+    _plant_lock other-run
+    touch -t 202001010000 "$LOCK"
+    run with_rig_lock bash "$LOCK" bash -c 'cat "$0/owner"' "$LOCK"
+    [ "$status" -eq 0 ]
+    [ "$output" = "test-owner" ]
+    [ ! -e "$LOCK" ]
+}
+
+@test "with_rig_lock leaves a lock that another owner took while the command ran" {
+    _load_rig_lock
+    run with_rig_lock bash "$LOCK" bash -c 'printf other-run >"$0/owner"' "$LOCK"
+    [ "$status" -eq 0 ]
+    [ "$(cat "$LOCK/owner")" = "other-run" ]
+}
+
+@test "release_lock cleans the rig and removes the lock it owns" {
+    _load_rig_lock
+    _plant_lock test-owner
+    run release_lock bash "$LOCK" _record_clean
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"released the rig lock"* ]]
+    [ "$(cat "$BATS_TEST_TMPDIR/cleans")" = "cleaned-with-lock" ]
+    [ ! -e "$LOCK" ]
+}
+
+@test "release_lock leaves a lock owned by another run and does not clean the rig" {
+    _load_rig_lock
+    _plant_lock other-run
+    run release_lock bash "$LOCK" _record_clean
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"belongs to another run"* ]]
+    [ ! -e "$BATS_TEST_TMPDIR/cleans" ]
+    [ "$(cat "$LOCK/owner")" = "other-run" ]
+}
+
+@test "release_lock leaves a lock without an owner file alone" {
+    _load_rig_lock
+    _plant_lock
+    run release_lock bash "$LOCK" _record_clean
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"belongs to another run"* ]]
+    [ ! -e "$BATS_TEST_TMPDIR/cleans" ]
+    [ -d "$LOCK" ]
+}
+
+@test "release_lock does nothing when there is no lock" {
+    _load_rig_lock
+    run release_lock bash "$LOCK" _record_clean
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"nothing to release"* ]]
+    [ ! -e "$BATS_TEST_TMPDIR/cleans" ]
+}
+
+@test "release_lock fails when the rig cannot be reached" {
+    _load_rig_lock
+    _plant_lock test-owner
+    _unreachable() { cat >/dev/null; return 255; }
+    run release_lock _unreachable "$LOCK" _record_clean
+    [ "$status" -eq 255 ]
+    [[ "$output" == *"could not reach the rig"* ]]
+    [ ! -e "$BATS_TEST_TMPDIR/cleans" ]
+    [ -d "$LOCK" ]
+}
+
+@test "with_rig_lock releases its lock and exits 143 when the run is terminated" {
+    _load_rig_lock
+    export PIDFILE="$BATS_TEST_TMPDIR/wrapped.pid"
+    ( with_rig_lock bash "$LOCK" bash -c 'echo $$ >"$PIDFILE"; exec sleep 30' ) >/dev/null 2>&1 &
+    local runner_pid=$! tries=0
+    while [ ! -s "$PIDFILE" ] && [ "$tries" -lt 100 ]; do sleep 0.1; tries=$((tries + 1)); done
+    [ -s "$PIDFILE" ]
+    [ "$(cat "$LOCK/owner")" = "test-owner" ]
+    local wrapped_pid
+    wrapped_pid="$(cat "$PIDFILE")"
+    kill -TERM "$runner_pid"
+    local status=0
+    wait "$runner_pid" || status=$?
+    [ "$status" -eq 143 ]
+    [ ! -e "$LOCK" ]
+    ! kill -0 "$wrapped_pid" 2>/dev/null
+}
+
+@test "an owner with forbidden characters is rejected before the rig is touched" {
+    _load_rig_lock
+    RIG_LOCK_OWNER='bad owner; rm -rf /'
+    run with_rig_lock bash "$LOCK" _record_run
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"rig lock owner"* ]]
+    [ ! -e "$BATS_TEST_TMPDIR/runs" ]
+    [ ! -e "$LOCK" ]
+    run release_lock bash "$LOCK" _record_clean
+    [ "$status" -eq 1 ]
+    [ ! -e "$BATS_TEST_TMPDIR/cleans" ]
+    RIG_LOCK_OWNER=''
+    run rig_lock_try_script "$LOCK"
+    [ "$status" -eq 1 ]
 }
 
 _load_collect_remote_tree() {
