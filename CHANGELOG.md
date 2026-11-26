@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.22.0](https://github.com/speednet-software/speedwave/compare/v0.21.0+260...v0.22.0+303) (2026-11-26)
+
+
+### Features
+- Delete a reminder with deleteReminder (#1509)
+- Filter, search and sort listReminders and report truncation (#1510)
+- Create, rename and delete reminder lists (#1530)
+- Read-only mode for integrations and git push (#1523)
+- List, download and delete Jira issue attachments (#1536)
+- Attach, download and delete Redmine attachments (#1535)
+- Bump Claude Code to 2.1.322 and add Fable 5.2 (#1533)
+- Verify the release signature in self-update (#1543)
+- Show subagents as a block and in a pinned panel (#1550)
+- Reminder alarms on create, update and read (#1511)
+- Manage issue categories and filter issues by category (#1559)
+- All issue fields in writes, reads and filters from one field table (#1561)
+- Show workflow progress live in the Workflow block (#1554)
+- Review merge requests with anchored comments and draft notes (#1565)
+
+### Bug Fixes
+- Close the audit-schedule issue on a green audit and fail the run on red (#1524)
+- Merge through the merge queue and return full PR state (#1527)
+- Render release notes as one list instead of one section per beta (#1532)
+- Ask for sign-in again when the claude.ai session expires (#1534)
+- Read the merge-async result so mergePullRequest can enqueue (#1537)
+- Bump rustls, vitest and minimatch past open security advisories (#1538)
+- Keep user work content out of diagnostics archives (#1540)
+- Queue a message sent while the chat session starts (#1529)
+- Show tool results in a resumed chat conversation (#1542)
+- Show the agent's task plan in a pinned panel above the composer (#1531)
+- Keep slash-command and skill messages when a conversation resumes (#1526)
+- Refresh OAuth tokens in the process that owns the session (#1541)
+- Show turns Claude Code starts on its own (#1528)
+- Show a resumed turn as one message and charge every response (#1546)
+- Bump quinn and proxy TLS crates past RustSec advisories (#1549)
+- Show Workflow tool calls and take the slash list from the session init (#1547)
+- Write the policy file atomically in the late-appearing policy test (#1552)
+- Keep a stopped chat session's output out of the next session (#1553)
+- Run the office venv on Python 3.13 and bump soupsieve to 4.1.3 (#1556)
+- Let an OAuth plugin redirect to http://localhost (#1560)
+- Build the image with @playwright/mcp 0.0.86 (#1567)
+- Bump cookie to 0.18.3 for RUSTSEC-2026-0594 (#1569)
+
+
 ## [0.21.0](https://github.com/speednet-software/speedwave/compare/v0.20.0...v0.21.0+260) (2026-11-06)
 
 
