@@ -46,11 +46,10 @@ Preconditions, all checked by the workflow before it writes anything:
 
 Steps:
 
-1. Check by hand what the e2e suite cannot cover, because it runs on an API key: sign in to Anthropic with a subscription (OAuth) and open the usage popover and confirm the plan windows are listed in order with values between 0 and 100.
-2. Run "Run workflow" on `Release` with `dev` selected in "Use workflow from" (any other branch fails) and the commit SHA in `commit`.
-3. A person from the promoter list approves the run in the `promotion` environment.
-4. The workflow creates `release/0.M` at the commit, then the beta's `GitHub Release` loses `prerelease`, gains `make_latest`, and its notes are rewritten to the list of changes since the previous line (hotfixes of that line excluded). A `changelog/0.M` PR to `dev` is opened with the `CHANGELOG.md` section; merge it like any other PR.
-5. File a Jira task for the landing "What's new" entry (EN and PL); update `install.mdx` on the landing to drop the macOS Intel row once this is the first stable of the cutover.
+1. Run "Run workflow" on `Release` with `dev` selected in "Use workflow from" (any other branch fails) and the commit SHA in `commit`.
+2. A person from the promoter list approves the run in the `promotion` environment.
+3. The workflow creates `release/0.M` at the commit, then the beta's `GitHub Release` loses `prerelease`, gains `make_latest`, and its notes are rewritten to the list of changes since the previous line (hotfixes of that line excluded). A `changelog/0.M` PR to `dev` is opened with the `CHANGELOG.md` section; merge it like any other PR.
+4. File a Jira task for the landing "What's new" entry (EN and PL); update `install.mdx` on the landing to drop the macOS Intel row once this is the first stable of the cutover.
 
 There is no bypass. If the rig is down or e2e is red, the stable waits. Do not create or push `release/0.M` by hand: the workflow creates it with `GH_AUTOMATION_PAT` and computes `M` itself. A hand-created branch publishes nothing (the push trigger ignores branch creation), but if it sits on another commit the promotion refuses until an admin removes it (see the recovery steps below).
 
