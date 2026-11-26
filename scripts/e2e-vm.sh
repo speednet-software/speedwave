@@ -142,15 +142,7 @@ with_rig_lock() {
     return "$rc"
 }
 
-rig_lock_abort() {
-    local runner="$1" lock="$2" child="$3" status="$4"
-    trap - HUP INT TERM
-    [ -z "$child" ] || kill "$child" 2>/dev/null || true
-    [ "${CI:-}" = "true" ] || rig_lock_release_script "$lock" | "$runner" || true
-    exit "$status"
-}
-
-release_lock() {
+release_rig_lock() {
     local runner="$1" lock="$2" clean_state="$3" rc=0
     rig_lock_owner_valid || return 1
     rig_lock_owner_check_script "$lock" | "$runner" || rc=$?
@@ -172,6 +164,39 @@ release_lock() {
     "$clean_state" || echo "WARNING: cleaning the rig before releasing its lock failed" >&2
     rig_lock_release_script "$lock" | "$runner"
     echo "released the rig lock $lock"
+}
+
+rig_lock_abort() {
+    local runner="$1" lock="$2" child="$3" status="$4"
+    trap - HUP INT TERM
+    [ -z "$child" ] || rig_lock_kill_tree "$child"
+    [ "${CI:-}" = "true" ] || rig_lock_release_script "$lock" | "$runner" || true
+    exit "$status"
+}
+
+rig_lock_kill_tree() {
+    local pid="$1" kids kid
+    kids="$(rig_lock_children "$pid")"
+    kill "$pid" 2>/dev/null || true
+    for kid in $kids; do
+        rig_lock_kill_tree "$kid"
+    done
+}
+
+rig_lock_children() {
+    local stat line ppid
+    if command -v pgrep >/dev/null 2>&1; then
+        pgrep -P "$1" || true
+        return 0
+    fi
+    for stat in /proc/[0-9]*/stat; do
+        line="$(cat "$stat" 2>/dev/null)" || continue
+        ppid="${line##*) }"
+        ppid="${ppid#* }"
+        ppid="${ppid%% *}"
+        [ "$ppid" = "$1" ] && line="${stat#/proc/}" && echo "${line%/stat}"
+    done
+    return 0
 }
 
 rig_lock_owner_valid() {
@@ -1195,8 +1220,8 @@ case "$TARGET" in
         ;;
     release-lock)
         case "${2:-}" in
-            windows|win) release_lock windows_wsl "$WINDOWS_RIG_LOCK" windows_clean_state ;;
-            macos|mac)   release_lock macos_bash "$MACOS_RIG_LOCK" macos_clean_state ;;
+            windows|win) release_rig_lock windows_wsl "$WINDOWS_RIG_LOCK" windows_clean_state ;;
+            macos|mac)   release_rig_lock macos_bash "$MACOS_RIG_LOCK" macos_clean_state ;;
             *)
                 echo "Usage: $0 release-lock <windows|macos>" >&2
                 exit 1

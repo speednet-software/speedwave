@@ -15,6 +15,8 @@ jobs:
     runs-on: [self-hosted, macOS, ARM64]
     environment: e2e
     timeout-minutes: 120
+    env:
+      E2E_LOCK_OWNER: gh-${{ github.run_id }}-${{ github.run_attempt }}-macos
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -22,7 +24,6 @@ jobs:
 
       - name: Run the macOS rig lane
         env:
-          E2E_LOCK_OWNER: gh-${{ github.run_id }}-${{ github.run_attempt }}-macos
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENROUTER_MODEL: ${{ secrets.OPENROUTER_MODEL }}
@@ -33,8 +34,6 @@ jobs:
 
       - name: Release the rig lock
         if: always()
-        env:
-          E2E_LOCK_OWNER: gh-${{ github.run_id }}-${{ github.run_attempt }}-macos
         run: SPEEDWAVE_MACOS_HOST="$(whoami)@127.0.0.1" bash scripts/e2e-vm.sh release-lock macos
 
       - name: Upload failure screenshots and the app log
@@ -54,6 +53,8 @@ jobs:
     runs-on: [self-hosted, Windows, X64]
     environment: e2e
     timeout-minutes: 120
+    env:
+      E2E_LOCK_OWNER: gh-${{ github.run_id }}-${{ github.run_attempt }}-windows
     defaults:
       run:
         shell: bash
@@ -68,7 +69,6 @@ jobs:
 
       - name: Run the Windows rig lane
         env:
-          E2E_LOCK_OWNER: gh-${{ github.run_id }}-${{ github.run_attempt }}-windows
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENROUTER_MODEL: ${{ secrets.OPENROUTER_MODEL }}
@@ -79,8 +79,6 @@ jobs:
 
       - name: Release the rig lock
         if: always()
-        env:
-          E2E_LOCK_OWNER: gh-${{ github.run_id }}-${{ github.run_attempt }}-windows
         run: SPEEDWAVE_WINDOWS_HOST="$USERNAME@127.0.0.1" bash scripts/e2e-vm.sh release-lock windows
 
       - name: Upload failure screenshots and the app log
