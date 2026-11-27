@@ -1,0 +1,28 @@
+{
+  "slug": "chrome",
+  "name": "Chrome Bridge (PoC)",
+  "description": "Drive your own Chrome from Speedwave: open windows and tabs, read pages, click, type, take screenshots and run JavaScript through a companion Chrome extension",
+  "version": "0.1.0",
+  "service_id": "chrome",
+  "resources": ["skills"],
+  "auth_fields": [],
+  "settings_schema": null,
+  "speedwave_compat": ">=0.0.1",
+  "mem_limit": "256m",
+  "cpu_limit": "0.5",
+  "host_bridge": {
+    "url_env": "CHROME_BRIDGE_URL",
+    "token_env": "CHROME_BRIDGE_TOKEN",
+    "display_name": "Chrome Bridge",
+    "roles": {
+      "worker": { "scheme": "header", "name": "x-chrome-bridge-auth" },
+      "desktop": { "scheme": "query_param", "name": "token" }
+    },
+    "origin_policy": "accept_if_auth_is_query_param",
+    "max_frame_bytes": 16777216,
+    "pending_slot_timeout_secs": 3600,
+    "preferred_port": 60124,
+    "persistent_token": true
+  },
+  "instructions": "## Connecting Chrome\n\nThe tools talk to a companion extension in your Chrome. Use a separate Chrome profile without bank or client accounts: the extension can read and control every tab.\n\n**One-time install:**\n\n1. Speedwave unpacks this plugin to `~/.speedwave/plugins/chrome/` (Windows: `%USERPROFILE%\\.speedwave\\plugins\\chrome\\`). The extension is in the `extension/` subfolder.\n2. In Chrome open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and pick the `extension/` folder.\n3. On this page, copy URL and Token from the **Bridge connection** card.\n4. Click the Speedwave icon in the Chrome toolbar, paste both and click **Connect**.\n\n**Each session:** Speedwave Desktop must be running; the extension reconnects on its own."
+}
