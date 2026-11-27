@@ -56,6 +56,20 @@ Consequences:
 
 Alternatives rejected: the remotes found in the project directory as the source of the list (decision 3); one list per account instead of per project (it leaves lateral movement between projects open); separate lists for fetch and push (the read-only mode of the integration blocks push for the whole forge, ADR-108); an absent list meaning "everything" during a migration (no release carries the git transport without the list, so there is nothing to migrate).
 
+## Amendment (2026-11-27): credential helper and a rotated caller token (SPEED-1046)
+
+Decision 7 wrote the caller secret into `~/.config/speedwave/git-transport.gitconfig` as `http.<proxy>/git/.extraHeader`. That file sits in `claude-home/<project>/`, a directory on the host disk, and `git config --list` printed the secret into the model's context in one session. Decision 4 relied on a secret that never changed.
+
+1. **A credential helper replaces `extraHeader`.** `containers/git-transport.sh` writes `~/.config/speedwave/git-proxy.gitconfig` with the `insteadOf` rules of decision 7 and `credential.<proxy>/git/.helper`, which names `containers/git-credential-speedwave.sh`. Git runs the helper when it needs credentials for a matching URL[^8]. The helper reads `/run/speedwave/secrets/caller-token` at that moment and prints `username=speedwave` and `password=<token>`; no configuration file holds the token. The script removes the old `git-transport.gitconfig` and its `include.path` entry at every start, and the host removes the old file from `claude-home` through `LEGACY_PATHS`. `SPEEDWAVE_GIT_PROXY_AUTH` no longer exists.
+2. **`/git/` accepts the token as HTTP Basic.** The password field carries the token and the user name is ignored; the `x-speedwave-proxy-auth` header still works. A request with neither gets `401` with `WWW-Authenticate: Basic`, which is what makes git ask the helper[^9]; a wrong token gets `401` as before. `containers/proxy/src/caller_auth.rs` compares SHA-256 digests of both values in constant time.
+3. **One token for the model, git and the hub, drawn at project start.** The token is 32 random bytes as hex, drawn when a start recreates the Claude Code sessions (`LockedRuntime::compose_up_recreate`, `compose_up_service` for `claude`, and `compose_up` while no `claude` container runs) and kept as the file `caller-token` in the tmpfs slots of `claude`, `mcp-hub` and the proxy `config` slot, never on the host disk and never in `compose.yml`. A process that attaches to a running project, a proxy reload and `stage_project_secrets` keep the staged token. The proxy and the hub read the file on every request, so a new token needs no restart of either. Decision 4's rule that a proxy without a caller secret rejects every git request now also covers a missing or empty `caller-token` file.
+
+Consequences:
+
+- The token stays in the environment of the agent's processes (`ANTHROPIC_CUSTOM_HEADERS`, `SPEEDWAVE_CALLER_TOKEN`), so `env` shows it and it opens `/v1`, `/git/` and the hub. The change removes it from the host disk and from `git config --list` and limits its life to one project start; it does not hide it from the agent.
+- The helper script is part of the `claude` image inputs (`build.rs::IMAGES`).
+- That git asks the helper only after a `401` with `WWW-Authenticate` is taken from the git documentation; `_tests/entrypoint/git-transport.bats` runs `git credential fill` against the generated configuration, and the full fetch and push against a real proxy is not covered by an automated test.
+
 ## References
 
 [^1]: Git, "HTTP transfer protocols", smart clients: `GET $GIT_URL/info/refs?service=git-upload-pack`, "The request MUST contain exactly one query parameter, `service=$servicename`", and `POST $GIT_URL/git-upload-pack` / `POST $GIT_URL/git-receive-pack`: https://git-scm.com/docs/http-protocol
@@ -71,3 +85,7 @@ Alternatives rejected: the remotes found in the project directory as the source 
 [^6]: GitHub Docs, "Scopes for OAuth apps", `repo`: "Grants full access to public and private repositories including read and write access to code": https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps
 
 [^7]: Git, `remote-curl.c`, `show_http_message`: on a failed ref discovery (`discover_refs`) git prints a `text/plain` response body to stderr, each line prefixed with `remote:`: https://github.com/git/git/blob/master/remote-curl.c
+
+[^8]: Git, `gitcredentials` manual, "CONFIGURING CREDENTIAL HELPERS" and "CREDENTIAL CONTEXTS" (`credential.<url>.helper`): https://git-scm.com/docs/gitcredentials
+
+[^9]: RFC 7617, The "Basic" HTTP Authentication Scheme, and RFC 9110, section 11.6.1, `WWW-Authenticate` in a `401` response: https://www.rfc-editor.org/rfc/rfc7617 and https://www.rfc-editor.org/rfc/rfc9110#section-11.6.1

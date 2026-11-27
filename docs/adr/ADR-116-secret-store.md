@@ -58,6 +58,10 @@ Does not protect against:
 - Time Machine and other backup copies. The key file is not excluded from backups, because the number of affected people is small and the key beside the ciphertext in the same backup is the same exposure as in item one.
 - `claude.env` and the OTLP headers in `config.json`. These are user-entered values in the user config that Speedwave passes on; they are not integration secrets and are not moved into the store. `NoTokensClaude` rejects the four names that carry secrets.
 
+## Amendment (2026-11-27): the caller token is not derived (SPEED-1046)
+
+Item 7 no longer holds for the caller token. The purpose `caller` and `proxy::caller_token_in` are gone: the token is 32 random bytes drawn when a project start recreates the Claude Code sessions, kept only in the tmpfs slots of `claude`, `mcp-hub` and the proxy `config` slot as the file `caller-token`, and read by the proxy and the hub on every request (amendment of 2026-11-27 in [ADR-106](ADR-106-git-push-from-the-container-through-the-proxy.md)). A derived token was the same for the life of the install key and anyone who read `secret-store.key` could compute it; a drawn token exists only in the VM until the next start. Worker bearers stay derived. `proxy/<project>/caller-token` stays in `LEGACY_PATHS`, and the secret env name list of the `generated` migration keeps `SPEEDWAVE_GIT_PROXY_AUTH` because compose files of older releases contain it.
+
 ## Release note
 
 Text for the release notes:
