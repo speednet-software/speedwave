@@ -44,12 +44,12 @@ pub fn truncate_if_oversized(path: &Path, max_bytes: u64) {
         Ok(m) if m.len() > max_bytes => {}
         _ => return,
     }
-    let content = match std::fs::read_to_string(path) {
+    let content = match std::fs::read(path) {
         Ok(c) => c,
         Err(_) => return,
     };
     let keep_from = content.len() / 2;
-    let tail = match content[keep_from..].find('\n') {
+    let tail = match content[keep_from..].iter().position(|&b| b == b'\n') {
         Some(pos) => &content[keep_from + pos + 1..],
         None => &content[keep_from..],
     };
@@ -219,6 +219,33 @@ mod tests {
             !result.contains("[0] "),
             "should have dropped the oldest entries"
         );
+    }
+
+    #[test]
+    fn truncate_if_oversized_survives_a_multibyte_char_at_the_midpoint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("multibyte.log");
+        let content = format!("{}é\nlast one\n", "a".repeat(9));
+        assert_eq!(content.len() / 2, 10, "midpoint must split the 2-byte char");
+        assert!(!content.is_char_boundary(content.len() / 2));
+        std::fs::write(&path, &content).unwrap();
+
+        truncate_if_oversized(&path, 5);
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"last one\n");
+    }
+
+    #[test]
+    fn truncate_if_oversized_handles_invalid_utf8() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("binary.log");
+        let mut content = b"first \xff\xfe line\n".to_vec();
+        content.extend_from_slice(b"second \xff line\nlast line\n");
+        std::fs::write(&path, &content).unwrap();
+
+        truncate_if_oversized(&path, 5);
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"last line\n");
     }
 
     #[test]

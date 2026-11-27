@@ -124,7 +124,7 @@ pub(crate) fn prefix_lines(source: &str, raw: &str, project: Option<&str>) -> St
             out.push('\n');
             continue;
         }
-        let normalized = if source == "desktop" {
+        let normalized = if source == "desktop" || source == "cli" {
             rewrite_desktop_bracketed_level(line)
         } else {
             line.to_string()
@@ -144,6 +144,7 @@ pub(crate) struct LogSources {
     pub desktop: String,
     pub mcp_os: String,
     pub claude: String,
+    pub cli: String,
     /// Lima VM serial log (macOS only; empty elsewhere).
     pub lima: String,
     pub entrypoint: String,
@@ -160,13 +161,14 @@ pub(crate) fn merge_log_sources(sources: LogSources, project: &str) -> String {
     let desktop = prefix_lines("desktop", &sources.desktop, None);
     let mcp_os = prefix_lines("mcp-os", &sources.mcp_os, None);
     let claude = prefix_lines("claude", &sources.claude, None);
+    let cli = prefix_lines("cli", &sources.cli, None);
     let lima = prefix_lines("lima", &sources.lima, None);
     let entrypoint = prefix_lines("entrypoint", &sources.entrypoint, None);
     let audit_proxy = prefix_lines("audit-proxy", &sources.audit_proxy, None);
     let audit_hub = prefix_lines("audit-hub", &sources.audit_hub, None);
 
     speedwave_runtime::log_sanitizer::sanitize(&format!(
-        "{compose}{desktop}{mcp_os}{claude}{lima}{entrypoint}{audit_proxy}{audit_hub}"
+        "{compose}{desktop}{mcp_os}{claude}{cli}{lima}{entrypoint}{audit_proxy}{audit_hub}"
     ))
 }
 
@@ -252,6 +254,7 @@ pub(crate) async fn get_all_logs(project: String, tail: Option<u32>) -> Result<S
                 desktop,
                 mcp_os: read_source("mcp-os"),
                 claude: read_source("claude"),
+                cli: read_source("cli"),
                 lima: read_source("lima"),
                 entrypoint: read_source("entrypoint"),
                 audit_proxy: read_source("audit-proxy"),
@@ -462,6 +465,15 @@ mod tests {
     }
 
     #[test]
+    fn prefix_lines_unwraps_the_bracketed_level_of_cli_lines() {
+        let raw = "2026-11-27T10:00:00.000+01:00 [INFO][speedwave_cli::x] hi\n";
+        assert_eq!(
+            prefix_lines("cli", raw, None),
+            "cli | 2026-11-27T10:00:00.000+01:00 INFO [speedwave_cli::x] hi\n"
+        );
+    }
+
+    #[test]
     fn rewrite_desktop_level_supports_warn_error_debug_trace_warning() {
         for lvl in ["DEBUG", "INFO", "WARN", "WARNING", "ERROR", "TRACE"] {
             let line = format!("2026-05-06T19:58:38.724+0200 [{lvl}][target] msg");
@@ -564,6 +576,7 @@ mod tests {
                 desktop: String::new(),
                 mcp_os: String::new(),
                 claude: String::new(),
+                cli: String::new(),
                 lima: String::new(),
                 entrypoint: String::new(),
                 audit_proxy: String::new(),
@@ -582,6 +595,7 @@ mod tests {
                 desktop: String::new(),
                 mcp_os: String::new(),
                 claude: String::new(),
+                cli: String::new(),
                 lima: String::new(),
                 entrypoint: "2026-07-13T12:00:01+02:00 ERROR FAIL example-plugin: clone failed\n"
                     .to_string(),
@@ -603,6 +617,7 @@ mod tests {
                 desktop: "2026-01-01T00:00:00.000+0000 [INFO][x] d\n".to_string(),
                 mcp_os: "ready\n".to_string(),
                 claude: "session started\n".to_string(),
+                cli: String::new(),
                 lima: String::new(),
                 entrypoint: String::new(),
                 audit_proxy: String::new(),
@@ -629,6 +644,7 @@ mod tests {
                 desktop: "MARKER_desktop\n".to_string(),
                 mcp_os: "MARKER_mcp_os\n".to_string(),
                 claude: "MARKER_claude\n".to_string(),
+                cli: "MARKER_cli\n".to_string(),
                 lima: "MARKER_lima\n".to_string(),
                 entrypoint: "MARKER_entrypoint\n".to_string(),
                 audit_proxy: "MARKER_audit_proxy\n".to_string(),
@@ -662,6 +678,7 @@ mod tests {
                         .to_string(),
                 mcp_os: String::new(),
                 claude: String::new(),
+                cli: String::new(),
                 lima: String::new(),
                 entrypoint: String::new(),
                 audit_proxy: String::new(),
@@ -685,6 +702,7 @@ mod tests {
                 desktop: "desktop_only_line\n".to_string(),
                 mcp_os: String::new(),
                 claude: String::new(),
+                cli: String::new(),
                 lima: String::new(),
                 entrypoint: String::new(),
                 audit_proxy: String::new(),
@@ -705,6 +723,7 @@ mod tests {
                 desktop: String::new(),
                 mcp_os: "mcp_os_line\n".to_string(),
                 claude: "claude_line\n".to_string(),
+                cli: String::new(),
                 lima: String::new(),
                 entrypoint: String::new(),
                 audit_proxy: String::new(),

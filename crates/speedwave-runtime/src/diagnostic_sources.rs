@@ -70,6 +70,10 @@ fn claude_session_path(data_dir: &Path, project: &str) -> Option<PathBuf> {
     Some(consts::claude_session_log_path_under(data_dir, project))
 }
 
+fn cli_path(data_dir: &Path, project: &str) -> Option<PathBuf> {
+    Some(consts::cli_log_path_under(data_dir, project))
+}
+
 fn entrypoint_path(data_dir: &Path, project: &str) -> Option<PathBuf> {
     Some(consts::entrypoint_log_path_under(data_dir, project))
 }
@@ -131,6 +135,14 @@ pub const DIAGNOSTIC_SOURCES: &[DiagnosticSource] = &[
         displayable: true,
         platforms: Platforms::All,
         kind: SourceKind::File(claude_session_path),
+        retention: Retention::Windowed(TimestampShape::Rfc3339Prefix),
+    },
+    DiagnosticSource {
+        key: "cli",
+        zip_entry: "cli/cli.log",
+        displayable: true,
+        platforms: Platforms::All,
+        kind: SourceKind::File(cli_path),
         retention: Retention::Windowed(TimestampShape::Rfc3339Prefix),
     },
     DiagnosticSource {
@@ -269,6 +281,21 @@ mod tests {
     }
 
     #[test]
+    fn cli_source_is_registered_displayable_and_resolves_to_the_cli_log() {
+        let s = DIAGNOSTIC_SOURCES
+            .iter()
+            .find(|s| s.key == "cli")
+            .expect("cli source must be registered");
+        assert!(s.displayable);
+        assert_eq!(s.zip_entry, "cli/cli.log");
+        let data_dir = Path::new("/fake/.speedwave");
+        assert_eq!(
+            resolve_file_path("cli", data_dir, "proj"),
+            Some(consts::cli_log_path_under(data_dir, "proj"))
+        );
+    }
+
+    #[test]
     fn retention_matches_the_timestamp_shape_each_source_writes() {
         let retention = |key: &str| {
             DIAGNOSTIC_SOURCES
@@ -277,7 +304,7 @@ mod tests {
                 .map(|s| s.retention)
         };
         let rfc3339 = Some(Retention::Windowed(TimestampShape::Rfc3339Prefix));
-        for key in ["desktop", "mcp-os", "claude", "entrypoint"] {
+        for key in ["desktop", "mcp-os", "claude", "cli", "entrypoint"] {
             assert_eq!(retention(key), rfc3339, "{key}");
         }
         assert_eq!(
@@ -322,6 +349,7 @@ mod tests {
         };
         assert!(entry("mcp-os").ends_with(consts::MCP_OS_LOG_FILE));
         assert!(entry("claude").ends_with(consts::CLAUDE_SESSION_LOG_FILE));
+        assert!(entry("cli").ends_with(consts::CLI_LOG_FILE));
         assert!(entry("audit-proxy").ends_with(consts::AUDIT_PROXY_FILE));
         assert!(entry("audit-hub").ends_with(consts::AUDIT_HUB_FILE));
     }
