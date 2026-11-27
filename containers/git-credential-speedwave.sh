@@ -7,6 +7,7 @@ cat > /dev/null
 token_file="${SPEEDWAVE_SECRETS_DIR:-/run/speedwave/secrets}/caller-token"
 token="$(cat "$token_file" 2>/dev/null)"
 if [ -z "$token" ]; then
+    echo "git-credential-speedwave: ${token_file} is missing or empty" >&2
     echo "quit=1"
     exit 0
 fi
