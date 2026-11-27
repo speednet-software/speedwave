@@ -676,14 +676,11 @@ pub async fn start_containers(
         })
     })
     .await
-    .map_err(|e| e.to_string())??;
-
-    crate::tray::refresh_tray_menu(&app);
-    Ok(())
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub async fn defer_container_start(project: String, app: tauri::AppHandle) -> Result<(), String> {
+pub async fn defer_container_start(project: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         check_project(&project)?;
         setup_wizard::defer_container_start(&project).map_err(|e| {
@@ -692,10 +689,7 @@ pub async fn defer_container_start(project: String, app: tauri::AppHandle) -> Re
         })
     })
     .await
-    .map_err(|e| e.to_string())??;
-
-    crate::tray::refresh_tray_menu(&app);
-    Ok(())
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1209,11 +1203,7 @@ fn get_security_policy_in(
         .and_then(|m| m.pii_policy);
     let resolved =
         speedwave_runtime::pii_policy::resolve_pii_policy(policy.as_ref(), managed.as_ref())?;
-    let pii_ner_enabled = speedwave_runtime::pii_policy::resolve_pii_ner(
-        user_config.beta_enabled(),
-        managed.as_ref(),
-        policy.as_ref(),
-    );
+    let pii_ner_enabled = speedwave_runtime::pii_policy::resolve_pii_ner(policy.as_ref());
     Ok(build_security_policy_response(
         &resolved,
         policy.as_ref(),
@@ -2776,28 +2766,24 @@ mod tests {
     }
 
     #[test]
-    fn the_policy_getter_reports_the_detector_opt_in_only_under_the_feature_gate() {
+    fn the_policy_getter_reports_the_detector_opt_in() {
         let mut cfg = make_config_with_active_project();
         cfg.find_project_mut("beta").unwrap().policy = Some(config::PiiPolicyUserConfig {
             policies: Vec::new(),
             custom_policies: Vec::new(),
             pii_ner_enabled: Some(true),
         });
-        cfg.ui = Some(config::UiPrefsConfig {
-            beta_enabled: Some(true),
-            ..Default::default()
-        });
-        let gate_on = seeded_tempdir(&cfg);
+        let opted_in = seeded_tempdir(&cfg);
         assert!(
-            get_security_policy_in(gate_on.path(), Some("beta"))
+            get_security_policy_in(opted_in.path(), Some("beta"))
                 .unwrap()
                 .pii_ner_enabled
         );
 
-        cfg.ui = None;
-        let gate_off = seeded_tempdir(&cfg);
+        cfg.find_project_mut("beta").unwrap().policy = None;
+        let default = seeded_tempdir(&cfg);
         assert!(
-            !get_security_policy_in(gate_off.path(), Some("beta"))
+            !get_security_policy_in(default.path(), Some("beta"))
                 .unwrap()
                 .pii_ner_enabled
         );
@@ -5123,45 +5109,6 @@ mod tests {
         assert!(
             fn_body.contains("check_os_warnings"),
             "run_system_check must call check_os_warnings()"
-        );
-    }
-
-    #[test]
-    fn start_containers_refreshes_tray_after_setup_completes() {
-        let source = include_str!("containers_cmd.rs");
-        let fn_start = source
-            .find("pub async fn start_containers(")
-            .expect("start_containers function must exist");
-        let fn_body = &source[fn_start..];
-        let next_fn = fn_body[1..]
-            .find("\npub ")
-            .map(|i| i + 1)
-            .unwrap_or(fn_body.len());
-        let fn_body = &fn_body[..next_fn];
-        assert!(
-            fn_body.contains("tray::refresh_tray_menu"),
-            "start_containers must call crate::tray::refresh_tray_menu so the \
-             ADR-058 beta toggle appears after the wizard's final step"
-        );
-    }
-
-    #[test]
-    fn create_project_does_not_refresh_tray_prematurely() {
-        let source = include_str!("containers_cmd.rs");
-        let fn_start = source
-            .find("pub async fn create_project(")
-            .expect("create_project function must exist");
-        let fn_body = &source[fn_start..];
-        let next_fn = fn_body[1..]
-            .find("\npub ")
-            .map(|i| i + 1)
-            .unwrap_or(fn_body.len());
-        let fn_body = &fn_body[..next_fn];
-        assert!(
-            !fn_body.contains("tray::refresh_tray_menu"),
-            "create_project must not call refresh_tray_menu — at that point \
-             is_setup_complete() is still false (containers_started is set \
-             later by start_containers)"
         );
     }
 

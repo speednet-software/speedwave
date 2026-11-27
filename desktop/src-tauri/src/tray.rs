@@ -3,7 +3,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use tauri::image::Image;
-use tauri::menu::{CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder};
+use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::Manager;
 
 pub(crate) const TRAY_ID: &str = "main-tray";
@@ -56,22 +56,12 @@ fn tooltip_for(recording: bool) -> &'static str {
     }
 }
 
-/// Variable tray-menu inputs (`update_version`, `beta_enabled`) managed via
-/// `app.manage`; access through the accessors, which recover from poisoning.
 #[derive(Default)]
 pub(crate) struct TrayMenuState {
     update_version: Mutex<Option<String>>,
-    beta_enabled: Mutex<bool>,
 }
 
 impl TrayMenuState {
-    pub(crate) fn new(beta_enabled: bool) -> Self {
-        Self {
-            update_version: Mutex::new(None),
-            beta_enabled: Mutex::new(beta_enabled),
-        }
-    }
-
     pub(crate) fn update_version(&self) -> Option<String> {
         match self.update_version.lock() {
             Ok(g) => g.clone(),
@@ -85,20 +75,6 @@ impl TrayMenuState {
             Err(p) => *p.into_inner() = version,
         }
     }
-
-    pub(crate) fn beta_enabled(&self) -> bool {
-        match self.beta_enabled.lock() {
-            Ok(g) => *g,
-            Err(p) => *p.into_inner(),
-        }
-    }
-
-    pub(crate) fn set_beta_enabled(&self, enabled: bool) {
-        match self.beta_enabled.lock() {
-            Ok(mut g) => *g = enabled,
-            Err(p) => *p.into_inner() = enabled,
-        }
-    }
 }
 
 /// Describes the tray menu shape independently of the Tauri `Menu` builder so
@@ -109,17 +85,10 @@ pub(crate) enum TrayItemSpec {
     Separator,
     CheckUpdate,
     InstallUpdate(String),
-    Beta { enabled: bool },
     Quit,
 }
 
-/// Returns the ordered menu items for the given inputs. Beta toggle is hidden
-/// before setup completion.
-pub(crate) fn tray_menu_spec(
-    update_version: Option<&str>,
-    beta_enabled: bool,
-    setup_complete: bool,
-) -> Vec<TrayItemSpec> {
+pub(crate) fn tray_menu_spec(update_version: Option<&str>) -> Vec<TrayItemSpec> {
     let mut items = vec![
         TrayItemSpec::Open,
         TrayItemSpec::Separator,
@@ -127,12 +96,6 @@ pub(crate) fn tray_menu_spec(
     ];
     if let Some(v) = update_version {
         items.push(TrayItemSpec::InstallUpdate(v.to_string()));
-    }
-    if setup_complete {
-        items.push(TrayItemSpec::Separator);
-        items.push(TrayItemSpec::Beta {
-            enabled: beta_enabled,
-        });
     }
     items.push(TrayItemSpec::Separator);
     items.push(TrayItemSpec::Quit);
@@ -149,10 +112,8 @@ pub(crate) fn load_tray_icon() -> Result<Image<'static>, tauri::Error> {
 pub(crate) fn build_tray_menu(
     app: &tauri::AppHandle,
     update_version: Option<&str>,
-    beta_enabled: bool,
-    setup_complete: bool,
 ) -> Result<tauri::menu::Menu<tauri::Wry>, tauri::Error> {
-    let spec = tray_menu_spec(update_version, beta_enabled, setup_complete);
+    let spec = tray_menu_spec(update_version);
     let mut builder = MenuBuilder::new(app);
     for item in spec {
         match item {
@@ -173,12 +134,6 @@ pub(crate) fn build_tray_menu(
                 let it = MenuItemBuilder::with_id("install_update", label).build(app)?;
                 builder = builder.item(&it);
             }
-            TrayItemSpec::Beta { enabled } => {
-                let it = CheckMenuItemBuilder::with_id("toggle_beta", "Beta features")
-                    .checked(enabled)
-                    .build(app)?;
-                builder = builder.item(&it);
-            }
             TrayItemSpec::Quit => {
                 let it = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
                 builder = builder.item(&it);
@@ -188,15 +143,11 @@ pub(crate) fn build_tray_menu(
     builder.build()
 }
 
-/// Rebuilds the tray menu from the current `TrayMenuState` and setup-complete
-/// status.
 pub(crate) fn refresh_tray_menu(app: &tauri::AppHandle) {
     let state = app.state::<TrayMenuState>();
     let update_version = state.update_version();
-    let beta_enabled = state.beta_enabled();
-    let setup_complete = crate::setup_wizard::is_setup_complete();
 
-    match build_tray_menu(app, update_version.as_deref(), beta_enabled, setup_complete) {
+    match build_tray_menu(app, update_version.as_deref()) {
         Ok(menu) => {
             if let Some(tray) = app.tray_by_id(TRAY_ID) {
                 if let Err(e) = tray.set_menu(Some(menu)) {
@@ -452,16 +403,13 @@ mod tests {
     }
 
     #[test]
-    fn spec_setup_complete_no_update_shows_unchecked_beta() {
-        let spec = tray_menu_spec(None, false, true);
+    fn spec_without_update_is_open_check_quit() {
         assert_eq!(
-            spec,
+            tray_menu_spec(None),
             vec![
                 TrayItemSpec::Open,
                 TrayItemSpec::Separator,
                 TrayItemSpec::CheckUpdate,
-                TrayItemSpec::Separator,
-                TrayItemSpec::Beta { enabled: false },
                 TrayItemSpec::Separator,
                 TrayItemSpec::Quit,
             ]
@@ -469,44 +417,14 @@ mod tests {
     }
 
     #[test]
-    fn spec_setup_complete_with_update_keeps_install_and_beta() {
-        let spec = tray_menu_spec(Some("1.2.3"), true, true);
+    fn spec_with_update_adds_install_after_check() {
         assert_eq!(
-            spec,
+            tray_menu_spec(Some("1.2.3")),
             vec![
                 TrayItemSpec::Open,
                 TrayItemSpec::Separator,
                 TrayItemSpec::CheckUpdate,
                 TrayItemSpec::InstallUpdate("1.2.3".to_string()),
-                TrayItemSpec::Separator,
-                TrayItemSpec::Beta { enabled: true },
-                TrayItemSpec::Separator,
-                TrayItemSpec::Quit,
-            ]
-        );
-    }
-
-    #[test]
-    fn spec_setup_incomplete_hides_beta_even_with_update() {
-        let spec = tray_menu_spec(Some("9.9.9"), true, false);
-        assert!(
-            !spec.iter().any(|i| matches!(i, TrayItemSpec::Beta { .. })),
-            "no beta item before setup completion"
-        );
-        assert!(spec
-            .iter()
-            .any(|i| matches!(i, TrayItemSpec::InstallUpdate(v) if v == "9.9.9")));
-    }
-
-    #[test]
-    fn spec_fresh_install_shows_only_open_check_quit() {
-        let spec = tray_menu_spec(None, false, false);
-        assert_eq!(
-            spec,
-            vec![
-                TrayItemSpec::Open,
-                TrayItemSpec::Separator,
-                TrayItemSpec::CheckUpdate,
                 TrayItemSpec::Separator,
                 TrayItemSpec::Quit,
             ]

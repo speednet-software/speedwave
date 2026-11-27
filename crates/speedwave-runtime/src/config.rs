@@ -834,18 +834,42 @@ pub struct SelectedIde {
     pub port: u16,
 }
 
-/// UI preferences (ADR-058). Top-level user-only — a checked-in repo
-/// `.speedwave.json` is not allowed to flip beta UI on or off.
+/// UI preferences. Top-level user-only: a checked-in repo `.speedwave.json`
+/// is not allowed to set them.
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
+#[serde(from = "UiPrefsWire")]
 pub struct UiPrefsConfig {
-    /// Reveal hidden / work-in-progress UI surfaces. Default = off.
-    pub beta_enabled: Option<bool>,
+    /// Feature flags by key; an unset flag is off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub features: Option<crate::feature_flags::FeatureFlagsConfig>,
     /// Native OS notifications for chat-session events (SPEED-522).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub notifications: Option<NotificationPrefsConfig>,
     /// Keep the computer out of idle sleep while work runs (SPEED-917). Default = on.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub keep_awake: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct UiPrefsWire {
+    #[serde(default)]
+    beta_enabled: Option<bool>,
+    #[serde(default)]
+    features: Option<crate::feature_flags::FeatureFlagsConfig>,
+    #[serde(default)]
+    notifications: Option<NotificationPrefsConfig>,
+    #[serde(default)]
+    keep_awake: Option<bool>,
+}
+
+impl From<UiPrefsWire> for UiPrefsConfig {
+    fn from(wire: UiPrefsWire) -> Self {
+        Self {
+            features: crate::feature_flags::migrate_legacy_beta(wire.features, wire.beta_enabled),
+            notifications: wire.notifications,
+            keep_awake: wire.keep_awake,
+        }
+    }
 }
 
 /// Stored notification switches; an unset switch resolves to on.
@@ -1627,7 +1651,7 @@ pub struct SpeedwaveUserConfig {
     pub active_project: Option<String>,
     /// IDE selected for the bridge.
     pub selected_ide: Option<SelectedIde>,
-    /// UI preferences (ADR-058). Top-level, user-only.
+    /// UI preferences. Top-level, user-only.
     pub ui: Option<UiPrefsConfig>,
     /// OTLP telemetry config. Top-level, user-only.
     pub telemetry: Option<TelemetryConfig>,
@@ -1658,12 +1682,29 @@ impl SpeedwaveUserConfig {
             .and_then(|n| self.find_project(n))
     }
 
-    /// `true` if beta-features UI surface is enabled (top-level only).
-    pub fn beta_enabled(&self) -> bool {
+    /// `true` when the user turned the feature on; a missing flag is off (top-level only).
+    pub fn feature_enabled(&self, feature: crate::feature_flags::Feature) -> bool {
         self.ui
             .as_ref()
-            .and_then(|u| u.beta_enabled)
-            .unwrap_or(false)
+            .and_then(|u| u.features.as_ref())
+            .is_some_and(|f| f.enabled(feature))
+    }
+
+    /// Stores the feature flag explicitly.
+    pub fn set_feature_enabled(&mut self, feature: crate::feature_flags::Feature, enabled: bool) {
+        self.ui
+            .get_or_insert_with(Default::default)
+            .features
+            .get_or_insert_with(Default::default)
+            .set(feature, enabled);
+    }
+
+    /// Every registered feature with its state, keyed by config key (top-level only).
+    pub fn feature_flags(&self) -> std::collections::BTreeMap<&'static str, bool> {
+        crate::feature_flags::Feature::ALL
+            .into_iter()
+            .map(|f| (f.key(), self.feature_enabled(f)))
+            .collect()
     }
 
     /// Notification switches, every unset one resolved to on (top-level only).
@@ -1929,18 +1970,8 @@ pub(crate) fn resolve_project_config_in_with_managed(
     let project_policy = user_config
         .find_project(project_name)
         .and_then(|p| p.policy.as_ref());
-    let pii_feature_enabled =
-        crate::pii_policy::pii_feature_enabled(user_config.beta_enabled(), managed_pii_policy);
-    let pii_policy = if pii_feature_enabled {
-        crate::pii_policy::resolve_pii_policy(project_policy, managed_pii_policy)
-    } else {
-        Ok(crate::pii_policy::disabled_policy())
-    };
-    let pii_ner_enabled = crate::pii_policy::resolve_pii_ner(
-        user_config.beta_enabled(),
-        managed_pii_policy,
-        project_policy,
-    );
+    let pii_policy = crate::pii_policy::resolve_pii_policy(project_policy, managed_pii_policy);
+    let pii_ner_enabled = crate::pii_policy::resolve_pii_ner(project_policy);
 
     let git_repositories = user_config
         .find_project(project_name)
@@ -2354,6 +2385,7 @@ fn resolve_integrations_for_test(
 )]
 mod tests {
     use super::*;
+    use crate::feature_flags::Feature;
     use std::io::Write;
 
     fn anthropic_entry() -> LlmProviderEntry {
@@ -2770,10 +2802,13 @@ mod tests {
                 "default_live_model": "small",
                 "keep_audio_after_finalize": false
             },
-            "ui": { "beta_enabled": true }
+            "ui": { "keep_awake": false }
         }"#;
         let cfg: SpeedwaveUserConfig = serde_json::from_str(old_json).expect("deserialize");
-        assert!(cfg.beta_enabled(), "the rest of the config still parses");
+        assert!(
+            !cfg.keep_awake_enabled(),
+            "the rest of the config still parses"
+        );
         let json_back = serde_json::to_string(&cfg).expect("reserialize");
         assert!(
             !json_back.contains("transcription"),
@@ -2797,51 +2832,129 @@ mod tests {
     }
 
     #[test]
-    fn beta_disabled_by_default() {
+    fn features_are_off_by_default() {
         let cfg = SpeedwaveUserConfig::default();
-        assert!(!cfg.beta_enabled());
+        for feature in Feature::ALL {
+            assert!(!cfg.feature_enabled(feature));
+        }
         assert!(cfg.ui.is_none());
     }
 
     #[test]
-    fn beta_enabled_only_when_user_set_it() {
-        let cfg_on = SpeedwaveUserConfig {
-            ui: Some(UiPrefsConfig {
-                beta_enabled: Some(true),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        assert!(cfg_on.beta_enabled());
+    fn feature_enabled_only_when_user_set_it() {
+        let mut cfg = SpeedwaveUserConfig::default();
+        cfg.set_feature_enabled(Feature::Office, true);
+        assert!(cfg.feature_enabled(Feature::Office));
+        assert!(!cfg.feature_enabled(Feature::TelemetrySettings));
+        cfg.set_feature_enabled(Feature::Office, false);
+        assert!(!cfg.feature_enabled(Feature::Office));
 
-        let cfg_off = SpeedwaveUserConfig {
-            ui: Some(UiPrefsConfig {
-                beta_enabled: Some(false),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        assert!(!cfg_off.beta_enabled());
-
-        let cfg_unset = SpeedwaveUserConfig {
+        let unset = SpeedwaveUserConfig {
             ui: Some(UiPrefsConfig::default()),
             ..Default::default()
         };
-        assert!(!cfg_unset.beta_enabled());
+        assert!(!unset.feature_enabled(Feature::Office));
     }
 
     #[test]
-    fn ui_prefs_round_trip_through_serde() {
-        let cfg = SpeedwaveUserConfig {
-            ui: Some(UiPrefsConfig {
-                beta_enabled: Some(true),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
+    fn feature_flags_lists_every_feature_by_key() {
+        let mut cfg = SpeedwaveUserConfig::default();
+        cfg.set_feature_enabled(Feature::TelemetrySettings, true);
+        let flags = cfg.feature_flags();
+        assert_eq!(flags.len(), Feature::ALL.len());
+        assert!(!flags["office"]);
+        assert!(flags["telemetry_settings"]);
+    }
+
+    #[test]
+    fn feature_flags_round_trip_through_serde() {
+        let mut cfg = SpeedwaveUserConfig::default();
+        cfg.set_feature_enabled(Feature::Office, true);
         let json = serde_json::to_string(&cfg).expect("serialize");
+        assert!(json.contains(r#""features":{"office":true}"#), "{json}");
         let back: SpeedwaveUserConfig = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.ui, cfg.ui);
+    }
+
+    #[test]
+    fn legacy_beta_true_turns_both_features_on() {
+        let cfg: SpeedwaveUserConfig =
+            serde_json::from_str(r#"{"projects":[],"ui":{"beta_enabled":true}}"#).expect("parse");
+        for feature in Feature::ALL {
+            assert!(cfg.feature_enabled(feature));
+        }
+    }
+
+    #[test]
+    fn legacy_beta_false_turns_both_features_off() {
+        let cfg: SpeedwaveUserConfig =
+            serde_json::from_str(r#"{"projects":[],"ui":{"beta_enabled":false}}"#).expect("parse");
+        for feature in Feature::ALL {
+            assert!(!cfg.feature_enabled(feature));
+        }
+    }
+
+    #[test]
+    fn missing_legacy_beta_leaves_both_features_off() {
+        let cfg: SpeedwaveUserConfig =
+            serde_json::from_str(r#"{"projects":[],"ui":{"keep_awake":true}}"#).expect("parse");
+        for feature in Feature::ALL {
+            assert!(!cfg.feature_enabled(feature));
+        }
+    }
+
+    #[test]
+    fn existing_features_entry_wins_over_legacy_beta() {
+        let cfg: SpeedwaveUserConfig = serde_json::from_str(
+            r#"{"projects":[],"ui":{"beta_enabled":true,"features":{"office":false}}}"#,
+        )
+        .expect("parse");
+        assert!(!cfg.feature_enabled(Feature::Office));
+        assert!(cfg.feature_enabled(Feature::TelemetrySettings));
+
+        let off: SpeedwaveUserConfig = serde_json::from_str(
+            r#"{"projects":[],"ui":{"beta_enabled":false,"features":{"office":true}}}"#,
+        )
+        .expect("parse");
+        assert!(off.feature_enabled(Feature::Office));
+        assert!(!off.feature_enabled(Feature::TelemetrySettings));
+    }
+
+    #[test]
+    fn legacy_beta_key_is_gone_after_the_next_save() {
+        let cfg: SpeedwaveUserConfig = serde_json::from_str(
+            r#"{"projects":[],"ui":{"beta_enabled":true,"keep_awake":false}}"#,
+        )
+        .expect("parse");
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        assert!(!json.contains("beta_enabled"), "{json}");
+        assert!(json.contains(r#""office":true"#), "{json}");
+        assert!(json.contains(r#""telemetry_settings":true"#), "{json}");
+        assert!(json.contains(r#""keep_awake":false"#), "{json}");
+    }
+
+    #[test]
+    fn legacy_beta_false_is_dropped_on_save() {
+        let cfg: SpeedwaveUserConfig =
+            serde_json::from_str(r#"{"projects":[],"ui":{"beta_enabled":false}}"#).expect("parse");
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        assert!(!json.contains("beta_enabled"), "{json}");
+    }
+
+    #[test]
+    fn migrated_features_survive_a_save_and_load_cycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, r#"{"projects":[],"ui":{"beta_enabled":true}}"#).unwrap();
+        let loaded = load_user_config_from(&path).unwrap();
+        save_user_config_to(&loaded, &path).unwrap();
+        let reloaded = load_user_config_from(&path).unwrap();
+        for feature in Feature::ALL {
+            assert!(reloaded.feature_enabled(feature));
+        }
+        assert!(!std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("beta_enabled"));
     }
 
     #[test]
@@ -2880,14 +2993,9 @@ mod tests {
     }
 
     #[test]
-    fn set_notification_prefs_keeps_beta_and_round_trips() {
-        let mut cfg = SpeedwaveUserConfig {
-            ui: Some(UiPrefsConfig {
-                beta_enabled: Some(true),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
+    fn set_notification_prefs_keeps_features_and_round_trips() {
+        let mut cfg = SpeedwaveUserConfig::default();
+        cfg.set_feature_enabled(Feature::Office, true);
         let prefs = NotificationPrefs {
             enabled: false,
             turn_finished: true,
@@ -2897,23 +3005,19 @@ mod tests {
         cfg.set_notification_prefs(prefs);
         let json = serde_json::to_string(&cfg).expect("serialize");
         let back: SpeedwaveUserConfig = serde_json::from_str(&json).expect("deserialize");
-        assert!(back.beta_enabled());
+        assert!(back.feature_enabled(Feature::Office));
         assert_eq!(back.notification_prefs(), prefs);
     }
 
     #[test]
     fn ui_prefs_without_notifications_serialize_without_the_key() {
-        let cfg = SpeedwaveUserConfig {
-            ui: Some(UiPrefsConfig {
-                beta_enabled: Some(true),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
+        let mut cfg = SpeedwaveUserConfig::default();
+        cfg.set_feature_enabled(Feature::Office, true);
         let json = serde_json::to_string(&cfg).expect("serialize");
         assert!(!json.contains("notifications"), "{json}");
         let parsed: SpeedwaveUserConfig =
-            serde_json::from_str(r#"{"projects":[],"ui":{"beta_enabled":true}}"#).expect("parse");
+            serde_json::from_str(r#"{"projects":[],"ui":{"features":{"office":true}}}"#)
+                .expect("parse");
         assert!(parsed.ui.and_then(|u| u.notifications).is_none());
     }
 
@@ -2932,17 +3036,12 @@ mod tests {
 
     #[test]
     fn set_keep_awake_keeps_the_other_ui_prefs_and_round_trips() {
-        let mut cfg = SpeedwaveUserConfig {
-            ui: Some(UiPrefsConfig {
-                beta_enabled: Some(true),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
+        let mut cfg = SpeedwaveUserConfig::default();
+        cfg.set_feature_enabled(Feature::Office, true);
         cfg.set_keep_awake(false);
         let json = serde_json::to_string(&cfg).expect("serialize");
         let back: SpeedwaveUserConfig = serde_json::from_str(&json).expect("deserialize");
-        assert!(back.beta_enabled());
+        assert!(back.feature_enabled(Feature::Office));
         assert!(!back.keep_awake_enabled());
         let mut on = back;
         on.set_keep_awake(true);
@@ -2968,7 +3067,7 @@ mod tests {
         }"#;
         let parsed: SpeedwaveUserConfig = serde_json::from_str(pre_adr_json).expect("parse");
         assert!(parsed.ui.is_none());
-        assert!(!parsed.beta_enabled());
+        assert!(!parsed.feature_enabled(Feature::Office));
     }
 
     #[test]
@@ -6676,10 +6775,7 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
-            ui: Some(UiPrefsConfig {
-                beta_enabled: Some(true),
-                ..Default::default()
-            }),
+            ui: None,
             telemetry: None,
         };
         let (claude, _) = resolve_project_config_in_with_managed(
@@ -6703,47 +6799,24 @@ mod tests {
     }
 
     #[test]
-    fn beta_off_resolves_inert_pii_policy() {
+    fn a_config_without_a_policy_resolves_the_default_pii_policy() {
         let tmp = tempfile::tempdir().unwrap();
-        let user_config = SpeedwaveUserConfig {
-            projects: vec![ProjectUserEntry {
-                name: "p".into(),
-                dir: tmp.path().to_string_lossy().to_string(),
-                claude: None,
-                integrations: None,
-                plugin_settings: None,
-                policy: Some(PiiPolicyUserConfig {
-                    policies: vec!["gdpr-art32".to_string()],
-                    ..Default::default()
-                }),
-                effort_pin: None,
-                read_only: false,
-            }],
-            active_project: None,
-            selected_ide: None,
-            ui: None,
-            telemetry: None,
-        };
         let (claude, _) = resolve_project_config_in_with_managed(
             tmp.path(),
             tmp.path(),
-            &user_config,
+            &SpeedwaveUserConfig::default(),
             "p",
             None,
             None,
             None,
         );
         let resolved = claude.pii_policy.unwrap();
-        assert_eq!(
-            resolved,
-            crate::pii_policy::disabled_policy(),
-            "with beta off and no MDM-forced policies, even a configured user \
-             policy must resolve to the inert all-off document"
-        );
+        assert_eq!(resolved, crate::pii_policy::ResolvedPiiPolicy::default());
+        assert!(!claude.pii_ner_enabled);
     }
 
     #[test]
-    fn beta_off_ignores_invalid_user_policy() {
+    fn an_unknown_user_policy_id_errors() {
         let tmp = tempfile::tempdir().unwrap();
         let user_config = SpeedwaveUserConfig {
             projects: vec![ProjectUserEntry {
@@ -6764,20 +6837,9 @@ mod tests {
             ui: None,
             telemetry: None,
         };
-        let (claude, _) = resolve_project_config_in_with_managed(
-            tmp.path(),
-            tmp.path(),
-            &user_config,
-            "p",
-            None,
-            None,
-            None,
-        );
-        assert_eq!(
-            claude.pii_policy,
-            Ok(crate::pii_policy::disabled_policy()),
-            "an invalid policy id must not error while the feature is beta-gated off"
-        );
+        let (claude, _) = resolve_project_config_for_test(tmp.path(), &user_config, "p");
+        let err = claude.pii_policy.unwrap_err();
+        assert!(err.contains("no-such-policy"), "{err}");
     }
 
     fn config_with_read_only(dir: &Path, read_only: bool) -> SpeedwaveUserConfig {
@@ -7158,13 +7220,7 @@ mod tests {
         .unwrap();
         let without_policy_key = tempfile::tempdir().unwrap();
 
-        let user_config = SpeedwaveUserConfig {
-            ui: Some(UiPrefsConfig {
-                beta_enabled: Some(true),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
+        let user_config = SpeedwaveUserConfig::default();
         let (claude_with, _) = resolve_project_config(with_policy_key.path(), &user_config, "p");
         let (claude_without, _) =
             resolve_project_config(without_policy_key.path(), &user_config, "p");

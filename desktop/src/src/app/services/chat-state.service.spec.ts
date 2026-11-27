@@ -1,14 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { DEFAULT_ALIAS } from './model-picker.service';
 import { TestBed } from '@angular/core/testing';
-import { signal } from '@angular/core';
 import {
   ChatStateService,
   CHAT_TAB_CLOSED,
   MAX_CHAT_TABS,
   NEW_CHAT_TAB_LIMIT,
   NEW_CONVERSATION_BUSY,
-  NEW_CONVERSATION_STREAMING,
   SESSION_KEPT_MARKER,
   modelSwitchRefused,
 } from './chat-state.service';
@@ -17,7 +15,6 @@ import { TauriService } from './tauri.service';
 import { LoggerService } from './logger.service';
 import { SlashService } from '../chat/slash/slash.service';
 import { PlanUsageService } from './plan-usage.service';
-import { BetaService } from './beta.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
 import { createDeferred, type Deferred } from '../testing/deferred';
 import { makeMockLogger } from '../testing/mock-logger';
@@ -29,12 +26,10 @@ describe('ChatStateService', () => {
   let service: ChatStateService;
   let mockTauri: MockTauriService;
   let mockLogger: ReturnType<typeof makeMockLogger>;
-  let betaEnabled: ReturnType<typeof signal<boolean>>;
 
   beforeEach(() => {
     mockTauri = new MockTauriService();
     mockLogger = makeMockLogger();
-    betaEnabled = signal(false);
     const invoke = mockTauri.invoke.bind(mockTauri);
     mockTauri.invoke = async <T>(cmd: string, args?: Record<string, unknown>): Promise<T> => {
       const answer = await invoke<T>(cmd, args);
@@ -77,7 +72,6 @@ describe('ChatStateService', () => {
         ChatStateService,
         { provide: TauriService, useValue: mockTauri },
         { provide: LoggerService, useValue: mockLogger },
-        { provide: BetaService, useValue: { enabled: betaEnabled.asReadonly() } },
       ],
     });
 
@@ -110,7 +104,7 @@ describe('ChatStateService', () => {
     });
   });
 
-  describe('startNewConversation — listener wiring', () => {
+  describe('listener wiring', () => {
     it('attaches the stream listener before the session starts', async () => {
       const projectState = TestBed.inject(ProjectStateService);
       await projectState.init();
@@ -133,7 +127,8 @@ describe('ChatStateService', () => {
         return mockTauri.invokeHandler(cmd, args);
       });
 
-      await service.startNewConversation();
+      await service.init();
+      await vi.waitFor(() => expect(order).toContain('invoke:start_chat'));
 
       expect(order.indexOf('listen:chat_stream')).toBeGreaterThanOrEqual(0);
       expect(order.indexOf('listen:chat_stream')).toBeLessThan(order.indexOf('invoke:start_chat'));
@@ -697,96 +692,49 @@ describe('ChatStateService', () => {
         projectState.status.set('ready');
       });
 
-      it('with beta opens a new active tab and leaves the open conversation as it is', async () => {
-        betaEnabled.set(true);
+      it('opens a new active tab and leaves the open conversation as it is', async () => {
         const tab1 = service.activeTabId();
         service._setState({ messages: conversation });
         const store1 = service.tabs().get(tab1)!;
-        const restart = vi.spyOn(store1, 'startNewConversation');
 
-        const tab2 = await service.openNewChat(service.activeTabId());
+        const tab2 = await service.openNewChat();
 
         expect(tab2).not.toBe(tab1);
         expect(service.tabs().size).toBe(2);
         expect(service.activeTabId()).toBe(tab2);
-        expect(restart).not.toHaveBeenCalled();
         expect(store1.messagesFromState()).toHaveLength(1);
       });
 
-      it('with beta opens a new tab while the active tab is still replying', async () => {
-        betaEnabled.set(true);
+      it('opens a new tab while the active tab is still replying', async () => {
         service.isStreaming = true;
         service._setState({ messages: conversation });
         expect(service.isStreamingFromState()).toBe(true);
 
         expect(service.newChatBlockedReason()).toBe('');
-        await service.openNewChat(service.activeTabId());
+        await service.openNewChat();
 
         expect(service.tabs().size).toBe(2);
       });
 
-      it('with beta at the tab cap refuses with the tab-limit reason and replaces nothing', async () => {
-        betaEnabled.set(true);
+      it('at the tab cap refuses with the tab-limit reason and replaces nothing', async () => {
         while (service.canOpenTab()) await service.openTab();
         const active = service.activeTabId();
         service._setState({ messages: conversation });
-        const restart = vi.spyOn(service.activeStore(), 'startNewConversation');
 
         expect(service.newChatBlockedReason()).toBe(NEW_CHAT_TAB_LIMIT);
-        await expect(service.openNewChat(service.activeTabId())).rejects.toThrow(
-          NEW_CHAT_TAB_LIMIT
-        );
+        await expect(service.openNewChat()).rejects.toThrow(NEW_CHAT_TAB_LIMIT);
 
         expect(service.tabs().size).toBe(MAX_CHAT_TABS);
         expect(service.activeTabId()).toBe(active);
-        expect(restart).not.toHaveBeenCalled();
         expect(service.messagesFromState()).toHaveLength(1);
       });
 
-      it('with beta refuses while no project is ready, opening no tab', async () => {
-        betaEnabled.set(true);
+      it('refuses while no project is ready, opening no tab', async () => {
         TestBed.inject(ProjectStateService).status.set('loading');
 
         expect(service.newChatBlockedReason()).toBe(NEW_CONVERSATION_BUSY);
-        await expect(service.openNewChat(service.activeTabId())).rejects.toThrow(
-          NEW_CONVERSATION_BUSY
-        );
+        await expect(service.openNewChat()).rejects.toThrow(NEW_CONVERSATION_BUSY);
         expect(service.tabs().size).toBe(1);
-      });
-
-      it('without beta restarts the active conversation in place, as before tabs', async () => {
-        const tab1 = service.activeTabId();
-        const restart = vi
-          .spyOn(service.activeStore(), 'startNewConversation')
-          .mockResolvedValue(undefined);
-
-        expect(await service.openNewChat(service.activeTabId())).toBe(tab1);
-
-        expect(restart).toHaveBeenCalledTimes(1);
-        expect(service.tabs().size).toBe(1);
-      });
-
-      it('without beta refuses once the origin tab closed, restarting nothing', async () => {
-        const restart = vi.spyOn(service.activeStore(), 'startNewConversation');
-
-        await expect(service.openNewChat('closed-tab')).rejects.toThrow(CHAT_TAB_CLOSED);
-
-        expect(restart).not.toHaveBeenCalled();
-      });
-
-      it('with beta opens a new tab even when the origin tab already closed', async () => {
-        betaEnabled.set(true);
-
-        const tab2 = await service.openNewChat('closed-tab');
-
-        expect(service.activeTabId()).toBe(tab2);
-        expect(service.tabs().size).toBe(2);
-      });
-
-      it('without beta keeps the restart gate of the active conversation', () => {
-        service.isStreaming = true;
-        service._setState({ messages: conversation });
-        expect(service.newChatBlockedReason()).toBe(NEW_CONVERSATION_STREAMING);
       });
     });
 
@@ -1195,7 +1143,6 @@ describe('ChatStateService', () => {
 
       it('branch 1: activates the tab the backend registry names as the transcript owner when the frontend ids do not match', async () => {
         TestBed.inject(ProjectStateService).activeProject.set('test');
-        betaEnabled.set(true);
         const tab1 = service.activeTabId();
         const tab2 = await service.openTab();
         service.activateTab(tab1);
@@ -1219,7 +1166,6 @@ describe('ChatStateService', () => {
 
       it('branch 1: a backend owner that is no longer an open tab falls through to a new resuming tab', async () => {
         TestBed.inject(ProjectStateService).activeProject.set('test');
-        betaEnabled.set(true);
         await service.openTab();
         mockTauri.invokeHandler = async (cmd: string) => {
           if (cmd === 'tab_owning_transcript') return 'closed-tab-id';
@@ -1263,9 +1209,8 @@ describe('ChatStateService', () => {
         expect(service.activeTabId()).toBe(tab2);
       });
 
-      it('beta off, single tab: a busy sole tab resumes in place instead of spawning an invisible second tab', async () => {
+      it('a busy sole tab opens a new tab and resumes there, because the tab bar is visible', async () => {
         TestBed.inject(ProjectStateService).activeProject.set('test');
-        betaEnabled.set(false);
         const tab1 = service.activeTabId();
         const active = service.tabs().get(tab1)!;
         active.isStreaming = true;
@@ -1277,40 +1222,17 @@ describe('ChatStateService', () => {
 
         await service.openConversation('single-busy');
 
-        expect(service.tabs().size).toBe(1);
-        expect(service.activeTabId()).toBe(tab1);
-        expect(invokeSpy).toHaveBeenCalledWith(
-          'resume_conversation',
-          expect.objectContaining({ sessionId: 'single-busy', tabId: tab1 })
-        );
-      });
-
-      it('beta on: a busy sole tab opens a new tab and resumes there, because the tab bar is visible', async () => {
-        TestBed.inject(ProjectStateService).activeProject.set('test');
-        betaEnabled.set(true);
-        const tab1 = service.activeTabId();
-        const active = service.tabs().get(tab1)!;
-        active.isStreaming = true;
-        mockTauri.invokeHandler = async (cmd: string) => {
-          if (cmd === 'get_conversation') return { session_id: 'single-busy-beta', messages: [] };
-          return undefined;
-        };
-        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-
-        await service.openConversation('single-busy-beta');
-
         expect(service.tabs().size).toBe(2);
         const newTabId = service.activeTabId();
         expect(newTabId).not.toBe(tab1);
         expect(invokeSpy).toHaveBeenCalledWith(
           'resume_conversation',
-          expect.objectContaining({ sessionId: 'single-busy-beta', tabId: newTabId })
+          expect.objectContaining({ sessionId: 'single-busy', tabId: newTabId })
         );
       });
 
-      it('pristine active tab + beta on: opens a new tab and resumes there instead of reusing the pristine tab', async () => {
+      it('pristine active tab: opens a new tab and resumes there instead of reusing the pristine tab', async () => {
         TestBed.inject(ProjectStateService).activeProject.set('test');
-        betaEnabled.set(true);
         const tab1 = service.activeTabId();
         expect(service.hasConversation()).toBe(false);
         mockTauri.invokeHandler = async (cmd: string) => {
@@ -1330,9 +1252,8 @@ describe('ChatStateService', () => {
         );
       });
 
-      it('busy active tab + beta on: with 2+ tabs already open, opens a new resuming tab under the cap', async () => {
+      it('busy active tab: with 2+ tabs already open, opens a new resuming tab under the cap', async () => {
         TestBed.inject(ProjectStateService).activeProject.set('test');
-        betaEnabled.set(true);
         const tab2 = await service.openTab();
         expect(service.tabs().size).toBe(2);
         const active = service.tabs().get(tab2)!;
@@ -1354,9 +1275,8 @@ describe('ChatStateService', () => {
         );
       });
 
-      it('busy active tab + beta on: applies the remembered resume decider to the freshly opened resuming tab', async () => {
+      it('busy active tab: applies the remembered resume decider to the freshly opened resuming tab', async () => {
         TestBed.inject(ProjectStateService).activeProject.set('test');
-        betaEnabled.set(true);
         const decider = vi.fn(() => Promise.resolve('fresh' as const));
         service.setResumeDecider(decider);
         const tab2 = await service.openTab();
@@ -1377,9 +1297,8 @@ describe('ChatStateService', () => {
         expect((newStore as unknown as { _resumeDecider: unknown })._resumeDecider).toBe(decider);
       });
 
-      it('at cap + beta on: resumes into the active tab in place, even while busy', async () => {
+      it('at cap: resumes into the active tab in place, even while busy', async () => {
         TestBed.inject(ProjectStateService).activeProject.set('test');
-        betaEnabled.set(true);
         const tab1 = service.activeTabId();
         const active = service.tabs().get(tab1)!;
         active.isStreaming = true;
@@ -1801,7 +1720,7 @@ describe('ChatStateService', () => {
     });
 
     async function resumeAcrossSwitch(): Promise<{ resuming: Promise<void> }> {
-      const resuming = service.resumeConversation('sess-older');
+      const resuming = service.activeStore().resumeConversation('sess-older');
       await vi.waitFor(() => expect(calls).toContain('resume_conversation'));
       mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
       mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other' });
@@ -1831,7 +1750,7 @@ describe('ChatStateService', () => {
     it('a resume begun while a switch runs never reaches the backend', async () => {
       mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
 
-      await service.resumeConversation('sess-older');
+      await service.activeStore().resumeConversation('sess-older');
 
       expect(calls).not.toContain('resume_conversation');
       expect(service.lastKnownSessionId).toBeNull();
@@ -3204,7 +3123,7 @@ describe('ChatStateService', () => {
       };
 
       await fireRestart(projectState);
-      await service.resumeConversation('sess-chosen');
+      await service.activeStore().resumeConversation('sess-chosen');
       answer.resolve('resume');
       await new Promise((r) => setTimeout(r, 0));
 
@@ -3528,7 +3447,7 @@ describe('ChatStateService', () => {
       expect(startTabs[1]).toBe(service.activeStore().tabId);
 
       startGate.reject(new Error('session spawn failed'));
-      await expect(stale).resolves.toMatchObject({ outcome: 'skipped' });
+      await expect(stale).resolves.toBe('skipped');
       expect(projectState.status()).toBe('ready');
       expect(projectState.error).toBe('');
     });
@@ -3675,7 +3594,7 @@ describe('ChatStateService', () => {
       await new Promise((r) => setTimeout(r, 0));
 
       startGate.resolve();
-      await expect(starting).resolves.toMatchObject({ outcome: 'started' });
+      await expect(starting).resolves.toBe('started');
       await switchProjectMidFlight();
       await stale;
 
@@ -3713,7 +3632,7 @@ describe('ChatStateService', () => {
 
     it('claims the chat at once and replaces the session only after the restart ends', async () => {
       const restart = projectState.restartContainers('test');
-      const resume = service.resumeConversation('sess-picked');
+      const resume = service.activeStore().resumeConversation('sess-picked');
       await new Promise((r) => setTimeout(r, 0));
 
       expect(commands()).toContain('restart_integration_containers');
@@ -3735,7 +3654,7 @@ describe('ChatStateService', () => {
       service.seedSessionId('sess-live');
 
       const restart = projectState.restartContainers('test');
-      const resume = service.resumeConversation('sess-picked');
+      const resume = service.activeStore().resumeConversation('sess-picked');
       pendingRestart.resolve();
       await restart;
       await resume;
@@ -3747,7 +3666,7 @@ describe('ChatStateService', () => {
 
     it('still resumes after the restart fails', async () => {
       const restart = projectState.restartContainers('test');
-      const resume = service.resumeConversation('sess-picked');
+      const resume = service.activeStore().resumeConversation('sess-picked');
       pendingRestart.reject(new Error('compose failed'));
 
       await expect(restart).resolves.toBe('failed');
@@ -3773,7 +3692,7 @@ describe('ChatStateService', () => {
       });
 
       const first = projectState.restartContainers('test');
-      const resume = service.resumeConversation('sess-picked');
+      const resume = service.activeStore().resumeConversation('sess-picked');
       pendingRestart.resolve();
       await first;
       await new Promise((r) => setTimeout(r, 0));
@@ -3789,7 +3708,7 @@ describe('ChatStateService', () => {
 
     it('drops the resume when a project switch starts before the restart ends', async () => {
       const restart = projectState.restartContainers('test');
-      const resume = service.resumeConversation('sess-of-test');
+      const resume = service.activeStore().resumeConversation('sess-of-test');
       await new Promise((r) => setTimeout(r, 0));
       mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
       pendingRestart.resolve();
@@ -3803,7 +3722,7 @@ describe('ChatStateService', () => {
 
     it('drops the resume when a project switch starts and fails back before the restart ends', async () => {
       const restart = projectState.restartContainers('test');
-      const resume = service.resumeConversation('sess-of-test');
+      const resume = service.activeStore().resumeConversation('sess-of-test');
       await new Promise((r) => setTimeout(r, 0));
       mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
       mockTauri.dispatchEvent('project_switch_failed', { project: 'test', error: 'switch failed' });
@@ -3818,7 +3737,7 @@ describe('ChatStateService', () => {
 
     it('drops the resume when the project changes before the restart ends, and frees the chat', async () => {
       const restart = projectState.restartContainers('test');
-      const resume = service.resumeConversation('sess-of-test');
+      const resume = service.activeStore().resumeConversation('sess-of-test');
       await new Promise((r) => setTimeout(r, 0));
       projectState.activeProject.set('other');
       pendingRestart.resolve();
@@ -3829,7 +3748,7 @@ describe('ChatStateService', () => {
       expect(commands()).not.toContain('get_conversation');
       expect(service.lastKnownSessionId).toBeNull();
 
-      await service.resumeConversation('sess-of-other');
+      await service.activeStore().resumeConversation('sess-of-other');
 
       expect(resumedSessions()).toEqual(['sess-of-other']);
     });

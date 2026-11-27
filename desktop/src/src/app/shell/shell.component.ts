@@ -16,7 +16,6 @@ import type { Subscription } from 'rxjs';
 import { filter } from 'rxjs/operators';
 import { ProjectSwitcherComponent } from '../project-switcher/project-switcher.component';
 import { UpdateNotificationComponent } from '../update-notification/update-notification.component';
-import { BetaService } from '../services/beta.service';
 import { ChatStateService } from '../services/chat-state.service';
 import { NotificationsService } from '../services/notifications.service';
 import { ProjectStateService } from '../services/project-state.service';
@@ -180,22 +179,12 @@ const TRANSCRIPTION_ENTRY_ID = 'meeting-transcription';
 
       <!-- Command palette modal — ⌘K opens, ESC (handled in shell) closes. -->
       <app-command-palette />
-
-      @if (beta.enabled()) {
-        <span
-          class="mono pointer-events-none fixed bottom-1.5 right-2 z-[1000] select-none rounded border border-[var(--line)] px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-[var(--ink-mute)]"
-          data-testid="beta-badge"
-          aria-label="Beta features enabled"
-          >Beta</span
-        >
-      }
     </div>
   `,
 })
 export class ShellComponent implements OnInit, OnDestroy {
   readonly projectState = inject(ProjectStateService);
   readonly ui = inject(UiStateService);
-  readonly beta = inject(BetaService);
   private readonly chat = inject(ChatStateService);
   private readonly transcription = inject(TranscriptionService);
   private readonly tabSwitcher = inject(TabSwitcherService);
@@ -373,27 +362,20 @@ export class ShellComponent implements OnInit, OnDestroy {
         }
         return;
       case 'r':
-        if (this.beta.enabled() && this.chatViewReady()) {
+        if (this.chatViewReady()) {
           event.preventDefault();
           this.ui.requestRestart();
         }
         return;
       case 't':
       case 'n':
-        if (this.beta.enabled()) {
-          if (this.chat.canOpenTab()) {
-            event.preventDefault();
-            void this.chat.openTab();
-          }
-          return;
-        }
-        if (key.toLowerCase() === 'n' && this.chatViewReady()) {
+        if (this.chat.canOpenTab()) {
           event.preventDefault();
-          this.ui.requestRestart();
+          void this.chat.openTab();
         }
         return;
       case 'w':
-        if (this.beta.enabled() && this.chat.tabs().size > 1) {
+        if (this.chat.tabs().size > 1) {
           event.preventDefault();
           void this.chat.closeTab(this.chat.activeTabId());
         }
@@ -488,7 +470,6 @@ export class ShellComponent implements OnInit, OnDestroy {
       event.ctrlKey &&
       !event.metaKey &&
       !event.altKey &&
-      this.beta.enabled() &&
       this.chatViewReady() &&
       !this.ui.paletteOpen() &&
       !this.ui.projectSwitcherOpen() &&

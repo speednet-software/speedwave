@@ -653,8 +653,7 @@ export class TranscriptionService {
   async stageForChat(sessionId: string, target: SendTarget = 'new-chat'): Promise<void> {
     const originTabId = this.chatState.activeTabId();
     const [session, md] = await Promise.all([this.get(sessionId), this.getMarkdown(sessionId)]);
-    const tabId =
-      target === 'new-chat' ? await this.chatState.openNewChat(originTabId) : originTabId;
+    const tabId = target === 'new-chat' ? await this.chatState.openNewChat() : originTabId;
     const store = this.chatState.claimTab(tabId);
     store.stageTranscript({ markdown: md, name: recordingName(session) });
     store.composerPromptDraft.set(

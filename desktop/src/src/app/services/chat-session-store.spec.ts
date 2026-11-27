@@ -7,13 +7,12 @@ import {
   MODEL_SWITCH_NOT_APPLIED,
   MODEL_SWITCH_UNCONFIRMED,
   modelSwitchRefused,
+  SESSION_KEPT_MARKER,
   NEW_CONVERSATION_AUTH,
   NEW_CONVERSATION_BUSY,
   NEW_CONVERSATION_FAILED,
   NEW_CONVERSATION_NO_PROJECT,
-  NEW_CONVERSATION_PROJECT_CHANGED,
   NEW_CONVERSATION_STREAMING,
-  SESSION_KEPT_MARKER,
   historyFitsTarget,
   isNotAuthenticatedError,
   mapContextOverflowError,
@@ -608,299 +607,6 @@ describe('ChatSessionStore', () => {
       expect(mockLogger.debug).toHaveBeenCalledWith(
         expect.stringContaining('get_model_pin failed: Error: config unreadable')
       );
-    });
-  });
-
-  describe('startNewConversation', () => {
-    function readyHandler(startChat: () => void) {
-      return async (cmd: string) => {
-        if (cmd === 'start_chat') return startChat();
-        if (cmd === 'list_projects')
-          return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
-        if (cmd === 'get_bundle_reconcile_state') return MOCK_BUNDLE_RECONCILE_DONE;
-        if (cmd === 'check_containers_running') return true;
-        return undefined;
-      };
-    }
-
-    it('clears the conversation and awaits a started session', async () => {
-      const projectState = TestBed.inject(ProjectStateService);
-      await projectState.init();
-      mockTauri.invokeHandler = readyHandler(() => undefined);
-      store._setState({
-        messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
-        currentBlocks: [],
-        sessionStats: null,
-      });
-      const spy = vi.spyOn(mockTauri, 'invoke');
-
-      await store.startNewConversation();
-
-      expect(store.messages.length).toBe(0);
-      expect(spy.mock.calls.filter((c) => c[0] === 'start_chat').length).toBe(1);
-      expect(store.lastKnownSessionId).toBeNull();
-      expect(store.hasConversation()).toBe(false);
-    });
-
-    it('claims the bootstrap slot so a later init does not start a second session', async () => {
-      const projectState = TestBed.inject(ProjectStateService);
-      await projectState.init();
-      mockTauri.invokeHandler = readyHandler(() => undefined);
-      const spy = vi.spyOn(mockTauri, 'invoke');
-
-      await store.startNewConversation();
-      await store.init();
-      await new Promise((r) => setTimeout(r, 0));
-
-      expect(spy.mock.calls.filter((c) => c[0] === 'start_chat').length).toBe(1);
-    });
-
-    it('throws and releases the slot when the session never starts', async () => {
-      const projectState = TestBed.inject(ProjectStateService);
-      await projectState.init();
-      let fail = true;
-      mockTauri.invokeHandler = readyHandler(() => {
-        if (fail) throw new Error('chat backend crashed');
-        return undefined;
-      });
-
-      store.seedSessionId('sess-old');
-
-      await expect(store.startNewConversation()).rejects.toThrow(NEW_CONVERSATION_FAILED);
-
-      expect(store.messages.length).toBe(0);
-      expect(store.lastKnownSessionId).toBe('sess-old');
-
-      fail = false;
-      projectState.status.set('ready');
-      const spy = vi.spyOn(mockTauri, 'invoke');
-      await store.startNewConversation();
-      expect(spy.mock.calls.filter((c) => c[0] === 'start_chat').length).toBe(1);
-    });
-
-    it('keeps the conversation and names the cause when the project is not ready', async () => {
-      const projectState = TestBed.inject(ProjectStateService);
-      await projectState.init();
-      mockTauri.invokeHandler = readyHandler(() => undefined);
-      store._setState({
-        messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
-        currentBlocks: [],
-        sessionStats: null,
-      });
-      projectState.status.set('starting');
-      const spy = vi.spyOn(mockTauri, 'invoke');
-
-      await expect(store.startNewConversation()).rejects.toThrow(NEW_CONVERSATION_BUSY);
-
-      expect(store.messages.length).toBe(1);
-      expect(spy.mock.calls.filter((c) => c[0] === 'start_chat').length).toBe(0);
-    });
-
-    it('tells the user to open a project instead of asking them to wait', async () => {
-      const projectState = TestBed.inject(ProjectStateService);
-      await projectState.init();
-      projectState.activeProject.set(null);
-
-      await expect(store.startNewConversation()).rejects.toThrow(NEW_CONVERSATION_NO_PROJECT);
-    });
-
-    it('refuses while a resume owns the session', async () => {
-      const projectState = TestBed.inject(ProjectStateService);
-      await projectState.init();
-      mockTauri.invokeHandler = readyHandler(() => undefined);
-      const resuming = store.resumeConversation('sess-1');
-
-      await expect(store.startNewConversation()).rejects.toThrow(NEW_CONVERSATION_BUSY);
-      await resuming;
-    });
-
-    it('leaves a resume that superseded it owning the session id', async () => {
-      const projectState = TestBed.inject(ProjectStateService);
-      await projectState.init();
-      const pendingStart = createDeferred();
-      const pendingResume = createDeferred();
-      const calls: string[] = [];
-      mockTauri.invokeHandler = async (cmd: string) => {
-        calls.push(cmd);
-        switch (cmd) {
-          case 'start_chat':
-            await pendingStart.promise;
-            return undefined;
-          case 'resume_conversation':
-            await pendingResume.promise;
-            return undefined;
-          case 'get_conversation':
-            return { session_id: 'sess-resumed', messages: [] };
-          case 'list_projects':
-            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
-          case 'get_bundle_reconcile_state':
-            return MOCK_BUNDLE_RECONCILE_DONE;
-          case 'check_containers_running':
-            return true;
-          default:
-            return undefined;
-        }
-      };
-      store.seedSessionId('sess-stale');
-
-      const starting = store.startNewConversation();
-      await vi.waitFor(() => {
-        expect(calls).toContain('start_chat');
-      });
-      const resuming = store.resumeConversation('sess-resumed');
-      pendingStart.resolve();
-
-      await expect(starting).rejects.toThrow(NEW_CONVERSATION_BUSY);
-      expect(store.lastKnownSessionId).toBe('sess-resumed');
-      expect(store.newConversationBlockedReason()).toBe(NEW_CONVERSATION_BUSY);
-
-      pendingResume.resolve();
-      await resuming;
-      expect(store.lastKnownSessionId).toBe('sess-resumed');
-    });
-
-    it('reads the resumed transcript only after the resume stopped the session writing it', async () => {
-      const projectState = TestBed.inject(ProjectStateService);
-      await projectState.init();
-      const pendingResume = createDeferred();
-      let resumed = false;
-      const hello = { role: 'assistant', content: 'Hello', timestamp: null, uuid: 'a-1' };
-      const goodbye = { role: 'assistant', content: 'Goodbye', timestamp: null, uuid: 'a-2' };
-      mockTauri.invokeHandler = async (cmd: string) => {
-        switch (cmd) {
-          case 'resume_conversation':
-            await pendingResume.promise;
-            resumed = true;
-            return undefined;
-          case 'get_conversation':
-            return {
-              session_id: 'sess-resumed',
-              messages: resumed ? [hello, goodbye] : [hello],
-            };
-          case 'list_projects':
-            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
-          case 'get_bundle_reconcile_state':
-            return MOCK_BUNDLE_RECONCILE_DONE;
-          case 'check_containers_running':
-            return true;
-          default:
-            return undefined;
-        }
-      };
-
-      const resuming = store.resumeConversation('sess-resumed');
-      pendingResume.resolve();
-      await resuming;
-
-      const replies = store
-        .messagesFromState()
-        .filter((m) => m.role === 'assistant')
-        .map((m) => m.blocks.map((b) => ('content' in b ? b.content : '')).join(''));
-      expect(replies).toEqual(['Hello', 'Goodbye']);
-    });
-
-    it('shows the resumed transcript when a header new-conversation start finishes during the resume', async () => {
-      const projectState = TestBed.inject(ProjectStateService);
-      await projectState.init();
-      const pendingStart = createDeferred();
-      const pendingResume = createDeferred();
-      const calls: string[] = [];
-      mockTauri.invokeHandler = async (cmd: string) => {
-        calls.push(cmd);
-        switch (cmd) {
-          case 'start_chat':
-            await pendingStart.promise;
-            return undefined;
-          case 'resume_conversation':
-            await pendingResume.promise;
-            return undefined;
-          case 'get_conversation':
-            return {
-              session_id: 'sess-resumed',
-              messages: [
-                { role: 'user', content: 'Say hello in one word.', timestamp: null },
-                { role: 'assistant', content: 'Hello', timestamp: null, uuid: 'a-1' },
-                { role: 'user', content: 'Say goodbye in one word.', timestamp: null },
-                { role: 'assistant', content: 'Goodbye', timestamp: null, uuid: 'a-2' },
-              ],
-            };
-          case 'list_projects':
-            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
-          case 'get_bundle_reconcile_state':
-            return MOCK_BUNDLE_RECONCILE_DONE;
-          case 'check_containers_running':
-            return true;
-          default:
-            return undefined;
-        }
-      };
-
-      store.resetForNewConversation();
-      await store.init();
-      await vi.waitFor(() => {
-        expect(calls).toContain('start_chat');
-      });
-      const resuming = store.resumeConversation('sess-resumed');
-      await vi.waitFor(() => {
-        expect(calls).toContain('resume_conversation');
-      });
-      pendingStart.resolve();
-      await pendingStart.promise;
-      pendingResume.resolve();
-      await resuming;
-
-      const replies = store
-        .messagesFromState()
-        .filter((m) => m.role === 'assistant')
-        .map((m) => m.blocks.map((b) => ('content' in b ? b.content : '')).join(''));
-      expect(replies).toEqual(['Hello', 'Goodbye']);
-      expect(store.lastKnownSessionId).toBe('sess-resumed');
-    });
-
-    it('keeps the conversation when a reply is still streaming', async () => {
-      const projectState = TestBed.inject(ProjectStateService);
-      await projectState.init();
-      mockTauri.invokeHandler = readyHandler(() => undefined);
-      store._setState({
-        messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
-        currentBlocks: [],
-        sessionStats: null,
-      });
-      store.isStreaming = true;
-      const spy = vi.spyOn(mockTauri, 'invoke');
-
-      await expect(store.startNewConversation()).rejects.toThrow(NEW_CONVERSATION_STREAMING);
-
-      expect(store.messages.length).toBe(1);
-      expect(spy.mock.calls.filter((c) => c[0] === 'start_chat').length).toBe(0);
-    });
-
-    it('keeps the conversation when a session start is already in flight', async () => {
-      const projectState = TestBed.inject(ProjectStateService);
-      await projectState.init();
-      mockTauri.invokeHandler = readyHandler(() => undefined);
-      store._setState({
-        messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
-        currentBlocks: [],
-        sessionStats: null,
-      });
-      const release = store.beginStartingSession();
-
-      await expect(store.startNewConversation()).rejects.toThrow(NEW_CONVERSATION_BUSY);
-
-      expect(store.messages.length).toBe(1);
-      release();
-    });
-
-    it('points at Settings when the backend rejects the start as unauthenticated', async () => {
-      const projectState = TestBed.inject(ProjectStateService);
-      await projectState.init();
-      mockTauri.invokeHandler = readyHandler(() => {
-        throw new Error('not authenticated');
-      });
-
-      await expect(store.startNewConversation()).rejects.toThrow(NEW_CONVERSATION_AUTH);
-      expect(projectState.status()).toBe('auth_required');
     });
   });
 
@@ -4131,7 +3837,12 @@ describe('ChatSessionStore', () => {
         const started = createDeferred<void>();
         mockTauri.invokeHandler = async (cmd: string) =>
           cmd === 'start_chat' ? started.promise : undefined;
-        return { started, starting: store.startNewConversation() };
+        return {
+          started,
+          starting: (
+            store as unknown as { startFreshSession(): Promise<void> }
+          ).startFreshSession(),
+        };
       }
 
       it('an effort pick made while a fresh session starts is sent to it once the start completes, before any turn', async () => {
@@ -4234,94 +3945,6 @@ describe('ChatSessionStore', () => {
         expect(store.pendingModelOverride()).toBeNull();
       });
 
-      it('a model pick queued while sign-in refuses a new conversation never undoes a later pick', async () => {
-        liveConversation();
-        await Promise.resolve();
-        const start = createDeferred<void>();
-        overrideInvoke('start_chat', () => start.promise);
-        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-        const starting = store.startNewConversation();
-        await vi.waitFor(() => {
-          expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'start_chat')).toBeGreaterThan(
-            -1
-          );
-        });
-
-        await store.applyModelSelection(haikuPick);
-        expect(store.pendingModelOverride()).toBe('claude-haiku-4-5');
-        start.reject(new Error(`${SESSION_KEPT_MARKER}: Claude is not authenticated.`));
-        await expect(starting).rejects.toThrow();
-        expect(store.lastKnownSessionId).toBe(LIVE);
-        expect(store.pendingModelOverride()).toBe('claude-haiku-4-5');
-
-        await store.applyModelSelection({
-          ...haikuPick,
-          catalogId: 'claude-sonnet-5',
-          wireId: 'claude-sonnet-5',
-        });
-        store.isStreaming = true;
-        store.handleStreamChunk({ chunk_type: 'Result', data: { session_id: LIVE } } as never);
-        await new Promise((r) => setTimeout(r, 0));
-
-        const switched = invokeSpy.mock.calls
-          .filter(([cmd]) => cmd === 'switch_chat_model')
-          .map(([, args]) => (args as { model: string }).model);
-        expect(switched).toEqual(['claude-sonnet-5']);
-      });
-
-      it('an effort pick queued while sign-in refuses a new conversation reaches the earlier session at its next turn end', async () => {
-        liveConversation();
-        await Promise.resolve();
-        const start = createDeferred<void>();
-        overrideInvoke('start_chat', () => start.promise);
-        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-        const starting = store.startNewConversation();
-        await vi.waitFor(() => {
-          expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'start_chat')).toBeGreaterThan(
-            -1
-          );
-        });
-
-        await store.applyEffortSelection('max');
-        start.reject(new Error(`${SESSION_KEPT_MARKER}: Claude is not authenticated.`));
-        await expect(starting).rejects.toThrow();
-        expect(store.lastKnownSessionId).toBe(LIVE);
-        expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'apply_chat_effort')).toBe(-1);
-        store.isStreaming = true;
-        store.handleStreamChunk({ chunk_type: 'Result', data: { session_id: LIVE } } as never);
-
-        await vi.waitFor(() => {
-          expect(indexOfCall(invokeSpy.mock.calls, appliedEffort('max'))).toBeGreaterThan(-1);
-        });
-      });
-
-      it('a pick queued while a new conversation fails to spawn is dropped: the earlier process is already stopped', async () => {
-        liveConversation();
-        await Promise.resolve();
-        const start = createDeferred<void>();
-        overrideInvoke('start_chat', () => start.promise);
-        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-        const starting = store.startNewConversation();
-        await vi.waitFor(() => {
-          expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'start_chat')).toBeGreaterThan(
-            -1
-          );
-        });
-
-        await store.applyEffortSelection('max');
-        await store.applyModelSelection(haikuPick);
-        start.reject(new Error('failed to spawn claude'));
-        await expect(starting).rejects.toThrow(NEW_CONVERSATION_FAILED);
-
-        expect(store.lastKnownSessionId).toBe(LIVE);
-        expect(store.pendingModelOverride()).toBeNull();
-        store.isStreaming = true;
-        store.handleStreamChunk({ chunk_type: 'Result', data: { session_id: LIVE } } as never);
-        await new Promise((r) => setTimeout(r, 0));
-        expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'apply_chat_effort')).toBe(-1);
-        expect(indexOfCall(invokeSpy.mock.calls, switchedModel)).toBe(-1);
-      });
-
       it('the fresh start after a container restart drops the picks when sign-in refuses it: the restart ended the earlier session', async () => {
         liveConversation();
         await Promise.resolve();
@@ -4345,13 +3968,15 @@ describe('ChatSessionStore', () => {
         expect(store.pendingModelOverride()).toBeNull();
       });
 
-      it('a pick queued while a new conversation waits for images the backend kept the session for reaches it at its next turn end', async () => {
+      it('a pick queued while a new conversation fails to spawn is dropped: the earlier process is already stopped', async () => {
         liveConversation();
         await Promise.resolve();
         const start = createDeferred<void>();
         overrideInvoke('start_chat', () => start.promise);
         const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-        const starting = store.startNewConversation();
+        const fresh = (
+          store as unknown as { startFreshSession(): Promise<void> }
+        ).startFreshSession();
         await vi.waitFor(() => {
           expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'start_chat')).toBeGreaterThan(
             -1
@@ -4359,15 +3984,17 @@ describe('ChatSessionStore', () => {
         });
 
         await store.applyEffortSelection('max');
-        start.reject(new Error(`${SESSION_KEPT_MARKER}: container images are still building`));
-        await expect(starting).rejects.toThrow(NEW_CONVERSATION_FAILED);
+        await store.applyModelSelection(haikuPick);
+        start.reject(new Error('failed to spawn claude'));
+        await fresh;
+
         expect(store.lastKnownSessionId).toBe(LIVE);
+        expect(store.pendingModelOverride()).toBeNull();
         store.isStreaming = true;
         store.handleStreamChunk({ chunk_type: 'Result', data: { session_id: LIVE } } as never);
-
-        await vi.waitFor(() => {
-          expect(indexOfCall(invokeSpy.mock.calls, appliedEffort('max'))).toBeGreaterThan(-1);
-        });
+        await new Promise((r) => setTimeout(r, 0));
+        expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'apply_chat_effort')).toBe(-1);
+        expect(indexOfCall(invokeSpy.mock.calls, switchedModel)).toBe(-1);
       });
 
       function resumeStarting(): {
@@ -4677,37 +4304,6 @@ describe('ChatSessionStore', () => {
         expect(provider).toEqual({ model: 'qwen3', contextTokens: 8192 });
       });
 
-      it('a New chat the backend kept writes back the pin its reset saved for a queued pick', async () => {
-        liveConversation();
-        await Promise.resolve();
-        const pin = pinStore('opus');
-        store.isStreaming = true;
-        await store.applyModelSelection(haikuPick);
-        store.handleStreamChunk({ chunk_type: 'Error', data: { content: 'upstream hiccup' } });
-        expect(store.pendingModelOverride()).toBe('claude-haiku-4-5');
-        overrideInvoke(
-          'start_chat',
-          rejected(`${SESSION_KEPT_MARKER}: container images are still building`)
-        );
-        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-
-        await expect(store.startNewConversation()).rejects.toThrow(NEW_CONVERSATION_FAILED);
-
-        await vi.waitFor(() => expect(pin()).toBe('opus'));
-        const calls = invokeSpy.mock.calls;
-        expect(launchModelOf(calls, 'start_chat')).toBe('claude-haiku-4-5');
-        expect(invokeSpy).toHaveBeenCalledWith('get_model_pin', { projectId: 'test' });
-        expect(invokeSpy).toHaveBeenCalledWith('set_model_pin', {
-          projectId: 'test',
-          model: 'claude-haiku-4-5',
-        });
-        expect(invokeSpy).toHaveBeenCalledWith('restore_model_pin', {
-          projectId: 'test',
-          model: null,
-        });
-        expect(store.pendingModelOverride()).toBe('claude-haiku-4-5');
-      });
-
       it('a resume that fails after the running session stopped drops the queued picks', async () => {
         liveConversation();
         await Promise.resolve();
@@ -4910,49 +4506,6 @@ describe('ChatSessionStore', () => {
         }
       });
 
-      it('a new conversation the backend refused before it stopped the running session shows that conversation again', async () => {
-        liveConversation();
-        await Promise.resolve();
-        overrideInvoke(
-          'start_chat',
-          rejected(`${SESSION_KEPT_MARKER}: container images are still building`)
-        );
-
-        await expect(store.startNewConversation()).rejects.toThrow(NEW_CONVERSATION_FAILED);
-
-        expect(JSON.stringify(store.messagesFromState())).toContain('Hello');
-        expect(store.sessionStatsFromState()?.session_id).toBe(LIVE);
-        expect(store.lastKnownSessionId).toBe(LIVE);
-      });
-
-      it('the kept-session prefix never reaches the start error the user reads', async () => {
-        liveConversation();
-        await Promise.resolve();
-        overrideInvoke(
-          'start_chat',
-          rejected(`${SESSION_KEPT_MARKER}: container images are still building`)
-        );
-
-        await expect(store.startNewConversation()).rejects.toThrow(NEW_CONVERSATION_FAILED);
-
-        const projectState = TestBed.inject(ProjectStateService);
-        expect(projectState.error).toContain('container images are still building');
-        expect(projectState.error).not.toContain(SESSION_KEPT_MARKER);
-      });
-
-      it('a new conversation that fails keeps the effort notice of the session it returns to', async () => {
-        liveConversation(rejected('chat session ended before the response'));
-        await Promise.resolve();
-        await store.applyEffortSelection('low');
-        expect(store.deferredEffort()).toBe('low');
-        overrideInvoke('start_chat', rejected('failed to spawn claude'));
-
-        await expect(store.startNewConversation()).rejects.toThrow(NEW_CONVERSATION_FAILED);
-
-        expect(store.lastKnownSessionId).toBe(LIVE);
-        expect(store.deferredEffort()).toBe('low');
-      });
-
       it("an older model pick's failed switch is not reported, the newer pick's failed save is", async () => {
         liveConversation();
         await Promise.resolve();
@@ -5028,7 +4581,7 @@ describe('ChatSessionStore', () => {
         await store.applyEffortSelection('max');
         await store.applyModelSelection(haikuPick);
         started.reject(new Error('failed to spawn claude'));
-        await expect(starting).rejects.toThrow();
+        await starting;
 
         expect(store.lastKnownSessionId).toBeNull();
         expect(store.pendingModelOverride()).toBeNull();
@@ -8496,7 +8049,334 @@ describe('ChatSessionStore', () => {
     });
   });
 
-  describe('startNewConversation across a project switch', () => {
+  describe('a fresh start', () => {
+    function readyHandler(startChat: () => void) {
+      return async (cmd: string) => {
+        if (cmd === 'start_chat') return startChat();
+        if (cmd === 'list_projects')
+          return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+        if (cmd === 'get_bundle_reconcile_state') return MOCK_BUNDLE_RECONCILE_DONE;
+        if (cmd === 'check_containers_running') return true;
+        return undefined;
+      };
+    }
+
+    function startFresh(): Promise<void> {
+      return (store as unknown as { startFreshSession(): Promise<void> }).startFreshSession();
+    }
+
+    function errorTexts(): string[] {
+      return store
+        .messagesFromState()
+        .flatMap((m) => m.blocks)
+        .flatMap((b) => (b.type === 'error' ? [b.content] : []));
+    }
+
+    function withOldMessage(): void {
+      store._setState({
+        messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
+        currentBlocks: [],
+        sessionStats: null,
+      });
+    }
+
+    it('clears the conversation and awaits a started session', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      mockTauri.invokeHandler = readyHandler(() => undefined);
+      withOldMessage();
+      const spy = vi.spyOn(mockTauri, 'invoke');
+
+      await startFresh();
+
+      expect(store.messages.length).toBe(0);
+      expect(spy.mock.calls.filter((c) => c[0] === 'start_chat').length).toBe(1);
+      expect(store.lastKnownSessionId).toBeNull();
+      expect(store.hasConversation()).toBe(false);
+      expect(errorTexts()).toEqual([]);
+    });
+
+    it('leaves a resume that superseded it owning the session id', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      const pendingStart = createDeferred();
+      const pendingResume = createDeferred();
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        switch (cmd) {
+          case 'start_chat':
+            await pendingStart.promise;
+            return undefined;
+          case 'resume_conversation':
+            await pendingResume.promise;
+            return undefined;
+          case 'get_conversation':
+            return { session_id: 'sess-resumed', messages: [] };
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'check_containers_running':
+            return true;
+          default:
+            return undefined;
+        }
+      };
+      store.seedSessionId('sess-stale');
+
+      const starting = startFresh();
+      await vi.waitFor(() => {
+        expect(calls).toContain('start_chat');
+      });
+      const resuming = store.resumeConversation('sess-resumed');
+      pendingStart.resolve();
+
+      await starting;
+      expect(errorTexts()).toEqual([
+        `Could not start a new conversation: ${NEW_CONVERSATION_BUSY}`,
+      ]);
+      expect(store.lastKnownSessionId).toBe('sess-resumed');
+      expect(store.newConversationBlockedReason()).toBe(NEW_CONVERSATION_BUSY);
+
+      pendingResume.resolve();
+      await resuming;
+      expect(store.lastKnownSessionId).toBe('sess-resumed');
+    });
+
+    it('reads the resumed transcript only after the resume stopped the session writing it', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      const pendingResume = createDeferred();
+      let resumed = false;
+      const hello = { role: 'assistant', content: 'Hello', timestamp: null, uuid: 'a-1' };
+      const goodbye = { role: 'assistant', content: 'Goodbye', timestamp: null, uuid: 'a-2' };
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'resume_conversation':
+            await pendingResume.promise;
+            resumed = true;
+            return undefined;
+          case 'get_conversation':
+            return {
+              session_id: 'sess-resumed',
+              messages: resumed ? [hello, goodbye] : [hello],
+            };
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'check_containers_running':
+            return true;
+          default:
+            return undefined;
+        }
+      };
+
+      const resuming = store.resumeConversation('sess-resumed');
+      pendingResume.resolve();
+      await resuming;
+
+      const replies = store
+        .messagesFromState()
+        .filter((m) => m.role === 'assistant')
+        .map((m) => m.blocks.map((b) => ('content' in b ? b.content : '')).join(''));
+      expect(replies).toEqual(['Hello', 'Goodbye']);
+    });
+
+    it('shows the resumed transcript when a new-conversation start finishes during the resume', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      const pendingStart = createDeferred();
+      const pendingResume = createDeferred();
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        switch (cmd) {
+          case 'start_chat':
+            await pendingStart.promise;
+            return undefined;
+          case 'resume_conversation':
+            await pendingResume.promise;
+            return undefined;
+          case 'get_conversation':
+            return {
+              session_id: 'sess-resumed',
+              messages: [
+                { role: 'user', content: 'Say hello in one word.', timestamp: null },
+                { role: 'assistant', content: 'Hello', timestamp: null, uuid: 'a-1' },
+                { role: 'user', content: 'Say goodbye in one word.', timestamp: null },
+                { role: 'assistant', content: 'Goodbye', timestamp: null, uuid: 'a-2' },
+              ],
+            };
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'check_containers_running':
+            return true;
+          default:
+            return undefined;
+        }
+      };
+
+      store.resetForNewConversation();
+      await store.init();
+      await vi.waitFor(() => {
+        expect(calls).toContain('start_chat');
+      });
+      const resuming = store.resumeConversation('sess-resumed');
+      await vi.waitFor(() => {
+        expect(calls).toContain('resume_conversation');
+      });
+      pendingStart.resolve();
+      await pendingStart.promise;
+      pendingResume.resolve();
+      await resuming;
+
+      const replies = store
+        .messagesFromState()
+        .filter((m) => m.role === 'assistant')
+        .map((m) => m.blocks.map((b) => ('content' in b ? b.content : '')).join(''));
+      expect(replies).toEqual(['Hello', 'Goodbye']);
+      expect(store.lastKnownSessionId).toBe('sess-resumed');
+    });
+
+    it('claims the bootstrap slot so a later init does not start a second session', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      mockTauri.invokeHandler = readyHandler(() => undefined);
+      const spy = vi.spyOn(mockTauri, 'invoke');
+
+      await startFresh();
+      await store.init();
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(spy.mock.calls.filter((c) => c[0] === 'start_chat').length).toBe(1);
+    });
+
+    it('reports the failure and releases the slot when the session never starts', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      let fail = true;
+      mockTauri.invokeHandler = readyHandler(() => {
+        if (fail) throw new Error('chat backend crashed');
+        return undefined;
+      });
+      store.seedSessionId('sess-old');
+      (
+        store as unknown as { _deferredEffort: { set(v: string | null): void } }
+      )._deferredEffort.set('low');
+
+      await startFresh();
+
+      expect(errorTexts()).toEqual([
+        `Could not start a new conversation: ${NEW_CONVERSATION_FAILED}`,
+      ]);
+      expect((store as unknown as { initialized: boolean }).initialized).toBe(false);
+      expect(store.lastKnownSessionId).toBe('sess-old');
+      expect(store.deferredEffort()).toBe('low');
+
+      fail = false;
+      projectState.status.set('ready');
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      await startFresh();
+      expect(spy.mock.calls.filter((c) => c[0] === 'start_chat').length).toBe(1);
+    });
+
+    it('keeps the conversation and names the cause when the project is not ready', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      mockTauri.invokeHandler = readyHandler(() => undefined);
+      withOldMessage();
+      projectState.status.set('starting');
+      const spy = vi.spyOn(mockTauri, 'invoke');
+
+      await startFresh();
+
+      expect(store.messages.length).toBe(2);
+      expect(errorTexts()).toEqual([
+        `Could not start a new conversation: ${NEW_CONVERSATION_BUSY}`,
+      ]);
+      expect(spy.mock.calls.filter((c) => c[0] === 'start_chat').length).toBe(0);
+    });
+
+    it('tells the user to open a project instead of asking them to wait', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      projectState.activeProject.set(null);
+
+      await startFresh();
+
+      expect(errorTexts()).toEqual([
+        `Could not start a new conversation: ${NEW_CONVERSATION_NO_PROJECT}`,
+      ]);
+    });
+
+    it('refuses while a resume owns the session', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      mockTauri.invokeHandler = readyHandler(() => undefined);
+      const resuming = store.resumeConversation('sess-1');
+
+      await startFresh();
+
+      expect(errorTexts()).toEqual([
+        `Could not start a new conversation: ${NEW_CONVERSATION_BUSY}`,
+      ]);
+      await resuming;
+    });
+
+    it('keeps the conversation when a reply is still streaming', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      mockTauri.invokeHandler = readyHandler(() => undefined);
+      withOldMessage();
+      store.isStreaming = true;
+      const spy = vi.spyOn(mockTauri, 'invoke');
+
+      await startFresh();
+
+      expect(store.messages.length).toBe(2);
+      expect(errorTexts()).toEqual([
+        `Could not start a new conversation: ${NEW_CONVERSATION_STREAMING}`,
+      ]);
+      expect(spy.mock.calls.filter((c) => c[0] === 'start_chat').length).toBe(0);
+    });
+
+    it('keeps the conversation when a session start is already in flight', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      mockTauri.invokeHandler = readyHandler(() => undefined);
+      withOldMessage();
+      const release = store.beginStartingSession();
+
+      await startFresh();
+
+      expect(store.messages.length).toBe(2);
+      expect(errorTexts()).toEqual([
+        `Could not start a new conversation: ${NEW_CONVERSATION_BUSY}`,
+      ]);
+      release();
+    });
+
+    it('points at Settings when the backend rejects the start as unauthenticated', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      mockTauri.invokeHandler = readyHandler(() => {
+        throw new Error('not authenticated');
+      });
+
+      await startFresh();
+
+      expect(errorTexts()).toEqual([
+        `Could not start a new conversation: ${NEW_CONVERSATION_AUTH}`,
+      ]);
+      expect(projectState.status()).toBe('auth_required');
+    });
+  });
+
+  describe('a fresh start across a project switch', () => {
     let projectState: ProjectStateService;
     let calls: string[];
     let started: Deferred;
@@ -8526,25 +8406,6 @@ describe('ChatSessionStore', () => {
       };
     });
 
-    async function startAcrossSwitch(): Promise<{ starting: Promise<void> }> {
-      const starting = store.startNewConversation();
-      await vi.waitFor(() => expect(calls).toContain('start_chat'));
-      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
-      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other' });
-      return { starting };
-    }
-
-    it('a new chat the backend refused before the switch landed leaves the project switched to alone', async () => {
-      const { starting } = await startAcrossSwitch();
-      started.reject(new Error(`${SESSION_KEPT_MARKER}: container images are still building`));
-
-      await expect(starting).rejects.toThrow(NEW_CONVERSATION_PROJECT_CHANGED);
-      expect(store.messagesFromState()).toEqual([]);
-      expect(store.lastKnownSessionId).toBeNull();
-      expect(store.sessionStatsFromState()).toBeNull();
-      expect(projectState.error).not.toContain('container images are still building');
-    });
-
     it('a fresh start after a restart that a switch overtakes leaves no error in the project switched to', async () => {
       const fresh = (
         store as unknown as { startFreshSession(): Promise<void> }
@@ -8559,21 +8420,32 @@ describe('ChatSessionStore', () => {
         'Could not start a new conversation'
       );
     });
-
-    it('a new chat that started after the switch began fails, so nothing is staged for the other project', async () => {
-      const { starting } = await startAcrossSwitch();
+    it('a fresh start that completed after the switch began leaves nothing staged for the other project', async () => {
+      const fresh = (
+        store as unknown as { startFreshSession(): Promise<void> }
+      ).startFreshSession();
+      await vi.waitFor(() => expect(calls).toContain('start_chat'));
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other' });
       started.resolve();
+      await fresh;
 
-      await expect(starting).rejects.toThrow(NEW_CONVERSATION_PROJECT_CHANGED);
+      expect(store.messagesFromState()).toEqual([]);
+      expect(store.lastKnownSessionId).toBeNull();
     });
 
     it('a sign-in refusal of the old project never marks the project switched to', async () => {
-      const { starting } = await startAcrossSwitch();
+      const fresh = (
+        store as unknown as { startFreshSession(): Promise<void> }
+      ).startFreshSession();
+      await vi.waitFor(() => expect(calls).toContain('start_chat'));
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other' });
       await new Promise((r) => setTimeout(r, 0));
       const statusOfTheOtherProject = projectState.status();
       started.reject(new Error('Claude is not authenticated. Please authenticate first.'));
+      await fresh;
 
-      await expect(starting).rejects.toThrow(NEW_CONVERSATION_PROJECT_CHANGED);
       expect(projectState.status()).toBe(statusOfTheOtherProject);
       expect(projectState.status()).not.toBe('auth_required');
     });

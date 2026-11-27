@@ -4,7 +4,6 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { Router, RouterModule } from '@angular/router';
 import { ShellComponent } from './shell.component';
 import { TauriService } from '../services/tauri.service';
-import { BetaService } from '../services/beta.service';
 import { ChatStateService } from '../services/chat-state.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { ThemeService } from '../services/theme.service';
@@ -86,11 +85,9 @@ describe('ShellComponent', () => {
   let projectState: ProjectStateService;
   let chatState: FakeChatState;
   let tabSwitcher: FakeTabSwitcher;
-  const betaEnabled = signal(true);
   const recordingSessionId = signal<string | null>(null);
 
   beforeEach(async () => {
-    betaEnabled.set(true);
     recordingSessionId.set(null);
     mockTauri = new MockTauriService();
     chatState = new FakeChatState();
@@ -122,7 +119,6 @@ describe('ShellComponent', () => {
       ],
       providers: [
         { provide: TauriService, useValue: mockTauri },
-        { provide: BetaService, useValue: { enabled: betaEnabled.asReadonly() } },
         { provide: ChatStateService, useValue: chatState },
         { provide: TabSwitcherService, useValue: tabSwitcher },
         {
@@ -404,8 +400,7 @@ describe('ShellComponent', () => {
     expect(fixture.nativeElement.querySelector('[data-testid="nav-chat"]')).not.toBeNull();
   });
 
-  it('shows the meeting-transcription nav entry when beta is disabled', () => {
-    betaEnabled.set(false);
+  it('lists the meeting-transcription nav entry between Plugins and Usage', () => {
     fixture.detectChanges();
 
     const nav = fixture.nativeElement.querySelector('[data-testid="nav-rail"]');
@@ -470,31 +465,6 @@ describe('ShellComponent', () => {
 
       const dots = fixture.nativeElement.querySelectorAll('[data-testid^="nav-recording-dot-"]');
       expect(dots.length).toBe(1);
-    });
-
-    it('keeps the entry and its dot when beta is turned off mid-recording', () => {
-      startRecording();
-      betaEnabled.set(false);
-      fixture.detectChanges();
-
-      expect(
-        fixture.nativeElement.querySelector('[data-testid="nav-meeting-transcription"]')
-      ).not.toBeNull();
-      expect(fixture.nativeElement.querySelector(DOT)).not.toBeNull();
-    });
-
-    it('keeps the entry without its dot once the recording ends with beta off', () => {
-      startRecording();
-      betaEnabled.set(false);
-      fixture.detectChanges();
-
-      recordingSessionId.set(null);
-      fixture.detectChanges();
-
-      expect(
-        fixture.nativeElement.querySelector('[data-testid="nav-meeting-transcription"]')
-      ).not.toBeNull();
-      expect(fixture.nativeElement.querySelector(DOT)).toBeNull();
     });
   });
 
@@ -726,14 +696,11 @@ describe('ShellComponent', () => {
       document.dispatchEvent(new KeyboardEvent('keydown', { key: '4', metaKey: true }));
     }
 
-    it('navigates whether beta is on or off', () => {
+    it('navigates to the meeting-transcription view', () => {
       const nav = vi.spyOn(TestBed.inject(Router), 'navigateByUrl').mockResolvedValue(true);
       pressCmd4();
-      betaEnabled.set(false);
-      pressCmd4();
-      expect(nav).toHaveBeenCalledTimes(2);
-      expect(nav).toHaveBeenNthCalledWith(1, '/meeting-transcription');
-      expect(nav).toHaveBeenNthCalledWith(2, '/meeting-transcription');
+      expect(nav).toHaveBeenCalledTimes(1);
+      expect(nav).toHaveBeenCalledWith('/meeting-transcription');
     });
   });
 
@@ -744,16 +711,9 @@ describe('ShellComponent', () => {
       return event;
     }
 
-    it('opens a new tab when beta is on and under the cap', () => {
+    it('opens a new tab under the cap', () => {
       pressCmdT();
       expect(chatState.openTab).toHaveBeenCalled();
-    });
-
-    it('is inert when beta is off, and never prevents the default browser action', () => {
-      betaEnabled.set(false);
-      const event = pressCmdT();
-      expect(chatState.openTab).not.toHaveBeenCalled();
-      expect(event.defaultPrevented).toBe(false);
     });
 
     it('is inert at the tab cap, and never prevents the default browser action', () => {
@@ -771,41 +731,9 @@ describe('ShellComponent', () => {
       return event;
     }
 
-    it('opens a new tab when beta is on and under the cap, same guard as ⌘T', () => {
+    it('opens a new tab under the cap, same guard as ⌘T', () => {
       pressCmdN();
       expect(chatState.openTab).toHaveBeenCalled();
-    });
-
-    it('without beta, requests a conversation restart on the chat route with a ready project (the header plus button path)', async () => {
-      betaEnabled.set(false);
-      const router = TestBed.inject(Router);
-      await router.navigate(['/chat']);
-      projectState.status.set('ready');
-      fixture.detectChanges();
-      const ui = TestBed.inject(UiStateService);
-      const before = ui.restartRequested();
-
-      const event = pressCmdN();
-
-      expect(chatState.openTab).not.toHaveBeenCalled();
-      expect(ui.restartRequested()).toBe(before + 1);
-      expect(event.defaultPrevented).toBe(true);
-    });
-
-    it('without beta, is inert off the chat route and never prevents the default browser action', async () => {
-      betaEnabled.set(false);
-      const router = TestBed.inject(Router);
-      await router.navigate(['/settings']);
-      projectState.status.set('ready');
-      fixture.detectChanges();
-      const ui = TestBed.inject(UiStateService);
-      const before = ui.restartRequested();
-
-      const event = pressCmdN();
-
-      expect(chatState.openTab).not.toHaveBeenCalled();
-      expect(ui.restartRequested()).toBe(before);
-      expect(event.defaultPrevented).toBe(false);
     });
 
     it('is inert at the tab cap, and never prevents the default browser action', () => {
@@ -841,21 +769,6 @@ describe('ShellComponent', () => {
 
       expect(ui.restartRequested()).toBe(before + 1);
       expect(event.defaultPrevented).toBe(true);
-    });
-
-    it('is inert without beta, where the header plus button and ⌘N restart instead', async () => {
-      betaEnabled.set(false);
-      const router = TestBed.inject(Router);
-      await router.navigate(['/chat']);
-      projectState.status.set('ready');
-      fixture.detectChanges();
-      const ui = TestBed.inject(UiStateService);
-      const before = ui.restartRequested();
-
-      const event = pressCmdR();
-
-      expect(ui.restartRequested()).toBe(before);
-      expect(event.defaultPrevented).toBe(false);
     });
 
     it('is inert off the chat route (the header plus is not rendered there either)', async () => {
@@ -990,20 +903,12 @@ describe('ShellComponent', () => {
       return event;
     }
 
-    it('closes the active tab when beta is on and more than one tab is open', () => {
+    it('closes the active tab when more than one tab is open', () => {
       chatState.setTabCount(2);
       chatState.setActiveTabId('t1');
       const event = pressCmdW();
       expect(chatState.closeTab).toHaveBeenCalledWith('t1');
       expect(event.defaultPrevented).toBe(true);
-    });
-
-    it('is inert when beta is off, and never prevents the default browser/native close', () => {
-      chatState.setTabCount(2);
-      betaEnabled.set(false);
-      const event = pressCmdW();
-      expect(chatState.closeTab).not.toHaveBeenCalled();
-      expect(event.defaultPrevented).toBe(false);
     });
 
     it('never closes the last remaining tab, and never prevents the default browser/native close', () => {
@@ -1142,7 +1047,6 @@ describe('ShellComponent', () => {
     });
 
     it.each([
-      ['beta is off', () => betaEnabled.set(false)],
       ['a dialog is open', () => document.body.appendChild(modalDialog())],
       [
         'a modal overlay is open',

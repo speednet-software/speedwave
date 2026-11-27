@@ -102,7 +102,7 @@ Which of the 8 categories each shipped template turns on (`gdpr-art32` disables 
 - **The MDM slot is inert until a future change wires it.** `forced_categories` round-trips through the JSON contract and is tested, but no code path today can actually populate it from an org policy source; this ADR records the intended shape so that future work extends rather than redesigns the contract.
 - **The category set is fixed at 8, changing it is a breaking schema change.** Both sides require the category map to be exhaustive; adding or removing a `PiiCategory`/`PIIType` member means bumping every template YAML, the cross-read test, and the `deny_unknown_fields`/exhaustiveness checks on both sides in the same change.
 - **Repo `.speedwave.json` cannot set a PII policy.** `ProjectRepoConfig` (the restricted subset a cloned repo may influence) has no `policy` field: a policy selection is user-config-only, the same restriction already applied to `provider`/`base_url`-class LLM fields, so a malicious cloned repo cannot weaken a project's PII filtering.
-- **Settings UI ships behind the beta-features flag.** A Security section in Desktop Settings (template picker plus Custom-mode category toggles, custom patterns, and sensitive-key editing) is included in this change but gated by Settings → Beta features, so it is off by default until the surface is exercised more widely (see `docs/guides/desktop.md` Security section). Removing the gate is a later, one-line change.
+- **Settings UI is not gated.** A Security section in Desktop Settings (template picker plus Custom-mode category toggles, custom patterns, and sensitive-key editing) is shown to every user; no feature flag hides it.
 
 ## Footnotes
 

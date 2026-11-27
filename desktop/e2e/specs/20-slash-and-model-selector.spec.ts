@@ -4,13 +4,7 @@ import { waitForHealthy } from '../helpers/health';
 import { restartAppAndReconnect } from '../helpers/app-restart';
 import { chatSpawn, waitForReadySession } from '../helpers/spawn-args';
 import { pickComposerEffort } from '../helpers/applied-effort';
-import {
-  clearModelPinFile,
-  clearEffortPinFile,
-  readModelPin,
-  readBetaEnabled,
-  setBetaEnabled,
-} from '../helpers/host-files';
+import { clearModelPinFile, clearEffortPinFile, readModelPin } from '../helpers/host-files';
 import {
   anthropicCatalog,
   latestAnthropicModelIds,
@@ -484,10 +478,8 @@ describe('Slash Popover + Model/Effort Selector', function () {
       ).toBe(0);
     });
 
-    it('(c2) with beta tabs, a pick on an idle tab respawns it and sets the project default for the next new tab, and the Default row clears it', async function () {
+    it('(c2) with chat tabs, a pick on an idle tab respawns it and sets the project default for the next new tab, and the Default row clears it', async function () {
       this.timeout(420_000);
-      const priorBeta = readBetaEnabled();
-      setBetaEnabled(true);
       await restartAppAndReconnect();
 
       try {
@@ -497,7 +489,7 @@ describe('Slash Popover + Model/Effort Selector', function () {
         await openChat();
         await $('[data-testid="chat-tabs"]').waitForExist({
           timeout: 30_000,
-          timeoutMsg: 'chat tab bar never appeared after enabling beta features',
+          timeoutMsg: 'chat tab bar never appeared',
         });
 
         const beforePick = await waitForReadySession();
@@ -543,7 +535,6 @@ describe('Slash Popover + Model/Effort Selector', function () {
         expect(thirdTabArgs.filter((a) => a === '--model').length).toBe(1);
         expect(thirdTabArgs[thirdTabArgs.indexOf('--model') + 1]).toBe('default');
       } finally {
-        setBetaEnabled(priorBeta);
         await restartAppAndReconnect();
         if ((await activeProjectSlug()) !== ANTHROPIC_PROJECT) {
           await switchToProject(ANTHROPIC_PROJECT);

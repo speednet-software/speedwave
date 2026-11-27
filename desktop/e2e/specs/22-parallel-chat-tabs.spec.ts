@@ -1,13 +1,6 @@
 /**
  * Parallel Chat Tabs E2E test (SPEED-388).
  *
- * Tabs are beta-gated (`ui.beta_enabled`): the before hook flips the flag directly
- * in config.json (the same file `get_beta_enabled` reads) and restarts the whole
- * app via `restartAppAndReconnect()` so the fresh boot picks it up — a live app
- * only refetches the flag on the `beta-changed` event, which a direct file edit
- * never fires. The after hook restores the prior value and restarts again, even
- * if an `it` above fails.
- *
  * Covers: opening a second tab, both tabs streaming independently with no
  * cross-tab content bleed, stopping one tab's stream leaving the other running,
  * and resuming an already-open conversation from history activating the
@@ -19,7 +12,6 @@
 
 import { switchToProject, activeProjectSlug } from '../helpers/projects';
 import { restartAppAndReconnect } from '../helpers/app-restart';
-import { readBetaEnabled, setBetaEnabled } from '../helpers/host-files';
 import {
   openChat,
   sendMessageNoWait,
@@ -76,16 +68,9 @@ async function resumeConversationMatching(sentinel: string): Promise<void> {
 }
 
 describe('Parallel Chat Tabs (SPEED-388)', function () {
-  let priorBetaEnabled = false;
-
-  before(function () {
-    priorBetaEnabled = readBetaEnabled();
-  });
-
-  it('enables beta features and starts from a single empty tab', async function () {
+  it('starts from a single empty tab', async function () {
     this.retries(FLAKY_STEP_RETRIES);
     this.timeout(240_000);
-    setBetaEnabled(true);
     await restartAppAndReconnect();
 
     if ((await activeProjectSlug()) !== E2E_PROJECT_NAME) {
@@ -96,7 +81,7 @@ describe('Parallel Chat Tabs (SPEED-388)', function () {
     await openChat();
     await $('[data-testid="chat-tabs"]').waitForExist({
       timeout: 30_000,
-      timeoutMsg: 'chat tab bar never appeared after enabling beta features',
+      timeoutMsg: 'chat tab bar never appeared',
     });
     await startNewConversation();
     expect((await chatTabRows()).length).toBe(1);
@@ -104,7 +89,6 @@ describe('Parallel Chat Tabs (SPEED-388)', function () {
 
   after(async function () {
     this.timeout(240_000);
-    setBetaEnabled(priorBetaEnabled);
     await restartAppAndReconnect();
   });
 
