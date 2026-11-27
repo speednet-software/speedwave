@@ -21,6 +21,13 @@ pub(super) static LOCK_ACQUISITIONS: std::sync::atomic::AtomicUsize =
 
 type SettledProjects = std::sync::Mutex<HashSet<(std::path::PathBuf, String)>>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TokenRotation {
+    Keep,
+    Rotate,
+    WhenSessionStopped,
+}
+
 /// RAII: inserts the project into `HELD_LOCKS` on construction and removes it
 /// on drop (even on panic).
 struct HeldGuard {
@@ -451,13 +458,6 @@ impl LockedRuntime {
             .unwrap_or_else(|p| p.into_inner())
             .insert(self.settled_key(project));
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TokenRotation {
-    Keep,
-    Rotate,
-    WhenSessionStopped,
 }
 
 fn legacy_networks_settled() -> &'static SettledProjects {
