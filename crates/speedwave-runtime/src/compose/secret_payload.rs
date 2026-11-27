@@ -2,9 +2,8 @@ use super::secret_slots::{
     builtin_worker_has_tokens, claude_secrets_mount, enabled_builtin_workers,
     enabled_plugin_workers, hub_policy_mount, hub_secrets_mount, proxy_config_mount,
     proxy_git_mount, proxy_policy_mount, proxy_tokens_mount, worker_auth_mount,
-    worker_tokens_mount, SlotMount, CLAUDE_API_KEY_FILE, CLAUDE_AUTH_TOKEN_FILE,
-    CLAUDE_CUSTOM_HEADERS_FILE, CLAUDE_GIT_PROXY_AUTH_FILE, OS_AUTH_TOKEN_FILE_NAME,
-    PROXY_CONFIG_FILE, WORKER_AUTH_FILE,
+    worker_tokens_mount, SlotMount, CALLER_TOKEN_FILE, CLAUDE_API_KEY_FILE, CLAUDE_AUTH_TOKEN_FILE,
+    CLAUDE_CUSTOM_HEADERS_FILE, OS_AUTH_TOKEN_FILE_NAME, PROXY_CONFIG_FILE, WORKER_AUTH_FILE,
 };
 use super::{llm, proxy, workers};
 use crate::config::{ResolvedClaudeConfig, ResolvedIntegrationsConfig};
@@ -124,6 +123,7 @@ pub(crate) fn collect_project_payload_in(
     resolved_config: &ResolvedClaudeConfig,
     integrations: &ResolvedIntegrationsConfig,
     plugin_manifests: &[PluginManifest],
+    caller_token: &str,
 ) -> anyhow::Result<ProjectPayload> {
     crate::validation::validate_project_name(project)?;
     let tokens_root = super::resolve_tokens_dir_in(data_dir, project);
@@ -180,6 +180,7 @@ pub(crate) fn collect_project_payload_in(
     if let Some((_, token)) = workers::running_mcp_os_in(data_dir) {
         hub_files.push(SecretFile::new(OS_AUTH_TOKEN_FILE_NAME, token));
     }
+    hub_files.push(SecretFile::new(CALLER_TOKEN_FILE, caller_token));
     slots.push(SlotFiles::new(hub_secrets_mount()?.slot, hub_files));
 
     let policy_files = policy_files(data_dir, project, &secrets)?;
@@ -191,10 +192,10 @@ pub(crate) fn collect_project_payload_in(
 
     slots.push(SlotFiles::new(
         proxy_config_mount()?.slot,
-        vec![SecretFile::new(
-            PROXY_CONFIG_FILE,
-            proxy_config.config.content,
-        )],
+        vec![
+            SecretFile::new(PROXY_CONFIG_FILE, proxy_config.config.content),
+            SecretFile::new(CALLER_TOKEN_FILE, caller_token),
+        ],
     ));
     slots.push(SlotFiles::new(
         proxy_tokens_mount()?.slot,
@@ -212,12 +213,7 @@ pub(crate) fn collect_project_payload_in(
 
     slots.push(SlotFiles::new(
         claude_secrets_mount()?.slot,
-        claude_secret_files(
-            data_dir,
-            project,
-            resolved_config,
-            !proxy_config.git_forges.is_empty(),
-        )?,
+        claude_secret_files(data_dir, project, resolved_config, caller_token)?,
     ));
 
     Ok(ProjectPayload { slots })
@@ -263,7 +259,7 @@ fn claude_secret_files(
     data_dir: &Path,
     project: &str,
     resolved_config: &ResolvedClaudeConfig,
-    git_forges_enabled: bool,
+    caller_token: &str,
 ) -> anyhow::Result<Vec<SecretFile>> {
     let mut files = Vec::new();
     if llm::anthropic_provider_active(&resolved_config.llm) {
@@ -275,15 +271,15 @@ fn claude_secret_files(
     if let Some(auth_token) = llm_env.auth_token {
         files.push(SecretFile::new(CLAUDE_AUTH_TOKEN_FILE, auth_token));
     }
-    if let Some(custom_headers) = llm_env.custom_headers {
+    let custom_headers = if llm_env.proxied {
+        Some(proxy::caller_header_value(caller_token))
+    } else {
+        llm_env.custom_headers
+    };
+    if let Some(custom_headers) = custom_headers {
         files.push(SecretFile::new(CLAUDE_CUSTOM_HEADERS_FILE, custom_headers));
     }
-    if git_forges_enabled {
-        files.push(SecretFile::new(
-            CLAUDE_GIT_PROXY_AUTH_FILE,
-            proxy::caller_token_in(data_dir, project)?,
-        ));
-    }
+    files.push(SecretFile::new(CALLER_TOKEN_FILE, caller_token));
     Ok(files)
 }
 

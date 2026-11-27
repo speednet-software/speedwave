@@ -60,7 +60,6 @@ static RULES: LazyLock<Vec<SanitizeRule>> = LazyLock::new(|| {
             "${1}***REDACTED***",
         ),
         (r"(?i)(x-speedwave-proxy-auth:\s*)\S+", "${1}***REDACTED***"),
-        (r"(SPEEDWAVE_GIT_PROXY_AUTH=)\S+", "${1}***REDACTED***"),
     ];
 
     definitions
@@ -114,7 +113,7 @@ mod tests {
     use super::*;
 
     /// Expected number of compiled rules; a mismatch flags a silently dropped rule.
-    const EXPECTED_RULE_COUNT: usize = 26;
+    const EXPECTED_RULE_COUNT: usize = 25;
 
     #[test]
     fn test_rules_count() {
@@ -157,7 +156,6 @@ mod tests {
             r#"(?i)((?:password|passwd|secret|api_key|apikey|api_secret|access_token|private_key|[a-z0-9_]*_token)\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^\s"',;&]+)"?"#,
             r"(OTEL_EXPORTER_OTLP_HEADERS=)[^\r\n]+",
             r"(?i)(x-speedwave-proxy-auth:\s*)\S+",
-            r"(SPEEDWAVE_GIT_PROXY_AUTH=)\S+",
         ];
 
         assert_eq!(
@@ -1275,18 +1273,12 @@ mod tests {
     }
 
     #[test]
-    fn redacts_git_proxy_auth_env_value() {
-        let s = "-e SPEEDWAVE_GIT_PROXY_AUTH=synthetic-caller-secret-0000 -e SPEEDWAVE_GIT_HOSTS=github.com";
+    fn redacts_caller_token_env_value() {
+        let s = "-e SPEEDWAVE_CALLER_TOKEN=synthetic-caller-secret-0000 -e SPEEDWAVE_GIT_HOSTS=github.com";
         let out = sanitize(s);
         assert!(!out.contains("synthetic-caller-secret-0000"), "{out}");
-        assert!(out.contains("SPEEDWAVE_GIT_PROXY_AUTH=***REDACTED***"));
+        assert!(out.contains("SPEEDWAVE_CALLER_TOKEN=***REDACTED***"));
         assert!(out.contains("SPEEDWAVE_GIT_HOSTS=github.com"));
-    }
-
-    #[test]
-    fn does_not_redact_git_proxy_auth_env_name_alone() {
-        let s = "SPEEDWAVE_GIT_PROXY_AUTH is absent without an enabled forge";
-        assert_eq!(sanitize(s), s);
     }
 
     #[test]

@@ -1,6 +1,8 @@
 use serde::Deserialize;
 use std::path::PathBuf;
 
+const CALLER_TOKEN_FILE: &str = "caller-token";
+
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum Auth {
@@ -95,8 +97,8 @@ pub struct Config {
     pub routes: Vec<Route>,
     #[serde(default)]
     pub git_forges: Vec<GitForge>,
-    #[serde(default)]
-    pub caller_token: Option<String>,
+    #[serde(skip)]
+    pub caller_token_file: Option<PathBuf>,
     #[serde(skip)]
     pub usage_path: PathBuf,
     #[serde(skip, default = "build_forward_client")]
@@ -119,10 +121,7 @@ impl std::fmt::Debug for Config {
         f.debug_struct("Config")
             .field("routes", &self.routes)
             .field("git_forges", &self.git_forges)
-            .field(
-                "caller_token",
-                &self.caller_token.as_ref().map(|_| "[redacted]"),
-            )
+            .field("caller_token_file", &self.caller_token_file)
             .field("usage_path", &self.usage_path)
             .field("ner", &self.ner)
             .finish_non_exhaustive()
@@ -149,7 +148,7 @@ impl Default for Config {
         Self {
             routes: Vec::new(),
             git_forges: Vec::new(),
-            caller_token: None,
+            caller_token_file: None,
             usage_path: PathBuf::from(
                 std::env::var("SPW_USAGE_PATH")
                     .unwrap_or_else(|_| "/usage/usage.jsonl".to_string()),
@@ -167,8 +166,6 @@ struct RoutesFile {
     routes: Vec<Route>,
     #[serde(default)]
     git_forges: Vec<GitForge>,
-    #[serde(default)]
-    caller_token: Option<String>,
     #[serde(default)]
     ner: Option<crate::ner::NerConfig>,
 }
@@ -189,7 +186,7 @@ impl Config {
         Ok(Self {
             routes: parsed.routes,
             git_forges: parsed.git_forges,
-            caller_token: parsed.caller_token,
+            caller_token_file: Some(path.with_file_name(CALLER_TOKEN_FILE)),
             ner,
             ..Self::default()
         })
@@ -290,15 +287,6 @@ mod tests {
         for repo in ["a/x/b", "owner/repo", "owner/re", "a/b", "x"] {
             assert!(!forge.allows(repo), "{repo}");
         }
-    }
-
-    #[test]
-    fn config_debug_redacts_caller_token() {
-        let mut cfg = fixture_config();
-        cfg.caller_token = Some("super-secret-caller-token".to_string());
-        let dbg = format!("{cfg:?}");
-        assert!(!dbg.contains("super-secret-caller-token"), "leaked: {dbg}");
-        assert!(dbg.contains("[redacted]"));
     }
 
     #[test]
@@ -409,10 +397,17 @@ mod tests {
     #[test]
     fn load_from_without_a_ner_section_has_no_detector() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_config(dir.path(), r#"{"routes":[],"caller_token":"c"}"#);
+        let path = write_config(dir.path(), r#"{"routes":[]}"#);
         let cfg = Config::load_from(&path).unwrap();
         assert!(cfg.ner.is_none());
-        assert_eq!(cfg.caller_token.as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn load_from_points_the_caller_token_at_the_file_beside_the_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(dir.path(), r#"{"routes":[],"caller_token":"ignored"}"#);
+        let cfg = Config::load_from(&path).unwrap();
+        assert_eq!(cfg.caller_token_file, Some(dir.path().join("caller-token")));
     }
 
     #[test]

@@ -4,6 +4,7 @@
 > **Date:** 2026-11-20
 > **Context:** SPEED-1015, a step of SPEED-579 (secrets at rest). Containers read credentials from host directories mounted through virtiofs (macOS) or `/mnt/c` (Windows), and some credentials were container env.
 > **Amendment (2026-11-24, [ADR-116](ADR-116-secret-store.md)):** The host plaintext credential files this ADR names as slot sources are gone. A slot is now built from the non-secret files on disk plus secret values read from the encrypted secret store, and the worker bearers and the proxy caller token are derived from the install key and written only to the tmpfs. Slot file names and the container side are unchanged.
+> **Amendment (2026-11-27, [ADR-106](ADR-106-git-push-from-the-container-through-the-proxy.md)):** The claude file `git-proxy-auth` and the variable `SPEEDWAVE_GIT_PROXY_AUTH` are replaced by `caller-token` and `SPEEDWAVE_CALLER_TOKEN`; the same file is also staged in the `mcp-hub` `secrets` slot and the proxy `config` slot, and the token is drawn at each project start instead of derived.
 
 ## Context
 

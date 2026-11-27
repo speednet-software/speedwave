@@ -30,7 +30,7 @@ Before this change secrets sat in the data directory as plain files: integration
     - An empty plaintext file is removed without encrypting.
     - OAuth state: the `.enc` files for the refresh token and the client secret are written first, then `oauth/<project>/<service>.json` is rewritten atomically without them; the client secret in `oauth/<project>/<slug>.seed.json` moves to the store.
     - The old `compose/<project>/compose.yml` and `snapshots/<project>/snapshot.json` are deleted only when their text contains a secret env name (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS`, `SPEEDWAVE_GIT_PROXY_AUTH`), because the migration runs at every start and live code still writes both files. Removing them unconditionally is an open question: it needs a way to tell an old file from the current one. A file that cannot be removed fails the migration.
-    - The worker bearer and caller token files are not migrated: their values are derived from now on, and `legacy_files`, which runs after `secrets_at_rest`, deletes them through `LEGACY_PATHS`.
+    - The worker bearer and caller token files are not migrated: the worker bearers are derived from now on and the caller token is drawn at project start (amendment of 2026-11-27), and `legacy_files`, which runs after `secrets_at_rest`, deletes them through `LEGACY_PATHS`.
     - A failed migration of one secret leaves the plaintext in place, the project starts without that integration and Speedwave retries at the next start.
     - A failed migration of the PII key blocks the project. While `policies/<project>/key` exists and the store has no PII key, creating a key is an error, because a new key makes every token in the history unreadable.
     - The install key is created by the migration when there is something to migrate, exclusively.
@@ -53,10 +53,14 @@ Does not protect against:
 - Swap and hibernation. tmpfs pages can be swapped out[^4], and a hibernation image of the host holds the memory of the Speedwave processes, including decrypted values.
 - The Claude Code credentials. `.credentials.json` of Claude Code (Anthropic subscription sign-in) belongs to Claude Code, lives in its own home directory (`claude-home/<project>/`) and is not written by Speedwave ([ADR-052](ADR-052-anthropic-oauth-login-flow.md)).
 - The bearers of plugin workers. They stay compose env because the plugin code lives in the sibling repository `speedwave-plugins` and reads env (ADR-115), so they appear in `compose.yml` and in the container description. They are derived values, not stored, but the value is on disk in the compose file.
-- The token in `mcp-os.lock.json` and `pii-ner.lock.json`. It lives as long as the host process and is regenerated at every start; the CLI finds a running process by reading this file ([ADR-074](ADR-074-cli-host-bridge-reconstruction.md)), so it has to be readable without the key. The token in `proxy.json` is staged in the tmpfs only.
+- The token in `mcp-os.lock.json` and `pii-ner.lock.json`. It lives as long as the host process and is regenerated at every start; the CLI finds a running process by reading this file ([ADR-074](ADR-074-cli-host-bridge-reconstruction.md)), so it has to be readable without the key. The NER token in `proxy.json` is staged in the tmpfs only.
 - The plugin bridge token in `plugin-state/<slug>/bridge-token`. It is stable on purpose, because the external application stores its own copy once ([ADR-063](ADR-063-host-bridge-generic.md)), so a derived or rotating value does not fit.
 - Time Machine and other backup copies. The key file is not excluded from backups, because the number of affected people is small and the key beside the ciphertext in the same backup is the same exposure as in item one.
 - `claude.env` and the OTLP headers in `config.json`. These are user-entered values in the user config that Speedwave passes on; they are not integration secrets and are not moved into the store. `NoTokensClaude` rejects the four names that carry secrets.
+
+## Amendment (2026-11-27): the caller token is not derived (SPEED-1046)
+
+Item 7 no longer holds for the caller token. The purpose `caller` and `proxy::caller_token_in` are gone: the token is 32 random bytes drawn when a project start recreates the Claude Code sessions, kept only in the tmpfs slots of `claude`, `mcp-hub` and the proxy `config` slot as the file `caller-token`, and read by the proxy and the hub on every request (amendment of 2026-11-27 in [ADR-106](ADR-106-git-push-from-the-container-through-the-proxy.md)). A derived token was the same for the life of the install key and anyone who read `secret-store.key` could compute it; a drawn token exists only in the VM until the next start. Worker bearers stay derived. `proxy/<project>/caller-token` stays in `LEGACY_PATHS`, and the secret env name list of the `generated` migration keeps `SPEEDWAVE_GIT_PROXY_AUTH` because compose files of older releases contain it.
 
 ## Release note
 

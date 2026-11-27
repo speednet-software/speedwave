@@ -2623,8 +2623,12 @@ mod tests {
         restage_secrets(&rt, "acme").unwrap();
 
         let calls = handles.vm_exec_calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert!(calls[0].stdin.starts_with(b"sync acme\n"));
+        assert_eq!(
+            calls.len(),
+            2,
+            "one read of the staged caller token, one sync"
+        );
+        assert!(calls[1].stdin.starts_with(b"sync acme\n"));
     }
 
     #[test]

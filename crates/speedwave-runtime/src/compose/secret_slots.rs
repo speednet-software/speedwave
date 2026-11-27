@@ -23,7 +23,7 @@ pub(super) const CLAUDE_SECRETS_TARGET: &str = "/run/speedwave/secrets";
 pub(super) const CLAUDE_API_KEY_FILE: &str = "anthropic-api-key";
 pub(super) const CLAUDE_AUTH_TOKEN_FILE: &str = "anthropic-auth-token";
 pub(super) const CLAUDE_CUSTOM_HEADERS_FILE: &str = "anthropic-custom-headers";
-pub(super) const CLAUDE_GIT_PROXY_AUTH_FILE: &str = "git-proxy-auth";
+pub(super) const CALLER_TOKEN_FILE: &str = "caller-token";
 
 pub(super) const OS_AUTH_TOKEN_FILE_NAME: &str = "os-auth-token";
 
@@ -95,6 +95,13 @@ pub(crate) fn proxy_git_mount(kind: GitForgeService) -> anyhow::Result<SlotMount
 
 pub(super) fn claude_secrets_mount() -> anyhow::Result<SlotMount> {
     SlotMount::new(CLAUDE_SERVICE, PURPOSE_SECRETS, CLAUDE_SECRETS_TARGET)
+}
+
+pub(crate) fn caller_token_vm_path(project: &str) -> anyhow::Result<String> {
+    Ok(format!(
+        "{}/{CALLER_TOKEN_FILE}",
+        claude_secrets_mount()?.slot.vm_dir(project)
+    ))
 }
 
 pub(crate) fn builtin_worker_has_tokens(svc: &McpServiceDescriptor) -> bool {

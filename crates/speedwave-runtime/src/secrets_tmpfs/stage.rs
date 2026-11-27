@@ -1,3 +1,4 @@
+use super::caller_token::{generate_token, is_token};
 use super::frame;
 use super::layout::{ProjectPayload, SecretFile, Slot, VM_ROOT};
 use crate::runtime::ContainerRuntime;
@@ -5,13 +6,31 @@ use std::path::Path;
 use std::time::Duration;
 
 const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+const READ_TIMEOUT: Duration = Duration::from_secs(30);
+const READ_SCRIPT: &str = r#"if [ -f "$1" ]; then cat "$1"; fi"#;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CallerTokenSource {
+    ReuseStaged,
+    DrawNew,
+}
 
 pub(crate) fn stage_project(
     runtime: &dyn ContainerRuntime,
     data_dir: &Path,
     project: &str,
+    token_source: CallerTokenSource,
 ) -> anyhow::Result<()> {
-    let payload = collect_payload(data_dir, project)?;
+    let settings = crate::config::load_project_settings(data_dir, project)?;
+    let caller_token = token_for_staging(runtime, project, token_source)?;
+    let payload = crate::compose::secret_payload::collect_project_payload_in(
+        data_dir,
+        project,
+        &settings.resolved_config,
+        &settings.integrations,
+        &settings.plugin_manifests,
+        &caller_token,
+    )?;
     sync_payload(runtime, project, &payload)
 }
 
@@ -24,23 +43,41 @@ pub(crate) fn put_file(
     run_frame(runtime, project, &frame::encode_put(project, slot, file)?)
 }
 
+fn token_for_staging(
+    runtime: &dyn ContainerRuntime,
+    project: &str,
+    token_source: CallerTokenSource,
+) -> anyhow::Result<String> {
+    if token_source == CallerTokenSource::ReuseStaged {
+        if let Some(staged) = staged_token(runtime, project)? {
+            return Ok(staged);
+        }
+    }
+    generate_token()
+}
+
+fn staged_token(runtime: &dyn ContainerRuntime, project: &str) -> anyhow::Result<Option<String>> {
+    let path = crate::compose::secret_slots::caller_token_vm_path(project)?;
+    let output = runtime
+        .vm_exec_as_root("sh", &["-c", READ_SCRIPT, "sh", &path], &[], READ_TIMEOUT)
+        .map_err(|e| e.context(format!("reading the caller token of project '{project}'")))?;
+    if !output.ok() {
+        anyhow::bail!(
+            "reading the caller token of project '{project}' from the VM failed ({}): {}",
+            output.status,
+            output.stderr_str().trim()
+        );
+    }
+    let staged = output.stdout_str().trim().to_string();
+    Ok(is_token(&staged).then_some(staged))
+}
+
 fn sync_payload(
     runtime: &dyn ContainerRuntime,
     project: &str,
     payload: &ProjectPayload,
 ) -> anyhow::Result<()> {
     run_frame(runtime, project, &frame::encode_sync(project, payload)?)
-}
-
-fn collect_payload(data_dir: &Path, project: &str) -> anyhow::Result<ProjectPayload> {
-    let settings = crate::config::load_project_settings(data_dir, project)?;
-    crate::compose::secret_payload::collect_project_payload_in(
-        data_dir,
-        project,
-        &settings.resolved_config,
-        &settings.integrations,
-        &settings.plugin_manifests,
-    )
 }
 
 fn run_frame(runtime: &dyn ContainerRuntime, project: &str, frame: &[u8]) -> anyhow::Result<()> {

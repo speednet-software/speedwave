@@ -65,6 +65,7 @@ pub const IMAGES: &[ImageDef] = &[
             "containers/install-claude.sh",
             "containers/osc52-copy.sh",
             "containers/git-transport.sh",
+            "containers/git-credential-speedwave.sh",
             "containers/speedwave-secret-env.sh",
             "containers/speedwave-exec.sh",
         ],

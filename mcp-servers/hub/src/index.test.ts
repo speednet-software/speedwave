@@ -1,6 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Express, NextFunction, Request, Response } from 'express';
 import type { Server } from 'http';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { JSONRPCHandler } from '@speedwave/mcp-shared';
 import { createHubApp, createSessionRateLimiter } from './index.js';
 
@@ -17,11 +20,18 @@ async function startApp(app: Express): Promise<{ baseUrl: string; server: Server
   });
 }
 
+const AUTH = { 'x-speedwave-proxy-auth': 'hub-test-token' };
+
 describe('createHubApp', () => {
   let rpcHandler: JSONRPCHandler;
   let server: Server | null = null;
+  let tokenDir: string;
+  let tokenPath: string;
 
   beforeEach(() => {
+    tokenDir = mkdtempSync(join(tmpdir(), 'hub-caller-'));
+    tokenPath = join(tokenDir, 'caller-token');
+    writeFileSync(tokenPath, 'hub-test-token\n');
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -39,20 +49,107 @@ describe('createHubApp', () => {
 
   afterEach(async () => {
     vi.restoreAllMocks();
+    rmSync(tokenDir, { recursive: true, force: true });
     if (server) {
       await new Promise<void>((resolve) => server!.close(() => resolve()));
       server = null;
     }
   });
 
-  it('POST notification returns 202', async () => {
-    const app = createHubApp(rpcHandler);
+  it('POST and DELETE without the caller token return 401 and run nothing', async () => {
+    const processRequest = vi.fn();
+    rpcHandler.processRequest = processRequest;
+    const app = createHubApp(rpcHandler, {}, tokenPath);
+    const { baseUrl, server: s } = await startApp(app);
+    server = s;
+
+    const post = await fetch(baseUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }),
+    });
+    const wrong = await fetch(baseUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-speedwave-proxy-auth': 'nope' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }),
+    });
+    const del = await fetch(baseUrl, {
+      method: 'DELETE',
+      headers: { 'Mcp-Session-Id': '550e8400-e29b-41d4-a716-446655440000' },
+    });
+
+    const malformed = await fetch(baseUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{not json',
+    });
+
+    expect([post.status, wrong.status, del.status, malformed.status]).toEqual([401, 401, 401, 401]);
+    expect(processRequest).not.toHaveBeenCalled();
+  });
+
+  it('follows a rotated token and rejects an empty token file', async () => {
+    const app = createHubApp(rpcHandler, {}, tokenPath);
+    const { baseUrl, server: s } = await startApp(app);
+    server = s;
+    const status = async (token: string) =>
+      (
+        await fetch(baseUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-speedwave-proxy-auth': token },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }),
+        })
+      ).status;
+
+    expect(await status('hub-test-token')).toBe(200);
+    writeFileSync(tokenPath, 'rotated\n');
+    expect(await status('hub-test-token')).toBe(401);
+    expect(await status('rotated')).toBe(200);
+    writeFileSync(tokenPath, '  \n');
+    expect(await status('')).toBe(401);
+    expect(await status('rotated')).toBe(401);
+  });
+
+  it('does not echo either token in the log or the response body', async () => {
+    const app = createHubApp(rpcHandler, {}, tokenPath);
     const { baseUrl, server: s } = await startApp(app);
     server = s;
 
     const res = await fetch(baseUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'x-speedwave-proxy-auth': 'presented-secret' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }),
+    });
+
+    expect(await res.text()).not.toContain('secret');
+    const logged = JSON.stringify(vi.mocked(console.warn).mock.calls);
+    expect(logged).not.toContain('hub-test-token');
+    expect(logged).not.toContain('presented-secret');
+  });
+
+  it('rejects every call when the hub has no caller token', async () => {
+    rmSync(tokenPath);
+    const app = createHubApp(rpcHandler, {}, tokenPath);
+    const { baseUrl, server: s } = await startApp(app);
+    server = s;
+
+    const res = await fetch(baseUrl, {
+      method: 'POST',
+      headers: { ...AUTH, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }),
+    });
+
+    expect(res.status).toBe(401);
+  });
+
+  it('POST notification returns 202', async () => {
+    const app = createHubApp(rpcHandler, {}, tokenPath);
+    const { baseUrl, server: s } = await startApp(app);
+    server = s;
+
+    const res = await fetch(baseUrl, {
+      method: 'POST',
+      headers: { ...AUTH, 'Content-Type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
     });
 
@@ -60,13 +157,13 @@ describe('createHubApp', () => {
   });
 
   it('POST regular request returns 200 JSON', async () => {
-    const app = createHubApp(rpcHandler);
+    const app = createHubApp(rpcHandler, {}, tokenPath);
     const { baseUrl, server: s } = await startApp(app);
     server = s;
 
     const res = await fetch(baseUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { ...AUTH, 'Content-Type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }),
     });
 
@@ -78,13 +175,13 @@ describe('createHubApp', () => {
   });
 
   it('POST batch returns array response', async () => {
-    const app = createHubApp(rpcHandler);
+    const app = createHubApp(rpcHandler, {}, tokenPath);
     const { baseUrl, server: s } = await startApp(app);
     server = s;
 
     const res = await fetch(baseUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { ...AUTH, 'Content-Type': 'application/json' },
       body: JSON.stringify([
         { jsonrpc: '2.0', id: 1, method: 'ping' },
         { jsonrpc: '2.0', id: 2, method: 'ping' },
@@ -100,24 +197,24 @@ describe('createHubApp', () => {
   });
 
   it('DELETE with valid session returns 204', async () => {
-    const app = createHubApp(rpcHandler);
+    const app = createHubApp(rpcHandler, {}, tokenPath);
     const { baseUrl, server: s } = await startApp(app);
     server = s;
 
     const res = await fetch(baseUrl, {
       method: 'DELETE',
-      headers: { 'Mcp-Session-Id': '550e8400-e29b-41d4-a716-446655440000' },
+      headers: { ...AUTH, 'Mcp-Session-Id': '550e8400-e29b-41d4-a716-446655440000' },
     });
 
     expect(res.status).toBe(204);
   });
 
   it('DELETE without session returns 400', async () => {
-    const app = createHubApp(rpcHandler);
+    const app = createHubApp(rpcHandler, {}, tokenPath);
     const { baseUrl, server: s } = await startApp(app);
     server = s;
 
-    const res = await fetch(baseUrl, { method: 'DELETE' });
+    const res = await fetch(baseUrl, { method: 'DELETE', headers: AUTH });
 
     expect(res.status).toBe(400);
     const body = await res.json();
@@ -125,7 +222,7 @@ describe('createHubApp', () => {
   });
 
   it('GET / returns 405 with Allow header', async () => {
-    const app = createHubApp(rpcHandler);
+    const app = createHubApp(rpcHandler, {}, tokenPath);
     const { baseUrl, server: s } = await startApp(app);
     server = s;
 
@@ -138,7 +235,7 @@ describe('createHubApp', () => {
   });
 
   it('error handling returns 500 JSON-RPC error', async () => {
-    const app = createHubApp(rpcHandler);
+    const app = createHubApp(rpcHandler, {}, tokenPath);
     const { baseUrl, server: s } = await startApp(app);
     server = s;
 
@@ -146,7 +243,7 @@ describe('createHubApp', () => {
 
     const res = await fetch(baseUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { ...AUTH, 'Content-Type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }),
     });
 
@@ -158,7 +255,7 @@ describe('createHubApp', () => {
   });
 
   it('GET /health returns ok', async () => {
-    const app = createHubApp(rpcHandler);
+    const app = createHubApp(rpcHandler, {}, tokenPath);
     const { baseUrl, server: s } = await startApp(app);
     server = s;
 
@@ -170,7 +267,7 @@ describe('createHubApp', () => {
   });
 
   it('POST over the per-session limit returns 429 with Retry-After', async () => {
-    const app = createHubApp(rpcHandler);
+    const app = createHubApp(rpcHandler, {}, tokenPath);
     const { baseUrl, server: s } = await startApp(app);
     server = s;
 
@@ -178,7 +275,7 @@ describe('createHubApp', () => {
     const send = () =>
       fetch(baseUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Mcp-Session-Id': sessionId },
+        headers: { ...AUTH, 'Content-Type': 'application/json', 'Mcp-Session-Id': sessionId },
         body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }),
       });
 

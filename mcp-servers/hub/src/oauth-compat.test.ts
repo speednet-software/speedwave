@@ -23,6 +23,8 @@ class FakeResponse extends EventEmitter {
   }
 }
 
+const CALLER_TOKEN = 'oauth-compat-test-token';
+
 const refreshCall = {
   id: 'req-1',
   method: 'tools/call',
@@ -137,7 +139,9 @@ describe('oauth compat endpoint in the hub app', () => {
   });
 
   async function start(rpcHandler: JSONRPCHandler, waitMs: number): Promise<void> {
-    const app = createHubApp(rpcHandler, { waitMs });
+    const tokenPath = join(dir, 'caller-token');
+    await writeFile(tokenPath, CALLER_TOKEN);
+    const app = createHubApp(rpcHandler, { waitMs }, tokenPath);
     await new Promise<void>((resolve) => {
       server = app.listen(0, '127.0.0.1', () => {
         const addr = server!.address();
@@ -204,7 +208,7 @@ describe('oauth compat endpoint in the hub app', () => {
 
     const list = await fetch(baseUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'x-speedwave-proxy-auth': CALLER_TOKEN },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
     });
     const listed = (await list.json()) as { result: { tools: Array<{ name: string }> } };
@@ -212,7 +216,7 @@ describe('oauth compat endpoint in the hub app', () => {
 
     const call = await fetch(baseUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'x-speedwave-proxy-auth': CALLER_TOKEN },
       body: JSON.stringify({
         jsonrpc: '2.0',
         id: 2,

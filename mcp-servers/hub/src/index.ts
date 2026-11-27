@@ -26,6 +26,7 @@ import { initializeRegistry } from './tool-registry.js';
 import { loadAuthTokens } from './auth-tokens.js';
 
 import { loadAccess } from './access-config.js';
+import { createCallerAuth } from './caller-auth.js';
 import { OAUTH_COMPAT_PATH, createOAuthCompatHandler, OAuthCompatOptions } from './oauth-compat.js';
 import { loadPolicy } from './policy.js';
 
@@ -141,14 +142,20 @@ export function createSessionRateLimiter() {
  * Create the Hub Express app with MCP transport endpoints.
  * @param rpcHandler - JSON-RPC handler to process incoming requests
  * @param oauthCompat - wait and concurrency limits of the OAuth compat endpoint
+ * @param callerTokenPath - file holding the caller token `POST /` and `DELETE /` require
  */
 export function createHubApp(
   rpcHandler: JSONRPCHandler,
-  oauthCompat: OAuthCompatOptions = {}
+  oauthCompat: OAuthCompatOptions = {},
+  callerTokenPath?: string
 ): Express {
   const app = express();
 
   app.disable('x-powered-by');
+
+  const requireCaller = createCallerAuth(callerTokenPath);
+  app.post('/', requireCaller);
+  app.delete('/', requireCaller);
 
   app.use(express.json({ limit: '1mb' }));
 
