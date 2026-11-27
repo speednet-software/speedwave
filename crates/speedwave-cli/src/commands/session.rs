@@ -21,6 +21,53 @@ pub(super) struct Started {
     _paste_watcher: PasteWatcher,
 }
 
+#[derive(Clone, Default)]
+struct ReconnectWarnings(Arc<Mutex<ReconnectState>>);
+
+#[derive(Default)]
+struct ReconnectState {
+    reported: HashSet<String>,
+    deferred: Vec<String>,
+    held: bool,
+}
+
+impl ReconnectWarnings {
+    fn warn_once(&self, service: &str) {
+        if let Some(message) = self.report(service) {
+            err!("{message}");
+        }
+    }
+
+    fn hold(&self) {
+        self.lock().held = true;
+    }
+
+    fn release(&self) -> Vec<String> {
+        let mut state = self.lock();
+        state.held = false;
+        std::mem::take(&mut state.deferred)
+    }
+
+    fn report(&self, service: &str) -> Option<String> {
+        let mut state = self.lock();
+        if !state.reported.insert(service.to_string()) {
+            return None;
+        }
+        let message = reconnect_warning(service);
+        if state.held {
+            state.deferred.push(message);
+            return None;
+        }
+        Some(message)
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, ReconnectState> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 pub(super) fn run(project: ProjectContext, runtime: LockedRuntime) -> anyhow::Result<()> {
     let started = bring_up(&project, &runtime)?;
 
@@ -170,53 +217,6 @@ fn reap_warning(runtime: &LockedRuntime, container: &str, instance_id: &str) -> 
         "Warning: Claude Code may still be running in '{container}': {}",
         redact_err(&e)
     ))
-}
-
-#[derive(Clone, Default)]
-struct ReconnectWarnings(Arc<Mutex<ReconnectState>>);
-
-#[derive(Default)]
-struct ReconnectState {
-    reported: HashSet<String>,
-    deferred: Vec<String>,
-    held: bool,
-}
-
-impl ReconnectWarnings {
-    fn warn_once(&self, service: &str) {
-        if let Some(message) = self.report(service) {
-            err!("{message}");
-        }
-    }
-
-    fn hold(&self) {
-        self.lock().held = true;
-    }
-
-    fn release(&self) -> Vec<String> {
-        let mut state = self.lock();
-        state.held = false;
-        std::mem::take(&mut state.deferred)
-    }
-
-    fn report(&self, service: &str) -> Option<String> {
-        let mut state = self.lock();
-        if !state.reported.insert(service.to_string()) {
-            return None;
-        }
-        let message = reconnect_warning(service);
-        if state.held {
-            state.deferred.push(message);
-            return None;
-        }
-        Some(message)
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, ReconnectState> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
 }
 
 fn reconnect_warning(service: &str) -> String {

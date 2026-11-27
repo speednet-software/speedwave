@@ -88,6 +88,13 @@ pub(crate) fn parse_action(args: &[String]) -> Result<CliAction, String> {
     }
 }
 
+fn reject_extra_args(args: &[String], expected_len: usize, usage: &str) -> Result<(), String> {
+    match args.get(expected_len) {
+        Some(extra) => Err(format!("unexpected argument: '{extra}'. usage: {usage}")),
+        None => Ok(()),
+    }
+}
+
 fn parse_plugin_toggle(
     args: &[String],
     subcommand: &str,
@@ -131,13 +138,6 @@ fn parse_project_tail(tail: &[String], usage: &str) -> Result<Option<String>, St
         return Err(format!("unexpected argument: '{extra}'. usage: {usage}"));
     }
     Ok(Some(project))
-}
-
-fn reject_extra_args(args: &[String], expected_len: usize, usage: &str) -> Result<(), String> {
-    match args.get(expected_len) {
-        Some(extra) => Err(format!("unexpected argument: '{extra}'. usage: {usage}")),
-        None => Ok(()),
-    }
 }
 
 #[cfg(test)]

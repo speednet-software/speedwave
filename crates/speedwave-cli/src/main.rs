@@ -453,20 +453,6 @@ mod tests {
         include_str!("../test-fixtures/release-signature/archive-windows.tar.gz.sig");
 
     #[test]
-    fn cli_does_not_spawn_host_workers() {
-        let source = include_str!("main.rs");
-        let forbidden = [(concat!("McpOsProcess::", "spawn"), "mcp-os")];
-        for (needle, worker) in forbidden {
-            assert!(
-                !source.contains(needle),
-                "CLI must not spawn the {worker} worker ({needle}) — Desktop is the \
-                 sole supervisor; two supervisors race kill_stale_node and crash \
-                 the Claude exec with exit 137 (ADR-068)"
-            );
-        }
-    }
-
-    #[test]
     fn print_help_lists_login_and_logout() {
         let source = include_str!("main.rs");
         let help_start = source

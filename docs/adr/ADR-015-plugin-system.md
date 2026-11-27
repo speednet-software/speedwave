@@ -42,7 +42,7 @@ There are two plugin types: an **MCP service plugin** has a `service_id` and a r
 - `apply_plugins()`, `generate_plugin_service()`, `WORKER_*_URL` injection, plugin SecurityChecks — `crates/speedwave-runtime/src/compose.rs`
 - Service-ID constants and reserved env keys — `crates/speedwave-runtime/src/consts.rs`
 - Per-project enable state and `plugin_settings` — `crates/speedwave-runtime/src/config.rs`
-- CLI subcommands — `crates/speedwave-cli/src/main.rs`
+- CLI subcommands — `crates/speedwave-cli/src/commands/` (parser in `cli_action.rs`)
 - Container resource symlinking — `containers/entrypoint.sh`
 - Hub discovery — `mcp-servers/hub/src/service-list.ts`, `tool-discovery.ts`, `tool-registry.ts`, `http-bridge.ts`, `auth-tokens.ts`
 - Tauri commands (10) — `desktop/src-tauri/src/plugin_cmd.rs`
