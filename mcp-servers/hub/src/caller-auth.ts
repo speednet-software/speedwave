@@ -1,8 +1,3 @@
-/**
- * Authenticates the `claude` container on the hub's MCP endpoint: the caller token sits in a tmpfs
- * slot file that is read on every request, so a rotation at project start needs no hub restart.
- */
-
 import { readFileSync } from 'node:fs';
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import { safeTokenCompare, ts } from '@speedwave/mcp-shared';
@@ -19,8 +14,7 @@ function readCallerToken(path: string): string | undefined {
 }
 
 /**
- * Express middleware that answers 401 unless the request carries the caller token; a missing or
- * empty token file rejects every request.
+ * Express middleware that answers 401 unless the request carries the caller token.
  * @param tokenPath - file holding the caller token
  */
 export function createCallerAuth(tokenPath: string = CALLER_TOKEN_PATH): RequestHandler {

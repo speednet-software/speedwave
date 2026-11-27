@@ -153,6 +153,10 @@ export function createHubApp(
 
   app.disable('x-powered-by');
 
+  const requireCaller = createCallerAuth(callerTokenPath);
+  app.post('/', requireCaller);
+  app.delete('/', requireCaller);
+
   app.use(express.json({ limit: '1mb' }));
 
   app.get('/health', (_req: Request, res: Response) => {
@@ -160,10 +164,6 @@ export function createHubApp(
   });
 
   app.post(OAUTH_COMPAT_PATH, createOAuthCompatHandler(oauthCompat));
-
-  const requireCaller = createCallerAuth(callerTokenPath);
-  app.post('/', requireCaller);
-  app.delete('/', requireCaller);
 
   app.use(createSessionRateLimiter());
 

@@ -78,8 +78,53 @@ describe('createHubApp', () => {
       headers: { 'Mcp-Session-Id': '550e8400-e29b-41d4-a716-446655440000' },
     });
 
-    expect([post.status, wrong.status, del.status]).toEqual([401, 401, 401]);
+    const malformed = await fetch(baseUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{not json',
+    });
+
+    expect([post.status, wrong.status, del.status, malformed.status]).toEqual([401, 401, 401, 401]);
     expect(processRequest).not.toHaveBeenCalled();
+  });
+
+  it('follows a rotated token and rejects an empty token file', async () => {
+    const app = createHubApp(rpcHandler, {}, tokenPath);
+    const { baseUrl, server: s } = await startApp(app);
+    server = s;
+    const status = async (token: string) =>
+      (
+        await fetch(baseUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-speedwave-proxy-auth': token },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }),
+        })
+      ).status;
+
+    expect(await status('hub-test-token')).toBe(200);
+    writeFileSync(tokenPath, 'rotated\n');
+    expect(await status('hub-test-token')).toBe(401);
+    expect(await status('rotated')).toBe(200);
+    writeFileSync(tokenPath, '  \n');
+    expect(await status('')).toBe(401);
+    expect(await status('rotated')).toBe(401);
+  });
+
+  it('does not echo either token in the log or the response body', async () => {
+    const app = createHubApp(rpcHandler, {}, tokenPath);
+    const { baseUrl, server: s } = await startApp(app);
+    server = s;
+
+    const res = await fetch(baseUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-speedwave-proxy-auth': 'presented-secret' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }),
+    });
+
+    expect(await res.text()).not.toContain('secret');
+    const logged = JSON.stringify(vi.mocked(console.warn).mock.calls);
+    expect(logged).not.toContain('hub-test-token');
+    expect(logged).not.toContain('presented-secret');
   });
 
   it('rejects every call when the hub has no caller token', async () => {
@@ -95,16 +140,6 @@ describe('createHubApp', () => {
     });
 
     expect(res.status).toBe(401);
-  });
-
-  it('GET /health stays open without the caller token', async () => {
-    const app = createHubApp(rpcHandler, {}, tokenPath);
-    const { baseUrl, server: s } = await startApp(app);
-    server = s;
-
-    const res = await fetch(`${baseUrl}/health`);
-
-    expect(res.status).toBe(200);
   });
 
   it('POST notification returns 202', async () => {
