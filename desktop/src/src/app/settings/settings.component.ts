@@ -290,11 +290,6 @@ export class SettingsComponent implements OnInit, OnDestroy {
       .subscribe((fragment) => this.scrollToFragment(fragment));
   }
 
-  /**
-   * Smooth-scrolls the section with `id` into view, retrying while a deferred (flag-gated) section mounts.
-   * @param id - the fragment id to scroll to; null/empty does nothing
-   * @param attempt - internal retry counter
-   */
   private scrollToFragment(id: string | null, attempt = 0): void {
     if (this.scrollTimer !== null) {
       clearTimeout(this.scrollTimer);

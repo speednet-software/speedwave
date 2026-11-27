@@ -127,7 +127,6 @@ export class ChatStateService {
     if (!store) throw new Error(`[chat-state] no store for active tab ${this._activeTabId()}`);
     return store;
   });
-  /** Whether another tab can be opened under `MAX_CHAT_TABS`. */
   readonly canOpenTab: Signal<boolean> = computed(() => this._tabs().size < MAX_CHAT_TABS);
 
   readonly sessionAuthFailed: Signal<boolean> = computed(() =>

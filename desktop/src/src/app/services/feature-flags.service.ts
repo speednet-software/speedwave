@@ -1,12 +1,11 @@
 import { Injectable, inject, signal } from '@angular/core';
 import { TauriService } from './tauri.service';
 import {
+  ALL_OFF,
   FEATURE_FLAGS_CHANGED_EVENT,
   type FeatureFlag,
   type FeatureFlags,
 } from '../models/feature-flags';
-
-const ALL_OFF: FeatureFlags = { office: false, telemetry_settings: false };
 
 /**
  * Feature flags (ADR-058): seeds from `get_feature_flags`, follows `feature-flags-changed`;

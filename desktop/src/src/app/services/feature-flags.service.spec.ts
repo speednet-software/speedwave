@@ -34,7 +34,7 @@ describe('FeatureFlagsService', () => {
     expect(service.enabled('telemetry_settings')).toBe(false);
   });
 
-  it('replaces the whole map on feature-flags-changed events', async () => {
+  it('applies the flags of each feature-flags-changed event', async () => {
     mockTauri.invokeHandler = async (cmd) =>
       cmd === 'get_feature_flags' ? { office: false, telemetry_settings: false } : undefined;
 

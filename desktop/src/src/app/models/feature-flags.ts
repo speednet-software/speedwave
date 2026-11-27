@@ -5,3 +5,6 @@ export type FeatureFlag = 'office' | 'telemetry_settings';
 
 /** Every flag with its state; mirrors the `get_feature_flags` result. */
 export type FeatureFlags = Record<FeatureFlag, boolean>;
+
+/** Every flag switched off; the state before the backend answers. */
+export const ALL_OFF: FeatureFlags = { office: false, telemetry_settings: false };

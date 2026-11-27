@@ -1,5 +1,3 @@
-//! UI preference commands: the feature flags.
-
 use std::collections::BTreeMap;
 use std::path::Path;
 

@@ -1,10 +1,10 @@
 import { signal } from '@angular/core';
 import { vi } from 'vitest';
-import type { FeatureFlag, FeatureFlags } from '../models/feature-flags';
+import { ALL_OFF, type FeatureFlag, type FeatureFlags } from '../models/feature-flags';
 
 /** Stand-in for `FeatureFlagsService` in component specs; flip flags with `setFlag`. */
 export class FakeFeatureFlagsService {
-  private readonly state = signal<FeatureFlags>({ office: false, telemetry_settings: false });
+  private readonly state = signal<FeatureFlags>(ALL_OFF);
 
   readonly set = vi.fn(async (flag: FeatureFlag, enabled: boolean): Promise<void> => {
     this.setFlag(flag, enabled);

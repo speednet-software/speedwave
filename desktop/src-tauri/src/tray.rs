@@ -56,8 +56,6 @@ fn tooltip_for(recording: bool) -> &'static str {
     }
 }
 
-/// Variable tray-menu input (`update_version`) managed via `app.manage`;
-/// access through the accessors, which recover from poisoning.
 #[derive(Default)]
 pub(crate) struct TrayMenuState {
     update_version: Mutex<Option<String>>,
@@ -90,7 +88,6 @@ pub(crate) enum TrayItemSpec {
     Quit,
 }
 
-/// Returns the ordered menu items for the given update version.
 pub(crate) fn tray_menu_spec(update_version: Option<&str>) -> Vec<TrayItemSpec> {
     let mut items = vec![
         TrayItemSpec::Open,
@@ -146,7 +143,6 @@ pub(crate) fn build_tray_menu(
     builder.build()
 }
 
-/// Rebuilds the tray menu from the current `TrayMenuState`.
 pub(crate) fn refresh_tray_menu(app: &tauri::AppHandle) {
     let state = app.state::<TrayMenuState>();
     let update_version = state.update_version();

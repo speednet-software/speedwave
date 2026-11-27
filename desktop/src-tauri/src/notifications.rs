@@ -117,8 +117,6 @@ pub(crate) fn install(app: &AppHandle) {
     }
 }
 
-/// Tells the frontend about `event`, then shows a notification when its switch and the
-/// background window allow it.
 pub(crate) fn notify_session_event(
     app: &AppHandle,
     project: &str,
