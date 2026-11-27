@@ -20,7 +20,7 @@ The CLI bare-run form (and `update`/`login`/`logout`) targets the active project
 
 ## CLI scope and subcommands
 
-The CLI handles argument parsing, project resolution, self-update via GitHub Releases, the plugin sub-surface, and the security pre-flight check — everything else is delegated to the runtime. The subcommand surface (see `CliAction` / `parse_action` in `crates/speedwave-cli/src/cli_action.rs`) is: bare run (start containers + interactive Claude), `check`, `init`, `login`, `logout`, `update`, `self-update`, and the `plugin` group (`install`, `list`, `remove`, `enable`, `disable`). The file is sizeable — production and test code are each on the order of several hundred lines, so do not rely on a fixed line count here.
+The CLI handles argument parsing, project resolution, self-update via GitHub Releases, the plugin sub-surface, and the security pre-flight check — everything else is delegated to the runtime. The subcommand surface (see `CliAction` / `parse_action` in `crates/speedwave-cli/src/cli_action.rs`) is: bare run (start containers + interactive Claude), `check`, `init`, `login`, `logout`, `update`, `self-update`, and the `plugin` group (`install`, `list`, `remove`, `enable`, `disable`).
 
 ## Where it lives in code
 

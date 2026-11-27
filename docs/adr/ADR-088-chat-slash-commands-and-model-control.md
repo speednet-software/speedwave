@@ -792,7 +792,7 @@ alone as before.
 **Both halves are Desktop-only, and the CLI is out of scope of this decision.**
 `--effort <pin>` is pushed in `chat.rs::prepare_args` and the migration lives in
 `desktop/src-tauri/src/pin_cmd.rs`; `crates/speedwave-cli` depends only on
-`speedwave-runtime`, so `crates/speedwave-cli/src/main.rs` spawns Claude Code with
+`speedwave-runtime`, so `crates/speedwave-cli/src/commands/session.rs` spawns Claude Code with
 `config::resolve_project_config`'s flags alone, which never carry `--effort`. A
 CLI session therefore gets Claude Code's own default effort, or whatever
 `effortLevel` the user set interactively in a CLI session, which Claude Code
