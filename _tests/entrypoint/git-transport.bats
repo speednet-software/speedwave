@@ -39,10 +39,6 @@ run_transport() {
         bash "$GIT_TRANSPORT"
 }
 
-exec_git() {
-    sh "$EXEC" HOME="$TMP_HOME" git "$@"
-}
-
 credential_fill() {
     printf 'url=%s\n\n' "$1" | exec_git credential fill
 }
@@ -60,6 +56,10 @@ assert_token_persisted_nowhere() {
 
 credential_fill_with_later_helper() {
     printf 'url=%s\n\n' "$URL" | exec_git -c credential.helper="$1" credential fill 2>&1
+}
+
+exec_git() {
+    sh "$EXEC" HOME="$TMP_HOME" git "$@"
 }
 
 @test "scp-style remote is rewritten to the proxy" {
