@@ -128,8 +128,6 @@ show_secret_env() {
     [[ "$output" == *"caller-secret-777" ]]
     run grep -c 'caller-secret-777' "$TEST_HOME/.claude/mcp-config.json"
     [ "$output" = "0" ]
-    run grep -F '"x-speedwave-proxy-auth": "${SPEEDWAVE_CALLER_TOKEN}"' "$TEST_HOME/.claude/mcp-config.json"
-    [ "$status" -eq 0 ]
     run node -e 'const c=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if(c.mcpServers["speedwave-hub"].headers["x-speedwave-proxy-auth"]!=="${SPEEDWAVE_CALLER_TOKEN}") process.exit(1)' "$TEST_HOME/.claude/mcp-config.json"
     [ "$status" -eq 0 ]
 }

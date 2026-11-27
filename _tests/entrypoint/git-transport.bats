@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 
-GIT_TRANSPORT="$BATS_TEST_DIRNAME/../../containers/git-transport.sh"
-EXEC="$BATS_TEST_DIRNAME/../../containers/speedwave-exec.sh"
+GIT_TRANSPORT_SRC="$BATS_TEST_DIRNAME/../../containers/git-transport.sh"
+EXEC_SRC="$BATS_TEST_DIRNAME/../../containers/speedwave-exec.sh"
 HELPER="$BATS_TEST_DIRNAME/../../containers/git-credential-speedwave.sh"
 
 setup() {
@@ -18,7 +18,13 @@ setup() {
     URL="$PROXY/github.com/o/r.git"
     export SPEEDWAVE_GIT_HOSTS="github.com"
     export SPEEDWAVE_GIT_PROXY_URL="$PROXY"
-    export SPEEDWAVE_GIT_CREDENTIAL_HELPER="$HELPER"
+    SCRIPTS="$TMP_HOME/scripts"
+    mkdir -p "$SCRIPTS"
+    cp "$EXEC_SRC" "$GIT_TRANSPORT_SRC" "$SCRIPTS/"
+    EXEC="$SCRIPTS/speedwave-exec.sh"
+    GIT_TRANSPORT="$SCRIPTS/git-transport.sh"
+    sed "s|/usr/local/bin/git-credential-speedwave.sh|$HELPER|" \
+        "$BATS_TEST_DIRNAME/../../containers/speedwave-secret-env.sh" > "$SCRIPTS/speedwave-secret-env.sh"
     unset GIT_CONFIG_COUNT
     AUTH="tok-secret-123"
     printf '%s\n' "$AUTH" > "$SECRETS_DIR/caller-token"
@@ -33,10 +39,8 @@ run_transport() {
         bash "$GIT_TRANSPORT"
 }
 
-# git as every process of the claude container starts it: through speedwave-exec,
-# which exports the secret files and the credential helper config.
 exec_git() {
-    "$EXEC" HOME="$TMP_HOME" git "$@"
+    sh "$EXEC" HOME="$TMP_HOME" git "$@"
 }
 
 credential_fill() {
@@ -161,9 +165,24 @@ credential_fill_with_later_helper() {
     export GIT_CONFIG_KEY_0=user.name
     export GIT_CONFIG_VALUE_0="Keep Me"
     run run_transport "github.com"
-    run "$EXEC" HOME="$TMP_HOME" git config --get user.name
+    run sh "$EXEC" HOME="$TMP_HOME" git config --get user.name
     [ "$output" = "Keep Me" ]
     run credential_fill "$URL"
+    [[ "$output" == *"password=$AUTH"* ]]
+}
+
+@test "a GIT_CONFIG_COUNT with a leading zero is read as decimal" {
+    export GIT_CONFIG_COUNT=08
+    for i in 0 1 2 3 4 5 6 7; do
+        export "GIT_CONFIG_KEY_$i=user.n$i"
+        export "GIT_CONFIG_VALUE_$i=v$i"
+    done
+    run run_transport "github.com"
+    run sh "$EXEC" HOME="$TMP_HOME" git config --get user.n7
+    [ "$status" -eq 0 ]
+    [ "$output" = "v7" ]
+    run credential_fill "$URL"
+    [ "$status" -eq 0 ]
     [[ "$output" == *"password=$AUTH"* ]]
 }
 
