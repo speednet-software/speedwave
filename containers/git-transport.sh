@@ -56,6 +56,7 @@ tmp="${conf_file}.tmp.$$"
         printf '\tinsteadOf = https://%s/\n' "$host"
     done
     printf '[credential "%s/"]\n' "$proxy_url"
+    printf '\thelper =\n'
     printf '\thelper = %s\n' "$helper"
 } > "$tmp" 2>/dev/null && chmod 600 "$tmp" 2>/dev/null && mv -f "$tmp" "$conf_file" 2>/dev/null
 if [ ! -f "$conf_file" ] || [ -e "$tmp" ]; then

@@ -89,6 +89,33 @@ credential_fill() {
     [[ "$output" != *"password="* ]]
 }
 
+@test "the helper prints quit=1 while the token file is missing or empty" {
+    helper="$BATS_TEST_DIRNAME/../../containers/git-credential-speedwave.sh"
+    rm "$SECRETS_DIR/caller-token"
+    run sh "$helper" get < /dev/null
+    [ "$status" -eq 0 ]
+    [ "$output" = "quit=1" ]
+    : > "$SECRETS_DIR/caller-token"
+    run sh "$helper" get < /dev/null
+    [ "$status" -eq 0 ]
+    [ "$output" = "quit=1" ]
+}
+
+@test "a credential.helper=store in the global config does not persist the token" {
+    git config --file "$TMP_HOME/.gitconfig" credential.helper store
+    run run_transport "github.com"
+    [ "$status" -eq 0 ]
+    run credential_fill "http://proxy:4000/git/github.com/o/r.git"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"password=$AUTH"* ]]
+    printf 'url=%s\nusername=speedwave\npassword=%s\n\n' "http://proxy:4000/git/github.com/o/r.git" "$AUTH" \
+        | env HOME="$TMP_HOME" git credential approve
+    [ ! -e "$TMP_HOME/.git-credentials" ]
+    [ ! -e "$TMP_HOME/.config/git/credentials" ]
+    run find "$TMP_HOME" -type f -not -path "$SECRETS_DIR/*" -exec grep -lF -- "$AUTH" {} +
+    [ -z "$output" ]
+}
+
 @test "the token is in no file under home and not in the git config listing" {
     run run_transport "github.com"
     [ "$status" -eq 0 ]

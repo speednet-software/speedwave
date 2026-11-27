@@ -5,8 +5,10 @@
 cat > /dev/null
 
 token_file="${SPEEDWAVE_SECRETS_DIR:-/run/speedwave/secrets}/caller-token"
-[ -f "$token_file" ] || exit 0
-token="$(cat "$token_file" 2>/dev/null)" || exit 0
-[ -n "$token" ] || exit 0
+token="$(cat "$token_file" 2>/dev/null)"
+if [ -z "$token" ]; then
+    echo "quit=1"
+    exit 0
+fi
 
 printf 'username=speedwave\npassword=%s\n' "$token"
