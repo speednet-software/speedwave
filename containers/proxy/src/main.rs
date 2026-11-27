@@ -13,6 +13,7 @@ use axum::{
 };
 
 mod audit;
+mod caller_auth;
 mod config;
 mod count_tokens;
 mod forward;
@@ -39,13 +40,15 @@ async fn require_caller_auth(
     request: axum::extract::Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let Some(expected) = cfg.caller_token.as_deref() else {
-        return Ok(next.run(request).await);
+    let expected = match caller_auth::expected(&cfg) {
+        caller_auth::Expected::Unrestricted => return Ok(next.run(request).await),
+        caller_auth::Expected::Unavailable => return Err(StatusCode::UNAUTHORIZED),
+        caller_auth::Expected::Token(token) => token,
     };
     let presented = headers
         .get(CALLER_AUTH_HEADER)
         .and_then(|v| v.to_str().ok());
-    if presented == Some(expected) {
+    if presented.is_some_and(|p| caller_auth::matches(p, &expected)) {
         Ok(next.run(request).await)
     } else {
         log::warn!("rejected /v1 request with missing or invalid caller auth");
@@ -680,10 +683,56 @@ mod tests {
         );
     }
 
+    fn caller_file(dir: &std::path::Path, value: &str) -> Option<std::path::PathBuf> {
+        let path = dir.join("caller-token");
+        std::fs::write(&path, value).unwrap();
+        Some(path)
+    }
+
+    async fn v1_status_with(cfg: Arc<Config>, presented: &str) -> StatusCode {
+        build_router(cfg)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header(CALLER_AUTH_HEADER, presented)
+                    .body(Body::from(r#"{"model":"local/x"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn v1_follows_a_rotated_caller_token_without_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = caller_file(dir.path(), "first").unwrap();
+        let cfg = Arc::new(Config {
+            caller_token_file: Some(file.clone()),
+            ..Config::default()
+        });
+        assert_ne!(v1_status_with(cfg.clone(), "first").await, 401);
+        std::fs::write(&file, "second").unwrap();
+        assert_eq!(v1_status_with(cfg.clone(), "first").await, 401);
+        assert_ne!(v1_status_with(cfg, "second").await, 401);
+    }
+
+    #[tokio::test]
+    async fn v1_is_rejected_while_the_caller_token_file_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Arc::new(Config {
+            caller_token_file: Some(dir.path().join("caller-token")),
+            ..Config::default()
+        });
+        assert_eq!(v1_status_with(cfg, "anything").await, 401);
+    }
+
     #[tokio::test]
     async fn v1_rejected_without_caller_token_when_configured() {
+        let dir = tempfile::tempdir().unwrap();
         let cfg = Arc::new(Config {
-            caller_token: Some("secret-abc".to_string()),
+            caller_token_file: caller_file(dir.path(), "secret-abc"),
             ..Config::default()
         });
         let app = build_router(cfg);
@@ -702,8 +751,9 @@ mod tests {
 
     #[tokio::test]
     async fn v1_rejected_with_wrong_caller_token() {
+        let dir = tempfile::tempdir().unwrap();
         let cfg = Arc::new(Config {
-            caller_token: Some("secret-abc".to_string()),
+            caller_token_file: caller_file(dir.path(), "secret-abc"),
             ..Config::default()
         });
         let app = build_router(cfg);
@@ -760,8 +810,9 @@ mod tests {
 
     #[tokio::test]
     async fn health_needs_no_caller_token() {
+        let dir = tempfile::tempdir().unwrap();
         let cfg = Arc::new(Config {
-            caller_token: Some("secret-abc".to_string()),
+            caller_token_file: caller_file(dir.path(), "secret-abc"),
             ..Config::default()
         });
         let app = build_router(cfg);
@@ -783,7 +834,8 @@ mod tests {
         let addr = spawn_mock_sse_backend().await;
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         let mut cfg = config_pointing_at(&addr, usage_dir.path().join("usage.jsonl"));
-        cfg.caller_token = Some("secret-abc".to_string());
+        let dir = tempfile::tempdir().unwrap();
+        cfg.caller_token_file = caller_file(dir.path(), "secret-abc");
         let app = build_router(Arc::new(cfg));
         let resp = app
             .oneshot(

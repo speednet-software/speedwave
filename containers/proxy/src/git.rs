@@ -9,7 +9,7 @@ use axum::{
 use base64::Engine;
 
 use crate::router::{Config, GitForge};
-use crate::{audit, CALLER_AUTH_HEADER};
+use crate::{audit, caller_auth, CALLER_AUTH_HEADER};
 use speedwave_access_policy::AccessMode;
 
 const RECEIVE_PACK: &str = "git-receive-pack";
@@ -48,7 +48,7 @@ pub async fn handler(State(cfg): State<Arc<Config>>, request: Request) -> Respon
     let mut denial = None;
     let response = if !caller_authorized(&cfg, &parts.headers) {
         log::warn!("rejected /git request with missing or invalid caller auth");
-        status_response(StatusCode::UNAUTHORIZED)
+        unauthorized_response()
     } else {
         match (cfg.git_forges.iter().find(|f| f.host == host), &classified) {
             (Some(forge), Some(git))
@@ -119,13 +119,24 @@ fn classify<'a>(method: &Method, rest: &str, query: Option<&'a str>) -> Option<G
 }
 
 fn caller_authorized(cfg: &Config, headers: &HeaderMap) -> bool {
-    let Some(expected) = cfg.caller_token.as_deref() else {
+    let caller_auth::Expected::Token(expected) = caller_auth::expected(cfg) else {
         return false;
     };
-    headers
+    let presented = headers
         .get(CALLER_AUTH_HEADER)
         .and_then(|v| v.to_str().ok())
-        == Some(expected)
+        .map(str::to_string)
+        .or_else(|| caller_auth::basic_password(headers));
+    presented.is_some_and(|p| caller_auth::matches(&p, &expected))
+}
+
+fn unauthorized_response() -> Response {
+    let mut resp = status_response(StatusCode::UNAUTHORIZED);
+    resp.headers_mut().insert(
+        header::WWW_AUTHENTICATE,
+        header::HeaderValue::from_static("Basic realm=\"speedwave\""),
+    );
+    resp
 }
 
 fn status_response(status: StatusCode) -> Response {
@@ -308,6 +319,7 @@ mod tests {
 
     struct Fixture {
         app: axum::Router,
+        caller_file: Option<std::path::PathBuf>,
         log: Log,
         audit: tempfile::TempDir,
         _tokens: tempfile::TempDir,
@@ -338,8 +350,13 @@ mod tests {
             std::fs::write(&token_file, format!("{t}\n")).unwrap();
         }
         let audit = tempfile::tempdir().unwrap();
+        let caller_token_file = caller_token.map(|value| {
+            let file = tokens.path().join("caller-token");
+            std::fs::write(&file, format!("{value}\n")).unwrap();
+            file
+        });
         let cfg = Config {
-            caller_token: caller_token.map(str::to_string),
+            caller_token_file: caller_token_file.clone(),
             git_forges: vec![GitForge {
                 host: "github.com".to_string(),
                 base_url,
@@ -353,6 +370,7 @@ mod tests {
         };
         Fixture {
             app: build_router(Arc::new(cfg)),
+            caller_file: caller_token_file,
             log,
             audit,
             _tokens: tokens,
@@ -365,6 +383,99 @@ mod tests {
             b = b.header(CALLER_AUTH_HEADER, c);
         }
         b.body(body).unwrap()
+    }
+
+    fn req_basic(uri: &str, credentials: &str) -> HttpRequest<Body> {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(credentials);
+        HttpRequest::builder()
+            .uri(uri)
+            .header(header::AUTHORIZATION, format!("Basic {encoded}"))
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    const INFO_REFS: &str = "/git/github.com/owner/repo/info/refs?service=git-upload-pack";
+
+    #[tokio::test]
+    async fn basic_password_is_accepted_whatever_the_user_name() {
+        let f = fixture(Some(CALLER), Some(TOKEN)).await;
+        for user in ["x", "speedwave", ""] {
+            let resp = f
+                .app
+                .clone()
+                .oneshot(req_basic(INFO_REFS, &format!("{user}:{CALLER}")))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200, "user {user:?}");
+        }
+        let seen = f.log.lock().await.clone();
+        assert_eq!(seen.len(), 3);
+        let forge_auth = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{TOKEN}"))
+        );
+        assert!(seen
+            .iter()
+            .all(|s| s.authorization.as_deref() == Some(forge_auth.as_str())));
+    }
+
+    #[tokio::test]
+    async fn missing_credentials_get_401_with_a_basic_challenge() {
+        let f = fixture(Some(CALLER), Some(TOKEN)).await;
+        let resp = f
+            .app
+            .clone()
+            .oneshot(req("GET", INFO_REFS, None, Body::empty()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 401);
+        let challenge = resp.headers()[header::WWW_AUTHENTICATE].to_str().unwrap();
+        assert!(challenge.starts_with("Basic "), "{challenge}");
+        assert!(f.log.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_wrong_basic_password_gets_401() {
+        let f = fixture(Some(CALLER), Some(TOKEN)).await;
+        for credentials in ["x:wrong", &format!("{CALLER}:x"), "no-colon"] {
+            let resp = f
+                .app
+                .clone()
+                .oneshot(req_basic(INFO_REFS, credentials))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 401, "{credentials}");
+        }
+        assert!(f.log.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_rotated_caller_token_is_followed_without_a_restart() {
+        let f = fixture(Some(CALLER), Some(TOKEN)).await;
+        let file = f.caller_file.clone().unwrap();
+        std::fs::write(&file, "rotated\n").unwrap();
+        let old = f
+            .app
+            .clone()
+            .oneshot(req_basic(INFO_REFS, &format!("x:{CALLER}")))
+            .await
+            .unwrap();
+        assert_eq!(old.status(), 401);
+        let new = f
+            .app
+            .clone()
+            .oneshot(req_basic(INFO_REFS, "x:rotated"))
+            .await
+            .unwrap();
+        assert_eq!(new.status(), 200);
+        std::fs::remove_file(&file).unwrap();
+        let gone = f
+            .app
+            .clone()
+            .oneshot(req_basic(INFO_REFS, "x:rotated"))
+            .await
+            .unwrap();
+        assert_eq!(gone.status(), 401);
     }
 
     fn audit_rows(f: &Fixture) -> Vec<serde_json::Value> {
