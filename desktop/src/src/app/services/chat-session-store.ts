@@ -1335,15 +1335,7 @@ export class ChatSessionStore {
     return { outcome: 'skipped', sessionKept: false };
   }
 
-  /**
-   * Clears the conversation and awaits a fresh backend session, so the caller can send
-   * into an empty chat. Refuses before clearing; a failed start clears first, then throws.
-   */
-  async startNewConversation(): Promise<void> {
-    await this.replaceConversation(true);
-  }
-
-  private async replaceConversation(priorProcessMayRun: boolean): Promise<void> {
+  private async replaceConversation(): Promise<void> {
     await this.deps.ensureListeners();
     const blocked = this.isStreaming
       ? NEW_CONVERSATION_STREAMING
@@ -1352,25 +1344,20 @@ export class ChatSessionStore {
     const project = this.deps.projectState.activeProject();
     const mark = this.deps.projectState.settledMark(project);
     const prior = this.captureConversationView();
-    const droppedPick = this.detachPendingModelPick();
+    void this.detachPendingModelPick();
     this.resetForNewConversation();
     this.initialized = true;
     this._sessionGeneration += 1;
     const gen = this._sessionGeneration;
-    const keepsPrior = priorProcessMayRun && prior.lastKnownSessionId !== null;
-    const { outcome, sessionKept } = await this.startChatSession(keepsPrior);
+    const { outcome } = await this.startChatSession(false);
     if (!this.deps.projectState.isStillSettledOn(project, mark)) {
       throw new Error(NEW_CONVERSATION_PROJECT_CHANGED);
     }
     if (outcome === 'started') return;
     if (gen === this._sessionGeneration) {
-      if (keepsPrior && sessionKept) {
-        this.returnToKeptSession(prior, droppedPick);
-      } else {
-        this.initialized = false;
-        this._lastKnownSessionId = prior.lastKnownSessionId;
-        this._deferredEffort.set(prior.deferredEffort);
-      }
+      this.initialized = false;
+      this._lastKnownSessionId = prior.lastKnownSessionId;
+      this._deferredEffort.set(prior.deferredEffort);
     }
     if (outcome === 'auth') throw new Error(NEW_CONVERSATION_AUTH);
     throw new Error(outcome === 'skipped' ? NEW_CONVERSATION_BUSY : NEW_CONVERSATION_FAILED);
@@ -2280,7 +2267,7 @@ export class ChatSessionStore {
     const project = this.deps.projectState.activeProject();
     const mark = this.deps.projectState.settledMark(project);
     try {
-      await this.replaceConversation(false);
+      await this.replaceConversation();
     } catch (err) {
       const content = `Could not start a new conversation: ${err instanceof Error ? err.message : String(err)}`;
       this.deps.log.error(`[chat-state] startFreshSession failed: ${String(err)}`);

@@ -103,17 +103,4 @@ describe('FeatureFlagsService', () => {
     await expect(service.set('office', true)).rejects.toThrow('unknown feature flag: office');
     expect(service.enabled('office')).toBe(false);
   });
-
-  it('refresh re-reads the flags from the backend', async () => {
-    let stored = { office: false, telemetry_settings: false };
-    mockTauri.invokeHandler = async (cmd) => (cmd === 'get_feature_flags' ? stored : undefined);
-    const service = createService();
-    await awaitInit();
-
-    stored = { office: true, telemetry_settings: true };
-    await service.refresh();
-
-    expect(service.enabled('office')).toBe(true);
-    expect(service.enabled('telemetry_settings')).toBe(true);
-  });
 });

@@ -6,13 +6,9 @@ import type { FeatureFlag, FeatureFlags } from '../models/feature-flags';
 export class FakeFeatureFlagsService {
   private readonly state = signal<FeatureFlags>({ office: false, telemetry_settings: false });
 
-  /** Records calls and applies the change like the real service after a successful save. */
   readonly set = vi.fn(async (flag: FeatureFlag, enabled: boolean): Promise<void> => {
     this.setFlag(flag, enabled);
   });
-
-  /** Re-read stub; the fake already holds the truth. */
-  readonly refresh = vi.fn(async (): Promise<void> => {});
 
   /**
    * Reads one flag, tracked by templates and computeds.

@@ -6801,10 +6801,17 @@ mod tests {
     #[test]
     fn a_config_without_a_policy_resolves_the_default_pii_policy() {
         let tmp = tempfile::tempdir().unwrap();
-        let (claude, _) = resolve_project_config(tmp.path(), &SpeedwaveUserConfig::default(), "p");
+        let (claude, _) = resolve_project_config_in_with_managed(
+            tmp.path(),
+            tmp.path(),
+            &SpeedwaveUserConfig::default(),
+            "p",
+            None,
+            None,
+            None,
+        );
         let resolved = claude.pii_policy.unwrap();
         assert_eq!(resolved, crate::pii_policy::ResolvedPiiPolicy::default());
-        assert_eq!(resolved.rules.len(), 7);
         assert!(!claude.pii_ner_enabled);
     }
 

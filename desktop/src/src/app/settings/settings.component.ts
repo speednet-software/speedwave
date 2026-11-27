@@ -263,7 +263,6 @@ export class SettingsComponent implements OnInit, OnDestroy {
   readonly theme = inject(ThemeService);
   /** UI state service exposed for the project switcher trigger in the header. */
   readonly ui = inject(UiStateService);
-  /** Feature flags: the telemetry section shows only while `telemetry_settings` is on. */
   readonly flags = inject(FeatureFlagsService);
   /** Dirty-section registry exposed to the template for the leave prompt. */
   readonly dirty = inject(SettingsDirtyService);

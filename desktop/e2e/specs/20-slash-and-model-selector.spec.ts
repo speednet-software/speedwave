@@ -480,6 +480,8 @@ describe('Slash Popover + Model/Effort Selector', function () {
 
     it('(c2) with chat tabs, a pick on an idle tab respawns it and sets the project default for the next new tab, and the Default row clears it', async function () {
       this.timeout(420_000);
+      await restartAppAndReconnect();
+
       try {
         if ((await activeProjectSlug()) !== ANTHROPIC_PROJECT) {
           await switchToProject(ANTHROPIC_PROJECT);

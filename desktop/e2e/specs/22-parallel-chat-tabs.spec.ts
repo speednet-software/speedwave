@@ -11,6 +11,7 @@
  */
 
 import { switchToProject, activeProjectSlug } from '../helpers/projects';
+import { restartAppAndReconnect } from '../helpers/app-restart';
 import {
   openChat,
   sendMessageNoWait,
@@ -70,6 +71,7 @@ describe('Parallel Chat Tabs (SPEED-388)', function () {
   it('starts from a single empty tab', async function () {
     this.retries(FLAKY_STEP_RETRIES);
     this.timeout(240_000);
+    await restartAppAndReconnect();
 
     if ((await activeProjectSlug()) !== E2E_PROJECT_NAME) {
       await switchToProject(E2E_PROJECT_NAME);

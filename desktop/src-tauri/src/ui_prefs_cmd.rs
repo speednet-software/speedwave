@@ -58,6 +58,7 @@ fn store_feature_flag_in(
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "test assertions may unwrap freely")]
 mod tests {
     use super::*;
 

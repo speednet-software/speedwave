@@ -104,36 +104,6 @@ describe('ChatStateService', () => {
     });
   });
 
-  describe('active store startNewConversation: listener wiring', () => {
-    it('attaches the stream listener before the session starts', async () => {
-      const projectState = TestBed.inject(ProjectStateService);
-      await projectState.init();
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'start_chat') return undefined;
-        if (cmd === 'list_projects')
-          return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
-        if (cmd === 'get_bundle_reconcile_state') return MOCK_BUNDLE_RECONCILE_DONE;
-        if (cmd === 'check_containers_running') return true;
-        return undefined;
-      };
-      const order: string[] = [];
-      vi.spyOn(mockTauri, 'listen').mockImplementation(async (event: string) => {
-        order.push(`listen:${event}`);
-        return () => undefined;
-      });
-      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-      invokeSpy.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
-        order.push(`invoke:${cmd}`);
-        return mockTauri.invokeHandler(cmd, args);
-      });
-
-      await service.activeStore().startNewConversation();
-
-      expect(order.indexOf('listen:chat_stream')).toBeGreaterThanOrEqual(0);
-      expect(order.indexOf('listen:chat_stream')).toBeLessThan(order.indexOf('invoke:start_chat'));
-    });
-  });
-
   describe('project switching clears state via ProjectStateService', () => {
     it('project_switch_started clears chat state', async () => {
       const projectState = TestBed.inject(ProjectStateService);
@@ -695,14 +665,12 @@ describe('ChatStateService', () => {
         const tab1 = service.activeTabId();
         service._setState({ messages: conversation });
         const store1 = service.tabs().get(tab1)!;
-        const restart = vi.spyOn(store1, 'startNewConversation');
 
         const tab2 = await service.openNewChat();
 
         expect(tab2).not.toBe(tab1);
         expect(service.tabs().size).toBe(2);
         expect(service.activeTabId()).toBe(tab2);
-        expect(restart).not.toHaveBeenCalled();
         expect(store1.messagesFromState()).toHaveLength(1);
       });
 
@@ -721,14 +689,12 @@ describe('ChatStateService', () => {
         while (service.canOpenTab()) await service.openTab();
         const active = service.activeTabId();
         service._setState({ messages: conversation });
-        const restart = vi.spyOn(service.activeStore(), 'startNewConversation');
 
         expect(service.newChatBlockedReason()).toBe(NEW_CHAT_TAB_LIMIT);
         await expect(service.openNewChat()).rejects.toThrow(NEW_CHAT_TAB_LIMIT);
 
         expect(service.tabs().size).toBe(MAX_CHAT_TABS);
         expect(service.activeTabId()).toBe(active);
-        expect(restart).not.toHaveBeenCalled();
         expect(service.messagesFromState()).toHaveLength(1);
       });
 

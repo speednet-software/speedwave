@@ -1,4 +1,3 @@
-/** Event the backend emits with the full flag map after a flag changes; mirrors Rust `FEATURE_FLAGS_CHANGED_EVENT`. */
 export const FEATURE_FLAGS_CHANGED_EVENT = 'feature-flags-changed';
 
 /** Feature flag keys; mirrors Rust `Feature`. */

@@ -42,8 +42,7 @@ export class FeatureFlagsService {
     this.state.update((flags) => ({ ...flags, [flag]: enabled }));
   }
 
-  /** Re-reads every flag from the backend, e.g. after a failed save. */
-  async refresh(): Promise<void> {
+  private async refresh(): Promise<void> {
     try {
       const flags = await this.tauri.invoke<Partial<FeatureFlags> | undefined>('get_feature_flags');
       this.state.update((current) => ({ ...current, ...flags }));

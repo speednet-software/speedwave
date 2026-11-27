@@ -4,21 +4,16 @@ import { FeatureFlagsService } from '../../services/feature-flags.service';
 import type { FeatureFlag } from '../../models/feature-flags';
 import { ToggleComponent } from '../../shared/toggle.component';
 
-/** One switch row; `flag` is the key `set_feature_flag` takes. */
-interface FlagRow {
-  flag: FeatureFlag;
+/** Text of one switch row. */
+interface FlagText {
   label: string;
   hint: string;
 }
 
-const FLAG_ROWS: readonly FlagRow[] = [
-  { flag: 'office', label: 'Office integration', hint: 'Shows Office in Integrations.' },
-  {
-    flag: 'telemetry_settings',
-    label: 'Telemetry settings',
-    hint: 'Shows the Telemetry section.',
-  },
-];
+const FLAG_TEXT: Record<FeatureFlag, FlagText> = {
+  office: { label: 'Office integration', hint: 'Shows Office in Integrations.' },
+  telemetry_settings: { label: 'Telemetry settings', hint: 'Shows the Telemetry section.' },
+};
 
 /** Settings → Experimental features (ADR-058): one switch per feature flag, effective at once. */
 @Component({
@@ -55,10 +50,12 @@ const FLAG_ROWS: readonly FlagRow[] = [
   `,
 })
 export class ExperimentalSectionComponent {
-  /** Emits a user-facing message when saving a flag fails. */
   readonly errorOccurred = output<string>();
 
-  readonly rows = FLAG_ROWS;
+  readonly rows = (Object.keys(FLAG_TEXT) as FeatureFlag[]).map((flag) => ({
+    flag,
+    ...FLAG_TEXT[flag],
+  }));
   protected readonly flags = inject(FeatureFlagsService);
 
   /**
