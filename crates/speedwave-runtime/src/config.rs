@@ -6816,7 +6816,7 @@ mod tests {
     }
 
     #[test]
-    fn an_invalid_user_policy_errors_without_any_toggle() {
+    fn an_unknown_user_policy_id_errors() {
         let tmp = tempfile::tempdir().unwrap();
         let user_config = SpeedwaveUserConfig {
             projects: vec![ProjectUserEntry {
@@ -6837,8 +6837,9 @@ mod tests {
             ui: None,
             telemetry: None,
         };
-        let (claude, _) = resolve_project_config(tmp.path(), &user_config, "p");
-        assert!(claude.pii_policy.is_err());
+        let (claude, _) = resolve_project_config_for_test(tmp.path(), &user_config, "p");
+        let err = claude.pii_policy.unwrap_err();
+        assert!(err.contains("no-such-policy"), "{err}");
     }
 
     fn config_with_read_only(dir: &Path, read_only: bool) -> SpeedwaveUserConfig {

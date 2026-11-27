@@ -14,7 +14,6 @@ pub enum Feature {
 }
 
 impl Feature {
-    /// Every registered feature.
     pub(crate) const ALL: [Feature; 2] = [Feature::Office, Feature::TelemetrySettings];
 
     /// The key under `ui.features` in the user config.

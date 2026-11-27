@@ -17,7 +17,6 @@ describe('FeatureFlagsService', () => {
     mockTauri = new MockTauriService();
   });
 
-  /** Waits until `FeatureFlagsService.init()` has registered its listener. */
   async function awaitInit(): Promise<void> {
     for (let i = 0; i < 20 && !mockTauri.listenHandlers['feature-flags-changed']; i++) {
       await Promise.resolve();

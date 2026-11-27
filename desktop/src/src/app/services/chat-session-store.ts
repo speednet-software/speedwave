@@ -79,11 +79,6 @@ import {
 
 type StartOutcome = 'started' | 'skipped' | 'auth' | 'failed';
 
-interface StartResult {
-  outcome: StartOutcome;
-  sessionKept: boolean;
-}
-
 interface ConversationView extends LegacyStateSnapshot {
   subagentRuns: AgentRuns;
   workflowRuns: WorkflowRuns;
@@ -502,7 +497,7 @@ export class ChatSessionStore {
     const generation = this._sessionGeneration;
     this._launchedFor = launchedFor === null ? null : { wireId: launchedFor, generation };
     this.initialized = true;
-    const { outcome } = await this.startChatSession();
+    const outcome = await this.startChatSession();
     if (outcome !== 'started' && this._launchedFor?.generation === generation) {
       this._launchedFor = null;
     }
@@ -1270,19 +1265,16 @@ export class ChatSessionStore {
     }
   }
 
-  /**
-   * Starts a backend chat session unless a resume or another start already owns it.
-   * @param keepPicksForKeptSession - Keep the queued picks when the backend kept the prior session.
-   */
-  async startChatSession(keepPicksForKeptSession = false): Promise<StartResult> {
-    if (this._disposed) return { outcome: 'skipped', sessionKept: false };
+  /** Starts a backend chat session unless a resume or another start already owns it. */
+  async startChatSession(): Promise<StartOutcome> {
+    if (this._disposed) return 'skipped';
     const project = this.deps.projectState.activeProject();
     const mark = this.deps.projectState.settledMark(project);
     const current = (gen: number): boolean =>
       gen === this._sessionGeneration && this.deps.projectState.isStillSettledOn(project, mark);
     if (this._resumeInProgress || this._lastKnownSessionId) {
       this.deps.log.debug('[chat-state] startChatSession: skipped (resume owns the session)');
-      return { outcome: 'skipped', sessionKept: false };
+      return 'skipped';
     }
     if (project && !this.startingSession) {
       this.startingSession = true;
@@ -1290,7 +1282,6 @@ export class ChatSessionStore {
       const gen = this._sessionGeneration;
       this.deps.log.debug(`[chat-state] startChatSession: project=${project}`);
       let outcome: StartOutcome = 'failed';
-      let sessionKept = false;
       try {
         if (this._modelWork.size > 0) await this.modelPicksSettled();
         await this.deps.tauri.invoke('start_chat', {
@@ -1308,7 +1299,6 @@ export class ChatSessionStore {
           outcome = 'skipped';
         } else {
           const msg = String(err);
-          sessionKept = msg.includes(SESSION_KEPT_MARKER);
           if (isNotAuthenticatedError(msg)) {
             this.deps.projectState.status.set('auth_required');
             this.notifyChange();
@@ -1327,12 +1317,12 @@ export class ChatSessionStore {
       }
       if (outcome === 'started') this.releaseForReadySession();
       else if (outcome !== 'skipped') {
-        if (!(keepPicksForKeptSession && sessionKept)) this.dropPendingPicks();
+        this.dropPendingPicks();
         this.returnStartSlot();
       }
-      return { outcome, sessionKept };
+      return outcome;
     }
-    return { outcome: 'skipped', sessionKept: false };
+    return 'skipped';
   }
 
   private async replaceConversation(): Promise<void> {
@@ -1349,7 +1339,7 @@ export class ChatSessionStore {
     this.initialized = true;
     this._sessionGeneration += 1;
     const gen = this._sessionGeneration;
-    const { outcome } = await this.startChatSession(false);
+    const outcome = await this.startChatSession();
     if (!this.deps.projectState.isStillSettledOn(project, mark)) {
       throw new Error(NEW_CONVERSATION_PROJECT_CHANGED);
     }

@@ -3416,7 +3416,7 @@ describe('ChatStateService', () => {
       expect(startTabs[1]).toBe(service.activeStore().tabId);
 
       startGate.reject(new Error('session spawn failed'));
-      await expect(stale).resolves.toMatchObject({ outcome: 'skipped' });
+      await expect(stale).resolves.toBe('skipped');
       expect(projectState.status()).toBe('ready');
       expect(projectState.error).toBe('');
     });
@@ -3563,7 +3563,7 @@ describe('ChatStateService', () => {
       await new Promise((r) => setTimeout(r, 0));
 
       startGate.resolve();
-      await expect(starting).resolves.toMatchObject({ outcome: 'started' });
+      await expect(starting).resolves.toBe('started');
       await switchProjectMidFlight();
       await stale;
 

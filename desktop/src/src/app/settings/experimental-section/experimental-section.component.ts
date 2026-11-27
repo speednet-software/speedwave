@@ -4,7 +4,6 @@ import { FeatureFlagsService } from '../../services/feature-flags.service';
 import type { FeatureFlag } from '../../models/feature-flags';
 import { ToggleComponent } from '../../shared/toggle.component';
 
-/** Text of one switch row. */
 interface FlagText {
   label: string;
   hint: string;

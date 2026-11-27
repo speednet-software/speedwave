@@ -466,7 +466,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
 
   protected readonly isGitForge = isGitForge;
 
-  /** Re-fetch when the Office flag changes: `response.services` is not cached, so filtering alone cannot reveal Office. */
+  /** Reloads the list when the Office flag changes. */
   constructor() {
     effect(() => {
       this.flags.enabled('office');

@@ -8,6 +8,11 @@ import {
   MODEL_SWITCH_UNCONFIRMED,
   modelSwitchRefused,
   SESSION_KEPT_MARKER,
+  NEW_CONVERSATION_AUTH,
+  NEW_CONVERSATION_BUSY,
+  NEW_CONVERSATION_FAILED,
+  NEW_CONVERSATION_NO_PROJECT,
+  NEW_CONVERSATION_STREAMING,
   historyFitsTarget,
   isNotAuthenticatedError,
   mapContextOverflowError,
@@ -3963,6 +3968,35 @@ describe('ChatSessionStore', () => {
         expect(store.pendingModelOverride()).toBeNull();
       });
 
+      it('a pick queued while a new conversation fails to spawn is dropped: the earlier process is already stopped', async () => {
+        liveConversation();
+        await Promise.resolve();
+        const start = createDeferred<void>();
+        overrideInvoke('start_chat', () => start.promise);
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+        const fresh = (
+          store as unknown as { startFreshSession(): Promise<void> }
+        ).startFreshSession();
+        await vi.waitFor(() => {
+          expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'start_chat')).toBeGreaterThan(
+            -1
+          );
+        });
+
+        await store.applyEffortSelection('max');
+        await store.applyModelSelection(haikuPick);
+        start.reject(new Error('failed to spawn claude'));
+        await fresh;
+
+        expect(store.lastKnownSessionId).toBe(LIVE);
+        expect(store.pendingModelOverride()).toBeNull();
+        store.isStreaming = true;
+        store.handleStreamChunk({ chunk_type: 'Result', data: { session_id: LIVE } } as never);
+        await new Promise((r) => setTimeout(r, 0));
+        expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'apply_chat_effort')).toBe(-1);
+        expect(indexOfCall(invokeSpy.mock.calls, switchedModel)).toBe(-1);
+      });
+
       function resumeStarting(): {
         resumed: ReturnType<typeof createDeferred<void>>;
         resuming: Promise<void>;
@@ -4547,7 +4581,7 @@ describe('ChatSessionStore', () => {
         await store.applyEffortSelection('max');
         await store.applyModelSelection(haikuPick);
         started.reject(new Error('failed to spawn claude'));
-        await expect(starting).rejects.toThrow();
+        await starting;
 
         expect(store.lastKnownSessionId).toBeNull();
         expect(store.pendingModelOverride()).toBeNull();
@@ -8015,6 +8049,171 @@ describe('ChatSessionStore', () => {
     });
   });
 
+  describe('a fresh start', () => {
+    function readyHandler(startChat: () => void) {
+      return async (cmd: string) => {
+        if (cmd === 'start_chat') return startChat();
+        if (cmd === 'list_projects')
+          return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+        if (cmd === 'get_bundle_reconcile_state') return MOCK_BUNDLE_RECONCILE_DONE;
+        if (cmd === 'check_containers_running') return true;
+        return undefined;
+      };
+    }
+
+    function startFresh(): Promise<void> {
+      return (store as unknown as { startFreshSession(): Promise<void> }).startFreshSession();
+    }
+
+    function errorTexts(): string[] {
+      return store
+        .messagesFromState()
+        .flatMap((m) => m.blocks)
+        .flatMap((b) => (b.type === 'error' ? [b.content] : []));
+    }
+
+    function withOldMessage(): void {
+      store._setState({
+        messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
+        currentBlocks: [],
+        sessionStats: null,
+      });
+    }
+
+    it('claims the bootstrap slot so a later init does not start a second session', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      mockTauri.invokeHandler = readyHandler(() => undefined);
+      const spy = vi.spyOn(mockTauri, 'invoke');
+
+      await startFresh();
+      await store.init();
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(spy.mock.calls.filter((c) => c[0] === 'start_chat').length).toBe(1);
+    });
+
+    it('reports the failure and releases the slot when the session never starts', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      let fail = true;
+      mockTauri.invokeHandler = readyHandler(() => {
+        if (fail) throw new Error('chat backend crashed');
+        return undefined;
+      });
+      store.seedSessionId('sess-old');
+      (
+        store as unknown as { _deferredEffort: { set(v: string | null): void } }
+      )._deferredEffort.set('low');
+
+      await startFresh();
+
+      expect(errorTexts()).toEqual([
+        `Could not start a new conversation: ${NEW_CONVERSATION_FAILED}`,
+      ]);
+      expect((store as unknown as { initialized: boolean }).initialized).toBe(false);
+      expect(store.lastKnownSessionId).toBe('sess-old');
+      expect(store.deferredEffort()).toBe('low');
+
+      fail = false;
+      projectState.status.set('ready');
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      await startFresh();
+      expect(spy.mock.calls.filter((c) => c[0] === 'start_chat').length).toBe(1);
+    });
+
+    it('keeps the conversation and names the cause when the project is not ready', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      mockTauri.invokeHandler = readyHandler(() => undefined);
+      withOldMessage();
+      projectState.status.set('starting');
+      const spy = vi.spyOn(mockTauri, 'invoke');
+
+      await startFresh();
+
+      expect(store.messages.length).toBe(2);
+      expect(errorTexts()).toEqual([
+        `Could not start a new conversation: ${NEW_CONVERSATION_BUSY}`,
+      ]);
+      expect(spy.mock.calls.filter((c) => c[0] === 'start_chat').length).toBe(0);
+    });
+
+    it('tells the user to open a project instead of asking them to wait', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      projectState.activeProject.set(null);
+
+      await startFresh();
+
+      expect(errorTexts()).toEqual([
+        `Could not start a new conversation: ${NEW_CONVERSATION_NO_PROJECT}`,
+      ]);
+    });
+
+    it('refuses while a resume owns the session', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      mockTauri.invokeHandler = readyHandler(() => undefined);
+      const resuming = store.resumeConversation('sess-1');
+
+      await startFresh();
+
+      expect(errorTexts()).toEqual([
+        `Could not start a new conversation: ${NEW_CONVERSATION_BUSY}`,
+      ]);
+      await resuming;
+    });
+
+    it('keeps the conversation when a reply is still streaming', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      mockTauri.invokeHandler = readyHandler(() => undefined);
+      withOldMessage();
+      store.isStreaming = true;
+      const spy = vi.spyOn(mockTauri, 'invoke');
+
+      await startFresh();
+
+      expect(store.messages.length).toBe(2);
+      expect(errorTexts()).toEqual([
+        `Could not start a new conversation: ${NEW_CONVERSATION_STREAMING}`,
+      ]);
+      expect(spy.mock.calls.filter((c) => c[0] === 'start_chat').length).toBe(0);
+    });
+
+    it('keeps the conversation when a session start is already in flight', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      mockTauri.invokeHandler = readyHandler(() => undefined);
+      withOldMessage();
+      const release = store.beginStartingSession();
+
+      await startFresh();
+
+      expect(store.messages.length).toBe(2);
+      expect(errorTexts()).toEqual([
+        `Could not start a new conversation: ${NEW_CONVERSATION_BUSY}`,
+      ]);
+      release();
+    });
+
+    it('points at Settings when the backend rejects the start as unauthenticated', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      mockTauri.invokeHandler = readyHandler(() => {
+        throw new Error('not authenticated');
+      });
+
+      await startFresh();
+
+      expect(errorTexts()).toEqual([
+        `Could not start a new conversation: ${NEW_CONVERSATION_AUTH}`,
+      ]);
+      expect(projectState.status()).toBe('auth_required');
+    });
+  });
+
   describe('a fresh start across a project switch', () => {
     let projectState: ProjectStateService;
     let calls: string[];
@@ -8058,6 +8257,35 @@ describe('ChatSessionStore', () => {
       expect(JSON.stringify(store.messagesFromState())).not.toContain(
         'Could not start a new conversation'
       );
+    });
+    it('a fresh start that completed after the switch began leaves nothing staged for the other project', async () => {
+      const fresh = (
+        store as unknown as { startFreshSession(): Promise<void> }
+      ).startFreshSession();
+      await vi.waitFor(() => expect(calls).toContain('start_chat'));
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other' });
+      started.resolve();
+      await fresh;
+
+      expect(store.messagesFromState()).toEqual([]);
+      expect(store.lastKnownSessionId).toBeNull();
+    });
+
+    it('a sign-in refusal of the old project never marks the project switched to', async () => {
+      const fresh = (
+        store as unknown as { startFreshSession(): Promise<void> }
+      ).startFreshSession();
+      await vi.waitFor(() => expect(calls).toContain('start_chat'));
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other' });
+      await new Promise((r) => setTimeout(r, 0));
+      const statusOfTheOtherProject = projectState.status();
+      started.reject(new Error('Claude is not authenticated. Please authenticate first.'));
+      await fresh;
+
+      expect(projectState.status()).toBe(statusOfTheOtherProject);
+      expect(projectState.status()).not.toBe('auth_required');
     });
   });
 

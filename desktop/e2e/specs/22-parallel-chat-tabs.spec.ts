@@ -87,6 +87,11 @@ describe('Parallel Chat Tabs (SPEED-388)', function () {
     expect((await chatTabRows()).length).toBe(1);
   });
 
+  after(async function () {
+    this.timeout(240_000);
+    await restartAppAndReconnect();
+  });
+
   it('opens a second tab that starts with its own empty conversation', async function () {
     this.timeout(30_000);
     const newTabBtn = await $('[data-testid="chat-tabs-new"]');
