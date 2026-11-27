@@ -11,7 +11,6 @@ use crate::{build, bundle};
 use std::path::{Path, PathBuf};
 
 mod addressing;
-pub(crate) mod caller_token;
 mod llm;
 mod networks;
 mod pii_ner;

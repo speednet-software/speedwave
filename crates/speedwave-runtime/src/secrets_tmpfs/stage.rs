@@ -1,6 +1,6 @@
+use super::caller_token::{generate_token, is_token};
 use super::frame;
 use super::layout::{ProjectPayload, SecretFile, Slot, VM_ROOT};
-use crate::compose::caller_token::{generate_token, is_token, TokenRotation};
 use crate::runtime::ContainerRuntime;
 use std::path::Path;
 use std::time::Duration;
@@ -9,14 +9,23 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const READ_SCRIPT: &str = r#"if [ -f "$1" ]; then cat "$1"; fi"#;
 
+/// Where the caller token of a staging comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CallerTokenSource {
+    /// The token already staged in the VM; a new one only when none is staged.
+    ReuseStaged,
+    /// A new random token, whatever is staged.
+    DrawNew,
+}
+
 pub(crate) fn stage_project(
     runtime: &dyn ContainerRuntime,
     data_dir: &Path,
     project: &str,
-    rotation: TokenRotation,
+    token_source: CallerTokenSource,
 ) -> anyhow::Result<()> {
     let settings = crate::config::load_project_settings(data_dir, project)?;
-    let caller_token = token_for_staging(runtime, project, rotation)?;
+    let caller_token = token_for_staging(runtime, project, token_source)?;
     let payload = crate::compose::secret_payload::collect_project_payload_in(
         data_dir,
         project,
@@ -40,9 +49,9 @@ pub(crate) fn put_file(
 fn token_for_staging(
     runtime: &dyn ContainerRuntime,
     project: &str,
-    rotation: TokenRotation,
+    token_source: CallerTokenSource,
 ) -> anyhow::Result<String> {
-    if rotation != TokenRotation::Rotate {
+    if token_source == CallerTokenSource::ReuseStaged {
         if let Some(staged) = staged_token(runtime, project)? {
             return Ok(staged);
         }

@@ -2,7 +2,8 @@
 //! read or write is serialised per project". `HELD_LOCKS` thread-local lets `transaction()` nest.
 
 use super::ContainerRuntime;
-use crate::compose::caller_token::TokenRotation;
+use crate::secrets_tmpfs::caller_token::TokenRotation;
+use crate::secrets_tmpfs::stage::CallerTokenSource;
 use std::cell::RefCell;
 use std::collections::HashSet;
 
@@ -373,18 +374,19 @@ impl LockedRuntime {
     }
 
     fn stage_secrets(&self, project: &str, rotation: TokenRotation) -> anyhow::Result<()> {
-        let rotation = match rotation {
+        let token_source = match rotation {
+            TokenRotation::Rotate => CallerTokenSource::DrawNew,
+            TokenRotation::Keep => CallerTokenSource::ReuseStaged,
             TokenRotation::WhenSessionStopped if self.claude_container_running(project) => {
-                TokenRotation::Keep
+                CallerTokenSource::ReuseStaged
             }
-            TokenRotation::WhenSessionStopped => TokenRotation::Rotate,
-            fixed => fixed,
+            TokenRotation::WhenSessionStopped => CallerTokenSource::DrawNew,
         };
         crate::secrets_tmpfs::stage::stage_project(
             self.inner.as_ref(),
             self.data_dir(),
             project,
-            rotation,
+            token_source,
         )
     }
 
@@ -612,7 +614,7 @@ mod tests {
     }
 
     fn is_fresh_token(value: &str) -> bool {
-        crate::compose::caller_token::is_token(value) && value != STAGED_TOKEN
+        crate::secrets_tmpfs::caller_token::is_token(value) && value != STAGED_TOKEN
     }
 
     #[test]
