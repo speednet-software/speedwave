@@ -327,7 +327,12 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
   };
 }
 
-function safeTokenCompare(provided: string, expected: string): boolean {
+/**
+ * Constant-time string comparison over HMAC digests.
+ * @param provided - value presented by the caller
+ * @param expected - secret to compare against
+ */
+export function safeTokenCompare(provided: string, expected: string): boolean {
   const hmac = (data: string) => createHmac('sha256', expected).update(data).digest();
   return timingSafeEqual(hmac(provided), hmac(expected));
 }

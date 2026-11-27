@@ -73,7 +73,13 @@ export type { JSONRPCHandlerOptions } from './jsonrpc.js';
 
 export { SSEStream, createSSEStream, sendJSONResponse } from './sse.js';
 
-export { createMCPServer, textResult, jsonResult, errorResult } from './server.js';
+export {
+  createMCPServer,
+  safeTokenCompare,
+  textResult,
+  jsonResult,
+  errorResult,
+} from './server.js';
 export type { MCPServerAuth, MCPServerOptions, MCPServer } from './server.js';
 
 export { bootWorker } from './boot.js';
