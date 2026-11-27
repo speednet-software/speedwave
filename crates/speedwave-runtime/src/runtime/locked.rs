@@ -2,7 +2,6 @@
 //! read or write is serialised per project". `HELD_LOCKS` thread-local lets `transaction()` nest.
 
 use super::ContainerRuntime;
-use crate::secrets_tmpfs::caller_token::TokenRotation;
 use crate::secrets_tmpfs::stage::CallerTokenSource;
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -454,6 +453,13 @@ impl LockedRuntime {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TokenRotation {
+    Keep,
+    Rotate,
+    WhenSessionStopped,
+}
+
 fn legacy_networks_settled() -> &'static SettledProjects {
     static SETTLED: std::sync::OnceLock<SettledProjects> = std::sync::OnceLock::new();
     SETTLED.get_or_init(Default::default)
@@ -614,7 +620,9 @@ mod tests {
     }
 
     fn is_fresh_token(value: &str) -> bool {
-        crate::secrets_tmpfs::caller_token::is_token(value) && value != STAGED_TOKEN
+        value.len() == STAGED_TOKEN.len()
+            && value.bytes().all(|b| b.is_ascii_hexdigit())
+            && value != STAGED_TOKEN
     }
 
     #[test]

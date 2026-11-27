@@ -2,14 +2,7 @@ use rand::TryRng;
 
 const TOKEN_BYTES: usize = 32;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TokenRotation {
-    Keep,
-    Rotate,
-    WhenSessionStopped,
-}
-
-pub(crate) fn generate_token() -> anyhow::Result<String> {
+pub(super) fn generate_token() -> anyhow::Result<String> {
     let mut bytes = [0u8; TOKEN_BYTES];
     rand::rngs::SysRng
         .try_fill_bytes(&mut bytes)
@@ -17,7 +10,7 @@ pub(crate) fn generate_token() -> anyhow::Result<String> {
     Ok(crate::bundle::bytes_to_hex(&bytes))
 }
 
-pub(crate) fn is_token(value: &str) -> bool {
+pub(super) fn is_token(value: &str) -> bool {
     value.len() == TOKEN_BYTES * 2
         && value
             .bytes()

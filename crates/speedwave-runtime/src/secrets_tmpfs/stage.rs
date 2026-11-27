@@ -9,12 +9,9 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const READ_SCRIPT: &str = r#"if [ -f "$1" ]; then cat "$1"; fi"#;
 
-/// Where the caller token of a staging comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CallerTokenSource {
-    /// The token already staged in the VM; a new one only when none is staged.
     ReuseStaged,
-    /// A new random token, whatever is staged.
     DrawNew,
 }
 
