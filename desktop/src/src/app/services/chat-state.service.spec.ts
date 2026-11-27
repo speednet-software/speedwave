@@ -104,6 +104,37 @@ describe('ChatStateService', () => {
     });
   });
 
+  describe('listener wiring', () => {
+    it('attaches the stream listener before the session starts', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'start_chat') return undefined;
+        if (cmd === 'list_projects')
+          return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+        if (cmd === 'get_bundle_reconcile_state') return MOCK_BUNDLE_RECONCILE_DONE;
+        if (cmd === 'check_containers_running') return true;
+        return undefined;
+      };
+      const order: string[] = [];
+      vi.spyOn(mockTauri, 'listen').mockImplementation(async (event: string) => {
+        order.push(`listen:${event}`);
+        return () => undefined;
+      });
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      invokeSpy.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+        order.push(`invoke:${cmd}`);
+        return mockTauri.invokeHandler(cmd, args);
+      });
+
+      await service.init();
+      await vi.waitFor(() => expect(order).toContain('invoke:start_chat'));
+
+      expect(order.indexOf('listen:chat_stream')).toBeGreaterThanOrEqual(0);
+      expect(order.indexOf('listen:chat_stream')).toBeLessThan(order.indexOf('invoke:start_chat'));
+    });
+  });
+
   describe('project switching clears state via ProjectStateService', () => {
     it('project_switch_started clears chat state', async () => {
       const projectState = TestBed.inject(ProjectStateService);
