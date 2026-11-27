@@ -683,27 +683,6 @@ mod tests {
         );
     }
 
-    fn caller_file(dir: &std::path::Path, value: &str) -> Option<std::path::PathBuf> {
-        let path = dir.join("caller-token");
-        std::fs::write(&path, value).unwrap();
-        Some(path)
-    }
-
-    async fn v1_status_with(cfg: Arc<Config>, presented: &str) -> StatusCode {
-        build_router(cfg)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/messages")
-                    .header(CALLER_AUTH_HEADER, presented)
-                    .body(Body::from(r#"{"model":"local/x"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap()
-            .status()
-    }
-
     #[tokio::test]
     async fn v1_follows_a_rotated_caller_token_without_a_restart() {
         let dir = tempfile::tempdir().unwrap();
@@ -850,6 +829,27 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 200, "correct caller token must pass");
+    }
+
+    fn caller_file(dir: &std::path::Path, value: &str) -> Option<std::path::PathBuf> {
+        let path = dir.join("caller-token");
+        std::fs::write(&path, value).unwrap();
+        Some(path)
+    }
+
+    async fn v1_status_with(cfg: Arc<Config>, presented: &str) -> StatusCode {
+        build_router(cfg)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header(CALLER_AUTH_HEADER, presented)
+                    .body(Body::from(r#"{"model":"local/x"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
     }
 
     #[tokio::test]

@@ -58,6 +58,10 @@ assert_token_persisted_nowhere() {
     [ -z "$output" ]
 }
 
+credential_fill_with_later_helper() {
+    printf 'url=%s\n\n' "$URL" | exec_git -c credential.helper="$1" credential fill 2>&1
+}
+
 @test "scp-style remote is rewritten to the proxy" {
     run run_transport "github.com"
     [ "$status" -eq 0 ]
@@ -119,10 +123,6 @@ assert_token_persisted_nowhere() {
     [ "$status" -ne 0 ]
     [[ "$output" != *"LATER"* ]]
     [[ "$output" == *"told us to quit"* ]]
-}
-
-credential_fill_with_later_helper() {
-    printf 'url=%s\n\n' "$URL" | exec_git -c credential.helper="$1" credential fill 2>&1
 }
 
 @test "a credential.helper=store set in the global config after the transport ran does not persist the token" {

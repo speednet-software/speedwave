@@ -394,17 +394,17 @@ mod tests {
         b.body(body).unwrap()
     }
 
+    fn req_basic(uri: &str, credentials: &str) -> HttpRequest<Body> {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(credentials);
+        req_authorization(uri, &format!("Basic {encoded}"))
+    }
+
     fn req_authorization(uri: &str, authorization: &str) -> HttpRequest<Body> {
         HttpRequest::builder()
             .uri(uri)
             .header(header::AUTHORIZATION, authorization)
             .body(Body::empty())
             .unwrap()
-    }
-
-    fn req_basic(uri: &str, credentials: &str) -> HttpRequest<Body> {
-        let encoded = base64::engine::general_purpose::STANDARD.encode(credentials);
-        req_authorization(uri, &format!("Basic {encoded}"))
     }
 
     const INFO_REFS: &str = "/git/github.com/owner/repo/info/refs?service=git-upload-pack";
