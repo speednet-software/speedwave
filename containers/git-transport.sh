@@ -3,24 +3,28 @@
 umask 077
 
 conf_dir="${HOME}/.config/speedwave"
-conf_file="${conf_dir}/git-transport.gitconfig"
+conf_file="${conf_dir}/git-proxy.gitconfig"
+old_conf_file="${conf_dir}/git-transport.gitconfig"
 # shellcheck disable=SC2088
-include_path="~/.config/speedwave/git-transport.gitconfig"
+include_path="~/.config/speedwave/git-proxy.gitconfig"
+# shellcheck disable=SC2088
+old_include_path="~/.config/speedwave/git-transport.gitconfig"
+helper="$(cd "$(dirname "$0")" && pwd)/git-credential-speedwave.sh"
 
 warn() {
     echo "git-transport: $*" >&2
 }
 
 proxy_url="${SPEEDWAVE_GIT_PROXY_URL%/}"
-proxy_auth="${SPEEDWAVE_GIT_PROXY_AUTH:-}"
 hosts_raw="${SPEEDWAVE_GIT_HOSTS:-}"
 
+rm -f "$old_conf_file" 2>/dev/null || warn "could not remove $old_conf_file"
+git config --global --fixed-value --unset-all include.path "$old_include_path" 2>/dev/null
+
 hosts=()
-if [ -n "$hosts_raw" ] && [ -n "$proxy_url" ] && [ -n "$proxy_auth" ]; then
+if [ -n "$hosts_raw" ] && [ -n "$proxy_url" ]; then
     if [[ ! "$proxy_url" =~ ^https?://[A-Za-z0-9._:-]+(/[A-Za-z0-9._~/-]*)?$ ]]; then
         warn "SPEEDWAVE_GIT_PROXY_URL is not a plain http(s) URL, skipping"
-    elif [[ ! "$proxy_auth" =~ ^[A-Za-z0-9._~+/=-]+$ ]]; then
-        warn "SPEEDWAVE_GIT_PROXY_AUTH has unsupported characters, skipping"
     else
         IFS=',' read -r -a candidates <<< "$hosts_raw"
         for host in ${candidates[@]+"${candidates[@]}"}; do
@@ -51,8 +55,8 @@ tmp="${conf_file}.tmp.$$"
         printf '\tinsteadOf = git@%s:\n' "${host%%:*}"
         printf '\tinsteadOf = https://%s/\n' "$host"
     done
-    printf '[http "%s/"]\n' "$proxy_url"
-    printf '\textraHeader = "x-speedwave-proxy-auth: %s"\n' "$proxy_auth"
+    printf '[credential "%s/"]\n' "$proxy_url"
+    printf '\thelper = %s\n' "$helper"
 } > "$tmp" 2>/dev/null && chmod 600 "$tmp" 2>/dev/null && mv -f "$tmp" "$conf_file" 2>/dev/null
 if [ ! -f "$conf_file" ] || [ -e "$tmp" ]; then
     rm -f "$tmp" 2>/dev/null

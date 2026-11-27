@@ -12,6 +12,6 @@ speedwave_export_secrets() {
     _speedwave_export_secret anthropic-api-key ANTHROPIC_API_KEY
     _speedwave_export_secret anthropic-auth-token ANTHROPIC_AUTH_TOKEN
     _speedwave_export_secret anthropic-custom-headers ANTHROPIC_CUSTOM_HEADERS
-    _speedwave_export_secret git-proxy-auth SPEEDWAVE_GIT_PROXY_AUTH
+    _speedwave_export_secret caller-token SPEEDWAVE_CALLER_TOKEN
     unset secret_file secret_value
 }

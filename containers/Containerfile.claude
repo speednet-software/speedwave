@@ -42,6 +42,7 @@ RUN CLAUDE_BIN=$(readlink -f /home/speedwave/.local/bin/claude) && \
 
 COPY --chmod=755 osc52-copy.sh /usr/local/bin/osc52-copy.sh
 COPY --chmod=755 git-transport.sh /usr/local/bin/git-transport.sh
+COPY --chmod=755 git-credential-speedwave.sh /usr/local/bin/git-credential-speedwave.sh
 COPY --chmod=644 speedwave-secret-env.sh /usr/local/bin/speedwave-secret-env.sh
 COPY --chmod=755 speedwave-exec.sh /usr/local/bin/speedwave-exec
 RUN ln -s osc52-copy.sh /usr/local/bin/pbcopy && \

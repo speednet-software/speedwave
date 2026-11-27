@@ -495,7 +495,10 @@ cat > "${HOME}/.claude/mcp-config.json" << EOF
   "mcpServers": {
     "speedwave-hub": {
       "type": "http",
-      "url": "http://mcp-hub:${MCP_HUB_PORT}"
+      "url": "http://mcp-hub:${MCP_HUB_PORT}",
+      "headers": {
+        "x-speedwave-proxy-auth": "\${SPEEDWAVE_CALLER_TOKEN}"
+      }
     }
   }
 }
