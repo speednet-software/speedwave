@@ -1,5 +1,3 @@
-//! The CLI's one log sink: stderr until the terminal is handed to Claude Code, a file always.
-
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -55,11 +53,13 @@ pub(crate) fn terminal_handed_over() -> bool {
 
 fn global() -> &'static CliLogger {
     LOGGER.get_or_init(|| {
-        let filter =
-            env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-                .build();
+        let filter = filter_from(env_logger::Env::default().default_filter_or("info"));
         CliLogger::new(filter, Box::new(std::io::stderr()))
     })
+}
+
+fn filter_from(env: env_logger::Env<'_>) -> env_logger::Logger {
+    env_logger::Builder::from_env(env).build()
 }
 
 impl CliLogger {
@@ -79,10 +79,8 @@ impl CliLogger {
     }
 
     fn hand_over_terminal(&self) -> TerminalHandover<'_> {
-        let sinks = lock(&self.sinks);
-        self.terminal_handed_over
-            .store(sinks.file.is_some(), Ordering::SeqCst);
-        drop(sinks);
+        let _sinks = lock(&self.sinks);
+        self.terminal_handed_over.store(true, Ordering::SeqCst);
         TerminalHandover { logger: self }
     }
 
@@ -109,7 +107,9 @@ impl Log for CliLogger {
         }
         let line = format_line(record);
         let mut sinks = lock(&self.sinks);
-        if !self.terminal_handed_over.load(Ordering::SeqCst) {
+        let mute_terminal =
+            self.terminal_handed_over.load(Ordering::SeqCst) && sinks.file.is_some();
+        if !mute_terminal {
             let _ = sinks.terminal.write_all(line.as_bytes());
         }
         if let Some(file) = sinks.file.as_mut() {
@@ -137,7 +137,6 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
-    clippy::expect_used,
     reason = "test fixtures assert on setup that must not silently fail"
 )]
 mod tests {
@@ -279,23 +278,49 @@ mod tests {
     }
 
     #[test]
-    fn a_debug_filter_lets_debug_lines_reach_the_terminal() {
-        let fx = Fixture::with_file("debug");
-
-        emit(&fx.logger, log::Level::Debug, "diagnostic detail");
-
-        assert!(fx.terminal.text().contains("diagnostic detail"));
-    }
-
-    #[test]
-    fn without_a_file_sink_the_handover_keeps_the_terminal_logging() {
+    fn without_a_file_sink_the_handover_is_recorded_but_the_terminal_keeps_logging() {
         let terminal = SharedBuf::default();
         let logger = CliLogger::new(filter("info"), Box::new(terminal.clone()));
 
-        let _handover = logger.hand_over_terminal();
+        let handover = logger.hand_over_terminal();
         emit(&logger, log::Level::Info, "no file attached");
 
+        assert!(logger.terminal_handed_over.load(Ordering::SeqCst));
         assert!(terminal.text().contains("no file attached"));
+        drop(handover);
+        assert!(!logger.terminal_handed_over.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn the_filter_is_read_from_the_named_variable() {
+        std::env::set_var("SPEEDWAVE_TEST_CLI_LOGGER_SET", "debug");
+        let terminal = SharedBuf::default();
+        let logger = CliLogger::new(
+            filter_from(env_logger::Env::new().filter_or("SPEEDWAVE_TEST_CLI_LOGGER_SET", "info")),
+            Box::new(terminal.clone()),
+        );
+
+        emit(&logger, log::Level::Debug, "diagnostic detail");
+
+        assert!(terminal.text().contains("diagnostic detail"));
+    }
+
+    #[test]
+    fn an_unset_variable_falls_back_to_the_info_filter() {
+        std::env::remove_var("SPEEDWAVE_TEST_CLI_LOGGER_UNSET");
+        let terminal = SharedBuf::default();
+        let logger = CliLogger::new(
+            filter_from(
+                env_logger::Env::new().filter_or("SPEEDWAVE_TEST_CLI_LOGGER_UNSET", "info"),
+            ),
+            Box::new(terminal.clone()),
+        );
+
+        emit(&logger, log::Level::Debug, "too verbose");
+        emit(&logger, log::Level::Info, "kept");
+
+        assert!(!terminal.text().contains("too verbose"));
+        assert!(terminal.text().contains("kept"));
     }
 
     #[test]

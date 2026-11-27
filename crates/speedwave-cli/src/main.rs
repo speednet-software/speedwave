@@ -697,6 +697,8 @@ fn main() -> anyhow::Result<()> {
             std::process::exit(1);
         });
         let project_name = resolve_action_project(&action, &user_config)?;
+        validate_project_name(&project_name).map_err(|e| anyhow::anyhow!(e))?;
+        cli_logger::attach_file(&consts::cli_log_path(&project_name));
         out!("Updating containers for project '{}'...", project_name);
         match update::update_containers(&runtime, &project_name) {
             Ok(result) => {
@@ -734,6 +736,7 @@ fn main() -> anyhow::Result<()> {
         });
         let project_name = resolve_action_project(&action, &user_config)?;
         validate_project_name(&project_name).map_err(|e| anyhow::anyhow!(e))?;
+        cli_logger::attach_file(&consts::cli_log_path(&project_name));
         let removed = speedwave_runtime::claude_home::remove_claude_credentials(
             consts::data_dir(),
             &project_name,
@@ -835,6 +838,8 @@ fn main() -> anyhow::Result<()> {
                 .as_ref()
                 .map(|m| m.name.clone())
                 .unwrap_or_else(|| service_id.clone());
+            validate_project_name(project).map_err(|e| anyhow::anyhow!(e))?;
+            cli_logger::attach_file(&consts::cli_log_path(project));
             config::with_config_lock(|| {
                 let mut user_config = config::load_user_config()?;
                 let cfg_entry = user_config
@@ -876,6 +881,8 @@ fn main() -> anyhow::Result<()> {
                 .as_ref()
                 .map(|m| m.name.clone())
                 .unwrap_or_else(|| service_id.clone());
+            validate_project_name(project).map_err(|e| anyhow::anyhow!(e))?;
+            cli_logger::attach_file(&consts::cli_log_path(project));
             config::with_config_lock(|| {
                 let mut user_config = config::load_user_config()?;
                 let cfg_entry = user_config
@@ -1129,11 +1136,10 @@ fn main() -> anyhow::Result<()> {
             ),
         );
         let cmd_ref: Vec<&str> = cmd.iter().map(String::as_str).collect();
-        let status_result = {
-            let _terminal = cli_logger::hand_over_terminal();
-            runtime.container_exec(&container_name, &cmd_ref).status()
-        };
+        let terminal = cli_logger::hand_over_terminal();
+        let status_result = runtime.container_exec(&container_name, &cmd_ref).status();
         terminal_restore::sanitize_host_terminal();
+        drop(terminal);
         reap_instance(&runtime, &container_name, &instance_id);
         let status = status_result?;
         std::process::exit(
@@ -1164,13 +1170,15 @@ fn main() -> anyhow::Result<()> {
     tail.extend(resolved.flags.iter().cloned());
     let exec_argv = stamped_exec_argv(&instance_id, tail);
     let exec_cmd: Vec<&str> = exec_argv.iter().map(String::as_str).collect();
-    let status_result = {
-        let _terminal = cli_logger::hand_over_terminal();
-        runtime.container_exec(&container_name, &exec_cmd).status()
-    };
+    reconnect_warnings.hold();
+    let terminal = cli_logger::hand_over_terminal();
+    let status_result = runtime.container_exec(&container_name, &exec_cmd).status();
     terminal_restore::sanitize_host_terminal();
+    drop(terminal);
     reap_instance(&runtime, &container_name, &instance_id);
-    reconnect_warnings.print_deferred();
+    for message in reconnect_warnings.release() {
+        err!("{message}");
+    }
     let status = status_result?;
 
     let is_oom = speedwave_runtime::resources::is_oom_exit(&status);
@@ -1188,36 +1196,37 @@ struct ReconnectWarnings(Arc<Mutex<ReconnectState>>);
 struct ReconnectState {
     reported: HashSet<String>,
     deferred: Vec<String>,
+    held: bool,
 }
 
 impl ReconnectWarnings {
     fn warn_once(&self, service: &str) {
-        if let Some(message) = self.report(service, cli_logger::terminal_handed_over()) {
+        if let Some(message) = self.report(service) {
             err!("{message}");
         }
     }
 
-    fn print_deferred(&self) {
-        for message in self.take_deferred() {
-            err!("{message}");
-        }
+    fn hold(&self) {
+        self.lock().held = true;
     }
 
-    fn report(&self, service: &str, defer: bool) -> Option<String> {
+    fn release(&self) -> Vec<String> {
+        let mut state = self.lock();
+        state.held = false;
+        std::mem::take(&mut state.deferred)
+    }
+
+    fn report(&self, service: &str) -> Option<String> {
         let mut state = self.lock();
         if !state.reported.insert(service.to_string()) {
             return None;
         }
         let message = reconnect_warning(service);
-        if defer {
+        if state.held {
             state.deferred.push(message);
             return None;
         }
         Some(message)
-    }
-
-    fn take_deferred(&self) -> Vec<String> {
-        std::mem::take(&mut self.lock().deferred)
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, ReconnectState> {
@@ -1573,26 +1582,47 @@ mod tests {
     #[test]
     fn reconnect_warning_is_reported_once_per_service() {
         let warnings = ReconnectWarnings::default();
-        assert!(warnings.report("slack", false).is_some());
-        assert!(warnings.report("slack", false).is_none());
-        assert!(warnings.report("sharepoint", false).is_some());
+        assert!(warnings.report("slack").is_some());
+        assert!(warnings.report("slack").is_none());
+        assert!(warnings.report("sharepoint").is_some());
     }
 
     #[test]
-    fn reconnect_warning_during_a_session_is_held_back_and_handed_out_once() {
+    fn reconnect_warning_when_not_held_is_returned_at_once() {
         let warnings = ReconnectWarnings::default();
 
-        assert!(warnings.report("slack", true).is_none());
-        assert!(warnings.report("slack", true).is_none());
-        assert!(warnings.report("slack", false).is_none());
-        assert!(warnings.report("sharepoint", true).is_none());
+        assert_eq!(warnings.report("slack"), Some(reconnect_warning("slack")));
+        assert!(warnings.release().is_empty());
+    }
 
-        let deferred = warnings.take_deferred();
+    #[test]
+    fn reconnect_warning_during_a_hold_is_deferred_and_released_once_per_service() {
+        let warnings = ReconnectWarnings::default();
+        warnings.hold();
+
+        assert!(warnings.report("slack").is_none());
+        assert!(warnings.report("slack").is_none());
+        assert!(warnings.report("sharepoint").is_none());
+
         assert_eq!(
-            deferred,
+            warnings.release(),
             vec![reconnect_warning("slack"), reconnect_warning("sharepoint")]
         );
-        assert!(warnings.take_deferred().is_empty());
+        assert!(warnings.release().is_empty());
+    }
+
+    #[test]
+    fn reconnect_warning_after_release_is_returned_at_once_again() {
+        let warnings = ReconnectWarnings::default();
+        warnings.hold();
+        assert!(warnings.report("slack").is_none());
+        let _ = warnings.release();
+
+        assert!(warnings.report("slack").is_none());
+        assert_eq!(
+            warnings.report("sharepoint"),
+            Some(reconnect_warning("sharepoint"))
+        );
     }
 
     #[test]

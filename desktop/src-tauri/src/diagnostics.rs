@@ -12,7 +12,6 @@ pub(crate) struct DiagnosticsInput {
     pub compose_path: Option<std::path::PathBuf>,
     /// Path to the Claude session log file.
     pub claude_session_log: Option<std::path::PathBuf>,
-    /// Path to the `speedwave` CLI log file.
     pub cli_log: Option<std::path::PathBuf>,
     /// Path to the container entrypoint's startup diagnostics log.
     pub entrypoint_log: Option<std::path::PathBuf>,
