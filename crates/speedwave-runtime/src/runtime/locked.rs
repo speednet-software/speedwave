@@ -142,7 +142,7 @@ impl LockedRuntime {
         with_acquired(project, || {
             self.refuse_during_engine_teardown()?;
             let rotation = if service == crate::consts::CLAUDE_COMPOSE_SERVICE {
-                TokenRotation::Rotate
+                TokenRotation::WhenSessionStopped
             } else {
                 TokenRotation::Keep
             };
@@ -395,7 +395,12 @@ impl LockedRuntime {
                     == Some(crate::consts::CLAUDE_COMPOSE_SERVICE)
                     && row.get("State").and_then(|v| v.as_str()) == Some("running")
             }),
-            Err(_) => true,
+            Err(e) => {
+                log::warn!(
+                    "could not list the containers of project '{project}', keeping the caller token: {e}"
+                );
+                true
+            }
         }
     }
 
@@ -607,7 +612,7 @@ mod tests {
     }
 
     fn is_fresh_token(value: &str) -> bool {
-        value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit()) && value != STAGED_TOKEN
+        crate::compose::caller_token::is_token(value) && value != STAGED_TOKEN
     }
 
     #[test]
@@ -671,7 +676,7 @@ mod tests {
     }
 
     #[test]
-    fn starting_the_claude_service_draws_a_new_token() {
+    fn starting_the_claude_service_draws_a_new_token_when_no_session_runs() {
         let (rt, handles, _data_dir) = staged_runtime(
             "acme",
             MockRuntimeBuilder::new().with_vm_exec_as_root_stdout(STAGED_TOKEN),
@@ -686,7 +691,28 @@ mod tests {
             "claude/secrets",
             "caller-token"
         )));
-        assert_eq!(read_calls(&handles), 0);
+    }
+
+    #[test]
+    fn starting_the_claude_service_keeps_the_token_while_a_session_runs() {
+        let (rt, handles, _data_dir) = staged_runtime(
+            "acme",
+            MockRuntimeBuilder::new()
+                .with_vm_exec_as_root_stdout(STAGED_TOKEN)
+                .with_ps_response(
+                    "acme",
+                    vec![serde_json::json!({"Service": "claude", "State": "running"})],
+                ),
+        );
+
+        rt.compose_up_service("acme", crate::consts::CLAUDE_COMPOSE_SERVICE)
+            .unwrap();
+
+        let frames = sync_frames(&handles);
+        assert_eq!(
+            staged_value(&frames[0], "claude/secrets", "caller-token"),
+            STAGED_TOKEN
+        );
     }
 
     #[test]

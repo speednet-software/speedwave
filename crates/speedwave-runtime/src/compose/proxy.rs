@@ -196,8 +196,6 @@ pub fn render_proxy_config(llm: &LlmConfig) -> String {
     render_proxy_config_full(llm, None, &[])
 }
 
-/// [`render_proxy_config`] plus the optional `ner` section pointing the proxy at the
-/// live host-side detector (ADR-096).
 pub(crate) fn render_proxy_config_full(
     llm: &LlmConfig,
     ner: Option<&super::pii_ner::NerRenderConfig>,

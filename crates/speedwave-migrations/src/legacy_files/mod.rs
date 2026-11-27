@@ -2,8 +2,7 @@
 //! current code neither reads nor writes: the host-exec state tree, the SharePoint v1 secrets, the
 //! mcp-os port and pid files, the in-tree plugin image marker, the state of the removed OAuth
 //! worker, and the worker bearers, proxy caller token and OAuth refresh locks that moved into the
-//! secret store layout, and the git transport gitconfig that carried the caller token. Jira: SPEED-1013,
-//! SPEED-1016, SPEED-1046. Added in: v0.23.0
+//! secret store layout. Jira: SPEED-1013, SPEED-1016. Added in: v0.23.0
 
 use std::path::Path;
 

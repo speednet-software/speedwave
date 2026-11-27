@@ -328,7 +328,7 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
 }
 
 /**
- * Constant-time string comparison over HMAC digests.
+ * Compares two strings in constant time.
  * @param provided - value presented by the caller
  * @param expected - secret to compare against
  */

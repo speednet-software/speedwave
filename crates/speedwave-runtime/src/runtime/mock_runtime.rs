@@ -484,7 +484,7 @@ impl MockRuntimeBuilder {
         self.vm_exec_as_root_exit = (code, stderr.to_string());
         self
     }
-    /// Makes every `vm_exec_as_root` call print `stdout`; the default is empty output.
+    /// Makes every `vm_exec_as_root` call print `stdout`.
     pub fn with_vm_exec_as_root_stdout(mut self, stdout: &str) -> Self {
         self.vm_exec_as_root_stdout = stdout.to_string();
         self

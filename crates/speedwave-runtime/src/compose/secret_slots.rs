@@ -97,6 +97,13 @@ pub(super) fn claude_secrets_mount() -> anyhow::Result<SlotMount> {
     SlotMount::new(CLAUDE_SERVICE, PURPOSE_SECRETS, CLAUDE_SECRETS_TARGET)
 }
 
+pub(crate) fn caller_token_vm_path(project: &str) -> anyhow::Result<String> {
+    Ok(format!(
+        "{}/{CALLER_TOKEN_FILE}",
+        claude_secrets_mount()?.slot.vm_dir(project)
+    ))
+}
+
 pub(crate) fn builtin_worker_has_tokens(svc: &McpServiceDescriptor) -> bool {
     !svc.credential_files.is_empty()
 }
