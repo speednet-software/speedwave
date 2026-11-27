@@ -130,6 +130,64 @@ describe('ComposerComponent', () => {
     });
   });
 
+  describe('dictionary and writing suggestions', () => {
+    function assistAttributes(): Record<string, string | null> {
+      const ta = textarea();
+      return {
+        spellcheck: ta.getAttribute('spellcheck'),
+        autocorrect: ta.getAttribute('autocorrect'),
+        writingsuggestions: ta.getAttribute('writingsuggestions'),
+      };
+    }
+
+    const ON = { spellcheck: 'true', autocorrect: 'on', writingsuggestions: 'true' };
+    const OFF = { spellcheck: 'false', autocorrect: 'off', writingsuggestions: 'false' };
+
+    it('turns them on for an empty field', () => {
+      expect(assistAttributes()).toEqual(ON);
+    });
+
+    it('turns them on for plain text', () => {
+      component.text.setValue('Napisz test');
+      fixture.detectChanges();
+      expect(assistAttributes()).toEqual(ON);
+    });
+
+    it('turns them on when a slash appears mid-sentence', () => {
+      component.text.setValue('hello /');
+      fixture.detectChanges();
+      expect(assistAttributes()).toEqual(ON);
+    });
+
+    it('turns them off when the text starts with a slash', () => {
+      component.text.setValue('/model sonnet');
+      fixture.detectChanges();
+      expect(assistAttributes()).toEqual(OFF);
+    });
+
+    it('turns them off when the slash follows leading whitespace', () => {
+      component.text.setValue('  /model');
+      fixture.detectChanges();
+      expect(assistAttributes()).toEqual(OFF);
+    });
+
+    it('turns them off while the command menu is open', () => {
+      component.slashOpen.set(true);
+      fixture.detectChanges();
+      expect(assistAttributes()).toEqual(OFF);
+    });
+
+    it('turns them back on after the slash is removed', () => {
+      component.text.setValue('/model');
+      fixture.detectChanges();
+      expect(assistAttributes()).toEqual(OFF);
+
+      component.text.setValue('model');
+      fixture.detectChanges();
+      expect(assistAttributes()).toEqual(ON);
+    });
+  });
+
   describe('Shift+Enter', () => {
     it('does NOT submit when Shift+Enter is pressed', () => {
       const emitted: string[] = [];

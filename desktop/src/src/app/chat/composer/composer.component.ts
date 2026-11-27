@@ -44,6 +44,7 @@ import { ComposerAttachments } from './composer-attachments';
 import { AttachMenuComponent, type PickedFiles } from './attach-menu.component';
 
 const SLASH_TRIGGER = /^(\s*)\/([^\s/]*)$/;
+const COMMAND_TEXT = /^\s*\//;
 
 const MIN_COMPOSER_HEIGHT_PX = 56;
 
@@ -179,6 +180,9 @@ const PLAN_MODE_PREFIX =
           aria-label="Compose message"
           class="block w-full min-w-0 resize-none border-0 bg-transparent p-0 text-[14px] leading-relaxed text-[var(--ink)] placeholder-[var(--ink-mute)] focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
           [placeholder]="effectivePlaceholder()"
+          [attr.spellcheck]="proseAssist()"
+          [attr.autocorrect]="proseAssist() ? 'on' : 'off'"
+          [attr.writingsuggestions]="proseAssist()"
           [formControl]="text"
           (keydown.enter)="onEnter($event)"
           (input)="onInput($event)"
@@ -388,6 +392,10 @@ export class ComposerComponent implements AfterViewInit {
   readonly planMode = signal<boolean>(false);
 
   readonly textValue = toSignal(this.text.valueChanges, { initialValue: '' });
+
+  readonly proseAssist = computed<boolean>(
+    () => !this.slashOpen() && !COMMAND_TEXT.test(this.textValue())
+  );
 
   readonly slashOverlayPositions: ConnectedPosition[] = [
     {
