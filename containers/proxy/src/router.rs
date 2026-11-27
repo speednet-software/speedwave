@@ -1,6 +1,8 @@
 use serde::Deserialize;
 use std::path::PathBuf;
 
+const CALLER_TOKEN_FILE: &str = "caller-token";
+
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum Auth {
@@ -89,8 +91,6 @@ fn entry_matches(entry: &str, repo: &str) -> bool {
         _ => false,
     }
 }
-
-const CALLER_TOKEN_FILE: &str = "caller-token";
 
 #[derive(Deserialize)]
 pub struct Config {

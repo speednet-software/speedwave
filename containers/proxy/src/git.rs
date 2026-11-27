@@ -45,8 +45,13 @@ pub async fn handler(State(cfg): State<Arc<Config>>, request: Request) -> Respon
     let (host, rest) = rest_of_path.split_once('/').unwrap_or((rest_of_path, ""));
     let classified = classify(&parts.method, rest, parts.uri.query());
 
+    let authorized = caller_authorized(&cfg, &parts.headers);
+    if !authorized && !credentials_sent(&parts.headers) {
+        return unauthorized_response();
+    }
+
     let mut denial = None;
-    let response = if !caller_authorized(&cfg, &parts.headers) {
+    let response = if !authorized {
         log::warn!("rejected /git request with missing or invalid caller auth");
         unauthorized_response()
     } else {
@@ -128,6 +133,10 @@ fn caller_authorized(cfg: &Config, headers: &HeaderMap) -> bool {
         .map(str::to_string)
         .or_else(|| caller_auth::basic_password(headers));
     presented.is_some_and(|p| caller_auth::matches(&p, &expected))
+}
+
+fn credentials_sent(headers: &HeaderMap) -> bool {
+    headers.contains_key(CALLER_AUTH_HEADER) || headers.contains_key(header::AUTHORIZATION)
 }
 
 fn unauthorized_response() -> Response {
@@ -385,13 +394,17 @@ mod tests {
         b.body(body).unwrap()
     }
 
-    fn req_basic(uri: &str, credentials: &str) -> HttpRequest<Body> {
-        let encoded = base64::engine::general_purpose::STANDARD.encode(credentials);
+    fn req_authorization(uri: &str, authorization: &str) -> HttpRequest<Body> {
         HttpRequest::builder()
             .uri(uri)
-            .header(header::AUTHORIZATION, format!("Basic {encoded}"))
+            .header(header::AUTHORIZATION, authorization)
             .body(Body::empty())
             .unwrap()
+    }
+
+    fn req_basic(uri: &str, credentials: &str) -> HttpRequest<Body> {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(credentials);
+        req_authorization(uri, &format!("Basic {encoded}"))
     }
 
     const INFO_REFS: &str = "/git/github.com/owner/repo/info/refs?service=git-upload-pack";
@@ -432,21 +445,32 @@ mod tests {
         let challenge = resp.headers()[header::WWW_AUTHENTICATE].to_str().unwrap();
         assert!(challenge.starts_with("Basic "), "{challenge}");
         assert!(f.log.lock().await.is_empty());
+        assert!(!f.audit.path().join("audit-proxy.jsonl").exists());
     }
 
     #[tokio::test]
-    async fn a_wrong_basic_password_gets_401() {
+    async fn wrong_credentials_get_401_and_an_audit_row() {
         let f = fixture(Some(CALLER), Some(TOKEN)).await;
-        for credentials in ["x:wrong", &format!("{CALLER}:x"), "no-colon"] {
-            let resp = f
-                .app
-                .clone()
-                .oneshot(req_basic(INFO_REFS, credentials))
-                .await
-                .unwrap();
-            assert_eq!(resp.status(), 401, "{credentials}");
+        let prefix = &CALLER[..CALLER.len() - 1];
+        let attempts = [
+            req_basic(INFO_REFS, "x:wrong"),
+            req_basic(INFO_REFS, &format!("{CALLER}:x")),
+            req_basic(INFO_REFS, &format!("x:{prefix}")),
+            req_basic(INFO_REFS, &format!("x:{CALLER}extra")),
+            req_basic(INFO_REFS, "no-colon"),
+            req_authorization(INFO_REFS, &format!("Bearer {CALLER}")),
+            req_authorization(INFO_REFS, "Basic !!!"),
+        ];
+        let count = attempts.len();
+        for attempt in attempts {
+            let resp = f.app.clone().oneshot(attempt).await.unwrap();
+            assert_eq!(resp.status(), 401);
+            assert!(resp.headers().contains_key(header::WWW_AUTHENTICATE));
         }
         assert!(f.log.lock().await.is_empty());
+        let rows = audit_rows(&f);
+        assert_eq!(rows.len(), count);
+        assert!(rows.iter().all(|r| r["status"] == 401));
     }
 
     #[tokio::test]
@@ -476,6 +500,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(gone.status(), 401);
+        std::fs::write(&file, "  \n").unwrap();
+        let blank = f
+            .app
+            .clone()
+            .oneshot(req_basic(INFO_REFS, "x:  "))
+            .await
+            .unwrap();
+        assert_eq!(blank.status(), 401);
     }
 
     fn audit_rows(f: &Fixture) -> Vec<serde_json::Value> {
