@@ -10,6 +10,7 @@ pub(super) struct ClaudeLlmEnv {
     pub(super) plain: std::collections::HashMap<String, String>,
     pub(super) auth_token: Option<String>,
     pub(super) custom_headers: Option<String>,
+    pub(super) proxied: bool,
 }
 
 pub(crate) fn apply_llm_config_in(
@@ -71,8 +72,7 @@ pub(super) fn claude_llm_env_in(
         if let Some(entry) = llm.active_provider() {
             let needs_direct = entry.kind == LlmProviderKind::Local && entry.has_custom_headers;
             if !needs_direct {
-                let caller_token = super::proxy::caller_token_in(data_dir, project)?;
-                return proxy_llm_env(llm, &caller_token);
+                return proxy_llm_env(llm);
             }
             log::info!("custom headers configured — using the direct (non-proxy) path");
         }
@@ -88,7 +88,7 @@ pub(super) fn claude_llm_env_in(
     legacy_llm_env_in(data_dir, llm, project)
 }
 
-fn proxy_llm_env(llm: &LlmConfig, caller_token: &str) -> anyhow::Result<ClaudeLlmEnv> {
+fn proxy_llm_env(llm: &LlmConfig) -> anyhow::Result<ClaudeLlmEnv> {
     let entry = llm
         .active_provider()
         .ok_or_else(|| anyhow::anyhow!("proxy path requires an active provider"))?;
@@ -96,10 +96,6 @@ fn proxy_llm_env(llm: &LlmConfig, caller_token: &str) -> anyhow::Result<ClaudeLl
 
     let mut extra_env = std::collections::HashMap::new();
     let mut auth_token = None;
-    let custom_headers = Some(format!(
-        "{}: {caller_token}",
-        super::proxy::PROXY_CALLER_AUTH_HEADER
-    ));
     match entry.kind {
         LlmProviderKind::AnthropicOauth | LlmProviderKind::AnthropicApiKey => {
             extra_env.extend(crate::defaults::anthropic_default_models_env());
@@ -164,7 +160,8 @@ fn proxy_llm_env(llm: &LlmConfig, caller_token: &str) -> anyhow::Result<ClaudeLl
     Ok(ClaudeLlmEnv {
         plain: extra_env,
         auth_token,
-        custom_headers,
+        custom_headers: None,
+        proxied: true,
     })
 }
 
@@ -198,6 +195,7 @@ fn legacy_llm_env_in(
             plain: crate::defaults::anthropic_default_models_env(),
             auth_token: None,
             custom_headers: None,
+            proxied: false,
         }),
         local if crate::config::LOCAL_PROVIDERS.contains(&local) => {
             let base_url = llm
@@ -275,6 +273,7 @@ fn legacy_llm_env_in(
                 plain: extra_env,
                 auth_token: Some(auth_token),
                 custom_headers,
+                proxied: false,
             })
         }
         _ => unreachable!("provider validated by early guard"),
@@ -427,12 +426,8 @@ pub fn validate_base_url(raw: &str) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    fn rendered_proxy_env(
-        yaml: &str,
-        llm: &crate::config::LlmConfig,
-        caller_token: &str,
-    ) -> anyhow::Result<String> {
-        inject_claude_env(yaml, &proxy_llm_env(llm, caller_token)?.plain)
+    fn rendered_proxy_env(yaml: &str, llm: &crate::config::LlmConfig) -> anyhow::Result<String> {
+        inject_claude_env(yaml, &proxy_llm_env(llm)?.plain)
     }
 
     fn rendered_legacy_env(
@@ -488,7 +483,7 @@ mod tests {
                 "claude-sonnet-4-6",
             ),
         ] {
-            let rendered = rendered_proxy_env(CLAUDE_ENV_YAML, &cfg, "test-caller-token").unwrap();
+            let rendered = rendered_proxy_env(CLAUDE_ENV_YAML, &cfg).unwrap();
             for line in rendered.lines() {
                 let t = line.trim().trim_start_matches('-').trim().trim_matches('"');
                 if let Some((key, _)) = t.split_once('=') {
@@ -525,12 +520,8 @@ mod tests {
             crate::config::LlmProviderKind::Local,
             crate::config::LlmProviderKind::OpenRouter,
         ] {
-            let rendered = rendered_proxy_env(
-                CLAUDE_ENV_YAML,
-                &routed_cfg(kind, Some(131_072)),
-                "test-caller-token",
-            )
-            .unwrap();
+            let rendered =
+                rendered_proxy_env(CLAUDE_ENV_YAML, &routed_cfg(kind, Some(131_072))).unwrap();
             assert!(
                 rendered.contains("CLAUDE_CODE_MAX_CONTEXT_TOKENS=131072"),
                 "{kind:?}: probed window must reach CC: {rendered}"
@@ -547,7 +538,6 @@ mod tests {
         let rendered = rendered_proxy_env(
             CLAUDE_ENV_YAML,
             &routed_cfg(crate::config::LlmProviderKind::Local, None),
-            "test-caller-token",
         )
         .unwrap();
         assert!(
@@ -579,7 +569,7 @@ mod tests {
             proxy_enabled: Some(true),
             ..Default::default()
         };
-        let rendered = rendered_proxy_env(CLAUDE_ENV_YAML, &cfg, "test-caller-token").unwrap();
+        let rendered = rendered_proxy_env(CLAUDE_ENV_YAML, &cfg).unwrap();
         assert!(!rendered.contains("CLAUDE_CODE_MAX_CONTEXT_TOKENS"));
         assert!(!rendered.contains("CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT"));
     }
@@ -618,12 +608,8 @@ mod tests {
                 proxy_enabled: Some(true),
                 ..Default::default()
             };
-            let rendered = rendered_proxy_env(
-                "services:\n  claude:\n    environment: []\n",
-                &cfg,
-                "test-caller-token",
-            )
-            .unwrap();
+            let rendered =
+                rendered_proxy_env("services:\n  claude:\n    environment: []\n", &cfg).unwrap();
             let expected_line = format!("ANTHROPIC_MODEL={expected_wire}");
             assert!(
                 rendered.contains(&expected_line),
@@ -937,12 +923,9 @@ mod tests {
             (AnthropicOauth, None, "claude-opus-5-5", true),
         ];
         for (kind, base_url, model, disabled) in cases {
-            let rendered = rendered_proxy_env(
-                CLAUDE_ENV_YAML,
-                &proxy_cfg("prov", kind, base_url, model),
-                "test-caller-token",
-            )
-            .unwrap();
+            let rendered =
+                rendered_proxy_env(CLAUDE_ENV_YAML, &proxy_cfg("prov", kind, base_url, model))
+                    .unwrap();
             assert_eq!(
                 rendered.contains("CLAUDE_CODE_ATTRIBUTION_HEADER=0"),
                 disabled,

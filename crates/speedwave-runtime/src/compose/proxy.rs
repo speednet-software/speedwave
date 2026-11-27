@@ -31,8 +31,6 @@ struct RenderRoute {
 struct RenderConfig<'a> {
     routes: Vec<RenderRoute>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    caller_token: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     ner: Option<&'a super::pii_ner::NerRenderConfig>,
     #[serde(skip_serializing_if = "<[GitForge]>::is_empty")]
     git_forges: &'a [GitForge],
@@ -44,9 +42,6 @@ pub const PROXY_PORT: u16 = 4000;
 /// In-network proxy URL every session points `ANTHROPIC_BASE_URL` at; routing
 /// is by the request body's model prefix, not the URL path.
 pub const PROXY_BASE_URL: &str = "http://proxy:4000";
-
-const CALLER_TOKEN_PURPOSE: &str = "caller";
-const CALLER_TOKEN_SERVICE: &str = "proxy";
 
 const GIT_TOKENS_MOUNT_ROOT: &str = "/git-tokens";
 
@@ -191,29 +186,20 @@ pub fn spw_key_env_name(provider_id: &str) -> String {
 /// `CALLER_AUTH_HEADER` in `containers/proxy/src/main.rs`.
 pub const PROXY_CALLER_AUTH_HEADER: &str = "x-speedwave-proxy-auth";
 
-pub(crate) fn caller_token_in(data_dir: &Path, project: &str) -> anyhow::Result<String> {
-    crate::validation::validate_project_name(project)?;
-    let store = SecretStore::open(data_dir)?;
-    Ok(store
-        .derive_token(CALLER_TOKEN_PURPOSE, project, CALLER_TOKEN_SERVICE)?
-        .to_string())
+pub(super) fn caller_header_value(caller_token: &str) -> String {
+    format!("{PROXY_CALLER_AUTH_HEADER}: {caller_token}")
 }
 
 /// Renders the proxy routing config (a `routes` array consumed by the forwarder
 /// `containers/proxy/src/router.rs`). Pure.
 pub fn render_proxy_config(llm: &LlmConfig) -> String {
-    render_proxy_config_with(llm, None)
+    render_proxy_config_full(llm, None, &[])
 }
 
-pub fn render_proxy_config_with(llm: &LlmConfig, caller_token: Option<&str>) -> String {
-    render_proxy_config_full(llm, caller_token, None, &[])
-}
-
-/// [`render_proxy_config_with`] plus the optional `ner` section pointing the proxy at the
+/// [`render_proxy_config`] plus the optional `ner` section pointing the proxy at the
 /// live host-side detector (ADR-096).
 pub(crate) fn render_proxy_config_full(
     llm: &LlmConfig,
-    caller_token: Option<&str>,
     ner: Option<&super::pii_ner::NerRenderConfig>,
     git_forges: &[GitForge],
 ) -> String {
@@ -285,7 +271,6 @@ pub(crate) fn render_proxy_config_full(
 
     serde_json::to_string(&RenderConfig {
         routes,
-        caller_token: caller_token.map(str::to_string),
         ner,
         git_forges,
     })
@@ -300,9 +285,8 @@ fn render_proxy_config_in(
     git_forges: &[GitForge],
 ) -> anyhow::Result<RenderedProxyConfig> {
     crate::validation::validate_project_name(project)?;
-    let token = caller_token_in(data_dir, project)?;
     let ner = super::pii_ner::live_ner_config_in(data_dir, pii_ner_enabled);
-    let content = render_proxy_config_full(llm, Some(&token), ner.as_ref(), git_forges);
+    let content = render_proxy_config_full(llm, ner.as_ref(), git_forges);
     Ok(RenderedProxyConfig {
         content,
         ner_url: ner.map(|ner| ner.url().to_string()),
@@ -417,31 +401,19 @@ mod tests {
     }
 
     #[test]
-    fn render_embeds_caller_token_when_present_and_omits_when_none() {
-        let cfg = full_provider_mix();
-        let with = render_proxy_config_with(&cfg, Some("secret-abc"));
-        assert!(
-            with.contains(r#""caller_token":"secret-abc""#),
-            "token must be embedded"
-        );
-        let without = render_proxy_config(&cfg);
-        assert!(
-            !without.contains("caller_token"),
-            "no token field when absent: {without}"
-        );
+    fn render_proxy_config_carries_no_caller_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let rendered = rendered_content(dir.path(), &full_provider_mix(), &[]);
+        assert!(!rendered.contains("caller_token"), "{rendered}");
+        assert!(!render_proxy_config(&full_provider_mix()).contains("caller_token"));
     }
 
     #[test]
-    fn caller_token_is_derived_stable_per_project_and_never_stored() {
-        let dir = tempfile::tempdir().unwrap();
-        let t1 = caller_token_in(dir.path(), "proj").unwrap();
-        let t2 = caller_token_in(dir.path(), "proj").unwrap();
-        assert_eq!(t1, t2, "token must be stable across renders");
-        assert_eq!(t1.len(), 64);
-        assert!(t1.chars().all(|c| c.is_ascii_hexdigit()));
-        assert_ne!(t1, caller_token_in(dir.path(), "other").unwrap());
-        assert!(!dir.path().join("proxy").join("proj").exists());
-        assert!(caller_token_in(dir.path(), "../evil").is_err());
+    fn caller_header_value_joins_the_header_name_and_the_token() {
+        assert_eq!(
+            caller_header_value("abc123"),
+            "x-speedwave-proxy-auth: abc123"
+        );
     }
 
     fn stored_key(dir: &Path, provider_id: &str) -> Option<String> {
@@ -457,18 +429,6 @@ mod tests {
         render_proxy_config_in(dir, "proj", llm, true, forges)
             .unwrap()
             .content
-    }
-
-    #[test]
-    fn render_proxy_config_embeds_the_caller_token() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = full_provider_mix();
-        let rendered = rendered_content(dir.path(), &cfg, &[]);
-        let token = caller_token_in(dir.path(), "proj").unwrap();
-        assert!(
-            rendered.contains(&format!(r#""caller_token":"{token}""#)),
-            "rendered proxy config must carry the caller token"
-        );
     }
 
     #[test]
@@ -539,7 +499,6 @@ mod tests {
             "the returned ner url must be the one inside the content"
         );
         assert!(rendered.ner_url.is_some());
-        assert!(rendered.content.contains(r#""caller_token":"#));
     }
 
     #[test]
@@ -564,15 +523,15 @@ mod tests {
     }
 
     #[test]
-    fn render_full_places_ner_after_the_caller_token() {
+    fn render_full_places_ner_after_the_routes() {
         let live = super::super::pii_ner::LiveNerService::test_new(50555, "t");
         let ner = super::super::pii_ner::ner_render_config(&live);
-        let rendered = render_proxy_config_full(&full_provider_mix(), Some("c"), Some(&ner), &[]);
-        let tail = r#","caller_token":"c","ner":{"url":"http://host.docker.internal:50555","token":"t","min_confidence":0.6,"labels":["#;
+        let rendered = render_proxy_config_full(&full_provider_mix(), Some(&ner), &[]);
+        let tail = r#"],"ner":{"url":"http://host.docker.internal:50555","token":"t","min_confidence":0.6,"labels":["#;
         assert!(rendered.contains(tail), "{rendered}");
         assert_eq!(
-            render_proxy_config_full(&full_provider_mix(), Some("c"), None, &[]),
-            render_proxy_config_with(&full_provider_mix(), Some("c"))
+            render_proxy_config_full(&full_provider_mix(), None, &[]),
+            render_proxy_config(&full_provider_mix())
         );
     }
 
@@ -791,7 +750,7 @@ mod tests {
     }
 
     fn rendered_git_forges(forges: &[GitForge]) -> serde_json::Value {
-        let json = render_proxy_config_full(&full_provider_mix(), Some("c"), None, forges);
+        let json = render_proxy_config_full(&full_provider_mix(), None, forges);
         serde_json::from_str::<serde_json::Value>(&json).unwrap()["git_forges"].clone()
     }
 
@@ -802,7 +761,7 @@ mod tests {
             Some("https://gitlab.example.com"),
         );
         assert!(forges.is_empty());
-        let json = render_proxy_config_full(&full_provider_mix(), Some("c"), None, &forges);
+        let json = render_proxy_config_full(&full_provider_mix(), None, &forges);
         assert!(!json.contains("git_forges"), "{json}");
     }
 
@@ -919,7 +878,7 @@ mod tests {
             &lists(&["*"], &[]),
         );
         assert!(forges[0].repositories.is_empty());
-        let json = render_proxy_config_full(&full_provider_mix(), Some("c"), None, &forges);
+        let json = render_proxy_config_full(&full_provider_mix(), None, &forges);
         assert!(json.contains(r#""repositories":[]"#), "{json}");
         assert_eq!(
             rendered_git_forges(&forges)[0]["repositories"],

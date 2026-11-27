@@ -827,7 +827,7 @@ impl SecurityCheck {
                 "ANTHROPIC_API_KEY",
                 "ANTHROPIC_AUTH_TOKEN",
                 "ANTHROPIC_CUSTOM_HEADERS",
-                "SPEEDWAVE_GIT_PROXY_AUTH",
+                "SPEEDWAVE_CALLER_TOKEN",
             ];
             let allowed = [
                 "CLAUDE_CODE_OAUTH_TOKEN",

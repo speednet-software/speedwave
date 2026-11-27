@@ -11,6 +11,7 @@ use crate::{build, bundle};
 use std::path::{Path, PathBuf};
 
 mod addressing;
+pub(crate) mod caller_token;
 mod llm;
 mod networks;
 mod pii_ner;
@@ -1107,14 +1108,23 @@ mod tests {
         )
     }
 
+    const TEST_CALLER_TOKEN: &str = "test-caller-token-0123456789abcdef";
+
     fn collect_payload(
         data_dir: &Path,
         project: &str,
         resolved: &ResolvedClaudeConfig,
         integrations: &ResolvedIntegrationsConfig,
     ) -> crate::secrets_tmpfs::layout::ProjectPayload {
-        secret_payload::collect_project_payload_in(data_dir, project, resolved, integrations, &[])
-            .expect("payload collection must succeed")
+        secret_payload::collect_project_payload_in(
+            data_dir,
+            project,
+            resolved,
+            integrations,
+            &[],
+            TEST_CALLER_TOKEN,
+        )
+        .expect("payload collection must succeed")
     }
 
     fn write_secret(data_dir: &Path, project: &str, service: &str, field: &str, value: &str) {
@@ -3113,13 +3123,12 @@ services:
                 .to_string()
         ));
 
-        let caller_token = proxy::caller_token_in(data_dir.path(), "test-project").unwrap();
         let env = service_strings(&doc, "claude", "environment");
         assert!(env.iter().any(|e| e.starts_with("SPEEDWAVE_GIT_HOSTS=")));
         assert!(env.contains(&"SPEEDWAVE_GIT_PROXY_URL=http://proxy:4000/git".to_string()));
         assert!(
             !env.iter()
-                .any(|e| e.starts_with("SPEEDWAVE_GIT_PROXY_AUTH")),
+                .any(|e| e.contains("CALLER_TOKEN") || e.contains("GIT_PROXY_AUTH")),
             "the caller secret reaches claude through its secrets slot, never env"
         );
 
@@ -3136,10 +3145,10 @@ services:
                 "claude",
                 "secrets",
                 "test-project",
-                "git-proxy-auth"
+                "caller-token"
             )
             .as_deref(),
-            Some(caller_token.as_str())
+            Some(TEST_CALLER_TOKEN)
         );
     }
 
@@ -4228,7 +4237,7 @@ services:
             .map(|v| v.to_string())
             .collect();
 
-        let caller_token = proxy::caller_token_in(data_dir, SECRETS_PROJECT).unwrap();
+        let caller_token = TEST_CALLER_TOKEN.to_string();
         values.push(caller_token.clone());
         let store = crate::secret_store::SecretStore::open(data_dir).unwrap();
         for svc in consts::TOGGLEABLE_MCP_SERVICES {
@@ -4490,7 +4499,15 @@ services:
             Some(planted.anthropic_key)
         );
         assert_eq!(
-            text("claude", "secrets", "git-proxy-auth").as_deref(),
+            text("claude", "secrets", "caller-token").as_deref(),
+            Some(planted.caller_token.as_str())
+        );
+        assert_eq!(
+            text("mcp-hub", "secrets", "caller-token").as_deref(),
+            Some(planted.caller_token.as_str())
+        );
+        assert_eq!(
+            text("proxy", "config", "caller-token").as_deref(),
             Some(planted.caller_token.as_str())
         );
         assert_eq!(
@@ -4506,7 +4523,7 @@ services:
             Some(planted.pii_key)
         );
         let proxy_config = text("proxy", "config", "proxy.json").unwrap();
-        assert!(proxy_config.contains(&planted.caller_token));
+        assert!(!proxy_config.contains(&planted.caller_token));
         assert!(proxy_config.contains(planted.ner_token));
     }
 
@@ -4588,6 +4605,7 @@ services:
             &api_key_config(),
             &integrations,
             &[manifest],
+            TEST_CALLER_TOKEN,
         )
         .unwrap();
 
@@ -4630,6 +4648,7 @@ services:
             &api_key_config(),
             &ResolvedIntegrationsConfig::default(),
             &[],
+            TEST_CALLER_TOKEN,
         );
         assert!(result.is_err());
     }
@@ -4684,6 +4703,7 @@ services:
             &api_key_config(),
             &all_enabled_integrations(),
             &[],
+            TEST_CALLER_TOKEN,
         );
 
         assert!(result.is_err(), "the project must not start");
@@ -4835,6 +4855,7 @@ services:
             &api_key_config(),
             &ResolvedIntegrationsConfig::default(),
             &[],
+            TEST_CALLER_TOKEN,
         )
         .unwrap_err()
         .to_string();
@@ -4863,6 +4884,7 @@ services:
             &api_key_config(),
             &integrations,
             &[test_example_plugin_manifest(plugin::TokenMount::ReadOnly)],
+            TEST_CALLER_TOKEN,
         )
         .unwrap();
 
@@ -4926,6 +4948,7 @@ services:
             &api_key_config(),
             &integrations,
             &[manifest],
+            TEST_CALLER_TOKEN,
         )
         .unwrap();
 
@@ -5484,7 +5507,7 @@ services:
             "ANTHROPIC_API_KEY=sk-ant-12345",
             "ANTHROPIC_AUTH_TOKEN=sk-no-key-required",
             "ANTHROPIC_CUSTOM_HEADERS=x-speedwave-proxy-auth: t",
-            "SPEEDWAVE_GIT_PROXY_AUTH=t",
+            "SPEEDWAVE_CALLER_TOKEN=t",
         ] {
             let yaml = format!(
                 r#"
@@ -5767,8 +5790,8 @@ services:
         let names: Vec<&str> = claude_files.files.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(
             names,
-            ["anthropic-custom-headers"],
-            "oauth sessions stage no auth file, only the proxy caller header"
+            ["anthropic-custom-headers", "caller-token"],
+            "oauth sessions stage no auth file, only the proxy caller header and the caller token"
         );
         for (key, value) in crate::defaults::anthropic_default_models_env() {
             let pin = format!("{key}={value}");
@@ -6132,6 +6155,18 @@ services:
             .as_deref(),
             Some("X-Test: 1"),
             "custom headers must be staged on the direct path"
+        );
+        assert_eq!(
+            payload_file_text(
+                &payload,
+                "claude",
+                "secrets",
+                "test-project",
+                "caller-token"
+            )
+            .as_deref(),
+            Some(TEST_CALLER_TOKEN),
+            "the hub token is staged whatever the LLM path"
         );
     }
 
@@ -8679,14 +8714,6 @@ services:
             &HostBridgesInfo::default()
         )
         .is_err());
-    }
-
-    #[test]
-    fn test_caller_token_rejects_invalid_name() {
-        let data_dir = tempfile::tempdir().unwrap();
-        assert!(proxy::caller_token_in(data_dir.path(), "").is_err());
-        assert!(proxy::caller_token_in(data_dir.path(), "../evil").is_err());
-        assert!(proxy::caller_token_in(data_dir.path(), &"a".repeat(64)).is_err());
     }
 
     #[cfg(unix)]

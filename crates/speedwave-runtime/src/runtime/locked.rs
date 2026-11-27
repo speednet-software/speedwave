@@ -2,6 +2,7 @@
 //! read or write is serialised per project". `HELD_LOCKS` thread-local lets `transaction()` nest.
 
 use super::ContainerRuntime;
+use crate::compose::caller_token::TokenRotation;
 use std::cell::RefCell;
 use std::collections::HashSet;
 
@@ -110,7 +111,7 @@ impl LockedRuntime {
     /// refused once [`super::begin_engine_teardown`] ran.
     pub fn compose_up(&self, project: &str) -> anyhow::Result<()> {
         with_acquired(project, || {
-            self.start_isolated(project, || {
+            self.start_isolated(project, TokenRotation::WhenSessionStopped, || {
                 let result = self.inner.compose_up(project);
                 crate::slash::invalidate_cache(project);
                 result
@@ -127,7 +128,7 @@ impl LockedRuntime {
     /// networks exist isolated; refused once [`super::begin_engine_teardown`] ran.
     pub fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()> {
         with_acquired(project, || {
-            self.start_isolated(project, || {
+            self.start_isolated(project, TokenRotation::Rotate, || {
                 let result = self.inner.compose_up_recreate(project);
                 crate::slash::invalidate_cache(project);
                 result
@@ -140,7 +141,12 @@ impl LockedRuntime {
     pub fn compose_up_service(&self, project: &str, service: &str) -> anyhow::Result<()> {
         with_acquired(project, || {
             self.refuse_during_engine_teardown()?;
-            self.stage_secrets_when_enabled(project)?;
+            let rotation = if service == crate::consts::CLAUDE_COMPOSE_SERVICE {
+                TokenRotation::Rotate
+            } else {
+                TokenRotation::Keep
+            };
+            self.stage_secrets_when_enabled(project, rotation)?;
             let legacy = self.isolate_egress_less_networks(project)?;
             if !legacy.is_empty() {
                 log::warn!(
@@ -294,7 +300,7 @@ impl LockedRuntime {
     /// Rewrites the project's secrets in the VM tmpfs from the host sources (under the
     /// per-project lock), for callers that change credentials while containers run.
     pub fn stage_project_secrets(&self, project: &str) -> anyhow::Result<()> {
-        with_acquired(project, || self.stage_secrets(project))
+        with_acquired(project, || self.stage_secrets(project, TokenRotation::Keep))
     }
 
     pub(crate) fn put_secret_file(
@@ -326,10 +332,11 @@ impl LockedRuntime {
     fn start_isolated(
         &self,
         project: &str,
+        rotation: TokenRotation,
         up: impl FnOnce() -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
         self.refuse_during_engine_teardown()?;
-        self.stage_secrets_when_enabled(project)?;
+        self.stage_secrets_when_enabled(project, rotation)?;
         let legacy = self.isolate_egress_less_networks(project)?;
         if legacy.is_empty() {
             return up();
@@ -354,15 +361,42 @@ impl LockedRuntime {
         Ok(())
     }
 
-    fn stage_secrets_when_enabled(&self, project: &str) -> anyhow::Result<()> {
+    fn stage_secrets_when_enabled(
+        &self,
+        project: &str,
+        rotation: TokenRotation,
+    ) -> anyhow::Result<()> {
         if self.secret_staging {
-            self.stage_secrets(project)?;
+            self.stage_secrets(project, rotation)?;
         }
         Ok(())
     }
 
-    fn stage_secrets(&self, project: &str) -> anyhow::Result<()> {
-        crate::secrets_tmpfs::stage::stage_project(self.inner.as_ref(), self.data_dir(), project)
+    fn stage_secrets(&self, project: &str, rotation: TokenRotation) -> anyhow::Result<()> {
+        let rotation = match rotation {
+            TokenRotation::WhenSessionStopped if self.claude_container_running(project) => {
+                TokenRotation::Keep
+            }
+            TokenRotation::WhenSessionStopped => TokenRotation::Rotate,
+            fixed => fixed,
+        };
+        crate::secrets_tmpfs::stage::stage_project(
+            self.inner.as_ref(),
+            self.data_dir(),
+            project,
+            rotation,
+        )
+    }
+
+    fn claude_container_running(&self, project: &str) -> bool {
+        match self.inner.compose_ps(project) {
+            Ok(rows) => rows.iter().any(|row| {
+                row.get("Service").and_then(|v| v.as_str())
+                    == Some(crate::consts::CLAUDE_COMPOSE_SERVICE)
+                    && row.get("State").and_then(|v| v.as_str()) == Some("running")
+            }),
+            Err(_) => true,
+        }
     }
 
     fn isolate_egress_less_networks(&self, project: &str) -> anyhow::Result<Vec<String>> {
@@ -527,6 +561,222 @@ mod tests {
             );
             assert!(call.stdin.starts_with(b"sync acme\n"));
         }
+    }
+
+    const STAGED_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn staged_value(frame: &[u8], slot: &str, name: &str) -> String {
+        use base64::Engine;
+        let text = String::from_utf8(frame.to_vec()).unwrap();
+        let prefix = format!("F {slot} {name} ");
+        let encoded = text
+            .lines()
+            .find_map(|line| line.strip_prefix(prefix.as_str()))
+            .unwrap_or_else(|| panic!("{slot} {name} is not in the frame"));
+        String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn sync_frames(handles: &crate::runtime::mock_runtime::MockHandles) -> Vec<Vec<u8>> {
+        handles
+            .vm_exec_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call.stdin.starts_with(b"sync acme\n"))
+            .map(|call| call.stdin.clone())
+            .collect()
+    }
+
+    fn read_calls(handles: &crate::runtime::mock_runtime::MockHandles) -> usize {
+        handles
+            .vm_exec_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| {
+                call.args
+                    .last()
+                    .is_some_and(|a| a.ends_with("/caller-token"))
+            })
+            .count()
+    }
+
+    fn is_fresh_token(value: &str) -> bool {
+        value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit()) && value != STAGED_TOKEN
+    }
+
+    #[test]
+    fn a_restage_keeps_the_token_staged_in_the_vm_for_every_reader() {
+        let (rt, handles, _data_dir) = staged_runtime(
+            "acme",
+            MockRuntimeBuilder::new().with_vm_exec_as_root_stdout(STAGED_TOKEN),
+        );
+
+        rt.stage_project_secrets("acme").unwrap();
+
+        let frames = sync_frames(&handles);
+        assert_eq!(frames.len(), 1);
+        for slot in ["claude/secrets", "mcp-hub/secrets", "proxy/config"] {
+            assert_eq!(
+                staged_value(&frames[0], slot, "caller-token"),
+                STAGED_TOKEN,
+                "{slot}"
+            );
+        }
+        assert_eq!(read_calls(&handles), 1);
+    }
+
+    #[test]
+    fn a_proxy_reload_does_not_change_the_token() {
+        let (rt, handles, _data_dir) = staged_runtime(
+            "acme",
+            MockRuntimeBuilder::new().with_vm_exec_as_root_stdout(STAGED_TOKEN),
+        );
+
+        rt.compose_up_service("acme", "proxy").unwrap();
+
+        let frames = sync_frames(&handles);
+        assert_eq!(
+            staged_value(&frames[0], "claude/secrets", "caller-token"),
+            STAGED_TOKEN
+        );
+    }
+
+    #[test]
+    fn every_recreate_draws_a_new_token_without_reading_the_old_one() {
+        let (rt, handles, _data_dir) = staged_runtime(
+            "acme",
+            MockRuntimeBuilder::new().with_vm_exec_as_root_stdout(STAGED_TOKEN),
+        );
+
+        rt.compose_up_recreate("acme").unwrap();
+        rt.compose_up_recreate("acme").unwrap();
+
+        let frames = sync_frames(&handles);
+        assert_eq!(frames.len(), 2);
+        let first = staged_value(&frames[0], "claude/secrets", "caller-token");
+        let second = staged_value(&frames[1], "claude/secrets", "caller-token");
+        assert!(is_fresh_token(&first), "{first}");
+        assert!(is_fresh_token(&second), "{second}");
+        assert_ne!(first, second);
+        for slot in ["mcp-hub/secrets", "proxy/config"] {
+            assert_eq!(staged_value(&frames[0], slot, "caller-token"), first);
+        }
+        assert_eq!(read_calls(&handles), 0);
+    }
+
+    #[test]
+    fn starting_the_claude_service_draws_a_new_token() {
+        let (rt, handles, _data_dir) = staged_runtime(
+            "acme",
+            MockRuntimeBuilder::new().with_vm_exec_as_root_stdout(STAGED_TOKEN),
+        );
+
+        rt.compose_up_service("acme", crate::consts::CLAUDE_COMPOSE_SERVICE)
+            .unwrap();
+
+        let frames = sync_frames(&handles);
+        assert!(is_fresh_token(&staged_value(
+            &frames[0],
+            "claude/secrets",
+            "caller-token"
+        )));
+        assert_eq!(read_calls(&handles), 0);
+    }
+
+    #[test]
+    fn a_start_joining_a_running_claude_keeps_the_token() {
+        let (rt, handles, _data_dir) = staged_runtime(
+            "acme",
+            MockRuntimeBuilder::new()
+                .with_vm_exec_as_root_stdout(STAGED_TOKEN)
+                .with_ps_response(
+                    "acme",
+                    vec![serde_json::json!({"Service": "claude", "State": "running"})],
+                ),
+        );
+
+        rt.compose_up("acme").unwrap();
+
+        let frames = sync_frames(&handles);
+        assert_eq!(
+            staged_value(&frames[0], "claude/secrets", "caller-token"),
+            STAGED_TOKEN
+        );
+    }
+
+    #[test]
+    fn a_start_with_the_claude_container_stopped_draws_a_new_token() {
+        for rows in [
+            vec![],
+            vec![serde_json::json!({"Service": "claude", "State": "exited"})],
+            vec![serde_json::json!({"Service": "proxy", "State": "running"})],
+        ] {
+            let (rt, handles, _data_dir) = staged_runtime(
+                "acme",
+                MockRuntimeBuilder::new()
+                    .with_vm_exec_as_root_stdout(STAGED_TOKEN)
+                    .with_ps_response("acme", rows.clone()),
+            );
+
+            rt.compose_up("acme").unwrap();
+
+            let frames = sync_frames(&handles);
+            assert!(
+                is_fresh_token(&staged_value(&frames[0], "claude/secrets", "caller-token")),
+                "{rows:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_start_that_cannot_list_the_containers_keeps_the_token() {
+        let (rt, handles, _data_dir) = staged_runtime(
+            "acme",
+            MockRuntimeBuilder::new()
+                .with_vm_exec_as_root_stdout(STAGED_TOKEN)
+                .with_ps_error("engine unreachable"),
+        );
+
+        rt.compose_up("acme").unwrap();
+
+        let frames = sync_frames(&handles);
+        assert_eq!(
+            staged_value(&frames[0], "claude/secrets", "caller-token"),
+            STAGED_TOKEN
+        );
+    }
+
+    #[test]
+    fn a_restage_with_no_token_in_the_vm_draws_one() {
+        let (rt, handles, _data_dir) = staged_runtime("acme", MockRuntimeBuilder::new());
+
+        rt.stage_project_secrets("acme").unwrap();
+
+        let frames = sync_frames(&handles);
+        assert!(is_fresh_token(&staged_value(
+            &frames[0],
+            "claude/secrets",
+            "caller-token"
+        )));
+    }
+
+    #[test]
+    fn a_restage_whose_token_read_fails_writes_nothing() {
+        let (rt, handles, _data_dir) = staged_runtime(
+            "acme",
+            MockRuntimeBuilder::new().with_vm_exec_as_root_exit(1, "vm unreachable"),
+        );
+
+        let err = rt.stage_project_secrets("acme").unwrap_err();
+
+        assert!(format!("{err:#}").contains("vm unreachable"), "{err:#}");
+        assert!(sync_frames(&handles).is_empty());
     }
 
     #[test]

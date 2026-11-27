@@ -192,6 +192,7 @@ pub struct MockRuntimeBuilder {
     validate_default: Result<(), String>,
     vm_exec_responses: HashMap<String, anyhow::Result<VmExecOutput>>,
     vm_exec_as_root_exit: (i32, String),
+    vm_exec_as_root_stdout: String,
     reset_vm_result: Result<(), String>,
     stop_vm_result: Result<(), String>,
     restart_engine_result: Result<(), String>,
@@ -271,6 +272,7 @@ impl MockRuntimeBuilder {
             validate_default: Ok(()),
             vm_exec_responses: HashMap::new(),
             vm_exec_as_root_exit: (0, String::new()),
+            vm_exec_as_root_stdout: String::new(),
             reset_vm_result: Ok(()),
             stop_vm_result: Ok(()),
             restart_engine_result: Ok(()),
@@ -482,6 +484,11 @@ impl MockRuntimeBuilder {
         self.vm_exec_as_root_exit = (code, stderr.to_string());
         self
     }
+    /// Makes every `vm_exec_as_root` call print `stdout`; the default is empty output.
+    pub fn with_vm_exec_as_root_stdout(mut self, stdout: &str) -> Self {
+        self.vm_exec_as_root_stdout = stdout.to_string();
+        self
+    }
     /// Makes the runtime read project compose files under `data_dir` instead of the empty
     /// temporary data dir the mock owns by default.
     pub fn with_data_dir(mut self, data_dir: &std::path::Path) -> Self {
@@ -560,6 +567,7 @@ impl MockRuntimeBuilder {
             validate_default: self.validate_default,
             vm_exec_responses: self.vm_exec_responses,
             vm_exec_as_root_exit: self.vm_exec_as_root_exit,
+            vm_exec_as_root_stdout: self.vm_exec_as_root_stdout,
             reset_vm_result: self.reset_vm_result,
             stop_vm_result: self.stop_vm_result,
             restart_engine_result: self.restart_engine_result,
@@ -614,6 +622,7 @@ struct MockRuntime {
     validate_default: Result<(), String>,
     vm_exec_responses: HashMap<String, anyhow::Result<VmExecOutput>>,
     vm_exec_as_root_exit: (i32, String),
+    vm_exec_as_root_stdout: String,
     reset_vm_result: Result<(), String>,
     stop_vm_result: Result<(), String>,
     restart_engine_result: Result<(), String>,
@@ -1037,7 +1046,7 @@ impl ContainerRuntime for MockRuntime {
         let (code, stderr) = &self.vm_exec_as_root_exit;
         Ok(VmExecOutput {
             status: exit_status(*code),
-            stdout: Vec::new(),
+            stdout: self.vm_exec_as_root_stdout.clone().into_bytes(),
             stderr: stderr.clone().into_bytes(),
         })
     }

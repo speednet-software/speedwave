@@ -1,5 +1,6 @@
 use super::frame;
 use super::layout::{ProjectPayload, SecretFile, Slot, VM_ROOT};
+use crate::compose::caller_token::{self, TokenRotation};
 use crate::runtime::ContainerRuntime;
 use std::path::Path;
 use std::time::Duration;
@@ -10,8 +11,18 @@ pub(crate) fn stage_project(
     runtime: &dyn ContainerRuntime,
     data_dir: &Path,
     project: &str,
+    rotation: TokenRotation,
 ) -> anyhow::Result<()> {
-    let payload = collect_payload(data_dir, project)?;
+    let settings = crate::config::load_project_settings(data_dir, project)?;
+    let caller_token = caller_token::token_for_staging(runtime, project, rotation)?;
+    let payload = crate::compose::secret_payload::collect_project_payload_in(
+        data_dir,
+        project,
+        &settings.resolved_config,
+        &settings.integrations,
+        &settings.plugin_manifests,
+        &caller_token,
+    )?;
     sync_payload(runtime, project, &payload)
 }
 
@@ -30,17 +41,6 @@ fn sync_payload(
     payload: &ProjectPayload,
 ) -> anyhow::Result<()> {
     run_frame(runtime, project, &frame::encode_sync(project, payload)?)
-}
-
-fn collect_payload(data_dir: &Path, project: &str) -> anyhow::Result<ProjectPayload> {
-    let settings = crate::config::load_project_settings(data_dir, project)?;
-    crate::compose::secret_payload::collect_project_payload_in(
-        data_dir,
-        project,
-        &settings.resolved_config,
-        &settings.integrations,
-        &settings.plugin_manifests,
-    )
 }
 
 fn run_frame(runtime: &dyn ContainerRuntime, project: &str, frame: &[u8]) -> anyhow::Result<()> {
