@@ -11,7 +11,7 @@ import {
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { LoggerService } from '../services/logger.service';
-import { BetaService } from '../services/beta.service';
+import { FeatureFlagsService } from '../services/feature-flags.service';
 import {
   DeviceCodeInfo,
   LoopbackFlowStart,
@@ -420,8 +420,6 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
   },
 })
 export class IntegrationsComponent implements OnInit, OnDestroy {
-  private static readonly BETA_ONLY_SERVICES = new Set(['office']);
-
   /** List of container-based MCP service integrations. */
   services: IntegrationStatusEntry[] = [];
   /** List of native OS integrations (reminders, calendar, mail, notes). */
@@ -462,17 +460,16 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   private tauri = inject(TauriService);
   private projectState = inject(ProjectStateService);
   private logger = inject(LoggerService);
-  private beta = inject(BetaService);
+  private flags = inject(FeatureFlagsService);
   private unsubProjectSettled: (() => void) | null = null;
   private unsubStatusRefresher: (() => void) | null = null;
 
-  readonly betaEnabled = this.beta.enabled;
   protected readonly isGitForge = isGitForge;
 
-  /** Re-fetch on beta toggle — response.services is not cached, so filter-only won't reveal beta-only services. */
+  /** Re-fetch when the Office flag changes: `response.services` is not cached, so filtering alone cannot reveal Office. */
   constructor() {
     effect(() => {
-      this.betaEnabled();
+      this.flags.enabled('office');
       if (this.activeProject) void this.loadIntegrations();
     });
   }
@@ -655,10 +652,8 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
       const response = await this.tauri.invoke<IntegrationsResponse>('get_integrations', {
         project: this.activeProject,
       });
-      const betaOn = this.betaEnabled();
-      this.services = response.services.filter(
-        (s) => betaOn || !IntegrationsComponent.BETA_ONLY_SERVICES.has(s.service)
-      );
+      const officeOn = this.flags.enabled('office');
+      this.services = response.services.filter((s) => officeOn || s.service !== 'office');
       this.osIntegrations = response.os;
       await this.loadSlackFeatures();
     } catch (e: unknown) {

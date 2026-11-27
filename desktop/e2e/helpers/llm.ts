@@ -538,11 +538,6 @@ export async function resumeNewestConversation(): Promise<void> {
 }
 
 export async function startNewConversation(): Promise<void> {
-  const headerPlus = await $('[data-testid="chat-header-new"]');
-  if (await headerPlus.isExisting()) {
-    await headerPlus.click();
-    return;
-  }
   await browser.keys([process.platform === 'darwin' ? 'Meta' : 'Control', 'r']);
   const confirm = await $('[data-testid="restart-confirm-restart"]');
   await confirm.waitForExist({ timeout: 2_000 }).catch(() => undefined);

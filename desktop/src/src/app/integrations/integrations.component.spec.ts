@@ -1,12 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
 import { IntegrationsComponent } from './integrations.component';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { LoggerService } from '../services/logger.service';
-import { BetaService } from '../services/beta.service';
+import { FeatureFlagsService } from '../services/feature-flags.service';
+import { FakeFeatureFlagsService } from '../testing/fake-feature-flags.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 import { createDeferred } from '../testing/deferred';
 import type { IntegrationStatusEntry } from '../models/integration';
@@ -165,10 +165,10 @@ describe('IntegrationsComponent', () => {
   let mockTauri: MockTauriService;
   let projectState: ProjectStateService;
   let mockLogger: ReturnType<typeof makeMockLogger>;
-  const betaEnabled = signal(false);
+  let flags: FakeFeatureFlagsService;
 
   beforeEach(async () => {
-    betaEnabled.set(false);
+    flags = new FakeFeatureFlagsService();
     mockTauri = new MockTauriService();
     setupMockTauri(mockTauri);
     mockLogger = makeMockLogger();
@@ -182,7 +182,7 @@ describe('IntegrationsComponent', () => {
       providers: [
         { provide: TauriService, useValue: mockTauri },
         { provide: LoggerService, useValue: mockLogger },
-        { provide: BetaService, useValue: { enabled: betaEnabled.asReadonly() } },
+        { provide: FeatureFlagsService, useValue: flags },
         provideRouter([]),
       ],
     }).compileComponents();
@@ -261,28 +261,20 @@ describe('IntegrationsComponent', () => {
     };
   }
 
-  it('shows slack when beta is off', async () => {
+  it('shows slack and sharepoint with every flag off', async () => {
     setupWithSlack();
-    betaEnabled.set(false);
     await component.ngOnInit();
     const serviceNames = component.services.map((s) => s.service);
     expect(serviceNames).toContain('slack');
     expect(serviceNames).toContain('sharepoint');
   });
 
-  it('shows slack when beta is on', async () => {
-    setupWithSlack();
-    betaEnabled.set(true);
-    await component.ngOnInit();
-    expect(component.services.map((s) => s.service)).toContain('slack');
-  });
+  describe('Office flag (ADR-058)', () => {
+    const flaggedServices = ['office'] as const;
+    const unflaggedServices = ['github', 'atlassian'] as const;
 
-  describe('beta gating (ADR-058)', () => {
-    const betaServices = ['office'] as const;
-    const nonBetaServices = ['github', 'atlassian'] as const;
-
-    function setupWithBetaServices(): void {
-      const extra = [...betaServices, ...nonBetaServices].map((svc) => ({
+    function setupWithFlaggedServices(): void {
+      const extra = [...flaggedServices, ...unflaggedServices].map((svc) => ({
         service: svc,
         enabled: false,
         configured: false,
@@ -316,43 +308,57 @@ describe('IntegrationsComponent', () => {
       };
     }
 
-    it.each(betaServices)('hides %s row when beta is off (default for new users)', async (svc) => {
-      setupWithBetaServices();
-      betaEnabled.set(false);
+    it.each(flaggedServices)('hides %s row while the office flag is off (default)', async (svc) => {
+      setupWithFlaggedServices();
+      flags.setFlag('office', false);
       await component.ngOnInit();
       expect(component.services.map((s) => s.service)).not.toContain(svc);
     });
 
-    it.each(betaServices)('shows %s row when beta is on', async (svc) => {
-      setupWithBetaServices();
-      betaEnabled.set(true);
+    it.each(flaggedServices)('shows %s row while the office flag is on', async (svc) => {
+      setupWithFlaggedServices();
+      flags.setFlag('office', true);
       await component.ngOnInit();
       expect(component.services.map((s) => s.service)).toContain(svc);
     });
 
-    it.each(nonBetaServices)('shows %s row even when beta is off', async (svc) => {
-      setupWithBetaServices();
-      betaEnabled.set(false);
+    it.each(unflaggedServices)('shows %s row while the office flag is off', async (svc) => {
+      setupWithFlaggedServices();
+      flags.setFlag('office', false);
       await component.ngOnInit();
       expect(component.services.map((s) => s.service)).toContain(svc);
     });
 
-    it('reveals all beta surfaces when beta toggles off → on mid-session', async () => {
-      setupWithBetaServices();
-      betaEnabled.set(false);
+    it('hides the Office row again when the office flag turns off mid-session', async () => {
+      setupWithFlaggedServices();
+      flags.setFlag('office', true);
+      await component.ngOnInit();
+      fixture.detectChanges();
+      expect(component.services.map((s) => s.service)).toContain('office');
+
+      flags.setFlag('office', false);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      fixture.detectChanges();
+
+      expect(component.services.map((s) => s.service)).not.toContain('office');
+    });
+
+    it('reveals the Office row when the office flag turns on mid-session', async () => {
+      setupWithFlaggedServices();
+      flags.setFlag('office', false);
       await component.ngOnInit();
       fixture.detectChanges();
       const namesOff = component.services.map((s) => s.service);
-      for (const svc of betaServices) {
+      for (const svc of flaggedServices) {
         expect(namesOff).not.toContain(svc);
       }
 
-      betaEnabled.set(true);
+      flags.setFlag('office', true);
       await new Promise((resolve) => setTimeout(resolve, 0));
       fixture.detectChanges();
 
       const namesOn = component.services.map((s) => s.service);
-      for (const svc of betaServices) {
+      for (const svc of flaggedServices) {
         expect(namesOn).toContain(svc);
       }
     });

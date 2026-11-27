@@ -4,6 +4,17 @@
 > **Context:** Work-in-progress Desktop UI surfaces need a runtime switch a developer or early adopter can flip without a rebuild, while staying hidden from ordinary users.
 >
 > **Amendment (2026-11-04):** Meeting transcription left beta (ADR-056, Amendment 25, SPEED-957). It was the only route behind `beta-enabled.guard.ts`, so the guard was removed; no route is beta-gated today, and the remaining beta surfaces are hidden by `BetaService` alone. The "Frontend" entry below describes the guard as it was.
+>
+> **Amendment (2026-11-27, SPEED-719):** The single "Beta features" switch is replaced by a registry of feature flags. The word "beta" meant two things in the code, the update channel (SPEED-674) and this switch, and one switch hid unrelated features: users without it had no chat tabs, no system notifications and no PII protection, although those features are stable, and the "Beta" badge showed after a switch to the stable channel because it reflected the switch, not the channel. What changed:
+>
+> - `speedwave_runtime::feature_flags::Feature` (`crates/speedwave-runtime/src/feature_flags.rs`) lists the flags: `office` and `telemetry_settings`. Each is stored under `ui.features` in the user config (user-only, as before), and an absent entry means off. `SpeedwaveUserConfig::feature_enabled` reads one. Removing a feature from behind its flag is removing one enum variant; the compiler names every use.
+> - A stored `ui.beta_enabled: true` migrates on read to both flags on; `false` or no key leaves both off, and an existing `ui.features` entry wins over the old key. The old key disappears at the next config save.
+> - `get_feature_flags` returns the whole map, `set_feature_flag` changes one flag (an unknown name fails with `unknown feature flag: <name>`) and the `feature-flags-changed` event carries the whole map (`desktop/src-tauri/src/ui_prefs_cmd.rs`). `get_beta_enabled`, `beta-changed` and the tray item `toggle_beta` are gone, so the tray menu has Open, Check for updates, an optional Install update and Quit.
+> - `FeatureFlagsService` (`desktop/src/src/app/services/feature-flags.service.ts`) replaces `BetaService`; the UI asks `enabled('office')` or `enabled('telemetry_settings')`. Settings has an "Experimental features" section with one switch per flag; a switch takes effect at once.
+> - Behind a flag: the Office row in Integrations (`office`) and the Telemetry section in Settings (`telemetry_settings`). A configured Office integration keeps working with the flag off, and MDM-forced telemetry does not read the flag. Not behind any flag any more: chat tabs and their shortcuts, system notifications, the Security section and PII tokenization (with its start-up policy check). The "Beta" badge is removed.
+> - The update channel does not read the flags, and the flags do not change the channel.
+>
+> The flags stay a UI visibility gate, never a security boundary. The sections below describe the tray switch as it was; the "Hidden before setup completion" reasoning no longer applies because no tray item remains.
 
 ## Decision
 

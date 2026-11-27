@@ -117,7 +117,7 @@ pub(crate) fn install(app: &AppHandle) {
     }
 }
 
-/// Tells the frontend about `event`, then shows a notification when beta, its switch and the
+/// Tells the frontend about `event`, then shows a notification when its switch and the
 /// background window allow it.
 pub(crate) fn notify_session_event(
     app: &AppHandle,
@@ -242,7 +242,6 @@ fn deliver(app: &AppHandle, target: NotificationTarget, event: SessionEvent) {
     };
     let app_id = app.config().identifier.clone();
     match decide(
-        cfg.beta_enabled(),
         &cfg.notification_prefs(),
         event,
         main_window_in_background(app),
@@ -290,13 +289,12 @@ fn deliver_reconnect(app: &AppHandle, project: &str, service: &str) {
 }
 
 fn decide(
-    beta_enabled: bool,
     prefs: &NotificationPrefs,
     event: SessionEvent,
     in_background: bool,
     resolve_permission: impl FnOnce() -> NotificationPermission,
 ) -> Result<(), Withheld> {
-    if !beta_enabled || !should_notify(prefs, event) {
+    if !should_notify(prefs, event) {
         return Err(Withheld::Off);
     }
     if !in_background {
@@ -453,14 +451,13 @@ mod tests {
     ];
 
     fn decide_with(
-        beta: bool,
         p: NotificationPrefs,
         event: SessionEvent,
         in_background: bool,
         permission: NotificationPermission,
     ) -> (Result<(), Withheld>, u32) {
         let mut asked = 0;
-        let result = decide(beta, &p, event, in_background, || {
+        let result = decide(&p, event, in_background, || {
             asked += 1;
             permission
         });
@@ -468,11 +465,10 @@ mod tests {
     }
 
     #[test]
-    fn every_event_notifies_in_the_background_with_beta_and_all_switches_on() {
+    fn every_event_notifies_in_the_background_with_all_switches_on() {
         for event in EVENTS {
             assert_eq!(
                 decide_with(
-                    true,
                     prefs(true, true, true, true),
                     event,
                     true,
@@ -488,7 +484,6 @@ mod tests {
         for event in EVENTS {
             assert_eq!(
                 decide_with(
-                    true,
                     prefs(true, true, true, true),
                     event,
                     false,
@@ -500,26 +495,9 @@ mod tests {
     }
 
     #[test]
-    fn nothing_notifies_or_prompts_without_beta() {
-        for event in EVENTS {
-            assert_eq!(
-                decide_with(
-                    false,
-                    prefs(true, true, true, true),
-                    event,
-                    true,
-                    NotificationPermission::Granted
-                ),
-                (Err(Withheld::Off), 0)
-            );
-        }
-    }
-
-    #[test]
     fn a_switched_off_event_never_asks_for_permission() {
         assert_eq!(
             decide_with(
-                true,
                 prefs(false, true, true, true),
                 SessionEvent::TurnFinished,
                 true,
@@ -529,7 +507,6 @@ mod tests {
         );
         assert_eq!(
             decide_with(
-                true,
                 prefs(true, true, false, true),
                 SessionEvent::AwaitingInput,
                 true,
@@ -548,7 +525,6 @@ mod tests {
         ] {
             assert_eq!(
                 decide_with(
-                    true,
                     prefs(true, true, true, true),
                     SessionEvent::SessionError,
                     true,
@@ -563,7 +539,6 @@ mod tests {
     fn a_suppressed_permission_still_hands_the_notification_to_windows() {
         assert_eq!(
             decide_with(
-                true,
                 prefs(true, true, true, true),
                 SessionEvent::AwaitingInput,
                 true,
@@ -809,7 +784,6 @@ mod tests {
         for event in EVENTS {
             assert_eq!(
                 decide_with(
-                    true,
                     prefs(true, true, true, true),
                     event,
                     true,

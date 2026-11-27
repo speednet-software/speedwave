@@ -45,11 +45,11 @@ class MockChatState {
     this.active = tabId;
     return tab;
   });
-  openNewChat = vi.fn(async (originTabId: string): Promise<string> => {
-    this.calls.push(`openNewChat:${originTabId}`);
+  openNewChat = vi.fn(async (): Promise<string> => {
+    this.calls.push('openNewChat');
     if (!this.opensTab) {
-      this.claimTab(originTabId);
-      return originTabId;
+      this.claimTab(this.active);
+      return this.active;
     }
     const tabId = `tab-${this.nextTab++}`;
     this.switchToNewTab(tabId);
@@ -1419,7 +1419,7 @@ describe('TranscriptionService', () => {
 
     it('opens a new chat before staging, by default', async () => {
       await svc.stageForChat('sess-1');
-      expect(mockChat.calls).toEqual(['openNewChat:tab-1']);
+      expect(mockChat.calls).toEqual(['openNewChat']);
     });
 
     it('stages into the tab a new chat opened and leaves the origin tab untouched', async () => {
@@ -1480,19 +1480,6 @@ describe('TranscriptionService', () => {
       expect(mockChat.activeTabId()).toBe('tab-1');
       expect(mockChat.tab('tab-1').stagedTranscript()?.markdown).toBe('# Meeting transcript');
       expect(mockChat.tab('tab-2').stagedTranscript()).toBeNull();
-    });
-
-    it('re-targets the origin tab before opening the new chat, not whichever tab is active at that point', async () => {
-      const markdownGate = gateMarkdown();
-      const staging = svc.stageForChat('sess-1');
-      await new Promise((r) => setTimeout(r, 0));
-
-      mockChat.switchToNewTab('tab-2');
-      markdownGate.resolve('# Meeting transcript');
-      await staging;
-
-      expect(mockChat.calls).toEqual(['openNewChat:tab-1']);
-      expect(mockChat.tab('tab-1').stagedTranscript()).not.toBeNull();
     });
 
     it('fails instead of misattaching the transcript when the origin tab was closed mid-flow', async () => {

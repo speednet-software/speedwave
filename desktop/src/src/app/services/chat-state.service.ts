@@ -16,7 +16,6 @@ import { ClaudeControlService } from './claude-control.service';
 import { PlanUsageService } from './plan-usage.service';
 import { LoggerService } from './logger.service';
 import { SlashService } from '../chat/slash/slash.service';
-import { BetaService } from './beta.service';
 import { WindowFocusService } from './window-focus.service';
 import {
   ChatSessionStore,
@@ -101,7 +100,6 @@ export class ChatStateService {
   private planUsage = inject(PlanUsageService);
   private clipboard = inject(Clipboard);
   private log = inject(LoggerService);
-  private beta = inject(BetaService);
   private windowFocus = inject(WindowFocusService);
   private slash = inject(SlashService);
 
@@ -133,7 +131,7 @@ export class ChatStateService {
     if (!store) throw new Error(`[chat-state] no store for active tab ${this._activeTabId()}`);
     return store;
   });
-  /** Whether another tab can be opened under `MAX_CHAT_TABS` (beta gating is the UI's job). */
+  /** Whether another tab can be opened under `MAX_CHAT_TABS`. */
   readonly canOpenTab: Signal<boolean> = computed(() => this._tabs().size < MAX_CHAT_TABS);
 
   readonly sessionAuthFailed: Signal<boolean> = computed(() =>
@@ -356,7 +354,7 @@ export class ChatStateService {
 
   /**
    * Resumes a conversation: the tab owning it is activated (and reconnected if its session ended);
-   * otherwise beta under the cap opens a new tab, and without beta the active tab resumes in place.
+   * otherwise a new tab opens under the cap, and at the cap the active tab resumes in place.
    * @param sessionId - Session UUID to resume.
    */
   async openConversation(sessionId: string): Promise<void> {
@@ -369,7 +367,7 @@ export class ChatStateService {
       }
       return;
     }
-    if (this.beta.enabled() && this.canOpenTab()) {
+    if (this.canOpenTab()) {
       await this.openTabResuming(sessionId);
       return;
     }
@@ -509,7 +507,6 @@ export class ChatStateService {
   );
 
   readonly newChatBlockedReason: Signal<string> = computed(() => {
-    if (!this.beta.enabled()) return this.newConversationBlockedReason();
     if (!this.canOpenTab()) return NEW_CHAT_TAB_LIMIT;
     return projectBlockedReason(this.projectState);
   });
@@ -597,24 +594,10 @@ export class ChatStateService {
   }
 
   /**
-   * Clears the conversation and awaits a fresh backend session, so the caller can send
-   * into an empty chat. Refuses before clearing; a failed start clears first, then throws.
-   */
-  startNewConversation(): Promise<void> {
-    return this.activeStore().startNewConversation();
-  }
-
-  /**
-   * Opens a new tab with beta, else restarts the conversation in `originTabId`.
-   * @param originTabId - Tab the request came from.
+   * Opens a new tab for a new chat.
    * @returns Id of the tab that holds the new chat.
    */
-  async openNewChat(originTabId: string): Promise<string> {
-    if (!this.beta.enabled()) {
-      this.claimTab(originTabId);
-      await this.startNewConversation();
-      return originTabId;
-    }
+  async openNewChat(): Promise<string> {
     const blocked = this.newChatBlockedReason();
     if (blocked) throw new Error(blocked);
     return this.openTab();

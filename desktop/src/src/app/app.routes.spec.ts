@@ -10,7 +10,7 @@ describe('app routes', () => {
     return shell?.children?.find((r) => r.path === path);
   }
 
-  it('opens meeting transcription without a guard, whatever the beta toggle', () => {
+  it('opens meeting transcription without a guard', () => {
     const route = shellChild('meeting-transcription');
     expect(route).toBeDefined();
     expect(route?.canActivate).toBeUndefined();

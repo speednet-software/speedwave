@@ -523,10 +523,7 @@ fn main() {
     let cleanup_ctx_window = cleanup_ctx.clone();
     let cleanup_ctx_runevent = cleanup_ctx.clone();
 
-    let initial_beta_enabled = config::load_user_config()
-        .map(|c| c.beta_enabled())
-        .unwrap_or(false);
-    let tray_state = tray::TrayMenuState::new(initial_beta_enabled);
+    let tray_state = tray::TrayMenuState::default();
 
     let cleanup_ctx_signal = cleanup_ctx.clone();
     match ctrlc::set_handler(move || {
@@ -778,12 +775,7 @@ fn main() {
             }
 
             use tauri::Manager;
-            let tray_menu = tray::build_tray_menu(
-                app.handle(),
-                None,
-                app.state::<tray::TrayMenuState>().beta_enabled(),
-                setup_wizard::is_setup_complete(),
-            )?;
+            let tray_menu = tray::build_tray_menu(app.handle(), None)?;
             let tray_icon = tray::load_tray_icon()?;
 
             let mut tray_builder = TrayIconBuilder::with_id(tray::TRAY_ID)
@@ -839,18 +831,6 @@ fn main() {
                                 log::warn!(
                                     "install_update clicked from tray but no version available"
                                 );
-                            }
-                        });
-                    }
-                    "toggle_beta" => {
-                        let app_clone = app.clone();
-                        tauri::async_runtime::spawn(async move {
-                            let current =
-                                app_clone.state::<tray::TrayMenuState>().beta_enabled();
-                            if let Err(e) =
-                                ui_prefs_cmd::apply_beta_toggle_inner(&app_clone, !current).await
-                            {
-                                log::error!("beta toggle from tray failed: {e}");
                             }
                         });
                     }
@@ -1064,7 +1044,8 @@ fn main() {
             update_commands::get_update_settings,
             update_commands::set_update_settings,
             update_commands::get_bundle_reconcile_state,
-            ui_prefs_cmd::get_beta_enabled,
+            ui_prefs_cmd::get_feature_flags,
+            ui_prefs_cmd::set_feature_flag,
             export_diagnostics,
             integrations_cmd::get_integrations,
             integrations_cmd::set_integration_enabled,

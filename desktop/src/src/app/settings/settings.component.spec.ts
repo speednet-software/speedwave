@@ -7,10 +7,11 @@ import { SettingsComponent } from './settings.component';
 import { LlmProviderComponent } from './llm-provider/llm-provider.component';
 import { SecuritySectionComponent } from './security-section/security-section.component';
 import { TauriService } from '../services/tauri.service';
-import { BetaService } from '../services/beta.service';
+import { FeatureFlagsService } from '../services/feature-flags.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { ThemeService, THEME_IDS, THEME_MODES } from '../services/theme.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
+import { FakeFeatureFlagsService } from '../testing/fake-feature-flags.service';
 import { createDeferred } from '../testing/deferred';
 import { SettingsDirtyService } from './settings-dirty.service';
 
@@ -46,10 +47,10 @@ describe('SettingsComponent', () => {
   let component: SettingsComponent;
   let fixture: ComponentFixture<SettingsComponent>;
   let mockTauri: MockTauriService;
-  const betaEnabled = signal(true);
+  let flags: FakeFeatureFlagsService;
 
   beforeEach(async () => {
-    betaEnabled.set(true);
+    flags = new FakeFeatureFlagsService();
     mockTauri = new MockTauriService();
     setupMockTauri(mockTauri);
 
@@ -57,7 +58,7 @@ describe('SettingsComponent', () => {
       imports: [SettingsComponent, RouterModule.forRoot([])],
       providers: [
         { provide: TauriService, useValue: mockTauri },
-        { provide: BetaService, useValue: { enabled: betaEnabled.asReadonly() } },
+        { provide: FeatureFlagsService, useValue: flags },
       ],
     }).compileComponents();
 
@@ -118,53 +119,67 @@ describe('SettingsComponent', () => {
     expect(advancedEl).not.toBeNull();
   });
 
-  it('renders TranscriptionSectionComponent whether beta is on or off', () => {
-    betaEnabled.set(false);
+  it.each([
+    ['transcription', 'app-transcription-section'],
+    ['notifications', 'app-notifications-section'],
+    ['sleep', 'app-sleep-section'],
+    ['read-only integrations', 'app-access-section'],
+    ['security', 'app-security-section'],
+    ['experimental features', 'app-experimental-section'],
+  ])('renders the %s section whichever flags are on', (_name, selector) => {
     fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('app-transcription-section')).not.toBeNull();
-    betaEnabled.set(true);
+    expect(fixture.nativeElement.querySelector(selector)).not.toBeNull();
+    flags.setFlag('office', true);
+    flags.setFlag('telemetry_settings', true);
     fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('app-transcription-section')).not.toBeNull();
+    expect(fixture.nativeElement.querySelector(selector)).not.toBeNull();
   });
 
-  it('renders NotificationsSectionComponent when beta is enabled', () => {
-    fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('app-notifications-section')).not.toBeNull();
-  });
-
-  it('hides NotificationsSectionComponent when beta is disabled', () => {
-    betaEnabled.set(false);
-    fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('app-notifications-section')).toBeNull();
-  });
-
-  it('renders the Sleep section whether beta is on or off', () => {
-    betaEnabled.set(false);
-    fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('app-sleep-section')).not.toBeNull();
-    betaEnabled.set(true);
-    fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('app-sleep-section')).not.toBeNull();
-  });
-
-  it('renders the Read-only integrations section whether beta is on or off', () => {
-    betaEnabled.set(false);
-    fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('app-access-section')).not.toBeNull();
-    betaEnabled.set(true);
-    fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('app-access-section')).not.toBeNull();
-  });
-
-  it('renders TelemetrySectionComponent when beta is enabled', () => {
-    fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('app-telemetry-section')).not.toBeNull();
-  });
-
-  it('hides TelemetrySectionComponent when beta is disabled', () => {
-    betaEnabled.set(false);
+  it('hides TelemetrySectionComponent while telemetry_settings is off', () => {
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('app-telemetry-section')).toBeNull();
+  });
+
+  it('shows TelemetrySectionComponent once telemetry_settings turns on, and hides it again', () => {
+    fixture.detectChanges();
+    flags.setFlag('telemetry_settings', true);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('app-telemetry-section')).not.toBeNull();
+    flags.setFlag('telemetry_settings', false);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('app-telemetry-section')).toBeNull();
+  });
+
+  it('keeps the telemetry section independent of the office flag', () => {
+    flags.setFlag('office', true);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('app-telemetry-section')).toBeNull();
+  });
+
+  it('places Experimental features after Update and directly above Advanced', () => {
+    fixture.detectChanges();
+    const tags = Array.from(
+      (fixture.nativeElement as HTMLElement).querySelectorAll(
+        'app-update-section, app-experimental-section, app-advanced-section'
+      )
+    ).map((el) => el.tagName.toLowerCase());
+    expect(tags).toEqual([
+      'app-update-section',
+      'app-experimental-section',
+      'app-advanced-section',
+    ]);
+  });
+
+  it('turning on telemetry_settings in Experimental features shows the Telemetry section at once', async () => {
+    fixture.detectChanges();
+    const input = fixture.nativeElement.querySelector(
+      '[data-testid="experimental-telemetry_settings-toggle"]'
+    ) as HTMLInputElement;
+    input.checked = true;
+    input.dispatchEvent(new Event('change'));
+    await fixture.whenStable();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('app-telemetry-section')).not.toBeNull();
   });
 
   it('smooth-scrolls a section into view for a matching URL fragment', () => {

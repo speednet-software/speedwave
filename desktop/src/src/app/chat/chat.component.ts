@@ -21,7 +21,6 @@ import { PlanUsageService } from '../services/plan-usage.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { UiStateService } from '../services/ui-state.service';
 import { LoggerService } from '../services/logger.service';
-import { BetaService } from '../services/beta.service';
 import type { ConversationSummary, ChatAttachment, StagedTranscript } from '../models/chat';
 import { formatContextLabel } from '../models/llm';
 import { ChatHeaderComponent } from './header/chat-header.component';
@@ -108,7 +107,6 @@ export class ChatComponent implements OnInit, OnDestroy {
   readonly projectState = inject(ProjectStateService);
   private readonly planUsage = inject(PlanUsageService);
   readonly ui = inject(UiStateService);
-  private readonly beta = inject(BetaService);
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
   private router = inject(Router);
@@ -458,11 +456,11 @@ export class ChatComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Restarts the current conversation (plus button, ⌘N; ⌘R with beta). With beta on, a tab holding
-   * content or a streaming turn asks for confirmation first; without beta it resets at once.
+   * Restarts the current conversation (⌘R, the session-ended banner). A tab holding content or a
+   * streaming turn asks for confirmation first.
    */
   async newConversation(): Promise<void> {
-    if (this.beta.enabled() && (this.chat.isStreaming || this.chat.hasConversation())) {
+    if (this.chat.isStreaming || this.chat.hasConversation()) {
       this.restartConfirmBody.set(
         this.chat.isStreaming
           ? 'The response in progress will be discarded.'

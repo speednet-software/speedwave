@@ -32,7 +32,7 @@ A composer pick on a live session is a `set_model` control request to that tab's
 
 Model ids have one length cap: `chat.rs::MAX_MODEL_ID_LEN` (128) bounds both `validate_launch_model` and the live pick validator `chat_session_cmd.rs::validate_model_pick`, so a `set_model` pick can no longer be accepted at a length the next spawn rejects. The `default` alias literal is `defaults.rs::DEFAULT_MODEL_ALIAS`, read by the alias list and the picker's default row.
 
-Per-tab model selection is not beta-gated: a composer pick always applies to the current tab. Only the tab strip and its surfaces are beta-gated (desktop-ui rules).
+Per-tab model selection is not behind a flag: a composer pick always applies to the current tab. The tab strip and its surfaces were behind the beta switch until SPEED-719 (ADR-058, amendment 2026-11-27) and are now shown to everyone.
 
 ## Amendment (2026-10-11, settings.json store kept, SPEED-388)
 

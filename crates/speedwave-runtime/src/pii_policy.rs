@@ -278,53 +278,19 @@ fn safe_default_policy() -> ResolvedPiiPolicy {
     }
 }
 
-/// The beta-off no-op policy: nothing tokenized or logged, no rules, no
-/// keywords — the proxy and hub engines compile it to zero rules.
-pub fn disabled_policy() -> ResolvedPiiPolicy {
-    ResolvedPiiPolicy {
-        version: 3,
-        source: ResolvedPiiPolicySource::default(),
-        rules: Vec::new(),
-        keywords: Vec::new(),
-    }
+/// Resolves the detector switch: the user opt-in.
+pub fn resolve_pii_ner(user: Option<&crate::config::PiiPolicyUserConfig>) -> bool {
+    user.and_then(|u| u.pii_ner_enabled).unwrap_or(false)
 }
 
-/// PII tokenization is beta-gated (ADR-058); MDM-forced policies apply
-/// regardless of the toggle — an org policy must never silently vanish.
-pub fn pii_feature_enabled(
-    beta_enabled: bool,
-    managed: Option<&crate::config::ManagedPiiPolicyConfig>,
-) -> bool {
-    beta_enabled || managed.is_some_and(|m| !m.forced_policies.is_empty())
-}
-
-/// Resolves the detector switch: the user opt-in, under the PII feature gate.
-pub fn resolve_pii_ner(
-    beta_enabled: bool,
-    managed: Option<&crate::config::ManagedPiiPolicyConfig>,
-    user: Option<&crate::config::PiiPolicyUserConfig>,
-) -> bool {
-    pii_feature_enabled(beta_enabled, managed)
-        && user.and_then(|u| u.pii_ner_enabled).unwrap_or(false)
-}
-
-/// Resolved detector switch for one project, read from the on-disk layers.
+/// Resolved detector switch for one project, read from the user config.
 pub fn pii_ner_enabled_for_project(project: &str) -> bool {
     let user_config = crate::config::load_user_config().unwrap_or_default();
     resolve_pii_ner(
-        user_config.beta_enabled(),
-        managed_pii_policy_from_disk().as_ref(),
         user_config
             .find_project(project)
             .and_then(|p| p.policy.as_ref()),
     )
-}
-
-fn managed_pii_policy_from_disk() -> Option<crate::config::ManagedPiiPolicyConfig> {
-    crate::managed_config::load_managed_config()
-        .ok()
-        .flatten()
-        .and_then(|m| m.pii_policy)
 }
 
 /// Save-time gate, a superset of the TS load lint so a saved rule never gets silently dropped
@@ -1065,10 +1031,6 @@ pub fn check_pii_policy_at_boot() -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .and_then(|m| m.pii_policy);
 
-    if !pii_feature_enabled(user_config.beta_enabled(), managed.as_ref()) {
-        return Ok(());
-    }
-
     if let Err(e) = resolve_pii_policy(policy, managed.as_ref()) {
         if pii_policy_error_implicates_mdm(policy, managed.as_ref()) {
             return Err(e);
@@ -1367,38 +1329,7 @@ keywords: []
     }
 
     #[test]
-    fn disabled_policy_compiles_to_engine_noop() {
-        let policy = disabled_policy();
-        assert!(policy.rules.is_empty());
-        assert!(policy.keywords.is_empty());
-        let compiled =
-            speedwave_pii_engine::compile_policy_v3(&serde_json::to_string(&policy).unwrap())
-                .expect("the beta-off policy must be a valid v3 document");
-        assert!(compiled.rules().is_empty(), "no rules");
-        assert!(compiled.keywords().is_empty(), "no keywords");
-    }
-
-    #[test]
-    fn pii_feature_enabled_gates_on_beta_or_mdm_forced() {
-        let forced = ManagedPiiPolicyConfig {
-            forced_policies: vec!["gdpr-art32".to_string()],
-        };
-        let empty = ManagedPiiPolicyConfig::default();
-        assert!(pii_feature_enabled(true, None));
-        assert!(pii_feature_enabled(true, Some(&forced)));
-        assert!(
-            pii_feature_enabled(false, Some(&forced)),
-            "MDM-forced policies must apply with beta off"
-        );
-        assert!(!pii_feature_enabled(false, None));
-        assert!(
-            !pii_feature_enabled(false, Some(&empty)),
-            "a managed file forcing nothing must not enable the feature"
-        );
-    }
-
-    #[test]
-    fn resolve_pii_ner_follows_the_user_opt_in_under_the_feature_gate() {
+    fn resolve_pii_ner_follows_the_user_opt_in() {
         let user_on = PiiPolicyUserConfig {
             pii_ner_enabled: Some(true),
             ..Default::default()
@@ -1408,29 +1339,11 @@ keywords: []
             ..Default::default()
         };
         let unset = PiiPolicyUserConfig::default();
-        let forced = ManagedPiiPolicyConfig {
-            forced_policies: vec!["gdpr-art32".to_string()],
-        };
 
-        assert!(resolve_pii_ner(true, None, Some(&user_on)));
-        assert!(!resolve_pii_ner(true, None, Some(&user_off)));
-        assert!(
-            !resolve_pii_ner(true, None, Some(&unset)),
-            "an absent switch is off"
-        );
-        assert!(!resolve_pii_ner(true, None, None));
-        assert!(
-            !resolve_pii_ner(false, None, Some(&user_on)),
-            "the PII feature gate wins over the user opt-in"
-        );
-        assert!(
-            resolve_pii_ner(false, Some(&forced), Some(&user_on)),
-            "MDM-forced policies open the gate for the user opt-in with beta off"
-        );
-        assert!(
-            !resolve_pii_ner(false, Some(&forced), None),
-            "MDM-forced policies never turn the detector on by themselves"
-        );
+        assert!(resolve_pii_ner(Some(&user_on)));
+        assert!(!resolve_pii_ner(Some(&user_off)));
+        assert!(!resolve_pii_ner(Some(&unset)), "an absent switch is off");
+        assert!(!resolve_pii_ner(None));
     }
 
     #[test]

@@ -13,7 +13,7 @@ import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { ProjectStateService } from '../services/project-state.service';
 import { ThemeService, THEME_MODES, type ThemeId, type ThemeMode } from '../services/theme.service';
 import { UiStateService } from '../services/ui-state.service';
-import { BetaService } from '../services/beta.service';
+import { FeatureFlagsService } from '../services/feature-flags.service';
 import { LlmProviderComponent } from './llm-provider/llm-provider.component';
 import { AdvancedSectionComponent } from './advanced-section/advanced-section.component';
 import { TranscriptionSectionComponent } from './transcription-section/transcription-section.component';
@@ -21,6 +21,7 @@ import { TelemetrySectionComponent } from './telemetry-section/telemetry-section
 import { SecuritySectionComponent } from './security-section/security-section.component';
 import { UpdateSectionComponent } from './update-section/update-section.component';
 import { NotificationsSectionComponent } from './notifications-section/notifications-section.component';
+import { ExperimentalSectionComponent } from './experimental-section/experimental-section.component';
 import { SleepSectionComponent } from './sleep-section/sleep-section.component';
 import { AccessSectionComponent } from './access-section/access-section.component';
 import { ProjectPillComponent } from '../project-switcher/project-pill.component';
@@ -80,6 +81,7 @@ const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
     UpdateSectionComponent,
     NotificationsSectionComponent,
     SleepSectionComponent,
+    ExperimentalSectionComponent,
     AccessSectionComponent,
     ProjectPillComponent,
     RecreateOnDirective,
@@ -205,23 +207,21 @@ const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
           (errorOccurred)="error = $event"
         />
 
-        @if (beta.enabled()) {
-          <app-notifications-section (errorOccurred)="error = $event" />
-        }
+        <app-notifications-section (errorOccurred)="error = $event" />
 
-        @if (beta.enabled()) {
+        @if (flags.enabled('telemetry_settings')) {
           <app-telemetry-section (errorOccurred)="error = $event" />
         }
 
-        @if (beta.enabled()) {
-          <app-security-section
-            *appRecreateOn="activeProject()"
-            [project]="activeProject()"
-            (errorOccurred)="error = $event"
-          />
-        }
+        <app-security-section
+          *appRecreateOn="activeProject()"
+          [project]="activeProject()"
+          (errorOccurred)="error = $event"
+        />
 
         <app-update-section [activeProject]="activeProject()" (errorOccurred)="error = $event" />
+
+        <app-experimental-section (errorOccurred)="error = $event" />
 
         <app-advanced-section
           (errorOccurred)="error = $event"
@@ -263,8 +263,8 @@ export class SettingsComponent implements OnInit, OnDestroy {
   readonly theme = inject(ThemeService);
   /** UI state service exposed for the project switcher trigger in the header. */
   readonly ui = inject(UiStateService);
-  /** Beta-features gate: the notifications, telemetry and security sections are beta-only. */
-  readonly beta = inject(BetaService);
+  /** Feature flags: the telemetry section shows only while `telemetry_settings` is on. */
+  readonly flags = inject(FeatureFlagsService);
   /** Dirty-section registry exposed to the template for the leave prompt. */
   readonly dirty = inject(SettingsDirtyService);
 
@@ -292,7 +292,7 @@ export class SettingsComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Smooth-scrolls the section with `id` into view, retrying while a deferred (beta-gated) section mounts.
+   * Smooth-scrolls the section with `id` into view, retrying while a deferred (flag-gated) section mounts.
    * @param id - the fragment id to scroll to; null/empty does nothing
    * @param attempt - internal retry counter
    */

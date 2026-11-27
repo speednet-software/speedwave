@@ -124,7 +124,7 @@ pub(crate) fn start_if_active_wants() {
 }
 
 /// Stops the detector unless the active project wants it; never starts it. Call after a
-/// switch, a Settings save and a beta toggle.
+/// switch and a Settings save.
 pub(crate) fn stop_unless_active_wants() {
     apply_for_active_project(Transition::StopUnlessWanted);
 }

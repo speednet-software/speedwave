@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { signal } from '@angular/core';
 import { Router } from '@angular/router';
 import { RouterModule } from '@angular/router';
 import { By } from '@angular/platform-browser';
@@ -10,10 +9,10 @@ import { ChatMessageListComponent } from './message-list/chat-message-list.compo
 import { ModalOverlayComponent } from '../shell/modal-overlay/modal-overlay.component';
 import { TauriService } from '../services/tauri.service';
 import { ChatStateService } from '../services/chat-state.service';
+import { ChatSessionStore } from '../services/chat-session-store';
 import { ProjectStateService } from '../services/project-state.service';
 import { UiStateService } from '../services/ui-state.service';
 import { LoggerService } from '../services/logger.service';
-import { BetaService } from '../services/beta.service';
 import { TranscriptionService } from '../services/transcription.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 import { createDeferred } from '../testing/deferred';
@@ -33,7 +32,6 @@ describe('ChatComponent', () => {
   let projectState: ProjectStateService;
   let uiState: UiStateService;
   let mockLogger: ReturnType<typeof makeMockLogger>;
-  let betaEnabled: ReturnType<typeof signal<boolean>>;
 
   beforeEach(async () => {
     mockTauri = new MockTauriService();
@@ -66,13 +64,11 @@ describe('ChatComponent', () => {
       }
     };
 
-    betaEnabled = signal(false);
     await TestBed.configureTestingModule({
       imports: [ChatComponent, RouterModule.forRoot([])],
       providers: [
         { provide: TauriService, useValue: mockTauri },
         { provide: LoggerService, useValue: mockLogger },
-        { provide: BetaService, useValue: { enabled: betaEnabled.asReadonly() } },
       ],
     }).compileComponents();
 
@@ -100,11 +96,13 @@ describe('ChatComponent', () => {
       };
 
       const resumePromise = component.resumeConversation('11111111-1111-1111-1111-111111111111');
-      await Promise.resolve();
-      expect(chatState.loadingTranscriptFromState()).toBe(true);
+      const anyLoading = (): boolean =>
+        [...chatState.tabs().values()].some((store) => store.loadingTranscriptFromState());
+      await vi.waitFor(() => expect(anyLoading()).toBe(true));
 
       pendingGetConversation.resolve();
       await resumePromise;
+      expect(anyLoading()).toBe(false);
       expect(chatState.loadingTranscriptFromState()).toBe(false);
     });
 
@@ -124,7 +122,7 @@ describe('ChatComponent', () => {
       projectState.activeProject.set('test');
       const dispose = vi.fn();
       const begin = vi
-        .spyOn(chatState.activeStore(), 'beginStartingSession')
+        .spyOn(ChatSessionStore.prototype, 'beginStartingSession')
         .mockReturnValue(dispose);
 
       const pendingGetConversation = createDeferred();
@@ -136,14 +134,17 @@ describe('ChatComponent', () => {
         return undefined;
       };
 
-      const resumePromise = component.resumeConversation('11111111-1111-1111-1111-111111111111');
-      await Promise.resolve();
-      expect(begin).toHaveBeenCalledTimes(1);
-      expect(dispose).not.toHaveBeenCalled();
+      try {
+        const resumePromise = component.resumeConversation('11111111-1111-1111-1111-111111111111');
+        await vi.waitFor(() => expect(begin).toHaveBeenCalledTimes(1));
+        expect(dispose).not.toHaveBeenCalled();
 
-      pendingGetConversation.resolve();
-      await resumePromise;
-      expect(dispose).toHaveBeenCalledTimes(1);
+        pendingGetConversation.resolve();
+        await resumePromise;
+        expect(dispose).toHaveBeenCalledTimes(1);
+      } finally {
+        begin.mockRestore();
+      }
     });
   });
 
@@ -449,7 +450,7 @@ describe('ChatComponent', () => {
       fixture2.destroy();
     });
 
-    describe('with chat tabs (beta)', () => {
+    describe('with chat tabs', () => {
       function transcriptChip(): Element | null {
         return fixture.nativeElement.querySelector('[data-testid="composer-transcript"]');
       }
@@ -461,7 +462,6 @@ describe('ChatComponent', () => {
       }
 
       beforeEach(async () => {
-        betaEnabled.set(true);
         projectState.activeProject.set('test');
         projectState.status.set('ready');
         await component.ngOnInit();
@@ -942,21 +942,7 @@ describe('ChatComponent', () => {
       expect(component.restartConfirmOpen()).toBe(false);
     });
 
-    it('without beta, resets at once even when the tab holds conversation content (no dialog)', async () => {
-      chatState._setState({
-        messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
-        currentBlocks: [],
-      });
-      chatState.isStreaming = false;
-
-      await component.newConversation();
-
-      expect(component.restartConfirmOpen()).toBe(false);
-      expect(chatState.messages).toEqual([]);
-    });
-
     it('shows the confirmation instead of resetting when idle with conversation content', async () => {
-      betaEnabled.set(true);
       chatState._setState({
         messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
         currentBlocks: [],
@@ -971,7 +957,6 @@ describe('ChatComponent', () => {
     });
 
     it('confirming the idle-conversation dialog resets all state', async () => {
-      betaEnabled.set(true);
       chatState._setState({
         messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
         currentBlocks: [],
@@ -1120,7 +1105,6 @@ describe('ChatComponent', () => {
     });
 
     it('⌘R on an idle conversation shows the dialog; confirming performs the plus-button reset', async () => {
-      betaEnabled.set(true);
       projectState.activeProject.set('test');
       projectState.status.set('ready');
       await component.ngOnInit();
@@ -1152,7 +1136,6 @@ describe('ChatComponent', () => {
 
   describe('mid-stream restart confirmation', () => {
     beforeEach(async () => {
-      betaEnabled.set(true);
       projectState.activeProject.set('test');
       projectState.status.set('ready');
       await component.ngOnInit();
@@ -1216,16 +1199,6 @@ describe('ChatComponent', () => {
       expect(component.restartConfirmOpen()).toBe(false);
       expect(chatState.messages).toHaveLength(1);
       expect(chatState.isStreaming).toBe(true);
-    });
-
-    it('without beta, a mid-stream restart resets at once without the dialog', async () => {
-      betaEnabled.set(false);
-
-      await component.newConversation();
-
-      expect(component.restartConfirmOpen()).toBe(false);
-      expect(chatState.messages).toEqual([]);
-      expect(chatState.isStreaming).toBe(false);
     });
 
     it('dismissing the dialog (closed output) performs no reset', async () => {
