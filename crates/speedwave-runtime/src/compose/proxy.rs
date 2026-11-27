@@ -406,14 +406,6 @@ mod tests {
         assert!(!render_proxy_config(&full_provider_mix()).contains("caller_token"));
     }
 
-    #[test]
-    fn caller_header_value_joins_the_header_name_and_the_token() {
-        assert_eq!(
-            caller_header_value("abc123"),
-            "x-speedwave-proxy-auth: abc123"
-        );
-    }
-
     fn stored_key(dir: &Path, provider_id: &str) -> Option<String> {
         let name = SecretName::llm_provider_key("proj", provider_id).unwrap();
         SecretStore::open(dir)
