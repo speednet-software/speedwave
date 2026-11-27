@@ -131,17 +131,17 @@ describe('ComposerComponent', () => {
   });
 
   describe('dictionary and writing suggestions', () => {
-    function assistAttributes(): readonly (string | null)[] {
+    function assistAttributes(): Record<string, string | null> {
       const ta = textarea();
-      return [
-        ta.getAttribute('spellcheck'),
-        ta.getAttribute('autocorrect'),
-        ta.getAttribute('writingsuggestions'),
-      ];
+      return {
+        spellcheck: ta.getAttribute('spellcheck'),
+        autocorrect: ta.getAttribute('autocorrect'),
+        writingsuggestions: ta.getAttribute('writingsuggestions'),
+      };
     }
 
-    const ON = ['true', 'on', 'true'];
-    const OFF = ['false', 'off', 'false'];
+    const ON = { spellcheck: 'true', autocorrect: 'on', writingsuggestions: 'true' };
+    const OFF = { spellcheck: 'false', autocorrect: 'off', writingsuggestions: 'false' };
 
     it('turns them on for an empty field', () => {
       expect(assistAttributes()).toEqual(ON);

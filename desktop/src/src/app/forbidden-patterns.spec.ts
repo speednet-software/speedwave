@@ -39,8 +39,16 @@ function walk(dir: string, extensions: readonly string[]): string[] {
   return out;
 }
 
-const DICTIONARY_ON_LABEL =
-  'dictionary, autocorrect or writing suggestions switched on outside the chat composer (index.html turns them off app-wide)';
+const DICTIONARY_ON: ForbiddenPattern = {
+  label:
+    'dictionary, autocorrect or writing suggestions not switched off outside the chat composer (index.html turns them off app-wide)',
+  regex:
+    /\b(?:spellcheck|writingsuggestions)\b(?!\]?\s*=\s*["']{1,2}false["']{1,2})|\bautocorrect\b(?!\]?\s*=\s*["']{1,2}off["']{1,2})/i,
+  extensions: ['.ts', '.html'],
+  onlyUnder: 'app',
+  ignoreFiles: ['composer.component.ts'],
+  ignoreSuffixes: ['.spec.ts'],
+};
 
 const FORBIDDEN: readonly ForbiddenPattern[] = [
   {
@@ -102,15 +110,7 @@ const FORBIDDEN: readonly ForbiddenPattern[] = [
     extensions: ['.ts', '.html'],
     onlyUnder: 'app/meeting-transcription',
   },
-  {
-    label: DICTIONARY_ON_LABEL,
-    regex:
-      /\b(?:spellcheck\s*=\s*["']?true|autocorrect\s*=\s*["']?on|writingsuggestions\s*=\s*["']?true)|\[(?:attr\.)?(?:spellcheck|autocorrect|writingsuggestions)\]\s*=\s*"(?!\s*(?:false|'false'|'off')\s*")/,
-    extensions: ['.ts', '.html'],
-    onlyUnder: 'app',
-    ignoreFiles: ['composer.component.ts'],
-    ignoreSuffixes: ['.spec.ts'],
-  },
+  DICTIONARY_ON,
 ];
 
 function gatherViolations(pattern: ForbiddenPattern): string[] {
@@ -141,19 +141,25 @@ describe('forbidden-patterns — static-analysis guardrail', () => {
   }
 
   describe('dictionary guard', () => {
-    const guard = FORBIDDEN.find((p) => p.label === DICTIONARY_ON_LABEL);
-
     it.each([
       '<input spellcheck="true" />',
       '<input spellcheck=true />',
+      '<input spellcheck />',
+      '<input spellcheck="" />',
+      '<input spellcheck="TRUE" />',
       '<input autocorrect="on" />',
+      '<input autocorrect="true" />',
+      '<input autocorrect="" />',
       '<textarea writingsuggestions="true"></textarea>',
+      '<textarea writingsuggestions=""></textarea>',
       '<input [attr.spellcheck]="enabled()" />',
       '<input [spellcheck]="enabled" />',
+      '<input [attr.autocorrect]="false" />',
       "<input [attr.autocorrect]=\"enabled() ? 'on' : 'off'\" />",
       '<input [attr.writingsuggestions]="enabled()" />',
+      "host: { '[attr.spellcheck]': 'enabled()' },",
     ])('flags %s', (line) => {
-      expect(guard?.regex.test(line)).toBe(true);
+      expect(DICTIONARY_ON.regex.test(line)).toBe(true);
     });
 
     it.each([
@@ -161,9 +167,10 @@ describe('forbidden-patterns — static-analysis guardrail', () => {
       '<input autocorrect="off" />',
       '<input writingsuggestions="false" />',
       '<input [attr.spellcheck]="false" />',
+      '<input [attr.autocorrect]="\'off\'" />',
       '<input type="text" />',
     ])('allows %s', (line) => {
-      expect(guard?.regex.test(line)).toBe(false);
+      expect(DICTIONARY_ON.regex.test(line)).toBe(false);
     });
   });
 });
