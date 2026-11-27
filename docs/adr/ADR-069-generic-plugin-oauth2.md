@@ -39,7 +39,7 @@ A self-hosted IdP (e.g. GLPI[^8]) has no fixed `authorize_url`/`token_url` — t
 - SSRF validator (shared SSOT) — `crates/speedwave-runtime/src/url_validation.rs`.
 - Generic refresh provider + discriminated grant state — `crates/speedwave-runtime/src/oauth_refresh/generic.rs` and `store.rs` (moved from `mcp-servers/oauth` by ADR-111).
 - Host-side flows — `desktop/src-tauri/src/plugin_oauth_cmd.rs` (authorization_code) and the shared `oauth_flow::run_device_poll` for device-code.
-- Compose injection of the fixed compat URL and bearer file into the containers of enabled OAuth plugins — `crates/speedwave-runtime/src/compose/mod.rs` (`apply_oauth_compat_in`). Refresh runs in `oauth_refresh::spawn_session_refresher`, started by the CLI (`crates/speedwave-cli/src/main.rs`) and Desktop (`desktop/src-tauri/src/session_refresh.rs`) (ADR-111).
+- Compose injection of the fixed compat URL and bearer file into the containers of enabled OAuth plugins — `crates/speedwave-runtime/src/compose/mod.rs` (`apply_oauth_compat_in`). Refresh runs in `oauth_refresh::spawn_session_refresher`, started by the CLI (`crates/speedwave-cli/src/commands/session.rs`) and Desktop (`desktop/src-tauri/src/session_refresh.rs`) (ADR-111).
 - UI — `desktop/src/src/app/shared/oauth-connect/` (shared connect component), `plugin-credentials-form`, `plugin-detail`.
 
 ## Refresh-retry in plugin workers

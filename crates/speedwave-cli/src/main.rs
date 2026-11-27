@@ -1,200 +1,34 @@
 //! `speedwave` CLI: runs Claude Code in a hardened per-project container.
 
-use speedwave_runtime::compose::{self, SecurityCheck, SecurityRule};
 use speedwave_runtime::config;
 use speedwave_runtime::consts;
-use speedwave_runtime::engine_path;
-use speedwave_runtime::oauth_refresh::{self, RefreshOutcome};
-use speedwave_runtime::plugin;
-use speedwave_runtime::runtime::{detect_runtime, ensure_exec_healthy};
-use speedwave_runtime::update;
 use speedwave_runtime::update_channel::{self, UpdateChannel};
-use speedwave_runtime::validation;
-use strum::IntoEnumIterator;
 
-use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-mod cli_logger;
-mod paste_watcher;
-mod release_signature;
-mod terminal_restore;
-
-const START_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
-
-fn sanitize_output_line(line: &str) -> String {
-    speedwave_runtime::log_sanitizer::sanitize(line)
-}
-
-fn redact_err(e: &impl std::fmt::Display) -> String {
-    sanitize_output_line(&format!("{e:#}"))
-}
-
-#[expect(
-    clippy::print_stdout,
-    clippy::print_stderr,
-    reason = "the CLI's single output sink — every other call site routes through out!/err!"
-)]
-fn emit(to_stderr: bool, args: std::fmt::Arguments<'_>) {
-    let line = sanitize_output_line(&args.to_string());
-    if to_stderr {
-        eprintln!("{line}");
-    } else {
-        println!("{line}");
-    }
-}
+use std::time::{SystemTime, UNIX_EPOCH};
 
 macro_rules! out {
-    () => { emit(false, format_args!("")) };
-    ($($arg:tt)*) => { emit(false, format_args!($($arg)*)) };
+    () => { $crate::emit(false, format_args!("")) };
+    ($($arg:tt)*) => { $crate::emit(false, format_args!($($arg)*)) };
 }
 
 macro_rules! err {
-    () => { emit(true, format_args!("")) };
-    ($($arg:tt)*) => { emit(true, format_args!($($arg)*)) };
+    () => { $crate::emit(true, format_args!("")) };
+    ($($arg:tt)*) => { $crate::emit(true, format_args!($($arg)*)) };
 }
 
-#[derive(Debug, PartialEq)]
-enum CliAction {
-    PluginInstall(String),
-    PluginList,
-    PluginRemove(String),
-    PluginEnable { service_id: String, project: String },
-    PluginDisable { service_id: String, project: String },
-    Check,
-    Init(Option<String>),
-    Login(Option<String>),
-    Logout(Option<String>),
-    SelfUpdate,
-    Update(Option<String>),
-    Run(Option<String>),
-    Help,
-    Version,
-}
+mod cli_action;
+mod cli_logger;
+mod command_needs;
+mod commands;
+mod paste_watcher;
+mod project_command;
+mod release_signature;
+mod terminal_restore;
 
-fn parse_project_flag(args: &[String], subcommand: &str) -> Result<String, String> {
-    let flag_pos = args.iter().position(|a| a == "--project").ok_or(format!(
-        "usage: speedwave plugin {subcommand} <service_id> --project <project>"
-    ))?;
-    args.get(flag_pos + 1).cloned().ok_or(format!(
-        "usage: speedwave plugin {subcommand} <service_id> --project <project>"
-    ))
-}
-
-fn parse_optional_project_tail(
-    tail: &[String],
-    subcommand: &str,
-) -> Result<Option<String>, String> {
-    let usage = || format!("usage: speedwave {subcommand} [--project <project>]");
-    let mut iter = tail.iter();
-    let Some(first) = iter.next() else {
-        return Ok(None);
-    };
-    let project = if let Some(value) = first.strip_prefix("--project=") {
-        if value.is_empty() {
-            return Err(usage());
-        }
-        value.to_string()
-    } else if first == "--project" {
-        iter.next().cloned().ok_or_else(usage)?
-    } else {
-        return Err(format!("unexpected argument: '{first}'. {}", usage()));
-    };
-    if let Some(extra) = iter.next() {
-        return Err(format!("unexpected argument: '{extra}'. {}", usage()));
-    }
-    Ok(Some(project))
-}
-
-fn reject_extra_args(args: &[String], expected_len: usize, usage: &str) -> Result<(), String> {
-    match args.get(expected_len) {
-        Some(extra) => Err(format!("unexpected argument: '{extra}'. usage: {usage}")),
-        None => Ok(()),
-    }
-}
-
-fn parse_action(args: &[String]) -> Result<CliAction, String> {
-    match args.get(1).map(|s| s.as_str()) {
-        Some("--help" | "-h" | "help") => Ok(CliAction::Help),
-        Some("--version" | "-V") => Ok(CliAction::Version),
-        Some("plugin") => match args.get(2).map(|s| s.as_str()) {
-            Some("install") => {
-                let path = args
-                    .get(3)
-                    .ok_or("usage: speedwave plugin install <zip-path>".to_string())?;
-                reject_extra_args(args, 4, "speedwave plugin install <zip-path>")?;
-                Ok(CliAction::PluginInstall(path.clone()))
-            }
-            Some("list") => {
-                reject_extra_args(args, 3, "speedwave plugin list")?;
-                Ok(CliAction::PluginList)
-            }
-            Some("remove") => {
-                let slug = args
-                    .get(3)
-                    .ok_or("usage: speedwave plugin remove <slug>".to_string())?;
-                reject_extra_args(args, 4, "speedwave plugin remove <slug>")?;
-                Ok(CliAction::PluginRemove(slug.clone()))
-            }
-            Some("enable") => {
-                let service_id = args.get(3).ok_or(
-                    "usage: speedwave plugin enable <service_id> --project <project>".to_string(),
-                )?;
-                let project = parse_project_flag(args, "enable")?;
-                Ok(CliAction::PluginEnable {
-                    service_id: service_id.clone(),
-                    project,
-                })
-            }
-            Some("disable") => {
-                let service_id = args.get(3).ok_or(
-                    "usage: speedwave plugin disable <service_id> --project <project>".to_string(),
-                )?;
-                let project = parse_project_flag(args, "disable")?;
-                Ok(CliAction::PluginDisable {
-                    service_id: service_id.clone(),
-                    project,
-                })
-            }
-            _ => Err("usage: speedwave plugin [install|list|remove|enable|disable]".to_string()),
-        },
-        Some("check") => {
-            reject_extra_args(args, 2, "speedwave check")?;
-            Ok(CliAction::Check)
-        }
-        Some("init") => {
-            let name = args.get(2).cloned();
-            reject_extra_args(args, 3, "speedwave init [name]")?;
-            Ok(CliAction::Init(name))
-        }
-        Some("self-update") => {
-            reject_extra_args(args, 2, "speedwave self-update")?;
-            Ok(CliAction::SelfUpdate)
-        }
-        Some("update") => Ok(CliAction::Update(parse_optional_project_tail(
-            &args[2..],
-            "update",
-        )?)),
-        Some("login") => Ok(CliAction::Login(parse_optional_project_tail(
-            &args[2..],
-            "login",
-        )?)),
-        Some("logout") => Ok(CliAction::Logout(parse_optional_project_tail(
-            &args[2..],
-            "logout",
-        )?)),
-        Some(flag) if flag.starts_with('-') => Ok(CliAction::Run(parse_optional_project_tail(
-            &args[1..],
-            "run",
-        )?)),
-        Some(unknown) => Err(format!(
-            "unknown command: '{unknown}'. Run 'speedwave --help' for usage."
-        )),
-        None => Ok(CliAction::Run(None)),
-    }
-}
+use cli_action::{parse_action, CliAction};
+use command_needs::command_needs;
+use project_command::prepare;
 
 const REPO_OWNER: &str = "speednet-software";
 const REPO_NAME: &str = "speedwave";
@@ -203,58 +37,132 @@ const MAX_SIGNATURE_BYTES: u64 = 4096;
 const UPDATE_CHECK_INTERVAL_SECS: u64 =
     speedwave_runtime::consts::UPDATE_CHECK_INTERVAL_HOURS as u64 * 3600;
 
-fn skip_plugin_audit(action: &CliAction) -> bool {
-    matches!(
-        action,
-        CliAction::Init(_)
-            | CliAction::PluginInstall(_)
-            | CliAction::PluginList
-            | CliAction::PluginRemove(_)
-    )
-}
-
 #[derive(serde::Serialize, serde::Deserialize)]
 struct UpdateCheckCache {
     last_check: u64,
     latest_version: String,
 }
 
-fn update_cache_path() -> PathBuf {
-    consts::data_dir().join("update-check.json")
-}
+fn main() -> anyhow::Result<()> {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let sanitized = speedwave_runtime::log_sanitizer::sanitize(&format!("{info}"));
+        log::error!("PANIC: {sanitized}");
+        #[cfg(debug_assertions)]
+        default_hook(info);
+        #[cfg(not(debug_assertions))]
+        {
+            let _ = &default_hook;
+            if !cli_logger::terminal_handed_over() {
+                err!("PANIC: {sanitized}");
+            }
+        }
+    }));
 
-#[cfg(test)]
-fn update_cache_path_in(data_dir: &std::path::Path) -> PathBuf {
-    data_dir.join("update-check.json")
-}
+    cli_logger::init();
 
-fn read_update_cache() -> Option<UpdateCheckCache> {
-    let path = update_cache_path();
-    let data = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&data).ok()
-}
-
-fn write_update_cache(cache: &UpdateCheckCache) {
-    let path = update_cache_path();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    if std::env::var(consts::BUNDLE_RESOURCES_ENV).is_err() {
+        let marker = consts::data_dir().join(consts::RESOURCES_MARKER);
+        if let Ok(contents) = std::fs::read_to_string(&marker) {
+            let resources_dir = contents.trim();
+            if !resources_dir.is_empty() {
+                log::debug!("loaded resources dir from marker: {resources_dir}");
+                std::env::set_var(consts::BUNDLE_RESOURCES_ENV, resources_dir);
+            }
+        }
     }
-    let _ = serde_json::to_string(cache)
-        .ok()
-        .and_then(|json| std::fs::write(path, json).ok());
+
+    let args: Vec<String> = std::env::args().collect();
+
+    let action = parse_action(&args).unwrap_or_else(|msg| {
+        err!("{}", msg);
+        std::process::exit(1);
+    });
+
+    if action == CliAction::Help {
+        print_help();
+        std::process::exit(0);
+    }
+
+    if action == CliAction::Version {
+        out!("speedwave {}", env!("SPEEDWAVE_VERSION"));
+        std::process::exit(0);
+    }
+
+    if action == CliAction::SelfUpdate {
+        if let Err(e) = run_self_update() {
+            let e = redact_err(&e);
+            err!("Self-update failed: {e}");
+            std::process::exit(1);
+        }
+        std::process::exit(0);
+    }
+
+    maybe_print_update_hint();
+
+    if let Err(e) = config::heal_llm_config_on_disk() {
+        log::warn!("llm config heal failed: {}", redact_err(&e));
+    }
+
+    if command_needs(&action).plugin_audit {
+        if let Err(failures) = speedwave_runtime::plugin::audit_all() {
+            err!("Plugin verification failed:");
+            for (slug, reason) in &failures {
+                err!("  • {slug}: {reason}");
+            }
+            err!(
+                "\nFix: speedwave plugin remove <slug>   OR   \
+                 rm -rf ~/.speedwave/plugins/<slug>/\nThen reinstall a signed plugin."
+            );
+            std::process::exit(2);
+        }
+    }
+
+    if let Err(e) = speedwave_runtime::config::check_telemetry_policy_at_boot() {
+        err!("Organization policy error: {}", redact_err(&e));
+        err!("Contact your administrator to correct the managed configuration.");
+        std::process::exit(2);
+    }
+
+    if let Err(e) = speedwave_runtime::pii_policy::check_pii_policy_at_boot() {
+        err!("Organization policy error: {}", redact_err(&e));
+        err!("Contact your administrator to correct the managed configuration.");
+        std::process::exit(2);
+    }
+
+    let prepared = prepare(&action, consts::data_dir())?;
+    commands::run(&action, prepared)
 }
 
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
+fn print_help() {
+    out!(
+        "\
+speedwave — run Claude Code in a hardened container per project
 
-fn is_app_bundle() -> bool {
-    std::env::current_exe()
-        .map(|p| p.to_string_lossy().contains(".app/"))
-        .unwrap_or(false)
+USAGE:
+    speedwave         [--project <p>] Start Claude Code for the active project (or <p>)
+    speedwave check                   Run security + OS prerequisite checks
+    speedwave init [name]             Register the current directory as a project
+    speedwave login   [--project <p>] Run Anthropic OAuth login (sign-in starts automatically)
+    speedwave logout  [--project <p>] Delete Claude Code credentials for the project
+    speedwave update  [--project <p>] Rebuild container images for the active project (or <p>)
+    speedwave self-update             Download the latest speedwave CLI binary
+
+    speedwave plugin install <zip>    Install a plugin from a signed ZIP
+    speedwave plugin list             List installed plugins
+    speedwave plugin remove <slug>    Uninstall a plugin
+    speedwave plugin enable  <id> --project <project>   Enable a plugin per-project
+    speedwave plugin disable <id> --project <project>   Disable a plugin per-project
+
+    speedwave --help | -h | help       Show this help and exit
+    speedwave --version | -V           Show the version and exit
+
+The active project is the one selected in Speedwave Desktop; `--project <p>`
+overrides it. The working directory does not select the project.
+
+Most commands require Speedwave Desktop to be running.
+Full documentation: https://speedwave.dev/docs",
+    );
 }
 
 fn maybe_print_update_hint() {
@@ -296,21 +204,42 @@ fn maybe_print_update_hint() {
     });
 }
 
-fn run_rebuild(exe: &std::path::Path) -> anyhow::Result<()> {
-    let status = speedwave_runtime::binary::interactive_command(&exe.to_string_lossy())
-        .arg("update")
-        .env_remove(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV)
-        .status()
-        .map_err(|e| anyhow::anyhow!("Failed to run container image rebuild: {e}"))?;
-    if !status.success() {
-        anyhow::bail!(
-            "Container image rebuild failed (exit {}). \
-             Ensure Speedwave Desktop is running, then run `speedwave update` \
-             again.",
-            status.code().unwrap_or(-1)
-        );
+fn update_cache_path() -> PathBuf {
+    consts::data_dir().join("update-check.json")
+}
+
+#[cfg(test)]
+fn update_cache_path_in(data_dir: &std::path::Path) -> PathBuf {
+    data_dir.join("update-check.json")
+}
+
+fn read_update_cache() -> Option<UpdateCheckCache> {
+    let path = update_cache_path();
+    let data = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&data).ok()
+}
+
+fn write_update_cache(cache: &UpdateCheckCache) {
+    let path = update_cache_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
     }
-    Ok(())
+    let _ = serde_json::to_string(cache)
+        .ok()
+        .and_then(|json| std::fs::write(path, json).ok());
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn is_app_bundle() -> bool {
+    std::env::current_exe()
+        .map(|p| p.to_string_lossy().contains(".app/"))
+        .unwrap_or(false)
 }
 
 fn run_self_update() -> anyhow::Result<()> {
@@ -379,6 +308,23 @@ fn run_self_update() -> anyhow::Result<()> {
         out!("Already up to date ({}).", current);
     }
 
+    Ok(())
+}
+
+fn run_rebuild(exe: &std::path::Path) -> anyhow::Result<()> {
+    let status = speedwave_runtime::binary::interactive_command(&exe.to_string_lossy())
+        .arg("update")
+        .env_remove(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV)
+        .status()
+        .map_err(|e| anyhow::anyhow!("Failed to run container image rebuild: {e}"))?;
+    if !status.success() {
+        anyhow::bail!(
+            "Container image rebuild failed (exit {}). \
+             Ensure Speedwave Desktop is running, then run `speedwave update` \
+             again.",
+            status.code().unwrap_or(-1)
+        );
+    }
     Ok(())
 }
 
@@ -455,849 +401,26 @@ fn tag_is_newer_than(current: &str, tag: &str) -> anyhow::Result<bool> {
     Ok(candidate_version > current_version)
 }
 
-fn validate_project_name(name: &str) -> Result<(), String> {
-    validation::validate_project_name(name).map_err(|e| e.to_string())
+fn sanitize_output_line(line: &str) -> String {
+    speedwave_runtime::log_sanitizer::sanitize(line)
 }
 
-fn build_login_exec_cmd(base_url: &str, unset_keys: &[&str]) -> Vec<String> {
-    let script = format!(
-        "unset {}; export ANTHROPIC_BASE_URL={base_url}; exec {} auth login --claudeai",
-        unset_keys.join(" "),
-        consts::CLAUDE_BINARY,
-    );
-    vec!["sh".to_string(), "-lc".to_string(), script]
+fn redact_err(e: &impl std::fmt::Display) -> String {
+    sanitize_output_line(&format!("{e:#}"))
 }
 
-#[cfg(windows)]
-const LOGIN_PASTE_STEP: &[&str] = &[
-    "2. Paste it at the \"Paste code here\" prompt with Ctrl+Shift+V",
-    "   or a right-click, then press Enter. Plain Ctrl+V may not paste there.",
-];
-
-#[cfg(not(windows))]
-const LOGIN_PASTE_STEP: &[&str] =
-    &["2. Paste it at the \"Paste code here\" prompt with Cmd+V, then press Enter."];
-
-fn login_instructions() -> String {
-    let mut lines = vec![
-        "Anthropic sign-in".to_string(),
-        String::new(),
-        "1. Open the link printed below, sign in and copy the code it shows.".to_string(),
-    ];
-    lines.extend(LOGIN_PASTE_STEP.iter().map(|line| line.to_string()));
-    lines.push("3. Close this terminal when sign-in is done.".to_string());
-    framed(&lines)
-}
-
-fn framed(lines: &[String]) -> String {
-    let width = lines
-        .iter()
-        .map(|line| line.chars().count())
-        .max()
-        .unwrap_or(0);
-    let rule = "─".repeat(width + 2);
-    let body: String = lines
-        .iter()
-        .map(|line| format!("│ {line:<width$} │\n"))
-        .collect();
-    format!("┌{rule}┐\n{body}└{rule}┘")
-}
-
-fn select_anthropic_in(
-    user_config: &mut config::SpeedwaveUserConfig,
-    project: &str,
-    evidence: config::AnthropicEvidence,
-) -> bool {
-    let Some(entry) = user_config.find_project_mut(project) else {
-        return false;
-    };
-    let claude = entry.claude.get_or_insert_with(Default::default);
-    let llm = claude.llm.get_or_insert_with(Default::default);
-    let migrated = config::migrate_llm(llm, evidence);
-    let selected = llm.set_active_to_anthropic();
-    selected || migrated
-}
-
-fn select_anthropic_after_login(project: &str) -> anyhow::Result<()> {
-    config::with_config_lock(|| {
-        let mut user_config = config::load_user_config()?;
-        let evidence = config::AnthropicEvidence::detect_in(consts::data_dir().as_path(), project);
-        if select_anthropic_in(&mut user_config, project, evidence) {
-            config::save_user_config(&user_config)?;
-        }
-        Ok(())
-    })
-}
-
-fn print_help() {
-    out!(
-        "\
-speedwave — run Claude Code in a hardened container per project
-
-USAGE:
-    speedwave         [--project <p>] Start Claude Code for the active project (or <p>)
-    speedwave check                   Run security + OS prerequisite checks
-    speedwave init [name]             Register the current directory as a project
-    speedwave login   [--project <p>] Run Anthropic OAuth login (sign-in starts automatically)
-    speedwave logout  [--project <p>] Delete Claude Code credentials for the project
-    speedwave update                  Rebuild container images for the active project
-    speedwave self-update             Download the latest speedwave CLI binary
-
-    speedwave plugin install <zip>    Install a plugin from a signed ZIP
-    speedwave plugin list             List installed plugins
-    speedwave plugin remove <slug>    Uninstall a plugin
-    speedwave plugin enable  <id> --project <project>   Enable a plugin per-project
-    speedwave plugin disable <id> --project <project>   Disable a plugin per-project
-
-    speedwave --help | -h | help       Show this help and exit
-    speedwave --version | -V           Show the version and exit
-
-The active project is the one selected in Speedwave Desktop; `--project <p>`
-overrides it. The working directory does not select the project.
-
-Most commands require Speedwave Desktop to be running.
-Full documentation: https://speedwave.dev/docs",
-    );
-}
-
-fn runtime_not_available() -> ! {
-    err!("Speedwave runtime is not running.");
-    err!("CLI requires Speedwave Desktop to be running with a completed setup.");
-    err!("1. Open Speedwave.app");
-    err!("2. Complete the Setup Wizard");
-    err!("3. Start your project");
-    err!("Then run `speedwave` again.");
-    std::process::exit(1);
-}
-
-fn main() -> anyhow::Result<()> {
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let sanitized = speedwave_runtime::log_sanitizer::sanitize(&format!("{info}"));
-        log::error!("PANIC: {sanitized}");
-        #[cfg(debug_assertions)]
-        default_hook(info);
-        #[cfg(not(debug_assertions))]
-        {
-            let _ = &default_hook;
-            if !cli_logger::terminal_handed_over() {
-                err!("PANIC: {sanitized}");
-            }
-        }
-    }));
-
-    cli_logger::init();
-
-    if std::env::var(consts::BUNDLE_RESOURCES_ENV).is_err() {
-        let marker = consts::data_dir().join(consts::RESOURCES_MARKER);
-        if let Ok(contents) = std::fs::read_to_string(&marker) {
-            let resources_dir = contents.trim();
-            if !resources_dir.is_empty() {
-                log::debug!("loaded resources dir from marker: {resources_dir}");
-                std::env::set_var(consts::BUNDLE_RESOURCES_ENV, resources_dir);
-            }
-        }
+#[expect(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "the CLI's single output sink — every other call site routes through out!/err!"
+)]
+fn emit(to_stderr: bool, args: std::fmt::Arguments<'_>) {
+    let line = sanitize_output_line(&args.to_string());
+    if to_stderr {
+        eprintln!("{line}");
+    } else {
+        println!("{line}");
     }
-
-    let args: Vec<String> = std::env::args().collect();
-
-    let action = parse_action(&args).unwrap_or_else(|msg| {
-        err!("{}", msg);
-        std::process::exit(1);
-    });
-
-    if action == CliAction::Help {
-        print_help();
-        std::process::exit(0);
-    }
-
-    if action == CliAction::Version {
-        out!("speedwave {}", env!("SPEEDWAVE_VERSION"));
-        std::process::exit(0);
-    }
-
-    if action == CliAction::SelfUpdate {
-        if let Err(e) = run_self_update() {
-            let e = redact_err(&e);
-            err!("Self-update failed: {e}");
-            std::process::exit(1);
-        }
-        std::process::exit(0);
-    }
-
-    maybe_print_update_hint();
-
-    if let Err(e) = config::heal_llm_config_on_disk() {
-        log::warn!("llm config heal failed: {}", redact_err(&e));
-    }
-
-    if !skip_plugin_audit(&action) {
-        if let Err(failures) = speedwave_runtime::plugin::audit_all() {
-            err!("Plugin verification failed:");
-            for (slug, reason) in &failures {
-                err!("  • {slug}: {reason}");
-            }
-            err!(
-                "\nFix: speedwave plugin remove <slug>   OR   \
-                 rm -rf ~/.speedwave/plugins/<slug>/\nThen reinstall a signed plugin."
-            );
-            std::process::exit(2);
-        }
-    }
-
-    if let Err(e) = speedwave_runtime::config::check_telemetry_policy_at_boot() {
-        err!("Organization policy error: {}", redact_err(&e));
-        err!("Contact your administrator to correct the managed configuration.");
-        std::process::exit(2);
-    }
-
-    if let Err(e) = speedwave_runtime::pii_policy::check_pii_policy_at_boot() {
-        err!("Organization policy error: {}", redact_err(&e));
-        err!("Contact your administrator to correct the managed configuration.");
-        std::process::exit(2);
-    }
-
-    if let CliAction::Init(ref custom_name) = action {
-        let cwd = std::env::current_dir()?;
-        let canonical = std::fs::canonicalize(&cwd)?;
-        let raw_canonical = canonical.to_string_lossy();
-        let canonical_str = engine_path::strip_extended_length_prefix(&raw_canonical).to_string();
-        let name = match custom_name {
-            Some(n) => n.clone(),
-            None => PathBuf::from(&canonical_str)
-                .file_name()
-                .map(|f| f.to_string_lossy().to_string())
-                .ok_or_else(|| anyhow::anyhow!("Cannot determine directory name"))?,
-        };
-        validation::validate_project_name(&name)?;
-
-        match speedwave_runtime::project::add_project(&name, &canonical_str) {
-            Ok(()) => {
-                out!("Project '{}' registered at {}", name, canonical_str);
-            }
-            Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("already registered") || msg.contains("already exists") {
-                    out!("{}", msg);
-                } else {
-                    return Err(e);
-                }
-            }
-        }
-        std::process::exit(0);
-    }
-
-    if let CliAction::Update(_) = action {
-        let runtime = detect_runtime();
-        if !runtime.is_available() {
-            runtime_not_available();
-        }
-        let user_config = config::load_user_config().unwrap_or_else(|e| {
-            err!("Failed to load config: {err}", err = redact_err(&e));
-            std::process::exit(1);
-        });
-        let project_name = resolve_action_project(&action, &user_config)?;
-        validate_project_name(&project_name).map_err(|e| anyhow::anyhow!(e))?;
-        cli_logger::attach_file(&consts::cli_log_path(&project_name));
-        out!("Updating containers for project '{}'...", project_name);
-        match update::update_containers(&runtime, &project_name) {
-            Ok(result) => {
-                out!(
-                    "Updated {} containers ({} images rebuilt)",
-                    result.containers_recreated,
-                    result.images_rebuilt
-                );
-                std::process::exit(0);
-            }
-            Err(e) => {
-                let msg = redact_err(&e);
-                err!("Container update failed: {msg}");
-                if update::is_torn_down(&e) {
-                    match update::rollback_containers(&runtime, &project_name) {
-                        Ok(()) => err!("Rolled back to the previous container state."),
-                        Err(rollback_err) => {
-                            let rollback_err = redact_err(&rollback_err);
-                            err!(
-                                "Automatic rollback also failed: {rollback_err}. \
-                                 Run `speedwave` to start containers manually."
-                            );
-                        }
-                    }
-                }
-                std::process::exit(1);
-            }
-        }
-    }
-
-    if let CliAction::Logout(_) = action {
-        let user_config = config::load_user_config().unwrap_or_else(|e| {
-            err!("Failed to load config: {err}", err = redact_err(&e));
-            std::process::exit(1);
-        });
-        let project_name = resolve_action_project(&action, &user_config)?;
-        validate_project_name(&project_name).map_err(|e| anyhow::anyhow!(e))?;
-        cli_logger::attach_file(&consts::cli_log_path(&project_name));
-        let removed = speedwave_runtime::claude_home::remove_claude_credentials(
-            consts::data_dir(),
-            &project_name,
-        )?;
-        if removed == 0 {
-            err!("No Claude credentials found for project '{project_name}'.");
-        } else {
-            err!("Removed Claude credentials for project '{project_name}' ({removed} file(s)).");
-        }
-        std::process::exit(0);
-    }
-
-    match &action {
-        CliAction::PluginInstall(path) => {
-            let rt = detect_runtime();
-            let rt_ref: Option<&speedwave_runtime::runtime::LockedRuntime> =
-                if rt.is_available() { Some(&rt) } else { None };
-            let outcome = plugin::install_plugin(std::path::Path::new(path), rt_ref, &mut |_| {})?;
-            match outcome {
-                plugin::InstallOutcome::Installed(manifest) => {
-                    out!(
-                        "Plugin '{}' ({}) installed successfully",
-                        manifest.name,
-                        manifest.slug
-                    );
-                }
-                plugin::InstallOutcome::InstalledPendingBuild(manifest) => {
-                    err!(
-                        "Plugin '{}' ({}) installed; image build failed and will retry on next launch",
-                        manifest.name, manifest.slug
-                    );
-                }
-            }
-            std::process::exit(0);
-        }
-        CliAction::PluginList => {
-            let plugins = plugin::list_for_ui();
-            if plugins.is_empty() {
-                out!("No plugins installed");
-            } else {
-                for e in &plugins {
-                    let name = e
-                        .manifest
-                        .as_ref()
-                        .map(|m| m.name.as_str())
-                        .unwrap_or(&e.slug);
-                    let version = e
-                        .manifest
-                        .as_ref()
-                        .map(|m| m.version.as_str())
-                        .unwrap_or("?");
-                    if e.verification_status == plugin::VerificationStatus::Verified {
-                        out!("{name} ({}): {version}  [verified]", e.slug);
-                    } else {
-                        let reason = e.verification_error.as_deref().unwrap_or("unverified");
-                        out!("{name} ({}): {version}  [UNVERIFIED: {reason}]", e.slug);
-                    }
-                }
-            }
-            std::process::exit(0);
-        }
-        CliAction::PluginRemove(slug) => {
-            let rt = detect_runtime();
-            let rt_ref: Option<&speedwave_runtime::runtime::LockedRuntime> =
-                if rt.is_available() { Some(&rt) } else { None };
-            plugin::remove_plugin(slug, rt_ref)?;
-            out!("Plugin '{}' removed", slug);
-            std::process::exit(0);
-        }
-        CliAction::PluginEnable {
-            service_id,
-            project,
-        } => {
-            let entries = plugin::list_for_ui();
-            let entry = entries
-                .iter()
-                .find(|e| {
-                    e.manifest.as_ref().map(|m| m.service_id.as_deref()) == Some(Some(service_id))
-                        || e.slug == *service_id
-                })
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "No installed plugin with service_id '{}'. Run `speedwave plugin list` to see installed plugins.",
-                        service_id
-                    )
-                })?;
-            if entry.verification_status != plugin::VerificationStatus::Verified {
-                return Err(anyhow::anyhow!(
-                    "plugin '{}' cannot be enabled: {}. Reinstall a signed plugin or remove it.",
-                    service_id,
-                    entry
-                        .verification_error
-                        .as_deref()
-                        .unwrap_or("signature verification failed")
-                ));
-            }
-            let display_name = entry
-                .manifest
-                .as_ref()
-                .map(|m| m.name.clone())
-                .unwrap_or_else(|| service_id.clone());
-            validate_project_name(project).map_err(|e| anyhow::anyhow!(e))?;
-            cli_logger::attach_file(&consts::cli_log_path(project));
-            config::with_config_lock(|| {
-                let mut user_config = config::load_user_config()?;
-                let cfg_entry = user_config
-                    .projects
-                    .iter_mut()
-                    .find(|p| p.name == *project)
-                    .ok_or_else(|| anyhow::anyhow!("project '{}' not found in config", project))?;
-                let integrations = cfg_entry.integrations.get_or_insert_with(Default::default);
-                integrations.set_plugin_enabled(service_id, true);
-                config::save_user_config(&user_config)
-            })?;
-            out!(
-                "Plugin '{}' (service_id: {}) enabled for project '{}'",
-                display_name,
-                service_id,
-                project
-            );
-            std::process::exit(0);
-        }
-        CliAction::PluginDisable {
-            service_id,
-            project,
-        } => {
-            let entries = plugin::list_for_ui();
-            let entry = entries
-                .iter()
-                .find(|e| {
-                    e.manifest.as_ref().map(|m| m.service_id.as_deref()) == Some(Some(service_id))
-                        || e.slug == *service_id
-                })
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "No installed plugin with service_id '{}'. Run `speedwave plugin list` to see installed plugins.",
-                        service_id
-                    )
-                })?;
-            let display_name = entry
-                .manifest
-                .as_ref()
-                .map(|m| m.name.clone())
-                .unwrap_or_else(|| service_id.clone());
-            validate_project_name(project).map_err(|e| anyhow::anyhow!(e))?;
-            cli_logger::attach_file(&consts::cli_log_path(project));
-            config::with_config_lock(|| {
-                let mut user_config = config::load_user_config()?;
-                let cfg_entry = user_config
-                    .projects
-                    .iter_mut()
-                    .find(|p| p.name == *project)
-                    .ok_or_else(|| anyhow::anyhow!("project '{}' not found in config", project))?;
-                let integrations = cfg_entry.integrations.get_or_insert_with(Default::default);
-                integrations.set_plugin_enabled(service_id, false);
-                config::save_user_config(&user_config)
-            })?;
-            out!(
-                "Plugin '{}' (service_id: {}) disabled for project '{}'",
-                display_name,
-                service_id,
-                project
-            );
-            std::process::exit(0);
-        }
-        _ => {}
-    }
-
-    let runtime = detect_runtime();
-
-    if !runtime.is_available() {
-        if !runtime.is_installed() {
-            runtime_not_available();
-        }
-        err!("Starting the Speedwave runtime (it was stopped)...");
-        if let Err(e) = runtime.ensure_ready() {
-            err!("Failed to start the runtime: {}", redact_err(&e));
-            std::process::exit(1);
-        }
-    }
-
-    let _cli_session = match speedwave_runtime::session::CliSessionGuard::acquire(consts::data_dir())
-    {
-        Ok(guard) => Some(guard),
-        Err(e) => {
-            log::warn!("CLI session lock unavailable: {e}");
-            None
-        }
-    };
-
-    speedwave_runtime::provision::ensure_windows_invariants();
-
-    let mut user_config = config::load_user_config().unwrap_or_else(|e| {
-        err!("Failed to load config: {err}", err = redact_err(&e));
-        std::process::exit(1);
-    });
-
-    let project_name = resolve_action_project(&action, &user_config)?;
-
-    validate_project_name(&project_name).map_err(|e| anyhow::anyhow!(e))?;
-    cli_logger::attach_file(&consts::cli_log_path(&project_name));
-
-    if matches!(action, CliAction::Login(_)) {
-        if let Err(e) = select_anthropic_after_login(&project_name) {
-            err!(
-                "Login failed: could not select Anthropic: {}",
-                redact_err(&e)
-            );
-            std::process::exit(1);
-        }
-        user_config = config::load_user_config().unwrap_or_else(|e| {
-            err!("Failed to load config: {err}", err = redact_err(&e));
-            std::process::exit(1);
-        });
-    }
-
-    let project_dir = user_config
-        .find_project(&project_name)
-        .map(|p| std::path::PathBuf::from(&p.dir))
-        .ok_or_else(|| {
-            let available = user_config
-                .projects
-                .iter()
-                .map(|p| p.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            anyhow::anyhow!(
-                "project '{project_name}' not found in config. Available projects: {available}"
-            )
-        })?;
-
-    if let Err(e) = speedwave_runtime::cloudstorage::check_project_readable_or_err(&project_dir) {
-        err!(
-            "{}",
-            speedwave_runtime::cloudstorage::TCC_USER_REMEDIATION_MESSAGE
-        );
-        err!("({e})");
-        std::process::exit(1);
-    }
-
-    let (resolved, integrations) =
-        config::resolve_project_config(&project_dir, &user_config, &project_name);
-
-    let cleaned = speedwave_runtime::legacy_token_cleanup::run_legacy_token_cleanup_at_startup();
-    if cleaned > 0 {
-        log::info!("legacy token cleanup sanitised {cleaned} project(s)");
-    }
-
-    let _ = speedwave_runtime::oauth_state_migration::run_oauth_state_migration_at_startup();
-
-    let host_bridges = compose::host_bridges_from_disk();
-
-    let compose_yml = compose::render_compose(
-        &project_name,
-        &project_dir.to_string_lossy(),
-        &resolved,
-        &integrations,
-        Some(&runtime),
-        &host_bridges,
-    )?;
-
-    let manifests = plugin::list_installed_plugins().unwrap_or_else(|e| {
-        log::warn!("Failed to list installed plugins: {e}");
-        Vec::new()
-    });
-    let expected_paths =
-        compose::SecurityExpectedPaths::compute(&project_name, &project_dir.to_string_lossy())?
-            .with_telemetry_locked(resolved.telemetry.any_locked);
-
-    let prereq_violations = speedwave_runtime::os_prereqs::check_os_prereqs();
-
-    if action == CliAction::Check {
-        let security_violations =
-            SecurityCheck::run(&compose_yml, &project_name, &manifests, &expected_paths);
-
-        let os_warnings = speedwave_runtime::os_prereqs::check_os_warnings();
-        for w in &os_warnings {
-            err!("  WARNING: {w}\n");
-        }
-
-        let use_color = std::io::IsTerminal::is_terminal(&std::io::stderr());
-        let green = if use_color { "\x1b[32m" } else { "" };
-        let red = if use_color { "\x1b[31m" } else { "" };
-        let reset = if use_color { "\x1b[0m" } else { "" };
-
-        if prereq_violations.is_empty() && security_violations.is_empty() {
-            out!("speedwave check OK -- all system checks passed");
-            err!();
-            for rule in SecurityRule::iter() {
-                err!("  {green}OK{reset}    {}  {}", rule, rule.description());
-            }
-            std::process::exit(0);
-        } else {
-            err!("speedwave check FAILED -- containers NOT started\n");
-            let failed_rules: std::collections::HashSet<SecurityRule> =
-                security_violations.iter().map(|v| v.rule).collect();
-            for rule in SecurityRule::iter() {
-                if failed_rules.contains(&rule) {
-                    err!("  {red}FAIL{reset}  {}  {}", rule, rule.description());
-                } else {
-                    err!("  {green}OK{reset}    {}  {}", rule, rule.description());
-                }
-            }
-            if !prereq_violations.is_empty() {
-                err!();
-                for v in &prereq_violations {
-                    err!("  {} -- {}", v.rule, v.message);
-                    err!("  Fix: {}\n", v.remediation);
-                }
-            }
-            if !security_violations.is_empty() {
-                err!();
-                for v in &security_violations {
-                    err!("  [{}] {} -- {}", v.container, v.rule, v.message);
-                    err!("  Fix: {}\n", v.remediation);
-                }
-            }
-            std::process::exit(1);
-        }
-    }
-
-    if !prereq_violations.is_empty() {
-        err!("speedwave check FAILED -- containers NOT started\n");
-        for v in &prereq_violations {
-            err!("  {} -- {}", v.rule, v.message);
-            err!("  Fix: {}\n", v.remediation);
-        }
-        std::process::exit(1);
-    }
-    speedwave_runtime::fs_security::ensure_data_dir_permissions(&project_name)?;
-    let violations = SecurityCheck::run(&compose_yml, &project_name, &manifests, &expected_paths);
-    if !violations.is_empty() {
-        err!("speedwave check FAILED -- containers NOT started\n");
-        for v in &violations {
-            err!("  [{}] {} -- {}", v.container, v.rule, v.message);
-            err!("  Fix: {}\n", v.remediation);
-        }
-        std::process::exit(1);
-    }
-
-    let bundle_manifest = speedwave_runtime::bundle::load_current_bundle_manifest()?;
-    let enabled_imgs = speedwave_runtime::build::enabled_images(&integrations);
-    let prior_state = speedwave_runtime::bundle::load_bundle_state();
-    let built = speedwave_runtime::build::build_missing_images_locked(
-        &runtime,
-        &enabled_imgs,
-        &bundle_manifest,
-    )
-    .map_err(|e| anyhow::anyhow!("container image build failed: {}", redact_err(&e)))?;
-    if built > 0 {
-        out!("Built {built} container image(s) for this app version");
-        match speedwave_runtime::build::resolve_build_root() {
-            Ok(root) => {
-                if let Err(e) = speedwave_runtime::bundle::sync_claude_resources(&root) {
-                    err!(
-                        "Warning: claude-resources sync failed: {} (skills may be stale)",
-                        redact_err(&e)
-                    );
-                }
-            }
-            Err(e) => err!(
-                "Warning: build root unavailable, claude-resources not synced: {}",
-                redact_err(&e)
-            ),
-        }
-        speedwave_runtime::build::prune_superseded_images(
-            &runtime,
-            &prior_state.applied_image_hashes,
-            prior_state.applied_bundle_id.as_deref(),
-            &bundle_manifest,
-        );
-    }
-    let enabled_plugin_ids: Vec<&str> = integrations.enabled_plugin_service_ids();
-    plugin::ensure_plugin_images(&runtime, &enabled_plugin_ids)
-        .map_err(|e| anyhow::anyhow!("plugin image build failed: {}", redact_err(&e)))?;
-
-    runtime.transaction(&project_name, |runtime| -> anyhow::Result<()> {
-        compose::save_compose(&project_name, &compose_yml)?;
-        speedwave_runtime::runtime::compose_validate_with_retry(runtime, &project_name)?;
-        runtime.compose_up(&project_name)?;
-        Ok(())
-    })?;
-
-    let container_name = format!("{}_{}_claude", consts::compose_prefix(), project_name);
-    ensure_exec_healthy(&runtime, &project_name, &container_name)?;
-
-    let _paste_watcher = paste_watcher::PasteWatcher::spawn(project_dir.clone());
-
-    if let CliAction::Login(_) = action {
-        err!("{}", login_instructions());
-        let instance_id = speedwave_runtime::session::new_instance_id();
-        let cmd = stamped_exec_argv(
-            &instance_id,
-            build_login_exec_cmd(
-                compose::PROXY_BASE_URL,
-                compose::anthropic_login_unset_keys(),
-            ),
-        );
-        let cmd_ref: Vec<&str> = cmd.iter().map(String::as_str).collect();
-        let terminal = cli_logger::hand_over_terminal();
-        let status_result = runtime.container_exec(&container_name, &cmd_ref).status();
-        terminal_restore::sanitize_host_terminal();
-        drop(terminal);
-        reap_instance(&runtime, &container_name, &instance_id);
-        let status = status_result?;
-        std::process::exit(
-            status
-                .code()
-                .unwrap_or(if status.success() { 0 } else { 1 }),
-        );
-    }
-
-    let reconnect_warnings = ReconnectWarnings::default();
-    let started = oauth_refresh::refresh_now_with_timeout(&project_name, START_REFRESH_TIMEOUT);
-    for refreshed in started {
-        if refreshed.outcome == RefreshOutcome::ReconnectRequired {
-            reconnect_warnings.warn_once(&refreshed.service);
-        }
-    }
-    let _session_refresher = oauth_refresh::spawn_session_refresher(&project_name, {
-        let reconnect_warnings = reconnect_warnings.clone();
-        move |refreshed| {
-            if refreshed.outcome == RefreshOutcome::ReconnectRequired {
-                reconnect_warnings.warn_once(&refreshed.service);
-            }
-        }
-    });
-
-    let instance_id = speedwave_runtime::session::new_instance_id();
-    let mut tail = vec![consts::CLAUDE_BINARY.to_string()];
-    tail.extend(resolved.flags.iter().cloned());
-    let exec_argv = stamped_exec_argv(&instance_id, tail);
-    let exec_cmd: Vec<&str> = exec_argv.iter().map(String::as_str).collect();
-    reconnect_warnings.hold();
-    let terminal = cli_logger::hand_over_terminal();
-    let status_result = runtime.container_exec(&container_name, &exec_cmd).status();
-    terminal_restore::sanitize_host_terminal();
-    drop(terminal);
-    reap_instance(&runtime, &container_name, &instance_id);
-    for message in reconnect_warnings.release() {
-        err!("{message}");
-    }
-    let status = status_result?;
-
-    let is_oom = speedwave_runtime::resources::is_oom_exit(&status);
-    if is_oom {
-        err!("{}", speedwave_runtime::resources::OOM_MESSAGE);
-    }
-    let code = status.code().unwrap_or(if is_oom { 137 } else { 1 });
-    std::process::exit(code);
-}
-
-#[derive(Clone, Default)]
-struct ReconnectWarnings(Arc<Mutex<ReconnectState>>);
-
-#[derive(Default)]
-struct ReconnectState {
-    reported: HashSet<String>,
-    deferred: Vec<String>,
-    held: bool,
-}
-
-impl ReconnectWarnings {
-    fn warn_once(&self, service: &str) {
-        if let Some(message) = self.report(service) {
-            err!("{message}");
-        }
-    }
-
-    fn hold(&self) {
-        self.lock().held = true;
-    }
-
-    fn release(&self) -> Vec<String> {
-        let mut state = self.lock();
-        state.held = false;
-        std::mem::take(&mut state.deferred)
-    }
-
-    fn report(&self, service: &str) -> Option<String> {
-        let mut state = self.lock();
-        if !state.reported.insert(service.to_string()) {
-            return None;
-        }
-        let message = reconnect_warning(service);
-        if state.held {
-            state.deferred.push(message);
-            return None;
-        }
-        Some(message)
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, ReconnectState> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-}
-
-fn reconnect_warning(service: &str) -> String {
-    let name = oauth_refresh::service_display_name(service);
-    format!(
-        "Warning: the {name} sign-in expired and Speedwave cannot refresh it. \
-         Reconnect {name} in Speedwave Desktop: Settings, Integrations, {name}."
-    )
-}
-
-fn stamped_exec_argv(instance_id: &str, tail: Vec<String>) -> Vec<String> {
-    let mut argv = speedwave_runtime::session::instance_env_argv(instance_id);
-    argv.extend(tail);
-    argv
-}
-
-fn reap_instance(
-    runtime: &speedwave_runtime::runtime::LockedRuntime,
-    container: &str,
-    instance_id: &str,
-) {
-    if let Some(warning) = reap_warning(runtime, container, instance_id) {
-        err!("{warning}");
-    }
-}
-
-fn reap_warning(
-    runtime: &speedwave_runtime::runtime::LockedRuntime,
-    container: &str,
-    instance_id: &str,
-) -> Option<String> {
-    let e = speedwave_runtime::session::reap_instance(runtime, container, instance_id).err()?;
-    Some(format!(
-        "Warning: Claude Code may still be running in '{container}': {}",
-        redact_err(&e)
-    ))
-}
-
-fn resolve_action_project(
-    action: &CliAction,
-    user_config: &config::SpeedwaveUserConfig,
-) -> anyhow::Result<String> {
-    match action {
-        CliAction::Run(Some(name))
-        | CliAction::Login(Some(name))
-        | CliAction::Logout(Some(name))
-        | CliAction::Update(Some(name)) => {
-            user_config.require_project(name)?;
-            Ok(name.clone())
-        }
-        _ => resolve_project_fallback(user_config),
-    }
-}
-
-fn resolve_project_fallback(user_config: &config::SpeedwaveUserConfig) -> anyhow::Result<String> {
-    user_config
-        .active_project
-        .clone()
-        .or_else(|| user_config.projects.first().map(|p| p.name.clone()))
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "No project configured. Run `speedwave init` or complete the Speedwave.app setup."
-            )
-        })
 }
 
 #[cfg(test)]
@@ -1328,621 +451,6 @@ mod tests {
     #[cfg(windows)]
     const FIXTURE_SIGNATURE: &str =
         include_str!("../test-fixtures/release-signature/archive-windows.tar.gz.sig");
-
-    #[test]
-    fn cli_bare_run_syncs_resources_when_images_rebuilt() {
-        let source = include_str!("main.rs");
-        let run_flow = source
-            .find("Built {built} container image(s)")
-            .expect("bare-run rebuild message must exist");
-        let window = &source[run_flow..run_flow + 900];
-        assert!(
-            window.contains("sync_claude_resources"),
-            "bare-run rebuild must sync claude-resources alongside images"
-        );
-    }
-
-    #[test]
-    fn interactive_exec_sanitizes_host_terminal_before_exit() {
-        let source = include_str!("main.rs");
-        let exec = source
-            .find(".container_exec(&container_name, &exec_cmd)")
-            .expect("interactive exec must exist");
-        let sanitize = source[exec..]
-            .find("sanitize_host_terminal()")
-            .expect("interactive exec must sanitize the host terminal after status()");
-        let oom = source[exec..]
-            .find("is_oom_exit(&status)")
-            .expect("OOM check must exist after the interactive exec");
-        assert!(
-            sanitize < oom,
-            "sanitize must run before the OOM message so it renders on a sane terminal"
-        );
-    }
-
-    #[test]
-    fn login_exec_sanitizes_host_terminal_before_exit() {
-        let source = include_str!("main.rs");
-        let exec = source
-            .find(".container_exec(&container_name, &cmd_ref)")
-            .expect("login exec must exist");
-        let window = &source[exec..exec + 300];
-        assert!(
-            window.contains("sanitize_host_terminal()"),
-            "login exec must sanitize the host terminal after status()"
-        );
-    }
-
-    #[test]
-    fn interactive_exec_sanitizes_and_reaps_before_propagating_spawn_error() {
-        let source = include_str!("main.rs");
-        let exec = source
-            .find(".container_exec(&container_name, &exec_cmd)")
-            .expect("interactive exec must exist");
-        let status_line_end = source[exec..]
-            .find(';')
-            .map(|i| exec + i)
-            .expect("status() statement must be terminated");
-        assert!(
-            !source[exec..status_line_end].contains('?'),
-            "the interactive exec status must be captured without an early `?` return"
-        );
-        let sanitize = source[status_line_end..]
-            .find("sanitize_host_terminal()")
-            .map(|i| status_line_end + i)
-            .expect("sanitize must run after the captured status");
-        let propagate = source[status_line_end..]
-            .find("status_result?")
-            .map(|i| status_line_end + i)
-            .expect("the captured status_result must be propagated after cleanup");
-        assert!(
-            sanitize < propagate,
-            "sanitize/reap must run before the spawn error is propagated"
-        );
-    }
-
-    #[test]
-    fn login_exec_sanitizes_and_reaps_before_propagating_spawn_error() {
-        let source = include_str!("main.rs");
-        let exec = source
-            .find(".container_exec(&container_name, &cmd_ref)")
-            .expect("login exec must exist");
-        let status_line_end = source[exec..]
-            .find(';')
-            .map(|i| exec + i)
-            .expect("status() statement must be terminated");
-        assert!(
-            !source[exec..status_line_end].contains('?'),
-            "the login exec status must be captured without an early `?` return"
-        );
-        let sanitize = source[status_line_end..]
-            .find("sanitize_host_terminal()")
-            .map(|i| status_line_end + i)
-            .expect("sanitize must run after the captured status");
-        let propagate = source[status_line_end..]
-            .find("status_result?")
-            .map(|i| status_line_end + i)
-            .expect("the captured status_result must be propagated after cleanup");
-        assert!(
-            sanitize < propagate,
-            "sanitize/reap must run before the spawn error is propagated"
-        );
-    }
-
-    #[test]
-    fn cli_aligns_nerdctl_before_compose_work() {
-        let source = include_str!("main.rs");
-        let avail = source
-            .find("runtime_not_available();")
-            .expect("availability gate must exist");
-        let align = source
-            .find("ensure_windows_invariants();")
-            .expect("CLI must apply Windows invariants (nerdctl pin + metadata automount)");
-        let txn = source
-            .find("runtime.transaction(")
-            .expect("compose transaction must exist");
-        assert!(
-            avail < align && align < txn,
-            "Windows invariants must run after availability, before compose work"
-        );
-    }
-
-    #[test]
-    fn run_builds_missing_images_before_compose_transaction() {
-        let src = include_str!("main.rs");
-        let build_pos = src
-            .find("build_missing_images_locked")
-            .expect("run path must build missing images");
-        let tx_pos = src
-            .find("runtime.transaction(&project_name")
-            .expect("run path must use the compose transaction");
-        assert!(
-            build_pos < tx_pos,
-            "missing-image build (at {build_pos}) must precede the compose \
-             transaction (at {tx_pos}) — builds stay outside compose locks"
-        );
-    }
-
-    #[test]
-    fn cli_prunes_superseded_images_after_build() {
-        let src = include_str!("main.rs");
-        let build_pos = src
-            .find("build_missing_images_locked")
-            .expect("run path must call build_missing_images_locked");
-        let prune_pos = src
-            .find("prune_superseded_images")
-            .expect("run path must prune superseded images after build");
-        assert!(
-            build_pos < prune_pos,
-            "prune_superseded_images (at {prune_pos}) must follow build_missing_images_locked \
-             (at {build_pos}) — prune needs the previous state captured before the build"
-        );
-        let state_pos = src
-            .find("load_bundle_state()")
-            .expect("run path must load prior bundle state for GC");
-        assert!(
-            state_pos < build_pos,
-            "load_bundle_state (at {state_pos}) must precede build_missing_images_locked \
-             (at {build_pos}) — prune compares applied hashes vs new manifest"
-        );
-    }
-
-    #[test]
-    fn parse_action_no_args_returns_run() {
-        let args = vec!["speedwave".to_string()];
-        assert_eq!(parse_action(&args).unwrap(), CliAction::Run(None));
-    }
-
-    #[test]
-    fn parse_action_help_long_flag() {
-        let args = vec!["speedwave".to_string(), "--help".to_string()];
-        assert_eq!(parse_action(&args).unwrap(), CliAction::Help);
-    }
-
-    #[test]
-    fn parse_action_help_short_flag() {
-        let args = vec!["speedwave".to_string(), "-h".to_string()];
-        assert_eq!(parse_action(&args).unwrap(), CliAction::Help);
-    }
-
-    #[test]
-    fn parse_action_help_subcommand() {
-        let args = vec!["speedwave".to_string(), "help".to_string()];
-        assert_eq!(parse_action(&args).unwrap(), CliAction::Help);
-    }
-
-    #[test]
-    fn parse_action_version_long_flag() {
-        let args = vec!["speedwave".to_string(), "--version".to_string()];
-        assert_eq!(parse_action(&args).unwrap(), CliAction::Version);
-    }
-
-    #[test]
-    fn parse_action_version_short_flag() {
-        let args = vec!["speedwave".to_string(), "-V".to_string()];
-        assert_eq!(parse_action(&args).unwrap(), CliAction::Version);
-    }
-
-    #[test]
-    fn main_handles_help_before_runtime_check() {
-        let source = include_str!("main.rs");
-        let main_start = source
-            .find("\nfn main() -> anyhow::Result<()>")
-            .expect("main.rs must define fn main()");
-        let main_body = &source[main_start..];
-        let help_idx = main_body
-            .find("if action == CliAction::Help")
-            .expect("main() must handle CliAction::Help");
-        let runtime_idx = main_body
-            .find("runtime_not_available()")
-            .expect("main() must have at least one runtime_not_available call site");
-        assert!(
-            help_idx < runtime_idx,
-            "CliAction::Help must be handled BEFORE any runtime_not_available \
-             call site inside main() — otherwise `speedwave --help` fails \
-             when Desktop is not running"
-        );
-    }
-
-    #[test]
-    fn main_handles_version_before_runtime_check() {
-        let source = include_str!("main.rs");
-        let main_start = source
-            .find("\nfn main() -> anyhow::Result<()>")
-            .expect("main.rs must define fn main()");
-        let main_body = &source[main_start..];
-        let version_idx = main_body
-            .find("if action == CliAction::Version")
-            .expect("main() must handle CliAction::Version");
-        let runtime_idx = main_body
-            .find("runtime_not_available()")
-            .expect("main() must have at least one runtime_not_available call site");
-        assert!(
-            version_idx < runtime_idx,
-            "CliAction::Version must be handled BEFORE any runtime_not_available \
-             call site inside main() — otherwise `speedwave --version` fails \
-             when Desktop is not running"
-        );
-    }
-
-    #[test]
-    fn cli_does_not_spawn_host_workers() {
-        let source = include_str!("main.rs");
-        let forbidden = [(concat!("McpOsProcess::", "spawn"), "mcp-os")];
-        for (needle, worker) in forbidden {
-            assert!(
-                !source.contains(needle),
-                "CLI must not spawn the {worker} worker ({needle}) — Desktop is the \
-                 sole supervisor; two supervisors race kill_stale_node and crash \
-                 the Claude exec with exit 137 (ADR-068)"
-            );
-        }
-    }
-
-    #[test]
-    fn reconnect_warning_is_reported_once_per_service() {
-        let warnings = ReconnectWarnings::default();
-        assert!(warnings.report("slack").is_some());
-        assert!(warnings.report("slack").is_none());
-        assert!(warnings.report("sharepoint").is_some());
-    }
-
-    #[test]
-    fn reconnect_warning_when_not_held_is_returned_at_once() {
-        let warnings = ReconnectWarnings::default();
-
-        assert_eq!(warnings.report("slack"), Some(reconnect_warning("slack")));
-        assert!(warnings.release().is_empty());
-    }
-
-    #[test]
-    fn reconnect_warning_during_a_hold_is_deferred_and_released_once_per_service() {
-        let warnings = ReconnectWarnings::default();
-        warnings.hold();
-
-        assert!(warnings.report("slack").is_none());
-        assert!(warnings.report("slack").is_none());
-        assert!(warnings.report("sharepoint").is_none());
-
-        assert_eq!(
-            warnings.release(),
-            vec![reconnect_warning("slack"), reconnect_warning("sharepoint")]
-        );
-        assert!(warnings.release().is_empty());
-    }
-
-    #[test]
-    fn reconnect_warning_after_release_is_returned_at_once_again() {
-        let warnings = ReconnectWarnings::default();
-        warnings.hold();
-        assert!(warnings.report("slack").is_none());
-        let _ = warnings.release();
-
-        assert!(warnings.report("slack").is_none());
-        assert_eq!(
-            warnings.report("sharepoint"),
-            Some(reconnect_warning("sharepoint"))
-        );
-    }
-
-    #[test]
-    fn reconnect_warning_names_the_service_and_the_desktop_path() {
-        assert_eq!(
-            reconnect_warning("slack"),
-            "Warning: the Slack sign-in expired and Speedwave cannot refresh it. \
-             Reconnect Slack in Speedwave Desktop: Settings, Integrations, Slack."
-        );
-        assert!(reconnect_warning("no-such-service")
-            .contains("Settings, Integrations, no-such-service."));
-    }
-
-    #[test]
-    fn paste_watcher_spawns_before_login_branch_exit() {
-        let source = include_str!("main.rs");
-        let spawn_idx = source
-            .find(concat!("PasteWatcher::", "spawn"))
-            .expect("main.rs must spawn the PasteWatcher");
-        let login_idx = source
-            .find("if let CliAction::Login(_) = action")
-            .expect("main.rs must handle the login branch");
-        assert!(
-            spawn_idx < login_idx,
-            "PasteWatcher::spawn must run BEFORE the login branch — the login \
-             branch ends in process::exit, so a watcher spawned after it never \
-             runs during `speedwave login` and clipboard image paste fails there"
-        );
-    }
-
-    #[test]
-    fn parse_action_check() {
-        let args = vec!["speedwave".to_string(), "check".to_string()];
-        assert_eq!(parse_action(&args).unwrap(), CliAction::Check);
-    }
-
-    #[test]
-    fn parse_action_plugin_install() {
-        let args = vec![
-            "speedwave".to_string(),
-            "plugin".to_string(),
-            "install".to_string(),
-            "/tmp/foo.zip".to_string(),
-        ];
-        assert_eq!(
-            parse_action(&args).unwrap(),
-            CliAction::PluginInstall("/tmp/foo.zip".to_string())
-        );
-    }
-
-    #[test]
-    fn parse_action_plugin_list() {
-        let args = vec![
-            "speedwave".to_string(),
-            "plugin".to_string(),
-            "list".to_string(),
-        ];
-        assert_eq!(parse_action(&args).unwrap(), CliAction::PluginList);
-    }
-
-    #[test]
-    fn parse_action_plugin_remove() {
-        let args = vec![
-            "speedwave".to_string(),
-            "plugin".to_string(),
-            "remove".to_string(),
-            "my-plugin".to_string(),
-        ];
-        assert_eq!(
-            parse_action(&args).unwrap(),
-            CliAction::PluginRemove("my-plugin".to_string())
-        );
-    }
-
-    #[test]
-    fn parse_action_plugin_no_subcommand() {
-        let args = vec!["speedwave".to_string(), "plugin".to_string()];
-        assert!(parse_action(&args).is_err());
-    }
-
-    #[test]
-    fn parse_action_plugin_install_no_path() {
-        let args = vec![
-            "speedwave".to_string(),
-            "plugin".to_string(),
-            "install".to_string(),
-        ];
-        assert!(parse_action(&args).is_err());
-    }
-
-    #[test]
-    fn parse_action_plugin_remove_no_slug() {
-        let args = vec![
-            "speedwave".to_string(),
-            "plugin".to_string(),
-            "remove".to_string(),
-        ];
-        assert!(parse_action(&args).is_err());
-    }
-
-    #[test]
-    fn parse_action_unknown_command_errors() {
-        let args = vec!["speedwave".to_string(), "updatte".to_string()];
-        let err = parse_action(&args).unwrap_err();
-        assert!(
-            err.contains("unknown command") && err.contains("updatte"),
-            "expected unknown-command error, got: {err}"
-        );
-    }
-
-    #[test]
-    fn parse_action_unknown_flag_yields_unexpected_argument() {
-        let args = vec!["speedwave".to_string(), "-x".to_string()];
-        let err = parse_action(&args).unwrap_err();
-        assert!(
-            err.contains("unexpected argument") && err.contains("-x"),
-            "expected unexpected argument error for unknown flag, got: {err}"
-        );
-    }
-
-    #[test]
-    fn parse_action_login_no_project() {
-        let args = vec!["speedwave".to_string(), "login".to_string()];
-        assert_eq!(parse_action(&args).unwrap(), CliAction::Login(None));
-    }
-
-    #[test]
-    fn parse_action_login_with_project() {
-        let args = vec![
-            "speedwave".to_string(),
-            "login".to_string(),
-            "--project".to_string(),
-            "foo".to_string(),
-        ];
-        assert_eq!(
-            parse_action(&args).unwrap(),
-            CliAction::Login(Some("foo".to_string()))
-        );
-    }
-
-    #[test]
-    fn parse_action_login_project_flag_without_value() {
-        let args = vec![
-            "speedwave".to_string(),
-            "login".to_string(),
-            "--project".to_string(),
-        ];
-        let err = parse_action(&args).unwrap_err();
-        assert!(
-            err.contains("speedwave login"),
-            "expected usage hint, got: {err}"
-        );
-    }
-
-    #[test]
-    fn parse_action_logout_no_project() {
-        let args = vec!["speedwave".to_string(), "logout".to_string()];
-        assert_eq!(parse_action(&args).unwrap(), CliAction::Logout(None));
-    }
-
-    #[test]
-    fn parse_action_logout_with_project() {
-        let args = vec![
-            "speedwave".to_string(),
-            "logout".to_string(),
-            "--project".to_string(),
-            "bar".to_string(),
-        ];
-        assert_eq!(
-            parse_action(&args).unwrap(),
-            CliAction::Logout(Some("bar".to_string()))
-        );
-    }
-
-    #[test]
-    fn parse_action_logout_project_flag_without_value() {
-        let args = vec![
-            "speedwave".to_string(),
-            "logout".to_string(),
-            "--project".to_string(),
-        ];
-        assert!(parse_action(&args).is_err());
-    }
-
-    fn argv(parts: &[&str]) -> Vec<String> {
-        parts.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn parse_action_leading_flag_before_subcommand_errors() {
-        let args = argv(&["speedwave", "--project", "acme", "login"]);
-        let err = parse_action(&args).unwrap_err();
-        assert!(
-            err.contains("unexpected argument") && err.contains("login"),
-            "expected trailing-garbage error, got: {err}"
-        );
-    }
-
-    #[test]
-    fn parse_action_update_with_project_space_form() {
-        let args = argv(&["speedwave", "update", "--project", "acme"]);
-        assert_eq!(
-            parse_action(&args).unwrap(),
-            CliAction::Update(Some("acme".to_string()))
-        );
-    }
-
-    #[test]
-    fn parse_action_login_equals_form() {
-        let args = argv(&["speedwave", "login", "--project=acme"]);
-        assert_eq!(
-            parse_action(&args).unwrap(),
-            CliAction::Login(Some("acme".to_string()))
-        );
-    }
-
-    #[test]
-    fn parse_action_bare_run_equals_form() {
-        let args = argv(&["speedwave", "--project=acme"]);
-        assert_eq!(
-            parse_action(&args).unwrap(),
-            CliAction::Run(Some("acme".to_string()))
-        );
-    }
-
-    #[test]
-    fn parse_action_equals_form_empty_value_errors() {
-        let args = argv(&["speedwave", "login", "--project="]);
-        let err = parse_action(&args).unwrap_err();
-        assert!(err.contains("speedwave login"), "got: {err}");
-    }
-
-    #[test]
-    fn parse_action_login_extra_positional_errors() {
-        let args = argv(&["speedwave", "login", "extra", "junk"]);
-        let err = parse_action(&args).unwrap_err();
-        assert!(
-            err.contains("unexpected argument") && err.contains("extra"),
-            "got: {err}"
-        );
-    }
-
-    #[test]
-    fn parse_action_login_extra_after_project_value_errors() {
-        let args = argv(&["speedwave", "login", "--project", "acme", "junk"]);
-        let err = parse_action(&args).unwrap_err();
-        assert!(
-            err.contains("unexpected argument") && err.contains("junk"),
-            "got: {err}"
-        );
-    }
-
-    #[test]
-    fn parse_action_check_rejects_extra_args() {
-        let args = argv(&["speedwave", "check", "junk"]);
-        let err = parse_action(&args).unwrap_err();
-        assert!(err.contains("speedwave check"), "got: {err}");
-    }
-
-    #[test]
-    fn parse_action_self_update_rejects_extra_args() {
-        let args = argv(&["speedwave", "self-update", "junk"]);
-        assert!(parse_action(&args).is_err());
-    }
-
-    #[test]
-    fn parse_action_init_rejects_extra_args() {
-        let args = argv(&["speedwave", "init", "name", "junk"]);
-        let err = parse_action(&args).unwrap_err();
-        assert!(err.contains("speedwave init"), "got: {err}");
-    }
-
-    #[test]
-    fn parse_action_plugin_install_rejects_extra_args() {
-        let args = argv(&["speedwave", "plugin", "install", "x.zip", "junk"]);
-        assert!(parse_action(&args).is_err());
-    }
-
-    #[test]
-    fn parse_action_compat_desktop_login_project_space_form() {
-        let args = argv(&["speedwave", "login", "--project", "My Project"]);
-        assert_eq!(
-            parse_action(&args).unwrap(),
-            CliAction::Login(Some("My Project".to_string()))
-        );
-    }
-
-    #[test]
-    fn parse_action_compat_bare_run_with_project() {
-        let args = argv(&["speedwave", "--project", "acme"]);
-        assert_eq!(
-            parse_action(&args).unwrap(),
-            CliAction::Run(Some("acme".to_string()))
-        );
-    }
-
-    #[test]
-    fn parse_action_compat_bare_run_no_args() {
-        let args = argv(&["speedwave"]);
-        assert_eq!(parse_action(&args).unwrap(), CliAction::Run(None));
-    }
-
-    #[test]
-    fn parse_action_compat_plugin_enable_shape() {
-        let args = argv(&[
-            "speedwave",
-            "plugin",
-            "enable",
-            "slack",
-            "--project",
-            "acme",
-        ]);
-        assert_eq!(
-            parse_action(&args).unwrap(),
-            CliAction::PluginEnable {
-                service_id: "slack".to_string(),
-                project: "acme".to_string(),
-            }
-        );
-    }
 
     #[test]
     fn print_help_lists_login_and_logout() {
@@ -1977,301 +485,6 @@ mod tests {
         assert!(
             body.contains("speedwave --version | -V"),
             "print_help must document `--version | -V` flag"
-        );
-    }
-
-    #[test]
-    fn stamped_exec_argv_places_claude_after_instance_marker() {
-        let argv = stamped_exec_argv(
-            "id-1",
-            vec![consts::CLAUDE_BINARY.to_string(), "--flag".to_string()],
-        );
-        assert_eq!(argv[0], "env");
-        assert_eq!(
-            argv[1],
-            format!("{}=id-1", speedwave_runtime::session::SESSION_INSTANCE_ENV)
-        );
-        assert_eq!(argv[2], "/usr/local/bin/claude");
-        assert_eq!(argv[3], "--flag");
-    }
-
-    #[test]
-    fn framed_pads_every_line_to_the_widest_one() {
-        let boxed = framed(&["ab".to_string(), "abcd".to_string(), String::new()]);
-        let rows: Vec<&str> = boxed.lines().collect();
-        assert_eq!(
-            rows,
-            ["┌──────┐", "│ ab   │", "│ abcd │", "│      │", "└──────┘"]
-        );
-    }
-
-    #[test]
-    fn framed_counts_characters_not_bytes() {
-        let boxed = framed(&["zażółć".to_string(), "abcdef".to_string()]);
-        let widths: Vec<usize> = boxed.lines().map(|row| row.chars().count()).collect();
-        assert!(widths.iter().all(|w| *w == widths[0]), "{boxed}");
-    }
-
-    #[test]
-    fn framed_without_lines_is_an_empty_box() {
-        assert_eq!(framed(&[]), "┌──┐\n└──┘");
-    }
-
-    #[test]
-    fn login_instructions_fit_an_80_column_terminal() {
-        let boxed = login_instructions();
-        let widest = boxed.lines().map(|row| row.chars().count()).max();
-        assert!(widest.is_some_and(|w| w <= 80), "{boxed}");
-    }
-
-    #[test]
-    fn build_login_exec_cmd_unsets_and_execs_auth_login() {
-        let cmd = build_login_exec_cmd(
-            "http://proxy:4000",
-            &["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL"],
-        );
-        assert_eq!(cmd[0], "sh");
-        assert_eq!(cmd[1], "-lc");
-        let script = &cmd[2];
-        assert!(
-            script.contains("unset ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL"),
-            "{script}"
-        );
-        assert!(
-            script.contains("export ANTHROPIC_BASE_URL=http://proxy:4000"),
-            "{script}"
-        );
-        let exec_pos = script.find("exec ").expect("exec present");
-        let unset_pos = script.find("unset ").unwrap();
-        assert!(unset_pos < exec_pos, "unset must precede exec: {script}");
-        assert!(
-            script.contains(&format!("{} auth login --claudeai", consts::CLAUDE_BINARY)),
-            "auth login subcommand: {script}"
-        );
-    }
-
-    #[test]
-    fn build_login_exec_cmd_uses_runtime_ssot_unset_list() {
-        let cmd = build_login_exec_cmd(
-            compose::PROXY_BASE_URL,
-            compose::anthropic_login_unset_keys(),
-        );
-        let script = &cmd[2];
-        for key in compose::anthropic_login_unset_keys() {
-            assert!(script.contains(key), "unset list missing `{key}`: {script}");
-        }
-        assert!(script.contains(compose::PROXY_BASE_URL), "{script}");
-    }
-
-    #[test]
-    fn login_selects_anthropic_before_render_compose() {
-        let source = include_str!("main.rs");
-        let select_idx = source
-            .find("select_anthropic_after_login(&project_name)")
-            .expect("main() must select Anthropic on the login path");
-        let render_idx = source
-            .find("compose::render_compose(")
-            .expect("the CLI must call render_compose in main()");
-        assert!(
-            select_idx < render_idx,
-            "select_anthropic_after_login must run before render_compose"
-        );
-        let gate_idx = source
-            .find("if matches!(action, CliAction::Login(_)) {")
-            .expect("the Anthropic-select must be gated on the Login action");
-        assert!(
-            gate_idx < select_idx && select_idx < render_idx,
-            "select must sit inside the Login gate, before render_compose"
-        );
-    }
-
-    #[test]
-    fn login_select_failure_is_fatal_not_a_warning() {
-        let source = include_str!("main.rs");
-        let gate_idx = source
-            .find("if matches!(action, CliAction::Login(_)) {")
-            .expect("login gate must exist");
-        let render_idx = source
-            .find("compose::render_compose(")
-            .expect("render_compose must exist");
-        let block = &source[gate_idx..render_idx];
-        assert!(
-            block.contains("Login failed: could not select Anthropic")
-                && block.contains("std::process::exit(1)"),
-            "login select failure must exit non-zero, not warn-and-continue"
-        );
-    }
-
-    fn user_config_with_project(
-        project: &str,
-        claude: Option<config::ClaudeOverrides>,
-    ) -> config::SpeedwaveUserConfig {
-        let mut user_config = config::SpeedwaveUserConfig::default();
-        user_config.projects.push(config::ProjectUserEntry {
-            name: project.to_string(),
-            dir: "/tmp/proj".to_string(),
-            claude,
-            integrations: None,
-            plugin_settings: None,
-            policy: None,
-            effort_pin: None,
-            read_only: false,
-        });
-        user_config
-    }
-
-    #[test]
-    fn select_anthropic_in_creates_llm_override_for_fresh_project() {
-        let mut user_config = user_config_with_project("proj", None);
-        assert!(select_anthropic_in(
-            &mut user_config,
-            "proj",
-            config::AnthropicEvidence::None
-        ));
-        let llm = user_config
-            .find_project_mut("proj")
-            .unwrap()
-            .claude
-            .as_ref()
-            .unwrap()
-            .llm
-            .as_ref()
-            .unwrap();
-        assert!(!llm.is_unconfigured());
-        assert_eq!(
-            llm.active.as_ref().unwrap().provider_id,
-            config::ANTHROPIC_PROVIDER_ID,
-            "fresh project must select anthropic, not just stop being fresh"
-        );
-    }
-
-    #[test]
-    fn select_anthropic_in_creates_llm_override_when_claude_present_but_llm_absent() {
-        let mut user_config = user_config_with_project(
-            "proj",
-            Some(config::ClaudeOverrides {
-                env: None,
-                settings: None,
-                llm: None,
-            }),
-        );
-        assert!(select_anthropic_in(
-            &mut user_config,
-            "proj",
-            config::AnthropicEvidence::None
-        ));
-        assert!(!user_config
-            .find_project_mut("proj")
-            .unwrap()
-            .claude
-            .as_ref()
-            .unwrap()
-            .llm
-            .as_ref()
-            .unwrap()
-            .is_unconfigured());
-    }
-
-    #[test]
-    fn select_anthropic_in_reactivates_explicit_logout() {
-        let llm = config::LlmConfig {
-            schema_version: Some(config::LLM_SCHEMA_VERSION),
-            providers: vec![config::LlmProviderEntry {
-                id: config::ANTHROPIC_PROVIDER_ID.to_string(),
-                kind: config::LlmProviderKind::AnthropicOauth,
-                base_url: None,
-                model: None,
-                has_api_key: false,
-                context_tokens: None,
-                has_custom_headers: false,
-            }],
-            active: None,
-            ..Default::default()
-        };
-        assert!(
-            llm.is_unconfigured(),
-            "precondition: logged-out is unconfigured"
-        );
-        let mut user_config = user_config_with_project(
-            "proj",
-            Some(config::ClaudeOverrides {
-                env: None,
-                settings: None,
-                llm: Some(llm),
-            }),
-        );
-        assert!(select_anthropic_in(
-            &mut user_config,
-            "proj",
-            config::AnthropicEvidence::None
-        ));
-        assert!(!user_config
-            .find_project_mut("proj")
-            .unwrap()
-            .claude
-            .as_ref()
-            .unwrap()
-            .llm
-            .as_ref()
-            .unwrap()
-            .is_unconfigured());
-    }
-
-    #[test]
-    fn select_anthropic_in_preserves_raw_v1_local_config() {
-        let mut user_config = user_config_with_project(
-            "proj",
-            Some(config::ClaudeOverrides {
-                env: None,
-                settings: None,
-                llm: Some(config::LlmConfig {
-                    provider: Some("lmstudio".into()),
-                    base_url: Some("http://localhost:1234".into()),
-                    model: Some("qwen".into()),
-                    ..Default::default()
-                }),
-            }),
-        );
-        assert!(select_anthropic_in(
-            &mut user_config,
-            "proj",
-            config::AnthropicEvidence::Oauth
-        ));
-        let binding = user_config.find_project_mut("proj").unwrap();
-        let llm = binding.claude.as_ref().unwrap().llm.as_ref().unwrap();
-        let local = llm
-            .providers
-            .iter()
-            .find(|p| p.id == "local")
-            .expect("local entry must survive the lift");
-        assert_eq!(local.base_url.as_deref(), Some("http://localhost:1234"));
-        assert_eq!(local.model.as_deref(), Some("qwen"));
-        assert_eq!(
-            llm.active.as_ref().unwrap().provider_id,
-            config::ANTHROPIC_PROVIDER_ID
-        );
-    }
-
-    #[test]
-    fn select_anthropic_in_preserves_v1_pinned_anthropic_model() {
-        let mut user_config = user_config_with_project(
-            "proj",
-            Some(config::ClaudeOverrides {
-                env: None,
-                settings: None,
-                llm: Some(config::LlmConfig {
-                    provider: Some(config::ANTHROPIC_PROVIDER_ID.to_string()),
-                    model: Some("claude-opus-4-6".into()),
-                    ..Default::default()
-                }),
-            }),
-        );
-        select_anthropic_in(&mut user_config, "proj", config::AnthropicEvidence::Oauth);
-        let binding = user_config.find_project_mut("proj").unwrap();
-        let llm = binding.claude.as_ref().unwrap().llm.as_ref().unwrap();
-        assert_eq!(
-            llm.effective_active_model().as_deref(),
-            Some("claude-opus-4-6")
         );
     }
 
@@ -2332,325 +545,8 @@ mod tests {
     }
 
     #[test]
-    fn select_anthropic_in_noop_when_project_not_found() {
-        let mut user_config = config::SpeedwaveUserConfig::default();
-        assert!(!select_anthropic_in(
-            &mut user_config,
-            "ghost-project",
-            config::AnthropicEvidence::None
-        ));
-        assert!(user_config.find_project_mut("ghost-project").is_none());
-    }
-
-    #[test]
-    fn select_anthropic_in_idempotent_when_already_anthropic() {
-        let mut llm = config::LlmConfig {
-            schema_version: Some(config::LLM_SCHEMA_VERSION),
-            providers: vec![config::LlmProviderEntry {
-                id: config::ANTHROPIC_PROVIDER_ID.to_string(),
-                kind: config::LlmProviderKind::AnthropicOauth,
-                base_url: None,
-                model: None,
-                has_api_key: false,
-                context_tokens: None,
-                has_custom_headers: false,
-            }],
-            active: None,
-            ..Default::default()
-        };
-        assert!(
-            llm.set_active_to_anthropic(),
-            "first activation changes state"
-        );
-        config::migrate_llm(&mut llm, config::AnthropicEvidence::None);
-        let mut user_config = user_config_with_project(
-            "proj",
-            Some(config::ClaudeOverrides {
-                env: None,
-                settings: None,
-                llm: Some(llm),
-            }),
-        );
-        assert!(
-            !select_anthropic_in(&mut user_config, "proj", config::AnthropicEvidence::None),
-            "already-active anthropic must not report a change"
-        );
-    }
-
-    #[test]
-    fn oauth_state_migration_runs_after_cleanup_and_before_render() {
-        let source = include_str!("main.rs");
-        let cleanup_idx = source
-            .find("run_legacy_token_cleanup_at_startup()")
-            .expect("the CLI must call run_legacy_token_cleanup_at_startup in main()");
-        let migration_idx = source
-            .find("run_oauth_state_migration_at_startup()")
-            .expect("the CLI must call run_oauth_state_migration_at_startup in main()");
-        let render_idx = source
-            .find("compose::render_compose(")
-            .expect("the CLI must call render_compose in main()");
-        assert!(
-            cleanup_idx < migration_idx,
-            "oauth_state_migration must run after legacy_token_cleanup"
-        );
-        assert!(
-            migration_idx < render_idx,
-            "oauth_state_migration must run before render_compose"
-        );
-    }
-
-    #[test]
-    fn test_exec_cmd_includes_resolved_flags() {
-        use speedwave_runtime::defaults;
-        let mut tail = vec![consts::CLAUDE_BINARY.to_string()];
-        tail.extend(defaults::DEFAULT_FLAGS.iter().map(|f| f.to_string()));
-        let argv = stamped_exec_argv("id-2", tail);
-        assert!(argv.contains(&consts::CLAUDE_BINARY.to_string()));
-        assert!(argv.contains(&"--dangerously-skip-permissions".to_string()));
-        assert!(argv.contains(&"--mcp-config".to_string()));
-        assert!(argv.contains(&defaults::MCP_CONFIG_PATH.to_string()));
-        assert!(argv.contains(&"--strict-mcp-config".to_string()));
-    }
-
-    #[test]
-    fn interactive_exec_is_stamped_and_reaped() {
-        let source = include_str!("main.rs");
-        let exec = source
-            .find(".container_exec(&container_name, &exec_cmd)")
-            .expect("interactive exec must exist");
-        let before = &source[exec.saturating_sub(700)..exec];
-        assert!(
-            before.contains("stamped_exec_argv("),
-            "run argv must carry the instance marker"
-        );
-        let after = &source[exec..exec + 500];
-        assert!(
-            after.contains("reap_instance("),
-            "run path must reap the marked process after status()"
-        );
-    }
-
-    #[test]
-    fn login_exec_is_stamped_and_reaped() {
-        let source = include_str!("main.rs");
-        let exec = source
-            .find(".container_exec(&container_name, &cmd_ref)")
-            .expect("login exec must exist");
-        let before = &source[exec.saturating_sub(700)..exec];
-        assert!(
-            before.contains("stamped_exec_argv("),
-            "login argv must carry the instance marker"
-        );
-        let after = &source[exec..exec + 500];
-        assert!(
-            after.contains("reap_instance("),
-            "login path must reap the marked process after status()"
-        );
-    }
-
-    #[test]
-    fn cli_session_guard_spans_compose_and_interactive_execs() {
-        let source = include_str!("main.rs");
-        let ready = source
-            .find("runtime.ensure_ready()")
-            .expect("runtime recovery must exist");
-        let guard = source
-            .find("CliSessionGuard::acquire(")
-            .expect("CLI must hold the live-session lock");
-        let txn = source
-            .find("runtime.transaction(")
-            .expect("compose transaction must exist");
-        assert!(
-            ready < guard && guard < txn,
-            "guard must be taken once the VM is confirmed, before compose/image work"
-        );
-    }
-
-    fn proj(name: &str) -> config::ProjectUserEntry {
-        config::ProjectUserEntry {
-            name: name.to_string(),
-            dir: format!("/projects/{name}"),
-            claude: None,
-            integrations: None,
-            plugin_settings: None,
-            policy: None,
-            effort_pin: None,
-            read_only: false,
-        }
-    }
-
-    fn config_with(
-        projects: Vec<config::ProjectUserEntry>,
-        active: Option<&str>,
-    ) -> config::SpeedwaveUserConfig {
-        config::SpeedwaveUserConfig {
-            projects,
-            active_project: active.map(str::to_string),
-            selected_ide: None,
-            ui: None,
-            telemetry: None,
-        }
-    }
-
-    #[test]
-    fn resolve_fallback_prefers_active_project() {
-        let cfg = config_with(vec![proj("alpha"), proj("beta")], Some("beta"));
-        assert_eq!(resolve_project_fallback(&cfg).unwrap(), "beta");
-    }
-
-    #[test]
-    fn resolve_fallback_uses_first_when_active_none() {
-        let cfg = config_with(vec![proj("alpha"), proj("beta")], None);
-        assert_eq!(resolve_project_fallback(&cfg).unwrap(), "alpha");
-    }
-
-    #[test]
-    fn resolve_fallback_errors_when_no_projects() {
-        let cfg = config_with(vec![], None);
-        assert!(resolve_project_fallback(&cfg).is_err());
-    }
-
-    #[test]
-    fn resolve_fallback_ignores_cwd() {
-        let cwd = std::env::current_dir().unwrap();
-        let cwd_project = config::ProjectUserEntry {
-            name: "here".to_string(),
-            dir: cwd.to_string_lossy().to_string(),
-            claude: None,
-            integrations: None,
-            plugin_settings: None,
-            policy: None,
-            effort_pin: None,
-            read_only: false,
-        };
-        let cfg = config_with(vec![proj("alpha"), cwd_project], Some("alpha"));
-        assert_eq!(resolve_project_fallback(&cfg).unwrap(), "alpha");
-    }
-
-    #[test]
-    fn parse_action_project_flag_overrides_run() {
-        let args = vec![
-            "speedwave".to_string(),
-            "--project".to_string(),
-            "beta".to_string(),
-        ];
-        assert_eq!(
-            parse_action(&args).unwrap(),
-            CliAction::Run(Some("beta".to_string()))
-        );
-    }
-
-    #[test]
-    fn parse_action_project_flag_without_value_errors() {
-        let args = vec!["speedwave".to_string(), "--project".to_string()];
-        assert!(parse_action(&args).is_err());
-    }
-
-    #[test]
-    fn resolve_action_project_uses_run_override() {
-        let cfg = config_with(vec![proj("alpha"), proj("beta")], Some("alpha"));
-        let action = CliAction::Run(Some("beta".to_string()));
-        assert_eq!(resolve_action_project(&action, &cfg).unwrap(), "beta");
-    }
-
-    #[test]
-    fn resolve_action_project_bare_run_uses_active() {
-        let cfg = config_with(vec![proj("alpha"), proj("beta")], Some("beta"));
-        let action = CliAction::Run(None);
-        assert_eq!(resolve_action_project(&action, &cfg).unwrap(), "beta");
-    }
-
-    #[test]
-    fn resolve_action_project_login_override_wins() {
-        let cfg = config_with(vec![proj("alpha"), proj("beta")], Some("alpha"));
-        let action = CliAction::Login(Some("beta".to_string()));
-        assert_eq!(resolve_action_project(&action, &cfg).unwrap(), "beta");
-    }
-
-    #[test]
-    fn resolve_action_project_explicit_missing_errors() {
-        let cfg = config_with(vec![proj("alpha")], Some("alpha"));
-        let action = CliAction::Run(Some("typo".to_string()));
-        let err = resolve_action_project(&action, &cfg).unwrap_err();
-        assert!(
-            err.to_string().contains("not found in config"),
-            "expected not-found error, got: {err}"
-        );
-    }
-
-    #[test]
-    fn resolve_action_project_update_override_wins() {
-        let cfg = config_with(vec![proj("alpha"), proj("beta")], Some("alpha"));
-        let action = CliAction::Update(Some("beta".to_string()));
-        assert_eq!(resolve_action_project(&action, &cfg).unwrap(), "beta");
-    }
-
-    #[test]
-    fn resolve_action_project_logout_override_wins() {
-        let cfg = config_with(vec![proj("alpha"), proj("beta")], Some("alpha"));
-        let action = CliAction::Logout(Some("beta".to_string()));
-        assert_eq!(resolve_action_project(&action, &cfg).unwrap(), "beta");
-    }
-
-    #[test]
     fn test_claude_binary_path_is_usr_local_bin() {
         assert_eq!(consts::CLAUDE_BINARY, "/usr/local/bin/claude");
-    }
-
-    #[test]
-    fn validate_project_name_valid() {
-        assert!(validate_project_name("my-project").is_ok());
-        assert!(validate_project_name("project_1.0").is_ok());
-        assert!(validate_project_name("a").is_ok());
-    }
-
-    #[test]
-    fn validate_project_name_empty() {
-        assert!(validate_project_name("").is_err());
-    }
-
-    #[test]
-    fn validate_project_name_starts_with_special() {
-        assert!(validate_project_name("-project").is_err());
-        assert!(validate_project_name(".hidden").is_err());
-    }
-
-    #[test]
-    fn validate_project_name_invalid_chars() {
-        assert!(validate_project_name("my project").is_err());
-        assert!(validate_project_name("caf\u{00e9}").is_err());
-        assert!(validate_project_name("path/name").is_err());
-    }
-
-    #[test]
-    fn parse_action_self_update() {
-        let args = vec!["speedwave".to_string(), "self-update".to_string()];
-        assert_eq!(parse_action(&args).unwrap(), CliAction::SelfUpdate);
-    }
-
-    #[test]
-    fn parse_action_update() {
-        let args = vec!["speedwave".to_string(), "update".to_string()];
-        assert_eq!(parse_action(&args).unwrap(), CliAction::Update(None));
-    }
-
-    #[test]
-    fn parse_action_init_no_name() {
-        let args = vec!["speedwave".to_string(), "init".to_string()];
-        assert_eq!(parse_action(&args).unwrap(), CliAction::Init(None));
-    }
-
-    #[test]
-    fn parse_action_init_with_name() {
-        let args = vec![
-            "speedwave".to_string(),
-            "init".to_string(),
-            "my-custom-name".to_string(),
-        ];
-        assert_eq!(
-            parse_action(&args).unwrap(),
-            CliAction::Init(Some("my-custom-name".to_string()))
-        );
     }
 
     #[test]
@@ -2744,205 +640,6 @@ mod tests {
         assert!(resources_dir.is_empty());
     }
 
-    #[test]
-    fn parse_action_plugin_enable() {
-        let args = vec![
-            "speedwave".to_string(),
-            "plugin".to_string(),
-            "enable".to_string(),
-            "my-svc".to_string(),
-            "--project".to_string(),
-            "demo".to_string(),
-        ];
-        assert_eq!(
-            parse_action(&args).unwrap(),
-            CliAction::PluginEnable {
-                service_id: "my-svc".to_string(),
-                project: "demo".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn parse_action_plugin_disable() {
-        let args = vec![
-            "speedwave".to_string(),
-            "plugin".to_string(),
-            "disable".to_string(),
-            "my-svc".to_string(),
-            "--project".to_string(),
-            "demo".to_string(),
-        ];
-        assert_eq!(
-            parse_action(&args).unwrap(),
-            CliAction::PluginDisable {
-                service_id: "my-svc".to_string(),
-                project: "demo".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn parse_action_plugin_enable_missing_service_id() {
-        let args = vec![
-            "speedwave".to_string(),
-            "plugin".to_string(),
-            "enable".to_string(),
-        ];
-        assert!(parse_action(&args).is_err());
-    }
-
-    #[test]
-    fn parse_action_plugin_disable_missing_service_id() {
-        let args = vec![
-            "speedwave".to_string(),
-            "plugin".to_string(),
-            "disable".to_string(),
-        ];
-        assert!(parse_action(&args).is_err());
-    }
-
-    #[test]
-    fn parse_action_plugin_enable_missing_project_flag() {
-        let args = vec![
-            "speedwave".to_string(),
-            "plugin".to_string(),
-            "enable".to_string(),
-            "my-svc".to_string(),
-        ];
-        assert!(parse_action(&args).is_err());
-    }
-
-    #[test]
-    fn parse_action_plugin_disable_missing_project_flag() {
-        let args = vec![
-            "speedwave".to_string(),
-            "plugin".to_string(),
-            "disable".to_string(),
-            "my-svc".to_string(),
-        ];
-        assert!(parse_action(&args).is_err());
-    }
-
-    #[test]
-    fn parse_action_plugin_enable_missing_project_value() {
-        let args = vec![
-            "speedwave".to_string(),
-            "plugin".to_string(),
-            "enable".to_string(),
-            "my-svc".to_string(),
-            "--project".to_string(),
-        ];
-        assert!(parse_action(&args).is_err());
-    }
-
-    #[test]
-    fn test_check_includes_os_prereqs() {
-        let source = include_str!("main.rs");
-
-        let check_start = source
-            .find("if action == CliAction::Check")
-            .expect("CliAction::Check handler must exist in main.rs");
-        let check_body = &source[check_start..];
-
-        assert!(
-            check_body.contains("prereq_violations.is_empty()"),
-            "check handler must test prereq_violations.is_empty()"
-        );
-
-        assert!(
-            check_body.contains(r#""{} -- {}", v.rule, v.message"#),
-            "check handler must print prereq violations as 'rule -- message'"
-        );
-        assert!(
-            check_body.contains(r#""  Fix: {}\n", v.remediation"#),
-            "check handler must print 'Fix: remediation' for each prereq violation"
-        );
-
-        let gate_start = source
-            .find("// Mandatory prereq + security gate")
-            .expect("pre-compose prereq gate must exist in main.rs");
-        let gate_body = &source[gate_start..];
-        assert!(
-            gate_body.contains("prereq_violations.is_empty()"),
-            "pre-compose gate must check prereq_violations"
-        );
-    }
-
-    #[test]
-    fn test_check_does_not_autofix_permissions() {
-        let source = include_str!("main.rs");
-        let check_start = source
-            .find("if action == CliAction::Check")
-            .expect("CliAction::Check handler must exist in main.rs");
-        let after_check = &source[check_start..];
-        let check_end = after_check[1..]
-            .find("CliAction::")
-            .map(|pos| pos + 1)
-            .expect(
-                "there must be another CliAction:: reference after the Check handler \
-                 — if this fails, the source structure has changed significantly",
-            );
-        let check_block = &after_check[..check_end];
-
-        assert!(
-            !check_block.contains("ensure_data_dir_permissions"),
-            "speedwave check must NOT call ensure_data_dir_permissions — \
-             check is diagnostic-only, it reports violations without fixing them"
-        );
-    }
-
-    #[test]
-    fn test_cli_check_calls_check_os_warnings() {
-        let source = include_str!("main.rs");
-        let check_start = source
-            .find("if action == CliAction::Check")
-            .expect("CliAction::Check handler must exist in main.rs");
-        let check_body = &source[check_start..];
-        assert!(
-            check_body.contains("check_os_warnings"),
-            "CliAction::Check handler must call check_os_warnings()"
-        );
-    }
-
-    #[test]
-    fn parse_action_plugin_disable_missing_project_value() {
-        let args = vec![
-            "speedwave".to_string(),
-            "plugin".to_string(),
-            "disable".to_string(),
-            "my-svc".to_string(),
-            "--project".to_string(),
-        ];
-        assert!(parse_action(&args).is_err());
-    }
-
-    #[test]
-    fn skip_plugin_audit_skips_recovery_actions() {
-        assert!(skip_plugin_audit(&CliAction::Init(None)));
-        assert!(skip_plugin_audit(&CliAction::Init(Some("foo".into()))));
-        assert!(skip_plugin_audit(&CliAction::PluginInstall(
-            "/tmp/x.zip".into()
-        )));
-        assert!(skip_plugin_audit(&CliAction::PluginList));
-        assert!(skip_plugin_audit(&CliAction::PluginRemove("foo".into())));
-    }
-
-    #[test]
-    fn skip_plugin_audit_does_not_skip_runtime_actions() {
-        assert!(!skip_plugin_audit(&CliAction::Run(None)));
-        assert!(!skip_plugin_audit(&CliAction::Check));
-        assert!(!skip_plugin_audit(&CliAction::Update(None)));
-        assert!(!skip_plugin_audit(&CliAction::PluginEnable {
-            project: "p".into(),
-            service_id: "s".into(),
-        }));
-        assert!(!skip_plugin_audit(&CliAction::PluginDisable {
-            project: "p".into(),
-            service_id: "s".into(),
-        }));
-    }
-
     fn extract_fn_body<'a>(source: &'a str, signature: &str) -> &'a str {
         let fn_start = source
             .find(signature)
@@ -2953,33 +650,6 @@ mod tests {
             .map(|i| i + 1)
             .unwrap_or(after_start.len());
         &after_start[..fn_end]
-    }
-
-    #[test]
-    fn host_bridges_are_reconstructed_and_passed_to_render_compose() {
-        let source = include_str!("main.rs");
-        let fn_body = extract_fn_body(source, "fn main(");
-        let build_pos = fn_body.find("compose::host_bridges_from_disk()");
-        let render_pos = fn_body
-            .find("compose::render_compose(")
-            .expect("main() must call render_compose");
-        assert!(
-            build_pos.is_some_and(|b| b < render_pos),
-            "main() must build host_bridges_from_disk() before render_compose"
-        );
-        let empty_default = format!("HostBridgesInfo::{}()", "default");
-        assert!(
-            !fn_body[..render_pos].contains(&empty_default),
-            "main() must not pass an empty HostBridgesInfo to render_compose"
-        );
-        let call = &fn_body[render_pos..];
-        let call_end = call
-            .find(';')
-            .expect("render_compose statement must end with ;");
-        assert!(
-            call[..call_end].contains("&host_bridges"),
-            "render_compose must receive &host_bridges, not an inline default"
-        );
     }
 
     #[test]
@@ -3077,98 +747,11 @@ mod tests {
     }
 
     #[test]
-    fn a_reap_that_fails_in_a_running_container_warns_that_claude_code_may_still_run() {
-        let container = "cli-reap-fails_claude";
-        let (runtime, _handles) =
-            speedwave_runtime::runtime::mock_runtime::MockRuntimeBuilder::new()
-                .push_exec_piped_failure("container is not responding")
-                .build();
-
-        let warning = reap_warning(&runtime, container, "abc-123").expect("a warning");
-
-        assert!(
-            warning.starts_with(&format!(
-                "Warning: Claude Code may still be running in '{container}': "
-            )),
-            "{warning}"
-        );
-        assert!(warning.contains("container is not responding"), "{warning}");
-    }
-
-    #[test]
-    fn a_reap_that_finds_no_container_or_a_stopped_one_stays_quiet() {
-        for (container, stderr) in [
-            (
-                "cli-reap-missing_claude",
-                "Error: No such container: cli-reap-missing_claude",
-            ),
-            (
-                "cli-reap-stopped_claude",
-                "level=fatal msg=\"cannot exec in a stopped state\"",
-            ),
-        ] {
-            let (runtime, handles) =
-                speedwave_runtime::runtime::mock_runtime::MockRuntimeBuilder::new()
-                    .push_exec_piped_failure(stderr)
-                    .build();
-
-            let warning = reap_warning(&runtime, container, "abc-123");
-
-            assert_eq!(warning, None, "{stderr}");
-            assert_eq!(handles.exec_calls.lock().unwrap().len(), 1, "{stderr}");
-        }
-    }
-
-    #[test]
-    fn a_reap_that_succeeds_stays_quiet() {
-        let (runtime, handles) =
-            speedwave_runtime::runtime::mock_runtime::MockRuntimeBuilder::new().build();
-
-        let warning = reap_warning(&runtime, "cli-reap-ok_claude", "abc-123");
-
-        assert_eq!(warning, None);
-        let calls = handles.exec_calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(
-            calls[0].argv,
-            speedwave_runtime::session::kill_by_instance_command("abc-123")
-        );
-    }
-
-    #[test]
     fn redact_err_strips_secrets_from_error_chains() {
         let err = anyhow::anyhow!("compose render failed: Authorization: Bearer sk-leak-xyz");
         let red = redact_err(&err);
         assert!(!red.contains("sk-leak-xyz"), "leaked: {red}");
         assert!(red.contains("REDACTED"), "not redacted: {red}");
-    }
-
-    #[test]
-    fn plugin_enable_disable_hold_config_lock_across_save() {
-        let source = include_str!("main.rs");
-        let enable_arm = "CliAction::PluginEnable {\n            service_id,\n            project,\n        } => {";
-        let disable_arm = "CliAction::PluginDisable {\n            service_id,\n            project,\n        } => {";
-        for arm_marker in [enable_arm, disable_arm] {
-            let arm_start = source
-                .find(arm_marker)
-                .unwrap_or_else(|| panic!("{arm_marker} must exist in main.rs"));
-            let rest = &source[arm_start..];
-            let arm_end = rest
-                .find("std::process::exit(0);")
-                .unwrap_or_else(|| panic!("{arm_marker} must end with exit(0)"));
-            let arm = &rest[..arm_end];
-            let lock_pos = arm
-                .find("config::with_config_lock(")
-                .unwrap_or_else(|| panic!("{arm_marker} must take the config lock"));
-            let save_pos = arm
-                .find("config::save_user_config(&user_config)")
-                .unwrap_or_else(|| panic!("{arm_marker} must call save_user_config"));
-            assert!(
-                lock_pos < save_pos,
-                "{arm_marker} must wrap its load→mutate→save in config::with_config_lock \
-                 or a concurrent config writer can lose this update"
-            );
-        }
     }
 
     fn install_from_mock_release(

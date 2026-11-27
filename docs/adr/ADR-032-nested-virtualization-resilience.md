@@ -27,7 +27,7 @@ Apply a four-layer strategy so image builds survive nested-virt I/O degradation:
 ## Where it lives in code
 
 - Build retry + worker pool + classifier — `crates/speedwave-runtime/src/build.rs` (`with_build_recovery` (recovery ladder, shared by bundle + plugin builds), `build_images_for_bundle_in`, `try_build_images`, `is_transient_build_error`, `is_snapshotter_error`, `is_disk_full_error`; constants `TRANSIENT_BUILD_RETRIES`, `TRANSIENT_BUILD_RETRY_BASE_DELAY`, `DEFAULT_BUILD_WORKER_FALLBACK`, `IMAGES`)
-- VM-host warning — `crates/speedwave-runtime/src/os_prereqs.rs` (`check_os_warnings`, `parse_vm_info`), surfaced by `crates/speedwave-cli/src/main.rs` on `speedwave check`
+- VM-host warning — `crates/speedwave-runtime/src/os_prereqs.rs` (`check_os_warnings`, `parse_vm_info`), surfaced by `crates/speedwave-cli/src/commands/check.rs` on `speedwave check`
 - apt hardening — `containers/Containerfile.claude`
 
 ## Consequences

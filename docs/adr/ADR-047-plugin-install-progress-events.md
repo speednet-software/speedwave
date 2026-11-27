@@ -34,7 +34,7 @@ The Rust SSOT `ALL_PLUGIN_INSTALL_PHASES` is mirrored by `PLUGIN_INSTALL_PHASES`
 - Progress event, outcome, phase SSOT, peek, install signature — `crates/speedwave-runtime/src/plugin.rs` (`PluginInstallProgress`, `InstallOutcome`, `ALL_PLUGIN_INSTALL_PHASES`, `peek_plugin_manifest`, `install_plugin`, `ensure_plugin_images`).
 - Sanitizer — `crates/speedwave-runtime/src/log_sanitizer.rs` (`sanitize`).
 - Tauri commands — `desktop/src-tauri/src/plugin_cmd.rs` (async `install_plugin`, `peek_plugin_manifest`); registered in `desktop/src-tauri/src/main.rs`.
-- CLI outcome handling — `crates/speedwave-cli/src/main.rs` (`InstallOutcome` match, exit 0 both variants).
+- CLI outcome handling — `crates/speedwave-cli/src/commands/plugin.rs` (`InstallOutcome` match, exit 0 both variants).
 - Shared step UI — `desktop/src/src/app/shared/progress-steps/progress-steps.component.ts`; install overlay in `desktop/src/src/app/plugins/plugins.component.ts`; frontend models in `desktop/src/src/app/models/plugin.ts`.
 
 ## Rejected alternatives

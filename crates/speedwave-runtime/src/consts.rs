@@ -1063,13 +1063,9 @@ pub fn claude_session_log_path(project: &str) -> std::path::PathBuf {
     claude_session_log_path_under(data_dir(), project)
 }
 
-pub(crate) fn cli_log_path_under(data_dir: &std::path::Path, project: &str) -> std::path::PathBuf {
+/// Build the per-project CLI log path under `data_dir`.
+pub fn cli_log_path_under(data_dir: &std::path::Path, project: &str) -> std::path::PathBuf {
     project_logs_dir_under(data_dir, project).join(CLI_LOG_FILE)
-}
-
-/// Build the per-project CLI log path.
-pub fn cli_log_path(project: &str) -> std::path::PathBuf {
-    cli_log_path_under(data_dir(), project)
 }
 
 fn project_logs_dir_under(data_dir: &std::path::Path, project: &str) -> std::path::PathBuf {
@@ -2338,16 +2334,6 @@ mod tests {
             cli_log_path_under(data, "myproject"),
             std::path::PathBuf::from("/fake/.speedwave/logs/myproject/cli.log")
         );
-    }
-
-    #[test]
-    fn test_cli_log_path_sits_next_to_the_claude_session_log() {
-        assert_eq!(
-            cli_log_path("proj.v1").parent(),
-            claude_session_log_path("proj.v1").parent()
-        );
-        assert!(cli_log_path("proj").ends_with(CLI_LOG_FILE));
-        assert!(cli_log_path("proj").starts_with(data_dir()));
     }
 
     #[test]

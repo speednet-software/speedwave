@@ -176,7 +176,7 @@ Implementation: `containers/osc52-copy.sh`, `containers/Containerfile.claude`
 
 ## Implementation
 
-- `crates/speedwave-cli/src/main.rs` — `CliAction::Login`/`CliAction::Logout` dispatch
+- `crates/speedwave-cli/src/commands/login.rs`, `crates/speedwave-cli/src/commands/logout.rs` — `CliAction::Login`/`CliAction::Logout` handlers
 - `crates/speedwave-runtime/src/claude_home.rs` — `claude_home_dir()` (compose mount + CLI) and `remove_claude_credentials()` (logout); SSOT for the per-project claude-home path layout
 - `crates/speedwave-runtime/src/consts.rs` — `CLAUDE_HOME_SUBDIR` constant
 - `containers/entrypoint.sh` — pre-creates `~/.claude.json`
