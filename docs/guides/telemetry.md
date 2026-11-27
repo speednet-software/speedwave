@@ -1,6 +1,6 @@
 # Telemetry (OTLP)
 
-Speedwave can send the in-container Claude Code's OpenTelemetry (OTLP) telemetry to a collector you choose. A user configures it in **Settings → Telemetry**; an organization can force or lock the settings via an MDM-deployed file so the user cannot change them.
+Speedwave can send the in-container Claude Code's OpenTelemetry (OTLP) telemetry to a collector you choose. A user configures it in **Settings → Telemetry**, a section that is shown only when the `telemetry_settings` flag is on in **Settings → Experimental features**; an organization can force or lock the settings via an MDM-deployed file so the user cannot change them.
 
 ## User self-service
 

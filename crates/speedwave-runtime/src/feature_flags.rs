@@ -16,8 +16,7 @@ pub enum Feature {
 impl Feature {
     pub(crate) const ALL: [Feature; 2] = [Feature::Office, Feature::TelemetrySettings];
 
-    /// The key under `ui.features` in the user config.
-    pub fn key(self) -> &'static str {
+    pub(crate) fn key(self) -> &'static str {
         match self {
             Self::Office => "office",
             Self::TelemetrySettings => "telemetry_settings",

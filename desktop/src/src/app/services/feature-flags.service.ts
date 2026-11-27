@@ -42,19 +42,19 @@ export class FeatureFlagsService {
     this.state.update((flags) => ({ ...flags, [flag]: enabled }));
   }
 
-  private async refresh(): Promise<void> {
-    try {
-      const flags = await this.tauri.invoke<Partial<FeatureFlags> | undefined>('get_feature_flags');
-      this.state.update((current) => ({ ...current, ...flags }));
-    } catch {}
-  }
-
   private async init(): Promise<void> {
     await this.refresh();
     try {
       await this.tauri.listen<FeatureFlags>(FEATURE_FLAGS_CHANGED_EVENT, (event) => {
         this.state.update((current) => ({ ...current, ...event.payload }));
       });
+    } catch {}
+  }
+
+  private async refresh(): Promise<void> {
+    try {
+      const flags = await this.tauri.invoke<Partial<FeatureFlags> | undefined>('get_feature_flags');
+      this.state.update((current) => ({ ...current, ...flags }));
     } catch {}
   }
 }
