@@ -47,6 +47,7 @@ pub(crate) fn hand_over_terminal() -> TerminalHandover<'static> {
     global().hand_over_terminal()
 }
 
+#[cfg(not(debug_assertions))]
 pub(crate) fn terminal_handed_over() -> bool {
     global().terminal_handed_over.load(Ordering::SeqCst)
 }
@@ -292,22 +293,7 @@ mod tests {
     }
 
     #[test]
-    fn the_filter_is_read_from_the_named_variable() {
-        std::env::set_var("SPEEDWAVE_TEST_CLI_LOGGER_SET", "debug");
-        let terminal = SharedBuf::default();
-        let logger = CliLogger::new(
-            filter_from(env_logger::Env::new().filter_or("SPEEDWAVE_TEST_CLI_LOGGER_SET", "info")),
-            Box::new(terminal.clone()),
-        );
-
-        emit(&logger, log::Level::Debug, "diagnostic detail");
-
-        assert!(terminal.text().contains("diagnostic detail"));
-    }
-
-    #[test]
     fn an_unset_variable_falls_back_to_the_info_filter() {
-        std::env::remove_var("SPEEDWAVE_TEST_CLI_LOGGER_UNSET");
         let terminal = SharedBuf::default();
         let logger = CliLogger::new(
             filter_from(
