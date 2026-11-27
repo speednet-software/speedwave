@@ -2,7 +2,8 @@
 //! current code neither reads nor writes: the host-exec state tree, the SharePoint v1 secrets, the
 //! mcp-os port and pid files, the in-tree plugin image marker, the state of the removed OAuth
 //! worker, and the worker bearers, proxy caller token and OAuth refresh locks that moved into the
-//! secret store layout. Jira: SPEED-1013, SPEED-1016. Added in: v0.23.0
+//! secret store layout, and the git transport gitconfig that carried the caller token. Jira: SPEED-1013,
+//! SPEED-1016, SPEED-1046. Added in: v0.23.0
 
 use std::path::Path;
 
@@ -91,7 +92,12 @@ const LEGACY_PATHS: &[LegacyPath] = &[
     },
     LegacyPath {
         pattern: "proxy/{project}/caller-token",
-        reason: "proxy caller token file, now derived from the install key",
+        reason: "proxy caller token file, now drawn at project start and kept in the VM tmpfs only",
+        added_in: ADDED_IN,
+    },
+    LegacyPath {
+        pattern: "claude-home/{project}/.config/speedwave/git-transport.gitconfig",
+        reason: "git transport gitconfig that held the caller token, now a credential helper",
         added_in: ADDED_IN,
     },
     LegacyPath {
@@ -307,6 +313,14 @@ mod tests {
             files.push(secrets.join("sharepoint-auth-token"));
             files.push(secrets.join("worker-auth-token"));
             files.push(data_dir.join("proxy").join(project).join("caller-token"));
+            files.push(
+                data_dir
+                    .join("claude-home")
+                    .join(project)
+                    .join(".config")
+                    .join("speedwave")
+                    .join("git-transport.gitconfig"),
+            );
         }
         files.push(data_dir.join("plugins").join("glpi").join(".image_pending"));
         files.push(
@@ -350,6 +364,14 @@ mod tests {
             files.push(secrets.join("llm.openrouter_api_key.enc"));
         }
         files.push(data_dir.join("secret-store.key"));
+        files.push(
+            data_dir
+                .join("claude-home")
+                .join("alpha")
+                .join(".config")
+                .join("speedwave")
+                .join("git-proxy.gitconfig"),
+        );
         files
     }
 
