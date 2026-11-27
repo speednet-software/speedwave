@@ -113,6 +113,8 @@ pub const AUDIT_HUB_FILE: &str = "audit-hub.jsonl";
 
 /// Log filename for the Claude session output.
 pub const CLAUDE_SESSION_LOG_FILE: &str = "claude-session.log";
+/// Log filename for the `speedwave` CLI's own log lines.
+pub const CLI_LOG_FILE: &str = "cli.log";
 /// Entrypoint's startup diagnostics log, written by the container into claude-home.
 pub const ENTRYPOINT_LOG_FILE: &str = ".speedwave-entrypoint.log";
 /// Path to the Claude Code binary inside the container.
@@ -1054,15 +1056,26 @@ pub fn claude_session_log_path_under(
     data_dir: &std::path::Path,
     project: &str,
 ) -> std::path::PathBuf {
-    data_dir
-        .join("logs")
-        .join(project)
-        .join(CLAUDE_SESSION_LOG_FILE)
+    project_logs_dir_under(data_dir, project).join(CLAUDE_SESSION_LOG_FILE)
 }
 
 /// Build the per-project Claude session log path.
 pub fn claude_session_log_path(project: &str) -> std::path::PathBuf {
     claude_session_log_path_under(data_dir(), project)
+}
+
+/// SSOT for the CLI log path under an explicit data dir — used by the diagnostic-source registry.
+pub fn cli_log_path_under(data_dir: &std::path::Path, project: &str) -> std::path::PathBuf {
+    project_logs_dir_under(data_dir, project).join(CLI_LOG_FILE)
+}
+
+/// Build the per-project CLI log path.
+pub fn cli_log_path(project: &str) -> std::path::PathBuf {
+    cli_log_path_under(data_dir(), project)
+}
+
+fn project_logs_dir_under(data_dir: &std::path::Path, project: &str) -> std::path::PathBuf {
+    data_dir.join("logs").join(project)
 }
 
 /// Host-side path of the container entrypoint's startup log (claude-home is mounted `:rw`).
@@ -2318,6 +2331,25 @@ mod tests {
             path,
             std::path::PathBuf::from("/home/user/.speedwave/logs/proj.v1/claude-session.log")
         );
+    }
+
+    #[test]
+    fn test_cli_log_path_under_builds_the_per_project_path() {
+        let data = std::path::Path::new("/fake/.speedwave");
+        assert_eq!(
+            cli_log_path_under(data, "myproject"),
+            std::path::PathBuf::from("/fake/.speedwave/logs/myproject/cli.log")
+        );
+    }
+
+    #[test]
+    fn test_cli_log_path_sits_next_to_the_claude_session_log() {
+        assert_eq!(
+            cli_log_path("proj.v1").parent(),
+            claude_session_log_path("proj.v1").parent()
+        );
+        assert!(cli_log_path("proj").ends_with(CLI_LOG_FILE));
+        assert!(cli_log_path("proj").starts_with(data_dir()));
     }
 
     #[test]

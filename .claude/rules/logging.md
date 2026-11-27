@@ -15,7 +15,7 @@ All Rust code uses the `log` crate facade for diagnostic output. **Never use `ep
 | Binary                        | Backend                                      | Config                                              |
 | ----------------------------- | -------------------------------------------- | --------------------------------------------------- |
 | Desktop (`speedwave-desktop`) | `tauri-plugin-log` v2 (file + stdout)        | Fixed at `Trace`; no runtime toggle, no UI setting. |
-| CLI (`speedwave`)             | `env_logger` (stderr, respects `RUST_LOG`)   | Initialized at CLI `main()` start                   |
+| CLI (`speedwave`)             | `cli_logger.rs` (file always, stderr until the terminal is handed over) | Initialized at CLI `main()` start; `RUST_LOG` filters both sinks |
 | Library (`speedwave-runtime`) | `log` crate facade only (no backend opinion) | Callers provide the backend                         |
 
 - **SSOT for secret redaction:** `crates/speedwave-runtime/src/log_sanitizer.rs` — all log output passes through `sanitize()` via `.format()` callbacks in both Desktop and CLI loggers. Secrets never reach disk or stdout.
@@ -25,7 +25,7 @@ All Rust code uses the `log` crate facade for diagnostic output. **Never use `ep
 - **Claude Code `ANTHROPIC_LOG=debug` output** passes through `http_debug_collator.rs` (block grouping + per-transaction summarizing) before the session log — extend it rather than logging raw multi-line debug blocks.
 - **Poll loops log on state change only** — never one line per iteration (follow the IDE Bridge pattern).
 - **Desktop log files:** `~/Library/Logs/<bundle-id>/` (macOS), `%LOCALAPPDATA%/<bundle-id>/logs` (Windows) — must match `tauri-plugin-log v2 TargetKind::LogDir`. Bundle id is `pl.speedwave.desktop` in release, `pl.speedwave.desktop.$(DEV_INSTANCE)` under `make dev` (so `pl.speedwave.desktop.dev` by default, and a named instance logs to its own directory); resolved at runtime in `desktop_log_dir()`. Rotation: 50 MB per file, `KeepSome(10)` — tauri-plugin-log prunes on every rotation; no separate cleanup timer.
-- **CLI:** `RUST_LOG=debug speedwave check` enables debug output on stderr.
+- **CLI:** `cli_logger.rs::CliLogger` is the one logger, with two sinks behind env_logger's filter (default `info`, `RUST_LOG` overrides): stderr, and `<data_dir>/logs/<project>/cli.log` (`consts::cli_log_path`, chmod 600, truncated to its newest half above 2 MB at start, registered in `DIAGNOSTIC_SOURCES` as `cli`). The file is attached by `cli_logger::attach_file` once `main()` has validated the project name; a command without a project (`self-update`, help, version) logs to stderr only. Around the `container_exec` of the Claude session and of `login`, `cli_logger::hand_over_terminal()` returns a guard that silences stderr (the file still receives every line) and restores it on drop; a handover without an attached file silences nothing. While the terminal is handed over, the panic hook writes only through the logger and `ReconnectWarnings` holds a warning back and prints it after Claude exits. `RUST_LOG=debug speedwave check` enables debug output on stderr.
 
 ## Rules for writing log statements
 

@@ -12,6 +12,8 @@ pub(crate) struct DiagnosticsInput {
     pub compose_path: Option<std::path::PathBuf>,
     /// Path to the Claude session log file.
     pub claude_session_log: Option<std::path::PathBuf>,
+    /// Path to the `speedwave` CLI log file.
+    pub cli_log: Option<std::path::PathBuf>,
     /// Path to the container entrypoint's startup diagnostics log.
     pub entrypoint_log: Option<std::path::PathBuf>,
     /// Path to the proxy's usage JSONL (ZIP-only; not shown in `/logs`).
@@ -115,6 +117,7 @@ pub(crate) fn build_diagnostics_zip(
         (&input.serial_log, "lima"),
         (&input.mcp_os_log, "mcp-os"),
         (&input.claude_session_log, "claude"),
+        (&input.cli_log, "cli"),
         (&input.compose_path, "compose-yml"),
         (&input.entrypoint_log, "entrypoint"),
         (&input.proxy_usage_log, "proxy-usage"),
@@ -196,6 +199,7 @@ pub(crate) async fn export_diagnostics(project: String, window: String) -> Resul
             mcp_os_log: resolve("mcp-os"),
             compose_path: resolve("compose-yml"),
             claude_session_log: resolve("claude"),
+            cli_log: resolve("cli"),
             entrypoint_log: resolve("entrypoint"),
             proxy_usage_log: resolve("proxy-usage"),
         };
@@ -316,6 +320,7 @@ mod tests {
             ),
             mcp_os_log: None,
             compose_path: Some(compose_path),
+            cli_log: None,
             claude_session_log: None,
             entrypoint_log: None,
             proxy_usage_log: Some(usage_path),
@@ -380,6 +385,7 @@ mod tests {
             container_logs: None,
             mcp_os_log: None,
             compose_path: None,
+            cli_log: None,
             claude_session_log: None,
             entrypoint_log: None,
             proxy_usage_log: None,
@@ -471,6 +477,7 @@ mod tests {
                 "compose.yml",
                 "# 2020-01-01T00:00:00Z OLD-COMPOSE-WHOLE\nservices: {}\n",
             )),
+            cli_log: None,
             claude_session_log: Some(mk(
                 "claude.log",
                 "2026-11-12T11:59:00.000+00:00 SESSION:ab: OLD-CLAUDE\n\
@@ -672,6 +679,7 @@ mod tests {
             )),
             mcp_os_log: None,
             compose_path: None,
+            cli_log: None,
             claude_session_log: None,
             entrypoint_log: None,
             proxy_usage_log: None,
@@ -718,6 +726,7 @@ mod tests {
             container_logs: None,
             mcp_os_log: None,
             compose_path: Some(compose_path),
+            cli_log: None,
             claude_session_log: None,
             entrypoint_log: None,
             proxy_usage_log: None,
@@ -762,6 +771,7 @@ mod tests {
             container_logs: None,
             mcp_os_log: None,
             compose_path: None,
+            cli_log: None,
             claude_session_log: None,
             entrypoint_log: None,
             proxy_usage_log: None,
@@ -794,6 +804,7 @@ mod tests {
             container_logs: None,
             mcp_os_log: None,
             compose_path: None,
+            cli_log: None,
             claude_session_log: None,
             entrypoint_log: None,
             proxy_usage_log: None,
@@ -823,6 +834,7 @@ mod tests {
             container_logs: None,
             mcp_os_log: None,
             compose_path: None,
+            cli_log: None,
             claude_session_log: None,
             entrypoint_log: None,
             proxy_usage_log: None,
@@ -856,6 +868,7 @@ mod tests {
             container_logs: None,
             mcp_os_log: Some(mcp_os_log),
             compose_path: None,
+            cli_log: None,
             claude_session_log: None,
             entrypoint_log: None,
             proxy_usage_log: None,
@@ -870,6 +883,39 @@ mod tests {
             "ZIP should contain mcp-os entry named '{}', got: {:?}",
             expected_entry,
             names
+        );
+    }
+
+    #[test]
+    fn diagnostics_zip_includes_cli_log() {
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("diag-cli.zip");
+
+        let cli_log = tmp.path().join("cli.log");
+        std::fs::write(
+            &cli_log,
+            "2026-11-13T11:00:00.000+00:00 [INFO][speedwave_runtime::oauth_refresh] refreshed the token of service slack\n",
+        )
+        .unwrap();
+
+        let input = DiagnosticsInput {
+            log_dir: None,
+            serial_log: None,
+            container_logs: None,
+            mcp_os_log: None,
+            compose_path: None,
+            cli_log: Some(cli_log),
+            claude_session_log: None,
+            entrypoint_log: None,
+            proxy_usage_log: None,
+        };
+
+        build_zip(&zip_path, &input).unwrap();
+
+        let content = read_zip_entry(&zip_path, "cli/cli.log").unwrap();
+        assert!(
+            content.contains("refreshed the token of service slack"),
+            "content: {content}"
         );
     }
 
@@ -891,6 +937,7 @@ mod tests {
             container_logs: None,
             mcp_os_log: None,
             compose_path: None,
+            cli_log: None,
             claude_session_log: Some(session_log),
             entrypoint_log: None,
             proxy_usage_log: None,
@@ -928,6 +975,7 @@ mod tests {
             container_logs: None,
             mcp_os_log: None,
             compose_path: None,
+            cli_log: None,
             claude_session_log: None,
             entrypoint_log: Some(log),
             proxy_usage_log: None,
@@ -979,6 +1027,7 @@ mod tests {
             )),
             mcp_os_log: Some(mk("mcp.log", &format!("{stamp} {}\n", secrets[3]))),
             compose_path: Some(mk("compose.yml", secrets[0])),
+            cli_log: None,
             claude_session_log: Some(mk("claude.log", &format!("{stamp} {}\n", secrets[4]))),
             entrypoint_log: Some(mk("entrypoint.log", &format!("{stamp} {}\n", secrets[5]))),
             proxy_usage_log: Some(mk(
@@ -1020,6 +1069,7 @@ mod tests {
             container_logs: None,
             mcp_os_log: Some(readable),
             compose_path: Some(unreadable),
+            cli_log: None,
             claude_session_log: None,
             entrypoint_log: None,
             proxy_usage_log: None,
@@ -1074,6 +1124,7 @@ mod tests {
             container_logs: None,
             mcp_os_log: None,
             compose_path: None,
+            cli_log: None,
             claude_session_log: None,
             entrypoint_log: None,
             proxy_usage_log: Some(unreadable),
@@ -1107,6 +1158,7 @@ mod tests {
             container_logs: None,
             mcp_os_log: None,
             compose_path: None,
+            cli_log: None,
             claude_session_log: None,
             entrypoint_log: None,
             proxy_usage_log: Some(tmp.path().join("nope.jsonl")),
@@ -1134,6 +1186,7 @@ mod tests {
             container_logs: None,
             mcp_os_log: None,
             compose_path: Some(unreadable),
+            cli_log: None,
             claude_session_log: None,
             entrypoint_log: None,
             proxy_usage_log: None,
@@ -1168,6 +1221,7 @@ mod tests {
             container_logs: Some("x".into()),
             mcp_os_log: Some(mk("mcp.log")),
             compose_path: Some(mk("compose.yml")),
+            cli_log: Some(mk("cli.log")),
             claude_session_log: Some(mk("claude.log")),
             entrypoint_log: Some(mk("entrypoint.log")),
             proxy_usage_log: Some(mk("usage.jsonl")),
