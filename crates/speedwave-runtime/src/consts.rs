@@ -1063,7 +1063,8 @@ pub fn claude_session_log_path(project: &str) -> std::path::PathBuf {
     claude_session_log_path_under(data_dir(), project)
 }
 
-pub(crate) fn cli_log_path_under(data_dir: &std::path::Path, project: &str) -> std::path::PathBuf {
+/// Build the per-project CLI log path under `data_dir`.
+pub fn cli_log_path_under(data_dir: &std::path::Path, project: &str) -> std::path::PathBuf {
     project_logs_dir_under(data_dir, project).join(CLI_LOG_FILE)
 }
 
